@@ -2339,6 +2339,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn round_robin_cycles_all_workers_after_membership_refresh() {
+        const TEST_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_round_robin_all_workers".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = Client::with_reconcile_interval(endpoint, TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+
+        client.override_instance_avail(vec![30, 10, 40, 20]);
+        let router =
+            PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::RoundRobin)
+                .await
+                .unwrap();
+
+        let selected: Vec<u64> = (0..8).filter_map(|_| router.select_next_worker()).collect();
+        assert_eq!(selected, vec![10, 20, 30, 40, 10, 20, 30, 40]);
+
+        client.override_instance_avail(vec![40, 20, 50, 30]);
+        let selected: Vec<u64> = (0..8).filter_map(|_| router.select_next_worker()).collect();
+        assert_eq!(selected, vec![20, 30, 40, 50, 20, 30, 40, 50]);
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
     async fn device_aware_cpu_only_selects_least_loaded_instance() {
         let state = RoutingOccupancyState::default();
         // All candidates are CPU. Make worker 2 the least-loaded one.

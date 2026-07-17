@@ -208,6 +208,12 @@ impl RoutingInstances {
         routable_ids: Vec<u64>,
         overloaded_ids: HashSet<u64>,
     ) -> Self {
+        let mut discovered_ids = discovered_ids;
+        discovered_ids.sort_unstable();
+
+        let mut routable_ids = routable_ids;
+        routable_ids.sort_unstable();
+
         let free_ids = Self::derive_free_ids(&routable_ids, &overloaded_ids);
         Self {
             discovered_ids,
@@ -756,6 +762,28 @@ impl Client {
 mod tests {
     use super::*;
     use crate::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+
+    #[test]
+    fn routing_instances_use_stable_instance_order() {
+        let routing_instances = RoutingInstances::new(vec![30, 10, 40, 20]);
+
+        assert_eq!(routing_instances.discovered_ids(), &[10, 20, 30, 40]);
+        assert_eq!(routing_instances.routable_ids(), &[10, 20, 30, 40]);
+        assert_eq!(routing_instances.free_ids(), &[10, 20, 30, 40]);
+
+        let routing_instances = routing_instances.set_overloaded(HashSet::from([20]));
+        assert_eq!(routing_instances.free_ids(), &[10, 30, 40]);
+    }
+
+    #[test]
+    fn routing_reconciliation_refreshes_stable_full_membership() {
+        let routing_instances = RoutingInstances::new(vec![10, 20]);
+        let routing_instances = routing_instances.reconcile_discovered(vec![40, 10, 30, 20]);
+
+        assert_eq!(routing_instances.discovered_ids(), &[10, 20, 30, 40]);
+        assert_eq!(routing_instances.routable_ids(), &[10, 20, 30, 40]);
+        assert_eq!(routing_instances.free_ids(), &[10, 20, 30, 40]);
+    }
 
     /// Test that instances removed via report_instance_down are restored after
     /// the reconciliation interval elapses.
