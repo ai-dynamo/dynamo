@@ -203,6 +203,7 @@
 /lib/runtime/tests/                                                          @ai-dynamo/dynamo-runtime-codeowners
 /lib/backend-common/                                                         @ai-dynamo/dynamo-runtime-codeowners
 /lib/llm/src/common/                                                         @ai-dynamo/dynamo-runtime-codeowners
+/lib/sidecar/common/                                                         @ai-dynamo/dynamo-runtime-codeowners
 /tests/dependencies/                                                         @ai-dynamo/dynamo-runtime-codeowners
 /tests/serve/launch/                                                         @ai-dynamo/dynamo-runtime-codeowners
 /tests/serve/trtllm/                                                         @ai-dynamo/dynamo-runtime-codeowners
@@ -224,7 +225,6 @@
 /lib/runtime/src/component/                                                  @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/src/discovery/                                                  @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/src/protocols/                                                  @ai-dynamo/dynamo-runtime-codeowners
-/lib/backend/sidecar-common/                                                 @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/src/transports/                                                 @ai-dynamo/dynamo-runtime-codeowners
 /lib/backend-common/examples/                                                @ai-dynamo/dynamo-runtime-codeowners
 /components/src/dynamo/common/                                               @ai-dynamo/dynamo-runtime-codeowners
