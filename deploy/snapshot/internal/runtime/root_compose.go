@@ -427,6 +427,10 @@ func mkdirAllAt(
 		sourceFD, sourceErr := openDirectoryAt(snapshotRootFD, relative)
 		if errors.Is(sourceErr, unix.ENOENT) {
 			sourceFD, sourceErr = openDirectoryAt(placeholderRootFD, relative)
+			if errors.Is(sourceErr, unix.ENOENT) {
+				current = next
+				continue
+			}
 		}
 		if sourceErr != nil {
 			unix.Close(next)
