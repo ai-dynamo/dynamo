@@ -19,8 +19,7 @@ pub const ROUTER_HINT_SOURCE_CONTROL_ENDPOINT_RUNTIME_KEY: &str =
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RouterHint {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_control_endpoint: Option<String>,
+    pub source_control_endpoint: String,
     /// Root-aligned source-side KV block hashes. `block_hashes[i]`
     /// corresponds to request block `i`; the target decides which suffix to fetch.
     pub block_hashes: Vec<ExternalSequenceBlockHash>,

@@ -56,10 +56,16 @@ def enable_router_hint_support(runtime_config: Any, engine_args: Any) -> None:
     if not any(_supports_router_hint(tier) for tier in _secondary_tiers(engine_args)):
         return
 
-    runtime_config.set_engine_specific(ROUTER_HINT_RUNTIME_CAPABILITY_KEY, "true")
     control_endpoint = _router_hint_source_control_endpoint(engine_args)
-    if control_endpoint is not None:
-        runtime_config.set_engine_specific(
-            ROUTER_HINT_SOURCE_CONTROL_ENDPOINT_RUNTIME_KEY,
-            json.dumps(control_endpoint),
+    if control_endpoint is None:
+        raise ValueError(
+            "router_hint support requires an advertisable source control endpoint; "
+            "set control_advertise_host and a positive control_port on the "
+            "router_hint secondary tier"
         )
+
+    runtime_config.set_engine_specific(ROUTER_HINT_RUNTIME_CAPABILITY_KEY, "true")
+    runtime_config.set_engine_specific(
+        ROUTER_HINT_SOURCE_CONTROL_ENDPOINT_RUNTIME_KEY,
+        json.dumps(control_endpoint),
+    )
