@@ -808,7 +808,7 @@ def test_discovery_does_not_invoke_properties_or_walk_helper_graphs():
     ]
 
 
-def test_unregistered_parameter_and_zero_byte_storage_are_rejected():
+def test_selected_invalid_storage_is_rejected_before_publication_or_rebind():
     parameter = torch.nn.Parameter(torch.ones(1))
     model = torch.nn.Module()
     model.__dict__["hidden"] = parameter
@@ -816,12 +816,62 @@ def test_unregistered_parameter_and_zero_byte_storage_are_rejected():
     with pytest.raises(RuntimeError, match="Unregistered Parameter"):
         register_module_tensors(writer, model)
 
+    valid = torch.arange(4, dtype=torch.float32)
     empty = torch.empty(0)
     model = torch.nn.Module()
+    model.valid = valid
     model.empty = empty
-    _, writer = _writer_for_tensor(empty)
+    store = _MetadataStore()
+    writer = _Manager(
+        store,
+        {
+            "valid": (
+                valid.untyped_storage().data_ptr(),
+                valid.untyped_storage().nbytes(),
+            ),
+            "empty": (empty.untyped_storage().data_ptr(), 0),
+        },
+        mapped=True,
+    )
+    old_storage = valid.untyped_storage()._cdata
     with pytest.raises(RuntimeError, match="zero-byte"):
         register_module_tensors(writer, model)
+    assert store.entries == {}
+    with pytest.raises(RuntimeError, match="zero-byte"):
+        rebind_nonparameter_tensors(writer, model)
+    assert valid.untyped_storage()._cdata == old_storage
+
+
+def test_unmapped_unsupported_nonparameters_are_ignored():
+    valid = torch.arange(4, dtype=torch.float32)
+    empty = torch.empty(0)
+    autograd = torch.ones(1, requires_grad=True)
+    model = torch.nn.Module()
+    model.valid = valid
+    model.register_buffer("empty", empty)
+    model.autograd = autograd
+    store, writer = _writer_for_tensor(valid)
+    empty_storage = empty.untyped_storage()._cdata
+    autograd_storage = autograd.untyped_storage()._cdata
+
+    assert register_module_tensors(writer, model) == {"allocation"}
+    manifest = msgspec.msgpack.decode(next(iter(store.entries.values()))[2])
+    assert [binding["path"] for binding in manifest["objects"][0]["bindings"]] == [
+        "valid"
+    ]
+
+    model.register_parameter("cpu_weight", torch.nn.Parameter(torch.ones(1)))
+    with pytest.raises(RuntimeError, match=r"Parameter 'cpu_weight'.*not contained"):
+        register_module_tensors(writer, model)
+    model.cpu_weight = None
+
+    old_valid_storage = valid.untyped_storage()._cdata
+    assert (
+        rebind_nonparameter_tensors(writer, model) == valid.untyped_storage().nbytes()
+    )
+    assert valid.untyped_storage()._cdata != old_valid_storage
+    assert empty.untyped_storage()._cdata == empty_storage
+    assert autograd.untyped_storage()._cdata == autograd_storage
 
 
 def test_publisher_rebind_clones_once_retains_source_and_is_idempotent():
@@ -888,7 +938,6 @@ def test_swap_accepts_exclusively_owned_replacements_for_parameter_and_view():
             replacement = torch_module._make_parameter_from_template(
                 tensor,
                 replacement,
-                path="weight",
                 requires_grad=True,
             )
         replacements[id(tensor)] = replacement
@@ -923,7 +972,7 @@ def test_swap_preflight_failure_does_not_mutate_earlier_objects():
     second_storage = second.untyped_storage()._cdata
     second_ref = weakref.ref(second)
 
-    with pytest.raises(RuntimeError, match="second.*weakref"):
+    with pytest.raises(RuntimeError, match=r"second.*weakref"):
         torch_module._swap_discovered_tensors(objects, replacements)
 
     assert second_ref() is second
