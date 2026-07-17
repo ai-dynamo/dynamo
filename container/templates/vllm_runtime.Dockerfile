@@ -210,11 +210,11 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
 # The upstream vllm/vllm-openai base image ships a GPL/GPL-3.0 ffmpeg built
 # against libx264/libx265/libmp3lame. Purge ONLY the explicitly-named ffmpeg +
 # codec packages and replace them with the LGPL-only in-tree ffmpeg built in
-# wheel_builder (--disable-gpl --disable-nonfree; H.264 via NVENC, VP9 via
-# libvpx). PyAV, torchaudio, torchvision, soundfile and Pillow all bundle their
-# own libraries and do not link the system ffmpeg/codecs, so removing them is
-# safe. dpkg-query keeps the match robust across base-image/arch version
-# suffixes (e.g. libavcodec58 vs 60).
+# wheel_builder (--disable-gpl --disable-nonfree; VP8/VP9/rawvideo only, with no
+# H.264/H.265/AAC capability). PyAV, torchaudio, torchvision, soundfile and
+# Pillow all bundle their own libraries and do not link the system
+# ffmpeg/codecs, so removing them is safe. dpkg-query keeps the match robust
+# across base-image/arch version suffixes (e.g. libavcodec58 vs 60).
 #
 # This grep is the COMPLETE, auditable set of what leaves the image: there is
 # deliberately NO apt-get autoremove, so the removal can never cascade into
@@ -243,10 +243,9 @@ RUN --mount=type=bind,source=./container/deps/vllm/validate_torch_compile_smoke.
     python3 /tmp/validate_torch_compile_smoke.py
 
 # Copy the LGPL ffmpeg from wheel_builder: versioned shared libs (libav*.so*,
-# libsw*.so*) + libvpx + the LGPL CLI binary that imageio/diffusers target via
-# IMAGEIO_FFMPEG_EXE. Ungated by enable_media_ffmpeg because the base GPL ffmpeg
-# was just purged, so the LGPL CLI must always be present for the omni
-# video-export path to have something to encode with.
+# libsw*.so*) + libvpx + the LGPL CLI binary selected through
+# IMAGEIO_FFMPEG_EXE. The GLM image is not multimodal, and this vLLM-specific
+# build has no H.264 encoder, decoder, or parser.
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
     mkdir -p /usr/local/lib/pkgconfig && \
     cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
@@ -278,11 +277,11 @@ RUN rm -rf /workspace/vllm
 # Remove the codec-bearing video-DECODE wheels inherited from the vllm-openai
 # base. Each bundles its own full ffmpeg carrying software H.264/H.265/AAC;
 # PyAV and decord additionally ship GPL libx264/libx265. Dynamo's vLLM component
-# imports none of them, so they are unused decode-side dead weight. The in-tree
-# LGPL ffmpeg + imageio-ffmpeg installed above are intentionally KEPT for the
-# omni HW video-encode path (h264_nvenc — the sanctioned path). Direct rm makes
-# the removal robust regardless of how the base image's pip is configured; the
-# guards fail the build if any of them survive.
+# imports none of them, so they are unused decode-side dead weight. The
+# Dynamo-owned ffmpeg + imageio-ffmpeg installed above are intentionally kept,
+# but the vLLM build exposes only VP8/VP9/rawvideo and no H.264 capability.
+# Direct rm makes the removal robust regardless of how the base image's pip is
+# configured; the guards fail the build if any of them survive.
 RUN set -eux; \
     python3 -m pip uninstall --yes \
         av decord decord2 opencv-python opencv-python-headless torchcodec PyNvVideoCodec \

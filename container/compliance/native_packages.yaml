@@ -77,8 +77,8 @@ packages:
   # NOTE: NIXL ships as the `nixl` Python wheel (attributed by the python
   # generator), so it is intentionally NOT duplicated here.
 
-  # LGPL media stack — built --disable-gpl in wheel_builder (h264_nvenc + libvpx)
-  # and copied into the vLLM runtime. SGLang intentionally contains no FFmpeg.
+  # LGPL media stack — built --disable-gpl in wheel_builder with libvpx and no
+  # H.264 capability, then copied into vLLM. SGLang contains no FFmpeg.
   - name: ffmpeg
     version: "8.1.2"
     license: LGPL-2.1-or-later

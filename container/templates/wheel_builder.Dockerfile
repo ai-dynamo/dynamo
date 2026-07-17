@@ -292,25 +292,20 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
 # AAC implementations.
 {% if framework != "sglang" %}
 # Build FFmpeg so libs are available for Rust checks in CI.
-# We also build the ffmpeg CLI with h264_nvenc + libvpx_vp9 encoders so Python
-# code can encode video without the GPL-licensed binary shipped by imageio-ffmpeg.
-# Stays LGPL-only: --disable-gpl --disable-nonfree are preserved; H.264 comes from
-# NVIDIA's NVENC (proprietary HW encoder, already a runtime dependency of these
-# GPU images) and VP9 from libvpx (BSD).
+# The GLM vLLM image is not multimodal, so its ffmpeg build deliberately carries
+# no H.264 capability. It retains only libvpx_vp9 encoding. Other frameworks keep
+# the NVIDIA H.264 encode path they require.
 #
 # MEDIA CODEC ALLOWLIST: the in-tree libavcodec should carry only
 # the media formats we actually build and use, not ffmpeg's full default decoder
 # set. A blanket --disable-decoders/--disable-demuxers/--disable-parsers plus a
 # narrow allowlist keeps the shipped libav*.so limited to that set (HW NVDEC can
 # be re-added explicitly if a decode feature ever needs H.264/H.265). The
-# allowlist covers exactly two paths: (1) the encode CLI ingesting rawvideo
-# frames from imageio over a pipe and encoding with h264_nvenc (NVIDIA's HW
-# encoder — the sanctioned path) or libvpx_vp9, and (2) the Rust media-ffmpeg
+# allowlist covers rawvideo ingestion, VP9 encoding, and the Rust media-ffmpeg
 # VideoDecoder decoding VP8/VP9 in mp4/webm/mkv (test fixtures are VP9-in-mp4).
-# The h264 *parser* is enabled — not the H.264 decoder — because the mp4 muxer
-# needs it to package the h264_nvenc bitstream (extract SPS/PPS); a parser
-# carries no codec implementation. Image decode does not use ffmpeg (it goes
-# through the Rust `image` crate), so no still-image decoders are enabled here.
+# The vLLM build also omits the H.264 parser and NVENC headers so H.264 cannot be
+# encoded, decoded, or parsed. Image decode does not use ffmpeg (it goes through
+# the Rust `image` crate), so no still-image decoders are enabled here.
 # The `fd` protocol is enabled alongside `pipe`: `ffmpeg -i -` reads stdin via
 # the `fd:` protocol on ffmpeg 8.x (not `pipe:`), so omitting it breaks the
 # imageio encode path with "Protocol not found. Did you mean file:fd:?". Both
@@ -320,8 +315,8 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
 # this also trims the decoder surface to what we ship.
 # Do not delete the source tarball for legal reasons.
 ARG FFMPEG_VERSION
-ARG NV_CODEC_HEADERS_REF
-ARG LIBVPX_REF
+{% if framework != "vllm" %}ARG NV_CODEC_HEADERS_REF
+{% endif %}ARG LIBVPX_REF
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
     export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
@@ -335,13 +330,13 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     elif [ "$DEVICE" = "cuda" ]; then \
     dnf install -y --setopt=tsflags=nocontexts pkg-config xz git yasm; \
     fi && \
-    # nv-codec-headers: provides the NVENC/NVDEC API headers ffmpeg compiles against.
+    cd /tmp && \
+{% if framework != "vllm" %}    # nv-codec-headers: provides the NVENC/NVDEC API headers ffmpeg compiles against.
     # Header-only, no runtime dep here; libcuda/libnvidia-encode are loaded at runtime
     # in the consuming container.
-    cd /tmp && \
     git clone --depth 1 --branch ${NV_CODEC_HEADERS_REF} https://github.com/FFmpeg/nv-codec-headers.git && \
     make -C nv-codec-headers PREFIX=/usr/local install && \
-    # libvpx: BSD-licensed VP9 encoder needed for the WebM output path. Built from
+{% endif %}    # libvpx: BSD-licensed VP9 encoder needed for the WebM output path. Built from
     # source so we don't need to track distro package names (libvpx-dev on Debian
     # vs libvpx-devel via EPEL on RHEL/manylinux).
     git clone --depth 1 --branch ${LIBVPX_REF} https://chromium.googlesource.com/webm/libvpx.git && \
@@ -366,23 +361,31 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         --disable-devices \
         --disable-libdrm \
         --enable-shared \
-        --enable-nvenc \
-        --enable-libvpx \
+{% if framework != "vllm" %}        --enable-nvenc \
+{% endif %}        --enable-libvpx \
         --disable-encoders \
-        --enable-encoder=h264_nvenc,libvpx_vp9 \
-        --disable-decoders \
+{% if framework == "vllm" %}        --enable-encoder=libvpx_vp9 \
+{% else %}        --enable-encoder=h264_nvenc,libvpx_vp9 \
+{% endif %}        --disable-decoders \
         --enable-decoder=vp8,vp9,rawvideo \
         --disable-muxers \
         --enable-muxer=mov,mp4,matroska,webm \
         --disable-demuxers \
         --enable-demuxer=mov,matroska,rawvideo \
         --disable-parsers \
-        --enable-parser=vp8,vp9,h264 \
-        --disable-protocols \
+{% if framework == "vllm" %}        --enable-parser=vp8,vp9 \
+{% else %}        --enable-parser=vp8,vp9,h264 \
+{% endif %}        --disable-protocols \
         --enable-protocol=file,pipe,fd && \
     make -j$(nproc) && \
     make install && \
-    /tmp/use-sccache.sh show-stats "FFMPEG" && \
+{% if framework == "vllm" %}    for surface in codecs encoders decoders parsers bsfs formats; do \
+        if /usr/local/bin/ffmpeg -hide_banner "-${surface}" 2>&1 | grep -qi h264; then \
+            echo "ERROR: vLLM ffmpeg still exposes H.264 via ${surface}" >&2; \
+            exit 1; \
+        fi; \
+    done && \
+{% endif %}    /tmp/use-sccache.sh show-stats "FFMPEG" && \
     ldconfig && \
     mkdir -p /usr/local/src/ffmpeg && \
     find /tmp/ffmpeg-${FFMPEG_VERSION} \( -name config.log -o -name config.status \) -delete && \
