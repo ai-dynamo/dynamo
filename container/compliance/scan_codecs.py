@@ -6,7 +6,7 @@ We ship an in-tree ffmpeg built to a narrow media-codec set, so the shipped
 filesystem should not contain media-codec libraries/binaries from anywhere else.
 Because SBOMs miss statically-bundled codec `.so` files, this is primarily a
 FILESYSTEM scan of the built image; an optional `--sbom` adds a CycloneDX
-component/version gate (an ffmpeg version floor). See OPS-7665 for background.
+component/version gate (an ffmpeg version floor).
 
 A denylist hit is classified as:
   - ALLOWED    — under an `allow_paths` prefix (our own in-tree ffmpeg)
@@ -30,6 +30,11 @@ import sys
 from pathlib import Path
 
 import yaml
+
+try:
+    from packaging.version import Version
+except ImportError:  # packaging is optional; fall back to a numeric-tuple compare
+    Version = None
 
 logger = logging.getLogger("compliance.scan_codecs")
 
@@ -102,19 +107,16 @@ def scan_filesystem(root: Path, policy: CodecPolicy):
 
 
 def _version_lt(a: str, b: str) -> bool:
-    """a < b, best-effort. Uses packaging if available, else a numeric tuple."""
-    try:
-        from packaging.version import Version
-
+    """a < b. Uses packaging.version when available, else a numeric-tuple fallback.
+    A malformed version under packaging raises (InvalidVersion) and fails the scan
+    rather than silently degrading to the naive comparator."""
+    if Version is not None:
         return Version(a) < Version(b)
-    except Exception:
 
-        def key(v: str):
-            return [
-                int(x) if x.isdigit() else 0 for x in v.replace("-", ".").split(".")
-            ]
+    def key(v: str) -> list[int]:
+        return [int(x) if x.isdigit() else 0 for x in v.replace("-", ".").split(".")]
 
-        return key(a) < key(b)
+    return key(a) < key(b)
 
 
 def scan_sbom(sbom_path: Path, policy: CodecPolicy) -> list[dict]:

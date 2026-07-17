@@ -13,7 +13,6 @@ import json
 from pathlib import Path
 
 import pytest
-
 from compliance.scan_codecs import CodecPolicy, main, scan_filesystem, scan_sbom
 
 # The real shipped policy — the tests assert against it, not a fixture, so a
@@ -37,7 +36,7 @@ def test_in_tree_ffmpeg_is_allowed(tmp_path: Path):
         "usr/local/bin/ffmpeg",
     ):
         _touch(tmp_path, rel)
-    violations, exceptions, allowed = scan_filesystem(tmp_path, _POLICY)
+    violations, _exceptions, allowed = scan_filesystem(tmp_path, _POLICY)
     assert violations == []
     assert {a["path"] for a in allowed} == {
         "/usr/local/lib/libavcodec.so.62",
@@ -51,7 +50,7 @@ def test_dali_bundled_libav_is_a_logged_exception(tmp_path: Path):
         tmp_path,
         "usr/local/lib/python3.12/dist-packages/nvidia/dali/.libs/libavcodec-73c99a8b.so.62",
     )
-    violations, exceptions, allowed = scan_filesystem(tmp_path, _POLICY)
+    violations, exceptions, _allowed = scan_filesystem(tmp_path, _POLICY)
     assert violations == []
     assert len(exceptions) == 1
     assert "DALI" in (exceptions[0]["detail"] or "")

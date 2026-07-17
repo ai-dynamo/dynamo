@@ -100,7 +100,7 @@ RUN python3 -m compliance.policy.validate \
         --policy /opt/compliance/policy/licenses.toml \
         --input /legal/osrb-deps.csv
 
-# Media-codec allowlist gate (see OPS-7665): scans THIS stage's filesystem (==
+# Media-codec allowlist gate: scans THIS stage's filesystem (==
 # the shipped image tree, since licenses is FROM pre_runtime) and fails the build
 # if a media-codec library/binary (a third-party libav*, libx264/265, or a stray
 # or imageio-bundled ffmpeg) ships outside our in-tree allowlist or a reasoned
