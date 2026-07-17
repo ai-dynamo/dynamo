@@ -18,6 +18,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::DynamoError;
 
@@ -161,16 +162,91 @@ pub struct EngineConfig {
     pub llm: Option<LlmRegistration>,
 }
 
+/// Cancellation context for work performed before the distributed runtime is
+/// connected.
+///
+/// The context is deliberately small: engines already own their parsed
+/// backend configuration, while `Worker` owns process shutdown. Snapshot
+/// implementations should check [`is_cancelled`](Self::is_cancelled) between
+/// non-cancellable initialization steps and race sentinel waits against
+/// [`cancelled`](Self::cancelled).
+#[derive(Clone, Debug)]
+pub struct PreRuntimeContext {
+    shutdown: CancellationToken,
+}
+
+impl PreRuntimeContext {
+    pub(crate) fn new(shutdown: CancellationToken) -> Self {
+        Self { shutdown }
+    }
+
+    /// Whether SIGTERM/SIGINT has requested worker shutdown.
+    pub fn is_cancelled(&self) -> bool {
+        self.shutdown.is_cancelled()
+    }
+
+    /// Wait until worker shutdown is requested.
+    pub async fn cancelled(&self) {
+        self.shutdown.cancelled().await;
+    }
+}
+
+/// Runtime identity and transport settings reparsed after snapshot restore.
+///
+/// These fields replace the values parsed in the snapshot-producing process.
+/// In particular, `event_plane=None` clears a stale snapshot-time override.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestoredRuntimeConfig {
+    pub namespace: String,
+    pub discovery_backend: String,
+    pub request_plane: String,
+    pub event_plane: Option<String>,
+}
+
+/// Result of [`LLMEngine::prepare_for_runtime`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum PreRuntimeOutcome {
+    /// Snapshot mode is disabled; proceed through the normal cold-start path.
+    #[default]
+    Continue,
+    /// Engine resources were initialized before the distributed runtime.
+    /// `cleanup()` is now owed even if runtime creation or `start()` fails.
+    Prepared {
+        /// Replacement runtime settings parsed in the restored container.
+        restored_runtime: RestoredRuntimeConfig,
+    },
+    /// The snapshot-producing process completed successfully. The launcher
+    /// must exit without connecting the distributed runtime or tearing down
+    /// the captured engine state.
+    ExitSuccess,
+}
+
 /// Inference engine trait.
 ///
 /// Lifecycle:
 ///   1. Construct the engine (typically via a backend-specific `from_args`).
-///   2. `start()` — start the engine, return `EngineConfig` metadata.
-///   3. `generate()` — called for each request (concurrent calls expected).
-///   4. `abort()` — called when a request is cancelled (optional, default no-op).
-///   5. `cleanup()` — called once on shutdown, release all resources.
+///   2. `prepare_for_runtime()` — optional pre-distributed-runtime preparation.
+///   3. `start()` — activate the engine, return `EngineConfig` metadata.
+///   4. `generate()` — called for each request (concurrent calls expected).
+///   5. `abort()` — called when a request is cancelled (optional, default no-op).
+///   6. `cleanup()` — called once on shutdown, release all resources.
 #[async_trait]
 pub trait LLMEngine: Send + Sync + 'static {
+    /// Prepare engine state before Dynamo opens discovery or transport
+    /// connections.
+    ///
+    /// The default preserves the existing cold-start lifecycle. Snapshot-aware
+    /// engines initialize and stabilize their vendor runtime here, wait for the
+    /// shared snapshot/restore protocol, and return [`PreRuntimeOutcome::Prepared`]
+    /// after restore. `Worker` will not construct `DistributedRuntime` until
+    /// this method returns.
+    async fn prepare_for_runtime(
+        &self,
+        _context: PreRuntimeContext,
+    ) -> Result<PreRuntimeOutcome, DynamoError> {
+        Ok(PreRuntimeOutcome::Continue)
+    }
+
     /// Start the engine and return registration metadata.
     ///
     /// After this returns, the engine MUST be ready to accept `generate()`

@@ -29,7 +29,7 @@ use std::sync::Arc;
 use dynamo_runtime::{Runtime, logging};
 
 use crate::engine::{LLMEngine, RawEngine};
-use crate::worker::{Worker, WorkerConfig};
+use crate::worker::{Worker, WorkerConfig, WorkerExit};
 
 /// Drive the full lifecycle for an already-constructed token-pipeline engine.
 pub fn run(engine: Arc<dyn LLMEngine>, config: WorkerConfig) -> anyhow::Result<()> {
@@ -62,9 +62,15 @@ fn run_worker(
 
     secondary.block_on(async move {
         let result = build(config)
-            .run(runtime.clone())
+            .run_with_outcome(runtime.clone())
             .await
             .map_err(anyhow::Error::from);
+
+        if matches!(result, Ok(WorkerExit::ExitSuccess)) {
+            // Preserve the captured engine image: no engine destructors and no
+            // normal runtime teardown on the snapshot-producing path.
+            std::process::exit(0);
+        }
 
         // Trigger Phase 1/2/3 token cancellation + NATS/etcd disconnect.
         // Worker::run has already done discovery unregister, drain, and
@@ -72,6 +78,6 @@ fn run_worker(
         // teardown.
         runtime.shutdown();
 
-        result
+        result.map(|_| ())
     })
 }

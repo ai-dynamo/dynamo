@@ -13,6 +13,61 @@ from dynamo.trtllm.constants import DisaggregationMode, Modality
 _EXTERNAL_MODEL_LOAD_FORMATS = {"gms"}
 
 
+async def prepare_unified_snapshot(
+    engine: Any,
+    *,
+    config: Any,
+    argv: list[str] | None,
+    context: Any,
+):
+    """Prepare unified TRT-LLM state before DistributedRuntime creation."""
+
+    from dynamo.common.backend import PreRuntimeOutcome
+    from dynamo.common.model_fetch import fetch_model
+    from dynamo.common.snapshot.lifecycle import (
+        EngineSnapshotController,
+        SnapshotConfig,
+        configure_snapshot_capture_env,
+        unified_snapshot_outcome,
+    )
+    from dynamo.llm.exceptions import Cancelled, EngineShutdown, InvalidArgument
+
+    snapshot_config = SnapshotConfig.from_env()
+    if snapshot_config is None:
+        return PreRuntimeOutcome.continue_startup()
+    if config is None:
+        raise InvalidArgument(
+            "TRT-LLM snapshot preparation is missing parsed configuration"
+        )
+    try:
+        _validate_supported_snapshot_config(config)
+    except ValueError as exc:
+        raise InvalidArgument(str(exc)) from exc
+
+    try:
+        if _should_prefetch_model_for_snapshot(config):
+            await fetch_model(config.model)
+        configure_snapshot_capture_env()
+        logging.info("Unified TRT-LLM snapshot mode enabled")
+        await engine._initialize_engine()
+    except (Cancelled, InvalidArgument):
+        raise
+    except Exception as exc:
+        raise EngineShutdown(f"TRT-LLM snapshot_prepare failed: {exc}") from exc
+
+    controller = EngineSnapshotController(
+        engine=engine,
+        pause_controller=_NoOpSnapshotPauseController(),
+        snapshot_config=snapshot_config,
+    )
+    return await unified_snapshot_outcome(
+        controller,
+        argv=argv,
+        context=context,
+        backend_name="TRT-LLM",
+    )
+
+
 def _should_prefetch_model_for_snapshot(config: Any) -> bool:
     if os.path.exists(config.model):
         return False

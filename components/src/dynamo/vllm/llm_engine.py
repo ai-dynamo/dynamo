@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sys
 import tempfile
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any, Optional, cast
@@ -37,6 +38,7 @@ from dynamo.common.backend.engine import (
     LLMEngine,
     LlmRegistration,
     LogitsProcessorSpec,
+    PreRuntimeOutcome,
     is_generation_stage,
     logits_processors_for_request,
     resolve_test_logits_processor_spec,
@@ -220,6 +222,9 @@ class VllmLLMEngine(LLMEngine):
         self._stat_logger_factory: Optional[_UnifiedStatLoggerFactory] = None
         self._logits_processor_spec: LogitsProcessorSpec | None = None
         self._pause_controller: VllmEnginePauseController | None = None
+        self._engine_config: EngineConfig | None = None
+        self._snapshot_config: Any = None
+        self._snapshot_argv: list[str] | None = None
         self._multimodal_request_processor: VllmMultimodalRequestProcessor | None = None
         self._pause_lock = asyncio.Lock()
         self._scale_ep_lock = asyncio.Lock()
@@ -309,6 +314,8 @@ class VllmLLMEngine(LLMEngine):
         media_decoder, media_fetcher = create_frontend_media_config(
             config.frontend_decoding
         )
+        engine._snapshot_config = config
+        engine._snapshot_argv = list(argv) if argv is not None else list(sys.argv[1:])
         worker_config = WorkerConfig.from_runtime_config(
             config,
             model_name=config.model,
@@ -323,9 +330,25 @@ class VllmLLMEngine(LLMEngine):
         """Stash the serving endpoint for dynamic-LoRA discovery publishing."""
         self._endpoint = endpoint
 
+    async def prepare_for_runtime(self, context) -> PreRuntimeOutcome:
+        from dynamo.vllm.snapshot import prepare_unified_snapshot
+
+        return await prepare_unified_snapshot(
+            self,
+            config=self._snapshot_config,
+            argv=self._snapshot_argv,
+            context=context,
+        )
+
     async def start(self, worker_id: int) -> EngineConfig:
-        """Start vLLM and return normalized metadata for runtime registration."""
         del worker_id  # vLLM's NixlConnector handles its own per-worker IDs
+        return await self._initialize_engine()
+
+    async def _initialize_engine(self) -> EngineConfig:
+        """Load vLLM once; reused by cold start and pre-runtime restore."""
+        if self._engine_config is not None:
+            return self._engine_config
+
         os.environ.setdefault("VLLM_NO_USAGE_STATS", "1")
         os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
@@ -394,7 +417,7 @@ class VllmLLMEngine(LLMEngine):
         block_size = get_configured_kv_event_block_size(vllm_config)
         self._kv_event_block_size = block_size
 
-        return EngineConfig(
+        self._engine_config = EngineConfig(
             model=self.engine_args.model,
             served_model_name=self._served_model_name,
             llm=LlmRegistration(
@@ -408,6 +431,7 @@ class VllmLLMEngine(LLMEngine):
                 data_parallel_size=self._dp_range[1],
             ),
         )
+        return self._engine_config
 
     async def generate(
         self, request: GenerateRequest, context: Context

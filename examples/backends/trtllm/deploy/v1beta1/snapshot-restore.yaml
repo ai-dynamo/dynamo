@@ -11,7 +11,7 @@
 # being tested.
 #
 # Requirements validated for the single-GPU TRTLLM path:
-# - Run the normal TRTLLM entrypoint. Do not wrap it in cuda-checkpoint
+# - Run the unified TRT-LLM entrypoint. Do not wrap it in cuda-checkpoint
 #   --launch-job; the snapshot-agent drives CRIU/cuda-checkpoint externally.
 # - Keep the TRTLLM engine config conservative enough for a small smoke test.
 # - Restrict UCX away from RDMA/IB transports. The snapshot stack can migrate
@@ -74,7 +74,7 @@ spec:
               command:
                 - python3
                 - -m
-                - dynamo.trtllm
+                - dynamo.trtllm.unified_main
               args:
                 - --model-path
                 - Qwen/Qwen3-0.6B

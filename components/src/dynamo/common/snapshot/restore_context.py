@@ -6,9 +6,10 @@
 import json
 import logging
 import os
+from dataclasses import dataclass
 from inspect import isawaitable
 from pathlib import Path
-from typing import Awaitable, Callable, Mapping, TypeVar
+from typing import Awaitable, Callable, Mapping, Protocol, TypeVar, cast
 
 from dynamo.common.snapshot.constants import (
     KUBERNETES_OPTIONAL_ENV_NAMES,
@@ -22,6 +23,24 @@ from dynamo.common.snapshot.constants import (
 
 logger = logging.getLogger(__name__)
 ConfigT = TypeVar("ConfigT")
+
+
+class _RuntimeConfig(Protocol):
+    namespace: str
+    discovery_backend: str
+    request_plane: str
+    event_plane: str | None
+
+
+@dataclass(frozen=True)
+class RestoredRuntimeConfig:
+    """Unified Worker identity/transport settings after restore."""
+
+    namespace: str
+    discovery_backend: str
+    request_plane: str
+    event_plane: str | None = None
+
 
 _RESTORE_RUNTIME_CONFIG_FIELDS = (
     "namespace",
@@ -90,7 +109,29 @@ async def refresh_snapshot_restore_config(
     return config
 
 
-def parse_snapshot_restore_runtime_config(argv: list[str] | None) -> object:
+def load_restored_runtime_config(
+    argv: list[str] | None,
+) -> RestoredRuntimeConfig:
+    """Apply restore context and return unified Worker replacement settings.
+
+    This module owns the small result record so restore-standby and unit-test
+    paths do not need to import the native backend bindings.
+    """
+
+    apply_snapshot_restore_env()
+    parsed = parse_snapshot_restore_runtime_config(argv)
+    _validate_kubernetes_restore_env_for_config(parsed)
+    return RestoredRuntimeConfig(
+        namespace=parsed.namespace,
+        discovery_backend=parsed.discovery_backend,
+        request_plane=parsed.request_plane,
+        event_plane=parsed.event_plane,
+    )
+
+
+def parse_snapshot_restore_runtime_config(
+    argv: list[str] | None,
+) -> _RuntimeConfig:
     """Parse Dynamo runtime args after restore env has been applied.
 
     This uses the same ``DynamoRuntimeArgGroup`` env/CLI handling as normal
@@ -110,7 +151,7 @@ def parse_snapshot_restore_runtime_config(argv: list[str] | None) -> object:
     args, _ = parser.parse_known_args(argv)
     config = DynamoRuntimeConfig.from_cli_args(args)
     config.validate()
-    return config
+    return cast(_RuntimeConfig, config)
 
 
 def apply_snapshot_restore_env() -> dict[str, str | None]:

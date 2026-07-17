@@ -8,7 +8,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Generic, TypeVar
+from typing import Any, Awaitable, Callable, Generic, TypeVar
 
 from dynamo.common.snapshot.constants import (
     READY_FOR_SNAPSHOT_FILE,
@@ -23,6 +23,14 @@ EngineT = TypeVar("EngineT")
 # Poll interval for the snapshot-control directory. Snapshot and restore
 # latencies are seconds, so 100ms is negligible overhead.
 SENTINEL_POLL_INTERVAL_SEC = 0.1
+
+
+class SnapshotLifecycleError(RuntimeError):
+    """Snapshot failure annotated with the lifecycle phase."""
+
+    def __init__(self, phase: str, message: str):
+        self.phase = phase
+        super().__init__(message)
 
 
 def is_snapshot_enabled() -> bool:
@@ -48,29 +56,41 @@ class SnapshotConfig:
         self,
         pause_controller: Any,
         *pause_args: object,
+        cancelled: Callable[[], Awaitable[object]] | None = None,
     ) -> bool:
         logger.info("Pausing model")
-        await pause_controller.pause(*pause_args)
+        try:
+            await pause_controller.pause(*pause_args)
+        except Exception as exc:
+            raise SnapshotLifecycleError("snapshot_prepare", str(exc)) from exc
 
         try:
-            with open(self.ready_file, "w", encoding="utf-8") as ready_file:
-                ready_file.write("ready")
+            try:
+                with open(self.ready_file, "w", encoding="utf-8") as ready_file:
+                    ready_file.write("ready")
 
-            logger.info(
-                "Ready for snapshot. Polling for sentinel in %s "
-                "(snapshot-complete or restore-complete)",
-                self.control_dir,
-            )
+                logger.info(
+                    "Ready for snapshot. Polling for sentinel in %s "
+                    "(snapshot-complete or restore-complete)",
+                    self.control_dir,
+                )
 
-            event = await self._wait_for_sentinel()
+                event = await self._wait_for_sentinel_or_cancel(cancelled)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                raise SnapshotLifecycleError("snapshot_wait", str(exc)) from exc
         finally:
             self._cleanup_ready_and_sentinels()
 
         if event == "restore":
             logger.info("Restore sentinel detected")
             logger.info("Resuming model after restore")
-            await pause_controller.resume()
-            pause_controller.mark_resumed()
+            try:
+                await pause_controller.resume()
+                pause_controller.mark_resumed()
+            except Exception as exc:
+                raise SnapshotLifecycleError("restore_resume", str(exc)) from exc
             # The checkpoint is complete; post-restore model registration may
             # need normal Hugging Face cache/download behavior.
             os.environ.pop("HF_HUB_OFFLINE", None)
@@ -78,6 +98,30 @@ class SnapshotConfig:
 
         logger.info("Snapshot completion sentinel detected")
         return False
+
+    async def _wait_for_sentinel_or_cancel(
+        self, cancelled: Callable[[], Awaitable[object]] | None
+    ) -> str:
+        if cancelled is None:
+            return await self._wait_for_sentinel()
+
+        sentinel_task = asyncio.create_task(self._wait_for_sentinel())
+        cancel_task = asyncio.ensure_future(cancelled())
+        try:
+            done, _ = await asyncio.wait(
+                {sentinel_task, cancel_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if cancel_task in done:
+                sentinel_task.cancel()
+                await asyncio.gather(sentinel_task, return_exceptions=True)
+                raise asyncio.CancelledError("snapshot lifecycle cancelled")
+            return sentinel_task.result()
+        finally:
+            for task in (sentinel_task, cancel_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(sentinel_task, cancel_task, return_exceptions=True)
 
     async def _wait_for_sentinel(self) -> str:
         snapshot_path = Path(self.control_dir) / SNAPSHOT_COMPLETE_FILE
@@ -169,8 +213,41 @@ class EngineSnapshotController(Generic[EngineT]):
     snapshot_config: SnapshotConfig
     pause_args: tuple[object, ...] = ()
 
-    async def wait_for_restore(self) -> bool:
+    async def wait_for_restore(
+        self, cancelled: Callable[[], Awaitable[object]] | None = None
+    ) -> bool:
         return await self.snapshot_config.run_lifecycle(
             self.pause_controller,
             *self.pause_args,
+            cancelled=cancelled,
         )
+
+
+async def unified_snapshot_outcome(
+    controller: EngineSnapshotController[Any],
+    *,
+    argv: list[str] | None,
+    context: Any,
+    backend_name: str,
+):
+    """Translate the shared sentinel protocol into the unified engine result."""
+
+    from dynamo.common.backend import PreRuntimeOutcome
+    from dynamo.common.snapshot.restore_context import load_restored_runtime_config
+    from dynamo.llm.exceptions import Cancelled, EngineShutdown
+
+    try:
+        restored = await controller.wait_for_restore(cancelled=context.cancelled)
+    except asyncio.CancelledError as exc:
+        raise Cancelled(f"{backend_name} snapshot lifecycle cancelled") from exc
+    except SnapshotLifecycleError as exc:
+        raise EngineShutdown(f"{backend_name} {exc.phase} failed: {exc}") from exc
+
+    if not restored:
+        return PreRuntimeOutcome.exit_success()
+
+    try:
+        restored_runtime = load_restored_runtime_config(argv)
+    except Exception as exc:
+        raise EngineShutdown(f"{backend_name} restore_context failed: {exc}") from exc
+    return PreRuntimeOutcome.prepared(restored_runtime)

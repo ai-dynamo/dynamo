@@ -10,11 +10,15 @@ See dynamo/common/backend/README.md for architecture, response contract,
 and feature gap details.
 """
 
-from dynamo.common.backend.run import run
-from dynamo.trtllm.llm_engine import TrtllmLLMEngine
-
 
 def main():
+    from dynamo.common.snapshot.restore_context import maybe_run_restore_standby_mode
+
+    maybe_run_restore_standby_mode()
+
+    from dynamo.common.backend.run import run
+    from dynamo.trtllm.llm_engine import TrtllmLLMEngine
+
     run(TrtllmLLMEngine)
 
 

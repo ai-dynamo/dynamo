@@ -102,7 +102,8 @@ async def _check_start_populates_registration_metadata(started_engine):
     """``start`` must derive ``kv_cache_block_size`` from SGLang's page size
     and populate ``max_num_seqs`` from ``max-running-requests`` — without
     these values the Rust registration path has no routing signals."""
-    _engine, cfg = started_engine
+    engine, cfg = started_engine
+    assert await engine.start(0) is cfg, "start must reuse the prepared SGLang engine"
     assert cfg.llm is not None
     assert cfg.llm.kv_cache_block_size and cfg.llm.kv_cache_block_size > 0
     # total_kv_blocks is derived as ceil(max_total_tokens / page_size).

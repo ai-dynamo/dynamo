@@ -30,7 +30,8 @@ use tokio_util::sync::CancellationToken;
 use crate::adapter::{EngineAdapter, RawEngineAdapter};
 use crate::disagg::DisaggregationMode;
 use crate::engine::{
-    EngineConfig, KvEventSource, LLMEngine, MetricsBindings, MetricsCtx, RawEngine,
+    EngineConfig, KvEventSource, LLMEngine, MetricsBindings, MetricsCtx, PreRuntimeContext,
+    PreRuntimeOutcome, RawEngine, RestoredRuntimeConfig,
 };
 use crate::error::{BackendError, DynamoError, ErrorType};
 use crate::publisher::{PublisherHandles, setup_publishers};
@@ -98,6 +99,32 @@ impl RuntimeConfig {
         // `dynamo-runtime` itself in DistributedConfig::from_settings.
         unsafe {
             self.apply_with(|key, value| std::env::set_var(key, value));
+        }
+    }
+
+    /// Replace the process transport settings with this complete runtime
+    /// configuration. Unlike [`apply_to_env`](Self::apply_to_env), an unset
+    /// field removes the corresponding variable so restore cannot inherit a
+    /// stale snapshot-time event-plane override.
+    ///
+    /// This is called only in the serialized pre-distributed-runtime startup
+    /// phase. No Dynamo discovery or transport task exists yet.
+    pub fn replace_env(&self) {
+        // SAFETY: Worker invokes this before DistributedRuntime construction,
+        // while startup is serialized and no Dynamo task can concurrently read
+        // these settings. Snapshot restore already requires replacing the
+        // process environment before runtime services start.
+        unsafe {
+            Self::replace_one("DYN_DISCOVERY_BACKEND", self.discovery_backend.as_deref());
+            Self::replace_one("DYN_REQUEST_PLANE", self.request_plane.as_deref());
+            Self::replace_one("DYN_EVENT_PLANE", self.event_plane.as_deref());
+        }
+    }
+
+    unsafe fn replace_one(key: &str, value: Option<&str>) {
+        match value {
+            Some(value) => unsafe { std::env::set_var(key, value) },
+            None => unsafe { std::env::remove_var(key) },
         }
     }
 
@@ -237,6 +264,13 @@ enum LifecycleState {
     /// `start_engine` has not been called (or shutdown arrived first and
     /// flipped us straight to `Stopped`).
     Init,
+    /// `prepare_for_runtime()` is running. If it fails, cleanup is owed because
+    /// the implementation may have allocated partial engine state.
+    Preparing,
+    /// Pre-runtime preparation initialized engine resources successfully.
+    Prepared,
+    /// Pre-runtime preparation failed after it may have allocated resources.
+    PrepareFailed,
     /// `engine.start()` returned successfully; `engine.cleanup()` is owed.
     Running,
     /// `engine.start()` raised. The engine may have allocated partial
@@ -245,6 +279,16 @@ enum LifecycleState {
     StartFailed,
     /// Cleanup done. `engine.cleanup()` will not be called again.
     Stopped,
+}
+
+/// Terminal result from the lifecycle driver.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkerExit {
+    /// Normal shutdown or a pre-start shutdown request.
+    Completed,
+    /// Snapshot capture completed; the launcher must exit immediately without
+    /// normal engine or runtime teardown.
+    ExitSuccess,
 }
 
 /// The engine a [`Worker`] drives, tagged by request modality. Both variants
@@ -259,6 +303,18 @@ pub(crate) enum EngineKind {
 }
 
 impl EngineKind {
+    async fn prepare_for_runtime(
+        &self,
+        context: PreRuntimeContext,
+    ) -> Result<PreRuntimeOutcome, DynamoError> {
+        match self {
+            EngineKind::Llm(e) => e.prepare_for_runtime(context).await,
+            // Snapshot lifecycle support is intentionally limited to LLMEngine
+            // for DIS-2356. Raw media engines retain their existing lifecycle.
+            EngineKind::Raw(_) => Ok(PreRuntimeOutcome::Continue),
+        }
+    }
+
     async fn start(&self, worker_id: u64) -> Result<EngineConfig, DynamoError> {
         match self {
             EngineKind::Llm(e) => e.start(worker_id).await,
@@ -368,9 +424,9 @@ impl EngineKind {
 
 /// Runtime host for an engine (an [`LLMEngine`] or a [`RawEngine`]).
 ///
-/// `run()` creates the distributed runtime, calls `engine.start()`,
-/// registers the model, serves the endpoint, and calls
-/// `engine.cleanup()` on shutdown (guaranteed once `start()` succeeded).
+/// `run()` prepares the engine, creates the distributed runtime, calls
+/// `engine.start()`, registers the model, serves the endpoint, and calls
+/// `engine.cleanup()` on shutdown or partial initialization failure.
 pub struct Worker {
     engine: EngineKind,
     config: WorkerConfig,
@@ -423,9 +479,12 @@ impl Worker {
     ///
     /// A SIGTERM/SIGINT listener is installed at the top of `run` and
     /// shared via a [`CancellationToken`]:
-    ///   * Pre-start signal (during `DistributedRuntime` construction):
-    ///     the post-DRT cancellation check returns `Ok(())` cleanly and
-    ///     `engine.start()` is never called.
+    ///   * Preparation signal: `PreRuntimeContext` wakes the engine's
+    ///     preparation hook so it can return a typed cancellation failure;
+    ///     cleanup then runs once without creating `DistributedRuntime`.
+    ///   * Pre-start signal (during `DistributedRuntime` construction): the
+    ///     post-DRT cancellation check returns cleanly and `engine.start()` is
+    ///     never called.
     ///   * Mid-start signal: `engine.start()` is allowed to complete (we
     ///     never cancel a partially-initialized engine mid-flight); the
     ///     post-start cancellation check then runs the orchestrator
@@ -433,9 +492,16 @@ impl Worker {
     ///   * Mid-serve signal: the serve loop's [`tokio::select`] picks up
     ///     the same token and runs the orchestrator.
     ///
-    /// `engine.cleanup()` is guaranteed to run exactly once if
-    /// `engine.start()` succeeded, regardless of which path led to shutdown.
-    pub async fn run(mut self, runtime: Runtime) -> Result<(), DynamoError> {
+    /// `engine.cleanup()` is guaranteed to run exactly once after preparation
+    /// returns `Prepared` or fails, or after `engine.start()` begins. Successful
+    /// snapshot capture deliberately skips cleanup.
+    pub async fn run(self, runtime: Runtime) -> Result<(), DynamoError> {
+        self.run_with_outcome(runtime).await.map(|_| ())
+    }
+
+    /// Lifecycle driver that preserves the successful snapshot-exit signal for
+    /// process launchers. Most embedded callers should use [`run`](Self::run).
+    pub async fn run_with_outcome(mut self, runtime: Runtime) -> Result<WorkerExit, DynamoError> {
         // Validate the worker config up front so misconfiguration surfaces
         // before any signal handlers, tokio tasks, or runtime construction.
         // The same validation is also reachable via `run_inner`, but doing
@@ -519,9 +585,11 @@ impl Worker {
         signal_handle.abort();
         let _ = signal_handle.await;
 
-        // Final safety net: guarantee engine.cleanup() runs if start()
-        // succeeded. No-op if cleanup already ran via the orchestrator.
-        self.cleanup_once().await;
+        // Snapshot producers must exit with the captured engine untouched.
+        // Every other terminal path gets the usual exactly-once cleanup.
+        if !matches!(outcome, Ok(WorkerExit::ExitSuccess)) {
+            self.cleanup_once().await;
+        }
 
         outcome
     }
@@ -530,9 +598,26 @@ impl Worker {
         &mut self,
         runtime: Runtime,
         shutdown: &CancellationToken,
-    ) -> Result<(), DynamoError> {
+    ) -> Result<WorkerExit, DynamoError> {
         // model_input was already validated at the top of `run`; re-checking
         // here would double-error on misconfig.
+        match self.prepare_engine(shutdown.clone()).await? {
+            PreRuntimeOutcome::Continue => {}
+            PreRuntimeOutcome::Prepared { restored_runtime } => {
+                self.apply_restored_runtime_config(restored_runtime);
+            }
+            PreRuntimeOutcome::ExitSuccess => return Ok(WorkerExit::ExitSuccess),
+        }
+
+        // A snapshot lifecycle can wait for an external agent. Honour a signal
+        // before opening discovery/NATS connections after that wait completes.
+        if shutdown.is_cancelled() {
+            tracing::info!(
+                "Shutdown signal observed after engine preparation; exiting before runtime creation"
+            );
+            return Ok(WorkerExit::Completed);
+        }
+
         let drt = DistributedRuntime::from_settings(runtime)
             .await
             .map_err(|e| {
@@ -564,7 +649,7 @@ impl Worker {
         // nothing to clean up.
         if shutdown.is_cancelled() {
             tracing::info!("Shutdown signal observed before engine.start(); exiting cleanly");
-            return Ok(());
+            return Ok(WorkerExit::Completed);
         }
 
         // Pull the worker's unique runtime ID from the DRT before handing it
@@ -610,11 +695,12 @@ impl Worker {
         if shutdown.is_cancelled() {
             tracing::info!("Shutdown signal observed during engine.start(); running orchestrator");
             self.orchestrator_steps(&endpoint).await;
-            return Ok(());
+            return Ok(WorkerExit::Completed);
         }
 
         self.serve_with_orchestrator(&engine_config, endpoint, shutdown.clone())
-            .await
+            .await?;
+        Ok(WorkerExit::Completed)
     }
 
     /// Build KV-event publishers and the `SnapshotPublisher` from the
@@ -751,15 +837,71 @@ impl Worker {
         self.run_engine_shutdown_steps().await;
     }
 
+    /// Run the optional pre-distributed-runtime engine phase exactly once.
+    async fn prepare_engine(
+        &mut self,
+        shutdown: CancellationToken,
+    ) -> Result<PreRuntimeOutcome, DynamoError> {
+        assert_eq!(
+            self.state,
+            LifecycleState::Init,
+            "prepare_engine called in unexpected state {:?}",
+            self.state
+        );
+        self.state = LifecycleState::Preparing;
+        match self
+            .engine
+            .prepare_for_runtime(PreRuntimeContext::new(shutdown))
+            .await
+        {
+            Ok(PreRuntimeOutcome::Continue) => {
+                // Default/cold-start implementations allocated nothing; retain
+                // the legacy pre-start cleanup semantics.
+                self.state = LifecycleState::Init;
+                Ok(PreRuntimeOutcome::Continue)
+            }
+            Ok(PreRuntimeOutcome::Prepared { restored_runtime }) => {
+                self.state = LifecycleState::Prepared;
+                Ok(PreRuntimeOutcome::Prepared { restored_runtime })
+            }
+            Ok(PreRuntimeOutcome::ExitSuccess) => {
+                // Do not transition to a cleanup-eligible state: the launcher
+                // exits immediately and preserves the captured engine image.
+                self.state = LifecycleState::Init;
+                Ok(PreRuntimeOutcome::ExitSuccess)
+            }
+            Err(error) => {
+                self.state = LifecycleState::PrepareFailed;
+                Err(error)
+            }
+        }
+    }
+
+    fn apply_restored_runtime_config(&mut self, restored: RestoredRuntimeConfig) {
+        self.config.namespace = restored.namespace;
+        self.config.runtime = RuntimeConfig {
+            discovery_backend: Some(restored.discovery_backend),
+            request_plane: Some(restored.request_plane),
+            event_plane: restored.event_plane,
+        };
+        self.config.runtime.replace_env();
+        tracing::info!(
+            namespace = %self.config.namespace,
+            discovery_backend = ?self.config.runtime.discovery_backend,
+            request_plane = ?self.config.runtime.request_plane,
+            event_plane = ?self.config.runtime.event_plane,
+            "Applied restored runtime configuration before DistributedRuntime creation"
+        );
+    }
+
     /// Start the engine exactly once. `Worker::run` consumes `self`, so all
     /// lifecycle transitions are single-threaded and do not need a mutex.
     async fn start_engine(&mut self, worker_id: u64) -> Result<EngineConfig, DynamoError> {
         // `start_engine` is called once from `run_inner`, which consumes
         // `self`. Hitting any other state is a programmer error worth
         // panicking over in release as well as debug builds.
-        assert_eq!(
-            self.state,
-            LifecycleState::Init,
+        assert!(
+            matches!(self.state, LifecycleState::Init | LifecycleState::Prepared),
             "start_engine called in unexpected state {:?}",
             self.state
         );
@@ -789,7 +931,11 @@ impl Worker {
                 self.state = LifecycleState::Stopped;
                 return;
             }
-            LifecycleState::Running | LifecycleState::StartFailed => {}
+            LifecycleState::Preparing
+            | LifecycleState::Prepared
+            | LifecycleState::PrepareFailed
+            | LifecycleState::Running
+            | LifecycleState::StartFailed => {}
         }
         let cleanup_start = std::time::Instant::now();
         match self.engine.cleanup().await {
@@ -2340,8 +2486,17 @@ mod tests {
 
     /// Mock engine that records `cleanup` calls and lets a test drive
     /// `start` success/failure via a flag.
+    #[derive(Clone, Copy)]
+    enum PrepareBehavior {
+        Continue,
+        Prepared,
+        ExitSuccess,
+        Fail,
+    }
+
     struct StateMockEngine {
         start_should_fail: bool,
+        prepare_behavior: PrepareBehavior,
         cleanup_calls: Arc<AtomicUsize>,
     }
 
@@ -2350,6 +2505,17 @@ mod tests {
             let cleanup_calls = Arc::new(AtomicUsize::new(0));
             let eng = Arc::new(Self {
                 start_should_fail,
+                prepare_behavior: PrepareBehavior::Continue,
+                cleanup_calls: cleanup_calls.clone(),
+            });
+            (eng, cleanup_calls)
+        }
+
+        fn with_prepare(prepare_behavior: PrepareBehavior) -> (Arc<Self>, Arc<AtomicUsize>) {
+            let cleanup_calls = Arc::new(AtomicUsize::new(0));
+            let eng = Arc::new(Self {
+                start_should_fail: false,
+                prepare_behavior,
                 cleanup_calls: cleanup_calls.clone(),
             });
             (eng, cleanup_calls)
@@ -2358,6 +2524,28 @@ mod tests {
 
     #[async_trait]
     impl LLMEngine for StateMockEngine {
+        async fn prepare_for_runtime(
+            &self,
+            _context: PreRuntimeContext,
+        ) -> Result<PreRuntimeOutcome, DynamoError> {
+            match self.prepare_behavior {
+                PrepareBehavior::Continue => Ok(PreRuntimeOutcome::Continue),
+                PrepareBehavior::Prepared => Ok(PreRuntimeOutcome::Prepared {
+                    restored_runtime: RestoredRuntimeConfig {
+                        namespace: "prepared".to_string(),
+                        discovery_backend: "mem".to_string(),
+                        request_plane: "tcp".to_string(),
+                        event_plane: None,
+                    },
+                }),
+                PrepareBehavior::ExitSuccess => Ok(PreRuntimeOutcome::ExitSuccess),
+                PrepareBehavior::Fail => Err(err(
+                    ErrorType::Backend(BackendError::EngineShutdown),
+                    "synthetic prepare failure",
+                )),
+            }
+        }
+
         async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
             if self.start_should_fail {
                 Err(err(
@@ -2403,6 +2591,75 @@ mod tests {
                 ..WorkerConfig::default()
             },
         )
+    }
+
+    #[tokio::test]
+    async fn prepare_default_continue_preserves_init_state() {
+        let (engine, cleanup_calls) = StateMockEngine::new(false);
+        let mut worker = worker_with(engine);
+        let outcome = worker
+            .prepare_engine(CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, PreRuntimeOutcome::Continue);
+        assert_eq!(worker.state, LifecycleState::Init);
+        worker.cleanup_once().await;
+        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn prepared_engine_is_cleanup_eligible_before_start() {
+        let (engine, cleanup_calls) = StateMockEngine::with_prepare(PrepareBehavior::Prepared);
+        let mut worker = worker_with(engine);
+        let outcome = worker
+            .prepare_engine(CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(matches!(outcome, PreRuntimeOutcome::Prepared { .. }));
+        assert_eq!(worker.state, LifecycleState::Prepared);
+        worker.cleanup_once().await;
+        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_prepare_runs_cleanup_exactly_once() {
+        let (engine, cleanup_calls) = StateMockEngine::with_prepare(PrepareBehavior::Fail);
+        let mut worker = worker_with(engine);
+        assert!(
+            worker
+                .prepare_engine(CancellationToken::new())
+                .await
+                .is_err()
+        );
+        assert_eq!(worker.state, LifecycleState::PrepareFailed);
+        worker.cleanup_once().await;
+        worker.cleanup_once().await;
+        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn snapshot_exit_does_not_make_cleanup_eligible() {
+        let (engine, cleanup_calls) = StateMockEngine::with_prepare(PrepareBehavior::ExitSuccess);
+        let mut worker = worker_with(engine);
+        let outcome = worker
+            .prepare_engine(CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, PreRuntimeOutcome::ExitSuccess);
+        worker.cleanup_once().await;
+        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn pre_runtime_context_observes_shutdown_cancellation() {
+        let shutdown = CancellationToken::new();
+        let context = PreRuntimeContext::new(shutdown.clone());
+        assert!(!context.is_cancelled());
+
+        shutdown.cancel();
+        context.cancelled().await;
+
+        assert!(context.is_cancelled());
     }
 
     #[tokio::test]
@@ -2860,6 +3117,44 @@ mod tests {
                 ("DYN_EVENT_PLANE".to_string(), "zmq".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn restored_runtime_config_replaces_worker_and_clears_event_plane() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let old_discovery = std::env::var_os("DYN_DISCOVERY_BACKEND");
+        let old_request = std::env::var_os("DYN_REQUEST_PLANE");
+        let old_event = std::env::var_os("DYN_EVENT_PLANE");
+        // SAFETY: env-mutating tests in this module are serialized by ENV_LOCK.
+        unsafe { std::env::set_var("DYN_EVENT_PLANE", "stale") };
+
+        let (engine, _) = StateMockEngine::new(false);
+        let mut worker = worker_with(engine);
+        worker.apply_restored_runtime_config(RestoredRuntimeConfig {
+            namespace: "restored".to_string(),
+            discovery_backend: "mem".to_string(),
+            request_plane: "tcp".to_string(),
+            event_plane: None,
+        });
+
+        assert_eq!(worker.config.namespace, "restored");
+        assert_eq!(std::env::var("DYN_DISCOVERY_BACKEND").unwrap(), "mem");
+        assert_eq!(std::env::var("DYN_REQUEST_PLANE").unwrap(), "tcp");
+        assert!(std::env::var_os("DYN_EVENT_PLANE").is_none());
+
+        // SAFETY: restore the serialized process environment before unlocking.
+        unsafe {
+            for (key, value) in [
+                ("DYN_DISCOVERY_BACKEND", old_discovery),
+                ("DYN_REQUEST_PLANE", old_request),
+                ("DYN_EVENT_PLANE", old_event),
+            ] {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
     }
 
     #[test]

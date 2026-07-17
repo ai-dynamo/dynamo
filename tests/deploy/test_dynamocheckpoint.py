@@ -83,6 +83,7 @@ class CheckpointBackendConfig:
     frontend_component: str
     target_container: str
     model: str
+    command: tuple[str, ...]
     args: tuple[str, ...]
     env: tuple[tuple[str, str], ...] = ()
     extra_volumes: tuple[dict[str, Any], ...] = ()
@@ -100,6 +101,7 @@ CHECKPOINT_BACKENDS = {
         frontend_component=FRONTEND_COMPONENT,
         target_container=TARGET_CONTAINER,
         model=CHECKPOINT_MODEL,
+        command=("python3", "-m", "dynamo.vllm.unified_main"),
         args=(
             "--model",
             CHECKPOINT_MODEL,
@@ -123,6 +125,7 @@ CHECKPOINT_BACKENDS = {
         frontend_component=FRONTEND_COMPONENT,
         target_container=TARGET_CONTAINER,
         model=CHECKPOINT_MODEL,
+        command=("python3", "-m", "dynamo.sglang.unified_main"),
         args=(
             "--model-path",
             CHECKPOINT_MODEL,
@@ -150,6 +153,7 @@ CHECKPOINT_BACKENDS = {
         frontend_component=FRONTEND_COMPONENT,
         target_container=TARGET_CONTAINER,
         model=CHECKPOINT_MODEL,
+        command=("python3", "-m", "dynamo.trtllm.unified_main"),
         # Only the CI-sizing overrides that differ from TensorRT-LLM defaults
         # are passed. The remaining single-GPU snapshot settings from
         # examples/backends/trtllm/engine_configs/qwen3/snapshot.yaml are already
@@ -255,6 +259,7 @@ def _new_checkpoint_spec(
     if backend.pod_spec_updates:
         pod_spec.update(copy.deepcopy(backend.pod_spec_updates))
     container = containers[0]
+    container["command"] = list(backend.command)
     container["args"] = list(backend.args)
     if backend.container_resources:
         container["resources"] = copy.deepcopy(backend.container_resources)
@@ -570,7 +575,7 @@ async def test_dgd_checkpoint_restore_deploy(
     skip_service_restart: bool,
     request: pytest.FixtureRequest,
 ) -> None:
-    """Verify a DGD worker can be checkpointed, restored, and still serve."""
+    """Verify a unified worker can be checkpointed, restored, and still serve."""
     backend = _checkpoint_backend(request)
     if not image:
         pytest.fail(

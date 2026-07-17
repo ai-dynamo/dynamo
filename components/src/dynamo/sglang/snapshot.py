@@ -11,15 +11,69 @@ from typing import Any
 
 import sglang as sgl
 
+from dynamo.common.backend import PreRuntimeOutcome
 from dynamo.common.snapshot.lifecycle import (
     EngineSnapshotController,
     SnapshotConfig,
     configure_snapshot_capture_env,
+    unified_snapshot_outcome,
 )
+from dynamo.llm.exceptions import Cancelled, EngineShutdown, InvalidArgument
 
 from .pause import SGLangEnginePauseController
 
 logger = logging.getLogger(__name__)
+
+
+def _configure_server_args_for_snapshot(server_args: Any) -> None:
+    # Enable memory_saver so GPU memory can be released for CRIU. GMS uses
+    # VA-stable unmap/remap and forbids CPU weight backup.
+    server_args.enable_memory_saver = True
+    try:
+        from gpu_memory_service.integrations.sglang import is_gms_active
+
+        using_gms = is_gms_active()
+    except ImportError:
+        using_gms = False
+    if not using_gms:
+        server_args.enable_weights_cpu_backup = True
+
+
+async def prepare_unified_snapshot(
+    engine: Any,
+    *,
+    argv: list[str] | None,
+    context: Any,
+) -> PreRuntimeOutcome:
+    snapshot_config = SnapshotConfig.from_env()
+    if snapshot_config is None:
+        return PreRuntimeOutcome.continue_startup()
+
+    try:
+        configure_snapshot_capture_env()
+        _configure_server_args_for_snapshot(engine.server_args)
+        logger.info("Unified SGLang snapshot mode enabled")
+        await engine._initialize_engine()
+        await warmup_engine(engine.engine, engine.server_args)
+        if engine._pause_controller is None:
+            raise RuntimeError("SGLang snapshot pause controller was not initialized")
+    except (Cancelled, InvalidArgument):
+        raise
+    except Exception as exc:
+        raise EngineShutdown(f"SGLang snapshot_prepare failed: {exc}") from exc
+    gc.collect()
+
+    controller = EngineSnapshotController(
+        engine=engine,
+        pause_controller=engine._pause_controller,
+        snapshot_config=snapshot_config,
+    )
+    return await unified_snapshot_outcome(
+        controller,
+        argv=argv,
+        context=context,
+        backend_name="SGLang",
+    )
 
 
 async def warmup_engine(engine: sgl.Engine, server_args: Any) -> None:
@@ -135,18 +189,7 @@ async def prepare_snapshot_engine(
     configure_snapshot_capture_env()
     logger.info("Snapshot mode enabled (watcher-driven signals)")
 
-    # Enable memory_saver so GPU memory can be released for CRIU.
-    # When using GMS, weights use VA-stable unmap/remap (no CPU backup); GMS
-    # forbids enable_weights_cpu_backup. Otherwise use CPU backup for weights.
-    server_args.enable_memory_saver = True
-    try:
-        from gpu_memory_service.integrations.sglang import is_gms_active
-
-        _using_gms = is_gms_active()
-    except ImportError:
-        _using_gms = False
-    if not _using_gms:
-        server_args.enable_weights_cpu_backup = True
+    _configure_server_args_for_snapshot(server_args)
 
     start_time = time.time()
     engine = sgl.Engine(server_args=server_args)

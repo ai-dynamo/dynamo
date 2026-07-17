@@ -101,7 +101,8 @@ async def _check_start_populates_registration_metadata(started_engine):
     """``start`` threads ``max_seq_len`` / ``kv_block_size`` / ``max_batch_size``
     from ``from_args``'s parsed config through to ``EngineConfig`` —
     mismatches here surface as incorrect Rust-side routing decisions."""
-    _engine, cfg = started_engine
+    engine, cfg = started_engine
+    assert await engine.start(0) is cfg, "start must reuse the prepared TRT-LLM engine"
     assert cfg.llm is not None
     assert cfg.llm.context_length == 1024
     assert cfg.llm.kv_cache_block_size > 0
