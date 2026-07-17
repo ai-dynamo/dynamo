@@ -84,7 +84,7 @@ Python engine authors keep the split API.)
   owns runtime lifecycle. `BaseEngine` owns the modality-agnostic lifecycle;
   `LLMEngine` and `RawEngine` subclass it and differ *only* in the `generate`
   contract (token vs. raw media). Do not add per-engine mixins or intermediate
-  bases between a modality ABC and its concrete backend (e.g. `VllmLLMEngine`).
+  bases between a modality ABC and its concrete backend (e.g. `SampleLLMEngine`).
   A new media modality is a new `RawEngine` implementation, not a new
   engine trait or lifecycle.
 

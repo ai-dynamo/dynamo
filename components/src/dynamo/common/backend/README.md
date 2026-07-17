@@ -35,9 +35,6 @@ LLMEngine (ABC)                <-- engine boundary (engine.py)
     |   - is_quiescent() -> Optional[bool]   (prefill drain early-exit, optional)
     |   - cleanup()                          (shutdown)
     |
-    +-- VllmLLMEngine          <-- vllm/llm_engine.py
-    +-- SglangLLMEngine        <-- sglang/llm_engine.py
-    +-- TrtllmLLMEngine        <-- trtllm/llm_engine.py
     +-- SampleLLMEngine        <-- sample_engine.py
 
 Worker                  <-- runtime integration (worker.py)
