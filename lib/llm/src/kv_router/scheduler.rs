@@ -20,6 +20,7 @@ use super::sequence::{
 use crate::discovery::RuntimeConfigWatch;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use anyhow::Result;
+use dynamo_admission_control::register_builtin_policies;
 use dynamo_kv_router::{
     PrefillLoadEstimator,
     config::{KvRouterConfig, RouterConfigOverride},
@@ -63,7 +64,7 @@ where
         model_name: Option<&str>,
         worker_type: &'static str,
         cancellation_token: CancellationToken,
-        admission_policies: PolicyClassAdmissionPolicies,
+        mut admission_policies: PolicyClassAdmissionPolicies,
     ) -> Result<Self, KvSchedulerError> {
         let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> =
             workers_with_configs.borrow().clone();
@@ -88,6 +89,13 @@ where
         let profile = kv_router_config
             .policy_profile(model_name)
             .map_err(|error| KvSchedulerError::InitFailed(error.to_string()))?;
+        register_builtin_policies(
+            &profile,
+            workers_with_configs.clone(),
+            block_size,
+            &mut admission_policies,
+        )
+        .map_err(|error| KvSchedulerError::InitFailed(error.to_string()))?;
         let queue_recheck_interval = kv_router_config.router_queue_recheck_interval();
         let metric_model = model_name.unwrap_or("unknown");
         let queue_metrics = profile
