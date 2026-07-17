@@ -558,6 +558,10 @@ sglang_configs = {
             "Qwen/Qwen2-VL-7B-Instruct",
         ],
         timeout=360,
+        # SGLang's video path decodes with decord; the shipped image omits it as
+        # a media-codec carrier, so install it for this test only.
+        # See common._install_test_only_packages.
+        env={"DYN_TEST_ONLY_PIP_INSTALL": "decord2"},
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload(
@@ -604,6 +608,9 @@ sglang_configs = {
             "DYN_ENCODE_GPU_MEM": "0.1",
             "DYN_WORKER_GPU_MEM": "0.4",
             "DYN_SGL_EMBEDDING_TRANSFER_MODE": "local",
+            # SGLang's video path decodes with decord; the shipped image omits it
+            # as a media-codec carrier, so install it for this test only.
+            "DYN_TEST_ONLY_PIP_INSTALL": "decord2",
         },
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
