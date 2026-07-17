@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """Configure a minikube cluster with Docker driver, GPU support, and NVIDIA GPU Operator."""
 
 import logging
@@ -40,25 +42,21 @@ def check_nvidia_driver() -> tuple[bool, str]:
         return False, f"Unexpected error checking NVIDIA driver: {e!s}"
 
 
-def _is_minikube_running() -> bool:
+def _minikube_exists() -> bool:
+    """Return True if a minikube cluster exists (running, stopped, or errored)."""
     result = subprocess.run(["minikube", "status"], capture_output=True, text=True)
-    if result.returncode == 85:
-        logger.info("minikube is not running")
-        return False
-    if result.returncode == 0 and "Running" in result.stdout:
-        return True
-    logger.error(f"minikube status: rc={result.returncode}, stdout={result.stdout!r}")
-    return False
+    # exit code 85 means no cluster exists at all
+    return result.returncode != 85
 
 
 def _minikube_delete() -> None:
-    if _is_minikube_running():
-        logger.warning("Minikube is currently running!")
+    if _minikube_exists():
+        logger.warning("A minikube cluster already exists!")
         if not typer.confirm("This will stop and delete the existing minikube cluster. Continue?"):
             logger.info("Cancelled by user")
             raise typer.Exit(0)
-        logger.info("Stopping and deleting minikube")
-        check_call(["minikube", "stop"])
+        logger.info("Deleting minikube cluster")
+        subprocess.run(["minikube", "stop"], capture_output=True)
         check_call(["minikube", "delete"])
 
 
@@ -86,6 +84,7 @@ def _install_gpu_operator(driver_installed: bool) -> None:
 
     cmd = [
         "helm", "install", "--wait", "--generate-name",
+        "--kube-context", "minikube",
         "-n", "gpu-operator", "--create-namespace",
         "nvidia/gpu-operator",
         f"--version={GPU_OPERATOR_VERSION}",
