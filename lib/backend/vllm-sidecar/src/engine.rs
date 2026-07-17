@@ -127,6 +127,7 @@ impl LLMEngine for VllmSidecarEngine {
         tracing::info!(
             endpoint = %self.endpoint,
             connections = self.transport.connections,
+            mode = %self.mode,
             "connecting to vLLM gRPC"
         );
         let client = VllmClient::connect(&self.endpoint, self.transport).await?;
@@ -137,8 +138,9 @@ impl LLMEngine for VllmSidecarEngine {
         tracing::info!(
             endpoint = %self.endpoint,
             connections = connection_count,
-            model = %self.model.source,
-            "vLLM gRPC is ready"
+            configured_model_source = %self.model.source,
+            mode = %self.mode,
+            "vLLM gRPC transport connected"
         );
         Ok(self.model.engine_config())
     }

@@ -449,8 +449,10 @@ impl ResponseState {
             )));
         }
 
-        let reason = pb::finish_info::FinishReason::try_from(finish.finish_reason)
-            .map_err(|_| client::protocol_error("unknown finish reason"))?;
+        let reason =
+            pb::finish_info::FinishReason::try_from(finish.finish_reason).map_err(|_| {
+                client::protocol_error(format!("unknown finish reason {}", finish.finish_reason))
+            })?;
         let completion_tokens = self.reported_completion_tokens();
         mapped.finish_reason = Some(match reason {
             pb::finish_info::FinishReason::Length => dynamo_backend_common::FinishReason::Length,
@@ -502,9 +504,13 @@ impl ResponseState {
             || prompt.ranks.len() != count
             || prompt.candidate_tokens.len() != count
         {
-            return Err(client::protocol_error(
-                "prompt logprob arrays do not match num_prompt_tokens",
-            ));
+            return Err(client::protocol_error(format!(
+                "prompt logprob array lengths do not match expected count {count}: token_ids={}, logprobs={}, ranks={}, candidate_tokens={}",
+                prompt.token_ids.len(),
+                prompt.logprobs.len(),
+                prompt.ranks.len(),
+                prompt.candidate_tokens.len(),
+            )));
         }
 
         self.prompt_info = Some(prompt);
@@ -569,9 +575,13 @@ fn map_output_logprobs(
         || output.ranks.len() != count
         || output.candidate_tokens.len() != count
     {
-        return Err(client::protocol_error(
-            "output logprob arrays do not match token_ids",
-        ));
+        return Err(client::protocol_error(format!(
+            "output logprob array lengths do not match expected count {count}: token_ids={}, logprobs={}, ranks={}, candidate_tokens={}",
+            output.token_ids.len(),
+            output.logprobs.len(),
+            output.ranks.len(),
+            output.candidate_tokens.len(),
+        )));
     }
     let log_probs = output
         .logprobs

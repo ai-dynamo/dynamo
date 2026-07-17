@@ -32,10 +32,10 @@ pub fn normalize_grpc_endpoint(raw: &str, argument: &str) -> Result<String, Stri
         ));
     }
 
-    let (host, normalized) = if let Some(host) = endpoint.strip_prefix("grpc://") {
-        (host, format!("http://{host}"))
-    } else if let Some(host) = endpoint.strip_prefix("http://") {
-        (host, endpoint.to_string())
+    let normalized = if let Some(authority) = endpoint.strip_prefix("grpc://") {
+        format!("http://{authority}")
+    } else if endpoint.starts_with("http://") {
+        endpoint.to_string()
     } else if endpoint.starts_with("grpcs://") || endpoint.starts_with("https://") {
         return Err(format!("TLS endpoints are not supported by `{argument}`"));
     } else if endpoint.contains("://") {
@@ -43,13 +43,25 @@ pub fn normalize_grpc_endpoint(raw: &str, argument: &str) -> Result<String, Stri
             "unsupported endpoint scheme in `{argument}`: `{endpoint}`"
         ));
     } else {
-        (endpoint, format!("http://{endpoint}"))
+        format!("http://{endpoint}")
     };
 
-    if host.is_empty() {
+    let parsed = url::Url::parse(&normalized)
+        .map_err(|error| format!("invalid gRPC endpoint for `{argument}`: {error}"))?;
+    if parsed.host().is_none() {
         return Err(format!("`{argument}` must include a host"));
     }
-    Ok(normalized)
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(format!("`{argument}` must not include user information"));
+    }
+    if parsed.path() != "/" || parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(format!(
+            "`{argument}` must contain only a plaintext scheme and authority"
+        ));
+    }
+
+    let authority = &parsed[url::Position::BeforeHost..url::Position::AfterPort];
+    Ok(format!("http://{authority}"))
 }
 
 /// CLI flags that every Rust backend needs. Flatten these into your engine's
@@ -229,6 +241,10 @@ mod tests {
             "grpc://",
             "https://server",
             "other://server",
+            "http://user:password@server:50051",
+            "http://server:50051/path",
+            "http://server:50051?token=secret",
+            "http://server:50051#fragment",
         ] {
             assert!(normalize_grpc_endpoint(endpoint, ARGUMENT).is_err());
         }
