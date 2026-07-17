@@ -31,10 +31,14 @@
  * both light and dark; .dark overrides mirror DepMetadata.tsx). */
 const DEP_INDEX_CSS = `
 .dep-index{--dep-mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"RobotoMono",monospace;margin:0 0 2rem;}
-/* Slim result-count line. No title/heading here — registry.mdx frontmatter
-   already renders the "Dynamo Enhancement Proposals" H1 + subtitle above. */
-.dep-index-head{display:flex;align-items:baseline;gap:16px;margin:0 0 14px;}
+/* Result-count line + search box. No title/heading here — registry.mdx
+   frontmatter already renders the "Dynamo Enhancement Proposals" H1 + subtitle
+   above. Count on the left, search pushed right (margin-left:auto). */
+.dep-index-head{display:flex;align-items:center;flex-wrap:wrap;gap:12px 16px;margin:0 0 14px;}
 .dep-index-count{font-family:var(--dep-mono);font-size:12px;font-weight:600;letter-spacing:.06em;color:var(--pst-color-text-muted,#6b6b6b);text-transform:uppercase;white-space:nowrap;}
+.dep-index-search{margin-left:auto;font-family:var(--dep-mono);font-size:12px;color:var(--pst-color-text-base,#1a1a1a);background:var(--pst-color-surface,#fbfbfa);border:1px solid var(--border,var(--grayscale-a5,#dcdcdc));border-radius:2px;padding:7px 11px;min-width:240px;flex:0 1 320px;}
+.dep-index-search::placeholder{color:var(--pst-color-text-muted,#9a9a9a);}
+.dep-index-search:focus{outline:none;border-color:var(--nv-color-green,#76b900);box-shadow:0 0 0 3px rgba(118,185,0,.15);}
 .dep-index-filters{display:flex;flex-wrap:wrap;gap:7px;align-items:center;margin-bottom:18px;}
 .dep-index-chip{font-family:var(--dep-mono);font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;border:1px solid var(--border,var(--grayscale-a5,#dcdcdc));background:transparent;color:var(--pst-color-text-muted,#6b6b6b);padding:5px 11px;border-radius:2px;cursor:pointer;display:inline-flex;align-items:center;gap:7px;line-height:1;}
 .dep-index-chip .dep-index-sw{width:8px;height:8px;border-radius:0;}

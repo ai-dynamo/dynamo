@@ -69,7 +69,7 @@
   };
 
   // Per-mount view state (reset each time a fresh mount is built).
-  var state = { status: "All", sig: "All SIGs", sort: "num" };
+  var state = { q: "", status: "All", sig: "All SIGs", sort: "num" };
   var gridEl = null;
   var countEl = null;
   // True when the last renderGrid() ran against an empty dataset, so scan() can
@@ -134,6 +134,20 @@
     var ka = String(a.dep || a.slug || "");
     var kb = String(b.dep || b.slug || "");
     return ka.localeCompare(kb, undefined, { numeric: true, sensitivity: "base" });
+  }
+
+  /** Lowercased searchable text for one DEP: title, number, slug, status,
+   * SIG, category, submitter, and every author label/handle. */
+  function haystack(d) {
+    var parts = [d.title, d.dep, d.slug, d.status, d.sig, d.category, d.submitter];
+    var authors = Array.isArray(d.authors) ? d.authors : [];
+    for (var i = 0; i < authors.length; i++) {
+      if (authors[i]) {
+        parts.push(authors[i].label);
+        parts.push(authors[i].handle);
+      }
+    }
+    return parts.filter(Boolean).join(" ").toLowerCase();
   }
 
   function uniqueSigs(items) {
@@ -214,11 +228,13 @@
     var all = records();
     renderedEmpty = all.length === 0;
 
+    var q = String(state.q || "").trim().toLowerCase();
     var filtered = [];
     for (var i = 0; i < all.length; i++) {
       var d = all[i];
       if (state.status !== "All" && d.status !== state.status) continue;
       if (state.sig !== "All SIGs" && d.sig !== state.sig) continue;
+      if (q && haystack(d).indexOf(q) === -1) continue;
       filtered.push(d);
     }
     filtered.sort(compare);
@@ -245,7 +261,7 @@
 
   function buildSkeleton(mount) {
     // Reset view state for the fresh mount.
-    state = { status: "All", sig: "All SIGs", sort: "num" };
+    state = { q: "", status: "All", sig: "All SIGs", sort: "num" };
 
     // No <h2> title here: registry.mdx frontmatter already renders "Dynamo
     // Enhancement Proposals" as the page H1 + subtitle. A second heading was a
@@ -253,6 +269,22 @@
     var head = el("div", "dep-index-head");
     countEl = el("span", "dep-index-count", "");
     head.appendChild(countEl);
+
+    // Free-text search: title, DEP number, author @handle, SIG, category.
+    // Right-aligned via .dep-index-search { margin-left:auto }.
+    var search = el("input", "dep-index-search");
+    search.setAttribute("type", "search");
+    search.setAttribute("placeholder", "Search proposals\u2026");
+    search.setAttribute(
+      "aria-label",
+      "Search proposals by title, DEP number, or author",
+    );
+    search.addEventListener("input", function () {
+      state.q = search.value;
+      renderGrid();
+    });
+    head.appendChild(search);
+
     mount.appendChild(head);
 
     var filters = el("div", "dep-index-filters");
