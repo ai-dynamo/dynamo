@@ -46,10 +46,6 @@ def run_select_service(args: List[str]) -> None:
     """Run the Dynamo selection service with the given arguments."""
     ...
 
-def run_sglang_sidecar(args: List[str]) -> None:
-    """Run the SGLang gRPC sidecar with the given arguments."""
-    ...
-
 # Any Python object that can be serialized to JSON (dict, list, str, int, etc.)
 JsonLike = Any
 
@@ -1851,15 +1847,13 @@ class KvRouterConfig:
         disk_cache_hit_weight: float = 0.25,
         router_temperature: float = 0.0,
         use_kv_events: bool = True,
-        durable_kv_events: bool = False,
+        *,
         router_replica_sync: bool = False,
         router_track_active_blocks: bool = True,
         router_track_output_blocks: bool = False,
         router_assume_kv_reuse: bool = True,
         router_track_prefill_tokens: bool = True,
         router_prefill_load_model: str = "none",
-        router_snapshot_threshold: Optional[int] = 1000000,
-        router_reset_states: bool = False,
         router_ttl_secs: float = 120.0,
         router_queue_threshold: Optional[float] = None,
         router_event_threads: int = 4,
@@ -1869,7 +1863,6 @@ class KvRouterConfig:
         shared_cache_multiplier: float = 0.0,
         shared_cache_type: str = "none",
         router_predicted_ttl_secs: Optional[float] = None,
-        *,
         overlap_score_credit: float = 1.0,
         overlap_score_credit_decay: float = 0.0,
         prefill_load_scale: float = 1.0,
@@ -1886,9 +1879,6 @@ class KvRouterConfig:
             disk_cache_hit_weight: Credit multiplier for disk/external cache hits (default: 0.25)
             router_temperature: Temperature for normalized worker sampling via softmax (default: 0.0)
             use_kv_events: Whether to use KV events from workers (default: True)
-            durable_kv_events: **Deprecated.** Enable durable KV events using NATS JetStream (default: False).
-                This option will be removed in a future release. The event-plane subscriber
-                (local_indexer mode) is now the recommended path.
             router_replica_sync: Enable replica synchronization (default: False)
             router_track_active_blocks: Track active blocks for load balancing (default: True)
             router_track_output_blocks: Track output blocks during generation (default: False).
@@ -1901,8 +1891,6 @@ class KvRouterConfig:
             router_prefill_load_model: Prompt-side prefill load model (default: "none").
                 "none" keeps static prompt load accounting.
                 "aic" decays the oldest active prefill request using AIC-predicted duration.
-            router_snapshot_threshold: Number of messages before snapshot (default: 1000000)
-            router_reset_states: Reset router state on startup (default: False)
             router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)
             router_queue_threshold: Optional queue threshold fraction for prefill token capacity (default: None).
                 Requests are queued if all workers exceed this fraction of max_num_batched_tokens.
@@ -2385,7 +2373,7 @@ class LoRADownloader:
     def __init__(self, cache_path: Optional[str] = None) -> None: ...
     def download_if_needed(self, lora_uri: str) -> Awaitable[str]: ...
     def get_cache_path(self, cache_key: str) -> str: ...
-    def is_cached(self, cache_key: str) -> bool: ...
+    def is_cached(self, lora_uri: str) -> bool: ...
     def validate_cached(self, cache_key: str) -> bool: ...
 
     @staticmethod
@@ -3177,6 +3165,10 @@ class VirtualConnectorCoordinator:
     async def wait_for_scaling_completion(self) -> None:
         ...
 
+    async def is_scaling_ready(self) -> bool:
+        """Return whether the client acknowledged the current scaling decision."""
+        ...
+
 class VirtualConnectorClient:
     """How a client discovers planner requests and marks them complete"""
 
@@ -3276,6 +3268,11 @@ class SelectionServiceError(DynamoException):
 # ---------------------------------------------------------------------------
 
 class backend:
+    @staticmethod
+    def _run_sglang_sidecar(argv: Optional[List[str]] = None) -> None:
+        """Run the native SGLang sidecar with CLI-style arguments."""
+        ...
+
     class DisaggregationMode:
         # Mirrors `dynamo_backend_common::DisaggregationMode`. Engines consult
         # this on the WorkerConfig to switch their per-mode protocol behavior;

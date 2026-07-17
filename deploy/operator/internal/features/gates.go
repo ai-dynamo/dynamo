@@ -39,8 +39,7 @@ const (
 	// Default: false
 	GMSSnapshot Name = "gmsSnapshot"
 
-	// Checkpoint enables checkpoint restore integration in generated workloads.
-	// DynamoCheckpoint resource reconciliation is independent of this gate.
+	// Checkpoint enables checkpoint creation and restore.
 	//
 	// Owner: @galletas1712
 	// Experimental since: v1.0.0

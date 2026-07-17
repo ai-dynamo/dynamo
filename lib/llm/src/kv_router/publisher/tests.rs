@@ -1405,7 +1405,7 @@ mod tests_startup_helpers {
             .unwrap();
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-        // Simulate JetStream: forward worker's published event to router
+        // Forward the worker's published event to the router.
         let (subject, bytes) = {
             let published = worker_published.lock().unwrap();
             assert_eq!(published.len(), 1, "Worker should have published 1 event");
@@ -3728,7 +3728,7 @@ mod event_plane_batch_tests {
     }
 
     #[tokio::test]
-    async fn jetstream_batch_sink_preserves_singleton_publication() {
+    async fn singleton_batch_sink_preserves_singleton_publication() {
         let sink = SingletonSink::default();
         let events = vec![router_event(1), router_event(2), router_event(3)];
 

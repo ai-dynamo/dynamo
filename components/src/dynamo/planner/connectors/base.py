@@ -1,35 +1,71 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
-from abc import ABC, abstractmethod
+"""Planner connector interface.
 
-from dynamo.planner.config.defaults import SubComponentType
+A connector is the deployment-control peripheral consumed by
+``PlannerEnvironment``.  It owns scaling, deployment validation, worker
+capability discovery, and replica-state introspection for one deployment mode.
+"""
+
+from __future__ import annotations
+
+from typing import Optional, Protocol
+
+from dynamo.planner.config.defaults import SubComponentType, TargetReplica
+from dynamo.planner.monitoring.worker_info import WorkerInfo
 
 
-# TODO: add ability to scale component to X replicas
-class PlannerConnector(ABC):
-    @abstractmethod
-    async def add_component(
-        self, sub_component_type: SubComponentType, blocking: bool = True
-    ) -> None:
-        """Add a component to the planner"""
+class WorkerInfoProvider(Protocol):
+    def get_worker_info(
+        self,
+        sub_component_type: SubComponentType,
+        backend: str = "vllm",
+    ) -> WorkerInfo:
         pass
 
-    @abstractmethod
-    async def remove_component(
-        self, sub_component_type: SubComponentType, blocking: bool = True
-    ) -> None:
-        """Remove a component from the planner"""
+
+class PlannerConnector(WorkerInfoProvider, Protocol):
+    async def async_init(self) -> None:
         pass
+
+    async def validate_deployment(
+        self,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+    ) -> None:
+        pass
+
+    async def wait_for_deployment_ready(self, include_planner: bool = True) -> None:
+        pass
+
+    def get_model_name(
+        self,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+    ) -> str:
+        pass
+
+    def get_gpu_counts(
+        self,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+    ) -> tuple[Optional[int], Optional[int]]:
+        pass
+
+    async def get_actual_worker_counts(
+        self,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
+    ) -> tuple[int, int, bool]:
+        pass
+
+    async def set_component_replicas(
+        self, target_replicas: list[TargetReplica], blocking: bool = True
+    ) -> None:
+        pass
+
+
+__all__ = ["PlannerConnector", "WorkerInfoProvider"]

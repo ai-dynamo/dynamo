@@ -33,15 +33,12 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "disk_cache_hit_weight",
     "router_temperature",
     "use_kv_events",
-    "durable_kv_events",
     "router_replica_sync",
     "router_track_active_blocks",
     "router_track_output_blocks",
     "router_assume_kv_reuse",
     "router_track_prefill_tokens",
     "router_prefill_load_model",
-    "router_snapshot_threshold",
-    "router_reset_states",
     "router_ttl_secs",
     "router_queue_threshold",
     "router_policy_config",
@@ -61,7 +58,6 @@ _DEPRECATED_OVERLAP_WEIGHT_MESSAGE = (
 _LOAD_AWARE_KWARG_OVERRIDES = {
     "overlap_score_credit": 0.0,
     "use_kv_events": False,
-    "durable_kv_events": False,
     "router_track_active_blocks": True,
     "router_assume_kv_reuse": False,
     "router_track_prefill_tokens": True,
@@ -116,15 +112,12 @@ class KvRouterConfigBase(ConfigBase):
     disk_cache_hit_weight: float
     router_temperature: float
     use_kv_events: bool
-    durable_kv_events: bool
     router_replica_sync: bool
     router_track_active_blocks: bool
     router_track_output_blocks: bool
     router_assume_kv_reuse: bool
     router_track_prefill_tokens: bool
     router_prefill_load_model: str
-    router_snapshot_threshold: int
-    router_reset_states: bool
     router_ttl_secs: float
     router_queue_threshold: Optional[float]
     router_policy_config: Optional[str] = None
@@ -166,7 +159,7 @@ class KvRouterArgGroup(ArgGroup):
                 "KV Router: Enable load-aware routing without cache-reuse signals. "
                 "On the frontend, this implies --router-mode kv. "
                 "This preset sets overlap_score_credit=0, disables KV events and "
-                "durable KV events, disables KV-reuse assumptions, enables active-block "
+                "KV-reuse assumptions, enables active-block "
                 "and prefill-token load tracking, and disables remote/shared cache indexers."
             ),
         )
@@ -271,19 +264,6 @@ class KvRouterArgGroup(ArgGroup):
         )
         add_negatable_bool_argument(
             g,
-            flag_name="--router-durable-kv-events",
-            env_var="DYN_ROUTER_DURABLE_KV_EVENTS",
-            default=False,
-            help=(
-                "[Deprecated] KV Router: Enable durable KV events using NATS JetStream. "
-                "This option will be removed in a future release. The event-plane subscriber "
-                "(local_indexer mode) is now the recommended path."
-            ),
-            dest="durable_kv_events",
-            obsolete_flag="--durable-kv-events",
-        )
-        add_negatable_bool_argument(
-            g,
             flag_name="--router-replica-sync",
             env_var="DYN_ROUTER_REPLICA_SYNC",
             default=False,
@@ -352,24 +332,6 @@ class KvRouterArgGroup(ArgGroup):
                 "[EXPERIMENTAL] KV Router: Prompt-side prefill load model. "
                 "'none' keeps static prompt load accounting. "
                 "'aic' decays the oldest active prefill request using AIC-predicted duration."
-            ),
-        )
-        add_argument(
-            g,
-            flag_name="--router-snapshot-threshold",
-            env_var="DYN_ROUTER_SNAPSHOT_THRESHOLD",
-            default=1000000,
-            help="KV Router: Number of messages in stream before triggering a snapshot.",
-            arg_type=int,
-        )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--router-reset-states",
-            env_var="DYN_ROUTER_RESET_STATES",
-            default=False,
-            help=(
-                "KV Router: Reset router state on startup, purging stream and object store. "
-                "WARNING: This can affect existing router replicas."
             ),
         )
         add_argument(
