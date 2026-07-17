@@ -76,8 +76,8 @@ data:
     kv-cache-dtype: fp8_e4m3
     context-length: 250000
     mem-fraction-static: 0.88
-    max-running-requests: 160
-    cuda-graph-max-bs: 160
+    max-running-requests: 64
+    cuda-graph-max-bs: 64
     cuda-graph-bs:
       - 1
       - 2
@@ -96,30 +96,6 @@ data:
       - 56
       - 60
       - 64
-      - 68
-      - 72
-      - 76
-      - 80
-      - 84
-      - 88
-      - 92
-      - 96
-      - 100
-      - 104
-      - 108
-      - 112
-      - 116
-      - 120
-      - 124
-      - 128
-      - 132
-      - 136
-      - 140
-      - 144
-      - 148
-      - 152
-      - 156
-      - 160
     attention-backend: dsa
     dsa-prefill-backend: flashmla_kv
     dsa-decode-backend: flashmla_kv

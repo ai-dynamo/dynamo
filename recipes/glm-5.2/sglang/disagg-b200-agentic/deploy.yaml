@@ -271,6 +271,8 @@ spec:
                 #   value: match-expected
                 # - name: SGLANG_SIMULATE_ACC_TOKEN_ID
                 #   value: "32"
+                # - name: SGLANG_SIMULATE_UNIFORM_EXPERTS
+                #   value: "1"
                 - name: SGLANG_DISAGGREGATION_WAITING_TIMEOUT
                   value: "3600"
                 - name: SGLANG_DISAGGREGATION_NIXL_BACKEND

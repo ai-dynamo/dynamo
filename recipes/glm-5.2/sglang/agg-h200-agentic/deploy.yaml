@@ -41,6 +41,8 @@ data:
     cp-strategy: interleave
     moe-a2a-backend: megamoe
     fp8-gemm-backend: flashinfer_deepgemm
+    hicache-size: 100
+    enable-hierarchical-cache: true
     watchdog-timeout: 3600
     enable-metrics: true
     kv-events-config:

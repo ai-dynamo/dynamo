@@ -42,7 +42,7 @@ data:
     max-running-requests: 128
     cuda-graph-max-bs: 128
     watchdog-timeout: 3600
-    mem-fraction-static: 0.927
+    mem-fraction-static: 0.925
     enable-dp-lm-head: true
     enable-metrics: true
     speculative-moe-runner-backend: flashinfer_cutlass
