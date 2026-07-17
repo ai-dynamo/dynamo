@@ -931,6 +931,7 @@ pub type DiscoveryStream = Pin<Box<dyn Stream<Item = Result<DiscoveryEvent>> + S
 struct ModelRegistrationIdentity {
     display_name: String,
     source_path: Option<String>,
+    is_lora: bool,
 }
 
 impl ModelRegistrationIdentity {
@@ -939,13 +940,17 @@ impl ModelRegistrationIdentity {
     }
 
     fn is_compatible_with(&self, other: &Self) -> bool {
-        self.base_identity() == other.base_identity()
+        if self.is_lora || other.is_lora {
+            self.base_identity() == other.base_identity()
+        } else {
+            self.display_name == other.display_name
+        }
     }
 }
 
 fn extract_model_registration_identity(
     card_json: &serde_json::Value,
-    _model_suffix: Option<&str>,
+    model_suffix: Option<&str>,
 ) -> Result<ModelRegistrationIdentity> {
     let display_name = card_json
         .get("display_name")
@@ -958,9 +963,13 @@ fn extract_model_registration_identity(
         .get("source_path")
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned);
+    let is_lora =
+        model_suffix.is_some() || card_json.get("lora").is_some_and(|value| !value.is_null());
+
     Ok(ModelRegistrationIdentity {
         display_name,
         source_path,
+        is_lora,
     })
 }
 

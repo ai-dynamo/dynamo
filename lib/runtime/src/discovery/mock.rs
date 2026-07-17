@@ -419,7 +419,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn register_allows_served_aliases_of_same_base_lineage_on_same_endpoint() {
+    async fn register_rejects_distinct_base_cards_with_same_source_path_on_same_endpoint() {
         let registry = SharedMockRegistry::new();
         let discovery1 = MockDiscovery::new(Some(1), registry.clone());
         let discovery2 = MockDiscovery::new(Some(2), registry);
@@ -435,7 +435,14 @@ mod tests {
         };
 
         discovery1.register(spec("public-name-a")).await.unwrap();
-        discovery2.register(spec("public-name-b")).await.unwrap();
+        let err = discovery2
+            .register(spec("public-name-b"))
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains(
+            "Cannot register model 'public-name-b' on endpoint 'ns/comp/generate': a different model 'public-name-a' is already registered there"
+        ));
 
         let instances = discovery1
             .list(DiscoveryQuery::EndpointModels {
@@ -445,7 +452,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(instances.len(), 2);
+        assert_eq!(instances.len(), 1);
     }
 
     #[tokio::test]

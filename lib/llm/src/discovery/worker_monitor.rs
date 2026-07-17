@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,6 +29,95 @@ use super::{RuntimeConfigWatch, runtime_config_watch};
 // Re-export worker type constants from timing.rs (single source of truth)
 pub use crate::protocols::common::timing::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
 const UNSET_DP_RANK_LABEL: &str = "none";
+const MAX_PENDING_LOAD_UPDATES: usize = 4096;
+
+type PendingLoadKey = (u64, u32);
+type PendingLoadUpdates = HashMap<PendingLoadKey, ActiveLoad>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LoadMembership {
+    Exact,
+    Pending,
+    Foreign,
+    Ambiguous,
+}
+
+fn classify_load_membership(
+    worker_id: u64,
+    source_workers: &HashSet<u64>,
+    other_workers: &HashSet<u64>,
+) -> LoadMembership {
+    match (
+        source_workers.contains(&worker_id),
+        other_workers.contains(&worker_id),
+    ) {
+        (true, false) => LoadMembership::Exact,
+        (false, false) => LoadMembership::Pending,
+        (false, true) => LoadMembership::Foreign,
+        (true, true) => LoadMembership::Ambiguous,
+    }
+}
+
+fn defer_load_update(
+    pending_loads: &mut PendingLoadUpdates,
+    active_load: ActiveLoad,
+    endpoint_role: &str,
+) {
+    let key = (active_load.worker_id, active_load.dp_rank);
+    if pending_loads.len() >= MAX_PENDING_LOAD_UPDATES && !pending_loads.contains_key(&key) {
+        tracing::warn!(
+            worker_id = active_load.worker_id,
+            dp_rank = active_load.dp_rank,
+            endpoint_role,
+            max_pending = MAX_PENDING_LOAD_UPDATES,
+            "dropping load event because the pending membership buffer is full"
+        );
+        return;
+    }
+
+    pending_loads.insert(key, active_load);
+}
+
+fn take_resolved_pending_loads(
+    pending_loads: &mut PendingLoadUpdates,
+    source_workers: &HashSet<u64>,
+    other_workers: &HashSet<u64>,
+) -> Vec<(LoadMembership, ActiveLoad)> {
+    let resolved_keys: Vec<PendingLoadKey> = pending_loads
+        .keys()
+        .filter(|(worker_id, _)| {
+            classify_load_membership(*worker_id, source_workers, other_workers)
+                != LoadMembership::Pending
+        })
+        .copied()
+        .collect();
+
+    resolved_keys
+        .into_iter()
+        .filter_map(|key| {
+            pending_loads.remove(&key).map(|active_load| {
+                (
+                    classify_load_membership(active_load.worker_id, source_workers, other_workers),
+                    active_load,
+                )
+            })
+        })
+        .collect()
+}
+
+fn queue_resolved_pending_loads(
+    prefill_scope: bool,
+    pending_loads: &mut PendingLoadUpdates,
+    source_workers: &HashSet<u64>,
+    other_workers: &HashSet<u64>,
+    ready_loads: &mut VecDeque<(bool, ActiveLoad)>,
+) {
+    ready_loads.extend(
+        take_resolved_pending_loads(pending_loads, source_workers, other_workers)
+            .into_iter()
+            .map(|(_membership, active_load)| (prefill_scope, active_load)),
+    );
+}
 
 /// Clean up load and latency Prometheus metrics for a worker across the specified dp_ranks.
 ///
@@ -714,6 +803,9 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
             let mut known_prefill_workers: std::collections::HashSet<u64> =
                 std::collections::HashSet::new();
             let mut prefill_instances_rx: Option<tokio::sync::watch::Receiver<Vec<u64>>> = None;
+            let mut pending_decode_loads = PendingLoadUpdates::new();
+            let mut pending_prefill_loads = PendingLoadUpdates::new();
+            let mut ready_loads = VecDeque::new();
 
             let mut known_worker_dp_ranks: HashMap<u64, std::collections::HashSet<u32>> =
                 HashMap::new();
@@ -725,7 +817,12 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                 // endpoint. The source bit is retained so membership can be validated before
                 // accepting worker-owned state.
                 let kv_event_future = async {
-                    match (&mut kv_metrics_rx, &mut prefill_metrics_rx) {
+                    if let Some((prefill_scope, active_load)) = ready_loads.pop_front() {
+                        return (prefill_scope, Some(Ok(active_load)));
+                    }
+
+                    let (prefill_scope, event) = match (&mut kv_metrics_rx, &mut prefill_metrics_rx)
+                    {
                         (Some(decode_rx), Some(prefill_rx)) => {
                             tokio::select! {
                                 event = decode_rx.next() => (false, event),
@@ -735,7 +832,11 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         (Some(decode_rx), None) => (false, decode_rx.next().await),
                         (None, Some(prefill_rx)) => (true, prefill_rx.next().await),
                         (None, None) => std::future::pending().await,
-                    }
+                    };
+                    (
+                        prefill_scope,
+                        event.map(|result| result.map(|(_envelope, active_load)| active_load)),
+                    )
                 };
 
                 let config_change_future = async {
@@ -853,15 +954,17 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         let Some(event_result) = kv_event else {
                             if prefill_scope {
                                 prefill_metrics_rx = None;
+                                pending_prefill_loads.clear();
                                 tracing::debug!("prefill KV metrics stream closed");
                             } else {
                                 kv_metrics_rx = None;
+                                pending_decode_loads.clear();
                                 tracing::debug!("decode KV metrics stream closed");
                             }
                             continue;
                         };
 
-                        let Ok((_envelope, active_load)) = event_result else {
+                        let Ok(active_load) = event_result else {
                             tracing::error!("Error receiving KV metrics event: {event_result:?}");
                             continue;
                         };
@@ -869,36 +972,60 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         let worker_id = active_load.worker_id;
                         let dp_rank = active_load.dp_rank;
 
-                        let (source_workers, other_workers, source_name) = if prefill_scope {
-                            (&known_prefill_workers, &known_decode_workers, "prefill")
+                        let (source_workers, other_workers, endpoint_role, pending_loads) = if prefill_scope {
+                            (
+                                &known_prefill_workers,
+                                &known_decode_workers,
+                                "prefill",
+                                &mut pending_prefill_loads,
+                            )
                         } else {
-                            (&known_decode_workers, &known_prefill_workers, "decode")
+                            (
+                                &known_decode_workers,
+                                &known_prefill_workers,
+                                "decode",
+                                &mut pending_decode_loads,
+                            )
                         };
-                        if !source_workers.contains(&worker_id) {
-                            tracing::warn!(
-                                worker_id,
-                                dp_rank,
-                                endpoint_role = source_name,
-                                "ignoring load event from worker that is not a member of the publishing endpoint"
-                            );
-                            continue;
-                        }
-                        if other_workers.contains(&worker_id) {
-                            worker_load_states.remove(&worker_id);
-                            if overloaded_tracker.update_worker(worker_id, false) {
-                                let overloaded_instances = overloaded_tracker.ids();
-                                publish_overloaded_instances(
-                                    &client,
-                                    &prefill_client_holder,
-                                    &overloaded_instances,
+
+                        match classify_load_membership(worker_id, source_workers, other_workers) {
+                            LoadMembership::Pending => {
+                                tracing::warn!(
+                                    worker_id,
+                                    dp_rank,
+                                    endpoint_role,
+                                    "deferring load event until endpoint membership is discovered"
                                 );
+                                defer_load_update(pending_loads, active_load, endpoint_role);
+                                continue;
                             }
-                            tracing::error!(
-                                worker_id,
-                                dp_rank,
-                                "worker is registered in multiple cache-owning endpoints; ignoring ambiguous load event"
-                            );
-                            continue;
+                            LoadMembership::Foreign => {
+                                tracing::warn!(
+                                    worker_id,
+                                    dp_rank,
+                                    endpoint_role,
+                                    "ignoring load event for worker owned by a different endpoint"
+                                );
+                                continue;
+                            }
+                            LoadMembership::Ambiguous => {
+                                worker_load_states.remove(&worker_id);
+                                if overloaded_tracker.update_worker(worker_id, false) {
+                                    let overloaded_instances = overloaded_tracker.ids();
+                                    publish_overloaded_instances(
+                                        &client,
+                                        &prefill_client_holder,
+                                        &overloaded_instances,
+                                    );
+                                }
+                                tracing::error!(
+                                    worker_id,
+                                    dp_rank,
+                                    "worker is registered in multiple cache-owning endpoints; ignoring ambiguous load event"
+                                );
+                                continue;
+                            }
+                            LoadMembership::Exact => {}
                         }
 
                         // Track known worker/dp_rank combinations for cleanup
@@ -994,6 +1121,20 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         }
 
                         known_decode_workers = current_instances;
+                        queue_resolved_pending_loads(
+                            false,
+                            &mut pending_decode_loads,
+                            &known_decode_workers,
+                            &known_prefill_workers,
+                            &mut ready_loads,
+                        );
+                        queue_resolved_pending_loads(
+                            true,
+                            &mut pending_prefill_loads,
+                            &known_prefill_workers,
+                            &known_decode_workers,
+                            &mut ready_loads,
+                        );
                     }
 
                     // Handle prefill endpoint instance changes (for TTFT and prefill metrics cleanup in disaggregated mode)
@@ -1009,6 +1150,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         let Ok(()) = result else {
                             // Prefill endpoint closed - stop watching to avoid busy loop
                             prefill_instances_rx = None;
+                            pending_prefill_loads.clear();
                             tracing::info!("Prefill endpoint watcher closed, will re-activate when client is set");
                             continue;
                         };
@@ -1045,6 +1187,20 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         }
 
                         known_prefill_workers = current_instances;
+                        queue_resolved_pending_loads(
+                            false,
+                            &mut pending_decode_loads,
+                            &known_decode_workers,
+                            &known_prefill_workers,
+                            &mut ready_loads,
+                        );
+                        queue_resolved_pending_loads(
+                            true,
+                            &mut pending_prefill_loads,
+                            &known_prefill_workers,
+                            &known_decode_workers,
+                            &mut ready_loads,
+                        );
                     }
 
                     // Wait for prefill client to be registered (push-based notification)
@@ -1053,8 +1209,17 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         if let Some(prefill_client) = prefill_client {
                             let prefill_endpoint = prefill_client.endpoint.clone();
                             let rx = prefill_client.instance_avail_watcher();
+                            pending_prefill_loads.clear();
                             known_prefill_workers = rx.borrow().iter().copied().collect();
                             prefill_instances_rx = Some(rx);
+
+                            queue_resolved_pending_loads(
+                                false,
+                                &mut pending_decode_loads,
+                                &known_decode_workers,
+                                &known_prefill_workers,
+                                &mut ready_loads,
+                            );
 
                             prefill_metrics_rx = match EventSubscriber::for_endpoint(
                                 &prefill_endpoint,
@@ -1113,8 +1278,9 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 #[cfg(test)]
 mod tests {
     use super::{
-        LoadThresholdConfig, OverloadedWorkerTracker, WorkerLoadState,
-        compute_overloaded_instances, publish_overloaded_instances,
+        LoadMembership, LoadThresholdConfig, OverloadedWorkerTracker, PendingLoadUpdates,
+        WorkerLoadState, compute_overloaded_instances, defer_load_update,
+        publish_overloaded_instances, take_resolved_pending_loads,
     };
     use dynamo_kv_router::protocols::ActiveLoad;
     use std::collections::HashSet;
@@ -1130,6 +1296,66 @@ mod tests {
         assert!(tracker.update_worker(7, false));
         assert!(!tracker.contains(7));
         assert!(!tracker.update_worker(7, false));
+    }
+
+    #[test]
+    fn pending_load_replays_only_after_exact_endpoint_membership() {
+        let mut pending_loads = PendingLoadUpdates::new();
+        defer_load_update(
+            &mut pending_loads,
+            ActiveLoad {
+                worker_id: 7,
+                dp_rank: 2,
+                active_decode_blocks: Some(42),
+                active_prefill_tokens: None,
+                kv_used_blocks: Some(21),
+            },
+            "decode",
+        );
+
+        let mut source_workers = HashSet::new();
+        let other_workers = HashSet::new();
+        assert!(
+            take_resolved_pending_loads(&mut pending_loads, &source_workers, &other_workers,)
+                .is_empty()
+        );
+        assert_eq!(pending_loads.len(), 1);
+
+        source_workers.insert(7);
+        let resolved =
+            take_resolved_pending_loads(&mut pending_loads, &source_workers, &other_workers);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].0, LoadMembership::Exact);
+        assert_eq!(resolved[0].1.worker_id, 7);
+        assert_eq!(resolved[0].1.dp_rank, 2);
+        assert!(pending_loads.is_empty());
+    }
+
+    #[test]
+    fn pending_load_fails_closed_for_foreign_or_ambiguous_membership() {
+        let active_load = ActiveLoad {
+            worker_id: 7,
+            dp_rank: 0,
+            active_decode_blocks: Some(42),
+            active_prefill_tokens: None,
+            kv_used_blocks: Some(21),
+        };
+        let mut source_workers = HashSet::new();
+        let other_workers = HashSet::from([7]);
+
+        let mut pending_loads = PendingLoadUpdates::from([((7, 0), active_load.clone())]);
+        let foreign =
+            take_resolved_pending_loads(&mut pending_loads, &source_workers, &other_workers);
+        assert_eq!(foreign.len(), 1);
+        assert_eq!(foreign[0].0, LoadMembership::Foreign);
+
+        source_workers.insert(7);
+        let mut pending_loads = PendingLoadUpdates::from([((7, 0), active_load)]);
+        let ambiguous =
+            take_resolved_pending_loads(&mut pending_loads, &source_workers, &other_workers);
+        assert_eq!(ambiguous.len(), 1);
+        assert_eq!(ambiguous[0].0, LoadMembership::Ambiguous);
+        assert!(pending_loads.is_empty());
     }
 
     #[test]
