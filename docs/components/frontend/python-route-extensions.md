@@ -80,6 +80,7 @@ A registered entry-point name always takes precedence; the path fallback only ap
   ```
 
 - **Live state:** `FrontendExtensionContext` exposes the current frontend state so responses reflect models registering/draining at runtime — e.g. `ctx.has_any_ready_model()`, `ctx.serving_ready_display_names()`, `ctx.is_model_ready_to_serve(name)`, `ctx.is_ready()`.
+- **Keep handlers fast and non-blocking.** Handlers run on a small, dedicated thread pool (isolated from the inference tokenization pool), so a slow handler degrades only other extension routes, not inference. Still, the pool is small and GIL-serialized: a handler that exceeds ~30s is treated as hung and its request returns `503`, and a saturated pool sheds new extension requests with `503`. Do not block on network/disk or run heavy compute inline.
 
 ## Notes
 

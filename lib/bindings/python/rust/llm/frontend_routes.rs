@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
+use std::sync::mpsc::{SyncSender, sync_channel};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use dynamo_llm::http::service::axum::{
     Json,
@@ -175,34 +177,95 @@ fn frontend_route_extension_from_routes(routes: Vec<PyFrontendRoute>) -> Fronten
     })
 }
 
+const EXTENSION_POOL_THREADS: usize = 2;
+const EXTENSION_QUEUE_DEPTH: usize = 64;
+const EXTENSION_HANDLER_TIMEOUT: Duration = Duration::from_secs(30);
+
+type ExtensionJob = Box<dyn FnOnce() + Send + 'static>;
+
+/// Dedicated pool for Python extension handlers, kept off tokio's shared
+/// `spawn_blocking` pool so a slow handler can't starve inference tokenization.
+/// Small and bounded because handlers are GIL-serialized.
+fn extension_executor() -> &'static SyncSender<ExtensionJob> {
+    static POOL: OnceLock<SyncSender<ExtensionJob>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let (tx, rx) = sync_channel::<ExtensionJob>(EXTENSION_QUEUE_DEPTH);
+        let rx = Arc::new(Mutex::new(rx));
+        for i in 0..EXTENSION_POOL_THREADS {
+            let rx = rx.clone();
+            std::thread::Builder::new()
+                .name(format!("frontend-ext-{i}"))
+                .spawn(move || {
+                    loop {
+                        let job = rx.lock().unwrap().recv();
+                        match job {
+                            // catch_unwind so a panicking handler can't kill the worker.
+                            Ok(job) => {
+                                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(job))
+                                    .is_err()
+                                {
+                                    tracing::error!("Python frontend route extension panicked");
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                })
+                .expect("spawn frontend extension worker");
+        }
+        tx
+    })
+}
+
+fn extension_error_response(status: StatusCode, message: &str) -> Response {
+    (status, Json(json!({ "error": message }))).into_response()
+}
+
 async fn call_python_frontend_route(
     handler: Arc<PyObject>,
     context: RsFrontendExtensionContext,
 ) -> Response {
-    // Run the synchronous Python handler on a blocking thread so a slow
-    // extension cannot pin a tokio worker and reduce request concurrency.
-    let outcome = tokio::task::spawn_blocking(move || {
-        Python::with_gil(|py| call_python_frontend_route_inner(py, &handler, context))
-    })
-    .await;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let job: ExtensionJob = Box::new(move || {
+        let result = Python::with_gil(|py| call_python_frontend_route_inner(py, &handler, context));
+        let _ = tx.send(result);
+    });
 
-    match outcome {
-        Ok(Ok((status, body))) => (status, Json(body)).into_response(),
-        Ok(Err(err)) => {
+    // Bounded pool: shed with 503 rather than blocking the caller or queueing without limit.
+    if extension_executor().try_send(job).is_err() {
+        tracing::warn!("frontend extension pool saturated; shedding request");
+        return extension_error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "frontend route extension busy",
+        );
+    }
+
+    match tokio::time::timeout(EXTENSION_HANDLER_TIMEOUT, rx).await {
+        Ok(Ok(Ok((status, body)))) => (status, Json(body)).into_response(),
+        Ok(Ok(Err(err))) => {
             tracing::error!(error = %err, "Python frontend route extension failed");
-            (
+            extension_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "frontend route extension failed"})),
+                "frontend route extension failed",
             )
-                .into_response()
         }
-        Err(err) => {
-            tracing::error!(error = %err, "Python frontend route extension task panicked");
-            (
+        Ok(Err(_)) => {
+            // Worker dropped the sender without a value (handler panicked).
+            tracing::error!("Python frontend route extension worker dropped without a response");
+            extension_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "frontend route extension failed"})),
+                "frontend route extension failed",
             )
-                .into_response()
+        }
+        Err(_) => {
+            tracing::error!(
+                timeout_s = EXTENSION_HANDLER_TIMEOUT.as_secs(),
+                "Python frontend route extension timed out"
+            );
+            extension_error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "frontend route extension timed out",
+            )
         }
     }
 }
