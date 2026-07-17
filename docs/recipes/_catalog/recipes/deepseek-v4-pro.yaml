@@ -9,10 +9,7 @@ model:
   name: DeepSeek-V4-Pro
   hf_id: nvidia/DeepSeek-V4-Pro-NVFP4
   precision: NVFP4 (B200) / FP8 (H200)
-# STAGED: experimental until the recipe pins the v1.3.0 GA image (currently
-# nvstaging rc.4) and Expected Performance is confirmed on that image. Flip to
-# `validated` + GA image + populated expected_performance at GA (see gaps).
-status: experimental
+status: validated
 targets:
 - id: disagg-b200-agentic
   recommended: true
@@ -21,7 +18,7 @@ targets:
     count: 16
   runtime:
     framework: vllm
-    image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.3.0-rc.4-cuda13
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
   topology: disaggregated
   techniques:
   - disaggregated-prefill-decode
@@ -50,7 +47,7 @@ targets:
     count: 8
   runtime:
     framework: vllm
-    image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.3.0-rc.4-cuda13
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
   topology: aggregated
   techniques:
   - expert-parallel
@@ -77,7 +74,7 @@ targets:
     count: 8
   runtime:
     framework: vllm
-    image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.3.0-rc.4-cuda13
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
   topology: aggregated
   techniques:
   - expert-parallel
@@ -103,7 +100,7 @@ targets:
     count: 32
   runtime:
     framework: vllm
-    image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.3.0-rc.4-cuda13
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
   topology: disaggregated
   techniques:
   - disaggregated-prefill-decode
@@ -127,7 +124,6 @@ targets:
 related_benchmarks: []
 maintainer: null
 gaps:
-- 'STAGED follow-up: image is pre-GA (nvstaging vllm-runtime 1.3.0-rc.4); flip status to `validated` and repin to the nvcr.io/nvidia GA v1.3.0 image at release.'
 - Expected Performance floor-picks were measured on a pre-GA build, not the shipped RC/GA image; omitted (available:false) until confirmed on the GA image.
 - 'H200 targets are secondary/best-effort on the public FP8 checkpoint, capped at max_model_len 86016 (HBM); cannot serve the full 1M context the B200 recipes handle.'
 - maintainer unknown
