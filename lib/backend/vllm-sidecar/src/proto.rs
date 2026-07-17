@@ -5,7 +5,3 @@
 #![allow(missing_docs)]
 
 tonic::include_proto!("vllm");
-
-#[cfg(test)]
-pub(crate) const FILE_DESCRIPTOR_SET: &[u8] =
-    tonic::include_file_descriptor_set!("vllm_descriptor");

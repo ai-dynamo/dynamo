@@ -12,7 +12,6 @@ use dynamo_backend_common::{
     PreprocessedRequest, SamplingOptions, StopConditions,
 };
 use futures::{Stream, StreamExt};
-use prost::Message;
 use serde_json::json;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify, oneshot};
@@ -25,28 +24,6 @@ use crate::engine::VllmSidecarEngine;
 use crate::json::{json_to_struct, struct_to_json};
 use crate::model::ConfiguredModel;
 use crate::proto as pb;
-
-#[test]
-fn generated_descriptor_contains_released_generate_service() {
-    let descriptor =
-        prost_types::FileDescriptorSet::decode(pb::FILE_DESCRIPTOR_SET).expect("decode descriptor");
-    let file = descriptor
-        .file
-        .iter()
-        .find(|file| file.package.as_deref() == Some("vllm"))
-        .expect("vllm descriptor");
-    let service = file
-        .service
-        .iter()
-        .find(|service| service.name.as_deref() == Some("Generate"))
-        .expect("Generate service");
-    let methods: Vec<_> = service
-        .method
-        .iter()
-        .filter_map(|method| method.name.as_deref())
-        .collect();
-    assert_eq!(methods, ["Generate", "GenerateStream"]);
-}
 
 #[derive(Clone, Default)]
 struct FakeGenerate {

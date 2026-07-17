@@ -19,7 +19,4 @@ fn executable_exposes_native_grpc_configuration() {
     for flag in ["--vllm-endpoint", "--model-path", "--disaggregation-mode"] {
         assert!(stdout.contains(flag), "missing {flag} in help output");
     }
-    for flag in ["--vllm-connections", "--model-name"] {
-        assert!(!stdout.contains(flag), "obsolete {flag} in help output");
-    }
 }

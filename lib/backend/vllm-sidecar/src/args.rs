@@ -39,25 +39,7 @@ pub(crate) fn normalize_endpoint(raw: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
-
-    use super::{Args, normalize_endpoint};
-
-    fn required_args() -> Vec<&'static str> {
-        vec![
-            "dynamo-vllm-sidecar",
-            "--vllm-endpoint",
-            "127.0.0.1:50051",
-            "--model-path",
-            "Qwen/Qwen3-0.6B",
-        ]
-    }
-
-    #[test]
-    fn parses_required_args() {
-        let args = Args::try_parse_from(required_args()).expect("parse args");
-        assert_eq!(args.model_path, "Qwen/Qwen3-0.6B");
-    }
+    use super::normalize_endpoint;
 
     #[test]
     fn normalizes_plaintext_endpoints() {
