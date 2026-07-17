@@ -2182,6 +2182,8 @@ dependencies = [
  "async-nats 0.49.1",
  "async-stream",
  "async-trait",
+ "aws-config",
+ "aws-sdk-s3",
  "axum",
  "axum-server",
  "base64 0.22.1",

@@ -40,7 +40,7 @@ export DYN_REQUEST_TRACE_FILE_PATH=/mnt/captures/run-42/request-trace
 | --- | --- | --- | --- |
 | `DYN_REQUEST_TRACE` | unset | Truthy value | Master switch. When enabled and `DYN_REQUEST_TRACE_RECORDS` is unset, emits `request_end,tool`. |
 | `DYN_REQUEST_TRACE_RECORDS` | `request_end,tool` when `DYN_REQUEST_TRACE=1`; unset otherwise | `request_end`, `request_payload`, `tool` | Comma-separated record types to emit. Setting this variable enables only the listed records. |
-| `DYN_REQUEST_TRACE_SINKS` | `file` | `file`, `stderr`, `nats`, `otel` | Comma-separated record sinks. |
+| `DYN_REQUEST_TRACE_SINKS` | `file` | `file`, `stderr`, `nats`, `otel`, `s3` | Comma-separated record sinks. The `s3` sink is compiled in only when `dynamo-llm` was built with the `request-trace-s3` cargo feature (enabled on shipped Python wheels). |
 | `DYN_REQUEST_TRACE_FILE_PATH` | `/tmp/dynamo-request-trace` | File path or segment prefix | Literal path when `DYN_REQUEST_TRACE_FILE_FORMAT=jsonl`; gzip segment prefix when `DYN_REQUEST_TRACE_FILE_FORMAT=jsonl_gz`. |
 | `DYN_REQUEST_TRACE_FILE_FORMAT` | `jsonl_gz` | `jsonl`, `jsonl_gz` | File record format. `jsonl_gz` writes `<prefix>.<index>.jsonl.gz`; `jsonl` writes a literal JSONL path. |
 | `DYN_REQUEST_TRACE_CAPACITY` | `1024` | Positive integer | Best-effort in-process broadcast capacity. |
@@ -50,6 +50,11 @@ export DYN_REQUEST_TRACE_FILE_PATH=/mnt/captures/run-42/request-trace
 | `DYN_REQUEST_TRACE_FILE_FLUSH_INTERVAL_MS` | `1000` | Integer milliseconds | Periodic flush interval. |
 | `DYN_REQUEST_TRACE_FILE_ROLL_BYTES` | `268435456` | Positive integer bytes | Gzip roll threshold in uncompressed bytes. |
 | `DYN_REQUEST_TRACE_FILE_ROLL_LINES` | unset | Positive integer records | Optional gzip roll threshold in records. |
+| `DYN_REQUEST_TRACE_S3_BUCKET` | unset (required for `s3`) | S3 bucket name | Destination bucket for the S3 sink. Startup fails if `DYN_REQUEST_TRACE_SINKS` includes `s3` and this is unset. |
+| `DYN_REQUEST_TRACE_S3_REGION` | AWS SDK default resolution | AWS region | Region override for the S3 sink. When unset the SDK resolves via env, profile, or IMDS. |
+| `DYN_REQUEST_TRACE_S3_PREFIX` | empty (bucket root) | Object key prefix | Optional key prefix; records land at `{prefix}/{yyyy}/{mm}/{dd}/{host}-{HHMMSS}-{run_id}-{seq}.jsonl.gz`. |
+| `DYN_REQUEST_TRACE_S3_ROLL_UNCOMPRESSED_BYTES` | `67108864` (64 MiB) | Positive integer bytes | Batch roll threshold. When the pending batch reaches this size it is gzipped and uploaded as one object. |
+| `DYN_REQUEST_TRACE_S3_FLUSH_INTERVAL_MS` | `10000` (10 s) | Positive integer milliseconds | Periodic flush interval. Any partial batch is uploaded when this elapses so low-volume traces still land in S3. |
 | `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` | unset | ZMQ bind address | Optional ZMQ PULL bind address for harness tool events. |
 | `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC` | `agent-tool-events` | ZMQ topic | First-frame ZMQ topic filter when endpoint is configured. |
 | `DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST` | unset (none) | Comma/whitespace-separated header names | Allowlist of HTTP request header names to record in `request_payload` rows (`payload.http_request_headers`), case-insensitive. Only listed headers are captured; unset/empty captures none. Applies to every sink. Captured values are unredacted, so avoid allowlisting credential-bearing headers. |
@@ -83,6 +88,31 @@ The `otel` sink uses the standard `OTEL_EXPORTER_OTLP_*` variables. Set
 route request trace records through an OpenTelemetry Collector. The `otel`
 sink writes each request trace row as one OTLP log record with the full
 row serialized in the `payload` attribute.
+
+The `s3` sink writes records directly to an S3 bucket as gzipped JSONL
+objects, one object per rolled batch. Records are batched in-process and
+uploaded when the batch reaches `DYN_REQUEST_TRACE_S3_ROLL_UNCOMPRESSED_BYTES`
+or when `DYN_REQUEST_TRACE_S3_FLUSH_INTERVAL_MS` elapses. Object keys are
+`{prefix}/{yyyy}/{mm}/{dd}/{host}-{HHMMSS}-{run_id}-{seq}.jsonl.gz`, where
+`run_id` is a per-process UUID that keeps container restarts and hostname
+collisions from overwriting earlier batches. Credentials come from the AWS
+SDK default provider chain (env vars, IMDS, IRSA, Pod Identity, shared
+profiles); how the frontend pod is credentialed is a deployment concern.
+On terminal upload failure (SDK retries exhausted or operation timeout hit)
+the batch is dropped and a `put_object failed after SDK retries; batch
+discarded` warning is logged; no on-disk retry queue is kept.
+
+```bash
+export DYN_REQUEST_TRACE=1
+export DYN_REQUEST_TRACE_SINKS=s3
+export DYN_REQUEST_TRACE_S3_BUCKET=my-org-request-traces
+export DYN_REQUEST_TRACE_S3_REGION=us-west-2
+export DYN_REQUEST_TRACE_S3_PREFIX=frontend-a/prod
+```
+
+The `s3` sink is compiled in only when `dynamo-llm` was built with the
+`request-trace-s3` cargo feature. Shipped Dynamo Python wheels enable it;
+custom builds must pass `--features request-trace-s3`.
 
 ## Record Shape
 
