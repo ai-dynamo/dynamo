@@ -269,7 +269,7 @@ impl WorkerCatalogRecord {
     }
 }
 
-// Manual `Default` (not derived) so `model_name`/`tenant_id` match the serde
+// Manual `Default` (not derived) so `model_name`/`routing_group` match the serde
 // defaults (`"default"`) rather than empty strings; a `..Default::default()`
 // caller that forgets to set them would otherwise store the worker under an
 // unexpected `("", "")` scope.
@@ -278,7 +278,7 @@ impl Default for WorkerRequest {
         Self {
             worker_id: 0,
             model_name: default_model_name(),
-            tenant_id: default_tenant_id(),
+            routing_group: default_routing_group(),
             endpoint: None,
             kv_events_endpoint: None,
             kv_events_endpoints: HashMap::new(),

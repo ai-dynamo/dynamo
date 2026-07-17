@@ -3,23 +3,18 @@
 
 //! In-process, runtime-free worker selector.
 //!
-//! Standalone mode runs the runtime-free selection service **in-process**: the
-//! EPP and a [`SelectionService`] are compiled into one binary and the EPP calls
-//! the selector's Rust API directly — no HTTP client, no second Deployment.
+//! Standalone mode runs the [`SelectionService`] in-process and calls its Rust
+//! API directly. With `DYN_EPP_PEER_SERVICE` set, [`Selector`] enables
+//! replica-sync and a [`crate::peer_discovery`] watch so replicated pods sync
+//! active load over ZMQ; otherwise a single replica runs local.
 //!
-//! With `DYN_EPP_PEER_SERVICE` set, [`Selector`] enables the service's
-//! replica-sync and starts a [`crate::peer_discovery`] watch of the EPP's own
-//! Service, so replicated EPP pods discover their siblings and sync active load
-//! over ZMQ (admission / prefill-complete / free). Without it, a single replica
-//! runs fully local.
-//!
-//! This module also owns the small plain types the reflector → topology adapter →
-//! router pipeline speaks ([`WorkerRegistration`], [`SelectRequest`],
-//! [`SelectResponse`]); the selector maps them to the selection service's own
-//! public request/response types (no JSON in the hot path).
+//! Also owns the plain types the reflector → topology adapter → router pipeline
+//! speaks ([`WorkerRegistration`], [`SelectRequest`], [`SelectResponse`]), mapped
+//! onto the selection service's own request/response types.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use anyhow::{Result, anyhow};
 
@@ -27,16 +22,16 @@ use dynamo_kv_router::config::kv_router_config_from_dynamo_env;
 use dynamo_kv_router::protocols::RoutingConstraints;
 use dynamo_kv_router::services::selection::{
     PromptRequest, SelectAndReserveRequest as CoreSelectAndReserveRequest, SelectionError,
-    SelectionService, SelectionServiceBuilder, WorkerRequest as CoreWorkerRequest,
+    SelectionService, SelectionServiceBuilder, WorkerLifecycle, WorkerRequest as CoreWorkerRequest,
 };
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::epp_standalone_config::EppStandaloneConfig;
 
-/// Tenant scope for standalone mode. Must match between worker registration and
+/// Routing group for standalone mode. Must match between worker registration and
 /// selection; the selection service's own default is `"default"`.
-const DEFAULT_TENANT: &str = "default";
+const DEFAULT_ROUTING_GROUP: &str = "default";
 
 /// A worker the EPP registers into the selector. Only the fields standalone
 /// mode populates are included; the selector defaults the rest.
@@ -46,7 +41,6 @@ pub struct WorkerRegistration {
     pub model_name: String,
     pub endpoint: String,
     pub block_size: u32,
-    pub data_parallel_size: u32,
     pub kv_events_endpoints: HashMap<u32, String>,
     pub replay_endpoint: Option<String>,
     pub total_kv_blocks: Option<u64>,
@@ -86,7 +80,6 @@ pub struct OverlapSummary {
 pub struct SelectResponse {
     pub selection_id: Option<String>,
     pub worker_id: u64,
-    pub dp_rank: u32,
     pub endpoint: String,
     pub block_size: u32,
     pub overlap: OverlapSummary,
@@ -103,6 +96,10 @@ pub struct Selector {
     /// [`Selector::reconcile`] skip no-op upserts that would re-register
     /// KV-event listeners.
     current: Mutex<HashMap<u64, WorkerRegistration>>,
+    /// Peer-discovery readiness in replicated mode: `None` when replication is
+    /// disabled (single replica, always ready), or `Some(flag)` that latches
+    /// `true` once the initial peer-set sync completes. ANDed into EPP health.
+    peer_ready: Option<Arc<AtomicBool>>,
 }
 
 impl Selector {
@@ -114,19 +111,32 @@ impl Selector {
         let kv_router_config = kv_router_config_from_dynamo_env();
         let cancel = CancellationToken::new();
 
+        // `max_num_batched_tokens` is applied uniformly to every worker the EPP
+        // registers, so validate it once here — before worker discovery — when
+        // the router policy needs it. Without this, a missing/zero value only
+        // surfaces later as a confusing "no schedulable workers" at request time.
+        // The selection service still enforces it per worker as defense in depth.
+        if kv_router_config.requires_max_num_batched_tokens()
+            && cfg.max_num_batched_tokens.unwrap_or(0) == 0
+        {
+            anyhow::bail!(
+                "DYN_EPP_MAX_NUM_BATCHED_TOKENS is required (and must be > 0) because the router \
+                 scheduling policy (queue threshold or policy config) is enabled; set it to the \
+                 engine's --max-num-batched-tokens"
+            );
+        }
+
         let mut builder =
             SelectionServiceBuilder::new(kv_router_config).indexer_threads(cfg.selector_threads);
 
-        // Config validation already guarantees peer_sync_port is Some whenever
-        // peer_service is set; resolve the (name, port) pair once and surface the
-        // invariant as an error rather than a panic.
+        // Replication is enabled by peer_service. Resolve the required named
+        // `replica-agg` EndpointSlice port before building the selection service
+        // so both the local bind and peer dialing use the Service contract.
         let replication: Option<(String, u16)> = match &cfg.peer_service {
-            Some(name) => {
-                let port = cfg.peer_sync_port.ok_or_else(|| {
-                    anyhow!("peer_sync_port is required when peer_service is set")
-                })?;
-                Some((name.clone(), port))
-            }
+            Some(name) => Some((
+                name.clone(),
+                crate::peer_discovery::resolve_replica_sync_port(&cfg.namespace, name).await?,
+            )),
             None => None,
         };
 
@@ -143,7 +153,7 @@ impl Selector {
                 .map_err(|e| anyhow!("building embedded selection service: {e}"))?,
         );
 
-        if let Some((service_name, peer_sync_port)) = replication {
+        let peer_ready = if let Some((service_name, peer_sync_port)) = replication {
             // POD_IP is required (not advisory) in replicated mode: without it we
             // can't exclude our own IP from the peer set, so this replica would
             // sync with itself and double-count its own load. Fail fast rather
@@ -160,17 +170,22 @@ impl Selector {
                     )
                 })?;
             // The EPP's own Service lives in the EPP's namespace (same as the
-            // pool); reuse the single resolved namespace.
-            crate::peer_discovery::spawn(
-                service.clone(),
-                &cfg.namespace,
-                &service_name,
-                peer_sync_port,
-                self_ip,
-                cancel.clone(),
+            // pool); reuse the single resolved namespace. The returned flag gates
+            // EPP readiness until the initial peer-set sync completes.
+            Some(
+                crate::peer_discovery::spawn(
+                    service.clone(),
+                    &cfg.namespace,
+                    &service_name,
+                    peer_sync_port,
+                    self_ip,
+                    cancel.clone(),
+                )
+                .await?,
             )
-            .await?;
-        }
+        } else {
+            None
+        };
 
         tracing::info!(
             indexer_threads = cfg.selector_threads,
@@ -182,17 +197,27 @@ impl Selector {
             service,
             cancel,
             current: Mutex::new(HashMap::new()),
+            peer_ready,
         })
+    }
+
+    /// Peer-discovery readiness for replicated mode: `None` when replication is
+    /// off (always ready), else a flag that latches `true` after the initial
+    /// peer-set sync. Callers AND this into the EPP's health/readiness signal.
+    pub fn peer_ready(&self) -> Option<Arc<AtomicBool>> {
+        self.peer_ready.clone()
     }
 
     fn worker_request(reg: &WorkerRegistration) -> CoreWorkerRequest {
         CoreWorkerRequest {
             worker_id: reg.worker_id,
             model_name: reg.model_name.clone(),
-            tenant_id: DEFAULT_TENANT.to_string(),
+            routing_group: DEFAULT_ROUTING_GROUP.to_string(),
             endpoint: Some(reg.endpoint.clone()),
             block_size: Some(reg.block_size),
-            data_parallel_size: Some(reg.data_parallel_size),
+            // DP is out of scope for V1: register a single rank. Multi-rank DP is
+            // a follow-up; the selection service already supports it.
+            data_parallel_size: Some(1),
             kv_events_endpoints: reg.kv_events_endpoints.clone(),
             replay_endpoint: reg.replay_endpoint.clone(),
             total_kv_blocks: reg.total_kv_blocks,
@@ -212,11 +237,27 @@ impl Selector {
             if current.get(worker_id) == Some(reg) {
                 continue;
             }
-            self.service
+            let record = self
+                .service
                 .upsert_worker(Self::worker_request(reg))
                 .await
                 .map_err(|e| anyhow!("upsert_worker failed: {e}"))?;
-            current.insert(*worker_id, reg.clone());
+            // Only cache the registration once the core reports the worker
+            // Schedulable. An Incomplete (or otherwise non-schedulable) record
+            // means it never became routable; caching it would make every later
+            // identical snapshot skip the re-upsert, leaving the worker silently
+            // unconverged. Leave it uncached so the next reconcile retries, and
+            // surface the reasons so the stuck state is visible.
+            if record.lifecycle == WorkerLifecycle::Schedulable {
+                current.insert(*worker_id, reg.clone());
+            } else {
+                tracing::warn!(
+                    worker_id = *worker_id,
+                    lifecycle = ?record.lifecycle,
+                    reasons = ?record.not_schedulable_reasons,
+                    "Worker upserted but not schedulable; leaving uncached to retry on the next reconcile"
+                );
+            }
         }
 
         // Delete workers that are no longer desired.
@@ -243,9 +284,8 @@ impl Selector {
     pub async fn select_and_reserve(&self, req: SelectRequest) -> Result<SelectResponse> {
         let core_req = CoreSelectAndReserveRequest {
             model_name: req.model_name,
-            tenant_id: DEFAULT_TENANT.to_string(),
+            routing_group: DEFAULT_ROUTING_GROUP.to_string(),
             selection_id: req.selection_id,
-            reservation_id: None,
             prompt: PromptRequest {
                 token_ids: Some(req.token_ids),
                 // KV cache-isolation namespace; keeps EPP block hashing aligned
@@ -270,7 +310,6 @@ impl Selector {
         Ok(SelectResponse {
             selection_id: resp.selection_id,
             worker_id: resp.worker_id,
-            dp_rank: resp.dp_rank,
             endpoint: resp.endpoint,
             block_size: resp.block_size,
             overlap: OverlapSummary {
@@ -294,5 +333,84 @@ impl Drop for Selector {
         // Stop the peer-discovery watch; the service's own Drop stops the core,
         // KV-event listeners, scheduling, and replica-sync tasks.
         self.cancel.cancel();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal single-replica config (no peer service, so no cluster access).
+    /// `max_num_batched_tokens` is set so `Selector::new` never fails its
+    /// fast-fail check regardless of the ambient router policy.
+    fn test_config() -> EppStandaloneConfig {
+        EppStandaloneConfig {
+            selector_threads: 1,
+            peer_service: None,
+            inference_pool_name: "test-pool".to_string(),
+            namespace: "test-ns".to_string(),
+            model_name: "test-model".to_string(),
+            vllm_render_url: "http://vllm-render:8000".to_string(),
+            vllm_render_max_response_bytes: 16 * 1024 * 1024,
+            tokenization_timeout_ms: 5_000,
+            block_size: 16,
+            kv_event_port: 5557,
+            replay_port: None,
+            total_kv_blocks: None,
+            max_num_batched_tokens: Some(8192),
+        }
+    }
+
+    /// A registration the core marks `Incomplete`: `block_size = 0` fails the
+    /// schedulable-metadata check independent of router/kv-event config, so the
+    /// upsert returns `Ok` with a non-`Schedulable` lifecycle.
+    fn incomplete_registration(worker_id: u64) -> WorkerRegistration {
+        WorkerRegistration {
+            worker_id,
+            model_name: "test-model".to_string(),
+            endpoint: "http://10.0.0.1:8000".to_string(),
+            block_size: 0,
+            kv_events_endpoints: HashMap::new(),
+            replay_endpoint: None,
+            total_kv_blocks: None,
+            max_num_batched_tokens: None,
+            stable_routing_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn incomplete_worker_is_not_cached_as_reconciled() {
+        let selector = Selector::new(&test_config())
+            .await
+            .expect("selector should build");
+
+        let desired = HashMap::from([(1u64, incomplete_registration(1))]);
+        selector
+            .reconcile(&desired)
+            .await
+            .expect("reconcile should succeed");
+
+        // The worker came back Incomplete, so it must NOT be recorded as
+        // reconciled — otherwise the identical next snapshot would skip the
+        // re-upsert and the worker would stay silently unconverged.
+        assert!(
+            selector.current.lock().await.is_empty(),
+            "Incomplete worker must not be cached as reconciled"
+        );
+        assert!(
+            !selector.any_ready().await,
+            "an Incomplete worker must not be schedulable"
+        );
+
+        // A second identical reconcile must re-attempt the upsert (cache miss),
+        // not skip it, so the worker keeps getting a chance to converge.
+        selector
+            .reconcile(&desired)
+            .await
+            .expect("second reconcile should succeed");
+        assert!(
+            selector.current.lock().await.is_empty(),
+            "Incomplete worker must still be uncached after a repeat reconcile"
+        );
     }
 }
