@@ -51,6 +51,8 @@ def _make_config(**parallel_overrides):
     cfg.stage_configs_path = None
     cfg.output_modalities = None
     cfg.engine_args.trust_remote_code = False
+    cfg.engine_args.enable_lora = False
+    cfg.engine_args.max_loras = None
     cfg.diffusion = OmniDiffusionKwargs()
     cfg.parallel = dataclasses.replace(OmniParallelKwargs(), **parallel_overrides)
     return cfg
@@ -102,3 +104,25 @@ class TestDiffusionParallelConfigCoverage:
         kwargs = _build_kwargs(config)
 
         assert kwargs["output_modalities"] == ["image"]
+
+    def test_lora_disabled_resolves_no_capacity(self):
+        config = _make_config()
+        handler = BaseOmniHandler.__new__(BaseOmniHandler)
+
+        assert handler._resolve_lora_capacity(config) is None
+
+    def test_lora_enabled_defaults_to_single_slot(self):
+        config = _make_config()
+        config.engine_args.enable_lora = True
+        handler = BaseOmniHandler.__new__(BaseOmniHandler)
+
+        assert handler._resolve_lora_capacity(config) == 1
+
+    def test_lora_enabled_rejects_oversized_capacity(self):
+        config = _make_config()
+        config.engine_args.enable_lora = True
+        config.engine_args.max_loras = 2
+        handler = BaseOmniHandler.__new__(BaseOmniHandler)
+
+        with pytest.raises(ValueError, match="at most one loaded LoRA adapter"):
+            handler._resolve_lora_capacity(config)

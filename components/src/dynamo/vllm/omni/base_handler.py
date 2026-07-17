@@ -54,7 +54,14 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
 
         # Initialize attributes needed from BaseWorkerHandler
         # We don't call super().__init__() because VllmEngineMonitor expects AsyncLLM,
-        # but AsyncOmni manages its own engines internally
+        # but AsyncOmni manages its own engines internally.
+        #
+        # CRITICAL: AsyncOmni must implement the vLLM LoRA interface:
+        # - add_lora(LoRARequest) - dynamically load adapter into engine
+        # - remove_lora(int) - unload adapter by ID
+        # - list_loras() - query currently loaded adapters
+        # BaseWorkerHandler.load_lora() depends on these methods when
+        # _preload_lora_into_engine() is True (default for AGGREGATED mode).
 
         # TODO: Kv publishers not supported yet
         # TODO: Adopt to baseworker initialization pattern
@@ -68,10 +75,28 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
         # Keep historical attribute names for compatibility with existing code.
         self.loaded_loras = self._lora_state.loaded_loras
         self._lora_load_locks = self._lora_state.lora_load_locks
+        self._lora_load_locks_guard = self._lora_state.lora_load_locks_guard
+        self._lora_capacity = self._resolve_lora_capacity(config)
         # Track adapters already handed to vLLM so load/unload stays idempotent.
+        # This set ensures the same adapter isn't handed to add_lora() twice,
+        # and tracks which adapters are in the engine (vs. just in loaded_loras metadata).
         self._engine_loaded_loras: set[str] = set()
 
         logger.info(f"{self.__class__.__name__} initialized successfully")
+
+    def _resolve_lora_capacity(self, config) -> int | None:
+        """Return the effective LoRA capacity for this Omni backend."""
+        if not getattr(config.engine_args, "enable_lora", False):
+            return None
+
+        requested_capacity = getattr(config.engine_args, "max_loras", None)
+        if requested_capacity is not None and requested_capacity != 1:
+            raise ValueError(
+                "vLLM-Omni supports at most one loaded LoRA adapter; "
+                f"requested max_loras={requested_capacity}"
+            )
+
+        return 1
 
     def _build_omni_kwargs(self, config) -> Dict[str, Any]:
         """Build keyword arguments for AsyncOmni constructor."""

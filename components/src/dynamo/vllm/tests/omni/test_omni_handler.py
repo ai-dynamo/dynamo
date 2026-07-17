@@ -68,6 +68,8 @@ def _make_handler(stage_types=("diffusion",)):
     handler.loaded_loras = handler._lora_state.loaded_loras
     handler._lora_load_locks = handler._lora_state.lora_load_locks
     handler._lora_load_locks_guard = handler._lora_state.lora_load_locks_guard
+    handler._lora_capacity = 1
+    handler._engine_loaded_loras = set()
 
     # Add attributes required by _resolve_lora_request() (called by _resolve_and_apply_lora)
     handler._served_model_name = config.served_model_name or config.model
@@ -333,6 +335,17 @@ class TestLoraEnablement:
 
         with patch("dynamo.vllm.omni.omni_handler.get_lora_manager", return_value=None):
             assert handler._resolve_lora_request("ghost-adapter") is None
+
+
+class TestLoraCapacity:
+    def test_constructor_rejects_oversized_capacity(self):
+        """OmniHandler should reject max_loras > 1 at construction time."""
+        with patch(
+            "dynamo.vllm.omni.omni_handler.BaseOmniHandler.__init__",
+            side_effect=ValueError("at most one loaded LoRA adapter"),
+        ):
+            with pytest.raises(ValueError, match="at most one loaded LoRA adapter"):
+                OmniHandler("test-model", MagicMock(), MagicMock())
 
 
 class TestBuildOriginalPrompt:

@@ -264,18 +264,37 @@ class OmniHandler(BaseOmniHandler):
             base_model_path=self.config.model,
             worker_type=WorkerType.Aggregated,
             needs=[],
-            max_gpu_lora_count=getattr(self.config.engine_args, "max_loras", None),
+            max_gpu_lora_count=self._lora_capacity,
         )
 
     async def load_lora(self, request=None):
+        """Load a LoRA adapter into the vLLM-Omni engine.
+
+        Delegates to BaseWorkerHandler which calls AsyncOmni.add_lora().
+        AsyncOmni supports the vLLM LoRA interface (add_lora/remove_lora).
+
+        Note: Diffusion LoRA is separately applied at request time via
+        OmniDiffusionSamplingParams.lora_request (omni_handler.py:100-102),
+        not through this engine method. This engine path handles LLM and
+        other stage adapters.
+        """
         async for response in super().load_lora(request):
             yield response
 
     async def unload_lora(self, request=None):
+        """Unload a LoRA adapter from the vLLM-Omni engine.
+
+        Delegates to BaseWorkerHandler which calls AsyncOmni.remove_lora().
+        AsyncOmni supports the vLLM LoRA interface (add_lora/remove_lora).
+        """
         async for response in super().unload_lora(request):
             yield response
 
     async def list_loras(self, request=None):
+        """List currently loaded LoRA adapters.
+
+        Delegates to BaseWorkerHandler which queries the engine's loaded adapters.
+        """
         async for response in super().list_loras(request):
             yield response
 

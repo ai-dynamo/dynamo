@@ -131,6 +131,7 @@ async def init_omni(
             # frontend, so they register as Aggregated.
             worker_type=WorkerType.Aggregated,
             needs=[],
+            max_gpu_lora_count=1 if engine_lora_enabled else None,
         )
 
         logger.info("Starting to serve Omni worker endpoint...")

@@ -2388,9 +2388,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         "hot_swap": is_hot_swap,
                     }
                 finally:
-                    # Avoid lock-map growth on failed loads: if this attempt did not leave the LoRA
-                    # loaded, remove the lock entry (best-effort).
-                    self._lora_state.cleanup_lock_if_not_loaded(lora_name, lock)
+                    # Stripes are intentionally retained. Evicting a lock here
+                    # can separate a waiting request from a later lifecycle op.
+                    pass
         except Exception as e:
             logger.exception(f"Failed to load LoRA adapter: {e}")
             yield {"status": "error", "message": str(e)}
@@ -2477,8 +2477,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         "lora_id": lora_id,
                     }
                 finally:
-                    # Remove lock entry once the LoRA is not loaded (or never was).
-                    self._lora_state.cleanup_lock_if_not_loaded(lora_name, lock)
+                    # Stripes are intentionally retained. Evicting a lock here
+                    # can separate a waiting request from a later lifecycle op.
+                    pass
         except Exception as e:
             logger.exception(f"Failed to unload LoRA adapter: {e}")
             yield {"status": "error", "message": str(e)}

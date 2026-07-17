@@ -47,22 +47,22 @@ class LoRAState:
         return None
 
     def get_lock(self, lora_name: str) -> asyncio.Lock:
-        """Get/create per-LoRA lock without eagerly allocating locks."""
+        """Get/create per-LoRA lock without eagerly allocating locks.
+
+        Locks are retained indefinitely (never evicted) to ensure the invariant
+        that a given adapter name always maps to the same asyncio.Lock. This is
+        critical for serializing load, unload, and inference-admission operations
+        on the same adapter, preventing races where an unload deletes bookkeeping
+        during vLLM's lazy adapter activation.
+
+        This non-evicting design is analogous to the striped locks in llm_engine.py.
+        """
         with self.lora_load_locks_guard:
             lock = self.lora_load_locks.get(lora_name)
             if lock is None:
                 lock = asyncio.Lock()
                 self.lora_load_locks[lora_name] = lock
             return lock
-
-    def cleanup_lock_if_not_loaded(self, lora_name: str, lock: asyncio.Lock) -> None:
-        """Drop lock map entry when adapter is not loaded anymore."""
-        with self.lora_load_locks_guard:
-            if (
-                lora_name not in self.loaded_loras
-                and self.lora_load_locks.get(lora_name) is lock
-            ):
-                self.lora_load_locks.pop(lora_name, None)
 
     def list_lora_ids(self) -> dict[str, int]:
         """Return map of loaded LoRA names to integer IDs."""
