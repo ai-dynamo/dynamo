@@ -48,8 +48,38 @@ from tests.utils.payloads import (
     LoraTestChatPayload,
     ToolCallingChatPayload,
 )
+from tests.utils.router_nvext import require_router_worker_id
 
 logger = logging.getLogger(__name__)
+
+
+def _assert_distinct_router_workers(payload, min_distinct: int = 2):
+    """Require distinct nvext worker IDs across repeated router requests."""
+    seen: set[int] = set()
+    n = 0
+    orig_validate = payload.validate
+
+    def validate(response, content):
+        nonlocal n
+        orig_validate(response, content)
+        worker_id = require_router_worker_id(response.json())
+        for key in ("prefill_worker_id", "decode_worker_id"):
+            if isinstance(worker_id.get(key), int):
+                seen.add(worker_id[key])
+        n += 1
+        # Diversify the prompt so KV affinity does not pin every request.
+        msg = payload.body["messages"][0]
+        msg["content"] = msg["content"].split("\n[probe-", 1)[0] + f"\n[probe-{n}]"
+
+    def final_validation():
+        assert len(seen) >= min_distinct, (
+            f"expected >= {min_distinct} distinct worker IDs across {n} requests, "
+            f"got {sorted(seen)}"
+        )
+
+    payload.validate = validate
+    payload.final_validation = final_validation
+    return payload
 
 
 def _is_cuda12() -> bool:
@@ -400,11 +430,19 @@ vllm_configs = {
             pytest.mark.gpu_2,
             pytest.mark.router,
             pytest.mark.pre_merge,
+            # Per-GPU peak matches other Qwen3-0.6B agg workers (~3.8 GiB);
+            # 2 replicas fit the existing 2x L4 (24 GiB) gpu_2 lane.
+            pytest.mark.profiled_vram_gib(3.8),
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                1_119_388_000
+            ),  # KV cache cap (2x safety over min=559_693_824)
             pytest.mark.timeout(600),
-        ],  # TODO: profile to get max_vram
+        ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
-            router_selection_chat_payload_default(),
+            _assert_distinct_router_workers(
+                router_selection_chat_payload_default(repeat_count=6)
+            ),
             kv_events_metrics_payload(system_ports=[DefaultPort.SYSTEM2.value]),
         ],
         env={},
