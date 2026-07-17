@@ -5081,7 +5081,7 @@ func TestDetectBackendFrameworkFromArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := detectBackendFrameworkFromArgs(tt.command, tt.args)
+			result, err := DetectBackendFrameworkFromArgs(tt.command, tt.args)
 
 			if tt.expectError {
 				if err == nil {

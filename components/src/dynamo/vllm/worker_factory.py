@@ -682,6 +682,17 @@ class WorkerFactory:
             if config.enable_rl
             else None
         )
+        lora_enabled = config.engine_args.enable_lora
+        if lora_enabled:
+            load_lora_endpoint = runtime.endpoint(
+                f"{config.namespace}.{config.component}.load_lora"
+            )
+            unload_lora_endpoint = runtime.endpoint(
+                f"{config.namespace}.{config.component}.unload_lora"
+            )
+            list_loras_endpoint = runtime.endpoint(
+                f"{config.namespace}.{config.component}.list_loras"
+            )
 
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
         fpm_worker_id = str(generate_endpoint.connection_id())
@@ -790,6 +801,10 @@ class WorkerFactory:
         shutdown_endpoints[:] = [generate_endpoint, clear_endpoint, perf_endpoint]
         if rl_endpoint is not None:
             shutdown_endpoints.append(rl_endpoint)
+        if lora_enabled:
+            shutdown_endpoints.extend(
+                [load_lora_endpoint, unload_lora_endpoint, list_loras_endpoint]
+            )
 
         # Prefill workers expose no OpenAI surface — the role is carried by
         # `worker_type=Prefill`. We register the legacy `ModelType.Prefill`
@@ -856,6 +871,23 @@ class WorkerFactory:
                         handler.rl_dispatch,
                         metrics_labels=prefill_metrics_labels,
                     )
+                )
+            if lora_enabled:
+                serve_tasks.extend(
+                    [
+                        load_lora_endpoint.serve_endpoint(
+                            handler.load_lora,
+                            metrics_labels=prefill_metrics_labels,
+                        ),
+                        unload_lora_endpoint.serve_endpoint(
+                            handler.unload_lora,
+                            metrics_labels=prefill_metrics_labels,
+                        ),
+                        list_loras_endpoint.serve_endpoint(
+                            handler.list_loras,
+                            metrics_labels=prefill_metrics_labels,
+                        ),
+                    ]
                 )
             await asyncio.gather(*serve_tasks)
             logger.debug("serve_endpoint completed for prefill worker")
