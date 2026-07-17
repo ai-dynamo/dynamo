@@ -27,6 +27,7 @@ from gpu_memory_service.client.torch.module import (
     _make_parameter_from_template,
     _match_storages_to_gms_mappings,
     _swap_discovered_tensors,
+    _validate_discovered_storage,
     materialize_module_from_gms,
 )
 from gpu_memory_service.client.torch.tensor import (
@@ -278,6 +279,9 @@ def _move_untracked_params(
         and discovered_storage.storage.device.type == "cuda"
         and id(discovered_storage) not in located_storage_ids
     ]
+    for discovered_storage in storages:
+        _validate_discovered_storage(discovered_storage)
+
     replacements: dict[int, torch.Tensor] = {}
     objects = []
 
@@ -302,7 +306,6 @@ def _move_untracked_params(
                     replacement = _make_parameter_from_template(
                         tensor,
                         replacement,
-                        path=tensor_object.bindings[0].path,
                         requires_grad=bool(tensor.requires_grad),
                     )
                 replacements[id(tensor)] = replacement
