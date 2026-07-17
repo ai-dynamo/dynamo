@@ -16,6 +16,7 @@
 # This test verifies that the HTTP server can be started and responds correctly to requests.
 
 import asyncio
+import contextlib
 import json
 import time
 from typing import AsyncGenerator, Dict
@@ -135,42 +136,30 @@ async def http_server(runtime: DistributedRuntime):
                 "HTTP server exited during startup"
             ) from server_task.exception()
 
+    async def wait_until_accepting():
+        # start_done fires when service.run() returns, but the socket is bound
+        # later on the runtime's background threads; wait until it accepts.
+        while True:
+            try:
+                _, writer = await asyncio.open_connection("localhost", port)
+                writer.close()
+                return
+            except ConnectionError:
+                raise_if_server_exited()
+                await asyncio.sleep(0.1)
+
     async def stop_server():
         service.shutdown()
-        await asyncio.sleep(0.1)  # let the service drain in flight requests
-        if not server_task.done():
-            server_task.cancel()
-            try:
-                await asyncio.wait_for(server_task, timeout=10.0)
-            except asyncio.CancelledError:
-                pass
+        server_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await asyncio.wait_for(server_task, timeout=10.0)
 
     try:
         await asyncio.wait_for(start_done.wait(), timeout=30.0)
         raise_if_server_exited()
-
-        # start_done fires when service.run() returns, but the socket is bound
-        # later on the runtime's background threads; wait until it accepts.
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + 10.0
-        while loop.time() < deadline:
-            try:
-                _, writer = await asyncio.open_connection("localhost", port)
-            except ConnectionError:
-                raise_if_server_exited()
-                await asyncio.sleep(0.1)
-                continue
-            writer.close()
-            try:
-                await writer.wait_closed()
-            except OSError:
-                pass
-            break
-        else:
-            raise TimeoutError(f"HTTP server did not accept connections on port {port}")
+        await asyncio.wait_for(wait_until_accepting(), timeout=10.0)
     except BaseException:
-        # Teardown below the yield is skipped when setup fails, so clean up here.
-        await stop_server()
+        await stop_server()  # teardown past the yield won't run on setup failure
         raise
 
     yield f"http://localhost:{port}", model_name
