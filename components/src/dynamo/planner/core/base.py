@@ -39,7 +39,7 @@ from dynamo.planner.environment.state import DeploymentState
 from dynamo.planner.monitoring.diagnostics_recorder import DiagnosticsRecorder
 from dynamo.planner.monitoring.live_dashboard import start_live_dashboard
 from dynamo.planner.monitoring.planner_metrics import PlannerPrometheusMetrics
-from dynamo.planner.offline.trace_data import extract_metrics_from_mooncake
+from dynamo.planner.offline.trace_data import extract_metrics_from_trace
 from dynamo.runtime import DistributedRuntime
 
 if TYPE_CHECKING:
@@ -193,7 +193,7 @@ class NativePlannerBase:
         if self.config.load_predictor_warmup_trace is None:
             return None
         try:
-            metrics = extract_metrics_from_mooncake(
+            metrics = extract_metrics_from_trace(
                 self.config.load_predictor_warmup_trace,
                 self.config.throughput_adjustment_interval_seconds,
             )
