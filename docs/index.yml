@@ -695,14 +695,18 @@ navigation:
       # sources as the sidebar status pills (synced upstream + hand-authored
       # <DepMetadata> cards) — nothing on the page is hand-maintained.
       #
-      # slug MUST NOT be `index`: Fern reserves that slug for the tab/section
-      # root and silently drops the page (it vanishes from the sidebar and
-      # 404s at /proposals/index). Using a real slug (`registry`) both fixes
-      # that AND makes this the tab landing page — the bare /proposals root
-      # redirects to the first layout entry, exactly like the recipes tab's
-      # `Browse All Recipes` (slug: browse).
+      # Proposals tab landing page: as the first layout entry, the bare
+      # /proposals root redirects here (/proposals/registry), like the recipes
+      # tab's `Browse All Recipes`.
+      #
+      # Do NOT name this page index.mdx or give it slug `index`. Fern reserves
+      # the `index` slug for the tab root and drops any page that claims it
+      # (observed: the page vanishes from the sidebar and 404s). The recipes
+      # browse-all landing sidesteps both by using recipes/README.mdx +
+      # slug: browse; this mirrors that with a real filename + slug
+      # (registry.mdx + registry). README.mdx here is already the Overview page.
       - page: All Proposals
-        path: proposals/index.mdx
+        path: proposals/registry.mdx
         slug: registry
       - page: Overview
         path: proposals/README.mdx

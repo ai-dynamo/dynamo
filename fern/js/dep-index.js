@@ -7,7 +7,7 @@
  * WHAT
  *   Renders a filterable / sortable card grid of every Dynamo Enhancement
  *   Proposal into the <div id="dep-index"> mount emitted by
- *   fern/components/DepIndex.tsx on docs/proposals/index.mdx. Each card links
+ *   fern/components/DepIndex.tsx on docs/proposals/registry.mdx. Each card links
  *   to the DEP's stable /proposals/<slug> page.
  *
  * DATA SOURCE

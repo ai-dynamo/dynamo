@@ -6,7 +6,7 @@
  *
  * Regenerated on every Fern docs build by fern/scripts/sync_deps.py.
  * Consumed by fern/js/dep-index.js to render the filterable DEP
- * registry grid on the Proposals index page (docs/proposals/index.mdx).
+ * registry grid on the Proposals registry page (docs/proposals/registry.mdx).
  *
  * Each record: { slug, dep, title, status, sig?, category?,
  *               authors?: [{label, handle}], submitter? }.

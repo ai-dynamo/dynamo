@@ -596,8 +596,8 @@ def write_status_data_js(root: Path, status_map: dict[str, str]) -> Path:
 # Index dataset                                                               #
 # --------------------------------------------------------------------------- #
 #
-# The Proposals index landing page (docs/proposals/index.mdx -> slug /proposals/
-# index) renders a filterable "registry" grid of every DEP. Like the sidebar
+# The Proposals registry landing page (docs/proposals/registry.mdx -> slug
+# /proposals/registry) renders a filterable "registry" grid of every DEP. Like the sidebar
 # status pills, it is populated at runtime from a build-time asset: a list of
 # per-DEP records on `window.__DEP_INDEX`, materialised here into
 # fern/js/dep-index-data.js and consumed by fern/js/dep-index.js. Same two
@@ -808,8 +808,8 @@ def render_index_data_js(records: list[dict[str, Any]]) -> str:
         " * Regenerated on every Fern docs build by "
         "fern/scripts/sync_deps.py.\n"
         " * Consumed by fern/js/dep-index.js to render the filterable DEP\n"
-        " * registry grid on the Proposals index page "
-        "(docs/proposals/index.mdx).\n"
+        " * registry grid on the Proposals registry page "
+        "(docs/proposals/registry.mdx).\n"
         " *\n"
         " * Each record: { slug, dep, title, status, sig?, category?,\n"
         " *               authors?: [{label, handle}], submitter? }.\n"
