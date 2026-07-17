@@ -68,10 +68,10 @@ def load_benchmark_points_file(path: str, mode: str) -> ExplicitBenchmarkPoints:
         raise ValueError(f"--benchmark-points-file {path!r}: {error}") from error
 
 
-def normalize_benchmark_points(payload: object, mode: str) -> ExplicitBenchmarkPoints:
+def normalize_benchmark_points(payload: object, mode: BenchmarkMode) -> ExplicitBenchmarkPoints:
     """Validate and return a canonical, rank-independent pure-point manifest."""
 
-    if not isinstance(mode, str) or mode not in {"prefill", "decode", "agg"}:
+    if mode not in BenchmarkMode:
         raise ValueError("benchmark mode must be one of prefill, decode, or agg")
     if not isinstance(payload, dict):
         raise ValueError("top level must be an object")
