@@ -15,7 +15,10 @@ from typing import (
     Sequence,
     Set,
     Tuple,
+    TypedDict,
 )
+
+from typing_extensions import NotRequired
 
 # Import from specialized modules
 from .prometheus_metrics import RuntimeMetrics as PyRuntimeMetrics
@@ -1131,6 +1134,23 @@ class ApproxKvIndexer:
         ...
 
 
+class KvStoredEventInput(TypedDict):
+    type: Literal["stored"]
+    token_ids: List[int]
+    num_block_tokens: List[int]
+    block_hashes: List[int]
+    parent_hash: NotRequired[Optional[int]]
+    block_mm_infos: NotRequired[Optional[List[Optional[Dict[str, Any]]]]]
+    lora_name: NotRequired[Optional[str]]
+    is_eagle: NotRequired[Optional[bool]]
+    cache_salt: NotRequired[Optional[str]]
+
+
+class KvRemovedEventInput(TypedDict):
+    type: Literal["removed"]
+    block_hashes: List[int]
+
+
 class KvEventPublisher:
     """
     A KV event publisher will publish KV events corresponding to the component.
@@ -1157,7 +1177,8 @@ class KvEventPublisher:
         When zmq_endpoint is provided, the publisher subscribes to a ZMQ socket for
         incoming engine events (e.g. from SGLang/vLLM) and relays them to NATS.
 
-        When zmq_endpoint is None, events are pushed manually via publish_stored/publish_removed.
+        When zmq_endpoint is None, events are pushed manually via publish_batch,
+        publish_stored, or publish_removed.
 
         Args:
             endpoint: The endpoint to extract component information from for event publishing
@@ -1167,6 +1188,8 @@ class KvEventPublisher:
             enable_local_indexer: Enable worker-local KV indexer
             zmq_endpoint: Optional ZMQ endpoint for relay mode (e.g. "tcp://127.0.0.1:5557")
             zmq_topic: ZMQ topic to subscribe to (defaults to "" when zmq_endpoint is set)
+            batching_timeout_ms: Cross-list batching timeout in milliseconds. None/0
+                flushes at each submitted source-list boundary.
             kv_state_endpoint: KV event ownership endpoint; defaults to endpoint.
         """
 
@@ -1208,6 +1231,18 @@ class KvEventPublisher:
 
         Args:
             block_hashes: List of block hashes to remove (signed 64-bit integers)
+        """
+        ...
+
+    def publish_batch(
+        self, events: Sequence[KvStoredEventInput | KvRemovedEventInput]
+    ) -> None:
+        """
+        Publish an ordered list of KV events as one processor input.
+
+        The complete list is validated before it is enqueued. Compatible
+        events are coalesced while preserving source order and the processor's
+        existing block-count limits.
         """
         ...
 
