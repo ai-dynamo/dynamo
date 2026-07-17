@@ -502,9 +502,14 @@ class DeploymentSpec:
         pvcs = spec.setdefault("pvcs", [])
         if not any(p.get("name") == pvc_name for p in pvcs):
             pvcs.append({"name": pvc_name, "create": False})
+        # HF_HOME once at the deployment level (the operator merges spec.envs into
+        # every component). The volumeMount is per-service — the DGD has no
+        # deployment-wide mount, and each pod must mount the volume itself.
+        envs = spec.setdefault("envs", [])
+        if not any(e.get("name") == "HF_HOME" for e in envs):
+            envs.append({"name": "HF_HOME", "value": mount_point})
         for service in self.services:
             service.add_pvc_mount(pvc_name, mount_point)
-            self.set_service_env_var(service.name, "HF_HOME", mount_point)
 
     def set_frontend_sidecar_image(
         self, image: str, service_name: Optional[str] = None
