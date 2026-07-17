@@ -2351,9 +2351,25 @@ mod tests {
             .unwrap();
         let component = ns.component("test_component".to_string()).unwrap();
         let endpoint = component.endpoint("test_endpoint".to_string());
-        let client = Client::with_reconcile_interval(endpoint, TEST_RECONCILE_INTERVAL)
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
             .await
             .unwrap();
+
+        // Register a real endpoint instance and wait for discovery to settle on
+        // non-empty membership before applying the synthetic override. The
+        // monitor_instance_source task runs an initial reconcile immediately
+        // when the client is constructed, regardless of the long reconcile
+        // interval; without a real instance for that reconcile to land on, it
+        // can clobber the override below and leave the router with no workers.
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instances = client.wait_for_instances().await.unwrap();
+        let real_id = instances[0].id();
+        for _ in 0..50 {
+            if client.instance_ids_avail().contains(&real_id) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
 
         client.override_instance_avail(vec![30, 10, 40, 20]);
         let router =
