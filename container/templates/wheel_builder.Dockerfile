@@ -306,10 +306,13 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
 # narrow allowlist keeps the shipped libav*.so limited to that set (HW NVDEC can
 # be re-added explicitly if a decode feature ever needs H.264/H.265). The
 # allowlist covers exactly two paths: (1) the encode CLI ingesting rawvideo
-# frames from imageio over a pipe, and (2) the Rust media-ffmpeg VideoDecoder
-# decoding VP8/VP9 in mp4/webm/mkv (test fixtures are VP9-in-mp4). Image decode
-# does not use ffmpeg (it goes through the Rust `image` crate), so no still-image
-# decoders are enabled here.
+# frames from imageio over a pipe and encoding with h264_nvenc (NVIDIA's HW
+# encoder — the sanctioned path) or libvpx_vp9, and (2) the Rust media-ffmpeg
+# VideoDecoder decoding VP8/VP9 in mp4/webm/mkv (test fixtures are VP9-in-mp4).
+# The h264 *parser* is enabled — not the H.264 decoder — because the mp4 muxer
+# needs it to package the h264_nvenc bitstream (extract SPS/PPS); a parser
+# carries no codec implementation. Image decode does not use ffmpeg (it goes
+# through the Rust `image` crate), so no still-image decoders are enabled here.
 #
 # Combined with the 8.1 -> 8.1.2 bump below (an upstream maintenance release),
 # this also trims the decoder surface to what we ship.
@@ -372,7 +375,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         --disable-demuxers \
         --enable-demuxer=mov,matroska,rawvideo \
         --disable-parsers \
-        --enable-parser=vp8,vp9 \
+        --enable-parser=vp8,vp9,h264 \
         --disable-protocols \
         --enable-protocol=file,pipe && \
     make -j$(nproc) && \
