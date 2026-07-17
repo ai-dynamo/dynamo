@@ -109,6 +109,10 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 delayed_start=60,
                 profiled_vram_gib=8.2,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
+                # Backend video decode goes through vLLM's VideoMediaIO (opencv);
+                # the shipped image omits it as a media-codec carrier, so install
+                # it for this test only. See common._install_test_only_packages.
+                env={"DYN_TEST_ONLY_PIP_INSTALL": "opencv-python-headless"},
                 tests=[MmCase(payload=make_video_payload(["red", "static", "still"]))],
             ),
             "agg_unified": TopologyConfig(
@@ -165,6 +169,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 delayed_start=60,
                 profiled_vram_gib=8.2,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
+                # See agg_video: install the opencv backend decoder for this test only.
+                env={"DYN_TEST_ONLY_PIP_INSTALL": "opencv-python-headless"},
                 tests=[
                     MmCase(
                         payload=make_video_payload(["red", "static", "still"]),
@@ -249,6 +255,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 single_gpu=True,
                 profiled_vram_gib=19.7,
                 requested_vllm_kv_cache_bytes=1_714_881_000,
+                # See agg_video: install the opencv backend decoder for this test only.
+                env={"DYN_TEST_ONLY_PIP_INSTALL": "opencv-python-headless"},
                 tests=[MmCase(payload=make_video_payload(["red", "static", "still"]))],
             ),
             "p_d": TopologyConfig(
