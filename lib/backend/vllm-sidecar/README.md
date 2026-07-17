@@ -42,6 +42,10 @@ dynamo-vllm-sidecar \
 Use `VLLM_GRPC_ENDPOINT` instead of `--vllm-endpoint` when the endpoint is
 provided through the environment.
 
+The sidecar opens eight gRPC connections by default. This avoided
+connection-level throttling in high-concurrency sidecar tests. Override the
+pool size with `--grpc-connections` or `DYN_SIDECAR_GRPC_CONNECTIONS`.
+
 Connection startup uses a 30-second timeout per attempt, a one-second retry
 interval, and a five-minute deadline for establishing the full connection
 pool. Override them with `--grpc-connect-attempt-timeout-secs`,

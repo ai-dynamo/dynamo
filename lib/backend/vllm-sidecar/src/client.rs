@@ -20,20 +20,14 @@ pub(crate) struct VllmClient {
 impl VllmClient {
     pub(crate) async fn connect(
         endpoint: &str,
-        connections: usize,
         transport: GrpcTransportConfig,
     ) -> Result<Self, DynamoError> {
-        if connections == 0 {
-            return Err(invalid_argument(
-                "vLLM gRPC connection count must be greater than zero",
-            ));
-        }
         let endpoint = Endpoint::from_shared(endpoint.to_string())
             .map_err(|error| invalid_argument(format!("invalid vLLM endpoint: {error}")))?;
         let deadline = Instant::now() + transport.startup_deadline;
         let first = connect_until_ready(endpoint.clone(), transport, deadline).await?;
         let mut channels = vec![first];
-        let remaining = try_join_all((1..connections).map(|_| {
+        let remaining = try_join_all((1..transport.connections.get()).map(|_| {
             let endpoint = endpoint.clone();
             async move { connect_until_ready(endpoint, transport, deadline).await }
         }))

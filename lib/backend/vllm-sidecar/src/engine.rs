@@ -15,11 +15,8 @@ use crate::client::{self, VllmClient};
 use crate::convert::{ResponseState, build_generate_request};
 use crate::model::ConfiguredModel;
 
-const CONNECTIONS: usize = 8;
-
 pub struct VllmSidecarEngine {
     endpoint: String,
-    connections: usize,
     model: ConfiguredModel,
     mode: DisaggregationMode,
     transport: GrpcTransportConfig,
@@ -30,14 +27,12 @@ pub struct VllmSidecarEngine {
 impl VllmSidecarEngine {
     pub(crate) fn new(
         endpoint: String,
-        connections: usize,
         model: ConfiguredModel,
         mode: DisaggregationMode,
         transport: GrpcTransportConfig,
     ) -> Self {
         Self {
             endpoint,
-            connections,
             model,
             mode,
             transport,
@@ -78,7 +73,7 @@ impl VllmSidecarEngine {
             source: args.model_path,
         };
         let mode = args.common.disaggregation_mode;
-        let engine = Self::new(endpoint, CONNECTIONS, model.clone(), mode, transport);
+        let engine = Self::new(endpoint, model.clone(), mode, transport);
         let (tool_call_parser, reasoning_parser) = if mode.is_prefill() {
             (None, None)
         } else {
@@ -118,10 +113,10 @@ impl LLMEngine for VllmSidecarEngine {
         }
         tracing::info!(
             endpoint = %self.endpoint,
-            connections = self.connections,
+            connections = self.transport.connections,
             "connecting to vLLM gRPC"
         );
-        let client = VllmClient::connect(&self.endpoint, self.connections, self.transport).await?;
+        let client = VllmClient::connect(&self.endpoint, self.transport).await?;
         let connection_count = client.connection_count();
         self.client
             .set(client)

@@ -3,6 +3,7 @@
 
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -397,12 +398,14 @@ fn request() -> PreprocessedRequest {
 fn engine(endpoint: &str, mode: DisaggregationMode, connections: usize) -> VllmSidecarEngine {
     VllmSidecarEngine::new(
         endpoint.to_string(),
-        connections,
         ConfiguredModel {
             source: "model-source".to_string(),
         },
         mode,
-        GrpcTransportConfig::default(),
+        GrpcTransportConfig {
+            connections: NonZeroUsize::new(connections).expect("non-zero connection count"),
+            ..Default::default()
+        },
     )
 }
 
@@ -528,7 +531,11 @@ async fn prefill_decode_handoff_is_opaque_and_repeatable() {
 #[tokio::test]
 async fn pool_uses_each_configured_connection() {
     let server = FakeServer::start(FakeGenerate::default()).await;
-    let client = VllmClient::connect(&server.endpoint, 2, GrpcTransportConfig::default())
+    let transport = GrpcTransportConfig {
+        connections: NonZeroUsize::new(2).unwrap(),
+        ..Default::default()
+    };
+    let client = VllmClient::connect(&server.endpoint, transport)
         .await
         .expect("connect pool");
     assert_eq!(client.connection_count(), 2);
@@ -563,6 +570,7 @@ async fn startup_deadline_caps_connection_retries() {
     drop(listener);
 
     let transport = GrpcTransportConfig {
+        connections: NonZeroUsize::new(2).unwrap(),
         connect_attempt_timeout: std::time::Duration::from_millis(50),
         retry_interval: std::time::Duration::from_millis(10),
         startup_deadline: std::time::Duration::from_millis(100),
@@ -570,7 +578,7 @@ async fn startup_deadline_caps_connection_retries() {
     let endpoint = format!("http://{address}");
     let result = tokio::time::timeout(
         std::time::Duration::from_millis(300),
-        VllmClient::connect(&endpoint, 2, transport),
+        VllmClient::connect(&endpoint, transport),
     )
     .await
     .expect("connection retries must respect the startup deadline");

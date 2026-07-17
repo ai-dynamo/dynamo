@@ -7,6 +7,7 @@
 //! the same CLI surface across Rust and Python backends. Engines extend this
 //! with their own `clap` `Args` using `#[command(flatten)]`.
 
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -15,6 +16,7 @@ use clap::Args;
 use crate::disagg::DisaggregationMode;
 
 const DEFAULT_GRPC_CONNECT_ATTEMPT_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_GRPC_CONNECTIONS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
 const DEFAULT_GRPC_RETRY_INTERVAL_SECS: u64 = 1;
 const DEFAULT_GRPC_STARTUP_DEADLINE_SECS: u64 = 300;
 
@@ -128,6 +130,16 @@ pub struct CommonArgs {
     #[arg(long, default_value_t = false, env = "DYN_ROUTE_TO_ENCODER")]
     pub route_to_encoder: bool,
 
+    /// Number of parallel sidecar gRPC connections. The default of eight was
+    /// sufficient in sidecar load tests to avoid connection-level throttling
+    /// at high request concurrency.
+    #[arg(
+        long = "grpc-connections",
+        env = "DYN_SIDECAR_GRPC_CONNECTIONS",
+        default_value_t = DEFAULT_GRPC_CONNECTIONS
+    )]
+    pub grpc_connections: NonZeroUsize,
+
     /// Maximum duration of one sidecar gRPC connection attempt.
     #[arg(
         long = "grpc-connect-attempt-timeout-secs",
@@ -159,6 +171,7 @@ pub struct CommonArgs {
 impl CommonArgs {
     pub fn grpc_transport_config(&self) -> GrpcTransportConfig {
         GrpcTransportConfig {
+            connections: self.grpc_connections,
             connect_attempt_timeout: Duration::from_secs(self.grpc_connect_attempt_timeout_secs),
             retry_interval: Duration::from_secs(self.grpc_retry_interval_secs),
             startup_deadline: Duration::from_secs(self.grpc_startup_deadline_secs),
@@ -168,6 +181,7 @@ impl CommonArgs {
 
 #[derive(Clone, Copy, Debug)]
 pub struct GrpcTransportConfig {
+    pub connections: NonZeroUsize,
     pub connect_attempt_timeout: Duration,
     pub retry_interval: Duration,
     pub startup_deadline: Duration,
@@ -176,6 +190,7 @@ pub struct GrpcTransportConfig {
 impl Default for GrpcTransportConfig {
     fn default() -> Self {
         Self {
+            connections: DEFAULT_GRPC_CONNECTIONS,
             connect_attempt_timeout: Duration::from_secs(DEFAULT_GRPC_CONNECT_ATTEMPT_TIMEOUT_SECS),
             retry_interval: Duration::from_secs(DEFAULT_GRPC_RETRY_INTERVAL_SECS),
             startup_deadline: Duration::from_secs(DEFAULT_GRPC_STARTUP_DEADLINE_SECS),
