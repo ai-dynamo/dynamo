@@ -8,7 +8,7 @@ Supports two modes:
 - "disagg": Routes prefill and decode requests to separate pool types
   based on (ISL, TTFT) and (context_length, ITL) respectively.
 - "agg": Routes generate requests to unified pools that handle both
-  prefill and decode, based on (ISL, ITL).
+  prefill and decode, based on (TTFT, ITL) or optionally (ISL, TTFT, ITL).
 
 Both modes support priority-based pool overrides from agent hints.
 """
@@ -328,12 +328,16 @@ class GlobalRouterHandler:
         """
         Handle generate requests (agg mode).
 
-        Selects the appropriate agg pool based on TTFT target, ITL target, and
-        optional priority, then forwards the request to the local router in
-        that pool. The pool's workers handle both prefill and decode.
+        Selects the appropriate agg pool based on TTFT target, ITL target,
+        optional ISL, and optional priority, then forwards the request to the
+        local router in that pool. The pool's workers handle both prefill and
+        decode.
         """
         assert self.config.agg_pool_selection_strategy is not None
         assert self.config.agg_pool_dynamo_namespaces is not None
+
+        token_ids = request.get("token_ids", [])
+        isl = len(token_ids)
 
         # Extract SLA targets from nvext.router (forwarded by the preprocessor
         # as the `router` field on PreprocessedRequest), fallback to CLI defaults.
@@ -355,6 +359,7 @@ class GlobalRouterHandler:
             ttft_target_ms=ttft_target_ms,
             itl_target_ms=itl_target_ms,
             priority=priority,
+            isl=isl,
         )
         namespace = self.config.agg_pool_dynamo_namespaces[pool_idx]
         assert self.config.agg_pool_priorities is not None
@@ -365,7 +370,7 @@ class GlobalRouterHandler:
         )
 
         logger.info(
-            f"Routing agg request: TTFT_target={ttft_target_ms}ms, "
+            f"Routing agg request: ISL={isl}, TTFT_target={ttft_target_ms}ms, "
             f"ITL_target={itl_target_ms}ms, priority={priority} -> "
             f"pool {pool_idx} ({namespace}); retry_order={pool_order}"
         )
