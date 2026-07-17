@@ -932,6 +932,9 @@ fn extract_candidate_subset(
 struct ExtProcError {
     status_code: StatusCode,
     message: String,
+    /// When set, emit a `Retry-After` header (seconds). Only used for shed (429)
+    /// responses so failover can back off before retrying.
+    retry_after_secs: Option<u64>,
 }
 
 impl ExtProcError {
@@ -940,14 +943,25 @@ impl ExtProcError {
             PickError::NoEndpoints => Self {
                 status_code: StatusCode::ServiceUnavailable,
                 message: e.to_string(),
+                retry_after_secs: None,
             },
             PickError::RoutingFailed(msg) => Self {
                 status_code: StatusCode::ServiceUnavailable,
                 message: msg,
+                retry_after_secs: None,
             },
             PickError::TokenizationFailed(msg) => Self {
                 status_code: StatusCode::BadRequest,
                 message: msg,
+                retry_after_secs: None,
+            },
+            // Explicit load-shedding verdict: distinct from a failure. Surface as
+            // HTTP 429 with an optional Retry-After so the gateway / client
+            // failover treats it as "back off and retry / route elsewhere".
+            PickError::AllWorkersOverloaded { retry_after_secs } => Self {
+                status_code: StatusCode::TooManyRequests,
+                message: "service saturated: all workers overloaded".to_string(),
+                retry_after_secs,
             },
             // Upstream tokenizer failures are not client errors: preserve their
             // semantics so clients retry appropriately. `e.to_string()` is the
@@ -955,26 +969,34 @@ impl ExtProcError {
             PickError::TokenizerUnavailable => Self {
                 status_code: StatusCode::ServiceUnavailable,
                 message: e.to_string(),
+                retry_after_secs: None,
             },
             PickError::TokenizerTimeout => Self {
                 status_code: StatusCode::GatewayTimeout,
                 message: e.to_string(),
+                retry_after_secs: None,
             },
             PickError::TokenizerUpstreamError => Self {
                 status_code: StatusCode::BadGateway,
                 message: e.to_string(),
+                retry_after_secs: None,
             },
             // In-flight limit saturated: shed as retryable backpressure. The
             // variant message ("endpoint picker overloaded") is client-safe.
             PickError::Overloaded => Self {
                 status_code: StatusCode::ServiceUnavailable,
                 message: e.to_string(),
+                retry_after_secs: None,
             },
         }
     }
 
     fn into_processing_response(self) -> ProcessingResponse {
-        envoy_helpers::build_error_response(self.status_code, Some(&self.message))
+        if self.status_code == StatusCode::TooManyRequests {
+            envoy_helpers::build_shed_response(self.retry_after_secs, Some(&self.message))
+        } else {
+            envoy_helpers::build_error_response(self.status_code, Some(&self.message))
+        }
     }
 }
 
@@ -1591,5 +1613,28 @@ mod tests {
     fn overloaded_pick_error_maps_to_503() {
         let err = ExtProcError::from_pick_error(PickError::Overloaded);
         assert_eq!(err.status_code, StatusCode::ServiceUnavailable);
+    }
+
+    /// A load-shed `PickError::AllWorkersOverloaded` maps to 429 with an
+    /// optional `Retry-After`, distinct from `Overloaded`'s 503: this is a
+    /// deliberate shed verdict, not the process protecting itself.
+    #[test]
+    fn all_workers_overloaded_pick_error_maps_to_429_with_retry_after() {
+        let err = ExtProcError::from_pick_error(PickError::AllWorkersOverloaded {
+            retry_after_secs: Some(5),
+        });
+        assert_eq!(err.status_code, StatusCode::TooManyRequests);
+        assert_eq!(err.retry_after_secs, Some(5));
+    }
+
+    /// Without a configured delay the shed still answers 429, just with no
+    /// hint, rather than inventing a retry time.
+    #[test]
+    fn all_workers_overloaded_pick_error_omits_absent_retry_after() {
+        let err = ExtProcError::from_pick_error(PickError::AllWorkersOverloaded {
+            retry_after_secs: None,
+        });
+        assert_eq!(err.status_code, StatusCode::TooManyRequests);
+        assert_eq!(err.retry_after_secs, None);
     }
 }
