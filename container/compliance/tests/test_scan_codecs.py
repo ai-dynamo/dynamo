@@ -15,6 +15,13 @@ from pathlib import Path
 import pytest
 from compliance.scan_codecs import CodecPolicy, main, scan_filesystem, scan_sbom
 
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.post_merge,
+    pytest.mark.gpu_0,
+    pytest.mark.unit,
+]
+
 # The real shipped policy — the tests assert against it, not a fixture, so a
 # policy edit that would let a non-allowlisted media codec through fails a test here.
 _POLICY = CodecPolicy.load(
@@ -94,6 +101,29 @@ def test_sbom_flags_ffmpeg_below_cve_floor(tmp_path: Path):
     )
     hits = scan_sbom(sbom, _POLICY)
     assert [h["path"] for h in hits] == ["sbom:ffmpeg@8.0.1"]
+
+
+def test_codec_under_tmp_is_scanned(tmp_path: Path):
+    # /tmp is a real image directory (not a virtual kernel fs) — a codec left
+    # there still ships and must be flagged, not pruned from the walk.
+    _touch(tmp_path, "tmp/libx264.so.164")
+    violations, _, _ = scan_filesystem(tmp_path, _POLICY)
+    assert [v["path"] for v in violations] == ["/tmp/libx264.so.164"]
+
+
+def test_sbom_unversioned_denied_component_is_flagged(tmp_path: Path):
+    # A denied component with no version cannot be proven >= the fixed floor,
+    # so it must be flagged rather than silently pass the version gate.
+    sbom = tmp_path / "s.cdx.json"
+    sbom.write_text(json.dumps({"components": [{"name": "ffmpeg"}]}))
+    hits = scan_sbom(sbom, _POLICY)
+    assert len(hits) == 1 and "no version" in hits[0]["path"]
+
+
+def test_missing_sbom_path_fails(tmp_path: Path):
+    # An explicitly-supplied but missing --sbom must fail, not silently skip
+    # (which would disable the version-floor gate unnoticed).
+    assert main(["--root", str(tmp_path), "--sbom", str(tmp_path / "nope.json")]) == 1
 
 
 def test_fail_on_findings_exit_code(tmp_path: Path):
