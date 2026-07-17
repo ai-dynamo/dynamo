@@ -5,8 +5,8 @@ title: Writing Unified Backends
 subtitle: Choose Python or Rust for Dynamo's shared backend contract
 ---
 
-Dynamo's unified backend path lets custom engines implement the same lifecycle
-contract used by the built-in backends. The engine owns inference; Dynamo owns
+Dynamo's unified backend path lets custom engines implement Dynamo's shared
+backend lifecycle contract. The engine owns inference; Dynamo owns
 runtime registration, request serving, cancellation monitoring, signal handling,
 drain, and graceful shutdown.
 
@@ -41,8 +41,8 @@ Supported today:
 - structured backend errors
 - graceful shutdown and drain hooks
 
-Still use the lower-level Python worker path when you need a backend-specific
-feature that has not reached its unified engine, a separate multimodal encode
+Still use the lower-level Python worker path when you need a feature the
+unified contract does not cover, a separate multimodal encode
 worker, engine-specific routes, custom request handling, or direct control of
 the request payload.
 
@@ -104,10 +104,8 @@ alongside this guide.
 ### Python feature gaps
 
 The unified backend is in beta. The summary below is the common
-contract — what every engine on the unified path gets — plus the
-gaps that apply to all three engines. Per-engine specifics (vLLM
-sleep/wake, SGLang diffusion, TRT-LLM custom logits processors,
-etc.) live in the
+contract — what every engine on the unified interface gets — plus the
+gaps in the contract itself. Backend-specific details live in the
 [package README](../../components/src/dynamo/common/backend/README.md#feature-gaps).
 
 **Supported today**
@@ -115,7 +113,7 @@ etc.) live in the
 Lifecycle and runtime:
 - Aggregated token-in-token-out inference
 - Disaggregated serving (`agg` / `prefill` / `decode`) — KV transfer
-  uses NIXL across all three engines; SGLang exchanges a Dynamo-level
+  uses NIXL across supported engines; SGLang exchanges a Dynamo-level
   bootstrap address (host/port/room), vLLM and TRT-LLM use an
   engine-internal handshake
 - Model registration with discovery and endpoint types
@@ -173,9 +171,6 @@ Request handling:
   backend advertises through model registration)
 - Tool / reasoning parser configuration (`tool_call_parser`,
   `reasoning_parser`, `exclude_tools_when_tool_choice_none`)
-- vLLM image and video inference in aggregated and prefill/decode deployments,
-  including frontend-rendered multimodal input transfer and the CPU embedding
-  cache. See [vLLM Multimodal](../features/multimodal/multimodal-vllm.md#unified-vllm-backend).
 
 **Remaining Python unified-backend gaps**
 
@@ -188,9 +183,9 @@ Request handling:
 | LoRA adapters | Dynamic load / unload / list, ModelDeploymentCard publishing, per-adapter serialization locks, per-request adapter threading on prefill |
 | Snapshot / checkpoint | CRIU-based engine state save/restore + identity reload |
 
-If you need one of these features today, keep that workload on the
-existing per-engine entry point (`dynamo.<backend>.main`) until the
-unified path catches up.
+If you need one of these features today, use the built-in engines' own
+entry points (`dynamo.<backend>`), which cover them outside the unified
+contract.
 
 ### Python: What you are building
 
@@ -899,10 +894,9 @@ guide.
 ### Rust feature gaps
 
 The unified backend is in beta. The summary below is the common
-contract — what every engine on the unified path gets, whether
+contract — what every engine on the unified interface gets, whether
 written in Rust directly or plugged in from Python via the PyO3
-`Worker` shim. Per-engine specifics (vLLM sleep/wake, SGLang
-diffusion, TRT-LLM custom logits processors, etc.) live in the
+`Worker` shim. Backend-specific details live in the
 [Python package README](../../components/src/dynamo/common/backend/README.md#feature-gaps).
 
 **Supported today**
@@ -974,13 +968,14 @@ Request handling:
 |---------|----------------|
 | `cum_log_probs` response wire | Completion-side `log_probs` / `top_logprobs` are populated on the unified path for vLLM, SGLang, and TRT-LLM (shared helpers in `components/src/dynamo/common/backend/logprobs.py`). Prompt-side logprobs ride on the final chunk's `LLMEngineOutput.engine_data["prompt_logprobs"]` (consumed by `prompt_logprobs_from_engine_data` in the response builders). `cum_log_probs` is still not emitted. |
 | Text-in-text-out mode | `ModelInput::Text` is rejected at startup — `Tokens` only |
-| Native Rust multimodal engines | The shared request fields are available, but native Rust engines do not yet implement image, video, embedding transfer, or the `ENCODE` role. The Python unified vLLM engine supports aggregated and prefill/decode image and video inference. |
+| Native Rust multimodal engines | The shared request fields are available, but native Rust engines do not yet implement image, video, embedding transfer, or the `ENCODE` role. |
 | Diffusion | Image (FLUX), video (Wan2.1), LLM diffusion (DLLM) workers; no diffusion engine, MediaOutput, or media scheduling on the unified path |
 | LoRA adapters | Dynamic load / unload / list, ModelDeploymentCard publishing, per-adapter serialization |
 | Snapshot / checkpoint | CRIU-based engine state save/restore + identity reload |
 
-If you need one of these features today, keep that workload on the
-existing per-engine entry point until the unified path catches up.
+If you need one of these features today, use the built-in engines' own
+entry points (`dynamo.<backend>`), which cover them outside the unified
+contract.
 
 ### Rust: What you are building
 

@@ -58,7 +58,7 @@ For development, use the [devcontainer](https://github.com/ai-dynamo/dynamo/tree
 | [**KVBM**](../../components/kvbm/README.md) | ✅ | |
 | [**LMCache**](../../integrations/lmcache-integration.md) | ✅ | CUDA 12.9 and arm64/aarch64 containers may require building LMCache from source |
 | [**FlexKV**](../../integrations/flexkv-integration.md) | ✅ | |
-| [**Multimodal Support**](../../features/multimodal/multimodal-vllm.md) | ✅ | Aggregated and P/D image/video serving on legacy and unified Python backends; separate Encode workers use the legacy path |
+| [**Multimodal Support**](../../features/multimodal/multimodal-vllm.md) | ✅ | Aggregated and P/D image/video serving on the vLLM Python backend; separate Encode workers use a dedicated encode path |
 | [**Observability**](vllm-observability.md) | ✅ | Metrics and monitoring |
 | **WideEP** | ✅ | Support for DeepEP |
 | **DP Rank Routing** | ✅ | [Hybrid load balancing](https://docs.vllm.ai/en/stable/serving/data_parallel_deployment/?h=external+dp#hybrid-load-balancing) via external DP rank control |
@@ -109,43 +109,6 @@ bash launch/agg.sh
 > ```
 >
 > Then run the launch script. Without these, workers register but the frontend cannot discover them and requests hang.
-
-### Rust Backend Preview
-
-The Python vLLM backend remains the recommended entry point for production
-deployments and examples. The Rust backend is a development preview for
-validating the Rust `LLMEngine` integration with vLLM's engine-core client.
-Use it when working on the Rust backend contract, cancellation, metrics,
-or P/D wiring; use `python -m dynamo.vllm` or
-`python -m dynamo.vllm.unified_main` for the most complete vLLM feature
-coverage.
-
-> [!NOTE]
-> The Rust backend depends on vLLM's engine-core crates, which are not yet
-> published to crates.io and are pulled as git dependencies. They are gated
-> behind the off-by-default `vllm_rs` cargo feature, so the default workspace
-> build does not require the git sources and the crate is excluded from the
-> published Dynamo crates. You must pass `--features vllm_rs` to build or run it.
-
-To run the Rust backend locally, start the same infrastructure services and
-frontend, then launch the Rust worker in another terminal:
-
-```bash
-docker compose -f dev/docker-compose.yml up -d
-
-python -m dynamo.frontend --http-port 8000
-```
-
-```bash
-DYN_SYSTEM_PORT=8081 cargo run -p dynamo-vllm-rs-backend --features vllm_rs -- Qwen/Qwen3-0.6B -- \
-  --enforce-eager \
-  --max-model-len 4096
-```
-
-The Rust worker starts a managed vLLM engine-core process and registers with
-the Dynamo frontend using the same discovery path as the Python unified
-backend. The Rust backend is expected to become the default only after it
-reaches feature and operational parity with the Python vLLM backend.
 
 ## Next Steps
 
