@@ -109,12 +109,16 @@ vllm_omni_configs = {
         ],
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.xpu_1,
-            pytest.mark.post_merge,
-            pytest.mark.timeout(1200),
-            pytest.mark.skip(
-                reason="Qwen/Qwen-Image requires ~40GB GPU memory, exceeds CI capacity (22GB)"
-            ),
+            pytest.mark.h100,
+            # Temporary: pre_merge so PR CI can validate on the H100 lane in
+            # pr.yaml. Flip back to nightly once CI passes (OPS-7582).
+            pytest.mark.pre_merge,
+            pytest.mark.timeout(1800),
+            # Qwen-Image BF16 weights ~40–42 GiB; with VAE tiling/slicing + 2 GiB
+            # KV budget, derived peak ≈47 GiB.
+            pytest.mark.profiled_vram_gib(47.0),
+            # Modest KV pool for diffusion text-encoder/DiT; weights dominate.
+            pytest.mark.requested_vllm_kv_cache_bytes(2_147_483_648),
         ],
         model="Qwen/Qwen-Image",
         request_payloads=[
