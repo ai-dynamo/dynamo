@@ -69,8 +69,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/namespace_scope"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/rbac"
@@ -586,14 +584,16 @@ func registerControllers(
 	operatorImage string,
 	operatorPullPolicy corev1.PullPolicy,
 ) error {
-	if err := (&controller.DynamoComponentDeploymentReconciler{
-		Client:                mgr.GetClient(),
-		Recorder:              mgr.GetEventRecorderFor("dynamocomponentdeployment"),
-		Config:                operatorCfg,
-		RuntimeConfig:         runtimeConfig,
+	setupOptions := controller.SetupOptions{
+		Config:        operatorCfg,
+		RuntimeConfig: runtimeConfig,
+	}
+
+	if err := controller.SetupDynamoComponentDeployment(mgr, controller.DynamoComponentDeploymentSetupOptions{
+		SetupOptions:          setupOptions,
 		DockerSecretRetriever: dockerSecretRetriever,
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to create DynamoComponentDeployment controller: %w", err)
+	}); err != nil {
+		return err
 	}
 
 	scaleClient, err := createScalesGetter(mgr)
@@ -603,90 +603,45 @@ func registerControllers(
 
 	rbacManager := rbac.NewManager(mgr.GetClient())
 
-	if err = (&controller.DynamoGraphDeploymentReconciler{
-		Client:                mgr.GetClient(),
-		Recorder:              mgr.GetEventRecorderFor("dynamographdeployment"),
-		Config:                operatorCfg,
-		RuntimeConfig:         runtimeConfig,
-		RestConfig:            mgr.GetConfig(),
+	if err := controller.SetupDynamoGraphDeployment(mgr, controller.DynamoGraphDeploymentSetupOptions{
+		SetupOptions:          setupOptions,
 		DockerSecretRetriever: dockerSecretRetriever,
 		ScaleClient:           scaleClient,
-		SSHKeyManager:         sshKeyManager,
 		RBACManager:           rbacManager,
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to create DynamoGraphDeployment controller: %w", err)
+		SSHKeyManager:         sshKeyManager,
+	}); err != nil {
+		return err
 	}
-
-	if err = (&controller.DynamoGraphDeploymentScalingAdapterReconciler{
-		Client:        mgr.GetClient(),
-		Scheme:        mgr.GetScheme(),
-		Recorder:      mgr.GetEventRecorderFor("dgdscalingadapter"),
-		Config:        operatorCfg,
-		RuntimeConfig: runtimeConfig,
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to create DGDScalingAdapter controller: %w", err)
+	if err := controller.SetupDynamoGraphDeploymentScalingAdapter(mgr, setupOptions); err != nil {
+		return err
 	}
-
-	if err = (&controller.DynamoGraphDeploymentRequestReconciler{
-		Client:                  mgr.GetClient(),
-		APIReader:               mgr.GetAPIReader(),
-		Recorder:                mgr.GetEventRecorderFor("dynamographdeploymentrequest"),
-		Config:                  operatorCfg,
-		RuntimeConfig:           runtimeConfig,
-		GPUDiscoveryCache:       gpu.NewGPUDiscoveryCache(),
-		GPUDiscovery:            gpu.NewGPUDiscovery(gpu.ScrapeMetricsEndpoint),
+	if err := controller.SetupDynamoGraphDeploymentRequest(mgr, controller.DynamoGraphDeploymentRequestSetupOptions{
+		SetupOptions:            setupOptions,
+		RBACManager:             rbacManager,
 		OperatorImage:           operatorImage,
 		OperatorImagePullPolicy: operatorPullPolicy,
-		RBACManager:             rbacManager,
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to create DynamoGraphDeploymentRequest controller: %w", err)
+	}); err != nil {
+		return err
 	}
-
-	if err = (&controller.DynamoModelReconciler{
-		Client:         mgr.GetClient(),
-		Recorder:       mgr.GetEventRecorderFor("dynamomodel"),
-		EndpointClient: modelendpoint.NewClient(),
-		Config:         operatorCfg,
-		RuntimeConfig:  runtimeConfig,
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to create DynamoModel controller: %w", err)
+	if err := controller.SetupDynamoModel(mgr, controller.DynamoModelSetupOptions{
+		SetupOptions: setupOptions,
+	}); err != nil {
+		return err
 	}
-
-	if err = (&controller.CheckpointReconciler{
-		Client:        mgr.GetClient(),
-		Config:        operatorCfg,
-		RuntimeConfig: runtimeConfig,
-		Recorder:      mgr.GetEventRecorderFor("checkpoint"),
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to create DynamoCheckpoint controller: %w", err)
+	if err := controller.SetupDynamoCheckpoint(mgr, setupOptions); err != nil {
+		return err
 	}
-
-	if err = (&controller.PodSnapshotReconciler{
-		Client:        mgr.GetClient(),
-		Config:        operatorCfg,
-		RuntimeConfig: runtimeConfig,
-		Recorder:      mgr.GetEventRecorderFor("snapshot"),
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to create PodSnapshot controller: %w", err)
+	if err := controller.SetupPodSnapshot(mgr, setupOptions); err != nil {
+		return err
 	}
 
 	if runtimeConfig.Gate.Enabled(features.Grove) {
-		if err = controller.NewFailoverCascadeReconciler(
-			mgr.GetClient(),
-			mgr.GetEventRecorderFor("gms-failover-cascade"),
-		).SetupWithManager(mgr); err != nil {
-			return fmt.Errorf("unable to create GMS FailoverCascade controller: %w", err)
+		if err := controller.SetupFailoverCascade(mgr); err != nil {
+			return err
 		}
 	}
-
-	if err = (&controller.TopologyLabelReconciler{
-		Client:        mgr.GetClient(),
-		NodeReader:    mgr.GetAPIReader(),
-		Config:        operatorCfg,
-		RuntimeConfig: runtimeConfig,
-		Recorder:      mgr.GetEventRecorderFor("topology-label"),
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to create TopologyLabel controller: %w", err)
+	if err := controller.SetupTopologyLabel(mgr, setupOptions); err != nil {
+		return err
 	}
 
 	setupLog.Info("Controllers registered successfully")
