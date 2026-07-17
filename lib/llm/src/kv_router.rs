@@ -297,7 +297,7 @@ where
             Arc::new(move || client_for_overload.overloaded_instance_ids());
 
         let scheduler = KvScheduler::start(
-            component.clone(),
+            endpoint.clone(),
             block_size,
             workers_with_configs.clone(),
             selector,
@@ -316,7 +316,7 @@ where
             tracing::info!("Skipping KV event subscription (using remote indexer)");
         } else if kv_router_config.should_subscribe_to_kv_events() {
             indexer::start_subscriber(
-                component.clone(),
+                endpoint.clone(),
                 indexer.clone(),
                 workers_with_configs.clone(),
                 model_name.clone().unwrap_or_else(|| "unknown".to_string()),

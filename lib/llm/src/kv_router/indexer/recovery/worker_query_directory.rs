@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
 use dynamo_kv_router::protocols::{DpRank, WorkerId};
 use dynamo_runtime::component::Instance;
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryInstanceId, EndpointInstanceId};
+use dynamo_runtime::protocols::EndpointId;
 
 use super::worker_query_state::RecoveryKey;
 
@@ -15,14 +17,22 @@ const QUERY_ENDPOINT_PREFIX: &str = "worker_kv_indexer_query_dp";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct DiscoveredQueryEndpoint {
+    pub(super) source_endpoint: EndpointId,
     pub(super) worker_id: WorkerId,
     pub(super) dp_rank: DpRank,
     pub(super) target: Instance,
 }
 
+#[derive(Debug, Clone)]
+struct RecoveryTargetEntry {
+    target: Instance,
+    generation: u64,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct WorkerQueryEndpointDirectory {
-    targets: DashMap<RecoveryKey, Instance>,
+    targets: DashMap<RecoveryKey, RecoveryTargetEntry>,
+    next_generation: AtomicU64,
 }
 
 impl WorkerQueryEndpointDirectory {
@@ -42,8 +52,10 @@ impl WorkerQueryEndpointDirectory {
         let DiscoveryInstance::Endpoint(inst) = instance else {
             return None;
         };
+        let source_endpoint = inst.source_endpoint.clone()?;
         let (worker_id, dp_rank) = Self::parse_endpoint_name(&inst.endpoint, inst.instance_id)?;
         Some(DiscoveredQueryEndpoint {
+            source_endpoint,
             worker_id,
             dp_rank,
             target: inst,
@@ -52,25 +64,55 @@ impl WorkerQueryEndpointDirectory {
 
     pub(super) fn parse_removed(
         id: DiscoveryInstanceId,
-    ) -> Option<(WorkerId, DpRank, EndpointInstanceId)> {
+    ) -> Option<(EndpointId, WorkerId, DpRank, EndpointInstanceId)> {
         let DiscoveryInstanceId::Endpoint(eid) = id else {
             return None;
         };
+        let source_endpoint = eid.source_endpoint.clone()?;
         let (worker_id, dp_rank) = Self::parse_endpoint_name(&eid.endpoint, eid.instance_id)?;
-        Some((worker_id, dp_rank, eid))
+        Some((source_endpoint, worker_id, dp_rank, eid))
     }
 
-    pub(super) fn insert(&self, endpoint: &DiscoveredQueryEndpoint) -> Option<Instance> {
-        self.targets.insert(
-            (endpoint.worker_id, endpoint.dp_rank),
-            endpoint.target.clone(),
-        )
+    pub(super) fn insert(&self, endpoint: &DiscoveredQueryEndpoint) -> (Option<Instance>, u64) {
+        let key = (endpoint.worker_id, endpoint.dp_rank);
+        match self.targets.entry(key) {
+            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                if entry.get().target == endpoint.target {
+                    return (None, entry.get().generation);
+                }
+                let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+                let previous = entry.insert(RecoveryTargetEntry {
+                    target: endpoint.target.clone(),
+                    generation,
+                });
+                (Some(previous.target), generation)
+            }
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+                entry.insert(RecoveryTargetEntry {
+                    target: endpoint.target.clone(),
+                    generation,
+                });
+                (None, generation)
+            }
+        }
     }
 
+    #[cfg(test)]
     pub(super) fn target_for(&self, worker_id: WorkerId, dp_rank: DpRank) -> Option<Instance> {
         self.targets
             .get(&(worker_id, dp_rank))
-            .map(|target| target.value().clone())
+            .map(|entry| entry.target.clone())
+    }
+
+    pub(super) fn target_with_generation(
+        &self,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+    ) -> Option<(Instance, u64)> {
+        self.targets
+            .get(&(worker_id, dp_rank))
+            .map(|entry| (entry.target.clone(), entry.generation))
     }
 
     pub(super) fn keys(&self) -> HashSet<RecoveryKey> {
@@ -92,7 +134,7 @@ impl WorkerQueryEndpointDirectory {
         let dashmap::mapref::entry::Entry::Occupied(entry) = self.targets.entry(key) else {
             return false;
         };
-        if entry.get().endpoint_instance_id() != *endpoint_id {
+        if entry.get().target.endpoint_instance_id() != *endpoint_id {
             return false;
         }
         entry.remove();

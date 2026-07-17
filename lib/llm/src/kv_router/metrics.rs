@@ -64,6 +64,7 @@ use crate::http::service::metrics::generate_log_buckets;
 pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
 const TARGET_NAMESPACE_LABEL: &str = "target_namespace";
 const TARGET_COMPONENT_LABEL: &str = "target_component";
+const TARGET_ENDPOINT_LABEL: &str = "target_endpoint";
 
 /// Buckets for CPU-bound compute phases (block hashing, sequence hashing).
 fn compute_overhead_buckets() -> Vec<f64> {
@@ -230,6 +231,7 @@ impl RouterWorkerStatusMetrics {
                             labels::WORKER_TYPE,
                             TARGET_NAMESPACE_LABEL,
                             TARGET_COMPONENT_LABEL,
+                            TARGET_ENDPOINT_LABEL,
                         ],
                         &[],
                     )
@@ -263,10 +265,17 @@ impl RouterWorkerStatusMetrics {
         worker_type: &str,
         target_namespace: &str,
         target_component: &str,
+        target_endpoint: &str,
         count: usize,
     ) {
         self.kv_event_source_mismatch_workers
-            .with_label_values(&[model, worker_type, target_namespace, target_component])
+            .with_label_values(&[
+                model,
+                worker_type,
+                target_namespace,
+                target_component,
+                target_endpoint,
+            ])
             .set(count as i64);
     }
 }
@@ -913,6 +922,7 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
                     labels::WORKER_TYPE,
                     TARGET_NAMESPACE_LABEL,
                     TARGET_COMPONENT_LABEL,
+                    TARGET_ENDPOINT_LABEL,
                 ],
             )
             .unwrap(),
@@ -925,8 +935,12 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
             .unwrap();
 
         metrics.set_registered(123, 0, "decode");
-        metrics.set_kv_event_source_mismatch_workers("model-a", "decode", "ns-a", "decode", 2);
-        metrics.set_kv_event_source_mismatch_workers("model-a", "prefill", "ns-a", "prefill", 0);
+        metrics.set_kv_event_source_mismatch_workers(
+            "model-a", "decode", "ns-a", "decode", "generate", 2,
+        );
+        metrics.set_kv_event_source_mismatch_workers(
+            "model-a", "prefill", "ns-a", "prefill", "generate", 0,
+        );
 
         let output = gather_pef(&registry);
         assert!(
@@ -937,13 +951,13 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
         );
         assert!(
             output.contains(
-                "dynamo_component_router_kv_event_source_mismatch_workers{model=\"model-a\",target_component=\"decode\",target_namespace=\"ns-a\",worker_type=\"decode\"} 2"
+                "dynamo_component_router_kv_event_source_mismatch_workers{model=\"model-a\",target_component=\"decode\",target_endpoint=\"generate\",target_namespace=\"ns-a\",worker_type=\"decode\"} 2"
             ),
             "\nActual PEF:\n{output}"
         );
         assert!(
             output.contains(
-                "dynamo_component_router_kv_event_source_mismatch_workers{model=\"model-a\",target_component=\"prefill\",target_namespace=\"ns-a\",worker_type=\"prefill\"} 0"
+                "dynamo_component_router_kv_event_source_mismatch_workers{model=\"model-a\",target_component=\"prefill\",target_endpoint=\"generate\",target_namespace=\"ns-a\",worker_type=\"prefill\"} 0"
             ),
             "\nActual PEF:\n{output}"
         );

@@ -1,12 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! A WorkerSet represents a group of workers deployed from the same configuration,
-//! identified by their shared namespace. Each WorkerSet owns a complete pipeline
-//! (engines, KV router, prefill router) built from its specific ModelDeploymentCard.
+//! A WorkerSet represents a group of workers behind one serving endpoint. Each
+//! WorkerSet owns a complete pipeline (engines, KV router, prefill router) built
+//! from its specific ModelDeploymentCard.
 
 use std::sync::Arc;
 
+use dynamo_runtime::protocols::EndpointId;
 use tokio::sync::watch;
 
 use crate::{
@@ -30,6 +31,10 @@ use crate::{
 pub struct WorkerSet {
     /// Full namespace (e.g., "ns-abc12345")
     namespace: String,
+
+    /// Exact serving pool identity. Discovery-backed WorkerSets always set
+    /// this; in-process models have no distributed endpoint.
+    endpoint_id: Option<EndpointId>,
 
     /// MDC checksum for this set's configuration
     mdcsum: String,
@@ -71,6 +76,7 @@ impl WorkerSet {
     pub fn new(namespace: String, mdcsum: String, card: ModelDeploymentCard) -> Self {
         Self {
             namespace,
+            endpoint_id: None,
             mdcsum,
             card,
             chat_engine: None,
@@ -92,6 +98,14 @@ impl WorkerSet {
 
     pub fn namespace(&self) -> &str {
         &self.namespace
+    }
+
+    pub fn endpoint_id(&self) -> Option<&EndpointId> {
+        self.endpoint_id.as_ref()
+    }
+
+    pub(crate) fn set_endpoint_id(&mut self, endpoint_id: EndpointId) {
+        self.endpoint_id = Some(endpoint_id);
     }
 
     pub fn mdcsum(&self) -> &str {
@@ -240,6 +254,20 @@ mod tests {
             mdcsum.to_string(),
             ModelDeploymentCard::default(),
         )
+    }
+
+    #[test]
+    fn discovery_worker_set_retains_endpoint_identity() {
+        let mut worker_set = make_worker_set("ns1", "abc");
+        let endpoint_id = EndpointId {
+            namespace: "ns1".to_string(),
+            component: "workers".to_string(),
+            name: "generate".to_string(),
+        };
+
+        worker_set.set_endpoint_id(endpoint_id.clone());
+
+        assert_eq!(worker_set.endpoint_id(), Some(&endpoint_id));
     }
 
     /// Generic stub satisfying any `ServerStreamingEngine<Req, Annotated<Resp>>` trait

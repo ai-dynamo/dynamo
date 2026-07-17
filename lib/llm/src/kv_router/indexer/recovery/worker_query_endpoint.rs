@@ -14,6 +14,7 @@ use dynamo_runtime::{
         AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn,
         network::Ingress,
     },
+    protocols::EndpointId,
     stream,
     traits::DistributedRuntimeProvider,
 };
@@ -26,6 +27,7 @@ use crate::kv_router::{
 /// Worker-side endpoint registration for Router -> LocalKvIndexer query service
 pub(crate) async fn start_worker_kv_query_endpoint(
     component: Component,
+    source_endpoint: EndpointId,
     worker_id: u64,
     dp_rank: DpRank,
     local_indexer: Arc<LocalKvIndexer>,
@@ -54,6 +56,7 @@ pub(crate) async fn start_worker_kv_query_endpoint(
         worker_kv_indexer_query_endpoint_for_worker(worker_id, dp_rank)
     };
     tracing::info!(
+        source_endpoint = %source_endpoint,
         "WorkerKvQuery endpoint starting for worker {worker_id} dp_rank {dp_rank} \
          routed by instance {route_worker_id} on endpoint '{endpoint_name}'"
     );
@@ -61,6 +64,7 @@ pub(crate) async fn start_worker_kv_query_endpoint(
     if let Err(e) = component
         .endpoint(&endpoint_name)
         .endpoint_builder()
+        .source_endpoint(source_endpoint)
         .handler(ingress)
         .graceful_shutdown(true)
         .start()

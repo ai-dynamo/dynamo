@@ -503,6 +503,7 @@ mod push_handler_notify_tests {
                 instance_id: 0,
                 transport: TransportType::Nats(endpoint_name.to_string()),
                 device_type: None,
+                source_endpoint: None,
             },
             payload,
         );
@@ -744,6 +745,7 @@ mod integration_tests {
                 instance_id: 12345,
                 transport: crate::component::TransportType::Nats(endpoint.to_string()),
                 device_type: None,
+                source_endpoint: None,
             },
             payload.clone(),
         );
@@ -780,6 +782,7 @@ mod integration_tests {
                     instance_id: i,
                     transport: crate::component::TransportType::Nats(endpoint.clone()),
                     device_type: None,
+                    source_endpoint: None,
                 },
                 payload,
             );
@@ -824,6 +827,7 @@ mod integration_tests {
                 instance_id: 999,
                 transport: crate::component::TransportType::Nats(endpoint.to_string()),
                 device_type: None,
+                source_endpoint: None,
             },
             payload.clone(),
         );

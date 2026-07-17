@@ -6,8 +6,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 use dashmap::DashMap;
-use dynamo_runtime::component::{Component, Instance};
+use dynamo_runtime::component::{Component, Endpoint, Instance};
 use dynamo_runtime::discovery::{DiscoveryEvent, DiscoveryQuery, EndpointInstanceId};
+use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use futures::StreamExt;
 use rand::Rng;
@@ -47,6 +48,12 @@ const RECOVERY_MAX_RETRIES: u32 = 8;
 const RECOVERY_INITIAL_BACKOFF_MS: u64 = 200;
 const RECOVERY_CONCURRENCY_LIMIT: usize = 16;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct QueryEndpointIncarnation {
+    instance_id: EndpointInstanceId,
+    generation: u64,
+}
+
 /// Router-side client for querying worker local KV indexers.
 ///
 /// Discovers query endpoints via `ComponentEndpoints` discovery, filtering for
@@ -60,6 +67,7 @@ const RECOVERY_CONCURRENCY_LIMIT: usize = 16;
 /// sending removal events to the router indexer when all dp_ranks for a worker
 /// disappear.
 pub struct WorkerQueryClient {
+    source_endpoint: EndpointId,
     component: Component,
     transport: Arc<dyn WorkerQueryTransport>,
     /// Indexer for applying recovered events and worker removals.
@@ -75,12 +83,14 @@ pub struct WorkerQueryClient {
 
 impl WorkerQueryClient {
     fn new(
+        source_endpoint: EndpointId,
         component: Component,
         indexer: Indexer,
         transport: Arc<dyn WorkerQueryTransport>,
         cancellation_token: CancellationToken,
     ) -> Arc<Self> {
         Arc::new(Self {
+            source_endpoint,
             component,
             transport,
             indexer,
@@ -101,15 +111,17 @@ impl WorkerQueryClient {
     /// The health monitor compares those endpoints with runtime worker configuration
     /// and reports workers whose expected KV event sources are missing.
     pub async fn spawn(
-        component: Component,
+        endpoint: Endpoint,
         indexer: Indexer,
         workers_with_configs: RuntimeConfigWatch,
         model: String,
         worker_type: &'static str,
         cancellation_token: CancellationToken,
     ) -> Result<Arc<Self>> {
+        let component = endpoint.component().clone();
         let transport = Arc::new(RuntimeWorkerQueryTransport::new(&component).await?);
         let client = Self::new(
+            endpoint.id(),
             component.clone(),
             indexer,
             transport,
@@ -120,6 +132,7 @@ impl WorkerQueryClient {
         let health_cancel = cancellation_token.child_token();
         spawn_kv_event_source_health_monitor(
             component.clone(),
+            endpoint.id(),
             workers_with_configs,
             client.query_endpoints.clone(),
             model,
@@ -183,11 +196,14 @@ impl WorkerQueryClient {
                     self.handle_discovered_query_endpoint(endpoint).await;
                 }
                 DiscoveryEvent::Removed(id) => {
-                    let Some((worker_id, dp_rank, endpoint_id)) =
+                    let Some((source_endpoint, worker_id, dp_rank, endpoint_id)) =
                         WorkerQueryEndpointDirectory::parse_removed(id)
                     else {
                         continue;
                     };
+                    if source_endpoint != self.source_endpoint {
+                        continue;
+                    }
                     self.handle_removed_query_endpoint(worker_id, dp_rank, endpoint_id)
                         .await;
                 }
@@ -204,30 +220,67 @@ impl WorkerQueryClient {
             .clone()
     }
 
+    #[cfg(test)]
     fn query_target_for(&self, worker_id: WorkerId, dp_rank: DpRank) -> Option<Instance> {
         if let Some(target) = self.query_endpoints.target_for(worker_id, dp_rank) {
             return Some(target);
         }
 
+        Some(Instance {
+            namespace: self.component.namespace().name().to_string(),
+            component: self.component.name().to_string(),
+            endpoint: worker_kv_indexer_query_endpoint(dp_rank),
+            instance_id: worker_id,
+            transport: dynamo_runtime::component::TransportType::Nats(String::new()),
+            device_type: None,
+            source_endpoint: Some(self.source_endpoint.clone()),
+        })
+    }
+
+    fn active_query_incarnation(
+        &self,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+    ) -> Option<QueryEndpointIncarnation> {
+        let active = self
+            .query_endpoints
+            .target_with_generation(worker_id, dp_rank)
+            .map(|(target, generation)| QueryEndpointIncarnation {
+                instance_id: target.endpoint_instance_id(),
+                generation,
+            });
+        if active.is_some() {
+            return active;
+        }
+
         #[cfg(test)]
         {
-            Some(Instance {
-                namespace: self.component.namespace().name().to_string(),
-                component: self.component.name().to_string(),
-                endpoint: worker_kv_indexer_query_endpoint(dp_rank),
-                instance_id: worker_id,
-                transport: dynamo_runtime::component::TransportType::Nats(String::new()),
-                device_type: None,
-            })
+            return self.query_target_for(worker_id, dp_rank).map(|target| {
+                QueryEndpointIncarnation {
+                    instance_id: target.endpoint_instance_id(),
+                    generation: 0,
+                }
+            });
         }
 
         #[cfg(not(test))]
         None
     }
 
+    fn query_incarnation_is_active(
+        &self,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+        expected: &QueryEndpointIncarnation,
+    ) -> bool {
+        self.active_query_incarnation(worker_id, dp_rank)
+            .is_some_and(|active| active == *expected)
+    }
+
     #[cfg(test)]
     async fn handle_discovered_worker(self: &Arc<Self>, worker_id: WorkerId, dp_rank: DpRank) {
         let endpoint = DiscoveredQueryEndpoint {
+            source_endpoint: self.source_endpoint.clone(),
             worker_id,
             dp_rank,
             target: Instance {
@@ -237,18 +290,32 @@ impl WorkerQueryClient {
                 instance_id: worker_id,
                 transport: dynamo_runtime::component::TransportType::Nats(String::new()),
                 device_type: None,
+                source_endpoint: Some(self.source_endpoint.clone()),
             },
         };
         self.handle_discovered_query_endpoint(endpoint).await;
     }
 
     async fn handle_discovered_query_endpoint(self: &Arc<Self>, endpoint: DiscoveredQueryEndpoint) {
+        if endpoint.source_endpoint != self.source_endpoint
+            || endpoint.target.source_endpoint.as_ref() != Some(&endpoint.source_endpoint)
+        {
+            tracing::error!(
+                expected_source_endpoint = %self.source_endpoint,
+                declared_source_endpoint = %endpoint.source_endpoint,
+                worker_id = endpoint.worker_id,
+                dp_rank = endpoint.dp_rank,
+                "Ignoring recovery source attributed to another serving endpoint"
+            );
+            return;
+        }
         let worker_id = endpoint.worker_id;
         let dp_rank = endpoint.dp_rank;
         let endpoint_id = endpoint.target.endpoint_instance_id();
         self.transport.clear_instance_tombstone(&endpoint_id).await;
 
-        let replaced = match self.query_endpoints.insert(&endpoint) {
+        let (previous, _generation) = self.query_endpoints.insert(&endpoint);
+        let replaced = match previous {
             Some(previous) if previous != endpoint.target => Some(previous),
             _ => None,
         };
@@ -262,12 +329,25 @@ impl WorkerQueryClient {
             self.transport
                 .cancel_instance_streams(&previous.endpoint_instance_id())
                 .await;
+            if let Some((_, cancel)) = self.recovery_cancels.remove(&(worker_id, dp_rank)) {
+                cancel.cancel();
+            }
         }
 
+        self.activate_discovered_rank(worker_id, dp_rank, replaced.is_some())
+            .await;
+    }
+
+    async fn activate_discovered_rank(
+        self: &Arc<Self>,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+        replaced: bool,
+    ) {
         let worker_state = self.get_or_create_worker_state(worker_id);
         let spawn = {
             let mut worker_state = worker_state.lock().await;
-            let action = worker_state.handle_discovered_rank(dp_rank, replaced.is_some());
+            let action = worker_state.handle_discovered_rank(dp_rank, replaced);
             if action.reset_rank {
                 self.indexer.remove_worker_dp_rank(worker_id, dp_rank).await;
             }
@@ -366,6 +446,12 @@ impl WorkerQueryClient {
         }
     }
 
+    fn recovery_events_match_source(key: RecoveryKey, events: &[RouterEvent]) -> bool {
+        events
+            .iter()
+            .all(|event| event.worker_id == key.0 && event.event.dp_rank == key.1)
+    }
+
     pub(crate) async fn handle_live_event(self: &Arc<Self>, event: RouterEvent) {
         let worker_id = event.worker_id;
         let dp_rank = event.event.dp_rank;
@@ -412,9 +498,34 @@ impl WorkerQueryClient {
         start_event_id: Option<u64>,
         end_event_id: Option<u64>,
     ) {
+        let Some(query_incarnation) = self.active_query_incarnation(key.0, key.1) else {
+            let client = self.clone();
+            tokio::spawn(async move {
+                if let Some(worker_state) = client.worker_states.get(&key.0).map(|e| e.clone()) {
+                    worker_state.lock().await.finish_failed_recovery(key.1);
+                }
+                tracing::debug!(
+                    source_endpoint = %client.source_endpoint,
+                    worker_id = key.0,
+                    dp_rank = key.1,
+                    "Deferring recovery until an attributed query endpoint is discovered"
+                );
+            });
+            return;
+        };
         let client = self.clone();
 
         tokio::spawn(async move {
+            if !client.query_incarnation_is_active(key.0, key.1, &query_incarnation) {
+                tracing::debug!(
+                    source_endpoint = %client.source_endpoint,
+                    worker_id = key.0,
+                    dp_rank = key.1,
+                    query_incarnation = ?query_incarnation,
+                    "Skipping recovery for a stale query-endpoint incarnation"
+                );
+                return;
+            }
             // Re-check liveness under the worker-state lock, then register the
             // cancellation token only if the rank is still present. Removal holds
             // this same lock to drop the rank before it drains `recovery_cancels`,
@@ -426,15 +537,9 @@ impl WorkerQueryClient {
                 let live = match client.worker_states.get(&key.0).map(|e| e.clone()) {
                     Some(worker_state) => {
                         let worker_state = worker_state.lock().await;
-                        // TODO(#10580 follow-up): pre-existing ABA case — if removing
-                        // the final rank deletes `WorkerState` and rediscovery
-                        // recreates it at epoch 0, a stale follow-up still carrying
-                        // epoch 0 can pass this check against the freshly discovered
-                        // endpoint. Out of scope for the #10580 fix (the base branch
-                        // already has a resettable epoch + dynamic target resolution);
-                        // a follow-up should fold the endpoint/rank incarnation into
-                        // the recovery identity, or use a generation that survives
-                        // removal.
+                        // Worker epoch fences clear barriers while the separately captured
+                        // query-target generation survives final-rank deletion and fences
+                        // replacement/remove-readd ABA.
                         (worker_state.epoch == epoch && worker_state.ranks.contains_key(&key.1))
                             .then(|| {
                                 client
@@ -475,7 +580,13 @@ impl WorkerQueryClient {
 
                 Some(
                     client
-                        .fetch_recovery_response(key.0, key.1, start_event_id, end_event_id)
+                        .fetch_recovery_response(
+                            key.0,
+                            key.1,
+                            &query_incarnation,
+                            start_event_id,
+                            end_event_id,
+                        )
                         .await,
                 )
             };
@@ -490,7 +601,9 @@ impl WorkerQueryClient {
             };
 
             if let Some(result) = result {
-                client.finish_recovery_task(key, epoch, result).await;
+                client
+                    .finish_recovery_task(key, epoch, query_incarnation, result)
+                    .await;
             }
         });
     }
@@ -499,8 +612,19 @@ impl WorkerQueryClient {
         self: Arc<Self>,
         key: RecoveryKey,
         epoch: u64,
+        query_incarnation: QueryEndpointIncarnation,
         result: Result<WorkerKvQueryResponse>,
     ) {
+        if !self.query_incarnation_is_active(key.0, key.1, &query_incarnation) {
+            tracing::error!(
+                source_endpoint = %self.source_endpoint,
+                worker_id = key.0,
+                dp_rank = key.1,
+                query_incarnation = ?query_incarnation,
+                "Discarding recovery result from a stale query-endpoint incarnation"
+            );
+            return;
+        }
         let Some(worker_state) = self.worker_states.get(&key.0).map(|entry| entry.clone()) else {
             return;
         };
@@ -525,6 +649,16 @@ impl WorkerQueryClient {
                 events,
                 last_event_id,
             }) => {
+                if !Self::recovery_events_match_source(key, &events) {
+                    tracing::error!(
+                        source_endpoint = %self.source_endpoint,
+                        worker_id = key.0,
+                        dp_rank = key.1,
+                        "Discarding recovery batch containing events for another endpoint member"
+                    );
+                    worker_state.finish_failed_recovery(key.1);
+                    return;
+                }
                 tracing::debug!(
                     "Got {count} buffered events from worker {} dp_rank {}",
                     key.0,
@@ -549,6 +683,16 @@ impl WorkerQueryClient {
                 events,
                 last_event_id,
             }) => {
+                if !Self::recovery_events_match_source(key, &events) {
+                    tracing::error!(
+                        source_endpoint = %self.source_endpoint,
+                        worker_id = key.0,
+                        dp_rank = key.1,
+                        "Discarding tree dump containing events for another endpoint member"
+                    );
+                    worker_state.finish_failed_recovery(key.1);
+                    return;
+                }
                 let represented_blocks = events
                     .iter()
                     .map(|event| match &event.event.data {
@@ -633,9 +777,23 @@ impl WorkerQueryClient {
         &self,
         worker_id: WorkerId,
         dp_rank: DpRank,
+        query_incarnation: &QueryEndpointIncarnation,
         attempt: u32,
     ) -> Option<Instance> {
-        if let Some(target) = self.query_target_for(worker_id, dp_rank) {
+        if let Some((target, generation)) = self
+            .query_endpoints
+            .target_with_generation(worker_id, dp_rank)
+            && generation == query_incarnation.generation
+            && target.endpoint_instance_id() == query_incarnation.instance_id
+        {
+            return Some(target);
+        }
+
+        #[cfg(test)]
+        if query_incarnation.generation == 0
+            && let Some(target) = self.query_target_for(worker_id, dp_rank)
+            && target.endpoint_instance_id() == query_incarnation.instance_id
+        {
             return Some(target);
         }
 
@@ -656,6 +814,7 @@ impl WorkerQueryClient {
         &self,
         worker_id: WorkerId,
         dp_rank: DpRank,
+        query_incarnation: &QueryEndpointIncarnation,
         start_event_id: Option<u64>,
         end_event_id: Option<u64>,
     ) -> Result<WorkerKvQueryResponse> {
@@ -667,8 +826,14 @@ impl WorkerQueryClient {
         let mut last_error = None;
 
         for attempt in 0..RECOVERY_MAX_RETRIES {
+            if !self.query_incarnation_is_active(worker_id, dp_rank, query_incarnation) {
+                anyhow::bail!(
+                    "Recovery source changed for endpoint {} worker {worker_id} dp_rank {dp_rank}",
+                    self.source_endpoint
+                );
+            }
             let Some(target) = self
-                .resolve_query_target_for_recovery(worker_id, dp_rank, attempt)
+                .resolve_query_target_for_recovery(worker_id, dp_rank, query_incarnation, attempt)
                 .await
             else {
                 last_error = Some(anyhow::anyhow!(
@@ -871,6 +1036,7 @@ mod tests {
         let (kv_indexer, indexer) = make_test_indexer();
         let transport = Arc::new(MockWorkerQueryTransport::default());
         let client = WorkerQueryClient::new(
+            test_source_endpoint(),
             component,
             indexer,
             transport.clone(),
@@ -879,7 +1045,19 @@ mod tests {
         (client, transport, kv_indexer)
     }
 
+    fn test_source_endpoint() -> EndpointId {
+        EndpointId::from("test-ns.test-component.generate")
+    }
+
     fn make_instance(endpoint: String, instance_id: WorkerId) -> Instance {
+        make_instance_with_source(endpoint, instance_id, Some(test_source_endpoint()))
+    }
+
+    fn make_instance_with_source(
+        endpoint: String,
+        instance_id: WorkerId,
+        source_endpoint: Option<EndpointId>,
+    ) -> Instance {
         Instance {
             namespace: "test-ns".to_string(),
             component: "test-component".to_string(),
@@ -887,6 +1065,7 @@ mod tests {
             instance_id,
             transport: TransportType::Nats("nats://127.0.0.1:4222".to_string()),
             device_type: None,
+            source_endpoint,
         }
     }
 
@@ -900,6 +1079,7 @@ mod tests {
             component: "test-component".to_string(),
             endpoint,
             instance_id,
+            source_endpoint: Some(test_source_endpoint()),
         })
     }
 
@@ -1004,6 +1184,7 @@ mod tests {
         assert_eq!(
             parsed,
             DiscoveredQueryEndpoint {
+                source_endpoint: test_source_endpoint(),
                 worker_id: 11,
                 dp_rank: 4,
                 target: make_instance(endpoint_name, 11),
@@ -1023,14 +1204,16 @@ mod tests {
             .expect("worker-scoped query endpoint id should parse");
 
         let expected = DiscoveredQueryEndpoint {
+            source_endpoint: test_source_endpoint(),
             worker_id: 100,
             dp_rank: 4,
             target: make_instance(endpoint_name, 11),
         };
         assert_eq!(parsed, expected.clone());
-        assert_eq!(parsed_id.0, expected.worker_id);
-        assert_eq!(parsed_id.1, expected.dp_rank);
-        assert_eq!(parsed_id.2, expected.target.endpoint_instance_id());
+        assert_eq!(parsed_id.0, expected.source_endpoint);
+        assert_eq!(parsed_id.1, expected.worker_id);
+        assert_eq!(parsed_id.2, expected.dp_rank);
+        assert_eq!(parsed_id.3, expected.target.endpoint_instance_id());
     }
 
     #[tokio::test]
@@ -1038,6 +1221,7 @@ mod tests {
         let (client, transport, kv_indexer) = make_test_client("logical-route").await;
         let endpoint_name = worker_kv_indexer_query_endpoint_for_worker(100, 4);
         let endpoint = DiscoveredQueryEndpoint {
+            source_endpoint: client.source_endpoint.clone(),
             worker_id: 100,
             dp_rank: 4,
             target: make_instance(endpoint_name.clone(), 11),
@@ -1063,6 +1247,176 @@ mod tests {
             vec![((100, 4), make_instance(endpoint_name, 11))]
         );
         kv_indexer.flush().await;
+    }
+
+    #[tokio::test]
+    async fn missing_or_foreign_source_endpoint_is_rejected_before_directory_mutation() {
+        let (client, transport, kv_indexer) = make_test_client("reject-foreign-source").await;
+        let key = (100, 4);
+        let endpoint_name = worker_kv_indexer_query_endpoint_for_worker(key.0, key.1);
+        let foreign_source = EndpointId::from("test-ns.test-component.other");
+
+        client
+            .handle_discovered_query_endpoint(DiscoveredQueryEndpoint {
+                source_endpoint: foreign_source.clone(),
+                worker_id: key.0,
+                dp_rank: key.1,
+                target: make_instance_with_source(endpoint_name.clone(), 11, Some(foreign_source)),
+            })
+            .await;
+        client
+            .handle_discovered_query_endpoint(DiscoveredQueryEndpoint {
+                source_endpoint: client.source_endpoint.clone(),
+                worker_id: key.0,
+                dp_rank: key.1,
+                target: make_instance_with_source(endpoint_name, 12, None),
+            })
+            .await;
+
+        assert!(client.query_endpoints.keys().is_empty());
+        assert!(!rank_state_matches(&client, key, |_| true));
+        assert_eq!(transport.call_count(), 0);
+        assert!(transport.cleared_tombstones().is_empty());
+        assert!(transport.cancelled_instances().is_empty());
+        kv_indexer.flush().await;
+    }
+
+    #[tokio::test]
+    async fn foreign_source_cannot_replace_an_accepted_recovery_target() {
+        let (client, transport, kv_indexer) = make_test_client("foreign-replacement").await;
+        let key = (100, 4);
+        let endpoint_name = worker_kv_indexer_query_endpoint_for_worker(key.0, key.1);
+        let accepted = make_instance(endpoint_name.clone(), 11);
+        transport.push_action(
+            key,
+            MockQueryAction {
+                started: None,
+                release: None,
+                response: Ok(WorkerKvQueryResponse::TreeDump {
+                    events: vec![],
+                    last_event_id: 0,
+                }),
+            },
+        );
+        client
+            .handle_discovered_query_endpoint(DiscoveredQueryEndpoint {
+                source_endpoint: client.source_endpoint.clone(),
+                worker_id: key.0,
+                dp_rank: key.1,
+                target: accepted.clone(),
+            })
+            .await;
+        wait_for(|| transport.call_count() == 1).await;
+
+        let foreign_source = EndpointId::from("test-ns.test-component.other");
+        client
+            .handle_discovered_query_endpoint(DiscoveredQueryEndpoint {
+                source_endpoint: foreign_source.clone(),
+                worker_id: key.0,
+                dp_rank: key.1,
+                target: make_instance_with_source(endpoint_name, 12, Some(foreign_source)),
+            })
+            .await;
+
+        assert_eq!(
+            client.query_endpoints.target_for(key.0, key.1),
+            Some(accepted)
+        );
+        assert!(transport.cancelled_instances().is_empty());
+        assert_eq!(transport.cleared_tombstones().len(), 1);
+        assert_eq!(transport.call_count(), 1);
+        kv_indexer.flush().await;
+    }
+
+    #[tokio::test]
+    async fn identical_worker_rank_recovers_independently_for_two_source_endpoints() {
+        let component = make_test_component("two-source-endpoints").await;
+        let source_a = EndpointId::from("test-ns.test-component.a");
+        let source_b = EndpointId::from("test-ns.test-component.b");
+        let key = (100, 4);
+        let endpoint_name = worker_kv_indexer_query_endpoint_for_worker(key.0, key.1);
+
+        let (kv_indexer_a, indexer_a) = make_test_indexer();
+        let transport_a = Arc::new(MockWorkerQueryTransport::default());
+        let client_a = WorkerQueryClient::new(
+            source_a.clone(),
+            component.clone(),
+            indexer_a,
+            transport_a.clone(),
+            CancellationToken::new(),
+        );
+        let (kv_indexer_b, indexer_b) = make_test_indexer();
+        let transport_b = Arc::new(MockWorkerQueryTransport::default());
+        let client_b = WorkerQueryClient::new(
+            source_b.clone(),
+            component,
+            indexer_b,
+            transport_b.clone(),
+            CancellationToken::new(),
+        );
+
+        for (transport, event_id) in [(&transport_a, 11), (&transport_b, 22)] {
+            transport.push_action(
+                key,
+                MockQueryAction {
+                    started: None,
+                    release: None,
+                    response: Ok(WorkerKvQueryResponse::TreeDump {
+                        events: vec![make_store_event(key.0, key.1, event_id)],
+                        last_event_id: event_id,
+                    }),
+                },
+            );
+        }
+
+        let target_a = make_instance_with_source(endpoint_name.clone(), 11, Some(source_a.clone()));
+        let target_b = make_instance_with_source(endpoint_name, 11, Some(source_b.clone()));
+        client_a
+            .handle_discovered_query_endpoint(DiscoveredQueryEndpoint {
+                source_endpoint: source_a.clone(),
+                worker_id: key.0,
+                dp_rank: key.1,
+                target: target_a.clone(),
+            })
+            .await;
+        client_b
+            .handle_discovered_query_endpoint(DiscoveredQueryEndpoint {
+                source_endpoint: source_b.clone(),
+                worker_id: key.0,
+                dp_rank: key.1,
+                target: target_b,
+            })
+            .await;
+
+        wait_for(|| transport_a.call_count() == 1 && transport_b.call_count() == 1).await;
+        kv_indexer_a.flush().await;
+        kv_indexer_b.flush().await;
+        assert_eq!(
+            stored_block_hashes_for(&kv_indexer_a.dump_events().await.unwrap(), key.0, key.1),
+            vec![11]
+        );
+        assert_eq!(
+            stored_block_hashes_for(&kv_indexer_b.dump_events().await.unwrap(), key.0, key.1),
+            vec![22]
+        );
+
+        client_a
+            .handle_live_event(make_clear_event(key.0, key.1, 12))
+            .await;
+        client_a
+            .handle_removed_query_endpoint(key.0, key.1, target_a.endpoint_instance_id())
+            .await;
+        kv_indexer_a.flush().await;
+        kv_indexer_b.flush().await;
+        assert!(
+            stored_block_hashes_for(&kv_indexer_a.dump_events().await.unwrap(), key.0, key.1)
+                .is_empty()
+        );
+        assert_eq!(
+            stored_block_hashes_for(&kv_indexer_b.dump_events().await.unwrap(), key.0, key.1),
+            vec![22]
+        );
+        assert!(rank_state_matches(&client_b, key, |_| true));
     }
 
     #[tokio::test]
@@ -1101,6 +1455,7 @@ mod tests {
 
         client
             .handle_discovered_query_endpoint(DiscoveredQueryEndpoint {
+                source_endpoint: client.source_endpoint.clone(),
                 worker_id: key.0,
                 dp_rank: key.1,
                 target: first_target.clone(),
@@ -1115,6 +1470,7 @@ mod tests {
 
         client
             .handle_discovered_query_endpoint(DiscoveredQueryEndpoint {
+                source_endpoint: client.source_endpoint.clone(),
                 worker_id: key.0,
                 dp_rank: key.1,
                 target: second_target.clone(),
@@ -1127,6 +1483,15 @@ mod tests {
         })
         .await;
 
+        // A delayed removal for the old incarnation must not evict the replacement.
+        client
+            .handle_removed_query_endpoint(key.0, key.1, first_id.clone())
+            .await;
+        assert_eq!(
+            client.query_endpoints.target_for(key.0, key.1),
+            Some(second_target.clone())
+        );
+
         assert_eq!(transport.cancelled_instances(), vec![first_id.clone()]);
         assert_eq!(transport.cleared_tombstones(), vec![first_id, second_id]);
         assert_eq!(
@@ -1137,6 +1502,152 @@ mod tests {
         kv_indexer.flush().await;
         let events = kv_indexer.dump_events().await.unwrap();
         assert_eq!(stored_block_hashes_for(&events, key.0, key.1), vec![1]);
+    }
+
+    #[tokio::test]
+    async fn replacement_discards_delayed_result_from_old_incarnation() {
+        let (client, transport, kv_indexer) = make_test_client("replace-delayed-result").await;
+        let key = (100, 4);
+        let endpoint_name = worker_kv_indexer_query_endpoint_for_worker(key.0, key.1);
+        let first_target = make_instance(endpoint_name.clone(), 11);
+        let second_target = make_instance(endpoint_name, 12);
+        let first_started = Arc::new(Notify::new());
+        let first_release = Arc::new(Notify::new());
+
+        transport.push_action(
+            key,
+            MockQueryAction {
+                started: Some(first_started.clone()),
+                release: Some(first_release.clone()),
+                response: Ok(WorkerKvQueryResponse::TreeDump {
+                    events: vec![make_store_event(key.0, key.1, 90)],
+                    last_event_id: 90,
+                }),
+            },
+        );
+        transport.push_action(
+            key,
+            MockQueryAction {
+                started: None,
+                release: None,
+                response: Ok(WorkerKvQueryResponse::TreeDump {
+                    events: vec![make_store_event(key.0, key.1, 1)],
+                    last_event_id: 1,
+                }),
+            },
+        );
+
+        client
+            .handle_discovered_query_endpoint(DiscoveredQueryEndpoint {
+                source_endpoint: client.source_endpoint.clone(),
+                worker_id: key.0,
+                dp_rank: key.1,
+                target: first_target,
+            })
+            .await;
+        first_started.notified().await;
+        client
+            .handle_discovered_query_endpoint(DiscoveredQueryEndpoint {
+                source_endpoint: client.source_endpoint.clone(),
+                worker_id: key.0,
+                dp_rank: key.1,
+                target: second_target,
+            })
+            .await;
+
+        wait_for(|| {
+            rank_state_matches(&client, key, |state| {
+                state.last_applied_id() == Some(1) && !state.recovery_inflight
+            })
+        })
+        .await;
+        first_release.notify_waiters();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        assert_eq!(transport.call_count(), 2);
+        kv_indexer.flush().await;
+        assert_eq!(
+            stored_block_hashes_for(&kv_indexer.dump_events().await.unwrap(), key.0, key.1),
+            vec![1]
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_and_readd_same_endpoint_id_fences_old_generation() {
+        let (client, transport, kv_indexer) = make_test_client("readd-generation").await;
+        let key = (100, 4);
+        let target = make_instance(
+            worker_kv_indexer_query_endpoint_for_worker(key.0, key.1),
+            11,
+        );
+
+        for event_id in [1, 2] {
+            transport.push_action(
+                key,
+                MockQueryAction {
+                    started: None,
+                    release: None,
+                    response: Ok(WorkerKvQueryResponse::TreeDump {
+                        events: vec![make_store_event(key.0, key.1, event_id)],
+                        last_event_id: event_id,
+                    }),
+                },
+            );
+        }
+
+        client
+            .handle_discovered_query_endpoint(DiscoveredQueryEndpoint {
+                source_endpoint: client.source_endpoint.clone(),
+                worker_id: key.0,
+                dp_rank: key.1,
+                target: target.clone(),
+            })
+            .await;
+        wait_for(|| {
+            rank_state_matches(&client, key, |state| {
+                state.last_applied_id() == Some(1) && !state.recovery_inflight
+            })
+        })
+        .await;
+        let old_incarnation = client
+            .active_query_incarnation(key.0, key.1)
+            .expect("first recovery source should be active");
+        client
+            .handle_removed_query_endpoint(key.0, key.1, target.endpoint_instance_id())
+            .await;
+        client
+            .handle_discovered_query_endpoint(DiscoveredQueryEndpoint {
+                source_endpoint: client.source_endpoint.clone(),
+                worker_id: key.0,
+                dp_rank: key.1,
+                target,
+            })
+            .await;
+        wait_for(|| {
+            rank_state_matches(&client, key, |state| {
+                state.last_applied_id() == Some(2) && !state.recovery_inflight
+            })
+        })
+        .await;
+
+        client
+            .clone()
+            .finish_recovery_task(
+                key,
+                0,
+                old_incarnation,
+                Ok(WorkerKvQueryResponse::TreeDump {
+                    events: vec![make_store_event(key.0, key.1, 99)],
+                    last_event_id: 99,
+                }),
+            )
+            .await;
+
+        kv_indexer.flush().await;
+        assert_eq!(
+            stored_block_hashes_for(&kv_indexer.dump_events().await.unwrap(), key.0, key.1),
+            vec![2]
+        );
     }
 
     #[tokio::test]
@@ -1161,6 +1672,7 @@ mod tests {
 
         client
             .handle_discovered_query_endpoint(DiscoveredQueryEndpoint {
+                source_endpoint: client.source_endpoint.clone(),
                 worker_id: key.0,
                 dp_rank: key.1,
                 target,
@@ -1199,6 +1711,7 @@ mod tests {
 
         client
             .handle_discovered_query_endpoint(DiscoveredQueryEndpoint {
+                source_endpoint: client.source_endpoint.clone(),
                 worker_id: key.0,
                 dp_rank: key.1,
                 target,

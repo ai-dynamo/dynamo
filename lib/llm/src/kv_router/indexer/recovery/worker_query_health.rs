@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use dynamo_kv_router::protocols::{DpRank, WorkerId};
 use dynamo_runtime::component::Component;
+use dynamo_runtime::protocols::EndpointId;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -162,6 +163,7 @@ fn expected_query_endpoints(
 
 pub(super) fn spawn_kv_event_source_health_monitor(
     component: Component,
+    source_endpoint: EndpointId,
     mut workers_with_configs: RuntimeConfigWatch,
     query_endpoints: Arc<WorkerQueryEndpointDirectory>,
     model: String,
@@ -171,6 +173,7 @@ pub(super) fn spawn_kv_event_source_health_monitor(
     let metrics = RouterWorkerStatusMetrics::from_component(&component);
     let target_namespace = component.namespace().name().to_string();
     let target_component = component.name().to_string();
+    let target_endpoint = source_endpoint.name;
 
     tokio::spawn(async move {
         let mut monitor = KvEventSourceHealthMonitor::default();
@@ -200,6 +203,7 @@ pub(super) fn spawn_kv_event_source_health_monitor(
                 worker_type,
                 &target_namespace,
                 &target_component,
+                &target_endpoint,
                 evaluation.mismatch_worker_count,
             );
 
@@ -211,6 +215,7 @@ pub(super) fn spawn_kv_event_source_health_monitor(
                     worker_type,
                     target_namespace,
                     target_component,
+                    target_endpoint,
                     "KV event routing degraded: expected worker-local KV indexer query endpoints were not discovered. Cache overlap will remain empty for the affected ranks and cache-aware routing will be ineffective. For Dynamo vLLM, verify that prefix caching is enabled (--no-enable-prefix-caching is not set) and that the worker has --kv-events-config '{{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:PORT\",\"enable_kv_cache_events\":true}}'; if both are configured, check router endpoint discovery health. To intentionally use approximate routing, set --no-router-kv-events. Continuing to serve.",
                 );
             }
@@ -222,6 +227,7 @@ pub(super) fn spawn_kv_event_source_health_monitor(
                     worker_type,
                     target_namespace,
                     target_component,
+                    target_endpoint,
                     "KV event source mismatch no longer active; endpoints are registered or the worker is no longer expected"
                 );
             }

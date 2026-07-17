@@ -15,7 +15,7 @@ use dynamo_kv_router::protocols::{ActiveLoad, ActiveSequenceEvent, WorkerWithDpR
 pub use dynamo_kv_router::sequence::{ActiveSequences, RequestId};
 
 use anyhow::Result;
-use dynamo_runtime::component::Component;
+use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::transports::event_plane::{EventPublisher, EventSubscriber};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -127,7 +127,7 @@ pub type ActiveSequencesMulti = ActiveSequencesMultiWorker<RuntimeSequencePublis
 /// Convenience async constructor that creates the NATS publishers/subscribers
 /// and returns an `Arc<ActiveSequencesMulti>` with replica sync already running.
 pub async fn create_multi_worker_sequences(
-    component: Component,
+    endpoint: Endpoint,
     block_size: usize,
     workers_with_configs: HashMap<u64, ModelRuntimeConfig>,
     replica_sync: bool,
@@ -135,11 +135,10 @@ pub async fn create_multi_worker_sequences(
     worker_type: &'static str,
     cancellation_token: CancellationToken,
 ) -> Result<Arc<ActiveSequencesMulti>> {
-    let event_publisher =
-        EventPublisher::for_component(&component, ACTIVE_SEQUENCES_SUBJECT).await?;
+    let event_publisher = EventPublisher::for_endpoint(&endpoint, ACTIVE_SEQUENCES_SUBJECT).await?;
     let metrics_publisher =
-        Arc::new(EventPublisher::for_namespace(component.namespace(), KV_METRICS_SUBJECT).await?);
-    let worker_status_metrics = RouterWorkerStatusMetrics::from_component(&component);
+        Arc::new(EventPublisher::for_endpoint(&endpoint, KV_METRICS_SUBJECT).await?);
+    let worker_status_metrics = RouterWorkerStatusMetrics::from_component(endpoint.component());
 
     let publisher = RuntimeSequencePublisher {
         event_publisher,
@@ -169,7 +168,7 @@ pub async fn create_multi_worker_sequences(
     let arc = Arc::new(multi_worker);
 
     if replica_sync {
-        let subscriber = EventSubscriber::for_component(&component, ACTIVE_SEQUENCES_SUBJECT)
+        let subscriber = EventSubscriber::for_endpoint(&endpoint, ACTIVE_SEQUENCES_SUBJECT)
             .await?
             .typed::<ActiveSequenceEvent>();
         let subscriber = RuntimeSequenceSubscriber { inner: subscriber };
@@ -184,7 +183,7 @@ pub async fn create_multi_worker_sequences(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_runtime::{DistributedRuntime, Runtime};
+    use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
     use tokio::time::Instant;
 
     fn tracking_hint(tokens: usize) -> Option<PrefillLoadHint> {
@@ -192,6 +191,85 @@ mod tests {
             initial_effective_prefill_tokens: tokens,
             expected_prefill_duration: None,
         })
+    }
+
+    #[tokio::test]
+    async fn active_sequence_replica_sync_isolated_by_endpoint() -> Result<()> {
+        let runtime = Runtime::from_current()?;
+        let distributed =
+            DistributedRuntime::new(runtime, DistributedConfig::process_local()).await?;
+        let namespace = distributed.namespace(format!(
+            "active-sequence-endpoint-isolation-{}",
+            uuid::Uuid::new_v4()
+        ))?;
+        let component = namespace.component("workers")?;
+        let endpoint_a = component.endpoint("generate-a");
+        let endpoint_b = component.endpoint("generate-b");
+        let workers = HashMap::from([(0, ModelRuntimeConfig::new())]);
+
+        let cancel = CancellationToken::new();
+        let sequences_a = create_multi_worker_sequences(
+            endpoint_a.clone(),
+            4,
+            workers.clone(),
+            true,
+            1,
+            crate::discovery::WORKER_TYPE_DECODE,
+            cancel.child_token(),
+        )
+        .await?;
+        let sequences_a_peer = create_multi_worker_sequences(
+            endpoint_a,
+            4,
+            workers.clone(),
+            true,
+            3,
+            crate::discovery::WORKER_TYPE_DECODE,
+            cancel.child_token(),
+        )
+        .await?;
+        let sequences_b = create_multi_worker_sequences(
+            endpoint_b,
+            4,
+            workers,
+            true,
+            2,
+            crate::discovery::WORKER_TYPE_DECODE,
+            cancel.child_token(),
+        )
+        .await?;
+
+        let worker = WorkerWithDpRank::new(0, 0);
+        tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+            for request_index in 0..100 {
+                if sequences_a_peer.active_blocks()[&worker] > 0 {
+                    break;
+                }
+
+                sequences_a.add_request(
+                    SequenceRequest {
+                        request_id: format!("endpoint-a-request-{request_index}"),
+                        token_sequence: Some(vec![1, 2, 3, 4]),
+                        track_prefill_tokens: true,
+                        expected_output_tokens: None,
+                        prefill_load_hint: tracking_hint(4),
+                        worker,
+                        lora_name: None,
+                    },
+                    Instant::now(),
+                )?;
+                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            }
+
+            anyhow::ensure!(sequences_a_peer.active_blocks()[&worker] > 0);
+            Ok::<_, anyhow::Error>(())
+        })
+        .await??;
+        assert!(sequences_a.active_blocks()[&worker] > 0);
+        assert!(sequences_a_peer.active_blocks()[&worker] > 0);
+        assert_eq!(sequences_b.active_blocks()[&worker], 0);
+        cancel.cancel();
+        Ok(())
     }
 
     #[tokio::test]
@@ -205,7 +283,7 @@ mod tests {
         let distributed = DistributedRuntime::from_settings(runtime.clone()).await?;
 
         let namespace = distributed.namespace("test_cross_instance_sync")?;
-        let component = namespace.component("sequences")?;
+        let endpoint = namespace.component("sequences")?.endpoint("generate");
 
         let mut workers_with_configs = HashMap::new();
 
@@ -217,7 +295,7 @@ mod tests {
         workers_with_configs.insert(1, config_worker_1);
 
         let seq_manager_1 = create_multi_worker_sequences(
-            component.clone(),
+            endpoint.clone(),
             block_size,
             workers_with_configs.clone(),
             true,
@@ -227,7 +305,7 @@ mod tests {
         )
         .await?;
         let seq_manager_2 = create_multi_worker_sequences(
-            component,
+            endpoint,
             block_size,
             workers_with_configs,
             true,
@@ -356,7 +434,7 @@ mod tests {
         let distributed = DistributedRuntime::from_settings(runtime.clone()).await?;
 
         let namespace = distributed.namespace("test_no_token_seq_sync")?;
-        let component = namespace.component("sequences")?;
+        let endpoint = namespace.component("sequences")?.endpoint("generate");
 
         let mut workers_with_configs = HashMap::new();
         workers_with_configs.insert(
@@ -373,7 +451,7 @@ mod tests {
         );
 
         let seq_manager_1 = create_multi_worker_sequences(
-            component.clone(),
+            endpoint.clone(),
             block_size,
             workers_with_configs.clone(),
             true,
@@ -383,7 +461,7 @@ mod tests {
         )
         .await?;
         let seq_manager_2 = create_multi_worker_sequences(
-            component,
+            endpoint,
             block_size,
             workers_with_configs,
             true,

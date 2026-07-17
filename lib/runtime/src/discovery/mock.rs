@@ -108,15 +108,13 @@ fn matches_query(instance: &DiscoveryInstance, query: &DiscoveryQuery) -> bool {
         // EventChannel matching - unified query
         (
             DiscoveryInstance::EventChannel {
-                namespace: inst_ns,
-                component: inst_comp,
+                scope: inst_scope,
                 topic: inst_topic,
                 ..
             },
             DiscoveryQuery::EventChannels(query),
         ) => {
-            query.namespace.as_ref().is_none_or(|ns| ns == inst_ns)
-                && query.component.as_ref().is_none_or(|c| c == inst_comp)
+            query.scope.as_ref().is_none_or(|scope| scope == inst_scope)
                 && query.topic.as_ref().is_none_or(|t| t == inst_topic)
         }
 
@@ -293,6 +291,7 @@ mod tests {
             endpoint: "test-ep".to_string(),
             transport: crate::component::TransportType::Nats("test-subject".to_string()),
             device_type: None,
+            source_endpoint: None,
         };
 
         let query = DiscoveryQuery::Endpoint {
@@ -340,6 +339,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn source_attribution_distinguishes_mock_instances_and_removals() {
+        let client = MockDiscovery::new(Some(42), SharedMockRegistry::new());
+        let query = DiscoveryQuery::Endpoint {
+            namespace: "relay".to_string(),
+            component: "backend".to_string(),
+            endpoint: "worker_kv_indexer_query_dp0".to_string(),
+        };
+        let source_a = crate::protocols::EndpointId {
+            namespace: "workers".to_string(),
+            component: "backend".to_string(),
+            name: "generate-a".to_string(),
+        };
+        let source_b = crate::protocols::EndpointId {
+            name: "generate-b".to_string(),
+            ..source_a.clone()
+        };
+        let spec = |source_endpoint| DiscoverySpec::Endpoint {
+            namespace: "relay".to_string(),
+            component: "backend".to_string(),
+            endpoint: "worker_kv_indexer_query_dp0".to_string(),
+            transport: crate::component::TransportType::Nats("query-subject".to_string()),
+            device_type: None,
+            source_endpoint: Some(source_endpoint),
+        };
+
+        let registered_a = client.register(spec(source_a.clone())).await.unwrap();
+        let registered_b = client.register(spec(source_b.clone())).await.unwrap();
+        assert_eq!(client.list(query.clone()).await.unwrap().len(), 2);
+
+        let mut stream = client.list_and_watch(query.clone(), None).await.unwrap();
+        for _ in 0..2 {
+            assert!(matches!(
+                stream.next().await.unwrap().unwrap(),
+                DiscoveryEvent::Added(DiscoveryInstance::Endpoint(_))
+            ));
+        }
+
+        client.unregister(registered_a).await.unwrap();
+        let removed = tokio::time::timeout(tokio::time::Duration::from_secs(1), async {
+            loop {
+                if let DiscoveryEvent::Removed(id) = stream.next().await.unwrap().unwrap() {
+                    break id;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            removed
+                .extract_endpoint_id()
+                .unwrap()
+                .source_endpoint
+                .as_ref(),
+            Some(&source_a)
+        );
+        assert_eq!(client.list(query).await.unwrap(), vec![registered_b]);
+    }
+
+    #[tokio::test]
     async fn register_allows_same_model_name_on_same_endpoint() {
         let registry = SharedMockRegistry::new();
         let discovery1 = MockDiscovery::new(Some(1), registry.clone());
@@ -348,6 +406,36 @@ mod tests {
 
         discovery1.register(spec.clone()).await.unwrap();
         discovery2.register(spec).await.unwrap();
+
+        let instances = discovery1
+            .list(DiscoveryQuery::EndpointModels {
+                namespace: "ns".to_string(),
+                component: "comp".to_string(),
+                endpoint: "generate".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(instances.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn register_allows_served_aliases_of_same_base_lineage_on_same_endpoint() {
+        let registry = SharedMockRegistry::new();
+        let discovery1 = MockDiscovery::new(Some(1), registry.clone());
+        let discovery2 = MockDiscovery::new(Some(2), registry);
+        let spec = |display_name: &str| DiscoverySpec::Model {
+            namespace: "ns".to_string(),
+            component: "comp".to_string(),
+            endpoint: "generate".to_string(),
+            card_json: serde_json::json!({
+                "display_name": display_name,
+                "source_path": "org/base-model",
+            }),
+            model_suffix: None,
+        };
+
+        discovery1.register(spec("public-name-a")).await.unwrap();
+        discovery2.register(spec("public-name-b")).await.unwrap();
 
         let instances = discovery1
             .list(DiscoveryQuery::EndpointModels {

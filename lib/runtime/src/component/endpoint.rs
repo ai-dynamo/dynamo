@@ -72,6 +72,10 @@ pub struct EndpointConfig {
     #[educe(Debug(ignore))]
     #[builder(default, setter(into, strip_option))]
     health_check_payload: Option<serde_json::Value>,
+
+    /// Serving endpoint whose worker-local state this endpoint exposes.
+    #[builder(default, setter(into, strip_option))]
+    source_endpoint: Option<EndpointId>,
 }
 
 impl EndpointConfigBuilder {
@@ -96,8 +100,14 @@ impl EndpointConfigBuilder {
     }
 
     pub async fn start(self) -> Result<()> {
-        let (endpoint, handler, metrics_labels, graceful_shutdown, health_check_payload) =
-            self.build_internal()?.dissolve();
+        let (
+            endpoint,
+            handler,
+            metrics_labels,
+            graceful_shutdown,
+            health_check_payload,
+            source_endpoint,
+        ) = self.build_internal()?.dissolve();
         let connection_id = endpoint.drt().connection_id();
         let endpoint_id = endpoint.id();
 
@@ -169,6 +179,7 @@ impl EndpointConfigBuilder {
                 instance_id: connection_id,
                 transport,
                 device_type: endpoint_device_type(),
+                source_endpoint: source_endpoint.clone(),
             };
             tracing::debug!(endpoint_name = %endpoint.name, "Registering endpoint health check target");
             let guard = system_health.lock();
@@ -248,6 +259,7 @@ impl EndpointConfigBuilder {
             endpoint: endpoint_id.name.clone(),
             transport,
             device_type: endpoint_device_type(),
+            source_endpoint,
         };
 
         if let Err(e) = discovery.register(discovery_spec).await {
@@ -363,6 +375,7 @@ impl Endpoint {
             instance_id,
             transport,
             device_type: endpoint_device_type(),
+            source_endpoint: None,
         });
 
         let discovery = drt.discovery();
@@ -405,6 +418,7 @@ impl Endpoint {
             endpoint: endpoint_id.name,
             transport,
             device_type: endpoint_device_type(),
+            source_endpoint: None,
         };
 
         let discovery = drt.discovery();

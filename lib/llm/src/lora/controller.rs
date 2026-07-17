@@ -20,14 +20,15 @@ use crate::lora::routing::mcf_allocator::{
 use crate::lora::routing::table::{LoraReplicaConfig, LoraRoutingTable};
 use crate::lora::routing::{AllocationAlgorithmType, LoraAllocator, create_lora_allocator};
 use crate::lora::state_tracker::LoraStateTracker;
+use dynamo_runtime::protocols::EndpointId;
 
 #[derive(Debug, Clone)]
 struct HysteresisState {
     last_scale_down_tick: u64,
 }
 
-/// Process-global guard ensuring at most one LoRA controller owns the (unlabeled, process-global)
-/// Prometheus LoRA gauges at a time. See [`LoraController::start`].
+/// Process-global guard for the legacy unscoped controller entrypoint. Endpoint-scoped
+/// controllers publish into independent Prometheus label sets and do not use this guard.
 static CONTROLLER_RUNNING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
@@ -58,6 +59,8 @@ pub struct LoraController {
     routing_table: LoraRoutingTable,
     state_tracker: LoraStateTracker,
     load_estimator: Arc<LoadEstimator>,
+    metrics_endpoint: String,
+    published_metric_loras: HashSet<String>,
     hysteresis: HashMap<String, HysteresisState>,
     tick: u64,
     // MCF-specific state
@@ -95,6 +98,8 @@ impl LoraController {
             routing_table,
             state_tracker,
             load_estimator,
+            metrics_endpoint: "unscoped".to_string(),
+            published_metric_loras: HashSet::new(),
             hysteresis: HashMap::new(),
             tick: 0,
             mcf_solver,
@@ -107,15 +112,45 @@ impl LoraController {
 
     /// Start the controller background loop.
     ///
-    /// IMPORTANT — single controller per process: the LoRA Prometheus gauges
-    /// (`http::service::metrics::LORA_*`) are process-global, unlabeled singletons.
-    /// [`Self::update_prometheus_metrics`] resets and republishes them from THIS controller's
-    /// snapshot every tick, and [`Self::clear_lora_routing_and_metrics`] resets them on a full
-    /// drain. Two controllers in one process would therefore clobber each other's gauges (each
-    /// tick erasing the other's series). There is exactly one model manager — and thus one LoRA
-    /// controller — per frontend process today; this method enforces that invariant by logging a
-    /// loud error if a second controller is started, since the metrics would otherwise be wrong.
+    /// This legacy entrypoint retains the single unscoped-controller guard. New serving paths use
+    /// [`Self::start_for_endpoint`] so controller state and metrics remain endpoint-qualified.
     pub fn start(
+        config: LoraAllocationConfig,
+        routing_table: LoraRoutingTable,
+        state_tracker: LoraStateTracker,
+        load_estimator: Arc<LoadEstimator>,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
+        Self::start_inner(
+            None,
+            config,
+            routing_table,
+            state_tracker,
+            load_estimator,
+            cancel_token,
+        )
+    }
+
+    pub fn start_for_endpoint(
+        endpoint_id: EndpointId,
+        config: LoraAllocationConfig,
+        routing_table: LoraRoutingTable,
+        state_tracker: LoraStateTracker,
+        load_estimator: Arc<LoadEstimator>,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
+        Self::start_inner(
+            Some(endpoint_id),
+            config,
+            routing_table,
+            state_tracker,
+            load_estimator,
+            cancel_token,
+        )
+    }
+
+    fn start_inner(
+        endpoint_id: Option<EndpointId>,
         config: LoraAllocationConfig,
         routing_table: LoraRoutingTable,
         state_tracker: LoraStateTracker,
@@ -127,8 +162,10 @@ impl LoraController {
         // controller may own them. `acquired` is true iff we won the swap; only the winner carries
         // a `ControllerRunningGuard` into the task, whose Drop releases the flag on ANY exit
         // (cancel/panic/abort) so a clean restart is never wedged.
-        let acquired = !CONTROLLER_RUNNING.swap(true, Ordering::SeqCst);
-        if !acquired {
+        let acquired = endpoint_id
+            .is_none()
+            .then(|| !CONTROLLER_RUNNING.swap(true, Ordering::SeqCst));
+        if acquired == Some(false) {
             tracing::error!(
                 "A LoRA allocation controller is already running in this process. Starting a \
                  second one is unsupported: they share process-global, unlabeled Prometheus LoRA \
@@ -136,16 +173,21 @@ impl LoraController {
                  one LoRA controller per process."
             );
         }
-        let release_guard = acquired.then_some(ControllerRunningGuard);
+        let release_guard =
+            acquired.and_then(|acquired| acquired.then_some(ControllerRunningGuard));
 
         let timestep = Duration::from_secs(config.timestep_secs);
         let mut controller = Self::new(config, routing_table, state_tracker, load_estimator);
+        if let Some(endpoint_id) = &endpoint_id {
+            controller.metrics_endpoint = endpoint_id.to_string();
+        }
 
         tokio::spawn(async move {
             // Released on ANY exit of this task (clean cancel, escaped panic, or abort).
             let _release_guard = release_guard;
             let mut interval = tokio::time::interval(timestep);
             tracing::info!(
+                endpoint = endpoint_id.as_ref().map(ToString::to_string),
                 timestep_secs = controller.config.timestep_secs,
                 algorithm = controller.allocator.name(),
                 "LoRA allocation controller started"
@@ -154,7 +196,10 @@ impl LoraController {
             loop {
                 tokio::select! {
                     _ = cancel_token.cancelled() => {
-                        tracing::debug!("LoRA allocation controller shutting down");
+                        tracing::debug!(
+                            endpoint = endpoint_id.as_ref().map(ToString::to_string),
+                            "LoRA allocation controller shutting down"
+                        );
                         // `_release_guard` Drop clears CONTROLLER_RUNNING as this task unwinds.
                         break;
                     }
@@ -243,9 +288,7 @@ impl LoraController {
             let loads = self.load_estimator.get_current_load();
             let raw_arrival_counts = self.load_estimator.get_raw_arrival_counts();
             self.update_prometheus_metrics(&table_snapshot, &loads, &raw_arrival_counts);
-            crate::http::service::metrics::LORA_CHURN_LOADS_GAUGE.set(0);
-            crate::http::service::metrics::LORA_CHURN_UNLOADS_GAUGE.set(0);
-            crate::http::service::metrics::LORA_OVERFLOW_COUNT_GAUGE.set(0);
+            self.update_churn_metrics(0, 0, 0);
             tracing::debug!(
                 "No LoRA slots available; preserved only warm live routes (fail-closed), \
                  skipping recompute"
@@ -603,9 +646,7 @@ impl LoraController {
 
         // R3-7: reset churn/overflow gauges at tick start so a failed MCF solve does not leave
         // stale values from a prior successful tick; the success branch sets the actual diff.
-        crate::http::service::metrics::LORA_CHURN_LOADS_GAUGE.set(0);
-        crate::http::service::metrics::LORA_CHURN_UNLOADS_GAUGE.set(0);
-        crate::http::service::metrics::LORA_OVERFLOW_COUNT_GAUGE.set(0);
+        self.update_churn_metrics(0, 0, 0);
 
         // Build worker inputs
         let worker_inputs: Vec<WorkerInput> = workers
@@ -705,10 +746,11 @@ impl LoraController {
                 }
 
                 // N7: export churn + overflow gauges (registered but previously never set).
-                crate::http::service::metrics::LORA_CHURN_LOADS_GAUGE.set(total_loads as i64);
-                crate::http::service::metrics::LORA_CHURN_UNLOADS_GAUGE.set(total_unloads as i64);
-                crate::http::service::metrics::LORA_OVERFLOW_COUNT_GAUGE
-                    .set(result.overflow_count as i64);
+                self.update_churn_metrics(
+                    total_loads as i64,
+                    total_unloads as i64,
+                    result.overflow_count as i64,
+                );
 
                 // Update routing table from MCF result
                 let active_set: HashSet<&str> =
@@ -973,15 +1015,9 @@ impl LoraController {
         changed
     }
 
-    /// Republish this controller's LoRA gauges.
-    ///
-    /// The gauge vectors are process-global, unlabeled singletons: this resets each vector and
-    /// repopulates it solely from this controller's snapshot, so it is correct ONLY under the
-    /// single-controller-per-process invariant enforced in [`Self::start`]. If that invariant is
-    /// ever relaxed (multiple controllers per process), these gauges must gain a
-    /// model/component/endpoint label and reset only this controller's label values.
+    /// Republish this controller's endpoint-qualified LoRA gauges.
     fn update_prometheus_metrics(
-        &self,
+        &mut self,
         table_snapshot: &[(String, LoraReplicaConfig)],
         loads: &HashMap<String, usize>,
         raw_arrival_counts: &HashMap<String, u64>,
@@ -991,35 +1027,62 @@ impl LoraController {
             LORA_RAW_ARRIVAL_COUNT_GAUGE, LORA_REPLICA_FACTOR_GAUGE,
         };
 
-        LORA_REPLICA_FACTOR_GAUGE.reset();
-        LORA_IS_ACTIVE_GAUGE.reset();
-        LORA_RAW_ARRIVAL_COUNT_GAUGE.reset();
-        LORA_ESTIMATED_LOAD_GAUGE.reset();
-        LORA_ACTIVE_REQUESTS_GAUGE.reset();
+        let inflight = self.load_estimator.get_inflight_counts();
+        let current_loras = table_snapshot
+            .iter()
+            .map(|(name, _)| name.clone())
+            .chain(inflight.keys().cloned())
+            .collect::<HashSet<_>>();
+        for stale_lora in self.published_metric_loras.difference(&current_loras) {
+            let labels = [self.metrics_endpoint.as_str(), stale_lora.as_str()];
+            let _ = LORA_REPLICA_FACTOR_GAUGE.remove_label_values(&labels);
+            let _ = LORA_IS_ACTIVE_GAUGE.remove_label_values(&labels);
+            let _ = LORA_RAW_ARRIVAL_COUNT_GAUGE.remove_label_values(&labels);
+            let _ = LORA_ESTIMATED_LOAD_GAUGE.remove_label_values(&labels);
+            let _ = LORA_ACTIVE_REQUESTS_GAUGE.remove_label_values(&labels);
+        }
 
         for (lora_name, config) in table_snapshot {
+            let labels = [self.metrics_endpoint.as_str(), lora_name.as_str()];
             LORA_REPLICA_FACTOR_GAUGE
-                .with_label_values(&[lora_name])
+                .with_label_values(&labels)
                 .set(config.replica_factor as i64);
             LORA_IS_ACTIVE_GAUGE
-                .with_label_values(&[lora_name])
+                .with_label_values(&labels)
                 .set(if config.is_active { 1 } else { 0 });
             let raw_count = raw_arrival_counts.get(lora_name).copied().unwrap_or(0);
             LORA_RAW_ARRIVAL_COUNT_GAUGE
-                .with_label_values(&[lora_name])
+                .with_label_values(&labels)
                 .set(raw_count as i64);
             let load = loads.get(lora_name).copied().unwrap_or(0);
             LORA_ESTIMATED_LOAD_GAUGE
-                .with_label_values(&[lora_name])
+                .with_label_values(&labels)
                 .set(load as i64);
         }
 
-        let inflight = self.load_estimator.get_inflight_counts();
         for (lora_name, count) in &inflight {
             LORA_ACTIVE_REQUESTS_GAUGE
-                .with_label_values(&[lora_name.as_str()])
+                .with_label_values(&[self.metrics_endpoint.as_str(), lora_name.as_str()])
                 .set(*count as i64);
         }
+        self.published_metric_loras = current_loras;
+    }
+
+    fn update_churn_metrics(&self, loads: i64, unloads: i64, overflow: i64) {
+        use crate::http::service::metrics::{
+            LORA_CHURN_LOADS_GAUGE, LORA_CHURN_UNLOADS_GAUGE, LORA_OVERFLOW_COUNT_GAUGE,
+        };
+
+        let endpoint = [self.metrics_endpoint.as_str()];
+        LORA_CHURN_LOADS_GAUGE
+            .with_label_values(&endpoint)
+            .set(loads);
+        LORA_CHURN_UNLOADS_GAUGE
+            .with_label_values(&endpoint)
+            .set(unloads);
+        LORA_OVERFLOW_COUNT_GAUGE
+            .with_label_values(&endpoint)
+            .set(overflow);
     }
 
     /// Clear all LoRA routing state and reset every LoRA gauge.
@@ -1031,12 +1094,6 @@ impl LoraController {
     /// path (workers live, no slots) instead prunes/rebinds routes against the live worker set,
     /// since those entries can still name live workers.
     fn clear_lora_routing_and_metrics(&mut self) {
-        use crate::http::service::metrics::{
-            LORA_ACTIVE_REQUESTS_GAUGE, LORA_CHURN_LOADS_GAUGE, LORA_CHURN_UNLOADS_GAUGE,
-            LORA_ESTIMATED_LOAD_GAUGE, LORA_IS_ACTIVE_GAUGE, LORA_OVERFLOW_COUNT_GAUGE,
-            LORA_RAW_ARRIVAL_COUNT_GAUGE, LORA_REPLICA_FACTOR_GAUGE,
-        };
-
         for (name, _) in self.routing_table.snapshot_configs() {
             self.routing_table.remove_lora(&name);
         }
@@ -1048,23 +1105,10 @@ impl LoraController {
         self.prev_worker_capacities.clear();
         self.prev_replica_counts.clear();
 
-        LORA_REPLICA_FACTOR_GAUGE.reset();
-        LORA_IS_ACTIVE_GAUGE.reset();
-        LORA_RAW_ARRIVAL_COUNT_GAUGE.reset();
-        LORA_ESTIMATED_LOAD_GAUGE.reset();
-        LORA_CHURN_LOADS_GAUGE.set(0);
-        LORA_CHURN_UNLOADS_GAUGE.set(0);
-        LORA_OVERFLOW_COUNT_GAUGE.set(0);
-
-        // In-flight requests can still be draining even with no workers; keep reporting them
-        // (reset then repopulate from the estimator, matching the normal metrics path) rather than
-        // forcing the gauge to zero.
-        LORA_ACTIVE_REQUESTS_GAUGE.reset();
-        for (lora_name, count) in &self.load_estimator.get_inflight_counts() {
-            LORA_ACTIVE_REQUESTS_GAUGE
-                .with_label_values(&[lora_name.as_str()])
-                .set(*count as i64);
-        }
+        // In-flight requests can still be draining even with no workers; the normal publisher
+        // keeps those series while removing stale allocation series for only this endpoint.
+        self.update_prometheus_metrics(&[], &HashMap::new(), &HashMap::new());
+        self.update_churn_metrics(0, 0, 0);
     }
 
     /// Compute proportional replica counts for active LoRAs.

@@ -7,7 +7,7 @@
 //!   (used by the vLLM adapter — ZMQ bridge from EngineCore child process).
 //! - `FpmDirectPublisher`: thin wrapper around `dynamo_llm::fpm_publisher::FpmDirectPublisher`
 //!   (used by the TRT-LLM adapter — direct event-plane publish, no ZMQ hop).
-//! - `FpmEventSubscriber`: wraps `EventSubscriber::for_component` for the consumer side.
+//! - `FpmEventSubscriber`: wraps `EventSubscriber::for_endpoint` for the consumer side.
 //!   Supports two mutually exclusive modes:
 //!   - **recv mode**: call `recv()` to pull one message at a time (existing behaviour).
 //!   - **tracking mode**: call `start_tracking()` once, then `get_recent_stats()` to
@@ -26,8 +26,10 @@ use tokio_util::sync::CancellationToken;
 use super::*;
 use crate::Endpoint;
 use crate::to_pyerr;
-use dynamo_runtime::component::Component;
-use dynamo_runtime::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryQuery};
+use dynamo_runtime::component::Endpoint as RuntimeEndpoint;
+use dynamo_runtime::discovery::{
+    DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery, ModelCardInstanceId,
+};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventSubscriber;
 
@@ -56,9 +58,8 @@ impl FpmEventRelay {
     #[new]
     #[pyo3(signature = (endpoint, zmq_endpoint))]
     fn new(endpoint: Endpoint, zmq_endpoint: String) -> PyResult<Self> {
-        let component = endpoint.inner.component().clone();
-        let inner =
-            llm_rs::fpm_publisher::FpmEventRelay::new(component, zmq_endpoint).map_err(to_pyerr)?;
+        let inner = llm_rs::fpm_publisher::FpmEventRelay::new(endpoint.inner.clone(), zmq_endpoint)
+            .map_err(to_pyerr)?;
         Ok(Self { inner })
     }
 
@@ -100,11 +101,11 @@ impl FpmDirectPublisher {
     #[new]
     #[pyo3(signature = (endpoint, worker_id, dp_size=1))]
     fn new(endpoint: Endpoint, worker_id: String, dp_size: u32) -> PyResult<Self> {
-        let component = endpoint.inner.component().clone();
-        let rt = component.drt().runtime().secondary();
+        let rt = endpoint.inner.component().drt().runtime().secondary();
         let (inner, publishers) = rt
             .block_on(async {
-                llm_rs::fpm_publisher::FpmDirectPublisher::new(component, worker_id, dp_size).await
+                llm_rs::fpm_publisher::FpmDirectPublisher::new(endpoint.inner, worker_id, dp_size)
+                    .await
             })
             .map_err(to_pyerr)?;
         Ok(Self { inner, publishers })
@@ -417,7 +418,7 @@ fn read_u32(cursor: &mut std::io::Cursor<&[u8]>) -> Option<u32> {
 /// pruned from `latest_stats` on `Removed` events.
 #[pyclass]
 pub(crate) struct FpmEventSubscriber {
-    component: Component,
+    endpoint: RuntimeEndpoint,
     cancel: CancellationToken,
 
     // recv mode state (lazily initialised on first recv() call)
@@ -431,11 +432,11 @@ pub(crate) struct FpmEventSubscriber {
     // (insert on Added, remove on Removed).  Used by get_recent_stats()
     // to filter out ghost entries without contending with Task 1's writes.
     known_workers: Arc<DashSet<String>>,
-    // Serialized ModelDeploymentCard per worker_id, captured on discovery
-    // Added events.  Exposed via get_model_cards() so connectors can
-    // construct WorkerInfo from the same MDC stream the liveness watch
-    // uses, without the subscriber having to interpret card fields itself.
-    worker_model_cards: Arc<DashMap<String, String>>,
+    // Serialized ModelDeploymentCards keyed by their complete discovery
+    // identity. A worker can own a base card and multiple LoRA cards;
+    // retaining the suffix prevents removal of one card from making the
+    // whole worker disappear.
+    worker_model_cards: Arc<DashMap<ModelCardInstanceId, String>>,
 }
 
 #[pymethods]
@@ -449,9 +450,8 @@ impl FpmEventSubscriber {
     #[new]
     #[pyo3(signature = (endpoint,))]
     fn new(endpoint: Endpoint) -> PyResult<Self> {
-        let component = endpoint.inner.component().clone();
         Ok(Self {
-            component,
+            endpoint: endpoint.inner,
             cancel: CancellationToken::new(),
             recv_started: Arc::new(AtomicBool::new(false)),
             rx: Arc::new(std::sync::Mutex::new(None)),
@@ -477,7 +477,7 @@ impl FpmEventSubscriber {
 
         // Lazily start the recv-mode subscriber task on the first call.
         if !self.recv_started.swap(true, Ordering::SeqCst) {
-            let component = self.component.clone();
+            let endpoint = self.endpoint.clone();
             let cancel = self.cancel.clone();
             let (tx, rx_new) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
 
@@ -486,16 +486,16 @@ impl FpmEventSubscriber {
                 *guard = Some(rx_new);
             }
 
-            let rt = component.drt().runtime().secondary();
+            let rt = endpoint.component().drt().runtime().secondary();
             rt.spawn(async move {
-                let mut subscriber =
-                    match EventSubscriber::for_component(&component, FPM_TOPIC).await {
-                        Ok(s) => s,
-                        Err(e) => {
-                            tracing::error!("FPM subscriber (recv): failed to create: {e}");
-                            return;
-                        }
-                    };
+                let mut subscriber = match EventSubscriber::for_endpoint(&endpoint, FPM_TOPIC).await
+                {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::error!("FPM subscriber (recv): failed to create: {e}");
+                        return;
+                    }
+                };
 
                 tracing::info!("FPM subscriber (recv): listening for forward-pass-metrics events");
 
@@ -551,8 +551,8 @@ impl FpmEventSubscriber {
     ///    raw bytes in `latest_stats`.  Uses per-shard locking via `DashMap`
     ///    so contention with concurrent readers is minimal.
     ///
-    /// 2. **MDC discovery watch** (Task 2): monitors `ComponentModels` for the
-    ///    target component.  Maintains `known_workers` (the set of currently
+    /// 2. **MDC discovery watch** (Task 2): monitors `EndpointModels` for the
+    ///    target endpoint.  Maintains `known_workers` (the set of currently
     ///    alive worker IDs) and eagerly removes dead-worker entries from
     ///    `latest_stats` on `Removed` events.
     ///
@@ -567,8 +567,8 @@ impl FpmEventSubscriber {
             return Err(PyRuntimeError::new_err("Tracking already started"));
         }
 
-        let component = self.component.clone();
-        let rt = component.drt().runtime().secondary();
+        let endpoint = self.endpoint.clone();
+        let rt = endpoint.component().drt().runtime().secondary();
         let cancel = self.cancel.clone();
         let stats = self.latest_stats.clone();
         let known = self.known_workers.clone();
@@ -583,11 +583,11 @@ impl FpmEventSubscriber {
         // wait for the insert to complete.
         rt.spawn({
             let cancel = cancel.clone();
-            let component = component.clone();
+            let endpoint = endpoint.clone();
             let stats = stats.clone();
             async move {
                 let mut subscriber =
-                    match EventSubscriber::for_component(&component, FPM_TOPIC).await {
+                    match EventSubscriber::for_endpoint(&endpoint, FPM_TOPIC).await {
                         Ok(s) => s,
                         Err(e) => {
                             tracing::error!("FPM tracker: failed to create subscriber: {e}");
@@ -641,15 +641,17 @@ impl FpmEventSubscriber {
         let cards = self.worker_model_cards.clone();
         rt.spawn({
             let cancel = cancel.clone();
-            let component = component.clone();
+            let endpoint = endpoint.clone();
             let stats = stats.clone();
             let known = known.clone();
             let cards = cards.clone();
             async move {
-                let discovery = component.drt().discovery();
-                let query = DiscoveryQuery::ComponentModels {
-                    namespace: component.namespace().name(),
-                    component: component.name().to_string(),
+                let discovery = endpoint.component().drt().discovery();
+                let endpoint_id = endpoint.id();
+                let query = DiscoveryQuery::EndpointModels {
+                    namespace: endpoint_id.namespace,
+                    component: endpoint_id.component,
+                    endpoint: endpoint_id.name,
                 };
 
                 let stream = match discovery.list_and_watch(query, Some(cancel.clone())).await {
@@ -680,7 +682,10 @@ impl FpmEventSubscriber {
                                     if let DiscoveryInstance::Model { ref card_json, .. } = instance {
                                         match serde_json::to_string(card_json) {
                                             Ok(s) => {
-                                                cards.insert(wid.clone(), s);
+                                                let DiscoveryInstanceId::Model(card_id) = instance.id() else {
+                                                    unreachable!("model instance must have a model identity");
+                                                };
+                                                cards.insert(card_id, s);
                                             }
                                             Err(e) => {
                                                 tracing::warn!(
@@ -693,9 +698,24 @@ impl FpmEventSubscriber {
                                     tracing::debug!("FPM tracker: worker {wid} added to known set");
                                 }
                                 Some(Ok(DiscoveryEvent::Removed(id))) => {
-                                    let removed_id = id.instance_id().to_string();
+                                    let DiscoveryInstanceId::Model(card_id) = id else {
+                                        tracing::warn!(
+                                            "FPM tracker: endpoint model watch returned non-model removal"
+                                        );
+                                        continue;
+                                    };
+                                    let removed_id = card_id.instance_id.to_string();
+                                    cards.remove(&card_id);
+
+                                    if has_model_card_for_worker(&cards, card_id.instance_id) {
+                                        tracing::debug!(
+                                            "FPM tracker: model card removed for worker {removed_id}; \
+                                             other cards remain"
+                                        );
+                                        continue;
+                                    }
+
                                     known.remove(&removed_id);
-                                    cards.remove(&removed_id);
 
                                     // Eagerly prune latest_stats for the common case
                                     // (worker removed cleanly before any late FPMs arrive).
@@ -769,11 +789,22 @@ impl FpmEventSubscriber {
             ));
         }
 
-        let snapshot = self
-            .worker_model_cards
-            .iter()
-            .filter(|entry| self.known_workers.contains(entry.key()))
-            .map(|entry| (entry.key().clone(), entry.value().clone()))
+        let mut selected: HashMap<String, (bool, String)> = HashMap::new();
+        for entry in self.worker_model_cards.iter() {
+            let worker_id = entry.key().instance_id.to_string();
+            if !self.known_workers.contains(&worker_id) {
+                continue;
+            }
+            select_worker_model_card(
+                &mut selected,
+                worker_id,
+                entry.key().model_suffix.is_none(),
+                entry.value().clone(),
+            );
+        }
+        let snapshot = selected
+            .into_iter()
+            .map(|(worker_id, (_, card))| (worker_id, card))
             .collect();
 
         Ok(snapshot)
@@ -785,8 +816,73 @@ impl FpmEventSubscriber {
     }
 }
 
+fn select_worker_model_card(
+    selected: &mut HashMap<String, (bool, String)>,
+    worker_id: String,
+    is_base: bool,
+    card: String,
+) {
+    match selected.entry(worker_id) {
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert((is_base, card));
+        }
+        std::collections::hash_map::Entry::Occupied(mut entry) if is_base && !entry.get().0 => {
+            entry.insert((true, card));
+        }
+        std::collections::hash_map::Entry::Occupied(_) => {}
+    }
+}
+
+fn has_model_card_for_worker(
+    cards: &DashMap<ModelCardInstanceId, String>,
+    instance_id: u64,
+) -> bool {
+    cards
+        .iter()
+        .any(|entry| entry.key().instance_id == instance_id)
+}
+
 impl Drop for FpmEventSubscriber {
     fn drop(&mut self) {
         self.cancel.cancel();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn card_id(instance_id: u64, model_suffix: Option<&str>) -> ModelCardInstanceId {
+        ModelCardInstanceId {
+            namespace: "ns".to_string(),
+            component: "worker".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id,
+            model_suffix: model_suffix.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn base_model_card_wins_over_lora_cards() {
+        let mut selected = HashMap::new();
+        select_worker_model_card(&mut selected, "42".to_string(), false, "lora".to_string());
+        select_worker_model_card(&mut selected, "42".to_string(), true, "base".to_string());
+        select_worker_model_card(&mut selected, "42".to_string(), false, "lora-2".to_string());
+
+        assert_eq!(selected.get("42"), Some(&(true, "base".to_string())));
+    }
+
+    #[test]
+    fn removing_one_model_card_keeps_worker_live_while_another_remains() {
+        let cards = DashMap::new();
+        let base = card_id(42, None);
+        let lora = card_id(42, Some("adapter"));
+        cards.insert(base.clone(), "base".to_string());
+        cards.insert(lora, "lora".to_string());
+
+        cards.remove(&base);
+
+        assert!(has_model_card_for_worker(&cards, 42));
+        assert!(!has_model_card_for_worker(&cards, 7));
     }
 }

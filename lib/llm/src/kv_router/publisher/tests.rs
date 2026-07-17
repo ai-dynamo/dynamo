@@ -1729,10 +1729,13 @@ mod test_integration_publisher {
     async fn test_metrics_publishing_behavior() -> Result<()> {
         // Set up runtime and namespace
         let drt = create_test_drt_async().await;
-        let namespace = drt.namespace("ns2001".to_string())?;
+        let endpoint = drt
+            .namespace("ns2001".to_string())?
+            .component("worker")?
+            .endpoint("generate");
 
         // Create a subscriber for the metrics events
-        let mut subscriber = EventSubscriber::for_namespace(&namespace, KV_METRICS_SUBJECT)
+        let mut subscriber = EventSubscriber::for_endpoint(&endpoint, KV_METRICS_SUBJECT)
             .await
             .unwrap()
             .typed::<ActiveLoad>();
@@ -1741,8 +1744,8 @@ mod test_integration_publisher {
         let publisher = WorkerMetricsPublisher::new().unwrap();
         let worker_id = 1234;
 
-        // Start NATS metrics publishing
-        publisher.start_nats_metrics_publishing(namespace.clone(), worker_id);
+        // Start event-plane metrics publishing
+        publisher.start_metrics_publishing(endpoint, worker_id);
 
         // Allow some time for the background task to start
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -3799,15 +3802,16 @@ mod event_plane_batch_tests {
                     .expect("create namespace")
                     .component("worker")
                     .expect("create component");
-                let publisher = EventPublisher::for_component_with_transport(
-                    &component,
+                let endpoint = component.endpoint("generate");
+                let publisher = EventPublisher::for_endpoint_with_transport(
+                    &endpoint,
                     KV_EVENT_SUBJECT,
                     EventTransportKind::Zmq,
                 )
                 .await
                 .expect("create publisher");
-                let mut subscriber = EventSubscriber::for_component_with_transport(
-                    &component,
+                let mut subscriber = EventSubscriber::for_endpoint_with_transport(
+                    &endpoint,
                     KV_EVENT_SUBJECT,
                     EventTransportKind::Zmq,
                 )

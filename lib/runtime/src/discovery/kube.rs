@@ -157,16 +157,10 @@ impl Discovery for KubeDiscoveryClient {
                 );
                 metadata.register_model_card(instance.clone())?;
             }
-            DiscoveryInstance::EventChannel {
-                namespace,
-                component,
-                topic,
-                ..
-            } => {
+            DiscoveryInstance::EventChannel { scope, topic, .. } => {
                 tracing::info!(
-                    "Registering event channel: namespace={}, component={}, topic={}, instance_id={:x}",
-                    namespace,
-                    component,
+                    "Registering event channel: scope={:?}, topic={}, instance_id={:x}",
+                    scope,
                     topic,
                     instance_id
                 );
@@ -235,16 +229,10 @@ impl Discovery for KubeDiscoveryClient {
                 );
                 metadata.unregister_model_card(&instance)?;
             }
-            DiscoveryInstance::EventChannel {
-                namespace,
-                component,
-                topic,
-                ..
-            } => {
+            DiscoveryInstance::EventChannel { scope, topic, .. } => {
                 tracing::info!(
-                    "Unregistering event channel: namespace={}, component={}, topic={}, instance_id={:x}",
-                    namespace,
-                    component,
+                    "Unregistering event channel: scope={:?}, topic={}, instance_id={:x}",
+                    scope,
                     topic,
                     instance_id
                 );

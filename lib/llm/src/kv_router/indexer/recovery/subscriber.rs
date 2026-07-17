@@ -7,7 +7,7 @@ use crate::kv_router::Indexer;
 use anyhow::Result;
 use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, RouterEvent};
 use dynamo_runtime::{
-    component::Component,
+    component::Endpoint,
     discovery::EventTransportKind,
     prelude::*,
     transports::event_plane::{EventSubscriber, TypedEventSubscriber},
@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 /// - On worker Added: dumps worker's local indexer into router
 /// - On worker Removed: removes worker from router indexer
 async fn start_kv_router_background_event_plane(
-    component: Component,
+    endpoint: Endpoint,
     indexer: Indexer,
     transport_kind: EventTransportKind,
     workers_with_configs: RuntimeConfigWatch,
@@ -35,7 +35,7 @@ async fn start_kv_router_background_event_plane(
     // subscription becoming active — the tree state at fetch time is guaranteed
     // to be a subset of what the subscription will deliver.
     let subscriber =
-        EventSubscriber::for_component_with_transport(&component, KV_EVENT_SUBJECT, transport_kind)
+        EventSubscriber::for_endpoint_with_transport(&endpoint, KV_EVENT_SUBJECT, transport_kind)
             .await?
             .typed::<Vec<RouterEvent>>();
 
@@ -46,7 +46,7 @@ async fn start_kv_router_background_event_plane(
     // WorkerQueryClient handles its own discovery loop for lifecycle + initial recovery.
     // No blocking wait — recovery happens asynchronously as endpoints are discovered.
     let worker_query_client = WorkerQueryClient::spawn(
-        component.clone(),
+        endpoint.clone(),
         indexer,
         workers_with_configs,
         model,
@@ -54,23 +54,18 @@ async fn start_kv_router_background_event_plane(
         cancellation_token.child_token(),
     )
     .await?;
-    let kv_event_subject = format!(
-        "namespace.{}.component.{}.{}",
-        component.namespace().name(),
-        component.name(),
-        KV_EVENT_SUBJECT
-    );
+    let endpoint_id = endpoint.id();
 
     match transport_kind {
         EventTransportKind::Nats => {
             tracing::info!(
-                subject = %kv_event_subject,
+                endpoint = %endpoint_id,
                 "KV Router using NATS Core subscription (local_indexer mode)"
             );
         }
         EventTransportKind::Zmq => {
             tracing::info!(
-                subject = %kv_event_subject,
+                endpoint = %endpoint_id,
                 "KV Router using ZMQ event plane subscription (local_indexer mode)"
             );
         }
@@ -142,13 +137,14 @@ async fn forward_live_event(worker_query_client: &Arc<WorkerQueryClient>, event:
 }
 
 pub async fn start_subscriber(
-    component: Component,
+    endpoint: Endpoint,
     indexer: Indexer,
     workers_with_configs: RuntimeConfigWatch,
     model: String,
     worker_type: &'static str,
     cancellation_token: CancellationToken,
 ) -> Result<()> {
+    let component = endpoint.component();
     let transport_kind = component.drt().default_event_transport_kind();
 
     if transport_kind == EventTransportKind::Zmq {
@@ -158,7 +154,7 @@ pub async fn start_subscriber(
     }
 
     start_kv_router_background_event_plane(
-        component,
+        endpoint,
         indexer,
         transport_kind,
         workers_with_configs,

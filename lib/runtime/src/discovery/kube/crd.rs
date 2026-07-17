@@ -122,6 +122,9 @@ pub async fn apply_cr(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::component::{Instance, TransportType};
+    use crate::discovery::{DiscoveryInstance, DiscoveryQuery};
+    use crate::protocols::EndpointId;
     use kube::Resource;
 
     #[test]
@@ -159,5 +162,54 @@ mod tests {
             serde_json::from_str(&json).expect("Failed to deserialize CR");
 
         assert_eq!(deserialized.spec.data, data);
+    }
+
+    #[test]
+    fn source_attribution_round_trips_through_kubernetes_metadata() {
+        let mut metadata = DiscoveryMetadata::new();
+        let source_a = EndpointId {
+            namespace: "workers".to_string(),
+            component: "backend".to_string(),
+            name: "generate-a".to_string(),
+        };
+        let source_b = EndpointId {
+            name: "generate-b".to_string(),
+            ..source_a.clone()
+        };
+
+        for source_endpoint in [source_a.clone(), source_b.clone()] {
+            metadata
+                .register_endpoint(DiscoveryInstance::Endpoint(Instance {
+                    namespace: "relay".to_string(),
+                    component: "backend".to_string(),
+                    endpoint: "worker_kv_indexer_query_dp0".to_string(),
+                    instance_id: 7,
+                    transport: TransportType::Nats("query-subject".to_string()),
+                    device_type: None,
+                    source_endpoint: Some(source_endpoint),
+                }))
+                .unwrap();
+        }
+
+        let cr = build_cr("test-pod", "test-pod", "pod-uid", &metadata).unwrap();
+        let round_trip: DiscoveryMetadata = serde_json::from_value(cr.spec.data).unwrap();
+        let endpoints = round_trip.filter(&DiscoveryQuery::Endpoint {
+            namespace: "relay".to_string(),
+            component: "backend".to_string(),
+            endpoint: "worker_kv_indexer_query_dp0".to_string(),
+        });
+
+        assert_eq!(endpoints.len(), 2);
+        let sources = endpoints
+            .into_iter()
+            .map(|instance| match instance {
+                DiscoveryInstance::Endpoint(instance) => instance.source_endpoint,
+                _ => unreachable!(),
+            })
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            sources,
+            std::collections::HashSet::from([Some(source_a), Some(source_b)])
+        );
     }
 }

@@ -64,12 +64,12 @@ impl ReplicaSyncRuntime {
         coordinator: Weak<AffinityCoordinatorInner>,
         parent_cancel: &CancellationToken,
     ) -> Result<Self> {
-        let component = client.endpoint.component();
-        let router_id = component.drt().discovery().instance_id();
-        let publisher = EventPublisher::for_component(component, SESSION_AFFINITY_SUBJECT)
+        let endpoint = &client.endpoint;
+        let router_id = endpoint.drt().discovery().instance_id();
+        let publisher = EventPublisher::for_endpoint(endpoint, SESSION_AFFINITY_SUBJECT)
             .await
             .context("create session affinity event publisher")?;
-        let mut subscriber = EventSubscriber::for_component(component, SESSION_AFFINITY_SUBJECT)
+        let mut subscriber = EventSubscriber::for_endpoint(endpoint, SESSION_AFFINITY_SUBJECT)
             .await
             .context("create session affinity event subscriber")?
             .typed::<SessionAffinityUpdate>();
@@ -262,12 +262,12 @@ mod tests {
             .unwrap()
             .component(component_name)
             .unwrap();
-        let client = component.endpoint("generate").client().await.unwrap();
-        let query = DiscoveryQuery::EventChannels(EventChannelQuery::topic(
-            namespace_name,
-            component_name,
+        let endpoint = component.endpoint("generate");
+        let query = DiscoveryQuery::EventChannels(EventChannelQuery::endpoint_topic(
+            endpoint.id(),
             SESSION_AFFINITY_SUBJECT,
         ));
+        let client = endpoint.client().await.unwrap();
 
         let original = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
         original.enable_replica_sync(client.clone()).await.unwrap();

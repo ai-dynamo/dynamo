@@ -874,10 +874,10 @@ impl WorkerMetricsPublisher {
         endpoint: Endpoint,
     ) -> PyResult<Bound<'p, PyAny>> {
         let rs_publisher = self.inner.clone();
-        let rs_component = endpoint.inner.component().clone();
+        let rs_endpoint = endpoint.inner;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             rs_publisher
-                .create_endpoint(rs_component)
+                .create_endpoint(rs_endpoint)
                 .await
                 .map_err(to_pyerr)?;
             Ok(())
@@ -925,10 +925,10 @@ impl MultimodalEmbeddingCachePublisher {
         endpoint: Endpoint,
     ) -> PyResult<Bound<'p, PyAny>> {
         let rs_publisher = self.inner.clone();
-        let rs_component = endpoint.inner.component().clone();
+        let rs_endpoint = endpoint.inner;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             rs_publisher
-                .create_endpoint(rs_component)
+                .create_endpoint(rs_endpoint)
                 .await
                 .map_err(to_pyerr)?;
             Ok(())
@@ -1018,12 +1018,9 @@ impl KvEventPublisher {
             return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
         }
 
-        // Extract component from endpoint
-        let component = endpoint.inner.component().clone();
-
         let inner =
             llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer_and_worker_id(
-                component,
+                endpoint.inner,
                 worker_id,
                 kv_block_size as u32,
                 source_config,

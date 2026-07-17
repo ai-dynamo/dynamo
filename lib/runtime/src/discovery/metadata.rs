@@ -292,16 +292,12 @@ fn filter_instances(
             .into_iter()
             .filter(|inst| match inst {
                 DiscoveryInstance::EventChannel {
-                    namespace: ns,
-                    component: comp,
-                    topic: t,
-                    ..
+                    scope, topic: t, ..
                 } => {
-                    // Filter by namespace if specified
-                    query.namespace.as_ref().is_none_or(|qns| qns == ns)
-                        // Filter by component if specified
-                        && query.component.as_ref().is_none_or(|qc| qc == comp)
-                        // Filter by topic if specified
+                    query
+                        .scope
+                        .as_ref()
+                        .is_none_or(|expected| expected == scope)
                         && query.topic.as_ref().is_none_or(|qt| qt == t)
                 }
                 _ => false,
@@ -405,6 +401,7 @@ mod tests {
             instance_id: 123,
             transport: TransportType::Nats("nats://localhost:4222".to_string()),
             device_type: None,
+            source_endpoint: None,
         });
 
         metadata.register_endpoint(instance).unwrap();
@@ -438,6 +435,7 @@ mod tests {
                         instance_id: i,
                         transport: TransportType::Nats("nats://localhost:4222".to_string()),
                         device_type: None,
+                        source_endpoint: None,
                     });
                     meta.register_endpoint(instance).unwrap();
                 })
@@ -467,6 +465,7 @@ mod tests {
                 instance_id: i,
                 transport: TransportType::Nats("nats://localhost:4222".to_string()),
                 device_type: None,
+                source_endpoint: None,
             });
             metadata.register_endpoint(instance).unwrap();
         }
@@ -491,15 +490,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_event_channel_registration() {
-        use crate::discovery::EventTransport;
+        use crate::discovery::{EventScope, EventTransport};
 
         let mut metadata = DiscoveryMetadata::new();
 
         // Register event channels
         for i in 0..3 {
             let instance = DiscoveryInstance::EventChannel {
-                namespace: "test".to_string(),
-                component: "comp1".to_string(),
+                scope: EventScope::Component {
+                    namespace: "test".to_string(),
+                    component: "comp1".to_string(),
+                },
                 topic: "test-topic".to_string(),
                 instance_id: i,
                 transport: EventTransport::zmq(format!("tcp://localhost:{}", 5000 + i)),
@@ -531,8 +532,10 @@ mod tests {
 
         // Test unregister
         let instance = DiscoveryInstance::EventChannel {
-            namespace: "test".to_string(),
-            component: "comp1".to_string(),
+            scope: EventScope::Component {
+                namespace: "test".to_string(),
+                component: "comp1".to_string(),
+            },
             topic: "test-topic".to_string(),
             instance_id: 0,
             transport: EventTransport::zmq("tcp://localhost:5000"),
@@ -541,9 +544,74 @@ mod tests {
         assert_eq!(metadata.get_all_event_channels().len(), 2);
     }
 
+    #[test]
+    fn event_channel_queries_match_exact_scope() {
+        use crate::discovery::{EventScope, EventTransport};
+        use crate::protocols::EndpointId;
+
+        let mut metadata = DiscoveryMetadata::new();
+        let component_scope = EventScope::Component {
+            namespace: "test".to_string(),
+            component: "worker".to_string(),
+        };
+        let endpoint_a = EndpointId {
+            namespace: "test".to_string(),
+            component: "worker".to_string(),
+            name: "a".to_string(),
+        };
+        let endpoint_b = EndpointId {
+            name: "b".to_string(),
+            ..endpoint_a.clone()
+        };
+
+        for (instance_id, scope) in [
+            (1, component_scope),
+            (
+                2,
+                EventScope::Endpoint {
+                    endpoint: endpoint_a.clone(),
+                },
+            ),
+            (
+                3,
+                EventScope::Endpoint {
+                    endpoint: endpoint_b.clone(),
+                },
+            ),
+        ] {
+            metadata
+                .register_event_channel(DiscoveryInstance::EventChannel {
+                    scope,
+                    topic: "kv-events".to_string(),
+                    instance_id,
+                    transport: EventTransport::zmq(format!("tcp://localhost:{instance_id}")),
+                })
+                .unwrap();
+        }
+
+        let component = metadata.filter(&DiscoveryQuery::EventChannels(EventChannelQuery::topic(
+            "test",
+            "worker",
+            "kv-events",
+        )));
+        assert_eq!(component.len(), 1);
+
+        let endpoint_a_instances = metadata.filter(&DiscoveryQuery::EventChannels(
+            EventChannelQuery::endpoint_topic(endpoint_a, "kv-events"),
+        ));
+        assert_eq!(endpoint_a_instances.len(), 1);
+        assert_eq!(endpoint_a_instances[0].instance_id(), 2);
+
+        let endpoint_b_instances = metadata.filter(&DiscoveryQuery::EventChannels(
+            EventChannelQuery::endpoint_topic(endpoint_b, "kv-events"),
+        ));
+        assert_eq!(endpoint_b_instances.len(), 1);
+        assert_eq!(endpoint_b_instances[0].instance_id(), 3);
+    }
+
     #[tokio::test]
     async fn test_mixed_instances() {
-        use crate::discovery::EventTransport;
+        use crate::discovery::{EventScope, EventTransport};
 
         let mut metadata = DiscoveryMetadata::new();
 
@@ -555,6 +623,7 @@ mod tests {
             instance_id: 1,
             transport: TransportType::Nats("nats://localhost:4222".to_string()),
             device_type: None,
+            source_endpoint: None,
         });
         metadata.register_endpoint(endpoint).unwrap();
 
@@ -569,8 +638,10 @@ mod tests {
         metadata.register_model_card(model).unwrap();
 
         let event_channel = DiscoveryInstance::EventChannel {
-            namespace: "test".to_string(),
-            component: "comp1".to_string(),
+            scope: EventScope::Component {
+                namespace: "test".to_string(),
+                component: "comp1".to_string(),
+            },
             topic: "test-topic".to_string(),
             instance_id: 3,
             transport: EventTransport::zmq("tcp://localhost:5000"),

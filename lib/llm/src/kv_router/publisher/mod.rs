@@ -13,7 +13,7 @@ use dynamo_kv_router::protocols::*;
 pub use dynamo_kv_router::zmq_wire::create_stored_blocks;
 #[cfg(test)]
 use dynamo_kv_router::zmq_wire::*;
-use dynamo_runtime::component::Component;
+use dynamo_runtime::component::{Component, Endpoint};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 
 use crate::kv_router::{
@@ -133,12 +133,12 @@ pub struct KvEventPublisher {
 
 impl KvEventPublisher {
     pub fn new(
-        component: Component,
+        endpoint: Endpoint,
         kv_block_size: u32,
         source_config: Option<KvEventSourceConfig>,
     ) -> Result<Self> {
         Self::new_with_local_indexer(
-            component,
+            endpoint,
             kv_block_size,
             source_config,
             false,
@@ -148,7 +148,7 @@ impl KvEventPublisher {
     }
 
     pub fn new_with_local_indexer(
-        component: Component,
+        endpoint: Endpoint,
         kv_block_size: u32,
         source_config: Option<KvEventSourceConfig>,
         enable_local_indexer: bool,
@@ -156,7 +156,7 @@ impl KvEventPublisher {
         batching_timeout_ms: Option<u64>,
     ) -> Result<Self> {
         Self::new_with_local_indexer_and_worker_id(
-            component,
+            endpoint,
             None,
             kv_block_size,
             source_config,
@@ -167,7 +167,7 @@ impl KvEventPublisher {
     }
 
     pub fn new_with_local_indexer_and_worker_id(
-        component: Component,
+        endpoint: Endpoint,
         worker_id: Option<WorkerId>,
         kv_block_size: u32,
         source_config: Option<KvEventSourceConfig>,
@@ -175,6 +175,7 @@ impl KvEventPublisher {
         dp_rank: DpRank,
         batching_timeout_ms: Option<u64>,
     ) -> Result<Self> {
+        let component = endpoint.component().clone();
         let cancellation_token = CancellationToken::new();
         let batching_timeout_ms = batching_timeout_ms
             .filter(|&ms| {
@@ -194,14 +195,14 @@ impl KvEventPublisher {
 
         let _ = KvPublisherMetrics::from_component(&component);
 
-        let component_name = component.name();
+        let endpoint_id = endpoint.id();
         tracing::info!(
-            "Initializing KvEventPublisher for worker {worker_id} in component {component_name}"
+            "Initializing KvEventPublisher for worker {worker_id} on endpoint {endpoint_id}"
         );
 
         if enable_local_indexer {
             tracing::info!(
-                "LocalKvIndexer enabled for worker {worker_id} in component {component_name}"
+                "LocalKvIndexer enabled for worker {worker_id} on endpoint {endpoint_id}"
             );
         }
 
@@ -242,6 +243,7 @@ impl KvEventPublisher {
                 .secondary()
                 .spawn(start_worker_kv_query_endpoint(
                     component,
+                    endpoint.id(),
                     worker_id,
                     dp_rank,
                     local_indexer,
@@ -252,11 +254,11 @@ impl KvEventPublisher {
         let local_indexer_clone = local_indexer.clone();
 
         tracing::info!("Using event plane for KV event publishing");
-        let component_clone = component.clone();
+        let endpoint_clone = endpoint.clone();
         component.drt().runtime().secondary().spawn(async move {
             let event_publisher =
-                match dynamo_runtime::transports::event_plane::EventPublisher::for_component(
-                    &component_clone,
+                match dynamo_runtime::transports::event_plane::EventPublisher::for_endpoint(
+                    &endpoint_clone,
                     KV_EVENT_SUBJECT,
                 )
                 .await

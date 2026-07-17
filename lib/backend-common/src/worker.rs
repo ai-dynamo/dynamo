@@ -595,7 +595,7 @@ impl Worker {
             crate::metrics::LifecycleGauges::new(&engine_metrics, model_load_time_seconds)?;
 
         self.setup_publishing(
-            &component,
+            &endpoint,
             &engine_config,
             &engine_metrics,
             model_load_time_seconds,
@@ -626,7 +626,7 @@ impl Worker {
     /// KV events.
     async fn setup_publishing(
         &mut self,
-        component: &dynamo_runtime::component::Component,
+        endpoint: &dynamo_runtime::component::Endpoint,
         engine_config: &EngineConfig,
         engine_metrics: &crate::metrics::EngineMetrics,
         model_load_time_seconds: f64,
@@ -665,7 +665,7 @@ impl Worker {
             "Starting KV-aware-routing publishers"
         );
         let handles = setup_publishers(
-            component,
+            endpoint,
             engine_metrics,
             kv_sources,
             bindings.dp_ranks,

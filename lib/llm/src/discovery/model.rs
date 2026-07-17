@@ -146,6 +146,31 @@ impl Model {
             .map(|entry| entry.value().clone())
     }
 
+    /// Return the only decode WorkerSet with a prefill router in a namespace,
+    /// failing closed when multiple endpoint-scoped pools make the legacy
+    /// namespace-only coordination ambiguous.
+    pub(crate) fn unique_prefill_routed_worker_set_in_namespace(
+        &self,
+        namespace: &str,
+    ) -> Option<Arc<WorkerSet>> {
+        let mut matches = self
+            .worker_sets
+            .iter()
+            .filter(|entry| {
+                entry.value().namespace() == namespace && entry.value().prefill_router.is_some()
+            })
+            .map(|entry| entry.value().clone());
+        let worker_set = matches.next()?;
+        if matches.next().is_some() {
+            tracing::error!(
+                namespace,
+                "Refusing ambiguous namespace-only prefill-router lookup across multiple endpoints"
+            );
+            return None;
+        }
+        Some(worker_set)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.worker_sets.is_empty()
     }
