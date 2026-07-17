@@ -6,9 +6,13 @@
 import logging
 import os
 
-from gpu_memory_service.common.utils import ENV_LOG_LEVEL
-
 logger = logging.getLogger(__name__)
+
+# Optional override for the gpu_memory_service log level in the vLLM worker
+# (a logging level name, e.g. "DEBUG"); unset falls back to vLLM's own level.
+# vLLM-integration-scoped, so it lives here rather than in common (which is
+# reserved for operator/Go-lockstep env vars honored across every context).
+ENV_LOG_LEVEL = "DYN_GMS_VLLM_LOG_LEVEL"
 
 
 def configure_gms_worker_logging() -> None:
@@ -17,7 +21,7 @@ def configure_gms_worker_logging() -> None:
     vLLM configures only the "vllm" logger, so gpu_memory_service.* INFO is
     silently dropped in EngineCore worker processes. Copy vLLM's handlers onto
     the "gpu_memory_service" parent logger so every child inherits them via
-    propagation, at DYN_GMS_LOG_LEVEL or vLLM's own level. Idempotent.
+    propagation, at DYN_GMS_VLLM_LOG_LEVEL or vLLM's own level. Idempotent.
     """
     gms_root = logging.getLogger("gpu_memory_service")
     if gms_root.handlers:
