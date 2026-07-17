@@ -192,23 +192,19 @@ class NativePlannerBase:
     ) -> Optional[list[TrafficObservation]]:
         if self.config.load_predictor_warmup_trace is None:
             return None
-        try:
-            metrics = extract_metrics_from_trace(
-                self.config.load_predictor_warmup_trace,
-                self.config.throughput_adjustment_interval_seconds,
+        metrics = extract_metrics_from_trace(
+            self.config.load_predictor_warmup_trace,
+            self.config.throughput_adjustment_interval_seconds,
+        )
+        return [
+            TrafficObservation(
+                duration_s=self.config.throughput_adjustment_interval_seconds,
+                num_req=float(m["request_count"]),
+                isl=float(m["avg_isl"]),
+                osl=float(m["avg_osl"]),
             )
-            return [
-                TrafficObservation(
-                    duration_s=self.config.throughput_adjustment_interval_seconds,
-                    num_req=float(m["request_count"]),
-                    isl=float(m["avg_isl"]),
-                    osl=float(m["avg_osl"]),
-                )
-                for m in metrics
-            ]
-        except Exception as exc:
-            logger.warning("Failed to warm load predictors: %s", exc)
-            return None
+            for m in metrics
+        ]
 
     async def _bootstrap_engine_plugins_if_needed(self) -> None:
         # Keep the orchestrator dependency aligned with lazy engine construction.

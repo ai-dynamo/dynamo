@@ -193,3 +193,26 @@ def test_unknown_trace_format_is_rejected(tmp_path):
 
     with pytest.raises(ValueError, match="Unsupported warmup trace format"):
         extract_metrics_from_trace(path, 10)
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    [float("nan"), float("inf"), 10**400],
+    ids=["nan", "infinity", "float-overflow"],
+)
+def test_numeric_timestamp_must_be_finite(tmp_path, timestamp):
+    path = _write_trace(tmp_path, [_rec(timestamp, 100, 10)])
+
+    with pytest.raises(ValueError, match="timestamp must be finite"):
+        extract_metrics_from_trace(path, 10)
+
+
+def test_dynamo_v1_incomplete_request_end_is_rejected(tmp_path):
+    record = _dynamo_rec(100_000, 100, 10)
+    del record["request"]["output_tokens"]
+    path = _write_trace(tmp_path, [record])
+
+    with pytest.raises(
+        ValueError, match="output_tokens must be a non-negative integer"
+    ):
+        extract_metrics_from_trace(path, 10)

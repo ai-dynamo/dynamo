@@ -4,6 +4,7 @@
 import glob
 import gzip
 import json
+import math
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Literal, Optional, Sequence, Tuple
@@ -100,7 +101,13 @@ def _number(record: Dict[str, Any], field: str, location: str) -> float:
     value = record.get(field)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{field} must be numeric at {location}")
-    return float(value)
+    try:
+        number = float(value)
+    except OverflowError as error:
+        raise ValueError(f"{field} must be finite at {location}") from error
+    if not math.isfinite(number):
+        raise ValueError(f"{field} must be finite at {location}")
+    return number
 
 
 def _length(record: Dict[str, Any], field: str, location: str) -> int:
