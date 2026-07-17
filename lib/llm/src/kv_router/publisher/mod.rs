@@ -17,7 +17,8 @@ use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 
 use crate::kv_router::{
-    KV_EVENT_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE, indexer::start_worker_kv_query_endpoint,
+    KV_EVENT_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE,
+    indexer::{start_worker_kv_query_endpoint, worker_kv_query_endpoint},
     metrics::KvPublisherMetrics,
 };
 
@@ -129,6 +130,8 @@ pub struct KvEventPublisher {
     tx: mpsc::UnboundedSender<Vec<PlacementEvent>>,
     /// Internal monotonic event ID counter. Shared with the ZMQ listener if present.
     next_event_id: Arc<AtomicU64>,
+    /// Worker-local KV indexer query endpoint, when local indexer mode is enabled.
+    local_indexer_query_endpoint: Option<dynamo_runtime::component::Endpoint>,
 }
 
 impl KvEventPublisher {
@@ -232,8 +235,9 @@ impl KvEventPublisher {
             None
         };
 
-        let _local_indexer_query_handle = local_indexer.as_ref().map(|local_indexer_ref| {
-            let component = component.clone();
+        let local_indexer_query_endpoint = local_indexer.as_ref().map(|local_indexer_ref| {
+            let endpoint = worker_kv_query_endpoint(&component, worker_id, dp_rank);
+            let endpoint_for_task = endpoint.clone();
             let local_indexer = local_indexer_ref.clone();
 
             component
@@ -241,11 +245,13 @@ impl KvEventPublisher {
                 .runtime()
                 .secondary()
                 .spawn(start_worker_kv_query_endpoint(
-                    component,
+                    endpoint_for_task,
                     worker_id,
                     dp_rank,
                     local_indexer,
-                ))
+                ));
+
+            endpoint
         });
 
         let cancellation_token_clone = cancellation_token.clone();
@@ -286,6 +292,7 @@ impl KvEventPublisher {
             worker_id,
             tx,
             next_event_id,
+            local_indexer_query_endpoint,
         })
     }
 
@@ -326,6 +333,10 @@ impl KvEventPublisher {
 
     pub fn kv_block_size(&self) -> u32 {
         self.kv_block_size
+    }
+
+    pub fn local_indexer_query_endpoint(&self) -> Option<dynamo_runtime::component::Endpoint> {
+        self.local_indexer_query_endpoint.clone()
     }
 
     pub fn shutdown(&mut self) {

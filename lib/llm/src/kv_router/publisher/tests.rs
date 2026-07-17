@@ -30,6 +30,7 @@ mod test_event_processing {
             worker_id: 7,
             tx,
             next_event_id: Arc::new(AtomicU64::new(0)),
+            local_indexer_query_endpoint: None,
         };
 
         publisher

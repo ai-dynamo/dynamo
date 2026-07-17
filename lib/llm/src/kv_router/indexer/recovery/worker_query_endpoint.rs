@@ -23,9 +23,23 @@ use crate::kv_router::{
     worker_kv_indexer_query_endpoint, worker_kv_indexer_query_endpoint_for_worker,
 };
 
+pub(crate) fn worker_kv_query_endpoint(
+    component: &Component,
+    worker_id: u64,
+    dp_rank: DpRank,
+) -> dynamo_runtime::component::Endpoint {
+    let route_worker_id = component.drt().connection_id();
+    let endpoint_name = if route_worker_id == worker_id {
+        worker_kv_indexer_query_endpoint(dp_rank)
+    } else {
+        worker_kv_indexer_query_endpoint_for_worker(worker_id, dp_rank)
+    };
+    component.endpoint(&endpoint_name)
+}
+
 /// Worker-side endpoint registration for Router -> LocalKvIndexer query service
 pub(crate) async fn start_worker_kv_query_endpoint(
-    component: Component,
+    endpoint: dynamo_runtime::component::Endpoint,
     worker_id: u64,
     dp_rank: DpRank,
     local_indexer: Arc<LocalKvIndexer>,
@@ -47,19 +61,14 @@ pub(crate) async fn start_worker_kv_query_endpoint(
         }
     };
 
-    let route_worker_id = component.drt().connection_id();
-    let endpoint_name = if route_worker_id == worker_id {
-        worker_kv_indexer_query_endpoint(dp_rank)
-    } else {
-        worker_kv_indexer_query_endpoint_for_worker(worker_id, dp_rank)
-    };
+    let route_worker_id = endpoint.component().drt().connection_id();
+    let endpoint_name = endpoint.name().to_string();
     tracing::info!(
         "WorkerKvQuery endpoint starting for worker {worker_id} dp_rank {dp_rank} \
          routed by instance {route_worker_id} on endpoint '{endpoint_name}'"
     );
 
-    if let Err(e) = component
-        .endpoint(&endpoint_name)
+    if let Err(e) = endpoint
         .endpoint_builder()
         .handler(ingress)
         .graceful_shutdown(true)

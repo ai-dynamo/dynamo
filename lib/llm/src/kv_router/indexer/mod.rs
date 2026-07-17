@@ -34,7 +34,9 @@ pub use self::embedding_cache::{EmbeddingCacheIndexer, try_build_cache_indexer};
 use self::remote::RemoteIndexer;
 pub use self::remote::{ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use self::side::SideIndexer;
-pub(crate) use recovery::{start_subscriber, start_worker_kv_query_endpoint};
+pub(crate) use recovery::{
+    start_subscriber, start_worker_kv_query_endpoint, worker_kv_query_endpoint,
+};
 
 /// `approx` is the optional predict-on-route side indexer. It is always local
 /// to this router, even when the primary indexer is served or consumed
