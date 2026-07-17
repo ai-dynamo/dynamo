@@ -8,15 +8,52 @@ hide-toc: true
 ---
 
 import { TerminalDemo } from "@/components/TerminalDemo";
+import { LangGate } from "@/components/LangGate";
+import { EventsCalendar } from "@/components/EventsCalendar";
 
 <div className="welcome-gradient" />
 
-<div className="github-buttons">
+## Get Started
 
-<iframe src="https://ghbtns.com/github-btn.html?user=ai-dynamo&repo=dynamo&type=star&count=true&size=large" frameBorder="0" scrolling="0" width="170" height="30" title="Star ai-dynamo/dynamo on GitHub"></iframe>
-<iframe src="https://ghbtns.com/github-btn.html?user=ai-dynamo&repo=dynamo&type=fork&count=true&size=large" frameBorder="0" scrolling="0" width="170" height="30" title="Fork ai-dynamo/dynamo on GitHub"></iframe>
+<CardGroup cols={3}>
+  <Card title="Kubernetes Quickstart" icon="regular dharmachakra" href="/dynamo/dev/kubernetes">
+    Deploy the full production stack fast.
+  </Card>
+  <LangGate langs="zh" invert>
+    <Card title="Community Slack" icon="brands slack" href="https://ai-dynamo.slack.com">
+      Join ai-dynamo.slack.com to directly engage with Dynamo developers.
+    </Card>
+  </LangGate>
+  <LangGate langs="zh">
+    <Card title="Community WeChat" icon="brands weixin">
+      Request to be added to Dynamo WeChat or join ai-dynamo.slack.com.
+    </Card>
+  </LangGate>
+  <Card title="Community Calendar" icon="regular calendar" href="https://calendar.google.com/calendar/u/0/r?cid=Y19jMjQ0OGQyZWZiMDllYWMyZGRlZTFmMzQ1MjQxMjQxMzViZDNmNDU1NDg2ODc2OTA1OTEwNWUxOGUxYjk3ZThmQGdyb3VwLmNhbGVuZGFyLmdvb2dsZS5jb20">
+    View past and upcoming Dynamo meetups and community meetings.
+  </Card>
+</CardGroup>
 
-</div>
+## Why Dynamo
+
+<CardGroup cols={2}>
+  <Card title="Production-grade best performance" icon="regular gauge-high">
+    As shown on [InferenceX](https://inferencex.semianalysis.com/), Dynamo delivers the best performance for distributed inference and showcases state-of-the-art fault tolerance.
+  </Card>
+  <Card title="Best SW integration and interop" icon="regular puzzle-piece">
+    Works with every major inference engine (LightSeek, SGLang, TRT-LLM, vLLM), plugs into any network or storage layer through NIXL, integrates the widest range of KV caches (LMCache, HiCache, FlexKV), and runs anywhere — Kubernetes, Slurm, or local.
+  </Card>
+  <Card title="HW Neutrality" icon="regular microchip">
+    In addition to NVIDIA GPUs, Dynamo supports Intel XPUs and AMD GPUs.
+  </Card>
+  <Card title="Open & Community-Driven" icon="regular users">
+    Open source and developed in the open. Adopt one component at a time, or run the full stack.
+  </Card>
+</CardGroup>
+
+Dynamo optimizes the system around the inference engine: it adds the distributed layer — disaggregated serving, smart routing, KV cache management across memory tiers, and autoscaling — on top of any supported backend.
+
+## Dynamo in Action
 
 <TerminalDemo
   src="./assets/hero-demo-25.cast"
@@ -26,54 +63,8 @@ import { TerminalDemo } from "@/components/TerminalDemo";
   rows="25"
 />
 
-## Why Dynamo
+## Community Events
 
-<CardGroup cols={2}>
-  <Card title="Performance & Runtime" icon="regular gauge-high">
-    Disaggregated serving, KV cache-aware routing, and KV cache offloading, composed over the NIXL low-latency transfer layer.
-  </Card>
-  <Card title="Backends & Ecosystem" icon="regular microchip">
-    Serve vLLM, SGLang, and TensorRT-LLM behind one OpenAI-compatible API. Swap engines without changing your serving infrastructure.
-  </Card>
-  <Card title="Kubernetes-Native" icon="regular cubes">
-    Operator, CRDs, autoscaling, multinode scheduling, and an inference gateway — Kubernetes-native, but not Kubernetes-only.
-  </Card>
-  <Card title="Open & Community-Driven" icon="regular users">
-    Open source and developed in the open. Adopt one component at a time, or run the full stack.
-  </Card>
-</CardGroup>
+Meetups, talks, and community meetings — updated automatically from the Dynamo [public calendar](https://calendar.google.com/calendar/u/0?cid=Y19jMjQ0OGQyZWZiMDllYWMyZGRlZTFmMzQ1MjQxMjQxMzViZDNmNDU1NDg2ODc2OTA1OTEwNWUxOGUxYjk3ZThmQGdyb3VwLmNhbGVuZGFyLmdvb2dsZS5jb20).
 
-Dynamo optimizes the system around the inference engine: it adds the distributed layer — disaggregated serving, smart routing, KV cache management across memory tiers, and autoscaling — on top of any supported backend.
-
-## Get Started
-
-<CardGroup cols={3}>
-  <Card title="Introduction" icon="regular book-open" href="/dynamo/dev/getting-started/introduction">
-    What Dynamo is, how it is built, and where to go next.
-  </Card>
-  <Card title="Kubernetes Quickstart" icon="regular cloud-arrow-up" href="/dynamo/dev/kubernetes">
-    Cluster fast path — the full production stack.
-  </Card>
-  <Card title="Local Quickstart" icon="regular laptop-code" href="/dynamo/dev/getting-started/local-installation">
-    Container fast path — running in about five minutes.
-  </Card>
-</CardGroup>
-
-## Join the Community
-
-Dynamo is developed in the open. Ask questions, report issues, and help shape the roadmap.
-
-<CardGroup cols={2}>
-  <Card title="CNCF Slack" icon="brands slack" href="https://communityinviter.com/apps/cloud-native/cncf">
-    Join CNCF Slack and find us in `#ai-dynamo`.
-  </Card>
-  <Card title="GitHub" icon="brands github" href="https://github.com/ai-dynamo/dynamo">
-    Source, releases, and issue tracking on `ai-dynamo/dynamo`.
-  </Card>
-  <Card title="GitHub Discussions" icon="regular comments" href="https://github.com/ai-dynamo/dynamo/discussions">
-    Ask questions and share ideas with maintainers and users.
-  </Card>
-  <Card title="Discord" icon="brands discord" href="https://discord.gg/D92uqZRjCZ">
-    Chat with the community in real time.
-  </Card>
-</CardGroup>
+<EventsCalendar />
