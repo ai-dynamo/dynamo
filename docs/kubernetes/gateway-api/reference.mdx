@@ -106,12 +106,12 @@ request forwarding.
 | Approximate routing | Tokenized requests, request lifecycle, and local predicted state. | Use when KV events are unavailable, disabled, or not supported by the selected deployment shape. |
 
 In the operator-managed GAIE path, KV events reach the EPP through the Dynamo event plane using
-NATS/JetStream. vLLM can also publish KV events through ZMQ in other integration shapes; the
+NATS Core. vLLM can also publish KV events through ZMQ in other integration shapes; the
 operator-managed `DynamoGraphDeployment` path does not use ZMQ for the EPP.
 
 ```mermaid
 flowchart LR
-    Worker["Dynamo worker"] -->|"publishes KV events"| NATS["Dynamo runtime<br/>NATS/JetStream"]
+    Worker["Dynamo worker"] -->|"publishes KV events"| NATS["Dynamo runtime<br/>NATS Core event plane"]
     NATS -->|"delivers state"| EPP["Dynamo EPP"]
     EPP -->|"scores endpoints"| Gateway["Gateway data plane"]
     Gateway -->|"forwards selected request"| Sidecar["Frontend sidecar"]

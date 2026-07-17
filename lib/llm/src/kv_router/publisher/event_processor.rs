@@ -9,14 +9,13 @@ use tokio_util::sync::CancellationToken;
 
 use dynamo_kv_router::indexer::LocalKvIndexer;
 use dynamo_kv_router::protocols::*;
-use dynamo_runtime::transports::nats::NatsQueue;
 
 use crate::kv_router::metrics::kv_publisher_metrics;
 
 use super::DEFAULT_MAX_BATCH_BLOCKS;
 use super::batching::BatchingState;
 use super::dedup::EventDedupFilter;
-use super::sinks::{JetStreamPublisher, RouterEventBatchSink, emit};
+use super::sinks::{RouterEventBatchSink, emit};
 
 pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
     publisher: P,
@@ -206,26 +205,6 @@ pub(super) async fn start_event_processor<P: RouterEventBatchSink + 'static>(
 ) {
     run_event_processor_loop(
         publisher,
-        worker_id,
-        cancellation_token,
-        rx,
-        local_indexer,
-        batching_timeout_ms,
-        DEFAULT_MAX_BATCH_BLOCKS,
-    )
-    .await
-}
-
-pub(super) async fn start_event_processor_jetstream(
-    publisher: NatsQueue,
-    worker_id: u64,
-    cancellation_token: CancellationToken,
-    rx: mpsc::UnboundedReceiver<Vec<PlacementEvent>>,
-    local_indexer: Option<Arc<LocalKvIndexer>>,
-    batching_timeout_ms: Option<u64>,
-) {
-    run_event_processor_loop(
-        JetStreamPublisher(publisher),
         worker_id,
         cancellation_token,
         rx,

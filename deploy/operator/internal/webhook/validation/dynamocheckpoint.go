@@ -59,7 +59,16 @@ func (v *DynamoCheckpointValidator) ValidateUpdate(
 func (v *dynamoCheckpointValidation) validateDynamoCheckpoint(
 	checkpoint *nvidiacomv1alpha1.DynamoCheckpoint,
 ) field.ErrorList {
-	return v.validateDynamoCheckpointSpec(&checkpoint.Spec, field.NewPath("spec"))
+	specPath := field.NewPath("spec")
+	allErrs := field.ErrorList{}
+	if !features.MustGateFrom(v.ctx).Enabled(features.Checkpoint) {
+		allErrs = append(allErrs, field.Forbidden(
+			specPath,
+			"checkpoint functionality is disabled in the operator configuration",
+		))
+	}
+	allErrs = append(allErrs, v.validateDynamoCheckpointSpec(&checkpoint.Spec, specPath)...)
+	return allErrs
 }
 
 // validateDynamoCheckpointSpec validates spec. spec and fldPath must not be nil.

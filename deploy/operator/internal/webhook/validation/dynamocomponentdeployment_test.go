@@ -24,6 +24,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -55,6 +56,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		name            string
 		deployment      runtime.Object
 		oldDeployment   runtime.Object
+		checkpointOff   bool
 		wantSchemaErr   string
 		wantCELErr      string
 		wantWebhookErrs []string
@@ -67,6 +69,31 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.Replicas = &validReplicas
 				dcd.Spec.BackendFramework = dcdAdmissionSGLangBackend
 			}),
+		},
+		{
+			name:          "checkpoint configuration requires operator feature gate",
+			checkpointOff: true,
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.experimental.checkpoint: Forbidden: checkpoint functionality is disabled in the operator configuration"},
+		},
+		{
+			name:          "checkpoint update requires operator feature gate",
+			checkpointOff: true,
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
+				}
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.experimental.checkpoint: Forbidden: checkpoint functionality is disabled in the operator configuration"},
 		},
 		{
 			name: "invalid replicas",
@@ -1007,6 +1034,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 
 			handler := NewDynamoComponentDeploymentHandler()
 			ctx := dgdAdmissionContext(dgdAdmissionOperation(tt.oldDeployment), nvidiacomv1beta1.DynamoComponentDeploymentGVK)
+			ctx = features.WithGate(ctx, features.Gates{Checkpoint: !tt.checkpointOff})
 			var warnings []string
 			var err error
 			if tt.oldDeployment == nil {

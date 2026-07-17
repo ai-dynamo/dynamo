@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Temporary copy of SGLang's native gRPC contract. See README.md for provenance
-// and the removal plan.
+// Temporary copy of the SGLang sidecar's native gRPC contract. See README.md
+// for provenance and the removal plan.
 
 syntax = "proto3";
 package sglang.runtime.v1;

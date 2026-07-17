@@ -27,15 +27,16 @@ func TestDynamoCheckpointValidator_Validate(t *testing.T) {
 	requestValidators := requestValidatorsFromCRD(t, "nvidia.com_dynamocheckpoints.yaml")
 
 	tests := []struct {
-		name          string
-		checkpoint    *nvidiacomv1alpha1.DynamoCheckpoint
-		oldCheckpoint *nvidiacomv1alpha1.DynamoCheckpoint
-		mutateRequest func(*testing.T, map[string]any)
-		gmsSnapshot   bool
-		wantSchemaErr string
-		wantCELErr    string
-		wantWebhook   []string
-		wantWarnings  []string
+		name               string
+		checkpoint         *nvidiacomv1alpha1.DynamoCheckpoint
+		oldCheckpoint      *nvidiacomv1alpha1.DynamoCheckpoint
+		mutateRequest      func(*testing.T, map[string]any)
+		checkpointDisabled bool
+		gmsSnapshot        bool
+		wantSchemaErr      string
+		wantCELErr         string
+		wantWebhook        []string
+		wantWarnings       []string
 	}{
 		// Source-version schema and CEL boundaries.
 		{
@@ -86,6 +87,14 @@ func TestDynamoCheckpointValidator_Validate(t *testing.T) {
 			checkpoint: dynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
 				checkpoint.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: "not-semver"}
 			}),
+		},
+		{
+			name:               "checkpoint feature gate is enforced",
+			checkpoint:         dynamoCheckpointForAdmission(nil),
+			checkpointDisabled: true,
+			wantWebhook: []string{
+				"spec: Forbidden: checkpoint functionality is disabled in the operator configuration",
+			},
 		},
 		{
 			name:       "GMS checkpoint feature gate is enforced",
@@ -197,6 +206,15 @@ func TestDynamoCheckpointValidator_Validate(t *testing.T) {
 			gmsSnapshot:   true,
 		},
 		{
+			name:               "checkpoint feature gate applies on update",
+			oldCheckpoint:      dynamoCheckpointForAdmission(nil),
+			checkpoint:         dynamoCheckpointForAdmission(nil),
+			checkpointDisabled: true,
+			wantWebhook: []string{
+				"spec: Forbidden: checkpoint functionality is disabled in the operator configuration",
+			},
+		},
+		{
 			name:          "identity immutability is enforced by source CEL",
 			oldCheckpoint: dynamoCheckpointForAdmission(nil),
 			checkpoint: dynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
@@ -224,8 +242,9 @@ func TestDynamoCheckpointValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name:          "deleting checkpoint skips update validation",
-			oldCheckpoint: dynamoCheckpointForAdmission(nil),
+			name:               "deleting checkpoint skips update validation",
+			oldCheckpoint:      dynamoCheckpointForAdmission(nil),
+			checkpointDisabled: true,
 			checkpoint: dynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
 				checkpoint.Spec.GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{
 					Enabled: true,
@@ -279,7 +298,10 @@ func TestDynamoCheckpointValidator_Validate(t *testing.T) {
 
 			handler := NewDynamoCheckpointHandler()
 			ctx := dgdAdmissionContext(dynamoCheckpointAdmissionOperation(tt.oldCheckpoint), nvidiacomv1alpha1.GroupVersion.WithKind("DynamoCheckpoint"))
-			ctx = features.WithGate(ctx, features.Gates{GMSSnapshot: tt.gmsSnapshot})
+			ctx = features.WithGate(ctx, features.Gates{
+				Checkpoint:  !tt.checkpointDisabled,
+				GMSSnapshot: tt.gmsSnapshot,
+			})
 			var warnings []string
 			var err error
 			if tt.oldCheckpoint == nil {

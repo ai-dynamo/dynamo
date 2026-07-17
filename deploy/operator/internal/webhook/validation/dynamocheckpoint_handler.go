@@ -90,7 +90,6 @@ func (h *DynamoCheckpointHandler) RegisterWithManager(mgr manager.Manager, gate 
 	mgr.GetWebhookServer().Register(dynamoCheckpointWebhookPath, webhook)
 	return nil
 }
-
 func castToDynamoCheckpoint(obj runtime.Object) (*nvidiacomv1alpha1.DynamoCheckpoint, error) {
 	ckpt, ok := obj.(*nvidiacomv1alpha1.DynamoCheckpoint)
 	if !ok {

@@ -10,9 +10,6 @@ use dynamo_kv_router::RouterEventSink;
 use dynamo_kv_router::indexer::LocalKvIndexer;
 use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, RouterEvent, StorageTier};
 use dynamo_runtime::transports::event_plane::EventPublisher;
-use dynamo_runtime::transports::nats::NatsQueue;
-
-use crate::kv_router::KV_EVENT_SUBJECT;
 
 pub(super) struct EventPlanePublisher(pub(super) EventPublisher);
 
@@ -140,14 +137,6 @@ pub(super) fn event_plane_event_batches(
         batch_start = batch_end;
         Some(batch)
     })
-}
-
-pub(super) struct JetStreamPublisher(pub(super) NatsQueue);
-
-impl RouterEventSink for JetStreamPublisher {
-    fn publish_event(&self, event: &RouterEvent) -> impl Future<Output = Result<()>> + Send {
-        NatsQueue::publish_event(&self.0, KV_EVENT_SUBJECT, event)
-    }
 }
 
 pub(super) async fn emit(

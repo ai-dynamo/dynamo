@@ -28,37 +28,13 @@ When `--no-router-kv-events` is used, the router does not consume worker KV even
 
 #### Prefix Cache Persistence and Recovery
 
-Prefix cache recovery matters because stale or missing prefix state directly affects cache-hit routing decisions. Dynamo supports two recovery strategies.
-
-##### NATS Core / Event Plane with Local Indexer Mode
+Prefix cache recovery matters because stale or missing prefix state directly affects cache-hit routing decisions. Dynamo recovers state from worker-local indexers:
 
 - Prefix state persists on workers. Events are fire-and-forget, but workers retain their local indexer state.
 - On startup, each router queries each worker's local indexer to rebuild prefix state.
 - Recovery depends on workers being available. If a worker is down, its blocks cannot be recovered until the worker returns.
-- This mode keeps the infrastructure simpler because JetStream is not required.
 
 For more on gap detection and replay, see [KV Event Replay — Dynamo vs vLLM](kv-event-replay-comparison.md).
-
-##### JetStream Mode
-
-JetStream mode requires `--router-durable-kv-events` on both frontend and workers.
-
-- Prefix blocks are stored in NATS JetStream with 1-hour retention.
-- Snapshots are saved to NATS object store at configurable thresholds.
-- New replicas automatically restore this state on startup.
-- You can launch a third router replica even if the first two are down, and it will recover the full prefix state.
-
-```bash
-python -m dynamo.frontend \
-    --router-mode kv \
-    --http-port 8002 \
-    --router-durable-kv-events
-```
-
->[!Note]
-> If you need to start with a fresh state in JetStream mode, you have two options:
-> 1. Use a different namespace or component, which creates a new stream and NATS object store path.
-> 2. Launch a router with `--router-reset-states`, which purges the entire stream and radix snapshot. Only do this when launching the first router replica in a component, because it can bring existing replicas into an inconsistent state.
 
 ### Active Block State
 
@@ -152,7 +128,7 @@ graph TD
 
 ## Additional Notes
 
-Request-plane transport is independent of KV event transport. The request plane (`DYN_REQUEST_PLANE` or `--request-plane`) controls how requests reach workers. KV events use NATS in JetStream or NATS Core modes, or ZMQ when `--event-plane zmq` is set. With `--event-plane zmq` and `--discovery-backend file` or `mem`, the router can run without etcd or NATS. When using a NATS-based event plane, NATS is initialized automatically; set `NATS_SERVER=nats://...` to override the default `localhost:4222`.
+Request-plane transport is independent of KV event transport. The request plane (`DYN_REQUEST_PLANE` or `--request-plane`) controls how requests reach workers. KV events use NATS Core when `--event-plane nats` is set, or ZMQ when `--event-plane zmq` is set. With `--event-plane zmq` and `--discovery-backend file` or `mem`, the router can run without etcd or NATS. When using a NATS-based event plane, NATS is initialized automatically; set `NATS_SERVER=nats://...` to override the default `localhost:4222`.
 
 When `--router-kv-overlap-score-credit` is set to 0, no KV indexer is created and prefix matching is disabled. When `--no-router-kv-events` is set, a KV indexer is still created but no event subscriber is launched; the router predicts cache state from its own routing decisions with TTL-based expiration.
 

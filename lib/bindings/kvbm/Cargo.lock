@@ -1549,12 +1549,12 @@ dependencies = [
  "dynamo-runtime",
  "dynamo-tokens",
  "dynamo-truthy",
+ "fastrand",
  "flume",
  "indexmap 2.14.0",
  "ordered-float 4.6.0",
  "parking_lot",
  "prometheus",
- "rand 0.9.4",
  "rmp-serde",
  "rustc-hash 2.1.2",
  "seqlock",
@@ -1566,7 +1566,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
- "validator",
  "xxhash-rust",
 ]
 
