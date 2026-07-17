@@ -30,7 +30,9 @@ from dynamo.vllm.multimodal_utils.protocol import (
     vLLMMultimodalRequest,
 )
 from dynamo.vllm.multimodal_utils.vision_encoder_backend import (
+    EncoderOutputFormat,
     Preprocessed,
+    Qwen2VLImageEncoding,
     VisionEncoderBackend,
 )
 
@@ -42,7 +44,9 @@ __all__ = [
     "encode_image_embeddings",
     "extract_user_text",
     "get_encoder_components",
+    "EncoderOutputFormat",
     "Preprocessed",
+    "Qwen2VLImageEncoding",
     "VisionEncoderBackend",
     "ImageLoader",
     "ModelFamily",
