@@ -3,8 +3,7 @@
 
 """Legacy worker-factory LoRA lifecycle tests.
 
-The unified vLLM engine has separate lifecycle coverage. These tests protect
-the still-supported ``BaseWorkerHandler`` path used by release images.
+These tests protect the ``BaseWorkerHandler`` path used by release images.
 """
 
 import asyncio
