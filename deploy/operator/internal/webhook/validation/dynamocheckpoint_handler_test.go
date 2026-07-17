@@ -82,11 +82,10 @@ func TestDynamoCheckpointValidator_Validate(t *testing.T) {
 			gmsSnapshot: true,
 		},
 		{
-			name: "invalid shared metadata annotation uses its exact field path",
+			name: "DGD-only metadata annotations are ignored",
 			checkpoint: dynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
 				checkpoint.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: "not-semver"}
 			}),
-			wantWebhook: []string{`metadata.annotations[nvidia.com/dynamo-operator-origin-version]: Invalid value: "not-semver": must be valid semver`},
 		},
 		{
 			name:       "GMS checkpoint feature gate is enforced",

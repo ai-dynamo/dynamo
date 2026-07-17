@@ -39,7 +39,7 @@ func NewDynamoGraphDeploymentRequestValidator() *DynamoGraphDeploymentRequestVal
 // dynamoGraphDeploymentRequestValidation carries DGDR-specific request state.
 // API values, paths, and accumulated errors remain explicit validator arguments.
 type dynamoGraphDeploymentRequestValidation struct {
-	sharedValidation
+	ctx context.Context
 }
 
 // Validate performs stateless validation on request. ctx and request must not be nil.
@@ -47,9 +47,9 @@ func (v *DynamoGraphDeploymentRequestValidator) Validate(
 	ctx context.Context,
 	request *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 ) (admission.Warnings, error) {
-	validation := &dynamoGraphDeploymentRequestValidation{sharedValidation: sharedValidation{ctx: ctx}}
+	validation := &dynamoGraphDeploymentRequestValidation{ctx: ctx}
 	allErrs := validation.validateDynamoGraphDeploymentRequest(request)
-	return validation.warnings, invalidDynamoGraphDeploymentRequestError(request, allErrs)
+	return nil, invalidDynamoGraphDeploymentRequestError(request, allErrs)
 }
 
 // ValidateUpdate validates newRequest against oldRequest. ctx, oldRequest, and newRequest must not be nil.
@@ -58,20 +58,16 @@ func (v *DynamoGraphDeploymentRequestValidator) ValidateUpdate(
 	oldRequest *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 	newRequest *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 ) (admission.Warnings, error) {
-	validation := &dynamoGraphDeploymentRequestValidation{sharedValidation: sharedValidation{ctx: ctx}}
-	allErrs := validation.validateDynamoGraphDeploymentRequest(newRequest)
-	allErrs = append(allErrs, validation.validateDynamoGraphDeploymentRequestUpdate(newRequest, oldRequest)...)
-	return validation.warnings, invalidDynamoGraphDeploymentRequestError(newRequest, allErrs)
+	validation := &dynamoGraphDeploymentRequestValidation{ctx: ctx}
+	allErrs := validation.validateDynamoGraphDeploymentRequestUpdate(newRequest, oldRequest)
+	return nil, invalidDynamoGraphDeploymentRequestError(newRequest, allErrs)
 }
 
 // validateDynamoGraphDeploymentRequest validates request. request must not be nil.
 func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRequest(
 	request *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 ) field.ErrorList {
-	allErrs := field.ErrorList{}
-	allErrs = append(allErrs, v.validateObjectMeta(&request.ObjectMeta, field.NewPath("metadata"), false)...)
-	allErrs = append(allErrs, v.validateDynamoGraphDeploymentRequestSpec(&request.Spec, field.NewPath("spec"))...)
-	return allErrs
+	return v.validateDynamoGraphDeploymentRequestSpec(&request.Spec, field.NewPath("spec"))
 }
 
 // validateDynamoGraphDeploymentRequestSpec validates spec. spec and fldPath must not be nil.
@@ -121,11 +117,36 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 	fldPath *field.Path,
 	oldPhase nvidiacomv1beta1.DGDRPhase,
 ) field.ErrorList {
-	if !isImmutableDGDRPhase(oldPhase) || apiequality.Semantic.DeepEqual(newSpec, oldSpec) {
-		return nil
+	allErrs := field.ErrorList{}
+
+	gpuDiscoveryEnabled := features.MustGateFrom(v.ctx).Enabled(features.GPUDiscovery)
+	newRequiresHardware := !gpuDiscoveryEnabled && !hasManualDGDRHardware(newSpec.Hardware)
+	oldRequiresHardware := !gpuDiscoveryEnabled && !hasManualDGDRHardware(oldSpec.Hardware)
+	if newRequiresHardware && !oldRequiresHardware {
+		allErrs = append(allErrs, field.Required(
+			fldPath.Child("hardware"),
+			"GPU hardware configuration is required when GPU discovery is disabled",
+		))
 	}
-	return field.ErrorList{field.Forbidden(
-		fldPath,
-		fmt.Sprintf("updates are forbidden while the resource is in phase %q; delete and recreate the resource to change its spec", oldPhase),
-	)}
+
+	newHasIncompatibleSearch := newSpec.SearchStrategy == nvidiacomv1beta1.SearchStrategyThorough &&
+		newSpec.Backend == nvidiacomv1beta1.BackendTypeAuto
+	oldHasIncompatibleSearch := oldSpec.SearchStrategy == nvidiacomv1beta1.SearchStrategyThorough &&
+		oldSpec.Backend == nvidiacomv1beta1.BackendTypeAuto
+	if newHasIncompatibleSearch && !oldHasIncompatibleSearch {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("searchStrategy"),
+			newSpec.SearchStrategy,
+			fmt.Sprintf("is incompatible with spec.backend %q; set spec.backend to a specific backend (sglang, trtllm, or vllm)", newSpec.Backend),
+		))
+	}
+
+	if isImmutableDGDRPhase(oldPhase) && !apiequality.Semantic.DeepEqual(newSpec, oldSpec) {
+		allErrs = append(allErrs, field.Forbidden(
+			fldPath,
+			fmt.Sprintf("updates are forbidden while the resource is in phase %q; delete and recreate the resource to change its spec", oldPhase),
+		))
+	}
+
+	return allErrs
 }

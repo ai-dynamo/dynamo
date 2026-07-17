@@ -84,12 +84,11 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 
 		// Structural create rules.
 		{
-			name: "invalid shared metadata annotation uses its exact field path",
+			name: "DGD-only metadata annotations are ignored",
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
 				request.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: "not-semver"}
 			}),
 			gpuDiscovery: true,
-			wantWebhook:  []string{`metadata.annotations[nvidia.com/dynamo-operator-origin-version]: Invalid value: "not-semver": must be valid semver`},
 		},
 		{
 			name: "thorough search requires a concrete backend",
@@ -155,6 +154,32 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			},
 		},
 		{
+			name: "spec update is rejected during deploying",
+			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeploying
+			}),
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.Model = alternateAdmissionModel
+			}),
+			gpuDiscovery: true,
+			wantWebhook: []string{
+				`spec: Forbidden: updates are forbidden while the resource is in phase "Deploying"; delete and recreate the resource to change its spec`,
+			},
+		},
+		{
+			name: "spec update is rejected during deployed",
+			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeployed
+			}),
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.Model = alternateAdmissionModel
+			}),
+			gpuDiscovery: true,
+			wantWebhook: []string{
+				`spec: Forbidden: updates are forbidden while the resource is in phase "Deployed"; delete and recreate the resource to change its spec`,
+			},
+		},
+		{
 			name: "spec update is accepted during failed phase",
 			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseFailed
@@ -165,7 +190,37 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 		},
 		{
-			name:       "create semantics also apply on update",
+			name: "unchanged thorough and auto violation is ratcheted on update",
+			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.Backend = nvidiacomv1beta1.BackendTypeAuto
+				request.Spec.SearchStrategy = nvidiacomv1beta1.SearchStrategyThorough
+			}),
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.Backend = nvidiacomv1beta1.BackendTypeAuto
+				request.Spec.SearchStrategy = nvidiacomv1beta1.SearchStrategyThorough
+				request.Labels = map[string]string{"updated": "true"}
+			}),
+			gpuDiscovery: true,
+		},
+		{
+			name:       "missing hardware is ratcheted when GPU discovery becomes disabled",
+			oldRequest: betaDGDRForAdmission(nil),
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Labels = map[string]string{"updated": "true"}
+			}),
+		},
+		{
+			name: "removing manual hardware is rejected while GPU discovery is disabled",
+			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.Hardware = &nvidiacomv1beta1.HardwareSpec{GPUSKU: nvidiacomv1beta1.GPUSKUTypeH100SXM}
+			}),
+			request: betaDGDRForAdmission(nil),
+			wantWebhook: []string{
+				"spec.hardware: Required value: GPU hardware configuration is required when GPU discovery is disabled",
+			},
+		},
+		{
+			name:       "newly introduced search violation is rejected on update",
 			oldRequest: betaDGDRForAdmission(nil),
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
 				request.Spec.Backend = nvidiacomv1beta1.BackendTypeAuto

@@ -80,11 +80,10 @@ func TestDynamoModelValidator_Validate(t *testing.T) {
 			model: loraModelForAdmission("file:///local/path"),
 		},
 		{
-			name: "invalid shared metadata annotation uses its exact field path",
+			name: "DGD-only metadata annotations are ignored",
 			model: dynamoModelForAdmission(func(model *nvidiacomv1alpha1.DynamoModel) {
 				model.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: "not-semver"}
 			}),
-			wantWebhook: []string{`metadata.annotations[nvidia.com/dynamo-operator-origin-version]: Invalid value: "not-semver": must be valid semver`},
 		},
 		{
 			name: "empty required names aggregate in API declaration order",
