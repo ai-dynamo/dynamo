@@ -168,3 +168,6 @@ package-lock.json
 
 # HuggingFace hub cache downloaded by tests (never commit; committed fixtures use plain dir names)
 lib/llm/tests/data/sample-models/models--*/
+
+# Local git worktrees
+.worktrees/

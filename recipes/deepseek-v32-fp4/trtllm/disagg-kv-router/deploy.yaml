@@ -19,7 +19,6 @@ spec:
             - dynamo.frontend
             - --router-mode
             - kv
-            - --router-reset-states
             - --request-plane
             - nats
           env:

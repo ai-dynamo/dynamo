@@ -10,7 +10,6 @@ use thiserror::Error;
 
 use super::{QueueAdmissionConfig, config::RouterQueuePolicy};
 
-const DEFAULT_PREFILL_BUSY_THRESHOLD_FRAC: f64 = 16.0;
 const SYNTHETIC_POLICY_CLASS: &str = "default";
 
 #[derive(Debug, Error)]
@@ -488,20 +487,14 @@ fn resolve_policy_class(
         }
     };
 
-    let (prefill_busy_threshold, prefill_busy_threshold_frac) =
-        match (raw.prefill_busy_threshold, raw.prefill_busy_threshold_frac) {
-            (None, None) => (None, Some(DEFAULT_PREFILL_BUSY_THRESHOLD_FRAC)),
-            thresholds => thresholds,
-        };
-
     Ok(ResolvedPolicyClass {
         config: PolicyClassConfig {
             name: raw.name,
             queue_policy: raw.queue_policy,
             queue_admission: raw.queue_admission,
             quantum: raw.quantum,
-            prefill_busy_threshold,
-            prefill_busy_threshold_frac,
+            prefill_busy_threshold: raw.prefill_busy_threshold,
+            prefill_busy_threshold_frac: raw.prefill_busy_threshold_frac,
             request_queue_limit_per_worker: raw.request_queue_limit_per_worker,
             raw_isl_token_queue_limit_per_worker: raw.raw_isl_token_queue_limit_per_worker,
             cached_token_queue_limit_per_worker: raw.cached_token_queue_limit_per_worker,
@@ -621,6 +614,7 @@ models:
         policy_family: latency
         cache_bucket: uncached
         quantum: 4
+        prefill_busy_threshold_frac: 0.0
 "#,
         )
         .unwrap();
@@ -628,9 +622,12 @@ models:
         let exact = config.resolve_profile(Some("exact-model"), Some(3.0), RouterQueuePolicy::Wspt);
         assert_eq!(exact.classes().len(), 2);
         assert_eq!(exact.default_class().name, "model-cached");
-        assert_eq!(
-            exact.default_class().prefill_busy_threshold_frac,
-            Some(DEFAULT_PREFILL_BUSY_THRESHOLD_FRAC)
+        assert_eq!(exact.default_class().prefill_busy_threshold_frac, None);
+        assert!(!exact.default_class().queueing_enabled());
+        assert!(
+            exact
+                .class(exact.resolve_class_index(None, usize::MAX))
+                .queueing_enabled()
         );
         assert_eq!(exact.default_class().queue_policy, RouterQueuePolicy::Fcfs);
         assert_eq!(
@@ -975,10 +972,7 @@ policy_classes:
             "custom_priority",
             "explicit classes intentionally bypass cache classification"
         );
-        assert_eq!(
-            root.default_class().prefill_busy_threshold_frac,
-            Some(DEFAULT_PREFILL_BUSY_THRESHOLD_FRAC)
-        );
+        assert_eq!(root.default_class().prefill_busy_threshold_frac, Some(16.0));
 
         let model = config.resolve_profile(
             Some("example/large-model"),

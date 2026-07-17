@@ -157,10 +157,6 @@ This starts the router with:
 - KV cache routing mode
 - HTTP port 8000
 
-The default event path uses NATS Core/local-indexer mode. `--router-reset-states`
-only applies to deprecated durable JetStream mode (`--router-durable-kv-events`)
-and is not needed for these benchmark commands.
-
 To see all available router arguments, run:
 ```bash
 python -m dynamo.frontend --help
@@ -294,7 +290,7 @@ python real_data_benchmark.py --input-dataset trace.jsonl --prefix-root-multipli
 
 #### Prerequisites: tune the priority queue
 
-The router queue is enabled by default, but the default threshold is conservative. To make priority effects visible under benchmark load, use a lower `--router-queue-threshold`. A threshold of `0.0` is the most sensitive setting and queues once all eligible workers have active prefill tokens.
+The router queue is disabled by default. To make priority effects visible under benchmark load, set `--router-queue-threshold`; `0.0` is the most sensitive value and queues once all eligible workers have active prefill tokens.
 
 ```bash
 # Launch the router with a sensitive priority queue threshold.

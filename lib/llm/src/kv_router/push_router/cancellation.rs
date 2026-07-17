@@ -83,4 +83,16 @@ mod tests {
         assert_eq!(error.error_type(), ErrorType::Cancelled);
         assert!(dropped.load(Ordering::SeqCst));
     }
+
+    #[tokio::test]
+    async fn ready_operation_wins_if_context_is_already_stopped() {
+        let context = Controller::new("completed-request".to_string());
+        context.stop();
+
+        let result = cancel_on_stop(&context, context.id(), std::future::ready(42))
+            .await
+            .unwrap();
+
+        assert_eq!(result, 42);
+    }
 }

@@ -390,7 +390,7 @@ Not all metrics appear in every deployment. The chart below shows which metric g
 |---|---|---|---|---|
 | `dynamo_component_router_*` (request metrics) | Registered and populated | Registered and populated | Registered, **always zero** | Populated (on `DYN_SYSTEM_PORT`) |
 | `dynamo_router_overhead_*` (routing overhead) | Registered and populated | Registered and populated | **Not registered** | **Not created** |
-| `dynamo_frontend_router_queue_*` (queue depth) | Registered; populated when `--router-queue-threshold` set | Registered; populated when `--router-queue-threshold` set | **Not registered** | **Not created** |
+| `dynamo_frontend_router_queue_*` (queue depth) | Registered; populated when a CLI or policy-class queue threshold is set | Registered; populated when a CLI or policy-class queue threshold is set | **Not registered** | **Not created** |
 | `dynamo_component_kv_cache_events_applied` (indexer) | Populated when KV events are received | Populated when KV events are received | **Not registered** | Populated when KV events are received |
 | `dynamo_frontend_worker_*` (per-worker load/timing) | Registered and populated | Registered and populated (`worker_type`=`prefill`/`decode`) | Registered and populated (`worker_type`=`decode`) | **Not created** |
 
@@ -412,6 +412,7 @@ All metrics carry the standard hierarchy labels (`dynamo_namespace`, `dynamo_com
 
 | Metric | Type | Description |
 |--------|------|-------------|
+| `dynamo_component_router_requests_started_total` | Counter | Requests admitted by the router scheduler |
 | `dynamo_component_router_requests_total` | Counter | Total requests processed by the router |
 | `dynamo_component_router_time_to_first_token_seconds` | Histogram | Time to first token (seconds) |
 | `dynamo_component_router_inter_token_latency_seconds` | Histogram | Average inter-token latency (seconds) |
@@ -433,7 +434,7 @@ Histograms (in milliseconds) tracking the time spent in each phase of the routin
 
 #### Router Queue Metrics (`dynamo_frontend_router_queue_*`)
 
-Gauges track pending work in each router policy class. They are registered by the frontend and are populated when queueing is enabled through either `--router-queue-threshold` or `--router-policy-config`.
+Gauges track pending work in each router policy class. They are registered by the frontend and are populated when queueing is enabled through either `--router-queue-threshold` or a threshold in `--router-policy-config`.
 
 | Metric | Type | Description |
 |--------|------|-------------|
