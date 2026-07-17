@@ -48,6 +48,20 @@ PROVIDER_TARGET = "tests.frontend.route_extension_provider:routes"
 # tests/frontend/test_frontend_route_extension.py -> repo root
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# Keep the frontend fully standalone: mem discovery + TCP request plane +
+# explicit zmq event plane. The explicit event plane is required — the runtime
+# only treats the event plane as "no NATS" when it is set explicitly, so an
+# ambient NATS_SERVER (CI sets one) would otherwise force a NATS connection.
+# No etcd/NATS/worker is needed for a static custom route.
+STANDALONE_ARGS = [
+    "--discovery-backend",
+    "mem",
+    "--request-plane",
+    "tcp",
+    "--event-plane",
+    "zmq",
+]
+
 
 def _pythonpath(*parts: str) -> str:
     entries = [p for p in parts if p]
@@ -86,19 +100,16 @@ def test_frontend_route_extension_serves_custom_route(request, tmp_path, selecto
     with DynamoFrontendProcess(
         request,
         frontend_port=0,
-        extra_args=["--frontend-route-extension", extension],
-        extra_env={
-            "PYTHONPATH": pythonpath,
-            # In-process discovery: the frontend boots standalone (no etcd/NATS/
-            # worker) since the custom route does not depend on inference.
-            "DYN_DISCOVERY_BACKEND": "mem",
-        },
+        extra_args=[*STANDALONE_ARGS, "--frontend-route-extension", extension],
+        extra_env={"PYTHONPATH": pythonpath},
     ) as frontend:
         url = f"http://localhost:{frontend.frontend_port}{HELLO_PATH}"
 
         response = None
         deadline = time.time() + 60
         while time.time() < deadline:
+            if not frontend.is_running():
+                pytest.fail(f"frontend exited during startup:\n{frontend.read_logs()}")
             try:
                 response = requests.get(url, timeout=5)
                 if response.status_code == 200:
@@ -128,7 +139,8 @@ def test_frontend_route_extension_rejects_duplicate_routes(tmp_path):
     try:
         env = os.environ.copy()
         env["PYTHONPATH"] = _pythonpath(str(tmp_path), str(REPO_ROOT))
-        env["DYN_DISCOVERY_BACKEND"] = "mem"
+        # Standalone, NATS-free (see STANDALONE_ARGS); drop any ambient NATS_SERVER.
+        env.pop("NATS_SERVER", None)
         proc = subprocess.run(
             [
                 sys.executable,
@@ -138,6 +150,7 @@ def test_frontend_route_extension_rejects_duplicate_routes(tmp_path):
                 str(port),
                 "--router-mode",
                 "round-robin",
+                *STANDALONE_ARGS,
                 "--frontend-route-extension",
                 "dup",
             ],

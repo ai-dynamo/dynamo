@@ -1481,18 +1481,11 @@ mod tests {
         ))
     }
 
-    // The test extensions read live state through the narrowed
-    // FrontendExtensionContext (read-only accessors) captured in the handler
-    // closure — the same shape the Python bridge uses — rather than installing
-    // the full internal State via Router::with_state.
+    // Test extensions read live state via the narrowed context captured in the
+    // handler closure (the Python bridge's shape), not Router::with_state.
     fn readiness_extension(context: FrontendExtensionContext) -> FrontendRouteSet {
-        let route_docs = vec![RouteDoc::new(
-            axum::http::Method::GET,
-            "/test/frontend-route",
-        )];
-        let route = axum::Router::new().route(
-            "/test/frontend-route",
-            axum::routing::get(move || {
+        FrontendRouteSet::builder()
+            .get("/test/frontend-route", move || {
                 let context = context.clone();
                 async move {
                     if context.has_any_ready_model() {
@@ -1501,9 +1494,8 @@ mod tests {
                         axum::http::StatusCode::SERVICE_UNAVAILABLE
                     }
                 }
-            }),
-        );
-        FrontendRouteSet::new(route_docs, route)
+            })
+            .build()
     }
 
     fn first_test_extension(context: FrontendExtensionContext) -> FrontendRouteSet {
@@ -1523,13 +1515,8 @@ mod tests {
     }
 
     fn draining_extension(context: FrontendExtensionContext) -> FrontendRouteSet {
-        let route_docs = vec![RouteDoc::new(
-            axum::http::Method::GET,
-            "/test/frontend-route/draining",
-        )];
-        let route = axum::Router::new().route(
-            "/test/frontend-route/draining",
-            axum::routing::get(move || {
+        FrontendRouteSet::builder()
+            .get("/test/frontend-route/draining", move || {
                 let context = context.clone();
                 async move {
                     if context.is_ready() {
@@ -1538,18 +1525,16 @@ mod tests {
                         axum::http::StatusCode::ACCEPTED
                     }
                 }
-            }),
-        );
-        FrontendRouteSet::new(route_docs, route)
+            })
+            .build()
     }
 
     fn test_status_extension(_context: FrontendExtensionContext, path: &str) -> FrontendRouteSet {
-        let route_docs = vec![RouteDoc::new(axum::http::Method::GET, path)];
-        let route = axum::Router::new().route(
-            path,
-            axum::routing::get(|| async { axum::http::StatusCode::NO_CONTENT }),
-        );
-        FrontendRouteSet::new(route_docs, route)
+        FrontendRouteSet::builder()
+            .get(path.to_string(), || async {
+                axum::http::StatusCode::NO_CONTENT
+            })
+            .build()
     }
 
     async fn get_status(port: u16, path: &str) -> reqwest::StatusCode {

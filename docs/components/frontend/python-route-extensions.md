@@ -6,11 +6,13 @@ title: Python Route Extensions
 
 Python route extensions let an external package register additional HTTP routes on the Dynamo frontend, served on the same port as the OpenAI-compatible API — without a custom binary or a from-source build.
 
-Extensions are **opt-in**: the frontend only loads a provider you explicitly select on the command line. A selection is either a **name** registered under the `dynamo.frontend.routes` entry-point group (preferred for packaged plugins) or a direct **`module:function`** path (handy for quick/ad-hoc use). Extensions add routes; they cannot change or override the built-in inference routes (a duplicate method+path is rejected at startup).
+Extensions are **opt-in**: the frontend only loads a provider you explicitly select on the command line. A selection is either a **name** registered under the `dynamo.frontend.routes` entry-point group (preferred for packaged plugins) or a direct **`module:function`** path (handy for quick/ad-hoc use). Extensions add routes; they cannot change or override the built-in inference routes (a duplicate path is rejected at startup).
+
+The initial contract is intentionally narrow: **static-path `GET` routes** with a synchronous handler. Path parameters (`/{id}`), wildcards, non-`GET` methods, and `async def` handlers are rejected at construction. This surface can grow later without breaking existing extensions.
 
 ## Minimal example
 
-**1. Write a route provider.** A provider is a callable that returns a `FrontendRoute` (or an iterable of them). Each handler is synchronous, receives a `FrontendExtensionContext`, and returns a JSON-serializable body (HTTP 200) or a `(status_code, body)` tuple.
+**1. Write a route provider.** A provider is a callable that returns a `FrontendRoute` (or an iterable of them). Each handler is synchronous, receives a `FrontendExtensionContext`, and returns a JSON-serializable body (HTTP 200) or a `FrontendResponse` to set the status code.
 
 ```python
 # hello_routes.py
@@ -65,12 +67,22 @@ A registered entry-point name always takes precedence; the path fallback only ap
 
 ## Handler contract
 
-- **Signature:** `handler(ctx: FrontendExtensionContext)` — synchronous. Async handlers are rejected.
-- **Return:** a JSON-serializable value (implies `200`), or a `(status_code, body)` tuple to set the status.
+- **Route:** `GET` only, static path (no `{param}`/`*wildcard`) — enforced at `FrontendRoute` construction.
+- **Signature:** `handler(ctx: FrontendExtensionContext)` — synchronous. `async def` handlers are rejected at construction.
+- **Return:** a JSON-serializable value (implies `200`), or `FrontendResponse(status_code, body)` to set the status. Ordinary tuples serialize as JSON arrays — use `FrontendResponse` for status overrides:
+
+  ```python
+  from dynamo.llm import FrontendResponse
+
+  def _health_ready(ctx):
+      body = {"status": "ready" if ctx.has_any_ready_model() else "not ready"}
+      return body if ctx.has_any_ready_model() else FrontendResponse(503, body)
+  ```
+
 - **Live state:** `FrontendExtensionContext` exposes the current frontend state so responses reflect models registering/draining at runtime — e.g. `ctx.has_any_ready_model()`, `ctx.serving_ready_display_names()`, `ctx.is_model_ready_to_serve(name)`, `ctx.is_ready()`.
 
 ## Notes
 
-- Select multiple extensions by repeating `--frontend-route-extension` (or via a space/comma-separated `DYN_FRONTEND_ROUTE_EXTENSIONS`). Names are de-duplicated.
+- Select multiple extensions by repeating `--frontend-route-extension` (or via a **whitespace-separated** `DYN_FRONTEND_ROUTE_EXTENSIONS`). Names are de-duplicated.
 - Passing an unknown name fails fast and lists the available registered extensions.
 - Extensions apply to the HTTP frontend only.

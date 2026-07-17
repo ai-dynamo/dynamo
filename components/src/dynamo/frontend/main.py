@@ -91,16 +91,12 @@ def setup_sglang_engine_factory(
     )
 
 
-def _frontend_route_extension_entry_points():
-    """Return the entry points registered under the frontend-route group.
-
-    Handles both the ``EntryPoints.select`` API (Python >= 3.10) and the older
-    mapping-style ``entry_points().get`` fallback.
-    """
-    entry_points = importlib.metadata.entry_points()
-    if hasattr(entry_points, "select"):
-        return list(entry_points.select(group=FRONTEND_ROUTE_ENTRYPOINT_GROUP))
-    return list(entry_points.get(FRONTEND_ROUTE_ENTRYPOINT_GROUP, ()))
+def _frontend_route_extension_entry_points() -> list[importlib.metadata.EntryPoint]:
+    """Return the entry points registered under the frontend-route group."""
+    # `EntryPoints.select` is the supported API on the Python >= 3.10 floor.
+    return list(
+        importlib.metadata.entry_points().select(group=FRONTEND_ROUTE_ENTRYPOINT_GROUP)
+    )
 
 
 def _normalize_frontend_routes(

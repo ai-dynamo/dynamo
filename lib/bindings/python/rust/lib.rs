@@ -194,6 +194,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyAsyncRequestStream>()?;
     m.add_class::<llm::entrypoint::EntrypointArgs>()?;
     m.add_class::<llm::frontend_routes::PyFrontendRoute>()?;
+    m.add_class::<llm::frontend_routes::PyFrontendResponse>()?;
     m.add_class::<llm::frontend_routes::PyFrontendExtensionContext>()?;
     m.add_class::<llm::entrypoint::EngineConfig>()?;
     m.add_class::<llm::entrypoint::EngineType>()?;
