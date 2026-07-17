@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env::var;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -896,19 +896,14 @@ pub(super) static VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV: &str =
 
 fn append_route_docs(
     all_docs: &mut Vec<RouteDoc>,
-    seen_routes: &mut HashMap<(axum::http::Method, String), String>,
+    seen_routes: &mut HashSet<RouteDoc>,
     route_docs: Vec<RouteDoc>,
 ) -> Result<()> {
     for route_doc in route_docs {
-        let key = (route_doc.method().clone(), route_doc.path().to_string());
-        if let Some(existing) = seen_routes.get(&key) {
-            anyhow::bail!(
-                "duplicate HTTP route registered: {} conflicts with {}",
-                route_doc,
-                existing
-            );
+        if let Some(existing) = seen_routes.get(&route_doc) {
+            anyhow::bail!("duplicate HTTP route registered: {route_doc} conflicts with {existing}");
         }
-        seen_routes.insert(key, route_doc.to_string());
+        seen_routes.insert(route_doc.clone());
         all_docs.push(route_doc);
     }
     Ok(())
@@ -1034,7 +1029,7 @@ impl HttpServiceConfigBuilder {
         }
 
         let mut all_docs = Vec::new();
-        let mut route_doc_keys = HashMap::new();
+        let mut seen_route_docs = HashSet::new();
 
         // Shared on_response callback for both system and inference routes
         let on_response = |response: &Response<Body>, latency: Duration, _span: &tracing::Span| {
@@ -1082,7 +1077,7 @@ impl HttpServiceConfigBuilder {
         }
         let mut system_router = axum::Router::new();
         for (route_docs, route) in system_routes {
-            append_route_docs(&mut all_docs, &mut route_doc_keys, route_docs)?;
+            append_route_docs(&mut all_docs, &mut seen_route_docs, route_docs)?;
             system_router = system_router.merge(route);
         }
         // Inference routes (completions, chat, embeddings, etc.) — info-level spans
@@ -1094,7 +1089,7 @@ impl HttpServiceConfigBuilder {
         );
         let mut inference_router = axum::Router::new();
         for (route_docs, route) in endpoint_routes {
-            append_route_docs(&mut all_docs, &mut route_doc_keys, route_docs)?;
+            append_route_docs(&mut all_docs, &mut seen_route_docs, route_docs)?;
             inference_router = inference_router.merge(route);
         }
         inference_router = inference_router.layer(
@@ -1110,7 +1105,7 @@ impl HttpServiceConfigBuilder {
         // OpenAPI documentation routes (system)
         let (openapi_docs, openapi_route) =
             super::openapi_docs::openapi_router(all_docs.clone(), None);
-        append_route_docs(&mut all_docs, &mut route_doc_keys, openapi_docs)?;
+        append_route_docs(&mut all_docs, &mut seen_route_docs, openapi_docs)?;
         system_router = system_router.merge(openapi_route);
 
         system_router = system_router.layer(
