@@ -1014,18 +1014,34 @@ impl Worker {
         let serve_fut = builder.start();
         tokio::pin!(serve_fut);
 
-        let rl_endpoint = match (crate::rl::enabled(), self.config.rl_metadata.clone()) {
-            (true, Some(metadata)) => match crate::rl::serve_endpoint(&endpoint, metadata) {
+        let rl_endpoint = if crate::rl::enabled() {
+            let setup = self
+                .config
+                .rl_metadata
+                .clone()
+                .ok_or_else(|| {
+                    err(
+                        ErrorType::Backend(BackendError::InvalidArgument),
+                        "DYN_ENABLE_RL requires worker RL metadata",
+                    )
+                })
+                .and_then(|metadata| {
+                    crate::rl::serve_endpoint(&endpoint, metadata).map_err(|error| {
+                        err(
+                            ErrorType::Backend(BackendError::Unknown),
+                            format!("RL endpoint setup: {error}"),
+                        )
+                    })
+                });
+            match setup {
                 Ok(endpoint) => Some(endpoint),
                 Err(error) => {
                     self.orchestrator_steps(&endpoint).await;
-                    return Err(err(
-                        ErrorType::Backend(BackendError::Unknown),
-                        format!("RL endpoint setup: {error}"),
-                    ));
+                    return Err(error);
                 }
-            },
-            _ => None,
+            }
+        } else {
+            None
         };
         let rl_endpoint_handle = rl_endpoint.as_ref().map(|rl| rl.endpoint.clone());
         let rl_serve = async move {
