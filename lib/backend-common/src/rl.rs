@@ -44,9 +44,11 @@ pub(crate) fn serve_endpoint(
     }
     let endpoint_name = resolve_endpoint_name(&primary.id().name)?;
     let endpoint = primary.component().endpoint(endpoint_name);
+    let system_url = self_host_base_url(primary.drt())?;
     let handler = Arc::new(RlRouteHandler {
         routes: primary.drt().engine_routes().clone(),
         metadata,
+        system_url,
     });
     let ingress = Ingress::for_engine(handler.clone())?;
     let future = endpoint
@@ -59,6 +61,20 @@ pub(crate) fn serve_endpoint(
         endpoint,
         future: Box::pin(future),
     })
+}
+
+fn self_host_base_url(drt: &dynamo_runtime::DistributedRuntime) -> anyhow::Result<Option<String>> {
+    let Some(info) = drt.system_status_server_info() else {
+        return Ok(None);
+    };
+    let configured = dynamo_runtime::RuntimeConfig::from_settings()
+        .unwrap_or_default()
+        .system_host;
+    let host = match configured.as_str() {
+        "0.0.0.0" | "::" | "[::]" => dynamo_runtime::utils::local_ip_for_advertise(),
+        _ => configured,
+    };
+    Ok(Some(format!("http://{host}:{}", info.port())))
 }
 
 fn resolve_endpoint_name(primary_name: &str) -> anyhow::Result<String> {
@@ -82,6 +98,7 @@ fn validate_endpoint_name(endpoint_name: &str, primary_name: &str) -> anyhow::Re
 struct RlRouteHandler {
     routes: EngineRouteRegistry,
     metadata: RlWorkerMetadata,
+    system_url: Option<String>,
 }
 
 impl RlRouteHandler {
@@ -104,17 +121,20 @@ impl RlRouteHandler {
             });
         }
 
-        let mut routes = self
-            .routes
-            .routes()
-            .into_iter()
-            .filter(|route| !route.contains('/'))
-            .collect::<Vec<_>>();
+        let mut routes = self.routes.routes().into_iter().collect::<Vec<_>>();
+        routes.retain(|route| {
+            !route.contains('/')
+                || matches!(
+                    route.as_str(),
+                    "update/load_lora" | "update/unload_lora" | "update/list_loras"
+                )
+        });
         routes.sort();
         routes.dedup();
         json!({
             "status": "ok",
             "routes": routes,
+            "system_url": self.system_url,
             "admin_base_url": self.metadata.admin_base_url,
             "world_size": self.metadata.world_size,
         })
@@ -138,12 +158,18 @@ mod tests {
     use super::*;
 
     fn handler() -> RlRouteHandler {
+        let routes = EngineRouteRegistry::new();
+        routes.register(
+            "update/load_lora",
+            Arc::new(|_| Box::pin(async { Ok(json!({"status": "ok"})) })),
+        );
         RlRouteHandler {
-            routes: EngineRouteRegistry::new(),
+            routes,
             metadata: RlWorkerMetadata {
                 admin_base_url: "http://worker:8120".to_string(),
                 world_size: 2,
             },
+            system_url: Some("http://worker:8181".to_string()),
         }
     }
 
@@ -153,7 +179,8 @@ mod tests {
             handler().dispatch(&json!({"method": "routes"})),
             json!({
                 "status": "ok",
-                "routes": [],
+                "routes": ["update/load_lora"],
+                "system_url": "http://worker:8181",
                 "admin_base_url": "http://worker:8120",
                 "world_size": 2,
             })

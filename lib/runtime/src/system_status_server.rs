@@ -104,6 +104,8 @@ impl SystemStatusState {
 pub struct LoadLoraRequest {
     pub lora_name: String,
     pub source: LoraSource,
+    #[serde(default)]
+    pub load_inplace: bool,
 }
 
 /// Source information for loading a LoRA
@@ -373,6 +375,7 @@ async fn load_lora_handler(
             "source": {
                 "uri": request.source.uri
             },
+            "load_inplace": request.load_inplace,
         }),
     )
     .await

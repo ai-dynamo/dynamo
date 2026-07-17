@@ -260,6 +260,13 @@ pub trait LLMEngine: Send + Sync + 'static {
         Err(unsupported_lora())
     }
 
+    /// Replace one LoRA while preserving its public name and engine ID.
+    /// The default preserves compatibility for engines that only implement
+    /// the original load operation.
+    async fn load_lora_inplace(&self, adapter: LoraAdapter) -> Result<LoraAdapter, DynamoError> {
+        self.load_lora(adapter).await
+    }
+
     /// Unload one logical LoRA adapter by name.
     async fn unload_lora(&self, _name: &str) -> Result<LoraAdapter, DynamoError> {
         Err(unsupported_lora())

@@ -308,7 +308,10 @@ message LoraAdapter {
   string source_path = 3;
 }
 
-message LoadLoraRequest { LoraAdapter adapter = 1; }
+message LoadLoraRequest {
+  LoraAdapter adapter = 1;
+  bool load_inplace = 2;
+}
 message LoadLoraResponse {
   LoraAdapter adapter = 1;
   bool already_loaded = 2;

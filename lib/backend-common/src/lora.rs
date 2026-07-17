@@ -188,6 +188,12 @@ impl LoraController {
             .and_then(Value::as_str)
             .filter(|uri| !uri.trim().is_empty())
             .ok_or_else(|| "'source.uri' is required in request".to_string())?;
+        let load_inplace = match request.get("load_inplace") {
+            None => false,
+            Some(value) => value
+                .as_bool()
+                .ok_or_else(|| "'load_inplace' must be a boolean".to_string())?,
+        };
         validate_adapter_name(&self.reserved_names, &name)?;
 
         let operation = self.operation_lock(&name);
@@ -214,7 +220,8 @@ impl LoraController {
             name: name.clone(),
             path: path.to_string_lossy().into_owned(),
         };
-        if let Some(existing) = self.loaded.lock().await.get(&name).cloned() {
+        let existing = { self.loaded.lock().await.get(&name).cloned() };
+        if let Some(existing) = existing {
             if existing.adapter == adapter {
                 if !existing.published {
                     self.discovery
@@ -230,9 +237,41 @@ impl LoraController {
                 }
                 return Ok(success(&existing.adapter, "already loaded"));
             }
-            return Err(format!(
-                "LoRA adapter '{name}' conflicts with the loaded source path"
-            ));
+            if !load_inplace {
+                return Err(format!(
+                    "LoRA adapter '{name}' conflicts with the loaded source path"
+                ));
+            }
+            let adapter = self
+                .engine
+                .load_lora_inplace(adapter)
+                .await
+                .map_err(|error| error.to_string())?;
+            let published = if existing.published {
+                true
+            } else {
+                match self.discovery.attach(&adapter).await {
+                    Ok(()) => true,
+                    Err(error) => {
+                        self.loaded.lock().await.insert(
+                            name,
+                            ManagedLora {
+                                adapter,
+                                published: false,
+                            },
+                        );
+                        return Err(format!("failed to register replaced LoRA model: {error}"));
+                    }
+                }
+            };
+            self.loaded.lock().await.insert(
+                name,
+                ManagedLora {
+                    adapter: adapter.clone(),
+                    published,
+                },
+            );
+            return Ok(success(&adapter, "replaced successfully"));
         }
 
         let adapter = self
@@ -488,6 +527,13 @@ mod tests {
             Ok(adapter)
         }
 
+        async fn load_lora_inplace(
+            &self,
+            adapter: LoraAdapter,
+        ) -> Result<LoraAdapter, DynamoError> {
+            self.load_lora(adapter).await
+        }
+
         async fn unload_lora(&self, name: &str) -> Result<LoraAdapter, DynamoError> {
             self.events.lock().await.push(format!("unload:{name}"));
             if self.fail_unload.load(Ordering::SeqCst) {
@@ -662,6 +708,42 @@ mod tests {
             engine.loaded.lock().await["adapter-a"].id,
             i64::from(lora_name_to_id("adapter-a"))
         );
+    }
+
+    #[tokio::test]
+    async fn load_inplace_replaces_a_stable_name_with_a_new_source() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("step-1");
+        let second = root.path().join("step-2");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        let engine = MockEngine::new(Vec::new());
+        let discovery = Arc::new(MockDiscovery::default());
+        let controller = LoraController::new_with(
+            engine.clone(),
+            discovery.clone(),
+            Some(downloader(&root.path().join("cache"))),
+            HashSet::new(),
+        )
+        .await
+        .unwrap();
+
+        for (path, load_inplace) in [(&first, false), (&second, true)] {
+            controller
+                .load(json!({
+                    "lora_name": "adapter-a",
+                    "source": { "uri": format!("file://{}", path.display()) },
+                    "load_inplace": load_inplace,
+                }))
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(
+            engine.loaded.lock().await["adapter-a"].path,
+            std::fs::canonicalize(second).unwrap().to_string_lossy()
+        );
+        assert_eq!(discovery.attached.lock().await.as_slice(), ["adapter-a"]);
     }
 
     #[tokio::test]

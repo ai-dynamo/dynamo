@@ -120,6 +120,40 @@ impl VllmSidecarEngine {
         }
     }
 
+    async fn load_lora_with_mode(
+        &self,
+        adapter: LoraAdapter,
+        load_inplace: bool,
+    ) -> Result<LoraAdapter, DynamoError> {
+        let mut client = self
+            .pool
+            .get()
+            .map(Pool::control_client)
+            .ok_or_else(|| client::engine_shutdown("load_lora called before start"))?;
+        let requested = adapter.clone();
+        let response = client
+            .load_lora(pb::LoadLoraRequest {
+                adapter: Some(pb::LoraAdapter {
+                    lora_id: adapter.id,
+                    lora_name: adapter.name,
+                    source_path: adapter.path,
+                }),
+                load_inplace,
+            })
+            .await
+            .map_err(|status| client::status_to_dynamo("LoadLora", status))?
+            .into_inner()
+            .adapter
+            .ok_or_else(|| client::engine_shutdown("LoadLora returned no adapter"))?;
+        let loaded = lora_from_proto(response)?;
+        if loaded != requested {
+            return Err(client::engine_shutdown(
+                "LoadLora returned an adapter identity different from the request",
+            ));
+        }
+        Ok(loaded)
+    }
+
     /// Parse CLI args, bootstrap-discover the engine role + model, and build the
     /// pair `run()` consumes.
     pub fn from_args(argv: Option<Vec<String>>) -> Result<(Self, WorkerConfig), DynamoError> {
@@ -448,32 +482,11 @@ impl LLMEngine for VllmSidecarEngine {
     }
 
     async fn load_lora(&self, adapter: LoraAdapter) -> Result<LoraAdapter, DynamoError> {
-        let mut client = self
-            .pool
-            .get()
-            .map(Pool::control_client)
-            .ok_or_else(|| client::engine_shutdown("load_lora called before start"))?;
-        let requested = adapter.clone();
-        let response = client
-            .load_lora(pb::LoadLoraRequest {
-                adapter: Some(pb::LoraAdapter {
-                    lora_id: adapter.id,
-                    lora_name: adapter.name,
-                    source_path: adapter.path,
-                }),
-            })
-            .await
-            .map_err(|status| client::status_to_dynamo("LoadLora", status))?
-            .into_inner()
-            .adapter
-            .ok_or_else(|| client::engine_shutdown("LoadLora returned no adapter"))?;
-        let loaded = lora_from_proto(response)?;
-        if loaded != requested {
-            return Err(client::engine_shutdown(
-                "LoadLora returned an adapter identity different from the request",
-            ));
-        }
-        Ok(loaded)
+        self.load_lora_with_mode(adapter, false).await
+    }
+
+    async fn load_lora_inplace(&self, adapter: LoraAdapter) -> Result<LoraAdapter, DynamoError> {
+        self.load_lora_with_mode(adapter, true).await
     }
 
     async fn unload_lora(&self, name: &str) -> Result<LoraAdapter, DynamoError> {
