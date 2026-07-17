@@ -228,8 +228,7 @@ runs:
         if [ -n "${VCLUSTER_HOST_PRIORITY_CLASS}" ]; then
           VCLUSTER_HELM_ARGS+=(--set "sync.toHost.pods.priorityClassName=${VCLUSTER_HOST_PRIORITY_CLASS}")
         fi
-        # Sync statically-provisioned PVs (the model cache) to the host so the
-        # host kubelet honors the PV's nfs source + mountOptions when it mounts.
+        # Sync the model-cache PV to the host so its mount options are honored.
         if [ -n "${MODEL_CACHE_NFS_SERVER}" ]; then
           VCLUSTER_HELM_ARGS+=(--set "sync.toHost.persistentVolumes.enabled=true")
         fi
@@ -339,10 +338,8 @@ runs:
       run: |
         echo "::group::Create shared model cache PV/PVC inside vCluster"
         set -euo pipefail
-        # Static NFS PV (with the mount options Azure Files NFS 4.1 needs) + a bound
-        # PVC in the default namespace. Deploy tests reference the PVC by name via
-        # --model-cache-pvc. capacity is nominal (NFS PVs are not enforced). The PV
-        # is synced to the host (see sync.toHost.persistentVolumes in Create vCluster).
+        # Static NFS PV + bound PVC in the default namespace; deploy tests reference
+        # the PVC by name via --model-cache-pvc. Capacity is nominal (not enforced).
         kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster apply -f - <<EOF
         apiVersion: v1
         kind: PersistentVolume

@@ -187,22 +187,8 @@ class ServiceSpec:
             return
         self._spec["envs"] = value
 
-    @property
-    def component_type(self) -> Optional[str]:
-        """Component role, e.g. ``frontend`` or ``worker``.
-
-        v1alpha1 stores it as ``componentType``; v1beta1 as ``type``.
-        """
-        if self._schema == SCHEMA_V1BETA1:
-            return self._spec.get("type")
-        return self._spec.get("componentType")
-
     def add_pvc_mount(self, pvc_name: str, mount_point: str) -> None:
-        """Mount a PVC (declared in ``spec.pvcs``) into this service.
-
-        Uses the operator-native service-level ``volumeMounts`` list (``name`` +
-        ``mountPoint``), which the operator resolves into a pod volume. Idempotent.
-        """
+        """Add a service-level volumeMount for a PVC declared in ``spec.pvcs``. Idempotent."""
         mounts = self._spec.setdefault("volumeMounts", [])
         if not any(m.get("name") == pvc_name for m in mounts):
             mounts.append({"name": pvc_name, "mountPoint": mount_point})
@@ -508,21 +494,15 @@ class DeploymentSpec:
     def mount_model_cache_pvc(
         self, pvc_name: str, mount_point: str = "/models"
     ) -> None:
-        """Mount a pre-existing model-cache PVC into every worker service.
-
-        Adds a ``spec.pvcs`` entry (``create: false`` — the PVC is provisioned
-        out-of-band, e.g. by the CI setup action) and, on each worker, a
-        ``volumeMount`` at ``mount_point`` plus ``HF_HOME=<mount_point>`` so the
-        worker reads weights from the shared cache instead of downloading from
-        HuggingFace. No-op-safe to call once; used by CI via --model-cache-pvc.
+        """Reference a pre-existing PVC and mount it at ``mount_point`` on every
+        service, with ``HF_HOME`` pointed at it so models come from the shared cache
+        instead of HuggingFace. Idempotent; used by CI via --model-cache-pvc.
         """
         spec = self._deployment_spec["spec"]
         pvcs = spec.setdefault("pvcs", [])
         if not any(p.get("name") == pvc_name for p in pvcs):
             pvcs.append({"name": pvc_name, "create": False})
         for service in self.services:
-            if service.component_type != "worker":
-                continue
             service.add_pvc_mount(pvc_name, mount_point)
             self.set_service_env_var(service.name, "HF_HOME", mount_point)
 
