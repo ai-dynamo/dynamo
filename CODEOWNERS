@@ -66,6 +66,7 @@
 # === router  (@ai-dynamo/dynamo-router-codeowners) ===
 /lib/kv-router/                                                              @ai-dynamo/dynamo-router-codeowners
 /lib/kv-router/tests/                                                        @ai-dynamo/dynamo-router-codeowners
+/lib/admission-control/                                                      @ai-dynamo/dynamo-router-codeowners
 /lib/kv-router/src/indexer/                                                  @ai-dynamo/dynamo-router-codeowners
 /lib/kv-router/src/recovery/                                                 @ai-dynamo/dynamo-router-codeowners
 /lib/kv-router/src/zmq_wire/                                                 @ai-dynamo/dynamo-router-codeowners
