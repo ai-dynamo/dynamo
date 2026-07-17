@@ -38,8 +38,6 @@ def check_nvidia_driver() -> tuple[bool, str]:
         return False, "nvidia-smi not found — NVIDIA driver may not be installed"
     except CalledProcessError as e:
         return False, f"nvidia-smi failed with exit code {e.returncode}"
-    except Exception as e:
-        return False, f"Unexpected error checking NVIDIA driver: {e!s}"
 
 
 def _minikube_exists() -> bool:
@@ -74,7 +72,8 @@ def _start_minikube() -> None:
         check_call(["kubectl", "config", "use-context", "minikube"])
 
     current_context = check_output(["kubectl", "config", "current-context"], text=True).strip()
-    assert current_context == "minikube", f"Expected minikube context, got: {current_context}"
+    if current_context != "minikube":
+        raise RuntimeError(f"Expected minikube context, got: {current_context}")
 
 
 def _install_gpu_operator(driver_installed: bool) -> None:
@@ -83,7 +82,8 @@ def _install_gpu_operator(driver_installed: bool) -> None:
     check_call(["helm", "repo", "update"])
 
     cmd = [
-        "helm", "install", "--wait", "--generate-name",
+        "helm", "upgrade", "--install", "--wait",
+        "gpu-operator",
         "--kube-context", "minikube",
         "-n", "gpu-operator", "--create-namespace",
         "nvidia/gpu-operator",

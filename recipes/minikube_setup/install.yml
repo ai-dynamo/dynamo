@@ -6,7 +6,9 @@
   become: yes
   gather_facts: yes
   vars:
-    minikube_download_url: "https://github.com/kubernetes/minikube/releases/latest/download/minikube-linux-amd64"
+    minikube_version: "v1.38.1"
+    minikube_download_url: "https://github.com/kubernetes/minikube/releases/download/{{ minikube_version }}/minikube-linux-amd64"
+    minikube_checksum: "sha256:099477eaf248bcb5bcea8ce78a2898e93ac01461c35189da1848c3de82ecd22e"
     system_bin_dir: "/usr/local/bin"
   tasks:
     - name: Check if Minikube is already installed
@@ -20,6 +22,7 @@
       get_url:
         url: "{{ minikube_download_url }}"
         dest: "{{ system_bin_dir }}/minikube"
+        checksum: "{{ minikube_checksum }}"
         mode: '0755'
         owner: root
         group: root
