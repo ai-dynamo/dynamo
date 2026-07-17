@@ -60,7 +60,8 @@ pub struct LoraController {
     state_tracker: LoraStateTracker,
     load_estimator: Arc<LoadEstimator>,
     metrics_endpoint: String,
-    published_metric_loras: HashSet<String>,
+    published_allocation_metric_loras: HashSet<String>,
+    published_active_request_metric_loras: HashSet<String>,
     hysteresis: HashMap<String, HysteresisState>,
     tick: u64,
     // MCF-specific state
@@ -99,7 +100,8 @@ impl LoraController {
             state_tracker,
             load_estimator,
             metrics_endpoint: "unscoped".to_string(),
-            published_metric_loras: HashSet::new(),
+            published_allocation_metric_loras: HashSet::new(),
+            published_active_request_metric_loras: HashSet::new(),
             hysteresis: HashMap::new(),
             tick: 0,
             mcf_solver,
@@ -1028,17 +1030,30 @@ impl LoraController {
         };
 
         let inflight = self.load_estimator.get_inflight_counts();
-        let current_loras = table_snapshot
+        let current_allocation_loras = table_snapshot
             .iter()
             .map(|(name, _)| name.clone())
-            .chain(inflight.keys().cloned())
             .collect::<HashSet<_>>();
-        for stale_lora in self.published_metric_loras.difference(&current_loras) {
+        for stale_lora in self
+            .published_allocation_metric_loras
+            .difference(&current_allocation_loras)
+        {
             let labels = [self.metrics_endpoint.as_str(), stale_lora.as_str()];
             let _ = LORA_REPLICA_FACTOR_GAUGE.remove_label_values(&labels);
             let _ = LORA_IS_ACTIVE_GAUGE.remove_label_values(&labels);
             let _ = LORA_RAW_ARRIVAL_COUNT_GAUGE.remove_label_values(&labels);
             let _ = LORA_ESTIMATED_LOAD_GAUGE.remove_label_values(&labels);
+        }
+        let current_active_request_loras = current_allocation_loras
+            .iter()
+            .cloned()
+            .chain(inflight.keys().cloned())
+            .collect::<HashSet<_>>();
+        for stale_lora in self
+            .published_active_request_metric_loras
+            .difference(&current_active_request_loras)
+        {
+            let labels = [self.metrics_endpoint.as_str(), stale_lora.as_str()];
             let _ = LORA_ACTIVE_REQUESTS_GAUGE.remove_label_values(&labels);
         }
 
@@ -1060,12 +1075,13 @@ impl LoraController {
                 .set(load as i64);
         }
 
-        for (lora_name, count) in &inflight {
+        for lora_name in &current_active_request_loras {
             LORA_ACTIVE_REQUESTS_GAUGE
                 .with_label_values(&[self.metrics_endpoint.as_str(), lora_name.as_str()])
-                .set(*count as i64);
+                .set(inflight.get(lora_name).copied().unwrap_or_default() as i64);
         }
-        self.published_metric_loras = current_loras;
+        self.published_allocation_metric_loras = current_allocation_loras;
+        self.published_active_request_metric_loras = current_active_request_loras;
     }
 
     fn update_churn_metrics(&self, loads: i64, unloads: i64, overflow: i64) {
@@ -1207,6 +1223,9 @@ impl LoraController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prometheus::{IntGaugeVec, core::Collector};
+
+    use crate::http::service::metrics::{LORA_ACTIVE_REQUESTS_GAUGE, LORA_REPLICA_FACTOR_GAUGE};
     use crate::lora::load_estimator::LoadEstimator;
     use crate::lora::routing::table::LoraRoutingTable;
     use crate::lora::state_tracker::LoraStateTracker;
@@ -1262,6 +1281,111 @@ mod tests {
             load_estimator.clone(),
         );
         (controller, state_tracker, load_estimator, routing_table)
+    }
+
+    fn lora_metric_value(gauge: &IntGaugeVec, endpoint: &str, lora: &str) -> Option<f64> {
+        gauge.collect().iter().find_map(|family| {
+            family.get_metric().iter().find_map(|metric| {
+                let mut found_endpoint = false;
+                let mut found_lora = false;
+                for label in metric.get_label() {
+                    match label.name() {
+                        "endpoint" => found_endpoint = label.value() == endpoint,
+                        "lora" => found_lora = label.value() == lora,
+                        _ => {}
+                    }
+                }
+                (found_endpoint && found_lora).then(|| metric.get_gauge().value())
+            })
+        })
+    }
+
+    fn has_lora_metric_series(gauge: &IntGaugeVec, endpoint: &str, lora: &str) -> bool {
+        lora_metric_value(gauge, endpoint, lora).is_some()
+    }
+
+    #[test]
+    fn allocation_and_active_request_metrics_have_independent_lifecycles() {
+        let (mut controller, _st, load_estimator, routing_table) = setup_controller();
+        let endpoint = "test.metric-lifecycle.generate";
+        let lora = "metric-lifecycle-adapter";
+        controller.metrics_endpoint = endpoint.to_string();
+        routing_table.update_allocation(
+            lora.to_string(),
+            LoraReplicaConfig {
+                lora_name: lora.to_string(),
+                replica_factor: 1,
+                replica_set: vec![make_worker(1)],
+                updated_at: Instant::now(),
+                is_active: true,
+            },
+        );
+        load_estimator.increment_load(lora);
+
+        let loads = load_estimator.get_current_load();
+        let raw_arrivals = load_estimator.get_raw_arrival_counts();
+        controller.update_prometheus_metrics(
+            &routing_table.snapshot_configs(),
+            &loads,
+            &raw_arrivals,
+        );
+        assert!(has_lora_metric_series(
+            &LORA_REPLICA_FACTOR_GAUGE,
+            endpoint,
+            lora
+        ));
+        assert!(has_lora_metric_series(
+            &LORA_ACTIVE_REQUESTS_GAUGE,
+            endpoint,
+            lora
+        ));
+
+        routing_table.remove_lora(lora);
+        controller.update_prometheus_metrics(&[], &loads, &raw_arrivals);
+        assert!(!has_lora_metric_series(
+            &LORA_REPLICA_FACTOR_GAUGE,
+            endpoint,
+            lora
+        ));
+        assert!(has_lora_metric_series(
+            &LORA_ACTIVE_REQUESTS_GAUGE,
+            endpoint,
+            lora
+        ));
+
+        routing_table.update_allocation(
+            lora.to_string(),
+            LoraReplicaConfig {
+                lora_name: lora.to_string(),
+                replica_factor: 1,
+                replica_set: vec![make_worker(1)],
+                updated_at: Instant::now(),
+                is_active: true,
+            },
+        );
+        load_estimator.decrement_load(lora);
+        controller.update_prometheus_metrics(
+            &routing_table.snapshot_configs(),
+            &loads,
+            &raw_arrivals,
+        );
+        assert!(has_lora_metric_series(
+            &LORA_REPLICA_FACTOR_GAUGE,
+            endpoint,
+            lora
+        ));
+        assert_eq!(
+            lora_metric_value(&LORA_ACTIVE_REQUESTS_GAUGE, endpoint, lora),
+            Some(0.0)
+        );
+
+        routing_table.remove_lora(lora);
+        controller.update_prometheus_metrics(&[], &HashMap::new(), &HashMap::new());
+        assert!(!has_lora_metric_series(
+            &LORA_ACTIVE_REQUESTS_GAUGE,
+            endpoint,
+            lora
+        ));
     }
 
     #[test]

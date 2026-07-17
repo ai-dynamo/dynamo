@@ -70,6 +70,10 @@ enum PrefillActivationState {
     /// Boxed to keep the enum variant sizes balanced (`Endpoint` is much
     /// larger than `oneshot::Sender`). Satisfies `clippy::large_enum_variant`.
     PrefillReady(Box<Endpoint>),
+    /// More than one exact endpoint leaf claimed a P/D role in this model
+    /// namespace. Keep the rendezvous poisoned so a later duplicate discovery
+    /// event cannot silently reactivate a topology selected by arrival order.
+    Ambiguous,
 }
 
 /// State for the optional Encode endpoint / token-pipeline rendezvous.
@@ -1268,7 +1272,16 @@ impl ModelManager {
         &self,
         model_name: &str,
         namespace: &str,
-    ) -> Option<oneshot::Receiver<Endpoint>> {
+        decode_endpoint: &EndpointId,
+    ) -> anyhow::Result<Option<oneshot::Receiver<Endpoint>>> {
+        if let Some(model) = self.get_model(model_name)
+            && let Err(error) =
+                model.prefill_router_topology_with_decode_candidate(namespace, decode_endpoint)
+        {
+            self.poison_prefill_router_topology(model_name, namespace);
+            return Err(error.into());
+        }
+
         let key = Self::model_namespace_key(model_name, namespace);
         // Use the entry API so the activator state mutation is atomic per-key:
         // a concurrent `remove_prefill_activator` (called by the watcher on
@@ -1290,7 +1303,7 @@ impl ModelManager {
                         namespace = %namespace,
                         "Prefill endpoint cached; returning fresh receiver"
                     );
-                    Some(rx)
+                    Ok(Some(rx))
                 }
                 PrefillActivationState::DecodeWaiting(_) => {
                     // Decode already registered — entry stays in place so the
@@ -1301,8 +1314,13 @@ impl ModelManager {
                         namespace = %namespace,
                         "Decode WorkerSet already registered for this prefill router"
                     );
-                    None
+                    Ok(None)
                 }
+                PrefillActivationState::Ambiguous => anyhow::bail!(
+                    "prefill-router topology for model {:?} namespace {:?} is ambiguous",
+                    model_name,
+                    namespace
+                ),
             },
             Entry::Vacant(v) => {
                 // New registration: create tx/rx pair, store sender, return receiver.
@@ -1313,7 +1331,22 @@ impl ModelManager {
                     namespace = %namespace,
                     "No prefill endpoint for namespace yet, storing sender for future activation"
                 );
-                Some(rx)
+                Ok(Some(rx))
+            }
+        }
+    }
+
+    fn poison_prefill_router_topology(&self, model_name: &str, namespace: &str) {
+        let key = Self::model_namespace_key(model_name, namespace);
+        self.prefill_router_activators
+            .insert(key, PrefillActivationState::Ambiguous);
+
+        let Some(model) = self.get_model(model_name) else {
+            return;
+        };
+        for worker_set in model.prefill_routed_decode_worker_sets_in_namespace(namespace) {
+            if let Some(ref prefill_router) = worker_set.prefill_router {
+                prefill_router.deactivate();
             }
         }
     }
@@ -1328,12 +1361,27 @@ impl ModelManager {
     ) -> anyhow::Result<()> {
         let key = Self::model_namespace_key(model_name, namespace);
 
+        // Resolve the namespace-level topology before mutating rendezvous
+        // state. Endpoint-scoped WorkerSets are leaves, but a model namespace
+        // supports only one P/D pairing; discovery order must not choose among
+        // multiple prefill-routed decode endpoints.
+        let reactivation_target = if let Some(model) = self.get_model(model_name) {
+            match model.unique_prefill_routed_worker_set_in_namespace(namespace) {
+                Ok(worker_set) => worker_set,
+                Err(error) => {
+                    self.poison_prefill_router_topology(model_name, namespace);
+                    return Err(error.into());
+                }
+            }
+        } else {
+            None
+        };
+
         // Reactivate any existing deactivated decode-side `PrefillRouter`. Used
         // by the PrefillReady-refresh and Vacant arms — the rebuilding case
         // for prefill workers that previously died and now rejoin.
         let reactivate_if_needed = || {
-            if let Some(model) = self.get_model(model_name)
-                && let Some(ws) = model.unique_prefill_routed_worker_set_in_namespace(namespace)
+            if let Some(ws) = reactivation_target.as_ref()
                 && let Some(ref pr) = ws.prefill_router
                 && pr.is_deactivated()
             {
@@ -1351,6 +1399,13 @@ impl ModelManager {
         // cleanup — letting a stale `PrefillReady` get resurrected here.
         match self.prefill_router_activators.entry(key) {
             Entry::Occupied(mut o) => {
+                if matches!(o.get(), PrefillActivationState::Ambiguous) {
+                    anyhow::bail!(
+                        "prefill-router topology for model {:?} namespace {:?} is ambiguous",
+                        model_name,
+                        namespace
+                    );
+                }
                 // Atomically swap the value to a fresh PrefillReady. The old
                 // value tells us which transition we just performed.
                 let new_value = PrefillActivationState::PrefillReady(Box::new(endpoint.clone()));
@@ -1399,6 +1454,9 @@ impl ModelManager {
                             );
                         }
                     }
+                    PrefillActivationState::Ambiguous => unreachable!(
+                        "ambiguous prefill topology is rejected before state replacement"
+                    ),
                 }
                 Ok(())
             }
@@ -1432,11 +1490,23 @@ impl ModelManager {
     /// Called by the watcher when all prefill workers in a namespace are removed.
     /// After deactivation, requests fall back to aggregated mode.
     pub fn deactivate_prefill_router_for_decode(&self, model_name: &str, namespace: &str) {
-        if let Some(model) = self.get_model(model_name)
-            && let Some(ws) = model.unique_prefill_routed_worker_set_in_namespace(namespace)
-            && let Some(ref pr) = ws.prefill_router
-        {
-            pr.deactivate();
+        let Some(model) = self.get_model(model_name) else {
+            return;
+        };
+
+        if let Err(error) = model.unique_prefill_routed_worker_set_in_namespace(namespace) {
+            tracing::error!(
+                model_name,
+                namespace,
+                %error,
+                "Deactivating every prefill router in ambiguous endpoint-scoped topology"
+            );
+        }
+
+        for worker_set in model.prefill_routed_decode_worker_sets_in_namespace(namespace) {
+            if let Some(ref prefill_router) = worker_set.prefill_router {
+                prefill_router.deactivate();
+            }
         }
     }
 
@@ -2490,12 +2560,22 @@ mod tests {
     // Note: activate_prefill_router requires an Endpoint (needs DistributedRuntime),
     // so we test the registration state machine and cleanup only.
 
+    fn decode_endpoint_id(namespace: &str) -> EndpointId {
+        EndpointId {
+            namespace: namespace.to_string(),
+            component: "decode".to_string(),
+            name: "generate".to_string(),
+        }
+    }
+
     #[test]
     fn test_prefill_router_register_new() {
         let mm = ModelManager::new();
 
         // First registration for a (model, namespace) returns Some(rx)
-        let rx = mm.register_prefill_router("llama", "ns1");
+        let rx = mm
+            .register_prefill_router("llama", "ns1", &decode_endpoint_id("ns1"))
+            .unwrap();
         assert!(rx.is_some());
     }
 
@@ -2503,11 +2583,15 @@ mod tests {
     fn test_prefill_router_double_register_returns_none() {
         let mm = ModelManager::new();
 
-        let rx1 = mm.register_prefill_router("llama", "ns1");
+        let rx1 = mm
+            .register_prefill_router("llama", "ns1", &decode_endpoint_id("ns1"))
+            .unwrap();
         assert!(rx1.is_some());
 
         // Second registration for the same (model, namespace) returns None
-        let rx2 = mm.register_prefill_router("llama", "ns1");
+        let rx2 = mm
+            .register_prefill_router("llama", "ns1", &decode_endpoint_id("ns1"))
+            .unwrap();
         assert!(rx2.is_none());
     }
 
@@ -2516,8 +2600,12 @@ mod tests {
         let mm = ModelManager::new();
 
         // Different namespaces should be independent
-        let rx1 = mm.register_prefill_router("llama", "ns1");
-        let rx2 = mm.register_prefill_router("llama", "ns2");
+        let rx1 = mm
+            .register_prefill_router("llama", "ns1", &decode_endpoint_id("ns1"))
+            .unwrap();
+        let rx2 = mm
+            .register_prefill_router("llama", "ns2", &decode_endpoint_id("ns2"))
+            .unwrap();
         assert!(rx1.is_some());
         assert!(rx2.is_some());
     }
@@ -2527,8 +2615,12 @@ mod tests {
         let mm = ModelManager::new();
 
         // Different models should be independent
-        let rx1 = mm.register_prefill_router("llama", "ns1");
-        let rx2 = mm.register_prefill_router("gpt", "ns1");
+        let rx1 = mm
+            .register_prefill_router("llama", "ns1", &decode_endpoint_id("ns1"))
+            .unwrap();
+        let rx2 = mm
+            .register_prefill_router("gpt", "ns1", &decode_endpoint_id("ns1"))
+            .unwrap();
         assert!(rx1.is_some());
         assert!(rx2.is_some());
     }
@@ -2537,14 +2629,18 @@ mod tests {
     fn test_prefill_router_remove_allows_reregister() {
         let mm = ModelManager::new();
 
-        let rx = mm.register_prefill_router("llama", "ns1");
+        let rx = mm
+            .register_prefill_router("llama", "ns1", &decode_endpoint_id("ns1"))
+            .unwrap();
         assert!(rx.is_some());
 
         // Remove the activator
         mm.remove_prefill_activator("llama", "ns1");
 
         // Should be able to register again
-        let rx2 = mm.register_prefill_router("llama", "ns1");
+        let rx2 = mm
+            .register_prefill_router("llama", "ns1", &decode_endpoint_id("ns1"))
+            .unwrap();
         assert!(rx2.is_some());
     }
 
@@ -2727,7 +2823,9 @@ mod tests {
         let mm = ModelManager::new();
 
         // Decode registers first → DecodeWaiting in map.
-        let rx1 = mm.register_prefill_router("llama", "ns1");
+        let rx1 = mm
+            .register_prefill_router("llama", "ns1", &decode_endpoint_id("ns1"))
+            .unwrap();
         assert!(rx1.is_some());
 
         // Decode WorkerSet is removed before prefill registers. Drop the
@@ -2739,7 +2837,9 @@ mod tests {
         mm.remove_decode_prefill_waiter("llama", "ns1");
 
         // Rebuild path: a new register_prefill_router must succeed.
-        let rx2 = mm.register_prefill_router("llama", "ns1");
+        let rx2 = mm
+            .register_prefill_router("llama", "ns1", &decode_endpoint_id("ns1"))
+            .unwrap();
         assert!(
             rx2.is_some(),
             "after stale-DecodeWaiting cleanup, decode rebuild must get a fresh rx"
@@ -2752,7 +2852,9 @@ mod tests {
         let mm = ModelManager::new();
         mm.remove_decode_prefill_waiter("llama", "ns1");
         // And the next register must still work.
-        let rx = mm.register_prefill_router("llama", "ns1");
+        let rx = mm
+            .register_prefill_router("llama", "ns1", &decode_endpoint_id("ns1"))
+            .unwrap();
         assert!(rx.is_some());
     }
 
@@ -2774,7 +2876,9 @@ mod tests {
 
     /// Helper: make a WorkerSet with an activated PrefillRouter attached.
     fn make_worker_set_with_prefill_router(namespace: &str, mdcsum: &str) -> WorkerSet {
-        let mut ws = make_worker_set(namespace, mdcsum);
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Decode);
+        let mut ws = WorkerSet::new(namespace.to_string(), mdcsum.to_string(), card);
         let pr = PrefillRouter::disabled(
             std::sync::Arc::new(ModelManager::new()),
             dynamo_runtime::pipeline::RouterMode::RoundRobin,
@@ -2783,6 +2887,32 @@ mod tests {
         pr.mark_active_for_test();
         ws.prefill_router = Some(pr);
         ws
+    }
+
+    fn make_endpoint_worker_set_with_prefill_router(namespace: &str, component: &str) -> WorkerSet {
+        let mut worker_set = make_worker_set_with_prefill_router(namespace, component);
+        worker_set.set_endpoint_id(EndpointId {
+            namespace: namespace.to_string(),
+            component: component.to_string(),
+            name: "generate".to_string(),
+        });
+        worker_set
+    }
+
+    fn make_typed_endpoint_worker_set(
+        namespace: &str,
+        component: &str,
+        worker_type: crate::worker_type::WorkerType,
+    ) -> WorkerSet {
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(worker_type);
+        let mut worker_set = WorkerSet::new(namespace.to_string(), component.to_string(), card);
+        worker_set.set_endpoint_id(EndpointId {
+            namespace: namespace.to_string(),
+            component: component.to_string(),
+            name: "generate".to_string(),
+        });
+        worker_set
     }
 
     /// Calling deactivate on a non-existent model must not panic.
@@ -2827,6 +2957,121 @@ mod tests {
         // Idempotent: calling again must not panic.
         mm.deactivate_prefill_router_for_decode("llama", "ns1");
         assert!(mm.model_display_names().contains("llama"));
+    }
+
+    #[test]
+    fn test_deactivate_prefill_router_fails_ambiguous_endpoints_closed() {
+        let mm = ModelManager::new();
+        mm.add_worker_set(
+            "llama",
+            "decode-a",
+            make_endpoint_worker_set_with_prefill_router("ns1", "decode-a"),
+        );
+        mm.add_worker_set(
+            "llama",
+            "decode-b",
+            make_endpoint_worker_set_with_prefill_router("ns1", "decode-b"),
+        );
+
+        mm.deactivate_prefill_router_for_decode("llama", "ns1");
+
+        let model = mm.get_model("llama").expect("model");
+        for key in ["decode-a", "decode-b"] {
+            let router = model
+                .get_worker_set(key)
+                .and_then(|worker_set| worker_set.prefill_router.clone())
+                .expect("prefill router");
+            assert!(router.is_deactivated(), "{key} must fail closed");
+        }
+        assert!(mm.model_display_names().contains("llama"));
+    }
+
+    #[tokio::test]
+    async fn second_prefill_endpoint_poisons_existing_pairing() {
+        use crate::worker_type::WorkerType;
+
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let mm = ModelManager::new();
+        let _receiver = mm
+            .register_prefill_router("llama", "ns1", &decode_endpoint_id("ns1"))
+            .unwrap()
+            .expect("decode registration");
+        mm.add_worker_set(
+            "llama",
+            "decode",
+            make_endpoint_worker_set_with_prefill_router("ns1", "decode"),
+        );
+
+        for component in ["prefill-a", "prefill-b"] {
+            mm.add_worker_set(
+                "llama",
+                component,
+                make_typed_endpoint_worker_set("ns1", component, WorkerType::Prefill),
+            );
+            let endpoint = distributed
+                .namespace("ns1".to_string())
+                .unwrap()
+                .component(component.to_string())
+                .unwrap()
+                .endpoint("generate".to_string());
+            let activation = mm.activate_prefill_router("llama", "ns1", endpoint);
+            if component == "prefill-a" {
+                activation.unwrap();
+            } else {
+                assert!(activation.is_err());
+            }
+        }
+
+        let router = mm
+            .get_model("llama")
+            .and_then(|model| model.get_worker_set("decode"))
+            .and_then(|worker_set| worker_set.prefill_router.clone())
+            .expect("decode router");
+        assert!(router.is_deactivated());
+        assert_eq!(mm.get_model("llama").unwrap().worker_set_count(), 3);
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn second_decode_endpoint_poisons_pairing_without_removing_serving_leaf() {
+        use crate::worker_type::WorkerType;
+
+        let mm = ModelManager::new();
+        let _receiver = mm
+            .register_prefill_router("llama", "ns1", &decode_endpoint_id("ns1"))
+            .unwrap();
+        mm.add_worker_set(
+            "llama",
+            "decode-a",
+            make_endpoint_worker_set_with_prefill_router("ns1", "decode"),
+        );
+
+        let decode_b = EndpointId {
+            namespace: "ns1".to_string(),
+            component: "decode-b".to_string(),
+            name: "generate".to_string(),
+        };
+        assert!(
+            mm.register_prefill_router("llama", "ns1", &decode_b)
+                .is_err()
+        );
+        mm.add_worker_set(
+            "llama",
+            "decode-b",
+            make_typed_endpoint_worker_set("ns1", "decode-b", WorkerType::Decode),
+        );
+
+        let router = mm
+            .get_model("llama")
+            .and_then(|model| model.get_worker_set("decode-a"))
+            .and_then(|worker_set| worker_set.prefill_router.clone())
+            .expect("first decode router");
+        assert!(router.is_deactivated());
+        assert_eq!(mm.get_model("llama").unwrap().worker_set_count(), 2);
     }
 
     // -- is_model_ready_to_serve / has_any_ready_model tests --

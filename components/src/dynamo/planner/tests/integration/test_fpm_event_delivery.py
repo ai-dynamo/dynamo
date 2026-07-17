@@ -83,8 +83,9 @@ async def test_endpoint_fpm_reaches_planner_and_drives_scale_up(tmp_path, monkey
         worker_endpoint = worker_runtime.endpoint(endpoint_path)
         worker_id = str(worker_endpoint.connection_id())
         decoy_endpoint = decoy_runtime.endpoint(f"{namespace}.worker.generate-decoy")
-        decoy_worker_id = str(decoy_endpoint.connection_id())
-        decoy_publisher = FpmDirectPublisher(decoy_endpoint, decoy_worker_id, dp_size=1)
+        # Deliberately reuse the serving worker ID. If endpoint scoping regresses, identity-based
+        # assertions cannot distinguish this decoy from the configured serving pool.
+        decoy_publisher = FpmDirectPublisher(decoy_endpoint, worker_id, dp_size=1)
         stack.callback(decoy_publisher.shutdown)
         await register_model(
             ModelInput.Tensor,
@@ -93,7 +94,6 @@ async def test_endpoint_fpm_reaches_planner_and_drives_scale_up(tmp_path, monkey
             "test-model",
             worker_type=WorkerType.Aggregated,
         )
-
         state = DeploymentState()
         state.decode.info = WorkerInfo(
             component_name="worker",
@@ -103,20 +103,6 @@ async def test_endpoint_fpm_reaches_planner_and_drives_scale_up(tmp_path, monkey
         state.decode.replicas.active = 1
         state.decode.replicas.expected = 1
         sources = _PlannerSources(namespace, state)
-        provider = RuntimeFpmProvider(
-            require_prefill=False,
-            require_decode=True,
-            backend="vllm",
-            model_name="test-model",
-            runtime=planner_runtime,
-            state_source=sources,
-            namespace_source=sources,
-        )
-        await provider.async_init()
-        stack.push_async_callback(provider.shutdown)
-
-        publisher = FpmDirectPublisher(worker_endpoint, worker_id, dp_size=1)
-        stack.callback(publisher.shutdown)
         config = PlannerConfig(
             mode="agg",
             enable_load_scaling=True,
@@ -129,26 +115,59 @@ async def test_endpoint_fpm_reaches_planner_and_drives_scale_up(tmp_path, monkey
             max_gpu_budget=-1,
             metric_reporting_prometheus_port=0,
         )
+        # Establish a decoy-only quiet phase before the serving publisher emits anything. A
+        # component-scoped subscription would observe this as the real worker because the IDs are
+        # intentionally identical; the endpoint-scoped subscriber must remain empty.
+        async with AsyncExitStack() as isolation_stack:
+            isolation_provider = RuntimeFpmProvider(
+                require_prefill=False,
+                require_decode=True,
+                backend="vllm",
+                model_name="test-model",
+                runtime=planner_runtime,
+                state_source=sources,
+                namespace_source=sources,
+            )
+            await isolation_provider.async_init()
+            isolation_stack.push_async_callback(isolation_provider.shutdown)
+            for _ in range(20):
+                decoy_publisher.publish(
+                    dp_rank=0,
+                    scheduled_num_prefill_requests=0,
+                    scheduled_sum_prefill_tokens=0,
+                    scheduled_sum_prefill_kv_tokens=0,
+                    scheduled_num_decode_requests=1,
+                    scheduled_sum_decode_kv_tokens=999,
+                    queued_num_prefill_requests=0,
+                    queued_sum_prefill_tokens=0,
+                    queued_num_decode_requests=1,
+                    queued_sum_decode_kv_tokens=999,
+                    wall_time_secs=0.01,
+                )
+                await asyncio.sleep(0.05)
+                assert not isolation_provider.collect_fpm().decode
+
+        publisher = FpmDirectPublisher(worker_endpoint, worker_id, dp_size=1)
+        stack.callback(publisher.shutdown)
+        provider = RuntimeFpmProvider(
+            require_prefill=False,
+            require_decode=True,
+            backend="vllm",
+            model_name="test-model",
+            runtime=planner_runtime,
+            state_source=sources,
+            namespace_source=sources,
+        )
+        await provider.async_init()
+        stack.push_async_callback(provider.shutdown)
         planner = _DecodePlanner(
             None,
             config,
             _PlannerEnvironment(namespace, state, provider),
         )
+
         tick_input = None
         for _ in range(100):
-            decoy_publisher.publish(
-                dp_rank=0,
-                scheduled_num_prefill_requests=0,
-                scheduled_sum_prefill_tokens=0,
-                scheduled_sum_prefill_kv_tokens=0,
-                scheduled_num_decode_requests=1,
-                scheduled_sum_decode_kv_tokens=999,
-                queued_num_prefill_requests=0,
-                queued_sum_prefill_tokens=0,
-                queued_num_decode_requests=1,
-                queued_sum_decode_kv_tokens=999,
-                wall_time_secs=0.01,
-            )
             publisher.publish(
                 dp_rank=0,
                 scheduled_num_prefill_requests=0,
@@ -178,7 +197,6 @@ async def test_endpoint_fpm_reaches_planner_and_drives_scale_up(tmp_path, monkey
         observations = tick_input.fpm_observations
         assert observations.decode is not None
         assert (worker_id, 0) in observations.decode
-        assert (decoy_worker_id, 0) not in observations.decode
 
         scaling = PlannerScalingState(
             config,

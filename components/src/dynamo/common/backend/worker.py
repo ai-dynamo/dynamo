@@ -144,6 +144,7 @@ class WorkerConfig:
     route_to_encoder: bool = False
     media_decoder: Optional[MediaDecoder] = None
     media_fetcher: Optional[MediaFetcher] = None
+    # KV event/recovery ownership endpoint. None uses this worker's serving endpoint.
     kv_state_endpoint: Optional[str] = None
 
     @classmethod

@@ -176,8 +176,22 @@ impl DiscoveryMetadata {
     pub fn register_event_source(&mut self, instance: DiscoveryInstance) -> Result<()> {
         match instance.id() {
             DiscoveryInstanceId::EventSource(key) => {
-                self.event_sources.insert(key.to_path(), instance);
-                Ok(())
+                let path = key.to_path();
+                match self.event_sources.entry(path) {
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(instance);
+                        Ok(())
+                    }
+                    std::collections::hash_map::Entry::Occupied(entry)
+                        if entry.get() == &instance =>
+                    {
+                        Ok(())
+                    }
+                    std::collections::hash_map::Entry::Occupied(entry) => anyhow::bail!(
+                        "Event source incarnation '{}' cannot change its descriptor",
+                        entry.key()
+                    ),
+                }
             }
             DiscoveryInstanceId::Endpoint(_) => {
                 anyhow::bail!("Cannot register Endpoint instance as event source")
@@ -647,6 +661,23 @@ mod tests {
         let old = source(100);
         let current = source(205);
         metadata.register_event_source(old.clone()).unwrap();
+        metadata.register_event_source(old.clone()).unwrap();
+        let mut conflicting = old.clone();
+        let DiscoveryInstance::EventSource {
+            metadata: descriptor,
+            ..
+        } = &mut conflicting
+        else {
+            unreachable!()
+        };
+        *descriptor = serde_json::json!({"worker_id": 7, "dp_rank": 0, "changed": true});
+        assert!(
+            metadata
+                .register_event_source(conflicting)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot change its descriptor")
+        );
         metadata.register_event_source(current.clone()).unwrap();
 
         let query =

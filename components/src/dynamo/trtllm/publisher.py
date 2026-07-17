@@ -375,6 +375,10 @@ class Publisher:
     Note: The ZmqKvEventPublisher used here is the pure Python ZMQ publisher defined
     in this module, not the Rust-based KvEventPublisher from dynamo.llm (which is
     used in main.py as the worker-side subscriber from consolidator to NATS).
+
+    ``kv_state_endpoint`` selects the exact Dynamo endpoint that owns the published
+    KV event and recovery state. ``None`` maps KV state to the serving endpoint; it
+    does not change the endpoint used for request routing.
     """
 
     def __init__(
@@ -512,7 +516,7 @@ class Publisher:
                     kv_block_size=self.kv_block_size,
                     dp_rank=rank,
                     enable_local_indexer=self.enable_local_indexer,
-                    kv_state_endpoint=getattr(self, "kv_state_endpoint", None),
+                    kv_state_endpoint=self.kv_state_endpoint,
                 )
             logging.info(
                 f"Created {self.attention_dp_size} KV event publisher(s) for attention DP ranks"

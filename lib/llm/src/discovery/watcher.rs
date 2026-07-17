@@ -1143,25 +1143,17 @@ impl ModelWatcher {
                     self.manager
                         .deactivate_encoder_router_for_consumers(&model_name, worker_namespace);
                 }
-                Some(WorkerType::Decode)
-                | Some(WorkerType::Aggregated)
-                | Some(WorkerType::Encode)
-                | None => {
-                    // Decode-component teardown — and any surface-bearing worker
-                    // that built a pipeline via the model_type chain (including
-                    // an sglang multimodal encode front door, which registers a
-                    // prefill router just like a decode worker): always run the
-                    // waiter cleanup, regardless of whether `remove_worker_set`
-                    // found an entry. If a decode worker registered (creating a
-                    // `DecodeWaiting` activator entry) but `handle_add_helper`
-                    // later failed before `add_worker_set`, the WorkerSet is
-                    // absent here yet the stale `DecodeWaiting` still needs to be
-                    // cleared. The helper is state-safe
-                    // (`remove_if(|_, v| matches!(v, DecodeWaiting(_)))`) so
-                    // calling it on a key that's vacant or holds `PrefillReady`
-                    // is a no-op.
+                Some(WorkerType::Decode) => {
+                    // A decode registration may create a `DecodeWaiting`
+                    // activator before `handle_add_helper` installs its
+                    // WorkerSet. Always remove that waiter on teardown, even
+                    // when no WorkerSet was installed.
                     self.manager
                         .remove_decode_prefill_waiter(&model_name, worker_namespace);
+                    self.manager
+                        .remove_consumer_encoder_waiter(&model_name, worker_namespace);
+                }
+                Some(WorkerType::Aggregated) | Some(WorkerType::Encode) | None => {
                     self.manager
                         .remove_consumer_encoder_waiter(&model_name, worker_namespace);
                 }
@@ -1639,39 +1631,56 @@ impl ModelWatcher {
                 None
             };
 
-            // Create prefill chooser once if we're building pipelines
-            // Both chat and completions will share the same prefill chooser instance
+            // Only a typed Decode endpoint participates in the namespace-level
+            // P/D rendezvous. Aggregated and Encode endpoints are independent
+            // serving leaves and must not claim or perturb that pairing.
             let model_name = card.name().to_string();
-            let prefill_chooser = if needs_preprocessed_routing {
-                self.manager
-                    .register_prefill_router(&model_name, &namespace)
-                    .map(|rx| {
-                        // Create prefill-specific config with track_active_blocks disabled
-                        let mut prefill_config = router_config.kv_router_config.clone();
-                        prefill_config.router_track_active_blocks = false;
-                        // Prefill KV events are emitted by prefill workers; do not inherit
-                        // decode-only speculative hash mode.
-                        let prefill_enable_eagle = false;
-
-                        PrefillRouter::new(
-                            rx,
-                            self.manager.clone(),
-                            router_config.router_mode,
-                            card.kv_cache_block_size,
-                            Some(prefill_config),
-                            self.prefill_load_estimator.clone(),
-                            router_config.session_affinity_ttl_secs,
-                            model_name.clone(),
-                            namespace.clone(),
-                            prefill_enable_eagle,
-                            // Hand the monitor directly so the prefill Client can be attached
-                            // to it on activation (no namespace lookup).
-                            worker_monitor.clone(),
-                        )
-                    })
+            let prefill_receiver = if needs_preprocessed_routing
+                && effective_worker_type(card.worker_type, card.model_type) == WorkerType::Decode
+            {
+                match self
+                    .manager
+                    .register_prefill_router(&model_name, &namespace, &endpoint.id())
+                {
+                    Ok(receiver) => receiver,
+                    Err(error) => {
+                        tracing::error!(
+                            model_name,
+                            namespace,
+                            %error,
+                            "Refusing ambiguous endpoint-scoped P/D topology; ordinary serving remains enabled"
+                        );
+                        None
+                    }
+                }
             } else {
                 None
             };
+            // Chat and completions on this decode endpoint share one prefill chooser.
+            let prefill_chooser = prefill_receiver.map(|rx| {
+                // Create prefill-specific config with track_active_blocks disabled
+                let mut prefill_config = router_config.kv_router_config.clone();
+                prefill_config.router_track_active_blocks = false;
+                // Prefill KV events are emitted by prefill workers; do not inherit
+                // decode-only speculative hash mode.
+                let prefill_enable_eagle = false;
+
+                PrefillRouter::new(
+                    rx,
+                    self.manager.clone(),
+                    router_config.router_mode,
+                    card.kv_cache_block_size,
+                    Some(prefill_config),
+                    self.prefill_load_estimator.clone(),
+                    router_config.session_affinity_ttl_secs,
+                    model_name.clone(),
+                    namespace.clone(),
+                    prefill_enable_eagle,
+                    // Hand the monitor directly so the prefill Client can be attached
+                    // to it on activation (no namespace lookup).
+                    worker_monitor.clone(),
+                )
+            });
 
             let encoder_chooser = if needs_preprocessed_routing {
                 if supports_encoder_result_handoff(card) {

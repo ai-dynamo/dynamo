@@ -257,12 +257,16 @@ async fn run_membership_coordinator(
                 }
             }
             CoordinatorInput::Source(Some(event)) => {
-                reconcile_discovery_event(event, &resolution, &mut membership, &mut source_ids);
+                let stream_is_healthy =
+                    reconcile_discovery_event(event, &resolution, &mut membership, &mut source_ids);
                 publish_view(
                     &sender,
                     &mut lifecycle,
                     membership.view(&serving_endpoint, &configs),
                 );
+                if !stream_is_healthy {
+                    drop(source_stream.take());
+                }
             }
             CoordinatorInput::Source(None) => {
                 membership = KvSourceMembership::new();
@@ -321,9 +325,9 @@ fn reconcile_discovery_event(
     resolution: &KvStateEndpointResolution,
     membership: &mut KvSourceMembership,
     source_ids: &mut HashMap<u64, KvSourceId>,
-) {
+) -> bool {
     let KvStateEndpointResolution::Resolved(expected_endpoint) = resolution else {
-        return;
+        return true;
     };
     let expected_scope = EventScope::Endpoint {
         endpoint: expected_endpoint.clone(),
@@ -338,7 +342,7 @@ fn reconcile_discovery_event(
         })) => {
             if scope != expected_scope || topic != KV_EVENT_SUBJECT {
                 tracing::warn!(publisher_id, "Ignoring incorrectly scoped KV event source");
-                return;
+                return true;
             }
             let source = match serde_json::from_value::<KvEventSource>(metadata) {
                 Ok(source) => source,
@@ -347,7 +351,7 @@ fn reconcile_discovery_event(
                         membership.invalidate_descriptor(existing.clone());
                     }
                     tracing::warn!(publisher_id, %error, "Ignoring malformed KV event source");
-                    return;
+                    return true;
                 }
             };
             if source.kv_state_endpoint != *expected_endpoint || source.publisher_id != publisher_id
@@ -359,7 +363,7 @@ fn reconcile_discovery_event(
                     publisher_id,
                     "Ignoring KV event source with inconsistent attribution"
                 );
-                return;
+                return true;
             }
 
             let source_id = source.source_id();
@@ -370,7 +374,7 @@ fn reconcile_discovery_event(
                         publisher_id,
                         "KV publisher changed its immutable logical source attribution"
                     );
-                    return;
+                    return true;
                 }
             } else {
                 source_ids.insert(publisher_id, source_id);
@@ -385,16 +389,23 @@ fn reconcile_discovery_event(
             publisher_id,
         }))) => {
             if scope != expected_scope || topic != KV_EVENT_SUBJECT {
-                return;
+                return true;
             }
             let Some(source_id) = source_ids.remove(&publisher_id) else {
-                return;
+                return true;
             };
             membership.remove(&source_id);
         }
         Ok(DiscoveryEvent::Added(_)) | Ok(DiscoveryEvent::Removed(_)) => {}
-        Err(error) => tracing::error!(%error, "KV event-source discovery stream failed"),
+        Err(error) => {
+            tracing::error!(%error, "KV event-source discovery stream failed; rebinding");
+            *membership = KvSourceMembership::new();
+            source_ids.clear();
+            return false;
+        }
     }
+
+    true
 }
 
 fn publish_view(
@@ -662,6 +673,32 @@ mod tests {
         assert!(
             invalid.lifecycle_generation(&worker).unwrap()
                 > active.lifecycle_generation(&worker).unwrap()
+        );
+    }
+
+    #[test]
+    fn source_stream_error_clears_membership_and_requests_rebind() {
+        let serving = endpoint("generate");
+        let kv = endpoint("kv");
+        let configs = HashMap::from([(42, runtime_config(Some(kv.clone())))]);
+        let worker = WorkerWithDpRank::new(42, 4);
+        let source = source(&kv, 42, 100);
+        let mut membership = KvSourceMembership::new();
+        membership.add(source.clone()).unwrap();
+        let mut source_ids = HashMap::from([(source.publisher_id, source.source_id())]);
+
+        let stream_is_healthy = reconcile_discovery_event(
+            Err(anyhow::anyhow!("watch failed")),
+            &KvStateEndpointResolution::Resolved(kv),
+            &mut membership,
+            &mut source_ids,
+        );
+
+        assert!(!stream_is_healthy);
+        assert!(source_ids.is_empty());
+        assert_eq!(
+            membership.view(&serving, &configs).status(&worker),
+            Some(&KvSourceStatus::Missing)
         );
     }
 }

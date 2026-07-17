@@ -994,6 +994,9 @@ impl KvEventPublisher {
     ///         so compatible events within that list are still coalesced.
     ///         Use ``50`` to allow compatible tails to span lists for up to 50 ms.
     ///         Maximum allowed is 15_000 (15 seconds); larger values are capped.
+    ///     kv_state_endpoint: Optional endpoint that owns this publisher's KV event
+    ///         and recovery state. When None, KV state maps to ``endpoint``; this
+    ///         does not change the endpoint used for request routing.
     #[new]
     #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None, kv_state_endpoint=None))]
     #[allow(clippy::too_many_arguments)]

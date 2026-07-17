@@ -12,8 +12,8 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    GetWorkersRequest, KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError,
-    LowerTierIndexer, ThreadPoolIndexer, WorkerKvQueryResponse,
+    GetWorkersRequest, KvEventSender, KvIndexer, KvIndexerInterface, KvIndexerMetrics,
+    KvRouterError, LowerTierIndexer, ThreadPoolIndexer, WorkerKvQueryResponse,
 };
 use crate::protocols::*;
 
@@ -626,7 +626,7 @@ impl LocalKvIndexer {
 
     // Delegation methods to underlying KvIndexer
     /// Get a sender for `RouterEvent`s.
-    pub fn event_sender(&self) -> mpsc::Sender<RouterEvent> {
+    pub fn event_sender(&self) -> KvEventSender {
         self.indexer.event_sender()
     }
 

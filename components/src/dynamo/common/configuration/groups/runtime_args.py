@@ -25,6 +25,8 @@ class DynamoRuntimeConfig(ConfigBase):
 
     namespace: str
     endpoint: Optional[str] = None
+    # Exact endpoint that owns this worker's KV event and recovery state. None
+    # maps KV state to the serving endpoint and does not change request routing.
     kv_state_endpoint: Optional[str] = None
     discovery_backend: str
     request_plane: str
