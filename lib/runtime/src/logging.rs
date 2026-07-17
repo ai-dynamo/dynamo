@@ -1531,7 +1531,7 @@ fn targets_filter(config: &LoggingConfig, dyn_log: Option<&str>) -> Option<Targe
     for directive in dyn_directives {
         // Parsing as `Targets` is also the feature test for whether the
         // configured directive requires EnvFilter's dynamic span matching.
-        directive.parse::<Targets>().ok()?;
+        targets_compatible(directive)?;
         directives.push(directive.to_string());
     }
 
@@ -1544,9 +1544,9 @@ fn targets_filter(config: &LoggingConfig, dyn_log: Option<&str>) -> Option<Targe
 
     for (module, level) in &config.log_filters {
         let directive = format!("{module}={level}");
-        match directive.parse::<Targets>() {
-            Ok(_) => directives.push(directive),
-            Err(_) => match directive.parse::<Directive>() {
+        match targets_compatible(&directive) {
+            Some(()) => directives.push(directive),
+            None => match directive.parse::<Directive>() {
                 // Valid span or field directives require EnvFilter's dynamic
                 // matching, so do not silently drop a configured filter.
                 Ok(_) => return None,
@@ -1565,6 +1565,13 @@ fn targets_filter(config: &LoggingConfig, dyn_log: Option<&str>) -> Option<Targe
 
     directives.push("request_span=trace".to_string());
     directives.join(",").parse::<Targets>().ok()
+}
+
+/// `Targets` accepts bracketed span selectors as literal target names, while
+/// `EnvFilter` interprets them as dynamic span or field selectors. Bracketed
+/// directives therefore require the EnvFilter path even when Targets parses.
+fn targets_compatible(directive: &str) -> Option<()> {
+    (!directive.contains('[') && directive.parse::<Targets>().is_ok()).then_some(())
 }
 
 fn env_filter(config: &LoggingConfig) -> EnvFilter {
@@ -2001,11 +2008,35 @@ pub mod tests {
     }
 
     #[test]
+    fn span_selector_dyn_log_falls_back_to_env_filter() {
+        assert!(
+            targets_filter(
+                &LoggingConfig::default(),
+                Some("dynamo_runtime[request]=debug"),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn dynamic_log_filters_fall_back_to_env_filter() {
         let config = LoggingConfig {
             log_level: DEFAULT_FILTER_LEVEL.to_string(),
             log_filters: HashMap::from([(
                 "dynamo_runtime[request{model=foo}]".to_string(),
+                "debug".to_string(),
+            )]),
+        };
+
+        assert!(targets_filter(&config, None).is_none());
+    }
+
+    #[test]
+    fn span_selector_log_filters_fall_back_to_env_filter() {
+        let config = LoggingConfig {
+            log_level: DEFAULT_FILTER_LEVEL.to_string(),
+            log_filters: HashMap::from([(
+                "dynamo_runtime[request]".to_string(),
                 "debug".to_string(),
             )]),
         };
