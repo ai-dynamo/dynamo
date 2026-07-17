@@ -31,7 +31,11 @@ impl GrpcChannelPool {
         let tonic_endpoint = Endpoint::from_shared(endpoint_label.clone()).map_err(|error| {
             invalid_argument(format!("invalid {peer} endpoint after validation: {error}"))
         })?;
-        let deadline = Instant::now() + transport.startup_deadline;
+        let deadline = checked_instant_add(
+            Instant::now(),
+            transport.startup_deadline,
+            "gRPC startup deadline",
+        )?;
         let first = connect_until_ready(
             peer,
             tonic_endpoint.clone(),
@@ -164,8 +168,25 @@ async fn connect_until_ready(
                 last_error.as_deref(),
             ));
         }
-        sleep_until((Instant::now() + transport.retry_interval).min(deadline)).await;
+        let retry_at = checked_instant_add(
+            Instant::now(),
+            transport.retry_interval,
+            "gRPC retry interval",
+        )?;
+        sleep_until(retry_at.min(deadline)).await;
     }
+}
+
+fn checked_instant_add(
+    instant: Instant,
+    duration: Duration,
+    setting: &str,
+) -> Result<Instant, DynamoError> {
+    instant.checked_add(duration).ok_or_else(|| {
+        invalid_argument(format!(
+            "{setting} {duration:?} exceeds the supported monotonic clock range"
+        ))
+    })
 }
 
 fn startup_timeout(
