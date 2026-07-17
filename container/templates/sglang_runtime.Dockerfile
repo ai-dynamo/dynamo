@@ -182,7 +182,7 @@ RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')
 {% if device == "cuda" %}
 # Apply pinned SGLang hotfixes to the source tree carried by the upstream runtime
 # image and assert the vendored patches contain no test-path hunks.
-RUN --mount=type=bind,source=./container/deps/sglang_patches,target=/tmp/sglang_patches \
+RUN --mount=type=bind,source=./container/deps/sglang/patches,target=/tmp/sglang_patches \
     set -eu; \
     SGLANG_DIR="/sgl-workspace/sglang"; \
     python3 -c "import importlib.util, os; spec = importlib.util.find_spec('sglang'); assert spec and spec.origin; assert os.path.realpath(spec.origin).startswith('${SGLANG_DIR}/'), spec.origin"; \

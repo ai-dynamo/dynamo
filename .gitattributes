@@ -13,7 +13,7 @@
 *.mp4               binary
 
 # Unified-diff context lines in vendored patches can look like blank trailing whitespace.
-container/deps/sglang_patches/*.patch whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
+container/deps/sglang/patches/*.patch whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
 
 # Exclude test data files from linguist language detection
 lib/llm/tests/data/** linguist-vendored
