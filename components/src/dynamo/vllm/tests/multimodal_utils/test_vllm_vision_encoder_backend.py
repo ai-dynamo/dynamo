@@ -14,6 +14,7 @@ import torch
 
 from dynamo.vllm.multimodal_utils.vision_encoder_backend import (
     Preprocessed,
+    Qwen2VLImageEncoding,
     VisionEncoderBackend,
 )
 
@@ -97,5 +98,14 @@ def test_default_attrs_and_close_noop():
     assert e.buckets is None
     assert e.max_batch_cost is None
     assert e.preprocess_concurrency == 0
+    assert e.output_format == "tensor"
     assert e.image_token_id == 151655
     assert e.close() is None
+
+
+def test_qwen_encoding_is_frozen_and_keeps_grid_metadata():
+    encoding = Qwen2VLImageEncoding(torch.zeros((1, 4)), (1, 2, 2))
+
+    assert encoding.grid_thw == (1, 2, 2)
+    with pytest.raises(Exception):
+        encoding.grid_thw = (1, 4, 4)  # type: ignore[misc]

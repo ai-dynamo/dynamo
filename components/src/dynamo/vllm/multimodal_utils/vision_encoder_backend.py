@@ -6,15 +6,15 @@
 ``VisionEncoderBackend`` is the **single surface an encoder author implements**.
 It is a pure policy + compute backend: no threads, no futures, no event loop.
 Dynamo owns all the *driving* — the dedicated actor thread, cross-request
-coalescing, the embeds splice, and the lifecycle — via ``ThreadedMicroBatcher``
+coalescing, engine adaptation, and the lifecycle — via ``ThreadedMicroBatcher``
 (the generic cross-request batcher) and ``AsyncVisionEncoder`` (the async
 request-API glue). This module defines only the contract those drivers call.
 
 The encoder runs in the **same process** as the aggregated vLLM worker (no
-separate encode worker, no NIXL transfer): it turns image inputs into the
-visual-token embeddings for each image, and Dynamo splices those embeds into a
-mixed ``EmbedsPrompt`` at the placeholder positions (see
-``embed_assembler.build_mixed_embeds``) for a text-only LM.
+separate encode worker, no NIXL transfer). It declares the semantic shape of its
+artifact through ``output_format``; the resolved downstream decoder selects the
+engine adapter. Text-only decoders use a mixed ``EmbedsPrompt``. Qwen2/2.5-VL
+decoders use vLLM's native external multimodal ``TokensPrompt`` route.
 
 Division of labour (author vs. Dynamo):
 
@@ -32,18 +32,21 @@ Division of labour (author vs. Dynamo):
   there is no preprocess phase — ``preprocess`` is never called and raws go
   straight to ``forward_batch``. A mismatch (overridden ``preprocess`` with
   ``preprocess_concurrency`` left at ``0``) fails fast at startup.
-- ``forward_batch(items, target_bucket=None) -> list[torch.Tensor]`` — **actor
+- ``forward_batch(items, target_bucket=None) -> EncoderBatchOutput`` — **actor
   thread, serialized.** ``items`` are a cost-bounded batch (summed ``cost`` within
   the budget). Fence (stream event + sync) and **copy outputs to CPU** before
-  returning, so results are safe to consume from another thread and splice
-  directly. Returns one ``(n_visual_tokens, lm_hidden_dim)`` **CPU** tensor per
-  item, in input order. ``target_bucket`` is reserved for CUDA-graph batching,
-  once supported (the ladder rung to pad to); it is ``None`` until then.
+  returning, so results are safe to consume from another thread. Returns one
+  artifact per item, in input order. ``"tensor"`` producers return CPU tensors;
+  ``"qwen2_vl_projected_grid"`` producers return ``Qwen2VLImageEncoding``.
+  ``target_bucket`` is reserved for CUDA-graph batching, once supported (the
+  ladder rung to pad to); it is ``None`` until then.
 - ``close()`` — actor thread, on teardown. Release any thread-affine resources.
 
 Attributes read **once at setup** (never per-request):
 
-- ``image_token_id`` — the token id marking image positions in the prompt;
+- ``output_format`` — the semantic artifact kind. It does not choose the engine
+  prompt route; Dynamo selects that from the resolved decoder.
+- ``image_token_id`` — for ``"tensor"`` output, the token id marking image positions;
   **hardcode it for your model** (e.g. ``151655`` for Qwen3-VL's ``<|image_pad|>``).
   Dynamo uses it to locate each image span for the splice.
 - ``max_batch_cost`` — the scalar dispatch ceiling the batcher packs up to; a
@@ -65,7 +68,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Generic, List, Optional, Sequence, TypeVar
+from typing import Generic, List, Literal, Optional, Sequence, TypeAlias, TypeVar
 
 import torch
 
@@ -93,18 +96,38 @@ class Preprocessed(Generic[ItemT]):
     cost: int = 1
 
 
+EncoderOutputFormat: TypeAlias = Literal["tensor", "qwen2_vl_projected_grid"]
+
+
+@dataclass(frozen=True)
+class Qwen2VLImageEncoding:
+    """Projected Qwen2/2.5-VL rows and their pre-merge patch grid.
+
+    Rows are in canonical ``(t, merged_h, merged_w)`` raster order. A Qwen2.5
+    producer must undo the tower's window permutation before returning.
+    """
+
+    projected: torch.Tensor
+    grid_thw: tuple[int, int, int]
+
+
+EncoderOutput: TypeAlias = torch.Tensor | Qwen2VLImageEncoding
+EncoderBatchOutput: TypeAlias = list[torch.Tensor] | list[Qwen2VLImageEncoding]
+
+
 class VisionEncoderBackend(ABC, Generic[RawT, ItemT]):
     """Author-written, in-process vision encoder contract.
 
     A pure policy + compute backend — no threads, no futures. Dynamo drives it
     on a dedicated actor thread (``ThreadedMicroBatcher``) and exposes the async
     request API (``AsyncVisionEncoder``). Subclasses implement ``build`` and
-    ``forward_batch`` and set ``image_token_id``; ``preprocess`` (default identity
-    passthrough), ``max_batch_cost``, ``buckets``, and ``preprocess_concurrency``
-    are overridden only as needed.
+    ``forward_batch`` and declare ``output_format``. Tensor producers also set
+    ``image_token_id``. ``preprocess`` (default identity passthrough),
+    ``max_batch_cost``, ``buckets``, and ``preprocess_concurrency`` are overridden
+    only as needed.
     """
 
-    #: Image placeholder token id — **hardcode it for your model** (e.g. ``151655``
+    #: Tensor-output placeholder token id — **hardcode it for your model** (e.g. ``151655``
     #: for Qwen3-VL's ``<|image_pad|>``; resolve it from your tokenizer offline if
     #: unsure). Dynamo uses it to locate each image span for the splice. Declared
     #: without a default so a backend that forgets to set it fails fast at startup.
@@ -129,6 +152,10 @@ class VisionEncoderBackend(ABC, Generic[RawT, ItemT]):
     #: encoder needs off-loop prep is a property of the encoder, so it lives here;
     #: the driver takes an optional override for tuning.
     preprocess_concurrency: int = 0
+
+    #: Producer-semantic artifact declaration. The downstream decoder still
+    #: selects the concrete engine adapter; this only validates compatibility.
+    output_format: EncoderOutputFormat = "tensor"
 
     # ---- subclass contract -------------------------------------------------
 
@@ -158,14 +185,14 @@ class VisionEncoderBackend(ABC, Generic[RawT, ItemT]):
     @abstractmethod
     def forward_batch(
         self, items: List[ItemT], target_bucket: Optional[int] = None
-    ) -> List[torch.Tensor]:
-        """Encode one cost-bounded batch (actor thread); one tensor per item, in order.
+    ) -> EncoderBatchOutput:
+        """Encode one cost-bounded batch; one artifact per item, in order.
 
         Fence (stream event + sync) and **copy outputs to CPU** before returning,
-        so results are safe to consume from another thread and splice directly.
-        Return one ``(n_visual_tokens, lm_hidden_dim)`` **CPU** tensor per item, in
-        input order. ``target_bucket`` is reserved for CUDA-graph batching, once
-        supported (the ladder rung to pad to), and is ``None`` until then.
+        so results are safe to consume from another thread. Tensor backends return
+        ``(n_visual_tokens, lm_hidden_dim)`` rows. Native Qwen backends return
+        ``Qwen2VLImageEncoding``. ``target_bucket`` is reserved for CUDA-graph
+        batching and is ``None`` until then.
         """
         ...
 

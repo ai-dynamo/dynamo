@@ -733,9 +733,9 @@ class DynamoVllmConfig(ConfigBase):
         """Validate the aggregated CustomEncoder configuration.
 
         The encoder runs in-process in a single aggregated worker on the
-        token-in/token-out path and produces image embeds for the mixed
-        EmbedsPrompt, so it is a multimodal, aggregated-only, token-mode
-        component. Enforce those here (fail fast) instead of silently bypassing
+        token-in/token-out path and produces decoder-adapted image artifacts, so
+        it is a multimodal, aggregated-only, token-mode component. Enforce those
+        here (fail fast) instead of silently bypassing
         the multimodal gate at request time, no-op'ing in a decode worker that
         never reaches the custom-encoder branch, or loading the encoder in
         --use-vllm-tokenizer text mode where it is never invoked.
