@@ -27,6 +27,7 @@ kube = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
 rcgen = { workspace = true }
+reqwest = { workspace = true }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 serde = { workspace = true }
@@ -43,6 +44,9 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt"] }
 uuid = { workspace = true }
 validator = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
 
 [package.metadata.cargo-machete]
 ignored = ["prost"]

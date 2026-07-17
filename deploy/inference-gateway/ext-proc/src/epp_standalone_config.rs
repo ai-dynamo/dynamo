@@ -11,9 +11,11 @@
 //! [`EppStandaloneConfig::validate_config`] for field and cross-field checks.
 
 use validator::Validate;
+use validator::ValidationError;
 
 const DEFAULT_KV_EVENT_PORT: u16 = 5557;
 const DEFAULT_SELECTOR_THREADS: usize = 4;
+const DEFAULT_VLLM_RENDER_TIMEOUT_MS: u64 = 5_000;
 
 /// Environment variable that selects the EPP operating mode.
 pub const DYN_EPP_MODE: &str = "DYN_EPP_MODE";
@@ -69,6 +71,13 @@ pub struct EppStandaloneConfig {
     /// Served/catalog model identity used to group discovered workers.
     #[validate(length(min = 1, message = "DYN_MODEL_NAME is required"))]
     pub model_name: String,
+    /// Base URL of the vLLM renderer used to tokenize chat requests.
+    #[validate(length(min = 1, message = "DYN_EPP_VLLM_RENDER_URL is required"))]
+    #[validate(custom(function = "validate_vllm_render_url"))]
+    pub vllm_render_url: String,
+    /// Deadline for calls to the vLLM renderer.
+    #[validate(range(min = 1, message = "DYN_EPP_VLLM_RENDER_TIMEOUT_MS must be >= 1"))]
+    pub vllm_render_timeout_ms: u64,
     /// KV-cache block size; MUST equal the inference engine block size.
     #[validate(range(min = 1, message = "DYN_KV_CACHE_BLOCK_SIZE must be >= 1"))]
     pub block_size: u32,
@@ -108,6 +117,9 @@ impl EppStandaloneConfig {
             inference_pool_name: trimmed(get("DYN_EPP_INFERENCE_POOL_NAME")).unwrap_or_default(),
             namespace: trimmed(get("POD_NAMESPACE")).unwrap_or_default(),
             model_name: trimmed(get("DYN_MODEL_NAME")).unwrap_or_default(),
+            vllm_render_url: trimmed(get("DYN_EPP_VLLM_RENDER_URL")).unwrap_or_default(),
+            vllm_render_timeout_ms: opt_parse::<u64>(get, "DYN_EPP_VLLM_RENDER_TIMEOUT_MS")?
+                .unwrap_or(DEFAULT_VLLM_RENDER_TIMEOUT_MS),
             block_size: opt_parse::<u32>(get, "DYN_KV_CACHE_BLOCK_SIZE")?.unwrap_or(0),
             kv_event_port: opt_parse::<u16>(get, "DYN_EPP_KV_EVENT_PORT")?
                 .unwrap_or(DEFAULT_KV_EVENT_PORT),
@@ -121,6 +133,19 @@ impl EppStandaloneConfig {
     pub fn validate_config(&self) -> anyhow::Result<()> {
         self.validate()
             .map_err(|e| anyhow::anyhow!("invalid {STANDALONE_MODE} EPP config: {e}"))
+    }
+}
+
+fn validate_vllm_render_url(value: &str) -> Result<(), ValidationError> {
+    let valid_url = reqwest::Url::parse(value)
+        .map(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
+        .unwrap_or(false);
+    if valid_url {
+        Ok(())
+    } else {
+        let mut error = ValidationError::new("vllm_render_url_invalid");
+        error.message = Some("DYN_EPP_VLLM_RENDER_URL must be an absolute HTTP(S) URL".into());
+        Err(error)
     }
 }
 
@@ -205,6 +230,7 @@ mod tests {
             ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
             ("POD_NAMESPACE", "inference"),
             ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+            ("DYN_EPP_VLLM_RENDER_URL", "http://vllm-render:8000"),
             ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
         ])
         .expect("config should parse");
@@ -214,6 +240,8 @@ mod tests {
         assert_eq!(cfg.inference_pool_name, "vllm-qwen-pool");
         assert_eq!(cfg.namespace, "inference");
         assert_eq!(cfg.model_name, "Qwen/Qwen3-0.6B");
+        assert_eq!(cfg.vllm_render_url, "http://vllm-render:8000");
+        assert_eq!(cfg.vllm_render_timeout_ms, DEFAULT_VLLM_RENDER_TIMEOUT_MS);
         assert_eq!(cfg.block_size, 16);
         assert_eq!(cfg.kv_event_port, DEFAULT_KV_EVENT_PORT);
         assert!(cfg.replay_port.is_none());
@@ -228,6 +256,7 @@ mod tests {
             parse_cfg(&[
                 ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
                 ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+                ("DYN_EPP_VLLM_RENDER_URL", "http://vllm-render:8000"),
                 ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
             ])
             .is_err()
@@ -242,6 +271,7 @@ mod tests {
             ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
             ("POD_NAMESPACE", "inference"),
             ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+            ("DYN_EPP_VLLM_RENDER_URL", "http://vllm-render:8000"),
             ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
         ])
         .expect("peer service config should parse");
@@ -256,6 +286,7 @@ mod tests {
             parse_cfg(&[
                 ("POD_NAMESPACE", "inference"),
                 ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+                ("DYN_EPP_VLLM_RENDER_URL", "http://vllm-render:8000"),
                 ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
             ])
             .is_err()
@@ -269,6 +300,7 @@ mod tests {
                 ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
                 ("POD_NAMESPACE", "inference"),
                 ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+                ("DYN_EPP_VLLM_RENDER_URL", "http://vllm-render:8000"),
                 ("DYN_KV_CACHE_BLOCK_SIZE", "0"),
             ])
             .is_err()
@@ -281,6 +313,7 @@ mod tests {
             ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
             ("POD_NAMESPACE", "inference"),
             ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+            ("DYN_EPP_VLLM_RENDER_URL", "http://vllm-render:8000"),
             ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
             ("DYN_EPP_KV_EVENT_REPLAY_PORT", "5558"),
         ])
@@ -309,8 +342,51 @@ mod tests {
                 ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
                 ("POD_NAMESPACE", "inference"),
                 ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+                ("DYN_EPP_VLLM_RENDER_URL", "http://vllm-render:8000"),
                 ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
                 ("DYN_EPP_MAX_NUM_BATCHED_TOKENS", "0"),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn vllm_render_url_is_required() {
+        assert!(
+            parse_cfg(&[
+                ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
+                ("POD_NAMESPACE", "inference"),
+                ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+                ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn vllm_render_url_must_be_http() {
+        assert!(
+            parse_cfg(&[
+                ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
+                ("POD_NAMESPACE", "inference"),
+                ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+                ("DYN_EPP_VLLM_RENDER_URL", "unix:///tmp/vllm.sock"),
+                ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn vllm_render_timeout_must_be_positive() {
+        assert!(
+            parse_cfg(&[
+                ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
+                ("POD_NAMESPACE", "inference"),
+                ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+                ("DYN_EPP_VLLM_RENDER_URL", "http://vllm-render:8000"),
+                ("DYN_EPP_VLLM_RENDER_TIMEOUT_MS", "0"),
+                ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
             ])
             .is_err()
         );
