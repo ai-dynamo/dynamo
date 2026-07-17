@@ -6,7 +6,35 @@
 import logging
 import os
 
+from gpu_memory_service.common.utils import ENV_LOG_LEVEL
+
 logger = logging.getLogger(__name__)
+
+
+def configure_gms_worker_logging() -> None:
+    """Route gpu_memory_service logs through vLLM's handler in worker subprocesses.
+
+    vLLM configures only the "vllm" logger, so gpu_memory_service.* INFO is
+    silently dropped in EngineCore worker processes. Copy vLLM's handlers onto
+    the "gpu_memory_service" parent logger so every child inherits them via
+    propagation, at DYN_GMS_LOG_LEVEL or vLLM's own level. Idempotent.
+    """
+    gms_root = logging.getLogger("gpu_memory_service")
+    if gms_root.handlers:
+        return
+    import vllm.logger  # noqa: F401 — ensure vLLM configured logging first
+
+    vllm_logger = logging.getLogger("vllm")
+    for handler in vllm_logger.handlers:
+        gms_root.addHandler(handler)
+    level = os.environ.get(ENV_LOG_LEVEL)
+    if level and hasattr(logging, level):
+        gms_root.setLevel(getattr(logging, level))
+    elif vllm_logger.level != logging.NOTSET:
+        gms_root.setLevel(vllm_logger.level)
+    else:
+        gms_root.setLevel(logging.INFO)
+    gms_root.propagate = False
 
 
 def configure_gms_lock_mode(engine_args) -> None:
