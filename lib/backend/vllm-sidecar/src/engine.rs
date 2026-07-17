@@ -41,13 +41,26 @@ impl VllmSidecarEngine {
         }
     }
 
-    pub fn from_env() -> Result<(Self, WorkerConfig), DynamoError> {
-        Self::from_parsed(<Args as clap::Parser>::parse())
-    }
-
-    pub fn from_args(argv: Vec<String>) -> Result<(Self, WorkerConfig), DynamoError> {
-        let args = <Args as clap::Parser>::try_parse_from(argv)
-            .map_err(|error| client::invalid_argument(error.to_string()))?;
+    pub fn from_args(argv: Option<Vec<String>>) -> Result<(Self, WorkerConfig), DynamoError> {
+        let parsing_process_args = argv.is_none();
+        let parsed = match argv {
+            Some(argv) => <Args as clap::Parser>::try_parse_from(argv),
+            None => <Args as clap::Parser>::try_parse(),
+        };
+        let args = match parsed {
+            Ok(args) => args,
+            Err(error)
+                if parsing_process_args
+                    && matches!(
+                        error.kind(),
+                        clap::error::ErrorKind::DisplayHelp
+                            | clap::error::ErrorKind::DisplayVersion
+                    ) =>
+            {
+                error.exit()
+            }
+            Err(error) => return Err(client::invalid_argument(error.to_string())),
+        };
         Self::from_parsed(args)
     }
 
