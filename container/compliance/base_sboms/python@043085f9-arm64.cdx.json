@@ -1,0 +1,6075 @@
+{
+  "$schema": "http://cyclonedx.org/schema/bom-1.7.schema.json",
+  "bomFormat": "CycloneDX",
+  "components": [
+    {
+      "bom-ref": "27a7ad9728454466",
+      "name": "/usr/lib/aarch64-linux-gnu/engines-3/afalg.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "46c8180b644265f5",
+      "name": "/usr/lib/aarch64-linux-gnu/engines-3/loader_attic.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "91e674b27c4a2ea0",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ANSI_X3.110.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "629a13fa0f069d47",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ARMSCII-8.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "53823d1f7043d11c",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ASMO_449.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7d16addf54cd7420",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/BIG5.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c8be1f5a1c474f08",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/BIG5HKSCS.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7610a6da8915f440",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/BRF.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "59e51351882d3461",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP10007.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "46ebba0e8de0e3c2",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP1125.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5a43d0e11e78c53c",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP1250.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "256f00c07d3fdf9a",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP1251.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f46ac30e0c73ec30",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP1252.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8b6d9157f468575d",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP1253.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b8eb54e53b04ee8e",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP1254.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "97bbf77f05b08cb2",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP1255.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ed3349dda3f5983f",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP1256.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1cee9de782a86741",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP1257.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "407bbdbcd2afe2eb",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP1258.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "89f30ebb1074dca8",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP737.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0f5d8b267ab48f17",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP770.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "10de5a0cbb74aace",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP771.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f861bb3a22c8d5c2",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP772.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b498d2cf05bebc6b",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP773.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9f898a4c3d9b58e2",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP774.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "05dd21b2c5bbaab8",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP775.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "aaddac9fe2ea04a2",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/CP932.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9fecd989645ed9b7",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/CSN_369103.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1d01267f1215b86e",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/CWI.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9d5b08bb312ad92a",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/DEC-MCS.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "05a74b1b0a6339da",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-AT-DE-A.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d8f17ed45821d0e4",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-AT-DE.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "90812c8ce033c165",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-CA-FR.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5f83e115652c871c",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-DK-NO-A.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "064c565b4103f23c",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-DK-NO.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "003c7a0ac293c77a",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-ES-A.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "41b84b6e8e4c4fc7",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-ES-S.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1f9f8b0368f3a467",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-ES.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "41a2f6b2e56aca2f",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-FI-SE-A.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "beb8cbd5702ae81d",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-FI-SE.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "cee89defcdd92fa2",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-FR.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6f6004f6c27d3c06",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-IS-FRISS.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "75969852283c8125",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-IT.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9deebc193bcdf34a",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-PT.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bd99623099a2fe96",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-UK.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a473e03fb82c6861",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/EBCDIC-US.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e2c67d586785cf37",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ECMA-CYRILLIC.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "dc2aecf658f63315",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/EUC-CN.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5257cb2662cd4e0c",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/EUC-JISX0213.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e86eeab29d69cb20",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/EUC-JP-MS.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4a07c0dc1bdcc176",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/EUC-JP.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d84ccbf449371abe",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/EUC-KR.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4e5ff38954cd822b",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/EUC-TW.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bab8fa8bd4a27736",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/GB18030.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bdecd10a4b08016c",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/GBBIG5.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7f6a748e6917971b",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/GBGBK.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f2bfd30a79af6492",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/GBK.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ae05a233aedb5ae1",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/GEORGIAN-ACADEMY.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b17d7c5750fa5f00",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/GEORGIAN-PS.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "75e426091ae1a745",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/GOST_19768-74.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "53134782d26f03d4",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/GREEK-CCITT.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f7045c37d754fe34",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/GREEK7-OLD.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3b13ef73f83120f4",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/GREEK7.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7b869a6ac84a944f",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/HP-GREEK8.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6fe5237cd3c1a2ce",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/HP-ROMAN8.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8e705a7fc0df3866",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/HP-ROMAN9.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c8e7478cf5d4b3c7",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/HP-THAI8.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ab324c0bea36aa93",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/HP-TURKISH8.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "63517df8e4954f92",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM037.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0fbeed31149352af",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM038.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "94e5feb35ccacd02",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1004.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "91abe3396b528913",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1008.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2f5309a60467d011",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1008_420.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "cb1ad70a63fb8d47",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1025.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9f539dd610081af1",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1026.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ad9e93691c1d1cea",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1046.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4b21c4e28a8f64eb",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1047.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "91fca15f57c55ccc",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1097.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d1b3583a69e8a5f5",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1112.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4e5de32baafa8b38",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1122.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f8cbab916bc17b68",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1123.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f8626cae31c306bb",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1124.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d897f3f7acf2f8c8",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1129.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9998aa8eb2013c06",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1130.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a56dd12aa48766da",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1132.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8134eb5cc2dafcb9",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1133.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5a25bad96fcff355",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1137.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "501ea559250e1982",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1140.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f44dfb2853081316",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1141.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "07c3d57cb1b10e86",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1142.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a850eb397015a505",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1143.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6a0d079f55c8e411",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1144.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "082afba1c6c1cabe",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1145.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "db29dafe1a06ae50",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1146.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3d9a501b4b19bba7",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1147.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "db27a82dd1e519b2",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1148.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4e411000ebacc5c0",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1149.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "724d837f26f99473",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1153.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "82e5eff8fe55a693",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1154.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "44860c122d1f0c24",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1155.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "af9bbdeb80d46d81",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1156.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "20464e5c8e9d7aae",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1157.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c45674ca37a51847",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1158.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "800ff9368ae0ac52",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1160.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "852521d18fc0102e",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1161.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9f714432712b6446",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1162.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "481834caf417eb7c",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1163.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c737118b92f42ae2",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1164.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d7f1b58dd713f701",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1166.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "807eda30c4801f6f",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1167.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "45cc67b85ee4f482",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM12712.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5269dcc4565ca914",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1364.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7a121b99f057d8c5",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1371.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6c5f7ff6f705c5e9",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1388.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c441f8629d4235a1",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1390.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6b857d0c497a9426",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM1399.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "949dfab68996414a",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM16804.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5f23bbd451195451",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM256.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "626402ba7fc4ea31",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM273.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bf589ff759e2b783",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM274.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "14db1d0b2dc5b3b3",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM275.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8645ab2a8c2e3e40",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM277.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3547f365a76aba21",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM278.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a32c0955a376322c",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM280.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "12fabb569ce86fd8",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM281.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "909b73a93d7a2bf1",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM284.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b820674c43664642",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM285.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c39fd4cf0b324147",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM290.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "87914c309fd51a6e",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM297.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6eb28978e730f9a2",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM420.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "68d3cf2d1fc3cd64",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM423.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "fc099f6b30c45400",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM424.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bc774c5f5d1fe059",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM437.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a69641850fe5e83a",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM4517.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c2f07712a6d5621a",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM4899.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "09fcab7dcaa7e9f7",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM4909.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7113465c1ce6a324",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM4971.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d3b25dc9ac8ed475",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM500.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ed1b9b2f3483023d",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM5347.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0d2a602adb1d4e13",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM803.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "693352c5e972a117",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM850.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5c51c5c6b0298de2",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM851.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b7f39918faac1f78",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM852.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "28ca3f6b0d3e9575",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM855.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e584677311481bd4",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM856.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "42f4ad09c24bb239",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM857.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8466a9cf11488508",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM858.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f5fd09d837062b5f",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM860.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a8c2087aa9f50311",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM861.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "63a8357bf35f68cc",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM862.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bff6f7c7f5475f79",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM863.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9ba0b953fd72e9ab",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM864.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "97ff5dcfa6fffa4d",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM865.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "929eb3e621a27978",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM866.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "99fdb37b830b1531",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM866NAV.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7872ae3234017ae2",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM868.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e5252e864496b833",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM869.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a894b845b7799a51",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM870.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8d9a3e70aaf3d2db",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM871.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "547e7541b9518b46",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM874.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e86cfd3e1ccb4fb6",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM875.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5e3406f6fb4dab0a",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM880.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e972a9157b6fa9e3",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM891.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2f753132bdf80a82",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM901.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b0ad7649075912c3",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM902.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "60191dcfc08e432f",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM903.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b835352d774ff4a9",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM9030.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c4f6dc05aacb8148",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM904.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4f3d977c6992ca20",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM905.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "65a54f2597a81269",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM9066.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2e0a7f235097fa3a",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM918.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4104ed8649f7d3cc",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM921.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "54746e801cdb9e8f",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM922.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a9a0e0f37771ec0a",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM930.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ed781636a84e1789",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM932.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c9ddcdcb5c166ce3",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM933.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b36a823666452292",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM935.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b6210b94224f8dc6",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM937.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "91d71b8c4ca2869f",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM939.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "10ee37e49682545c",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM943.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "11f7298c3dd3968d",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IBM9448.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2d11626d72c341d5",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/IEC_P27-1.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b33955689e3aafe1",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/INIS-8.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d841b64ac723ccf9",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/INIS-CYRILLIC.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2cf7375e11a0a895",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/INIS.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3edb935321561ac9",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISIRI-3342.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a2c715f86b55ccba",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO-2022-CN-EXT.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "eb4f594cdfae944f",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO-2022-CN.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d1bd1a1778a43093",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO-2022-JP-3.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "271673f72d660f26",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO-2022-JP.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "eea2156e2161bed5",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO-2022-KR.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1e49bee77f46291a",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO-IR-197.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "efae51eb28393eb4",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO-IR-209.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c1a2a749adc5d7c9",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO646.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f0a3b28ae2eda589",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-1.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2e9413be96d53484",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-10.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7d6724f6c9949762",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-11.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7377cc9ab8fa2d7f",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-13.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "32a5d4d41d601230",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-14.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8c588d8b81d733f1",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-15.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "129702294ae08279",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-16.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9cbad33f4f949745",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-2.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c0f28d5ecc36ee71",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-3.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f47503fe16832ad9",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-4.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2173cd21ae3a08c1",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-5.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d9824b33e00762a8",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-6.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "dbb5f89eb4a72745",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-7.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c3c04e17b297a257",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-8.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a3329ed8be7e716a",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-9.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "210dc1ea01f342e9",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO8859-9E.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "decc9bdf5b46a051",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO_10367-BOX.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "25de0b5b8f156c7c",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO_11548-1.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bd4829375ca72e47",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO_2033.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "61816751a0cb2328",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO_5427-EXT.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "fdcd21443c4f297d",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO_5427.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8b0943d46f8ef4c2",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO_5428.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f9af92957406a1cd",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO_6937-2.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8a1c8c3181a793fd",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/ISO_6937.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "148ae9d7c1499e21",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/JOHAB.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "fcae4730bf68f938",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/KOI-8.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3e594fa55aa6defa",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/KOI8-R.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a9fbd2e84a5fd00e",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/KOI8-RU.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b9888fa6c8c91b1a",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/KOI8-T.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "27758a8121796213",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/KOI8-U.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7edf1e11d0929bf9",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/LATIN-GREEK-1.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0f2060c45c77ca1b",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/LATIN-GREEK.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "267170987c998a24",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/MAC-CENTRALEUROPE.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4762a1f04f3b2ee5",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/MAC-IS.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0a8c9582fc2250f2",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/MAC-SAMI.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d860efb50110b315",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/MAC-UK.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "317bb0bb8822d520",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/MACINTOSH.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9bf3740398746906",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/MIK.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e73bd510ea9a9928",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/NATS-DANO.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f985c9cacecbff11",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/NATS-SEFI.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ef18848ac0c6a281",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/PT154.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "166f281103bc157e",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/RK1048.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5be340cae91b7cf4",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/SAMI-WS2.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "37ed5d31f95de4c3",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/SHIFT_JISX0213.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "75c012eda0646f3d",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/SJIS.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b6b1585356bedafc",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/T.61.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b39b3462c7ed8647",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/TCVN5712-1.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4ef3acdff1d3373f",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/TIS-620.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0284126bc8d7a9fe",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/TSCII.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ece5d4239c6c61a6",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/UHC.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3769db2065042d04",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/UNICODE.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5a0aa770d4223538",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/UTF-16.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f92f0b1e4b11fcc6",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/UTF-32.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0550cfae129a8980",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/UTF-7.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f5053ec10b024de9",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/VISCII.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5b4f20cb85f7f5ae",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/gconv-modules",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b2cd200e11b8448b",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/gconv-modules.cache",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7106c9c71c0c10be",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/gconv-modules.d/gconv-modules-extra.conf",
+      "type": "file"
+    },
+    {
+      "bom-ref": "798d0c45fa2caaac",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/libCNS.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2fddc886386423b6",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/libGB.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f3fca3cf39830378",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/libISOIR165.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e2c4fa36d856f9e9",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/libJIS.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6e28372650cab48e",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/libJISX0213.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a67697a4121295c6",
+      "name": "/usr/lib/aarch64-linux-gnu/gconv/libKSC.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "853c459a084f3f15",
+      "name": "/usr/lib/aarch64-linux-gnu/krb5/plugins/preauth/spake.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d627c66d22ae6aaa",
+      "name": "/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4b7fd80a95db218a",
+      "name": "/usr/lib/aarch64-linux-gnu/libBrokenLocale.so.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "11de5a0be3ffe31c",
+      "name": "/usr/lib/aarch64-linux-gnu/libanl.so.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "763ce4a06cfdf941",
+      "name": "/usr/lib/aarch64-linux-gnu/libbz2.so.1.0.4",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ab66c2e0602ae218",
+      "name": "/usr/lib/aarch64-linux-gnu/libc.so.6",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ab2193e3bd4929d9",
+      "name": "/usr/lib/aarch64-linux-gnu/libc_malloc_debug.so.0",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e10e4b4ade9a2420",
+      "name": "/usr/lib/aarch64-linux-gnu/libcom_err.so.2.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ce125aa3b15a5df4",
+      "name": "/usr/lib/aarch64-linux-gnu/libcrypt.so.1.1.0",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ae6d62c9aef45250",
+      "name": "/usr/lib/aarch64-linux-gnu/libcrypto.so.3",
+      "type": "file"
+    },
+    {
+      "bom-ref": "aa7b5b665263b9db",
+      "name": "/usr/lib/aarch64-linux-gnu/libdb-5.3.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f9c30f556f8c07f2",
+      "name": "/usr/lib/aarch64-linux-gnu/libdl.so.2",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bc148a94482d57ab",
+      "name": "/usr/lib/aarch64-linux-gnu/libexpat.so.1.10.2",
+      "type": "file"
+    },
+    {
+      "bom-ref": "897d07ef4ee09510",
+      "name": "/usr/lib/aarch64-linux-gnu/libexpatw.so.1.10.2",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8e1959ffe4aa169d",
+      "name": "/usr/lib/aarch64-linux-gnu/libffi.so.8.1.4",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a33eea1173d99742",
+      "name": "/usr/lib/aarch64-linux-gnu/libformw.so.6.5",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3cc39bd1e5ee0258",
+      "name": "/usr/lib/aarch64-linux-gnu/libgcc_s.so.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bedc2454f8343082",
+      "name": "/usr/lib/aarch64-linux-gnu/libgomp.so.1.0.0",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4d94bd1de7832954",
+      "name": "/usr/lib/aarch64-linux-gnu/libgssapi_krb5.so.2.2",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6754ee21ef4a9513",
+      "name": "/usr/lib/aarch64-linux-gnu/libhistory.so.8.2",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e68701492f983a99",
+      "name": "/usr/lib/aarch64-linux-gnu/libk5crypto.so.3.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b6daf5a97324be7c",
+      "name": "/usr/lib/aarch64-linux-gnu/libkeyutils.so.1.10",
+      "type": "file"
+    },
+    {
+      "bom-ref": "10becf40c0707a91",
+      "name": "/usr/lib/aarch64-linux-gnu/libkrb5.so.3.3",
+      "type": "file"
+    },
+    {
+      "bom-ref": "823b0ce180370bd6",
+      "name": "/usr/lib/aarch64-linux-gnu/libkrb5support.so.0.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "08b6e30b6ba1e2a6",
+      "name": "/usr/lib/aarch64-linux-gnu/liblzma.so.5.8.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "344732bd6d666735",
+      "name": "/usr/lib/aarch64-linux-gnu/libm.so.6",
+      "type": "file"
+    },
+    {
+      "bom-ref": "386b3df3273bfdca",
+      "name": "/usr/lib/aarch64-linux-gnu/libmemusage.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2ce6ad0b864f9ee2",
+      "name": "/usr/lib/aarch64-linux-gnu/libmenuw.so.6.5",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b00b604b389ab7a2",
+      "name": "/usr/lib/aarch64-linux-gnu/libmvec.so.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d729fd605d2691af",
+      "name": "/usr/lib/aarch64-linux-gnu/libncursesw.so.6.5",
+      "type": "file"
+    },
+    {
+      "bom-ref": "393ff7f47b371919",
+      "name": "/usr/lib/aarch64-linux-gnu/libnsl.so.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f27381f655ffb7bf",
+      "name": "/usr/lib/aarch64-linux-gnu/libnsl.so.2.0.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "019ae2147299a81c",
+      "name": "/usr/lib/aarch64-linux-gnu/libnss_compat.so.2",
+      "type": "file"
+    },
+    {
+      "bom-ref": "064f12a5929c0043",
+      "name": "/usr/lib/aarch64-linux-gnu/libnss_dns.so.2",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9a6483b5f0b480e1",
+      "name": "/usr/lib/aarch64-linux-gnu/libnss_files.so.2",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2c5b8e710fb53246",
+      "name": "/usr/lib/aarch64-linux-gnu/libnss_hesiod.so.2",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b02ac3b443f0dd98",
+      "name": "/usr/lib/aarch64-linux-gnu/libpanelw.so.6.5",
+      "type": "file"
+    },
+    {
+      "bom-ref": "72c3052eda868287",
+      "name": "/usr/lib/aarch64-linux-gnu/libpcprofile.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "17c3d72f74f15899",
+      "name": "/usr/lib/aarch64-linux-gnu/libpthread.so.0",
+      "type": "file"
+    },
+    {
+      "bom-ref": "457d593004a8482d",
+      "name": "/usr/lib/aarch64-linux-gnu/libreadline.so.8.2",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c217473a1aeae8d3",
+      "name": "/usr/lib/aarch64-linux-gnu/libresolv.so.2",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ebaa2202fd49cebc",
+      "name": "/usr/lib/aarch64-linux-gnu/librt.so.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d1bcad2f8e877e7a",
+      "name": "/usr/lib/aarch64-linux-gnu/libsqlite3.so.0.8.6",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f1955a314a0aeed7",
+      "name": "/usr/lib/aarch64-linux-gnu/libssl.so.3",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9866e937b1fba9f2",
+      "name": "/usr/lib/aarch64-linux-gnu/libstdc++.so.6.0.33",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f87c9636440a7640",
+      "name": "/usr/lib/aarch64-linux-gnu/libthread_db.so.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2851be033ba740b7",
+      "name": "/usr/lib/aarch64-linux-gnu/libtic.so.6.5",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7d721b44166a7b24",
+      "name": "/usr/lib/aarch64-linux-gnu/libtinfo.so.6.5",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e992c8e480965172",
+      "name": "/usr/lib/aarch64-linux-gnu/libtirpc.so.3.0.0",
+      "type": "file"
+    },
+    {
+      "bom-ref": "32b943204d4edc92",
+      "name": "/usr/lib/aarch64-linux-gnu/libutil.so.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2567ddae5c16a49d",
+      "name": "/usr/lib/aarch64-linux-gnu/libuuid.so.1.3.0",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0f8a401d5c8388c3",
+      "name": "/usr/lib/aarch64-linux-gnu/libz.so.1.3.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "be31a8964d558904",
+      "name": "/usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7",
+      "type": "file"
+    },
+    {
+      "bom-ref": "61b26a0cd4c015f0",
+      "name": "/usr/lib/aarch64-linux-gnu/ossl-modules/fips.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b4e6f97c88b58560",
+      "name": "/usr/lib/os-release",
+      "type": "file"
+    },
+    {
+      "bom-ref": "eebad716487c68ee",
+      "name": "/usr/local/bin/python",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d6cec11f6c0c4a78",
+      "name": "/usr/local/bin/python3",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6232066190890968",
+      "name": "/usr/local/bin/python3.12",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b6ce76dd408e7e90",
+      "name": "/usr/local/lib/libpython3.12.so",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c31ccaec266198c3",
+      "name": "/usr/local/lib/libpython3.12.so.1.0",
+      "type": "file"
+    },
+    {
+      "bom-ref": "874de281cb1a4da3",
+      "name": "/usr/share/base-files/dot.bashrc",
+      "type": "file"
+    },
+    {
+      "bom-ref": "07ed20bb015583a9",
+      "name": "/usr/share/base-files/dot.profile",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b09e694251d22a60",
+      "name": "/usr/share/base-files/dot.profile.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ebb456a2f48d3741",
+      "name": "/usr/share/base-files/info.dir",
+      "type": "file"
+    },
+    {
+      "bom-ref": "13243b3facd3c955",
+      "name": "/usr/share/base-files/motd",
+      "type": "file"
+    },
+    {
+      "bom-ref": "deecca919b38e8fe",
+      "name": "/usr/share/base-files/profile",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6f8faba7ca00040e",
+      "name": "/usr/share/base-files/profile.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "969f63f3973e6de5",
+      "name": "/usr/share/base-files/staff-group-for-usr-local",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f08d41f454213cae",
+      "name": "/usr/share/bug/media-types/presubj",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0ef04277496f6896",
+      "name": "/usr/share/common-licenses/Apache-2.0",
+      "type": "file"
+    },
+    {
+      "bom-ref": "638b9af95a87be92",
+      "name": "/usr/share/common-licenses/Artistic",
+      "type": "file"
+    },
+    {
+      "bom-ref": "74c0f93606d27e6f",
+      "name": "/usr/share/common-licenses/BSD",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1ac4018ca30574ff",
+      "name": "/usr/share/common-licenses/CC0-1.0",
+      "type": "file"
+    },
+    {
+      "bom-ref": "29cdbf61ad3ec484",
+      "name": "/usr/share/common-licenses/GFDL-1.2",
+      "type": "file"
+    },
+    {
+      "bom-ref": "087ff191195a7b72",
+      "name": "/usr/share/common-licenses/GFDL-1.3",
+      "type": "file"
+    },
+    {
+      "bom-ref": "66b073bed84fca3e",
+      "name": "/usr/share/common-licenses/GPL-1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "27c5ddef6bf2756a",
+      "name": "/usr/share/common-licenses/GPL-2",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e3ad72b1e872b03e",
+      "name": "/usr/share/common-licenses/GPL-3",
+      "type": "file"
+    },
+    {
+      "bom-ref": "de46561806ed5a50",
+      "name": "/usr/share/common-licenses/LGPL-2",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9b6f44f012c7e2e7",
+      "name": "/usr/share/common-licenses/LGPL-2.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2f982967946e4695",
+      "name": "/usr/share/common-licenses/LGPL-3",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8b4ccbdc49e703b6",
+      "name": "/usr/share/common-licenses/MPL-1.1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "116c30358b0d3b5d",
+      "name": "/usr/share/common-licenses/MPL-2.0",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f662ffe68dc136e6",
+      "name": "/usr/share/doc/base-files/NEWS.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "40729281c06b5e40",
+      "name": "/usr/share/doc/base-files/README",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c98c76840ba63727",
+      "name": "/usr/share/doc/base-files/README.FHS",
+      "type": "file"
+    },
+    {
+      "bom-ref": "021d5d96e90f11f7",
+      "name": "/usr/share/doc/base-files/changelog.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1ac8f8b34f169155",
+      "name": "/usr/share/doc/base-files/copyright",
+      "type": "file"
+    },
+    {
+      "bom-ref": "17d27299c79cbf94",
+      "name": "/usr/share/doc/gcc-14-base/README.Debian.arm64.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "08ec27df460862db",
+      "name": "/usr/share/doc/gcc-14-base/TODO.Debian",
+      "type": "file"
+    },
+    {
+      "bom-ref": "799de7ec0f9ec4be",
+      "name": "/usr/share/doc/gcc-14-base/changelog.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "51635ffd453907dc",
+      "name": "/usr/share/doc/gcc-14-base/copyright",
+      "type": "file"
+    },
+    {
+      "bom-ref": "87da2d766e7b1f6f",
+      "name": "/usr/share/doc/libbz2-1.0/changelog.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e19651f101198c39",
+      "name": "/usr/share/doc/libbz2-1.0/changelog.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2f76f9875f7bb629",
+      "name": "/usr/share/doc/libbz2-1.0/copyright",
+      "type": "file"
+    },
+    {
+      "bom-ref": "580c59ce4832e049",
+      "name": "/usr/share/doc/libc6/NEWS.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "438e32721c62f1cf",
+      "name": "/usr/share/doc/libc6/NEWS.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "002223c9314f9a6c",
+      "name": "/usr/share/doc/libc6/README.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9699ddec402b013e",
+      "name": "/usr/share/doc/libc6/README.hesiod.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7aac32fabfadcfb8",
+      "name": "/usr/share/doc/libc6/changelog.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "378a4194eba5ca04",
+      "name": "/usr/share/doc/libc6/changelog.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2717fe7e4250478f",
+      "name": "/usr/share/doc/libc6/copyright",
+      "type": "file"
+    },
+    {
+      "bom-ref": "cb67c65a15f41f2a",
+      "name": "/usr/share/doc/libcom-err2/changelog.Debian.arm64.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "30af0beb6605998d",
+      "name": "/usr/share/doc/libcom-err2/changelog.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d3c0c194e549a02c",
+      "name": "/usr/share/doc/libcom-err2/copyright",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4bf9e6486672acbb",
+      "name": "/usr/share/doc/libcrypt1/changelog.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b3b2ce90c842fe71",
+      "name": "/usr/share/doc/libcrypt1/changelog.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f968e63977af696f",
+      "name": "/usr/share/doc/libcrypt1/copyright",
+      "type": "file"
+    },
+    {
+      "bom-ref": "12c6ee224c57a364",
+      "name": "/usr/share/doc/libdb5.3t64/build_signature_arm64.txt",
+      "type": "file"
+    },
+    {
+      "bom-ref": "544a3bb57fe1bf6a",
+      "name": "/usr/share/doc/libdb5.3t64/changelog.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "befc296ad985e1ed",
+      "name": "/usr/share/doc/libdb5.3t64/copyright",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3dbe09ce6b6b224a",
+      "name": "/usr/share/doc/libexpat1/AUTHORS",
+      "type": "file"
+    },
+    {
+      "bom-ref": "58c7ebfc9509883e",
+      "name": "/usr/share/doc/libexpat1/changelog.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7ae1fa32b8b3e934",
+      "name": "/usr/share/doc/libexpat1/changelog.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8fd29e33c972d88f",
+      "name": "/usr/share/doc/libexpat1/copyright",
+      "type": "file"
+    },
+    {
+      "bom-ref": "eef4434c3eba7a8c",
+      "name": "/usr/share/doc/libffi8/changelog.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1d7b14914415399b",
+      "name": "/usr/share/doc/libffi8/copyright",
+      "type": "file"
+    },
+    {
+      "bom-ref": "747927f824edff44",
+      "name": "/usr/share/doc/libgssapi-krb5-2/changelog.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d4193561abf04a98",
+      "name": "/usr/share/doc/libgssapi-krb5-2/copyright",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bd95447d5f51d128",
+      "name": "/usr/share/doc/libk5crypto3/changelog.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bbf868288742fbc1",
+      "name": "/usr/share/doc/libk5crypto3/copyright",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bb5601ad509c0d45",
+      "name": "/usr/share/doc/libkeyutils1/changelog.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7acc45cc6817b53e",
+      "name": "/usr/share/doc/libkeyutils1/copyright",
+      "type": "file"
+    },
+    {
+      "bom-ref": "af793acc9fba706a",
+      "name": "/usr/share/doc/libkrb5-3/README.Debian",
+      "type": "file"
+    },
+    {
+      "bom-ref": "939ed612822e5c4e",
+      "name": "/usr/share/doc/libkrb5-3/README.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "acf55ee1f30caa0e",
+      "name": "/usr/share/doc/libkrb5-3/changelog.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "cc4e38159f668570",
+      "name": "/usr/share/doc/libkrb5-3/copyright",
+      "type": "file"
+    },
+    {
+      "bom-ref": "357326c1230103ff",
+      "name": "/usr/share/doc/libkrb5support0/changelog.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1f1f6b3e45779f8b",
+      "name": "/usr/share/doc/libkrb5support0/copyright",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0d0e55bb509fb5ff",
+      "name": "/usr/share/doc/liblzma5/AUTHORS",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8012692eec207708",
+      "name": "/usr/share/doc/liblzma5/NEWS.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5f64495c835bc0c7",
+      "name": "/usr/share/doc/liblzma5/THANKS.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4233d7705f20a841",
+      "name": "/usr/share/doc/liblzma5/changelog.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5951b27d028f7241",
+      "name": "/usr/share/doc/liblzma5/changelog.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1ddaa796dc1617a0",
+      "name": "/usr/share/doc/liblzma5/copyright",
+      "type": "file"
+    },
+    {
+      "bom-ref": "56e3fecc685b28fe",
+      "name": "/usr/share/doc/libnsl2/changelog.Debian.arm64.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d95443dc0b85a5ae",
+      "name": "/usr/share/doc/libnsl2/changelog.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e4c05cbd616e18b5",
+      "name": "/usr/share/doc/libnsl2/changelog.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2a38ef8c46fbf5f1",
+      "name": "/usr/share/doc/libnsl2/copyright",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f03a49de665635cc",
+      "name": "/usr/share/doc/libreadline8t64/README.Debian",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9abcbf7c2f765b54",
+      "name": "/usr/share/doc/libreadline8t64/USAGE",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f8b8b454c7691b95",
+      "name": "/usr/share/doc/libreadline8t64/changelog.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "225240d44cfff7d9",
+      "name": "/usr/share/doc/libreadline8t64/changelog.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4b24ea3759fd66d6",
+      "name": "/usr/share/doc/libreadline8t64/copyright",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bee7d46862c79649",
+      "name": "/usr/share/doc/libreadline8t64/examples/Inputrc",
+      "type": "file"
+    },
+    {
+      "bom-ref": "76df5528a25e5d6e",
+      "name": "/usr/share/doc/libreadline8t64/inputrc.arrows",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e7e52dca8286c134",
+      "name": "/usr/share/doc/libsqlite3-0/README.Debian",
+      "type": "file"
+    },
+    {
+      "bom-ref": "897efbc68323d89e",
+      "name": "/usr/share/doc/libsqlite3-0/changelog.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "df11eaef84a9c2af",
+      "name": "/usr/share/doc/libsqlite3-0/changelog.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b178b0011447b987",
+      "name": "/usr/share/doc/libsqlite3-0/changelog.html.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a42d1e51a89324b3",
+      "name": "/usr/share/doc/libsqlite3-0/copyright",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6fc77c814ee3726a",
+      "name": "/usr/share/doc/libssl3t64/NEWS.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4377e7d333d6ebfa",
+      "name": "/usr/share/doc/libssl3t64/changelog.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5b08dfe204d56f3b",
+      "name": "/usr/share/doc/libssl3t64/changelog.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5ab5951d42d72c68",
+      "name": "/usr/share/doc/libssl3t64/copyright",
+      "type": "file"
+    },
+    {
+      "bom-ref": "62ca57413dd68888",
+      "name": "/usr/share/doc/libtinfo6/changelog.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "96972ea33f8cec05",
+      "name": "/usr/share/doc/libtinfo6/changelog.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "dd9e05bf76637bda",
+      "name": "/usr/share/doc/libtinfo6/copyright",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7ec1469bc6fce003",
+      "name": "/usr/share/doc/libtirpc3t64/NEWS.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "be52989bb70c6fc4",
+      "name": "/usr/share/doc/libtirpc3t64/changelog.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a1633f2798ff0009",
+      "name": "/usr/share/doc/libtirpc3t64/changelog.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "910b7b121791eb45",
+      "name": "/usr/share/doc/libtirpc3t64/copyright",
+      "type": "file"
+    },
+    {
+      "bom-ref": "06bad7c3f7bd6990",
+      "name": "/usr/share/doc/libuuid1/NEWS.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "468df15dacbe59b2",
+      "name": "/usr/share/doc/libuuid1/changelog.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1c65ee49da84b724",
+      "name": "/usr/share/doc/libuuid1/changelog.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9489c6fdd5d908d2",
+      "name": "/usr/share/doc/libuuid1/copyright",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7b4834f384973e53",
+      "name": "/usr/share/doc/libzstd1/changelog.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bbb23c59205efbef",
+      "name": "/usr/share/doc/libzstd1/changelog.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "047c23c6b57e419f",
+      "name": "/usr/share/doc/libzstd1/copyright",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e9ed8d9c78ad22ee",
+      "name": "/usr/share/doc/media-types/changelog.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e6bea96639250827",
+      "name": "/usr/share/doc/media-types/copyright",
+      "type": "file"
+    },
+    {
+      "bom-ref": "522a23aa553979d9",
+      "name": "/usr/share/doc/netbase/changelog.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "fc8ad845573d9aa9",
+      "name": "/usr/share/doc/netbase/copyright",
+      "type": "file"
+    },
+    {
+      "bom-ref": "61122fbf5ce05c3f",
+      "name": "/usr/share/doc/openssl-provider-fips/changelog.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6b9420d1c5474a2b",
+      "name": "/usr/share/doc/openssl-provider-fips/changelog.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "85c2917bba9b533f",
+      "name": "/usr/share/doc/openssl-provider-fips/copyright",
+      "type": "file"
+    },
+    {
+      "bom-ref": "960ecd94748092ba",
+      "name": "/usr/share/doc/tzdata/NEWS.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9f56b91843fadf1a",
+      "name": "/usr/share/doc/tzdata/README.Debian",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6d61df55cdf6d2ce",
+      "name": "/usr/share/doc/tzdata/changelog.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f8502e9326bbf6de",
+      "name": "/usr/share/doc/tzdata/changelog.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "000d7c34ed64f1f8",
+      "name": "/usr/share/doc/tzdata/copyright",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5e8b1122b2f23ef0",
+      "name": "/usr/share/doc/zlib1g/changelog.Debian.arm64.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e9b9a96372e6db80",
+      "name": "/usr/share/doc/zlib1g/changelog.Debian.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4c30dec3f7559dc3",
+      "name": "/usr/share/doc/zlib1g/changelog.gz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c9fa127244f02e15",
+      "name": "/usr/share/doc/zlib1g/copyright",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f9bb8e895255e611",
+      "name": "/usr/share/gcc/python/libstdcxx/__init__.py",
+      "type": "file"
+    },
+    {
+      "bom-ref": "919a1bdd6661b7d2",
+      "name": "/usr/share/gcc/python/libstdcxx/v6/__init__.py",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c2ca252db3e88c62",
+      "name": "/usr/share/gcc/python/libstdcxx/v6/printers.py",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ddb2356f920f1e49",
+      "name": "/usr/share/gcc/python/libstdcxx/v6/xmethods.py",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4fd6b83f9e6443d5",
+      "name": "/usr/share/gdb/auto-load/usr/lib/aarch64-linux-gnu/libstdc++.so.6.0.33-gdb.py",
+      "type": "file"
+    },
+    {
+      "bom-ref": "135e1ad980829186",
+      "name": "/usr/share/lintian/overrides/base-files",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e201cbcfcb8021f8",
+      "name": "/usr/share/lintian/overrides/libc6",
+      "type": "file"
+    },
+    {
+      "bom-ref": "216d1d6324a1ac54",
+      "name": "/usr/share/lintian/overrides/libdb5.3t64",
+      "type": "file"
+    },
+    {
+      "bom-ref": "344badc429bb7895",
+      "name": "/usr/share/lintian/overrides/libgcc-s1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "df53d60c137778a0",
+      "name": "/usr/share/lintian/overrides/libgssapi-krb5-2",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e3576095bf5e4e0e",
+      "name": "/usr/share/lintian/overrides/libkrb5-3",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f49e88a09577245f",
+      "name": "/usr/share/lintian/overrides/libkrb5support0",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b1ebbf1c292d1600",
+      "name": "/usr/share/lintian/overrides/libssl3t64",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b2f992a036b748c9",
+      "name": "/usr/share/lintian/overrides/libtirpc3t64",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1ba8c24218d61635",
+      "name": "/usr/share/lintian/overrides/tzdata",
+      "type": "file"
+    },
+    {
+      "bom-ref": "930363af98bc4a15",
+      "name": "/usr/share/zoneinfo/Africa/Abidjan",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5a927005ae47556c",
+      "name": "/usr/share/zoneinfo/Africa/Accra",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b363c80dcf5dbb14",
+      "name": "/usr/share/zoneinfo/Africa/Addis_Ababa",
+      "type": "file"
+    },
+    {
+      "bom-ref": "61ed18def11e051e",
+      "name": "/usr/share/zoneinfo/Africa/Algiers",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bbd56c59e295b87f",
+      "name": "/usr/share/zoneinfo/Africa/Asmara",
+      "type": "file"
+    },
+    {
+      "bom-ref": "31cf91a0b78f3472",
+      "name": "/usr/share/zoneinfo/Africa/Bamako",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4c0373f72ef2ff61",
+      "name": "/usr/share/zoneinfo/Africa/Bangui",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7dc92d204f9526c5",
+      "name": "/usr/share/zoneinfo/Africa/Banjul",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1218c605df61c46a",
+      "name": "/usr/share/zoneinfo/Africa/Bissau",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6d955bbbd7c78917",
+      "name": "/usr/share/zoneinfo/Africa/Blantyre",
+      "type": "file"
+    },
+    {
+      "bom-ref": "04fc66ff95ee8f9f",
+      "name": "/usr/share/zoneinfo/Africa/Brazzaville",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e94fb8d13d9d3a61",
+      "name": "/usr/share/zoneinfo/Africa/Bujumbura",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ab8f2fcc06b89158",
+      "name": "/usr/share/zoneinfo/Africa/Cairo",
+      "type": "file"
+    },
+    {
+      "bom-ref": "49e2b13b851b37f0",
+      "name": "/usr/share/zoneinfo/Africa/Casablanca",
+      "type": "file"
+    },
+    {
+      "bom-ref": "04a00c1b9d30aa12",
+      "name": "/usr/share/zoneinfo/Africa/Ceuta",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6ead8d9af9a49fbc",
+      "name": "/usr/share/zoneinfo/Africa/Conakry",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8286349c50aecce8",
+      "name": "/usr/share/zoneinfo/Africa/Dakar",
+      "type": "file"
+    },
+    {
+      "bom-ref": "156743ea3e029aef",
+      "name": "/usr/share/zoneinfo/Africa/Dar_es_Salaam",
+      "type": "file"
+    },
+    {
+      "bom-ref": "96013442d50b23fe",
+      "name": "/usr/share/zoneinfo/Africa/Djibouti",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7edacc1f330cabb1",
+      "name": "/usr/share/zoneinfo/Africa/Douala",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ae5ce8356bb3edc1",
+      "name": "/usr/share/zoneinfo/Africa/El_Aaiun",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f4360374575d5edd",
+      "name": "/usr/share/zoneinfo/Africa/Freetown",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3c42877fae3a0c6a",
+      "name": "/usr/share/zoneinfo/Africa/Gaborone",
+      "type": "file"
+    },
+    {
+      "bom-ref": "fadbbdbe0bc5e9c2",
+      "name": "/usr/share/zoneinfo/Africa/Harare",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2786fc6cef2b60fa",
+      "name": "/usr/share/zoneinfo/Africa/Johannesburg",
+      "type": "file"
+    },
+    {
+      "bom-ref": "af574014161bf1c9",
+      "name": "/usr/share/zoneinfo/Africa/Juba",
+      "type": "file"
+    },
+    {
+      "bom-ref": "cfdfb1cf2c4146bd",
+      "name": "/usr/share/zoneinfo/Africa/Kampala",
+      "type": "file"
+    },
+    {
+      "bom-ref": "462fd5036800fb45",
+      "name": "/usr/share/zoneinfo/Africa/Khartoum",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5cfdfaa737430528",
+      "name": "/usr/share/zoneinfo/Africa/Kigali",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0832911c93cb2032",
+      "name": "/usr/share/zoneinfo/Africa/Kinshasa",
+      "type": "file"
+    },
+    {
+      "bom-ref": "365b0eca13e56c6c",
+      "name": "/usr/share/zoneinfo/Africa/Lagos",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9ad3ef65b1721e2d",
+      "name": "/usr/share/zoneinfo/Africa/Libreville",
+      "type": "file"
+    },
+    {
+      "bom-ref": "af628ff420a9c6cb",
+      "name": "/usr/share/zoneinfo/Africa/Lome",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bccca30a036452ce",
+      "name": "/usr/share/zoneinfo/Africa/Luanda",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2b1127fce9c76f38",
+      "name": "/usr/share/zoneinfo/Africa/Lubumbashi",
+      "type": "file"
+    },
+    {
+      "bom-ref": "01ad221fc97af4ca",
+      "name": "/usr/share/zoneinfo/Africa/Lusaka",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b73a4ce7a3eb375d",
+      "name": "/usr/share/zoneinfo/Africa/Malabo",
+      "type": "file"
+    },
+    {
+      "bom-ref": "db9bd6192d15ce49",
+      "name": "/usr/share/zoneinfo/Africa/Maputo",
+      "type": "file"
+    },
+    {
+      "bom-ref": "fc36bc45d1e90fa5",
+      "name": "/usr/share/zoneinfo/Africa/Maseru",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2e524ff6eab33662",
+      "name": "/usr/share/zoneinfo/Africa/Mbabane",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3027a76bdfd1630c",
+      "name": "/usr/share/zoneinfo/Africa/Mogadishu",
+      "type": "file"
+    },
+    {
+      "bom-ref": "35d7102b50403ed9",
+      "name": "/usr/share/zoneinfo/Africa/Monrovia",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ff962043cfed976e",
+      "name": "/usr/share/zoneinfo/Africa/Nairobi",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0d519021656e438f",
+      "name": "/usr/share/zoneinfo/Africa/Ndjamena",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5cbb88297ad3dbb6",
+      "name": "/usr/share/zoneinfo/Africa/Niamey",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4e3aa097249fe6eb",
+      "name": "/usr/share/zoneinfo/Africa/Nouakchott",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3ae30f6e45505a4a",
+      "name": "/usr/share/zoneinfo/Africa/Ouagadougou",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f8f4ec48e2454571",
+      "name": "/usr/share/zoneinfo/Africa/Porto-Novo",
+      "type": "file"
+    },
+    {
+      "bom-ref": "446bc400ebfd57ad",
+      "name": "/usr/share/zoneinfo/Africa/Sao_Tome",
+      "type": "file"
+    },
+    {
+      "bom-ref": "83526b59152d9a82",
+      "name": "/usr/share/zoneinfo/Africa/Tripoli",
+      "type": "file"
+    },
+    {
+      "bom-ref": "da41d69a7df5e77d",
+      "name": "/usr/share/zoneinfo/Africa/Tunis",
+      "type": "file"
+    },
+    {
+      "bom-ref": "efc273427bb8b58d",
+      "name": "/usr/share/zoneinfo/Africa/Windhoek",
+      "type": "file"
+    },
+    {
+      "bom-ref": "36173dd37a983041",
+      "name": "/usr/share/zoneinfo/America/Adak",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0a3d75e6777da23d",
+      "name": "/usr/share/zoneinfo/America/Anchorage",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f15f1c9faa133d5a",
+      "name": "/usr/share/zoneinfo/America/Anguilla",
+      "type": "file"
+    },
+    {
+      "bom-ref": "756fb2218fcc70e7",
+      "name": "/usr/share/zoneinfo/America/Antigua",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b18b2faca873687f",
+      "name": "/usr/share/zoneinfo/America/Araguaina",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b9c078d124499d36",
+      "name": "/usr/share/zoneinfo/America/Argentina/Buenos_Aires",
+      "type": "file"
+    },
+    {
+      "bom-ref": "cec92e6aba3c1ce8",
+      "name": "/usr/share/zoneinfo/America/Argentina/Catamarca",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a4d886a4203cf900",
+      "name": "/usr/share/zoneinfo/America/Argentina/Cordoba",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e5e78fc1995ac529",
+      "name": "/usr/share/zoneinfo/America/Argentina/Jujuy",
+      "type": "file"
+    },
+    {
+      "bom-ref": "cad2b9a2d9949757",
+      "name": "/usr/share/zoneinfo/America/Argentina/La_Rioja",
+      "type": "file"
+    },
+    {
+      "bom-ref": "708e7e640084b522",
+      "name": "/usr/share/zoneinfo/America/Argentina/Mendoza",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ed6a1adeb250a6f0",
+      "name": "/usr/share/zoneinfo/America/Argentina/Rio_Gallegos",
+      "type": "file"
+    },
+    {
+      "bom-ref": "03dc15384b42e8d1",
+      "name": "/usr/share/zoneinfo/America/Argentina/Salta",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4966dabf3f39d6a6",
+      "name": "/usr/share/zoneinfo/America/Argentina/San_Juan",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5d96f0208ee68056",
+      "name": "/usr/share/zoneinfo/America/Argentina/San_Luis",
+      "type": "file"
+    },
+    {
+      "bom-ref": "30ad3dc182f5935c",
+      "name": "/usr/share/zoneinfo/America/Argentina/Tucuman",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4233433a95e49368",
+      "name": "/usr/share/zoneinfo/America/Argentina/Ushuaia",
+      "type": "file"
+    },
+    {
+      "bom-ref": "535cbcc46ce1af47",
+      "name": "/usr/share/zoneinfo/America/Aruba",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2a8601cc74ab0a4e",
+      "name": "/usr/share/zoneinfo/America/Asuncion",
+      "type": "file"
+    },
+    {
+      "bom-ref": "98bf3b10589f76e1",
+      "name": "/usr/share/zoneinfo/America/Atikokan",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bb6e4064dee0db08",
+      "name": "/usr/share/zoneinfo/America/Bahia",
+      "type": "file"
+    },
+    {
+      "bom-ref": "78d0ee1fd408de72",
+      "name": "/usr/share/zoneinfo/America/Bahia_Banderas",
+      "type": "file"
+    },
+    {
+      "bom-ref": "cbbbf1b3e7b781d5",
+      "name": "/usr/share/zoneinfo/America/Barbados",
+      "type": "file"
+    },
+    {
+      "bom-ref": "531f9881dfc53268",
+      "name": "/usr/share/zoneinfo/America/Belem",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c41264e73529cb1d",
+      "name": "/usr/share/zoneinfo/America/Belize",
+      "type": "file"
+    },
+    {
+      "bom-ref": "cc46986c8218f0c3",
+      "name": "/usr/share/zoneinfo/America/Blanc-Sablon",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bdf481aa3df157e2",
+      "name": "/usr/share/zoneinfo/America/Boa_Vista",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1cd9402eab5d8113",
+      "name": "/usr/share/zoneinfo/America/Bogota",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6e90dad068718794",
+      "name": "/usr/share/zoneinfo/America/Boise",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ab8f9bf6ec29e6b2",
+      "name": "/usr/share/zoneinfo/America/Cambridge_Bay",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ce6b15872c7b301f",
+      "name": "/usr/share/zoneinfo/America/Campo_Grande",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ee590185b8644ab3",
+      "name": "/usr/share/zoneinfo/America/Cancun",
+      "type": "file"
+    },
+    {
+      "bom-ref": "473ec27ded4b5d00",
+      "name": "/usr/share/zoneinfo/America/Caracas",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c99a431e12b5fad9",
+      "name": "/usr/share/zoneinfo/America/Cayenne",
+      "type": "file"
+    },
+    {
+      "bom-ref": "86e6a23b458ac94e",
+      "name": "/usr/share/zoneinfo/America/Cayman",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ca7ca0ffeb959a32",
+      "name": "/usr/share/zoneinfo/America/Chicago",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3e54f49e0c3aadaa",
+      "name": "/usr/share/zoneinfo/America/Chihuahua",
+      "type": "file"
+    },
+    {
+      "bom-ref": "506f71f2d0e6f6b5",
+      "name": "/usr/share/zoneinfo/America/Ciudad_Juarez",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5548cf230167b730",
+      "name": "/usr/share/zoneinfo/America/Costa_Rica",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1a7ddc62e933c1c8",
+      "name": "/usr/share/zoneinfo/America/Coyhaique",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1812b123548d199c",
+      "name": "/usr/share/zoneinfo/America/Creston",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c43b09a433730507",
+      "name": "/usr/share/zoneinfo/America/Cuiaba",
+      "type": "file"
+    },
+    {
+      "bom-ref": "68c52c15ae467f8a",
+      "name": "/usr/share/zoneinfo/America/Curacao",
+      "type": "file"
+    },
+    {
+      "bom-ref": "209dbea6fab77bde",
+      "name": "/usr/share/zoneinfo/America/Danmarkshavn",
+      "type": "file"
+    },
+    {
+      "bom-ref": "65d0f0b05dfa61d6",
+      "name": "/usr/share/zoneinfo/America/Dawson",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8367754582412733",
+      "name": "/usr/share/zoneinfo/America/Dawson_Creek",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9dc4fe73bc5b0516",
+      "name": "/usr/share/zoneinfo/America/Denver",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e22fc10f7cf996f2",
+      "name": "/usr/share/zoneinfo/America/Detroit",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6e0c1bd5054dec2c",
+      "name": "/usr/share/zoneinfo/America/Dominica",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4df22654fd4a4da3",
+      "name": "/usr/share/zoneinfo/America/Edmonton",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ebfaea3901a38447",
+      "name": "/usr/share/zoneinfo/America/Eirunepe",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4fb6e2d911e08faf",
+      "name": "/usr/share/zoneinfo/America/El_Salvador",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6d627cf8074c3ea3",
+      "name": "/usr/share/zoneinfo/America/Fort_Nelson",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3b1ccc6f347255d9",
+      "name": "/usr/share/zoneinfo/America/Fortaleza",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ebb7a107f0e731db",
+      "name": "/usr/share/zoneinfo/America/Glace_Bay",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f0fc95a9b112edea",
+      "name": "/usr/share/zoneinfo/America/Goose_Bay",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4edb9a7d1982ee52",
+      "name": "/usr/share/zoneinfo/America/Grand_Turk",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e8f9c45b82466087",
+      "name": "/usr/share/zoneinfo/America/Grenada",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3f2fb5bf332f7012",
+      "name": "/usr/share/zoneinfo/America/Guadeloupe",
+      "type": "file"
+    },
+    {
+      "bom-ref": "153c598b1d2e8c25",
+      "name": "/usr/share/zoneinfo/America/Guatemala",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f8f4fefd90e3172c",
+      "name": "/usr/share/zoneinfo/America/Guayaquil",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8b147e0e2401032f",
+      "name": "/usr/share/zoneinfo/America/Guyana",
+      "type": "file"
+    },
+    {
+      "bom-ref": "843bd114c527e9ea",
+      "name": "/usr/share/zoneinfo/America/Halifax",
+      "type": "file"
+    },
+    {
+      "bom-ref": "355c917f0124db62",
+      "name": "/usr/share/zoneinfo/America/Havana",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a4b7b2d70f6cec42",
+      "name": "/usr/share/zoneinfo/America/Hermosillo",
+      "type": "file"
+    },
+    {
+      "bom-ref": "551d756add609192",
+      "name": "/usr/share/zoneinfo/America/Indiana/Indianapolis",
+      "type": "file"
+    },
+    {
+      "bom-ref": "44c6a71f8d06af13",
+      "name": "/usr/share/zoneinfo/America/Indiana/Knox",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a307dd03b5a40301",
+      "name": "/usr/share/zoneinfo/America/Indiana/Marengo",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2a94455cc1fc7488",
+      "name": "/usr/share/zoneinfo/America/Indiana/Petersburg",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c8824ce73fff3354",
+      "name": "/usr/share/zoneinfo/America/Indiana/Tell_City",
+      "type": "file"
+    },
+    {
+      "bom-ref": "725c56fa669873b5",
+      "name": "/usr/share/zoneinfo/America/Indiana/Vevay",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5ab05c1699fcf585",
+      "name": "/usr/share/zoneinfo/America/Indiana/Vincennes",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a9823318d6871ab1",
+      "name": "/usr/share/zoneinfo/America/Indiana/Winamac",
+      "type": "file"
+    },
+    {
+      "bom-ref": "65bd13f6a8f6f0c4",
+      "name": "/usr/share/zoneinfo/America/Inuvik",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d7ee277468fd5320",
+      "name": "/usr/share/zoneinfo/America/Iqaluit",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4eadf10db13e5247",
+      "name": "/usr/share/zoneinfo/America/Jamaica",
+      "type": "file"
+    },
+    {
+      "bom-ref": "608184fbceab5c9c",
+      "name": "/usr/share/zoneinfo/America/Juneau",
+      "type": "file"
+    },
+    {
+      "bom-ref": "da5c6680e9e18ff5",
+      "name": "/usr/share/zoneinfo/America/Kentucky/Louisville",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4ea48c69b9899918",
+      "name": "/usr/share/zoneinfo/America/Kentucky/Monticello",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f55d328c39643999",
+      "name": "/usr/share/zoneinfo/America/La_Paz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c29e9bcedc595736",
+      "name": "/usr/share/zoneinfo/America/Lima",
+      "type": "file"
+    },
+    {
+      "bom-ref": "839b70ed779f2495",
+      "name": "/usr/share/zoneinfo/America/Los_Angeles",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bd5ebc0d0f438841",
+      "name": "/usr/share/zoneinfo/America/Maceio",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1d0dc4965deff892",
+      "name": "/usr/share/zoneinfo/America/Managua",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a8b3e6175f174ae2",
+      "name": "/usr/share/zoneinfo/America/Manaus",
+      "type": "file"
+    },
+    {
+      "bom-ref": "21b92819c777f0ec",
+      "name": "/usr/share/zoneinfo/America/Martinique",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5d95197b4bae4f52",
+      "name": "/usr/share/zoneinfo/America/Matamoros",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1be58b3fcc692f24",
+      "name": "/usr/share/zoneinfo/America/Mazatlan",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f7d338d86d046742",
+      "name": "/usr/share/zoneinfo/America/Menominee",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5adc79bf069fcf8a",
+      "name": "/usr/share/zoneinfo/America/Merida",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1d848f968f74ae5a",
+      "name": "/usr/share/zoneinfo/America/Metlakatla",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ee6261f45c15d672",
+      "name": "/usr/share/zoneinfo/America/Mexico_City",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e4d7d8ce81a151ed",
+      "name": "/usr/share/zoneinfo/America/Miquelon",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bef2c96b36ff40d0",
+      "name": "/usr/share/zoneinfo/America/Moncton",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d0c7b659294df278",
+      "name": "/usr/share/zoneinfo/America/Monterrey",
+      "type": "file"
+    },
+    {
+      "bom-ref": "acf61381946fbf7a",
+      "name": "/usr/share/zoneinfo/America/Montevideo",
+      "type": "file"
+    },
+    {
+      "bom-ref": "60a61c76fa8c498c",
+      "name": "/usr/share/zoneinfo/America/Montserrat",
+      "type": "file"
+    },
+    {
+      "bom-ref": "15035baf740d53c4",
+      "name": "/usr/share/zoneinfo/America/Nassau",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f559b29e533bcd3d",
+      "name": "/usr/share/zoneinfo/America/New_York",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8a64060deb1e2fac",
+      "name": "/usr/share/zoneinfo/America/Nome",
+      "type": "file"
+    },
+    {
+      "bom-ref": "313a118a6e4c3e6d",
+      "name": "/usr/share/zoneinfo/America/Noronha",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a093f879480b4665",
+      "name": "/usr/share/zoneinfo/America/North_Dakota/Beulah",
+      "type": "file"
+    },
+    {
+      "bom-ref": "aab403436572fdb3",
+      "name": "/usr/share/zoneinfo/America/North_Dakota/Center",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b340834ea8d28085",
+      "name": "/usr/share/zoneinfo/America/North_Dakota/New_Salem",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5d7b0313f72a7608",
+      "name": "/usr/share/zoneinfo/America/Nuuk",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7b82ee6bf9d0d59a",
+      "name": "/usr/share/zoneinfo/America/Ojinaga",
+      "type": "file"
+    },
+    {
+      "bom-ref": "685a52869b30986c",
+      "name": "/usr/share/zoneinfo/America/Panama",
+      "type": "file"
+    },
+    {
+      "bom-ref": "090a86b491340bb6",
+      "name": "/usr/share/zoneinfo/America/Paramaribo",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b79cc15050325171",
+      "name": "/usr/share/zoneinfo/America/Phoenix",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b853926907a33f12",
+      "name": "/usr/share/zoneinfo/America/Port-au-Prince",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7d2bb1d447fdff61",
+      "name": "/usr/share/zoneinfo/America/Port_of_Spain",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f2e3d335f46942eb",
+      "name": "/usr/share/zoneinfo/America/Porto_Velho",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f6d856116fc016dd",
+      "name": "/usr/share/zoneinfo/America/Puerto_Rico",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6a286f16867eadfd",
+      "name": "/usr/share/zoneinfo/America/Punta_Arenas",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d368ce86f1eafdc1",
+      "name": "/usr/share/zoneinfo/America/Rankin_Inlet",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c445b2ed2b1920db",
+      "name": "/usr/share/zoneinfo/America/Recife",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9ddf27cb135bbeae",
+      "name": "/usr/share/zoneinfo/America/Regina",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ce711e338e835e25",
+      "name": "/usr/share/zoneinfo/America/Resolute",
+      "type": "file"
+    },
+    {
+      "bom-ref": "345103040408b149",
+      "name": "/usr/share/zoneinfo/America/Rio_Branco",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c06b10612d2b5810",
+      "name": "/usr/share/zoneinfo/America/Santarem",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5fe4e4396c81740b",
+      "name": "/usr/share/zoneinfo/America/Santiago",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1f268d3956e339cf",
+      "name": "/usr/share/zoneinfo/America/Santo_Domingo",
+      "type": "file"
+    },
+    {
+      "bom-ref": "31899b902c9da9d9",
+      "name": "/usr/share/zoneinfo/America/Sao_Paulo",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9e36caa8546e4795",
+      "name": "/usr/share/zoneinfo/America/Scoresbysund",
+      "type": "file"
+    },
+    {
+      "bom-ref": "855d8c0ab52f166a",
+      "name": "/usr/share/zoneinfo/America/Sitka",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2fa992b58490d511",
+      "name": "/usr/share/zoneinfo/America/St_Johns",
+      "type": "file"
+    },
+    {
+      "bom-ref": "dfeb4559381d7b86",
+      "name": "/usr/share/zoneinfo/America/St_Kitts",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f76423ea4855b315",
+      "name": "/usr/share/zoneinfo/America/St_Lucia",
+      "type": "file"
+    },
+    {
+      "bom-ref": "faab045603cc17bc",
+      "name": "/usr/share/zoneinfo/America/St_Thomas",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0aa82cba8e886b34",
+      "name": "/usr/share/zoneinfo/America/St_Vincent",
+      "type": "file"
+    },
+    {
+      "bom-ref": "26f9ab63b3461b4e",
+      "name": "/usr/share/zoneinfo/America/Swift_Current",
+      "type": "file"
+    },
+    {
+      "bom-ref": "be15044e21be3ac5",
+      "name": "/usr/share/zoneinfo/America/Tegucigalpa",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ad9b2e279b8990a1",
+      "name": "/usr/share/zoneinfo/America/Thule",
+      "type": "file"
+    },
+    {
+      "bom-ref": "246e32d4a4ba7d86",
+      "name": "/usr/share/zoneinfo/America/Tijuana",
+      "type": "file"
+    },
+    {
+      "bom-ref": "27b8c4c3d15c9ab0",
+      "name": "/usr/share/zoneinfo/America/Toronto",
+      "type": "file"
+    },
+    {
+      "bom-ref": "cba9aa58397b8374",
+      "name": "/usr/share/zoneinfo/America/Tortola",
+      "type": "file"
+    },
+    {
+      "bom-ref": "687e254d35f2fd83",
+      "name": "/usr/share/zoneinfo/America/Vancouver",
+      "type": "file"
+    },
+    {
+      "bom-ref": "fc1b551c82dd9e5a",
+      "name": "/usr/share/zoneinfo/America/Whitehorse",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b23fbe0585ba0c8d",
+      "name": "/usr/share/zoneinfo/America/Winnipeg",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4228581bf8cd9829",
+      "name": "/usr/share/zoneinfo/America/Yakutat",
+      "type": "file"
+    },
+    {
+      "bom-ref": "742e09b662fc9a80",
+      "name": "/usr/share/zoneinfo/Antarctica/Casey",
+      "type": "file"
+    },
+    {
+      "bom-ref": "458da40140052d53",
+      "name": "/usr/share/zoneinfo/Antarctica/Davis",
+      "type": "file"
+    },
+    {
+      "bom-ref": "89ca2c79e2a9d175",
+      "name": "/usr/share/zoneinfo/Antarctica/DumontDUrville",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a4e6bef942f5d9db",
+      "name": "/usr/share/zoneinfo/Antarctica/Macquarie",
+      "type": "file"
+    },
+    {
+      "bom-ref": "793e77c372ff09c1",
+      "name": "/usr/share/zoneinfo/Antarctica/Mawson",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3b5e3425bbde1226",
+      "name": "/usr/share/zoneinfo/Antarctica/McMurdo",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f9008e1975a3277f",
+      "name": "/usr/share/zoneinfo/Antarctica/Palmer",
+      "type": "file"
+    },
+    {
+      "bom-ref": "afb26d57720c552e",
+      "name": "/usr/share/zoneinfo/Antarctica/Rothera",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7b109286d3fb8a2e",
+      "name": "/usr/share/zoneinfo/Antarctica/Syowa",
+      "type": "file"
+    },
+    {
+      "bom-ref": "adaa2c30760e8881",
+      "name": "/usr/share/zoneinfo/Antarctica/Troll",
+      "type": "file"
+    },
+    {
+      "bom-ref": "04077cd23bb6e6c5",
+      "name": "/usr/share/zoneinfo/Antarctica/Vostok",
+      "type": "file"
+    },
+    {
+      "bom-ref": "33931e36764d31f6",
+      "name": "/usr/share/zoneinfo/Asia/Aden",
+      "type": "file"
+    },
+    {
+      "bom-ref": "59390d06a104f123",
+      "name": "/usr/share/zoneinfo/Asia/Almaty",
+      "type": "file"
+    },
+    {
+      "bom-ref": "78a1264220a8f1fd",
+      "name": "/usr/share/zoneinfo/Asia/Amman",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3112f86fddd40616",
+      "name": "/usr/share/zoneinfo/Asia/Anadyr",
+      "type": "file"
+    },
+    {
+      "bom-ref": "29d5f3e073f87edc",
+      "name": "/usr/share/zoneinfo/Asia/Aqtau",
+      "type": "file"
+    },
+    {
+      "bom-ref": "912f151d1139f788",
+      "name": "/usr/share/zoneinfo/Asia/Aqtobe",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1a797f3776c7cae6",
+      "name": "/usr/share/zoneinfo/Asia/Ashgabat",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1a9f3f8ea202e815",
+      "name": "/usr/share/zoneinfo/Asia/Atyrau",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3c4c43638d3aaf16",
+      "name": "/usr/share/zoneinfo/Asia/Baghdad",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e7a4204429379f9f",
+      "name": "/usr/share/zoneinfo/Asia/Bahrain",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b044c03c97daf976",
+      "name": "/usr/share/zoneinfo/Asia/Baku",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e0c3a6bd31e954e2",
+      "name": "/usr/share/zoneinfo/Asia/Bangkok",
+      "type": "file"
+    },
+    {
+      "bom-ref": "78278ec3ea9c2767",
+      "name": "/usr/share/zoneinfo/Asia/Barnaul",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ebb8a758d57e49d7",
+      "name": "/usr/share/zoneinfo/Asia/Beirut",
+      "type": "file"
+    },
+    {
+      "bom-ref": "170684bdd01cdb4b",
+      "name": "/usr/share/zoneinfo/Asia/Bishkek",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8fabe3fdd6de0e36",
+      "name": "/usr/share/zoneinfo/Asia/Brunei",
+      "type": "file"
+    },
+    {
+      "bom-ref": "62878215901415a4",
+      "name": "/usr/share/zoneinfo/Asia/Chita",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7cf2ce551ee595f8",
+      "name": "/usr/share/zoneinfo/Asia/Colombo",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3fbffc6c308e2a3d",
+      "name": "/usr/share/zoneinfo/Asia/Damascus",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6b9b429d3bfcb16e",
+      "name": "/usr/share/zoneinfo/Asia/Dhaka",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e21d4d3d579a3a41",
+      "name": "/usr/share/zoneinfo/Asia/Dili",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3a396f8af75d925a",
+      "name": "/usr/share/zoneinfo/Asia/Dubai",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1779c3ac8942f83e",
+      "name": "/usr/share/zoneinfo/Asia/Dushanbe",
+      "type": "file"
+    },
+    {
+      "bom-ref": "49b05f28880d6152",
+      "name": "/usr/share/zoneinfo/Asia/Famagusta",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bc0928c88ec0bc86",
+      "name": "/usr/share/zoneinfo/Asia/Gaza",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1bec0c71d81e03b6",
+      "name": "/usr/share/zoneinfo/Asia/Hebron",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7aa49b28e34ca256",
+      "name": "/usr/share/zoneinfo/Asia/Ho_Chi_Minh",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4308b30f4136a6e6",
+      "name": "/usr/share/zoneinfo/Asia/Hong_Kong",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0c64da480339ed40",
+      "name": "/usr/share/zoneinfo/Asia/Hovd",
+      "type": "file"
+    },
+    {
+      "bom-ref": "57462a49a3537fac",
+      "name": "/usr/share/zoneinfo/Asia/Irkutsk",
+      "type": "file"
+    },
+    {
+      "bom-ref": "75cf18620624f49a",
+      "name": "/usr/share/zoneinfo/Asia/Jakarta",
+      "type": "file"
+    },
+    {
+      "bom-ref": "db94c808a04371b3",
+      "name": "/usr/share/zoneinfo/Asia/Jayapura",
+      "type": "file"
+    },
+    {
+      "bom-ref": "498366205ffede1b",
+      "name": "/usr/share/zoneinfo/Asia/Jerusalem",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c64648c8d2042702",
+      "name": "/usr/share/zoneinfo/Asia/Kabul",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4c466dd5f9168900",
+      "name": "/usr/share/zoneinfo/Asia/Kamchatka",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2af83c14535bbdca",
+      "name": "/usr/share/zoneinfo/Asia/Karachi",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0b7731300d182742",
+      "name": "/usr/share/zoneinfo/Asia/Kathmandu",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bff0aee88eb0f0b9",
+      "name": "/usr/share/zoneinfo/Asia/Khandyga",
+      "type": "file"
+    },
+    {
+      "bom-ref": "02a9b8bab5db102d",
+      "name": "/usr/share/zoneinfo/Asia/Kolkata",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4326d6c870adf11f",
+      "name": "/usr/share/zoneinfo/Asia/Krasnoyarsk",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7dc4121f65659aa8",
+      "name": "/usr/share/zoneinfo/Asia/Kuala_Lumpur",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c6bf0cc367e21f29",
+      "name": "/usr/share/zoneinfo/Asia/Kuching",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2fa23c1d5f69e0a7",
+      "name": "/usr/share/zoneinfo/Asia/Kuwait",
+      "type": "file"
+    },
+    {
+      "bom-ref": "44087f2fb29ed3f4",
+      "name": "/usr/share/zoneinfo/Asia/Macau",
+      "type": "file"
+    },
+    {
+      "bom-ref": "deb416ed1c59103d",
+      "name": "/usr/share/zoneinfo/Asia/Magadan",
+      "type": "file"
+    },
+    {
+      "bom-ref": "427d6fb80d5a99e9",
+      "name": "/usr/share/zoneinfo/Asia/Makassar",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1f6cb59512215ebd",
+      "name": "/usr/share/zoneinfo/Asia/Manila",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b10e27b25395711d",
+      "name": "/usr/share/zoneinfo/Asia/Muscat",
+      "type": "file"
+    },
+    {
+      "bom-ref": "906bf59cd8f52d53",
+      "name": "/usr/share/zoneinfo/Asia/Nicosia",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0893df882f694d86",
+      "name": "/usr/share/zoneinfo/Asia/Novokuznetsk",
+      "type": "file"
+    },
+    {
+      "bom-ref": "542e7066f96ed814",
+      "name": "/usr/share/zoneinfo/Asia/Novosibirsk",
+      "type": "file"
+    },
+    {
+      "bom-ref": "87c59e798c3e3729",
+      "name": "/usr/share/zoneinfo/Asia/Omsk",
+      "type": "file"
+    },
+    {
+      "bom-ref": "13ebb12c5d0bf16e",
+      "name": "/usr/share/zoneinfo/Asia/Oral",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a2d723f77a77c243",
+      "name": "/usr/share/zoneinfo/Asia/Phnom_Penh",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2ae42ff045ef1b8d",
+      "name": "/usr/share/zoneinfo/Asia/Pontianak",
+      "type": "file"
+    },
+    {
+      "bom-ref": "01056279501c682a",
+      "name": "/usr/share/zoneinfo/Asia/Pyongyang",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7b81615f02eb575b",
+      "name": "/usr/share/zoneinfo/Asia/Qatar",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b06e42f9af31999e",
+      "name": "/usr/share/zoneinfo/Asia/Qostanay",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f6965c076c14a0b9",
+      "name": "/usr/share/zoneinfo/Asia/Qyzylorda",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4da46249b67d12f6",
+      "name": "/usr/share/zoneinfo/Asia/Riyadh",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b9aeb0e5dc37b49e",
+      "name": "/usr/share/zoneinfo/Asia/Sakhalin",
+      "type": "file"
+    },
+    {
+      "bom-ref": "87e952e12cf28879",
+      "name": "/usr/share/zoneinfo/Asia/Samarkand",
+      "type": "file"
+    },
+    {
+      "bom-ref": "471573d3f405a496",
+      "name": "/usr/share/zoneinfo/Asia/Seoul",
+      "type": "file"
+    },
+    {
+      "bom-ref": "81b136d628b55277",
+      "name": "/usr/share/zoneinfo/Asia/Shanghai",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d7b32764133132f3",
+      "name": "/usr/share/zoneinfo/Asia/Singapore",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1866211e18a8a1fc",
+      "name": "/usr/share/zoneinfo/Asia/Srednekolymsk",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3e36a9629d56f5f8",
+      "name": "/usr/share/zoneinfo/Asia/Taipei",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1ded5628eaffee77",
+      "name": "/usr/share/zoneinfo/Asia/Tashkent",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c8c3662db8999888",
+      "name": "/usr/share/zoneinfo/Asia/Tbilisi",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f2b0ebaa636a1c53",
+      "name": "/usr/share/zoneinfo/Asia/Tehran",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9ca0402ed0c4b23b",
+      "name": "/usr/share/zoneinfo/Asia/Thimphu",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2807aec0796a1690",
+      "name": "/usr/share/zoneinfo/Asia/Tokyo",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1ef1289added1408",
+      "name": "/usr/share/zoneinfo/Asia/Tomsk",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b04a5f4cbe0ed48f",
+      "name": "/usr/share/zoneinfo/Asia/Ulaanbaatar",
+      "type": "file"
+    },
+    {
+      "bom-ref": "96f03dd71df163f2",
+      "name": "/usr/share/zoneinfo/Asia/Urumqi",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5e92df5b0b1d97e8",
+      "name": "/usr/share/zoneinfo/Asia/Ust-Nera",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b3270cca403bed79",
+      "name": "/usr/share/zoneinfo/Asia/Vientiane",
+      "type": "file"
+    },
+    {
+      "bom-ref": "210b7dd859294654",
+      "name": "/usr/share/zoneinfo/Asia/Vladivostok",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f1251d08b218c1fd",
+      "name": "/usr/share/zoneinfo/Asia/Yakutsk",
+      "type": "file"
+    },
+    {
+      "bom-ref": "764b212c9d3f20e7",
+      "name": "/usr/share/zoneinfo/Asia/Yangon",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5e36eb5f06eb19ae",
+      "name": "/usr/share/zoneinfo/Asia/Yekaterinburg",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d85816fe6595a270",
+      "name": "/usr/share/zoneinfo/Asia/Yerevan",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b992cd3a2b24cbdd",
+      "name": "/usr/share/zoneinfo/Atlantic/Azores",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c13680c3eb7c5df8",
+      "name": "/usr/share/zoneinfo/Atlantic/Bermuda",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6549ebd01143306b",
+      "name": "/usr/share/zoneinfo/Atlantic/Canary",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4be3582f43c7ae03",
+      "name": "/usr/share/zoneinfo/Atlantic/Cape_Verde",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9f819e52895c23de",
+      "name": "/usr/share/zoneinfo/Atlantic/Faroe",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0156467f988321f7",
+      "name": "/usr/share/zoneinfo/Atlantic/Madeira",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e4a57653d7d2290f",
+      "name": "/usr/share/zoneinfo/Atlantic/Reykjavik",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9148913a28bfd23b",
+      "name": "/usr/share/zoneinfo/Atlantic/South_Georgia",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7de0888019ee178f",
+      "name": "/usr/share/zoneinfo/Atlantic/St_Helena",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1cea50f4aec2c67b",
+      "name": "/usr/share/zoneinfo/Atlantic/Stanley",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3c36f406d8aa4daf",
+      "name": "/usr/share/zoneinfo/Australia/Adelaide",
+      "type": "file"
+    },
+    {
+      "bom-ref": "77b950dd8f8642de",
+      "name": "/usr/share/zoneinfo/Australia/Brisbane",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2d98e58b083a1600",
+      "name": "/usr/share/zoneinfo/Australia/Broken_Hill",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9b423a6ec5c00bd5",
+      "name": "/usr/share/zoneinfo/Australia/Darwin",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a39d1502e8388717",
+      "name": "/usr/share/zoneinfo/Australia/Eucla",
+      "type": "file"
+    },
+    {
+      "bom-ref": "02b8a7dd89240105",
+      "name": "/usr/share/zoneinfo/Australia/Hobart",
+      "type": "file"
+    },
+    {
+      "bom-ref": "be4e83813c245cbb",
+      "name": "/usr/share/zoneinfo/Australia/Lindeman",
+      "type": "file"
+    },
+    {
+      "bom-ref": "006cccfc47fdaf1f",
+      "name": "/usr/share/zoneinfo/Australia/Lord_Howe",
+      "type": "file"
+    },
+    {
+      "bom-ref": "94c4b9ab9aa6eabf",
+      "name": "/usr/share/zoneinfo/Australia/Melbourne",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c8d08a27397a38c4",
+      "name": "/usr/share/zoneinfo/Australia/Perth",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f436810ff78722b0",
+      "name": "/usr/share/zoneinfo/Australia/Sydney",
+      "type": "file"
+    },
+    {
+      "bom-ref": "682158c1d9c72e8b",
+      "name": "/usr/share/zoneinfo/Etc/GMT",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d74fc1584a8b5bd4",
+      "name": "/usr/share/zoneinfo/Etc/GMT+1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ca6c9c2927c1906c",
+      "name": "/usr/share/zoneinfo/Etc/GMT+10",
+      "type": "file"
+    },
+    {
+      "bom-ref": "25eca8ef2116459d",
+      "name": "/usr/share/zoneinfo/Etc/GMT+11",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0ad174a2cc5a6088",
+      "name": "/usr/share/zoneinfo/Etc/GMT+12",
+      "type": "file"
+    },
+    {
+      "bom-ref": "dffc2297e97d1deb",
+      "name": "/usr/share/zoneinfo/Etc/GMT+2",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c663a01f586b9754",
+      "name": "/usr/share/zoneinfo/Etc/GMT+3",
+      "type": "file"
+    },
+    {
+      "bom-ref": "682c2f9b14300926",
+      "name": "/usr/share/zoneinfo/Etc/GMT+4",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1f90ab6deb859e3d",
+      "name": "/usr/share/zoneinfo/Etc/GMT+5",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5606b32bd3309778",
+      "name": "/usr/share/zoneinfo/Etc/GMT+6",
+      "type": "file"
+    },
+    {
+      "bom-ref": "610d915109e714fe",
+      "name": "/usr/share/zoneinfo/Etc/GMT+7",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ec967036342c1a93",
+      "name": "/usr/share/zoneinfo/Etc/GMT+8",
+      "type": "file"
+    },
+    {
+      "bom-ref": "08411e05874d8e88",
+      "name": "/usr/share/zoneinfo/Etc/GMT+9",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1d6c3a6557496d9a",
+      "name": "/usr/share/zoneinfo/Etc/GMT-1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a2a0fd0198e7fc99",
+      "name": "/usr/share/zoneinfo/Etc/GMT-10",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0f74603e9b3a71ee",
+      "name": "/usr/share/zoneinfo/Etc/GMT-11",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8147225108bf7d25",
+      "name": "/usr/share/zoneinfo/Etc/GMT-12",
+      "type": "file"
+    },
+    {
+      "bom-ref": "83a21e0bd6c426da",
+      "name": "/usr/share/zoneinfo/Etc/GMT-13",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c98f9f54475311bf",
+      "name": "/usr/share/zoneinfo/Etc/GMT-14",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6110a97983fa4a93",
+      "name": "/usr/share/zoneinfo/Etc/GMT-2",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4b5da82d9d3db569",
+      "name": "/usr/share/zoneinfo/Etc/GMT-3",
+      "type": "file"
+    },
+    {
+      "bom-ref": "06221b4355537d6f",
+      "name": "/usr/share/zoneinfo/Etc/GMT-4",
+      "type": "file"
+    },
+    {
+      "bom-ref": "da6d063ab28bcb3e",
+      "name": "/usr/share/zoneinfo/Etc/GMT-5",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e400e55b2e541624",
+      "name": "/usr/share/zoneinfo/Etc/GMT-6",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6fc320ac0e03a807",
+      "name": "/usr/share/zoneinfo/Etc/GMT-7",
+      "type": "file"
+    },
+    {
+      "bom-ref": "22f6d53d679e1f79",
+      "name": "/usr/share/zoneinfo/Etc/GMT-8",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ee340ef3e3242402",
+      "name": "/usr/share/zoneinfo/Etc/GMT-9",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c953d5ae4d30ffc5",
+      "name": "/usr/share/zoneinfo/Etc/UTC",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2b850551c0440af7",
+      "name": "/usr/share/zoneinfo/Europe/Amsterdam",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5bfeffe36fbb504d",
+      "name": "/usr/share/zoneinfo/Europe/Andorra",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6c524d3101a5b5b8",
+      "name": "/usr/share/zoneinfo/Europe/Astrakhan",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7b1412b672b82edf",
+      "name": "/usr/share/zoneinfo/Europe/Athens",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e2dc9b8f06e21bbf",
+      "name": "/usr/share/zoneinfo/Europe/Belgrade",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e9a7bfd6dc6faf65",
+      "name": "/usr/share/zoneinfo/Europe/Berlin",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e7ee44ecfd436a77",
+      "name": "/usr/share/zoneinfo/Europe/Brussels",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3443014d1d5870f9",
+      "name": "/usr/share/zoneinfo/Europe/Bucharest",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e37b760ad0d00ae6",
+      "name": "/usr/share/zoneinfo/Europe/Budapest",
+      "type": "file"
+    },
+    {
+      "bom-ref": "db7597f7dc168b7c",
+      "name": "/usr/share/zoneinfo/Europe/Chisinau",
+      "type": "file"
+    },
+    {
+      "bom-ref": "42bd6c17a2e2ef32",
+      "name": "/usr/share/zoneinfo/Europe/Copenhagen",
+      "type": "file"
+    },
+    {
+      "bom-ref": "99e4deaee4d2cdb1",
+      "name": "/usr/share/zoneinfo/Europe/Dublin",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7fa1c25e893753c5",
+      "name": "/usr/share/zoneinfo/Europe/Gibraltar",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e4306349ec590041",
+      "name": "/usr/share/zoneinfo/Europe/Guernsey",
+      "type": "file"
+    },
+    {
+      "bom-ref": "37b025e7a1b94527",
+      "name": "/usr/share/zoneinfo/Europe/Helsinki",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ae9423f9887f1d7d",
+      "name": "/usr/share/zoneinfo/Europe/Isle_of_Man",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7a627cbc3b9ce675",
+      "name": "/usr/share/zoneinfo/Europe/Istanbul",
+      "type": "file"
+    },
+    {
+      "bom-ref": "cda1e591060f2825",
+      "name": "/usr/share/zoneinfo/Europe/Jersey",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e51d2d65ad5f163d",
+      "name": "/usr/share/zoneinfo/Europe/Kaliningrad",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6a3f989486915815",
+      "name": "/usr/share/zoneinfo/Europe/Kirov",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8eb373c76b0866da",
+      "name": "/usr/share/zoneinfo/Europe/Kyiv",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e559788336655dfd",
+      "name": "/usr/share/zoneinfo/Europe/Lisbon",
+      "type": "file"
+    },
+    {
+      "bom-ref": "149645c197e0e7a7",
+      "name": "/usr/share/zoneinfo/Europe/Ljubljana",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7619b24ee840241a",
+      "name": "/usr/share/zoneinfo/Europe/London",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d76d1821249e7d01",
+      "name": "/usr/share/zoneinfo/Europe/Luxembourg",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1ca867870adca836",
+      "name": "/usr/share/zoneinfo/Europe/Madrid",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ad4f0d4b79b1a09e",
+      "name": "/usr/share/zoneinfo/Europe/Malta",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3dfadb38d16bfa74",
+      "name": "/usr/share/zoneinfo/Europe/Minsk",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f3b0d8417988e7fc",
+      "name": "/usr/share/zoneinfo/Europe/Monaco",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4436608e4d09d92c",
+      "name": "/usr/share/zoneinfo/Europe/Moscow",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a5c4fc43bc0f982e",
+      "name": "/usr/share/zoneinfo/Europe/Oslo",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c2803f434764dd39",
+      "name": "/usr/share/zoneinfo/Europe/Paris",
+      "type": "file"
+    },
+    {
+      "bom-ref": "210d50ae2fb4bbd0",
+      "name": "/usr/share/zoneinfo/Europe/Prague",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6783490cdcd9831b",
+      "name": "/usr/share/zoneinfo/Europe/Riga",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d60f344d987f8ac2",
+      "name": "/usr/share/zoneinfo/Europe/Rome",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2aa37119ff6bb6d3",
+      "name": "/usr/share/zoneinfo/Europe/Samara",
+      "type": "file"
+    },
+    {
+      "bom-ref": "78406b451bcdbf92",
+      "name": "/usr/share/zoneinfo/Europe/Sarajevo",
+      "type": "file"
+    },
+    {
+      "bom-ref": "82a69752bc2b8327",
+      "name": "/usr/share/zoneinfo/Europe/Saratov",
+      "type": "file"
+    },
+    {
+      "bom-ref": "aab35b3b890cd148",
+      "name": "/usr/share/zoneinfo/Europe/Simferopol",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b250871b0a501a78",
+      "name": "/usr/share/zoneinfo/Europe/Skopje",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0fcbd33b8275d7fd",
+      "name": "/usr/share/zoneinfo/Europe/Sofia",
+      "type": "file"
+    },
+    {
+      "bom-ref": "31fef068828c46f1",
+      "name": "/usr/share/zoneinfo/Europe/Stockholm",
+      "type": "file"
+    },
+    {
+      "bom-ref": "887b6d434a62e715",
+      "name": "/usr/share/zoneinfo/Europe/Tallinn",
+      "type": "file"
+    },
+    {
+      "bom-ref": "93063bd322389895",
+      "name": "/usr/share/zoneinfo/Europe/Tirane",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6da134301b1df9cd",
+      "name": "/usr/share/zoneinfo/Europe/Ulyanovsk",
+      "type": "file"
+    },
+    {
+      "bom-ref": "dc229c49b685262d",
+      "name": "/usr/share/zoneinfo/Europe/Vaduz",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bbcc50a122dffa7a",
+      "name": "/usr/share/zoneinfo/Europe/Vienna",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d844535422ad6f37",
+      "name": "/usr/share/zoneinfo/Europe/Vilnius",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c3e87acffc0cbc8b",
+      "name": "/usr/share/zoneinfo/Europe/Volgograd",
+      "type": "file"
+    },
+    {
+      "bom-ref": "77638b943bf346a4",
+      "name": "/usr/share/zoneinfo/Europe/Warsaw",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c5e76f0ddedd3ab5",
+      "name": "/usr/share/zoneinfo/Europe/Zagreb",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9c20875c16f981b7",
+      "name": "/usr/share/zoneinfo/Europe/Zurich",
+      "type": "file"
+    },
+    {
+      "bom-ref": "483cdd68a4d55229",
+      "name": "/usr/share/zoneinfo/Factory",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e7152a1525f97c05",
+      "name": "/usr/share/zoneinfo/Indian/Antananarivo",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ddcd840f756bf1f2",
+      "name": "/usr/share/zoneinfo/Indian/Chagos",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d1020d99212a0670",
+      "name": "/usr/share/zoneinfo/Indian/Christmas",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1832556a247cb00a",
+      "name": "/usr/share/zoneinfo/Indian/Cocos",
+      "type": "file"
+    },
+    {
+      "bom-ref": "345c3866eb0b2a16",
+      "name": "/usr/share/zoneinfo/Indian/Comoro",
+      "type": "file"
+    },
+    {
+      "bom-ref": "eab9b6596bd6d150",
+      "name": "/usr/share/zoneinfo/Indian/Kerguelen",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4fd6069ae6191f39",
+      "name": "/usr/share/zoneinfo/Indian/Mahe",
+      "type": "file"
+    },
+    {
+      "bom-ref": "051f7a4deb81d8c7",
+      "name": "/usr/share/zoneinfo/Indian/Maldives",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b78c30a423592d2c",
+      "name": "/usr/share/zoneinfo/Indian/Mauritius",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b9675fca334808cf",
+      "name": "/usr/share/zoneinfo/Indian/Mayotte",
+      "type": "file"
+    },
+    {
+      "bom-ref": "eaa8e0a02e2c80d4",
+      "name": "/usr/share/zoneinfo/Indian/Reunion",
+      "type": "file"
+    },
+    {
+      "bom-ref": "551a5c187716594b",
+      "name": "/usr/share/zoneinfo/Pacific/Apia",
+      "type": "file"
+    },
+    {
+      "bom-ref": "df4b730095a5a0f4",
+      "name": "/usr/share/zoneinfo/Pacific/Auckland",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4479e74a7f16da0e",
+      "name": "/usr/share/zoneinfo/Pacific/Bougainville",
+      "type": "file"
+    },
+    {
+      "bom-ref": "34abb387a9c614a1",
+      "name": "/usr/share/zoneinfo/Pacific/Chatham",
+      "type": "file"
+    },
+    {
+      "bom-ref": "00b8a259950cedc6",
+      "name": "/usr/share/zoneinfo/Pacific/Chuuk",
+      "type": "file"
+    },
+    {
+      "bom-ref": "753db06fc14ad603",
+      "name": "/usr/share/zoneinfo/Pacific/Easter",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b6dfa4af7b4df9ab",
+      "name": "/usr/share/zoneinfo/Pacific/Efate",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4fcd4dab2c930147",
+      "name": "/usr/share/zoneinfo/Pacific/Fakaofo",
+      "type": "file"
+    },
+    {
+      "bom-ref": "beec98660bed83c3",
+      "name": "/usr/share/zoneinfo/Pacific/Fiji",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3b038801329b0311",
+      "name": "/usr/share/zoneinfo/Pacific/Funafuti",
+      "type": "file"
+    },
+    {
+      "bom-ref": "42f8fe032f312f89",
+      "name": "/usr/share/zoneinfo/Pacific/Galapagos",
+      "type": "file"
+    },
+    {
+      "bom-ref": "724cee391b3c7efa",
+      "name": "/usr/share/zoneinfo/Pacific/Gambier",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b53497bc59d234c6",
+      "name": "/usr/share/zoneinfo/Pacific/Guadalcanal",
+      "type": "file"
+    },
+    {
+      "bom-ref": "54db45d1c3f60bc5",
+      "name": "/usr/share/zoneinfo/Pacific/Guam",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7263653ab794a8da",
+      "name": "/usr/share/zoneinfo/Pacific/Honolulu",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2b2e7b6ca7b5be72",
+      "name": "/usr/share/zoneinfo/Pacific/Kanton",
+      "type": "file"
+    },
+    {
+      "bom-ref": "38f2f989be9be964",
+      "name": "/usr/share/zoneinfo/Pacific/Kiritimati",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9ced6dd1ce5e6b5b",
+      "name": "/usr/share/zoneinfo/Pacific/Kosrae",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9ca5daac74fe253e",
+      "name": "/usr/share/zoneinfo/Pacific/Kwajalein",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9bc4566a7b65a33b",
+      "name": "/usr/share/zoneinfo/Pacific/Majuro",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c94d706c7086362d",
+      "name": "/usr/share/zoneinfo/Pacific/Marquesas",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0d5af9232c43c4e0",
+      "name": "/usr/share/zoneinfo/Pacific/Midway",
+      "type": "file"
+    },
+    {
+      "bom-ref": "088f21e14003cc23",
+      "name": "/usr/share/zoneinfo/Pacific/Nauru",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4d6d1ba4e38b3c13",
+      "name": "/usr/share/zoneinfo/Pacific/Niue",
+      "type": "file"
+    },
+    {
+      "bom-ref": "676a557623880c3c",
+      "name": "/usr/share/zoneinfo/Pacific/Norfolk",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d1c67948b99d4d8e",
+      "name": "/usr/share/zoneinfo/Pacific/Noumea",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9c0279af62080863",
+      "name": "/usr/share/zoneinfo/Pacific/Pago_Pago",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2035e39944e7cf78",
+      "name": "/usr/share/zoneinfo/Pacific/Palau",
+      "type": "file"
+    },
+    {
+      "bom-ref": "16fdedc1f916f474",
+      "name": "/usr/share/zoneinfo/Pacific/Pitcairn",
+      "type": "file"
+    },
+    {
+      "bom-ref": "baec12d3e9220dcd",
+      "name": "/usr/share/zoneinfo/Pacific/Pohnpei",
+      "type": "file"
+    },
+    {
+      "bom-ref": "11b4200cbc01ce77",
+      "name": "/usr/share/zoneinfo/Pacific/Port_Moresby",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e8fbbe8f47830475",
+      "name": "/usr/share/zoneinfo/Pacific/Rarotonga",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a2e017fc37dfb130",
+      "name": "/usr/share/zoneinfo/Pacific/Saipan",
+      "type": "file"
+    },
+    {
+      "bom-ref": "651088c6967cae5f",
+      "name": "/usr/share/zoneinfo/Pacific/Tahiti",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e7be38cd0adbcbaa",
+      "name": "/usr/share/zoneinfo/Pacific/Tarawa",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bafa1b2593ba74a6",
+      "name": "/usr/share/zoneinfo/Pacific/Tongatapu",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5052f37b5be3d780",
+      "name": "/usr/share/zoneinfo/Pacific/Wake",
+      "type": "file"
+    },
+    {
+      "bom-ref": "05856de93225efad",
+      "name": "/usr/share/zoneinfo/Pacific/Wallis",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7d218e00e1a82ecd",
+      "name": "/usr/share/zoneinfo/iso3166.tab",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5c25c1e3b707e789",
+      "name": "/usr/share/zoneinfo/leap-seconds.list",
+      "type": "file"
+    },
+    {
+      "bom-ref": "836b4771ba1c75e4",
+      "name": "/usr/share/zoneinfo/leapseconds",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ac391dba940fbb42",
+      "name": "/usr/share/zoneinfo/tzdata.zi",
+      "type": "file"
+    },
+    {
+      "bom-ref": "bb0bb5d20f00445e",
+      "name": "/usr/share/zoneinfo/zone.tab",
+      "type": "file"
+    },
+    {
+      "bom-ref": "fed6ba2277ca98a9",
+      "name": "/usr/share/zoneinfo/zone1970.tab",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b0afc08418b5f194",
+      "name": "/usr/share/zoneinfo/zonenow.tab",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2592f734fe3f7312",
+      "name": "/var/lib/dpkg/status.d/base-files",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b0f152e00267772c",
+      "name": "/var/lib/dpkg/status.d/base-files.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e2b0f68ce753b089",
+      "name": "/var/lib/dpkg/status.d/gcc-14-base",
+      "type": "file"
+    },
+    {
+      "bom-ref": "37d59165441372d5",
+      "name": "/var/lib/dpkg/status.d/gcc-14-base.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "cd156049a0afe9c7",
+      "name": "/var/lib/dpkg/status.d/libbz2-1.0",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5b6fadc8f5d0fa3e",
+      "name": "/var/lib/dpkg/status.d/libbz2-1.0.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6ea3097207c48717",
+      "name": "/var/lib/dpkg/status.d/libc6",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5ce411518af94caf",
+      "name": "/var/lib/dpkg/status.d/libc6.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "30dc9eeb1964eaff",
+      "name": "/var/lib/dpkg/status.d/libcom-err2",
+      "type": "file"
+    },
+    {
+      "bom-ref": "5f30d41f88c5805e",
+      "name": "/var/lib/dpkg/status.d/libcom-err2.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "42a722cb455ef71d",
+      "name": "/var/lib/dpkg/status.d/libcrypt1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c59af422efc151a3",
+      "name": "/var/lib/dpkg/status.d/libcrypt1.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "18e71509ca911390",
+      "name": "/var/lib/dpkg/status.d/libdb5.3t64",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6d56642fb932879a",
+      "name": "/var/lib/dpkg/status.d/libdb5.3t64.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "cde94c4e5f61dd4d",
+      "name": "/var/lib/dpkg/status.d/libexpat1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "0c250283ef2e153c",
+      "name": "/var/lib/dpkg/status.d/libexpat1.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ad7a39798ac0d803",
+      "name": "/var/lib/dpkg/status.d/libffi8",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a3d21d2aa4ef0b8b",
+      "name": "/var/lib/dpkg/status.d/libffi8.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7994cb3f4d47e6fb",
+      "name": "/var/lib/dpkg/status.d/libgcc-s1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b3b9154501c96f88",
+      "name": "/var/lib/dpkg/status.d/libgcc-s1.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "ed3d6ad3e22afc26",
+      "name": "/var/lib/dpkg/status.d/libgomp1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "1c2118839e0404af",
+      "name": "/var/lib/dpkg/status.d/libgomp1.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d997bb0298e26aca",
+      "name": "/var/lib/dpkg/status.d/libgssapi-krb5-2",
+      "type": "file"
+    },
+    {
+      "bom-ref": "e20ae889c7df39f2",
+      "name": "/var/lib/dpkg/status.d/libgssapi-krb5-2.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "02dc1176295c13a2",
+      "name": "/var/lib/dpkg/status.d/libk5crypto3",
+      "type": "file"
+    },
+    {
+      "bom-ref": "69ba9ed3239ca4e7",
+      "name": "/var/lib/dpkg/status.d/libk5crypto3.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "afd88e40de691aba",
+      "name": "/var/lib/dpkg/status.d/libkeyutils1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "298739788e193290",
+      "name": "/var/lib/dpkg/status.d/libkeyutils1.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "74c04241f108c652",
+      "name": "/var/lib/dpkg/status.d/libkrb5-3",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f637d49177d277ed",
+      "name": "/var/lib/dpkg/status.d/libkrb5-3.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "9c65c028d2b238da",
+      "name": "/var/lib/dpkg/status.d/libkrb5support0",
+      "type": "file"
+    },
+    {
+      "bom-ref": "db11553e432343a5",
+      "name": "/var/lib/dpkg/status.d/libkrb5support0.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "2db78d04c25fe450",
+      "name": "/var/lib/dpkg/status.d/liblzma5",
+      "type": "file"
+    },
+    {
+      "bom-ref": "920e2e3fff9e9a1b",
+      "name": "/var/lib/dpkg/status.d/liblzma5.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "38feb5566360da36",
+      "name": "/var/lib/dpkg/status.d/libncursesw6",
+      "type": "file"
+    },
+    {
+      "bom-ref": "3cd66e45cf43dedc",
+      "name": "/var/lib/dpkg/status.d/libncursesw6.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "963f5d71dc524b8c",
+      "name": "/var/lib/dpkg/status.d/libnsl2",
+      "type": "file"
+    },
+    {
+      "bom-ref": "130696090840c09d",
+      "name": "/var/lib/dpkg/status.d/libnsl2.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "37773fb150b776e8",
+      "name": "/var/lib/dpkg/status.d/libreadline8t64",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d457937d999fdc69",
+      "name": "/var/lib/dpkg/status.d/libreadline8t64.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "f0dbf739feed9caa",
+      "name": "/var/lib/dpkg/status.d/libsqlite3-0",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c678f6d04cb45e46",
+      "name": "/var/lib/dpkg/status.d/libsqlite3-0.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c6b4c414a759aff0",
+      "name": "/var/lib/dpkg/status.d/libssl3t64",
+      "type": "file"
+    },
+    {
+      "bom-ref": "d4b628e6f4f0f9cb",
+      "name": "/var/lib/dpkg/status.d/libssl3t64.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a3bc4ee825abd176",
+      "name": "/var/lib/dpkg/status.d/libstdc++6",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7da8cda7d719817f",
+      "name": "/var/lib/dpkg/status.d/libstdc++6.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "a92deb0b851bde93",
+      "name": "/var/lib/dpkg/status.d/libtinfo6",
+      "type": "file"
+    },
+    {
+      "bom-ref": "c3654ed5640540c4",
+      "name": "/var/lib/dpkg/status.d/libtinfo6.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "efc4ff7187c65aa2",
+      "name": "/var/lib/dpkg/status.d/libtirpc3t64",
+      "type": "file"
+    },
+    {
+      "bom-ref": "8a03adbc86e206d3",
+      "name": "/var/lib/dpkg/status.d/libtirpc3t64.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "7f420d317f4f65db",
+      "name": "/var/lib/dpkg/status.d/libuuid1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "45b0b475f748ec3a",
+      "name": "/var/lib/dpkg/status.d/libuuid1.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "747169d76f8aff7e",
+      "name": "/var/lib/dpkg/status.d/libzstd1",
+      "type": "file"
+    },
+    {
+      "bom-ref": "4446d836a626fa28",
+      "name": "/var/lib/dpkg/status.d/libzstd1.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "35aa49848f728b23",
+      "name": "/var/lib/dpkg/status.d/media-types",
+      "type": "file"
+    },
+    {
+      "bom-ref": "fcdb10b698161097",
+      "name": "/var/lib/dpkg/status.d/media-types.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "eda4d4cf0900f9a5",
+      "name": "/var/lib/dpkg/status.d/netbase",
+      "type": "file"
+    },
+    {
+      "bom-ref": "feeedbf2bec912ff",
+      "name": "/var/lib/dpkg/status.d/netbase.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "76dd7ea5e3109ed1",
+      "name": "/var/lib/dpkg/status.d/openssl-provider-fips",
+      "type": "file"
+    },
+    {
+      "bom-ref": "71046726f280bf0d",
+      "name": "/var/lib/dpkg/status.d/openssl-provider-fips.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "b21bde815981b92d",
+      "name": "/var/lib/dpkg/status.d/tzdata",
+      "type": "file"
+    },
+    {
+      "bom-ref": "894b2b668952a6a7",
+      "name": "/var/lib/dpkg/status.d/tzdata.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "71f0489bfff4d181",
+      "name": "/var/lib/dpkg/status.d/zlib1g",
+      "type": "file"
+    },
+    {
+      "bom-ref": "6534cac23e59297f",
+      "name": "/var/lib/dpkg/status.d/zlib1g.md5sums",
+      "type": "file"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/base-files@13.8%2Bdeb13u4?arch=arm64&distro=debian-13&package-id=f8b3c51eba0a9b91",
+      "cpe": "cpe:2.3:a:base-files:base-files:13.8\\+deb13u4:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "id": "GPL-2.0-or-later"
+          }
+        },
+        {
+          "license": {
+            "name": "GPL"
+          }
+        },
+        {
+          "license": {
+            "name": "verbatim"
+          }
+        }
+      ],
+      "name": "base-files",
+      "publisher": "Santiago Vila <sanvila@debian.org>",
+      "purl": "pkg:deb/debian/base-files@13.8%2Bdeb13u4?arch=arm64&distro=debian-13",
+      "type": "library",
+      "version": "13.8+deb13u4"
+    },
+    {
+      "bom-ref": "os:debian@13",
+      "description": "Distroless",
+      "externalReferences": [
+        {
+          "type": "issue-tracker",
+          "url": "https://github.com/GoogleContainerTools/distroless/issues/new"
+        },
+        {
+          "type": "website",
+          "url": "https://github.com/GoogleContainerTools/distroless"
+        },
+        {
+          "comment": "support",
+          "type": "other",
+          "url": "https://github.com/GoogleContainerTools/distroless/blob/master/README.md"
+        }
+      ],
+      "name": "debian",
+      "swid": {
+        "name": "debian",
+        "tagId": "debian",
+        "version": "13"
+      },
+      "type": "operating-system",
+      "version": "13"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/gcc-14-base@14.2.0-19?arch=arm64&distro=debian-13&package-id=78580bef4c21d3d4&upstream=gcc-14",
+      "cpe": "cpe:2.3:a:gcc-14-base:gcc-14-base:14.2.0-19:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "name": "sha256:20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79"
+          }
+        }
+      ],
+      "name": "gcc-14-base",
+      "publisher": "Debian GCC Maintainers <debian-gcc@lists.debian.org>",
+      "purl": "pkg:deb/debian/gcc-14-base@14.2.0-19?arch=arm64&distro=debian-13&upstream=gcc-14",
+      "type": "library",
+      "version": "14.2.0-19"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/libbz2-1.0@1.0.8-6?arch=arm64&distro=debian-13&package-id=4194e49c36fcd20d&upstream=bzip2",
+      "cpe": "cpe:2.3:a:libbz2-1.0:libbz2-1.0:1.0.8-6:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "id": "GPL-2.0-only"
+          }
+        },
+        {
+          "license": {
+            "name": "BSD-variant"
+          }
+        }
+      ],
+      "name": "libbz2-1.0",
+      "publisher": "Anibal Monsalve Salazar <anibal@debian.org>",
+      "purl": "pkg:deb/debian/libbz2-1.0@1.0.8-6?arch=arm64&distro=debian-13&upstream=bzip2",
+      "type": "library",
+      "version": "1.0.8-6"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/libc6@2.41-12%2Bdeb13u2?arch=arm64&distro=debian-13&package-id=4de5c472655a9ac2&upstream=glibc",
+      "cpe": "cpe:2.3:a:libc6:libc6:2.41-12\\+deb13u2:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-2-Clause"
+          }
+        },
+        {
+          "license": {
+            "id": "BSL-1.0"
+          }
+        },
+        {
+          "license": {
+            "id": "FSFAP"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-2.0-only"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-2.0-or-later"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-3.0-only"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-3.0-or-later"
+          }
+        },
+        {
+          "license": {
+            "id": "ISC"
+          }
+        },
+        {
+          "license": {
+            "id": "LGPL-2.0-only"
+          }
+        },
+        {
+          "license": {
+            "id": "LGPL-2.0-or-later"
+          }
+        },
+        {
+          "license": {
+            "id": "LGPL-2.1-only"
+          }
+        },
+        {
+          "license": {
+            "id": "LGPL-2.1-or-later"
+          }
+        },
+        {
+          "license": {
+            "id": "LGPL-3.0-only"
+          }
+        },
+        {
+          "license": {
+            "id": "LGPL-3.0-or-later"
+          }
+        },
+        {
+          "license": {
+            "id": "SunPro"
+          }
+        },
+        {
+          "license": {
+            "id": "Unicode-DFS-2016"
+          }
+        },
+        {
+          "license": {
+            "name": "BSD-3-clause-Berkeley"
+          }
+        },
+        {
+          "license": {
+            "name": "BSD-3-clause-Carnegie"
+          }
+        },
+        {
+          "license": {
+            "name": "BSD-3-clause-Oracle"
+          }
+        },
+        {
+          "license": {
+            "name": "BSD-3-clause-WIDE"
+          }
+        },
+        {
+          "license": {
+            "name": "BSD-like-Spencer"
+          }
+        },
+        {
+          "license": {
+            "name": "CORE-MATH"
+          }
+        },
+        {
+          "license": {
+            "name": "Carnegie"
+          }
+        },
+        {
+          "license": {
+            "name": "DEC"
+          }
+        },
+        {
+          "license": {
+            "name": "GPL-2+-with-link-exception"
+          }
+        },
+        {
+          "license": {
+            "name": "IBM"
+          }
+        },
+        {
+          "license": {
+            "name": "Inner-Net"
+          }
+        },
+        {
+          "license": {
+            "name": "LGPL-2.1+-with-link-exception"
+          }
+        },
+        {
+          "license": {
+            "name": "MIT-like-Lord"
+          }
+        },
+        {
+          "license": {
+            "name": "PCRE"
+          }
+        },
+        {
+          "license": {
+            "name": "Univ-Coimbra"
+          }
+        },
+        {
+          "license": {
+            "name": "public-domain"
+          }
+        }
+      ],
+      "name": "libc6",
+      "publisher": "GNU Libc Maintainers <debian-glibc@lists.debian.org>",
+      "purl": "pkg:deb/debian/libc6@2.41-12%2Bdeb13u2?arch=arm64&distro=debian-13&upstream=glibc",
+      "type": "library",
+      "version": "2.41-12+deb13u2"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/libcom-err2@1.47.2-3%2Bb10?arch=arm64&distro=debian-13&package-id=609551254a6282ff&upstream=e2fsprogs%401.47.2-3",
+      "cpe": "cpe:2.3:a:libcom-err2:libcom-err2:1.47.2-3\\+b10:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "id": "0BSD"
+          }
+        },
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        },
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-2.0-only"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-2.0-or-later"
+          }
+        },
+        {
+          "license": {
+            "id": "ISC"
+          }
+        },
+        {
+          "license": {
+            "id": "Kazlib"
+          }
+        },
+        {
+          "license": {
+            "id": "LGPL-2.0-only"
+          }
+        },
+        {
+          "license": {
+            "id": "Latex2e"
+          }
+        },
+        {
+          "license": {
+            "name": "BSD-3-Clause-Variant"
+          }
+        },
+        {
+          "license": {
+            "name": "BSD-4-Clause-CMU"
+          }
+        },
+        {
+          "license": {
+            "name": "Expat"
+          }
+        },
+        {
+          "license": {
+            "name": "GPL"
+          }
+        }
+      ],
+      "name": "libcom-err2",
+      "publisher": "Theodore Y. Ts'o <tytso@mit.edu>",
+      "purl": "pkg:deb/debian/libcom-err2@1.47.2-3%2Bb10?arch=arm64&distro=debian-13&upstream=e2fsprogs%401.47.2-3",
+      "type": "library",
+      "version": "1.47.2-3+b10"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/libcrypt1@1%3A4.4.38-1?arch=arm64&distro=debian-13&package-id=28d40e5d20f8dcc3&upstream=libxcrypt",
+      "cpe": "cpe:2.3:a:libcrypt1:libcrypt1:1\\:4.4.38-1:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "name": "sha256:5a5e7ca0e9f3f9679977e3a3e9ede45ad92885a3297ea78e766979f9866c5a16"
+          }
+        }
+      ],
+      "name": "libcrypt1",
+      "publisher": "Marco d'Itri <md@linux.it>",
+      "purl": "pkg:deb/debian/libcrypt1@1%3A4.4.38-1?arch=arm64&distro=debian-13&upstream=libxcrypt",
+      "type": "library",
+      "version": "1:4.4.38-1"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/libdb5.3t64@5.3.28%2Bdfsg2-9?arch=arm64&distro=debian-13&package-id=1812d120ef181a7b&upstream=db5.3",
+      "cpe": "cpe:2.3:a:libdb5.3t64:libdb5.3t64:5.3.28\\+dfsg2-9:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-3.0-only"
+          }
+        },
+        {
+          "license": {
+            "id": "MS-PL"
+          }
+        },
+        {
+          "license": {
+            "id": "Sleepycat"
+          }
+        },
+        {
+          "license": {
+            "id": "X11"
+          }
+        },
+        {
+          "license": {
+            "id": "Zlib"
+          }
+        },
+        {
+          "license": {
+            "name": "Artistic"
+          }
+        },
+        {
+          "license": {
+            "name": "BSD-3-clause-fjord"
+          }
+        },
+        {
+          "license": {
+            "name": "GPL"
+          }
+        },
+        {
+          "license": {
+            "name": "MIT-old"
+          }
+        },
+        {
+          "license": {
+            "name": "TCL-like"
+          }
+        }
+      ],
+      "name": "libdb5.3t64",
+      "publisher": "Debian QA Group <packages@qa.debian.org>",
+      "purl": "pkg:deb/debian/libdb5.3t64@5.3.28%2Bdfsg2-9?arch=arm64&distro=debian-13&upstream=db5.3",
+      "type": "library",
+      "version": "5.3.28+dfsg2-9"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/libexpat1@2.7.1-2?arch=arm64&distro=debian-13&package-id=532529a830f663eb&upstream=expat",
+      "cpe": "cpe:2.3:a:libexpat1:libexpat1:2.7.1-2:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "libexpat1",
+      "publisher": "Laszlo Boszormenyi (GCS) <gcs@debian.org>",
+      "purl": "pkg:deb/debian/libexpat1@2.7.1-2?arch=arm64&distro=debian-13&upstream=expat",
+      "type": "library",
+      "version": "2.7.1-2"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/libffi8@3.4.8-2?arch=arm64&distro=debian-13&package-id=1af099503fa5fd03&upstream=libffi",
+      "cpe": "cpe:2.3:a:libffi8:libffi8:3.4.8-2:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "id": "GPL-2.0-or-later"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-3.0-or-later"
+          }
+        },
+        {
+          "license": {
+            "id": "MPL-1.1"
+          }
+        },
+        {
+          "license": {
+            "id": "X11"
+          }
+        },
+        {
+          "license": {
+            "name": "Expat"
+          }
+        },
+        {
+          "license": {
+            "name": "GPL"
+          }
+        },
+        {
+          "license": {
+            "name": "public-domain"
+          }
+        }
+      ],
+      "name": "libffi8",
+      "publisher": "Debian GCC Maintainers <debian-gcc@lists.debian.org>",
+      "purl": "pkg:deb/debian/libffi8@3.4.8-2?arch=arm64&distro=debian-13&upstream=libffi",
+      "type": "library",
+      "version": "3.4.8-2"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/libgcc-s1@14.2.0-19?arch=arm64&distro=debian-13&package-id=0e5ca87fa1ab7b35&upstream=gcc-14",
+      "cpe": "cpe:2.3:a:libgcc-s1:libgcc-s1:14.2.0-19:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "name": "sha256:20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79"
+          }
+        }
+      ],
+      "name": "libgcc-s1",
+      "publisher": "Debian GCC Maintainers <debian-gcc@lists.debian.org>",
+      "purl": "pkg:deb/debian/libgcc-s1@14.2.0-19?arch=arm64&distro=debian-13&upstream=gcc-14",
+      "type": "library",
+      "version": "14.2.0-19"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/libgomp1@14.2.0-19?arch=arm64&distro=debian-13&package-id=8d4d6890752630d0&upstream=gcc-14",
+      "cpe": "cpe:2.3:a:libgomp1:libgomp1:14.2.0-19:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "name": "sha256:20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79"
+          }
+        }
+      ],
+      "name": "libgomp1",
+      "publisher": "Debian GCC Maintainers <debian-gcc@lists.debian.org>",
+      "purl": "pkg:deb/debian/libgomp1@14.2.0-19?arch=arm64&distro=debian-13&upstream=gcc-14",
+      "type": "library",
+      "version": "14.2.0-19"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/libgssapi-krb5-2@1.21.3-5?arch=arm64&distro=debian-13&package-id=d6f057369a2d5a49&upstream=krb5",
+      "cpe": "cpe:2.3:a:libgssapi-krb5-2:libgssapi-krb5-2:1.21.3-5:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "name": "sha256:936728f4181718f42951b881c1e8f1386bf6b2723c4fbc533c374d6f42c71816"
+          }
+        }
+      ],
+      "name": "libgssapi-krb5-2",
+      "publisher": "Sam Hartman <hartmans@debian.org>",
+      "purl": "pkg:deb/debian/libgssapi-krb5-2@1.21.3-5?arch=arm64&distro=debian-13&upstream=krb5",
+      "type": "library",
+      "version": "1.21.3-5"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/libk5crypto3@1.21.3-5?arch=arm64&distro=debian-13&package-id=1c5ebfcb704d3087&upstream=krb5",
+      "cpe": "cpe:2.3:a:libk5crypto3:libk5crypto3:1.21.3-5:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "name": "sha256:936728f4181718f42951b881c1e8f1386bf6b2723c4fbc533c374d6f42c71816"
+          }
+        }
+      ],
+      "name": "libk5crypto3",
+      "publisher": "Sam Hartman <hartmans@debian.org>",
+      "purl": "pkg:deb/debian/libk5crypto3@1.21.3-5?arch=arm64&distro=debian-13&upstream=krb5",
+      "type": "library",
+      "version": "1.21.3-5"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/libkeyutils1@1.6.3-6?arch=arm64&distro=debian-13&package-id=41d500e3e8394f96&upstream=keyutils",
+      "cpe": "cpe:2.3:a:libkeyutils1:libkeyutils1:1.6.3-6:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "id": "GPL-2.0-only"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-2.0-or-later"
+          }
+        },
+        {
+          "license": {
+            "id": "LGPL-2.0-only"
+          }
+        },
+        {
+          "license": {
+            "id": "LGPL-2.0-or-later"
+          }
+        }
+      ],
+      "name": "libkeyutils1",
+      "publisher": "Christian Kastner <ckk@debian.org>",
+      "purl": "pkg:deb/debian/libkeyutils1@1.6.3-6?arch=arm64&distro=debian-13&upstream=keyutils",
+      "type": "library",
+      "version": "1.6.3-6"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/libkrb5-3@1.21.3-5?arch=arm64&distro=debian-13&package-id=0c4902f70f01031b&upstream=krb5",
+      "cpe": "cpe:2.3:a:libkrb5-3:libkrb5-3:1.21.3-5:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "name": "sha256:936728f4181718f42951b881c1e8f1386bf6b2723c4fbc533c374d6f42c71816"
+          }
+        }
+      ],
+      "name": "libkrb5-3",
+      "publisher": "Sam Hartman <hartmans@debian.org>",
+      "purl": "pkg:deb/debian/libkrb5-3@1.21.3-5?arch=arm64&distro=debian-13&upstream=krb5",
+      "type": "library",
+      "version": "1.21.3-5"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/libkrb5support0@1.21.3-5?arch=arm64&distro=debian-13&package-id=0d5871943edb0662&upstream=krb5",
+      "cpe": "cpe:2.3:a:libkrb5support0:libkrb5support0:1.21.3-5:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "name": "sha256:936728f4181718f42951b881c1e8f1386bf6b2723c4fbc533c374d6f42c71816"
+          }
+        }
+      ],
+      "name": "libkrb5support0",
+      "publisher": "Sam Hartman <hartmans@debian.org>",
+      "purl": "pkg:deb/debian/libkrb5support0@1.21.3-5?arch=arm64&distro=debian-13&upstream=krb5",
+      "type": "library",
+      "version": "1.21.3-5"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/liblzma5@5.8.1-1?arch=arm64&distro=debian-13&package-id=8dc00300669c0131&upstream=xz-utils",
+      "cpe": "cpe:2.3:a:liblzma5:liblzma5:5.8.1-1:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "id": "0BSD"
+          }
+        },
+        {
+          "license": {
+            "id": "FSFUL"
+          }
+        },
+        {
+          "license": {
+            "id": "FSFULLR"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-2.0-only"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-2.0-or-later"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-3.0-only"
+          }
+        },
+        {
+          "license": {
+            "id": "LGPL-2.1-only"
+          }
+        },
+        {
+          "license": {
+            "id": "LGPL-2.1-or-later"
+          }
+        },
+        {
+          "license": {
+            "name": "GPL-3.0-or-later-WITH-Autoconf-exception-macro"
+          }
+        },
+        {
+          "license": {
+            "name": "PD"
+          }
+        },
+        {
+          "license": {
+            "name": "PD-debian"
+          }
+        },
+        {
+          "license": {
+            "name": "noderivs"
+          }
+        },
+        {
+          "license": {
+            "name": "permissive-nowarranty"
+          }
+        }
+      ],
+      "name": "liblzma5",
+      "publisher": "Sebastian Andrzej Siewior <sebastian@breakpoint.cc>",
+      "purl": "pkg:deb/debian/liblzma5@5.8.1-1?arch=arm64&distro=debian-13&upstream=xz-utils",
+      "type": "library",
+      "version": "5.8.1-1"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/libncursesw6@6.5%2B20250216-2?arch=arm64&distro=debian-13&package-id=940430c899f17ed4&upstream=ncurses",
+      "cpe": "cpe:2.3:a:libncursesw6:libncursesw6:6.5\\+20250216-2:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        },
+        {
+          "license": {
+            "id": "X11"
+          }
+        },
+        {
+          "license": {
+            "name": "MIT/X11"
+          }
+        }
+      ],
+      "name": "libncursesw6",
+      "publisher": "Ncurses Maintainers <ncurses@packages.debian.org>",
+      "purl": "pkg:deb/debian/libncursesw6@6.5%2B20250216-2?arch=arm64&distro=debian-13&upstream=ncurses",
+      "type": "library",
+      "version": "6.5+20250216-2"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/libnsl2@1.3.0-3%2Bb3?arch=arm64&distro=debian-13&package-id=af8c9e7323d453e0&upstream=libnsl%401.3.0-3",
+      "cpe": "cpe:2.3:a:libnsl2:libnsl2:1.3.0-3\\+b3:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-2.0-only"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-3.0-only"
+          }
+        },
+        {
+          "license": {
+            "id": "LGPL-2.1-only"
+          }
+        },
+        {
+          "license": {
+            "id": "LGPL-2.1-or-later"
+          }
+        },
+        {
+          "license": {
+            "id": "MIT"
+          }
+        },
+        {
+          "license": {
+            "name": "GPL-2+-autoconf-exception"
+          }
+        },
+        {
+          "license": {
+            "name": "GPL-2+-libtool-exception"
+          }
+        },
+        {
+          "license": {
+            "name": "GPL-3+-autoconf-exception"
+          }
+        },
+        {
+          "license": {
+            "name": "permissive-autoconf-m4"
+          }
+        },
+        {
+          "license": {
+            "name": "permissive-autoconf-m4-no-warranty"
+          }
+        },
+        {
+          "license": {
+            "name": "permissive-configure"
+          }
+        },
+        {
+          "license": {
+            "name": "permissive-fsf"
+          }
+        },
+        {
+          "license": {
+            "name": "permissive-makefile-in"
+          }
+        }
+      ],
+      "name": "libnsl2",
+      "publisher": "GNU Libc Maintainers <debian-glibc@lists.debian.org>",
+      "purl": "pkg:deb/debian/libnsl2@1.3.0-3%2Bb3?arch=arm64&distro=debian-13&upstream=libnsl%401.3.0-3",
+      "type": "library",
+      "version": "1.3.0-3+b3"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/libreadline8t64@8.2-6?arch=arm64&distro=debian-13&package-id=e03071545f9c4af8&upstream=readline",
+      "cpe": "cpe:2.3:a:libreadline8t64:libreadline8t64:8.2-6:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "id": "GPL-2.0-only"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-2.0-or-later"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-3.0-only"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-3.0-or-later"
+          }
+        },
+        {
+          "license": {
+            "name": "GFDL"
+          }
+        },
+        {
+          "license": {
+            "name": "GFDL-NIV-1.3+"
+          }
+        },
+        {
+          "license": {
+            "name": "ISC-no-attribution"
+          }
+        }
+      ],
+      "name": "libreadline8t64",
+      "publisher": "Matthias Klose <doko@debian.org>",
+      "purl": "pkg:deb/debian/libreadline8t64@8.2-6?arch=arm64&distro=debian-13&upstream=readline",
+      "type": "library",
+      "version": "8.2-6"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/libsqlite3-0@3.46.1-7%2Bdeb13u1?arch=arm64&distro=debian-13&package-id=58c4b8c5383b51fd&upstream=sqlite3",
+      "cpe": "cpe:2.3:a:libsqlite3-0:libsqlite3-0:3.46.1-7\\+deb13u1:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "id": "GPL-2.0-only"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-2.0-or-later"
+          }
+        },
+        {
+          "license": {
+            "name": "public-domain"
+          }
+        }
+      ],
+      "name": "libsqlite3-0",
+      "publisher": "Laszlo Boszormenyi (GCS) <gcs@debian.org>",
+      "purl": "pkg:deb/debian/libsqlite3-0@3.46.1-7%2Bdeb13u1?arch=arm64&distro=debian-13&upstream=sqlite3",
+      "type": "library",
+      "version": "3.46.1-7+deb13u1"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/libssl3t64@3.5.5-1~deb13u1?arch=arm64&distro=debian-13&package-id=5aa1fcb35264ee5c&upstream=openssl",
+      "cpe": "cpe:2.3:a:libssl3t64:libssl3t64:3.5.5-1\\~deb13u1:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-1.0-only"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-1.0-or-later"
+          }
+        },
+        {
+          "license": {
+            "name": "Artistic"
+          }
+        }
+      ],
+      "name": "libssl3t64",
+      "publisher": "Debian OpenSSL Team <pkg-openssl-devel@alioth-lists.debian.net>",
+      "purl": "pkg:deb/debian/libssl3t64@3.5.5-1~deb13u1?arch=arm64&distro=debian-13&upstream=openssl",
+      "type": "library",
+      "version": "3.5.5-1~deb13u1"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/libstdc%2B%2B6@14.2.0-19?arch=arm64&distro=debian-13&package-id=9cc8acacefdee288&upstream=gcc-14",
+      "cpe": "cpe:2.3:a:libstdc\\+\\+6:libstdc\\+\\+6:14.2.0-19:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "name": "sha256:20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79"
+          }
+        }
+      ],
+      "name": "libstdc++6",
+      "publisher": "Debian GCC Maintainers <debian-gcc@lists.debian.org>",
+      "purl": "pkg:deb/debian/libstdc%2B%2B6@14.2.0-19?arch=arm64&distro=debian-13&upstream=gcc-14",
+      "type": "library",
+      "version": "14.2.0-19"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/libtinfo6@6.5%2B20250216-2?arch=arm64&distro=debian-13&package-id=40b68c5de6b1f2f2&upstream=ncurses",
+      "cpe": "cpe:2.3:a:libtinfo6:libtinfo6:6.5\\+20250216-2:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        },
+        {
+          "license": {
+            "id": "X11"
+          }
+        },
+        {
+          "license": {
+            "name": "MIT/X11"
+          }
+        }
+      ],
+      "name": "libtinfo6",
+      "publisher": "Ncurses Maintainers <ncurses@packages.debian.org>",
+      "purl": "pkg:deb/debian/libtinfo6@6.5%2B20250216-2?arch=arm64&distro=debian-13&upstream=ncurses",
+      "type": "library",
+      "version": "6.5+20250216-2"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/libtirpc3t64@1.3.6%2Bds-1?arch=arm64&distro=debian-13&package-id=789de3b44b5e439c&upstream=libtirpc",
+      "cpe": "cpe:2.3:a:libtirpc3t64:libtirpc3t64:1.3.6\\+ds-1:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-2.0-only"
+          }
+        },
+        {
+          "license": {
+            "id": "LGPL-2.1-only"
+          }
+        }
+      ],
+      "name": "libtirpc3t64",
+      "publisher": "Josue Ortega <josue@debian.org>",
+      "purl": "pkg:deb/debian/libtirpc3t64@1.3.6%2Bds-1?arch=arm64&distro=debian-13&upstream=libtirpc",
+      "type": "library",
+      "version": "1.3.6+ds-1"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/libuuid1@2.41-5?arch=arm64&distro=debian-13&package-id=684383143c8bccf2&upstream=util-linux",
+      "cpe": "cpe:2.3:a:libuuid1:libuuid1:2.41-5:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-2-Clause"
+          }
+        },
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        },
+        {
+          "license": {
+            "id": "BSD-4-Clause"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-2.0-only"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-2.0-or-later"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-3.0-only"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-3.0-or-later"
+          }
+        },
+        {
+          "license": {
+            "id": "ISC"
+          }
+        },
+        {
+          "license": {
+            "id": "LGPL-2.0-only"
+          }
+        },
+        {
+          "license": {
+            "id": "LGPL-2.0-or-later"
+          }
+        },
+        {
+          "license": {
+            "id": "LGPL-2.1-only"
+          }
+        },
+        {
+          "license": {
+            "id": "LGPL-2.1-or-later"
+          }
+        },
+        {
+          "license": {
+            "id": "LGPL-3.0-only"
+          }
+        },
+        {
+          "license": {
+            "id": "LGPL-3.0-or-later"
+          }
+        },
+        {
+          "license": {
+            "name": "BSLA"
+          }
+        },
+        {
+          "license": {
+            "name": "Expat"
+          }
+        },
+        {
+          "license": {
+            "name": "LGPL"
+          }
+        },
+        {
+          "license": {
+            "name": "public-domain"
+          }
+        }
+      ],
+      "name": "libuuid1",
+      "publisher": "Chris Hofstaedtler <zeha@debian.org>",
+      "purl": "pkg:deb/debian/libuuid1@2.41-5?arch=arm64&distro=debian-13&upstream=util-linux",
+      "type": "library",
+      "version": "2.41-5"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/libzstd1@1.5.7%2Bdfsg-1?arch=arm64&distro=debian-13&package-id=02b5bf6dd9ecb243&upstream=libzstd",
+      "cpe": "cpe:2.3:a:libzstd1:libzstd1:1.5.7\\+dfsg-1:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-2.0-only"
+          }
+        },
+        {
+          "license": {
+            "id": "Zlib"
+          }
+        },
+        {
+          "license": {
+            "name": "Expat"
+          }
+        }
+      ],
+      "name": "libzstd1",
+      "publisher": "RPM packaging team <team+pkg-rpm@tracker.debian.org>",
+      "purl": "pkg:deb/debian/libzstd1@1.5.7%2Bdfsg-1?arch=arm64&distro=debian-13&upstream=libzstd",
+      "type": "library",
+      "version": "1.5.7+dfsg-1"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/media-types@13.0.0?arch=all&distro=debian-13&package-id=3c9375f7f83b0d94",
+      "cpe": "cpe:2.3:a:media-types:media-types:13.0.0:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "name": "ad-hoc"
+          }
+        }
+      ],
+      "name": "media-types",
+      "publisher": "Mime-Support Packagers <team+debian-mimesupport-packagers@tracker.debian.org>",
+      "purl": "pkg:deb/debian/media-types@13.0.0?arch=all&distro=debian-13",
+      "type": "library",
+      "version": "13.0.0"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/netbase@6.5?arch=all&distro=debian-13&package-id=789361e68c8ad425",
+      "cpe": "cpe:2.3:a:netbase:netbase:6.5:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "id": "GPL-2.0-only"
+          }
+        }
+      ],
+      "name": "netbase",
+      "publisher": "Marco d'Itri <md@linux.it>",
+      "purl": "pkg:deb/debian/netbase@6.5?arch=all&distro=debian-13",
+      "type": "library",
+      "version": "6.5"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/openssl-provider-fips@3.5.5-1~deb13u1?arch=arm64&distro=debian-13&package-id=0a860ebf362cbd90&upstream=openssl",
+      "cpe": "cpe:2.3:a:openssl-provider-fips:openssl-provider-fips:3.5.5-1\\~deb13u1:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-1.0-only"
+          }
+        },
+        {
+          "license": {
+            "id": "GPL-1.0-or-later"
+          }
+        },
+        {
+          "license": {
+            "name": "Artistic"
+          }
+        }
+      ],
+      "name": "openssl-provider-fips",
+      "publisher": "Debian OpenSSL Team <pkg-openssl-devel@alioth-lists.debian.net>",
+      "purl": "pkg:deb/debian/openssl-provider-fips@3.5.5-1~deb13u1?arch=arm64&distro=debian-13&upstream=openssl",
+      "type": "library",
+      "version": "3.5.5-1~deb13u1"
+    },
+    {
+      "bom-ref": "pkg:generic/python@3.12.13?package-id=44b2ae23c30a5fe3",
+      "cpe": "cpe:2.3:a:python_software_foundation:python:3.12.13:*:*:*:*:*:*:*",
+      "name": "python",
+      "purl": "pkg:generic/python@3.12.13",
+      "type": "application",
+      "version": "3.12.13"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/tzdata@2026a-0%2Bdeb13u1?arch=all&distro=debian-13&package-id=b579583c7128019b",
+      "cpe": "cpe:2.3:a:tzdata:tzdata:2026a-0\\+deb13u1:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "name": "public-domain"
+          }
+        }
+      ],
+      "name": "tzdata",
+      "publisher": "GNU Libc Maintainers <debian-glibc@lists.debian.org>",
+      "purl": "pkg:deb/debian/tzdata@2026a-0%2Bdeb13u1?arch=all&distro=debian-13",
+      "type": "library",
+      "version": "2026a-0+deb13u1"
+    },
+    {
+      "bom-ref": "pkg:deb/debian/zlib1g@1%3A1.3.dfsg%2Breally1.3.1-1%2Bb1?arch=arm64&distro=debian-13&package-id=90e7d5b74b631f9d&upstream=zlib%401%3A1.3.dfsg%2Breally1.3.1-1",
+      "cpe": "cpe:2.3:a:zlib1g:zlib1g:1\\:1.3.dfsg\\+really1.3.1-1\\+b1:*:*:*:*:*:*:*",
+      "licenses": [
+        {
+          "license": {
+            "id": "Zlib"
+          }
+        }
+      ],
+      "name": "zlib1g",
+      "publisher": "Mark Brown <broonie@debian.org>",
+      "purl": "pkg:deb/debian/zlib1g@1%3A1.3.dfsg%2Breally1.3.1-1%2Bb1?arch=arm64&distro=debian-13&upstream=zlib%401%3A1.3.dfsg%2Breally1.3.1-1",
+      "type": "library",
+      "version": "1:1.3.dfsg+really1.3.1-1+b1"
+    }
+  ],
+  "metadata": {
+    "component": {
+      "bom-ref": "d39aa0db6bf63243",
+      "name": "nvcr.io/nvidia/distroless/python",
+      "type": "container",
+      "version": "3.12-v4.0.3"
+    },
+    "properties": [
+      {
+        "name": "syft:image:labels:org.opencontainers.image.created",
+        "value": "2026-03-16T23:38:54Z"
+      },
+      {
+        "name": "syft:image:labels:org.opencontainers.image.documentation",
+        "value": "https://developer.download.nvidia.com/distroless-oss/docs.html"
+      },
+      {
+        "name": "syft:image:labels:org.opencontainers.image.revision",
+        "value": "23737194f65d13d7c282e2fffa64efab18a32a59"
+      },
+      {
+        "name": "syft:image:labels:org.opencontainers.image.title",
+        "value": "Python 3.12 Distroless Image"
+      },
+      {
+        "name": "syft:image:labels:org.opencontainers.image.url",
+        "value": "https://developer.download.nvidia.com/distroless-oss/index.html"
+      },
+      {
+        "name": "syft:image:labels:org.opencontainers.image.version",
+        "value": "v4.0.3"
+      }
+    ],
+    "tools": {
+      "components": [
+        {
+          "author": "anchore",
+          "name": "syft",
+          "type": "application",
+          "version": "1.46.0"
+        }
+      ]
+    }
+  },
+  "serialNumber": "urn:uuid:8046eb0e-7f96-578c-b113-55cc78496d0b",
+  "specVersion": "1.7",
+  "version": 1
+}

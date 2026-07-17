@@ -31,14 +31,7 @@ const QUERY_REQUEST_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 const DYN_KV_INDEXER_TEST_ENDPOINTS: &str = "DYN_KV_INDEXER_TEST_ENDPOINTS";
 
 fn test_endpoints_enabled() -> bool {
-    matches!(
-        std::env::var(DYN_KV_INDEXER_TEST_ENDPOINTS)
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str(),
-        "1" | "true" | "yes" | "on"
-    )
+    dynamo_truthy::env_is_truthy(DYN_KV_INDEXER_TEST_ENDPOINTS)
 }
 
 use super::logging::{AccessLogModel, AccessLogSink};

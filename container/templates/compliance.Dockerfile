@@ -34,6 +34,13 @@
 #                                if no baseline captured); set by
 #                                _render_context() from `framework`/
 #                                `device_key`.
+#   compliance_ecosystems     -- comma-separated --ecosystem list for the
+#                                licenses stage. planner drops dpkg (distroless,
+#                                ships no builder Debian packages); other targets
+#                                get python,rust,dpkg,native. Set by
+#                                _render_context().
+#   compliance_source_ecosystem_flags -- repeated --ecosystem flags for the
+#                                sources_collect stage; per-target likewise.
 #   framework, target, make_efa -- already in render context; control
 #                                  ecosystem flags + EFA native attribution.
 
@@ -85,7 +92,7 @@ ARG TARGETARCH
 # `--venv ${VIRTUAL_ENV}` is what broke system-Python images.
 RUN {% if framework == "sglang" %}PKG_ARG="--site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% else %}if [ -n "${VIRTUAL_ENV:-}" ]; then PKG_ARG="--venv ${VIRTUAL_ENV}"; else PKG_ARG="--site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; fi{% endif %} && \
     python3 -m compliance.generators \
-    --ecosystem python,rust,dpkg,native \
+    --ecosystem {{ compliance_ecosystems }} \
     ${PKG_ARG} \
     --rust-licenses-dir /tmp/rust-licenses \
     --output-dir /legal \
@@ -152,7 +159,7 @@ ARG TARGETARCH
 RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
         {% if framework == "sglang" %}RUST_PKG_ARG="--rust-site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% else %}if [ -n "${VIRTUAL_ENV:-}" ]; then RUST_PKG_ARG="--rust-venv ${VIRTUAL_ENV}"; else RUST_PKG_ARG="--rust-site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; fi{% endif %} && \
         python3 -m compliance.collect_sources \
-            --ecosystem dpkg --ecosystem rust --ecosystem native \
+            {{ compliance_source_ecosystem_flags }} \
             --output-zip /sources.zip \
             --sources-root /sources \
             --native-source-dir /opt/native-sources \
@@ -161,7 +168,7 @@ RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
             ${BASELINE_SBOM_FILE:+--baseline-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}-${TARGETARCH}.cdx.json} \
             -v ; \
     else \
-        : > /sources.zip ; \
+        python3 -c "import zipfile; zipfile.ZipFile('/sources.zip','w').close()" ; \
     fi
 
 
