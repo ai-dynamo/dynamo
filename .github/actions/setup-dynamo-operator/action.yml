@@ -395,13 +395,22 @@ runs:
       shell: bash
       run: |
         echo "::group::Wait for Dynamo operator CRDs inside vCluster"
-        # CRDs live in the chart's crds/ directory so Helm installs them before any pod
-        # starts. Waiting for Established is independent of vCluster syncer pod-Ready
-        # latency, which is unreliable on some clusters (e.g. AWS with LimitRange QoS mismatch).
-        kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
+        # The crd-apply init container installs CRDs asynchronously after Helm returns.
+        # Poll for the resource because a condition wait fails if it does not exist yet.
+        VKUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster
+        CRD=dynamographdeployments.nvidia.com
+        end=$((SECONDS + 1800))
+        until kubectl --kubeconfig="${VKUBECONFIG}" get "crd/${CRD}" >/dev/null 2>&1; do
+          if [ $SECONDS -ge $end ]; then
+            echo "::error::CRD ${CRD} was not created after 1800s"
+            exit 1
+          fi
+          sleep 5
+        done
+        kubectl --kubeconfig="${VKUBECONFIG}" \
           wait --for=condition=established \
-          crd/dynamographdeployments.nvidia.com \
-          --timeout=1800s
+          "crd/${CRD}" \
+          --timeout=120s
         echo "::endgroup::"
 
     - name: Wait for operator pod to be ready
