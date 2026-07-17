@@ -68,7 +68,8 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
         # Keep historical attribute names for compatibility with existing code.
         self.loaded_loras = self._lora_state.loaded_loras
         self._lora_load_locks = self._lora_state.lora_load_locks
-        self._lora_load_locks_guard = self._lora_state.lora_load_locks_guard
+        # Track adapters already handed to vLLM so load/unload stays idempotent.
+        self._engine_loaded_loras: set[str] = set()
 
         logger.info(f"{self.__class__.__name__} initialized successfully")
 
