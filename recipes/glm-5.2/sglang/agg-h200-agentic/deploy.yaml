@@ -39,7 +39,7 @@ data:
     dsa-prefill-backend: flashmla_kv
     enable-prefill-cp: true
     cp-strategy: interleave
-    moe-a2a-backend: megamoe
+    moe-a2a-backend: none
     fp8-gemm-backend: flashinfer_deepgemm
     hicache-size: 100
     enable-hierarchical-cache: true

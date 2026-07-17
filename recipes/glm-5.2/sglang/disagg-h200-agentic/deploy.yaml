@@ -31,7 +31,7 @@ data:
     tensor-parallel-size: 8
     data-parallel-size: 1
     ep-size: 8
-    moe-a2a-backend: megamoe
+    moe-a2a-backend: none
     kv-cache-dtype: fp8_e4m3
     fp8-gemm-backend: flashinfer_deepgemm
     mem-fraction-static: 0.92
