@@ -1567,9 +1567,10 @@ fn targets_filter(config: &LoggingConfig, dyn_log: Option<&str>) -> Option<Targe
     directives.join(",").parse::<Targets>().ok()
 }
 
-/// `Targets` accepts bracketed span selectors as literal target names, while
-/// `EnvFilter` interprets them as dynamic span or field selectors. Bracketed
-/// directives therefore require the EnvFilter path even when Targets parses.
+/// An opening `[` begins EnvFilter's span or field selector grammar. Targets
+/// accepts some bracketed forms as literal targets or static field filters, but
+/// routing every bracketed directive through EnvFilter keeps the configuration
+/// language consistent. Curly braces alone remain ordinary target characters.
 fn targets_compatible(directive: &str) -> Option<()> {
     (!directive.contains('[') && directive.parse::<Targets>().is_ok()).then_some(())
 }
@@ -2019,6 +2020,17 @@ pub mod tests {
     }
 
     #[test]
+    fn field_presence_dyn_log_falls_back_to_env_filter() {
+        assert!(
+            targets_filter(
+                &LoggingConfig::default(),
+                Some("dynamo_runtime[{request_id}]=debug"),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn dynamic_log_filters_fall_back_to_env_filter() {
         let config = LoggingConfig {
             log_level: DEFAULT_FILTER_LEVEL.to_string(),
@@ -2037,6 +2049,19 @@ pub mod tests {
             log_level: DEFAULT_FILTER_LEVEL.to_string(),
             log_filters: HashMap::from([(
                 "dynamo_runtime[request]".to_string(),
+                "debug".to_string(),
+            )]),
+        };
+
+        assert!(targets_filter(&config, None).is_none());
+    }
+
+    #[test]
+    fn field_presence_log_filters_fall_back_to_env_filter() {
+        let config = LoggingConfig {
+            log_level: DEFAULT_FILTER_LEVEL.to_string(),
+            log_filters: HashMap::from([(
+                "dynamo_runtime[{request_id}]".to_string(),
                 "debug".to_string(),
             )]),
         };
