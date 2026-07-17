@@ -18,6 +18,7 @@ from dynamo.common.snapshot.constants import (
 from dynamo.common.snapshot.restore_context import (
     apply_snapshot_restore_env,
     refresh_snapshot_restore_config,
+    write_snapshot_restore_context,
 )
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
@@ -48,12 +49,14 @@ def write_restore_context(monkeypatch, tmp_path, env):
 
 def test_apply_snapshot_restore_env_applies_and_clears_values(monkeypatch, tmp_path):
     monkeypatch.setenv("DYN_REQUEST_PLANE", "tcp")
+    monkeypatch.setenv("DYN_EVENT_PLANE_HOST", "192.0.2.10")
     write_restore_context(
         monkeypatch,
         tmp_path,
         {
             "DYN_DISCOVERY_BACKEND": "etcd",
             "DYN_REQUEST_PLANE": None,
+            "DYN_EVENT_PLANE_HOST": None,
             "UNSUPPORTED_ENV": "ignored",
         },
     )
@@ -63,10 +66,37 @@ def test_apply_snapshot_restore_env_applies_and_clears_values(monkeypatch, tmp_p
     assert restored == {
         "DYN_DISCOVERY_BACKEND": "etcd",
         "DYN_REQUEST_PLANE": None,
+        "DYN_EVENT_PLANE_HOST": None,
     }
     assert os.environ["DYN_DISCOVERY_BACKEND"] == "etcd"
     assert "DYN_REQUEST_PLANE" not in os.environ
+    assert "DYN_EVENT_PLANE_HOST" not in os.environ
     assert "UNSUPPORTED_ENV" not in os.environ
+
+
+def test_write_snapshot_restore_context_captures_event_plane_host(monkeypatch, tmp_path):
+    monkeypatch.setenv("DYN_EVENT_PLANE_HOST", "192.0.2.10")
+
+    write_snapshot_restore_context(str(tmp_path))
+
+    context = json.loads(
+        (tmp_path / SNAPSHOT_RESTORE_CONTEXT_FILE).read_text(encoding="utf-8")
+    )
+    assert context["env"]["DYN_EVENT_PLANE_HOST"] == "192.0.2.10"
+
+
+def test_apply_snapshot_restore_env_updates_event_plane_host(monkeypatch, tmp_path):
+    monkeypatch.setenv("DYN_EVENT_PLANE_HOST", "192.0.2.10")
+    write_restore_context(
+        monkeypatch,
+        tmp_path,
+        {"DYN_EVENT_PLANE_HOST": "198.51.100.10"},
+    )
+
+    restored = apply_snapshot_restore_env()
+
+    assert restored == {"DYN_EVENT_PLANE_HOST": "198.51.100.10"}
+    assert os.environ["DYN_EVENT_PLANE_HOST"] == "198.51.100.10"
 
 
 async def test_refresh_snapshot_restore_config_reparses_runtime_fields(

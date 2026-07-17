@@ -21,6 +21,7 @@ pub use zmq_transport::{ZmqPubTransport, ZmqSubTransport};
 // Re-export transport kind from discovery for convenience
 pub use crate::discovery::EventTransportKind;
 
+use std::net::IpAddr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -38,11 +39,33 @@ use std::task::{Context, Poll};
 
 use crate::DistributedRuntime;
 use crate::component::{Component, Namespace};
+use crate::config::environment_names::event_plane::DYN_EVENT_PLANE_HOST;
 use crate::discovery::{
     Discovery, DiscoveryInstance, DiscoveryQuery, DiscoverySpec, EventChannelQuery, EventTransport,
 };
 use crate::traits::DistributedRuntimeProvider;
 use crate::utils::local_ip_for_advertise;
+
+fn event_plane_host_from_env() -> Result<String> {
+    let Ok(host) = std::env::var(DYN_EVENT_PLANE_HOST) else {
+        return Ok(local_ip_for_advertise());
+    };
+
+    if host.is_empty() {
+        return Ok(local_ip_for_advertise());
+    }
+
+    let ip = host.parse::<IpAddr>().map_err(|_| {
+        anyhow::anyhow!(
+            "Invalid {DYN_EVENT_PLANE_HOST} value '{host}': expected an IPv4 or IPv6 address"
+        )
+    })?;
+
+    Ok(match ip {
+        IpAddr::V4(_) => ip.to_string(),
+        IpAddr::V6(_) => format!("[{ip}]"),
+    })
+}
 
 /// Scope of the event plane - determines the subject prefix for pub/sub.
 #[derive(Debug, Clone)]
@@ -396,6 +419,7 @@ impl EventPublisher {
                     )
                 } else {
                     // DIRECT MODE: Bind PUB socket
+                    let advertised_host = event_plane_host_from_env()?;
                     let (pub_transport, actual_bind_endpoint) = std::thread::spawn({
                         let topic = topic.clone();
                         move || {
@@ -414,14 +438,13 @@ impl EventPublisher {
                     .join()
                     .expect("Failed to join ZMQ initialization thread");
 
-                    // Get local IP for public endpoint
+                    // Use the configured or auto-detected local IP for the public endpoint.
                     let actual_port: u16 = actual_bind_endpoint
                         .rsplit(':')
                         .next()
                         .and_then(|s| s.parse().ok())
                         .expect("Failed to parse port from bind endpoint");
-                    let local_ip = local_ip_for_advertise();
-                    let public_endpoint = format!("tcp://{}:{}", local_ip, actual_port);
+                    let public_endpoint = format!("tcp://{}:{}", advertised_host, actual_port);
 
                     let codec = Arc::new(Codec::Msgpack(MsgpackCodec));
                     TransportSetup::ZmqDirect(
@@ -824,10 +847,158 @@ mod tests {
     use super::*;
     use crate::config::environment_names::zmq_broker as broker_env;
 
+    #[test]
+    fn direct_zmq_advertise_host_from_env_formats_ip_literals() {
+        assert_eq!(
+            temp_env::with_vars([(DYN_EVENT_PLANE_HOST, Some("192.0.2.10"))], || {
+                event_plane_host_from_env()
+            })
+            .unwrap(),
+            "192.0.2.10"
+        );
+        assert_eq!(
+            temp_env::with_vars([(DYN_EVENT_PLANE_HOST, Some("2001:db8::10"))], || {
+                event_plane_host_from_env()
+            })
+            .unwrap(),
+            "[2001:db8::10]"
+        );
+    }
+
+    #[test]
+    fn direct_zmq_advertise_host_from_env_falls_back_or_rejects_invalid_values() {
+        let auto_detected = local_ip_for_advertise();
+        assert_eq!(
+            temp_env::with_vars([(DYN_EVENT_PLANE_HOST, None::<&str>)], || {
+                event_plane_host_from_env()
+            })
+            .unwrap(),
+            auto_detected
+        );
+        assert_eq!(
+            temp_env::with_vars([(DYN_EVENT_PLANE_HOST, Some(""))], || {
+                event_plane_host_from_env()
+            })
+            .unwrap(),
+            auto_detected
+        );
+
+        let error = temp_env::with_vars([(DYN_EVENT_PLANE_HOST, Some("ib0"))], || {
+            event_plane_host_from_env()
+        })
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Invalid DYN_EVENT_PLANE_HOST value 'ib0': expected an IPv4 or IPv6 address"
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_zmq_publisher_advertises_configured_host() {
+        temp_env::async_with_vars(
+            [
+                (DYN_EVENT_PLANE_HOST, Some("127.0.0.1")),
+                (broker_env::DYN_ZMQ_BROKER_URL, None::<&str>),
+                (broker_env::DYN_ZMQ_BROKER_ENABLED, None::<&str>),
+            ],
+            async {
+                let runtime = crate::Runtime::from_current().expect("create runtime handle");
+                let drt = DistributedRuntime::new(
+                    runtime,
+                    crate::distributed::DistributedConfig::process_local(),
+                )
+                .await
+                .expect("create distributed runtime");
+                let component = drt
+                    .namespace("event-publisher-host-test")
+                    .expect("create namespace")
+                    .component("worker")
+                    .expect("create component");
+
+                let publisher = EventPublisher::for_component_with_transport(
+                    &component,
+                    "events",
+                    EventTransportKind::Zmq,
+                )
+                .await
+                .expect("create publisher");
+
+                let instances = drt
+                    .discovery()
+                    .list(DiscoveryQuery::EventChannels(EventChannelQuery::topic(
+                        "event-publisher-host-test",
+                        "worker",
+                        "events",
+                    )))
+                    .await
+                    .expect("list event publishers");
+                assert_eq!(instances.len(), 1);
+
+                let endpoint = match &instances[0] {
+                    DiscoveryInstance::EventChannel {
+                        transport: EventTransport::Zmq { endpoint },
+                        ..
+                    } => endpoint,
+                    instance => panic!("expected direct ZMQ event channel, got {instance:?}"),
+                };
+                let port = endpoint
+                    .strip_prefix("tcp://127.0.0.1:")
+                    .expect("configured host should be advertised")
+                    .parse::<u16>()
+                    .expect("advertised endpoint should include a port");
+                assert_ne!(port, 0);
+
+                drop(publisher);
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn direct_zmq_publisher_rejects_invalid_configured_host() {
+        temp_env::async_with_vars(
+            [
+                (DYN_EVENT_PLANE_HOST, Some("ib0")),
+                (broker_env::DYN_ZMQ_BROKER_URL, None::<&str>),
+                (broker_env::DYN_ZMQ_BROKER_ENABLED, None::<&str>),
+            ],
+            async {
+                let runtime = crate::Runtime::from_current().expect("create runtime handle");
+                let drt = DistributedRuntime::new(
+                    runtime,
+                    crate::distributed::DistributedConfig::process_local(),
+                )
+                .await
+                .expect("create distributed runtime");
+                let component = drt
+                    .namespace("event-publisher-invalid-host-test")
+                    .expect("create namespace")
+                    .component("worker")
+                    .expect("create component");
+
+                match EventPublisher::for_component_with_transport(
+                    &component,
+                    "events",
+                    EventTransportKind::Zmq,
+                )
+                .await
+                {
+                    Ok(_) => panic!("invalid host should reject publisher creation"),
+                    Err(error) => assert_eq!(
+                        error.to_string(),
+                        "Invalid DYN_EVENT_PLANE_HOST value 'ib0': expected an IPv4 or IPv6 address"
+                    ),
+                }
+            },
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn same_topic_publishers_are_independent_across_recreation() {
         temp_env::async_with_vars(
             [
+                (DYN_EVENT_PLANE_HOST, None::<&str>),
                 (broker_env::DYN_ZMQ_BROKER_URL, None::<&str>),
                 (broker_env::DYN_ZMQ_BROKER_ENABLED, None::<&str>),
             ],
@@ -1018,6 +1189,7 @@ mod tests {
     async fn dropped_publisher_unregister_completes_within_graceful_shutdown() {
         temp_env::async_with_vars(
             [
+                (DYN_EVENT_PLANE_HOST, None::<&str>),
                 (broker_env::DYN_ZMQ_BROKER_URL, None::<&str>),
                 (broker_env::DYN_ZMQ_BROKER_ENABLED, None::<&str>),
             ],
