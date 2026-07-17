@@ -35,6 +35,7 @@ from dynamo.planner.errors import (
 from dynamo.planner.monitoring.dgd_services import (
     Service,
     get_component_from_type_or_name,
+    get_main_container,
 )
 
 pytestmark = [
@@ -113,6 +114,49 @@ def _deployment_with_worker_status(
         "spec": {"components": [_component("worker", "worker")]},
         "status": {"components": {"worker": worker_status}},
     }
+
+
+def test_get_main_container_default_name():
+    component = _component("worker", args=["--model", "m"], gpu=1)
+    assert get_main_container(component)["name"] == "main"
+
+
+def test_get_main_container_custom_main_container_name():
+    component = {
+        "name": "worker",
+        "mainContainerNameOverride": "vllm-worker",
+        "podTemplate": {
+            "spec": {
+                "containers": [
+                    {"name": "sidecar"},
+                    {"name": "vllm-worker", "args": ["--model", "m"]},
+                ]
+            }
+        },
+    }
+    main = get_main_container(component)
+    assert main["name"] == "vllm-worker"
+    assert main["args"] == ["--model", "m"]
+
+
+def test_get_main_container_custom_name_ignores_literal_main():
+    # When mainContainerNameOverride is set, a container literally named "main"
+    # is no longer the planner-relevant main container.
+    component = {
+        "name": "worker",
+        "mainContainerNameOverride": "vllm-worker",
+        "podTemplate": {"spec": {"containers": [{"name": "main"}]}},
+    }
+    assert get_main_container(component) == {}
+
+
+def test_get_main_container_empty_custom_name_falls_back_to_default():
+    component = {
+        "name": "worker",
+        "mainContainerNameOverride": "",
+        "podTemplate": {"spec": {"containers": [{"name": "main", "args": ["-a"]}]}},
+    }
+    assert get_main_container(component)["name"] == "main"
 
 
 def test_kubernetes_connector_no_env_var():

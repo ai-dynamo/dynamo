@@ -24,6 +24,7 @@ import (
 	"hash/fnv"
 	"maps"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1503,9 +1504,11 @@ func GenerateBasePodSpec(
 	}
 
 	if main := GetMainContainer(component); main != nil {
-		if err := mergeContainerByName(&container, main); err != nil {
+		identityEnv := operatorIdentityEnv(container.Env)
+		if err := mergeContainerByName(&container, main, component.GetMainContainerName()); err != nil {
 			return nil, fmt.Errorf("failed to merge podTemplate main container: %w", err)
 		}
+		reassertOperatorIdentityEnv(&container, identityEnv)
 	}
 
 	if err := applyCompilationCache(&container, component, backendFramework); err != nil {
@@ -1544,9 +1547,10 @@ func GenerateBasePodSpec(
 	sidecars := make([]corev1.Container, 0)
 
 	if component.PodTemplate != nil {
+		mainContainerName := component.GetMainContainerName()
 		podSpecOverride := component.PodTemplate.Spec.DeepCopy()
 		for _, userContainer := range podSpecOverride.Containers {
-			if userContainer.Name != commonconsts.MainContainerName {
+			if userContainer.Name != mainContainerName {
 				sidecars = append(sidecars, userContainer)
 			}
 		}
@@ -1650,12 +1654,68 @@ func validateContainerVolumeMounts(volumeMounts []corev1.VolumeMount) error {
 	return nil
 }
 
-func mergeContainerByName(base *corev1.Container, override *corev1.Container) error {
+// reservedIdentityEnvNames are the discovery identity env vars the operator
+// owns exclusively. A user-supplied value for any of these keys is never
+// honored, because it would let a podTemplate env entry redirect the
+// container's discovery identity.
+var reservedIdentityEnvNames = []string{
+	"CONTAINER_NAME",
+	commonconsts.DynamoMainContainerEnvVar,
+	"DYN_KUBE_DISCOVERY_MODE",
+}
+
+// operatorIdentityEnv extracts the operator-owned discovery identity env vars
+// from a base container. These are reasserted after user env merges: discovery
+// identity must not be overridable through podTemplate env entries.
+func operatorIdentityEnv(env []corev1.EnvVar) []corev1.EnvVar {
+	identity := make([]corev1.EnvVar, 0, len(reservedIdentityEnvNames))
+	for _, e := range env {
+		if slices.Contains(reservedIdentityEnvNames, e.Name) {
+			identity = append(identity, e)
+		}
+	}
+	return identity
+}
+
+// reassertOperatorIdentityEnv makes the operator the sole authority over the
+// reserved identity env vars: a user-supplied value is replaced in place with
+// the operator's expected value, and a reserved key the operator did not set
+// (e.g. DYN_MAIN_CONTAINER_NAME for a default-named component) is removed
+// entirely so a stray user value cannot claim a foreign discovery identity.
+// Non-reserved env and the position of pre-existing keys are preserved, so a
+// component that supplies none of these keys renders byte-identically.
+func reassertOperatorIdentityEnv(container *corev1.Container, identity []corev1.EnvVar) {
+	expected := make(map[string]corev1.EnvVar, len(identity))
+	for _, e := range identity {
+		expected[e.Name] = e
+	}
+	out := make([]corev1.EnvVar, 0, len(container.Env)+len(identity))
+	applied := make(map[string]bool, len(identity))
+	for _, e := range container.Env {
+		if slices.Contains(reservedIdentityEnvNames, e.Name) {
+			if exp, ok := expected[e.Name]; ok {
+				out = append(out, exp)
+				applied[e.Name] = true
+			}
+			// Operator did not set this reserved key: drop the user's value.
+			continue
+		}
+		out = append(out, e)
+	}
+	for _, e := range identity {
+		if !applied[e.Name] {
+			out = append(out, e)
+		}
+	}
+	container.Env = out
+}
+
+func mergeContainerByName(base *corev1.Container, override *corev1.Container, mainContainerName string) error {
 	if override == nil {
 		return nil
 	}
 	user := override.DeepCopy()
-	user.Name = commonconsts.MainContainerName
+	user.Name = mainContainerName
 	baseEnv := base.Env
 	if err := mergo.Merge(base, *user, mergo.WithOverride); err != nil {
 		return err
@@ -1670,7 +1730,7 @@ func mergeContainerByName(base *corev1.Container, override *corev1.Container) er
 	if user.StartupProbe != nil {
 		base.StartupProbe = user.StartupProbe
 	}
-	base.Name = commonconsts.MainContainerName
+	base.Name = mainContainerName
 	return nil
 }
 
@@ -1813,6 +1873,12 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 			ParentGraphDeploymentNamespace: parentContext.ParentGraphDeploymentNamespace,
 			Discovery:                      parentContext.Discovery,
 			DynamoNamespace:                parentContext.DynamoNamespace,
+			// The sidecar is its own container: identity env vars must carry
+			// its name (not "main"), and the component's main-container name
+			// rides along so DYN_MAIN_CONTAINER_NAME stays consistent across
+			// all containers in the pod.
+			MainContainerName: parentContext.MainContainerName,
+			ContainerName:     sidecarName,
 		}
 		frontendDefaults := NewFrontendDefaults()
 		base, err := frontendDefaults.GetBaseContainer(frontendContext)
@@ -1826,6 +1892,7 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 			return fmt.Errorf("failed to merge frontend sidecar %q: %w", sidecarName, err)
 		}
 		base.Env = MergeEnvs(baseEnv, user.Env)
+		reassertOperatorIdentityEnv(&base, operatorIdentityEnv(baseEnv))
 		AddStandardEnvVars(&base, operatorConfig)
 		base.VolumeMounts = appendMissingVolumeMounts(base.VolumeMounts, parentMounts)
 		podSpec.Containers[i] = base
@@ -1880,6 +1947,7 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 		DynamoNamespace:                dynamoNamespace,
 		EPPConfig:                      component.EPPConfig,
 		WorkerHashSuffix:               workerHashSuffix,
+		MainContainerName:              component.GetMainContainerName(),
 	}
 	return componentContext
 }
@@ -1949,7 +2017,7 @@ func applyDGDTemplateDefaults(
 	}
 	if len(dynamoDeployment.Spec.Env) > 0 {
 		podTemplate := ensurePodTemplate(component)
-		main := ensureMainContainer(podTemplate)
+		main := ensureMainContainer(podTemplate, component.GetMainContainerName())
 		main.Env = MergeEnvs(dynamoDeployment.Spec.Env, main.Env)
 	}
 
@@ -1987,7 +2055,7 @@ func applyKvTransferPolicyToWorkerComponent(
 		return
 	}
 	podTemplate := ensurePodTemplate(component)
-	main := ensureMainContainer(podTemplate)
+	main := ensureMainContainer(podTemplate, component.GetMainContainerName())
 	main.Env = MergeEnvs(removeWorkerKvTransferPolicyEnvVars(main.Env), workerKvTransferPolicyEnvVars(kvt))
 	main.VolumeMounts = appendTopologyLabelVolumeMount(main.VolumeMounts, TopologyLabelVolumeMount())
 	podTemplate.Spec.Volumes = appendTopologyLabelVolume(podTemplate.Spec.Volumes, TopologyLabelVolume(kvt, groveClusterTopologyDomains))
@@ -2171,6 +2239,9 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		); err != nil {
 			return nil, fmt.Errorf("failed to inject checkpoint config for role %s: %w", p.r.Name, err)
 		}
+	}
+	if err := ValidateRenderedPodSpecContainerNames(podSpec); err != nil {
+		return nil, fmt.Errorf("invalid rendered pod spec for component %q role %q: %w", p.componentName, p.r.Role, err)
 	}
 
 	// MinAvailable serves two purposes for Grove PCLQ:
@@ -2767,6 +2838,9 @@ func generateAnnotations(component *v1beta1.DynamoComponentDeploymentSharedSpec,
 			return nil, fmt.Errorf("failed to merge annotations: %w", err)
 		}
 	}
+	// Record the effective main-container name on the pod so discovery
+	// watchers resolve this pod's main container from the pod itself.
+	stampMainContainerAnnotation(annotations, component)
 	return annotations, nil
 }
 

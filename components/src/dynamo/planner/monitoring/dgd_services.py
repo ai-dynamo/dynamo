@@ -48,12 +48,23 @@ def break_arguments(args: list[str] | None) -> list[str]:
     return ans
 
 
+def _resolve_main_container_name(component: dict) -> str:
+    """Return the component's main container name.
+
+    v1beta1 components may rename the main container via
+    ``mainContainerNameOverride``; fall back to the default ``main`` when the
+    field is unset or empty.
+    """
+    return component.get("mainContainerNameOverride") or MAIN_CONTAINER_NAME
+
+
 def _main_container_from_pod_template(component: dict) -> dict:
+    main_container_name = _resolve_main_container_name(component)
     containers = (
         component.get("podTemplate", {}).get("spec", {}).get("containers", []) or []
     )
     for container in containers:
-        if container.get("name") == MAIN_CONTAINER_NAME:
+        if container.get("name") == main_container_name:
             return container
     return {}
 

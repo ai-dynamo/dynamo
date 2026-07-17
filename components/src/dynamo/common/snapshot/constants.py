@@ -44,6 +44,10 @@ RESTORE_RUNTIME_ENV_NAMES = {
     # Kubernetes discovery mode env read when the restored runtime registers.
     "DYN_KUBE_DISCOVERY_MODE",
     "CONTAINER_NAME",
+    # Main-container identity override: must refresh (or clear) on restore so
+    # a rename between checkpoint and restore cannot resurrect a stale
+    # snapshot-time identity.
+    "DYN_MAIN_CONTAINER_NAME",
     # Optional non-secret platform endpoints that may be consumed after restore.
     "MODEL_EXPRESS_URL",
     "PROMETHEUS_ENDPOINT",

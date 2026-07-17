@@ -540,6 +540,26 @@ func TestBuildFailoverPod_TwoEnginesPlusSidecar(t *testing.T) {
 	assert.Equal(t, "frontend-sidecar", ps.Containers[2].Name)
 }
 
+func TestBuildFailoverPod_StripsMainContainerIdentityEnv(t *testing.T) {
+	// A custom mainContainerName equal to a generated engine name must not
+	// grant that engine pod-level identity: the cloned env is stripped and
+	// each engine keeps its per-container CONTAINER_NAME only.
+	ps := intraPodFailoverPodSpec()
+	ps.Containers[0].Env = append(ps.Containers[0].Env,
+		corev1.EnvVar{Name: commonconsts.DynamoMainContainerEnvVar, Value: "engine-0"})
+	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	require.NoError(t, err)
+
+	for _, engine := range ps.Containers[:2] {
+		env := map[string]string{}
+		for _, e := range engine.Env {
+			env[e.Name] = e.Value
+		}
+		assert.NotContains(t, env, commonconsts.DynamoMainContainerEnvVar, "engine %s", engine.Name)
+		assert.Equal(t, engine.Name, env["CONTAINER_NAME"])
+	}
+}
+
 func TestBuildFailoverPod_EmptyContainers(t *testing.T) {
 	ps := corev1.PodSpec{}
 	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)

@@ -257,30 +257,39 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			mutateRequest: setAlphaCompilationCacheVolumeNameEmpty,
 		},
 		{
-			name: "v1beta1 sidecars must provide an image in CEL",
+			// The former CEL rule hard-coded the main container name; the check
+			// now lives in the shared webhook, which resolves the effective
+			// main name and rejects imageless sidecars at admission.
+			name: "v1beta1 sidecar without an image is rejected by the webhook",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{Name: consts.MainContainerName}, {Name: "metrics"}},
 				}}
 			}),
-			wantCELErr: "spec.components[1].podTemplate.spec.containers[1]: Invalid value: sidecar containers must specify a non-empty image",
+			wantWebhookErrs: []string{`spec.components[1].podTemplate.spec.containers[1].image: Required value: is required for sidecar container "metrics"`},
 		},
 		{
-			name: "v1alpha1 converted sidecar without image reaches the webhook",
+			name: "v1alpha1 converted sidecar without image is rejected by the webhook",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["worker"].ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{PodSpec: &corev1.PodSpec{
 					Containers: []corev1.Container{{Name: "metrics"}},
 				}}
 			}),
+			wantWebhookErrs: []string{`spec.components[0].podTemplate.spec.containers[1].image: Required value: is required for sidecar container "metrics"`},
 		},
 		{
-			name: "v1alpha1 frontend sidecar without image reaches the webhook",
+			// The operator does not inject the frontend sidecar's image (it
+			// merges only command/args/env), so an imageless frontend sidecar
+			// container renders `image: ""` and must be rejected at admission
+			// like any other sidecar.
+			name: "v1alpha1 frontend sidecar without an image is rejected by the webhook",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["worker"].FrontendSidecar = &nvidiacomv1alpha1.FrontendSidecarSpec{}
 				dgd.Spec.Services["worker"].ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{PodSpec: &corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "metrics"}},
+					Containers: []corev1.Container{{Name: "metrics", Image: "metrics:latest"}},
 				}}
 			}),
+			wantWebhookErrs: []string{`spec.components[0].podTemplate.spec.containers[2].image: Required value: is required for sidecar container "sidecar-frontend"`},
 		},
 		{
 			name: "v1beta1 init containers must provide an image in CEL",
@@ -424,6 +433,164 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 			deployment: betaDGDForAdmission(nil),
 			wantCELErr: "spec.components[1]: Invalid value: minAvailable is immutable after creation",
+		},
+		{
+			name: "v1beta1 changed component mainContainerNameOverride update is rejected by CEL",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).MainContainerNameOverride = dcdAdmissionCustomMainName
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).MainContainerNameOverride = "engine2"
+			}),
+			wantCELErr: "spec.components[1]: Invalid value: mainContainerNameOverride is immutable after creation",
+		},
+		{
+			name: "v1beta1 removed component mainContainerNameOverride update is rejected by CEL",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).MainContainerNameOverride = dcdAdmissionCustomMainName
+			}),
+			deployment: betaDGDForAdmission(nil),
+			wantCELErr: "spec.components[1]: Invalid value: mainContainerNameOverride is immutable after creation",
+		},
+		{
+			name: "v1beta1 unchanged component mainContainerNameOverride update is admitted",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).MainContainerNameOverride = dcdAdmissionCustomMainName
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).MainContainerNameOverride = dcdAdmissionCustomMainName
+			}),
+		},
+		{
+			// v1alpha1 update dropping the preservation annotation converts to
+			// an empty override; caught by the version-agnostic webhook check,
+			// not the v1beta1-only CEL rule.
+			name:          "v1alpha1 update dropping the component preservation annotation cannot rename the main container",
+			oldDeployment: alphaDGDWithPreservedComponentMainContainerName(t, dcdAdmissionCustomMainName),
+			deployment:    alphaDGDWithPreservedComponentMainContainerName(t, ""),
+			wantWebhookErrs: []string{
+				`spec.components[1].mainContainerNameOverride: Invalid value: "": is immutable after creation`,
+			},
+		},
+
+		// mainContainerNameOverride shared-spec validation on the DGD component
+		// path. The same validator runs for standalone DCDs and DGD components,
+		// so these mirror the standalone DCD cases at the component path
+		// (migrated from a former bespoke validator test).
+		{
+			name: "v1beta1 component custom mainContainerNameOverride is admitted",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				w := betaWorkerComponent(dgd)
+				w.MainContainerNameOverride = dcdAdmissionCustomMainName
+				w.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: dcdAdmissionCustomMainName, Image: "engine:latest"}},
+				}}
+			}),
+		},
+		{
+			name: "v1beta1 component ambiguous mainContainerNameOverride is rejected",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				w := betaWorkerComponent(dgd)
+				w.MainContainerNameOverride = dcdAdmissionCustomMainName
+				w.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: dcdAdmissionCustomMainName, Image: "engine:latest"},
+						{Name: consts.MainContainerName, Image: "stray:latest"},
+					},
+				}}
+			}),
+			wantWebhookErrs: []string{`spec.components[1].mainContainerNameOverride: Invalid value: "engine": is ambiguous: podTemplate.spec.containers also declares a container named "main", which would be treated as a sidecar; rename that container or drop mainContainerNameOverride`},
+		},
+		{
+			name: "v1beta1 component frontendSidecar naming the custom main is rejected",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				w := betaWorkerComponent(dgd)
+				w.MainContainerNameOverride = dcdAdmissionCustomMainName
+				w.FrontendSidecar = k8sptr.To(dcdAdmissionCustomMainName)
+				w.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: dcdAdmissionCustomMainName, Image: "engine:latest"}},
+				}}
+			}),
+			wantWebhookErrs: []string{`spec.components[1].frontendSidecar: Invalid value: "engine": must designate a container other than the main container "engine"`},
+		},
+		{
+			name: "v1beta1 component mainContainerNameOverride colliding with a failover engine name is rejected",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoKubeDiscoveryMode: "container"}
+				w := betaWorkerComponent(dgd)
+				w.MainContainerNameOverride = "engine-0"
+				w.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  "engine-0",
+						Image: "engine:latest",
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{
+								corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("1"),
+							},
+						},
+					}},
+				}}
+				w.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{},
+					Failover:         &nvidiacomv1beta1.FailoverSpec{Mode: nvidiacomv1beta1.GMSModeIntraPod},
+				}
+			}),
+			wantWebhookErrs: []string{`spec.components[1].mainContainerNameOverride: Invalid value: "engine-0": must not collide with a reserved intra-pod failover engine container name`},
+		},
+		{
+			name: "v1beta1 component mainContainerNameOverride colliding with the GMS server name is rejected",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				w := betaWorkerComponent(dgd)
+				w.MainContainerNameOverride = "gms-server"
+				w.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  "gms-server",
+						Image: "engine:latest",
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{
+								corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("1"),
+							},
+						},
+					}},
+				}}
+				w.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{Mode: nvidiacomv1beta1.GMSModeIntraPod},
+				}
+			}),
+			wantWebhookErrs: []string{`spec.components[1].mainContainerNameOverride: Invalid value: "gms-server": must not collide with the reserved GMS server container name`},
+		},
+		{
+			// "gms-server" is only reserved when intra-pod GMS is enabled, so
+			// without GMS it is an ordinary (if unusual) main-container name.
+			name: "v1beta1 component mainContainerNameOverride named gms-server is allowed without GMS",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				w := betaWorkerComponent(dgd)
+				w.MainContainerNameOverride = "gms-server"
+				w.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "gms-server", Image: "engine:latest"}},
+				}}
+			}),
+		},
+		{
+			name: "v1beta1 component custom-named main GPU resources satisfy the GMS check",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				w := betaWorkerComponent(dgd)
+				w.MainContainerNameOverride = dcdAdmissionCustomMainName
+				w.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  dcdAdmissionCustomMainName,
+						Image: "engine:latest",
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{
+								corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("1"),
+							},
+						},
+					}},
+				}}
+				w.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{},
+				}
+			}),
 		},
 
 		// Checkpoint rules.
@@ -1791,6 +1958,31 @@ func setAlphaCompilationCacheVolumeNameEmpty(t *testing.T, request map[string]an
 		t.Fatal("request spec.services.worker.volumeMounts[0] is not an object")
 	}
 	volumeMount["name"] = ""
+}
+
+// alphaDGDWithPreservedComponentMainContainerName returns a v1alpha1 DGD whose
+// hub-preservation annotation carries mainContainerNameOverride=name on the
+// worker component, as if created via v1beta1 and stored. Dropping the
+// annotation on update converts to an empty override, which the version-
+// agnostic webhook must reject (the v1beta1 CEL rule never sees alpha requests).
+func alphaDGDWithPreservedComponentMainContainerName(t *testing.T, name string) *nvidiacomv1alpha1.DynamoGraphDeployment {
+	t.Helper()
+	containerName := name
+	if containerName == "" {
+		containerName = consts.MainContainerName
+	}
+	beta := betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+		w := betaWorkerComponent(dgd)
+		w.MainContainerNameOverride = name // "" leaves the override unset
+		w.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: containerName, Image: "engine:latest"}},
+		}}
+	})
+	alpha := &nvidiacomv1alpha1.DynamoGraphDeployment{}
+	if err := alpha.ConvertFrom(beta); err != nil {
+		t.Fatalf("convert beta DGD to v1alpha1: %v", err)
+	}
+	return alpha
 }
 
 func betaDGDForAdmission(

@@ -51,6 +51,9 @@ func buildCheckpointJob(
 	podTemplate.Labels[consts.SnapshotOwnerLabel] = ckpt.Name
 	targetContainerName := ckpt.Spec.Job.TargetContainerName
 	if targetContainerName == "" {
+		// Operator-created checkpoints always set Job.TargetContainerName to the
+		// component's resolved main-container name (see createCheckpointCR), so
+		// this literal default only applies to hand-authored CRs.
 		targetContainerName = consts.MainContainerName
 	}
 	podTemplate.Annotations[snapshotprotocol.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers([]string{targetContainerName})

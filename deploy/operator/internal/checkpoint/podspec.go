@@ -83,6 +83,9 @@ func ApplyRestorePodMetadataWithStorageConfig(
 
 	targets := checkpointInfo.RestoreTargetContainers
 	if len(targets) == 0 {
+		// No component spec is reachable here; callers with a component spec
+		// (DCD/DGD controllers) populate RestoreTargetContainers with the
+		// resolved main-container name, so custom-named mains are covered.
 		targets = []string{commonconsts.MainContainerName}
 	}
 	annotations[snapshotprotocol.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers(targets)
@@ -116,6 +119,9 @@ func ApplyRestoreCandidateMetadata(labels map[string]string, annotations map[str
 
 	targets := checkpointInfo.RestoreTargetContainers
 	if len(targets) == 0 {
+		// No component spec is reachable here; callers with a component spec
+		// (DCD/DGD controllers) populate RestoreTargetContainers with the
+		// resolved main-container name, so custom-named mains are covered.
 		targets = []string{commonconsts.MainContainerName}
 	}
 	annotations[commonconsts.CheckpointRestoreCandidateAnnotation] = commonconsts.KubeLabelValueTrue
@@ -230,6 +236,10 @@ func injectCheckpointIntoPodSpec(
 
 	targets := info.RestoreTargetContainers
 	if len(targets) == 0 {
+		// No component spec is reachable here; controller callers populate
+		// RestoreTargetContainers with the resolved main-container name and the
+		// pod webhook reads targets from the operator-written annotation, so
+		// custom-named mains are covered.
 		targets = []string{commonconsts.MainContainerName}
 	}
 	annotations := map[string]string{
