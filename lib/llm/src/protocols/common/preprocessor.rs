@@ -468,7 +468,7 @@ mod tests {
             .build()
             .unwrap();
         let hint = RouterHint {
-            source_control_endpoint: Some("tcp://127.0.0.1:23280".to_string()),
+            source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
             block_hashes: vec![ExternalSequenceBlockHash(11), ExternalSequenceBlockHash(22)],
             target_cached_prefix_blocks: 1,
         };
@@ -520,7 +520,7 @@ mod tests {
                 .build()
                 .unwrap();
             let hint = RouterHint {
-                source_control_endpoint: None,
+                source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
                 block_hashes: vec![ExternalSequenceBlockHash(33)],
                 target_cached_prefix_blocks: 2,
             };
@@ -538,41 +538,6 @@ mod tests {
                 serde_json::json!(2)
             );
         }
-    }
-
-    #[test]
-    fn attach_router_hint_omits_missing_source_endpoint() {
-        use dynamo_kv_router::{
-            protocols::ExternalSequenceBlockHash,
-            router_hint::{ROUTER_HINT_EXTRA_ARGS_KEY, RouterHint},
-        };
-
-        let mut req = PreprocessedRequest::builder()
-            .model("t".to_string())
-            .token_ids(vec![1])
-            .stop_conditions(StopConditions::default())
-            .sampling_options(SamplingOptions::default())
-            .output_options(OutputOptions::default())
-            .build()
-            .unwrap();
-        let hint = RouterHint {
-            source_control_endpoint: None,
-            block_hashes: vec![ExternalSequenceBlockHash(11)],
-            target_cached_prefix_blocks: 0,
-        };
-
-        req.attach_router_hint(&hint).unwrap();
-
-        let extra_args = req.extra_args.unwrap();
-        assert!(
-            extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY][ROUTER_HINT_EXTRA_ARGS_KEY]
-                .get("source_control_endpoint")
-                .is_none()
-        );
-        assert_eq!(
-            extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY][ROUTER_HINT_EXTRA_ARGS_KEY]["block_hashes"],
-            serde_json::json!([11])
-        );
     }
 
     #[test]

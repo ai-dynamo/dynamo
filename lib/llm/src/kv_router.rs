@@ -480,14 +480,15 @@ where
             let (source, block_hashes) =
                 candidates.best_source(prefix_blocks_to_beat, |worker| {
                     worker != target
-                        && configs
-                            .get(&worker.worker_id)
-                            .is_some_and(|config| config.supports_router_hints())
+                        && configs.get(&worker.worker_id).is_some_and(|config| {
+                            config.supports_router_hints()
+                                && config.router_hint_source_control_endpoint().is_some()
+                        })
                 })?;
             let source_control_endpoint = configs
                 .get(&source.worker_id)
-                .and_then(|config| config.router_hint_source_control_endpoint())
-                .map(str::to_string);
+                .and_then(|config| config.router_hint_source_control_endpoint())?
+                .to_string();
             (block_hashes, source_control_endpoint)
         };
 
