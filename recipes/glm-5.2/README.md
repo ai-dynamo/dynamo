@@ -21,7 +21,7 @@ Dynamo + SGLang deployment profiles for the B200 and H200 agentic workload:
 | **Routing**              | KV-aware                                   | KV-aware                                   | KV-aware                                   | KV-aware                                   |
 | **Speculative decoding** | EAGLE-style MTP (DL=3, SpeedBench AL=2.69) | EAGLE-style MTP (DL=3, SpeedBench AL=2.69) | EAGLE-style MTP (DL=3, SpeedBench AL=2.69) | EAGLE-style MTP (DL=3, SpeedBench AL=2.69) |
 | **Context length**       | 500,000                                    | 500,000                                    | 250,000                                    | 250,000                                    |
-| **KV cache offloading**  | HiCache CPU                                | HiCache CPU                                | HiCache CPU                                | None                                       |
+| **KV cache offloading**  | HiCache CPU                                | HiCache CPU                                | None                                       | None                                       |
 | **KV transfer**          | N/A                                        | NIXL/UCX over IB                           | N/A                                        | NIXL/UCX over IB                           |
 
 
