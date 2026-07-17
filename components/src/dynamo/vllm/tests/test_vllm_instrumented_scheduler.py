@@ -277,7 +277,15 @@ def test_explicit_parent_output_failure_is_indexed_and_aborted(monkeypatch):
     stub._bench_active = True
     stub._bench_current_point = point
     stub._bench_explicit_point_paths = {id(point): "decode[2]"}
+    stub._bench_sync_pending = False
+    stub._bench_point_deadline = 1.0
+    stub._bench_synchronize_result_failure = MagicMock(side_effect=lambda error: error)
     stub._bench_abort = MagicMock()
+    failure_calls = MagicMock()
+    failure_calls.attach_mock(
+        stub._bench_synchronize_result_failure, "synchronize_result"
+    )
+    failure_calls.attach_mock(stub._bench_abort, "abort")
     monkeypatch.setattr(
         instrumented_scheduler_module.AsyncScheduler,
         "update_from_output",
@@ -291,8 +299,122 @@ def test_explicit_parent_output_failure_is_indexed_and_aborted(monkeypatch):
     ):
         InstrumentedScheduler.update_from_output(stub, output, object())
 
+    synchronized_error = stub._bench_synchronize_result_failure.call_args.args[0]
     abort_error = stub._bench_abort.call_args.args[0]
-    assert "decode[2]" in str(abort_error)
+    assert "decode[2]" in str(synchronized_error)
+    assert abort_error is synchronized_error
+    assert [entry[0] for entry in failure_calls.mock_calls] == [
+        "synchronize_result",
+        "abort",
+    ]
+
+
+def test_warmup_output_failure_broadcasts_abort_before_cleanup(monkeypatch):
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_active = True
+    stub._bench_current_point = None
+    stub._bench_sync_pending = False
+    stub._bench_point_deadline = 0.0
+    stub._bench_plan_synchronized = True
+    stub._bench_synchronizer = MagicMock()
+    stub._bench_abort = MagicMock()
+    failure_calls = MagicMock()
+    failure_calls.attach_mock(stub._bench_synchronizer.broadcast_abort, "broadcast")
+    failure_calls.attach_mock(stub._bench_abort, "abort")
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler,
+        "update_from_output",
+        MagicMock(side_effect=RuntimeError("warmup update failed")),
+    )
+    output = SimpleNamespace(total_num_scheduled_tokens=1)
+
+    with pytest.raises(RuntimeError, match="warmup update failed") as error:
+        InstrumentedScheduler.update_from_output(stub, output, object())
+
+    stub._bench_synchronizer.broadcast_abort.assert_called_once_with(
+        "warmup update failed"
+    )
+    assert stub._bench_abort.call_args.args[0] is error.value
+    assert [entry[0] for entry in failure_calls.mock_calls] == [
+        "broadcast",
+        "abort",
+    ]
+
+
+def test_warmup_gate_uses_stable_negative_ids_and_no_result_barrier():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_sync_pending = False
+    stub._bench_warmup_sync_id = -1
+    stub._bench_current_point = None
+
+    InstrumentedScheduler._bench_arm_warmup_sync(stub)
+    first_point = stub._bench_current_point
+    assert first_point is not None
+    assert first_point.point_type == "warmup"
+    assert first_point.benchmark_id == -1
+    assert stub._bench_warmup_sync_id == -2
+
+    # A zero-token scheduler pass leaves the same gate armed for the next pass.
+    InstrumentedScheduler._bench_arm_warmup_sync(stub)
+    assert stub._bench_current_point is first_point
+    assert stub._bench_warmup_sync_id == -2
+
+    stub._bench_sync_pending = False
+    InstrumentedScheduler._bench_arm_warmup_sync(stub)
+    second_point = stub._bench_current_point
+    assert second_point is not None
+    assert second_point.benchmark_id == -2
+
+    stub._extract_scheduled = MagicMock(
+        return_value=SimpleNamespace(
+            num_prefill_requests=0,
+            sum_prefill_tokens=0,
+            sum_prefill_kv_tokens=0,
+            num_decode_requests=1,
+            sum_decode_kv_tokens=256,
+        )
+    )
+    stub._bench_explicit_point_paths = {}
+    stub._bench_synchronizer = MagicMock()
+    stub._bench_synchronizer.synchronize.return_value = "run-id"
+    stub._bench_sync_plan_digest = "uniform-plan"
+    stub._bench_grid_digest = "grid"
+    stub._bench_point_deadline = 0.0
+    stub._bench_point_result_timeout_seconds = 8.0
+    output = SimpleNamespace(total_num_scheduled_tokens=1)
+
+    InstrumentedScheduler._bench_synchronize_output(stub, output)
+
+    assert stub._bench_sync_pending is False
+    assert stub._bench_point_deadline == 0.0
+    stub._bench_synchronizer.synchronize.assert_called_once()
+    assert (
+        InstrumentedScheduler._bench_should_record_scheduled(
+            stub,
+            SimpleNamespace(num_prefill_requests=0, num_decode_requests=1),
+        )
+        is False
+    )
+
+
+def test_warmup_arms_gate_before_request_injection():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_active_req_ids = set()
+    stub._bench_config = BenchmarkConfig(warmup_iterations=1)
+    stub._bench_sync_pending = False
+    stub._bench_warmup_sync_id = -1
+    stub._bench_current_point = None
+    stub._bench_inject_prefill = MagicMock(
+        side_effect=RuntimeError("warmup injection failed")
+    )
+
+    with pytest.raises(RuntimeError, match="warmup injection failed"):
+        InstrumentedScheduler._bench_step_warmup(stub)
+
+    assert stub._bench_sync_pending is True
+    assert stub._bench_current_point is not None
+    assert stub._bench_current_point.point_type == "warmup"
+    assert stub._bench_current_point.benchmark_id == -1
 
 
 # ---------------------------------------------------------------------------
@@ -643,13 +765,14 @@ def test_benchmark_synchronizer_coordinates_boundary_and_cleanup():
         rank0.close()
 
 
-def test_benchmark_synchronizer_close_flushes_after_cleanup():
+def test_benchmark_synchronizer_close_flushes_terminal_messages():
     synchronizer = instrumented_scheduler_module._BenchmarkSynchronizer.__new__(
         instrumented_scheduler_module._BenchmarkSynchronizer
     )
     synchronizer._socket = MagicMock()
     synchronizer._timeout_ms = 1_000
     synchronizer._cleanup_complete = False
+    synchronizer._flush_on_close = False
 
     synchronizer.close()
     synchronizer._socket.close.assert_called_once_with(linger=0)
@@ -657,6 +780,28 @@ def test_benchmark_synchronizer_close_flushes_after_cleanup():
     synchronizer._socket.close.reset_mock()
     synchronizer._cleanup_complete = True
     synchronizer.close()
+    synchronizer._socket.close.assert_called_once_with(linger=2_000)
+
+    synchronizer._socket.close.reset_mock()
+    synchronizer._cleanup_complete = False
+    synchronizer._flush_on_close = True
+    synchronizer.close()
+    synchronizer._socket.close.assert_called_once_with(linger=2_000)
+
+
+def test_benchmark_synchronizer_error_notification_flushes_on_close():
+    synchronizer = instrumented_scheduler_module._BenchmarkSynchronizer.__new__(
+        instrumented_scheduler_module._BenchmarkSynchronizer
+    )
+    synchronizer._socket = MagicMock()
+    synchronizer._timeout_ms = 1_000
+    synchronizer._cleanup_complete = False
+    synchronizer._flush_on_close = False
+
+    synchronizer._notify_error([b"1"], "benchmark failed")
+    synchronizer.close()
+
+    synchronizer._socket.send_multipart.assert_called_once()
     synchronizer._socket.close.assert_called_once_with(linger=2_000)
 
 
@@ -858,6 +1003,253 @@ def test_benchmark_synchronizer_broadcasts_indexed_pre_output_failure():
             assert "prefill_injection_failed" in error
             assert "timed out" not in error
             assert "SchedulerOutput mismatch" not in error
+    finally:
+        rank1.close()
+        rank0.close()
+
+
+def test_benchmark_synchronizer_notifies_result_sender_on_plan_mismatch():
+    endpoint = f"inproc://benchmark-sync-{uuid.uuid4().hex}"
+    rank0 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=0,
+        dp_size=2,
+        master_ip="unused",
+        port=0,
+        timeout=1,
+        endpoint=endpoint,
+    )
+    rank1 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=1,
+        dp_size=2,
+        master_ip="unused",
+        port=0,
+        timeout=1,
+        endpoint=endpoint,
+    )
+    point = BenchmarkPoint(point_type="decode", benchmark_id=3)
+    follower_error = {}
+
+    def run_follower():
+        try:
+            rank1.synchronize(point, plan_digest="uniform-plan")
+            rank1.collect_result(
+                point,
+                [{"counter_id": 3, "dp_rank": 1}],
+                plan_digest="rank-1-result-plan",
+            )
+        except RuntimeError as error:
+            follower_error["error"] = error
+
+    follower = threading.Thread(target=run_follower)
+    follower.start()
+    try:
+        rank0.synchronize(point, plan_digest="uniform-plan")
+        with pytest.raises(RuntimeError, match="result plan mismatch") as error:
+            rank0.collect_result(
+                point,
+                [{"counter_id": 3, "dp_rank": 0}],
+                plan_digest="rank-0-result-plan",
+            )
+        follower.join(timeout=2)
+        assert not follower.is_alive()
+        errors = [str(error.value), str(follower_error["error"])]
+        for message in errors:
+            assert "result plan mismatch" in message
+            assert "timed out" not in message
+    finally:
+        rank1.close()
+        rank0.close()
+
+
+def test_benchmark_synchronizer_notifies_all_result_peers_on_plan_mismatch():
+    endpoint = f"inproc://benchmark-sync-{uuid.uuid4().hex}"
+    synchronizers = [
+        instrumented_scheduler_module._BenchmarkSynchronizer(
+            dp_rank=rank,
+            dp_size=3,
+            master_ip="unused",
+            port=0,
+            timeout=1,
+            endpoint=endpoint,
+        )
+        for rank in range(3)
+    ]
+    point = BenchmarkPoint(point_type="decode", benchmark_id=3)
+    follower_errors = {}
+    release_rank_2_result = threading.Event()
+
+    def run_follower(rank):
+        try:
+            synchronizers[rank].synchronize(point, plan_digest="uniform-plan")
+            if rank == 2 and not release_rank_2_result.wait(timeout=2):
+                raise RuntimeError("test did not release rank 2 result")
+            synchronizers[rank].collect_result(
+                point,
+                [{"counter_id": 3, "dp_rank": rank}],
+                plan_digest=(
+                    "mismatched-result-plan" if rank == 1 else "rank-0-result-plan"
+                ),
+            )
+        except RuntimeError as error:
+            follower_errors[rank] = error
+
+    followers = [threading.Thread(target=run_follower, args=(rank,)) for rank in (1, 2)]
+    for follower in followers:
+        follower.start()
+    try:
+        synchronizers[0].synchronize(point, plan_digest="uniform-plan")
+        with pytest.raises(RuntimeError, match="result plan mismatch") as error:
+            synchronizers[0].collect_result(
+                point,
+                [{"counter_id": 3, "dp_rank": 0}],
+                plan_digest="rank-0-result-plan",
+            )
+        # Rank 2 has completed GO but has not sent its result. It must already
+        # have the coordinator's error queued before entering collect_result.
+        release_rank_2_result.set()
+        for follower in followers:
+            follower.join(timeout=2)
+            assert not follower.is_alive()
+        errors = [str(error.value), *(str(follower_errors[rank]) for rank in (1, 2))]
+        for message in errors:
+            assert "result plan mismatch" in message
+            assert "timed out" not in message
+    finally:
+        release_rank_2_result.set()
+        for synchronizer in reversed(synchronizers):
+            synchronizer.close()
+
+
+def test_benchmark_synchronizer_abort_blocks_next_warmup_gate():
+    endpoint = f"inproc://benchmark-sync-{uuid.uuid4().hex}"
+    synchronizers = [
+        instrumented_scheduler_module._BenchmarkSynchronizer(
+            dp_rank=rank,
+            dp_size=3,
+            master_ip="unused",
+            port=0,
+            timeout=1,
+            endpoint=endpoint,
+        )
+        for rank in range(3)
+    ]
+    plan = BenchmarkPoint(point_type="plan", benchmark_id=0)
+    first_warmup = BenchmarkPoint(point_type="warmup", benchmark_id=-1)
+    next_warmup = BenchmarkPoint(point_type="warmup", benchmark_id=-2)
+    release_after_warmup = threading.Event()
+    abort_sent = threading.Event()
+    follower_errors = {}
+    indexed_error = "warmup[0]: parent update failed"
+
+    def run_failed_follower():
+        try:
+            synchronizers[1].synchronize(plan, plan_digest="uniform-plan")
+            synchronizers[1].synchronize(first_warmup, plan_digest="uniform-plan")
+            if not release_after_warmup.wait(timeout=2):
+                raise RuntimeError("test did not release warmup gate")
+            synchronizers[1].broadcast_abort(indexed_error)
+            abort_sent.set()
+        except RuntimeError as error:
+            follower_errors[1] = error
+
+    def run_waiting_follower():
+        try:
+            synchronizers[2].synchronize(plan, plan_digest="uniform-plan")
+            synchronizers[2].synchronize(first_warmup, plan_digest="uniform-plan")
+            if not release_after_warmup.wait(timeout=2) or not abort_sent.wait(
+                timeout=2
+            ):
+                raise RuntimeError("test did not release peer abort")
+            synchronizers[2].synchronize(next_warmup, plan_digest="uniform-plan")
+        except RuntimeError as error:
+            follower_errors[2] = error
+
+    followers = [
+        threading.Thread(target=run_failed_follower),
+        threading.Thread(target=run_waiting_follower),
+    ]
+    for follower in followers:
+        follower.start()
+    try:
+        synchronizers[0].synchronize(plan, plan_digest="uniform-plan")
+        synchronizers[0].synchronize(first_warmup, plan_digest="uniform-plan")
+        release_after_warmup.set()
+        with pytest.raises(RuntimeError, match=r"rank 1 aborted.*warmup\[0\]") as error:
+            synchronizers[0].synchronize(
+                next_warmup,
+                plan_digest="uniform-plan",
+            )
+        for follower in followers:
+            follower.join(timeout=2)
+            assert not follower.is_alive()
+        assert 1 not in follower_errors
+        peer_error = str(follower_errors[2])
+        assert indexed_error in str(error.value)
+        assert indexed_error in peer_error
+        assert "timed out" not in peer_error
+    finally:
+        release_after_warmup.set()
+        abort_sent.set()
+        for synchronizer in reversed(synchronizers):
+            synchronizer.close()
+
+
+@pytest.mark.parametrize("failing_rank", [0, 1])
+def test_benchmark_synchronizer_broadcasts_post_go_result_failure(failing_rank):
+    endpoint = f"inproc://benchmark-sync-{uuid.uuid4().hex}"
+    rank0 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=0,
+        dp_size=2,
+        master_ip="unused",
+        port=0,
+        timeout=1,
+        endpoint=endpoint,
+    )
+    rank1 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=1,
+        dp_size=2,
+        master_ip="unused",
+        port=0,
+        timeout=1,
+        endpoint=endpoint,
+    )
+    point = BenchmarkPoint(point_type="decode", benchmark_id=4)
+    indexed_error = (
+        "decode[2]: explicit benchmark point failed during execution: "
+        "parent update failed"
+    )
+    follower_error = {}
+
+    def run_follower():
+        try:
+            rank1.synchronize(point, plan_digest="uniform-plan")
+            rank1.collect_result(
+                point,
+                [] if failing_rank == 1 else [{"counter_id": 4, "dp_rank": 1}],
+                validation_error=indexed_error if failing_rank == 1 else None,
+                plan_digest="uniform-plan",
+            )
+        except RuntimeError as error:
+            follower_error["error"] = error
+
+    follower = threading.Thread(target=run_follower)
+    follower.start()
+    try:
+        rank0.synchronize(point, plan_digest="uniform-plan")
+        with pytest.raises(RuntimeError, match=r"decode\[2\]") as error:
+            rank0.collect_result(
+                point,
+                [] if failing_rank == 0 else [{"counter_id": 4, "dp_rank": 0}],
+                validation_error=indexed_error if failing_rank == 0 else None,
+                plan_digest="uniform-plan",
+            )
+        follower.join(timeout=2)
+        assert not follower.is_alive()
+        errors = [str(error.value), str(follower_error["error"])]
+        for message in errors:
+            assert "decode[2]" in message
+            assert "parent update failed" in message
+            assert "timed out" not in message
     finally:
         rank1.close()
         rank0.close()
@@ -1118,6 +1510,10 @@ def _make_decode_sweep_stub(connector, ec_connector=None):
     stub._bench_active = True
     stub._bench_phase = _BenchPhase.DECODE_SWEEP
     stub._bench_active_req_ids = {"__bench_0"}
+    stub._bench_sync_pending = False
+    stub._bench_point_deadline = 0.0
+    stub._bench_plan_synchronized = False
+    stub._bench_synchronizer = None
     stub.kv_cache_manager = MagicMock()
     stub.kv_cache_manager.num_kv_cache_groups = 1
     stub.finished_req_ids = set()
@@ -1205,10 +1601,51 @@ def test_explicit_parent_scheduler_failure_is_indexed_and_aborted():
     assert "prefill[1]" in str(abort_error)
 
 
+def test_post_go_scheduler_failure_uses_result_barrier_before_abort():
+    stub = _make_decode_sweep_stub(connector=None)
+    point = BenchmarkPoint(point_type="decode", benchmark_id=2)
+    stub._bench_phase = _BenchPhase.PREFILL_SWEEP
+    stub._bench_active_req_ids = set()
+    stub._bench_current_point = point
+    stub._bench_point_deadline = 1.0
+    stub._bench_explicit_point_paths = {id(point): "decode[1]"}
+    stub._schedule_and_record_time = MagicMock(
+        side_effect=RuntimeError("parent schedule failed after GO")
+    )
+    stub._bench_synchronize_result_failure = MagicMock(side_effect=lambda error: error)
+    stub._bench_synchronize_pending_failure = MagicMock(
+        side_effect=AssertionError("READY barrier must not be re-entered after GO")
+    )
+    stub._bench_abort = MagicMock()
+    failure_calls = MagicMock()
+    failure_calls.attach_mock(
+        stub._bench_synchronize_result_failure, "synchronize_result"
+    )
+    failure_calls.attach_mock(stub._bench_abort, "abort")
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"decode\[1\].*parent schedule failed after GO",
+    ):
+        InstrumentedScheduler.schedule(stub)
+
+    synchronized_error = stub._bench_synchronize_result_failure.call_args.args[0]
+    assert stub._bench_abort.call_args.args[0] is synchronized_error
+    assert [entry[0] for entry in failure_calls.mock_calls] == [
+        "synchronize_result",
+        "abort",
+    ]
+    stub._bench_synchronize_pending_failure.assert_not_called()
+
+
 def test_post_benchmark_normal_scheduler_failure_does_not_reabort():
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_active = True
     stub._bench_phase = _BenchPhase.DONE
+    stub._bench_sync_pending = False
+    stub._bench_point_deadline = 0.0
+    stub._bench_plan_synchronized = False
+    stub._bench_synchronizer = None
     stub._bench_abort = MagicMock()
     normal_error = RuntimeError("first normal scheduler step failed")
 
@@ -1518,10 +1955,11 @@ def test_benchmark_grid_tracks_each_requested_empty_phase(
     mode, prefill_points, decode_points, expected_missing_phases
 ):
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
-    stub._bench_config = SimpleNamespace(mode=mode)
+    stub._bench_config = BenchmarkConfig(mode=mode)
     stub._bench_grid = deque()
     stub._bench_grid_built = False
     stub._bench_missing_phases = []
+    stub._bench_explicit_points = None
 
     def generate_prefill_grid():
         stub._bench_grid.extend(
@@ -1544,11 +1982,12 @@ def test_benchmark_grid_tracks_each_requested_empty_phase(
 
 def test_benchmark_grid_has_no_point_cap():
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
-    stub._bench_config = SimpleNamespace(mode="prefill")
+    stub._bench_config = BenchmarkConfig(mode="prefill")
     stub._bench_grid = deque()
     stub._bench_grid_built = False
     stub._bench_missing_phases = []
     stub._bench_grid_error = None
+    stub._bench_explicit_points = None
 
     def generate_prefill_grid():
         stub._bench_grid.extend(
@@ -1568,11 +2007,12 @@ def test_benchmark_grid_has_no_point_cap():
 
 def test_benchmark_grid_assigns_stable_contiguous_ids_and_digest():
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
-    stub._bench_config = SimpleNamespace(mode="prefill")
+    stub._bench_config = BenchmarkConfig(mode="prefill")
     stub._bench_grid = deque()
     stub._bench_grid_built = False
     stub._bench_missing_phases = []
     stub._bench_grid_error = None
+    stub._bench_explicit_points = None
 
     def generate_prefill_grid():
         stub._bench_grid.extend(
@@ -1855,6 +2295,7 @@ def _prefill_grid_stub(
     stub._bench_hash_block_size = block_size
     stub._bench_prefill_capture_sizes = [8, 16]
     stub._bench_prefill_cudagraph_mode = "PIECEWISE"
+    stub._bench_explicit_points = None
     stub.num_lookahead_tokens = 0
     return stub
 
@@ -2756,6 +3197,37 @@ def test_pending_failure_barrier_is_not_reentered_after_sync_error():
     stub._bench_synchronizer.synchronize.assert_called_once_with(
         point,
         output_summary={},
+        validation_error=str(original_error),
+        plan_digest="uniform-plan",
+    )
+
+
+def test_result_failure_barrier_is_not_reentered_after_sync_error():
+    point = BenchmarkPoint(point_type="decode", benchmark_id=4)
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_point_deadline = 1.0
+    stub._bench_current_point = point
+    stub._bench_sync_plan_digest = "uniform-plan"
+    stub._bench_grid_digest = "grid"
+    stub._bench_synchronizer = MagicMock()
+    stub._bench_synchronizer.collect_result.side_effect = RuntimeError(
+        "result validation failed: rank 1: decode[0]: parent update failed"
+    )
+    original_error = RuntimeError("decode[0]: parent update failed")
+
+    propagated = InstrumentedScheduler._bench_synchronize_result_failure(
+        stub, original_error
+    )
+    repeated = InstrumentedScheduler._bench_synchronize_result_failure(
+        stub, original_error
+    )
+
+    assert "decode[0]" in str(propagated)
+    assert repeated is original_error
+    assert stub._bench_point_deadline == 0.0
+    stub._bench_synchronizer.collect_result.assert_called_once_with(
+        point,
+        [],
         validation_error=str(original_error),
         plan_digest="uniform-plan",
     )

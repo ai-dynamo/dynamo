@@ -8,11 +8,12 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Literal, TypedDict, cast
+from typing import Any, Literal, TypedDict, cast, overload
 
 BENCHMARK_POINTS_SCHEMA_VERSION = 1
 
 BenchmarkMode = Literal["prefill", "decode", "agg"]
+BENCHMARK_MODES: tuple[BenchmarkMode, ...] = ("prefill", "decode", "agg")
 
 
 class PrefillBenchmarkPoint(TypedDict):
@@ -24,6 +25,9 @@ class PrefillBenchmarkPoint(TypedDict):
 class DecodeBenchmarkPoint(TypedDict):
     total_kv_read_tokens: int
     batch_size: int
+
+
+BenchmarkPointInput = PrefillBenchmarkPoint | DecodeBenchmarkPoint
 
 
 class ExplicitBenchmarkPoints(TypedDict):
@@ -68,10 +72,12 @@ def load_benchmark_points_file(path: str, mode: str) -> ExplicitBenchmarkPoints:
         raise ValueError(f"--benchmark-points-file {path!r}: {error}") from error
 
 
-def normalize_benchmark_points(payload: object, mode: BenchmarkMode) -> ExplicitBenchmarkPoints:
+def normalize_benchmark_points(
+    payload: object, mode: object
+) -> ExplicitBenchmarkPoints:
     """Validate and return a canonical, rank-independent pure-point manifest."""
 
-    if mode not in BenchmarkMode:
+    if not isinstance(mode, str) or mode not in BENCHMARK_MODES:
         raise ValueError("benchmark mode must be one of prefill, decode, or agg")
     if not isinstance(payload, dict):
         raise ValueError("top level must be an object")
@@ -121,7 +127,23 @@ def benchmark_points_digest(points: ExplicitBenchmarkPoints) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _normalize_phase(value: object, phase: Literal["prefill", "decode"]):
+@overload
+def _normalize_phase(
+    value: object, phase: Literal["prefill"]
+) -> list[PrefillBenchmarkPoint]:
+    ...
+
+
+@overload
+def _normalize_phase(
+    value: object, phase: Literal["decode"]
+) -> list[DecodeBenchmarkPoint]:
+    ...
+
+
+def _normalize_phase(
+    value: object, phase: Literal["prefill", "decode"]
+) -> list[PrefillBenchmarkPoint] | list[DecodeBenchmarkPoint]:
     if not isinstance(value, list):
         raise ValueError(f"{phase} must be an array")
 

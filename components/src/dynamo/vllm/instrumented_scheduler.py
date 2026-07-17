@@ -93,7 +93,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from itertools import count
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, NoReturn
+from typing import TYPE_CHECKING, NoReturn, cast
 
 import msgspec.structs
 import zmq
@@ -114,7 +114,12 @@ from dynamo.common.forward_pass_metrics import (
 )
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.benchmark_points import (
+    BENCHMARK_MODES,
+    BenchmarkMode,
+    BenchmarkPointInput,
+    DecodeBenchmarkPoint,
     ExplicitBenchmarkPoints,
+    PrefillBenchmarkPoint,
     benchmark_points_digest,
     normalize_benchmark_points,
 )
@@ -145,7 +150,7 @@ def _utc_now_rfc3339() -> str:
 
 @dataclass
 class BenchmarkConfig:
-    mode: Literal["prefill", "decode", "agg"] = "agg"
+    mode: BenchmarkMode = "agg"
     warmup_iterations: int = 5
     output_path: str = "/tmp/benchmark_results.json"
     timeout: int = 900
@@ -202,6 +207,38 @@ def _benchmark_point_digest(point: BenchmarkPoint) -> str:
         separators=(",", ":"),
     ).encode()
     return hashlib.sha256(payload).hexdigest()
+
+
+def _parse_explicit_benchmark_config(
+    config: dict, mode: BenchmarkMode
+) -> tuple[ExplicitBenchmarkPoints | None, str | None, str | None]:
+    """Validate the optional explicit-points envelope without mutating config."""
+    raw_points = config.get("points")
+    raw_digest = config.get("points_digest")
+    raw_source_path = config.get("points_source_path")
+    if raw_points is None:
+        if raw_digest is not None:
+            raise ValueError("benchmark points_digest requires explicit points")
+        if raw_source_path is not None:
+            raise ValueError("benchmark points_source_path requires explicit points")
+        return None, None, None
+
+    points = normalize_benchmark_points(raw_points, mode)
+    actual_digest = benchmark_points_digest(points)
+    if not isinstance(raw_digest, str) or not raw_digest:
+        raise ValueError("benchmark points_digest is required with explicit points")
+    if raw_digest != actual_digest:
+        raise ValueError(
+            "benchmark explicit-points digest mismatch: "
+            f"expected={raw_digest} actual={actual_digest}"
+        )
+
+    source_path = None
+    if raw_source_path is not None:
+        if not isinstance(raw_source_path, str) or not raw_source_path:
+            raise ValueError("benchmark points_source_path must be a non-empty string")
+        source_path = raw_source_path
+    return points, actual_digest, source_path
 
 
 def _balanced_partition(
@@ -347,6 +384,7 @@ class _BenchmarkSynchronizer:
             self._socket.connect(self._endpoint)
         self._socket.setsockopt(zmq.LINGER, 0)
         self._cleanup_complete = False
+        self._flush_on_close = False
 
     @property
     def run_id(self) -> str | None:
@@ -359,7 +397,7 @@ class _BenchmarkSynchronizer:
     def close(self) -> None:
         linger = (
             self._timeout_ms + int(self.FINAL_GO_GRACE_SECONDS * 1000)
-            if self._cleanup_complete
+            if self._cleanup_complete or self._flush_on_close
             else 0
         )
         self._socket.close(linger=linger)
@@ -408,6 +446,7 @@ class _BenchmarkSynchronizer:
         point: BenchmarkPoint,
         fpms: list[dict],
         *,
+        validation_error: str | None = None,
         stop_requested: bool = False,
         stop_deadline_monotonic: float | None = None,
         plan_digest: str | None = None,
@@ -420,6 +459,7 @@ class _BenchmarkSynchronizer:
             "point_digest": _benchmark_point_digest(point),
             "plan_digest": plan_digest,
             "fpms": fpms,
+            "validation_error": validation_error,
             "stop_requested": stop_requested,
         }
         if self.dp_rank == 0:
@@ -457,6 +497,24 @@ class _BenchmarkSynchronizer:
         deadline = time.monotonic() + self.timeout_seconds + self.FINAL_GO_GRACE_SECONDS
         self._recv_follower(deadline, point.benchmark_id, "group_commit")
         return _BenchmarkGroupResult(rank_results, group_stop_requested)
+
+    def broadcast_abort(self, error: str) -> None:
+        """Publish a sweep-level failure outside a point barrier."""
+        if self.dp_rank == 0:
+            self._notify_error(
+                (str(rank).encode() for rank in range(1, self.dp_size)),
+                f"rank 0: {error}",
+            )
+            return
+
+        self._socket.send_json(
+            {
+                "type": "abort",
+                "dp_rank": self.dp_rank,
+                "error": error,
+            }
+        )
+        self._flush_on_close = True
 
     def synchronize_boundary(
         self,
@@ -591,7 +649,7 @@ class _BenchmarkSynchronizer:
         local_validation_error = local_ready.get("validation_error")
         identities: dict[int, bytes] = {}
         last_identity: bytes | None = None
-        validation_errors = []
+        validation_errors: list[str] = []
         if local_validation_error:
             validation_errors.append(f"rank 0: {local_validation_error}")
         deadline = time.monotonic() + self.timeout_seconds
@@ -615,6 +673,9 @@ class _BenchmarkSynchronizer:
                 identity, payload = frames
                 last_identity = identity
                 message = json.loads(payload)
+                if not isinstance(message, dict):
+                    raise RuntimeError("invalid attention-DP benchmark READY message")
+                self._raise_if_peer_aborted(identity, message)
                 rank = message.get("dp_rank")
                 if (
                     message.get("type") != "ready"
@@ -662,7 +723,8 @@ class _BenchmarkSynchronizer:
                     validation_errors.append(f"rank {rank}: {rank_validation_error}")
                 identities[rank] = identity
         except Exception as error:
-            error_identities = set(identities.values())
+            error_identities = {str(rank).encode() for rank in range(1, self.dp_size)}
+            error_identities.update(identities.values())
             if last_identity is not None:
                 error_identities.add(last_identity)
             self._notify_error(error_identities, str(error))
@@ -704,7 +766,10 @@ class _BenchmarkSynchronizer:
                 },
             )
         except Exception as error:
-            self._notify_error(identities.values(), str(error))
+            self._notify_error(
+                (str(rank).encode() for rank in range(1, self.dp_size)),
+                str(error),
+            )
             raise
         return self._run_id
 
@@ -749,6 +814,16 @@ class _BenchmarkSynchronizer:
         rank_results = [
             {"dp_rank": 0, "fpms": local_result["fpms"]},
         ]
+        local_validation_error = local_result.get("validation_error")
+        if local_validation_error is not None and not isinstance(
+            local_validation_error, str
+        ):
+            raise RuntimeError(
+                "attention-DP benchmark rank 0 sent an invalid validation error"
+            )
+        validation_errors = []
+        if local_validation_error is not None:
+            validation_errors.append(f"rank 0: {local_validation_error}")
         try:
             while len(identities) < self.dp_size - 1:
                 identity, message = self._recv_router(deadline, benchmark_id)
@@ -780,6 +855,14 @@ class _BenchmarkSynchronizer:
                     raise RuntimeError(
                         f"attention-DP benchmark rank {rank} sent invalid FPMs"
                     )
+                validation_error = message.get("validation_error")
+                if validation_error is not None and not isinstance(
+                    validation_error, str
+                ):
+                    raise RuntimeError(
+                        f"attention-DP benchmark rank {rank} sent an invalid "
+                        "validation error"
+                    )
                 rank_stop_requested = message.get("stop_requested")
                 if not isinstance(rank_stop_requested, bool):
                     raise RuntimeError(
@@ -788,6 +871,14 @@ class _BenchmarkSynchronizer:
                 stop_requested = stop_requested or rank_stop_requested
                 identities[rank] = identity
                 rank_results.append({"dp_rank": rank, "fpms": fpms})
+                if validation_error is not None:
+                    validation_errors.append(f"rank {rank}: {validation_error}")
+
+            if validation_errors:
+                raise RuntimeError(
+                    "attention-DP benchmark result validation failed: "
+                    + "; ".join(validation_errors)
+                )
 
             rank_results.sort(key=lambda result: result["dp_rank"])
             self._send_to_all(
@@ -826,7 +917,12 @@ class _BenchmarkSynchronizer:
             )
             return _BenchmarkGroupResult(rank_results, stop_requested)
         except Exception as error:
-            self._notify_error(identities.values(), str(error))
+            # Every follower completed the GO barrier before entering this
+            # result phase, so each deterministic rank identity already has a
+            # ROUTER route. Notify them all even if one invalid result arrived
+            # before the remaining results were dequeued.
+            error_identities = {str(rank).encode() for rank in range(1, self.dp_size)}
+            self._notify_error(error_identities, str(error))
             raise
 
     def _coordinate_group_prepared(
@@ -926,7 +1022,10 @@ class _BenchmarkSynchronizer:
             )
             return stop_requested
         except Exception as error:
-            self._notify_error(identities.values(), str(error))
+            self._notify_error(
+                (str(rank).encode() for rank in range(1, self.dp_size)),
+                str(error),
+            )
             raise
 
     def _coordinate_boundary_prepared(
@@ -996,7 +1095,10 @@ class _BenchmarkSynchronizer:
                 {"type": "cleanup_complete", "benchmark_id": benchmark_id},
             )
         except Exception as error:
-            self._notify_error(identities.values(), str(error))
+            self._notify_error(
+                (str(rank).encode() for rank in range(1, self.dp_size)),
+                str(error),
+            )
             raise
 
     def _recv_router(self, deadline: float, benchmark_id: int) -> tuple[bytes, dict]:
@@ -1015,6 +1117,7 @@ class _BenchmarkSynchronizer:
         message = json.loads(payload)
         if not isinstance(message, dict):
             raise RuntimeError("invalid attention-DP benchmark message")
+        self._raise_if_peer_aborted(identity, message)
         if message.get("benchmark_id") != benchmark_id:
             raise RuntimeError(
                 "attention-DP benchmark id mismatch: "
@@ -1022,16 +1125,34 @@ class _BenchmarkSynchronizer:
             )
         return identity, message
 
+    def _raise_if_peer_aborted(self, identity: bytes, message: dict) -> None:
+        if message.get("type") != "abort":
+            return
+        rank = message.get("dp_rank")
+        error = message.get("error")
+        if (
+            not isinstance(rank, int)
+            or not 1 <= rank < self.dp_size
+            or identity != str(rank).encode()
+            or not isinstance(error, str)
+        ):
+            raise RuntimeError(
+                f"invalid attention-DP benchmark abort message: {message}"
+            )
+        raise RuntimeError(f"attention-DP benchmark rank {rank} aborted: {error}")
+
     def _send_to_all(self, identities: dict[int, bytes], message: dict) -> None:
         payload = json.dumps(message).encode()
         for rank in sorted(identities):
             self._socket.send_multipart((identities[rank], payload))
+            self._flush_on_close = True
 
     def _notify_error(self, identities, error: str) -> None:
         payload = json.dumps({"type": "error", "error": error}).encode()
         for identity in identities:
             try:
                 self._socket.send_multipart((identity, payload))
+                self._flush_on_close = True
             except zmq.ZMQError:
                 logger.debug(
                     "Could not notify disconnected ADP benchmark rank",
@@ -1231,7 +1352,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 benchmark_output = self._bench_schedule(throttle_prefills)
             except Exception as error:
                 indexed_error = self._bench_explicit_runtime_error(error)
-                indexed_error = self._bench_synchronize_pending_failure(indexed_error)
+                indexed_error = self._bench_synchronize_failure(indexed_error)
                 logger.exception("Benchmark scheduling failed, cleaning up")
                 self._bench_abort(indexed_error)
                 if indexed_error is not error:
@@ -1322,10 +1443,11 @@ class InstrumentedScheduler(AsyncScheduler):
             if not benchmark_active:
                 raise
             indexed_error = self._bench_explicit_runtime_error(error)
+            synchronized_error = self._bench_synchronize_failure(indexed_error)
             logger.exception("Benchmark output update failed, cleaning up")
-            self._bench_abort(indexed_error)
-            if indexed_error is not error:
-                raise indexed_error from error
+            self._bench_abort(synchronized_error)
+            if synchronized_error is not error:
+                raise synchronized_error from error
             raise
 
     def _update_from_output(
@@ -1476,6 +1598,8 @@ class InstrumentedScheduler(AsyncScheduler):
         point = getattr(self, "_bench_current_point", None)
         if point is None:
             return False
+        if point.point_type == "warmup":
+            return False
         if point.point_type == "prefill":
             return scheduled.num_prefill_requests > 0
         return scheduled.num_decode_requests > 0
@@ -1564,47 +1688,14 @@ class InstrumentedScheduler(AsyncScheduler):
 
         cfg = bench_cfg if isinstance(bench_cfg, dict) else {}
         raw_mode = cfg.get("mode", "agg")
-        if not isinstance(raw_mode, str) or raw_mode not in {
-            "prefill",
-            "decode",
-            "agg",
-        }:
+        if not isinstance(raw_mode, str) or raw_mode not in BENCHMARK_MODES:
             raise ValueError("benchmark mode must be one of prefill, decode, or agg")
-        self._bench_explicit_points: ExplicitBenchmarkPoints | None = None
-        self._bench_explicit_points_digest: str | None = None
-        self._bench_explicit_points_source_path: str | None = None
-        raw_points = cfg.get("points")
-        raw_points_digest = cfg.get("points_digest")
-        raw_points_source_path = cfg.get("points_source_path")
-        if raw_points is not None:
-            self._bench_explicit_points = normalize_benchmark_points(
-                raw_points,
-                raw_mode,
-            )
-            actual_digest = benchmark_points_digest(self._bench_explicit_points)
-            if not isinstance(raw_points_digest, str) or not raw_points_digest:
-                raise ValueError(
-                    "benchmark points_digest is required with explicit points"
-                )
-            if raw_points_digest != actual_digest:
-                raise ValueError(
-                    "benchmark explicit-points digest mismatch: "
-                    f"expected={raw_points_digest} actual={actual_digest}"
-                )
-            self._bench_explicit_points_digest = actual_digest
-            if raw_points_source_path is not None:
-                if (
-                    not isinstance(raw_points_source_path, str)
-                    or not raw_points_source_path
-                ):
-                    raise ValueError(
-                        "benchmark points_source_path must be a non-empty string"
-                    )
-                self._bench_explicit_points_source_path = raw_points_source_path
-        elif raw_points_digest is not None:
-            raise ValueError("benchmark points_digest requires explicit points")
-        elif raw_points_source_path is not None:
-            raise ValueError("benchmark points_source_path requires explicit points")
+        mode = cast(BenchmarkMode, raw_mode)
+        (
+            self._bench_explicit_points,
+            self._bench_explicit_points_digest,
+            self._bench_explicit_points_source_path,
+        ) = _parse_explicit_benchmark_config(cfg, mode)
 
         # additional_config values arrive as strings from JSON; coerce to
         # the types that BenchmarkConfig expects.
@@ -1621,9 +1712,9 @@ class InstrumentedScheduler(AsyncScheduler):
             if k in cfg and not isinstance(cfg[k], int):
                 cfg[k] = int(cfg[k])
         known = {f.name for f in BenchmarkConfig.__dataclass_fields__.values()}
-        self._bench_config = BenchmarkConfig(
-            **{k: v for k, v in cfg.items() if k in known}
-        )
+        config_values = {k: v for k, v in cfg.items() if k in known}
+        config_values["mode"] = mode
+        self._bench_config = BenchmarkConfig(**config_values)
         if self._bench_config.timeout <= 0:
             raise ValueError("benchmark timeout must be positive")
         uniform_sample_limits = {
@@ -1741,6 +1832,7 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_current_fpms: list[dict] = []
         self._bench_active_req_ids: set[str] = set()
         self._bench_seq = 0
+        self._bench_warmup_sync_id = -1
         self._bench_grid_built = False
         self._bench_expected_points = 0
         self._bench_drain_pending = False
@@ -1816,13 +1908,11 @@ class InstrumentedScheduler(AsyncScheduler):
             return
         self._bench_grid_built = True
         mode = self._bench_config.mode
-        explicit_points = getattr(self, "_bench_explicit_points", None)
+        explicit_points = self._bench_explicit_points
         if explicit_points is not None:
             self._bench_expected_points = (
                 len(explicit_points["prefill"]) if mode in ("prefill", "agg") else 0
             ) + (len(explicit_points["decode"]) if mode in ("decode", "agg") else 0)
-            if not hasattr(self, "_bench_explicit_point_paths"):
-                self._bench_explicit_point_paths = {}
             self._bench_build_explicit_grid()
         else:
             if mode in ("prefill", "agg"):
@@ -1893,7 +1983,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 self._bench_explicit_point_paths[id(point)] = path
 
     def _bench_explicit_prefill_point(
-        self, raw_point: dict, path: str
+        self, raw_point: PrefillBenchmarkPoint, path: str
     ) -> BenchmarkPoint:
         total_prefill_tokens = raw_point["total_prefill_tokens"]
         total_kv_read_tokens = raw_point["total_kv_read_tokens"]
@@ -1930,7 +2020,7 @@ class InstrumentedScheduler(AsyncScheduler):
         )
 
     def _bench_explicit_decode_point(
-        self, raw_point: dict, path: str
+        self, raw_point: DecodeBenchmarkPoint, path: str
     ) -> BenchmarkPoint:
         total_kv_read_tokens = raw_point["total_kv_read_tokens"]
         batch_size = raw_point["batch_size"]
@@ -1963,7 +2053,7 @@ class InstrumentedScheduler(AsyncScheduler):
         )
 
     def _bench_raise_explicit_point_infeasible(
-        self, path: str, raw_point: dict
+        self, path: str, raw_point: BenchmarkPointInput
     ) -> NoReturn:
         limits = {
             "max_num_scheduled_tokens": self.max_num_scheduled_tokens,
@@ -2782,7 +2872,7 @@ class InstrumentedScheduler(AsyncScheduler):
         logger.info("Benchmark synthetic prefix cache cleared")
 
     def _bench_synchronize_output(self, output: SchedulerOutput) -> None:
-        """Release one measured point only after every ADP rank is ready."""
+        """Release one benchmark forward only after every ADP rank is ready."""
         if not self._bench_sync_pending or output.total_num_scheduled_tokens <= 0:
             return
         point = self._bench_current_point
@@ -2799,7 +2889,7 @@ class InstrumentedScheduler(AsyncScheduler):
             "sum_decode_kv_tokens": scheduled.sum_decode_kv_tokens,
         }
         validation_error = self._bench_output_validation_error(point, output_summary)
-        explicit_path = getattr(self, "_bench_explicit_point_paths", {}).get(id(point))
+        explicit_path = self._bench_explicit_point_paths.get(id(point))
         if validation_error is not None and explicit_path is not None:
             validation_error = f"{explicit_path}: {validation_error}"
         if self._bench_synchronizer is not None:
@@ -2811,23 +2901,23 @@ class InstrumentedScheduler(AsyncScheduler):
                 point,
                 output_summary,
                 validation_error,
-                plan_digest=getattr(self, "_bench_sync_plan_digest", None)
-                or getattr(self, "_bench_grid_digest", None),
+                plan_digest=self._bench_sync_plan_digest or self._bench_grid_digest,
             )
         elif validation_error is not None:
             self._bench_sync_pending = False
             raise RuntimeError(validation_error)
         else:
             self._bench_sync_pending = False
-        self._bench_point_deadline = (
-            time.monotonic() + self._bench_point_result_timeout_seconds
-        )
+        if point.point_type != "warmup":
+            self._bench_point_deadline = (
+                time.monotonic() + self._bench_point_result_timeout_seconds
+            )
 
     def _bench_synchronize_pending_failure(self, error: Exception) -> Exception:
         """Broadcast a pre-output point failure to every attention-DP rank."""
-        if not getattr(self, "_bench_sync_pending", False):
+        if not self._bench_sync_pending:
             return error
-        point = getattr(self, "_bench_current_point", None)
+        point = self._bench_current_point
         if point is None:
             self._bench_sync_pending = False
             return error
@@ -2835,7 +2925,7 @@ class InstrumentedScheduler(AsyncScheduler):
         # Consume the point barrier before entering it for the same reason as
         # _bench_synchronize_output: a synchronization error must not retry.
         self._bench_sync_pending = False
-        synchronizer = getattr(self, "_bench_synchronizer", None)
+        synchronizer = self._bench_synchronizer
         if synchronizer is None:
             return error
         try:
@@ -2843,8 +2933,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 point,
                 output_summary={},
                 validation_error=str(error),
-                plan_digest=getattr(self, "_bench_sync_plan_digest", None)
-                or getattr(self, "_bench_grid_digest", None),
+                plan_digest=self._bench_sync_plan_digest or self._bench_grid_digest,
             )
         except Exception as sync_error:
             if str(error) in str(sync_error):
@@ -2854,10 +2943,67 @@ class InstrumentedScheduler(AsyncScheduler):
             )
         return error
 
+    def _bench_synchronize_failure(self, error: Exception) -> Exception:
+        """Route a benchmark failure through its active synchronization phase."""
+        if self._bench_point_deadline > 0:
+            return self._bench_synchronize_result_failure(error)
+        if self._bench_sync_pending:
+            return self._bench_synchronize_pending_failure(error)
+        return self._bench_synchronize_unscoped_failure(error)
+
+    def _bench_synchronize_unscoped_failure(self, error: Exception) -> Exception:
+        """Broadcast a lifecycle failure after the plan barrier completed."""
+        synchronizer = self._bench_synchronizer
+        if synchronizer is None or not self._bench_plan_synchronized:
+            return error
+        error_message = str(error) or type(error).__name__
+        try:
+            synchronizer.broadcast_abort(error_message)
+        except Exception as sync_error:
+            if str(error) in str(sync_error):
+                return sync_error
+            return RuntimeError(
+                f"{error}; attention-DP benchmark abort broadcast failed: "
+                f"{sync_error}"
+            )
+        return error
+
+    def _bench_synchronize_result_failure(self, error: Exception) -> Exception:
+        """Broadcast a post-GO result failure before benchmark teardown."""
+        if self._bench_point_deadline <= 0:
+            return error
+        point = self._bench_current_point
+        self._bench_point_deadline = 0.0
+        if point is None:
+            return error
+
+        synchronizer = self._bench_synchronizer
+        if synchronizer is None:
+            return error
+        try:
+            synchronizer.collect_result(
+                point,
+                [],
+                validation_error=str(error),
+                plan_digest=self._bench_sync_plan_digest or self._bench_grid_digest,
+            )
+        except Exception as sync_error:
+            if str(error) in str(sync_error):
+                return sync_error
+            return RuntimeError(
+                f"{error}; attention-DP benchmark result synchronization "
+                f"failed: {sync_error}"
+            )
+        return error
+
     @staticmethod
     def _bench_output_validation_error(
         point: BenchmarkPoint, summary: dict
     ) -> str | None:
+        if point.point_type == "warmup":
+            # The READY coordinator still compares summaries across ranks.
+            # Warmup has no manifest point whose exact shape must be enforced.
+            return None
         if point.point_type == "prefill":
             expected = {
                 "total_num_scheduled_tokens": point.total_prefill_tokens,
@@ -3036,14 +3182,14 @@ class InstrumentedScheduler(AsyncScheduler):
 
     def _bench_synchronize_plan(self, validation_error: str | None = None) -> None:
         """Validate the complete realized plan before any synthetic request runs."""
-        if getattr(self, "_bench_plan_synchronized", True):
+        if self._bench_plan_synchronized is True:
             return
-        if getattr(self, "_bench_synchronizer", None) is not None:
+        if self._bench_synchronizer is not None:
             plan_point = BenchmarkPoint(point_type="plan", benchmark_id=0)
             self._bench_run_id = self._bench_synchronizer.synchronize(
                 plan_point,
                 validation_error=validation_error,
-                plan_digest=getattr(self, "_bench_sync_plan_digest", None),
+                plan_digest=self._bench_sync_plan_digest,
             )
         self._bench_plan_synchronized = True
 
@@ -3051,6 +3197,7 @@ class InstrumentedScheduler(AsyncScheduler):
         if not self._bench_active_req_ids:
             iters = self._bench_config.warmup_iterations
             if iters > 0:
+                self._bench_arm_warmup_sync()
                 self._bench_inject_prefill(prompt_lens=[256], max_tokens=iters)
                 logger.info("Benchmark warmup: 1 prefill + %d decode steps", iters)
             else:
@@ -3060,10 +3207,25 @@ class InstrumentedScheduler(AsyncScheduler):
         still_alive = any(rid in self.requests for rid in self._bench_active_req_ids)
         if not still_alive:
             self._bench_transition_after_warmup()
+        else:
+            self._bench_arm_warmup_sync()
         return None
+
+    def _bench_arm_warmup_sync(self) -> None:
+        """Gate the next warmup forward before it enters ADP collectives."""
+        if self._bench_sync_pending:
+            return
+        self._bench_current_point = BenchmarkPoint(
+            point_type="warmup",
+            benchmark_id=self._bench_warmup_sync_id,
+        )
+        self._bench_warmup_sync_id -= 1
+        self._bench_sync_pending = True
 
     def _bench_transition_after_warmup(self) -> None:
         self._bench_cleanup_requests()
+        self._bench_current_point = None
+        self._bench_sync_pending = False
         self._bench_current_fpms.clear()
         mode = self._bench_config.mode
         if mode in ("prefill", "agg"):
@@ -3285,12 +3447,14 @@ class InstrumentedScheduler(AsyncScheduler):
             point = self._bench_current_point
             local_fpms = list(self._bench_current_fpms)
             if self._bench_synchronizer is not None:
+                # The result barrier is single-use. If it raises, the output
+                # exception handler must not enter the same barrier again.
+                self._bench_point_deadline = 0.0
                 group_result = self._bench_synchronizer.collect_result(
                     point,
                     local_fpms,
                     stop_deadline_monotonic=self._bench_deadline_monotonic,
-                    plan_digest=getattr(self, "_bench_sync_plan_digest", None)
-                    or getattr(self, "_bench_grid_digest", None),
+                    plan_digest=self._bench_sync_plan_digest or self._bench_grid_digest,
                 )
             else:
                 group_result = _BenchmarkGroupResult(

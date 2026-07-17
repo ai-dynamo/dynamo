@@ -380,15 +380,13 @@ def update_engine_config_with_dynamo(
                 dynamo_config.prefix_max_batch_size_samples
             ),
         }
-        explicit_points = getattr(dynamo_config, "_benchmark_points", None)
+        explicit_points = dynamo_config._benchmark_points
         if explicit_points is not None:
             benchmark_config["points"] = explicit_points
-            benchmark_config["points_digest"] = getattr(
-                dynamo_config, "_benchmark_points_digest", None
-            )
-            benchmark_config["points_source_path"] = getattr(
-                dynamo_config, "_benchmark_points_source_path", None
-            )
+            benchmark_config["points_digest"] = dynamo_config._benchmark_points_digest
+            benchmark_config[
+                "points_source_path"
+            ] = dynamo_config._benchmark_points_source_path
         # main.py injects this after resolving its worker-specific output path.
         # Do not put it directly in EngineArgs until unified_main also gates
         # registration on benchmark completion and exposes the result endpoint.

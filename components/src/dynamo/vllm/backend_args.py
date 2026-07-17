@@ -21,6 +21,7 @@ from dynamo.common.configuration.utils import add_argument, add_negatable_bool_a
 
 from . import __version__
 from .benchmark_points import (
+    BENCHMARK_MODES,
     ExplicitBenchmarkPoints,
     benchmark_points_digest,
     load_benchmark_points_file,
@@ -237,7 +238,7 @@ class DynamoVllmArgGroup(ArgGroup):
             flag_name="--benchmark-mode",
             env_var="DYN_BENCHMARK_MODE",
             default=None,
-            choices=["prefill", "decode", "agg"],
+            choices=BENCHMARK_MODES,
             help=(
                 "Run self-benchmark on startup before accepting requests. "
                 "Sweeps iteration-total prefill tokens/KV reads/batch size and/or "
@@ -514,28 +515,65 @@ class DynamoVllmConfig(ConfigBase):
 
         conflicting_options = []
         sampling_options = (
-            ("prefill_max_new_token_samples", 64),
-            ("prefill_max_kv_read_token_samples", 16),
-            ("decode_max_kv_read_token_samples", 128),
-            ("decode_max_batch_size_samples", 128),
-            ("prefix_max_batch_size_samples", 3),
+            (
+                "prefill_max_new_token_samples",
+                self.prefill_max_new_token_samples,
+                self.prefill_max_new_token_samples_explicit,
+                64,
+            ),
+            (
+                "prefill_max_kv_read_token_samples",
+                self.prefill_max_kv_read_token_samples,
+                self.prefill_max_kv_read_token_samples_explicit,
+                16,
+            ),
+            (
+                "decode_max_kv_read_token_samples",
+                self.decode_max_kv_read_token_samples,
+                self.decode_max_kv_read_token_samples_explicit,
+                128,
+            ),
+            (
+                "decode_max_batch_size_samples",
+                self.decode_max_batch_size_samples,
+                self.decode_max_batch_size_samples_explicit,
+                128,
+            ),
+            (
+                "prefix_max_batch_size_samples",
+                self.prefix_max_batch_size_samples,
+                self.prefix_max_batch_size_samples_explicit,
+                3,
+            ),
         )
-        for name, default in sampling_options:
-            if (
-                getattr(self, f"{name}_explicit", False)
-                or getattr(self, name) != default
-            ):
+        for name, value, explicit, default in sampling_options:
+            if explicit or value != default:
                 conflicting_options.append(f"--{name.replace('_', '-')}")
 
         legacy_options = (
-            "benchmark_prefill_granularity",
-            "benchmark_prefill_kv_read_granularity",
-            "benchmark_prefill_batch_granularity",
-            "benchmark_decode_length_granularity",
-            "benchmark_decode_batch_granularity",
+            (
+                "benchmark_prefill_granularity",
+                self.benchmark_prefill_granularity,
+            ),
+            (
+                "benchmark_prefill_kv_read_granularity",
+                self.benchmark_prefill_kv_read_granularity,
+            ),
+            (
+                "benchmark_prefill_batch_granularity",
+                self.benchmark_prefill_batch_granularity,
+            ),
+            (
+                "benchmark_decode_length_granularity",
+                self.benchmark_decode_length_granularity,
+            ),
+            (
+                "benchmark_decode_batch_granularity",
+                self.benchmark_decode_batch_granularity,
+            ),
         )
-        for name in legacy_options:
-            if getattr(self, name) is not None:
+        for name, value in legacy_options:
+            if value is not None:
                 conflicting_options.append(f"--{name.replace('_', '-')}")
 
         if conflicting_options:

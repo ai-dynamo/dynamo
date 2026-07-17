@@ -144,9 +144,10 @@ def test_unused_phase_is_still_validated():
         normalize_benchmark_points(data, "prefill")
 
 
-def test_invalid_mode_is_rejected_explicitly():
+@pytest.mark.parametrize("mode", ["mixed", 1, None])
+def test_invalid_mode_is_rejected_explicitly(mode):
     with pytest.raises(ValueError, match="benchmark mode must be one of"):
-        normalize_benchmark_points(_valid_points(), "mixed")
+        normalize_benchmark_points(_valid_points(), mode)
 
 
 @pytest.mark.parametrize(

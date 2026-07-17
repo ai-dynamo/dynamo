@@ -1490,6 +1490,9 @@ def _make_dynamo_config(**overrides):
         "decode_max_kv_read_token_samples": 128,
         "decode_max_batch_size_samples": 128,
         "prefix_max_batch_size_samples": 3,
+        "_benchmark_points": None,
+        "_benchmark_points_digest": None,
+        "_benchmark_points_source_path": None,
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)

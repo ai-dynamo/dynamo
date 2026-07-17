@@ -10,8 +10,10 @@ worker registers for serving. The scheduler injects synthetic requests,
 records forward-pass metrics (FPMs), and writes the results to
 `/tmp/benchmark_results.json` by default.
 
-Use the `python -m dynamo.vllm` entry point shown below. The unified vLLM
-entry point does not yet gate worker registration on benchmark completion.
+Self-benchmarking is supported through the legacy WorkerFactory entry point,
+`python -m dynamo.vllm`. This path injects the self-benchmark and gates worker
+registration on its completion. `python -m dynamo.vllm.unified_main` does not
+yet inject or wait for the self-benchmark.
 
 Enable a generated sweep with `--benchmark-mode`:
 
