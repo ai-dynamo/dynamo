@@ -92,8 +92,7 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from itertools import count
-from pathlib import Path
-from typing import TYPE_CHECKING, NoReturn, cast
+from typing import TYPE_CHECKING, cast
 
 import msgspec.structs
 import zmq
@@ -116,12 +115,9 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.benchmark_points import (
     BENCHMARK_MODES,
     BenchmarkMode,
-    BenchmarkPointInput,
+    BenchmarkPoints,
     DecodeBenchmarkPoint,
-    ExplicitBenchmarkPoints,
     PrefillBenchmarkPoint,
-    benchmark_points_digest,
-    normalize_benchmark_points,
 )
 
 if TYPE_CHECKING:
@@ -207,38 +203,6 @@ def _benchmark_point_digest(point: BenchmarkPoint) -> str:
         separators=(",", ":"),
     ).encode()
     return hashlib.sha256(payload).hexdigest()
-
-
-def _parse_explicit_benchmark_config(
-    config: dict, mode: BenchmarkMode
-) -> tuple[ExplicitBenchmarkPoints | None, str | None, str | None]:
-    """Validate the optional explicit-points envelope without mutating config."""
-    raw_points = config.get("points")
-    raw_digest = config.get("points_digest")
-    raw_source_path = config.get("points_source_path")
-    if raw_points is None:
-        if raw_digest is not None:
-            raise ValueError("benchmark points_digest requires explicit points")
-        if raw_source_path is not None:
-            raise ValueError("benchmark points_source_path requires explicit points")
-        return None, None, None
-
-    points = normalize_benchmark_points(raw_points, mode)
-    actual_digest = benchmark_points_digest(points)
-    if not isinstance(raw_digest, str) or not raw_digest:
-        raise ValueError("benchmark points_digest is required with explicit points")
-    if raw_digest != actual_digest:
-        raise ValueError(
-            "benchmark explicit-points digest mismatch: "
-            f"expected={raw_digest} actual={actual_digest}"
-        )
-
-    source_path = None
-    if raw_source_path is not None:
-        if not isinstance(raw_source_path, str) or not raw_source_path:
-            raise ValueError("benchmark points_source_path must be a non-empty string")
-        source_path = raw_source_path
-    return points, actual_digest, source_path
 
 
 def _balanced_partition(
@@ -407,14 +371,12 @@ class _BenchmarkSynchronizer:
         point: BenchmarkPoint,
         output_summary: dict | None = None,
         validation_error: str | None = None,
-        plan_digest: str | None = None,
     ) -> str:
         ready = {
             "type": "ready",
             "dp_rank": self.dp_rank,
             "benchmark_id": point.benchmark_id,
             "point_digest": _benchmark_point_digest(point),
-            "plan_digest": plan_digest,
             "output_summary": output_summary or {},
             "validation_error": validation_error,
         }
@@ -446,10 +408,8 @@ class _BenchmarkSynchronizer:
         point: BenchmarkPoint,
         fpms: list[dict],
         *,
-        validation_error: str | None = None,
         stop_requested: bool = False,
         stop_deadline_monotonic: float | None = None,
-        plan_digest: str | None = None,
     ) -> _BenchmarkGroupResult:
         """Gather one completed iteration and agree whether to stop the sweep."""
         result = {
@@ -457,9 +417,7 @@ class _BenchmarkSynchronizer:
             "dp_rank": self.dp_rank,
             "benchmark_id": point.benchmark_id,
             "point_digest": _benchmark_point_digest(point),
-            "plan_digest": plan_digest,
             "fpms": fpms,
-            "validation_error": validation_error,
             "stop_requested": stop_requested,
         }
         if self.dp_rank == 0:
@@ -498,21 +456,13 @@ class _BenchmarkSynchronizer:
         self._recv_follower(deadline, point.benchmark_id, "group_commit")
         return _BenchmarkGroupResult(rank_results, group_stop_requested)
 
-    def broadcast_abort(self, error: str) -> None:
-        """Publish a sweep-level failure outside a point barrier."""
+    def abort(self, error: str) -> None:
+        """Notify peers before local benchmark cleanup closes the socket."""
         if self.dp_rank == 0:
-            self._notify_error(
-                (str(rank).encode() for rank in range(1, self.dp_size)),
-                f"rank 0: {error}",
-            )
+            self._notify_error(self._all_follower_identities(), f"rank 0: {error}")
             return
-
         self._socket.send_json(
-            {
-                "type": "abort",
-                "dp_rank": self.dp_rank,
-                "error": error,
-            }
+            {"type": "abort", "dp_rank": self.dp_rank, "error": error}
         )
         self._flush_on_close = True
 
@@ -644,14 +594,11 @@ class _BenchmarkSynchronizer:
     def _coordinate(self, local_ready: dict) -> str:
         expected_id = local_ready["benchmark_id"]
         expected_digest = local_ready["point_digest"]
-        expected_plan_digest = local_ready["plan_digest"]
         expected_summary = local_ready["output_summary"]
-        local_validation_error = local_ready.get("validation_error")
         identities: dict[int, bytes] = {}
-        last_identity: bytes | None = None
-        validation_errors: list[str] = []
-        if local_validation_error:
-            validation_errors.append(f"rank 0: {local_validation_error}")
+        validation_errors = []
+        if local_ready.get("validation_error"):
+            validation_errors.append(f"rank 0: {local_ready['validation_error']}")
         deadline = time.monotonic() + self.timeout_seconds
 
         try:
@@ -671,7 +618,6 @@ class _BenchmarkSynchronizer:
                         "invalid attention-DP benchmark READY multipart message"
                     )
                 identity, payload = frames
-                last_identity = identity
                 message = json.loads(payload)
                 if not isinstance(message, dict):
                     raise RuntimeError("invalid attention-DP benchmark READY message")
@@ -704,30 +650,18 @@ class _BenchmarkSynchronizer:
                         "attention-DP benchmark point mismatch for "
                         f"benchmark_id={expected_id} on rank {rank}"
                     )
-                if message.get("plan_digest") != expected_plan_digest:
-                    validation_errors.append(
-                        "attention-DP benchmark plan mismatch for "
-                        f"benchmark_id={expected_id} on rank {rank}"
-                    )
-                rank_validation_error = message.get("validation_error")
-                if (
-                    not local_validation_error
-                    and not rank_validation_error
-                    and message.get("output_summary") != expected_summary
-                ):
+                if message.get("output_summary") != expected_summary:
                     validation_errors.append(
                         "attention-DP benchmark SchedulerOutput mismatch for "
                         f"benchmark_id={expected_id} on rank {rank}"
                     )
-                if rank_validation_error:
-                    validation_errors.append(f"rank {rank}: {rank_validation_error}")
+                if message.get("validation_error"):
+                    validation_errors.append(
+                        f"rank {rank}: {message['validation_error']}"
+                    )
                 identities[rank] = identity
         except Exception as error:
-            error_identities = {str(rank).encode() for rank in range(1, self.dp_size)}
-            error_identities.update(identities.values())
-            if last_identity is not None:
-                error_identities.add(last_identity)
-            self._notify_error(error_identities, str(error))
+            self._notify_error(self._all_follower_identities(), str(error))
             raise
 
         if validation_errors:
@@ -766,10 +700,7 @@ class _BenchmarkSynchronizer:
                 },
             )
         except Exception as error:
-            self._notify_error(
-                (str(rank).encode() for rank in range(1, self.dp_size)),
-                str(error),
-            )
+            self._notify_error(self._all_follower_identities(), str(error))
             raise
         return self._run_id
 
@@ -807,23 +738,12 @@ class _BenchmarkSynchronizer:
     ) -> _BenchmarkGroupResult:
         benchmark_id = local_result["benchmark_id"]
         point_digest = local_result["point_digest"]
-        plan_digest = local_result["plan_digest"]
         deadline = time.monotonic() + self.timeout_seconds
         identities: dict[int, bytes] = {}
         stop_requested = local_result["stop_requested"]
         rank_results = [
             {"dp_rank": 0, "fpms": local_result["fpms"]},
         ]
-        local_validation_error = local_result.get("validation_error")
-        if local_validation_error is not None and not isinstance(
-            local_validation_error, str
-        ):
-            raise RuntimeError(
-                "attention-DP benchmark rank 0 sent an invalid validation error"
-            )
-        validation_errors = []
-        if local_validation_error is not None:
-            validation_errors.append(f"rank 0: {local_validation_error}")
         try:
             while len(identities) < self.dp_size - 1:
                 identity, message = self._recv_router(deadline, benchmark_id)
@@ -845,40 +765,20 @@ class _BenchmarkSynchronizer:
                         "attention-DP benchmark result point mismatch for "
                         f"benchmark_id={benchmark_id} on rank {rank}"
                     )
-                if message.get("plan_digest") != plan_digest:
-                    raise RuntimeError(
-                        "attention-DP benchmark result plan mismatch for "
-                        f"benchmark_id={benchmark_id} on rank {rank}"
-                    )
                 fpms = message.get("fpms")
                 if not isinstance(fpms, list):
                     raise RuntimeError(
                         f"attention-DP benchmark rank {rank} sent invalid FPMs"
                     )
-                validation_error = message.get("validation_error")
-                if validation_error is not None and not isinstance(
-                    validation_error, str
-                ):
-                    raise RuntimeError(
-                        f"attention-DP benchmark rank {rank} sent an invalid "
-                        "validation error"
-                    )
                 rank_stop_requested = message.get("stop_requested")
                 if not isinstance(rank_stop_requested, bool):
                     raise RuntimeError(
-                        f"attention-DP benchmark rank {rank} sent invalid stop decision"
+                        f"attention-DP benchmark rank {rank} sent invalid "
+                        "stop decision"
                     )
                 stop_requested = stop_requested or rank_stop_requested
                 identities[rank] = identity
                 rank_results.append({"dp_rank": rank, "fpms": fpms})
-                if validation_error is not None:
-                    validation_errors.append(f"rank {rank}: {validation_error}")
-
-            if validation_errors:
-                raise RuntimeError(
-                    "attention-DP benchmark result validation failed: "
-                    + "; ".join(validation_errors)
-                )
 
             rank_results.sort(key=lambda result: result["dp_rank"])
             self._send_to_all(
@@ -917,12 +817,7 @@ class _BenchmarkSynchronizer:
             )
             return _BenchmarkGroupResult(rank_results, stop_requested)
         except Exception as error:
-            # Every follower completed the GO barrier before entering this
-            # result phase, so each deterministic rank identity already has a
-            # ROUTER route. Notify them all even if one invalid result arrived
-            # before the remaining results were dequeued.
-            error_identities = {str(rank).encode() for rank in range(1, self.dp_size)}
-            self._notify_error(error_identities, str(error))
+            self._notify_error(self._all_follower_identities(), str(error))
             raise
 
     def _coordinate_group_prepared(
@@ -1022,10 +917,7 @@ class _BenchmarkSynchronizer:
             )
             return stop_requested
         except Exception as error:
-            self._notify_error(
-                (str(rank).encode() for rank in range(1, self.dp_size)),
-                str(error),
-            )
+            self._notify_error(self._all_follower_identities(), str(error))
             raise
 
     def _coordinate_boundary_prepared(
@@ -1095,10 +987,7 @@ class _BenchmarkSynchronizer:
                 {"type": "cleanup_complete", "benchmark_id": benchmark_id},
             )
         except Exception as error:
-            self._notify_error(
-                (str(rank).encode() for rank in range(1, self.dp_size)),
-                str(error),
-            )
+            self._notify_error(self._all_follower_identities(), str(error))
             raise
 
     def _recv_router(self, deadline: float, benchmark_id: int) -> tuple[bytes, dict]:
@@ -1125,6 +1014,9 @@ class _BenchmarkSynchronizer:
             )
         return identity, message
 
+    def _all_follower_identities(self) -> tuple[bytes, ...]:
+        return tuple(str(rank).encode() for rank in range(1, self.dp_size))
+
     def _raise_if_peer_aborted(self, identity: bytes, message: dict) -> None:
         if message.get("type") != "abort":
             return
@@ -1136,16 +1028,13 @@ class _BenchmarkSynchronizer:
             or identity != str(rank).encode()
             or not isinstance(error, str)
         ):
-            raise RuntimeError(
-                f"invalid attention-DP benchmark abort message: {message}"
-            )
+            raise RuntimeError(f"invalid attention-DP abort message: {message}")
         raise RuntimeError(f"attention-DP benchmark rank {rank} aborted: {error}")
 
     def _send_to_all(self, identities: dict[int, bytes], message: dict) -> None:
         payload = json.dumps(message).encode()
         for rank in sorted(identities):
             self._socket.send_multipart((identities[rank], payload))
-            self._flush_on_close = True
 
     def _notify_error(self, identities, error: str) -> None:
         payload = json.dumps({"type": "error", "error": error}).encode()
@@ -1349,62 +1238,64 @@ class InstrumentedScheduler(AsyncScheduler):
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         if self._bench_active and self._bench_phase != _BenchPhase.IDLE:
             try:
-                benchmark_output = self._bench_schedule(throttle_prefills)
+                output = self._bench_step()
             except Exception as error:
-                indexed_error = self._bench_explicit_runtime_error(error)
-                indexed_error = self._bench_synchronize_failure(indexed_error)
-                logger.exception("Benchmark scheduling failed, cleaning up")
+                indexed_error = self._bench_contextualize_error(error)
+                logger.exception("Benchmark step failed, cleaning up")
                 self._bench_abort(indexed_error)
                 if indexed_error is not error:
                     raise indexed_error from error
                 raise
-            if benchmark_output is not None:
-                return benchmark_output
+            if output is not None:
+                self.kv_cache_manager.new_step_starts()
+                self._update_after_schedule(output)
+                try:
+                    self._bench_synchronize_output(output)
+                except Exception as error:
+                    indexed_error = self._bench_contextualize_error(error)
+                    logger.exception("Benchmark synchronization failed")
+                    self._bench_abort(indexed_error)
+                    if indexed_error is not error:
+                        raise indexed_error from error
+                    raise
+                self._schedule_times.append(time.monotonic())
+                return output
 
-        return self._schedule_and_record_time(throttle_prefills)
-
-    def _bench_schedule(self, throttle_prefills: bool) -> SchedulerOutput | None:
-        """Run one fully guarded scheduler step while self-benchmarking."""
-        output = self._bench_step()
-        if not self._bench_active:
-            # DONE clears and writes benchmark state in _bench_step. Keep the
-            # first normal scheduler step outside schedule()'s benchmark
-            # exception handler so it cannot overwrite a successful artifact.
-            return None
-        if output is not None:
-            self.kv_cache_manager.new_step_starts()
-            self._update_after_schedule(output)
-            self._bench_synchronize_output(output)
-            self._schedule_times.append(time.monotonic())
-            return output
-
-        if self._bench_phase == _BenchPhase.DECODE_SWEEP and self._bench_active_req_ids:
-            empty = SchedulerOutput(
-                scheduled_new_reqs=[],
-                scheduled_cached_reqs=CachedRequestData.make_empty(),
-                num_scheduled_tokens={},
-                total_num_scheduled_tokens=0,
-                scheduled_spec_decode_tokens={},
-                scheduled_encoder_inputs={},
-                num_common_prefix_blocks=(
-                    [0] * self.kv_cache_manager.num_kv_cache_groups
-                ),
-                finished_req_ids=self.finished_req_ids,
-                free_encoder_mm_hashes=[],
-            )
-            # See _bench_inject_fake_decode for the rationale; the parent
-            # scheduler attaches connector metadata to every SchedulerOutput
-            # when a connector is configured, so benchmark-built outputs must
-            # do the same or the worker asserts on bind_connector_metadata.
-            # Direct attribute access keeps future vLLM API changes fail-loud.
-            if self.connector is not None:
-                empty.kv_connector_metadata = self.connector.build_connector_meta(empty)
-            if self.ec_connector is not None:
-                empty.ec_connector_metadata = self.ec_connector.build_connector_meta(
-                    empty
+            if (
+                self._bench_phase == _BenchPhase.DECODE_SWEEP
+                and self._bench_active_req_ids
+            ):
+                empty = SchedulerOutput(
+                    scheduled_new_reqs=[],
+                    scheduled_cached_reqs=CachedRequestData.make_empty(),
+                    num_scheduled_tokens={},
+                    total_num_scheduled_tokens=0,
+                    scheduled_spec_decode_tokens={},
+                    scheduled_encoder_inputs={},
+                    num_common_prefix_blocks=(
+                        [0] * self.kv_cache_manager.num_kv_cache_groups
+                    ),
+                    finished_req_ids=self.finished_req_ids,
+                    free_encoder_mm_hashes=[],
                 )
-            self._update_after_schedule(empty)
-            return empty
+                # See _bench_inject_fake_decode for the rationale; the
+                # parent scheduler attaches connector metadata to every
+                # SchedulerOutput when a connector is configured, so
+                # benchmark-built outputs must do the same or the worker
+                # asserts on bind_connector_metadata. Use direct
+                # attribute access (not getattr-with-default) so a
+                # future vLLM bump that drops these attributes from the
+                # parent fails loudly instead of being silently masked.
+                if self.connector is not None:
+                    empty.kv_connector_metadata = self.connector.build_connector_meta(
+                        empty
+                    )
+                if self.ec_connector is not None:
+                    empty.ec_connector_metadata = (
+                        self.ec_connector.build_connector_meta(empty)
+                    )
+                self._update_after_schedule(empty)
+                return empty
 
         return self._schedule_and_record_time(throttle_prefills)
 
@@ -1414,7 +1305,15 @@ class InstrumentedScheduler(AsyncScheduler):
         output = super().schedule(throttle_prefills)
         if output.total_num_scheduled_tokens > 0:
             if self._bench_active:
-                self._bench_synchronize_output(output)
+                try:
+                    self._bench_synchronize_output(output)
+                except Exception as error:
+                    indexed_error = self._bench_contextualize_error(error)
+                    logger.exception("Benchmark synchronization failed")
+                    self._bench_abort(indexed_error)
+                    if indexed_error is not error:
+                        raise indexed_error from error
+                    raise
             self._schedule_times.append(time.monotonic())
         return output
 
@@ -1436,18 +1335,16 @@ class InstrumentedScheduler(AsyncScheduler):
         scheduler_output: SchedulerOutput,
         model_runner_output: "ModelRunnerOutput",
     ):
-        benchmark_active = self._bench_active
+        if not self._bench_active:
+            return self._update_from_output(scheduler_output, model_runner_output)
         try:
             return self._update_from_output(scheduler_output, model_runner_output)
         except Exception as error:
-            if not benchmark_active:
-                raise
-            indexed_error = self._bench_explicit_runtime_error(error)
-            synchronized_error = self._bench_synchronize_failure(indexed_error)
+            indexed_error = self._bench_contextualize_error(error)
             logger.exception("Benchmark output update failed, cleaning up")
-            self._bench_abort(synchronized_error)
-            if synchronized_error is not error:
-                raise synchronized_error from error
+            self._bench_abort(indexed_error)
+            if indexed_error is not error:
+                raise indexed_error from error
             raise
 
     def _update_from_output(
@@ -1598,8 +1495,6 @@ class InstrumentedScheduler(AsyncScheduler):
         point = getattr(self, "_bench_current_point", None)
         if point is None:
             return False
-        if point.point_type == "warmup":
-            return False
         if point.point_type == "prefill":
             return scheduled.num_prefill_requests > 0
         return scheduled.num_decode_requests > 0
@@ -1691,11 +1586,14 @@ class InstrumentedScheduler(AsyncScheduler):
         if not isinstance(raw_mode, str) or raw_mode not in BENCHMARK_MODES:
             raise ValueError("benchmark mode must be one of prefill, decode, or agg")
         mode = cast(BenchmarkMode, raw_mode)
-        (
-            self._bench_explicit_points,
-            self._bench_explicit_points_digest,
-            self._bench_explicit_points_source_path,
-        ) = _parse_explicit_benchmark_config(cfg, mode)
+        raw_points = cfg.get("points")
+        self._bench_explicit_points = (
+            BenchmarkPoints.model_validate(raw_points)
+            if raw_points is not None
+            else None
+        )
+        if self._bench_explicit_points is not None:
+            self._bench_explicit_points.require_points_for(mode)
 
         # additional_config values arrive as strings from JSON; coerce to
         # the types that BenchmarkConfig expects.
@@ -1806,16 +1704,6 @@ class InstrumentedScheduler(AsyncScheduler):
             base, ext = os.path.splitext(self._bench_config.output_path)
             self._bench_config.output_path = f"{base}_dp{dp_rank}{ext}"
 
-        if self._bench_explicit_points_source_path is not None:
-            source_path = Path(self._bench_explicit_points_source_path).resolve()
-            output_path = Path(self._bench_config.output_path).resolve()
-            output_tmp_path = Path(f"{self._bench_config.output_path}.tmp").resolve()
-            if source_path in {output_path, output_tmp_path}:
-                raise ValueError(
-                    "benchmark points source would be overwritten by "
-                    f"attention-DP rank {dp_rank} output: {source_path}"
-                )
-
         try:
             os.unlink(self._bench_config.output_path)
         except FileNotFoundError:
@@ -1832,16 +1720,12 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_current_fpms: list[dict] = []
         self._bench_active_req_ids: set[str] = set()
         self._bench_seq = 0
-        self._bench_warmup_sync_id = -1
         self._bench_grid_built = False
         self._bench_expected_points = 0
         self._bench_drain_pending = False
         self._bench_prefix_cache_cleared = False
         self._bench_grid_error: str | None = None
         self._bench_grid_digest: str | None = None
-        self._bench_sync_plan_digest: str | None = None
-        self._bench_plan_synchronized = False
-        self._bench_explicit_point_paths: dict[int, str] = {}
         self._bench_started_at: str | None = None
         self._bench_completed_at: str | None = None
         self._bench_start_monotonic: float | None = None
@@ -1910,10 +1794,7 @@ class InstrumentedScheduler(AsyncScheduler):
         mode = self._bench_config.mode
         explicit_points = self._bench_explicit_points
         if explicit_points is not None:
-            self._bench_expected_points = (
-                len(explicit_points["prefill"]) if mode in ("prefill", "agg") else 0
-            ) + (len(explicit_points["decode"]) if mode in ("decode", "agg") else 0)
-            self._bench_build_explicit_grid()
+            self._bench_build_explicit_grid(explicit_points)
         else:
             if mode in ("prefill", "agg"):
                 points_before = len(self._bench_grid)
@@ -1936,79 +1817,49 @@ class InstrumentedScheduler(AsyncScheduler):
             separators=(",", ":"),
         ).encode()
         self._bench_grid_digest = hashlib.sha256(grid_payload).hexdigest()
-        plan_payload = json.dumps(
-            {
-                "grid_digest": self._bench_grid_digest,
-                "manifest_digest": (
-                    self._bench_explicit_points_digest
-                    if explicit_points is not None
-                    else None
-                ),
-                "mode": mode,
-                "timeout": self._bench_config.timeout,
-                "warmup_iterations": self._bench_config.warmup_iterations,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-        self._bench_sync_plan_digest = hashlib.sha256(plan_payload).hexdigest()
-        source = "explicit" if explicit_points is not None else "generated"
-        logger.info(
-            "Benchmark grid: %d points (%s mode, %s source)",
-            len(self._bench_grid),
-            mode,
-            source,
-        )
+        logger.info("Benchmark grid: %d points (%s mode)", len(self._bench_grid), mode)
 
-    def _bench_build_explicit_grid(self) -> None:
-        points = self._bench_explicit_points
-        assert points is not None
+    def _bench_build_explicit_grid(self, points: BenchmarkPoints) -> None:
         mode = self._bench_config.mode
-
         if mode in ("prefill", "agg"):
-            for index, raw_point in enumerate(points["prefill"]):
-                path = f"prefill[{index}]"
-                point = self._bench_explicit_prefill_point(raw_point, path)
-                self._bench_grid.append(point)
-                self._bench_explicit_point_paths[id(point)] = path
-
+            self._bench_grid.extend(
+                self._bench_explicit_prefill_point(point, f"prefill[{index}]")
+                for index, point in enumerate(points.prefill)
+            )
         if mode in ("decode", "agg"):
             self._bench_feasible_max_decode_batch_size = (
                 self._bench_decode_feasible_max_batch_size()
             )
-            for index, raw_point in enumerate(points["decode"]):
-                path = f"decode[{index}]"
-                point = self._bench_explicit_decode_point(raw_point, path)
-                self._bench_grid.append(point)
-                self._bench_explicit_point_paths[id(point)] = path
+            self._bench_grid.extend(
+                self._bench_explicit_decode_point(point, f"decode[{index}]")
+                for index, point in enumerate(points.decode)
+            )
 
     def _bench_explicit_prefill_point(
-        self, raw_point: PrefillBenchmarkPoint, path: str
+        self, point: PrefillBenchmarkPoint, path: str
     ) -> BenchmarkPoint:
-        total_prefill_tokens = raw_point["total_prefill_tokens"]
-        total_kv_read_tokens = raw_point["total_kv_read_tokens"]
-        batch_size = raw_point["batch_size"]
-        if total_kv_read_tokens > 0 and not getattr(
-            self.cache_config, "enable_prefix_caching", True
+        if (
+            point.total_kv_read_tokens > 0
+            and not self.cache_config.enable_prefix_caching
         ):
             raise ValueError(f"{path}: total_kv_read_tokens requires prefix caching")
         if not self._bench_prefill_point_feasible(
-            total_prefill_tokens,
-            batch_size,
-            total_kv_read_tokens,
+            point.total_prefill_tokens,
+            point.batch_size,
+            point.total_kv_read_tokens,
         ):
-            self._bench_raise_explicit_point_infeasible(path, raw_point)
+            self._bench_raise_explicit_infeasible(path, point)
 
-        capture_size, padding_tokens, sample_reasons = self._bench_cudagraph_metadata(
-            total_prefill_tokens,
+        capture_size, padding_tokens, reasons = self._bench_cudagraph_metadata(
+            point.total_prefill_tokens,
             self._bench_prefill_capture_sizes,
             self.max_num_scheduled_tokens,
         )
         return BenchmarkPoint(
             point_type="prefill",
-            total_prefill_tokens=total_prefill_tokens,
-            total_kv_read_tokens=total_kv_read_tokens,
-            batch_size=batch_size,
+            total_prefill_tokens=point.total_prefill_tokens,
+            total_kv_read_tokens=point.total_kv_read_tokens,
+            batch_size=point.batch_size,
             expected_cudagraph_mode=(
                 self._bench_prefill_cudagraph_mode
                 if capture_size is not None
@@ -2016,32 +1867,29 @@ class InstrumentedScheduler(AsyncScheduler):
             ),
             expected_capture_size=capture_size,
             padding_tokens=padding_tokens,
-            sample_reasons=["explicit", *sample_reasons],
+            sample_reasons=["explicit", *reasons],
         )
 
     def _bench_explicit_decode_point(
-        self, raw_point: DecodeBenchmarkPoint, path: str
+        self, point: DecodeBenchmarkPoint, path: str
     ) -> BenchmarkPoint:
-        total_kv_read_tokens = raw_point["total_kv_read_tokens"]
-        batch_size = raw_point["batch_size"]
         if (
-            batch_size > self._bench_feasible_max_decode_batch_size
+            point.batch_size > self._bench_feasible_max_decode_batch_size
             or not self._bench_decode_point_feasible(
-                batch_size,
-                total_kv_read_tokens,
+                point.batch_size, point.total_kv_read_tokens
             )
         ):
-            self._bench_raise_explicit_point_infeasible(path, raw_point)
+            self._bench_raise_explicit_infeasible(path, point)
 
-        capture_size, padding_tokens, sample_reasons = self._bench_cudagraph_metadata(
-            batch_size,
+        capture_size, padding_tokens, reasons = self._bench_cudagraph_metadata(
+            point.batch_size,
             self._bench_decode_capture_sizes,
             self._bench_feasible_max_decode_batch_size,
         )
         return BenchmarkPoint(
             point_type="decode",
-            total_kv_read_tokens=total_kv_read_tokens,
-            batch_size=batch_size,
+            total_kv_read_tokens=point.total_kv_read_tokens,
+            batch_size=point.batch_size,
             expected_cudagraph_mode=(
                 self._bench_decode_cudagraph_mode
                 if capture_size is not None
@@ -2049,12 +1897,14 @@ class InstrumentedScheduler(AsyncScheduler):
             ),
             expected_capture_size=capture_size,
             padding_tokens=padding_tokens,
-            sample_reasons=["explicit", *sample_reasons],
+            sample_reasons=["explicit", *reasons],
         )
 
-    def _bench_raise_explicit_point_infeasible(
-        self, path: str, raw_point: BenchmarkPointInput
-    ) -> NoReturn:
+    def _bench_raise_explicit_infeasible(
+        self,
+        path: str,
+        point: PrefillBenchmarkPoint | DecodeBenchmarkPoint,
+    ) -> None:
         limits = {
             "max_num_scheduled_tokens": self.max_num_scheduled_tokens,
             "max_num_running_reqs": self.max_num_running_reqs,
@@ -2062,8 +1912,8 @@ class InstrumentedScheduler(AsyncScheduler):
             "available_kv_blocks": self._bench_available_blocks(),
         }
         raise ValueError(
-            f"{path}: explicit benchmark point is infeasible for this engine: "
-            f"point={raw_point} limits={limits}"
+            f"{path}: explicit benchmark point is infeasible: "
+            f"point={point.model_dump()} limits={limits}"
         )
 
     def _bench_generate_prefill_grid(self) -> None:
@@ -2465,7 +2315,7 @@ class InstrumentedScheduler(AsyncScheduler):
             return
 
         feasible_max_batch = self._bench_decode_feasible_max_batch_size()
-        self._bench_feasible_max_decode_batch_size = max(0, feasible_max_batch)
+        self._bench_feasible_max_decode_batch_size = feasible_max_batch
         if feasible_max_batch < 1:
             logger.warning("KV cache too small for decode grid, skipping")
             return
@@ -2522,8 +2372,7 @@ class InstrumentedScheduler(AsyncScheduler):
         else:
             feasible_max_batch = (
                 self._bench_usable_blocks(
-                    self.max_num_running_reqs,
-                    reserve_watermark=True,
+                    self.max_num_running_reqs, reserve_watermark=True
                 )
                 // min_blocks_per_request
             )
@@ -2710,13 +2559,9 @@ class InstrumentedScheduler(AsyncScheduler):
             requests.append(req)
 
         self._bench_seq += len(requests)
-        # vLLM enqueues a request and records it in self.requests before its
-        # connector on_new_request hook runs. Track the whole batch first so
-        # the outer benchmark guard can abort every already-enqueued request
-        # if any later add_request call (including that hook) raises.
-        self._bench_active_req_ids.update(req.request_id for req in requests)
         for req in requests:
             self.add_request(req)
+            self._bench_active_req_ids.add(req.request_id)
         return len(requests)
 
     def _bench_inject_fake_decode(
@@ -2774,12 +2619,6 @@ class InstrumentedScheduler(AsyncScheduler):
             self.requests[req_id] = req
             self.running.append(req)  # type: ignore[has-type]
             self._bench_active_req_ids.add(req_id)
-            # These requests bypass add_request(), so pair the connector's
-            # normal creation hook explicitly. Cleanup uses finish_requests(),
-            # whose request_finished hook assumes this lifecycle pairing.
-            # Track first so a partially failing hook remains abort-cleanable.
-            if self.connector is not None:
-                self.connector.on_new_request(req)
             self._bench_seq += 1
 
             block_ids = new_blocks.get_block_ids()
@@ -2842,23 +2681,19 @@ class InstrumentedScheduler(AsyncScheduler):
         return output
 
     def _bench_cleanup_requests(self) -> None:
-        """Finish active benchmark requests through vLLM's cleanup path.
-
-        ``finish_requests`` removes requests from running, waiting, and
-        skipped-waiting queues and performs connector-aware resource release.
-        Direct KV freeing is insufficient for requests that failed while
-        being enqueued or while the parent scheduler was processing them.
-        """
-        active_req_ids = tuple(self._bench_active_req_ids)
-        try:
-            if active_req_ids:
-                self.finish_requests(
-                    active_req_ids,
-                    RequestStatus.FINISHED_ABORTED,
-                )
-        finally:
-            self._bench_active_req_ids.clear()
-            self._schedule_times.clear()
+        """Free all resources held by active benchmark requests."""
+        for req_id in list(self._bench_active_req_ids):
+            req = self.requests.get(req_id)
+            if req:
+                self.kv_cache_manager.free(req)
+                self.finished_req_ids.add(req_id)
+                del self.requests[req_id]
+        running = self.running  # type: ignore[has-type]
+        self.running = [
+            r for r in running if r.request_id not in self._bench_active_req_ids
+        ]
+        self._bench_active_req_ids.clear()
+        self._schedule_times.clear()
 
     def _bench_clear_prefix_cache(self) -> None:
         """Remove all synthetic prefix entries before normal serving starts."""
@@ -2872,7 +2707,7 @@ class InstrumentedScheduler(AsyncScheduler):
         logger.info("Benchmark synthetic prefix cache cleared")
 
     def _bench_synchronize_output(self, output: SchedulerOutput) -> None:
-        """Release one benchmark forward only after every ADP rank is ready."""
+        """Release one measured point only after every ADP rank is ready."""
         if not self._bench_sync_pending or output.total_num_scheduled_tokens <= 0:
             return
         point = self._bench_current_point
@@ -2889,121 +2724,23 @@ class InstrumentedScheduler(AsyncScheduler):
             "sum_decode_kv_tokens": scheduled.sum_decode_kv_tokens,
         }
         validation_error = self._bench_output_validation_error(point, output_summary)
-        explicit_path = self._bench_explicit_point_paths.get(id(point))
-        if validation_error is not None and explicit_path is not None:
-            validation_error = f"{explicit_path}: {validation_error}"
         if self._bench_synchronizer is not None:
-            # Mark the barrier consumed immediately before entering it. If a
-            # peer reports a validation failure, synchronize() raises;
-            # retrying from schedule()'s exception handler would deadlock.
-            self._bench_sync_pending = False
             self._bench_run_id = self._bench_synchronizer.synchronize(
                 point,
                 output_summary,
                 validation_error,
-                plan_digest=self._bench_sync_plan_digest or self._bench_grid_digest,
             )
         elif validation_error is not None:
-            self._bench_sync_pending = False
             raise RuntimeError(validation_error)
-        else:
-            self._bench_sync_pending = False
-        if point.point_type != "warmup":
-            self._bench_point_deadline = (
-                time.monotonic() + self._bench_point_result_timeout_seconds
-            )
-
-    def _bench_synchronize_pending_failure(self, error: Exception) -> Exception:
-        """Broadcast a pre-output point failure to every attention-DP rank."""
-        if not self._bench_sync_pending:
-            return error
-        point = self._bench_current_point
-        if point is None:
-            self._bench_sync_pending = False
-            return error
-
-        # Consume the point barrier before entering it for the same reason as
-        # _bench_synchronize_output: a synchronization error must not retry.
         self._bench_sync_pending = False
-        synchronizer = self._bench_synchronizer
-        if synchronizer is None:
-            return error
-        try:
-            synchronizer.synchronize(
-                point,
-                output_summary={},
-                validation_error=str(error),
-                plan_digest=self._bench_sync_plan_digest or self._bench_grid_digest,
-            )
-        except Exception as sync_error:
-            if str(error) in str(sync_error):
-                return sync_error
-            return RuntimeError(
-                f"{error}; attention-DP benchmark synchronization failed: {sync_error}"
-            )
-        return error
-
-    def _bench_synchronize_failure(self, error: Exception) -> Exception:
-        """Route a benchmark failure through its active synchronization phase."""
-        if self._bench_point_deadline > 0:
-            return self._bench_synchronize_result_failure(error)
-        if self._bench_sync_pending:
-            return self._bench_synchronize_pending_failure(error)
-        return self._bench_synchronize_unscoped_failure(error)
-
-    def _bench_synchronize_unscoped_failure(self, error: Exception) -> Exception:
-        """Broadcast a lifecycle failure after the plan barrier completed."""
-        synchronizer = self._bench_synchronizer
-        if synchronizer is None or not self._bench_plan_synchronized:
-            return error
-        error_message = str(error) or type(error).__name__
-        try:
-            synchronizer.broadcast_abort(error_message)
-        except Exception as sync_error:
-            if str(error) in str(sync_error):
-                return sync_error
-            return RuntimeError(
-                f"{error}; attention-DP benchmark abort broadcast failed: "
-                f"{sync_error}"
-            )
-        return error
-
-    def _bench_synchronize_result_failure(self, error: Exception) -> Exception:
-        """Broadcast a post-GO result failure before benchmark teardown."""
-        if self._bench_point_deadline <= 0:
-            return error
-        point = self._bench_current_point
-        self._bench_point_deadline = 0.0
-        if point is None:
-            return error
-
-        synchronizer = self._bench_synchronizer
-        if synchronizer is None:
-            return error
-        try:
-            synchronizer.collect_result(
-                point,
-                [],
-                validation_error=str(error),
-                plan_digest=self._bench_sync_plan_digest or self._bench_grid_digest,
-            )
-        except Exception as sync_error:
-            if str(error) in str(sync_error):
-                return sync_error
-            return RuntimeError(
-                f"{error}; attention-DP benchmark result synchronization "
-                f"failed: {sync_error}"
-            )
-        return error
+        self._bench_point_deadline = (
+            time.monotonic() + self._bench_point_result_timeout_seconds
+        )
 
     @staticmethod
     def _bench_output_validation_error(
         point: BenchmarkPoint, summary: dict
     ) -> str | None:
-        if point.point_type == "warmup":
-            # The READY coordinator still compares summaries across ranks.
-            # Warmup has no manifest point whose exact shape must be enforced.
-            return None
         if point.point_type == "prefill":
             expected = {
                 "total_num_scheduled_tokens": point.total_prefill_tokens,
@@ -3042,31 +2779,33 @@ class InstrumentedScheduler(AsyncScheduler):
             self._publisher.resume()
 
     def _bench_abort(self, error: Exception) -> None:
+        if self._bench_synchronizer is not None:
+            try:
+                self._bench_synchronizer.abort(str(error))
+            except zmq.ZMQError:
+                logger.warning(
+                    "Failed to notify attention-DP benchmark peers",
+                    exc_info=True,
+                )
+        self._bench_cleanup_requests()
         self._bench_grid_error = str(error)
-        cleanup_errors: list[tuple[str, Exception]] = []
-        try:
-            self._bench_cleanup_requests()
-        except Exception as request_error:
-            cleanup_errors.append(("request", request_error))
-            self._bench_grid_error = (
-                f"{self._bench_grid_error}; request cleanup failed: {request_error}"
-            )
+        cleanup_error: Exception | None = None
         try:
             self._bench_clear_prefix_cache()
         except Exception as prefix_error:
-            cleanup_errors.append(("prefix-cache", prefix_error))
+            cleanup_error = prefix_error
             self._bench_grid_error = (
-                f"{self._bench_grid_error}; prefix-cache cleanup failed: {prefix_error}"
+                f"{self._bench_grid_error}; prefix-cache cleanup failed: "
+                f"{prefix_error}"
             )
         try:
             self._bench_write_results()
         except Exception:
             logger.exception("Failed to write benchmark failure results")
-        self._bench_deactivate(resume_publisher=not cleanup_errors)
-        if cleanup_errors:
-            _, cleanup_error = cleanup_errors[0]
+        self._bench_deactivate(resume_publisher=cleanup_error is None)
+        if cleanup_error is not None:
             raise RuntimeError(
-                f"self-benchmark aborted: {self._bench_grid_error}"
+                "self-benchmark aborted and synthetic prefix-cache cleanup failed"
             ) from cleanup_error
 
     # -- State machine --------------------------------------------------
@@ -3157,12 +2896,7 @@ class InstrumentedScheduler(AsyncScheduler):
         (prefill / warmup / cleanup cycles).
         """
         self._bench_start_timing()
-        try:
-            self._bench_build_grid()
-        except Exception as error:
-            self._bench_synchronize_plan(validation_error=str(error))
-            raise
-        self._bench_synchronize_plan()
+        self._bench_build_grid()
 
         if self._bench_phase == _BenchPhase.WARMUP:
             return self._bench_step_warmup()
@@ -3180,24 +2914,10 @@ class InstrumentedScheduler(AsyncScheduler):
             logger.info("Benchmark complete")
         return None
 
-    def _bench_synchronize_plan(self, validation_error: str | None = None) -> None:
-        """Validate the complete realized plan before any synthetic request runs."""
-        if self._bench_plan_synchronized is True:
-            return
-        if self._bench_synchronizer is not None:
-            plan_point = BenchmarkPoint(point_type="plan", benchmark_id=0)
-            self._bench_run_id = self._bench_synchronizer.synchronize(
-                plan_point,
-                validation_error=validation_error,
-                plan_digest=self._bench_sync_plan_digest,
-            )
-        self._bench_plan_synchronized = True
-
     def _bench_step_warmup(self) -> SchedulerOutput | None:
         if not self._bench_active_req_ids:
             iters = self._bench_config.warmup_iterations
             if iters > 0:
-                self._bench_arm_warmup_sync()
                 self._bench_inject_prefill(prompt_lens=[256], max_tokens=iters)
                 logger.info("Benchmark warmup: 1 prefill + %d decode steps", iters)
             else:
@@ -3207,25 +2927,10 @@ class InstrumentedScheduler(AsyncScheduler):
         still_alive = any(rid in self.requests for rid in self._bench_active_req_ids)
         if not still_alive:
             self._bench_transition_after_warmup()
-        else:
-            self._bench_arm_warmup_sync()
         return None
-
-    def _bench_arm_warmup_sync(self) -> None:
-        """Gate the next warmup forward before it enters ADP collectives."""
-        if self._bench_sync_pending:
-            return
-        self._bench_current_point = BenchmarkPoint(
-            point_type="warmup",
-            benchmark_id=self._bench_warmup_sync_id,
-        )
-        self._bench_warmup_sync_id -= 1
-        self._bench_sync_pending = True
 
     def _bench_transition_after_warmup(self) -> None:
         self._bench_cleanup_requests()
-        self._bench_current_point = None
-        self._bench_sync_pending = False
         self._bench_current_fpms.clear()
         mode = self._bench_config.mode
         if mode in ("prefill", "agg"):
@@ -3280,15 +2985,9 @@ class InstrumentedScheduler(AsyncScheduler):
             return None
         point = next_point
 
-        self._bench_current_point = point
+        if "explicit" in point.sample_reasons:
+            self._bench_current_point = point
         self._bench_current_fpms = []
-        # Explicit live-realization failures must enter the same READY barrier
-        # as ranks that successfully construct a SchedulerOutput. Arm it before
-        # cache allocation and request injection so asymmetric rank failures
-        # propagate their indexed cause instead of becoming peer timeouts.
-        self._bench_sync_pending = id(point) in getattr(
-            self, "_bench_explicit_point_paths", {}
-        )
         new_token_lengths = self._bench_prefill_new_token_lengths(
             point.total_prefill_tokens, point.batch_size
         )
@@ -3307,10 +3006,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 ],
                 cache_salts=cache_salts,
             ):
-                self._bench_reject_point(
-                    point,
-                    "fake_prefix_cache_allocation_failed",
-                )
+                self._bench_skip_point(point, "fake_prefix_cache_allocation_failed")
                 logger.warning(
                     "Skipping benchmark prefill point after fake prefix-cache "
                     "allocation failed: %s",
@@ -3336,11 +3032,8 @@ class InstrumentedScheduler(AsyncScheduler):
                 expected_kv_read_tokens=kv_read_lengths,
             )
             if injected != point.batch_size:
-                self._bench_reject_point(
-                    point,
-                    "fake_prefix_cache_validation_failed",
-                )
                 self._bench_current_point = None
+                self._bench_skip_point(point, "fake_prefix_cache_validation_failed")
                 logger.warning(
                     "Skipping benchmark prefill point after fake prefix-cache "
                     "validation failed: %s",
@@ -3362,8 +3055,8 @@ class InstrumentedScheduler(AsyncScheduler):
             max_tokens=1,
         )
         if injected != point.batch_size:
-            self._bench_reject_point(point, "prefill_injection_failed")
             self._bench_current_point = None
+            self._bench_skip_point(point, "prefill_injection_failed")
             return None
         self._bench_sync_pending = True
         logger.info(
@@ -3398,9 +3091,6 @@ class InstrumentedScheduler(AsyncScheduler):
 
         self._bench_current_point = point
         self._bench_current_fpms = []
-        self._bench_sync_pending = id(point) in getattr(
-            self, "_bench_explicit_point_paths", {}
-        )
         context_lengths = self._bench_decode_context_lengths(
             point.total_kv_read_tokens, point.batch_size
         )
@@ -3418,11 +3108,8 @@ class InstrumentedScheduler(AsyncScheduler):
                 point.batch_size,
                 point,
             )
-            self._bench_reject_point(point, "decode_injection_failed")
-            # Generated grids still skip this point and clean it up here.
-            # Explicit grids raise above so schedule() can broadcast the
-            # indexed failure before _bench_abort owns the cleanup.
             self._bench_cleanup_requests()
+            self._bench_skip_point(point, "decode_injection_failed")
             self._bench_current_point = None
             return None
         self._bench_sync_pending = True
@@ -3447,14 +3134,10 @@ class InstrumentedScheduler(AsyncScheduler):
             point = self._bench_current_point
             local_fpms = list(self._bench_current_fpms)
             if self._bench_synchronizer is not None:
-                # The result barrier is single-use. If it raises, the output
-                # exception handler must not enter the same barrier again.
-                self._bench_point_deadline = 0.0
                 group_result = self._bench_synchronizer.collect_result(
                     point,
                     local_fpms,
                     stop_deadline_monotonic=self._bench_deadline_monotonic,
-                    plan_digest=self._bench_sync_plan_digest or self._bench_grid_digest,
                 )
             else:
                 group_result = _BenchmarkGroupResult(
@@ -3508,7 +3191,7 @@ class InstrumentedScheduler(AsyncScheduler):
                     point,
                     reason,
                 )
-                self._bench_reject_point(point, reason)
+                self._bench_skip_point(point, reason)
                 self._bench_current_point = None
                 self._bench_current_fpms = []
                 self._bench_point_deadline = 0.0
@@ -3561,30 +3244,41 @@ class InstrumentedScheduler(AsyncScheduler):
         return None
 
     def _bench_skip_point(self, point: BenchmarkPoint, reason: str) -> None:
+        explicit_path = self._bench_explicit_path(point)
+        if explicit_path is not None:
+            raise RuntimeError(
+                f"{explicit_path}: explicit benchmark point failed: {reason}"
+            )
         self._bench_skipped_points.append(
             SkippedBenchmarkPoint(point=point, reason=reason)
         )
 
-    def _bench_reject_point(self, point: BenchmarkPoint, reason: str) -> None:
-        explicit_path = getattr(self, "_bench_explicit_point_paths", {}).get(id(point))
-        if explicit_path is not None:
-            raise RuntimeError(
-                f"{explicit_path}: explicit benchmark point failed during "
-                f"execution: {reason}"
-            )
-        self._bench_skip_point(point, reason)
+    def _bench_explicit_path(self, point: BenchmarkPoint) -> str | None:
+        if "explicit" not in point.sample_reasons or point.point_type not in (
+            "prefill",
+            "decode",
+        ):
+            return None
+        points = self._bench_explicit_points
+        assert points is not None
+        index = point.benchmark_id - 1
+        if point.point_type == "decode" and self._bench_config.mode == "agg":
+            index -= len(points.prefill)
+        phase_points = (
+            points.prefill if point.point_type == "prefill" else points.decode
+        )
+        if not 0 <= index < len(phase_points):
+            return None
+        return f"{point.point_type}[{index}]"
 
-    def _bench_explicit_runtime_error(self, error: Exception) -> Exception:
-        point = getattr(self, "_bench_current_point", None)
+    def _bench_contextualize_error(self, error: Exception) -> Exception:
+        point = self._bench_current_point
         if point is None:
             return error
-        explicit_path = getattr(self, "_bench_explicit_point_paths", {}).get(id(point))
-        if explicit_path is None or str(error).startswith(f"{explicit_path}:"):
+        path = self._bench_explicit_path(point)
+        if path is None or str(error).startswith(f"{path}:"):
             return error
-        return RuntimeError(
-            f"{explicit_path}: explicit benchmark point failed during "
-            f"execution: {error}"
-        )
+        return RuntimeError(f"{path}: explicit benchmark point failed: {error}")
 
     # -- Results output -------------------------------------------------
 
@@ -3701,14 +3395,6 @@ class InstrumentedScheduler(AsyncScheduler):
             "missing_phases": missing_phases,
             "error": error,
         }
-        explicit_points = getattr(self, "_bench_explicit_points", None)
-        if explicit_points is not None:
-            output["point_source"] = {
-                "kind": "external_json",
-                "schema_version": explicit_points["schema_version"],
-                "placement": "uniform_per_dp_rank",
-                "sha256": getattr(self, "_bench_explicit_points_digest", None),
-            }
         dest = self._bench_config.output_path
         tmp = dest + ".tmp"
         with open(tmp, "w") as f:

@@ -15,7 +15,6 @@ from dynamo.vllm.constants import DisaggregationMode
 from dynamo.vllm.worker_factory import (
     EngineSetupResult,
     WorkerFactory,
-    _validate_benchmark_rank_payload,
     _wait_and_load_benchmark,
 )
 
@@ -90,20 +89,6 @@ def _single_rank_benchmark_payload(
     }
 
 
-def test_failed_benchmark_payload_preserves_explicit_point_error(tmp_path):
-    payload = _single_rank_benchmark_payload()
-    payload.update(
-        {
-            "status": "failed",
-            "valid": False,
-            "error": "prefill[1]: explicit benchmark point is infeasible",
-        }
-    )
-
-    with pytest.raises(RuntimeError, match=r"prefill\[1\].*infeasible"):
-        _validate_benchmark_rank_payload(payload, tmp_path / "benchmark.json")
-
-
 @pytest.mark.asyncio
 async def test_wait_and_load_benchmark_rejects_invalid_results(monkeypatch, tmp_path):
     output_path = tmp_path / "benchmark.json"
@@ -155,96 +140,6 @@ async def test_wait_and_load_benchmark_accepts_timeout_partial(monkeypatch, tmp_
         "completed_points": 1,
         "skipped_points": 0,
     }
-
-
-@pytest.mark.asyncio
-async def test_wait_and_load_benchmark_verifies_explicit_point_source(
-    monkeypatch, tmp_path
-):
-    output_path = tmp_path / "benchmark.json"
-    payload = _single_rank_benchmark_payload()
-    expected_source = {
-        "kind": "external_json",
-        "schema_version": 1,
-        "placement": "uniform_per_dp_rank",
-        "sha256": "manifest-1",
-    }
-    payload["point_source"] = expected_source
-    output_path.write_text(json.dumps(payload))
-    monkeypatch.setattr(
-        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 1)
-    )
-
-    merged = await _wait_and_load_benchmark(
-        {
-            "output_path": str(output_path),
-            "timeout": 1,
-            "points": {"schema_version": 1},
-            "points_digest": "manifest-1",
-        },
-        Mock(),
-    )
-
-    assert merged["point_source"] == expected_source
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "point_source",
-    [
-        None,
-        {
-            "kind": "external_json",
-            "schema_version": 1,
-            "placement": "uniform_per_dp_rank",
-            "sha256": "wrong-manifest",
-        },
-    ],
-)
-async def test_wait_and_load_benchmark_rejects_wrong_explicit_point_source(
-    monkeypatch, tmp_path, point_source
-):
-    output_path = tmp_path / "benchmark.json"
-    payload = _single_rank_benchmark_payload()
-    if point_source is not None:
-        payload["point_source"] = point_source
-    output_path.write_text(json.dumps(payload))
-    monkeypatch.setattr(
-        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 1)
-    )
-
-    with pytest.raises(RuntimeError, match="point source does not match"):
-        await _wait_and_load_benchmark(
-            {
-                "output_path": str(output_path),
-                "timeout": 1,
-                "points": {"schema_version": 1},
-                "points_digest": "manifest-1",
-            },
-            Mock(),
-        )
-
-
-@pytest.mark.asyncio
-async def test_wait_and_load_benchmark_preserves_points_source(monkeypatch, tmp_path):
-    output_path = tmp_path / "benchmark.json"
-    source_path = tmp_path / "benchmark_merged.json"
-    source_path.write_text("{}")
-    monkeypatch.setattr(
-        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 1)
-    )
-
-    with pytest.raises(RuntimeError, match="points source aliases"):
-        await _wait_and_load_benchmark(
-            {
-                "output_path": str(output_path),
-                "timeout": 1,
-                "points_source_path": str(source_path),
-            },
-            Mock(),
-        )
-
-    assert source_path.read_text() == "{}"
 
 
 @pytest.mark.asyncio

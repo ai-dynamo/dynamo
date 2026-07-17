@@ -82,7 +82,6 @@ def _validate_benchmark_rank_payload(data: dict, path: Path) -> str:
     def invalid(reason: str) -> RuntimeError:
         return RuntimeError(
             f"Self-benchmark produced incomplete results at {path}: {reason}; "
-            f"error={data.get('error')!r} "
             f"coverage={data.get('coverage')} "
             f"skipped_points={data.get('skipped_points')} "
             f"missing_phases={data.get('missing_phases')}"
@@ -298,12 +297,6 @@ def _merge_benchmark_rank_results(
                 f"Self-benchmark grid mismatch at {path}: "
                 f"expected={grid_digest} actual={data.get('grid_digest')}"
             )
-        if data.get("point_source") != reference.get("point_source"):
-            raise RuntimeError(
-                f"Self-benchmark point source mismatch at {path}: "
-                f"expected={reference.get('point_source')} "
-                f"actual={data.get('point_source')}"
-            )
         recorded_rank = data.get("dp", {}).get("rank")
         if recorded_rank != dp_rank:
             raise RuntimeError(
@@ -472,16 +465,6 @@ async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> 
     dp_ranks = list(range(dp_start, dp_start + dp_size))
     rank_paths = [_benchmark_rank_path(base_path, dp_rank) for dp_rank in dp_ranks]
     merged_path = _benchmark_merged_path(base_path, dp_start)
-    points_source_path = bench_cfg.get("points_source_path")
-    if points_source_path is not None:
-        source_path = Path(points_source_path).resolve()
-        artifact_paths = [*rank_paths, merged_path]
-        artifact_paths += [Path(f"{path}.tmp") for path in artifact_paths]
-        if source_path in {path.resolve() for path in artifact_paths}:
-            raise RuntimeError(
-                "Self-benchmark points source aliases a rank or merged output "
-                f"artifact: {source_path}"
-            )
     try:
         merged_path.unlink()
     except FileNotFoundError:
@@ -528,19 +511,6 @@ async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> 
         rank_data.append((dp_rank, p, data))
 
     merged = _merge_benchmark_rank_results(rank_data, merged_path)
-    if "points" in bench_cfg:
-        expected_source = {
-            "kind": "external_json",
-            "schema_version": bench_cfg["points"]["schema_version"],
-            "placement": "uniform_per_dp_rank",
-            "sha256": bench_cfg.get("points_digest"),
-        }
-        if merged.get("point_source") != expected_source:
-            raise RuntimeError(
-                "Self-benchmark explicit point source does not match the "
-                f"requested manifest: expected={expected_source} "
-                f"actual={merged.get('point_source')}"
-            )
     _write_json_atomic(merged_path, merged)
 
     if merged.get("status") == "partial":

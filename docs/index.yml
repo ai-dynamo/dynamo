@@ -390,8 +390,6 @@ navigation:
             contents:
               - page: Reference Guide
                 path: backends/vllm/vllm-reference-guide.md
-              - page: Self-Benchmarking
-                path: backends/vllm/vllm-self-benchmark.md
               - page: Frontend Processor Fallback
                 path: backends/vllm/vllm-chat-processor.md
               - page: Logits Processing

@@ -9,7 +9,6 @@ import argparse
 import logging
 import os
 import warnings
-from pathlib import Path
 from typing import Optional, Union
 
 from dynamo.common.configuration.arg_group import ArgGroup
@@ -22,8 +21,8 @@ from dynamo.common.configuration.utils import add_argument, add_negatable_bool_a
 from . import __version__
 from .benchmark_points import (
     BENCHMARK_MODES,
-    ExplicitBenchmarkPoints,
-    benchmark_points_digest,
+    BenchmarkMode,
+    BenchmarkPoints,
     load_benchmark_points_file,
 )
 from .constants import DisaggregationMode, EmbeddingTransferMode
@@ -468,7 +467,7 @@ class DynamoVllmConfig(ConfigBase):
     gms_shadow_mode: bool = False
 
     # Benchmark / self-profiling
-    benchmark_mode: Optional[str] = None
+    benchmark_mode: Optional[BenchmarkMode] = None
     benchmark_points_file: Optional[str] = None
     benchmark_warmup_iterations: int = 5
     benchmark_output_path: str = "/tmp/benchmark_results.json"
@@ -488,9 +487,7 @@ class DynamoVllmConfig(ConfigBase):
     benchmark_prefill_batch_granularity: Optional[int] = None
     benchmark_decode_length_granularity: Optional[int] = None
     benchmark_decode_batch_granularity: Optional[int] = None
-    _benchmark_points: Optional[ExplicitBenchmarkPoints] = None
-    _benchmark_points_digest: Optional[str] = None
-    _benchmark_points_source_path: Optional[str] = None
+    _benchmark_points: Optional[BenchmarkPoints] = None
 
     def validate(self) -> None:
         """Validate vLLM wrapper configuration."""
@@ -506,75 +503,47 @@ class DynamoVllmConfig(ConfigBase):
 
     def _load_explicit_benchmark_points(self) -> None:
         self._benchmark_points = None
-        self._benchmark_points_digest = None
-        self._benchmark_points_source_path = None
         if self.benchmark_points_file is None:
             return
         if self.benchmark_mode is None:
             raise ValueError("--benchmark-points-file requires --benchmark-mode")
 
         conflicting_options = []
-        sampling_options = (
-            (
-                "prefill_max_new_token_samples",
-                self.prefill_max_new_token_samples,
-                self.prefill_max_new_token_samples_explicit,
-                64,
-            ),
-            (
-                "prefill_max_kv_read_token_samples",
-                self.prefill_max_kv_read_token_samples,
-                self.prefill_max_kv_read_token_samples_explicit,
-                16,
-            ),
-            (
-                "decode_max_kv_read_token_samples",
-                self.decode_max_kv_read_token_samples,
-                self.decode_max_kv_read_token_samples_explicit,
-                128,
-            ),
-            (
-                "decode_max_batch_size_samples",
-                self.decode_max_batch_size_samples,
-                self.decode_max_batch_size_samples_explicit,
-                128,
-            ),
-            (
-                "prefix_max_batch_size_samples",
-                self.prefix_max_batch_size_samples,
-                self.prefix_max_batch_size_samples_explicit,
-                3,
-            ),
-        )
-        for name, value, explicit, default in sampling_options:
-            if explicit or value != default:
-                conflicting_options.append(f"--{name.replace('_', '-')}")
-
-        legacy_options = (
-            (
-                "benchmark_prefill_granularity",
-                self.benchmark_prefill_granularity,
-            ),
-            (
-                "benchmark_prefill_kv_read_granularity",
-                self.benchmark_prefill_kv_read_granularity,
-            ),
-            (
-                "benchmark_prefill_batch_granularity",
-                self.benchmark_prefill_batch_granularity,
-            ),
-            (
-                "benchmark_decode_length_granularity",
-                self.benchmark_decode_length_granularity,
-            ),
-            (
-                "benchmark_decode_batch_granularity",
-                self.benchmark_decode_batch_granularity,
-            ),
-        )
-        for name, value in legacy_options:
-            if value is not None:
-                conflicting_options.append(f"--{name.replace('_', '-')}")
+        if (
+            self.prefill_max_new_token_samples_explicit
+            or self.prefill_max_new_token_samples != 64
+        ):
+            conflicting_options.append("--prefill-max-new-token-samples")
+        if (
+            self.prefill_max_kv_read_token_samples_explicit
+            or self.prefill_max_kv_read_token_samples != 16
+        ):
+            conflicting_options.append("--prefill-max-kv-read-token-samples")
+        if (
+            self.decode_max_kv_read_token_samples_explicit
+            or self.decode_max_kv_read_token_samples != 128
+        ):
+            conflicting_options.append("--decode-max-kv-read-token-samples")
+        if (
+            self.decode_max_batch_size_samples_explicit
+            or self.decode_max_batch_size_samples != 128
+        ):
+            conflicting_options.append("--decode-max-batch-size-samples")
+        if (
+            self.prefix_max_batch_size_samples_explicit
+            or self.prefix_max_batch_size_samples != 3
+        ):
+            conflicting_options.append("--prefix-max-batch-size-samples")
+        if self.benchmark_prefill_granularity is not None:
+            conflicting_options.append("--benchmark-prefill-granularity")
+        if self.benchmark_prefill_kv_read_granularity is not None:
+            conflicting_options.append("--benchmark-prefill-kv-read-granularity")
+        if self.benchmark_prefill_batch_granularity is not None:
+            conflicting_options.append("--benchmark-prefill-batch-granularity")
+        if self.benchmark_decode_length_granularity is not None:
+            conflicting_options.append("--benchmark-decode-length-granularity")
+        if self.benchmark_decode_batch_granularity is not None:
+            conflicting_options.append("--benchmark-decode-batch-granularity")
 
         if conflicting_options:
             raise ValueError(
@@ -582,25 +551,10 @@ class DynamoVllmConfig(ConfigBase):
                 "option(s): " + ", ".join(conflicting_options)
             )
 
-        effective_output_path = os.environ.get(
-            "DYN_FPM_BENCHMARK_OUTPUT_PATH",
-            self.benchmark_output_path,
-        )
-        points_path = Path(self.benchmark_points_file).resolve()
-        output_path = Path(effective_output_path).resolve()
-        output_tmp_path = Path(f"{effective_output_path}.tmp").resolve()
-        if points_path in {output_path, output_tmp_path}:
-            raise ValueError(
-                "--benchmark-points-file must differ from both "
-                "--benchmark-output-path and its .tmp sidecar"
-            )
-
         self._benchmark_points = load_benchmark_points_file(
             self.benchmark_points_file,
             self.benchmark_mode,
         )
-        self._benchmark_points_digest = benchmark_points_digest(self._benchmark_points)
-        self._benchmark_points_source_path = str(points_path)
 
     def _resolve_legacy_benchmark_sampling(self) -> None:
         if self.benchmark_mode is None:

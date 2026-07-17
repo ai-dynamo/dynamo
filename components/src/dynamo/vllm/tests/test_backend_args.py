@@ -65,7 +65,7 @@ def write_benchmark_points(tmp_path):
 
 
 class TestExplicitBenchmarkPoints:
-    def test_file_is_loaded_and_digested_before_workers_start(self, tmp_path):
+    def test_file_is_loaded_before_workers_start(self, tmp_path):
         path, points = write_benchmark_points(tmp_path)
         config = create_config()
         config.benchmark_mode = "agg"
@@ -73,9 +73,8 @@ class TestExplicitBenchmarkPoints:
 
         config._load_explicit_benchmark_points()
 
-        assert config._benchmark_points == points
-        assert len(config._benchmark_points_digest) == 64
-        assert config._benchmark_points_source_path == str(path.resolve())
+        assert config._benchmark_points is not None
+        assert config._benchmark_points.model_dump(mode="json") == points
 
     def test_file_requires_benchmark_mode(self, tmp_path):
         path, _ = write_benchmark_points(tmp_path)
@@ -86,52 +85,21 @@ class TestExplicitBenchmarkPoints:
             config._load_explicit_benchmark_points()
 
     @pytest.mark.parametrize(
-        "field",
+        ("field", "value"),
         [
-            "prefill_max_new_token_samples_explicit",
-            "benchmark_decode_length_granularity",
+            ("prefill_max_new_token_samples_explicit", True),
+            ("benchmark_decode_length_granularity", 4),
+            ("prefill_max_new_token_samples", 7),
         ],
     )
-    def test_file_rejects_explicit_grid_controls(self, tmp_path, field):
+    def test_file_rejects_grid_controls(self, tmp_path, field, value):
         path, _ = write_benchmark_points(tmp_path)
         config = create_config()
         config.benchmark_mode = "agg"
         config.benchmark_points_file = str(path)
-        setattr(config, field, True if field.endswith("_explicit") else 4)
+        setattr(config, field, value)
 
         with pytest.raises(ValueError, match="cannot be combined"):
-            config._load_explicit_benchmark_points()
-
-    def test_file_rejects_programmatic_nondefault_grid_control(self, tmp_path):
-        path, _ = write_benchmark_points(tmp_path)
-        config = create_config()
-        config.benchmark_mode = "agg"
-        config.benchmark_points_file = str(path)
-        config.prefill_max_new_token_samples = 7
-
-        with pytest.raises(ValueError, match="prefill-max-new-token-samples"):
-            config._load_explicit_benchmark_points()
-
-    def test_file_cannot_alias_benchmark_output(self, tmp_path):
-        path, _ = write_benchmark_points(tmp_path)
-        config = create_config()
-        config.benchmark_mode = "agg"
-        config.benchmark_points_file = str(path)
-        config.benchmark_output_path = str(path)
-
-        with pytest.raises(ValueError, match="must differ"):
-            config._load_explicit_benchmark_points()
-
-    def test_file_cannot_alias_benchmark_output_tmp_sidecar(self, tmp_path):
-        _, points = write_benchmark_points(tmp_path)
-        path = tmp_path / "benchmark.json.tmp"
-        path.write_text(json.dumps(points), encoding="utf-8")
-        config = create_config()
-        config.benchmark_mode = "agg"
-        config.benchmark_points_file = str(path)
-        config.benchmark_output_path = str(tmp_path / "benchmark.json")
-
-        with pytest.raises(ValueError, match=r"\.tmp sidecar"):
             config._load_explicit_benchmark_points()
 
 
