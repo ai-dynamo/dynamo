@@ -12,6 +12,12 @@ use modelexpress_common::download as mx;
 
 use dynamo_runtime::config::environment_names::model as env_model;
 
+mod huggingface;
+
+pub(crate) use huggingface::{
+    HfRepoSpec, cached_hf_snapshot, download_hf_snapshot, finalize_hf_snapshot, huggingface_cache,
+};
+
 /// Check if a model is already cached in the HuggingFace hub cache directory.
 /// Returns the path to the cached model directory if found, None otherwise.
 ///
@@ -107,9 +113,7 @@ fn shard_files_present(index_path: &Path) -> bool {
 
 /// Check if offline mode is enabled via HF_HUB_OFFLINE environment variable.
 fn is_offline_mode() -> bool {
-    env::var(env_model::huggingface::HF_HUB_OFFLINE)
-        .map(|v| v == "1" || v.to_lowercase() == "true")
-        .unwrap_or(false)
+    dynamo_runtime::config::env_is_truthy(env_model::huggingface::HF_HUB_OFFLINE)
 }
 
 /// Check if shared-storage mode is disabled via MODEL_EXPRESS_NO_SHARED_STORAGE.
@@ -257,6 +261,16 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[serial_test::serial]
+    #[test]
+    fn hf_offline_mode_accepts_huggingface_truthy_values() {
+        for value in ["1", "true", "TRUE", "on", "ON", "yes", "YES"] {
+            temp_env::with_var(env_model::huggingface::HF_HUB_OFFLINE, Some(value), || {
+                assert!(is_offline_mode(), "rejected {value}")
+            });
+        }
+    }
 
     #[test]
     fn cache_dir_precedence_and_fallback() {
