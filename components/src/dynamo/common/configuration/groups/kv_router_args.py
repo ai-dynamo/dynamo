@@ -52,7 +52,6 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "shared_cache_multiplier",
     "shared_cache_type",
     "router_predicted_ttl_secs",
-    "router_hints",
 )
 
 _DEPRECATED_OVERLAP_WEIGHT_MESSAGE = (
@@ -71,7 +70,6 @@ _LOAD_AWARE_KWARG_OVERRIDES = {
     "shared_cache_multiplier": 0.0,
     "shared_cache_type": "none",
     "router_predicted_ttl_secs": None,
-    "router_hints": False,
 }
 
 
@@ -137,7 +135,6 @@ class KvRouterConfigBase(ConfigBase):
     shared_cache_multiplier: float = 0.0
     shared_cache_type: str = "none"
     router_predicted_ttl_secs: Optional[float] = None
-    router_hints: bool = False
     load_aware: bool = False
 
     def apply_load_aware_preset(self) -> None:
@@ -493,15 +490,4 @@ class KvRouterArgGroup(ArgGroup):
                 "Independent of --router-ttl-secs, which covers pure approximate mode."
             ),
             arg_type=float,
-        )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--router-hints",
-            env_var="DYN_ROUTER_HINTS",
-            default=False,
-            help=(
-                "[EXPERIMENTAL] KV Router: Attach compact router_hint extra_args "
-                "for eligible remote KV reuse decisions. Requires --router-mode=kv "
-                "on the frontend and is disabled by --load-aware."
-            ),
         )

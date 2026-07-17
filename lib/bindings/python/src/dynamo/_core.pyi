@@ -1785,7 +1785,6 @@ class KvRouterConfig:
         shared_cache_multiplier: float = 0.0,
         shared_cache_type: str = "none",
         router_predicted_ttl_secs: Optional[float] = None,
-        router_hints: bool = False,
         *,
         overlap_score_credit: float = 1.0,
         overlap_score_credit_decay: float = 0.0,
@@ -1843,8 +1842,6 @@ class KvRouterConfig:
                 applies to entries in the local side indexer and requires
                 use_kv_events=True. Set to None to disable. Independent of
                 router_ttl_secs, which covers pure approximate mode.
-            router_hints: Enable compact router_hint extra_args for eligible remote KV
-                reuse decisions (default: False). Frontend use requires --router-mode=kv.
         """
         ...
 

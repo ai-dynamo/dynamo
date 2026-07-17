@@ -453,15 +453,19 @@ where
         cache_hit_for_worker(cache_hit_estimates, worker)
     }
 
+    fn has_router_hint_capable_workers(&self) -> bool {
+        self.workers_with_configs
+            .borrow()
+            .values()
+            .any(|config| config.supports_router_hints())
+    }
+
     fn router_hint_for_selection(
         &self,
         target: WorkerWithDpRank,
         target_cached_prefix_blocks: u32,
         candidates: Option<&RouterHintRootCandidates>,
     ) -> Option<RouterHint> {
-        if !self.kv_router_config.router_hints {
-            return None;
-        }
         let candidates = candidates?;
 
         let (block_hashes, source_control_endpoint) = {
@@ -672,6 +676,7 @@ where
 
         let supports_overlap_refresh = self.scheduler.supports_overlap_refresh();
         let retain_block_hashes = supports_overlap_refresh || return_routing_hashes;
+        let retain_router_hint_chain = self.has_router_hint_capable_workers();
 
         let TieredLookupResult {
             tiered_matches,
@@ -688,7 +693,7 @@ where
             TieredLookupOptions {
                 cache_namespace: cache_namespace.as_deref(),
                 retain_block_hashes,
-                retain_router_hint_chain: self.kv_router_config.router_hints,
+                retain_router_hint_chain,
             },
         )
         .await?;
@@ -706,7 +711,7 @@ where
         let overlap =
             OverlapAnalysis::new(&self.kv_router_config, self.block_size, &tiered_matches)
                 .signals();
-        let router_hint_prep = if self.kv_router_config.router_hints {
+        let router_hint_prep = if retain_router_hint_chain {
             RouterHintPrep::from_tiered_matches(&tiered_matches)
         } else {
             RouterHintPrep::default()
