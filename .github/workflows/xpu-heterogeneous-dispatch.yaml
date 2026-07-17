@@ -47,6 +47,16 @@ on:
         required: false
         type: string
         default: 'onenvidia-rdma-kueue'
+      xpu_base_image:
+        description: 'XPU base/runtime image repository used when building'
+        required: false
+        type: string
+        default: 'public.ecr.aws/q9t5s3a7/vllm-ci-test-repo'
+      xpu_base_image_tag:
+        description: 'XPU base/runtime image tag used when building'
+        required: false
+        type: string
+        default: 'ee0da84ab9e04ac7610e28580af62c365e898389-xpu'
 
 concurrency:
   group: pr-xpu-${{ github.ref_name }}
@@ -89,6 +99,9 @@ jobs:
       - name: Build XPU image
         id: build
         shell: bash
+        env:
+          XPU_BASE_IMAGE: ${{ inputs.xpu_base_image }}
+          XPU_BASE_IMAGE_TAG: ${{ inputs.xpu_base_image_tag }}
         run: |
           set -x
 
@@ -96,12 +109,22 @@ jobs:
           SHORT_SHA="$(git rev-parse HEAD | cut -c1-7)"
           IMAGE_TAG="${IMAGE_NAME}:${{ github.run_id }}-${SHORT_SHA}"
 
+          BUILD_ARGS=()
+          if [[ -n "$XPU_BASE_IMAGE" && -n "$XPU_BASE_IMAGE_TAG" ]]; then
+            BUILD_ARGS+=(--build-arg "BASE_IMAGE=${XPU_BASE_IMAGE}")
+            BUILD_ARGS+=(--build-arg "BASE_IMAGE_TAG=${XPU_BASE_IMAGE_TAG}")
+            BUILD_ARGS+=(--build-arg "RUNTIME_IMAGE=${XPU_BASE_IMAGE}")
+            BUILD_ARGS+=(--build-arg "RUNTIME_IMAGE_TAG=${XPU_BASE_IMAGE_TAG}")
+            BUILD_ARGS+=(--build-arg "WHEEL_BUILDER_IMAGE=${XPU_BASE_IMAGE}:${XPU_BASE_IMAGE_TAG}")
+          fi
+
           echo "image_name=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
           echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
 
           docker build \
             --progress=plain \
             --tag "${IMAGE_TAG}" \
+            "${BUILD_ARGS[@]}" \
             -f ./container/rendered.Dockerfile \
             . 2>&1 | tee build-xpu.log
 
