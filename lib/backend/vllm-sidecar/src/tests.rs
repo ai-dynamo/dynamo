@@ -20,6 +20,7 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
 
 use crate::client::VllmClient;
+use crate::convert::{ResponseState, build_generate_request};
 use crate::engine::VllmSidecarEngine;
 use crate::json::{json_to_struct, struct_to_json};
 use crate::model::ConfiguredModel;
@@ -210,6 +211,68 @@ fn sequence_response(
             }),
         }),
     }
+}
+
+#[test]
+fn prompt_logprobs_are_retained_for_the_terminal_chunk() {
+    let request = request();
+    let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated);
+    let mut first_response = sequence_response(false, true, None);
+    first_response.prompt_info = Some(pb::PromptInfo {
+        num_prompt_tokens: 3,
+        token_ids: vec![11, 22, 33],
+        logprobs: vec![0.0, -0.2, -0.3],
+        ranks: vec![0, 1, 2],
+        candidate_tokens: vec![pb::CandidateTokenInfo::default(); 3],
+    });
+
+    let first = state
+        .convert(first_response)
+        .expect("convert first chunk")
+        .expect("first chunk");
+    assert!(first.finish_reason.is_none());
+    assert!(first.engine_data.is_none());
+
+    let mut terminal_response = sequence_response(true, true, None);
+    terminal_response
+        .outputs
+        .as_mut()
+        .unwrap()
+        .finish_info
+        .as_mut()
+        .unwrap()
+        .num_output_tokens = 2;
+    let terminal = state
+        .convert(terminal_response)
+        .expect("convert terminal chunk")
+        .expect("terminal chunk");
+    assert!(terminal.finish_reason.is_some());
+    assert!(terminal.engine_data.as_ref().unwrap()["prompt_logprobs"].is_array());
+}
+
+#[test]
+fn oversized_logprob_counts_are_rejected() {
+    let oversized = i32::MAX as u32 + 1;
+
+    let mut output_request = request();
+    output_request.output_options.logprobs = Some(oversized);
+    let output_error = build_generate_request(
+        &output_request,
+        "output-logprobs",
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("oversized output logprobs must fail");
+    assert!(output_error.to_string().contains("must fit in i32"));
+
+    let mut prompt_request = request();
+    prompt_request.output_options.prompt_logprobs = Some(oversized);
+    let prompt_error = build_generate_request(
+        &prompt_request,
+        "prompt-logprobs",
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("oversized prompt logprobs must fail");
+    assert!(prompt_error.to_string().contains("must fit in i32"));
 }
 
 struct FakeServer {

@@ -66,11 +66,11 @@ pub(crate) fn build_generate_request(
         response: Some(pb::ResponseOptions {
             prompt_token_ids: prompt_logprobs.is_some(),
             prompt_logprobs: prompt_logprobs.is_some(),
-            prompt_candidates: prompt_logprobs.map(top_n_candidates),
+            prompt_candidates: prompt_logprobs.map(top_n_candidates).transpose()?,
             output_text: Some(true),
             output_token_ids: true,
             output_logprobs: output_logprobs.is_some(),
-            output_candidates: output_logprobs.map(top_n_candidates),
+            output_candidates: output_logprobs.map(top_n_candidates).transpose()?,
         }),
         kv: Some(build_kv_parameters(request, mode)?),
         truncate_prompt_tokens: 0,
@@ -82,10 +82,15 @@ pub(crate) fn build_generate_request(
     })
 }
 
-fn top_n_candidates(count: u32) -> pb::CandidateTokens {
-    pb::CandidateTokens {
+fn top_n_candidates(count: u32) -> Result<pb::CandidateTokens, DynamoError> {
+    i32::try_from(count).map_err(|_| {
+        client::invalid_argument(format!(
+            "vLLM logprobs request must fit in i32; got {count}"
+        ))
+    })?;
+    Ok(pb::CandidateTokens {
         select: Some(pb::candidate_tokens::Select::TopN(count)),
-    }
+    })
 }
 
 fn normalize_top_k(top_k: Option<i32>) -> Result<u32, DynamoError> {
@@ -420,7 +425,6 @@ impl ResponseState {
             return if self.is_prefill || output.num_tokens == 0 {
                 Ok(None)
             } else {
-                self.attach_prompt_data(&mut mapped);
                 Ok(Some(mapped))
             };
         };
