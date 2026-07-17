@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"golang.org/x/sys/unix"
@@ -26,27 +28,55 @@ var (
 	mountSquashfs   = unix.Mount
 	unmountPath     = unix.Unmount
 	openMountTree   = unix.OpenTree
+
+	loopAllocationMu sync.Mutex
 )
 
-const loopAllocationAttempts = 8
+const (
+	loopAllocationAttempts   = 16
+	loopAllocationRetryDelay = 10 * time.Millisecond
+)
 
-func preflightRootfsMountCapability() error {
-	fd, err := unix.Open(
-		filepath.Join(hostDevicePath, "loop-control"),
-		unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW,
-		0,
-	)
+func preflightRootfsMountCapability() (retErr error) {
+	image, err := os.CreateTemp("", "dynamo-snapshot-loop-preflight-*")
 	if err != nil {
-		return fmt.Errorf("open loop-control for rootfs preflight: %w", err)
+		return fmt.Errorf("create scratch file for rootfs loop preflight: %w", err)
 	}
-	if err := unix.Close(fd); err != nil {
-		return fmt.Errorf("close loop-control after rootfs preflight: %w", err)
+	imagePath := image.Name()
+	loopFD := -1
+	defer func() {
+		if loopFD >= 0 {
+			retErr = errors.Join(
+				retErr,
+				clearLoop(loopFD, unix.LOOP_CLR_FD, 0),
+				unix.Close(loopFD),
+			)
+		}
+		retErr = errors.Join(retErr, image.Close(), os.Remove(imagePath))
+	}()
+
+	if err := image.Truncate(4096); err != nil {
+		return fmt.Errorf("size scratch file for rootfs loop preflight: %w", err)
+	}
+	loopFD, _, err = configureAvailableLoop(image)
+	if err != nil {
+		return fmt.Errorf(
+			"LOOP_CONFIGURE preflight failed; enable host loop support and permit loop ioctls: %w",
+			err,
+		)
 	}
 	return nil
 }
 
 // PrepareDetachedRootfsMount loop-mounts and detaches an already-validated image.
-func PrepareDetachedRootfsMount(image *os.File) (*os.File, error) {
+func PrepareDetachedRootfsMount(image *os.File) (detached *os.File, retErr error) {
+	return prepareDetachedRootfsMount(image, mountStagingDir)
+}
+
+func prepareDetachedRootfsMount(
+	image *os.File,
+	stagingDir string,
+) (detached *os.File, retErr error) {
 	if image == nil {
 		return nil, errors.New("validated rootfs image is required")
 	}
@@ -54,32 +84,50 @@ func PrepareDetachedRootfsMount(image *os.File) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer unix.Close(loopFD)
 	loopConfigured := true
+	mounted := false
+	mountpoint := ""
+	mountpointCreated := false
 	defer func() {
+		if mounted {
+			if err := unmountPath(mountpoint, unix.MNT_DETACH); err != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("unmount SquashFS staging mount: %w", err))
+			}
+		}
+		if mountpointCreated {
+			if err := os.Remove(mountpoint); err != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("remove SquashFS mountpoint: %w", err))
+			}
+		}
 		if loopConfigured {
-			_ = clearLoop(loopFD, unix.LOOP_CLR_FD, 0)
+			if err := clearLoop(loopFD, unix.LOOP_CLR_FD, 0); err != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("clear loop device: %w", err))
+			}
+		}
+		if err := unix.Close(loopFD); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("close loop device: %w", err))
+		}
+		if retErr != nil && detached != nil {
+			if err := detached.Close(); err != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("close detached SquashFS mount: %w", err))
+			}
+			detached = nil
 		}
 	}()
 
-	if err := os.MkdirAll(mountStagingDir, 0o700); err != nil {
+	if err := os.MkdirAll(stagingDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create SquashFS mount staging root: %w", err)
 	}
-	mountpoint := filepath.Join(mountStagingDir, uuid.NewString())
+	mountpoint = filepath.Join(stagingDir, uuid.NewString())
 	if err := os.Mkdir(mountpoint, 0o700); err != nil {
 		return nil, fmt.Errorf("create SquashFS mountpoint: %w", err)
 	}
-	defer os.Remove(mountpoint)
+	mountpointCreated = true
 
 	if err := mountSquashfs(loopPath, mountpoint, "squashfs", unix.MS_RDONLY, ""); err != nil {
 		return nil, fmt.Errorf("mount SquashFS image read-only: %w", err)
 	}
-	mounted := true
-	defer func() {
-		if mounted {
-			_ = unmountPath(mountpoint, unix.MNT_DETACH)
-		}
-	}()
+	mounted = true
 
 	mountFD, err := openMountTree(
 		unix.AT_FDCWD,
@@ -89,11 +137,11 @@ func PrepareDetachedRootfsMount(image *os.File) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("clone SquashFS mount with open_tree: %w", err)
 	}
-	detached := os.NewFile(uintptr(mountFD), "rootfs-squashfs-mount")
+	detached = os.NewFile(uintptr(mountFD), "rootfs-squashfs-mount")
 
 	if err := unmountPath(mountpoint, unix.MNT_DETACH); err != nil {
-		detached.Close()
-		return nil, fmt.Errorf("detach SquashFS staging mount: %w", err)
+		retErr = fmt.Errorf("detach SquashFS staging mount: %w", err)
+		return
 	}
 	mounted = false
 	loopConfigured = false // Autoclear now owns cleanup when the detached mount closes.
@@ -102,6 +150,9 @@ func PrepareDetachedRootfsMount(image *os.File) (*os.File, error) {
 }
 
 func configureAvailableLoop(image *os.File) (int, string, error) {
+	loopAllocationMu.Lock()
+	defer loopAllocationMu.Unlock()
+
 	config := &unix.LoopConfig{
 		Fd: uint32(image.Fd()),
 		Info: unix.LoopInfo64{
@@ -109,7 +160,7 @@ func configureAvailableLoop(image *os.File) (int, string, error) {
 		},
 	}
 	var lastErr error
-	for range loopAllocationAttempts {
+	for attempt := range loopAllocationAttempts {
 		loopControl, err := openLoopControl(
 			filepath.Join(hostDevicePath, "loop-control"),
 			unix.O_RDWR|unix.O_CLOEXEC,
@@ -121,6 +172,10 @@ func configureAvailableLoop(image *os.File) (int, string, error) {
 		loopNumber, err := loopIoctlRetInt(loopControl, unix.LOOP_CTL_GET_FREE)
 		unix.Close(loopControl)
 		if err != nil {
+			if retryLoopAllocation(attempt, err) {
+				lastErr = err
+				continue
+			}
 			return -1, "", fmt.Errorf("allocate loop device: %w", err)
 		}
 		if loopNumber < 0 || loopNumber > 1<<20 {
@@ -147,7 +202,7 @@ func configureAvailableLoop(image *os.File) (int, string, error) {
 			}
 		}
 		if err != nil {
-			if errors.Is(err, unix.EBUSY) || errors.Is(err, unix.ENOENT) {
+			if retryLoopAllocation(attempt, err) {
 				lastErr = err
 				continue
 			}
@@ -166,11 +221,11 @@ func configureAvailableLoop(image *os.File) (int, string, error) {
 		}
 		if err := configureLoop(loopFD, config); err != nil {
 			unix.Close(loopFD)
-			if errors.Is(err, unix.EBUSY) {
+			if retryLoopAllocation(attempt, err) {
 				lastErr = err
 				continue
 			}
-			return -1, "", fmt.Errorf("configure loop device %s: %w", loopPath, err)
+			return -1, "", fmt.Errorf("configure loop device %s with LOOP_CONFIGURE: %w", loopPath, err)
 		}
 		return loopFD, loopPath, nil
 	}
@@ -179,4 +234,15 @@ func configureAvailableLoop(image *os.File) (int, string, error) {
 		loopAllocationAttempts,
 		lastErr,
 	)
+}
+
+func retryLoopAllocation(attempt int, err error) bool {
+	if attempt+1 >= loopAllocationAttempts ||
+		(!errors.Is(err, unix.EBUSY) &&
+			!errors.Is(err, unix.ENOENT) &&
+			!errors.Is(err, unix.ENXIO)) {
+		return false
+	}
+	time.Sleep(loopAllocationRetryDelay)
+	return true
 }

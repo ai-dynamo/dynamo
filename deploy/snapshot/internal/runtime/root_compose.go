@@ -22,7 +22,7 @@ const (
 	restoreWork                     = RootfsBackingWorkspaceMountPath + "/work"
 )
 
-// RootComposition identifies the staged root and its setup phases.
+// RootComposition identifies the staged root and owns its backing mount.
 type RootComposition struct {
 	RootPath             string
 	MountAttachDuration  time.Duration
@@ -30,8 +30,11 @@ type RootComposition struct {
 }
 
 // ComposeRoot consumes a detached rootfs mount and workspace path handle,
-// and stages a placeholder-first OverlayFS without changing the caller root.
-func ComposeRoot(rootfsMountFD, workspaceFD, deletedFilesFD int) (*RootComposition, error) {
+// and stages a snapshot-over-placeholder OverlayFS without changing the caller root.
+func ComposeRoot(rootfsMountFD, workspaceFD, deletedFilesFD int) (result *RootComposition, retErr error) {
+	if rootfsMountFD >= 3 {
+		defer unix.Close(rootfsMountFD)
+	}
 	if rootfsMountFD < 3 || workspaceFD < 3 {
 		return nil, errors.New("rootfs mount and workspace FDs are required")
 	}
@@ -50,7 +53,6 @@ func ComposeRoot(rootfsMountFD, workspaceFD, deletedFilesFD int) (*RootCompositi
 	if err != nil {
 		return nil, err
 	}
-	composition := &RootComposition{RootPath: restoreRoot}
 
 	// Clone only the placeholder root mount. CRIU reconstructs child mounts.
 	placeholderFD, err := unix.OpenTree(
@@ -77,6 +79,22 @@ func ComposeRoot(rootfsMountFD, workspaceFD, deletedFilesFD int) (*RootCompositi
 		return nil, fmt.Errorf("attach rootfs backing workspace: %w", err)
 	}
 	unix.Close(backingTarget)
+	composition := &RootComposition{RootPath: restoreRoot}
+	defer func() {
+		if retErr != nil {
+			retErr = errors.Join(retErr, composition.Close())
+			result = nil
+		}
+	}()
+	entries, err := os.ReadDir(RootfsBackingWorkspaceMountPath)
+	if err != nil {
+		return nil, fmt.Errorf("read rootfs backing workspace for reset: %w", err)
+	}
+	for _, entry := range entries {
+		if err := os.RemoveAll(filepath.Join(RootfsBackingWorkspaceMountPath, entry.Name())); err != nil {
+			return nil, fmt.Errorf("reset rootfs backing workspace entry %q: %w", entry.Name(), err)
+		}
+	}
 
 	for _, path := range []string{
 		restoreRoot,
@@ -102,7 +120,6 @@ func ComposeRoot(rootfsMountFD, workspaceFD, deletedFilesFD int) (*RootCompositi
 		return nil, fmt.Errorf("attach inherited SquashFS mount: %w", err)
 	}
 	unix.Close(snapshotTarget)
-	unix.Close(rootfsMountFD)
 
 	placeholderTarget, err := unix.Open(
 		restorePlaceholder,
@@ -117,17 +134,32 @@ func ComposeRoot(rootfsMountFD, workspaceFD, deletedFilesFD int) (*RootCompositi
 		return nil, fmt.Errorf("attach placeholder root: %w", err)
 	}
 	unix.Close(placeholderTarget)
-	if err := copyDirectoryMetadataAt(workspaceMountFD, "placeholder", "upper"); err != nil {
-		return nil, fmt.Errorf("copy placeholder root metadata: %w", err)
+	snapshotRootFD, err := openDirectoryAt(workspaceMountFD, "snapshot")
+	if err != nil {
+		return nil, fmt.Errorf("open snapshot root metadata source: %w", err)
 	}
+	defer unix.Close(snapshotRootFD)
+	upperRootFD, err := openDirectoryAt(workspaceMountFD, "upper")
+	if err != nil {
+		return nil, fmt.Errorf("open restore upper root: %w", err)
+	}
+	defer unix.Close(upperRootFD)
+	if err := copyDirectoryOwnerAndMode(snapshotRootFD, upperRootFD); err != nil {
+		return nil, fmt.Errorf("copy snapshot root owner and mode: %w", err)
+	}
+	placeholderRootFD, err := openDirectoryAt(workspaceMountFD, "placeholder")
+	if err != nil {
+		return nil, fmt.Errorf("open placeholder root metadata source: %w", err)
+	}
+	defer unix.Close(placeholderRootFD)
 	composition.MountAttachDuration = time.Since(attachStart)
 
 	overlayStart := time.Now()
 	if err := replayDeletions(
 		deletions,
-		restoreUpper,
-		restorePlaceholder,
-		restoreSnapshotLower,
+		upperRootFD,
+		snapshotRootFD,
+		placeholderRootFD,
 	); err != nil {
 		return nil, err
 	}
@@ -135,15 +167,23 @@ func ComposeRoot(rootfsMountFD, workspaceFD, deletedFilesFD int) (*RootCompositi
 		return nil, fmt.Errorf("hide rootfs backing workspace: %w", err)
 	}
 	options := strings.Join([]string{
-		"lowerdir=" + restorePlaceholder + ":" + restoreSnapshotLower,
+		"lowerdir=" + restoreSnapshotLower + ":" + restorePlaceholder,
 		"upperdir=" + restoreUpper,
 		"workdir=" + restoreWork,
 	}, ",")
 	if err := unix.Mount("overlay", restoreRoot, "overlay", 0, options); err != nil {
-		return nil, fmt.Errorf("mount placeholder-first composed root: %w", err)
+		return nil, fmt.Errorf("mount snapshot-over-placeholder composed root: %w", err)
 	}
 	composition.OverlaySetupDuration = time.Since(overlayStart)
 	return composition, nil
+}
+
+// Close lazily disconnects the composed mount tree.
+func (composition *RootComposition) Close() error {
+	if err := unmountPath(RootfsBackingWorkspaceMountPath, unix.MNT_DETACH); err != nil {
+		return fmt.Errorf("unmount rootfs backing workspace: %w", err)
+	}
+	return nil
 }
 
 func moveMountToFD(sourceFD, targetFD int) error {
@@ -156,28 +196,16 @@ func moveMountToFD(sourceFD, targetFD int) error {
 	)
 }
 
-func copyDirectoryMetadataAt(rootFD int, source, target string) error {
-	const flags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
-	sourceFD, err := unix.Openat(rootFD, source, flags, 0)
-	if err != nil {
-		return fmt.Errorf("open source directory %q: %w", source, err)
-	}
-	defer unix.Close(sourceFD)
-	targetFD, err := unix.Openat(rootFD, target, flags, 0)
-	if err != nil {
-		return fmt.Errorf("open target directory %q: %w", target, err)
-	}
-	defer unix.Close(targetFD)
-
+func copyDirectoryOwnerAndMode(sourceFD, targetFD int) error {
 	var stat unix.Stat_t
 	if err := unix.Fstat(sourceFD, &stat); err != nil {
-		return fmt.Errorf("stat source directory %q: %w", source, err)
+		return fmt.Errorf("stat source directory: %w", err)
 	}
 	if err := unix.Fchown(targetFD, int(stat.Uid), int(stat.Gid)); err != nil {
-		return fmt.Errorf("set target directory %q ownership: %w", target, err)
+		return fmt.Errorf("set target directory ownership: %w", err)
 	}
 	if err := unix.Fchmod(targetFD, stat.Mode&0o7777); err != nil {
-		return fmt.Errorf("set target directory %q mode: %w", target, err)
+		return fmt.Errorf("set target directory mode: %w", err)
 	}
 	return nil
 }
@@ -212,30 +240,26 @@ func readDeletedFilesFD(deletedFilesFD int) (*deletedFiles, error) {
 
 func replayDeletions(
 	deletions *deletedFiles,
-	upperDir, placeholderRoot, snapshotRoot string,
+	upperRootFD, snapshotRootFD, placeholderRootFD int,
 ) error {
-	rootFD, err := unix.Open(
-		upperDir,
-		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW,
-		0,
-	)
-	if err != nil {
-		return fmt.Errorf("open restore upperdir: %w", err)
-	}
-	defer unix.Close(rootFD)
 	for _, entry := range deletions.OpaqueDirectory {
 		if err := replayOpaqueDirectory(
-			rootFD,
+			upperRootFD,
 			entry,
-			placeholderRoot,
-			snapshotRoot,
+			snapshotRootFD,
+			placeholderRootFD,
 		); err != nil {
 			return err
 		}
 	}
 	for _, entry := range deletions.Whiteouts {
 		parent, name := filepath.Split(entry)
-		parentFD, err := mkdirAllAt(rootFD, strings.TrimSuffix(parent, "/"))
+		parentFD, err := mkdirAllAt(
+			upperRootFD,
+			strings.TrimSuffix(parent, "/"),
+			snapshotRootFD,
+			placeholderRootFD,
+		)
 		if err != nil {
 			return fmt.Errorf("create whiteout parent for %q: %w", entry, err)
 		}
@@ -248,39 +272,48 @@ func replayDeletions(
 	return nil
 }
 
-// An opaque directory hides the placeholder layer but must not hide files
-// supplied by the SquashFS layer below it.
+// An opaque directory hides placeholder children absent from the snapshot.
 func replayOpaqueDirectory(
 	upperRootFD int,
-	relative, placeholderRoot, snapshotRoot string,
+	relative string,
+	snapshotRootFD, placeholderRootFD int,
 ) error {
 	if relative == "." {
 		relative = ""
 	}
-	if info, err := os.Lstat(filepath.Join(placeholderRoot, relative)); err == nil {
-		if !info.IsDir() {
-			return nil
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("inspect placeholder opaque path %q: %w", relative, err)
-	}
-	if info, err := os.Lstat(filepath.Join(snapshotRoot, relative)); err == nil {
-		if !info.IsDir() {
-			return fmt.Errorf("snapshot opaque path %q is not a directory", relative)
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
+	snapshotIsDirectory := false
+	snapshotFD, err := openDirectoryAt(snapshotRootFD, relative)
+	if err == nil {
+		snapshotIsDirectory = true
+		unix.Close(snapshotFD)
+	} else if !errors.Is(err, unix.ENOENT) {
 		return fmt.Errorf("inspect snapshot opaque path %q: %w", relative, err)
 	}
-	upperFD, err := mkdirAllAt(upperRootFD, relative)
+	placeholderFD, err := openDirectoryAt(placeholderRootFD, relative)
+	if err == nil {
+		unix.Close(placeholderFD)
+	} else if snapshotIsDirectory &&
+		(errors.Is(err, unix.ENOTDIR) || errors.Is(err, unix.ELOOP)) {
+		// The snapshot directory wins, and there is no placeholder directory to traverse.
+		return nil
+	} else if !errors.Is(err, unix.ENOENT) {
+		return fmt.Errorf("inspect placeholder opaque path %q: %w", relative, err)
+	}
+	upperFD, err := mkdirAllAt(
+		upperRootFD,
+		relative,
+		snapshotRootFD,
+		placeholderRootFD,
+	)
 	if err != nil {
 		return fmt.Errorf("create opaque directory %q: %w", relative, err)
 	}
 	defer unix.Close(upperFD)
-	placeholderEntries, err := directoryEntries(placeholderRoot, relative)
+	placeholderEntries, err := directoryEntriesAt(placeholderRootFD, relative)
 	if err != nil {
 		return err
 	}
-	snapshotEntries, err := directoryEntries(snapshotRoot, relative)
+	snapshotEntries, err := directoryEntriesAt(snapshotRootFD, relative)
 	if err != nil {
 		return err
 	}
@@ -294,8 +327,8 @@ func replayOpaqueDirectory(
 			if err := replayOpaqueDirectory(
 				upperRootFD,
 				filepath.Join(relative, name),
-				placeholderRoot,
-				snapshotRoot,
+				snapshotRootFD,
+				placeholderRootFD,
 			); err != nil {
 				return err
 			}
@@ -304,27 +337,8 @@ func replayOpaqueDirectory(
 	return nil
 }
 
-func directoryEntries(root, relative string) (map[string]uint32, error) {
-	rootFD, err := unix.Open(
-		root,
-		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW,
-		0,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer unix.Close(rootFD)
-	fd, err := unix.Dup(rootFD)
-	if err != nil {
-		return nil, err
-	}
-	if relative != "" {
-		unix.Close(fd)
-		fd, err = unix.Openat2(rootFD, relative, &unix.OpenHow{
-			Flags:   unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW,
-			Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS,
-		})
-	}
+func directoryEntriesAt(rootFD int, relative string) (map[string]uint32, error) {
+	fd, err := openDirectoryAt(rootFD, relative)
 	if errors.Is(err, unix.ENOENT) {
 		return map[string]uint32{}, nil
 	}
@@ -353,6 +367,16 @@ func directoryEntries(root, relative string) (map[string]uint32, error) {
 	return result, nil
 }
 
+func openDirectoryAt(rootFD int, relative string) (int, error) {
+	if relative == "" {
+		return unix.Dup(rootFD)
+	}
+	return unix.Openat2(rootFD, relative, &unix.OpenHow{
+		Flags:   unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW,
+		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS,
+	})
+}
+
 func createWhiteoutAt(parentFD int, name string) error {
 	err := unix.Mknodat(parentFD, name, unix.S_IFCHR, int(unix.Mkdev(0, 0)))
 	if !errors.Is(err, unix.EEXIST) {
@@ -368,7 +392,11 @@ func createWhiteoutAt(parentFD int, name string) error {
 	return nil
 }
 
-func mkdirAllAt(rootFD int, path string) (int, error) {
+func mkdirAllAt(
+	rootFD int,
+	path string,
+	snapshotRootFD, placeholderRootFD int,
+) (int, error) {
 	current, err := unix.Dup(rootFD)
 	if err != nil {
 		return -1, err
@@ -376,29 +404,39 @@ func mkdirAllAt(rootFD int, path string) (int, error) {
 	if path == "" {
 		return current, nil
 	}
+	var relative string
 	for _, component := range strings.Split(path, "/") {
 		if component == "" || component == "." || component == ".." {
 			unix.Close(current)
 			return -1, fmt.Errorf("invalid path component %q", component)
 		}
-		next, err := unix.Openat2(current, component, &unix.OpenHow{
-			Flags:   unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC,
-			Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS,
-		})
+		relative = filepath.Join(relative, component)
+		next, err := openDirectoryAt(current, component)
 		if errors.Is(err, unix.ENOENT) {
 			if err := unix.Mkdirat(current, component, 0o755); err != nil &&
 				!errors.Is(err, unix.EEXIST) {
 				unix.Close(current)
 				return -1, err
 			}
-			next, err = unix.Openat2(current, component, &unix.OpenHow{
-				Flags:   unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC,
-				Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS,
-			})
+			next, err = openDirectoryAt(current, component)
 		}
 		unix.Close(current)
 		if err != nil {
 			return -1, err
+		}
+		sourceFD, sourceErr := openDirectoryAt(snapshotRootFD, relative)
+		if errors.Is(sourceErr, unix.ENOENT) {
+			sourceFD, sourceErr = openDirectoryAt(placeholderRootFD, relative)
+		}
+		if sourceErr != nil {
+			unix.Close(next)
+			return -1, fmt.Errorf("open winning lower directory %q: %w", relative, sourceErr)
+		}
+		copyErr := copyDirectoryOwnerAndMode(sourceFD, next)
+		unix.Close(sourceFD)
+		if copyErr != nil {
+			unix.Close(next)
+			return -1, fmt.Errorf("copy lower directory owner and mode for %q: %w", relative, copyErr)
 		}
 		current = next
 	}
