@@ -81,11 +81,23 @@ class DynamoWorkerProcess(ManagedProcess):
 
         if is_prefill is True:
             command.extend(["--disaggregation-mode", "prefill"])
+            command.extend(
+                [
+                    "--kv-transfer-config",
+                    build_nixl_kv_transfer_config_json(),
+                ]
+            )
             health_check_urls = [
                 (f"http://localhost:{self.system_port}/health", self.is_ready)
             ]
         elif is_prefill is False:
             command.extend(["--disaggregation-mode", "decode"])
+            command.extend(
+                [
+                    "--kv-transfer-config",
+                    build_nixl_kv_transfer_config_json(),
+                ]
+            )
             health_check_urls = [
                 (f"http://localhost:{self.system_port}/health", self.is_ready),
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api),
