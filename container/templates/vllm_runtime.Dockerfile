@@ -10,10 +10,54 @@
 {% if platform == "multi" %}
 FROM --platform=linux/amd64 ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS vllm_runtime_amd64
 FROM --platform=linux/arm64 ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS vllm_runtime_arm64
-FROM vllm_runtime_${TARGETARCH} AS pre_runtime
+FROM vllm_runtime_${TARGETARCH} AS vllm_runtime_base
 {% else %}
-FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
+FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS vllm_runtime_base
 {% endif %}
+
+{% if device == "cuda" %}
+# The upstream PyAV and OpenCV wheels bundle their own FFmpeg libraries. Build
+# replacements against Dynamo's /usr/local FFmpeg so the runtime has exactly one
+# libav provider and one audited codec surface.
+FROM vllm_runtime_base AS vllm_media_wheel_builder
+USER root
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        build-essential \
+        cmake \
+        ninja-build \
+        pkg-config \
+        python3-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
+    rm -rf /usr/local/include/libav* /usr/local/include/libsw* && \
+    rm -f /usr/local/lib/libav*.so* /usr/local/lib/libsw*.so* /usr/local/lib/lib*vpx*.so* && \
+    rm -f /usr/local/lib/pkgconfig/libav*.pc /usr/local/lib/pkgconfig/libsw*.pc && \
+    mkdir -p /usr/local/include /usr/local/lib/pkgconfig && \
+    cp -rL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
+    cp -L /tmp/usr/local/lib/libav*.so* /tmp/usr/local/lib/libsw*.so* /usr/local/lib/ && \
+    find /tmp/usr/local/lib -maxdepth 1 -name 'lib*vpx*.so*' -exec cp -L {} /usr/local/lib/ \; && \
+    cp -L /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/local/lib/pkgconfig/ && \
+    ldconfig
+
+ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
+    LD_LIBRARY_PATH=/usr/local/lib
+RUN --mount=type=bind,source=./container/deps/vllm/requirements.media-source.txt,target=/tmp/requirements.media-source.txt,readonly \
+    --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    set -eux; \
+    export CMAKE_BUILD_PARALLEL_LEVEL="$(nproc)"; \
+    export CMAKE_PREFIX_PATH=/usr/local; \
+    export CMAKE_ARGS="-DWITH_FFMPEG=ON -DOPENCV_FFMPEG_USE_FIND_PACKAGE=OFF -DOPENCV_FFMPEG_ENABLE_LIBAVDEVICE=OFF -DOPENCV_FFMPEG_SKIP_DOWNLOAD=ON -DWITH_GSTREAMER=OFF -DWITH_QT=OFF -DWITH_GTK=OFF -DWITH_WIN32UI=OFF -DCMAKE_BUILD_RPATH=/usr/local/lib -DCMAKE_INSTALL_RPATH=/usr/local/lib"; \
+    python3 -m pip wheel \
+        --wheel-dir /opt/vllm-media-wheels \
+        --no-deps \
+        --no-binary=av,opencv-python \
+        --require-hashes \
+        --requirement /tmp/requirements.media-source.txt
+{% endif %}
+
+FROM vllm_runtime_base AS pre_runtime
 
 ARG PYTHON_VERSION
 ARG ENABLE_KVBM
@@ -22,6 +66,7 @@ ARG VLLM_OMNI_REF
 ARG NIXL_REF
 {% if device == "cuda" %}
 ARG CUDA_MAJOR
+ARG FFMPEG_VERSION
 {% endif %}
 ARG MODELEXPRESS_VERSION
 
@@ -211,10 +256,11 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
 # against libx264/libx265/libmp3lame. Purge ONLY the explicitly-named ffmpeg +
 # codec packages and replace them with the LGPL-only in-tree ffmpeg built in
 # wheel_builder (--disable-gpl --disable-nonfree; H.264 via NVENC, VP9 via
-# libvpx). PyAV, torchaudio, torchvision, soundfile and Pillow all bundle their
-# own libraries and do not link the system ffmpeg/codecs, so removing them is
-# safe. dpkg-query keeps the match robust across base-image/arch version
-# suffixes (e.g. libavcodec58 vs 60).
+# libvpx). PyAV and OpenCV are handled separately below because their upstream
+# wheels carry private FFmpeg libraries that apt cannot see. torchaudio,
+# torchvision, soundfile, and Pillow do not link libav. dpkg-query keeps the
+# package match robust across base-image/arch version suffixes (for example,
+# libavcodec58 versus libavcodec60).
 #
 # This grep is the COMPLETE, auditable set of what leaves the image: there is
 # deliberately NO apt-get autoremove, so the removal can never cascade into
@@ -248,15 +294,59 @@ RUN --mount=type=bind,source=./container/deps/vllm/validate_torch_compile_smoke.
 # was just purged, so the LGPL CLI must always be present for the omni
 # video-export path to have something to encode with.
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
+    rm -rf /usr/local/include/libav* /usr/local/include/libsw* /usr/local/src/ffmpeg && \
+    rm -f /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
+    rm -f /usr/local/lib/libav*.so* /usr/local/lib/libsw*.so* /usr/local/lib/lib*vpx*.so* && \
+    rm -f /usr/local/lib/pkgconfig/libav*.pc /usr/local/lib/pkgconfig/libsw*.pc && \
     mkdir -p /usr/local/lib/pkgconfig && \
-    cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
-    cp -nL /tmp/usr/local/lib/libav*.so* /tmp/usr/local/lib/libsw*.so* /usr/local/lib/ && \
-    cp -nL /tmp/usr/local/lib/lib*vpx*.so* /usr/local/lib/ 2>/dev/null || true && \
-    cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/local/lib/pkgconfig/ && \
-    cp -nL /tmp/usr/local/bin/ffmpeg /usr/local/bin/ffmpeg && \
+    cp -rL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
+    cp -L /tmp/usr/local/lib/libav*.so* /tmp/usr/local/lib/libsw*.so* /usr/local/lib/ && \
+    find /tmp/usr/local/lib -maxdepth 1 -name 'lib*vpx*.so*' -exec cp -L {} /usr/local/lib/ \; && \
+    cp -L /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/local/lib/pkgconfig/ && \
+    cp -L /tmp/usr/local/bin/ffmpeg /usr/local/bin/ffmpeg && \
     cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/ && \
     ldconfig
 ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
+
+# Replace upstream media wheels after vLLM-Omni has completed dependency
+# resolution. PyAV and OpenCV are rebuilt in vllm_media_wheel_builder against
+# the shared FFmpeg above; PyNvVideoCodec is removed because it provides a
+# separate NVDEC/libav codec path rather than using Dynamo's allowlisted build.
+COPY --from=vllm_media_wheel_builder /opt/vllm-media-wheels/ /opt/dynamo/vllm-media-wheels/
+RUN set -eux; \
+    python3 -m pip uninstall --yes \
+        av \
+        decord \
+        decord2 \
+        opencv-python \
+        opencv-python-headless \
+        PyNvVideoCodec; \
+    SITE_PACKAGES="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; \
+    rm -rf \
+        "${SITE_PACKAGES}"/av \
+        "${SITE_PACKAGES}"/av-*.dist-info \
+        "${SITE_PACKAGES}"/av.libs \
+        "${SITE_PACKAGES}"/cv2 \
+        "${SITE_PACKAGES}"/decord \
+        "${SITE_PACKAGES}"/decord-*.dist-info \
+        "${SITE_PACKAGES}"/decord.libs \
+        "${SITE_PACKAGES}"/decord2 \
+        "${SITE_PACKAGES}"/decord2-*.dist-info \
+        "${SITE_PACKAGES}"/decord2.libs \
+        "${SITE_PACKAGES}"/opencv_python-*.dist-info \
+        "${SITE_PACKAGES}"/opencv_python.libs \
+        "${SITE_PACKAGES}"/opencv_python_headless-*.dist-info \
+        "${SITE_PACKAGES}"/opencv_python_headless.libs \
+        "${SITE_PACKAGES}"/PyNvVideoCodec* \
+        "${SITE_PACKAGES}"/pynvvideocodec*; \
+    find "${SITE_PACKAGES}" \( -type f -o -type l \) \
+        | grep -E '/(libav(codec|device|filter|format|util)|libpostproc|libsw(resample|scale)|libx264|libx265|libopenh264|libfdk-aac|libfaac|libvo-aacenc|libaacplus)[^/]*\.so' \
+        | xargs --no-run-if-empty rm -f; \
+    uv pip install --system --no-deps \
+        /opt/dynamo/vllm-media-wheels/av-*.whl \
+        /opt/dynamo/vllm-media-wheels/opencv_python-*.whl; \
+    rm -rf /opt/dynamo/vllm-media-wheels /root/.cache/pip /root/.cache/uv; \
+    ldconfig
 {% endif %}
 
 # Replace the upstream vllm/vllm-openai image's imageio-ffmpeg (which ships a
@@ -268,7 +358,9 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
     --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --reinstall-package imageio-ffmpeg --no-deps \
-        --requirement /tmp/requirements.vllm.txt
+        --requirement /tmp/requirements.vllm.txt && \
+    SITE_PACKAGES="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" && \
+    rm -rf "${SITE_PACKAGES}"/imageio_ffmpeg/binaries
 
 # Remove the vLLM source tree shipped in the base image to avoid pytest
 # collection conflicts (duplicate conftest plugin registration) and stale
@@ -294,6 +386,14 @@ RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/
     sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen && \
     chmod 755 /opt/dynamo/.launch_screen && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
+
+{% if device == "cuda" %}
+# Keep this after every package install and workspace COPY so a later layer
+# cannot silently restore an upstream FFmpeg or broaden the codec surface.
+RUN --mount=type=bind,source=./container/deps/vllm/validate_ffmpeg_provider.py,target=/tmp/validate_ffmpeg_provider.py,readonly \
+    EXPECTED_FFMPEG_VERSION="${FFMPEG_VERSION}" \
+    python3 /tmp/validate_ffmpeg_provider.py
+{% endif %}
 
 USER dynamo
 

@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Build these distributions from source against Dynamo's allowlisted FFmpeg.
+# The hashes pin the PyPI source archives; binary wheels must never be used.
+
+av==18.0.0 \
+    --hash=sha256:4ef7e72c3d3a872584a1215173b16e0226811037f40dcdbf75992631098df1ba
+opencv-python==5.0.0.93 \
+    --hash=sha256:66aac3e5b5faa48d4025816592f3af19e4bfc2c68dec067bae2dbb4ca10aa9e2
