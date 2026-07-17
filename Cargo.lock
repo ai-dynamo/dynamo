@@ -2446,6 +2446,7 @@ name = "dynamo-ext-proc"
 version = "1.3.0"
 dependencies = [
  "anyhow",
+ "axum 0.8.4",
  "dynamo-kv-router",
  "dynamo-llm",
  "dynamo-runtime",
@@ -2456,6 +2457,7 @@ dependencies = [
  "prost 0.13.5",
  "prost-types 0.13.5",
  "rcgen",
+ "reqwest 0.12.28",
  "rustls 0.23.40",
  "rustls-pemfile",
  "serde",

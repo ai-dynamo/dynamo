@@ -18,8 +18,10 @@ pub mod epp_standalone_config;
 pub mod picker;
 pub mod proto;
 pub mod server;
+pub mod vllm_render_client;
 
 pub use epp::Router;
 pub use epp_standalone_config::{EppMode, EppStandaloneConfig};
 pub use picker::{Endpoint, EndpointPicker, PickResult, RequestInfo};
 pub use server::ExtProcServer;
+pub use vllm_render_client::{VllmRenderClient, VllmRenderError};
