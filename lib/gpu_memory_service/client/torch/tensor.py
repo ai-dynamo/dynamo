@@ -14,6 +14,8 @@ STORAGE_MANIFEST_PREFIX = "torch.module.storage/"
 
 
 class ModuleTensorKind(str, Enum):
+    """Classify how a tensor is bound to a module."""
+
     PARAMETER = "parameter"
     PERSISTENT_BUFFER = "persistent_buffer"
     NONPERSISTENT_BUFFER = "nonpersistent_buffer"
@@ -21,11 +23,15 @@ class ModuleTensorKind(str, Enum):
 
 
 class ModuleTensorBinding(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    """Name one module binding for a tensor object."""
+
     path: str
     kind: ModuleTensorKind
 
 
 class TensorObject(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    """Describe one tensor identity within a storage manifest."""
+
     dtype: str
     shape: tuple[int, ...]
     stride: tuple[int, ...]
@@ -35,6 +41,8 @@ class TensorObject(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
 
 
 class StorageManifest(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    """Describe one shared StorageImpl and its tensor objects."""
+
     nbytes: int
     objects: tuple[TensorObject, ...]
 
