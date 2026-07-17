@@ -210,7 +210,6 @@ impl<P: WorkerCapacityProvider> SessionAwareAdmissionControl<P> {
         let was_new = prior.is_none();
         let was_suspended = prior.as_ref().is_some_and(Program::is_suspended);
         let assigned_worker = prior.as_ref().and_then(|program| program.assigned_worker);
-        let prior_footprint = prior.as_ref().map_or(0, Program::footprint);
         let step_count = prior
             .as_ref()
             .map_or(1, |program| program.step_count.saturating_add(1));
@@ -255,21 +254,11 @@ impl<P: WorkerCapacityProvider> SessionAwareAdmissionControl<P> {
         if let Some(worker) = assigned_worker {
             if worker_is_structurally_allowed(worker) {
                 if worker_is_available(worker) {
-                    let total_used = usage
-                        .get(&worker)
-                        .copied()
-                        .unwrap_or(0)
-                        .saturating_sub(prior_footprint);
-                    let running_used = running_usage.get(&worker).copied().unwrap_or(0);
-                    if capacities
-                        .iter()
-                        .find(|capacity| capacity.worker == worker)
-                        .is_none_or(|capacity| {
-                            fits_worker_capacity(capacity, total_used, running_used, context_tokens)
-                        })
-                    {
-                        return AdmissionDecision::Ready(WorkerPlacement::Exact(worker));
-                    }
+                    // An assigned session already belongs to the active working set.
+                    // Preserve ThunderAgent's continuation semantics: dispatch its next
+                    // turn and let periodic pressure handling choose idle victims or
+                    // mark running victims for suspension after completion.
+                    return AdmissionDecision::Ready(WorkerPlacement::Exact(worker));
                 }
                 self.defer_request(session_id, id, now, true);
                 return AdmissionDecision::Defer;
@@ -1348,6 +1337,36 @@ mod tests {
         assert_eq!(
             policy.admit(request(2, Some("a"), 120)),
             AdmissionDecision::Ready(WorkerPlacement::Exact(worker(1)))
+        );
+    }
+
+    #[test]
+    fn active_session_continuation_is_not_capacity_gated() {
+        let mut policy = SessionAwareAdmissionControl::new(
+            || tiered_capacities(&[(1, 100, 100)]),
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            policy.admit(request(1, Some("a"), 80)),
+            AdmissionDecision::Ready(WorkerPlacement::Exact(worker(1)))
+        );
+        policy.on_event(AdmissionEvent::Dispatched {
+            id: AdmissionId::new(1),
+            worker: worker(1),
+        });
+        policy.on_event(AdmissionEvent::Completed {
+            id: AdmissionId::new(1),
+            context_tokens: 90,
+        });
+
+        assert_eq!(
+            policy.admit(request(2, Some("a"), 120)),
+            AdmissionDecision::Ready(WorkerPlacement::Exact(worker(1)))
+        );
+        assert_eq!(
+            policy.admit(request(3, Some("b"), 1)),
+            AdmissionDecision::Defer
         );
     }
 
