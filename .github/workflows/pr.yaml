@@ -36,6 +36,8 @@ jobs:
       benchmarks: ${{ steps.changes.outputs.benchmarks }}
       sample: ${{ steps.changes.outputs.sample }}
       efa: ${{ steps.changes.outputs.efa }}
+      base_ref: ${{ steps.changes.outputs.base_ref }}
+      merge_base_sha: ${{ steps.changes.outputs.merge_base_sha }}
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
     steps:
       - name: Checkout code
@@ -60,6 +62,7 @@ jobs:
       - snapshot-agent
       - snapshot-placeholder-vllm
       - snapshot-placeholder-sglang
+      - snapshot-placeholder-trtllm
       - power-agent
       - vllm-build
       - vllm-dev-build
@@ -98,16 +101,21 @@ jobs:
       - deploy-test-trtllm
       - deploy-operator-checkpoint-vllm
       - deploy-operator-checkpoint-sglang
+      - deploy-operator-checkpoint-trtllm
       - deploy-snapshot-agent-checkpoint-vllm
       - deploy-snapshot-agent-checkpoint-sglang
+      - deploy-snapshot-agent-checkpoint-trtllm
       - snapshot-placeholder-vllm
       - snapshot-placeholder-sglang
+      - snapshot-placeholder-trtllm
       - frontend-copy-to-acr
       - deploy-test-checkpoint-vllm
       - deploy-test-checkpoint-sglang
+      - deploy-test-checkpoint-trtllm
       - deploy-cleanup
       - deploy-cleanup-checkpoint-vllm
       - deploy-cleanup-checkpoint-sglang
+      - deploy-cleanup-checkpoint-trtllm
     if: always()
     steps:
       - name: Check all deploy test jobs
@@ -140,6 +148,12 @@ jobs:
       needs.changed-files.outputs.snapshot == 'true'
     name: Operator
     runs-on: prod-default-v2
+    # actions: read lets the compliance step download a prior run's baseline
+    # operator compliance artifact to diff the OSRB CSV against. Missing -> the
+    # diff soft-degrades, build stays green.
+    permissions:
+      contents: read
+      actions: read
     outputs:
       operator_default_tag: ${{ steps.build.outputs.image_tag }}
     steps:
@@ -160,6 +174,13 @@ jobs:
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
           extra_tags: |
             ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-operator
+          # OSRB CSV diff baseline: the target branch selects the rule, while the
+          # merge-base pins PR->main diffs to the PR's fork point.
+          diff_event_context: pr
+          diff_current_branch: ${{ github.ref_name }}
+          diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
+          diff_merge_base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
+          gh_token: ${{ secrets.GITHUB_TOKEN }}
 
 
 # ============================================================================
@@ -175,7 +196,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Set up Helm
-        uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112  # v4.3.0
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5.0.1
         with:
           version: 'v3.17.3'  # match deploy/operator/Makefile HELM_VERSION
       - name: Lint and test
@@ -256,21 +277,11 @@ jobs:
             --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
             -f deploy/power-agent/Dockerfile deploy/power-agent
       - name: Set up Helm
-        uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112  # v4.3.0
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5.0.1
         with:
           version: 'v3.17.3'  # match deploy/operator/Makefile HELM_VERSION
-      - name: Lint and render (production + dev)
-        run: |
-          CHART=deploy/helm/charts/power-agent
-          helm lint "$CHART" --set image.tag=ci-test
-          # Production DaemonSet render (default daemonset.enabled=true).
-          helm template power-agent "$CHART" --set image.tag=ci-test >/dev/null
-          # Dev-pod render: uses dev.image.* and must NOT require the production
-          # image.tag (regression guard for the daemonset-gated validation).
-          helm template power-agent "$CHART" \
-            --set daemonset.enabled=false \
-            --set dev.enabled=true \
-            --set dev.nodeName=ci-node >/dev/null
+      - name: Lint and test Helm chart
+        run: make -C deploy/helm/charts/power-agent lint test
 
 # ============================================================================
 # FRAMEWORK PIPELINES (Build → Test → Copy)
@@ -283,8 +294,9 @@ jobs:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files]
     # `sample` is here because sample tests piggyback on this image and run as part of vllm-test.
-    # `operator` and `snapshot` are here because DynamoCheckpoint deploy tests
-    # build a snapshot placeholder from the CI-built vLLM runtime image.
+    # `operator` is here because operator changes run the deploy tests, which
+    # deploy the CI-built runtime image. `snapshot` is here because
+    # DynamoCheckpoint deploy tests build a snapshot placeholder from it.
     if: |
       needs.changed-files.outputs.core == 'true' ||
       needs.changed-files.outputs.vllm == 'true' ||
@@ -302,6 +314,18 @@ jobs:
       inline_compliance: true
       artifact_retention_days: '7'
       build_timeout_minutes: 60
+      # OSRB CSV diff baseline: the target branch selects the rule, while the
+      # merge-base pins PR->main diffs to the PR's fork point.
+      diff_event_context: pr
+      diff_current_branch: ${{ github.ref_name }}
+      diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
+      diff_merge_base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
+    # actions: read lets the build download a prior run's baseline compliance
+    # artifact to diff against (a reusable workflow's token can't exceed the
+    # caller's). Missing -> the diff soft-degrades, build stays green.
+    permissions:
+      contents: read
+      actions: read
     secrets: inherit
 
   vllm-dev-build:
@@ -322,8 +346,9 @@ jobs:
   sglang-build:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [changed-files]
-    # `operator` and `snapshot` are here because DynamoCheckpoint deploy tests
-    # build a snapshot placeholder from the CI-built SGLang runtime image.
+    # `operator` is here because operator changes run the deploy tests, which
+    # deploy the CI-built runtime image. `snapshot` is here because
+    # DynamoCheckpoint deploy tests build a snapshot placeholder from it.
     if: |
       needs.changed-files.outputs.core == 'true' ||
       needs.changed-files.outputs.sglang == 'true' ||
@@ -340,6 +365,18 @@ jobs:
       inline_compliance: true
       artifact_retention_days: '7'
       build_timeout_minutes: 60
+      # OSRB CSV diff baseline: the target branch selects the rule, while the
+      # merge-base pins PR->main diffs to the PR's fork point.
+      diff_event_context: pr
+      diff_current_branch: ${{ github.ref_name }}
+      diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
+      diff_merge_base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
+    # actions: read lets the build download a prior run's baseline compliance
+    # artifact to diff against (a reusable workflow's token can't exceed the
+    # caller's). Missing -> the diff soft-degrades, build stays green.
+    permissions:
+      contents: read
+      actions: read
     secrets: inherit
 
   sglang-dev-build:
@@ -360,7 +397,15 @@ jobs:
   trtllm-build:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    # `operator` is here because operator changes run the deploy tests, which
+    # deploy the CI-built runtime image. `snapshot` is here because
+    # DynamoCheckpoint deploy tests build a snapshot placeholder from it.
+    if: |
+      needs.changed-files.outputs.core == 'true' ||
+      needs.changed-files.outputs.trtllm == 'true' ||
+      needs.changed-files.outputs.deploy == 'true' ||
+      needs.changed-files.outputs.operator == 'true' ||
+      needs.changed-files.outputs.snapshot == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
@@ -371,6 +416,18 @@ jobs:
       inline_compliance: true
       artifact_retention_days: '7'
       build_timeout_minutes: 60
+      # OSRB CSV diff baseline: the target branch selects the rule, while the
+      # merge-base pins PR->main diffs to the PR's fork point.
+      diff_event_context: pr
+      diff_current_branch: ${{ github.ref_name }}
+      diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
+      diff_merge_base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
+    # actions: read lets the build download a prior run's baseline compliance
+    # artifact to diff against (a reusable workflow's token can't exceed the
+    # caller's). Missing -> the diff soft-degrades, build stays green.
+    permissions:
+      contents: read
+      actions: read
     secrets: inherit
 
   trtllm-dev-build:
@@ -403,6 +460,18 @@ jobs:
       inline_compliance: true
       artifact_retention_days: '7'
       build_timeout_minutes: 60
+      # OSRB CSV diff baseline: the target branch selects the rule, while the
+      # merge-base pins PR->main diffs to the PR's fork point.
+      diff_event_context: pr
+      diff_current_branch: ${{ github.ref_name }}
+      diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
+      diff_merge_base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
+    # actions: read lets the build download a prior run's baseline compliance
+    # artifact to diff against (a reusable workflow's token can't exceed the
+    # caller's). Missing -> the diff soft-degrades, build stays green.
+    permissions:
+      contents: read
+      actions: read
     secrets: inherit
 
   sglang-efa-build:
@@ -420,6 +489,18 @@ jobs:
       inline_compliance: true
       artifact_retention_days: '7'
       build_timeout_minutes: 60
+      # OSRB CSV diff baseline: the target branch selects the rule, while the
+      # merge-base pins PR->main diffs to the PR's fork point.
+      diff_event_context: pr
+      diff_current_branch: ${{ github.ref_name }}
+      diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
+      diff_merge_base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
+    # actions: read lets the build download a prior run's baseline compliance
+    # artifact to diff against (a reusable workflow's token can't exceed the
+    # caller's). Missing -> the diff soft-degrades, build stays green.
+    permissions:
+      contents: read
+      actions: read
     secrets: inherit
 
   trtllm-efa-build:
@@ -437,6 +518,18 @@ jobs:
       inline_compliance: true
       artifact_retention_days: '7'
       build_timeout_minutes: 60
+      # OSRB CSV diff baseline: the target branch selects the rule, while the
+      # merge-base pins PR->main diffs to the PR's fork point.
+      diff_event_context: pr
+      diff_current_branch: ${{ github.ref_name }}
+      diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
+      diff_merge_base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
+    # actions: read lets the build download a prior run's baseline compliance
+    # artifact to diff against (a reusable workflow's token can't exceed the
+    # caller's). Missing -> the diff soft-degrades, build stays green.
+    permissions:
+      contents: read
+      actions: read
     secrets: inherit
 
   planner-build:
@@ -450,7 +543,21 @@ jobs:
       cuda_version: '[""]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      inline_compliance: true
+      artifact_retention_days: '7'
       build_timeout_minutes: 45
+      # OSRB CSV diff baseline: the target branch selects the rule, while the
+      # merge-base pins PR->main diffs to the PR's fork point.
+      diff_event_context: pr
+      diff_current_branch: ${{ github.ref_name }}
+      diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
+      diff_merge_base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
+    # actions: read lets the build download a prior run's baseline compliance
+    # artifact to diff against (a reusable workflow's token can't exceed the
+    # caller's). Missing -> the diff soft-degrades, build stays green.
+    permissions:
+      contents: read
+      actions: read
     secrets: inherit
 
   frontend-build:
@@ -746,9 +853,7 @@ jobs:
     needs: [changed-files, frontend-build]
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
+      (needs.changed-files.outputs.snapshot == 'true') &&
       needs.frontend-build.result == 'success'
     uses: ./.github/workflows/shared-copy.yml
     with:
@@ -763,9 +868,7 @@ jobs:
     needs: [changed-files, vllm-copy-to-acr]
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true')
+      (needs.changed-files.outputs.snapshot == 'true')
     runs-on: prod-default-v2
     steps:
       - name: Checkout code
@@ -813,9 +916,7 @@ jobs:
     needs: [changed-files, sglang-copy-to-acr]
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true')
+      (needs.changed-files.outputs.snapshot == 'true')
     runs-on: prod-default-v2
     steps:
       - name: Checkout code
@@ -844,7 +945,11 @@ jobs:
     needs: [changed-files, trtllm-build]
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true') &&
+      (needs.changed-files.outputs.core == 'true' ||
+       needs.changed-files.outputs.trtllm == 'true' ||
+       needs.changed-files.outputs.deploy == 'true' ||
+       needs.changed-files.outputs.operator == 'true' ||
+       needs.changed-files.outputs.snapshot == 'true') &&
       needs.trtllm-build.result == 'success'
     uses: ./.github/workflows/shared-copy.yml
     with:
@@ -854,6 +959,35 @@ jobs:
       copy_timeout_minutes: 10
     secrets: inherit
 
+  snapshot-placeholder-trtllm:
+    name: TRTLLM Snapshot Placeholder
+    needs: [changed-files, trtllm-copy-to-acr]
+    if: |
+      always() && !cancelled() &&
+      (needs.changed-files.outputs.snapshot == 'true')
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Build and push snapshot placeholder
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: snapshot
+          target: placeholder
+          image_tag: ${{ github.sha }}-trtllm-placeholder
+          builder_name: ${{ needs.changed-files.outputs.builder_name }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-placeholder
+          extra_build_args: |
+            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-runtime
+
   # ============================================================================
   # DEPLOY TEST PIPELINES
   # ============================================================================
@@ -861,7 +995,8 @@ jobs:
   deploy-operator:
     if: |
       !cancelled() && !failure() &&
-      (needs.changed-files.outputs.vllm == 'true' ||
+      (needs.changed-files.outputs.operator == 'true' ||
+       needs.changed-files.outputs.vllm == 'true' ||
        needs.changed-files.outputs.sglang == 'true' ||
        needs.changed-files.outputs.trtllm == 'true' ||
        needs.changed-files.outputs.deploy == 'true') &&
@@ -893,7 +1028,9 @@ jobs:
     needs: [changed-files, deploy-operator, vllm-copy-to-acr]
     if: |
       !cancelled() && !failure() &&
-      (needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true')
+      (needs.changed-files.outputs.vllm == 'true' ||
+       needs.changed-files.outputs.deploy == 'true' ||
+       needs.changed-files.outputs.operator == 'true')
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: vllm
@@ -909,7 +1046,9 @@ jobs:
     needs: [changed-files, deploy-operator, sglang-copy-to-acr]
     if: |
       !cancelled() && !failure() &&
-      (needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true')
+      (needs.changed-files.outputs.sglang == 'true' ||
+       needs.changed-files.outputs.deploy == 'true' ||
+       needs.changed-files.outputs.operator == 'true')
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: sglang
@@ -925,7 +1064,9 @@ jobs:
     needs: [changed-files, deploy-operator, trtllm-copy-to-acr]
     if: |
       !cancelled() && !failure() &&
-      (needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true')
+      (needs.changed-files.outputs.trtllm == 'true' ||
+       needs.changed-files.outputs.deploy == 'true' ||
+       needs.changed-files.outputs.operator == 'true')
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: trtllm
@@ -940,9 +1081,7 @@ jobs:
     name: vLLM DynamoCheckpoint Operator Setup
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
+      (needs.changed-files.outputs.snapshot == 'true') &&
       needs.operator.result == 'success'
     needs: [changed-files, operator]
     runs-on: prod-deploy-tester-v1
@@ -972,9 +1111,7 @@ jobs:
     name: SGLang DynamoCheckpoint Operator Setup
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
+      (needs.changed-files.outputs.snapshot == 'true') &&
       needs.operator.result == 'success'
     needs: [changed-files, operator]
     runs-on: prod-deploy-tester-v1
@@ -1000,14 +1137,42 @@ jobs:
           checkpoint_enabled: 'true'
           checkpoint_storage_size: 64Gi
 
+  deploy-operator-checkpoint-trtllm:
+    name: TRTLLM DynamoCheckpoint Operator Setup
+    if: |
+      always() && !cancelled() &&
+      (needs.changed-files.outputs.snapshot == 'true') &&
+      needs.operator.result == 'success'
+    needs: [changed-files, operator]
+    runs-on: prod-deploy-tester-v1
+    permissions:
+      contents: read
+    outputs:
+      namespace: ${{ steps.setup.outputs.namespace }}
+      vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
+      operator_tag: ${{ steps.setup.outputs.operator_tag }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Setup vCluster and operator
+        id: setup
+        uses: ./.github/actions/setup-dynamo-operator
+        with:
+          vcluster_name: ci-${{ github.run_id }}-checkpoint-trtllm
+          vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-trtllm-dt
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+          checkpoint_enabled: 'true'
+          checkpoint_storage_size: 64Gi
+
   deploy-snapshot-agent-checkpoint-vllm:
     name: vLLM DynamoCheckpoint Snapshot Agent Setup
     needs: [changed-files, deploy-operator-checkpoint-vllm, snapshot-agent]
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
+      (needs.changed-files.outputs.snapshot == 'true') &&
       needs.deploy-operator-checkpoint-vllm.result == 'success' &&
       needs.snapshot-agent.result == 'success'
     runs-on: prod-deploy-tester-v1
@@ -1054,9 +1219,7 @@ jobs:
     needs: [changed-files, deploy-operator-checkpoint-sglang, snapshot-agent]
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
+      (needs.changed-files.outputs.snapshot == 'true') &&
       needs.deploy-operator-checkpoint-sglang.result == 'success' &&
       needs.snapshot-agent.result == 'success'
     runs-on: prod-deploy-tester-v1
@@ -1098,14 +1261,59 @@ jobs:
           namespace: default
           snapshot_agent_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
 
+  deploy-snapshot-agent-checkpoint-trtllm:
+    name: TRTLLM DynamoCheckpoint Snapshot Agent Setup
+    needs: [changed-files, deploy-operator-checkpoint-trtllm, snapshot-agent]
+    if: |
+      always() && !cancelled() &&
+      (needs.changed-files.outputs.snapshot == 'true') &&
+      needs.deploy-operator-checkpoint-trtllm.result == 'success' &&
+      needs.snapshot-agent.result == 'success'
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Check if vCluster exists
+        id: vcluster-check
+        uses: ./.github/actions/check-vcluster-exists
+        with:
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.namespace }}
+      - name: Self-bootstrap vCluster (rerun)
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: ./.github/actions/setup-dynamo-operator
+        with:
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.namespace }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+          checkpoint_enabled: 'true'
+          checkpoint_storage_size: 64Gi
+      - name: Connect to vCluster
+        id: connect-vcluster
+        uses: ./.github/actions/connect-vcluster
+        with:
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.namespace }}
+      - name: Install snapshot-agent
+        uses: ./.github/actions/setup-snapshot-agent
+        with:
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
+          snapshot_agent_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
+
   deploy-test-checkpoint-vllm:
     name: vLLM DynamoCheckpoint Deploy Test
     needs: [changed-files, deploy-operator-checkpoint-vllm, deploy-snapshot-agent-checkpoint-vllm, snapshot-placeholder-vllm, frontend-copy-to-acr]
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
+      (needs.changed-files.outputs.snapshot == 'true') &&
       needs.deploy-snapshot-agent-checkpoint-vllm.result == 'success' &&
       needs.snapshot-placeholder-vllm.result == 'success' &&
       needs.frontend-copy-to-acr.result == 'success'
@@ -1170,9 +1378,7 @@ jobs:
     needs: [changed-files, deploy-operator-checkpoint-sglang, deploy-snapshot-agent-checkpoint-sglang, snapshot-placeholder-sglang, frontend-copy-to-acr]
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
+      (needs.changed-files.outputs.snapshot == 'true') &&
       needs.deploy-snapshot-agent-checkpoint-sglang.result == 'success' &&
       needs.snapshot-placeholder-sglang.result == 'success' &&
       needs.frontend-copy-to-acr.result == 'success'
@@ -1232,6 +1438,71 @@ jobs:
             --checkpoint-backend=sglang
             --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-dynamo-frontend
 
+  deploy-test-checkpoint-trtllm:
+    name: TRTLLM DynamoCheckpoint Deploy Test
+    needs: [changed-files, deploy-operator-checkpoint-trtllm, deploy-snapshot-agent-checkpoint-trtllm, snapshot-placeholder-trtllm, frontend-copy-to-acr]
+    if: |
+      always() && !cancelled() &&
+      (needs.changed-files.outputs.snapshot == 'true') &&
+      needs.deploy-snapshot-agent-checkpoint-trtllm.result == 'success' &&
+      needs.snapshot-placeholder-trtllm.result == 'success' &&
+      needs.frontend-copy-to-acr.result == 'success'
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Check if vCluster exists
+        id: vcluster-check
+        uses: ./.github/actions/check-vcluster-exists
+        with:
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.namespace }}
+      - name: Self-bootstrap vCluster (rerun)
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: ./.github/actions/setup-dynamo-operator
+        with:
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.namespace }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+          checkpoint_enabled: 'true'
+          checkpoint_storage_size: 64Gi
+      - name: Connect to vCluster
+        id: connect-vcluster
+        uses: ./.github/actions/connect-vcluster
+        with:
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.namespace }}
+      - name: Install snapshot-agent (rerun bootstrap)
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: ./.github/actions/setup-snapshot-agent
+        with:
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
+          snapshot_agent_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
+      - name: Run DynamoCheckpoint Deploy Test
+        uses: ./.github/actions/dynamo-deploy-test
+        with:
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.operator_tag }}
+          framework: checkpoint
+          profile: dgd_restore
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-placeholder
+          test_name: checkpoint_dgd_restore_trtllm
+          test_file: tests/deploy/test_dynamocheckpoint.py
+          extra_pytest_args: >-
+            -m dynamocheckpoint
+            --checkpoint-backend=trtllm
+            --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-dynamo-frontend
+
   deploy-cleanup:
     if: always()
     needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
@@ -1251,9 +1522,7 @@ jobs:
     name: vLLM DynamoCheckpoint Cleanup
     if: |
       always() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true')
+      (needs.changed-files.outputs.snapshot == 'true')
     needs: [changed-files, deploy-operator-checkpoint-vllm, deploy-snapshot-agent-checkpoint-vllm, deploy-test-checkpoint-vllm]
     runs-on: prod-deploy-tester-v1
     steps:
@@ -1268,9 +1537,7 @@ jobs:
     name: SGLang DynamoCheckpoint Cleanup
     if: |
       always() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true')
+      (needs.changed-files.outputs.snapshot == 'true')
     needs: [changed-files, deploy-operator-checkpoint-sglang, deploy-snapshot-agent-checkpoint-sglang, deploy-test-checkpoint-sglang]
     runs-on: prod-deploy-tester-v1
     steps:
@@ -1280,6 +1547,21 @@ jobs:
         with:
           vcluster_name: ci-${{ github.run_id }}-checkpoint-sglang
           vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-sglang-dt
+
+  deploy-cleanup-checkpoint-trtllm:
+    name: TRTLLM DynamoCheckpoint Cleanup
+    if: |
+      always() &&
+      (needs.changed-files.outputs.snapshot == 'true')
+    needs: [changed-files, deploy-operator-checkpoint-trtllm, deploy-snapshot-agent-checkpoint-trtllm, deploy-test-checkpoint-trtllm]
+    runs-on: prod-deploy-tester-v1
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Teardown vCluster
+        uses: ./.github/actions/teardown-dynamo-operator
+        with:
+          vcluster_name: ci-${{ github.run_id }}-checkpoint-trtllm
+          vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-trtllm-dt
 
   clean-k8s-builder:
     name: Clean K8s builder if exists
@@ -1291,6 +1573,7 @@ jobs:
       - snapshot-agent
       - snapshot-placeholder-vllm
       - snapshot-placeholder-sglang
+      - snapshot-placeholder-trtllm
       - power-agent
       - planner-test
       - vllm-copy-to-acr
@@ -1346,6 +1629,7 @@ jobs:
       - deploy-test-trtllm
       - deploy-test-checkpoint-vllm
       - deploy-test-checkpoint-sglang
+      - deploy-test-checkpoint-trtllm
     if: false
     # Disabled: gh-pages branch bloated to ~1GB after 72 commits of Allure reports
     # if: ${{ !cancelled() }}

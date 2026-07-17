@@ -21,8 +21,10 @@ import (
 	"context"
 	"testing"
 
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	admissionv1 "k8s.io/api/admission/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -32,7 +34,7 @@ import (
 
 // admissionCtx builds a context carrying an admission request for the given operation and kind.
 func admissionCtx(op admissionv1.Operation, kind schema.GroupVersionKind) context.Context {
-	return admission.NewContextWithRequest(context.Background(), admission.Request{
+	ctx := admission.NewContextWithRequest(context.Background(), admission.Request{
 		AdmissionRequest: admissionv1.AdmissionRequest{
 			Operation: op,
 			Kind: metav1.GroupVersionKind{
@@ -42,6 +44,7 @@ func admissionCtx(op admissionv1.Operation, kind schema.GroupVersionKind) contex
 			},
 		},
 	})
+	return features.WithGate(ctx, features.Defaults())
 }
 
 func TestDGDDefaulter_Default(t *testing.T) {
@@ -153,7 +156,7 @@ func TestDGDDefaulter_Default(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			defaulter := NewDGDDefaulter(tt.operatorVersion, false)
+			defaulter := NewDGDDefaulter(tt.operatorVersion)
 
 			err := defaulter.Default(tt.ctx, tt.dgd)
 			if (err != nil) != tt.wantErr {
@@ -229,7 +232,7 @@ func TestDGDDefaulter_DefaultsNilReplicas(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			defaulter := NewDGDDefaulter("0.9.0", false)
+			defaulter := NewDGDDefaulter("0.9.0")
 			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
@@ -395,7 +398,7 @@ func TestDGDDefaulter_DefaultsGroveMinAvailable(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			defaulter := NewDGDDefaulter("0.9.0", tt.groveEnabled)
+			defaulter := NewDGDDefaulter("0.9.0")
 			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:        "test",
@@ -407,6 +410,7 @@ func TestDGDDefaulter_DefaultsGroveMinAvailable(t *testing.T) {
 				},
 			}
 			ctx := admissionCtx(tt.op, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
+			ctx = features.WithGate(ctx, features.Gates{Grove: tt.groveEnabled})
 
 			if err := defaulter.Default(ctx, dgd); err != nil {
 				t.Fatalf("Default() unexpected error: %v", err)
@@ -432,5 +436,29 @@ func TestDGDDefaulter_DefaultsGroveMinAvailable(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDGDV1Alpha1Defaulter_Default(t *testing.T) {
+	dgd := &nvidiacomv1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: consts.ComponentTypeWorker,
+				},
+			},
+		},
+	}
+	defaulter := &dgdV1Alpha1Defaulter{defaulter: NewDGDDefaulter("0.9.0")}
+
+	if err := defaulter.Default(admissionCtx(admissionv1.Create, nvidiacomv1alpha1.DynamoGraphDeploymentGVK), dgd); err != nil {
+		t.Fatalf("Default() unexpected error: %v", err)
+	}
+	if got := dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]; got != "0.9.0" {
+		t.Errorf("origin annotation = %q, want %q", got, "0.9.0")
+	}
+	if got := dgd.Spec.Services["worker"].Replicas; got == nil || *got != 1 {
+		t.Errorf("worker replicas = %v, want 1", got)
 	}
 }

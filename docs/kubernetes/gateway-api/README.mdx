@@ -47,7 +47,7 @@ flowchart LR
     EPP -->|"x-dynamo-worker-instance-id"| Gateway
     Gateway -->|"forward request"| Sidecar["Frontend sidecar<br/>--router-mode direct"]
     Sidecar -->|"forwards"| Worker["Dynamo worker"]
-    Worker -. "publishes KV events" .-> Runtime["Dynamo runtime<br/>NATS/JetStream"]
+    Worker -. "publishes KV events" .-> Runtime["Dynamo runtime<br/>NATS Core event plane"]
     Runtime -. "updates routing state" .-> EPP
 ```
 
@@ -57,15 +57,15 @@ the EPP. The EPP receives Dynamo routing state from the runtime event plane and 
 worker ID to the gateway. The gateway forwards the request to the selected worker's Frontend sidecar,
 which runs in direct routing mode.
 
-In this operator-managed path, the EPP consumes routing state through the Dynamo event plane using
-NATS/JetStream. Direct vLLM ZMQ KV-event subscriptions are used by other integration shapes, but not
+In this operator-managed path, the EPP consumes live routing state through the Dynamo event plane using
+NATS Core. Direct vLLM ZMQ KV-event subscriptions are used by other integration shapes, but not
 by this quickstart path.
 
 ## Shared Prerequisites
 
 - A Kubernetes cluster with GPU nodes. For the baseline Gateway API environment, start with the
   upstream [Gateway API getting started guide](https://gateway-api.sigs.k8s.io/guides/getting-started/introduction/)
-  and the upstream [GAIE guide](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/guides/index.md).
+  and the upstream [GAIE introduction](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/index.md).
 - `kubectl`, [Helm](https://helm.sh/docs/intro/install/), and
   [jq](https://jqlang.org/download/) configured for the cluster.
 - Gateway API and GAIE CRDs installed. The quickstart installs them explicitly from pinned upstream
@@ -170,16 +170,15 @@ result with production-like traffic.
 | `replicas` and `podTemplate.spec.containers[].resources` | Scale or reserve capacity for EPP pods. | Keep EPP capacity aligned with gateway request volume. |
 | `DYN_MODEL_NAME` | Change the served model. | Match the worker model name. |
 | `DYN_KV_CACHE_BLOCK_SIZE` | Change the backend KV block size. | Match the backend `--block-size` value. |
-| `DYN_ENFORCE_DISAGG` | Require strict prefill/decode routing separation. | Set `"true"` only for disaggregated deployments that should fail closed when topology labels are missing. |
 | `label-filter` parameters | Change worker topology labels or component names. | Keep filter labels and values aligned with worker pod labels. |
 | `schedulingProfiles[].plugins[].weight` | Adjust how much each scorer influences endpoint selection. | Tune scorer weights deliberately; keep required filters and the picker in the profile. |
 | scorer and picker plugins | Change the routing strategy. | Treat this as advanced EPP tuning and validate with traffic. |
 
-For upstream EPP configuration semantics, see the GAIE
-[EPP YAML configuration guide](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/)
-and its
-[Scheduling Profiles](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/#scheduling-profiles)
-section for plugin weights. For label-based endpoint selection, see the upstream
+For upstream Endpoint Picker Plugin (EPP) semantics, see the GAIE
+[Implementer's Guide](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/guides/implementers.md)
+and the
+[Endpoint Picker Protocol specification](https://github.com/kubernetes-sigs/gateway-api-inference-extension/tree/main/docs/proposals/004-endpoint-picker-protocol).
+For label-based endpoint selection, see the upstream
 [InferencePool configuration guide](https://gateway-api-inference-extension.sigs.k8s.io/api-types/inferencepool/#how-to-configure-an-inferencepool).
 The `label-filter` plugin shown here is Dynamo-specific; the component role label comes from the
 Dynamo [ComponentType](../api-reference.md#componenttype) field.
@@ -231,8 +230,6 @@ Update them when the worker backend changes; do not use them to tune scoring.
               value: Qwen/Qwen3-0.6B # Match the worker model name.
             - name: DYN_KV_CACHE_BLOCK_SIZE
               value: "16" # Match the worker backend's --block-size.
-            - name: DYN_ENFORCE_DISAGG
-              value: "false" # Use "true" for disaggregated fail-closed behavior.
 ```
 
 See the complete EPP examples in the source tree:
@@ -249,9 +246,9 @@ available to the EPP.
 | KV cache aware routing | Worker-published KV cache events delivered through the Dynamo event plane. | Default path when workers publish KV events and you want cache locality to influence endpoint selection. |
 | Approximate routing | Endpoint availability plus local bookkeeping from tokenized requests and request lifecycle. | Fallback path when precise worker-published KV events are unavailable, disabled, or not yet supported by the chosen backend or deployment shape. |
 
-With operator-managed GAIE, NATS/JetStream backs routing-state delivery. The EPP can receive startup
-state and subsequent updates through the Dynamo event plane instead of rebuilding all state from new
-traffic after every EPP restart.
+With operator-managed GAIE, NATS Core backs live routing-state delivery. After a restart, the EPP
+rebuilds prefix state from worker-local indexers and then consumes subsequent updates through the
+Dynamo event plane.
 
 ## Compatibility and Defaults
 

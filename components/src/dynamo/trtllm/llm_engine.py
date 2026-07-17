@@ -61,12 +61,23 @@ from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.llm import KvEventPublisher, ModelInput
 from dynamo.trtllm.args import parse_args
 from dynamo.trtllm.constants import DisaggregationMode
+from dynamo.trtllm.conversation_affinity import (
+    CONVERSATION_PARAMS_AVAILABLE,
+    conversation_params_for,
+    engine_conversation_affinity_enabled,
+    session_id_from_request,
+)
 from dynamo.trtllm.engine import Backend, TensorRTLLMEngine
 from dynamo.trtllm.logits_processing.adapter import attach_logits_processors
 from dynamo.trtllm.request_handlers.handler_base import TRTLLMEnginePauseController
 from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
     DisaggregatedParamsCodec,
+)
+from dynamo.trtllm.utils.request_utils import (
+    apply_stop_conditions_to_sampling_params,
+    request_cache_salt,
+    stored_event_cache_salt,
 )
 from dynamo.trtllm.utils.trtllm_utils import deep_update, warn_override_collisions
 
@@ -131,6 +142,7 @@ class TrtllmLLMEngine(LLMEngine):
         disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED,
         component: str = "backend",
         publish_events_and_metrics: bool = False,
+        conversation_affinity: bool = False,
     ):
         self.engine_args = engine_args
         self.model_name = model_name
@@ -180,6 +192,13 @@ class TrtllmLLMEngine(LLMEngine):
         self._metrics_thread: Optional[threading.Thread] = None
         self._kv_events_thread: Optional[threading.Thread] = None
         self._attention_dp_size: int = 1
+        # Engine conversation-affinity gate; real value resolved in initialize().
+        # Default False so generate() is safe if reached before initialize()
+        # (e.g. unit tests that drive generate directly).
+        self._conversation_affinity: bool = False
+        # Manual override (--conversation-affinity / DYN_ENGINE_CONV_AFFINITY) to force
+        # engine-side conversation-affinity assignment regardless of engine detection.
+        self._engine_conversation_affinity_override: bool = conversation_affinity
         # Worker invokes on_ready callbacks serially during setup (see
         # `setup_kv_publishers` in lib/backend-common/src/publisher.rs); the
         # dict is fully populated before `_kv_events_thread` starts and
@@ -249,6 +268,15 @@ class TrtllmLLMEngine(LLMEngine):
             "enable_iter_perf_stats": True,
         }
 
+        # Match the legacy worker path: select TRT-LLM's guided-decoding
+        # implementation at engine startup, before generic engine-arg overrides.
+        if config.guided_decoding_backend is not None:
+            engine_args["guided_decoding_backend"] = config.guided_decoding_backend
+            logger.info(
+                "Guided decoding enabled with backend: %s",
+                config.guided_decoding_backend,
+            )
+
         # Apply --extra-engine-args / --override-engine-args. Match the
         # legacy `dynamo.trtllm` path so profiler/parallel-scheduler
         # overrides behave the same way.
@@ -306,6 +334,7 @@ class TrtllmLLMEngine(LLMEngine):
             disaggregation_mode=config.disaggregation_mode,
             component=config.component,
             publish_events_and_metrics=config.publish_events_and_metrics,
+            conversation_affinity=config.conversation_affinity,
         )
         worker_config = WorkerConfig.from_runtime_config(
             config,
@@ -366,6 +395,19 @@ class TrtllmLLMEngine(LLMEngine):
         ) or getattr(self._trtllm_metrics_collector, "log_metrics_dict", None)
 
         self._attention_dp_size = self._engine.get_attention_dp_size()
+        # Engine-owned conversation-affinity ADP routing (opt-in). When the engine's
+        # attention_dp_config.kv_cache_routing_conversation_affinity is enabled, its
+        # ConversationAwareADPRouter pins a conversation (agent_context.session_id) to a
+        # DP rank; this worker then forwards ConversationParams and does NOT force a rank.
+        self._conversation_affinity = engine_conversation_affinity_enabled(
+            self._engine.llm
+        )
+        if self._conversation_affinity and not CONVERSATION_PARAMS_AVAILABLE:
+            raise RuntimeError(
+                "attention_dp_config.kv_cache_routing_conversation_affinity is enabled but the "
+                "installed TensorRT-LLM build has no ConversationParams API (requires a release "
+                "newer than 1.3.0rc20)."
+            )
         # Always start the metrics-poll thread: it pushes the latest
         # ComponentSnapshot into the framework's SnapshotPublisher and
         # forwards each snap to `_log_iteration_stats` for `trtllm_kv_cache_*`.
@@ -587,6 +629,7 @@ class TrtllmLLMEngine(LLMEngine):
                 block_hashes,
                 parent_hash,
                 lora_name=data.get("lora_name"),
+                cache_salt=stored_event_cache_salt(data),
             )
         elif kind == "removed":
             partial = self._partial_block_hashes_by_rank.get(rank)
@@ -818,22 +861,60 @@ class TrtllmLLMEngine(LLMEngine):
             elif self.max_seq_len is not None:
                 sampling_params.max_tokens = max(1, self.max_seq_len - len(token_ids))
 
-        # TODO: mirror visible/hidden stop-token handling from the disagg
-        # path (handler_base.py) into a shared helper. See PR #9778.
-        ignore_eos = stop_conditions.get("ignore_eos")
-        if ignore_eos:
-            sampling_params.ignore_eos = ignore_eos
+        if is_generation_stage(_TRTLLM_TO_COMMON_DISAGG[self.disaggregation_mode]):
+            apply_stop_conditions_to_sampling_params(sampling_params, stop_conditions)
 
-        # Honour the router's DP rank decision; without it TRT-LLM picks
-        # its own rank and KV events land on the wrong publisher.
-        rank = validate_global_dp_rank(
-            forced_dp_rank(request), 0, self._attention_dp_size, "TRT-LLM"
+        # In conversation-affinity mode let the engine's ConversationAwareADPRouter pick the
+        # attention-DP rank from the conversation id; do NOT force a rank (an explicit rank is
+        # honored before affinity and would bypass it). The rank is suppressed even without an
+        # id so the engine's no-id balancing fallback runs. Otherwise honour the router's DP
+        # rank decision; without it TRT-LLM picks its own rank and KV events land on the wrong
+        # publisher.
+        #
+        # TODO(TRT-LLM tracking issue): rank-ownership mismatch. TRT-LLM's
+        # `ConversationAwareADPRouter` currently honors an explicit
+        # `attention_dp_rank` BEFORE looking up affinity AND does NOT record a
+        # `conversation_id -> rank` binding when explicit placement wins. Sticky
+        # routing here relies on Dynamo always suppressing the rank when
+        # affinity is enabled (as this branch does); if any other path leaks an
+        # explicit rank into an affinity-enabled request (e.g. frontend
+        # `push_router` still stamps a rank in some flows), the engine will
+        # honor the leaked rank without laying down a binding, and turn 2 will
+        # silently drift off the KV-cache-warmed worker. The safer fix is on
+        # the engine side (always record the binding, whether the rank came
+        # from explicit placement or fresh selection). Track upstream and drop
+        # this note when the router records unconditionally.
+        # Force engine-side conversation-affinity assignment when the operator set
+        # --conversation-affinity / DYN_ENGINE_CONV_AFFINITY, even if the engine did
+        # not advertise the capability at initialize() time. Mirrors the legacy
+        # HandlerBase path so both entry points behave identically.
+        conv_affinity = (
+            self._conversation_affinity or self._engine_conversation_affinity_override
         )
-        scheduling_params = (
-            SchedulingParams(attention_dp_rank=rank, attention_dp_relax=False)
-            if rank is not None
-            else None
-        )
+        if (
+            self._engine_conversation_affinity_override
+            and not CONVERSATION_PARAMS_AVAILABLE
+        ):
+            raise RuntimeError(
+                "--conversation-affinity / DYN_ENGINE_CONV_AFFINITY is set but "
+                "the installed TensorRT-LLM build has no ConversationParams API (requires a "
+                "release newer than 1.3.0rc20)."
+            )
+        conversation_params = None
+        if conv_affinity:
+            scheduling_params = None
+            conversation_params = conversation_params_for(
+                session_id_from_request(request)
+            )
+        else:
+            rank = validate_global_dp_rank(
+                forced_dp_rank(request), 0, self._attention_dp_size, "TRT-LLM"
+            )
+            scheduling_params = (
+                SchedulingParams(attention_dp_rank=rank, attention_dp_relax=False)
+                if rank is not None
+                else None
+            )
 
         entries = logits_processors_for_request(
             self._logits_processor_spec,
@@ -844,12 +925,20 @@ class TrtllmLLMEngine(LLMEngine):
         # Prefill returns one non-streaming chunk carrying the handoff -
         # matches the legacy disagg wire format.
         streaming = not is_prefill
+        cache_salt = request_cache_salt(request)
+        # Only pass conversation_params when affinity is active — older TRT-LLM builds'
+        # generate_async does not accept the keyword.
+        conv_kwargs = (
+            {"conversation_params": conversation_params} if conv_affinity else {}
+        )
         generation_result = self._engine.llm.generate_async(
             inputs=token_ids,
             sampling_params=sampling_params,
             streaming=streaming,
             disaggregated_params=disaggregated_params,
             scheduling_params=scheduling_params,
+            cache_salt=cache_salt,
+            **conv_kwargs,
             **telemetry.engine_trace_kwargs(context),
         )
 

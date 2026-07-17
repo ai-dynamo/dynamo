@@ -16,7 +16,7 @@ use super::components::{
     ReadyArrival, ScheduledWorkerCompletion, TrafficAccumulator, WorkerAdmission,
 };
 use super::events::{SimulationEvent, SimulationWorkerStage};
-use super::planner_hook::{PlannerHook, PlannerTickMetrics};
+use super::planner_hook::{LatestFpmBuffer, PlannerHook, PlannerTickMetrics};
 use super::progress::ReplayProgress;
 use super::runtime_utils::{
     next_timestamp as choose_next_timestamp, pop_ready_planner_tick, pop_ready_transfer_complete,
@@ -31,9 +31,9 @@ use crate::common::handoff::{
     IssuedHandoffAction, NormalizedHandoffConformance, NormalizedHandoffEvent,
     NormalizedStoredTiming,
 };
-use crate::common::protocols::{
-    DirectRequest, EngineType, ForwardPassSnapshot, MockEngineArgs, OutputSignal,
-};
+#[cfg(test)]
+use crate::common::protocols::ForwardPassSnapshot;
+use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs, OutputSignal};
 use crate::loadgen::{ReplayRequestHashes, WorkloadDriver};
 use crate::replay::{
     OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode, ReplayTerminalStatus,
@@ -286,9 +286,9 @@ pub(in crate::replay) struct DisaggRuntime {
     progress: ReplayProgress,
     stats: DisaggRuntimeStats,
     conformance_capture: Option<HandoffConformanceCapture>,
-    /// Forward pass metrics accumulated between planner ticks, keyed by (stage, worker_idx).
-    prefill_fpm_buffer: Vec<(usize, ForwardPassSnapshot)>,
-    decode_fpm_buffer: Vec<(usize, ForwardPassSnapshot)>,
+    /// Latest forward pass metric per worker/rank since the previous planner tick.
+    prefill_fpm_buffer: LatestFpmBuffer,
+    decode_fpm_buffer: LatestFpmBuffer,
     /// Traffic statistics accumulated between planner ticks.
     traffic: TrafficAccumulator,
     /// Optional cap on simulated wall-clock time. When set, `run()` exits
@@ -299,10 +299,9 @@ pub(in crate::replay) struct DisaggRuntime {
     /// calls back into the planner at each tick (this is the unified replacement
     /// for the old Python-driven `advance_to` stepping loop).
     planner_hook: Option<Box<dyn PlannerHook>>,
-    /// Whether to retain per-pass FPM snapshots in the buffers above. Only the
-    /// planner consumes them, so the plain `run()` path leaves this `false` —
-    /// otherwise the buffers grow unbounded (one entry per worker pass) for the
-    /// whole run with no reader (the memory leak this gating fixes).
+    /// Whether to retain the latest FPM snapshot per worker/rank in the buffers
+    /// above. Only the planner consumes them, so the plain `run()` path leaves this
+    /// `false`.
     collect_fpm: bool,
 }
 
@@ -470,8 +469,8 @@ impl DisaggRuntime {
             #[cfg(not(test))]
             stats: DisaggRuntimeStats,
             conformance_capture: capture_conformance.then(HandoffConformanceCapture::default),
-            prefill_fpm_buffer: Vec::new(),
-            decode_fpm_buffer: Vec::new(),
+            prefill_fpm_buffer: LatestFpmBuffer::default(),
+            decode_fpm_buffer: LatestFpmBuffer::default(),
             traffic: TrafficAccumulator::new(),
             max_sim_time_ms: None,
             planner_hook: None,
@@ -516,6 +515,16 @@ impl DisaggRuntime {
     /// planner via recurring `PlannerTick` events (one `on_tick` callback per tick).
     pub(in crate::replay) fn with_planner_hook(mut self, hook: Box<dyn PlannerHook>) -> Self {
         self.collect_fpm = true;
+        let prefill_dp_size = self.prefill_engine.dp_size();
+        for worker_id in self.prefill_engine.active_group_ids() {
+            self.prefill_fpm_buffer
+                .activate_worker(worker_id, prefill_dp_size, self.now_ms);
+        }
+        let decode_dp_size = self.decode_engine.dp_size();
+        for worker_id in self.decode_engine.active_group_ids() {
+            self.decode_fpm_buffer
+                .activate_worker(worker_id, decode_dp_size, self.now_ms);
+        }
         self.planner_hook = Some(hook);
         self
     }
@@ -782,11 +791,12 @@ impl DisaggRuntime {
         }
         let request = self.state(uuid)?.build_prefill_request()?;
         let replay_hashes = self.state_mut(uuid)?.take_replay_hashes();
+        let session_id = self.state(uuid)?.session_id().map(str::to_owned);
         let admissions = self
             .prefill_router
             .as_mut()
             .expect("prefill router presence checked above")
-            .on_request_arrival(&request, replay_hashes, self.now_ms)?
+            .on_request_arrival_for_session(&request, replay_hashes, session_id, self.now_ms)?
             .admissions;
         self.record_router_pending();
         self.dispatch_prefill_admissions(admissions)
@@ -805,11 +815,12 @@ impl DisaggRuntime {
             state.destination_routed = true;
         }
         let request = self.state(uuid)?.original_request()?.clone();
+        let session_id = self.state(uuid)?.session_id().map(str::to_owned);
         let admissions = self
             .decode_router
             .as_mut()
             .expect("decode router presence checked above")
-            .on_request_arrival(&request, None, self.now_ms)?
+            .on_request_arrival_for_session(&request, None, session_id, self.now_ms)?
             .admissions;
         self.record_router_pending();
         self.dispatch_decode_admissions(admissions)?;
@@ -1235,6 +1246,7 @@ impl DisaggRuntime {
         mut request: DirectRequest,
         arrival_time_ms: f64,
         replay_hashes: Option<ReplayRequestHashes>,
+        session_id: Option<String>,
     ) -> Result<Uuid> {
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
         request.uuid = Some(uuid);
@@ -1256,6 +1268,7 @@ impl DisaggRuntime {
             handoff_id,
             self.handoff_order,
             replay_hashes,
+            session_id,
         );
         let actions = state.coordinator.start()?;
         self.requests.insert(uuid, state);
@@ -1420,13 +1433,21 @@ impl DisaggRuntime {
         // latency — keep it out of the planner-facing traffic deltas (mirror the
         // aggregated path). It still frees its slot, advances, and is marked done.
         if !signal.rejected {
-            let state = self.state(signal.uuid)?;
-            let original = state.original_request()?;
-            let input_tokens = original.tokens.len();
-            let output_tokens = original.max_output_tokens;
+            let (input_tokens, requested_output_tokens) = {
+                let state = self.state(signal.uuid)?;
+                let original = state.original_request()?;
+                (original.tokens.len(), original.max_output_tokens)
+            };
+            let actual_output_tokens = self
+                .collector
+                .actual_output_length(signal.uuid)
+                .ok_or_else(|| {
+                    anyhow!("offline replay missing collector state for {}", signal.uuid)
+                })?;
+            debug_assert!(actual_output_tokens <= requested_output_tokens);
             let latencies = self.collector.request_latencies(signal.uuid);
             self.traffic
-                .on_request(input_tokens, output_tokens, latencies);
+                .on_request(input_tokens, actual_output_tokens, latencies);
         }
         let terminal_status = if signal.rejected {
             ReplayTerminalStatus::Rejected
@@ -1488,7 +1509,8 @@ impl DisaggRuntime {
                     if self.collect_fpm
                         && let Some(fpm) = payload.fpm
                     {
-                        self.prefill_fpm_buffer.push((payload.worker_idx, fpm));
+                        self.prefill_fpm_buffer
+                            .insert(payload.worker_idx, fpm, self.now_ms);
                     }
                     self.process_prefill_pass(
                         payload.worker_idx,
@@ -1504,7 +1526,8 @@ impl DisaggRuntime {
                     if self.collect_fpm
                         && let Some(fpm) = payload.fpm
                     {
-                        self.decode_fpm_buffer.push((payload.worker_idx, fpm));
+                        self.decode_fpm_buffer
+                            .insert(payload.worker_idx, fpm, self.now_ms);
                     }
                     self.process_decode_pass(
                         payload.output_signals,
@@ -1550,8 +1573,9 @@ impl DisaggRuntime {
                 session_id,
                 turn_index,
             } = ready;
-            let session_metadata = session_id.zip(turn_index);
-            let uuid = self.on_external_arrival(request, arrival_time_ms, replay_hashes)?;
+            let session_metadata = session_id.clone().zip(turn_index);
+            let uuid =
+                self.on_external_arrival(request, arrival_time_ms, replay_hashes, session_id)?;
             if let Some((session_id, turn_index)) = session_metadata {
                 self.collector
                     .on_session_metadata(uuid, session_id, turn_index);
@@ -1590,9 +1614,6 @@ impl DisaggRuntime {
     }
 
     fn handle_prefill_engine_effects(&mut self, effects: EngineEffects) -> Result<()> {
-        if self.collect_fpm {
-            self.prefill_fpm_buffer.extend(effects.fpm_snapshots);
-        }
         self.record_prefill_admissions(effects.admissions);
         self.apply_prefill_router_events(effects.pass_start_kv_events)?;
         for payload in effects.immediate_completions {
@@ -1600,7 +1621,8 @@ impl DisaggRuntime {
             if self.collect_fpm
                 && let Some(fpm) = payload.fpm
             {
-                self.prefill_fpm_buffer.push((payload.worker_idx, fpm));
+                self.prefill_fpm_buffer
+                    .insert(payload.worker_idx, fpm, self.now_ms);
             }
             self.process_prefill_pass(
                 payload.worker_idx,
@@ -1654,16 +1676,14 @@ impl DisaggRuntime {
     }
 
     fn handle_decode_engine_effects(&mut self, effects: EngineEffects) -> Result<()> {
-        if self.collect_fpm {
-            self.decode_fpm_buffer.extend(effects.fpm_snapshots);
-        }
         self.record_decode_admissions(effects.admissions)?;
         for payload in effects.immediate_completions {
             let payload = self.decode_engine.on_scheduled_completion(payload)?;
             if self.collect_fpm
                 && let Some(fpm) = payload.fpm
             {
-                self.decode_fpm_buffer.push((payload.worker_idx, fpm));
+                self.decode_fpm_buffer
+                    .insert(payload.worker_idx, fpm, self.now_ms);
             }
             self.process_decode_pass(
                 payload.output_signals,
@@ -1686,6 +1706,13 @@ impl DisaggRuntime {
             match stage {
                 SimulationWorkerStage::Prefill => {
                     if self.prefill_engine.mark_worker_ready(worker_id) {
+                        if self.collect_fpm {
+                            self.prefill_fpm_buffer.activate_worker(
+                                worker_id,
+                                self.prefill_engine.dp_size(),
+                                self.now_ms,
+                            );
+                        }
                         if let Some(router) = self.prefill_router.as_mut() {
                             router.add_worker(worker_id)?;
                             let effects = router.try_drain_pending(self.now_ms)?;
@@ -1697,6 +1724,13 @@ impl DisaggRuntime {
                 }
                 SimulationWorkerStage::Decode => {
                     if self.decode_engine.mark_worker_ready(worker_id) {
+                        if self.collect_fpm {
+                            self.decode_fpm_buffer.activate_worker(
+                                worker_id,
+                                self.decode_engine.dp_size(),
+                                self.now_ms,
+                            );
+                        }
                         if let Some(router) = self.decode_router.as_mut() {
                             router.add_worker(worker_id)?;
                             let effects = router.try_drain_pending(self.now_ms)?;
@@ -1822,13 +1856,25 @@ impl DisaggRuntime {
             if self.is_workload_done() {
                 continue;
             }
+            let active_prefill_ids = self.prefill_engine.active_group_ids();
+            let active_decode_ids = self.decode_engine.active_group_ids();
+            self.prefill_fpm_buffer.emit_idle_due(
+                &active_prefill_ids,
+                self.prefill_engine.dp_size(),
+                self.now_ms,
+            );
+            self.decode_fpm_buffer.emit_idle_due(
+                &active_decode_ids,
+                self.decode_engine.dp_size(),
+                self.now_ms,
+            );
             let metrics = PlannerTickMetrics {
                 now_ms: self.now_ms,
-                prefill_fpm: std::mem::take(&mut self.prefill_fpm_buffer),
-                decode_fpm: std::mem::take(&mut self.decode_fpm_buffer),
+                prefill_fpm: self.prefill_fpm_buffer.take(),
+                decode_fpm: self.decode_fpm_buffer.take(),
                 traffic: self.traffic.drain(self.now_ms),
-                active_prefill: self.active_prefill_count(),
-                active_decode: self.active_decode_count(),
+                active_prefill_ids,
+                active_decode_ids,
                 total_prefill: self.total_prefill_count(),
                 total_decode: self.total_decode_count(),
             };
@@ -1916,10 +1962,7 @@ impl DisaggRuntime {
         self.now_ms = new_now_ms;
     }
 
-    pub(in crate::replay) fn active_prefill_count(&self) -> usize {
-        self.prefill_engine.active_worker_ids().len()
-    }
-
+    #[cfg(test)]
     pub(in crate::replay) fn active_decode_count(&self) -> usize {
         self.decode_engine.active_worker_ids().len()
     }
@@ -1961,6 +2004,13 @@ impl DisaggRuntime {
                     );
                 }
                 None => {
+                    if self.collect_fpm {
+                        self.prefill_fpm_buffer.activate_worker(
+                            id,
+                            self.prefill_engine.dp_size(),
+                            self.now_ms,
+                        );
+                    }
                     if let Some(router) = self.prefill_router.as_mut() {
                         router.add_worker(id)?;
                     }
@@ -1997,6 +2047,13 @@ impl DisaggRuntime {
                     );
                 }
                 None => {
+                    if self.collect_fpm {
+                        self.decode_fpm_buffer.activate_worker(
+                            id,
+                            self.decode_engine.dp_size(),
+                            self.now_ms,
+                        );
+                    }
                     if let Some(router) = self.decode_router.as_mut() {
                         router.add_worker(id)?;
                     }
@@ -2073,12 +2130,12 @@ impl DisaggRuntime {
 
     #[cfg(test)]
     fn drain_prefill_fpm(&mut self) -> Vec<(usize, ForwardPassSnapshot)> {
-        std::mem::take(&mut self.prefill_fpm_buffer)
+        self.prefill_fpm_buffer.take()
     }
 
     #[cfg(test)]
     fn drain_decode_fpm(&mut self) -> Vec<(usize, ForwardPassSnapshot)> {
-        std::mem::take(&mut self.decode_fpm_buffer)
+        self.decode_fpm_buffer.take()
     }
 
     fn run_to_completion(&mut self) -> Result<()> {

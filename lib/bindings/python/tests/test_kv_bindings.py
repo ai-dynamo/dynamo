@@ -239,7 +239,7 @@ async def test_selection_service_selects_registered_worker(monkeypatch):
         assert selected["dp_rank"] == 0
         assert selected["endpoint"] == "http://worker-1:8000"
     finally:
-        service.shutdown()
+        await service.shutdown_async()
 
 
 @pytest.mark.skipif(

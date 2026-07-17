@@ -34,7 +34,7 @@ class FrontendRouterProcess(ManagedProcess):
     """Manages a dynamo.frontend process with configurable --router-mode.
 
     Supports all router modes (round-robin, random, kv, direct) and all
-    KV-specific options (block size, thresholds, durable events, disagg).
+    KV-specific options (block size, thresholds, disagg).
     block_size is only sent to the CLI when router_mode is "kv".
     """
 
@@ -45,13 +45,11 @@ class FrontendRouterProcess(ManagedProcess):
         frontend_port: int,
         namespace: str,
         store_backend: str = "etcd",
-        enforce_disagg: bool = False,
         blocks_threshold: float | str | None = None,
         tokens_threshold: int | str | None = None,
         tokens_threshold_frac: float | str | None = None,
         router_queue_threshold: float | str | None = None,
         request_plane: str = "nats",
-        durable_kv_events: bool = False,
         router_mode: str = "kv",
         min_initial_workers: int | None = None,
         router_aic_config: dict[str, str | int] | None = None,
@@ -77,9 +75,6 @@ class FrontendRouterProcess(ManagedProcess):
         if router_mode == "kv":
             command.extend(["--kv-cache-block-size", str(block_size)])
 
-        if enforce_disagg:
-            command.append("--enforce-disagg")
-
         if blocks_threshold is not None:
             command.extend(["--active-decode-blocks-threshold", str(blocks_threshold)])
 
@@ -93,9 +88,6 @@ class FrontendRouterProcess(ManagedProcess):
 
         if router_queue_threshold is not None:
             command.extend(["--router-queue-threshold", str(router_queue_threshold)])
-
-        if durable_kv_events:
-            command.append("--router-durable-kv-events")
 
         if serve_indexer:
             command.append("--serve-indexer")

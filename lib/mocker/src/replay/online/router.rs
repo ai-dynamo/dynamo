@@ -53,11 +53,11 @@ impl ReplayIndexer {
     ) -> Result<OverlapScores> {
         match self {
             Self::Single(indexer) => indexer
-                .find_matches_for_request(tokens, lora_name, None)
+                .find_matches_for_request(tokens, lora_name, None, None)
                 .await
                 .map_err(Into::into),
             Self::Concurrent(indexer) => indexer
-                .find_matches_for_request(tokens, lora_name, None)
+                .find_matches_for_request(tokens, lora_name, None, None)
                 .await
                 .map_err(Into::into),
         }
@@ -170,7 +170,7 @@ impl KvReplayRouter {
             scheduler_cancel.clone(),
             "replay",
             false,
-        ));
+        )?);
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
         let indexer_clone = indexer.clone();
         let event_task = tokio::spawn(async move {

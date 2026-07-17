@@ -171,7 +171,7 @@ impl MockEngineArgs {
 #[pymethods]
 impl MockEngineArgs {
     #[new]
-    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=42, aic_gemm_dtype=None, aic_moe_dtype=None, aic_fmha_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, handoff_session_timeout_ms=300000, kv_bytes_per_token=None, kv_transfer_bandwidth=None, kv_transfer_timing_mode="full_prompt", reasoning=None, response_replay_trace_path=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, num_g2_blocks=None, num_g3_blocks=None, offload_batch_size=None, bandwidth_g1_to_g2_gbps=None, bandwidth_g2_to_g1_gbps=None, bandwidth_g2_to_g3_gbps=None, bandwidth_g3_to_g2_gbps=None, enable_g4_storage=false, bandwidth_g2_to_g4_gbps=None, bandwidth_g4_to_g2_gbps=None))]
+    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=42, aic_gemm_dtype=None, aic_moe_dtype=None, aic_fmha_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, handoff_session_timeout_ms=300000, kv_bytes_per_token=None, kv_transfer_bandwidth=None, kv_transfer_timing_mode="full_prompt", reasoning=None, response_replay_trace_path=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, num_g2_blocks=None, num_g3_blocks=None, offload_batch_size=None, bandwidth_g1_to_g2_gbps=None, bandwidth_g2_to_g1_gbps=None, bandwidth_g2_to_g3_gbps=None, bandwidth_g3_to_g2_gbps=None, enable_g4_storage=false, bandwidth_g2_to_g4_gbps=None, bandwidth_g4_to_g2_gbps=None, max_model_len=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         engine_type: &str,
@@ -230,6 +230,7 @@ impl MockEngineArgs {
         enable_g4_storage: bool,
         bandwidth_g2_to_g4_gbps: Option<f64>,
         bandwidth_g4_to_g2_gbps: Option<f64>,
+        max_model_len: Option<usize>,
     ) -> PyResult<Self> {
         let engine_type = parse_mocker_engine_type(engine_type)?;
         let worker_type = parse_worker_type(worker_type)?;
@@ -248,6 +249,7 @@ impl MockEngineArgs {
         let mut builder = RsMockEngineArgs::builder()
             .engine_type(engine_type)
             .block_size(block_size)
+            .max_model_len(max_model_len)
             .max_num_seqs(max_num_seqs)
             .max_num_batched_tokens(max_num_batched_tokens)
             .enable_prefix_caching(enable_prefix_caching)
@@ -363,6 +365,11 @@ impl MockEngineArgs {
     #[getter]
     fn num_gpu_blocks(&self) -> usize {
         self.inner.num_gpu_blocks
+    }
+
+    #[getter]
+    fn max_model_len(&self) -> Option<usize> {
+        self.inner.max_model_len
     }
 
     #[getter]
@@ -1569,7 +1576,8 @@ fn validate_disagg_replay_mode(replay_mode: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_disagg_replay_mode;
+    use super::{fpm_snapshots_to_json, reconcile_replay_dp_topology, validate_disagg_replay_mode};
+    use dynamo_mocker::common::protocols::{ForwardPassSnapshot, MockEngineArgs};
 
     #[test]
     fn online_disaggregation_is_rejected_with_stable_message() {
@@ -1580,6 +1588,46 @@ mod tests {
             "disagg replay only supports replay_mode='offline'"
         );
         assert!(validate_disagg_replay_mode("offline").is_ok());
+    }
+
+    #[test]
+    fn programmatic_attention_dp_materializes_without_aic_backend() {
+        let mut args = MockEngineArgs::builder()
+            .dp_size(1)
+            .aic_attention_dp_size(Some(4))
+            .build()
+            .unwrap();
+
+        reconcile_replay_dp_topology(&mut args).unwrap();
+
+        assert_eq!(args.dp_size, 4);
+    }
+
+    #[test]
+    fn programmatic_attention_dp_rejects_mismatched_topology() {
+        let mut args = MockEngineArgs::builder()
+            .dp_size(2)
+            .aic_attention_dp_size(Some(4))
+            .build()
+            .unwrap();
+
+        let error = reconcile_replay_dp_topology(&mut args).unwrap_err();
+
+        assert!(error.to_string().contains("dp_size must match"));
+    }
+
+    #[test]
+    fn fpm_json_preserves_worker_and_dp_rank_identity() {
+        let snapshots = fpm_snapshots_to_json(vec![(
+            2,
+            ForwardPassSnapshot {
+                dp_rank: 3,
+                ..Default::default()
+            },
+        )]);
+
+        assert_eq!(snapshots[0]["worker_id"], 2);
+        assert_eq!(snapshots[0]["dp_rank"], 3);
     }
 }
 
@@ -1636,6 +1684,8 @@ fn materialize_replay_mocker_args(
 ) -> PyResult<RsMockEngineArgs> {
     let mut args = extra_args.inner();
     populate_missing_offload_kv_bytes_per_token(py, &mut args)?;
+    reconcile_replay_dp_topology(&mut args)
+        .map_err(|error| PyException::new_err(error.to_string()))?;
 
     if let Some(ref backend_name) = args.aic_backend.clone() {
         let backend = backend_name.clone();
@@ -1658,7 +1708,11 @@ fn materialize_replay_mocker_args(
         let undiscounted_accept_rates = args.undiscounted_aic_accept_rates();
         // AIC-backed config may intentionally omit num_gpu_blocks. Estimate it
         // here, after candidate TP/backend/model overrides have been applied.
-        if !extra_args.num_gpu_blocks_explicit() {
+        let num_gpu_blocks_explicit = extra_args.num_gpu_blocks_explicit();
+        // Under attention-DP, mirror the live path: one mocker worker owns
+        // `dp_size` independent per-rank schedulers, each with a per-rank KV pool.
+        // The topology applies whether KV capacity is explicit or estimated.
+        if !num_gpu_blocks_explicit {
             let per_rank_blocks = estimate_aic_num_gpu_blocks(
                 py,
                 &backend,
@@ -1688,14 +1742,11 @@ fn materialize_replay_mocker_args(
                     e
                 ))
             })?;
-            // AIC returns a per-rank (per-GPU) block count. Offline replay models a single
-            // KV pool per engine, so under DP-attention -- where each of the `dp` ranks holds
-            // a full KV replica for its slice of the batch -- the engine-wide pool is
-            // `per_rank * dp`. (The live mocker instead replicates one scheduler per dp rank,
-            // see lib/llm/src/mocker.rs, so it must keep the per-rank count; that is why this
-            // scaling lives on the offline-replay path and not inside the estimator.)
-            let dp = attention_dp_size.unwrap_or(1).max(1);
-            args.num_gpu_blocks = per_rank_blocks.saturating_mul(dp);
+            // AIC returns a per-rank (per-GPU) block count. When replicating attention-DP
+            // into per-rank workers, each worker owns this per-rank pool (engine-wide
+            // capacity stays `per_rank * dp`, now partitioned per rank as on real hardware).
+            // With dp == 1 the per-rank pool is the engine-wide pool.
+            args.num_gpu_blocks = per_rank_blocks;
         }
         let callback = create_aic_callback(
             py,
@@ -1728,18 +1779,33 @@ fn materialize_replay_mocker_args(
             model_name,
             backend_version
         );
-        // Offline replay runs a single aggregate engine holding the GLOBAL batch
-        // across all attention-DP ranks (it scales num_gpu_blocks by dp above and
-        // forbids scheduler-level dp_size>1). Record attention_dp_size so the perf
-        // model divides the scheduled batch back to the per-rank batch the AIC SDK
-        // expects. The live path keeps the default of 1 (it replicates per rank).
-        args.perf_model = Arc::new(PerfModel::from_aic_callback_with_attention_dp(
-            callback,
-            attention_dp_size.unwrap_or(1).max(1),
-        ));
+        // Every scheduler sees its own local batch, including under attention-DP.
+        args.perf_model = Arc::new(PerfModel::from_aic_callback(callback));
     }
 
     Ok(args)
+}
+
+/// Reconcile the scheduler topology before optional AIC callback/capacity
+/// materialization. This mirrors the JSON loader: an explicit attention-DP
+/// size defines rank topology even when the caller supplies KV capacity and no
+/// AIC backend.
+fn reconcile_replay_dp_topology(args: &mut RsMockEngineArgs) -> anyhow::Result<()> {
+    let attention_dp = args.aic_attention_dp_size;
+    let dp = attention_dp.unwrap_or(1).max(1);
+    let dp = u32::try_from(dp)
+        .map_err(|_| anyhow::anyhow!("aic_attention_dp_size does not fit into a u32"))?;
+    let has_aic_config = args.aic_backend.is_some() || attention_dp.is_some();
+    if has_aic_config && args.dp_size > 1 && args.dp_size != dp {
+        anyhow::bail!(
+            "dp_size must match aic_attention_dp_size for AIC-backed replay (got dp_size={}, aic_attention_dp_size={dp})",
+            args.dp_size
+        );
+    }
+    if attention_dp.is_some() && dp > 1 {
+        args.dp_size = dp;
+    }
+    Ok(())
 }
 
 fn populate_missing_offload_kv_bytes_per_token(
@@ -2027,6 +2093,7 @@ fn fpm_snapshots_to_json(
         .map(|(worker_id, fpm)| {
             json!({
                 "worker_id": worker_id,
+                "dp_rank": fpm.dp_rank,
                 "wall_time": fpm.wall_time_secs,
                 "num_prefill_requests": fpm.num_prefill_requests,
                 "sum_prefill_tokens": fpm.sum_prefill_tokens,
@@ -2399,8 +2466,8 @@ impl PlannerHook for PyPlannerHook {
             prefill_fpm,
             decode_fpm,
             traffic,
-            active_prefill,
-            active_decode,
+            active_prefill_ids,
+            active_decode_ids,
             total_prefill,
             total_decode,
         } = metrics;
@@ -2411,8 +2478,10 @@ impl PlannerHook for PyPlannerHook {
                 "now_ms": now_ms,
                 "prefill_fpm_snapshots": fpm_snapshots_to_json(prefill_fpm),
                 "decode_fpm_snapshots": fpm_snapshots_to_json(decode_fpm),
-                "active_prefill_count": active_prefill,
-                "active_decode_count": active_decode,
+                "active_prefill_count": active_prefill_ids.len(),
+                "active_decode_count": active_decode_ids.len(),
+                "active_prefill_ids": active_prefill_ids,
+                "active_decode_ids": active_decode_ids,
                 "total_prefill_count": total_prefill,
                 "total_decode_count": total_decode,
                 "traffic": {

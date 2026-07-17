@@ -41,10 +41,10 @@ Supported today:
 - structured backend errors
 - graceful shutdown and drain hooks
 
-Still use the lower-level Python worker path when you need features such as
-multimodal requests, LoRA adapter management, logprobs, guided decoding,
-engine-specific routes, custom request handling, or features that need direct
-control of the request payload.
+Still use the lower-level Python worker path when you need a backend-specific
+feature that has not reached its unified engine, a separate multimodal encode
+worker, engine-specific routes, custom request handling, or direct control of
+the request payload.
 
 After you implement the backend, package it into a runtime image with
 [Runtime Containers](custom-containers.md). For Kubernetes deployment, place the
@@ -125,6 +125,21 @@ Lifecycle and runtime:
 - `DynamoException` error chain wrapping
 - Finish reason normalization (handled by the Rust layer)
 - Engine control plumbing, with per-backend profiling, quiesce/resume, and supported weight-update controls
+- vLLM KV block clearing in aggregated, prefill, and decode modes through
+  `POST /engine/control/clear_kv_blocks` on the worker's system port. Send
+  `{}` as the JSON body. A successful reset clears both the prefix cache
+  and connector cache and returns
+  `{"status":"success","message":"KV cache cleared"}`. A rejected reset
+  returns HTTP 200 with
+  `{"status":"error","message":"KV cache reset failed"}`. An unavailable
+  engine returns `{"status":"error","message":"Engine is not running"}`;
+  exceptions return the same error shape with the exception text as the
+  message.
+  The direct control does not pause generation, drain work, or preempt
+  active requests. If blocks remain in use, wait for those requests to
+  finish and retry. The control is available even when prefix caching is
+  not explicitly enabled because the connector cache may still need a
+  reset.
 
 Observability:
 - Health-check canary via `health_check_payload()` (plus
@@ -147,11 +162,10 @@ Observability:
 
 Request handling:
 - Guided decoding — wired per-engine on the request side with
-  engine-specific coverage. vLLM (`StructuredOutputsParams`) and
-  TRT-LLM (`GuidedDecodingParams`) cover JSON schema / regex / grammar
-  / choice; SGLang (`_get_guided_decoding_params`) covers JSON schema
-  only — regex / grammar / choice are silently dropped today (see the
-  SGLang-specific gaps in the package README)
+  JSON schema, regex, grammar, and choice coverage. vLLM uses
+  `StructuredOutputsParams`, TRT-LLM uses `GuidedDecodingParams`, and
+  SGLang maps the constraints to `json_schema`, `regex`, and `ebnf`;
+  SGLang translates choices to an escaped regex alternation
 - Structural tag generation via `WorkerConfig.structural_tag_{mode,
   scope, schema}` and `serialize_structural_tag`
 - Custom Jinja chat templates via
@@ -159,14 +173,17 @@ Request handling:
   backend advertises through model registration)
 - Tool / reasoning parser configuration (`tool_call_parser`,
   `reasoning_parser`, `exclude_tools_when_tool_choice_none`)
+- vLLM image and video inference in aggregated and prefill/decode deployments,
+  including frontend-rendered multimodal input transfer and the CPU embedding
+  cache. See [vLLM Multimodal](../features/multimodal/multimodal-vllm.md#unified-vllm-backend).
 
-**Not yet on the unified path (common to all engines)**
+**Remaining Python unified-backend gaps**
 
 | Feature | What's missing |
 |---------|----------------|
 | Logprob response wire | Legacy handlers extract logprobs onto response chunks (vLLM `_extract_logprobs`, SGLang `_extract_logprobs` in `decode_handler`, TRT-LLM `_extract_logprobs` in `handler_base`); the unified `generate()` loops do not populate `log_probs` / `top_logprobs` / `cum_log_probs` on `GenerateChunk`. vLLM's `build_sampling_params` still passes `output_options.logprobs` to the engine on the unified path, so the engine computes them, but the values are dropped before they reach the chunk. SGLang and TRT-LLM unified `generate()` do not read `output_options.logprobs` at all. |
 | Text-in-text-out mode | Unified hardcodes `ModelInput.Tokens`; no engine-side tokenization or chat templating path |
-| Multimodal | Images / video / embeddings, NIXL embedding transfer, separate encode workers, `ENCODE` disaggregation role |
+| Multimodal parity | vLLM supports aggregated and prefill/decode image and video inference. SGLang and TRT-LLM multimodal execution, separate encode workers, and the `ENCODE` role are not yet available through their unified engines. |
 | Diffusion | Image (FLUX), video (Wan2.1), LLM diffusion (DLLM) workers; no diffusion engine, MediaOutput, or media scheduling on the unified path |
 | LoRA adapters | Dynamic load / unload / list, ModelDeploymentCard publishing, per-adapter serialization locks, per-request adapter threading on prefill |
 | Snapshot / checkpoint | CRIU-based engine state save/restore + identity reload |
@@ -497,6 +514,58 @@ async def cleanup(self) -> None:
         await self._engine.shutdown()
         self._engine = None
 ```
+
+#### Python: Metrics and Prometheus (optional)
+
+Unified backends have two metrics surfaces.
+
+Use `register_prometheus(metrics)` to bridge vendor-prefixed Prometheus
+families into the worker's `/metrics` output. The framework owns the
+`metrics` handle; do not retain it after the method returns.
+
+```python
+from dynamo.common.backend.metrics import register_global_registry
+
+async def register_prometheus(self, metrics):
+    register_global_registry(metrics, engine_prefix="vllm:")
+```
+
+Use `component_metrics_dp_ranks()` plus
+`attach_snapshot_publisher(publisher)` when the engine can push per-rank
+`ComponentSnapshot` values for `dynamo_component_*` gauges and the
+router's `kv_used_blocks` signal:
+
+```python
+from dynamo.common.backend.publisher import ComponentSnapshot
+
+def component_metrics_dp_ranks(self):
+    return [0]
+
+def attach_snapshot_publisher(self, publisher):
+    self._snapshot_publisher = publisher
+
+def _on_stats(self, used_blocks, total_blocks):
+    self._snapshot_publisher.publish(
+        0,
+        ComponentSnapshot(
+            kv_used_blocks=used_blocks,
+            kv_total_blocks=total_blocks,
+            gpu_cache_usage=used_blocks / total_blocks if total_blocks else 0.0,
+            dp_rank=0,
+        ),
+    )
+```
+
+Keep the rank list stable for the engine lifetime. `Worker` invokes
+`attach_snapshot_publisher()` only when the rank list is non-empty and
+`WorkerConfig.enable_kv_routing` is enabled. `register_prometheus()` still
+runs when `enable_kv_routing=False`.
+
+Use the in-tree backends as references: vLLM pushes snapshots from its
+stat logger and bridges `vllm:` / `lmcache:` metrics, SGLang pushes
+leader-node scheduler snapshots and bridges `sglang:` when
+`--enable-metrics` is set, and TRT-LLM pushes snapshots from its stats
+poll thread while bridging `trtllm_` metrics.
 
 #### Python: KV event publishing (optional)
 
@@ -886,11 +955,10 @@ Observability:
 Request handling:
 - Guided decoding — request shape carries
   `SamplingOptions::guided_decoding` (`GuidedDecodingOptions`);
-  engine-side coverage on the existing Python-bridged engines is:
-  vLLM and TRT-LLM forward JSON schema / regex / grammar / choice;
-  SGLang forwards JSON schema only (regex / grammar / choice are
-  silently dropped today). A new Rust engine should forward whichever
-  variants its backend supports
+  vLLM, SGLang, and TRT-LLM forward JSON schema, regex, grammar, and
+  choice. SGLang translates grammar to `ebnf` and choices to an escaped
+  regex alternation. A new Rust engine should forward whichever variants
+  its backend supports
 - Structural tag generation — `WorkerConfig::structural_tag_{mode,
   scope, schema}` (typed enums)
 - Custom Jinja chat templates — `WorkerConfig::custom_jinja_template`
@@ -906,7 +974,7 @@ Request handling:
 |---------|----------------|
 | `cum_log_probs` response wire | Completion-side `log_probs` / `top_logprobs` are populated on the unified path for vLLM, SGLang, and TRT-LLM (shared helpers in `components/src/dynamo/common/backend/logprobs.py`). Prompt-side logprobs ride on the final chunk's `LLMEngineOutput.engine_data["prompt_logprobs"]` (consumed by `prompt_logprobs_from_engine_data` in the response builders). `cum_log_probs` is still not emitted. |
 | Text-in-text-out mode | `ModelInput::Text` is rejected at startup — `Tokens` only |
-| Multimodal | Images / video / embeddings, NIXL embedding transfer, separate encode workers; `ENCODE` disaggregation role |
+| Native Rust multimodal engines | The shared request fields are available, but native Rust engines do not yet implement image, video, embedding transfer, or the `ENCODE` role. The Python unified vLLM engine supports aggregated and prefill/decode image and video inference. |
 | Diffusion | Image (FLUX), video (Wan2.1), LLM diffusion (DLLM) workers; no diffusion engine, MediaOutput, or media scheduling on the unified path |
 | LoRA adapters | Dynamic load / unload / list, ModelDeploymentCard publishing, per-adapter serialization |
 | Snapshot / checkpoint | CRIU-based engine state save/restore + identity reload |
@@ -1038,7 +1106,7 @@ inside `dynamo-runtime`:
 
    ```toml
    [toolchain]
-   channel = "1.93.1"
+   channel = "1.96.1"
    ```
 
    Older toolchains fail with `feature edition2024 is required`.

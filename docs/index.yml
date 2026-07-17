@@ -285,6 +285,8 @@ navigation:
                 path: observability/health-checks.md
               - page: Tracing
                 path: observability/tracing.md
+              - page: Forward Pass Metrics Tracing
+                path: observability/forward-pass-metrics-tracing.md
               - page: Logging
                 path: observability/logging.md
           - section: Inference Simulation
@@ -328,6 +330,8 @@ navigation:
                 path: features/multimodal/embedding-cache.md
               - page: Encoder Disaggregation
                 path: features/multimodal/encoder-disaggregation.md
+              - page: Custom Vision Encoders
+                path: features/multimodal/custom-vision-encoder.md
               - page: Multimodal KV Routing
                 path: features/multimodal/multimodal-kv-routing.md
               - page: SGLang Multimodal
@@ -631,6 +635,9 @@ navigation:
       - page: Browse All Recipes
         path: recipes/README.mdx
         slug: browse
+      - page: Inkling NVFP4
+        path: recipes/inkling.mdx
+        slug: inkling
       - page: Kimi-K2.6
         path: recipes/kimi-k2-6.mdx
         slug: kimi-k2-6

@@ -29,8 +29,8 @@ use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
 use dynamo_runtime::DistributedRuntime;
+use dynamo_runtime::config::env_is_truthy;
 use dynamo_runtime::config::environment_names::llm as env_llm;
-use dynamo_runtime::config::{env_is_falsey, env_is_truthy};
 use dynamo_runtime::discovery::Discovery;
 use dynamo_runtime::logging::{make_inference_request_span, make_system_request_span};
 use dynamo_runtime::metrics::{
@@ -288,6 +288,7 @@ struct StateFlags {
     realtime_endpoints_enabled: AtomicBool,
     responses_endpoints_enabled: AtomicBool,
     anthropic_endpoints_enabled: AtomicBool,
+    generate_endpoints_enabled: AtomicBool,
 }
 
 impl StateFlags {
@@ -304,6 +305,7 @@ impl StateFlags {
             EndpointType::AnthropicMessages => {
                 self.anthropic_endpoints_enabled.load(Ordering::Relaxed)
             }
+            EndpointType::Generate => self.generate_endpoints_enabled.load(Ordering::Relaxed),
         }
     }
 
@@ -336,6 +338,9 @@ impl StateFlags {
             EndpointType::AnthropicMessages => self
                 .anthropic_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
+            EndpointType::Generate => self
+                .generate_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
         }
     }
 }
@@ -363,6 +368,7 @@ impl State {
                 realtime_endpoints_enabled: AtomicBool::new(false),
                 responses_endpoints_enabled: AtomicBool::new(false),
                 anthropic_endpoints_enabled: AtomicBool::new(false),
+                generate_endpoints_enabled: AtomicBool::new(false),
             },
             cancel_token,
             frontend_api_config: config.frontend_api_config,
@@ -426,7 +432,7 @@ impl State {
     }
 
     /// Master switch for the `nvext` extension protocol (see
-    /// [`environment_names::llm::DYN_ENABLE_FRONTEND_NVEXT`]).
+    /// [`environment_names::llm::DYN_DISABLE_FRONTEND_NVEXT`]).
     #[inline]
     pub fn nvext_enabled(&self) -> bool {
         self.nvext_enabled
@@ -487,6 +493,8 @@ pub struct HttpService {
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     route_docs: Vec<RouteDoc>,
+    /// Resolved startup gate for the vLLM-compatible Generate API.
+    generate_api_enabled: bool,
     /// RL worker discovery router, served on a dedicated port when enabled.
     rl_router: Option<axum::Router>,
     rl_port: u16,
@@ -528,6 +536,14 @@ pub struct HttpServiceConfig {
     #[builder(default = "true")]
     enable_responses_endpoints: bool,
 
+    /// Experimental engine-native APIs (currently the token-in/token-out
+    /// `Generate` endpoint `POST /inference/v1/generate`). **Disabled by
+    /// default** — a deployment opts into this endpoint via this builder flag
+    /// or the `DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE` env var. When disabled
+    /// the route is not mounted, so a request gets a 404.
+    #[builder(default = "false")]
+    enable_engine_apis: bool,
+
     /// API behavior config retained in HTTP state for route and streaming decisions.
     #[builder(default)]
     frontend_api_config: FrontendApiConfig,
@@ -555,14 +571,14 @@ pub struct HttpServiceConfig {
     #[builder(default = "false")]
     enable_rl: bool,
 
-    /// Master switch for the `nvext` extension protocol. Default `true`,
-    /// env-falsey on `DYN_ENABLE_FRONTEND_NVEXT` overrides to `false`.
+    /// Master switch for the `nvext` extension protocol. Default `true`;
+    /// env-truthy `DYN_DISABLE_FRONTEND_NVEXT` overrides to `false`.
     #[builder(default = "true")]
     enable_nvext: bool,
 
     /// Master switch for the frontend admin API surface (`GET` /
-    /// `POST /busy_threshold`). Default `true`, env-falsey on
-    /// `DYN_ENABLE_FRONTEND_ADMIN_API` overrides to `false`.
+    /// `POST /busy_threshold`). Default `true`; env-truthy
+    /// `DYN_DISABLE_FRONTEND_ADMIN_API` overrides to `false`.
     #[builder(default = "true")]
     enable_admin_api: bool,
 
@@ -601,6 +617,10 @@ impl HttpService {
 
     pub fn anthropic_api_enabled(&self) -> bool {
         self.state().anthropic_api_enabled()
+    }
+
+    pub fn generate_api_enabled(&self) -> bool {
+        self.generate_api_enabled
     }
 
     pub async fn spawn(&self, cancel_token: CancellationToken) -> JoinHandle<Result<()>> {
@@ -863,6 +883,10 @@ static HTTP_SVC_EMB_PATH_ENV: &str = "DYN_HTTP_SVC_EMB_PATH";
 static HTTP_SVC_RESPONSES_PATH_ENV: &str = "DYN_HTTP_SVC_RESPONSES_PATH";
 /// Environment variable to set the anthropic messages endpoint path (default: `/v1/messages`)
 static HTTP_SVC_ANTHROPIC_PATH_ENV: &str = "DYN_HTTP_SVC_ANTHROPIC_PATH";
+/// Environment variable to enable the experimental vLLM-compatible
+/// `/inference/v1/generate` endpoint. Truthy value opts in; disabled by default.
+pub(super) static VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV: &str =
+    "DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE";
 
 impl HttpServiceConfigBuilder {
     pub fn build(self) -> Result<HttpService, anyhow::Error> {
@@ -870,6 +894,8 @@ impl HttpServiceConfigBuilder {
         let metrics_config = config.metrics_config.clone();
         let frontend_api_config = config.frontend_api_config.clone();
         let anthropic_endpoints_enabled = frontend_api_config.anthropic().enabled();
+        let generate_endpoint_enabled =
+            config.enable_engine_apis || env_is_truthy(VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV);
 
         let model_manager = Arc::new(ModelManager::new());
         let cancel_token = config.cancel_token.unwrap_or_default();
@@ -882,11 +908,12 @@ impl HttpServiceConfigBuilder {
                 cancel_token.child_token(),
             )) as Arc<dyn Discovery>
         });
-        // Env-falsey overrides the builder; unset preserves the builder default.
+        // Both surfaces are on by default; an env-truthy DISABLE var turns them
+        // off. The builder flag can also force off (e.g. tests), and wins.
         let nvext_enabled =
-            config.enable_nvext && !env_is_falsey(env_llm::DYN_ENABLE_FRONTEND_NVEXT);
+            config.enable_nvext && !env_is_truthy(env_llm::DYN_DISABLE_FRONTEND_NVEXT);
         let admin_api_enabled =
-            config.enable_admin_api && !env_is_falsey(env_llm::DYN_ENABLE_FRONTEND_ADMIN_API);
+            config.enable_admin_api && !env_is_truthy(env_llm::DYN_DISABLE_FRONTEND_ADMIN_API);
 
         let state = Arc::new(State::new(
             model_manager,
@@ -914,6 +941,9 @@ impl HttpServiceConfigBuilder {
             &EndpointType::AnthropicMessages,
             anthropic_endpoints_enabled,
         );
+        state
+            .flags
+            .set(&EndpointType::Generate, generate_endpoint_enabled);
 
         // enable prometheus metrics
         let registry = metrics::Registry::new();
@@ -998,7 +1028,7 @@ impl HttpServiceConfigBuilder {
             ));
         } else {
             tracing::info!(
-                env = env_llm::DYN_ENABLE_FRONTEND_ADMIN_API,
+                env = env_llm::DYN_DISABLE_FRONTEND_ADMIN_API,
                 "frontend admin API disabled — busy_threshold routes not registered"
             );
         }
@@ -1012,6 +1042,7 @@ impl HttpServiceConfigBuilder {
             state.clone(),
             &config.request_template,
             anthropic_endpoints_enabled,
+            generate_endpoint_enabled,
         );
         let mut inference_router = axum::Router::new();
         for (route_docs, route) in endpoint_routes {
@@ -1078,6 +1109,7 @@ impl HttpServiceConfigBuilder {
             tls_cert_path: config.tls_cert_path,
             tls_key_path: config.tls_key_path,
             route_docs: all_docs,
+            generate_api_enabled: generate_endpoint_enabled,
             rl_router,
             rl_port: config.rl_port,
         })
@@ -1129,6 +1161,7 @@ impl HttpServiceConfigBuilder {
         state: Arc<State>,
         request_template: &Option<RequestTemplate>,
         enable_anthropic_endpoints: bool,
+        enable_generate_endpoint: bool,
     ) -> Vec<(Vec<RouteDoc>, axum::Router)> {
         let mut routes = Vec::new();
         // Add chat completions route with conditional middleware
@@ -1171,6 +1204,13 @@ impl HttpServiceConfigBuilder {
                 EndpointType::AnthropicMessages,
                 (anthropic_docs, anthropic_route),
             );
+        }
+
+        if enable_generate_endpoint {
+            tracing::warn!("The vLLM-compatible /inference/v1/generate API is experimental.");
+            let (generate_docs, generate_route) =
+                super::generate::generate_router(state.clone(), None);
+            endpoint_routes.insert(EndpointType::Generate, (generate_docs, generate_route));
         }
 
         for endpoint_type in EndpointType::all() {
@@ -1389,13 +1429,13 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn test_enable_nvext_propagates_through_builder_to_state() {
-        use dynamo_runtime::config::environment_names::llm::DYN_ENABLE_FRONTEND_NVEXT;
+        use dynamo_runtime::config::environment_names::llm::DYN_DISABLE_FRONTEND_NVEXT;
 
         // `build()` ANDs the builder flag with the env var, so this test must
         // pin the env to unset. Going through `temp_env` also serializes it
-        // against `test_dyn_enable_frontend_nvext_env_var_mirror`, which mutates
+        // against `test_dyn_disable_frontend_nvext_env_var_mirror`, which mutates
         // the same process-global var in parallel.
-        temp_env::with_var_unset(DYN_ENABLE_FRONTEND_NVEXT, || {
+        temp_env::with_var_unset(DYN_DISABLE_FRONTEND_NVEXT, || {
             let on = HttpService::builder().enable_nvext(true).build().unwrap();
             assert!(on.state.nvext_enabled());
 
@@ -1410,17 +1450,17 @@ mod tests {
         });
     }
 
-    /// `DYN_ENABLE_FRONTEND_NVEXT` is the env-var mirror of the builder
-    /// flag. Unset -> builder default wins (on). Truthy strings -> on.
-    /// Falsey strings (`0` / `false` / `no` / `off`, case-insensitive) ->
+    /// `DYN_DISABLE_FRONTEND_NVEXT` is the env-var mirror of the builder
+    /// flag. Unset -> builder default wins (on). Falsey strings -> on.
+    /// Truthy strings (`1` / `true` / `yes` / `on`, case-insensitive) ->
     /// off, regardless of what the builder asked for.
     #[test]
     #[serial_test::serial]
-    fn test_dyn_enable_frontend_nvext_env_var_mirror() {
-        use dynamo_runtime::config::environment_names::llm::DYN_ENABLE_FRONTEND_NVEXT;
+    fn test_dyn_disable_frontend_nvext_env_var_mirror() {
+        use dynamo_runtime::config::environment_names::llm::DYN_DISABLE_FRONTEND_NVEXT;
 
         // Unset -> builder default (true) wins.
-        temp_env::with_var_unset(DYN_ENABLE_FRONTEND_NVEXT, || {
+        temp_env::with_var_unset(DYN_DISABLE_FRONTEND_NVEXT, || {
             let svc = HttpService::builder().build().unwrap();
             assert!(
                 svc.state.nvext_enabled(),
@@ -1428,30 +1468,53 @@ mod tests {
             );
         });
 
-        // Explicit truthy -> on (builder default also on; env doesn't flip it off).
-        temp_env::with_var(DYN_ENABLE_FRONTEND_NVEXT, Some("true"), || {
+        // Explicit falsey -> still on (disable not requested).
+        temp_env::with_var(DYN_DISABLE_FRONTEND_NVEXT, Some("false"), || {
             let svc = HttpService::builder().build().unwrap();
-            assert!(svc.state.nvext_enabled(), "env=true + default builder = on");
+            assert!(
+                svc.state.nvext_enabled(),
+                "disable=false + default builder = on"
+            );
         });
 
-        // Explicit falsey -> off, even though the builder default is on.
-        for falsey in ["false", "0", "no", "off", "FALSE"] {
-            temp_env::with_var(DYN_ENABLE_FRONTEND_NVEXT, Some(falsey), || {
+        // Explicit truthy -> off, even though the builder default is on.
+        for truthy in ["true", "1", "yes", "on", "TRUE"] {
+            temp_env::with_var(DYN_DISABLE_FRONTEND_NVEXT, Some(truthy), || {
                 let svc = HttpService::builder().build().unwrap();
                 assert!(
                     !svc.state.nvext_enabled(),
-                    "env={falsey:?} should override builder default to off"
+                    "disable={truthy:?} should override builder default to off"
                 );
             });
         }
 
         // Builder=false short-circuits regardless of env.
-        temp_env::with_var(DYN_ENABLE_FRONTEND_NVEXT, Some("true"), || {
+        temp_env::with_var_unset(DYN_DISABLE_FRONTEND_NVEXT, || {
             let svc = HttpService::builder().enable_nvext(false).build().unwrap();
             assert!(
                 !svc.state.nvext_enabled(),
-                "builder=false wins even if env=true"
+                "builder=false wins even if disable is unset"
             );
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn generate_api_enabled_reports_resolved_startup_gate() {
+        temp_env::with_var_unset(VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, || {
+            let disabled = HttpService::builder().build().unwrap();
+            assert!(!disabled.generate_api_enabled());
+
+            let enabled = HttpService::builder()
+                .enable_engine_apis(true)
+                .build()
+                .unwrap();
+            assert!(enabled.generate_api_enabled());
+        });
+
+        temp_env::with_var(VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, Some("1"), || {
+            let enabled = HttpService::builder().build().unwrap();
+            assert!(enabled.generate_api_enabled());
         });
     }
 }

@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use dynamo_runtime::protocols::annotated::AnnotationsProvider;
+use dynamo_runtime::protocols::annotated::{Annotated, AnnotationsProvider};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use validator::Validate;
@@ -22,7 +22,6 @@ use crate::protocols::common::extensions::{
 
 pub mod aggregator;
 mod delta;
-pub mod jail;
 pub mod tool_parser_v2;
 
 pub use aggregator::DeltaAggregator;
@@ -30,8 +29,9 @@ pub use delta::DeltaGenerator;
 
 use dynamo_parsers::tool_calling::{ToolCallResponse, ToolCallResponseChunk};
 use dynamo_protocols::types::{
-    ChatCompletionMessageToolCall, ChatCompletionMessageToolCallChunk, FunctionCall,
-    FunctionCallStream, FunctionType,
+    ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionMessageToolCall,
+    ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta, FinishReason,
+    FunctionCall, FunctionCallStream, FunctionType,
 };
 
 /// Map a parser-native [`ToolCallResponse`] onto the protocol/wire
@@ -173,6 +173,8 @@ impl NvCreateChatCompletionRequest {
             }
         }
         if let Some(effort) = reasoning_effort {
+            args.entry("enable_thinking".to_string())
+                .or_insert_with(|| serde_json::Value::Bool(effort.as_str() != Some("none")));
             args.insert("reasoning_effort".to_string(), effort);
         }
 
@@ -237,6 +239,45 @@ pub struct NvCreateChatCompletionStreamResponse {
     /// client-facing OpenAI-compatible streams.
     #[serde(skip)]
     pub llm_metrics: Option<crate::protocols::common::metrics::LLMMetricAnnotation>,
+}
+
+/// Build one synthetic stream choice from an existing response template.
+///
+/// Both streaming tool-call paths use this constructor when an engine omits a
+/// terminal choice. Accounting data belongs only on the usage chunk and must
+/// not be copied onto the synthetic choice.
+pub(super) fn stream_choice_chunk_from_template(
+    template: &NvCreateChatCompletionStreamResponse,
+    index: u32,
+    content: Option<ChatCompletionMessageContent>,
+    tool_calls: Option<Vec<ChatCompletionMessageToolCallChunk>>,
+    finish_reason: Option<FinishReason>,
+) -> Annotated<NvCreateChatCompletionStreamResponse> {
+    let mut response = template.clone();
+    response.inner.usage = None;
+    response.llm_metrics = None;
+    #[allow(deprecated)]
+    let choice = ChatChoiceStream {
+        index,
+        delta: ChatCompletionStreamResponseDelta {
+            role: None,
+            content,
+            tool_calls,
+            function_call: None,
+            refusal: None,
+            reasoning_content: None,
+        },
+        finish_reason,
+        logprobs: None,
+    };
+    response.inner.choices = vec![choice];
+    Annotated {
+        data: Some(response),
+        id: None,
+        event: None,
+        comment: None,
+        error: None,
+    }
 }
 
 /// Implements `NvExtProvider` for `NvCreateChatCompletionRequest`,
@@ -490,6 +531,7 @@ impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
 impl ValidateRequest for NvCreateChatCompletionRequest {
     fn validate(&self) -> Result<(), anyhow::Error> {
         validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
+        validate::validate_chat_template_args(self.chat_template_args.as_ref())?;
         validate::validate_messages(&self.inner.messages)?;
         validate::validate_model(&self.inner.model)?;
         // none for store
@@ -1155,6 +1197,51 @@ mod tests {
         assert_eq!(args.get("thinking_mode"), Some(&json!("disabled")));
         assert_eq!(args.get("reasoning_effort"), Some(&json!("none")));
         assert!(request.thinking.is_none());
+    }
+
+    #[test]
+    fn test_reasoning_effort_controls_enable_thinking() {
+        for (effort, expected) in [("none", false), ("low", true), ("high", true)] {
+            let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+                "model": "zai-org/GLM-5.2",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "reasoning_effort": effort
+            }))
+            .expect("request should deserialize");
+
+            request
+                .normalize_reasoning_template_args()
+                .expect("reasoning effort should normalize");
+
+            let args = request
+                .chat_template_args
+                .as_ref()
+                .expect("chat_template_args should be populated");
+            assert_eq!(args.get("enable_thinking"), Some(&json!(expected)));
+            assert_eq!(args.get("reasoning_effort"), Some(&json!(effort)));
+        }
+    }
+
+    #[test]
+    fn test_explicit_enable_thinking_overrides_reasoning_effort() {
+        let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "zai-org/GLM-5.2",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "reasoning_effort": "none",
+            "chat_template_args": {"enable_thinking": true}
+        }))
+        .expect("request should deserialize");
+
+        request
+            .normalize_reasoning_template_args()
+            .expect("reasoning effort should normalize");
+
+        let args = request
+            .chat_template_args
+            .as_ref()
+            .expect("chat_template_args should be populated");
+        assert_eq!(args.get("enable_thinking"), Some(&json!(true)));
+        assert_eq!(args.get("reasoning_effort"), Some(&json!("none")));
     }
 
     #[test]
