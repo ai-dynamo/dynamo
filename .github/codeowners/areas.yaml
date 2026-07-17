@@ -227,7 +227,7 @@ areas:
   - examples/custom_backend/
   - lib/backend-common/
   - lib/backend-common/examples/
-  - lib/backend/sidecar-common/
+  - lib/sidecar/common/
   - lib/bindings/
   - lib/bindings/c/
   - lib/bindings/python/
