@@ -98,6 +98,8 @@ logger = logging.getLogger(__name__)
 
 _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
+_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY: Final = "kv_transfer_params"
+_ROUTER_HINT_EXTRA_ARGS_KEY: Final = "router_hint"
 _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
     {
         "allow_unpaused",
@@ -837,11 +839,22 @@ def build_sampling_params(
         sampling_params.max_tokens = min(configured_default, dynamic_default)
 
     if isinstance(extra_args, dict):
-        kv_transfer_params = extra_args.get("kv_transfer_params")
+        kv_transfer_params = extra_args.get(_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY)
         if isinstance(kv_transfer_params, dict):
-            if sampling_params.extra_args is None:
-                sampling_params.extra_args = {}
-            sampling_params.extra_args["kv_transfer_params"] = kv_transfer_params
+            router_hint = kv_transfer_params.get(_ROUTER_HINT_EXTRA_ARGS_KEY)
+            if isinstance(router_hint, dict):
+                if sampling_params.extra_args is None:
+                    sampling_params.extra_args = {}
+                existing_params = sampling_params.extra_args.get(
+                    _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY
+                )
+                safe_kv_transfer_params = (
+                    dict(existing_params) if isinstance(existing_params, dict) else {}
+                )
+                safe_kv_transfer_params[_ROUTER_HINT_EXTRA_ARGS_KEY] = router_hint
+                sampling_params.extra_args[
+                    _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY
+                ] = safe_kv_transfer_params
 
     # Dynamo's internal token path consumes disjoint token deltas. This mirrors
     # the SGLang integration and lets vLLM's stream_interval gate reduce backend

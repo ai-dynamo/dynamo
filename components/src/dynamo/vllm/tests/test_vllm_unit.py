@@ -1099,7 +1099,7 @@ async def test_health_check_aggregated_returns_canary():
     assert payload["token_ids"]
 
 
-def test_build_sampling_params_passes_kv_transfer_params_extra_args():
+def test_build_sampling_params_allowlists_router_hint_extra_args():
     from dynamo.vllm.handlers import build_sampling_params
 
     router_hint = {
@@ -1112,15 +1112,30 @@ def test_build_sampling_params_passes_kv_transfer_params_extra_args():
         "sampling_options": {},
         "stop_conditions": {},
         "output_options": {},
-        "extra_args": {"kv_transfer_params": {"router_hint": router_hint}},
+        "extra_args": {
+            "kv_transfer_params": {
+                "router_hint": router_hint,
+                "untrusted_connector_param": "dropped",
+            },
+        },
     }
 
-    sp = build_sampling_params(request, default_sampling_params={})
+    sp = build_sampling_params(
+        request,
+        default_sampling_params={
+            "extra_args": {
+                "kv_transfer_params": {"internal": "kept"},
+                "other_internal": "kept",
+            }
+        },
+    )
 
     assert sp.extra_args == {
         "kv_transfer_params": {
+            "internal": "kept",
             "router_hint": router_hint,
-        }
+        },
+        "other_internal": "kept",
     }
 
 
