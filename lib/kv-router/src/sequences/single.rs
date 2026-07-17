@@ -314,7 +314,9 @@ impl ActiveSequences {
         }
 
         self.last_expiry_check_time = now;
-        let expired_requests_time = now - expiry_duration;
+        let Some(expired_requests_time) = now.checked_sub(expiry_duration) else {
+            return SequenceMutationOutcome::default();
+        };
         let expired_request_ids: HashSet<RequestId> = self
             .requests
             .iter()
