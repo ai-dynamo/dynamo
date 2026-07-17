@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 from typing import (
     Any,
     AsyncIterator,
+    Callable,
     Dict,
     Final,
     Generic,
@@ -103,6 +104,8 @@ logger = logging.getLogger(__name__)
 
 _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
+_RL_INIT_WEIGHTS_TIMEOUT_ENV = "DYN_RL_INIT_WEIGHTS_TIMEOUT_S"
+_RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S = 30.0
 _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
     {
         "allow_unpaused",
@@ -120,6 +123,15 @@ def build_prompt_tokens_details(
     if num_cached_tokens is None:
         return None
     return {"cached_tokens": num_cached_tokens}
+
+
+def _rl_init_weights_timeout_s() -> float:
+    return float(
+        os.environ.get(
+            _RL_INIT_WEIGHTS_TIMEOUT_ENV,
+            str(_RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S),
+        )
+    )
 
 
 class _DeferredAbort:
@@ -513,71 +525,6 @@ def _prompt_token_ids_for_engine_data(
     return list(prompt_token_ids or [])
 
 
-def _prompt_token_count_for_validation(
-    request: Dict[str, Any],
-    embedding_sequence_length: int | None = None,
-    prompt_token_count: int | None = None,
-) -> int | None:
-    """Return the prompt length used for max-model-length validation."""
-    if prompt_token_count is not None:
-        return prompt_token_count
-    if embedding_sequence_length is not None:
-        return embedding_sequence_length
-
-    extra_args = request.get("extra_args") or {}
-    if isinstance(extra_args, dict):
-        expanded_token_ids = extra_args.get("expanded_token_ids")
-        if expanded_token_ids:
-            return len(expanded_token_ids)
-    if "token_ids" in request:
-        return len(request.get("token_ids") or [])
-    return None
-
-
-def _explicit_max_tokens_budget_error(
-    request: Dict[str, Any],
-    model_max_len: int | None,
-    embedding_sequence_length: int | None = None,
-    prompt_token_count: int | None = None,
-) -> str | None:
-    if model_max_len is None or model_max_len <= 0:
-        return None
-
-    stop_conditions = request.get("stop_conditions") or {}
-    max_tokens = stop_conditions.get("max_tokens")
-    if max_tokens is None:
-        max_tokens = request.get("max_tokens")
-    if not isinstance(max_tokens, int) or isinstance(max_tokens, bool):
-        return None
-
-    prompt_tokens = _prompt_token_count_for_validation(
-        request,
-        embedding_sequence_length=embedding_sequence_length,
-        prompt_token_count=prompt_token_count,
-    )
-    if prompt_tokens is None:
-        return None
-
-    requested_tokens = prompt_tokens + max_tokens
-    if requested_tokens <= model_max_len:
-        return None
-
-    return (
-        f"This model's maximum context length is {model_max_len} tokens. "
-        f"However, you requested {requested_tokens} tokens "
-        f"({prompt_tokens} in the messages, {max_tokens} in the completion). "
-        "Please reduce the length of the messages or completion."
-    )
-
-
-def _prompt_token_count_for_text_mode(
-    input_param_manager: InputParamManager, input_data: Any
-) -> int:
-    if isinstance(input_data, list):
-        return len(input_data)
-    return len(input_param_manager.tokenizer.encode(input_data))
-
-
 def _flatten_logprobs(
     log_probs: Any,
 ) -> Optional[list[float]]:
@@ -843,7 +790,8 @@ def build_sampling_params(
 
     # If max_tokens wasn't provided (None or missing), compute a dynamic default
     provided_max_tokens = request.get("stop_conditions", {}).get("max_tokens", None)
-    input_length = _prompt_token_count_for_validation(request) or 0
+    token_ids = request.get("token_ids", [])
+    input_length = len(token_ids)
     if model_max_len is not None and provided_max_tokens is None:
         # Ensure at least 1 token generation by default when possible
         dynamic_default = max(1, model_max_len - input_length)
@@ -1078,6 +1026,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.loaded_loras = self._lora_state.loaded_loras
         self._lora_load_locks = self._lora_state.lora_load_locks
         self._lora_load_locks_guard = self._lora_state.lora_load_locks_guard
+        # Adapters known to have been handed to vLLM. Prefill registration is
+        # metadata-only, but vLLM activates a prefill adapter lazily when an
+        # inference request supplies its LoRARequest.
+        self._engine_loaded_loras: set[str] = set()
         self._paused: bool = False
         self._weight_version: str = "initial"
 
@@ -1174,8 +1126,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 f"VisionEncoderBackend subclass, got {backend_cls!r}."
             )
         # The author writes the VisionEncoderBackend; Dynamo wraps it in the
-        # AsyncVisionEncoder glue, which owns the preprocess pool and actor
-        # thread. load() runs backend.build() on the actor thread
+        # AsyncVisionEncoder glue, which owns the preprocess pool and
+        # ThreadedMicroBatcher actor thread. load() runs backend.build() there
         # (the backend picks its own device) and cleans that thread up on failure.
         encoder = AsyncVisionEncoder(backend_cls())
         encoder.load(config.model)
@@ -1188,11 +1140,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             config.model,
         )
 
-    def _shutdown_on_engine_dead(self, e: EngineDeadError) -> NoReturn:
-        logger.error(f"vLLM EngineDeadError: {e}")
+    def _shutdown_worker(self) -> NoReturn:
         logger.warning("Initiating Dynamo Runtime shutdown.")
         self.runtime.shutdown()
         os._exit(1)
+
+    def _shutdown_on_engine_dead(self, e: EngineDeadError) -> NoReturn:
+        logger.error(f"vLLM EngineDeadError: {e}")
+        self._shutdown_worker()
 
     def init_embedding_loader(
         self, config: Config, encode_worker_client: Optional[Client] = None
@@ -1805,7 +1760,27 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         kwargs = {k: v for k, v in body.items() if k != "engine_rpc"}
         async with self._pause_lock:
             try:
-                await self.engine_client.collective_rpc(rpc, kwargs=kwargs)
+                timeout_s = _rl_init_weights_timeout_s()
+                rpc_task = asyncio.create_task(
+                    self.engine_client.collective_rpc(rpc, kwargs=kwargs)
+                )
+                try:
+                    done, _ = await asyncio.wait({rpc_task}, timeout=timeout_s)
+                except asyncio.CancelledError:
+                    rpc_task.cancel()
+                    await asyncio.gather(rpc_task, return_exceptions=True)
+                    raise
+                if rpc_task not in done:
+                    rpc_task.cancel()
+                    await asyncio.gather(rpc_task, return_exceptions=True)
+                    logger.error(
+                        f"[RL] init_weights_update_group timed out after "
+                        f"{timeout_s:.1f} seconds (rpc={rpc}); terminating the "
+                        "worker because EngineCore may still be blocked"
+                    )
+                    self._shutdown_worker()
+
+                await rpc_task
                 logger.info(f"[RL] Weight update group initialized (rpc={rpc})")
                 return {"status": "ok", "message": "Weight update group initialized"}
             except EngineDeadError as e:
@@ -2001,6 +1976,17 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             lora_enabled=self._lora_enabled(),
         )
 
+    def _track_lora_request_activation(self, lora_request: LoRARequest | None) -> None:
+        """Record adapters handed to vLLM for request-time lazy activation."""
+        if lora_request is not None:
+            self._engine_loaded_loras.add(lora_request.lora_name)
+
+    @staticmethod
+    def _is_lora_not_loaded_error(error: Exception) -> bool:
+        """Return whether vLLM reports an idempotent remove of a missing LoRA."""
+        message = str(error).lower()
+        return "not loaded" in message or "not found" in message
+
     def _get_lora_lock(self, lora_name: str) -> asyncio.Lock:
         """Get/create the per-LoRA lock without eagerly allocating a new lock each call."""
         return self._lora_state.get_lock(lora_name)
@@ -2106,6 +2092,57 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             lora_name=lora_name,
         )
 
+    async def _generate_with_lora_admission_lock(
+        self,
+        lora_request: LoRARequest | None,
+        create_generator: Callable[[LoRARequest | None], AsyncIterator[Any]],
+    ) -> AsyncIterator[Any]:
+        """Yield results after atomically admitting a lazy LoRA request.
+
+        vLLM admits an ``AsyncLLM.generate`` request on its first iteration.
+        Holding the adapter lifecycle lock through that iteration prevents an
+        unload from deleting bookkeeping before lazy activation completes.
+        """
+        if lora_request is None or self._preload_lora_into_engine():
+            self._track_lora_request_activation(lora_request)
+            async for result in create_generator(lora_request):
+                yield result
+            return
+
+        lock = self._get_lora_lock(lora_request.lora_name)
+        async with lock:
+            # The adapter may have been unloaded or reloaded at a different path
+            # while this request waited. Look it up again while holding the lock.
+            admitted_lora_request = self._resolve_lora_request(lora_request.lora_name)
+            if admitted_lora_request is None:
+                logger.warning(
+                    "LoRA adapter %s was unloaded before vLLM admission; "
+                    "rejecting the request",
+                    lora_request.lora_name,
+                )
+                raise ValueError(
+                    f"unknown model or LoRA adapter: '{lora_request.lora_name}'"
+                )
+            generator = create_generator(admitted_lora_request)
+            self._track_lora_request_activation(admitted_lora_request)
+            try:
+                first_result = await anext(generator)
+            except StopAsyncIteration:
+                return
+
+        yield first_result
+        async for result in generator:
+            yield result
+
+    def _preload_lora_into_engine(self) -> bool:
+        """Whether lifecycle registration should eagerly activate the adapter.
+
+        Prefill keeps the downloaded adapter metadata and supplies its path in
+        the inference-time ``LoRARequest``. Decode and aggregated workers must
+        be immediately ready to generate and therefore continue to preload.
+        """
+        return self.config.disaggregation_mode != DisaggregationMode.PREFILL
+
     async def load_lora(self, request=None):
         """
         Load a LoRA adapter dynamically into the vLLM's AsyncLLM engine.
@@ -2141,6 +2178,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     old_info = self.loaded_loras.get(lora_name)
                     hot_swap_enabled = env_bool("DYN_LORA_HOTSWAP_ENABLED")
                     is_hot_swap = old_info is not None and hot_swap_enabled
+                    old_engine_loaded = lora_name in self._engine_loaded_loras
 
                     if old_info is not None and not hot_swap_enabled:
                         logger.info(
@@ -2175,9 +2213,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     # Generate deterministic ID from lora_name before using it
                     lora_id = lora_name_to_id(lora_name)
 
-                    if is_hot_swap and old_info is not None:
+                    if is_hot_swap and old_info is not None and old_engine_loaded:
                         try:
                             await self.engine_client.remove_lora(old_info.id)
+                            self._engine_loaded_loras.discard(lora_name)
                         except Exception as e:
                             logger.error(
                                 f"Failed to remove existing LoRA '{lora_name}' "
@@ -2193,36 +2232,49 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             }
                             return
 
-                    try:
-                        await self.engine_client.add_lora(
-                            LoRARequest(
-                                lora_name=lora_name,
-                                lora_int_id=lora_id,
-                                lora_path=lora_path,
+                    # Initial prefill registration is metadata-only. A hot
+                    # swap must still replace any lazily activated old adapter
+                    # atomically before the prefix cache is reset.
+                    preload_into_engine = (
+                        self._preload_lora_into_engine() or is_hot_swap
+                    )
+                    if preload_into_engine:
+                        try:
+                            await self.engine_client.add_lora(
+                                LoRARequest(
+                                    lora_name=lora_name,
+                                    lora_int_id=lora_id,
+                                    lora_path=lora_path,
+                                )
                             )
-                        )
-                    except Exception as e:
-                        if is_hot_swap and old_info is not None:
-                            try:
-                                await self.engine_client.add_lora(
-                                    LoRARequest(
-                                        lora_name=lora_name,
-                                        lora_int_id=old_info.id,
-                                        lora_path=old_info.path,
+                            self._engine_loaded_loras.add(lora_name)
+                        except Exception as e:
+                            if (
+                                is_hot_swap
+                                and old_info is not None
+                                and old_engine_loaded
+                            ):
+                                try:
+                                    await self.engine_client.add_lora(
+                                        LoRARequest(
+                                            lora_name=lora_name,
+                                            lora_int_id=old_info.id,
+                                            lora_path=old_info.path,
+                                        )
                                     )
-                                )
-                            except Exception as rollback_error:
-                                self.loaded_loras.pop(lora_name, None)
-                                logger.exception(
-                                    f"Rollback failed for LoRA {lora_name}: "
-                                    f"{rollback_error}"
-                                )
-                        yield {
-                            "status": "error",
-                            "message": f"Failed to add LoRA '{lora_name}': {e}",
-                            "lora_name": lora_name,
-                        }
-                        return
+                                    self._engine_loaded_loras.add(lora_name)
+                                except Exception as rollback_error:
+                                    self.loaded_loras.pop(lora_name, None)
+                                    logger.exception(
+                                        f"Rollback failed for LoRA {lora_name}: "
+                                        f"{rollback_error}"
+                                    )
+                            yield {
+                                "status": "error",
+                                "message": f"Failed to add LoRA '{lora_name}': {e}",
+                                "lora_name": lora_name,
+                            }
+                            return
 
                     # Track the LoRA
                     self.loaded_loras[lora_name] = LoRAInfo(id=lora_id, path=lora_path)
@@ -2245,16 +2297,24 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             rolled_back = "tracking only"
                             if old_info is not None:
                                 try:
-                                    await self.engine_client.remove_lora(lora_id)
-                                    await self.engine_client.add_lora(
-                                        LoRARequest(
-                                            lora_name=lora_name,
-                                            lora_int_id=old_info.id,
-                                            lora_path=old_info.path,
+                                    if preload_into_engine:
+                                        await self.engine_client.remove_lora(lora_id)
+                                        self._engine_loaded_loras.discard(lora_name)
+                                    if old_engine_loaded:
+                                        await self.engine_client.add_lora(
+                                            LoRARequest(
+                                                lora_name=lora_name,
+                                                lora_int_id=old_info.id,
+                                                lora_path=old_info.path,
+                                            )
                                         )
-                                    )
+                                        self._engine_loaded_loras.add(lora_name)
                                     self.loaded_loras[lora_name] = old_info
-                                    rolled_back = "engine+tracking"
+                                    rolled_back = (
+                                        "engine+tracking"
+                                        if old_engine_loaded
+                                        else "tracking only"
+                                    )
                                 except Exception as rollback_error:
                                     # Engine is in an indeterminate adapter state;
                                     # drop tracking so we never claim a clean swap.
@@ -2291,12 +2351,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 f"Failed to publish LoRA {lora_name} ModelDeploymentCard: {e}"
                             )
 
-                            # Rollback: remove the LoRA from the engine to maintain consistency
+                            # Roll back engine state when this worker preloaded;
+                            # prefill only needs to discard the cached metadata.
                             try:
-                                logger.debug(
-                                    f"Rolling back: removing LoRA '{lora_name}' from engine"
-                                )
-                                await self.engine_client.remove_lora(lora_id)
+                                if preload_into_engine:
+                                    logger.debug(
+                                        f"Rolling back: removing LoRA '{lora_name}' from engine"
+                                    )
+                                    await self.engine_client.remove_lora(lora_id)
+                                    self._engine_loaded_loras.discard(lora_name)
                                 self.loaded_loras.pop(lora_name, None)
                                 logger.debug(
                                     f"Successfully rolled back LoRA '{lora_name}'"
@@ -2362,14 +2425,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
                     logger.debug(f"Unloading LoRA adapter: {lora_name}")
                     lora_id = lora.id
-                    lora_path = lora.path
 
-                    await self.engine_client.remove_lora(lora_id)
-
-                    # Remove from tracking
-                    del self.loaded_loras[lora_name]
-
-                    # Unregister the LoRA model from the model registry
+                    # Stop advertising the adapter before mutating engine or
+                    # tracking state. Otherwise requests can still route here
+                    # after _resolve_lora_request has forgotten the adapter and
+                    # silently execute against the base model.
                     if self.generate_endpoint is not None:
                         logger.debug(
                             f"Unregistering LoRA '{lora_name}' ModelDeploymentCard"
@@ -2383,32 +2443,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             logger.exception(
                                 f"Failed to unregister LoRA {lora_name} ModelDeploymentCard: {e}"
                             )
-
-                            # Rollback: re-add the LoRA to the engine to maintain consistency
-                            try:
-                                logger.debug(
-                                    f"Rolling back: re-adding LoRA '{lora_name}' to engine"
-                                )
-                                await self.engine_client.add_lora(
-                                    LoRARequest(
-                                        lora_name=lora_name,
-                                        lora_int_id=lora_id,
-                                        lora_path=lora_path,
-                                    )
-                                )
-                                # Re-add to tracking
-                                self.loaded_loras[lora_name] = LoRAInfo(
-                                    id=lora_id, path=lora_path
-                                )
-                                logger.debug(
-                                    f"Successfully rolled back LoRA '{lora_name}'"
-                                )
-                            except Exception as rollback_error:
-                                logger.exception(
-                                    f"Failed to rollback LoRA {lora_name}: {rollback_error}"
-                                )
-
-                            # Return error status since unregistration failed
                             yield {
                                 "status": "error",
                                 "message": f"Failed to unregister LoRA '{lora_name}' from discovery registry: {str(e)}",
@@ -2419,6 +2453,19 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         logger.debug(
                             f"Cannot unregister LoRA '{lora_name}': generate_endpoint={self.generate_endpoint}"
                         )
+
+                    # Prefill lifecycle registration is metadata-only, but
+                    # vLLM may have activated the adapter lazily for an
+                    # inference request. Remove only adapters known to have
+                    # reached vLLM.
+                    if lora_name in self._engine_loaded_loras:
+                        try:
+                            await self.engine_client.remove_lora(lora_id)
+                        except Exception as e:
+                            if not self._is_lora_not_loaded_error(e):
+                                raise
+                        self._engine_loaded_loras.discard(lora_name)
+                    del self.loaded_loras[lora_name]
 
                     logger.info(
                         f"Successfully unloaded LoRA adapter: {lora_name} with ID {lora_id}"
@@ -2749,18 +2796,21 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 request_id,
                 lora_request,
             )
-            gen = self.engine_client.generate(
-                prompt,
-                sampling_params,
-                request_id,
-                lora_request=lora_request,
-                data_parallel_rank=data_parallel_rank,
-                trace_headers=trace_headers,
-                priority=priority,
-                **_engine_generate_reasoning_kwargs(
-                    self.engine_client,
-                    reasoning_ended,
-                    reasoning_parser_kwargs,
+            gen = self._generate_with_lora_admission_lock(
+                lora_request,
+                lambda admitted_lora_request: self.engine_client.generate(
+                    prompt,
+                    sampling_params,
+                    request_id,
+                    lora_request=admitted_lora_request,
+                    data_parallel_rank=data_parallel_rank,
+                    trace_headers=trace_headers,
+                    priority=priority,
+                    **_engine_generate_reasoning_kwargs(
+                        self.engine_client,
+                        reasoning_ended,
+                        reasoning_parser_kwargs,
+                    ),
                 ),
             )
 
@@ -3014,8 +3064,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # failure becomes a structured request error instead of escaping the
         # request coroutine and tearing down the stream.
         try:
-            # encode() preprocesses off-thread and serializes forwards on one
-            # dedicated actor thread.
+            # AsyncVisionEncoder preprocesses off-thread; its ThreadedMicroBatcher
+            # coalesces concurrent calls onto one dedicated actor thread.
             img_tensors: list[torch.Tensor] = await self._custom_encoder.encode(
                 image_urls
             )
@@ -3133,20 +3183,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             return
 
         _apply_nvext_cache_salt(request, prompt)
-
-        budget_error = _explicit_max_tokens_budget_error(
-            request,
-            self.model_max_len,
-            embedding_sequence_length=embedding_sequence_length,
-        )
-        if budget_error is not None:
-            logger.error("Request %s: %s", request_id, budget_error)
-            yield {
-                "finish_reason": f"error: {budget_error}",
-                "index": 0,
-                "token_ids": [],
-            }
-            return
 
         # Build sampling params from request
         sampling_params = build_sampling_params(
@@ -3269,35 +3305,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             prompt = TextPrompt(prompt=input_data)
 
         _apply_nvext_cache_salt(request, prompt)
-
-        request_max_tokens = request.get("max_tokens")
-        prompt_token_count = (
-            _prompt_token_count_for_text_mode(self.input_param_manager, input_data)
-            if isinstance(request_max_tokens, int)
-            and not isinstance(request_max_tokens, bool)
-            else None
-        )
-        budget_error = _explicit_max_tokens_budget_error(
-            request,
-            self.model_max_len,
-            prompt_token_count=prompt_token_count,
-        )
-        if budget_error is not None:
-            logger.error("Request %s: %s", request_id, budget_error)
-            yield {
-                "id": request.get("id") or request.get("request_id", request_id),
-                "created": int(time.time()),
-                "object": "chat.completion.chunk",
-                "model": request.get("model", "unknown"),
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {"role": "assistant", "content": ""},
-                        "finish_reason": f"error: {budget_error}",
-                    }
-                ],
-            }
-            return
 
         # Build sampling params from OpenAI-style request
         sampling_params = build_sampling_params_openai(
@@ -3520,18 +3527,21 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         async with self._abort_monitor(context, request_id, is_prefill=True):
             try:
-                gen = self.engine_client.generate(
-                    prompt,
-                    sampling_params,
-                    request_id,
-                    data_parallel_rank=dp_rank,
-                    lora_request=lora_request,
-                    trace_headers=trace_headers,
-                    priority=priority,
-                    **_engine_generate_reasoning_kwargs(
-                        self.engine_client,
-                        reasoning_ended,
-                        reasoning_parser_kwargs,
+                gen = self._generate_with_lora_admission_lock(
+                    lora_request,
+                    lambda admitted_lora_request: self.engine_client.generate(
+                        prompt,
+                        sampling_params,
+                        request_id,
+                        data_parallel_rank=dp_rank,
+                        lora_request=admitted_lora_request,
+                        trace_headers=trace_headers,
+                        priority=priority,
+                        **_engine_generate_reasoning_kwargs(
+                            self.engine_client,
+                            reasoning_ended,
+                            reasoning_parser_kwargs,
+                        ),
                     ),
                 )
             except EngineDeadError as e:

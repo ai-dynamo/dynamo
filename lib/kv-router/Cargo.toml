@@ -28,6 +28,7 @@ standalone-selection = ["standalone-indexer"]
 dynamo-runtime = { workspace = true, optional = true }
 dynamo-kv-hashing = { workspace = true }
 dynamo-tokens = { workspace = true }
+dynamo-truthy = { workspace = true }
 
 # workspace
 anyhow = { workspace = true }
@@ -37,8 +38,8 @@ dashmap = { workspace = true }
 indexmap = { workspace = true }
 ordered-float = { workspace = true }
 derive_builder = { workspace = true }
+fastrand = "2"
 prometheus = { workspace = true, optional = true }
-rand = { workspace = true }
 seqlock = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, optional = true }
@@ -49,10 +50,10 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 zmq = { version = "0.10", optional = true }
 uuid = { workspace = true }
-validator = { workspace = true }
 xxhash-rust = { workspace = true }
 
 # dependencies
+crossbeam-queue = "0.3"
 flume = "0.12.0"
 parking_lot = { workspace = true }
 rmp-serde = { workspace = true }
@@ -61,9 +62,16 @@ rustc-hash = "2.1.1"
 slotmap = "1"
 
 # standalone-indexer (optional)
-axum = { workspace = true, optional = true }
+axum = { version = "=0.8.4", default-features = false, features = [
+  "http1",
+  "json",
+  "matched-path",
+  "query",
+  "tokio",
+  "tracing",
+], optional = true }
 chrono = { workspace = true, optional = true }
-reqwest = { workspace = true, optional = true }
+reqwest = { version = "0.12.24", default-features = false, features = ["json"], optional = true }
 tracing-appender = { version = "0.2", optional = true }
 
 [dev-dependencies]

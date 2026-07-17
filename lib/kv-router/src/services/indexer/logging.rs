@@ -214,11 +214,4 @@ mod tests {
         assert!(content.contains(r#"{"n":0}"#));
         assert!(content.contains(r#"{"n":4}"#));
     }
-
-    #[test]
-    fn parse_header_name_validates() {
-        assert!(parse_header_name("x-trace-id").is_ok());
-        assert!(parse_header_name("x-request-id").is_ok());
-        assert!(parse_header_name("invalid header\n").is_err());
-    }
 }

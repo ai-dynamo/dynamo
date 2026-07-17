@@ -22,9 +22,9 @@ limitations under the License.
 [![PyPI](https://img.shields.io/pypi/v/ai-dynamo)](https://pypi.org/project/ai-dynamo/)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ai-dynamo/dynamo)
 [![Discord](https://dcbadge.limes.pink/api/server/D92uqZRjCZ?style=flat)](https://discord.gg/D92uqZRjCZ)
-![Community Contributors](https://img.shields.io/badge/community_contributors-70%2B-brightgreen)
+![Community Contributors](https://img.shields.io/badge/community_contributors-160%2B-brightgreen)
 
-| **[Docs](https://docs.nvidia.com/dynamo/)** | **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/5506)** | **[Recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Prebuilt Containers](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[Digest](docs/digest/index.mdx)** | **[Design Proposals](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22)** | **[How to Contribute](#community-and-contributing)** |
+| **[Docs](https://docs.nvidia.com/dynamo/)** | **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/9178)** | **[Recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Prebuilt Containers](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[Digest](docs/digest/index.mdx)** | **[Design Proposals](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22)** | **[How to Contribute](#community-and-contributing)** |
 
 <!-- The SVG badge uses systemLanguage so it only draws for Simplified Chinese/China browser language preferences. -->
 <p align="left">
@@ -33,14 +33,20 @@ limitations under the License.
 
 # Dynamo
 
-<!-- TEMPORARY BANNER: remove once Nemotron Ultra 3 recipes mature. -->
-> [!NOTE]
-> **Day-0 Nemotron 3 Ultra recipes available.** Tested and performance optimized Kubernetes deployment paths for [Nemotron 3 Ultra](recipes/nemotron-3-ultra/) are merged to main for **vLLM**, with a prebuilt container image published on NGC.\
-> Recipes include KV-aware routing, multi-token prediction (MTP), and disaggregated prefill/decode
-
 **The open-source, datacenter-scale inference stack.** Dynamo is the orchestration layer above inference engines — it doesn't replace SGLang, TensorRT-LLM, or vLLM, it turns them into a coordinated multi-node inference system. Disaggregated serving, intelligent routing, multi-tier KV caching, and automatic scaling work together to maximize throughput and minimize latency for LLM, reasoning, multimodal, and video generation workloads.
 
 Built in Rust for performance, Python for extensibility.
+
+## Community Events
+
+<!-- EVENTS:START -->
+| Date | Event | Location |
+|:-----|:------|:---------|
+| Thu, Jul 16, 2026 | **[Austin vLLM & llm-d AI Inference Meetup](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Austin+vLLM+%26+llm-d+AI+Inference+Meetup&dates=20260716T220000Z%2F20260716T230000Z&location=https%3A%2F%2Fluma.com%2Frxmldtp2%3Ftk%3DXiKvay&details=%3Cp%3E%E2%80%8B%3Cstrong%3E5%3A00PM+%E2%80%93+5%3A30PM+%E2%80%94+Doors+Open%2C+Check-In%3C%2Fstrong%3E%3Cbr%3E%3Cbr%3E%3Cstrong%3E5%3A30PM+%E2%80%93+5%3A40PM+%E2%80%94+Welcome+and+Opening+Remarks%3C%2Fstrong%3E%3C%2Fp%3E%3Cblockquote%3E%3Cp%3E%E2%80%8BJake+O%27Shea%2C+Principal%2C+Antler+%26amp%3B+Co-Founder+%2F+Organizer%2C+AITX%3Cbr%3ESasa+Zelenovic%2C+Sr.+Technical+Marketing+Manager%2C+Red+Hat+AI%3C%2Fp%3E%3C%2Fblockquote%3E%3Cp%3E%E2%80%8B%3Cstrong%3E5%3A40PM+%E2%80%93+6%3A10PM+%E2%80%94+Intro+to+vLLM+and+Project+Update%3C%2Fstrong%3E%3C%2Fp%3E%3Cblockquote%3E%3Cp%3E%E2%80%8BKyle+Sayers%2C+Sr.+Machine+Learning+Engineer%2C+Red+Hat+AI%3C%2Fp%3E%3C%2Fblockquote%3E%3Cp%3E%E2%80%8B%3Cstrong%3E6%3A10PM+%E2%80%93+6%3A30PM+%E2%80%94+Intro+to+Scalable%2C+Distributed+Inference+with+Kubernetes+and+llm-d%3C%2Fstrong%3E%3C%2Fp%3E%3Cblockquote%3E%3Cp%3E%E2%80%8BWill+Eaton%2C+Senior+Principal+Software+Engineer%2C+AI+Engineering%2C+Red+Hat+AI%3C%2Fp%3E%3C%2Fblockquote%3E%3Cp%3E%E2%80%8B%3Cstrong%3E6%3A30PM+%E2%80%93+6%3A45PM+%E2%80%94+NemoClaw%3A+Build+%26amp%3B+Deploy+Always-On+Agents%3C%2Fstrong%3E%3C%2Fp%3E%3Cblockquote%3E%3Cp%3E%E2%80%8BPatrick+Moorhead%2C+Technical+Marketing+Engineer%2C+AI%2C+NVIDIA%3C%2Fp%3E%3C%2Fblockquote%3E%3Cp%3E%E2%80%8B%3Cstrong%3E6%3A45PM+%E2%80%93+7%3A00PM+%E2%80%94+ModelExpress%3A+Fast+Weights+and+Compile+Caches+for+Inference+and+RL+Post-Training%3C%2Fstrong%3E%3C%2Fp%3E%3Cblockquote%3E%3Cp%3E%E2%80%8BGanesh+Kudleppanavar+-+Tech+Lead+Manager%2C+AI+Inference+NVIDIA%3C%2Fp%3E%3C%2Fblockquote%3E%3Cp%3E%E2%80%8B%3Cstrong%3E7%3A00PM+%E2%80%93+7%3A40PM+%E2%80%94+Hands-on+Workshop%3A+Getting+Started+with+Accurate+Model+Compression+and+Benchmarking%3C%2Fstrong%3E%3C%2Fp%3E%3Cblockquote%3E%3Cp%3E%E2%80%8BLegare+Kerrison%2C+Developer+Advocate%2C+Red+Hat+AI%3Cbr%3EGrace+Ableidinger%2C+Developer+Advocate%2C+Red+Hat+AI%3C%2Fp%3E%3C%2Fblockquote%3E%3Cp%3E%E2%80%8B%3Cstrong%3E7%3A40PM+%E2%80%93+8%3A00PM+%E2%80%94+Discussion+and+Q%26amp%3BA%3C%2Fstrong%3E%3C%2Fp%3E%3Cp%3E%E2%80%8B%3Cstrong%3E8%3A00PM+%E2%80%93+9%3A00PM+%E2%80%94+Networking%2C+Food+and+Drinks%3C%2Fstrong%3E%3C%2Fp%3E)** | [Luma](https://luma.com/rxmldtp2?tk=XiKvay) |
+| Thu, Jul 30, 2026 | **[Dynamo Afterhours](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+Afterhours&dates=20260731T010000Z%2F20260731T040000Z&location=https%3A%2F%2Fluma.com%2FJulyDynamoAfterHours)** | [Luma](https://luma.com/JulyDynamoAfterHours) |
+<!-- EVENTS:END -->
+
+> Events are updated automatically. Subscribe to our [public calendar](https://calendar.google.com/calendar/embed?src=c_c2448d2efb09eac2ddee1f34524124135bd3f4554868769059105e18e1b97e8f%40group.calendar.google.com).
 
 ## When to use Dynamo
 

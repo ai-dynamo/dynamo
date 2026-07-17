@@ -20,7 +20,7 @@ from typing import Optional
 
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import PlannerConnector
-from dynamo.planner.connectors.kubernetes_api import (
+from dynamo.planner.connectors.clients.kubernetes_api import (
     DYNAMO_WORKER_METADATA_API_VERSION,
     NVIDIA_API_GROUP,
     KubernetesAPI,
@@ -91,6 +91,10 @@ class KubernetesConnector(PlannerConnector):
         # For backwards compatibility
         self.graph_deployment_name = self.parent_dgd_name
         self.raise_not_ready = raise_not_ready
+
+    async def async_init(self):
+        """No-op asynchronous lifecycle hook."""
+        return
 
     def get_worker_runtime_namespace(self, base_dynamo_namespace: str) -> str:
         """Return the Dynamo namespace used by the current worker generation.
@@ -238,8 +242,10 @@ class KubernetesConnector(PlannerConnector):
                 errors.append(str(e))
 
         try:
-            self.get_model_name(
+            self._get_model_name_from_deployment(
                 deployment,
+                prefill_component_name=prefill_component_name,
+                decode_component_name=decode_component_name,
                 require_prefill=require_prefill,
                 require_decode=require_decode,
             )
@@ -252,17 +258,36 @@ class KubernetesConnector(PlannerConnector):
 
     def get_model_name(
         self,
-        deployment: Optional[dict] = None,
         require_prefill: bool = True,
         require_decode: bool = True,
     ) -> str:
-        """Get the model name from the deployment"""
+        """Get the model name from the current deployment."""
         try:
-            if deployment is None:
-                deployment = self.kube_api.get_graph_deployment(
-                    self.graph_deployment_name
+            deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        except PlannerError as e:
+            if self.user_provided_model_name:
+                logger.warning(
+                    f"Failed to get model name from deployment with error: {e}, using provided model name: {self.user_provided_model_name}"
                 )
+                return self.user_provided_model_name
+            raise
 
+        return self._get_model_name_from_deployment(
+            deployment,
+            require_prefill=require_prefill,
+            require_decode=require_decode,
+        )
+
+    def _get_model_name_from_deployment(
+        self,
+        deployment: dict,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
+    ) -> str:
+        """Get the model name from an already-fetched deployment."""
+        try:
             # TODO: dynamo/profiler/utils/config.py already contains DGD config parsing
             # and model name logic, should consolidate
             prefill_model_name = None
@@ -271,12 +296,14 @@ class KubernetesConnector(PlannerConnector):
                 prefill_service = get_component_from_type_or_name(
                     deployment,
                     SubComponentType.PREFILL,
+                    component_name=prefill_component_name,
                 )
                 prefill_model_name = prefill_service.get_model_name()
             if require_decode:
                 decode_service = get_component_from_type_or_name(
                     deployment,
                     SubComponentType.DECODE,
+                    component_name=decode_component_name,
                 )
                 decode_model_name = decode_service.get_model_name()
 
@@ -318,14 +345,27 @@ class KubernetesConnector(PlannerConnector):
 
     def get_gpu_counts(
         self,
-        deployment: Optional[dict] = None,
         require_prefill: bool = True,
         require_decode: bool = True,
     ) -> tuple[int, int]:
-        """Get the GPU counts for prefill and decode components from the deployment.
+        """Get the GPU counts for prefill and decode components."""
+        deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        return self._get_gpu_counts_from_deployment(
+            deployment,
+            require_prefill=require_prefill,
+            require_decode=require_decode,
+        )
+
+    def _get_gpu_counts_from_deployment(
+        self,
+        deployment: dict,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+    ) -> tuple[int, int]:
+        """Get GPU counts from an already-fetched deployment.
 
         Args:
-            deployment: Optional deployment dict, fetched if not provided
+            deployment: Deployment dict to inspect
             require_prefill: Whether to require a prefill component
             require_decode: Whether to require a decode component
 
@@ -335,9 +375,6 @@ class KubernetesConnector(PlannerConnector):
         Raises:
             DeploymentValidationError: If GPU counts cannot be determined from DGD
         """
-        if deployment is None:
-            deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
-
         prefill_gpu_count = 0
         decode_gpu_count = 0
         errors = []
@@ -567,7 +604,8 @@ class KubernetesConnector(PlannerConnector):
         )
         return info
 
-    def get_actual_worker_counts(
+    # todo -> how are we handling 3 active 2 more new workers pending?
+    async def get_actual_worker_counts(
         self,
         prefill_component_name: Optional[str] = None,
         decode_component_name: Optional[str] = None,

@@ -14,7 +14,7 @@ import logging
 import os
 import tempfile
 from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING, Any, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Optional, cast
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import ZmqEventPublisher
@@ -69,6 +69,9 @@ from dynamo.vllm.cache_info import (
     get_configured_kv_event_block_size,
 )
 from dynamo.vllm.capacity import per_rank_kv_blocks
+from dynamo.vllm.kv_connector_protocols import (
+    disable_hybrid_kv_cache_manager_for_incompatible_pd_connector,
+)
 
 from .handlers import (
     VllmEnginePauseController,
@@ -226,6 +229,10 @@ class VllmLLMEngine(LLMEngine):
         # publishes against it.
         self._endpoint: Optional[Endpoint] = None
         self.loaded_loras: dict[str, LoRAInfo] = {}
+        # Adapters known to have been handed to vLLM. Prefill registration is
+        # metadata-only, but vLLM activates a prefill adapter lazily when an
+        # inference request supplies its LoRARequest.
+        self._engine_loaded_loras: set[str] = set()
         # Adapters whose discovery ModelDeploymentCard is currently published.
         # Tracked separately from `loaded_loras` because the engine load and the
         # discovery publish can diverge on partial failure: an adapter may be
@@ -347,6 +354,7 @@ class VllmLLMEngine(LLMEngine):
         vllm_config = self.engine_args.create_engine_config(
             usage_context=UsageContext.OPENAI_API_SERVER
         )
+        disable_hybrid_kv_cache_manager_for_incompatible_pd_connector(vllm_config)
         self._vllm_config = vllm_config
         self._default_sampling_params = (
             vllm_config.model_config.get_diff_sampling_param()
@@ -412,6 +420,7 @@ class VllmLLMEngine(LLMEngine):
             raise RuntimeError("Engine not initialized")
         if self._default_sampling_params is None:
             raise RuntimeError("Engine not initialized")
+        engine_client = self.engine_client
 
         request_id = context.id()
 
@@ -505,18 +514,21 @@ class VllmLLMEngine(LLMEngine):
         lora_request = self._resolve_lora_request(request.get("model"))
         reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
 
-        gen = self.engine_client.generate(
-            prompt,
-            sampling_params,
-            request_id,
-            data_parallel_rank=local_dp_rank,
-            lora_request=lora_request,
-            **_engine_generate_reasoning_kwargs(
-                self.engine_client,
-                reasoning_ended,
-                reasoning_parser_kwargs,
+        gen = self._generate_with_lora_admission_lock(
+            lora_request,
+            lambda admitted_lora_request: engine_client.generate(
+                prompt,
+                sampling_params,
+                request_id,
+                data_parallel_rank=local_dp_rank,
+                lora_request=admitted_lora_request,
+                **_engine_generate_reasoning_kwargs(
+                    engine_client,
+                    reasoning_ended,
+                    reasoning_parser_kwargs,
+                ),
+                **telemetry.engine_trace_kwargs(context),
             ),
-            **telemetry.engine_trace_kwargs(context),
         )
 
         is_prefill = self.disaggregation_mode == DisaggregationMode.PREFILL
@@ -795,6 +807,18 @@ class VllmLLMEngine(LLMEngine):
             raise ValueError(f"unknown model or LoRA adapter: '{model_name}'")
         return None
 
+    def _track_lora_request_activation(self, lora_request: LoRARequest | None) -> None:
+        """Record adapters handed to vLLM for request-time lazy activation.
+
+        Prefill lifecycle registration deliberately does not call ``add_lora``.
+        vLLM can nevertheless load the adapter when this request reaches its
+        scheduler, so unload must attempt a matching removal. A request that
+        fails before vLLM activates the adapter is harmless: unload treats a
+        not-loaded response as idempotent.
+        """
+        if lora_request is not None:
+            self._engine_loaded_loras.add(lora_request.lora_name)
+
     def _get_lora_lock(self, lora_name: str) -> asyncio.Lock:
         """Return the stripe lock that serializes load/unload for ``lora_name``.
 
@@ -805,6 +829,50 @@ class VllmLLMEngine(LLMEngine):
         stripe serialize against each other (harmless on this control path).
         """
         return self._lora_load_locks[hash(lora_name) % _LORA_LOCK_STRIPES]
+
+    async def _generate_with_lora_admission_lock(
+        self,
+        lora_request: LoRARequest | None,
+        create_generator: Callable[[LoRARequest | None], AsyncGenerator[Any, None]],
+    ) -> AsyncGenerator[Any, None]:
+        """Yield results after atomically admitting a lazy LoRA request.
+
+        vLLM admits an ``AsyncLLM.generate`` request on its first iteration.
+        Holding the adapter lifecycle lock through that iteration prevents an
+        unload from deleting bookkeeping before lazy activation completes.
+        """
+        if lora_request is None or self._preload_lora_into_engine():
+            self._track_lora_request_activation(lora_request)
+            async for result in create_generator(lora_request):
+                yield result
+            return
+
+        lock = self._get_lora_lock(lora_request.lora_name)
+        async with lock:
+            # A pending request may have waited behind an unload. Re-resolve
+            # under the lock instead of admitting its stale path afterwards.
+            admitted_lora_request = self._resolve_lora_request(lora_request.lora_name)
+            generator = create_generator(admitted_lora_request)
+            self._track_lora_request_activation(admitted_lora_request)
+            try:
+                first_result = await anext(generator)
+            except StopAsyncIteration:
+                return
+
+        yield first_result
+        async for result in generator:
+            yield result
+
+    def _preload_lora_into_engine(self) -> bool:
+        """Whether lifecycle registration should eagerly activate the adapter.
+
+        A disaggregated prefill worker receives the adapter path again in the
+        per-request ``LoRARequest``. Letting vLLM activate it there avoids
+        consuming a prefill LoRA slot before the adapter is used. Decode and
+        aggregated workers must be immediately ready to generate, so they
+        retain the eager load behavior.
+        """
+        return self.disaggregation_mode != DisaggregationMode.PREFILL
 
     async def _publish_lora_card(self, lora_name: str, lora_id: int) -> None:
         """Publish a LoRA adapter as a ModelDeploymentCard for discovery.
@@ -873,6 +941,7 @@ class VllmLLMEngine(LLMEngine):
             base_model_path=self.engine_args.model,
             worker_type=worker_type,
             needs=needs,
+            max_gpu_lora_count=self.engine_args.max_loras,
         )
 
     def _lora_registration_topology(
@@ -1010,13 +1079,16 @@ class VllmLLMEngine(LLMEngine):
                 # Deterministic ID from lora_name before using it.
                 lora_id = lora_name_to_id(lora_name)
 
-                await self.engine_client.add_lora(
-                    LoRARequest(
-                        lora_name=lora_name,
-                        lora_int_id=lora_id,
-                        lora_path=lora_path,
+                preload_into_engine = self._preload_lora_into_engine()
+                if preload_into_engine:
+                    await self.engine_client.add_lora(
+                        LoRARequest(
+                            lora_name=lora_name,
+                            lora_int_id=lora_id,
+                            lora_path=lora_path,
+                        )
                     )
-                )
+                    self._engine_loaded_loras.add(lora_name)
 
                 self.loaded_loras[lora_name] = LoRAInfo(id=lora_id, path=lora_path)
                 logger.info(
@@ -1053,11 +1125,13 @@ class VllmLLMEngine(LLMEngine):
                         # `loaded_loras` but absent from `_published_loras`,
                         # so a retried load reconciles the publish.
                         try:
-                            logger.debug(
-                                "Rolling back: removing LoRA '%s' from engine",
-                                lora_name,
-                            )
-                            await self.engine_client.remove_lora(lora_id)
+                            if preload_into_engine:
+                                logger.debug(
+                                    "Rolling back: removing LoRA '%s' from engine",
+                                    lora_name,
+                                )
+                                await self.engine_client.remove_lora(lora_id)
+                                self._engine_loaded_loras.discard(lora_name)
                             self.loaded_loras.pop(lora_name, None)
                             logger.debug(
                                 "Successfully rolled back LoRA '%s'", lora_name
@@ -1197,25 +1271,29 @@ class VllmLLMEngine(LLMEngine):
                         lora_name,
                     )
 
-                # Discovery no longer routes to this adapter; remove it from
-                # the engine.
-                try:
-                    await self.engine_client.remove_lora(lora_id)
-                except Exception as e:
-                    # The discovery card is already gone but the engine still
-                    # holds the adapter (loaded-but-unpublished). Leave it in
-                    # loaded_loras so a retried unload skips the unregister
-                    # and retries only the engine removal.
-                    logger.exception(
-                        "Failed to remove LoRA %s from engine: %s",
-                        lora_name,
-                        e,
-                    )
-                    return {
-                        "status": "error",
-                        "message": f"Failed to remove LoRA '{lora_name}' from engine: {str(e)}",
-                        "lora_name": lora_name,
-                    }
+                # Prefill lifecycle registration is metadata-only, but vLLM
+                # may have activated the adapter lazily for an inference
+                # request. Remove only adapters known to have reached vLLM.
+                if lora_name in self._engine_loaded_loras:
+                    try:
+                        await self.engine_client.remove_lora(lora_id)
+                    except Exception as e:
+                        if not self._is_lora_not_loaded_error(e):
+                            # The discovery card is already gone but the engine still
+                            # holds the adapter (loaded-but-unpublished). Leave it in
+                            # loaded_loras so a retried unload skips the unregister
+                            # and retries only the engine removal.
+                            logger.exception(
+                                "Failed to remove LoRA %s from engine: %s",
+                                lora_name,
+                                e,
+                            )
+                            return {
+                                "status": "error",
+                                "message": f"Failed to remove LoRA '{lora_name}' from engine: {str(e)}",
+                                "lora_name": lora_name,
+                            }
+                    self._engine_loaded_loras.discard(lora_name)
 
                 del self.loaded_loras[lora_name]
 
@@ -1233,6 +1311,12 @@ class VllmLLMEngine(LLMEngine):
         except Exception as e:
             logger.exception("Failed to unload LoRA adapter: %s", e)
             return {"status": "error", "message": str(e)}
+
+    @staticmethod
+    def _is_lora_not_loaded_error(error: Exception) -> bool:
+        """Return whether vLLM reports an idempotent remove of a missing LoRA."""
+        message = str(error).lower()
+        return "not loaded" in message or "not found" in message
 
     async def list_loras(self, body: dict) -> dict:
         """List all loaded LoRA adapters as a lora_name -> lora_id mapping."""

@@ -687,8 +687,8 @@ reason = "Mere aggregation; system component"
 [[exceptions]]
 type = "dpkg"
 name = "libcom-err2"
-allow = ["GPL-2.0-only", "LGPL-2.0-only"]
-reason = "Mere aggregation; system component"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "LGPL-2.0-only"]
+reason = "Mere aggregation; system component (Debian bookworm copyright adds the -or-later variant)"
 
 [[exceptions]]
 type = "dpkg"

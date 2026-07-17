@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 use dynamo_tokens::SequenceHash;
 use parking_lot::RwLock;
@@ -11,7 +12,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::indexer::TieredMatchDetails;
 use crate::protocols::{
-    ActiveSequenceEvent, LocalBlockHash, RoutingConstraints, WorkerId, WorkerWithDpRank,
+    ActiveSequenceEvent, LocalBlockHash, PrefillLoadHint, RoutingConstraints, WorkerId,
+    WorkerWithDpRank,
 };
 use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::selector::DefaultWorkerSelector;
@@ -34,6 +36,7 @@ use crate::services::overlap::MooncakeOverlapSummary;
 use super::catalog::WorkerCatalog;
 use super::error::SelectionError;
 use super::input::PromptRequest;
+use super::pending::{PendingSelection, SelectionCache, SelectionCacheConfig};
 use super::types::{
     ModelLoadResponse, OverlapScoresRequest, OverlapScoresResponse, PotentialLoadsRequest,
     ReadyResponse, ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
@@ -80,6 +83,19 @@ struct SelectionOperation {
     routing_constraints: RoutingConstraints,
 }
 
+/// Resolved inputs for booking a reservation, shared by the cached and explicit
+/// `create_reservation` paths.
+struct ReservationBooking {
+    key: SelectionKey,
+    selection_id: String,
+    worker: WorkerWithDpRank,
+    sequence_hashes: Vec<SequenceHash>,
+    prefill_load_hint: Option<PrefillLoadHint>,
+    expected_output_tokens: Option<u32>,
+    track_prefill_tokens: bool,
+    lora_name: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SelectionServiceConfig {
     pub port: u16,
@@ -88,6 +104,7 @@ pub struct SelectionServiceConfig {
     pub replica_sync_port: Option<u16>,
     pub replica_sync_peers: Vec<String>,
     pub kv_router_config: crate::config::KvRouterConfig,
+    pub selection_cache: SelectionCacheConfig,
 }
 
 pub struct SelectionCore {
@@ -97,6 +114,9 @@ pub struct SelectionCore {
     kv_router_config: crate::config::KvRouterConfig,
     cancel_token: CancellationToken,
     replica_config: Option<ReplicaSyncConfig>,
+    /// Booking inputs captured by `select`, keyed by `selection_id`, so a later
+    /// `create_reservation` can replay them without re-sending the prompt.
+    selection_cache: SelectionCache,
 }
 
 impl SelectionCore {
@@ -106,8 +126,16 @@ impl SelectionCore {
         kv_router_config: crate::config::KvRouterConfig,
         indexer_threads: usize,
         cancel_token: CancellationToken,
+        cache_config: SelectionCacheConfig,
     ) -> Self {
-        Self::new_inner(kv_router_config, indexer_threads, cancel_token, None, true)
+        Self::new_inner(
+            kv_router_config,
+            indexer_threads,
+            cancel_token,
+            None,
+            true,
+            cache_config,
+        )
     }
 
     pub(super) fn new_managed(
@@ -115,6 +143,7 @@ impl SelectionCore {
         indexer_threads: usize,
         cancel_token: CancellationToken,
         replica_config: Option<ReplicaSyncConfig>,
+        cache_config: SelectionCacheConfig,
     ) -> Self {
         Self::new_inner(
             kv_router_config,
@@ -122,6 +151,7 @@ impl SelectionCore {
             cancel_token,
             replica_config,
             false,
+            cache_config,
         )
     }
 
@@ -131,6 +161,7 @@ impl SelectionCore {
         cancel_token: CancellationToken,
         replica_config: Option<ReplicaSyncConfig>,
         signal_indexer_ready: bool,
+        cache_config: SelectionCacheConfig,
     ) -> Self {
         let cancel_token = cancel_token.child_token();
         let indexer_registry = Arc::new(WorkerRegistry::new_with_cancel_token(
@@ -147,6 +178,7 @@ impl SelectionCore {
             kv_router_config,
             cancel_token,
             replica_config,
+            selection_cache: SelectionCache::new(&cache_config),
         }
     }
 
@@ -307,11 +339,15 @@ impl SelectionCore {
                 .await;
         }
 
-        let reasons = record.missing_schedulable_metadata(
-            self.kv_router_config.router_queue_threshold.is_some()
-                || self.kv_router_config.router_policy_config.is_some(),
-            self.kv_router_config.use_kv_events,
-        );
+        let queueing_enabled = self
+            .kv_router_config
+            .policy_profile(Some(&record.model_name))
+            .map_err(|error| SelectionError::BadRequest(error.to_string()))?
+            .classes()
+            .iter()
+            .any(|class| class.queueing_enabled());
+        let reasons = record
+            .missing_schedulable_metadata(queueing_enabled, self.kv_router_config.use_kv_events);
         if !reasons.is_empty() {
             let updated = self
                 .catalog
@@ -449,7 +485,7 @@ impl SelectionCore {
             self.cancel_token.child_token(),
             WORKER_TYPE,
             true,
-        );
+        )?;
         let entry = Arc::new(SelectionEntry {
             key: key.clone(),
             block_size,
@@ -666,6 +702,20 @@ impl SelectionCore {
                 request_id: selection_id.clone(),
             }
         };
+        // `select` (book == false) with a selection_id caches the booking inputs
+        // so a follow-up `create_reservation` can replay them by that id.
+        let cached_inputs = (!book).then(|| selection_id.clone()).flatten().map(|id| {
+            let track_prefill_tokens = router_config_override
+                .as_ref()
+                .and_then(|cfg| cfg.track_prefill_tokens)
+                .unwrap_or(self.kv_router_config.router_track_prefill_tokens);
+            (
+                id,
+                sequence_hashes.clone(),
+                prompt.lora_name.clone(),
+                track_prefill_tokens,
+            )
+        });
         let schedule_request = ScheduleRequest {
             mode,
             token_seq: Some(sequence_hashes),
@@ -705,6 +755,25 @@ impl SelectionCore {
             entry.block_size,
         );
 
+        let effective_prefill = effective_prefill_tokens(isl_tokens, response.cached_tokens);
+
+        if let Some((cache_id, sequence_hashes, lora_name, track_prefill_tokens)) = cached_inputs {
+            self.selection_cache.insert(
+                cache_id,
+                PendingSelection {
+                    key: key.clone(),
+                    worker: response.best_worker,
+                    sequence_hashes,
+                    isl_tokens,
+                    effective_prefill_tokens: effective_prefill,
+                    expected_output_tokens,
+                    track_prefill_tokens,
+                    lora_name,
+                },
+                Instant::now(),
+            );
+        }
+
         Ok(SelectResponse {
             selection_id,
             model_name: key.model_name,
@@ -714,7 +783,7 @@ impl SelectionCore {
             endpoint,
             block_size: entry.block_size,
             overlap,
-            effective_prefill_tokens: effective_prefill_tokens(isl_tokens, response.cached_tokens),
+            effective_prefill_tokens: effective_prefill,
         })
     }
 
@@ -723,7 +792,109 @@ impl SelectionCore {
         req: ReservationRequest,
     ) -> Result<ReservationResponse, SelectionError> {
         self.ensure_running()?;
+
         let key = SelectionKey::new(req.model_name.clone(), req.routing_group.clone());
+
+        // Explicit form: book on the given worker under selection_id, discarding
+        // any cached selection for the id so a later replay can't book stale state.
+        if let Some(worker_id) = req.worker_id {
+            self.selection_cache.discard(&key, &req.selection_id);
+            return self.reserve_explicit(key, worker_id, req).await;
+        }
+
+        // Replay form: peek, book, and consume only once the booking lands. A
+        // failure leaves the entry for a retry; concurrent replays of the same
+        // id collide at the scheduler, so they can't double-book.
+        let Some((pending, generation)) =
+            self.selection_cache
+                .peek(&key, &req.selection_id, Instant::now())
+        else {
+            return Err(SelectionError::NotFound(format!(
+                "no pending selection {} for {key} (expired, already used, \
+                 or never selected)",
+                req.selection_id
+            )));
+        };
+        let response = self.book_cached_selection(pending, &req).await?;
+        self.selection_cache
+            .remove(&key, &req.selection_id, generation);
+        Ok(response)
+    }
+
+    /// Book a reservation replaying what the matching `select` captured; request
+    /// fields other than the ids are ignored.
+    async fn book_cached_selection(
+        &self,
+        pending: Arc<PendingSelection>,
+        req: &ReservationRequest,
+    ) -> Result<ReservationResponse, SelectionError> {
+        let (entry, endpoint, prefill_load_hint) = self.resolve_cached_booking(&pending)?;
+        let track_prefill_tokens = pending.track_prefill_tokens;
+        self.finalize_reservation(
+            entry,
+            endpoint,
+            ReservationBooking {
+                key: pending.key.clone(),
+                selection_id: req.selection_id.clone(),
+                worker: pending.worker,
+                sequence_hashes: pending.sequence_hashes.clone(),
+                prefill_load_hint: track_prefill_tokens.then_some(prefill_load_hint),
+                expected_output_tokens: pending.expected_output_tokens,
+                track_prefill_tokens,
+                lora_name: pending.lora_name.clone(),
+            },
+        )
+        .await
+    }
+
+    /// Resolve everything a cached booking needs (ready entry, schedulable
+    /// endpoint, prefill hint), so the only fallible step left in
+    /// `finalize_reservation` is the scheduler call.
+    fn resolve_cached_booking(
+        &self,
+        pending: &PendingSelection,
+    ) -> Result<(Arc<SelectionEntry>, String, PrefillLoadHint), SelectionError> {
+        let entry = self.ready_entry(&pending.key)?;
+        // Validate the full worker/rank against current topology; a rank a PATCH
+        // removed during the window is rejected (the entry stays for a retry).
+        let endpoint = self
+            .catalog
+            .schedulable_worker_endpoint(pending.worker, &pending.key)
+            .ok_or_else(|| {
+                SelectionError::NotFound(format!(
+                    "schedulable worker {} (dp_rank {}) not found for {}",
+                    pending.worker.worker_id, pending.worker.dp_rank, pending.key
+                ))
+            })?;
+        let prefill_load_hint = prefill_load_hint_from_effective_tokens(
+            pending.isl_tokens,
+            pending.effective_prefill_tokens,
+        )
+        .map_err(|error| SelectionError::BadRequest(error.to_string()))?;
+        Ok((entry, endpoint, prefill_load_hint))
+    }
+
+    fn schedulable_endpoint(
+        &self,
+        worker_id: WorkerId,
+        key: &SelectionKey,
+    ) -> Result<String, SelectionError> {
+        self.catalog
+            .schedulable_endpoint(worker_id, key)
+            .ok_or_else(|| {
+                SelectionError::NotFound(format!(
+                    "schedulable worker {worker_id} not found for {key}"
+                ))
+            })
+    }
+
+    /// Book a reservation from a self-contained request (explicit worker_id and prompt).
+    async fn reserve_explicit(
+        &self,
+        key: SelectionKey,
+        worker_id: WorkerId,
+        req: ReservationRequest,
+    ) -> Result<ReservationResponse, SelectionError> {
         let entry = self.ready_entry(&key)?;
         let normalized = req
             .prompt
@@ -735,16 +906,8 @@ impl SelectionCore {
                     .map_err(|error| SelectionError::BadRequest(error.to_string()))
             })
             .transpose()?;
-        let worker = WorkerWithDpRank::new(req.worker_id, req.dp_rank.unwrap_or(0));
-        let endpoint = self
-            .catalog
-            .schedulable_endpoint(req.worker_id, &key)
-            .ok_or_else(|| {
-                SelectionError::NotFound(format!(
-                    "schedulable worker {} not found for {key}",
-                    req.worker_id
-                ))
-            })?;
+        let worker = WorkerWithDpRank::new(worker_id, req.dp_rank.unwrap_or(0));
+        let endpoint = self.schedulable_endpoint(worker.worker_id, &key)?;
         let track_prefill_tokens = req.effective_prefill_tokens.is_some()
             || req
                 .router_config_override
@@ -752,21 +915,60 @@ impl SelectionCore {
                 .and_then(|cfg| cfg.track_prefill_tokens)
                 .unwrap_or(self.kv_router_config.router_track_prefill_tokens);
 
+        self.finalize_reservation(
+            entry,
+            endpoint,
+            ReservationBooking {
+                key,
+                selection_id: req.selection_id,
+                worker,
+                sequence_hashes: normalized.sequence_hashes,
+                prefill_load_hint,
+                expected_output_tokens: req.expected_output_tokens,
+                track_prefill_tokens,
+                lora_name: req.prompt.lora_name,
+            },
+        )
+        .await
+    }
+
+    /// Register the booking with the scheduler. All fallible resolution happens
+    /// in the caller; the scheduler add here is the last step that can fail, and
+    /// the cached path leaves its selection in place (to retry) if it does.
+    async fn finalize_reservation(
+        &self,
+        entry: Arc<SelectionEntry>,
+        endpoint: String,
+        booking: ReservationBooking,
+    ) -> Result<ReservationResponse, SelectionError> {
+        let ReservationBooking {
+            key,
+            selection_id,
+            worker,
+            sequence_hashes,
+            prefill_load_hint,
+            expected_output_tokens,
+            track_prefill_tokens,
+            lora_name,
+        } = booking;
+
+        // Strict booking: never lazily recreate a worker/rank removed since the
+        // reservation was resolved.
         entry
             .scheduler
-            .add_request(SequenceRequest {
-                request_id: req.selection_id.clone(),
-                token_sequence: Some(normalized.sequence_hashes),
+            .add_request_if_registered(SequenceRequest {
+                request_id: selection_id.clone(),
+                token_sequence: Some(sequence_hashes),
                 track_prefill_tokens,
-                expected_output_tokens: req.expected_output_tokens,
+                expected_output_tokens,
                 prefill_load_hint,
                 worker,
-                lora_name: req.prompt.lora_name.clone(),
+                lora_name,
             })
             .await?;
 
         Ok(ReservationResponse {
-            selection_id: req.selection_id,
+            selection_id,
             model_name: key.model_name,
             routing_group: key.routing_group,
             worker_id: worker.worker_id,
@@ -1075,7 +1277,12 @@ mod tests {
     #[test]
     fn parent_cancel_cancels_core() {
         let parent = CancellationToken::new();
-        let core = SelectionCore::new_local(test_config(false), 1, parent.clone());
+        let core = SelectionCore::new_local(
+            test_config(false),
+            1,
+            parent.clone(),
+            SelectionCacheConfig::default(),
+        );
 
         assert!(!core.cancel_token.is_cancelled());
         parent.cancel();
@@ -1085,7 +1292,12 @@ mod tests {
     #[test]
     fn shutdown_keeps_parent_alive() {
         let parent = CancellationToken::new();
-        let core = SelectionCore::new_local(test_config(false), 1, parent.clone());
+        let core = SelectionCore::new_local(
+            test_config(false),
+            1,
+            parent.clone(),
+            SelectionCacheConfig::default(),
+        );
 
         core.shutdown();
 
@@ -1096,7 +1308,12 @@ mod tests {
     #[tokio::test]
     async fn shutdown_cancels_listeners() {
         let parent = CancellationToken::new();
-        let core = SelectionCore::new_local(test_config(true), 1, parent);
+        let core = SelectionCore::new_local(
+            test_config(true),
+            1,
+            parent,
+            SelectionCacheConfig::default(),
+        );
 
         let record = core
             .upsert_worker(worker_with_kv_events(1))
@@ -1111,7 +1328,12 @@ mod tests {
 
     #[tokio::test]
     async fn upsert_moves_global_worker_id_between_routing_groups() {
-        let core = SelectionCore::new_local(test_config(true), 1, CancellationToken::new());
+        let core = SelectionCore::new_local(
+            test_config(true),
+            1,
+            CancellationToken::new(),
+            SelectionCacheConfig::default(),
+        );
         let mut group_a = worker_with_kv_events(1);
         group_a.routing_group = "group-a".to_string();
         core.upsert_worker(group_a).await.expect("group A upsert");
@@ -1160,7 +1382,12 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_reports_not_ready_and_rejects_new_work() {
-        let core = SelectionCore::new_local(test_config(false), 1, CancellationToken::new());
+        let core = SelectionCore::new_local(
+            test_config(false),
+            1,
+            CancellationToken::new(),
+            SelectionCacheConfig::default(),
+        );
         core.upsert_worker(worker(1)).await.expect("worker upsert");
         assert!(core.ready().ready);
 
@@ -1197,7 +1424,7 @@ mod tests {
                 model_name: "model".to_string(),
                 routing_group: "default".to_string(),
                 selection_id: "res-after-shutdown".to_string(),
-                worker_id: 1,
+                worker_id: Some(1),
                 dp_rank: None,
                 prompt: prompt(),
                 router_config_override: None,
@@ -1225,6 +1452,7 @@ mod tests {
             config,
             1,
             CancellationToken::new(),
+            SelectionCacheConfig::default(),
         ));
 
         let record = core.upsert_worker(worker(1)).await.expect("worker upsert");
@@ -1258,6 +1486,7 @@ mod tests {
             config,
             1,
             CancellationToken::new(),
+            SelectionCacheConfig::default(),
         ));
 
         for worker_id in [1, 2] {
@@ -1278,7 +1507,7 @@ mod tests {
                 model_name: "model".to_string(),
                 routing_group: "default".to_string(),
                 selection_id: format!("occupy-{worker_id}"),
-                worker_id,
+                worker_id: Some(worker_id),
                 dp_rank: Some(0),
                 prompt: PromptRequest {
                     token_ids: None,

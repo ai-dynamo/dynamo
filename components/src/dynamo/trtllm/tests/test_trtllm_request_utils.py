@@ -1,9 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from types import SimpleNamespace
+
 import pytest
 
 from dynamo.trtllm.utils.request_utils import (
+    apply_stop_conditions_to_sampling_params,
     request_cache_salt,
     stored_event_cache_salt,
 )
@@ -11,6 +14,7 @@ from dynamo.trtllm.utils.request_utils import (
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.trtllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
@@ -80,3 +84,39 @@ def test_stored_event_cache_salt_rejects_conflicting_blocks() -> None:
 
     with pytest.raises(ValueError, match="conflicting cache_salt"):
         stored_event_cache_salt(data)
+
+
+def test_visible_stop_tokens_disable_engine_stopping() -> None:
+    sampling_params = SimpleNamespace(
+        ignore_eos=False,
+        min_tokens=None,
+        stop_token_ids=[200, 300],
+    )
+
+    apply_stop_conditions_to_sampling_params(
+        sampling_params,
+        {
+            "stop_token_ids_visible": [200],
+            "stop_token_ids_hidden": [100, 200],
+        },
+    )
+
+    assert sampling_params.ignore_eos is True
+    assert set(sampling_params.stop_token_ids) == {100, 300}
+
+
+def test_hidden_stop_tokens_keep_engine_stopping_enabled() -> None:
+    sampling_params = SimpleNamespace(
+        ignore_eos=False,
+        min_tokens=None,
+        stop_token_ids=[300],
+    )
+
+    apply_stop_conditions_to_sampling_params(
+        sampling_params,
+        {"stop_token_ids_hidden": [100], "min_tokens": 2},
+    )
+
+    assert sampling_params.ignore_eos is False
+    assert sampling_params.min_tokens == 2
+    assert set(sampling_params.stop_token_ids) == {100, 300}

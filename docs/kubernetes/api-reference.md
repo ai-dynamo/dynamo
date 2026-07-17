@@ -368,6 +368,7 @@ _Appears in:_
 | `location` _string_ | Deprecated: Location is ignored and no longer populated. It is retained<br />only so older objects continue to validate. |  | Optional: \{\} <br /> |
 | `storageType` _[DynamoCheckpointStorageType](#dynamocheckpointstoragetype)_ | Deprecated: StorageType is ignored and no longer populated. It is retained<br />only so older objects continue to validate. |  | Enum: [pvc s3 oci] <br />Optional: \{\} <br /> |
 | `jobName` _string_ | JobName is the name of the checkpoint creation Job |  | Optional: \{\} <br /> |
+| `podSnapshotName` _string_ | PodSnapshotName is the name of the PodSnapshot this checkpoint created to drive capture. It is<br />the authoritative pointer to the snapshot (which is otherwise located by label, not by<br />reconstructing its name) and lets the controller distinguish a never-created snapshot (empty)<br />from one that was created and later went missing (set, but no longer found). |  | Optional: \{\} <br /> |
 | `createdAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | CreatedAt is the timestamp when the checkpoint became ready |  | Optional: \{\} <br /> |
 | `message` _string_ | Message provides additional information about the current state |  | Optional: \{\} <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | DEPRECATED: Conditions are deprecated. Use status.phase instead. |  | Optional: \{\} <br /> |
@@ -792,6 +793,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `endpoints` _[EndpointInfo](#endpointinfo) array_ | Endpoints is the current list of all endpoints for this model |  | Optional: \{\} <br /> |
 | `readyEndpoints` _integer_ | ReadyEndpoints is the count of endpoints that are ready |  |  |
+| `loraFallbackCoveredEndpoints` _integer_ | LoRAFallbackCoveredEndpoints is the count of legacy prefill endpoints<br />covered by a capable prefill during a rolling upgrade. These endpoints are<br />excluded from ReadyEndpoints because they cannot serve the adapter directly. |  | Optional: \{\} <br /> |
 | `totalEndpoints` _integer_ | TotalEndpoints is the total count of endpoints |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions represents the latest available observations of the model's state |  | Optional: \{\} <br /> |
 
@@ -830,7 +832,8 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `address` _string_ | Address is the full address of the endpoint (e.g., "http://10.0.1.5:9090") |  |  |
 | `podName` _string_ | PodName is the name of the pod serving this endpoint |  | Optional: \{\} <br /> |
-| `ready` _boolean_ | Ready indicates whether the endpoint is ready to serve traffic<br />For LoRA models: true if the POST /loras request succeeded with a 2xx status code<br />For base models: always false (no probing performed) |  |  |
+| `ready` _boolean_ | Ready indicates whether this endpoint is ready to serve traffic.<br />For LoRA models: true only if this endpoint's lifecycle request succeeded.<br />For base models: always false (no probing performed). |  |  |
+| `loraFallbackCovered` _boolean_ | LoRAFallbackCovered indicates a legacy prefill endpoint that cannot manage<br />LoRAs itself is covered by a capable prefill in the same topology during a<br />rolling upgrade. It does not make this endpoint ready to serve the adapter. |  | Optional: \{\} <br /> |
 
 
 #### ExtraPodMetadata
@@ -3455,16 +3458,15 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `restricted` _string_ | Deprecated: Namespace-restricted mode is deprecated and will be removed in a future release.<br />Use cluster-wide mode (leave Restricted empty) instead. |  |  |
-| `scope` _[NamespaceScopeConfiguration](#namespacescopeconfiguration)_ | Deprecated: Scope is only used in namespace-restricted mode, which is deprecated. |  |  |
+| `restricted` _string_ | Restricted enables namespace-restricted mode for development and testing.<br />Namespace-restricted mode is not supported for production. |  |  |
+| `scope` _[NamespaceScopeConfiguration](#namespacescopeconfiguration)_ | Scope configures the namespace ownership claim in namespace-restricted mode. |  |  |
 
 
 #### NamespaceScopeConfiguration
 
 
 
-Deprecated: NamespaceScopeConfiguration is used only by the deprecated namespace-restricted
-mode and will be removed in a future release.
+NamespaceScopeConfiguration configures the development/test namespace ownership claim.
 
 
 
@@ -3888,7 +3890,7 @@ These are injected into all components when the corresponding infrastructure ser
 | Variable | Purpose | Default | Type |
 | --- | --- | --- | --- |
 | `USE_STREAMING` | Enables streaming mode for inference request proxying | `true` | `string` (boolean) |
-| `RUST_LOG` | Rust log level and filter configuration | `debug,dynamo_llm::kv_router=trace` | `string` |
+| `RUST_LOG` | Rust log level and filter configuration | `info` | `string` |
 
 ### VLLM Backend
 

@@ -90,6 +90,15 @@ impl ConcurrentRadixTreeCompressed {
                         block_hash = ?block_hash,
                         "Block not found during remove; skipping"
                     );
+                    // The remove event says this worker evicted the block, so
+                    // any lookup entry for it must not outlive the event. A
+                    // resolve miss with a live entry happens when the hash's
+                    // node was split off and the split child was later dropped
+                    // by clear_children_if_unreachable — without this scrub the
+                    // entry (and the per-worker tracked-block count) leaks
+                    // permanently. Mirrors the scrubs in apply_removed_hash's
+                    // miss branches.
+                    Self::remove_lookup_hashes(lookup, worker, [block_hash]);
                 }
             }
         }
