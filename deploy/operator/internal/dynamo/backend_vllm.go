@@ -238,7 +238,15 @@ func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32
 	// cannot resolve them. The shell sees all env vars regardless of
 	// definition order.
 	shellHostname := k8sToShellVarSyntax(leaderHostname)
-	runAsNonRoot := true
+	var runAsNonRoot *bool
+	if podSpec.SecurityContext != nil {
+		if podSpec.SecurityContext.RunAsUser != nil && *podSpec.SecurityContext.RunAsUser > 0 {
+			trueVal := true
+			runAsNonRoot = &trueVal
+		} else if podSpec.SecurityContext.RunAsNonRoot != nil {
+			runAsNonRoot = podSpec.SecurityContext.RunAsNonRoot
+		}
+	}
 	allowPrivilegeEscalation := false
 
 	initContainer := corev1.Container{
@@ -249,7 +257,7 @@ func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32
 			shellHostname, commonconsts.VLLMMpMasterPort, waitLeaderMountPath, waitLeaderScriptKey)},
 		Resources: commonconsts.VLLMMPInitResources,
 		SecurityContext: &corev1.SecurityContext{
-			RunAsNonRoot:             &runAsNonRoot,
+			RunAsNonRoot:             runAsNonRoot,
 			AllowPrivilegeEscalation: &allowPrivilegeEscalation,
 			Capabilities: &corev1.Capabilities{
 				Drop: []corev1.Capability{"ALL"},
