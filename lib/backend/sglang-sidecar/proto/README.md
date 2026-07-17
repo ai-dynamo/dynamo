@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Temporary SGLang gRPC contract
+# Temporary SGLang sidecar gRPC contract
 
 This copy is temporary while Dynamo waits for SGLang to include
 `sglang/srt/grpc/sglang.proto` in a release wheel. Once the contract is

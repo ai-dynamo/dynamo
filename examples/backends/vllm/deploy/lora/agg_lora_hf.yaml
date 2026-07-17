@@ -1,0 +1,63 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-agg-lora-hf
+spec:
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+    - name: VllmDecodeWorker
+      type: decode
+      replicas: 1
+      modelRef:
+        name: Qwen/Qwen3-0.6B
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+              workingDir: /workspace/examples/backends/vllm
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+                    optional: true
+              env:
+                - name: DYN_LORA_ENABLED
+                  value: "true"
+                - name: DYN_SYSTEM_PORT
+                  value: "9090"
+                - name: HF_HOME
+                  value: /home/dynamo/.cache/huggingface
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              args:
+                - --model
+                - Qwen/Qwen3-0.6B
+                - --enable-lora
+                - --max-lora-rank
+                - "64"
+                - --enforce-eager
+              resources:
+                limits:
+                  nvidia.com/gpu: "1"
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoModel
+metadata:
+  name: codelion-recovery-lora-hf
+spec:
+  modelName: codelion/Qwen3-0.6B-accuracy-recovery-lora
+  baseModelName: Qwen/Qwen3-0.6B
+  modelType: lora
+  source:
+    uri: hf://codelion/Qwen3-0.6B-accuracy-recovery-lora
