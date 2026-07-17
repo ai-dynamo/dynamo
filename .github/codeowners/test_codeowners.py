@@ -25,12 +25,12 @@ import pytest
 # Allow `import codeowners_match` when pytest runs from the repo root.
 sys.path.insert(0, str(Path(__file__).parent))
 
+import who_owns  # noqa: E402
 from build_codeowners import (  # noqa: E402
     CoverageGate,
     is_policy_change,
     split_coverage,
 )
-import who_owns  # noqa: E402
 from codeowners_match import (  # noqa: E402
     Area,
     ResolvedModel,
