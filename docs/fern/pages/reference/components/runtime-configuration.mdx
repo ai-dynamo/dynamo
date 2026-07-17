@@ -140,6 +140,12 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   Environment variable: `DYN_EVENT_PLANE`
 </ParamField>
 
+<ParamField path="DYN_EVENT_PLANE_HOST" type="string" default="auto-detected local IP">
+  IPv4 or IPv6 address advertised by direct ZMQ event publishers. Set this variable to an address
+  on the network interface that subscribers use to reach the publisher. Dynamo rejects hostnames.
+  This variable does not affect NATS or ZMQ broker mode.
+</ParamField>
+
 <ParamField path="--connector" type="string" default="null">
   KV-cache transfer connector. Accepts zero or more values. Deprecated for vLLM — use `--kv-transfer-config` instead. For TRT-LLM, valid options are `nixl`, `lmcache`, `kvbm`, `null`, and `none`.
 

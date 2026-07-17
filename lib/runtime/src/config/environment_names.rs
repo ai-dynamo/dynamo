@@ -806,6 +806,10 @@ pub mod event_plane {
     /// Event plane codec selection: "json" or "msgpack".
     pub const DYN_EVENT_PLANE_CODEC: &str = "DYN_EVENT_PLANE_CODEC";
 
+    /// Host IP advertised by direct ZMQ event publishers.
+    /// If unset, the runtime auto-detects a local IP address.
+    pub const DYN_EVENT_PLANE_HOST: &str = "DYN_EVENT_PLANE_HOST";
+
     /// Bounded capacity of the direct ZMQ event-subscriber's merged event channel.
     ///
     /// Many peer publishers (e.g. every other frontend under replica-sync) feed
@@ -1066,6 +1070,7 @@ mod tests {
             // Event Plane
             event_plane::DYN_EVENT_PLANE,
             event_plane::DYN_EVENT_PLANE_CODEC,
+            event_plane::DYN_EVENT_PLANE_HOST,
             event_plane::DYN_ZMQ_EVENT_SUBSCRIBER_CHANNEL_CAPACITY,
             // ZMQ Broker
             zmq_broker::DYN_ZMQ_BROKER_URL,
