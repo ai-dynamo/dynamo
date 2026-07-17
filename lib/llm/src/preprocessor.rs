@@ -2463,6 +2463,9 @@ impl OpenAIPreprocessor {
         // - kimi_k25: `</think>` (special token id 163607).
         // - minimax_m3: `]<]minimax[>[` tool-call namespace tokens and
         //   `<mm:think>` reasoning markers.
+        // - inkling: `<|message_model|>` / `<|content_thinking|>` /
+        //   `<|content_text|>` / `<|content_invoke_tool_json|>` / `<|end_message|>`
+        //   channel markers, consumed by both the tool-call and reasoning parsers.
         matches!(
             tool_call_parser,
             Some("gemma4")
@@ -2473,6 +2476,7 @@ impl OpenAIPreprocessor {
                 | Some("minimax-m3")
                 | Some("minimax_m3_nom")
                 | Some("minimax-m3-nom")
+                | Some("inkling")
         ) || matches!(
             reasoning_parser,
             Some("gemma4")
@@ -2481,6 +2485,7 @@ impl OpenAIPreprocessor {
                 | Some("kimi_k25")
                 | Some("minimax_m3")
                 | Some("minimax-m3")
+                | Some("inkling")
         )
     }
 
