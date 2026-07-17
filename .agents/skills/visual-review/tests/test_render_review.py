@@ -9,9 +9,9 @@ import pytest
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
-REPO_ROOT = Path(__file__).parents[1]
-RENDERER_PATH = REPO_ROOT / ".agents/skills/visual-review/scripts/render_review.py"
-TEMPLATE_PATH = REPO_ROOT / ".agents/skills/visual-review/assets/review-template.html"
+SKILL_ROOT = Path(__file__).parents[1]
+RENDERER_PATH = SKILL_ROOT / "scripts/render_review.py"
+TEMPLATE_PATH = SKILL_ROOT / "assets/review-template.html"
 
 module_spec = importlib.util.spec_from_file_location(
     "visual_review_renderer", RENDERER_PATH
