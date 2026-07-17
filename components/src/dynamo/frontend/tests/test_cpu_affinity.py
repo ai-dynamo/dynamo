@@ -35,7 +35,12 @@ def test_warns_when_affinity_spans_multiple_numa_nodes(
 
     assert len(caplog.records) == 1
     message = caplog.records[0].getMessage()
+    assert "CRITICAL PERFORMANCE WARNING" in message
     assert "Frontend CPU affinity spans multiple NUMA nodes" in message
+    assert (
+        "Running the frontend across multiple NUMA domains is known to cause "
+        "catastrophic performance issues."
+    ) in message
     assert "Available CPUs: 0-3,8-9" in message
     assert "node0" in message
     assert "node1" in message

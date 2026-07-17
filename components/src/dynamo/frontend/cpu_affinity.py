@@ -53,9 +53,10 @@ def warn_if_frontend_cpu_affinity_spans_numa_nodes(
     border = "=" * 80
     logger.warning(
         "%s\n"
-        "WARNING: Frontend CPU affinity spans multiple NUMA nodes!\n"
-        "Tokio worker threads may execute across NUMA domains, which can "
-        "degrade performance.\n"
+        "CRITICAL PERFORMANCE WARNING: Frontend CPU affinity spans "
+        "multiple NUMA nodes!\n"
+        "Running the frontend across multiple NUMA domains is known to cause "
+        "catastrophic performance issues.\n"
         "Available CPUs: %s\n"
         "NUMA nodes: %s\n"
         "Pin the frontend to CPUs from a single NUMA node.\n"
