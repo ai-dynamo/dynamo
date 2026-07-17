@@ -88,10 +88,9 @@ fn monitor_response_stream(
                     if completed_terminal {
                         guard.mark_completed_terminal();
                     }
+                    // Mark before yielding so a client drop completes admission, then keep
+                    // polling for the request-plane EOF after the application terminal item.
                     yield item;
-                    if completed_terminal {
-                        break true;
-                    }
                 }
             }
         };
@@ -658,7 +657,10 @@ mod tests {
     use std::{
         collections::HashMap,
         future,
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
         time::Duration,
     };
 
@@ -870,6 +872,42 @@ mod tests {
                 .all(|count| *count == 0)
         );
         cancel.cancel();
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn terminal_item_does_not_skip_transport_eof() {
+        let (router, runtime) = router(None).await;
+        let context = Context::new(()).context();
+        let drained = Arc::new(AtomicBool::new(false));
+        let source_drained = Arc::clone(&drained);
+        let source = ResponseStream::new(
+            Box::pin(async_stream::stream! {
+                yield Annotated::from_data(LLMEngineOutput {
+                    finish_reason: Some(FinishReason::Stop),
+                    ..Default::default()
+                });
+                source_drained.store(true, Ordering::Release);
+            }),
+            Arc::clone(&context),
+        );
+        let guard = RequestGuard::new(
+            Arc::clone(&router.chooser),
+            Arc::clone(&router.request_metrics),
+            "terminal-drain".to_string(),
+            &request(),
+            false,
+            None,
+        );
+        let monitored = monitor_response_stream(source, context, guard);
+        tokio::pin!(monitored);
+
+        assert!(monitored.next().await.is_some());
+        assert!(monitored.next().await.is_none());
+        assert!(drained.load(Ordering::Acquire));
+
         drop(router);
         runtime.shutdown();
     }
