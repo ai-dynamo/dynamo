@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Dynamo SGLang sidecar backend.
+//! Dynamo SGLang sidecar.
 //!
 //! A [`SglangSidecarEngine`] implements [`dynamo_backend_common::LLMEngine`] by
 //! proxying inference to an out-of-process SGLang engine over SGLang's native

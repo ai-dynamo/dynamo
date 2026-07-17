@@ -58,10 +58,10 @@ impl SglangSidecarEngine {
 
     pub fn from_args(argv: Option<Vec<String>>) -> Result<(Self, WorkerConfig), DynamoError> {
         let args = match argv {
-            Some(args) => <Args as clap::Parser>::try_parse_from(args),
-            None => <Args as clap::Parser>::try_parse(),
-        }
-        .map_err(|err| client::invalid_arg(err.to_string()))?;
+            Some(args) => <Args as clap::Parser>::try_parse_from(args)
+                .map_err(|err| client::invalid_arg(err.to_string()))?,
+            None => <Args as clap::Parser>::parse(),
+        };
 
         let endpoint = normalize_endpoint(&args.sglang_endpoint).map_err(client::invalid_arg)?;
         let transport = args.transport();

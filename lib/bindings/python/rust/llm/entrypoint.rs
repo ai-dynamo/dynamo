@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use pyo3::{
-    exceptions::{PyException, PyRuntimeError, PyValueError},
+    exceptions::{PyException, PyValueError},
     prelude::*,
 };
 use pyo3_async_runtimes::TaskLocals;
@@ -939,22 +939,6 @@ pub fn run_input<'p>(
         .await
         .map_err(to_pyerr)?;
         Ok(())
-    })
-}
-
-#[pyfunction]
-pub fn run_sglang_sidecar(py: Python<'_>, args: Vec<String>) -> PyResult<()> {
-    let mut argv = Vec::with_capacity(args.len() + 1);
-    argv.push("python -m dynamo.sglang_sidecar".to_string());
-    argv.extend(args);
-
-    let (engine, config) = py
-        .allow_threads(|| dynamo_sglang_sidecar::SglangSidecarEngine::from_args(Some(argv)))
-        .map_err(|err| PyValueError::new_err(err.to_string()))?;
-
-    py.allow_threads(|| {
-        dynamo_backend_common::run(Arc::new(engine), config)
-            .map_err(|err| PyRuntimeError::new_err(err.to_string()))
     })
 }
 
