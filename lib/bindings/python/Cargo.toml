@@ -49,7 +49,7 @@ mm-routing = ["dynamo-llm/mm-routing"]
 aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git", rev = "ffbab15797d3a3f14c382e937c0ab0c1c5cbc530", package = "aiconfigurator-core", optional = true }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
-dynamo-parsers = { version = "5.0.0" }
+dynamo-parsers = { version = "5.1.0" }
 dynamo-backend-common = { path = "../../backend-common" }
 dynamo-sglang-sidecar = { path = "../../backend/sglang-sidecar" }
 
@@ -118,7 +118,3 @@ tracing-subscriber = { version = "0.3", features = ["registry"] }
 inherits = "release"
 debug = true
 strip = false
-
-[patch.crates-io]
-# Temporary until UUID passthrough support is released in dynamo-protocols.
-dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "5cf0f586240cc1d1e4944b339544567a353d26b7" }

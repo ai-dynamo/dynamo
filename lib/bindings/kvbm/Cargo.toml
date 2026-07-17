@@ -60,7 +60,3 @@ dlpark = { version = "0.5", features = ["pyo3", "half"], optional = true }
 cudarc = { version = "=0.19.8", features = ["cuda-version-from-build-system", "fallback-latest"], optional = true }
 
 [dev-dependencies]
-
-[patch.crates-io]
-# Temporary until UUID passthrough support is released in dynamo-protocols.
-dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "5cf0f586240cc1d1e4944b339544567a353d26b7" }
