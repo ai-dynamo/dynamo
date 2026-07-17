@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use pyo3::{
-    exceptions::{PyException, PyRuntimeError, PyValueError},
+    exceptions::{PyException, PyValueError},
     prelude::*,
 };
 use pyo3_async_runtimes::TaskLocals;
@@ -237,7 +237,7 @@ impl AicPerfConfig {
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_queue_threshold=None, router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, shared_cache_multiplier=0.0, shared_cache_type="none", router_predicted_ttl_secs=None, *, overlap_score_credit=1.0, overlap_score_credit_decay=0.0, prefill_load_scale=1.0, router_policy_config=None))]
+    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, *, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_ttl_secs=120.0, router_queue_threshold=None, router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, shared_cache_multiplier=0.0, shared_cache_type="none", router_predicted_ttl_secs=None, overlap_score_credit=1.0, overlap_score_credit_decay=0.0, prefill_load_scale=1.0, router_policy_config=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         overlap_score_weight: Option<f64>,
@@ -245,15 +245,12 @@ impl KvRouterConfig {
         disk_cache_hit_weight: f64,
         router_temperature: f64,
         use_kv_events: bool,
-        durable_kv_events: bool,
         router_replica_sync: bool,
         router_track_active_blocks: bool,
         router_track_output_blocks: bool,
         router_assume_kv_reuse: bool,
         router_track_prefill_tokens: bool,
         router_prefill_load_model: &str,
-        router_snapshot_threshold: Option<u32>,
-        router_reset_states: bool,
         router_ttl_secs: f64,
         router_queue_threshold: Option<f64>,
         router_event_threads: u32,
@@ -284,7 +281,6 @@ impl KvRouterConfig {
             disk_cache_hit_weight,
             router_temperature,
             use_kv_events,
-            durable_kv_events,
             router_replica_sync,
             router_track_active_blocks,
             router_track_output_blocks,
@@ -293,8 +289,6 @@ impl KvRouterConfig {
             router_prefill_load_model: router_prefill_load_model
                 .parse::<RsRouterPrefillLoadModel>()
                 .map_err(PyValueError::new_err)?,
-            router_snapshot_threshold,
-            router_reset_states,
             router_ttl_secs,
             router_queue_threshold,
             router_policy_config,
@@ -945,22 +939,6 @@ pub fn run_input<'p>(
         .await
         .map_err(to_pyerr)?;
         Ok(())
-    })
-}
-
-#[pyfunction]
-pub fn run_sglang_sidecar(py: Python<'_>, args: Vec<String>) -> PyResult<()> {
-    let mut argv = Vec::with_capacity(args.len() + 1);
-    argv.push("python -m dynamo.sglang_sidecar".to_string());
-    argv.extend(args);
-
-    let (engine, config) = py
-        .allow_threads(|| dynamo_sglang_sidecar::SglangSidecarEngine::from_args(Some(argv)))
-        .map_err(|err| PyValueError::new_err(err.to_string()))?;
-
-    py.allow_threads(|| {
-        dynamo_backend_common::run(Arc::new(engine), config)
-            .map_err(|err| PyRuntimeError::new_err(err.to_string()))
     })
 }
 

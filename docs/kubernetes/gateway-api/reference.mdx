@@ -106,12 +106,12 @@ request forwarding.
 | Approximate routing | Tokenized requests, request lifecycle, and local predicted state. | Use when KV events are unavailable, disabled, or not supported by the selected deployment shape. |
 
 In the operator-managed GAIE path, KV events reach the EPP through the Dynamo event plane using
-NATS/JetStream. vLLM can also publish KV events through ZMQ in other integration shapes; the
+NATS Core. vLLM can also publish KV events through ZMQ in other integration shapes; the
 operator-managed `DynamoGraphDeployment` path does not use ZMQ for the EPP.
 
 ```mermaid
 flowchart LR
-    Worker["Dynamo worker"] -->|"publishes KV events"| NATS["Dynamo runtime<br/>NATS/JetStream"]
+    Worker["Dynamo worker"] -->|"publishes KV events"| NATS["Dynamo runtime<br/>NATS Core event plane"]
     NATS -->|"delivers state"| EPP["Dynamo EPP"]
     EPP -->|"scores endpoints"| Gateway["Gateway data plane"]
     Gateway -->|"forwards selected request"| Sidecar["Frontend sidecar"]
@@ -156,7 +156,8 @@ Set these values on the EPP component unless the deployment manifest says otherw
 | `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY` | `0.0` | Reduces prefix-overlap credit as active prefill load rises above the least-loaded eligible worker. |
 | `DYN_ROUTER_PREFILL_LOAD_SCALE` | `1.0` | Scales prompt-side prefill load after cache-hit credits are applied. |
 | `DYN_ROUTER_TEMPERATURE` | `0.0` | `0.0` selects deterministically. Higher values allow more worker exploration through softmax sampling. |
-| `DYN_ROUTER_REPLICA_SYNC` | `false` | Publishes and subscribes router state across router replicas. |
+| `DYN_ROUTER_REPLICA_SYNC` | `false` | Publishes and subscribes KV active-sequence state across router replicas. |
+| `DYN_ROUTER_SESSION_AFFINITY_TTL_SECS` | unset | Enables session affinity and best-effort binding sync with this router-local idle TTL. |
 | `DYN_ROUTER_TRACK_ACTIVE_BLOCKS` | `true` | Tracks active decode blocks for load balancing. |
 | `DYN_ROUTER_TRACK_OUTPUT_BLOCKS` | `false` | Predicts output blocks during generation and decays them by progress toward expected output length. |
 | `DYN_ROUTER_TRACK_PREFILL_TOKENS` | `true` | Includes active prompt-side prefill tokens in load accounting. |
