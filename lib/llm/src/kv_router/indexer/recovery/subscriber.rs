@@ -5,10 +5,7 @@ use super::worker_query::WorkerQueryClient;
 use crate::discovery::RuntimeConfigWatch;
 use crate::kv_router::Indexer;
 use anyhow::Result;
-use dynamo_kv_router::{
-    config::KvRouterConfig,
-    protocols::{KV_EVENT_SUBJECT, RouterEvent},
-};
+use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, RouterEvent};
 use dynamo_runtime::{
     component::Component,
     discovery::EventTransportKind,
@@ -18,16 +15,12 @@ use dynamo_runtime::{
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-/// Start a simplified background task for event consumption using the event plane.
+/// Start a background task for event consumption using the event plane.
 ///
-/// This is used when local indexer mode is enabled. Unlike `start_kv_router_background`,
-/// this function:
-/// - Uses the event plane (NATS Core or ZMQ) instead of JetStream
-/// - Does not support snapshots, purging, or durable consumers
+/// This function:
+/// - Uses the configured event plane (NATS Core or ZMQ)
 /// - On worker Added: dumps worker's local indexer into router
 /// - On worker Removed: removes worker from router indexer
-///
-/// This is appropriate when workers have local indexers enabled.
 async fn start_kv_router_background_event_plane(
     component: Component,
     indexer: Indexer,
@@ -148,10 +141,8 @@ async fn forward_live_event(worker_query_client: &Arc<WorkerQueryClient>, event:
     worker_query_client.handle_live_event(event).await;
 }
 
-/// Helper to decide which subscriber (JetStream or Event Plane) to start based on config
 pub async fn start_subscriber(
     component: Component,
-    kv_router_config: &KvRouterConfig,
     indexer: Indexer,
     workers_with_configs: RuntimeConfigWatch,
     model: String,
@@ -160,53 +151,20 @@ pub async fn start_subscriber(
 ) -> Result<()> {
     let transport_kind = component.drt().default_event_transport_kind();
 
-    // Start subscriber - durable_kv_events flag determines the mode:
-    // - durable_kv_events=false (default): Use NATS Core / generic event plane (requires workers to have local_indexer enabled)
-    // - durable_kv_events=true: Use JetStream for durability and multi-replica consistency
-    if kv_router_config.durable_kv_events {
-        tracing::warn!(
-            "--durable-kv-events is deprecated and will be removed in a future release. \
-             The event-plane subscriber (local_indexer mode) is now the recommended path."
-        );
-        if transport_kind != EventTransportKind::Nats {
-            anyhow::bail!(
-                "--durable-kv-events requires NATS event plane, but runtime is configured for {transport_kind:?}"
-            );
-        }
-        tracing::info!("Using JetStream subscription (--durable-kv-events enabled)");
-
-        let consumer_id = component.drt().discovery().instance_id().to_string();
-        super::jetstream::start_kv_router_background(
-            component,
-            consumer_id,
-            indexer,
-            kv_router_config,
-            cancellation_token,
-        )
-        .await
+    if transport_kind == EventTransportKind::Zmq {
+        tracing::info!("Using ZMQ event plane subscription (local_indexer mode)");
     } else {
-        if transport_kind == EventTransportKind::Zmq {
-            if kv_router_config.router_snapshot_threshold.is_some()
-                || kv_router_config.router_reset_states
-            {
-                tracing::warn!(
-                    "ZMQ event plane does not support KV snapshots or state reset; ignoring snapshot/reset settings"
-                );
-            }
-            tracing::info!("Using ZMQ event plane subscription (local_indexer mode)");
-        } else {
-            tracing::info!("Using NATS Core subscription (local_indexer mode)");
-        }
-
-        start_kv_router_background_event_plane(
-            component,
-            indexer,
-            transport_kind,
-            workers_with_configs,
-            model,
-            worker_type,
-            cancellation_token,
-        )
-        .await
+        tracing::info!("Using NATS Core subscription (local_indexer mode)");
     }
+
+    start_kv_router_background_event_plane(
+        component,
+        indexer,
+        transport_kind,
+        workers_with_configs,
+        model,
+        worker_type,
+        cancellation_token,
+    )
+    .await
 }

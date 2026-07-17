@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Compiles client stubs from the temporarily vendored SGLang gRPC contract.
+//! Compiles sidecar client stubs from the temporarily vendored SGLang gRPC contract.
 
 use std::env;
 use std::path::PathBuf;
