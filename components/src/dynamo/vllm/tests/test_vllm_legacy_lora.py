@@ -256,7 +256,7 @@ async def test_legacy_prefill_request_admission_serializes_with_unload(monkeypat
 
 @pytest.mark.asyncio
 async def test_legacy_prefill_request_rejects_adapter_unloaded_before_admission(
-    monkeypatch,
+    monkeypatch, caplog
 ):
     handler = _make_prefill_handler()
     handler.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
@@ -280,6 +280,8 @@ async def test_legacy_prefill_request_rejects_adapter_unloaded_before_admission(
                 _must_not_generate,
             )
         )
+
+    assert "adapterA was unloaded before vLLM admission" in caplog.text
 
 
 @pytest.mark.asyncio

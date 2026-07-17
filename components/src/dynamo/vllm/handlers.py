@@ -1014,8 +1014,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # metadata-only, but vLLM activates a prefill adapter lazily when an
         # inference request supplies its LoRARequest.
         self._engine_loaded_loras: set[str] = set()
-        # Fixed stripes serialize same-name lifecycle and lazy-request admission
-        # without retaining one asyncio.Lock per adapter ever seen.
+        # Requests and load/unload operations for the same adapter share a lock,
+        # so an unload cannot race with vLLM's lazy adapter activation. A fixed
+        # number of shared locks bounds memory as adapter names come and go.
         self._lora_load_locks = [asyncio.Lock() for _ in range(_LORA_LOCK_STRIPES)]
         self._paused: bool = False
         self._weight_version: str = "initial"
@@ -1977,10 +1978,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
         lock = self._get_lora_lock(lora_request.lora_name)
         async with lock:
-            # A pending request may have waited behind an unload. Re-resolve
-            # under the lock instead of admitting its stale path afterwards.
+            # The adapter may have been unloaded or reloaded at a different path
+            # while this request waited. Look it up again while holding the lock.
             admitted_lora_request = self._resolve_lora_request(lora_request.lora_name)
             if admitted_lora_request is None:
+                logger.warning(
+                    "LoRA adapter %s was unloaded before vLLM admission; "
+                    "rejecting the request",
+                    lora_request.lora_name,
+                )
                 raise ValueError(
                     f"unknown model or LoRA adapter: '{lora_request.lora_name}'"
                 )
