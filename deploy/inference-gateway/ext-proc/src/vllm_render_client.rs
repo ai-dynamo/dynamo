@@ -76,7 +76,13 @@ impl VllmRenderClient {
             matches!(endpoint.scheme(), "http" | "https") && endpoint.host_str().is_some(),
             "vLLM renderer base URL must be an absolute HTTP(S) URL"
         );
-        endpoint.set_path(CHAT_RENDER_PATH);
+        {
+            let mut path_segments = endpoint.path_segments_mut().map_err(|_| {
+                anyhow::anyhow!("vLLM renderer base URL cannot be used as a base URL")
+            })?;
+            path_segments.pop_if_empty();
+            path_segments.extend(CHAT_RENDER_PATH.trim_start_matches('/').split('/'));
+        }
         endpoint.set_query(None);
         endpoint.set_fragment(None);
 
@@ -204,6 +210,24 @@ mod tests {
 
         assert_eq!(token_ids, vec![1, 2, 3]);
         assert_eq!(body_rx.recv().await.unwrap().as_ref(), request);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn preserves_base_url_path_prefix() {
+        const PREFIXED_CHAT_RENDER_PATH: &str = "/gateway/vllm/v1/chat/completions/render";
+
+        let router = Router::new().route(
+            PREFIXED_CHAT_RENDER_PATH,
+            post(|| async { Json(json!({"token_ids": [4, 5]})) }),
+        );
+        let (base_url, server) = spawn_server(router).await;
+        let client =
+            VllmRenderClient::new(&format!("{base_url}/gateway/vllm/"), TEST_TIMEOUT).unwrap();
+
+        let token_ids = client.render_chat(b"{}").await.unwrap();
+
+        assert_eq!(token_ids, vec![4, 5]);
         server.abort();
     }
 
