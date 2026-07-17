@@ -240,7 +240,7 @@ const DEP_META_CSS = `
 .dep-meta-dot{position:relative;z-index:1;width:14px;height:14px;border-radius:50%;background:var(--pst-color-surface,#fff);border:2px solid var(--border,var(--grayscale-a5,#ccc));box-sizing:border-box;}
 .dep-meta-step.is-done .dep-meta-dot,.dep-meta-step.is-terminal .dep-meta-dot{background:var(--dep-accent,var(--nv-color-green,#76b900));border-color:var(--dep-accent,var(--nv-color-green,#76b900));}
 .dep-meta-step.is-current .dep-meta-dot{background:var(--dep-accent,var(--nv-color-green,#76b900));border-color:var(--dep-accent,var(--nv-color-green,#76b900));box-shadow:0 0 0 4px color-mix(in srgb,var(--dep-accent,#76b900) 22%,transparent);}
-.dep-meta-steplabel{font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;line-height:1.2;color:var(--pst-color-text-muted,#888);max-width:12ch;}
+.dep-meta-steplabel{font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;line-height:1.2;color:var(--pst-color-text-muted,#888);overflow-wrap:normal;word-break:keep-all;hyphens:none;}
 .dep-meta-step.is-done .dep-meta-steplabel,.dep-meta-step.is-current .dep-meta-steplabel,.dep-meta-step.is-terminal .dep-meta-steplabel{color:var(--pst-color-text-base,#1a1a1a);}
 `;
 
