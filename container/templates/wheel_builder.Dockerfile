@@ -300,7 +300,7 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
 # NVIDIA's NVENC (proprietary HW encoder, already a runtime dependency of these
 # GPU images) and VP9 from libvpx (BSD).
 #
-# MEDIA CODEC ALLOWLIST (see OPS-7665): the in-tree libavcodec should carry only
+# MEDIA CODEC ALLOWLIST: the in-tree libavcodec should carry only
 # the media formats we actually build and use, not ffmpeg's full default decoder
 # set. A blanket --disable-decoders/--disable-demuxers/--disable-parsers plus a
 # narrow allowlist keeps the shipped libav*.so limited to that set (HW NVDEC can

@@ -317,7 +317,7 @@ mod tests {
     /// Filename format: "{resolution}_{frames}.mp4" (e.g., "240p_10.mp4" -> 320x240, 10 frames)
     /// Fixtures are VP9-in-mp4: the in-tree ffmpeg only decodes a narrow
     /// allowlist (VP8/VP9), so H.264 fixtures would not decode. Regenerate with
-    /// `ffmpeg -f lavfi -i testsrc2=size=WxH:rate=1 -frames:v N -c:v libvpx-vp9 -g 1 -strict -2`.
+    /// `ffmpeg -f lavfi -i testsrc2=size=WxH:rate=1 -frames:v N -c:v libvpx-vp9 -g 1 -strict -2 {resolution}_{frames}.mp4`.
     fn load_test_video(filename: &str) -> (EncodedMediaData, u32, u32, u32) {
         let path = format!(
             "{}/tests/data/media/{}",
