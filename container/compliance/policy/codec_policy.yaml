@@ -8,8 +8,7 @@
 # that: it fails the image BUILD if a media-codec library/binary appears outside
 # our in-tree allowlist (allow_paths) or a reasoned exception — catching a distro
 # libav*, a wheel-bundled libavcodec, libx264/265, or a stray/imageio-bundled
-# ffmpeg that slipped in via a base-image or dependency bump. See OPS-7665 for
-# background and the exception rationale.
+# ffmpeg that slipped in via a base-image or dependency bump.
 #
 # Filesystem-first because bundled codec .so files don't appear as SBOM
 # components; deny_components adds a supplementary SBOM version floor.
@@ -76,5 +75,5 @@ exceptions:
     reason: >-
       NVIDIA DALI (nvidia-dali-cuda130) bundles its own libav* for its video
       reader. It is owned and handled by its own component team and tracked
-      separately (OPS-7665) rather than gated here.
+      separately rather than gated here.
     owner: DALI
