@@ -1,0 +1,151 @@
+<!doctype html>
+<!--
+  Standalone test harness for the TerminalDemo component logic.
+  Mirrors fern/components/TerminalDemo.tsx: same CDN player (3.17.0), same
+  options, same manual endAt trim/loop. If the demo plays correctly here, the
+  Fern component will too — this isolates the player from Fern's build.
+
+  Run:  python3 -m http.server 8009   (from repo root)
+  Open: http://localhost:8009/terminal-demo-test.html
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>TerminalDemo test — hero-demo.cast</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/asciinema-player@3.17.0/dist/bundle/asciinema-player.css" />
+<style>
+  body {
+    margin: 0;
+    background: #0b0b0f;
+    color: #d4d4d8;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 32px 20px;
+  }
+  h1 { font-size: 1.1rem; font-weight: 600; color: #76B900; }
+  .frame {
+    max-width: 860px;
+    margin: 20px auto;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 4px 16px rgb(0 0 0 / 25%);
+    background: #1a1a2e;
+  }
+  .bar {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 10px 14px;
+    background: #252545;
+  }
+  .bar .dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
+  .bar .title {
+    flex: 1; text-align: center; margin-right: 33px;
+    color: #d4d4d8; font-family: "SFMono-Regular", Menlo, Monaco, monospace;
+    font-size: 0.8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .frame .asciinema-player { background: #1a1a2e; }
+  .controls {
+    max-width: 860px;
+    margin: 0 auto 8px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 18px;
+    align-items: center;
+    font-size: 0.85rem;
+  }
+  .controls label { display: inline-flex; gap: 6px; align-items: center; }
+  .controls input[type=number] { width: 64px; background:#1a1a2e; color:#eee; border:1px solid #333; border-radius:6px; padding:3px 6px; }
+  button { background:#76B900; color:#000; border:0; border-radius:6px; padding:6px 14px; font-weight:600; cursor:pointer; }
+  #status { max-width:860px; margin:12px auto; font-family: monospace; font-size:0.8rem; white-space:pre-wrap; color:#9a9; }
+  .err { color:#ff6b6b !important; }
+</style>
+</head>
+<body>
+<h1>TerminalDemo — hero-demo.cast (asciicast v3, ~79s, 120×32)</h1>
+
+<div class="controls">
+  <label>startAt <input id="startAt" type="number" value="0" step="1" min="0" /></label>
+  <label>endAt <input id="endAt" type="number" value="0" step="1" min="0" placeholder="0=full" /></label>
+  <label>idleTimeLimit <input id="idle" type="number" value="1.5" step="0.5" min="0" /></label>
+  <label>speed <input id="speed" type="number" value="1" step="0.1" min="0.1" /></label>
+  <label><input id="loop" type="checkbox" checked /> loop</label>
+  <label><input id="autoplay" type="checkbox" checked /> autoplay</label>
+  <label><input id="controls" type="checkbox" /> controls</label>
+  <button id="reload">Reload player</button>
+</div>
+
+<div class="frame">
+  <div class="bar">
+    <span class="dot" style="background:#ff5f56"></span>
+    <span class="dot" style="background:#ffbd2e"></span>
+    <span class="dot" style="background:#27c93f"></span>
+    <span class="title">dynamo — hero demo</span>
+  </div>
+  <div id="player"></div>
+</div>
+<div id="status">loading player from CDN…</div>
+
+<script src="https://cdn.jsdelivr.net/npm/asciinema-player@3.17.0/dist/bundle/asciinema-player.min.js"></script>
+<script>
+  var CAST = "hero-demo.cast"; // relative — served over http
+  var player = null, trimTimer = null;
+  var statusEl = document.getElementById("status");
+
+  function log(msg, isErr) {
+    statusEl.textContent = msg;
+    statusEl.className = isErr ? "err" : "";
+  }
+
+  function num(id){ return parseFloat(document.getElementById(id).value); }
+  function bool(id){ return document.getElementById(id).checked; }
+
+  function build() {
+    if (trimTimer) { clearInterval(trimTimer); trimTimer = null; }
+    if (player && player.dispose) { try { player.dispose(); } catch(e){} }
+    document.getElementById("player").innerHTML = "";
+
+    if (!window.AsciinemaPlayer) { log("AsciinemaPlayer global missing — CDN blocked?", true); return; }
+
+    var startAt = num("startAt");
+    var endAt = num("endAt"); // 0 => full
+    var loop = bool("loop");
+    var autoplay = bool("autoplay");
+
+    try {
+      player = AsciinemaPlayer.create(CAST, document.getElementById("player"), {
+        autoPlay: autoplay,
+        loop: endAt > 0 ? false : loop,   // manual loop when trimming
+        idleTimeLimit: num("idle"),
+        speed: num("speed"),
+        controls: bool("controls"),
+        theme: "asciinema",
+        fit: "width",
+        startAt: startAt
+      });
+      log("player created ✓  (asciicast v3 " + (window.AsciinemaPlayer ? "accepted" : "?") + ")");
+    } catch (e) {
+      log("create() threw: " + e.message + "\nIf this mentions the format, the .cast is v3 and this player build rejects it →\n  asciinema convert hero-demo.cast hero-demo-v2.cast   (downgrades v3→v2)", true);
+      return;
+    }
+
+    // Manual endAt trim + loop (mirrors the component)
+    if (endAt > 0 && player.getCurrentTime) {
+      trimTimer = setInterval(function () {
+        if (!player) return;
+        try {
+          var t = player.getCurrentTime();
+          if (typeof t !== "number" || t < endAt) return;
+          if (loop && player.seek) { player.seek(startAt); if (autoplay && player.play) player.play(); }
+          else if (player.pause) { player.pause(); clearInterval(trimTimer); }
+        } catch (e) {}
+      }, 250);
+    }
+  }
+
+  document.getElementById("reload").addEventListener("click", build);
+  if (window.AsciinemaPlayer) build();
+  else { log("asciinema-player script did not load (offline / CDN blocked).", true); }
+</script>
+</body>
+</html>

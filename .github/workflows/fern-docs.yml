@@ -113,58 +113,68 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Sync dev content from main
         run: |
-          # Sync content directories from docs/ to fern/pages-dev/ on docs-website
-          # Excludes non-content items that are synced separately or not needed
+          # Sync content directories from docs/fern/ to fern/pages-dev/ on docs-website
+          # The fern project root and page content now co-locate under docs/fern/,
+          # so exclude the fern-root config/support files — only *pages* should land.
           echo "Syncing content pages to docs-website branch..."
           rm -rf docs-checkout/fern/pages-dev
           mkdir -p docs-checkout/fern/pages-dev
           rsync -a \
             --exclude='digest' \
             --exclude='index.yml' \
-            source-checkout/docs/ docs-checkout/fern/pages-dev/
+            --exclude='fern.config.json' \
+            --exclude='docs.yml' \
+            --exclude='components' \
+            --exclude='main.css' \
+            --exclude='welcome.mdx' \
+            --exclude='convert_callouts.py' \
+            --exclude='.gitignore' \
+            --exclude='dev.sh' \
+            --exclude='watch.sh' \
+            source-checkout/docs/fern/ docs-checkout/fern/pages-dev/
 
           # Sync index.yml as versions/dev.yml and transform paths for docs-website layout
           echo "Syncing index.yml to docs-website branch as versions/dev.yml..."
-          cp source-checkout/docs/index.yml docs-checkout/fern/versions/dev.yml
+          cp source-checkout/docs/fern/index.yml docs-checkout/fern/versions/dev.yml
 
           # Sync fern.config.json
           echo "Syncing fern.config.json to docs-website branch..."
-          cp source-checkout/fern/fern.config.json docs-checkout/fern/fern.config.json
+          cp source-checkout/docs/fern/fern.config.json docs-checkout/fern/fern.config.json
 
-          # Sync docs/README.md (developer guide, referenced from dev.yml)
-          if [ -f source-checkout/docs/README.md ]; then
-            cp source-checkout/docs/README.md docs-checkout/fern/README.md
+          # Sync README.md (developer guide, referenced from dev.yml)
+          if [ -f source-checkout/docs/fern/README.md ]; then
+            cp source-checkout/docs/fern/README.md docs-checkout/fern/README.md
           fi
 
           # Sync .gitignore if it exists
-          if [ -f source-checkout/fern/.gitignore ]; then
-            cp source-checkout/fern/.gitignore docs-checkout/fern/.gitignore
+          if [ -f source-checkout/docs/fern/.gitignore ]; then
+            cp source-checkout/docs/fern/.gitignore docs-checkout/fern/.gitignore
           fi
 
           # Sync convert_callouts.py script
-          if [ -f source-checkout/fern/convert_callouts.py ]; then
-            cp source-checkout/fern/convert_callouts.py docs-checkout/fern/convert_callouts.py
+          if [ -f source-checkout/docs/fern/convert_callouts.py ]; then
+            cp source-checkout/docs/fern/convert_callouts.py docs-checkout/fern/convert_callouts.py
           fi
 
           # Sync components/ directory (e.g., CustomFooter.tsx)
-          if [ -d source-checkout/fern/components ]; then
+          if [ -d source-checkout/docs/fern/components ]; then
             echo "Syncing components/ to docs-website branch..."
             rm -rf docs-checkout/fern/components
-            cp -r source-checkout/fern/components docs-checkout/fern/components
+            cp -r source-checkout/docs/fern/components docs-checkout/fern/components
           fi
 
           # Sync digest/ directory
-          if [ -d source-checkout/docs/digest ]; then
+          if [ -d source-checkout/docs/fern/digest ]; then
             echo "Syncing digest/ to docs-website branch..."
             # Keep fern/blogs for older versioned docs that still reference ../blogs.
             rm -rf docs-checkout/fern/digest
-            cp -r source-checkout/docs/digest docs-checkout/fern/digest
+            cp -r source-checkout/docs/fern/digest docs-checkout/fern/digest
           fi
 
           # Sync main.css
-          if [ -f source-checkout/fern/main.css ]; then
+          if [ -f source-checkout/docs/fern/main.css ]; then
             echo "Syncing main.css to docs-website branch..."
-            cp source-checkout/fern/main.css docs-checkout/fern/main.css
+            cp source-checkout/docs/fern/main.css docs-checkout/fern/main.css
           fi
 
       - name: Transform paths in dev.yml for docs-website layout
@@ -195,10 +205,11 @@ jobs:
           cat /tmp/preserved_product.yml
 
           # Copy docs.yml from source to get config updates (redirects, layout, etc.)
-          cp ../../source-checkout/fern/docs.yml docs.yml
+          cp ../../source-checkout/docs/fern/docs.yml docs.yml
 
-          # Fix asset paths: source uses ../docs/assets/ (relative to fern/ in source repo),
-          # but on docs-website assets live at fern/assets/ so we need ./assets/
+          # Fix asset paths: the source docs.yml now uses ./assets/ (fern root and
+          # assets co-locate under docs/fern/), so this sed is a harmless no-op kept
+          # for older source layouts.
           sed -i 's|\.\./docs/assets/|./assets/|g' docs.yml
 
           # Restore the preserved products[0] block
