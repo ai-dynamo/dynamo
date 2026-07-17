@@ -180,8 +180,6 @@ spec:
                       fieldPath: metadata.uid
                 - name: HF_HOME
                   value: /model-cache
-                - name: HF_HUB_OFFLINE
-                  value: "1"
                 - name: PYTHONUNBUFFERED
                   value: "1"
                 - name: DYN_FORWARDPASS_METRIC_PORT
@@ -288,8 +286,6 @@ spec:
                       fieldPath: metadata.uid
                 - name: HF_HOME
                   value: /model-cache
-                - name: HF_HUB_OFFLINE
-                  value: "1"
                 - name: PYTHONUNBUFFERED
                   value: "1"
                 - name: DYN_FORWARDPASS_METRIC_PORT
