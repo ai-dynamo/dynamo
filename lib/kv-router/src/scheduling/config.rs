@@ -778,6 +778,14 @@ impl KvRouterConfig {
         self.router_predicted_ttl_secs.is_some()
     }
 
+    /// True when the effective scheduling policy requires each worker to report
+    /// `max_num_batched_tokens` (queue-threshold admission or a router policy
+    /// config is active). Discovery-time callers can validate the value up front
+    /// rather than letting workers silently become unschedulable later.
+    pub fn requires_max_num_batched_tokens(&self) -> bool {
+        self.router_queue_threshold.is_some() || self.router_policy_config.is_some()
+    }
+
     pub fn assume_kv_reuse(&self, config_override: Option<&RouterConfigOverride>) -> bool {
         config_override
             .and_then(|cfg| cfg.assume_kv_reuse)

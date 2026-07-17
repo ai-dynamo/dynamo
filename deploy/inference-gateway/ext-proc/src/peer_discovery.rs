@@ -28,11 +28,87 @@ use dynamo_kv_router::services::selection::SelectionService;
 /// Label Kubernetes sets on every EndpointSlice pointing back to its Service.
 const SERVICE_NAME_LABEL: &str = "kubernetes.io/service-name";
 
+/// Named Service/EndpointSlice port used for aggregated replica synchronization.
+pub const REPLICA_AGG_PORT_NAME: &str = "replica-agg";
+
 /// Best-effort bound on how long startup waits for the initial EndpointSlice
 /// LIST before returning; the background task keeps syncing regardless.
 const INITIAL_LIST_TIMEOUT: Duration = Duration::from_secs(30);
 
 type Store = kube::runtime::reflector::Store<EndpointSlice>;
+
+/// Resolve the required aggregated replica-sync port from the peer Service's
+/// EndpointSlices. Every slice must expose the same named `replica-agg` port;
+/// missing or inconsistent ports fail EPP startup before replica sync is built.
+pub async fn resolve_replica_sync_port(namespace: &str, service_name: &str) -> Result<u16> {
+    use kube::{Api, Client, api::ListParams};
+
+    let client = Client::try_default()
+        .await
+        .context("building Kubernetes client for EPP peer port resolution")?;
+    let slices: Api<EndpointSlice> = Api::namespaced(client, namespace);
+    let list = slices
+        .list(&ListParams::default().labels(&format!("{SERVICE_NAME_LABEL}={service_name}")))
+        .await
+        .with_context(|| {
+            format!("listing EndpointSlices for EPP peer Service {namespace}/{service_name}")
+        })?;
+
+    replica_sync_port(list.items.iter()).with_context(|| {
+        format!(
+            "resolving named port {REPLICA_AGG_PORT_NAME:?} for EPP peer Service \
+             {namespace}/{service_name}"
+        )
+    })
+}
+
+fn replica_sync_port<'a>(slices: impl Iterator<Item = &'a EndpointSlice>) -> Result<u16> {
+    let mut resolved = BTreeSet::new();
+    let mut slice_count = 0usize;
+
+    for slice in slices {
+        slice_count += 1;
+        let slice_name = slice.metadata.name.as_deref().unwrap_or("<unnamed>");
+        let mut matches = slice
+            .ports
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter(|port| port.name.as_deref() == Some(REPLICA_AGG_PORT_NAME));
+        let endpoint_port = matches.next().with_context(|| {
+            format!(
+                "EndpointSlice {slice_name} does not expose named port \
+                 {REPLICA_AGG_PORT_NAME:?}"
+            )
+        })?;
+        anyhow::ensure!(
+            matches.next().is_none(),
+            "EndpointSlice {slice_name} exposes named port {REPLICA_AGG_PORT_NAME:?} more than once"
+        );
+        let raw_port = endpoint_port.port.with_context(|| {
+            format!(
+                "EndpointSlice {slice_name} named port {REPLICA_AGG_PORT_NAME:?} has no port number"
+            )
+        })?;
+        let port = u16::try_from(raw_port).with_context(|| {
+            format!(
+                "EndpointSlice {slice_name} named port {REPLICA_AGG_PORT_NAME:?} has invalid port {raw_port}"
+            )
+        })?;
+        anyhow::ensure!(
+            port > 0,
+            "named port {REPLICA_AGG_PORT_NAME:?} must be greater than zero"
+        );
+        resolved.insert(port);
+    }
+
+    anyhow::ensure!(slice_count > 0, "peer Service has no EndpointSlices");
+    anyhow::ensure!(
+        resolved.len() == 1,
+        "named port {REPLICA_AGG_PORT_NAME:?} resolves to inconsistent ports {resolved:?}"
+    );
+    Ok(*resolved.first().expect("validated one resolved port"))
+}
 
 /// Start the peer-discovery watch for the EPP's own `service_name` in
 /// `namespace`. Registers/deregisters replica-sync peers on `service` as sibling
@@ -226,7 +302,7 @@ fn peer_ips<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use k8s_openapi::api::discovery::v1::{Endpoint, EndpointConditions};
+    use k8s_openapi::api::discovery::v1::{Endpoint, EndpointConditions, EndpointPort};
 
     fn slice_with(ips: &[&str], terminating: bool, address_type: &str) -> EndpointSlice {
         EndpointSlice {
@@ -244,6 +320,17 @@ mod tests {
                 .collect(),
             ..Default::default()
         }
+    }
+
+    fn slice_with_replica_port(port: Option<i32>) -> EndpointSlice {
+        let mut slice = slice_with(&["10.0.0.1"], false, "IPv4");
+        slice.metadata.name = Some("epp-peers-abc".to_string());
+        slice.ports = Some(vec![EndpointPort {
+            name: Some(REPLICA_AGG_PORT_NAME.to_string()),
+            port,
+            ..Default::default()
+        }]);
+        slice
     }
 
     #[test]
@@ -281,5 +368,31 @@ mod tests {
     fn authority_brackets_ipv6_only() {
         assert_eq!(authority("10.0.0.1", 9092), "10.0.0.1:9092");
         assert_eq!(authority("fd00::1", 9092), "[fd00::1]:9092");
+    }
+
+    #[test]
+    fn resolves_replica_agg_named_port() {
+        let slices = [
+            slice_with_replica_port(Some(9092)),
+            slice_with_replica_port(Some(9092)),
+        ];
+        assert_eq!(replica_sync_port(slices.iter()).unwrap(), 9092);
+    }
+
+    #[test]
+    fn rejects_missing_replica_agg_named_port() {
+        let slices = [slice_with(&["10.0.0.1"], false, "IPv4")];
+        let error = replica_sync_port(slices.iter()).unwrap_err().to_string();
+        assert!(error.contains(REPLICA_AGG_PORT_NAME));
+    }
+
+    #[test]
+    fn rejects_inconsistent_replica_agg_named_ports() {
+        let slices = [
+            slice_with_replica_port(Some(9092)),
+            slice_with_replica_port(Some(9093)),
+        ];
+        let error = replica_sync_port(slices.iter()).unwrap_err().to_string();
+        assert!(error.contains("inconsistent ports"));
     }
 }
