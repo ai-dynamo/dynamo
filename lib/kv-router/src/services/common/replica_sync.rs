@@ -528,6 +528,8 @@ fn handle_replica_message<F>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "standalone-slot-tracker")]
+    use crate::ActiveSequenceStride;
     use crate::protocols::{ActiveSequenceEventData, WorkerWithDpRank};
     #[cfg(feature = "standalone-slot-tracker")]
     use crate::services::slot_tracker::registry::{SlotTrackerRegistry, TrackerKey};
@@ -688,7 +690,13 @@ mod tests {
         for attempt in 0..40 {
             let request_id = format!("warmup-{attempt}");
             registry_a
-                .add_request(&key, request_id.clone(), worker, vec![attempt], 0)
+                .add_request(
+                    &key,
+                    request_id.clone(),
+                    worker,
+                    ActiveSequenceStride::ONE.sample_dense(vec![attempt]),
+                    0,
+                )
                 .unwrap();
             warmup_requests.push(request_id);
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -704,7 +712,13 @@ mod tests {
         wait_for_load(&registry_b, 0, 0).await;
 
         registry_a
-            .add_request(&key, "target".to_string(), worker, vec![1, 2, 3], 8)
+            .add_request(
+                &key,
+                "target".to_string(),
+                worker,
+                ActiveSequenceStride::ONE.sample_dense(vec![1, 2, 3]),
+                8,
+            )
             .unwrap();
         wait_for_load(&registry_b, 3, 8).await;
 

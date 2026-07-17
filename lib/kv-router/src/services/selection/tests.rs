@@ -13,6 +13,7 @@ use tower::ServiceExt;
 use super::input::{MmRoutingInfoRequest, PromptRequest};
 use super::server::create_router;
 use super::*;
+use crate::ActiveSequenceStride;
 use crate::indexer::{LowerTierMatchDetails, MatchDetails, TieredMatchDetails};
 use crate::protocols::{
     BlockExtraInfo, BlockHashOptions, BlockMmObjectInfo, OverlapScores, StorageTier,
@@ -744,6 +745,95 @@ async fn cached_reservation_books_from_select() {
     )
     .await;
     assert_eq!(replay.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn sparse_selection_reservations_and_potential_loads_sample_once() {
+    let config = crate::config::KvRouterConfig {
+        router_active_sequence_stride: ActiveSequenceStride::new(3).unwrap(),
+        ..test_config()
+    };
+    let service = Arc::new(SelectionService::new_local_for_test(config, 1));
+    let app = create_router(Arc::new(AppState { service }));
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+
+    let first_tokens: Vec<u32> = (0..40).collect();
+    let select = post(
+        app.clone(),
+        "/select",
+        &serde_json::json!({
+            "model_name": "model",
+            "selection_id": "sparse-cached",
+            "token_ids": first_tokens,
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(select.status(), StatusCode::OK);
+    let reserve = post(
+        app.clone(),
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"sparse-cached"}"#,
+    )
+    .await;
+    assert_eq!(reserve.status(), StatusCode::CREATED);
+
+    let loads = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/loads")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let loads = response_json(loads).await;
+    assert_eq!(loads[0]["loads"][0]["potential_decode_blocks"], 9);
+
+    let freed = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/reservations/sparse-cached")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(freed.status(), StatusCode::OK);
+
+    let explicit = post(
+        app.clone(),
+        "/reservations",
+        &serde_json::json!({
+            "model_name": "model",
+            "selection_id": "sparse-explicit",
+            "worker_id": 1,
+            "token_ids": (0..40).collect::<Vec<u32>>(),
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(explicit.status(), StatusCode::CREATED);
+
+    let potential = post(
+        app,
+        "/potential_loads",
+        &serde_json::json!({
+            "model_name": "model",
+            "token_ids": (100..140).collect::<Vec<u32>>(),
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(potential.status(), StatusCode::OK);
+    let potential = response_json(potential).await;
+    assert_eq!(potential[0]["potential_decode_blocks"], 18);
 }
 
 #[tokio::test]

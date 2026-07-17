@@ -7,6 +7,7 @@
 //! implementations that wire the runtime-agnostic business logic (in `dynamo_kv_router`)
 //! to NATS event transport and Prometheus metrics.
 
+use dynamo_kv_router::ActiveSequenceStride;
 pub use dynamo_kv_router::multi_worker_sequence::{
     ActiveSequencesMultiWorker, SequenceError, SequencePublisher, SequenceRequest,
     SequenceSubscriber, SequenceTrackerOptions,
@@ -20,7 +21,6 @@ use anyhow::Result;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::transports::event_plane::{EventPublisher, EventSubscriber};
 use std::collections::HashMap;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio_util::sync::CancellationToken;
@@ -99,8 +99,8 @@ impl SequencePublisher for RuntimeSequencePublisher {
 
     fn observe_replica_stride_mismatch(
         &self,
-        expected: usize,
-        received: Result<NonZeroUsize, ActiveSequenceStrideError>,
+        expected: ActiveSequenceStride,
+        received: Result<ActiveSequenceStride, ActiveSequenceStrideError>,
         worker_type: &str,
     ) {
         self.worker_status_metrics
@@ -219,6 +219,7 @@ mod tests {
 
         let namespace = distributed.namespace("test_cross_instance_sync")?;
         let component = namespace.component("sequences")?;
+        let active_sequence_stride = ActiveSequenceStride::new(3).unwrap();
 
         let mut workers_with_configs = HashMap::new();
 
@@ -238,7 +239,7 @@ mod tests {
             CancellationToken::new(),
             SequenceTrackerOptions {
                 replica_sync: true,
-                active_sequence_stride: NonZeroUsize::new(3).unwrap(),
+                active_sequence_stride,
                 ..Default::default()
             },
         )
@@ -252,7 +253,7 @@ mod tests {
             CancellationToken::new(),
             SequenceTrackerOptions {
                 replica_sync: true,
-                active_sequence_stride: NonZeroUsize::new(3).unwrap(),
+                active_sequence_stride,
                 ..Default::default()
             },
         )
@@ -264,7 +265,7 @@ mod tests {
         seq_manager_1.add_request(
             SequenceRequest {
                 request_id: "request_0".to_string(),
-                token_sequence: Some(vec![0, 1, 2]),
+                token_sequence: Some(active_sequence_stride.sample_dense((0..9).collect())),
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
                 prefill_load_hint: tracking_hint(12),
@@ -277,7 +278,7 @@ mod tests {
         seq_manager_1.add_request(
             SequenceRequest {
                 request_id: "request_1".to_string(),
-                token_sequence: Some(vec![3, 4]),
+                token_sequence: Some(active_sequence_stride.sample_dense((9..15).collect())),
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
                 prefill_load_hint: tracking_hint(8),
@@ -290,7 +291,7 @@ mod tests {
         seq_manager_2.add_request(
             SequenceRequest {
                 request_id: "request_2".to_string(),
-                token_sequence: Some(vec![0, 1, 2, 3]),
+                token_sequence: Some(active_sequence_stride.sample_dense((0..12).collect())),
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
                 prefill_load_hint: tracking_hint(16),

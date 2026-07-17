@@ -9,12 +9,12 @@
 //! transport (e.g., NATS EventPublisher, Prometheus gauges) so that all business logic lives in
 //! this crate while the runtime glue stays in `lib/llm`.
 
+#[cfg(test)]
 use dynamo_tokens::SequenceHash;
 use parking_lot::{Mutex, RwLock};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::HashMap;
 use std::future::Future;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -29,6 +29,7 @@ use super::request_maps::RequestIndex;
 use super::single::{ActiveSequences, PromptMembershipDelta, RequestId};
 use super::topology::{WorkerDpRange, WorkerTable, WorkerTopologyChange, WorkerTopologyError};
 use super::{PotentialLoadMaps, PrefillTokenDeltas, WorkerLoadProjection};
+use crate::active_sequence::{ActiveSequenceStride, TrackedSequenceHashes};
 use crate::protocols::{
     ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, ActiveSequenceStrideError,
     PrefillLoadHint, WorkerId, WorkerWithDpRank,
@@ -84,8 +85,8 @@ pub trait SequencePublisher: Send + Sync {
     /// match the local tracker configuration.
     fn observe_replica_stride_mismatch(
         &self,
-        _expected: usize,
-        _received: Result<NonZeroUsize, ActiveSequenceStrideError>,
+        _expected: ActiveSequenceStride,
+        _received: Result<ActiveSequenceStride, ActiveSequenceStrideError>,
         _worker_type: &str,
     ) {
     }
@@ -130,7 +131,7 @@ pub struct SequenceTrackerOptions {
     /// Whether local lifecycle events are published for replica synchronization.
     pub replica_sync: bool,
     /// Number of physical prompt blocks represented by each retained sequence hash.
-    pub active_sequence_stride: NonZeroUsize,
+    pub active_sequence_stride: ActiveSequenceStride,
 }
 
 impl Default for SequenceTrackerOptions {
@@ -139,7 +140,7 @@ impl Default for SequenceTrackerOptions {
             replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
             expiry_enabled: true,
             replica_sync: false,
-            active_sequence_stride: NonZeroUsize::MIN,
+            active_sequence_stride: ActiveSequenceStride::ONE,
         }
     }
 }
@@ -166,7 +167,7 @@ pub enum SequenceError {
 /// Bundled parameters for adding a request to the sequence tracker.
 pub struct SequenceRequest {
     pub request_id: RequestId,
-    pub token_sequence: Option<Vec<SequenceHash>>,
+    pub token_sequence: Option<TrackedSequenceHashes>,
     pub track_prefill_tokens: bool,
     pub expected_output_tokens: Option<u32>,
     pub prefill_load_hint: Option<PrefillLoadHint>,
@@ -188,7 +189,7 @@ pub struct ActiveSequencesMultiWorker<P: SequencePublisher> {
     pub(super) request_index: RequestIndex,
     pub(super) prompt_registry: PromptRegistry,
     block_size: usize,
-    pub(super) active_sequence_stride: usize,
+    pub(super) active_sequence_stride: ActiveSequenceStride,
     pub(super) router_id: u64,
     pub(super) publisher: Arc<P>,
     remote_state_updates: watch::Sender<()>,
@@ -196,7 +197,7 @@ pub struct ActiveSequencesMultiWorker<P: SequencePublisher> {
     remote_state_update_count: AtomicUsize,
     replica_sync: bool,
     pub(super) warned_replica_stride_mismatches:
-        Mutex<FxHashSet<(u64, Result<NonZeroUsize, ActiveSequenceStrideError>)>>,
+        Mutex<FxHashSet<(u64, Result<ActiveSequenceStride, ActiveSequenceStrideError>)>>,
     pub(super) replica_worker_policy: ReplicaWorkerPolicy,
     worker_type: &'static str,
 }
@@ -283,7 +284,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         options: SequenceTrackerOptions,
     ) -> Self {
         assert!(block_size > 0, "block_size must be greater than 0");
-        let active_sequence_stride = options.active_sequence_stride.get();
+        let active_sequence_stride = options.active_sequence_stride;
         let (remote_state_updates, _) = watch::channel(());
         let workers = if options.expiry_enabled {
             WorkerTable::new(block_size, &dp_range)
@@ -403,7 +404,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     }
 
     fn event_stride(&self) -> Option<usize> {
-        (self.active_sequence_stride > 1).then_some(self.active_sequence_stride)
+        self.active_sequence_stride.event_value()
     }
 
     /// Subscribe to remote lifecycle updates that were applied through replica sync.
@@ -565,7 +566,10 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             request_id: req.request_id.clone(),
             worker: req.worker,
             data: ActiveSequenceEventData::AddRequest {
-                token_sequence: req.token_sequence.clone(),
+                token_sequence: req
+                    .token_sequence
+                    .as_ref()
+                    .map(|sequence| sequence.as_slice().to_vec()),
                 track_prefill_tokens: req.track_prefill_tokens,
                 expected_output_tokens: req.expected_output_tokens,
                 prefill_load_hint: req.prefill_load_hint,
@@ -682,7 +686,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     /// Query all workers for the potential blocks and tokens.
     pub fn potential_blocks_and_tokens<const INCLUDE_ACTIVE_REQUESTS: bool>(
         &self,
-        token_sequence: Option<&[SequenceHash]>,
+        token_sequence: Option<&TrackedSequenceHashes>,
         prefill_token_deltas: &PrefillTokenDeltas,
     ) -> PotentialLoadMaps {
         self.potential_blocks_and_tokens_at::<INCLUDE_ACTIVE_REQUESTS>(
@@ -694,7 +698,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
     pub fn potential_blocks_and_tokens_at<const INCLUDE_ACTIVE_REQUESTS: bool>(
         &self,
-        token_sequence: Option<&[SequenceHash]>,
+        token_sequence: Option<&TrackedSequenceHashes>,
         prefill_token_deltas: &PrefillTokenDeltas,
         decay_now: Instant,
     ) -> PotentialLoadMaps {
@@ -727,7 +731,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
     pub fn project_worker_loads(
         &self,
-        token_sequence: Option<&[SequenceHash]>,
+        token_sequence: Option<&TrackedSequenceHashes>,
         decay_now: Instant,
     ) -> FxHashMap<WorkerWithDpRank, WorkerLoadProjection> {
         #[cfg(feature = "bench")]
@@ -1134,6 +1138,14 @@ mod tests {
     use crate::sequences::prefill_tracker::PrefillTimeLoadError;
     use crate::test_utils::NoopSequencePublisher;
 
+    fn tracked_hashes(sequence: Vec<SequenceHash>) -> TrackedSequenceHashes {
+        crate::active_sequence::tracked_sequence_hashes(sequence)
+    }
+
+    fn tracked(sequence: Vec<SequenceHash>) -> Option<TrackedSequenceHashes> {
+        Some(tracked_hashes(sequence))
+    }
+
     fn make_sequences() -> ActiveSequencesMultiWorker<NoopSequencePublisher> {
         ActiveSequencesMultiWorker::new(
             NoopSequencePublisher,
@@ -1320,7 +1332,12 @@ mod tests {
         observations: Mutex<Vec<(WorkerWithDpRank, usize, usize)>>,
         registered: Mutex<Vec<WorkerWithDpRank>>,
         removed: Mutex<Vec<WorkerWithDpRank>>,
-        stride_mismatches: Mutex<Vec<(usize, Result<NonZeroUsize, ActiveSequenceStrideError>)>>,
+        stride_mismatches: Mutex<
+            Vec<(
+                ActiveSequenceStride,
+                Result<ActiveSequenceStride, ActiveSequenceStrideError>,
+            )>,
+        >,
     }
 
     impl RecordingPublisherState {
@@ -1384,8 +1401,8 @@ mod tests {
 
         fn observe_replica_stride_mismatch(
             &self,
-            expected: usize,
-            received: Result<NonZeroUsize, ActiveSequenceStrideError>,
+            expected: ActiveSequenceStride,
+            received: Result<ActiveSequenceStride, ActiveSequenceStrideError>,
             _worker_type: &str,
         ) {
             self.state
@@ -1434,7 +1451,7 @@ mod tests {
             "test",
             SequenceTrackerOptions {
                 replica_sync: true,
-                active_sequence_stride: NonZeroUsize::new(active_sequence_stride).unwrap(),
+                active_sequence_stride: ActiveSequenceStride::new(active_sequence_stride).unwrap(),
                 ..Default::default()
             },
         );
@@ -1529,7 +1546,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "req-1".to_string(),
-                    token_sequence: Some(vec![1, 2, 3]),
+                    token_sequence: tracked(vec![1, 2, 3]),
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -1559,7 +1576,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: a_oldest.clone(),
-                    token_sequence: Some(vec![1, 2, 3]),
+                    token_sequence: tracked(vec![1, 2, 3]),
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: modeled_hint(100, 10),
@@ -1573,7 +1590,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "a-later".to_string(),
-                    token_sequence: Some(vec![4, 5, 6]),
+                    token_sequence: tracked(vec![4, 5, 6]),
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: modeled_hint(60, 4),
@@ -1587,7 +1604,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "b-unmodeled".to_string(),
-                    token_sequence: Some(vec![7, 8, 9]),
+                    token_sequence: tracked(vec![7, 8, 9]),
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: tracking_hint(12),
@@ -1628,7 +1645,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "oldest".to_string(),
-                    token_sequence: Some(vec![1, 2, 3]),
+                    token_sequence: tracked(vec![1, 2, 3]),
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: modeled_hint(100, 10),
@@ -1642,7 +1659,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: later.clone(),
-                    token_sequence: Some(vec![4, 5, 6]),
+                    token_sequence: tracked(vec![4, 5, 6]),
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: modeled_hint(40, 4),
@@ -1697,7 +1714,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "req-a".to_string(),
-                    token_sequence: Some(vec![1, 2, 3]),
+                    token_sequence: tracked(vec![1, 2, 3]),
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: tracking_hint(12),
@@ -1718,7 +1735,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "req-b".to_string(),
-                    token_sequence: Some(vec![1, 2, 4]),
+                    token_sequence: tracked(vec![1, 2, 4]),
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: tracking_hint(12),
@@ -1736,13 +1753,14 @@ mod tests {
         let prefill_token_deltas = PrefillTokenDeltas::new(16, deltas);
         let expected =
             naive_potential_loads(&sequences, Some(&prompt), &prefill_token_deltas, decay_now);
+        let tracked_prompt = tracked_hashes(prompt);
 
         let actual = sequences.potential_blocks_and_tokens_at::<false>(
-            Some(&prompt),
+            Some(&tracked_prompt),
             &prefill_token_deltas,
             decay_now,
         );
-        let projections = sequences.project_worker_loads(Some(&prompt), decay_now);
+        let projections = sequences.project_worker_loads(Some(&tracked_prompt), decay_now);
 
         assert_eq!(actual.0, expected.0);
         assert_eq!(actual.1, expected.1);
@@ -1774,7 +1792,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "req-a".to_string(),
-                    token_sequence: Some(vec![1, 2, 4, 5]),
+                    token_sequence: tracked(vec![1, 2, 4, 5]),
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -1785,8 +1803,9 @@ mod tests {
             )
             .unwrap();
 
+        let query = tracked_hashes(vec![1, 2, 3, 5]);
         let (potential_blocks, _, _) = sequences.potential_blocks_and_tokens_at::<false>(
-            Some(&[1, 2, 3, 5]),
+            Some(&query),
             &PrefillTokenDeltas::none(),
             decay_now,
         );
@@ -1810,7 +1829,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "base".to_string(),
-                    token_sequence: Some(base_prompt.clone()),
+                    token_sequence: tracked(base_prompt.clone()),
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -1824,7 +1843,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "lora".to_string(),
-                    token_sequence: Some(lora_prompt),
+                    token_sequence: tracked(lora_prompt),
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -1841,8 +1860,9 @@ mod tests {
             &PrefillTokenDeltas::none(),
             decay_now,
         );
+        let tracked_base_prompt = tracked_hashes(base_prompt.clone());
         let actual = sequences.potential_blocks_and_tokens_at::<false>(
-            Some(&base_prompt),
+            Some(&tracked_base_prompt),
             &PrefillTokenDeltas::none(),
             decay_now,
         );
@@ -1870,7 +1890,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "req-a".to_string(),
-                    token_sequence: Some(prompt_a.clone()),
+                    token_sequence: tracked(prompt_a.clone()),
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -1884,7 +1904,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "req-b".to_string(),
-                    token_sequence: Some(prompt_b.clone()),
+                    token_sequence: tracked(prompt_b.clone()),
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -1901,8 +1921,9 @@ mod tests {
             &PrefillTokenDeltas::none(),
             decay_now,
         );
+        let tracked_prompt_b = tracked_hashes(prompt_b.clone());
         let actual = sequences.potential_blocks_and_tokens_at::<false>(
-            Some(&prompt_b),
+            Some(&tracked_prompt_b),
             &PrefillTokenDeltas::none(),
             decay_now,
         );
@@ -1920,7 +1941,7 @@ mod tests {
             decay_now,
         );
         let actual_after_free = sequences.potential_blocks_and_tokens_at::<false>(
-            Some(&prompt_b),
+            Some(&tracked_prompt_b),
             &PrefillTokenDeltas::none(),
             decay_now,
         );
@@ -1942,7 +1963,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "req-1".to_string(),
-                    token_sequence: Some(vec![1, 2, 3]),
+                    token_sequence: tracked(vec![1, 2, 3]),
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: tracking_hint(12),
@@ -1972,7 +1993,7 @@ mod tests {
             "test",
             SequenceTrackerOptions {
                 expiry_enabled: false,
-                active_sequence_stride: NonZeroUsize::new(3).unwrap(),
+                active_sequence_stride: ActiveSequenceStride::new(3).unwrap(),
                 ..Default::default()
             },
         );
@@ -1990,7 +2011,7 @@ mod tests {
                 .add_request(
                     SequenceRequest {
                         request_id: request_id.to_string(),
-                        token_sequence: Some(token_sequence),
+                        token_sequence: tracked(token_sequence),
                         track_prefill_tokens: true,
                         expected_output_tokens: None,
                         prefill_load_hint: tracking_hint(4),
@@ -2025,7 +2046,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "req-1".to_string(),
-                    token_sequence: Some(vec![1, 2, 3]),
+                    token_sequence: tracked(vec![1, 2, 3]),
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: tracking_hint(12),
@@ -2042,7 +2063,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "req-2".to_string(),
-                    token_sequence: Some(vec![1, 2, 3]),
+                    token_sequence: tracked(vec![1, 2, 3]),
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: tracking_hint(12),
@@ -2062,8 +2083,9 @@ mod tests {
             &PrefillTokenDeltas::none(),
             Instant::now(),
         );
+        let query = tracked_hashes(vec![1, 2, 3]);
         let actual = sequences.potential_blocks_and_tokens_at::<false>(
-            Some(&[1, 2, 3]),
+            Some(&query),
             &PrefillTokenDeltas::none(),
             Instant::now(),
         );
@@ -2350,7 +2372,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: request_id.clone(),
-                    token_sequence: Some(vec![10, 20]),
+                    token_sequence: tracked(vec![10, 20]),
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -2435,9 +2457,18 @@ mod tests {
         assert_eq!(
             *publisher.stride_mismatches.lock().unwrap(),
             vec![
-                (2, Ok(NonZeroUsize::new(3).unwrap())),
-                (2, Ok(NonZeroUsize::new(3).unwrap())),
-                (2, Err(ActiveSequenceStrideError::Zero)),
+                (
+                    ActiveSequenceStride::new(2).unwrap(),
+                    Ok(ActiveSequenceStride::new(3).unwrap()),
+                ),
+                (
+                    ActiveSequenceStride::new(2).unwrap(),
+                    Ok(ActiveSequenceStride::new(3).unwrap()),
+                ),
+                (
+                    ActiveSequenceStride::new(2).unwrap(),
+                    Err(ActiveSequenceStrideError::Zero),
+                ),
             ]
         );
         assert_eq!(sequences.warned_replica_stride_mismatches.lock().len(), 2);
@@ -2774,7 +2805,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "req-1".to_string(),
-                    token_sequence: Some(vec![1, 2, 3]),
+                    token_sequence: tracked(vec![1, 2, 3]),
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -2816,7 +2847,7 @@ mod tests {
             add_sequences.add_request_if_registered(
                 SequenceRequest {
                     request_id: "req-1".to_string(),
-                    token_sequence: Some(vec![1, 2, 3]),
+                    token_sequence: tracked(vec![1, 2, 3]),
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -2851,7 +2882,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: request_id.clone(),
-                    token_sequence: Some(vec![1, 2, 3]),
+                    token_sequence: tracked(vec![1, 2, 3]),
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -2899,7 +2930,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "req-1".to_string(),
-                    token_sequence: Some(vec![1, 2, 3]),
+                    token_sequence: tracked(vec![1, 2, 3]),
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: Some(PrefillLoadHint {

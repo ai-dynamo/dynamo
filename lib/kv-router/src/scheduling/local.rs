@@ -22,6 +22,7 @@ use super::types::{
     KvSchedulerError, OverloadedWorkerProvider, PotentialLoad, ScheduleMode, ScheduleRequest,
     SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
 };
+use crate::TrackedSequenceHashes;
 use crate::protocols::RoutingConstraints;
 use crate::protocols::{LocalBlockHash, WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use crate::sequences::topology::WorkerDpRange;
@@ -29,7 +30,6 @@ use crate::sequences::{
     ActiveSequencesMultiWorker, PrefillTokenDeltas, SequenceError, SequencePublisher,
     SequenceRequest,
 };
-use dynamo_tokens::SequenceHash;
 
 pub struct LocalScheduler<P, C, Sel = DefaultWorkerSelector, RF = NoopOverlapScoresRefresh>
 where
@@ -354,7 +354,7 @@ where
         &self,
         maybe_request_id: Option<String>,
         isl_tokens: usize,
-        token_seq: Option<Vec<SequenceHash>>,
+        token_seq: Option<TrackedSequenceHashes>,
         tier_overlap_blocks: TierOverlapBlocks,
         effective_overlap_blocks: HashMap<WorkerWithDpRank, f64>,
         effective_cached_tokens: HashMap<WorkerWithDpRank, usize>,
@@ -400,7 +400,7 @@ where
         &self,
         maybe_request_id: Option<String>,
         isl_tokens: usize,
-        token_seq: Option<Vec<SequenceHash>>,
+        token_seq: Option<TrackedSequenceHashes>,
         block_hashes: Option<Vec<LocalBlockHash>>,
         tier_overlap_blocks: TierOverlapBlocks,
         effective_overlap_blocks: HashMap<WorkerWithDpRank, f64>,
@@ -444,7 +444,7 @@ where
         &self,
         maybe_request_id: Option<String>,
         isl_tokens: usize,
-        token_seq: Option<Vec<SequenceHash>>,
+        token_seq: Option<TrackedSequenceHashes>,
         block_hashes: Option<Vec<LocalBlockHash>>,
         tier_overlap_blocks: TierOverlapBlocks,
         effective_overlap_blocks: HashMap<WorkerWithDpRank, f64>,
@@ -567,7 +567,7 @@ where
 
     pub fn get_potential_loads(
         &self,
-        token_seq: Option<Vec<SequenceHash>>,
+        token_seq: Option<TrackedSequenceHashes>,
         isl_tokens: usize,
         effective_cached_tokens: HashMap<WorkerWithDpRank, usize>,
         track_prefill_tokens: bool,
@@ -588,7 +588,7 @@ where
         };
         let (decode_blocks, prefill_tokens, active_requests) =
             self.slots.potential_blocks_and_tokens_at::<true>(
-                token_seq.as_deref(),
+                token_seq.as_ref(),
                 &prefill_token_deltas,
                 decay_now,
             );
@@ -775,6 +775,10 @@ mod tests {
     use crate::sequences::SequenceSubscriber;
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
 
+    fn tracked(sequence: Vec<u64>) -> Option<TrackedSequenceHashes> {
+        Some(crate::active_sequence::tracked_sequence_hashes(sequence))
+    }
+
     struct TestSequenceSubscriber {
         rx: mpsc::UnboundedReceiver<ActiveSequenceEvent>,
     }
@@ -871,7 +875,7 @@ mod tests {
     fn request(mode: ScheduleMode) -> ScheduleRequest {
         ScheduleRequest {
             mode,
-            token_seq: Some(vec![1, 2, 3, 4]),
+            token_seq: tracked(vec![1, 2, 3, 4]),
             block_hashes: None,
             isl_tokens: 64,
             lora_name: None,
@@ -912,7 +916,8 @@ mod tests {
             scheduler.get_active_lora_counts(),
             HashMap::from([(String::from("adapter-a"), 1)])
         );
-        let loads = scheduler.get_potential_loads(Some(vec![1, 2, 3, 4]), 64, HashMap::new(), true);
+        let loads =
+            scheduler.get_potential_loads(tracked(vec![1, 2, 3, 4]), 64, HashMap::new(), true);
         let worker_load = loads
             .iter()
             .find(|load| load.worker_id == response.best_worker.worker_id && load.dp_rank == 0)
@@ -986,7 +991,7 @@ mod tests {
             .schedule(
                 Some("req-1".to_string()),
                 64,
-                Some(vec![1, 2, 3, 4]),
+                tracked(vec![1, 2, 3, 4]),
                 TierOverlapBlocks::default(),
                 HashMap::new(),
                 HashMap::new(),
@@ -1035,7 +1040,7 @@ mod tests {
             .schedule(
                 Some("req-1".to_string()),
                 64,
-                Some(vec![1, 2, 3, 4]),
+                tracked(vec![1, 2, 3, 4]),
                 TierOverlapBlocks::default(),
                 HashMap::from([(worker, 0.75)]),
                 HashMap::from([(worker, 48)]),
@@ -1082,7 +1087,7 @@ mod tests {
             .schedule(
                 Some("req-1".to_string()),
                 64,
-                Some(vec![1, 2, 3, 4]),
+                tracked(vec![1, 2, 3, 4]),
                 TierOverlapBlocks::default(),
                 HashMap::new(),
                 HashMap::new(),
@@ -1107,7 +1112,7 @@ mod tests {
                     .schedule(
                         Some("req-2".to_string()),
                         64,
-                        Some(vec![5, 6, 7, 8]),
+                        tracked(vec![5, 6, 7, 8]),
                         TierOverlapBlocks::default(),
                         HashMap::new(),
                         HashMap::new(),
@@ -1153,7 +1158,7 @@ mod tests {
             .schedule(
                 Some("req-1".to_string()),
                 64,
-                Some(vec![1, 2, 3, 4]),
+                tracked(vec![1, 2, 3, 4]),
                 TierOverlapBlocks::default(),
                 HashMap::new(),
                 HashMap::new(),
@@ -1178,7 +1183,7 @@ mod tests {
                     .schedule(
                         Some("req-2".to_string()),
                         64,
-                        Some(vec![5, 6, 7, 8]),
+                        tracked(vec![5, 6, 7, 8]),
                         TierOverlapBlocks::default(),
                         HashMap::new(),
                         HashMap::new(),
@@ -1239,7 +1244,7 @@ mod tests {
             .schedule(
                 Some("req-1".to_string()),
                 64,
-                Some(vec![1, 2, 3, 4]),
+                tracked(vec![1, 2, 3, 4]),
                 TierOverlapBlocks::default(),
                 HashMap::new(),
                 HashMap::new(),
@@ -1264,7 +1269,7 @@ mod tests {
                     .schedule(
                         Some("req-2".to_string()),
                         64,
-                        Some(vec![5, 6, 7, 8]),
+                        tracked(vec![5, 6, 7, 8]),
                         TierOverlapBlocks::default(),
                         HashMap::new(),
                         HashMap::new(),
@@ -1324,7 +1329,7 @@ mod tests {
             .schedule(
                 Some("req-1".to_string()),
                 64,
-                Some(vec![1, 2, 3, 4]),
+                tracked(vec![1, 2, 3, 4]),
                 TierOverlapBlocks::default(),
                 HashMap::new(),
                 HashMap::new(),
@@ -1349,7 +1354,7 @@ mod tests {
                     .schedule(
                         Some("req-2".to_string()),
                         64,
-                        Some(vec![5, 6, 7, 8]),
+                        tracked(vec![5, 6, 7, 8]),
                         TierOverlapBlocks::default(),
                         HashMap::new(),
                         HashMap::new(),
@@ -1407,7 +1412,7 @@ mod tests {
             .schedule(
                 Some("req-1".to_string()),
                 64,
-                Some(vec![1, 2, 3, 4]),
+                tracked(vec![1, 2, 3, 4]),
                 TierOverlapBlocks::default(),
                 HashMap::new(),
                 HashMap::new(),
@@ -1608,7 +1613,7 @@ mod tests {
             },
         );
         let (scheduler, slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
-        let token_seq = vec![11, 22, 33, 44];
+        let token_seq = tracked(vec![11, 22, 33, 44]).unwrap();
 
         let prefill_token_deltas = PrefillTokenDeltas::uniform(128);
         let (decode_blocks, prefill_tokens, _) =
@@ -1666,7 +1671,7 @@ mod tests {
             .schedule(
                 Some("req-1".to_string()),
                 100,
-                Some(vec![1, 2, 3, 4]),
+                tracked(vec![1, 2, 3, 4]),
                 TierOverlapBlocks::default(),
                 HashMap::new(),
                 HashMap::new(),
@@ -1902,7 +1907,7 @@ mod tests {
             .schedule(
                 Some("req-1".to_string()),
                 64,
-                Some(vec![11, 22]),
+                tracked(vec![11, 22]),
                 TierOverlapBlocks::default(),
                 HashMap::new(),
                 HashMap::new(),

@@ -406,18 +406,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builder_rejects_zero_active_sequence_stride() {
+    async fn builder_rejects_invalid_router_configuration() {
         let mut config = test_config();
-        config.router_active_sequence_stride = 0;
+        config.router_temperature = -1.0;
 
         let error = SelectionServiceBuilder::new(config)
             .build()
             .await
             .err()
-            .expect("zero active-sequence stride must fail during service construction");
+            .expect("invalid router configuration must fail during service construction");
         let message = error.to_string();
         assert!(message.contains("invalid KV router configuration"));
-        assert!(message.contains("router_active_sequence_stride"));
+        assert!(message.contains("router_temperature"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

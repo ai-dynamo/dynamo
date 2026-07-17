@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashMap, HashSet};
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -11,6 +10,7 @@ use parking_lot::RwLock;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
+use crate::TrackedSequenceHashes;
 use crate::indexer::TieredMatchDetails;
 use crate::protocols::{
     ActiveSequenceEvent, LocalBlockHash, PrefillLoadHint, RoutingConstraints, WorkerId,
@@ -91,7 +91,7 @@ struct ReservationBooking {
     key: SelectionKey,
     selection_id: String,
     worker: WorkerWithDpRank,
-    sequence_hashes: Vec<SequenceHash>,
+    sequence_hashes: TrackedSequenceHashes,
     prefill_load_hint: Option<PrefillLoadHint>,
     expected_output_tokens: Option<u32>,
     track_prefill_tokens: bool,
@@ -445,9 +445,6 @@ impl SelectionCore {
             &key.routing_group,
             block_size,
         );
-        let active_sequence_stride =
-            NonZeroUsize::new(self.kv_router_config.router_active_sequence_stride)
-                .expect("KvRouterConfig validates active-sequence stride");
         let slots = Arc::new(ActiveSequencesMultiWorker::new_with_options(
             scoped_replica_sync.publisher,
             block_size as usize,
@@ -457,7 +454,7 @@ impl SelectionCore {
             SequenceTrackerOptions {
                 replica_worker_policy: ReplicaWorkerPolicy::RequireRegistered,
                 replica_sync: scoped_replica_sync.enabled,
-                active_sequence_stride,
+                active_sequence_stride: self.kv_router_config.router_active_sequence_stride,
                 ..Default::default()
             },
         ));

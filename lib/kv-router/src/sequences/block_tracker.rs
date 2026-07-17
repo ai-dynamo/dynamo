@@ -306,7 +306,11 @@ impl BlockTracker {
 
     pub(super) fn active_blocks(&self) -> usize {
         let load = self.load();
-        super::estimate_physical_active_blocks(load.prompt_units, load.output_blocks, 1)
+        super::estimate_physical_active_blocks(
+            load.prompt_units,
+            load.output_blocks,
+            crate::ActiveSequenceStride::ONE,
+        )
     }
 
     pub(super) fn load(&self) -> BlockLoad {

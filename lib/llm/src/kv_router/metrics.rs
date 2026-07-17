@@ -43,10 +43,10 @@
 //!
 //! See also: `docs/observability/metrics.md` (Router Metrics section).
 
-use std::num::NonZeroUsize;
 use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
 
+use dynamo_kv_router::ActiveSequenceStride;
 use dynamo_kv_router::protocols::ActiveSequenceStrideError;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::metrics::MetricsHierarchy;
@@ -284,8 +284,8 @@ impl RouterWorkerStatusMetrics {
 
     pub fn increment_active_sequence_stride_mismatch(
         &self,
-        expected: usize,
-        received: Result<NonZeroUsize, ActiveSequenceStrideError>,
+        expected: ActiveSequenceStride,
+        received: Result<ActiveSequenceStride, ActiveSequenceStrideError>,
         worker_type: &str,
     ) {
         let expected = expected.to_string();
@@ -968,12 +968,12 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
         metrics.set_kv_event_source_mismatch_workers("model-a", "decode", "ns-a", "decode", 2);
         metrics.set_kv_event_source_mismatch_workers("model-a", "prefill", "ns-a", "prefill", 0);
         metrics.increment_active_sequence_stride_mismatch(
-            4,
-            Ok(NonZeroUsize::new(2).unwrap()),
+            ActiveSequenceStride::new(4).unwrap(),
+            Ok(ActiveSequenceStride::new(2).unwrap()),
             "decode",
         );
         metrics.increment_active_sequence_stride_mismatch(
-            4,
+            ActiveSequenceStride::new(4).unwrap(),
             Err(ActiveSequenceStrideError::Zero),
             "decode",
         );

@@ -3,7 +3,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -12,6 +11,9 @@ use dynamo_tokens::{SequenceHash, Token, compute_hash_v2, compute_next_sequence_
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh3;
+
+use crate::active_sequence::ActiveSequenceStride;
+pub use crate::active_sequence::ActiveSequenceStrideError;
 
 const fn default_track_prefill_tokens() -> bool {
     true
@@ -633,18 +635,9 @@ pub struct ActiveSequenceEvent {
 
 impl ActiveSequenceEvent {
     /// Normalize the sender's stride, treating a missing value as the legacy stride of 1.
-    pub fn normalized_stride(&self) -> Result<NonZeroUsize, ActiveSequenceStrideError> {
-        match self.stride {
-            None => Ok(NonZeroUsize::MIN),
-            Some(stride) => NonZeroUsize::new(stride).ok_or(ActiveSequenceStrideError::Zero),
-        }
+    pub fn normalized_stride(&self) -> Result<ActiveSequenceStride, ActiveSequenceStrideError> {
+        ActiveSequenceStride::from_event_value(self.stride)
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
-pub enum ActiveSequenceStrideError {
-    #[error("active-sequence stride must be greater than zero")]
-    Zero,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -2073,7 +2066,7 @@ mod tests {
         let serialized = serde_json::to_value(&event).unwrap();
         assert!(serialized.get("stride").is_none());
         let decoded: ActiveSequenceEvent = serde_json::from_value(serialized).unwrap();
-        assert_eq!(decoded.normalized_stride(), Ok(NonZeroUsize::MIN));
+        assert_eq!(decoded.normalized_stride(), Ok(ActiveSequenceStride::ONE));
     }
 
     #[test]
@@ -2092,7 +2085,10 @@ mod tests {
             serialized.get("stride").and_then(|value| value.as_u64()),
             Some(4)
         );
-        assert_eq!(event.normalized_stride(), Ok(NonZeroUsize::new(4).unwrap()));
+        assert_eq!(
+            event.normalized_stride(),
+            Ok(ActiveSequenceStride::new(4).unwrap())
+        );
 
         event.stride = Some(0);
         assert_eq!(

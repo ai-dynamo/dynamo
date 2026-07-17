@@ -17,6 +17,7 @@ use dynamo_kv_router::config::{
     KvRouterConfig as RsKvRouterConfig, RouterPrefillLoadModel as RsRouterPrefillLoadModel,
     apply_deprecated_overlap_score_weight_override,
 };
+use dynamo_kv_router::ActiveSequenceStride;
 use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
@@ -273,6 +274,11 @@ impl KvRouterConfig {
                 &mut prefill_load_scale,
             );
         }
+
+        let router_active_sequence_stride =
+            ActiveSequenceStride::new(router_active_sequence_stride).map_err(|error| {
+                PyValueError::new_err(format!("router_active_sequence_stride: {error}"))
+            })?;
 
         let inner = RsKvRouterConfig {
             overlap_score_credit,

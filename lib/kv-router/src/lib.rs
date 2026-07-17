@@ -6,6 +6,7 @@
 //! This crate provides the core radix tree implementation and protocols for
 //! efficient KV cache lookup and routing in distributed LLM inference systems.
 
+pub mod active_sequence;
 mod active_set;
 pub(crate) mod cleanup;
 mod lookup_update;
@@ -41,6 +42,7 @@ pub use self::multi_worker_sequence::{
 };
 pub use self::sequence::{ActiveSequences, RequestId};
 pub use self::sequences::{PrefillTokenDeltas, WorkerLoadProjection};
+pub use active_sequence::{ActiveSequenceStride, ActiveSequenceStrideError, TrackedSequenceHashes};
 pub use concurrent_radix_tree::ConcurrentRadixTree;
 pub use concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 pub use config::{

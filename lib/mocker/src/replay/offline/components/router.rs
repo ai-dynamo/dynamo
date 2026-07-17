@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,9 +20,9 @@ use dynamo_kv_router::scheduling::{
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::{
     ActiveSequencesMultiWorker, DefaultWorkerSelector, RadixTree, SchedulingRequest,
-    SequenceRequest, WorkerLoadProjection, WorkerSelector, scheduling::TierOverlapBlocks,
+    SequenceRequest, TrackedSequenceHashes, WorkerLoadProjection, WorkerSelector,
+    scheduling::TierOverlapBlocks,
 };
-use dynamo_tokens::SequenceHash;
 use rustc_hash::FxHashMap;
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -128,7 +127,7 @@ impl SyncReplayIndexer {
 
 struct PendingRequest {
     uuid: Uuid,
-    token_seq: Option<Vec<SequenceHash>>,
+    token_seq: Option<TrackedSequenceHashes>,
     isl_tokens: usize,
     overlaps: OverlapScores,
     track_prefill_tokens: bool,
@@ -215,9 +214,11 @@ impl OfflineReplayRouter {
         let config = replay_router_config(args, router_config);
         let worker_config_template = replay_worker_config(args);
         let workers_with_configs = replay_workers_with_configs(args, num_workers);
-        let active_sequence_stride = NonZeroUsize::new(config.router_active_sequence_stride)
-            .ok_or_else(|| anyhow!("router active-sequence stride must be greater than zero"))?;
-        let slots = replay_slots(args, &workers_with_configs, active_sequence_stride);
+        let slots = replay_slots(
+            args,
+            &workers_with_configs,
+            config.router_active_sequence_stride,
+        );
         let selector = replay_selector(&config);
         let profile = config
             .configured_policy_profile()
@@ -546,7 +547,7 @@ impl OfflineReplayRouter {
     ) -> Result<AdmitOutcome> {
         let worker_loads = self
             .slots
-            .project_worker_loads(request.token_seq.as_deref(), decay_now);
+            .project_worker_loads(request.token_seq.as_ref(), decay_now);
         let scheduling_request = request.scheduling_request(self.block_size as usize, worker_loads);
         let eligibility = scheduling_request.eligibility();
         let selection = self.selector.select_worker(
@@ -700,14 +701,13 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use dynamo_kv_router::PrefillLoadEstimator;
-    use dynamo_kv_router::PrefillTokenDeltas;
     use dynamo_kv_router::config::{KvRouterConfig, RouterPrefillLoadModel, RouterQueuePolicy};
     use dynamo_kv_router::protocols::{
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
         KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier, WorkerId,
         WorkerWithDpRank,
     };
+    use dynamo_kv_router::{ActiveSequenceStride, PrefillLoadEstimator, PrefillTokenDeltas};
     use rustc_hash::FxHashMap;
     use uuid::Uuid;
 
@@ -843,7 +843,7 @@ mod tests {
     #[test]
     fn sparse_replay_corrects_active_and_potential_decode_blocks() {
         let config = KvRouterConfig {
-            router_active_sequence_stride: 3,
+            router_active_sequence_stride: ActiveSequenceStride::new(3).unwrap(),
             ..Default::default()
         };
         let mut router = OfflineReplayRouter::new(&replay_args(), Some(config), None, 1).unwrap();

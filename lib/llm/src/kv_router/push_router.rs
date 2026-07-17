@@ -674,7 +674,7 @@ mod tests {
     };
 
     use dynamo_kv_router::{
-        ActiveSequencesMultiWorker, DefaultWorkerSelector, SequencePublisher,
+        ActiveSequenceStride, ActiveSequencesMultiWorker, DefaultWorkerSelector, SequencePublisher,
         config::{KvRouterConfig, RouterQueuePolicy},
         protocols::{ActiveLoad, ActiveSequenceEvent, RoutingConstraints},
         scheduling::{
@@ -818,7 +818,7 @@ mod tests {
                     mode: ScheduleMode::TrackedWithAdmission {
                         request_id: request_id.clone(),
                     },
-                    token_seq: Some(vec![1]),
+                    token_seq: Some(ActiveSequenceStride::ONE.sample_dense(vec![1])),
                     block_hashes: None,
                     isl_tokens: 1,
                     lora_name: None,

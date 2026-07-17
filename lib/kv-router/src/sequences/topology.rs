@@ -471,7 +471,9 @@ mod tests {
             let mut seq = table.slots[idx].sequences.write();
             let outcome = seq.add_request_with_prefill_tracking(
                 "req-1".to_string(),
-                Some(vec![1, 2, 3]),
+                Some(crate::active_sequence::tracked_sequence_hashes(vec![
+                    1, 2, 3,
+                ])),
                 None,
                 true,
                 Some(crate::protocols::PrefillLoadHint {

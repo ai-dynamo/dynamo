@@ -3,7 +3,6 @@
 
 use std::collections::HashMap;
 use std::future;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use crate::common::protocols::MockEngineArgs;
@@ -13,8 +12,8 @@ use dynamo_kv_router::protocols::{
 };
 use dynamo_kv_router::scheduling::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::{
-    ActiveSequencesMultiWorker, DefaultWorkerSelector, LocalScheduler, SequencePublisher,
-    SequenceTrackerOptions,
+    ActiveSequenceStride, ActiveSequencesMultiWorker, DefaultWorkerSelector, LocalScheduler,
+    SequencePublisher, SequenceTrackerOptions,
 };
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -87,7 +86,7 @@ pub(super) fn replay_workers_with_configs(
 pub(super) fn replay_slots(
     args: &MockEngineArgs,
     workers_with_configs: &HashMap<WorkerId, ReplayWorkerConfig>,
-    active_sequence_stride: NonZeroUsize,
+    active_sequence_stride: ActiveSequenceStride,
 ) -> Arc<ActiveSequencesMultiWorker<ReplayNoopPublisher>> {
     let dp_range = workers_with_configs
         .iter()

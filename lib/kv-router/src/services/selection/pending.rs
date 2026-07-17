@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use dynamo_tokens::SequenceHash;
 use parking_lot::Mutex;
 
+use crate::TrackedSequenceHashes;
 use crate::protocols::WorkerWithDpRank;
 
 use super::types::SelectionKey;
@@ -51,7 +52,7 @@ impl Default for SelectionCacheConfig {
 pub(super) struct PendingSelection {
     pub key: SelectionKey,
     pub worker: WorkerWithDpRank,
-    pub sequence_hashes: Vec<SequenceHash>,
+    pub sequence_hashes: TrackedSequenceHashes,
     pub isl_tokens: usize,
     pub effective_prefill_tokens: usize,
     pub expected_output_tokens: Option<u32>,
@@ -238,6 +239,7 @@ impl SelectionCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ActiveSequenceStride;
 
     const TTL: Duration = Duration::from_secs(10);
     const CAP: usize = 2;
@@ -262,7 +264,7 @@ mod tests {
         PendingSelection {
             key: key(),
             worker: WorkerWithDpRank::new(worker_id, 0),
-            sequence_hashes: vec![1, 2, 3],
+            sequence_hashes: ActiveSequenceStride::ONE.sample_dense(vec![1, 2, 3]),
             isl_tokens: 12,
             effective_prefill_tokens: 8,
             expected_output_tokens: Some(16),

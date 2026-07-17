@@ -14,6 +14,7 @@ use dynamo_tokens::SequenceHash;
 use serde::de::{SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 
+use crate::ActiveSequenceStride;
 use crate::protocols::WorkerWithDpRank;
 use crate::sequences::SequenceError;
 use crate::services::common::replica_sync::PeerManager;
@@ -178,7 +179,7 @@ async fn add(
         &key,
         req.request_id,
         WorkerWithDpRank::new(req.worker_id, req.dp_rank),
-        req.sequence_hashes,
+        ActiveSequenceStride::ONE.sample_dense(req.sequence_hashes),
         req.new_isl_tokens,
     ) {
         Ok(()) => json_ok(StatusCode::CREATED),
@@ -236,9 +237,10 @@ async fn potential_loads(
         Err(error) => return json_rejection(error),
     };
     let key = TrackerKey::new(req.model_name, Some(req.routing_group));
+    let sequence_hashes = ActiveSequenceStride::ONE.sample_dense(req.sequence_hashes);
     match state
         .registry
-        .potential_loads(&key, &req.sequence_hashes, req.new_isl_tokens)
+        .potential_loads(&key, &sequence_hashes, req.new_isl_tokens)
     {
         Ok(loads) => Json(loads).into_response(),
         Err(error) => registry_error(error),

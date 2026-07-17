@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -149,9 +148,11 @@ impl KvReplayRouter {
         let indexer =
             create_replay_indexer(args.block_size as u32, config.router_event_threads as usize);
         let workers_with_configs = replay_workers_with_configs(args, num_workers);
-        let active_sequence_stride = NonZeroUsize::new(config.router_active_sequence_stride)
-            .ok_or_else(|| anyhow!("router active-sequence stride must be greater than zero"))?;
-        let slots = replay_slots(args, &workers_with_configs, active_sequence_stride);
+        let slots = replay_slots(
+            args,
+            &workers_with_configs,
+            config.router_active_sequence_stride,
+        );
         let (_worker_config_tx, worker_config_rx) =
             tokio::sync::watch::channel(workers_with_configs);
         let selector = replay_selector(&config);
@@ -401,6 +402,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use dynamo_kv_router::ActiveSequenceStride;
     use dynamo_kv_router::config::RouterQueuePolicy;
     use dynamo_kv_router::protocols::{
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
@@ -422,6 +424,40 @@ mod tests {
             strict_priority,
             policy_class: None,
         }
+    }
+
+    #[tokio::test]
+    async fn online_replay_samples_active_sequence_hashes_once() {
+        let args = MockEngineArgs::builder()
+            .block_size(64)
+            .max_num_batched_tokens(Some(1024))
+            .build()
+            .unwrap();
+        let config = KvRouterConfig {
+            router_active_sequence_stride: ActiveSequenceStride::new(3).unwrap(),
+            ..KvRouterConfig::default()
+        };
+        let router =
+            ReplayRouter::new(ReplayRouterMode::KvRouter, &args, Some(config), None, 1).unwrap();
+        let request = DirectRequest {
+            tokens: (0..10 * 64).collect(),
+            max_output_tokens: 1,
+            output_token_ids: None,
+            uuid: Some(Uuid::from_u128(100)),
+            dp_rank: 0,
+            arrival_timestamp_ms: Some(0.0),
+            priority: 0,
+            strict_priority: 0,
+            policy_class: None,
+        };
+
+        assert_eq!(router.select_worker(&request, 1).await.unwrap(), 0);
+        let loads = router.debug_potential_loads(0, false);
+        assert_eq!(loads.len(), 1);
+        assert_eq!(loads[0].potential_decode_blocks, 9);
+
+        router.on_complete(Uuid::from_u128(100)).await.unwrap();
+        router.shutdown().await.unwrap();
     }
 
     #[tokio::test]

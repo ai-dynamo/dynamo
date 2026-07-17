@@ -1504,7 +1504,7 @@ impl<
         });
         request.worker_loads = self
             .slots
-            .project_worker_loads(request.token_seq.as_deref(), decay_now);
+            .project_worker_loads(request.token_seq.as_ref(), decay_now);
 
         let selection = {
             let workers = self.workers_with_configs.borrow();
