@@ -26,6 +26,7 @@ use tmq::{
     subscribe::{Subscribe, subscribe},
 };
 use tokio::sync::{Mutex, broadcast};
+use tokio_util::task::AbortOnDropHandle;
 
 /// Returns the process-wide shared ZMQ context.
 ///
@@ -207,7 +208,7 @@ impl EventTransportTx for ZmqPubTransport {
 /// Uses a background async reader to fan out frames to multiple local subscribers.
 pub struct ZmqSubTransport {
     broadcast_tx: broadcast::Sender<Bytes>,
-    _socket_pump_handle: tokio::task::JoinHandle<()>,
+    socket_pump_handle: Arc<AbortOnDropHandle<()>>,
 }
 
 impl ZmqSubTransport {
@@ -230,7 +231,7 @@ impl ZmqSubTransport {
 
         Ok(Self {
             broadcast_tx,
-            _socket_pump_handle: pump_handle,
+            socket_pump_handle: Arc::new(AbortOnDropHandle::new(pump_handle)),
         })
     }
 
@@ -273,7 +274,7 @@ impl ZmqSubTransport {
 
         Ok(Self {
             broadcast_tx,
-            _socket_pump_handle: pump_handle,
+            socket_pump_handle: Arc::new(AbortOnDropHandle::new(pump_handle)),
         })
     }
 
@@ -353,8 +354,13 @@ impl ZmqSubTransport {
 impl EventTransportRx for ZmqSubTransport {
     async fn subscribe(&self, _subject: &str) -> Result<WireStream> {
         let mut receiver = self.broadcast_tx.subscribe();
+        let socket_pump_handle = Arc::clone(&self.socket_pump_handle);
 
         let stream = stream! {
+            // Keep the socket pump alive after the transport is dropped. The
+            // final transport or subscription stream aborts the pump, which
+            // drops its owned ZMQ socket instead of detaching the task.
+            let _socket_pump_handle = socket_pump_handle;
             loop {
                 match receiver.recv().await {
                     Ok(payload) => yield Ok(payload),
@@ -445,6 +451,10 @@ mod tests {
             .await
             .expect("Failed to create subscription");
 
+        // Broker-mode callers retain only the returned stream. It must keep the
+        // socket pump alive after the transport itself leaves scope.
+        drop(subscriber);
+
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         let codec = MsgpackCodec;
@@ -468,6 +478,33 @@ mod tests {
         assert_eq!(decoded.publisher_id, 12345);
         assert_eq!(decoded.sequence, 1);
         assert_eq!(decoded.topic, topic);
+    }
+
+    #[tokio::test]
+    async fn test_zmq_socket_pump_stops_with_last_owner() {
+        let endpoint = format!("inproc://dynamo-zmq-pump-lifetime-{}", std::process::id());
+        let topic = "pump-lifetime";
+
+        let (_publisher, _) = ZmqPubTransport::bind(&endpoint, topic).await.unwrap();
+        let subscriber = ZmqSubTransport::connect(&endpoint, topic).await.unwrap();
+        let pump_handle = subscriber.socket_pump_handle.abort_handle();
+        let stream = subscriber.subscribe(topic).await.unwrap();
+
+        drop(subscriber);
+        tokio::task::yield_now().await;
+        assert!(
+            !pump_handle.is_finished(),
+            "subscription stream should keep the socket pump alive"
+        );
+
+        drop(stream);
+        timeout(Duration::from_secs(1), async {
+            while !pump_handle.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("socket pump should stop when its final owner is dropped");
     }
 
     #[tokio::test]

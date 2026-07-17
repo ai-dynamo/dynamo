@@ -283,14 +283,18 @@ func (v *sharedValidation) validateFailoverSpec(
 // validateComponentCheckpointConfig validates checkpoint. checkpoint and fldPath must not be nil.
 // gms may be nil because checkpoint validates that sibling relationship.
 func (v *sharedValidation) validateComponentCheckpointConfig(
-	checkpoint *nvidiacomv1beta1.ComponentCheckpointConfig,
+	checkpointConfig *nvidiacomv1beta1.ComponentCheckpointConfig,
 	fldPath *field.Path,
 	gms *nvidiacomv1beta1.GPUMemoryServiceSpec,
 ) field.ErrorList {
-	if checkpoint.Job == nil {
-		return nil
+	var allErrs field.ErrorList
+	if checkpointConfig.Enabled && !features.MustGateFrom(v.ctx).Enabled(features.Checkpoint) {
+		allErrs = append(allErrs, field.Forbidden(fldPath, "checkpoint functionality is disabled in the operator configuration"))
 	}
-	return v.validateComponentCheckpointJobConfig(checkpoint.Job, fldPath.Child("job"), gms)
+	if checkpointConfig.Job == nil {
+		return allErrs
+	}
+	return append(allErrs, v.validateComponentCheckpointJobConfig(checkpointConfig.Job, fldPath.Child("job"), gms)...)
 }
 
 // validateComponentCheckpointJobConfig validates job. job and fldPath must not be nil.

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Command-line arguments and transport configuration for the SGLang gRPC sidecar.
+//! Command-line arguments and transport configuration for the SGLang sidecar.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -10,7 +10,7 @@ use std::time::Duration;
 #[derive(clap::Parser, Debug, Clone)]
 #[command(
     name = "dynamo-sglang-sidecar",
-    about = "Dynamo SGLang sidecar — drives an out-of-process SGLang native gRPC server."
+    about = "Dynamo sidecar for an out-of-process SGLang native gRPC server."
 )]
 pub struct Args {
     /// `host:port` (or URL) of SGLang's native `sglang.runtime.v1` service.
