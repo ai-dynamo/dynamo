@@ -255,12 +255,11 @@ impl WorkerQueryClient {
 
         #[cfg(test)]
         {
-            return self.query_target_for(worker_id, dp_rank).map(|target| {
-                QueryEndpointIncarnation {
+            self.query_target_for(worker_id, dp_rank)
+                .map(|target| QueryEndpointIncarnation {
                     instance_id: target.endpoint_instance_id(),
                     generation: 0,
-                }
-            });
+                })
         }
 
         #[cfg(not(test))]
