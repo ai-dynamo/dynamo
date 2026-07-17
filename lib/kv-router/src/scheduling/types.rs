@@ -161,6 +161,7 @@ pub struct ScheduleRequest {
     pub strict_priority: u32,
     pub policy_class: Option<String>,
     pub session_id: Option<String>,
+    pub session_final: bool,
     pub overlap: OverlapSignals,
     pub shared_cache_hits: Option<SharedCacheHits>,
 }
@@ -188,6 +189,7 @@ pub struct SchedulingRequest {
     pub strict_priority: u32,
     pub policy_class: Option<String>,
     pub session_id: Option<String>,
+    pub session_final: bool,
 
     // Overlap and cache signals.
     pub overlap: OverlapSignals,

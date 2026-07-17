@@ -146,6 +146,7 @@ impl WorkerEligibilitySnapshot {
 pub struct AdmissionRequest<'a> {
     id: AdmissionId,
     session_id: Option<&'a str>,
+    session_final: bool,
     progress: RequestProgress,
     worker_eligibility: WorkerEligibility,
 }
@@ -157,22 +158,25 @@ impl<'a> AdmissionRequest<'a> {
     pub fn new(
         id: AdmissionId,
         session_id: Option<&'a str>,
+        session_final: bool,
         context_tokens: usize,
         worker_eligibility: WorkerEligibility,
     ) -> Self {
         let (progress, _) = RequestProgress::new(context_tokens);
-        Self::with_progress(id, session_id, progress, worker_eligibility)
+        Self::with_progress(id, session_id, session_final, progress, worker_eligibility)
     }
 
     pub(crate) fn with_progress(
         id: AdmissionId,
         session_id: Option<&'a str>,
+        session_final: bool,
         progress: RequestProgress,
         worker_eligibility: WorkerEligibility,
     ) -> Self {
         Self {
             id,
             session_id,
+            session_final,
             progress,
             worker_eligibility,
         }
@@ -184,6 +188,11 @@ impl<'a> AdmissionRequest<'a> {
 
     pub fn session_id(&self) -> Option<&'a str> {
         self.session_id
+    }
+
+    /// Whether this request terminates its session after normal forwarding.
+    pub fn session_final(&self) -> bool {
+        self.session_final
     }
 
     /// Full tokenized request context, not uncached prefill work.
@@ -338,6 +347,7 @@ mod tests {
             policy.admit(AdmissionRequest::new(
                 AdmissionId::new(7),
                 Some("session"),
+                false,
                 42,
                 eligibility,
             )),

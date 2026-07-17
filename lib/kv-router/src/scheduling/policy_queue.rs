@@ -523,6 +523,7 @@ impl<T> PolicyQueue<T> {
         &mut self,
         class_index: usize,
         session_id: Option<&str>,
+        session_final: bool,
         context_tokens: usize,
         worker_eligibility: WorkerEligibility,
     ) -> Option<(AdmissionTicket, RequestProgressUpdater, AdmissionDecision)> {
@@ -534,6 +535,7 @@ impl<T> PolicyQueue<T> {
         let decision = policy.admit(AdmissionRequest::with_progress(
             id,
             session_id,
+            session_final,
             progress,
             worker_eligibility,
         ));
@@ -1351,8 +1353,8 @@ policy_classes:
         .unwrap();
         let eligibility = || WorkerEligibility::new(|| WorkerEligibilitySnapshot::new([]));
 
-        let first = queue.admit(0, None, 1, eligibility()).unwrap().0.id;
-        let second = queue.admit(1, None, 1, eligibility()).unwrap().0.id;
+        let first = queue.admit(0, None, false, 1, eligibility()).unwrap().0.id;
+        let second = queue.admit(1, None, false, 1, eligibility()).unwrap().0.id;
 
         assert_ne!(first, second);
     }

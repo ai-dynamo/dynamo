@@ -29,7 +29,7 @@ This policy is inspired by the [ThunderAgent paper](https://arxiv.org/abs/2602.1
 | Preserve the assigned worker across normal pressure suspension; upstream clears the backend and BFD may resume elsewhere. Structural worker removal and the starvation timeout remain escape paths. | In the matched replay this removed 219 migrations, improved turns by 12.4%, and raised physical cache reuse by 2.26 percentage points. |
 | Trigger pressure at 0.95, drain to 0.80, and also use 0.80 as the resume ceiling; upstream pauses only after projected overflow and resumes against remaining capacity. | The proactive high/low pair avoids engine-cache saturation, while earlier pausing and a separate resume ceiling both lost throughput or reuse. |
 | Account exact live logical context from `RequestProgress`; use device capacity to admit Running requests and device plus native-offload capacity for retained sessions. Omit upstream's character estimate, shared-token discount, per-program buffer, ACTING weight, and optional decay. | Host HiCache can retain an idle session, but must not be treated as room to enqueue more backend work. Exact Dynamo observations remove interacting heuristics. |
-| Expire quiescent state after a 30-minute inactivity lease instead of requiring upstream's explicit `/programs/release` call. | Immediate terminal cleanup admitted too much live context and hurt reuse; the lease bounded retained state while matching or improving the no-expiry control. |
+| Consume Dynamo's session-final signal instead of requiring upstream's separate `/programs/release` call, with a 30-minute inactivity lease as fallback. | The terminal request releases accounting immediately and is still forwarded normally; the lease bounds retained state for clients that cannot signal completion. |
 | Encode only `Running`, `IdleResident`, and `Suspended`, with waiters and rollback owned by native queue admission. | This removes invalid status/lifecycle combinations and gives cancellation and same-session concurrency one authoritative owner without changing the retained pause/resume policy. |
 
 ## State model
@@ -50,6 +50,7 @@ Each retained program is in exactly one state:
 AdmissionRequest
   -> no session_id: Bypass
   -> another request for the session is current: Defer as a session waiter
+  -> session-final request: forget retained placement/accounting and route the request normally
   -> begin request
        -> create Running state from the request's live progress handle
        -> suspended session: Defer
@@ -97,7 +98,9 @@ Running programs read their full logical context directly from the retained `Req
 
 This is a logical projection, not live engine or indexer residency.
 
-Completed sessions remain retained for `session_retention_seconds` (30 minutes by default). The clock resets after every successful turn. Once the retention lease expires, reconciliation removes an IdleResident or Suspended session only when it has no current or waiting request. This approximates useful cache residence without requiring clients to emit a terminal signal; a later turn is treated as a new session-aware program and still goes through normal KV-aware worker selection.
+When a request carries the session-final signal, admission immediately removes the session's retained placement and accounting state, then forwards that terminal request through normal routing. If another turn for the same session is already running, the final request waits behind it before releasing state. Completion or cancellation of the terminal request cannot recreate the released program.
+
+For clients that cannot emit the signal, completed sessions remain retained for `session_retention_seconds` (30 minutes by default). The clock resets after every successful turn. Once the retention lease expires, reconciliation removes an IdleResident or Suspended session only when it has no current or waiting request. A later turn is treated as a new session-aware program and still goes through normal KV-aware worker selection.
 
 ## Reconciliation algorithm
 
@@ -138,7 +141,7 @@ When a worker exceeds `pause_threshold * capacity`, Session-Aware Admission Cont
 | Retention capacity | Static device KV plus native-offload capacity from worker configuration. |
 | Pack and fairness | New-session fairness, grouped resume, largest-first placement, smallest-resident suspension, deferred Running suspension, high/low watermarks, and timeout. |
 | Sticky placement | `WorkerPlacement::Exact` preserves the selected worker/rank across turns and pressure suspension. Structural worker removal or the starvation timeout can clear it. |
-| Session expiry | A quiescent retained session is forgotten after `session_retention_seconds`; a later request starts a new program. |
+| Session release | A session-final request forgets retained state immediately; inactivity expiry is the fallback for clients without that signal. |
 
 ## Invariants
 
@@ -147,14 +150,13 @@ When a worker exceeds `pause_threshold * capacity`, Session-Aware Admission Cont
 - Placement never widens the request's router-owned eligibility.
 - Temporary overload does not migrate a sticky session before the configured starvation timeout.
 - A request is released at most once.
-- Abort restores the exact program state that existed before admission.
+- Abort restores the exact program state that existed before admission, except that a session-final request never recreates released state.
 - Deferred requests remain owned and accounted for by the KV-router queue, not this module.
 - Retention expiry never removes a Running session or a session with a current or waiting request.
 
 ## Deliberately absent
 
 - Live indexer/cache residency queries.
-- Client-driven session-final cleanup; inactivity retention is the lifecycle mechanism.
 - In-flight decode preemption or migration.
 - Soft KV demotion, prefetch, or retention actions.
 - Separate plug-ins for accounting, pressure, victim selection, packing, decay, or placement.

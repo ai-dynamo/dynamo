@@ -6,7 +6,7 @@ The currently implemented policy is [Session-Aware Admission Control](src/sessio
 
 To apply `session_aware` by default, configure it on the default policy family's only cache bucket. To opt in selected traffic instead, configure an explicit class by omitting `policy_family` and `cache_bucket`, then send `x-dynamo-meta-policy-class: <class-name>` on every HTTP request using that policy. Startup rejects Session-Aware attachment to one class in a multi-bucket family because cache-state changes could split a session across class-local program tables; cross-bucket ownership is intentionally deferred until that model is agreed.
 
-Session-Aware Admission Control retains quiescent completed sessions for `session_retention_seconds` (1,800 seconds by default) and then forgets their placement and accounting state. The inactivity lease resets after every successful turn, so clients do not need to emit a terminal signal. A later request for an expired session is admitted as a new program.
+Session-Aware Admission Control immediately forgets a session's placement and accounting state when a request carries Dynamo's session-final signal, while forwarding that request normally. When a client cannot emit the signal, quiescent completed sessions are retained for `session_retention_seconds` (1,800 seconds by default) and then forgotten. The inactivity lease resets after every successful turn. A later request for a released or expired session is admitted as a new program.
 
 ## Inspiration and comparison
 

@@ -849,6 +849,7 @@ impl<
                 .admit(
                     admission_class_index,
                     request.session_id.as_deref(),
+                    request.session_final,
                     request.isl_tokens,
                     worker_eligibility,
                 )
@@ -2257,6 +2258,7 @@ mod tests {
             strict_priority: 0,
             policy_class: None,
             session_id: None,
+            session_final: false,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -2302,6 +2304,7 @@ mod tests {
     struct GateState {
         deferred: Option<AdmissionId>,
         session_id: Option<String>,
+        session_final: bool,
         context_tokens: usize,
         progress: Option<RequestProgress>,
         dispatched: Vec<WorkerWithDpRank>,
@@ -2318,6 +2321,7 @@ mod tests {
             let mut state = self.state.lock().unwrap();
             state.deferred = Some(request.id());
             state.session_id = request.session_id().map(str::to_owned);
+            state.session_final = request.session_final();
             state.context_tokens = request.context_tokens();
             state.progress = Some(request.progress().clone());
             AdmissionDecision::Defer
@@ -2452,12 +2456,14 @@ policy_classes:
         let (mut request, response) = make_admission_request("deferred", 64);
         request.policy_class = Some("agents".to_owned());
         request.session_id = Some("session-a".to_owned());
+        request.session_final = true;
 
         let mut lease = enqueue_with_lease(&queue, request).await;
         assert_eq!(queue.pending_count(), 1);
         {
             let state = state.lock().unwrap();
             assert_eq!(state.session_id.as_deref(), Some("session-a"));
+            assert!(state.session_final);
             assert_eq!(state.context_tokens, 64);
             assert!(state.dispatched.is_empty());
         }

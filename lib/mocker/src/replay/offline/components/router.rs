@@ -179,6 +179,7 @@ impl PendingRequest {
             strict_priority: self.strict_priority,
             policy_class: self.policy_class.clone(),
             session_id: self.session_id.clone(),
+            session_final: false,
             expected_output_tokens: self.expected_output_tokens,
             pinned_worker: None,
             allowed_worker_ids: None,

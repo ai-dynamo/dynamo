@@ -112,6 +112,7 @@ impl Program {
 
 struct RequestState {
     session_id: String,
+    session_final: bool,
     progress: RequestProgress,
     worker_eligibility: WorkerEligibility,
     prior: Option<Program>,
@@ -172,6 +173,7 @@ impl<P: WorkerCapacityProvider> SessionAwareAdmissionControl<P> {
             id,
             RequestState {
                 session_id: session_id.to_owned(),
+                session_final: request.session_final(),
                 progress: request.progress().clone(),
                 worker_eligibility: request.worker_eligibility().clone(),
                 prior: None,
@@ -201,6 +203,9 @@ impl<P: WorkerCapacityProvider> SessionAwareAdmissionControl<P> {
         let context_tokens = request.progress.context_tokens();
         let progress = request.progress.clone();
         let worker_eligibility = request.worker_eligibility.clone();
+        if request.session_final {
+            return self.begin_session_final(id, session_id, worker_eligibility);
+        }
         let prior = self.programs.get(session_id).cloned();
         let was_new = prior.is_none();
         let was_suspended = prior.as_ref().is_some_and(Program::is_suspended);
@@ -317,6 +322,36 @@ impl<P: WorkerCapacityProvider> SessionAwareAdmissionControl<P> {
         }
     }
 
+    fn begin_session_final(
+        &mut self,
+        id: AdmissionId,
+        session_id: &str,
+        worker_eligibility: WorkerEligibility,
+    ) -> AdmissionDecision {
+        let assigned_worker = self
+            .programs
+            .get(session_id)
+            .and_then(|program| program.assigned_worker);
+        self.programs.shift_remove(session_id);
+        if let Some(request) = self.requests.get_mut(&id) {
+            // A terminal request releases the prior program at admission time.
+            // Completion or abort must not restore it.
+            request.prior = None;
+        }
+        self.sessions
+            .entry(session_id.to_owned())
+            .or_default()
+            .current = Some(id);
+        tracing::info!(%session_id, "Session-aware admission released final session");
+
+        if let Some(worker) = assigned_worker
+            && worker_eligibility.snapshot().structurally_allows(worker)
+        {
+            return AdmissionDecision::Ready(WorkerPlacement::Exact(worker));
+        }
+        AdmissionDecision::Ready(WorkerPlacement::Any)
+    }
+
     fn defer_request(
         &mut self,
         session_id: &str,
@@ -389,6 +424,10 @@ impl<P: WorkerCapacityProvider> SessionAwareAdmissionControl<P> {
         }
         if let Some(requests) = self.sessions.get_mut(&request.session_id) {
             requests.current = None;
+        }
+        if request.session_final {
+            self.programs.shift_remove(&request.session_id);
+            return self.promote_next(&request.session_id);
         }
         if completed_context_tokens.is_none() {
             match request.prior {
@@ -1148,6 +1187,21 @@ mod tests {
         AdmissionRequest::new(
             AdmissionId::new(id),
             session_id,
+            false,
+            context_tokens,
+            WorkerEligibility::new(|| WorkerEligibilitySnapshot::new([worker(1), worker(2)])),
+        )
+    }
+
+    fn final_request(
+        id: u64,
+        session_id: Option<&str>,
+        context_tokens: usize,
+    ) -> AdmissionRequest<'_> {
+        AdmissionRequest::new(
+            AdmissionId::new(id),
+            session_id,
+            true,
             context_tokens,
             WorkerEligibility::new(|| WorkerEligibilitySnapshot::new([worker(1), worker(2)])),
         )
@@ -1162,6 +1216,7 @@ mod tests {
         AdmissionRequest::new(
             AdmissionId::new(id),
             session_id,
+            false,
             context_tokens,
             WorkerEligibility::new(move || WorkerEligibilitySnapshot::new(eligible_workers())),
         )
@@ -1176,6 +1231,7 @@ mod tests {
         AdmissionRequest::new(
             AdmissionId::new(id),
             session_id,
+            false,
             context_tokens,
             WorkerEligibility::new(move || {
                 let (structural, available) = workers();
@@ -1538,6 +1594,88 @@ mod tests {
         });
         assert!(policy.programs["a"].is_idle_resident());
         assert_eq!(policy.programs["a"].footprint(), 140);
+    }
+
+    #[test]
+    fn session_final_releases_program_and_routes_normally() {
+        let mut policy =
+            SessionAwareAdmissionControl::new(|| capacities(&[(1, 1_000)]), Default::default())
+                .unwrap();
+        assert_eq!(
+            policy.admit(request(1, Some("a"), 100)),
+            AdmissionDecision::Ready(WorkerPlacement::Exact(worker(1)))
+        );
+        policy.on_event(AdmissionEvent::Dispatched {
+            id: AdmissionId::new(1),
+            worker: worker(1),
+        });
+        policy.on_event(AdmissionEvent::Completed {
+            id: AdmissionId::new(1),
+            context_tokens: 140,
+        });
+
+        assert_eq!(
+            policy.admit(final_request(2, Some("a"), 1)),
+            AdmissionDecision::Ready(WorkerPlacement::Exact(worker(1)))
+        );
+        assert!(!policy.programs.contains_key("a"));
+
+        policy.on_event(AdmissionEvent::Dispatched {
+            id: AdmissionId::new(2),
+            worker: worker(1),
+        });
+        policy.on_event(AdmissionEvent::Completed {
+            id: AdmissionId::new(2),
+            context_tokens: 1,
+        });
+        assert!(!policy.programs.contains_key("a"));
+
+        assert_eq!(
+            policy.admit(final_request(3, Some("a"), 1)),
+            AdmissionDecision::Ready(WorkerPlacement::Any)
+        );
+        policy.on_event(AdmissionEvent::Aborted {
+            id: AdmissionId::new(3),
+        });
+        assert!(!policy.programs.contains_key("a"));
+    }
+
+    #[test]
+    fn session_final_waits_for_inflight_turn_before_release() {
+        let mut policy =
+            SessionAwareAdmissionControl::new(|| capacities(&[(1, 1_000)]), Default::default())
+                .unwrap();
+        assert_eq!(
+            policy.admit(request(1, Some("a"), 100)),
+            AdmissionDecision::Ready(WorkerPlacement::Exact(worker(1)))
+        );
+        policy.on_event(AdmissionEvent::Dispatched {
+            id: AdmissionId::new(1),
+            worker: worker(1),
+        });
+
+        assert_eq!(
+            policy.admit(final_request(2, Some("a"), 1)),
+            AdmissionDecision::Defer
+        );
+        assert!(policy.programs.contains_key("a"));
+
+        assert_eq!(
+            policy.on_event(AdmissionEvent::Completed {
+                id: AdmissionId::new(1),
+                context_tokens: 140,
+            }),
+            vec![AdmissionAction::MakeReady {
+                id: AdmissionId::new(2),
+                placement: WorkerPlacement::Exact(worker(1)),
+            }]
+        );
+        assert!(!policy.programs.contains_key("a"));
+
+        policy.on_event(AdmissionEvent::Aborted {
+            id: AdmissionId::new(2),
+        });
+        assert!(!policy.programs.contains_key("a"));
     }
 
     #[test]
