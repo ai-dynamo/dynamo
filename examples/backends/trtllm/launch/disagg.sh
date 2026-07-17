@@ -19,11 +19,9 @@ export MODALITY=${MODALITY:-"text"}
 # If you want to use multimodal, set MODALITY to "multimodal"
 #export MODALITY=${MODALITY:-"multimodal"}
 
-# Strip --unified via the shared helper, then parse the remaining flags.
-# All of this runs BEFORE installing the kill-process-group EXIT trap so
-# an early exit (--help / unknown option) doesn't tear down the caller.
-pick_worker_module dynamo.trtllm dynamo.trtllm.unified_main "$@"
-set -- "${REMAINING_ARGS[@]}"
+# Parse flags BEFORE installing the kill-process-group EXIT trap so an early
+# exit (--help / unknown option) doesn't tear down the caller.
+WORKER_MODULE="dynamo.trtllm"
 
 ENABLE_OTEL=false
 while [[ $# -gt 0 ]]; do
@@ -33,8 +31,6 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
             echo "  --enable-otel        Enable OpenTelemetry tracing"
-            echo "  --unified            Use the unified backend entry point"
-            echo "                       (python -m dynamo.trtllm.unified_main)"
             echo "  -h, --help           Show this help message"
             exit 0
             ;;

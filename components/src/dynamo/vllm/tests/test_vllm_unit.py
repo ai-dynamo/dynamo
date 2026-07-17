@@ -3,7 +3,6 @@
 
 """Unit tests for vLLM backend components."""
 
-import asyncio
 import importlib
 import json
 import logging
@@ -15,7 +14,7 @@ import warnings
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -88,6 +87,87 @@ def test_base_model_lora_capacity(enable_lora, model_type, expected):
     )
 
     assert _load_vllm_main()._base_model_lora_capacity(config, model_type) == expected
+
+
+@pytest.mark.asyncio
+async def test_register_vllm_model_forwards_frontend_concurrency_limit(monkeypatch):
+    vllm_main = _load_vllm_main()
+
+    class FakeRuntimeConfig:
+        def set_structural_tag_mode(self, _mode):
+            pass
+
+        def set_structural_tag_scope(self, _scope):
+            pass
+
+        def set_structural_tag_schema(self, _schema):
+            pass
+
+        def set_engine_specific(self, _key, _value):
+            pass
+
+    register = AsyncMock()
+    monkeypatch.setattr(vllm_main, "ModelRuntimeConfig", FakeRuntimeConfig)
+    monkeypatch.setattr(
+        vllm_main,
+        "get_engine_cache_info",
+        lambda _engine: {
+            "num_gpu_blocks": 8,
+            "max_num_seqs": 4,
+            "max_num_batched_tokens": 1024,
+            "kv_event_block_size": 16,
+        },
+    )
+    monkeypatch.setattr(vllm_main, "get_dp_range_for_worker", lambda _config: (0, 1))
+    monkeypatch.setattr(vllm_main, "per_rank_kv_blocks", lambda blocks, _size: blocks)
+    monkeypatch.setattr(
+        vllm_main, "get_spec_decode_runtime_data", lambda _config, _vllm: None
+    )
+    monkeypatch.setattr(vllm_main, "apply_topology_config", lambda _config: None)
+    monkeypatch.setattr(
+        vllm_main, "create_frontend_media_config", lambda _enabled: (None, None)
+    )
+    monkeypatch.setattr(vllm_main, "register_model", register)
+
+    config = SimpleNamespace(
+        model="/models/base",
+        served_model_name="base",
+        enable_local_indexer=False,
+        disaggregation_mode=DisaggregationMode.AGGREGATED,
+        dyn_tool_call_parser=None,
+        dyn_reasoning_parser=None,
+        exclude_tools_when_tool_choice_none=False,
+        dyn_enable_structural_tag=False,
+        dyn_structural_tag_scope="request",
+        dyn_structural_tag_schema="auto",
+        frontend_decoding=False,
+        custom_jinja_template=None,
+        rejection_frontend_request_concurrency_limit=17,
+        engine_args=SimpleNamespace(
+            enable_lora=False,
+            load_format="auto",
+            max_loras=4,
+            stream_interval=None,
+        ),
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=4096, model_weights="")
+    )
+
+    await vllm_main.register_vllm_model(
+        dynamo_llm.ModelInput.Tokens,
+        dynamo_llm.ModelType.Chat,
+        object(),
+        config,
+        object(),
+        vllm_config,
+        dynamo_llm.WorkerType.Aggregated,
+    )
+
+    register.assert_awaited_once()
+    assert (
+        register.await_args.kwargs["rejection_frontend_request_concurrency_limit"] == 17
+    )
 
 
 def test_custom_jinja_template_invalid_path(mock_vllm_cli):
@@ -362,165 +442,6 @@ def test_parse_args_does_not_track_logprobs_mode_presence(mock_vllm_cli):
     mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
     config = parse_args()
     assert not hasattr(config, "logprobs_mode_explicitly_set")
-
-
-def test_unified_from_args_applies_rl_logprobs_default(monkeypatch):
-    from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
-    from dynamo.vllm import llm_engine
-
-    config = SimpleNamespace(
-        enable_rl=True,
-        engine_args=SimpleNamespace(
-            logprobs_mode="raw_logprobs",
-            served_model_name=["Qwen/Qwen3-0.6B"],
-        ),
-        served_model_name="Qwen/Qwen3-0.6B",
-        model="Qwen/Qwen3-0.6B",
-        disaggregation_mode=CommonDisaggregationMode.AGGREGATED,
-        headless=False,
-        component="backend",
-        namespace="dynamo",
-        route_to_encoder=False,
-        enable_multimodal=False,
-        frontend_decoding=False,
-        multimodal_embedding_cache_capacity_gb=0.0,
-        dyn_tool_call_parser=None,
-        dyn_reasoning_parser=None,
-        rejection_frontend_request_concurrency_limit=17,
-    )
-    worker_config = object()
-    parse_options = {}
-
-    def fake_parse_args(argv, *, fpm_trace_relay_supported):
-        parse_options["fpm_trace_relay_supported"] = fpm_trace_relay_supported
-        return config
-
-    monkeypatch.setattr(llm_engine, "parse_args", fake_parse_args)
-    monkeypatch.setattr(
-        llm_engine.WorkerConfig,
-        "from_runtime_config",
-        lambda *args, **kwargs: worker_config,
-    )
-
-    async def run_from_args():
-        return await llm_engine.VllmLLMEngine.from_args(["--enable-rl"])
-
-    engine, result_worker_config = asyncio.run(run_from_args())
-
-    assert config.engine_args.logprobs_mode == "processed_logprobs"
-    assert engine.enable_rl is True
-    assert engine._rejection_frontend_request_concurrency_limit == 17
-    assert result_worker_config is worker_config
-    assert parse_options["fpm_trace_relay_supported"] is False
-
-
-def test_unified_generate_passes_enable_rl_to_sampling_params(monkeypatch):
-    from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
-    from dynamo.vllm import llm_engine
-
-    captured: dict[str, bool] = {}
-
-    def fake_build_sampling_params(
-        request, default_sampling_params, model_max_len=None, *, enable_rl=False
-    ):
-        captured["enable_rl"] = enable_rl
-        return SimpleNamespace(extra_args=None)
-
-    async def empty_generation():
-        if False:
-            yield None
-
-    def fake_generate(*args, **kwargs):
-        return empty_generation()
-
-    engine = llm_engine.VllmLLMEngine(
-        SimpleNamespace(),
-        CommonDisaggregationMode.AGGREGATED,
-        served_model_name="test-model",
-        component="backend",
-        enable_rl=True,
-    )
-    engine.engine_client = SimpleNamespace(generate=fake_generate)
-    engine._default_sampling_params = {}
-    engine._model_max_len = 4096
-    engine._multimodal_request_processor = llm_engine.VllmMultimodalRequestProcessor(
-        model="test-model",
-        enable_multimodal=False,
-    )
-
-    monkeypatch.setattr(llm_engine, "build_sampling_params", fake_build_sampling_params)
-
-    async def run_generate():
-        context = SimpleNamespace(id=lambda: "req", trace_headers=lambda: None)
-        async for _ in engine.generate({"token_ids": [1, 2, 3]}, context):
-            pass
-
-    asyncio.run(run_generate())
-
-    assert captured["enable_rl"] is True
-
-
-@pytest.mark.asyncio
-async def test_unified_start_returns_normalized_served_model_name(monkeypatch):
-    """Return the Dynamo-normalized served model name from EngineConfig."""
-    from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
-    from dynamo.vllm import llm_engine
-
-    served_model_name = "Qwen/Qwen3-0.6B"
-    vllm_config = SimpleNamespace(
-        cache_config=SimpleNamespace(num_gpu_blocks=8),
-        model_config=SimpleNamespace(
-            max_model_len=4096, get_diff_sampling_param=lambda: {}
-        ),
-        scheduler_config=SimpleNamespace(
-            max_num_seqs=2,
-            max_num_batched_tokens=8192,
-        ),
-    )
-    engine_args = SimpleNamespace(
-        model=served_model_name,
-        served_model_name=[served_model_name],
-        create_model_config=lambda: SimpleNamespace(get_diff_sampling_param=lambda: {}),
-        create_engine_config=lambda usage_context: vllm_config,
-    )
-    engine_client = SimpleNamespace(vllm_config=vllm_config, shutdown=lambda: None)
-
-    monkeypatch.setattr(
-        llm_engine.AsyncLLM,
-        "from_vllm_config",
-        lambda **kwargs: engine_client,
-    )
-    monkeypatch.setattr(llm_engine, "get_dp_range_for_worker", lambda config: (0, 1))
-    monkeypatch.setattr(llm_engine, "per_rank_kv_blocks", lambda blocks, size: blocks)
-    monkeypatch.setattr(
-        llm_engine,
-        "configure_kv_event_block_size",
-        lambda client, config: asyncio.sleep(0),
-    )
-    monkeypatch.setattr(
-        llm_engine, "get_configured_kv_event_block_size", lambda config: 16
-    )
-    monkeypatch.setattr(
-        llm_engine.VllmLLMEngine,
-        "logits_processor_spec",
-        lambda self: asyncio.sleep(0),
-    )
-    monkeypatch.setattr(
-        llm_engine, "VllmEnginePauseController", lambda client: object()
-    )
-
-    engine = llm_engine.VllmLLMEngine(
-        engine_args,
-        CommonDisaggregationMode.AGGREGATED,
-        served_model_name=served_model_name,
-        component="backend",
-    )
-
-    config = await engine.start(worker_id=0)
-    await engine.cleanup()
-
-    assert engine_args.served_model_name == [served_model_name]
-    assert config.served_model_name == served_model_name
 
 
 def test_should_prefetch_model_for_default_load_format():
@@ -1253,46 +1174,6 @@ class TestBenchmarkGrid:
         total_kv = 100 * 16
         for ctx_len, bs in points:
             assert ctx_len <= total_kv
-
-
-@pytest.mark.asyncio
-async def test_health_check_decode_opts_out_with_warning():
-    # mock.patch the module logger directly: dynamo's logging setup
-    # turns off propagation on per-module loggers, so pytest's caplog
-    # (which attaches at root) doesn't see these warnings.
-    from dynamo.vllm.llm_engine import VllmLLMEngine
-
-    engine = VllmLLMEngine(
-        engine_args=None,
-        disaggregation_mode=DisaggregationMode.DECODE,
-        served_model_name="test",
-        component="backend",
-    )
-    with patch("dynamo.vllm.llm_engine.logger") as mock_logger:
-        payload = await engine.health_check_payload()
-
-    assert payload is None
-    assert mock_logger.warning.call_count == 1
-    msg = mock_logger.warning.call_args.args[0]
-    assert "DECODE worker: health-check canary disabled" in msg
-
-
-@pytest.mark.asyncio
-async def test_health_check_aggregated_returns_canary():
-    from dynamo.common.backend.health_check import HEALTH_CHECK_KEY
-    from dynamo.vllm.llm_engine import VllmLLMEngine
-
-    engine = VllmLLMEngine(
-        engine_args=None,
-        disaggregation_mode=DisaggregationMode.AGGREGATED,
-        served_model_name="test",
-        component="backend",
-    )
-    payload = await engine.health_check_payload()
-
-    assert payload is not None
-    assert payload[HEALTH_CHECK_KEY] is True
-    assert payload["token_ids"]
 
 
 def test_build_sampling_params_maps_max_thinking_tokens():
