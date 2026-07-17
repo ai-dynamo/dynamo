@@ -23,10 +23,12 @@ inline so this file stays hermetic — no live GitHub calls.
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -371,6 +373,13 @@ class ExtractStatusFromMdxTests(unittest.TestCase):
         text = '<DepMetadata dep="0000" status="Under Review" />'
         self.assertEqual(sync_deps._extract_status_from_mdx(text), "Under Review")
 
+    def test_extracts_single_quoted_status(self):
+        # Single-quoted JSX attribute values must be extracted too, so the
+        # docstring's single-quote claim holds. The opening quote is captured
+        # and the same quote closes it.
+        text = "<DepMetadata dep='0000' status='Accepted' />"
+        self.assertEqual(sync_deps._extract_status_from_mdx(text), "Accepted")
+
     def test_returns_none_when_no_dep_metadata(self):
         text = "# Just a regular markdown file with no DepMetadata."
         self.assertIsNone(sync_deps._extract_status_from_mdx(text))
@@ -459,16 +468,16 @@ class EntryStatusTests(unittest.TestCase):
 
     def test_returns_parsed_status(self):
         parsed = sync_deps.parse_dep_source(NOVA_LIKE)
-        self.assertEqual(sync_deps.entry_status({}, parsed), "Draft")
+        self.assertEqual(sync_deps.entry_status(parsed), "Draft")
 
     def test_defaults_to_draft_when_missing(self):
         parsed = sync_deps.ParsedDep(title="X", fields={}, body="")
-        self.assertEqual(sync_deps.entry_status({}, parsed), "Draft")
+        self.assertEqual(sync_deps.entry_status(parsed), "Draft")
 
     def test_defaults_to_draft_when_placeholder(self):
         # `[TBD]` / `N/A` are filtered by useful_fields — treat as unset.
         parsed = sync_deps.ParsedDep(title="X", fields={"Status": "[TBD]"}, body="")
-        self.assertEqual(sync_deps.entry_status({}, parsed), "Draft")
+        self.assertEqual(sync_deps.entry_status(parsed), "Draft")
 
 
 class RenderStatusDataJsTests(unittest.TestCase):
@@ -564,6 +573,83 @@ class WriteStatusDataJsTests(unittest.TestCase):
             out = sync_deps.write_status_data_js(root, status_map)
             got = out.read_text(encoding="utf-8")
         self.assertEqual(got, sync_deps.render_status_data_js(status_map))
+
+
+class MainWriteGateTests(unittest.TestCase):
+    """main() may write fern/js/dep-status-data.js ONLY on a full run.
+
+    A --dry-run must not touch the tree, and a --only (partial) run must not
+    clobber the committed snapshot with a truncated status map. In both cases
+    main() prints the map a full run would write and skips the write.
+    """
+
+    def _setup_root(self, td: str) -> Path:
+        root = Path(td)
+        # Minimal repo skeleton main() needs: fern/docs.yml (the root marker),
+        # the manifest, and the dirs the writers touch.
+        (root / "fern").mkdir()
+        (root / "fern" / "docs.yml").write_text("x\n", encoding="utf-8")
+        (root / "fern" / "js").mkdir()
+        (root / "fern" / "scripts").mkdir()
+        (root / "docs" / "proposals").mkdir(parents=True)
+        manifest = {
+            "deps": [
+                {
+                    "output": "dep-nova-synced",
+                    "dep": "Nova",
+                    "source": {
+                        "owner": "ai-dynamo",
+                        "repo": "enhancements",
+                        "ref": "main",
+                        "path": "deps/0000-nova.md",
+                    },
+                },
+                {
+                    "output": "dep-other-synced",
+                    "dep": "Other",
+                    "source": {
+                        "owner": "ai-dynamo",
+                        "repo": "enhancements",
+                        "ref": "main",
+                        "path": "deps/0001-other.md",
+                    },
+                },
+            ]
+        }
+        (root / "fern" / "scripts" / "deps.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        return root
+
+    def test_full_run_writes_status_data(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = self._setup_root(td)
+            data = root / "fern" / "js" / "dep-status-data.js"
+            with mock.patch.object(sync_deps, "fetch_source", return_value=NOVA_LIKE):
+                rc = sync_deps.main(["--root", str(root)])
+            self.assertEqual(rc, 0)
+            self.assertTrue(data.exists())
+            self.assertIn("window.__DEP_STATUS", data.read_text(encoding="utf-8"))
+
+    def test_dry_run_does_not_write_status_data(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = self._setup_root(td)
+            data = root / "fern" / "js" / "dep-status-data.js"
+            with mock.patch.object(sync_deps, "fetch_source", return_value=NOVA_LIKE):
+                rc = sync_deps.main(["--root", str(root), "--dry-run"])
+            # File must not exist — a dry run must not touch the tree.
+            self.assertEqual(rc, 0)
+            self.assertFalse(data.exists())
+
+    def test_only_does_not_write_status_data(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = self._setup_root(td)
+            data = root / "fern" / "js" / "dep-status-data.js"
+            with mock.patch.object(sync_deps, "fetch_source", return_value=NOVA_LIKE):
+                rc = sync_deps.main(["--root", str(root), "--only", "nova"])
+            # Partial sync must not clobber the committed snapshot.
+            self.assertEqual(rc, 0)
+            self.assertFalse(data.exists())
 
 
 if __name__ == "__main__":

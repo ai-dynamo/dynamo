@@ -63,7 +63,7 @@
    */
   function variant(status) {
     var s = String(status == null ? "" : status).toLowerCase();
-    if (/accept|approv|final|active|ratif/.test(s)) return "accepted";
+    if (/accept|approv|implement|final|active|ratif/.test(s)) return "accepted";
     if (/propos|review/.test(s)) return "proposed";
     if (/reject|withdraw/.test(s)) return "rejected";
     if (/replac|supersed|deferr|defer/.test(s)) return "muted";

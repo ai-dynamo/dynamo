@@ -4,8 +4,8 @@
  *
  * DepMetadata — a styled header card that separates a DEP's metadata (front
  * matter) from the proposal body: DEP number + title, a color-coded status
- * pill (Draft / Proposed / Accepted / ...), a labeled field grid, and an action
- * row of links (View PR, Tracking Issue, Discussion).
+ * pill (Draft / Under Review / Accepted / ...), a labeled field grid, and an
+ * action row of links (View PR, Tracking Issue).
  *
  * Server component (no "use client"), mirroring RecipeStyles.tsx. Registered
  * via docs.yml `experimental.mdx-components: ./components`;
@@ -27,7 +27,7 @@ interface DepMetadataProps {
    * title repeated inside the card as an H2 (usually you don't).
    */
   title?: string;
-  /** Lifecycle status: Draft | Proposed | Under Review | Accepted | Replaced | Deferred | Rejected. */
+  /** Lifecycle status: Draft | Under Review | Accepted | Rejected | Deferred | Implemented | Replaced. */
   status: string;
   category?: string;
   /**
@@ -49,14 +49,28 @@ interface DepMetadataProps {
   repo?: string;
   /** URL to the tracking issue. */
   trackingIssue?: string;
-  /** URL to the GitHub Discussion for this DEP. */
-  discussionsTo?: string;
 }
 
-/** Map a free-text status to a pill variant (color). */
-function statusVariant(status: string): string {
+/**
+ * Map a free-text lifecycle status to a pill variant (color).
+ *
+ * Kept as plain JavaScript syntax (no TS annotations in the signature or body)
+ * so the companion test file at fern/components/test_dep_metadata.mjs can
+ * regex-extract and eval it under node — the same extraction pattern used for
+ * parseLinkedItems below. The regex branches MUST stay byte-for-byte identical
+ * to variant() in fern/js/dep-status-pills.js so the on-page card pill and the
+ * sidebar pill always agree for the same DEP.
+ *
+ * Buckets: accepted (green) covers Accepted + Implemented + legacy synonyms;
+ * proposed (blue) covers Under Review + legacy Proposed; rejected (red);
+ * muted (gray) covers Deferred + Replaced; draft (amber) is the fallback.
+ *
+ * @param {string | null | undefined} status
+ * @returns {string}
+ */
+function statusVariant(status) {
   const s = (status || "").toLowerCase();
-  if (/accept|approv|final|active|ratif/.test(s)) return "accepted";
+  if (/accept|approv|implement|final|active|ratif/.test(s)) return "accepted";
   if (/propos|review/.test(s)) return "proposed";
   if (/reject|withdraw/.test(s)) return "rejected";
   if (/replac|supersed|deferr|defer/.test(s)) return "muted";
@@ -184,7 +198,6 @@ export function DepMetadata({
   owner = "ai-dynamo",
   repo = "dynamo",
   trackingIssue,
-  discussionsTo,
 }: DepMetadataProps) {
   const variant = statusVariant(status);
   const prUrl = pr ? `https://github.com/${owner}/${repo}/pull/${pr}` : undefined;
@@ -229,7 +242,7 @@ export function DepMetadata({
         </div>
       )}
 
-      {(prUrl || trackingIssue || discussionsTo) && (
+      {(prUrl || trackingIssue) && (
         <div className="dep-meta-actions">
           {prUrl && (
             <a className="dep-meta-action" href={prUrl} target="_blank" rel="noopener noreferrer">
@@ -239,11 +252,6 @@ export function DepMetadata({
           {trackingIssue && (
             <a className="dep-meta-action" href={trackingIssue} target="_blank" rel="noopener noreferrer">
               Tracking issue &rarr;
-            </a>
-          )}
-          {discussionsTo && (
-            <a className="dep-meta-action" href={discussionsTo} target="_blank" rel="noopener noreferrer">
-              Discussion &rarr;
             </a>
           )}
         </div>

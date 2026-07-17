@@ -192,8 +192,9 @@ docs site is the `dep-render` skill.
   docs page is a read-only mirror. Every reply happens on GitHub.
 - Reviewers leave line-level comments on the PR (the revision) and open-ended
   design discussion on the tracking issue. Both surface on the rendered page.
-- DEP-0001 is itself a *draft* proposal. Where a specific (exact lifecycle
-  state names, the final front-matter set) is still under review, defer to
-  `docs/proposals/0001-dep-process.mdx` rather than hard-asserting it.
+- DEP-0001 is itself a *draft* proposal, but the lifecycle enum and the metadata
+  field set are settled — see `docs/proposals/0001-dep-process.mdx` for the full
+  specification, and match the enhancements repo's current template for the
+  exact source serialization.
 - Retroactive DEP: same flow, but open it already reflecting the shipped state
   (reference the merged PRs, and set the status the work is actually in).

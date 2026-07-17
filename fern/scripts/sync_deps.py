@@ -445,13 +445,15 @@ def render_mdx(*, entry: dict[str, Any], parsed: ParsedDep) -> str:
 # When both sources supply the same slug the synced entry wins (upstream is
 # the authoritative source of truth for synced DEPs).
 
-# Regex targeting a `status="..."` attribute on the <DepMetadata /> component.
-# The component is often written across multiple lines, so we allow arbitrary
-# whitespace + other props between `<DepMetadata` and `status="..."`. Anchored
-# to the `<DepMetadata` opening tag so a `status=` on a different component
-# cannot be misattributed to the DEP.
+# Regex targeting a `status="..."` (or `status='...'`) attribute on the
+# <DepMetadata /> component. The component is often written across multiple
+# lines, so we allow arbitrary whitespace + other props between `<DepMetadata`
+# and the `status` attribute. The opening quote is captured and the same quote
+# must close it, so both single- and double-quoted attribute values are
+# extracted. Anchored to the `<DepMetadata` opening tag so a `status=` on a
+# different component cannot be misattributed to the DEP.
 _DEP_META_STATUS_RE = re.compile(
-    r"<DepMetadata\b[^>]*?\bstatus\s*=\s*\"(?P<status>[^\"]*)\"",
+    r"<DepMetadata\b[^>]*?\bstatus\s*=\s*(?P<quote>[\"'])(?P<status>.*?)(?P=quote)",
     re.DOTALL,
 )
 
@@ -502,7 +504,7 @@ def discover_hand_authored_statuses(root: Path) -> dict[str, str]:
     return out
 
 
-def entry_status(entry: dict[str, Any], parsed: ParsedDep) -> str:
+def entry_status(parsed: ParsedDep) -> str:
     """Return the sidebar status for a synced DEP.
 
     Uses the parsed `**Status**:` field of the upstream markdown when
@@ -510,7 +512,6 @@ def entry_status(entry: dict[str, Any], parsed: ParsedDep) -> str:
     placeholder is treated as missing). Defaults to "Draft" — the DEP-0001
     default lifecycle state.
     """
-    del entry  # reserved for future manifest-side overrides
     fields = useful_fields(parsed.fields)
     return fields.get("Status", "Draft")
 
@@ -660,7 +661,7 @@ def sync_entry(
     """
     text = fetch_source(entry)
     parsed = parse_dep_source(text)
-    status = entry_status(entry, parsed)
+    status = entry_status(parsed)
     mdx = render_mdx(entry=entry, parsed=parsed)
     out_dir = root / "docs" / "proposals" / "_generated"
     out_path = out_dir / f"{entry['output']}.mdx"
@@ -717,12 +718,30 @@ def main(argv: list[str] | None = None) -> int:
         _, status = sync_entry(entry, root=root, dry_run=args.dry_run)
         synced_statuses[entry["output"]] = status
 
-    # Always emit the sidebar status data file — even under --dry-run, so a
-    # local `fern check` after a dry-run sync still resolves the docs.yml
-    # `js:` reference. Hand-authored statuses are picked up from the tree
-    # regardless of whether --only filtered the manifest.
+    # Build the sidebar status map. Hand-authored statuses are picked up from
+    # the tree regardless of whether --only filtered the manifest.
     hand_authored = discover_hand_authored_statuses(root)
     status_map = merge_status_maps(hand_authored, synced_statuses)
+
+    # Only a FULL run (no --only, no --dry-run) may write dep-status-data.js.
+    # A --only run synced just a subset, so its status_map omits the unsynced
+    # DEPs and would TRUNCATE the committed snapshot. A --dry-run must not touch
+    # the tree at all. In both cases, print the map a full run WOULD write and
+    # skip the write, so a partial or dry run never clobbers the committed
+    # fern/js/dep-status-data.js. (That file is committed, so `fern check` after
+    # a partial/dry run still resolves the docs.yml `js:` reference.)
+    if args.dry_run or args.only:
+        reason = "--dry-run" if args.dry_run else "--only (partial sync)"
+        print(
+            f"[sync-deps] {reason}: NOT writing fern/js/dep-status-data.js — a "
+            f"partial or dry run must not clobber the committed snapshot. The "
+            f"status map a full run would write "
+            f"({len(status_map)} DEPs: {len(hand_authored)} hand-authored + "
+            f"{len(synced_statuses)} synced):"
+        )
+        print(render_status_data_js(status_map))
+        return 0
+
     data_path = write_status_data_js(root, status_map)
     print(
         f"[sync-deps] wrote {data_path} "

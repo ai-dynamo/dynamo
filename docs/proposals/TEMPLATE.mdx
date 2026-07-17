@@ -28,12 +28,12 @@ tracking-issue:
 import { DepMetadata } from "@/components/DepMetadata";
 import { PrInlineComments } from "@/components/PrInlineComments";
 
-{/* Metadata card. The status pill (Draft / Under Review / Approved / Replaced
-    / Deferred / Rejected) gives an at-a-glance status; the WARNING banner below
-    is the REQ-1 status admonition. Once your draft PR exists, add pr={NUMBER}
-    to surface a "View PR" action; fill trackingIssue / discussionsTo URLs. Do
-    not repeat the front-matter `title` here — Fern renders it as the page H1
-    above the card. */}
+{/* Metadata card. The status pill (Draft / Under Review / Accepted / Rejected
+    / Deferred / Implemented / Replaced) gives an at-a-glance status; the
+    WARNING banner below is the REQ-1 status admonition. Once your draft PR
+    exists, add pr={NUMBER} to surface a "View PR" action and fill the
+    trackingIssue URL. Do not repeat the front-matter `title` here — Fern
+    renders it as the page H1 above the card. */}
 
 <DepMetadata
   dep="NNNN"
@@ -45,7 +45,6 @@ import { PrInlineComments } from "@/components/PrInlineComments";
   requiredReviewers="[@approver-one](https://github.com/approver-one), [@approver-two](https://github.com/approver-two)"
   reviewDate="[Target date for review]"
   trackingIssue="https://github.com/ai-dynamo/enhancements/issues"
-  discussionsTo="https://github.com/ai-dynamo/enhancements/discussions"
 />
 
 > [!WARNING]

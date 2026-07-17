@@ -64,9 +64,9 @@ gh api repos/ai-dynamo/enhancements/contents/deps/NNNN-slug.md \
 ```
 
 The lifecycle states are Draft → Under Review → Accepted / Rejected / Deferred
-→ Implemented → Replaced (proposed in DEP-0001; treat exact names as the model
-the docs render layer currently implements, and defer to
-`docs/proposals/0001-dep-process.mdx` where still under review).
+→ Implemented → Replaced (standardized in DEP-0001, which the docs render layer
+implements; see `docs/proposals/0001-dep-process.mdx` for the full
+specification).
 
 ### 3. List Tracking Issues
 

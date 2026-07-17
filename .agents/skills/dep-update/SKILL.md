@@ -41,8 +41,8 @@ ships, or marking it Replaced when a later DEP supersedes it.
 
 ## Lifecycle
 
-As proposed in DEP-0001 (exact state names are still being reconciled in
-review — defer to the meta-DEP where they differ):
+The enum is standardized to this set (the docs render layer implements it); the
+DEP process around it is still under review in DEP-0001:
 
 **Draft → Under Review → Accepted / Rejected / Deferred → Implemented → Replaced**
 
@@ -70,9 +70,9 @@ pipeline converts the GitHub-style admonition to a native callout
 | Status | Banner admonition | Renders as |
 |--------|-------------------|------------|
 | Draft | `> [!WARNING]` | Warning |
-| Under Review (a.k.a. Proposed) | `> [!IMPORTANT]` | Info |
-| Accepted / Implemented (a.k.a. Approved) | `> [!NOTE]` | Note |
-| Rejected / Deferred / Replaced (a.k.a. Superseded) | `> [!CAUTION]` | Error |
+| Under Review | `> [!IMPORTANT]` | Info |
+| Accepted / Implemented | `> [!NOTE]` | Note |
+| Rejected / Deferred / Replaced | `> [!CAUTION]` | Error |
 
 ## Workflow
 
@@ -131,6 +131,6 @@ across status changes. Getting a DEP rendered in the first place is the
 - The banner and the `status` field must never disagree — a page that reads
   "Draft" in the field but shows a Note banner misleads readers about whether a
   proposal is ratified.
-- DEP-0001 is a *draft* proposal; where the exact lifecycle names are still
-  contested, phrase advice as the model the render layer implements today and
-  point to `docs/proposals/0001-dep-process.mdx`.
+- DEP-0001 is a *draft* proposal, but the lifecycle enum itself is settled — the
+  render layer implements exactly this set. Phrase advice as that model and
+  point to `docs/proposals/0001-dep-process.mdx` for the full specification.

@@ -124,12 +124,12 @@ test("Deferred → muted", () => {
   assert.equal(variant("Deferred"), "muted");
 });
 
-test("Implemented → draft (documented parity with DepMetadata.statusVariant)", () => {
-  // DepMetadata.statusVariant() has no /implement/ branch, so "Implemented"
-  // falls through to the default `draft` (amber) bucket. Do NOT change one
-  // side without changing the other — the sidebar pill and the on-page pill
-  // MUST render identically or the two pills disagree for the same DEP.
-  assert.equal(variant("Implemented"), "draft");
+test("Implemented → accepted (via /implement/)", () => {
+  // An Implemented DEP is a ratified, shipped decision — it renders the
+  // accepted (green) pill, NOT a draft (amber) one. This branch MUST stay
+  // identical to DepMetadata.statusVariant(): change one, change the other,
+  // or the sidebar pill and the on-page pill disagree for the same DEP.
+  assert.equal(variant("Implemented"), "accepted");
 });
 
 test("unknown status → draft (default)", () => {

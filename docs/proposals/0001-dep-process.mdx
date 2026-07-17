@@ -147,7 +147,7 @@ The split is deliberate. Linear gives NVIDIANs a repo-agnostic execution rollup,
 
 ### DEP Lifecycle
 
-The lifecycle below is the proposed model, shown as an example. Exact state names get finalized during DEP review — the current dynamo docs README banner uses a slightly different enum ("Approved", and no "Implemented" state) that we would reconcile. As proposed, a DEP moves through these states, and the banner and the `status` header carry the current one:
+The lifecycle below is the model the render layer implements today; the process around it is still under DEP review. The state names are standardized to this set and the docs README banner convention now matches it. A DEP moves through these states, and the banner and the `status` header carry the current one:
 
 * **Draft.** Opened as a PR to `ai-dynamo/enhancements`. Shape is under discussion. The PR may merge early so the DEP is discoverable and rendered; merging as Draft does not imply acceptance.
 * **Under Review.** The author requests a decision. The owning SIG's approvers engage on the PR (line-level) and the tracking issue (design).
@@ -171,24 +171,29 @@ How a DEP would be opened, discussed, accepted, and rendered, as proposed:
 
 ### Front-Matter Specification
 
-Each DEP would carry front-matter like the example below. The keys are proposed and match the docs-site template so a DEP stays portable between the repository and the rendered page; the final set gets settled in review.
+DEP metadata is serialized in two layers — one per home — each using the convention native to that home. Authors edit only the source layer; the render layer derives the rest from it.
 
-| Key | Meaning |
+* **Source markdown, in `ai-dynamo/enhancements`.** The DEP opens with a `**Key**: Value` metadata block — the KEP-style bold-key convention the enhancements repository already uses, *not* YAML front-matter. `fern/scripts/sync_deps.py` (`parse_dep_source`) reads that block.
+* **Rendered page, on the docs site.** The generated MDX carries YAML front-matter for only the keys Fern itself consumes — `title`, `subtitle`, `pr`, and `tracking-issue` — and passes the remaining metadata to the `<DepMetadata>` card as component props. `sync_deps.py` maps each source bold-key to its prop (`Owning SIG` → `owningSig`, `Review Date` → `reviewDate`, and so on).
+
+So a DEP does not carry loose YAML keys like `number:` or `status:` in its source; those live in the bold-key block on the source and become front-matter or `<DepMetadata>` props only on the rendered page. The DEP number and title come from the source H1 (`# DEP-NNNN: Title`) and the filename; on the rendered page the number is the card's `dep` prop and the title is the front-matter `title` (the page H1). The metadata fields, identical on both layers, are:
+
+| DEP metadata field | Meaning |
 | :--- | :--- |
-| `number` | DEP number, zero-padded to four digits (`0001`). |
-| `title` | Full title, prefixed with the DEP number on the rendered page. |
-| `status` | One of Draft, Under Review, Accepted, Rejected, Deferred, Implemented, Replaced. |
-| `category` | Architecture, Process, or a category the maintainers add. |
-| `owning-sig` | The SIG that owns the DEP. Mirrors Kubernetes' `owning-sig`. |
-| `participating-sigs` | Other SIGs involved or impacted (optional). Mirrors Kubernetes' `participating-sigs`. |
-| `authors` | Author name or team. |
-| `sponsor` | The owning SIG, or a maintainer shepherding on its behalf. |
-| `required-reviewers` | The owning SIG's approvers (chairs or technical leads). |
-| `review-date` | Target date for the decision. |
-| `tracking-issue` | URL of the anchor issue in `ai-dynamo/enhancements`. |
-| `pr` | The pull request that adds or edits the DEP. Drives the inline review and revision mirror. |
+| Status | One of Draft, Under Review, Accepted, Rejected, Deferred, Implemented, Replaced. |
+| Category | Architecture, Process, or a category the maintainers add. |
+| Owning SIG | The SIG that owns the DEP. Mirrors Kubernetes' `owning-sig`. |
+| Participating SIGs | Other SIGs involved or impacted (optional). Mirrors Kubernetes' `participating-sigs`. |
+| Authors | Author name or team. |
+| Sponsor | The owning SIG, or a maintainer shepherding on its behalf. |
+| Required Reviewers | The owning SIG's approvers (chairs or technical leads). |
+| Review Date | Target date for the decision. |
+| Replaces | The earlier DEP this one supersedes. Backs the Replaced lifecycle state. |
+| Replaced By | The later DEP that supersedes this one. Backs the Replaced lifecycle state. |
+| Tracking Issue | The anchor issue in `ai-dynamo/enhancements`. |
+| PR | The pull request that adds or edits the DEP. Drives the inline review and revision mirror. |
 
-As proposed, the `status` value maps to the docs-site banner: Draft to a warning callout, Under Review to an info callout, Accepted or Implemented to a note callout, and Rejected, Deferred, or Replaced to an error callout. Keep the `status` header and the banner in sync.
+The `status` value maps to the docs-site banner: Draft to a warning callout, Under Review to an info callout, Accepted or Implemented to a note callout, and Rejected, Deferred, or Replaced to an error callout. Keep the `**Status**` field and the banner in sync.
 
 ## Implementation Details
 
@@ -276,7 +281,7 @@ The phase breakdown below is proposed, not committed. Release targets and work i
 These are open for DEP review to settle. This proposal does not decide them.
 
 * **Relationship to `deps/0000-dep-process.md`.** `ai-dynamo/enhancements` already holds an approved `0000-dep-process`. Whether DEP-0001 extends and formalizes it, or supersedes it, is undecided here. The review picks one.
-* **Lifecycle state names.** The proposed states (Draft, Under Review, Accepted, Rejected, Deferred, Implemented, Replaced) need reconciling with the current dynamo docs README banner enum, which differs.
+* **Lifecycle state names.** Settled. The enum is standardized to Draft, Under Review, Accepted, Rejected, Deferred, Implemented, Replaced. The render layer (the `DepMetadata` card and the sidebar status pill) implements exactly this set, and the docs README banner convention now matches it, so the earlier README-vs-DEP-0001 mismatch is reconciled. Recorded here only to note that it is no longer open.
 * **Front-matter keys and roles.** The proposed front-matter and reviewer roles are a starting point, not a fixed schema.
 * **Phase plan.** The phases, targets, and effort estimates are illustrative and get set during review.
 * **SIG rollout dependency.** DEP-0001 references SIGs as the ownership layer but does not define them. Standing up SIGs — their names, chairs, and scope — is a separate governance effort this process depends on.

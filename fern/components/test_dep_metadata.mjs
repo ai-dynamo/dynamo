@@ -56,6 +56,7 @@ function extractFn(name) {
 }
 
 const parseLinkedItems = extractFn("parseLinkedItems");
+const statusVariant = extractFn("statusVariant");
 
 let passes = 0;
 let fails = 0;
@@ -146,6 +147,56 @@ test("empty commas do not produce empty entries", () => {
 test("null/undefined returns empty array (component-may-omit-value case)", () => {
   assert.deepEqual(parseLinkedItems(undefined), []);
   assert.deepEqual(parseLinkedItems(null), []);
+});
+
+console.log("");
+console.log(
+  "statusVariant() — maps a lifecycle status to a pill color; MUST mirror variant() in fern/js/dep-status-pills.js",
+);
+
+test("Draft → draft (amber, the default lifecycle state)", () => {
+  assert.equal(statusVariant("Draft"), "draft");
+});
+
+test("Under Review → proposed (blue, via /review/)", () => {
+  assert.equal(statusVariant("Under Review"), "proposed");
+});
+
+test("Accepted → accepted (green)", () => {
+  assert.equal(statusVariant("Accepted"), "accepted");
+});
+
+test("Implemented → accepted (green, via /implement/)", () => {
+  // An Implemented DEP is a ratified, shipped decision — it renders the
+  // accepted (green) pill, not the draft (amber) fallback. This branch MUST
+  // stay identical to variant() in fern/js/dep-status-pills.js.
+  assert.equal(statusVariant("Implemented"), "accepted");
+});
+
+test("Rejected → rejected (red)", () => {
+  assert.equal(statusVariant("Rejected"), "rejected");
+});
+
+test("Deferred → muted (gray)", () => {
+  assert.equal(statusVariant("Deferred"), "muted");
+});
+
+test("Replaced → muted (gray)", () => {
+  assert.equal(statusVariant("Replaced"), "muted");
+});
+
+test("legacy synonyms still color correctly (Proposed/Approved)", () => {
+  // The canonical enum drops "Proposed"/"Approved", but the matcher stays
+  // tolerant so any DEP still carrying the old label renders the right color.
+  assert.equal(statusVariant("Proposed"), "proposed");
+  assert.equal(statusVariant("Approved"), "accepted");
+});
+
+test("unknown / empty status → draft (default)", () => {
+  assert.equal(statusVariant("Whatever"), "draft");
+  assert.equal(statusVariant(""), "draft");
+  assert.equal(statusVariant(null), "draft");
+  assert.equal(statusVariant(undefined), "draft");
 });
 
 console.log(`\n${passes} passed, ${fails} failed`);
