@@ -3,9 +3,10 @@
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
-    DisaggregationMode, DynamoError, GenerateContext, GrpcTransportConfig, LLMEngine,
-    LLMEngineOutput, LLMEngineOutputExt, WorkerConfig, normalize_grpc_endpoint, usage,
+    DisaggregationMode, DynamoError, GenerateContext, LLMEngine, LLMEngineOutput,
+    LLMEngineOutputExt, WorkerConfig, usage,
 };
+use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use futures::stream::BoxStream;
 use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
@@ -16,7 +17,7 @@ use crate::convert::{ResponseState, build_generate_request};
 use crate::model::ConfiguredModel;
 
 pub struct VllmSidecarEngine {
-    endpoint: String,
+    endpoint: GrpcEndpoint,
     model: ConfiguredModel,
     mode: DisaggregationMode,
     transport: GrpcTransportConfig,
@@ -33,7 +34,7 @@ fn cancelled(state: &ResponseState) -> LLMEngineOutput {
 
 impl VllmSidecarEngine {
     pub(crate) fn new(
-        endpoint: String,
+        endpoint: GrpcEndpoint,
         model: ConfiguredModel,
         mode: DisaggregationMode,
         transport: GrpcTransportConfig,
@@ -75,44 +76,46 @@ impl VllmSidecarEngine {
         if args.model_path.trim().is_empty() {
             return Err(client::invalid_argument("model-path must not be empty"));
         }
-        if args.common.disaggregation_mode.is_encode() {
+        if args.sidecar.common.disaggregation_mode.is_encode() {
             return Err(client::invalid_argument(
                 "encode mode is not supported by the vLLM sidecar",
             ));
         }
-        if args.common.route_to_encoder {
+        if args.sidecar.common.route_to_encoder {
             return Err(client::invalid_argument(
                 "route-to-encoder is not supported by the vLLM sidecar",
             ));
         }
 
-        let endpoint = normalize_grpc_endpoint(&args.vllm_endpoint, "--vllm-endpoint")
-            .map_err(client::invalid_argument)?;
-        let transport = args.common.grpc_transport_config();
+        let endpoint = GrpcEndpoint::parse(&args.vllm_endpoint, "--vllm-endpoint")?;
+        let transport = args.sidecar.grpc.config();
         let model = ConfiguredModel {
             source: args.model_path,
         };
-        let mode = args.common.disaggregation_mode;
+        let mode = args.sidecar.common.disaggregation_mode;
         let engine = Self::new(endpoint, model.clone(), mode, transport);
         let (tool_call_parser, reasoning_parser) = if mode.is_prefill() {
             (None, None)
         } else {
             (
-                args.common.dyn_tool_call_parser,
-                args.common.dyn_reasoning_parser,
+                args.sidecar.common.dyn_tool_call_parser,
+                args.sidecar.common.dyn_reasoning_parser,
             )
         };
         let config = WorkerConfig {
-            namespace: args.common.namespace,
-            component: args.common.component,
-            endpoint: args.common.endpoint,
-            endpoint_types: args.common.endpoint_types,
-            custom_jinja_template: args.common.custom_jinja_template,
+            namespace: args.sidecar.common.namespace,
+            component: args.sidecar.common.component,
+            endpoint: args.sidecar.common.endpoint,
+            endpoint_types: args.sidecar.common.endpoint_types,
+            custom_jinja_template: args.sidecar.common.custom_jinja_template,
             model_name: model.source.clone(),
             served_model_name: None,
             tool_call_parser,
             reasoning_parser,
-            exclude_tools_when_tool_choice_none: args.common.exclude_tools_when_tool_choice_none,
+            exclude_tools_when_tool_choice_none: args
+                .sidecar
+                .common
+                .exclude_tools_when_tool_choice_none,
             enable_kv_routing: false,
             disaggregation_mode: mode,
             route_to_encoder: false,

@@ -2384,7 +2384,6 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
- "url",
 ]
 
 [[package]]
@@ -2906,6 +2905,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-sidecar-common"
+version = "1.3.0"
+dependencies = [
+ "clap",
+ "dynamo-backend-common",
+ "futures",
+ "tokio",
+ "tonic 0.13.1",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "dynamo-tokenizers"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2982,6 +2994,7 @@ dependencies = [
  "async-trait",
  "clap",
  "dynamo-backend-common",
+ "dynamo-sidecar-common",
  "futures",
  "prost 0.13.5",
  "prost-types 0.13.5",

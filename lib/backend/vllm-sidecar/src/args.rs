@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_backend_common::CommonArgs;
+use dynamo_sidecar_common::SidecarArgs;
 
 #[derive(clap::Parser, Clone, Debug)]
 #[command(
@@ -10,7 +10,7 @@ use dynamo_backend_common::CommonArgs;
 )]
 pub(crate) struct Args {
     #[command(flatten)]
-    pub common: CommonArgs,
+    pub sidecar: SidecarArgs,
 
     /// vLLM gRPC endpoint as host:port or an http:// URL.
     #[arg(long, env = "VLLM_GRPC_ENDPOINT")]
