@@ -604,6 +604,7 @@
 /lib/llm/src/request_trace/                                                  @ai-dynamo/dynamo-agents-codeowners @ai-dynamo/dynamo-observability-codeowners
 /lib/mocker/src/kv_manager/                                                  @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/runtime/src/logging.rs                                                  @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
+/lib/backend/sidecar-common/                                                 @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners
 /benchmarks/multimodal/image/                                                @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/multimodal/sweep/                                                @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-performance-codeowners
 /lib/llm/src/fpm_publisher.rs                                                @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners

@@ -553,6 +553,11 @@ areas:
   - tests/serve/multimodal_profiles/vllm_xpu.py
   - tests/serve/test_vllm_xpu.py
 shared:
+- glob: lib/backend/sidecar-common/
+  owners:
+  - backend-vllm
+  - backend-sglang
+  - backend-trtllm
 - glob: components/src/dynamo/thunderagent_router/
   owners:
   - router
