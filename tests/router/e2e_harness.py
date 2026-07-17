@@ -393,8 +393,8 @@ def run_indexers_sync_test(
     request,
     runtime_services_dynamic_ports,
     store_backend: str,
-    durable_kv_events: bool,
     request_plane: str,
+    event_plane: str,
     block_size: int,
     model_name: str,
     num_workers: int,
@@ -403,6 +403,7 @@ def run_indexers_sync_test(
 ):
     nats_process, _etcd_process = runtime_services_dynamic_ports
     process_kwargs = extra_process_kwargs or {}
+    test_nats_interruption = request_plane == "tcp" and event_plane == "nats"
 
     process = _create_engine_process(
         engine_process_cls=engine_process_cls,
@@ -414,7 +415,6 @@ def run_indexers_sync_test(
             "num_workers": num_workers,
             "single_gpu": True,
             "store_backend": store_backend,
-            "durable_kv_events": durable_kv_events,
             **process_kwargs,
         },
         engine_process_kwargs=engine_process_kwargs,
@@ -427,9 +427,9 @@ def run_indexers_sync_test(
             num_workers=num_workers,
             store_backend=store_backend,
             request_plane=request_plane,
-            test_nats_interruption=not durable_kv_events,
-            nats_server=nats_process if not durable_kv_events else None,
-            durable_kv_events=durable_kv_events,
+            event_plane=event_plane,
+            test_nats_interruption=test_nats_interruption,
+            nats_server=nats_process if test_nats_interruption else None,
             standalone_indexer_url=getattr(
                 engine_workers, "standalone_indexer_url", None
             ),

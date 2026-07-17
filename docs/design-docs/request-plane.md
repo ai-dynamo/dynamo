@@ -34,9 +34,9 @@ Dynamo has **two independent communication planes**:
 Because they are independent, you can mix them.
 
 For example, a deployment with TCP request plane can use different KV event planes:
-- **JetStream KV events**: requests use TCP, KV routing still uses NATS JetStream + object store for persistence.
 - **NATS Core KV events (local indexer)**: requests use TCP, KV events use NATS Core pub/sub and persistence lives on workers.
-- **no KV events**: requests use TCP and KV routing runs without events (no NATS required, but no event-backed persistence).
+- **ZMQ KV events (local indexer)**: requests use TCP, KV events use direct ZMQ pub/sub, and persistence lives on workers.
+- **No KV events**: requests use TCP and KV routing predicts cache state from routing decisions.
 
 ## Configuration
 
@@ -101,7 +101,7 @@ Additional TCP-specific environment variables:
 
 ### Using NATS
 
-NATS provides durable jetstream messaging for request plane and can be used for KV events (and router replica sync).
+NATS provides a brokered request plane and can also carry KV events and router replica synchronization over NATS Core.
 
 **Prerequisites:**
 - NATS server must be running and accessible
@@ -119,7 +119,7 @@ DYN_REQUEST_PLANE=nats python -m dynamo.vllm --model Qwen/Qwen3-0.6B
 **When to use NATS:**
 - Production deployments with service discovery
 - Event-backed KV-aware routing when using NATS as the event transport. Note: ZMQ event transport and approximate mode (`--no-router-kv-events`) both provide KV routing without NATS, with approximate mode using predicted cache state.
-- Need for message replay and persistence features
+- Environments where brokered request routing is preferred
 
 Limitations:
 - NATS does not support payloads beyond 16MB (use TCP for larger payloads)
@@ -230,7 +230,7 @@ curl http://localhost:8000/v1/chat/completions \
 ### Latency
 
 - **TCP**: Lowest latency due to direct connections and binary serialization
-- **NATS**: Moderate latency due to nats jet stream persistence
+- **NATS**: Additional broker-hop latency
 
 
 ### Resource Usage

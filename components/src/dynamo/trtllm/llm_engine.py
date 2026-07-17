@@ -142,6 +142,7 @@ class TrtllmLLMEngine(LLMEngine):
         disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED,
         component: str = "backend",
         publish_events_and_metrics: bool = False,
+        conversation_affinity: bool = False,
     ):
         self.engine_args = engine_args
         self.model_name = model_name
@@ -195,6 +196,9 @@ class TrtllmLLMEngine(LLMEngine):
         # Default False so generate() is safe if reached before initialize()
         # (e.g. unit tests that drive generate directly).
         self._conversation_affinity: bool = False
+        # Manual override (--conversation-affinity / DYN_ENGINE_CONV_AFFINITY) to force
+        # engine-side conversation-affinity assignment regardless of engine detection.
+        self._engine_conversation_affinity_override: bool = conversation_affinity
         # Worker invokes on_ready callbacks serially during setup (see
         # `setup_kv_publishers` in lib/backend-common/src/publisher.rs); the
         # dict is fully populated before `_kv_events_thread` starts and
@@ -330,6 +334,7 @@ class TrtllmLLMEngine(LLMEngine):
             disaggregation_mode=config.disaggregation_mode,
             component=config.component,
             publish_events_and_metrics=config.publish_events_and_metrics,
+            conversation_affinity=config.conversation_affinity,
         )
         worker_config = WorkerConfig.from_runtime_config(
             config,
@@ -879,8 +884,24 @@ class TrtllmLLMEngine(LLMEngine):
         # the engine side (always record the binding, whether the rank came
         # from explicit placement or fresh selection). Track upstream and drop
         # this note when the router records unconditionally.
+        # Force engine-side conversation-affinity assignment when the operator set
+        # --conversation-affinity / DYN_ENGINE_CONV_AFFINITY, even if the engine did
+        # not advertise the capability at initialize() time. Mirrors the legacy
+        # HandlerBase path so both entry points behave identically.
+        conv_affinity = (
+            self._conversation_affinity or self._engine_conversation_affinity_override
+        )
+        if (
+            self._engine_conversation_affinity_override
+            and not CONVERSATION_PARAMS_AVAILABLE
+        ):
+            raise RuntimeError(
+                "--conversation-affinity / DYN_ENGINE_CONV_AFFINITY is set but "
+                "the installed TensorRT-LLM build has no ConversationParams API (requires a "
+                "release newer than 1.3.0rc20)."
+            )
         conversation_params = None
-        if self._conversation_affinity:
+        if conv_affinity:
             scheduling_params = None
             conversation_params = conversation_params_for(
                 session_id_from_request(request)
@@ -908,9 +929,7 @@ class TrtllmLLMEngine(LLMEngine):
         # Only pass conversation_params when affinity is active — older TRT-LLM builds'
         # generate_async does not accept the keyword.
         conv_kwargs = (
-            {"conversation_params": conversation_params}
-            if self._conversation_affinity
-            else {}
+            {"conversation_params": conversation_params} if conv_affinity else {}
         )
         generation_result = self._engine.llm.generate_async(
             inputs=token_ids,

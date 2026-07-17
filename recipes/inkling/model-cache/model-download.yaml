@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: inkling-model-download
+spec:
+  backoffLimit: 3
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: inkling-model-download
+    spec:
+      restartPolicy: Never
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      containers:
+        - name: model-download
+          image: python:3.10-slim
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          command: ["sh", "-c"]
+          envFrom:
+            - secretRef:
+                name: hf-token-secret
+          env:
+            - name: HF_HOME
+              value: /tmp/hf-home
+            - name: HF_XET_HIGH_PERFORMANCE
+              value: "1"
+          resources:
+            requests:
+              cpu: "8"
+              memory: "24Gi"
+          args:
+            - |
+              set -eux
+              pip install --no-cache-dir huggingface_hub==1.16.4
+              hf download thinkingmachines/Inkling-NVFP4 --local-dir /model-cache/thinkingmachines/Inkling-NVFP4
+          volumeMounts:
+            - name: model-cache
+              mountPath: /model-cache
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          # Edit this if your cluster provides a shared RWX model PVC
+          claimName: model-cache
