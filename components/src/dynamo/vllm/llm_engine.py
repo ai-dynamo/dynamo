@@ -420,6 +420,7 @@ class VllmLLMEngine(LLMEngine):
             raise RuntimeError("Engine not initialized")
         if self._default_sampling_params is None:
             raise RuntimeError("Engine not initialized")
+        engine_client = self.engine_client
 
         request_id = context.id()
 
@@ -515,14 +516,14 @@ class VllmLLMEngine(LLMEngine):
 
         gen = self._generate_with_lora_admission_lock(
             lora_request,
-            lambda admitted_lora_request: self.engine_client.generate(
+            lambda admitted_lora_request: engine_client.generate(
                 prompt,
                 sampling_params,
                 request_id,
                 data_parallel_rank=local_dp_rank,
                 lora_request=admitted_lora_request,
                 **_engine_generate_reasoning_kwargs(
-                    self.engine_client,
+                    engine_client,
                     reasoning_ended,
                     reasoning_parser_kwargs,
                 ),

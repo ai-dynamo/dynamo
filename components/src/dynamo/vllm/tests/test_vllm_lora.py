@@ -821,6 +821,7 @@ async def test_prefill_unload_removes_request_activated_adapter(monkeypatch):
     engine.disaggregation_mode = DisaggregationMode.PREFILL
     _, unregister = _patch_discovery(monkeypatch)
     engine.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    engine._published_loras = {"adapterA"}
     engine._track_lora_request_activation(engine._resolve_lora_request("adapterA"))
 
     result = await engine.unload_lora({"lora_name": "adapterA"})
@@ -836,6 +837,7 @@ async def test_prefill_unload_treats_missing_request_adapter_as_idempotent(monke
     engine.disaggregation_mode = DisaggregationMode.PREFILL
     _, unregister = _patch_discovery(monkeypatch)
     engine.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    engine._published_loras = {"adapterA"}
     engine._engine_loaded_loras = {"adapterA"}
     engine.engine_client.remove_lora.side_effect = RuntimeError("adapter not found")
 
