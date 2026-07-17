@@ -24,6 +24,13 @@ pub struct VllmSidecarEngine {
     cancel: CancellationToken,
 }
 
+fn cancelled(state: &ResponseState) -> LLMEngineOutput {
+    LLMEngineOutput::cancelled().with_usage(usage(
+        state.prompt_tokens(),
+        state.reported_completion_tokens(),
+    ))
+}
+
 impl VllmSidecarEngine {
     pub(crate) fn new(
         endpoint: String,
@@ -159,7 +166,7 @@ impl LLMEngine for VllmSidecarEngine {
         let proto_request = build_generate_request(request, request_id, self.mode)?;
         let stopped_ctx = ctx.inner_arc();
         let shutdown = self.cancel.clone();
-        let mut cancelled = Box::pin(async move {
+        let mut cancellation = Box::pin(async move {
             tokio::select! {
                 _ = stopped_ctx.stopped() => {}
                 _ = shutdown.cancelled() => {}
@@ -167,14 +174,11 @@ impl LLMEngine for VllmSidecarEngine {
         });
         let stream = tokio::select! {
             biased;
-            _ = cancelled.as_mut() => None,
+            _ = cancellation.as_mut() => None,
             result = client.generate_stream(proto_request) => Some(result?),
         };
         let Some(mut stream) = stream else {
-            let output = LLMEngineOutput::cancelled().with_usage(usage(
-                state.prompt_tokens(),
-                state.reported_completion_tokens(),
-            ));
+            let output = cancelled(&state);
             return Ok(Box::pin(futures::stream::once(async move { Ok(output) })));
         };
 
@@ -182,11 +186,8 @@ impl LLMEngine for VllmSidecarEngine {
             loop {
                 tokio::select! {
                     biased;
-                    _ = cancelled.as_mut() => {
-                        yield Ok(LLMEngineOutput::cancelled().with_usage(usage(
-                            state.prompt_tokens(),
-                            state.reported_completion_tokens(),
-                        )));
+                    _ = cancellation.as_mut() => {
+                        yield Ok(cancelled(&state));
                         break;
                     }
                     message = stream.message() => {
