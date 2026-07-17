@@ -4,7 +4,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use dynamo_tokens::SequenceHash;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
@@ -12,6 +11,7 @@ use super::config::RouterConfigOverride;
 use super::filter::RoutingEligibility;
 use super::overlap::{OverlapSignals, SelectedWorkerTierSnapshot};
 use super::prefill_load::effective_prefill_tokens;
+use crate::active_sequence::TrackedSequenceHashes;
 pub use crate::protocols::PotentialLoad;
 use crate::protocols::{
     LocalBlockHash, RoutingConstraints, SharedCacheHits, WorkerConfigLike, WorkerId,
@@ -154,7 +154,7 @@ impl ScheduleMode {
 /// Validated request accepted by [`LocalScheduler`](super::LocalScheduler).
 pub struct ScheduleRequest {
     pub mode: ScheduleMode,
-    pub token_seq: Option<Vec<SequenceHash>>,
+    pub token_seq: Option<TrackedSequenceHashes>,
     pub block_hashes: Option<Vec<LocalBlockHash>>,
     pub isl_tokens: usize,
     pub lora_name: Option<String>,
@@ -179,7 +179,7 @@ pub struct ScheduleRequest {
 pub struct SchedulingRequest {
     // Request identity and payload.
     pub mode: ScheduleMode,
-    pub token_seq: Option<Vec<SequenceHash>>,
+    pub token_seq: Option<TrackedSequenceHashes>,
     pub isl_tokens: usize,
     pub lora_name: Option<String>,
     pub expected_output_tokens: Option<u32>,

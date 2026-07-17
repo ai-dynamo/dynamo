@@ -737,7 +737,13 @@ pub unsafe extern "C" fn create_routers(
             );
         }
 
-        let mut kv_router_config = kv_router_config_from_dynamo_env();
+        let mut kv_router_config = match kv_router_config_from_dynamo_env() {
+            Ok(config) => config,
+            Err(error) => {
+                tracing::error!(%error, "Invalid KV router environment configuration");
+                return Err(QueryRouterResult::ErrInitFailed);
+            }
+        };
         kv_router_config.skip_initial_worker_wait = true;
 
         // Build endpoint using the actual namespace discovered from workers,

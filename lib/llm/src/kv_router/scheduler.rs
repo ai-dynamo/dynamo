@@ -21,13 +21,12 @@ use crate::discovery::RuntimeConfigWatch;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use anyhow::Result;
 use dynamo_kv_router::{
-    PrefillLoadEstimator,
+    PrefillLoadEstimator, TrackedSequenceHashes,
     config::{KvRouterConfig, RouterConfigOverride},
     protocols::{RoutingConstraints, WorkerId, WorkerWithDpRank},
 };
 use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
-use dynamo_tokens::SequenceHash;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -100,14 +99,19 @@ where
             workers_with_configs.borrow().clone();
 
         let router_id = component.drt().discovery().instance_id();
+        let tracker_options = super::sequence::SequenceTrackerOptions {
+            replica_sync: kv_router_config.router_replica_sync,
+            active_sequence_stride: kv_router_config.router_active_sequence_stride,
+            ..Default::default()
+        };
         let slots = create_multi_worker_sequences(
             component.clone(),
             block_size as usize,
             initial_workers,
-            kv_router_config.router_replica_sync,
             router_id,
             worker_type,
             cancellation_token.child_token(),
+            tracker_options,
         )
         .await
         .map_err(|e| KvSchedulerError::InitFailed(e.to_string()))?;
@@ -203,7 +207,7 @@ where
         &self,
         maybe_request_id: Option<String>,
         isl_tokens: usize,
-        token_seq: Option<Vec<SequenceHash>>,
+        token_seq: Option<TrackedSequenceHashes>,
         tier_overlap_blocks: TierOverlapBlocks,
         effective_overlap_blocks: HashMap<dynamo_kv_router::protocols::WorkerWithDpRank, f64>,
         effective_cached_tokens: HashMap<dynamo_kv_router::protocols::WorkerWithDpRank, usize>,
@@ -248,7 +252,7 @@ where
         &self,
         maybe_request_id: Option<String>,
         isl_tokens: usize,
-        token_seq: Option<Vec<SequenceHash>>,
+        token_seq: Option<TrackedSequenceHashes>,
         block_hashes: Option<Vec<LocalBlockHash>>,
         tier_overlap_blocks: TierOverlapBlocks,
         effective_overlap_blocks: HashMap<dynamo_kv_router::protocols::WorkerWithDpRank, f64>,
@@ -292,7 +296,7 @@ where
         &self,
         maybe_request_id: Option<String>,
         isl_tokens: usize,
-        token_seq: Option<Vec<SequenceHash>>,
+        token_seq: Option<TrackedSequenceHashes>,
         block_hashes: Option<Vec<LocalBlockHash>>,
         tier_overlap_blocks: TierOverlapBlocks,
         effective_overlap_blocks: HashMap<dynamo_kv_router::protocols::WorkerWithDpRank, f64>,
@@ -404,7 +408,7 @@ where
 
     pub fn get_potential_loads(
         &self,
-        token_seq: Option<Vec<SequenceHash>>,
+        token_seq: Option<TrackedSequenceHashes>,
         isl_tokens: usize,
         effective_cached_tokens: HashMap<dynamo_kv_router::protocols::WorkerWithDpRank, usize>,
         track_prefill_tokens: bool,

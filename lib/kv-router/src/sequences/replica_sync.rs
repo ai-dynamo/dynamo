@@ -13,6 +13,7 @@ use super::multi_worker::{
     ActiveSequencesMultiWorker, ReplicaWorkerPolicy, SequencePublisher, SequenceSubscriber,
 };
 use super::prompt_registry::WorkerLoadSnapshot;
+use crate::active_sequence::TrackedSequenceHashes;
 use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData, WorkerWithDpRank};
 
 const MAX_REPLICA_BATCH_EVENTS: usize = 256;
@@ -146,17 +147,45 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     }
 
     fn apply_replica_event(&self, event: ActiveSequenceEvent, effects: &mut ReplicaBatchEffects) {
+        if event.router_id == self.router_id {
+            return;
+        }
+
+        let received_stride = event.normalized_stride();
+        if received_stride != Ok(self.active_sequence_stride) {
+            if self
+                .warned_replica_stride_mismatches
+                .lock()
+                .insert((event.router_id, received_stride))
+            {
+                let received_stride_label = received_stride
+                    .map(|stride| stride.to_string())
+                    .unwrap_or_else(|_| "malformed".to_string());
+                tracing::warn!(
+                    source_router_id = event.router_id,
+                    request_id = %event.request_id,
+                    expected_stride = %self.active_sequence_stride,
+                    received_stride = %received_stride_label,
+                    "Dropping active-sequence replica event with incompatible stride"
+                );
+            }
+            self.publisher.observe_replica_stride_mismatch(
+                self.active_sequence_stride,
+                received_stride,
+                self.worker_type(),
+            );
+            return;
+        }
+
         let ActiveSequenceEvent {
             request_id,
             worker: event_worker,
             data,
             router_id,
+            stride: _,
             lora_name,
         } = event;
-
-        if router_id == self.router_id {
-            return;
-        }
+        debug_assert_ne!(router_id, self.router_id);
 
         // ActiveSequenceEvent does not carry prompt-load decay timestamps yet.
         // Peer routers still approximate decay anchoring with local receive time.
@@ -169,6 +198,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 expected_output_tokens,
                 prefill_load_hint,
             } => {
+                let token_sequence =
+                    token_sequence.map(TrackedSequenceHashes::from_validated_event);
                 if self.replica_worker_policy == ReplicaWorkerPolicy::LazyRegister {
                     self.ensure_worker_registered(event_worker);
                 }

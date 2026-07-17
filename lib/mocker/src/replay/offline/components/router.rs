@@ -20,9 +20,9 @@ use dynamo_kv_router::scheduling::{
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::{
     ActiveSequencesMultiWorker, DefaultWorkerSelector, RadixTree, SchedulingRequest,
-    SequenceRequest, WorkerLoadProjection, WorkerSelector, scheduling::TierOverlapBlocks,
+    SequenceRequest, TrackedSequenceHashes, WorkerLoadProjection, WorkerSelector,
+    scheduling::TierOverlapBlocks,
 };
-use dynamo_tokens::SequenceHash;
 use rustc_hash::FxHashMap;
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -127,7 +127,7 @@ impl SyncReplayIndexer {
 
 struct PendingRequest {
     uuid: Uuid,
-    token_seq: Option<Vec<SequenceHash>>,
+    token_seq: Option<TrackedSequenceHashes>,
     isl_tokens: usize,
     overlaps: OverlapScores,
     track_prefill_tokens: bool,
@@ -214,7 +214,11 @@ impl OfflineReplayRouter {
         let config = replay_router_config(args, router_config);
         let worker_config_template = replay_worker_config(args);
         let workers_with_configs = replay_workers_with_configs(args, num_workers);
-        let slots = replay_slots(args, &workers_with_configs);
+        let slots = replay_slots(
+            args,
+            &workers_with_configs,
+            config.router_active_sequence_stride,
+        );
         let selector = replay_selector(&config);
         let profile = config
             .configured_policy_profile()
@@ -494,22 +498,16 @@ impl OfflineReplayRouter {
         let (priority_jump, strict_priority) = request.router_priorities();
         let (overlaps, token_seq) = match replay_hashes {
             Some(replay_hashes) => {
+                let token_seq = self.config.compute_seq_hashes_for_tracking(
+                    &request.tokens,
+                    self.block_size,
+                    None,
+                    BlockHashOptions::default(),
+                    Some(&replay_hashes.local_block_hashes),
+                );
                 let overlaps = self
                     .indexer
                     .find_matches_for_hashes(replay_hashes.local_block_hashes);
-                let token_seq = if !self.config.router_track_active_blocks {
-                    None
-                } else if self.config.router_assume_kv_reuse {
-                    Some(replay_hashes.sequence_hashes)
-                } else {
-                    self.config.compute_seq_hashes_for_tracking(
-                        &request.tokens,
-                        self.block_size,
-                        None,
-                        BlockHashOptions::default(),
-                        None,
-                    )
-                };
                 (overlaps, token_seq)
             }
             None => {
@@ -549,7 +547,7 @@ impl OfflineReplayRouter {
     ) -> Result<AdmitOutcome> {
         let worker_loads = self
             .slots
-            .project_worker_loads(request.token_seq.as_deref(), decay_now);
+            .project_worker_loads(request.token_seq.as_ref(), decay_now);
         let scheduling_request = request.scheduling_request(self.block_size as usize, worker_loads);
         let eligibility = scheduling_request.eligibility();
         let selection = self.selector.select_worker(
@@ -703,12 +701,13 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use dynamo_kv_router::PrefillLoadEstimator;
     use dynamo_kv_router::config::{KvRouterConfig, RouterPrefillLoadModel, RouterQueuePolicy};
     use dynamo_kv_router::protocols::{
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
         KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier, WorkerId,
+        WorkerWithDpRank,
     };
+    use dynamo_kv_router::{ActiveSequenceStride, PrefillLoadEstimator, PrefillTokenDeltas};
     use rustc_hash::FxHashMap;
     use uuid::Uuid;
 
@@ -839,6 +838,38 @@ mod tests {
         let scheduling_request = pending.scheduling_request(64, FxHashMap::default());
 
         assert_eq!(scheduling_request.session_id.as_deref(), Some("session-a"));
+    }
+
+    #[test]
+    fn sparse_replay_corrects_active_and_potential_decode_blocks() {
+        let config = KvRouterConfig {
+            router_active_sequence_stride: ActiveSequenceStride::new(3).unwrap(),
+            ..Default::default()
+        };
+        let mut router = OfflineReplayRouter::new(&replay_args(), Some(config), None, 1).unwrap();
+        let first = request_with_priorities(1, 7, 10 * 64, 0, 0);
+        let first_hashes = ReplayRequestHashes::from_tokens(&first.tokens, router.block_size);
+
+        router
+            .on_request_arrival(&first, Some(first_hashes), 0.0)
+            .unwrap();
+        assert_eq!(
+            router.debug_snapshot(0.0).active_blocks_by_worker,
+            vec![(0, 9)]
+        );
+
+        let second = request_with_priorities(2, 8, 10 * 64, 0, 0);
+        let second_hashes = ReplayRequestHashes::from_tokens(&second.tokens, router.block_size);
+        let second_pending = router
+            .build_pending_request(&second, Some(second_hashes), None)
+            .unwrap();
+        let second_sequence = second_pending.token_seq.unwrap();
+        assert_eq!(second_sequence.len(), 3);
+        let (potential_blocks, _, _) = router.slots.potential_blocks_and_tokens::<false>(
+            Some(&second_sequence),
+            &PrefillTokenDeltas::none(),
+        );
+        assert_eq!(potential_blocks[&WorkerWithDpRank::new(0, 0)], 18);
     }
 
     #[test]

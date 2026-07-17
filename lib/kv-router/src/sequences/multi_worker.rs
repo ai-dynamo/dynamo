@@ -9,9 +9,10 @@
 //! transport (e.g., NATS EventPublisher, Prometheus gauges) so that all business logic lives in
 //! this crate while the runtime glue stays in `lib/llm`.
 
+#[cfg(test)]
 use dynamo_tokens::SequenceHash;
-use parking_lot::RwLock;
-use rustc_hash::FxHashMap;
+use parking_lot::{Mutex, RwLock};
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
@@ -28,9 +29,10 @@ use super::request_maps::RequestIndex;
 use super::single::{ActiveSequences, PromptMembershipDelta, RequestId};
 use super::topology::{WorkerDpRange, WorkerTable, WorkerTopologyChange, WorkerTopologyError};
 use super::{PotentialLoadMaps, PrefillTokenDeltas, WorkerLoadProjection};
+use crate::active_sequence::{ActiveSequenceStride, TrackedSequenceHashes};
 use crate::protocols::{
-    ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint, WorkerId,
-    WorkerWithDpRank,
+    ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, ActiveSequenceStrideError,
+    PrefillLoadHint, WorkerId, WorkerWithDpRank,
 };
 
 // How often we force expire stale requests across all workers. See the comment
@@ -78,6 +80,16 @@ pub trait SequencePublisher: Send + Sync {
 
     /// Observe that a worker/dp_rank was removed from the router.
     fn observe_worker_removed(&self, _worker: &WorkerWithDpRank, _worker_type: &str) {}
+
+    /// Record a replica event dropped because its active-sequence stride does not
+    /// match the local tracker configuration.
+    fn observe_replica_stride_mismatch(
+        &self,
+        _expected: ActiveSequenceStride,
+        _received: Result<ActiveSequenceStride, ActiveSequenceStrideError>,
+        _worker_type: &str,
+    ) {
+    }
 }
 
 /// Abstraction over event subscription for replica sync.
@@ -109,10 +121,28 @@ pub enum ReplicaWorkerPolicy {
     RequireRegistered,
 }
 
+/// Construction options for a multi-worker active-sequence tracker.
 #[derive(Debug, Clone, Copy)]
-struct SequenceTrackerOptions {
-    replica_worker_policy: ReplicaWorkerPolicy,
-    expiry_enabled: bool,
+pub struct SequenceTrackerOptions {
+    /// How replica events for workers outside the current topology are handled.
+    pub replica_worker_policy: ReplicaWorkerPolicy,
+    /// Whether stale requests are eligible for time-based expiry.
+    pub expiry_enabled: bool,
+    /// Whether local lifecycle events are published for replica synchronization.
+    pub replica_sync: bool,
+    /// Number of physical prompt blocks represented by each retained sequence hash.
+    pub active_sequence_stride: ActiveSequenceStride,
+}
+
+impl Default for SequenceTrackerOptions {
+    fn default() -> Self {
+        Self {
+            replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
+            expiry_enabled: true,
+            replica_sync: false,
+            active_sequence_stride: ActiveSequenceStride::ONE,
+        }
+    }
 }
 
 /// Errors that can occur during sequence management operations.
@@ -137,7 +167,7 @@ pub enum SequenceError {
 /// Bundled parameters for adding a request to the sequence tracker.
 pub struct SequenceRequest {
     pub request_id: RequestId,
-    pub token_sequence: Option<Vec<SequenceHash>>,
+    pub token_sequence: Option<TrackedSequenceHashes>,
     pub track_prefill_tokens: bool,
     pub expected_output_tokens: Option<u32>,
     pub prefill_load_hint: Option<PrefillLoadHint>,
@@ -159,12 +189,15 @@ pub struct ActiveSequencesMultiWorker<P: SequencePublisher> {
     pub(super) request_index: RequestIndex,
     pub(super) prompt_registry: PromptRegistry,
     block_size: usize,
+    pub(super) active_sequence_stride: ActiveSequenceStride,
     pub(super) router_id: u64,
     pub(super) publisher: Arc<P>,
     remote_state_updates: watch::Sender<()>,
     #[cfg(test)]
     remote_state_update_count: AtomicUsize,
     replica_sync: bool,
+    pub(super) warned_replica_stride_mismatches:
+        Mutex<FxHashSet<(u64, Result<ActiveSequenceStride, ActiveSequenceStrideError>)>>,
     pub(super) replica_worker_policy: ReplicaWorkerPolicy,
     worker_type: &'static str,
 }
@@ -181,14 +214,16 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         router_id: u64,
         worker_type: &'static str,
     ) -> Self {
-        Self::new_with_replica_worker_policy(
+        Self::new_with_options(
             publisher,
             block_size,
             dp_range,
-            replica_sync,
             router_id,
             worker_type,
-            ReplicaWorkerPolicy::LazyRegister,
+            SequenceTrackerOptions {
+                replica_sync,
+                ..Default::default()
+            },
         )
     }
 
@@ -205,12 +240,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             publisher,
             block_size,
             dp_range,
-            replica_sync,
             router_id,
             worker_type,
             SequenceTrackerOptions {
-                replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
                 expiry_enabled: false,
+                replica_sync,
+                ..Default::default()
             },
         )
     }
@@ -229,26 +264,27 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             publisher,
             block_size,
             dp_range,
-            replica_sync,
             router_id,
             worker_type,
             SequenceTrackerOptions {
                 replica_worker_policy,
-                expiry_enabled: true,
+                replica_sync,
+                ..Default::default()
             },
         )
     }
 
-    fn new_with_options(
+    /// Create a tracker with explicit lifecycle, replication, and sparsity options.
+    pub fn new_with_options(
         publisher: P,
         block_size: usize,
         dp_range: HashMap<u64, (u32, u32)>,
-        replica_sync: bool,
         router_id: u64,
         worker_type: &'static str,
         options: SequenceTrackerOptions,
     ) -> Self {
         assert!(block_size > 0, "block_size must be greater than 0");
+        let active_sequence_stride = options.active_sequence_stride;
         let (remote_state_updates, _) = watch::channel(());
         let workers = if options.expiry_enabled {
             WorkerTable::new(block_size, &dp_range)
@@ -256,7 +292,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             WorkerTable::new_without_expiry(block_size, &dp_range)
         };
         let initial_workers: Vec<_> = workers.workers().collect();
-        let prompt_registry = PromptRegistry::new(initial_workers.iter().copied());
+        let prompt_registry =
+            PromptRegistry::new(initial_workers.iter().copied(), active_sequence_stride);
         let publisher = Arc::new(publisher);
         for worker in &initial_workers {
             publisher.observe_worker_registered(worker, worker_type);
@@ -267,12 +304,14 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             request_index: RequestIndex::default(),
             prompt_registry,
             block_size,
+            active_sequence_stride,
             router_id,
             publisher,
             remote_state_updates,
             #[cfg(test)]
             remote_state_update_count: AtomicUsize::new(0),
-            replica_sync,
+            replica_sync: options.replica_sync,
+            warned_replica_stride_mismatches: Mutex::new(FxHashSet::default()),
             replica_worker_policy: options.replica_worker_policy,
             worker_type,
         }
@@ -330,7 +369,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         load: WorkerLoadSnapshot,
         decay_now: Instant,
     ) -> ActiveLoad {
-        let active_blocks = load.active_blocks;
+        let active_blocks = load.active_decode_blocks(self.active_sequence_stride);
         let active_tokens = load.active_tokens(decay_now);
 
         self.publisher
@@ -362,6 +401,10 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 );
             }
         });
+    }
+
+    fn event_stride(&self) -> Option<usize> {
+        self.active_sequence_stride.event_value()
     }
 
     /// Subscribe to remote lifecycle updates that were applied through replica sync.
@@ -523,12 +566,16 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             request_id: req.request_id.clone(),
             worker: req.worker,
             data: ActiveSequenceEventData::AddRequest {
-                token_sequence: req.token_sequence.clone(),
+                token_sequence: req
+                    .token_sequence
+                    .as_ref()
+                    .map(|sequence| sequence.as_slice().to_vec()),
                 track_prefill_tokens: req.track_prefill_tokens,
                 expected_output_tokens: req.expected_output_tokens,
                 prefill_load_hint: req.prefill_load_hint,
             },
             router_id: self.router_id,
+            stride: self.event_stride(),
             lora_name: req.lora_name.clone(),
         });
         self.add_request_local(req, decay_now, lazily_register_worker)?;
@@ -639,7 +686,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     /// Query all workers for the potential blocks and tokens.
     pub fn potential_blocks_and_tokens<const INCLUDE_ACTIVE_REQUESTS: bool>(
         &self,
-        token_sequence: Option<&[SequenceHash]>,
+        token_sequence: Option<&TrackedSequenceHashes>,
         prefill_token_deltas: &PrefillTokenDeltas,
     ) -> PotentialLoadMaps {
         self.potential_blocks_and_tokens_at::<INCLUDE_ACTIVE_REQUESTS>(
@@ -651,7 +698,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
     pub fn potential_blocks_and_tokens_at<const INCLUDE_ACTIVE_REQUESTS: bool>(
         &self,
-        token_sequence: Option<&[SequenceHash]>,
+        token_sequence: Option<&TrackedSequenceHashes>,
         prefill_token_deltas: &PrefillTokenDeltas,
         decay_now: Instant,
     ) -> PotentialLoadMaps {
@@ -684,7 +731,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
     pub fn project_worker_loads(
         &self,
-        token_sequence: Option<&[SequenceHash]>,
+        token_sequence: Option<&TrackedSequenceHashes>,
         decay_now: Instant,
     ) -> FxHashMap<WorkerWithDpRank, WorkerLoadProjection> {
         #[cfg(feature = "bench")]
@@ -710,7 +757,11 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         result
     }
 
-    /// Query all workers for their current number of active blocks.
+    /// Query all workers for their estimated current number of active blocks.
+    /// Sparse prompt units are expanded by the configured stride; output blocks
+    /// remain at their physical count. Retained groups are fully represented,
+    /// shared prefixes that diverge inside a group may be conservatively
+    /// overcounted, and the final incomplete group is omitted.
     pub fn active_blocks(&self) -> HashMap<WorkerWithDpRank, usize> {
         self.prompt_registry.active_blocks()
     }
@@ -1036,6 +1087,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             worker,
             data: event_data,
             router_id: self.router_id,
+            stride: self.event_stride(),
             lora_name,
         });
         Ok(())
@@ -1061,6 +1113,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             worker,
             data: event_data,
             router_id: self.router_id,
+            stride: self.event_stride(),
             lora_name,
         });
         Ok(())
@@ -1084,6 +1137,14 @@ mod tests {
     };
     use crate::sequences::prefill_tracker::PrefillTimeLoadError;
     use crate::test_utils::NoopSequencePublisher;
+
+    fn tracked_hashes(sequence: Vec<SequenceHash>) -> TrackedSequenceHashes {
+        crate::active_sequence::tracked_sequence_hashes(sequence)
+    }
+
+    fn tracked(sequence: Vec<SequenceHash>) -> Option<TrackedSequenceHashes> {
+        Some(tracked_hashes(sequence))
+    }
 
     fn make_sequences() -> ActiveSequencesMultiWorker<NoopSequencePublisher> {
         ActiveSequencesMultiWorker::new(
@@ -1265,11 +1326,18 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingPublisherState {
+        events: Mutex<Vec<ActiveSequenceEvent>>,
         single_loads: Mutex<Vec<ActiveLoad>>,
         load_batches: Mutex<Vec<Vec<ActiveLoad>>>,
         observations: Mutex<Vec<(WorkerWithDpRank, usize, usize)>>,
         registered: Mutex<Vec<WorkerWithDpRank>>,
         removed: Mutex<Vec<WorkerWithDpRank>>,
+        stride_mismatches: Mutex<
+            Vec<(
+                ActiveSequenceStride,
+                Result<ActiveSequenceStride, ActiveSequenceStrideError>,
+            )>,
+        >,
     }
 
     impl RecordingPublisherState {
@@ -1278,11 +1346,13 @@ mod tests {
         }
 
         fn clear(&self) {
+            self.events.lock().unwrap().clear();
             self.single_loads.lock().unwrap().clear();
             self.load_batches.lock().unwrap().clear();
             self.observations.lock().unwrap().clear();
             self.registered.lock().unwrap().clear();
             self.removed.lock().unwrap().clear();
+            self.stride_mismatches.lock().unwrap().clear();
         }
     }
 
@@ -1293,8 +1363,9 @@ mod tests {
     impl SequencePublisher for RecordingPublisher {
         fn publish_event(
             &self,
-            _event: &ActiveSequenceEvent,
+            event: &ActiveSequenceEvent,
         ) -> impl Future<Output = anyhow::Result<()>> + Send {
+            self.state.events.lock().unwrap().push(event.clone());
             future::ready(Ok(()))
         }
 
@@ -1327,6 +1398,19 @@ mod tests {
         fn observe_worker_removed(&self, worker: &WorkerWithDpRank, _worker_type: &str) {
             self.state.removed.lock().unwrap().push(*worker);
         }
+
+        fn observe_replica_stride_mismatch(
+            &self,
+            expected: ActiveSequenceStride,
+            received: Result<ActiveSequenceStride, ActiveSequenceStrideError>,
+            _worker_type: &str,
+        ) {
+            self.state
+                .stride_mismatches
+                .lock()
+                .unwrap()
+                .push((expected, received));
+        }
     }
 
     fn make_recording_sequences(
@@ -1345,6 +1429,31 @@ mod tests {
             true,
             0,
             "test",
+        );
+        (sequences, state)
+    }
+
+    fn make_recording_sequences_with_stride(
+        workers: HashMap<u64, (u32, u32)>,
+        active_sequence_stride: usize,
+    ) -> (
+        ActiveSequencesMultiWorker<RecordingPublisher>,
+        Arc<RecordingPublisherState>,
+    ) {
+        let state = Arc::new(RecordingPublisherState::default());
+        let sequences = ActiveSequencesMultiWorker::new_with_options(
+            RecordingPublisher {
+                state: Arc::clone(&state),
+            },
+            4,
+            workers,
+            0,
+            "test",
+            SequenceTrackerOptions {
+                replica_sync: true,
+                active_sequence_stride: ActiveSequenceStride::new(active_sequence_stride).unwrap(),
+                ..Default::default()
+            },
         );
         (sequences, state)
     }
@@ -1389,8 +1498,14 @@ mod tests {
                 prefill_load_hint: tracking_hint(12),
             },
             router_id: 99,
+            stride: None,
             lora_name: None,
         }
+    }
+
+    fn with_stride(mut event: ActiveSequenceEvent, stride: usize) -> ActiveSequenceEvent {
+        event.stride = (stride > 1).then_some(stride);
+        event
     }
 
     fn replica_free(
@@ -1402,6 +1517,7 @@ mod tests {
             worker: payload_worker,
             data: ActiveSequenceEventData::Free,
             router_id: 99,
+            stride: None,
             lora_name: None,
         }
     }
@@ -1415,6 +1531,7 @@ mod tests {
             worker: payload_worker,
             data: ActiveSequenceEventData::MarkPrefillCompleted,
             router_id: 99,
+            stride: None,
             lora_name: None,
         }
     }
@@ -1429,7 +1546,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "req-1".to_string(),
-                    token_sequence: Some(vec![1, 2, 3]),
+                    token_sequence: tracked(vec![1, 2, 3]),
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -1459,7 +1576,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: a_oldest.clone(),
-                    token_sequence: Some(vec![1, 2, 3]),
+                    token_sequence: tracked(vec![1, 2, 3]),
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: modeled_hint(100, 10),
@@ -1473,7 +1590,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "a-later".to_string(),
-                    token_sequence: Some(vec![4, 5, 6]),
+                    token_sequence: tracked(vec![4, 5, 6]),
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: modeled_hint(60, 4),
@@ -1487,7 +1604,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "b-unmodeled".to_string(),
-                    token_sequence: Some(vec![7, 8, 9]),
+                    token_sequence: tracked(vec![7, 8, 9]),
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: tracking_hint(12),
@@ -1528,7 +1645,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "oldest".to_string(),
-                    token_sequence: Some(vec![1, 2, 3]),
+                    token_sequence: tracked(vec![1, 2, 3]),
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: modeled_hint(100, 10),
@@ -1542,7 +1659,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: later.clone(),
-                    token_sequence: Some(vec![4, 5, 6]),
+                    token_sequence: tracked(vec![4, 5, 6]),
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: modeled_hint(40, 4),
@@ -1597,7 +1714,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "req-a".to_string(),
-                    token_sequence: Some(vec![1, 2, 3]),
+                    token_sequence: tracked(vec![1, 2, 3]),
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: tracking_hint(12),
@@ -1618,7 +1735,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "req-b".to_string(),
-                    token_sequence: Some(vec![1, 2, 4]),
+                    token_sequence: tracked(vec![1, 2, 4]),
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: tracking_hint(12),
@@ -1636,13 +1753,14 @@ mod tests {
         let prefill_token_deltas = PrefillTokenDeltas::new(16, deltas);
         let expected =
             naive_potential_loads(&sequences, Some(&prompt), &prefill_token_deltas, decay_now);
+        let tracked_prompt = tracked_hashes(prompt);
 
         let actual = sequences.potential_blocks_and_tokens_at::<false>(
-            Some(&prompt),
+            Some(&tracked_prompt),
             &prefill_token_deltas,
             decay_now,
         );
-        let projections = sequences.project_worker_loads(Some(&prompt), decay_now);
+        let projections = sequences.project_worker_loads(Some(&tracked_prompt), decay_now);
 
         assert_eq!(actual.0, expected.0);
         assert_eq!(actual.1, expected.1);
@@ -1674,7 +1792,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "req-a".to_string(),
-                    token_sequence: Some(vec![1, 2, 4, 5]),
+                    token_sequence: tracked(vec![1, 2, 4, 5]),
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -1685,8 +1803,9 @@ mod tests {
             )
             .unwrap();
 
+        let query = tracked_hashes(vec![1, 2, 3, 5]);
         let (potential_blocks, _, _) = sequences.potential_blocks_and_tokens_at::<false>(
-            Some(&[1, 2, 3, 5]),
+            Some(&query),
             &PrefillTokenDeltas::none(),
             decay_now,
         );
@@ -1710,7 +1829,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "base".to_string(),
-                    token_sequence: Some(base_prompt.clone()),
+                    token_sequence: tracked(base_prompt.clone()),
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -1724,7 +1843,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "lora".to_string(),
-                    token_sequence: Some(lora_prompt),
+                    token_sequence: tracked(lora_prompt),
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -1741,8 +1860,9 @@ mod tests {
             &PrefillTokenDeltas::none(),
             decay_now,
         );
+        let tracked_base_prompt = tracked_hashes(base_prompt.clone());
         let actual = sequences.potential_blocks_and_tokens_at::<false>(
-            Some(&base_prompt),
+            Some(&tracked_base_prompt),
             &PrefillTokenDeltas::none(),
             decay_now,
         );
@@ -1770,7 +1890,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "req-a".to_string(),
-                    token_sequence: Some(prompt_a.clone()),
+                    token_sequence: tracked(prompt_a.clone()),
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -1784,7 +1904,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "req-b".to_string(),
-                    token_sequence: Some(prompt_b.clone()),
+                    token_sequence: tracked(prompt_b.clone()),
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -1801,8 +1921,9 @@ mod tests {
             &PrefillTokenDeltas::none(),
             decay_now,
         );
+        let tracked_prompt_b = tracked_hashes(prompt_b.clone());
         let actual = sequences.potential_blocks_and_tokens_at::<false>(
-            Some(&prompt_b),
+            Some(&tracked_prompt_b),
             &PrefillTokenDeltas::none(),
             decay_now,
         );
@@ -1820,7 +1941,7 @@ mod tests {
             decay_now,
         );
         let actual_after_free = sequences.potential_blocks_and_tokens_at::<false>(
-            Some(&prompt_b),
+            Some(&tracked_prompt_b),
             &PrefillTokenDeltas::none(),
             decay_now,
         );
@@ -1842,7 +1963,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "req-1".to_string(),
-                    token_sequence: Some(vec![1, 2, 3]),
+                    token_sequence: tracked(vec![1, 2, 3]),
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: tracking_hint(12),
@@ -1863,14 +1984,18 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn disabled_expiry_requires_explicit_cleanup_for_all_workers() {
-        let sequences = ActiveSequencesMultiWorker::new_without_expiry(
+    async fn sparse_tracker_without_expiry_requires_explicit_cleanup_for_all_workers() {
+        let sequences = ActiveSequencesMultiWorker::new_with_options(
             NoopSequencePublisher,
             4,
             HashMap::from([(1_u64, (0_u32, 1_u32))]),
-            false,
             0,
             "test",
+            SequenceTrackerOptions {
+                expiry_enabled: false,
+                active_sequence_stride: ActiveSequenceStride::new(3).unwrap(),
+                ..Default::default()
+            },
         );
         let initial_worker = WorkerWithDpRank::new(1, 0);
         let dynamic_worker = WorkerWithDpRank::new(2, 0);
@@ -1886,7 +2011,7 @@ mod tests {
                 .add_request(
                     SequenceRequest {
                         request_id: request_id.to_string(),
-                        token_sequence: Some(token_sequence),
+                        token_sequence: tracked(token_sequence),
                         track_prefill_tokens: true,
                         expected_output_tokens: None,
                         prefill_load_hint: tracking_hint(4),
@@ -1903,8 +2028,8 @@ mod tests {
 
         assert_eq!(active_request_count(&sequences, initial_worker), 1);
         assert_eq!(active_request_count(&sequences, dynamic_worker), 1);
-        assert_eq!(sequences.active_blocks().get(&initial_worker), Some(&2));
-        assert_eq!(sequences.active_blocks().get(&dynamic_worker), Some(&1));
+        assert_eq!(sequences.active_blocks().get(&initial_worker), Some(&6));
+        assert_eq!(sequences.active_blocks().get(&dynamic_worker), Some(&3));
 
         let now = Instant::now();
         sequences.free(&"initial".to_string(), now).unwrap();
@@ -1921,7 +2046,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "req-1".to_string(),
-                    token_sequence: Some(vec![1, 2, 3]),
+                    token_sequence: tracked(vec![1, 2, 3]),
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: tracking_hint(12),
@@ -1938,7 +2063,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "req-2".to_string(),
-                    token_sequence: Some(vec![1, 2, 3]),
+                    token_sequence: tracked(vec![1, 2, 3]),
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: tracking_hint(12),
@@ -1958,8 +2083,9 @@ mod tests {
             &PrefillTokenDeltas::none(),
             Instant::now(),
         );
+        let query = tracked_hashes(vec![1, 2, 3]);
         let actual = sequences.potential_blocks_and_tokens_at::<false>(
-            Some(&[1, 2, 3]),
+            Some(&query),
             &PrefillTokenDeltas::none(),
             Instant::now(),
         );
@@ -2210,6 +2336,7 @@ mod tests {
                         prefill_load_hint: tracking_hint(12),
                     },
                     router_id: 99,
+                    stride: None,
                     lora_name: None,
                 }),
                 Ok(ActiveSequenceEvent {
@@ -2217,6 +2344,7 @@ mod tests {
                     worker,
                     data: ActiveSequenceEventData::Free,
                     router_id: 99,
+                    stride: None,
                     lora_name: None,
                 }),
             ]),
@@ -2231,6 +2359,150 @@ mod tests {
         assert!(sequences.prompt_registry.is_block_index_empty());
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));
         assert_eq!(active_request_count(&sequences, worker), 0);
+    }
+
+    #[tokio::test]
+    async fn sparse_local_events_carry_stride_and_publish_corrected_load() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let (sequences, publisher) =
+            make_recording_sequences_with_stride(HashMap::from([(1, (0, 1))]), 3);
+        let request_id = "local-request".to_string();
+
+        sequences
+            .add_request(
+                SequenceRequest {
+                    request_id: request_id.clone(),
+                    token_sequence: tracked(vec![10, 20]),
+                    track_prefill_tokens: false,
+                    expected_output_tokens: None,
+                    prefill_load_hint: None,
+                    worker,
+                    lora_name: None,
+                },
+                Instant::now(),
+            )
+            .unwrap();
+        assert_eq!(sequences.active_blocks().get(&worker), Some(&6));
+        sequences.add_output_block(&request_id, None).unwrap();
+        assert_eq!(sequences.active_blocks().get(&worker), Some(&7));
+
+        sequences
+            .mark_prefill_completed(&request_id, Instant::now())
+            .unwrap();
+        sequences.free(&request_id, Instant::now()).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if publisher.events.lock().unwrap().len() == 3 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let events = publisher.events.lock().unwrap();
+        assert!(events.iter().all(|event| event.stride == Some(3)));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(&event.data, ActiveSequenceEventData::AddRequest { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(&event.data, ActiveSequenceEventData::MarkPrefillCompleted))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(&event.data, ActiveSequenceEventData::Free))
+        );
+    }
+
+    #[tokio::test]
+    async fn replica_sync_drops_only_mismatched_stride_events() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let (sequences, publisher) =
+            make_recording_sequences_with_stride(HashMap::from([(1, (0, 1))]), 2);
+        let good_request = "good-request".to_string();
+
+        let mut malformed = replica_add("malformed", worker, vec![7]);
+        malformed.stride = Some(0);
+        let subscriber = VecSubscriber {
+            events: VecDeque::from(vec![
+                Ok(with_stride(replica_add("wrong", worker, vec![1]), 3)),
+                Ok(with_stride(
+                    replica_add(good_request.clone(), worker, vec![10, 20]),
+                    2,
+                )),
+                Ok(with_stride(replica_mark(good_request.clone(), worker), 3)),
+                Ok(malformed),
+            ]),
+        };
+        sequences
+            .run_replica_sync(subscriber, CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert!(sequences.request_worker(&"wrong".to_string()).is_none());
+        assert!(sequences.request_worker(&"malformed".to_string()).is_none());
+        assert_eq!(sequences.request_worker(&good_request), Some(worker));
+        assert_eq!(sequences.active_blocks().get(&worker), Some(&4));
+        assert_eq!(
+            sequences.active_tokens(Instant::now()).get(&worker),
+            Some(&12)
+        );
+        assert_eq!(
+            *publisher.stride_mismatches.lock().unwrap(),
+            vec![
+                (
+                    ActiveSequenceStride::new(2).unwrap(),
+                    Ok(ActiveSequenceStride::new(3).unwrap()),
+                ),
+                (
+                    ActiveSequenceStride::new(2).unwrap(),
+                    Ok(ActiveSequenceStride::new(3).unwrap()),
+                ),
+                (
+                    ActiveSequenceStride::new(2).unwrap(),
+                    Err(ActiveSequenceStrideError::Zero),
+                ),
+            ]
+        );
+        assert_eq!(sequences.warned_replica_stride_mismatches.lock().len(), 2);
+
+        sequences
+            .run_replica_sync(
+                VecSubscriber {
+                    events: VecDeque::from(vec![Ok(with_stride(
+                        replica_free(good_request.clone(), worker),
+                        3,
+                    ))]),
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sequences.request_worker(&good_request), Some(worker));
+
+        sequences
+            .run_replica_sync(
+                VecSubscriber {
+                    events: VecDeque::from(vec![
+                        Ok(with_stride(replica_mark(good_request.clone(), worker), 2)),
+                        Ok(with_stride(replica_free(good_request.clone(), worker), 2)),
+                    ]),
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(sequences.request_worker(&good_request).is_none());
+        assert_eq!(sequences.active_blocks().get(&worker), Some(&0));
+        assert_eq!(publisher.stride_mismatches.lock().unwrap().len(), 4);
+        assert_eq!(sequences.warned_replica_stride_mismatches.lock().len(), 2);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2258,6 +2530,7 @@ mod tests {
                             prefill_load_hint: modeled_hint(12, 10),
                         },
                         router_id: 99,
+                        stride: None,
                         lora_name: None,
                     })]),
                 },
@@ -2277,6 +2550,7 @@ mod tests {
                         worker,
                         data: ActiveSequenceEventData::MarkPrefillCompleted,
                         router_id: 99,
+                        stride: None,
                         lora_name: None,
                     })]),
                 },
@@ -2301,6 +2575,7 @@ mod tests {
                             prefill_load_hint: modeled_hint(12, 6),
                         },
                         router_id: 99,
+                        stride: None,
                         lora_name: None,
                     })]),
                 },
@@ -2320,6 +2595,7 @@ mod tests {
                         worker,
                         data: ActiveSequenceEventData::Free,
                         router_id: 99,
+                        stride: None,
                         lora_name: None,
                     })]),
                 },
@@ -2359,6 +2635,7 @@ mod tests {
                                 prefill_load_hint: modeled_hint(100, 10),
                             },
                             router_id: 99,
+                            stride: None,
                             lora_name: None,
                         }),
                         Ok(ActiveSequenceEvent {
@@ -2371,6 +2648,7 @@ mod tests {
                                 prefill_load_hint: modeled_hint(40, 4),
                             },
                             router_id: 99,
+                            stride: None,
                             lora_name: None,
                         }),
                     ]),
@@ -2397,6 +2675,7 @@ mod tests {
                         worker,
                         data: ActiveSequenceEventData::Free,
                         router_id: 99,
+                        stride: None,
                         lora_name: None,
                     })]),
                 },
@@ -2435,6 +2714,7 @@ mod tests {
                     prefill_load_hint: tracking_hint(12),
                 },
                 router_id: 99,
+                stride: None,
                 lora_name: None,
             })]),
         };
@@ -2525,7 +2805,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "req-1".to_string(),
-                    token_sequence: Some(vec![1, 2, 3]),
+                    token_sequence: tracked(vec![1, 2, 3]),
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -2567,7 +2847,7 @@ mod tests {
             add_sequences.add_request_if_registered(
                 SequenceRequest {
                     request_id: "req-1".to_string(),
-                    token_sequence: Some(vec![1, 2, 3]),
+                    token_sequence: tracked(vec![1, 2, 3]),
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -2602,7 +2882,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: request_id.clone(),
-                    token_sequence: Some(vec![1, 2, 3]),
+                    token_sequence: tracked(vec![1, 2, 3]),
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -2650,7 +2930,7 @@ mod tests {
             .add_request(
                 SequenceRequest {
                     request_id: "req-1".to_string(),
-                    token_sequence: Some(vec![1, 2, 3]),
+                    token_sequence: tracked(vec![1, 2, 3]),
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: Some(PrefillLoadHint {

@@ -13,7 +13,8 @@ use dynamo_bench::kv_router_common::replay::NoopSequencePublisher;
 use dynamo_bench::kv_router_common::trace_gen::WorkerTimelines;
 use dynamo_kv_router::protocols::{PrefillLoadHint, WorkerWithDpRank};
 use dynamo_kv_router::{
-    ActiveSequencesMultiWorker, SequenceError, SequenceRequest, WorkerLoadProjection,
+    ActiveSequenceStride, ActiveSequencesMultiWorker, SequenceError, SequenceRequest,
+    WorkerLoadProjection,
 };
 use dynamo_tokens::SequenceHash;
 use rustc_hash::FxHashMap;
@@ -378,8 +379,8 @@ impl PreparedActiveSequencesTrial {
                         for byte in request.request_id.as_bytes() {
                             checksum ^= u64::from(*byte);
                         }
-                        if let Some(hashes) = request.token_sequence.as_deref() {
-                            for hash in hashes {
+                        if let Some(hashes) = request.token_sequence.as_ref() {
+                            for hash in hashes.as_slice() {
                                 checksum ^= *hash;
                             }
                         }
@@ -492,7 +493,7 @@ pub(crate) fn prepare_active_sequences_trial(
                     .to_vec();
                 LanePayload::ProjectAndAdd(SequenceRequest {
                     request_id: request.request_id.clone(),
-                    token_sequence: Some(token_sequence),
+                    token_sequence: Some(ActiveSequenceStride::ONE.sample_dense(token_sequence)),
                     track_prefill_tokens: true,
                     expected_output_tokens: Some(request.output_length),
                     prefill_load_hint: Some(PrefillLoadHint {
@@ -703,7 +704,7 @@ fn execute_payload(
     match payload {
         LanePayload::ProjectAndAdd(request) => {
             let projections =
-                sequences.project_worker_loads(request.token_sequence.as_deref(), decay_now);
+                sequences.project_worker_loads(request.token_sequence.as_ref(), decay_now);
             let projection_count = projections.len() as u64;
             let (projection_inspected, projection_digest) =
                 summarize_worker_projections(&projections);
@@ -1616,7 +1617,7 @@ mod tests {
     use crate::active_sequences_shared::{SequenceTrace, SequenceTraceEntry};
     use dynamo_bench::kv_router_common::replay::NoopSequencePublisher;
     use dynamo_kv_router::protocols::{PrefillLoadHint, WorkerWithDpRank};
-    use dynamo_kv_router::{ActiveSequencesMultiWorker, SequenceRequest};
+    use dynamo_kv_router::{ActiveSequenceStride, ActiveSequencesMultiWorker, SequenceRequest};
 
     fn add(request_id: &str, hashes: &[u64], timestamp_us: u64) -> SequenceTrace {
         SequenceTrace {
@@ -1651,7 +1652,7 @@ mod tests {
     fn request(request_id: &str, hashes: &[u64]) -> SequenceRequest {
         SequenceRequest {
             request_id: request_id.to_string(),
-            token_sequence: Some(hashes.to_vec()),
+            token_sequence: Some(ActiveSequenceStride::ONE.sample_dense(hashes.to_vec())),
             track_prefill_tokens: true,
             expected_output_tokens: Some(8),
             prefill_load_hint: Some(PrefillLoadHint {

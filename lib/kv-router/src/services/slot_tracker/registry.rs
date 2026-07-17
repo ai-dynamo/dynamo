@@ -4,7 +4,6 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use dynamo_tokens::SequenceHash;
 use parking_lot::Mutex;
 use rustc_hash::FxHashSet;
 use serde::Serialize;
@@ -12,6 +11,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use crate::TrackedSequenceHashes;
 use crate::protocols::{PrefillLoadHint, WorkerId, WorkerWithDpRank};
 use crate::scheduling::PotentialLoad;
 use crate::sequences::topology::{WorkerDpRange, WorkerTopologyError};
@@ -299,7 +299,7 @@ impl SlotTrackerRegistry {
         key: &TrackerKey,
         request_id: String,
         worker: WorkerWithDpRank,
-        sequence_hashes: Vec<SequenceHash>,
+        sequence_hashes: TrackedSequenceHashes,
         new_isl_tokens: usize,
     ) -> Result<(), ServiceError> {
         let entry = self.entry(key)?;
@@ -384,7 +384,7 @@ impl SlotTrackerRegistry {
     pub fn potential_loads(
         &self,
         key: &TrackerKey,
-        sequence_hashes: &[SequenceHash],
+        sequence_hashes: &TrackedSequenceHashes,
         new_isl_tokens: usize,
     ) -> Result<Vec<PotentialLoad>, RegistryError> {
         let entry = self.entry(key)?;
@@ -525,7 +525,13 @@ fn matches_filters(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ActiveSequenceStride;
     use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
+    use dynamo_tokens::SequenceHash;
+
+    fn tracked(sequence: Vec<SequenceHash>) -> TrackedSequenceHashes {
+        ActiveSequenceStride::ONE.sample_dense(sequence)
+    }
 
     fn registry() -> SlotTrackerRegistry {
         SlotTrackerRegistry::new(CancellationToken::new())
@@ -555,6 +561,7 @@ mod tests {
                     prefill_load_hint: None,
                 },
                 router_id,
+                stride: None,
                 lora_name: None,
             },
         }
@@ -624,7 +631,7 @@ mod tests {
                 &key,
                 "req-1".to_string(),
                 WorkerWithDpRank::new(1, 0),
-                vec![1, 2],
+                tracked(vec![1, 2]),
                 8,
             )
             .unwrap();
@@ -758,7 +765,7 @@ mod tests {
                 &key,
                 "bad-rank".to_string(),
                 WorkerWithDpRank::new(1, 1),
-                vec![1],
+                tracked(vec![1]),
                 0,
             ),
             Err(ServiceError::Sequence(SequenceError::WorkerNotFound { .. }))
@@ -769,7 +776,7 @@ mod tests {
                 &key,
                 "early-free".to_string(),
                 WorkerWithDpRank::new(1, 0),
-                vec![1, 2],
+                tracked(vec![1, 2]),
                 8,
             )
             .unwrap();
@@ -778,7 +785,7 @@ mod tests {
                 &key,
                 "early-free".to_string(),
                 WorkerWithDpRank::new(1, 0),
-                vec![1, 2],
+                tracked(vec![1, 2]),
                 8,
             ),
             Err(ServiceError::Sequence(
@@ -795,7 +802,7 @@ mod tests {
                 &key,
                 "early-complete".to_string(),
                 WorkerWithDpRank::new(1, 0),
-                vec![3],
+                tracked(vec![3]),
                 8,
             )
             .unwrap();
@@ -815,12 +822,13 @@ mod tests {
                 &key,
                 "req-1".to_string(),
                 WorkerWithDpRank::new(1, 0),
-                vec![1, 2, 3],
+                tracked(vec![1, 2, 3]),
                 8,
             )
             .unwrap();
 
-        let loads = registry.potential_loads(&key, &[1, 2, 4], 5).unwrap();
+        let query = tracked(vec![1, 2, 4]);
+        let loads = registry.potential_loads(&key, &query, 5).unwrap();
         assert_eq!(loads.len(), 1);
         assert_eq!(loads[0].worker_id, 1);
         assert_eq!(loads[0].dp_rank, 0);
@@ -839,7 +847,7 @@ mod tests {
                 &key,
                 "req-1".to_string(),
                 WorkerWithDpRank::new(1, 0),
-                vec![1, 2, 3],
+                tracked(vec![1, 2, 3]),
                 8,
             )
             .unwrap();

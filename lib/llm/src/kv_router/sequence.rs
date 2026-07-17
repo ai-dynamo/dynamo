@@ -7,11 +7,14 @@
 //! implementations that wire the runtime-agnostic business logic (in `dynamo_kv_router`)
 //! to NATS event transport and Prometheus metrics.
 
+use dynamo_kv_router::ActiveSequenceStride;
 pub use dynamo_kv_router::multi_worker_sequence::{
     ActiveSequencesMultiWorker, SequenceError, SequencePublisher, SequenceRequest,
-    SequenceSubscriber,
+    SequenceSubscriber, SequenceTrackerOptions,
 };
-use dynamo_kv_router::protocols::{ActiveLoad, ActiveSequenceEvent, WorkerWithDpRank};
+use dynamo_kv_router::protocols::{
+    ActiveLoad, ActiveSequenceEvent, ActiveSequenceStrideError, WorkerWithDpRank,
+};
 pub use dynamo_kv_router::sequence::{ActiveSequences, RequestId};
 
 use anyhow::Result;
@@ -93,6 +96,16 @@ impl SequencePublisher for RuntimeSequencePublisher {
         self.worker_status_metrics
             .remove_worker(worker.worker_id, worker.dp_rank, worker_type);
     }
+
+    fn observe_replica_stride_mismatch(
+        &self,
+        expected: ActiveSequenceStride,
+        received: Result<ActiveSequenceStride, ActiveSequenceStrideError>,
+        worker_type: &str,
+    ) {
+        self.worker_status_metrics
+            .increment_active_sequence_stride_mismatch(expected, received, worker_type);
+    }
 }
 
 /// Concrete [`SequenceSubscriber`] backed by NATS typed event stream.
@@ -130,10 +143,10 @@ pub async fn create_multi_worker_sequences(
     component: Component,
     block_size: usize,
     workers_with_configs: HashMap<u64, ModelRuntimeConfig>,
-    replica_sync: bool,
     router_id: u64,
     worker_type: &'static str,
     cancellation_token: CancellationToken,
+    options: SequenceTrackerOptions,
 ) -> Result<Arc<ActiveSequencesMulti>> {
     let event_publisher =
         EventPublisher::for_component(&component, ACTIVE_SEQUENCES_SUBJECT).await?;
@@ -157,18 +170,18 @@ pub async fn create_multi_worker_sequences(
         })
         .collect();
 
-    let multi_worker = ActiveSequencesMultiWorker::new(
+    let multi_worker = ActiveSequencesMultiWorker::new_with_options(
         publisher,
         block_size,
         dp_range,
-        replica_sync,
         router_id,
         worker_type,
+        options,
     );
 
     let arc = Arc::new(multi_worker);
 
-    if replica_sync {
+    if options.replica_sync {
         let subscriber = EventSubscriber::for_component(&component, ACTIVE_SEQUENCES_SUBJECT)
             .await?
             .typed::<ActiveSequenceEvent>();
@@ -206,6 +219,7 @@ mod tests {
 
         let namespace = distributed.namespace("test_cross_instance_sync")?;
         let component = namespace.component("sequences")?;
+        let active_sequence_stride = ActiveSequenceStride::new(3).unwrap();
 
         let mut workers_with_configs = HashMap::new();
 
@@ -220,20 +234,28 @@ mod tests {
             component.clone(),
             block_size,
             workers_with_configs.clone(),
-            true,
             1,
             crate::discovery::WORKER_TYPE_DECODE,
             CancellationToken::new(),
+            SequenceTrackerOptions {
+                replica_sync: true,
+                active_sequence_stride,
+                ..Default::default()
+            },
         )
         .await?;
         let seq_manager_2 = create_multi_worker_sequences(
             component,
             block_size,
             workers_with_configs,
-            true,
             2,
             crate::discovery::WORKER_TYPE_DECODE,
             CancellationToken::new(),
+            SequenceTrackerOptions {
+                replica_sync: true,
+                active_sequence_stride,
+                ..Default::default()
+            },
         )
         .await?;
 
@@ -243,7 +265,7 @@ mod tests {
         seq_manager_1.add_request(
             SequenceRequest {
                 request_id: "request_0".to_string(),
-                token_sequence: Some(vec![0, 1, 2]),
+                token_sequence: Some(active_sequence_stride.sample_dense((0..9).collect())),
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
                 prefill_load_hint: tracking_hint(12),
@@ -256,7 +278,7 @@ mod tests {
         seq_manager_1.add_request(
             SequenceRequest {
                 request_id: "request_1".to_string(),
-                token_sequence: Some(vec![3, 4]),
+                token_sequence: Some(active_sequence_stride.sample_dense((9..15).collect())),
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
                 prefill_load_hint: tracking_hint(8),
@@ -269,7 +291,7 @@ mod tests {
         seq_manager_2.add_request(
             SequenceRequest {
                 request_id: "request_2".to_string(),
-                token_sequence: Some(vec![0, 1, 2, 3]),
+                token_sequence: Some(active_sequence_stride.sample_dense((0..12).collect())),
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
                 prefill_load_hint: tracking_hint(16),
@@ -289,16 +311,16 @@ mod tests {
         let worker_1_dp0 = WorkerWithDpRank::new(1, 0);
 
         assert_eq!(
-            blocks_phase1[&worker_0_dp0], 3,
-            "Worker 0 dp_rank 0 should have 3 active blocks (from request_0)"
+            blocks_phase1[&worker_0_dp0], 9,
+            "Worker 0 dp_rank 0 should estimate 9 active blocks (from request_0)"
         );
         assert_eq!(
-            blocks_phase1[&worker_0_dp1], 2,
-            "Worker 0 dp_rank 1 should have 2 active blocks (from request_1)"
+            blocks_phase1[&worker_0_dp1], 6,
+            "Worker 0 dp_rank 1 should estimate 6 active blocks (from request_1)"
         );
         assert_eq!(
-            blocks_phase1[&worker_1_dp0], 4,
-            "Worker 1 dp_rank 0 should have 4 active blocks (from request_2 added by seq_manager_2)"
+            blocks_phase1[&worker_1_dp0], 12,
+            "Worker 1 dp_rank 0 should estimate 12 active blocks (from request_2 added by seq_manager_2)"
         );
         assert_eq!(
             tokens_phase1[&worker_0_dp0], 12,
@@ -311,6 +333,17 @@ mod tests {
         assert_eq!(
             tokens_phase1[&worker_1_dp0], 16,
             "Worker 1 dp_rank 0 should have 16 active tokens (from request_2 added by seq_manager_2)"
+        );
+
+        seq_manager_1.mark_prefill_completed(&"request_0".to_string(), Instant::now())?;
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+        assert_eq!(
+            seq_manager_1.active_tokens(Instant::now())[&worker_0_dp0],
+            0
+        );
+        assert_eq!(
+            seq_manager_2.active_tokens(Instant::now())[&worker_0_dp0],
+            0
         );
 
         seq_manager_1.free(&"request_2".to_string(), Instant::now())?;
@@ -376,20 +409,26 @@ mod tests {
             component.clone(),
             block_size,
             workers_with_configs.clone(),
-            true,
             1,
             crate::discovery::WORKER_TYPE_DECODE,
             CancellationToken::new(),
+            SequenceTrackerOptions {
+                replica_sync: true,
+                ..Default::default()
+            },
         )
         .await?;
         let seq_manager_2 = create_multi_worker_sequences(
             component,
             block_size,
             workers_with_configs,
-            true,
             2,
             crate::discovery::WORKER_TYPE_DECODE,
             CancellationToken::new(),
+            SequenceTrackerOptions {
+                replica_sync: true,
+                ..Default::default()
+            },
         )
         .await?;
 

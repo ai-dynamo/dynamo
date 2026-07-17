@@ -217,10 +217,31 @@ For Kubernetes deployment examples, see [Kubernetes Topology-Aware KV Transfer](
 ## Block Tracking
 
 - `--no-router-track-active-blocks`: Disables tracking of active blocks used for ongoing generation or decode phases. Disable this when routing to workers that only perform prefill.
+- `--router-active-sequence-stride`: Retains one active-sequence hash for every N complete prompt blocks. The equivalent environment variable is `DYN_ROUTER_ACTIVE_SEQUENCE_STRIDE`. The default of `1` retains every block.
 - `--router-track-output-blocks`: **Experimental.** Enables tracking of output blocks during generation. When enabled, the router adds placeholder blocks as tokens are generated and applies fractional decay based on progress toward the expected output sequence length (`agent_hints.osl` in `nvext`). For the cost-model behavior, see [Decode Load Modeling](router-concepts.md#decode-load-modeling).
 - `--no-router-assume-kv-reuse`: When tracking active blocks, disables the assumption of KV cache reuse. This is useful in disaggregated setups where transferred blocks are not actually deduplicated on the decode side.
 - `--no-router-track-prefill-tokens`: Disables prompt-side prefill token accounting in the router's active load model. Use this for decode-only routing paths where prompt processing already happened elsewhere.
 - `--router-replica-sync`: Disabled by default. Enables best-effort Runtime event-plane synchronization of KV active-sequence state. Session-affinity synchronization is independent and starts when `--router-session-affinity-ttl-secs` is set.
+
+Values above `1` reduce active-sequence event payloads and tracker state. The router converts each
+retained prompt unit back into an estimated physical-block count by multiplying it by the stride;
+output blocks remain unscaled. A prompt with fewer than N complete blocks contributes no prompt
+hashes, and the final incomplete group is omitted. Request counts and prefill-token accounting remain
+active. Prefixes that diverge inside a retained group can be conservatively overcounted because the
+retained rolling hash commits to every preceding block.
+
+> [!WARNING]
+> Configure the same stride on every frontend. Deploy the new binary everywhere with stride `1`
+> before enabling sparsity, then restart all frontends with one common value. An old receiver can
+> ignore the stride field while consuming a sparse sequence, so mixed old and new binaries are unsafe
+> after setting a value above `1`.
+
+When replica synchronization receives a different or malformed stride, it drops only that event and
+increments `router_active_sequence_stride_mismatches_total`. It logs the first mismatch for each
+source-router and received-stride pair. If a mismatched `Free` event is dropped, the receiving
+frontend retains phantom active load until the request crosses the active-sequence tracker's
+five-minute stale threshold and the next periodic sweep, which runs once per minute. This cleanup is
+independent of `--router-ttl-secs`, which controls predicted KV cache state.
 
 ## KV Indexer / Approx KV Indexer
 

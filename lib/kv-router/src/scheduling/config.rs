@@ -8,8 +8,10 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use derive_builder::Builder;
+use dynamo_tokens::SequenceHash;
 use serde::{Deserialize, Serialize};
 
+use crate::active_sequence::{ActiveSequenceStride, TrackedSequenceHashes};
 use crate::protocols::{
     BlockHashOptions, LocalBlockHash, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
@@ -19,6 +21,7 @@ const fn default_track_prefill_tokens() -> bool {
 }
 
 pub const DYN_ROUTER_MIN_INITIAL_WORKERS: &str = "DYN_ROUTER_MIN_INITIAL_WORKERS";
+pub const DYN_ROUTER_ACTIVE_SEQUENCE_STRIDE: &str = "DYN_ROUTER_ACTIVE_SEQUENCE_STRIDE";
 
 pub fn min_initial_workers_from_env() -> anyhow::Result<usize> {
     match env::var(DYN_ROUTER_MIN_INITIAL_WORKERS) {
@@ -93,9 +96,29 @@ pub fn apply_deprecated_overlap_score_weight_override(
     }
 }
 
+fn active_sequence_stride_env_value(
+    value: Result<String, VarError>,
+) -> anyhow::Result<Option<String>> {
+    match value {
+        Ok(value) => Ok(Some(value)),
+        Err(VarError::NotPresent) => Ok(None),
+        Err(VarError::NotUnicode(_)) => {
+            anyhow::bail!("{DYN_ROUTER_ACTIVE_SEQUENCE_STRIDE} must be valid unicode")
+        }
+    }
+}
+
 /// Build a [`KvRouterConfig`] from defaults and standard Dynamo environment variables.
-pub fn kv_router_config_from_dynamo_env() -> KvRouterConfig {
-    let config = kv_router_config_from_lookup(|key| env::var(key).ok());
+pub fn kv_router_config_from_dynamo_env() -> anyhow::Result<KvRouterConfig> {
+    let active_sequence_stride =
+        active_sequence_stride_env_value(env::var(DYN_ROUTER_ACTIVE_SEQUENCE_STRIDE))?;
+    let config = kv_router_config_from_lookup(|key| {
+        if key == DYN_ROUTER_ACTIVE_SEQUENCE_STRIDE {
+            active_sequence_stride.clone()
+        } else {
+            env::var(key).ok()
+        }
+    })?;
     tracing::info!(
         overlap_score_credit = config.overlap_score_credit,
         overlap_score_credit_decay = config.overlap_score_credit_decay,
@@ -104,6 +127,7 @@ pub fn kv_router_config_from_dynamo_env() -> KvRouterConfig {
         use_kv_events = config.use_kv_events,
         router_replica_sync = config.router_replica_sync,
         router_track_active_blocks = config.router_track_active_blocks,
+        router_active_sequence_stride = config.router_active_sequence_stride.get(),
         router_track_output_blocks = config.router_track_output_blocks,
         router_track_prefill_tokens = config.router_track_prefill_tokens,
         router_queue_threshold = ?config.router_queue_threshold,
@@ -111,10 +135,12 @@ pub fn kv_router_config_from_dynamo_env() -> KvRouterConfig {
         router_predicted_ttl_secs = ?config.router_predicted_ttl_secs,
         "KvRouterConfig initialized (DYN_* env overrides applied)"
     );
-    config
+    Ok(config)
 }
 
-fn kv_router_config_from_lookup(get_env: impl Fn(&str) -> Option<String>) -> KvRouterConfig {
+fn kv_router_config_from_lookup(
+    get_env: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<KvRouterConfig> {
     fn parse_f64(get_env: &impl Fn(&str) -> Option<String>, key: &str) -> Option<f64> {
         get_env(key).and_then(|value| value.parse().ok())
     }
@@ -161,6 +187,18 @@ fn kv_router_config_from_lookup(get_env: impl Fn(&str) -> Option<String>) -> KvR
     if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_TRACK_ACTIVE_BLOCKS") {
         config.router_track_active_blocks = value;
     }
+    if let Some(raw_value) = get_env(DYN_ROUTER_ACTIVE_SEQUENCE_STRIDE) {
+        let value = raw_value.parse::<usize>().map_err(|error| {
+            anyhow::anyhow!(
+                "{DYN_ROUTER_ACTIVE_SEQUENCE_STRIDE} must be an integer greater than or equal to 1, got {raw_value:?}: {error}"
+            )
+        })?;
+        config.router_active_sequence_stride = ActiveSequenceStride::new(value).map_err(|_| {
+            anyhow::anyhow!(
+                "{DYN_ROUTER_ACTIVE_SEQUENCE_STRIDE} must be greater than or equal to 1"
+            )
+        })?;
+    }
     if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_TRACK_OUTPUT_BLOCKS") {
         config.router_track_output_blocks = value;
     }
@@ -177,7 +215,7 @@ fn kv_router_config_from_lookup(get_env: impl Fn(&str) -> Option<String>) -> KvR
         config.router_predicted_ttl_secs = Some(value);
     }
 
-    config
+    Ok(config)
 }
 
 fn apply_deprecated_overlap_score_weight_override_option(
@@ -395,6 +433,7 @@ struct KvRouterConfigSerde {
     use_kv_events: bool,
     router_replica_sync: bool,
     router_track_active_blocks: bool,
+    router_active_sequence_stride: usize,
     router_track_output_blocks: bool,
     router_assume_kv_reuse: bool,
     router_track_prefill_tokens: bool,
@@ -427,6 +466,7 @@ impl Default for KvRouterConfigSerde {
             use_kv_events: config.use_kv_events,
             router_replica_sync: config.router_replica_sync,
             router_track_active_blocks: config.router_track_active_blocks,
+            router_active_sequence_stride: config.router_active_sequence_stride.get(),
             router_track_output_blocks: config.router_track_output_blocks,
             router_assume_kv_reuse: config.router_assume_kv_reuse,
             router_track_prefill_tokens: config.router_track_prefill_tokens,
@@ -478,6 +518,10 @@ pub struct KvRouterConfig {
 
     /// Whether to track active blocks in the router (default: true)
     pub router_track_active_blocks: bool,
+
+    /// Retain one active-sequence hash for every N complete prompt blocks.
+    /// A value of 1 disables sparsity.
+    pub router_active_sequence_stride: ActiveSequenceStride,
 
     /// Whether to track output blocks during generation (default: false)
     /// When enabled, the router adds placeholder blocks as tokens are generated
@@ -575,6 +619,7 @@ impl Default for KvRouterConfig {
             use_kv_events: true,
             router_replica_sync: false,
             router_track_active_blocks: true,
+            router_active_sequence_stride: ActiveSequenceStride::ONE,
             router_track_output_blocks: false,
             router_assume_kv_reuse: true,
             router_track_prefill_tokens: default_track_prefill_tokens(),
@@ -621,6 +666,10 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             use_kv_events: compat.use_kv_events,
             router_replica_sync: compat.router_replica_sync,
             router_track_active_blocks: compat.router_track_active_blocks,
+            router_active_sequence_stride: ActiveSequenceStride::new(
+                compat.router_active_sequence_stride,
+            )
+            .map_err(|error| format!("router_active_sequence_stride: {error}"))?,
             router_track_output_blocks: compat.router_track_output_blocks,
             router_assume_kv_reuse: compat.router_assume_kv_reuse,
             router_track_prefill_tokens: compat.router_track_prefill_tokens,
@@ -671,6 +720,13 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), String> {
 }
 
 impl KvRouterConfig {
+    pub(crate) fn sample_active_sequence_hashes(
+        &self,
+        sequence: Vec<SequenceHash>,
+    ) -> TrackedSequenceHashes {
+        self.router_active_sequence_stride.sample_dense(sequence)
+    }
+
     fn loaded_policy_config(
         &self,
     ) -> Result<
@@ -796,6 +852,9 @@ impl KvRouterConfig {
     /// - `None` if `router_track_active_blocks` is false
     /// - Random hashes if `router_track_active_blocks` is true but `router_assume_kv_reuse` is false
     /// - Actual sequence hashes if both are true
+    ///
+    /// The complete rolling chain is computed first, then every configured
+    /// stride endpoint is retained. Any incomplete trailing group is omitted.
     pub fn compute_seq_hashes_for_tracking(
         &self,
         tokens: &[u32],
@@ -803,30 +862,37 @@ impl KvRouterConfig {
         config_override: Option<&RouterConfigOverride>,
         hash_options: BlockHashOptions<'_>,
         precomputed_block_hashes: Option<&[LocalBlockHash]>,
-    ) -> Option<Vec<u64>> {
+    ) -> Option<TrackedSequenceHashes> {
         if !self.router_track_active_blocks {
             return None;
         }
 
         let num_blocks = tokens.len() / block_size as usize;
         if num_blocks == 0 {
-            return Some(Vec::new());
+            return Some(TrackedSequenceHashes::default());
         }
 
         let assume_kv_reuse = self.assume_kv_reuse(config_override);
 
-        if assume_kv_reuse {
+        let sequence = if assume_kv_reuse {
             let block_hashes = match precomputed_block_hashes {
                 Some(block_hashes) => block_hashes,
                 None => {
                     let computed = compute_block_hash_for_seq(tokens, block_size, hash_options);
-                    return Some(compute_seq_hash_for_block(&computed));
+                    return Some(
+                        self.sample_active_sequence_hashes(compute_seq_hash_for_block(&computed)),
+                    );
                 }
             };
-            Some(compute_seq_hash_for_block(block_hashes))
+            compute_seq_hash_for_block(block_hashes)
         } else {
-            Some((0..num_blocks).map(|_| fastrand::u64(..)).collect())
-        }
+            return Some(
+                self.router_active_sequence_stride
+                    .generate_for_complete_blocks(num_blocks, || fastrand::u64(..)),
+            );
+        };
+
+        Some(self.sample_active_sequence_hashes(sequence))
     }
 
     /// Check if KV event subscription should be started.
@@ -849,6 +915,10 @@ mod tests {
     use std::collections::HashMap;
 
     fn config_from_values(values: &[(&str, &str)]) -> KvRouterConfig {
+        try_config_from_values(values).unwrap()
+    }
+
+    fn try_config_from_values(values: &[(&str, &str)]) -> anyhow::Result<KvRouterConfig> {
         let values: HashMap<&str, &str> = values.iter().copied().collect();
         kv_router_config_from_lookup(|key| values.get(key).map(|value| (*value).to_string()))
     }
@@ -863,6 +933,7 @@ mod tests {
             ("DYN_USE_KV_EVENTS", "false"),
             ("DYN_ROUTER_REPLICA_SYNC", "yes"),
             ("DYN_ROUTER_TRACK_ACTIVE_BLOCKS", "0"),
+            ("DYN_ROUTER_ACTIVE_SEQUENCE_STRIDE", "4"),
             ("DYN_ROUTER_TRACK_OUTPUT_BLOCKS", "on"),
             ("DYN_ROUTER_TRACK_PREFILL_TOKENS", "false"),
             ("DYN_ROUTER_QUEUE_THRESHOLD", "4.5"),
@@ -875,6 +946,7 @@ mod tests {
         assert!(!config.use_kv_events);
         assert!(config.router_replica_sync);
         assert!(!config.router_track_active_blocks);
+        assert_eq!(config.router_active_sequence_stride.get(), 4);
         assert!(config.router_track_output_blocks);
         assert!(!config.router_track_prefill_tokens);
         assert_eq!(config.router_queue_threshold, Some(4.5));
@@ -882,6 +954,34 @@ mod tests {
         let predicted = config_from_values(&[("DYN_ROUTER_PREDICTED_TTL_SECS", "60")]);
         assert_eq!(predicted.router_predicted_ttl_secs, Some(60.0));
         assert!(predicted.validate_config().is_ok());
+    }
+
+    #[test]
+    fn dynamo_env_config_returns_errors_for_invalid_active_sequence_stride() {
+        let zero = try_config_from_values(&[(DYN_ROUTER_ACTIVE_SEQUENCE_STRIDE, "0")])
+            .unwrap_err()
+            .to_string();
+        assert!(zero.contains("must be greater than or equal to 1"));
+
+        let malformed = try_config_from_values(&[(DYN_ROUTER_ACTIVE_SEQUENCE_STRIDE, "oops")])
+            .unwrap_err()
+            .to_string();
+        assert!(malformed.contains("must be an integer greater than or equal to 1"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dynamo_env_config_rejects_non_unicode_active_sequence_stride() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let error =
+            active_sequence_stride_env_value(Err(VarError::NotUnicode(OsString::from_vec(vec![
+                0xff,
+            ]))))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("must be valid unicode"));
     }
 
     #[test]
@@ -974,7 +1074,114 @@ mod tests {
             Some(&precomputed),
         );
 
-        assert_eq!(seq_hashes, Some(compute_seq_hash_for_block(&precomputed)));
+        assert_eq!(
+            seq_hashes.unwrap().as_slice(),
+            compute_seq_hash_for_block(&precomputed)
+        );
+    }
+
+    #[test]
+    fn compute_seq_hashes_for_tracking_samples_complete_stride_groups() {
+        let config = KvRouterConfig {
+            router_active_sequence_stride: ActiveSequenceStride::new(3).unwrap(),
+            ..Default::default()
+        };
+        let tokens: Vec<u32> = (0..10).collect();
+        let block_hashes: Vec<LocalBlockHash> = (1..=10).map(LocalBlockHash).collect();
+        let full_sequence = compute_seq_hash_for_block(&block_hashes);
+
+        let sampled = config
+            .compute_seq_hashes_for_tracking(
+                &tokens,
+                1,
+                None,
+                BlockHashOptions::default(),
+                Some(&block_hashes),
+            )
+            .unwrap();
+
+        assert_eq!(
+            sampled.as_slice(),
+            &[full_sequence[2], full_sequence[5], full_sequence[8]]
+        );
+    }
+
+    #[test]
+    fn compute_seq_hashes_for_tracking_omits_short_and_trailing_groups() {
+        let config = KvRouterConfig {
+            router_active_sequence_stride: ActiveSequenceStride::new(4).unwrap(),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            config.compute_seq_hashes_for_tracking(
+                &[1, 2, 3],
+                1,
+                None,
+                BlockHashOptions::default(),
+                None,
+            ),
+            Some(TrackedSequenceHashes::default())
+        );
+
+        let sampled = config
+            .compute_seq_hashes_for_tracking(
+                &(0..10).collect::<Vec<_>>(),
+                1,
+                None,
+                BlockHashOptions::default(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(sampled.len(), 2);
+    }
+
+    #[test]
+    fn compute_seq_hashes_for_tracking_samples_no_reuse_hashes() {
+        let config = KvRouterConfig {
+            router_active_sequence_stride: ActiveSequenceStride::new(3).unwrap(),
+            router_assume_kv_reuse: false,
+            ..Default::default()
+        };
+
+        let sampled = config
+            .compute_seq_hashes_for_tracking(
+                &(0..8).collect::<Vec<_>>(),
+                1,
+                None,
+                BlockHashOptions::default(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(sampled.len(), 2);
+    }
+
+    #[test]
+    fn active_sequence_stride_defaults_from_legacy_json_and_rejects_zero() {
+        let config: KvRouterConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            config.router_active_sequence_stride,
+            ActiveSequenceStride::ONE
+        );
+
+        let config = KvRouterConfig {
+            router_active_sequence_stride: ActiveSequenceStride::new(4).unwrap(),
+            ..Default::default()
+        };
+        let encoded = serde_json::to_value(&config).unwrap();
+        assert_eq!(encoded["router_active_sequence_stride"], 4);
+        let decoded: KvRouterConfig = serde_json::from_value(encoded).unwrap();
+        assert_eq!(
+            decoded.router_active_sequence_stride,
+            ActiveSequenceStride::new(4).unwrap()
+        );
+
+        assert!(
+            serde_json::from_str::<KvRouterConfig>(r#"{"router_active_sequence_stride":0}"#)
+                .is_err()
+        );
+
+        assert!(ActiveSequenceStride::new(0).is_err());
     }
 
     #[test]

@@ -46,6 +46,8 @@
 use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
 
+use dynamo_kv_router::ActiveSequenceStride;
+use dynamo_kv_router::protocols::ActiveSequenceStrideError;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::metrics::MetricsHierarchy;
 use dynamo_runtime::metrics::prometheus_names::{
@@ -199,6 +201,7 @@ pub(crate) fn kv_publisher_metrics() -> Option<Arc<KvPublisherMetrics>> {
 pub(crate) struct RouterWorkerStatusMetrics {
     pub registered: IntGaugeVec,
     pub kv_event_source_mismatch_workers: IntGaugeVec,
+    pub active_sequence_stride_mismatches_total: IntCounterVec,
 }
 
 static ROUTER_WORKER_STATUS_METRICS: OnceLock<Arc<RouterWorkerStatusMetrics>> = OnceLock::new();
@@ -234,10 +237,19 @@ impl RouterWorkerStatusMetrics {
                         &[],
                     )
                     .expect("failed to create router_kv_event_source_mismatch_workers gauge");
+                let active_sequence_stride_mismatches_total = metrics
+                    .create_intcountervec(
+                        "router_active_sequence_stride_mismatches_total",
+                        "Total active-sequence replica events dropped because the sender stride did not match the local stride",
+                        &["expected_stride", "received_stride", labels::WORKER_TYPE],
+                        &[],
+                    )
+                    .expect("failed to create router_active_sequence_stride_mismatches_total counter");
 
                 Arc::new(Self {
                     registered,
                     kv_event_source_mismatch_workers,
+                    active_sequence_stride_mismatches_total,
                 })
             })
             .clone()
@@ -268,6 +280,21 @@ impl RouterWorkerStatusMetrics {
         self.kv_event_source_mismatch_workers
             .with_label_values(&[model, worker_type, target_namespace, target_component])
             .set(count as i64);
+    }
+
+    pub fn increment_active_sequence_stride_mismatch(
+        &self,
+        expected: ActiveSequenceStride,
+        received: Result<ActiveSequenceStride, ActiveSequenceStrideError>,
+        worker_type: &str,
+    ) {
+        let expected = expected.to_string();
+        let received = received
+            .map(|stride| stride.get().to_string())
+            .unwrap_or_else(|_| "malformed".to_string());
+        self.active_sequence_stride_mismatches_total
+            .with_label_values(&[&expected, &received, worker_type])
+            .inc();
     }
 }
 
@@ -916,6 +943,14 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
                 ],
             )
             .unwrap(),
+            active_sequence_stride_mismatches_total: IntCounterVec::new(
+                Opts::new(
+                    "dynamo_component_router_active_sequence_stride_mismatches_total",
+                    "Total active-sequence replica events dropped because the sender stride did not match the local stride",
+                ),
+                &["expected_stride", "received_stride", labels::WORKER_TYPE],
+            )
+            .unwrap(),
         };
         registry
             .register(Box::new(metrics.registered.clone()))
@@ -923,10 +958,25 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
         registry
             .register(Box::new(metrics.kv_event_source_mismatch_workers.clone()))
             .unwrap();
+        registry
+            .register(Box::new(
+                metrics.active_sequence_stride_mismatches_total.clone(),
+            ))
+            .unwrap();
 
         metrics.set_registered(123, 0, "decode");
         metrics.set_kv_event_source_mismatch_workers("model-a", "decode", "ns-a", "decode", 2);
         metrics.set_kv_event_source_mismatch_workers("model-a", "prefill", "ns-a", "prefill", 0);
+        metrics.increment_active_sequence_stride_mismatch(
+            ActiveSequenceStride::new(4).unwrap(),
+            Ok(ActiveSequenceStride::new(2).unwrap()),
+            "decode",
+        );
+        metrics.increment_active_sequence_stride_mismatch(
+            ActiveSequenceStride::new(4).unwrap(),
+            Err(ActiveSequenceStrideError::Zero),
+            "decode",
+        );
 
         let output = gather_pef(&registry);
         assert!(
@@ -944,6 +994,18 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
         assert!(
             output.contains(
                 "dynamo_component_router_kv_event_source_mismatch_workers{model=\"model-a\",target_component=\"prefill\",target_namespace=\"ns-a\",worker_type=\"prefill\"} 0"
+            ),
+            "\nActual PEF:\n{output}"
+        );
+        assert!(
+            output.contains(
+                "dynamo_component_router_active_sequence_stride_mismatches_total{expected_stride=\"4\",received_stride=\"2\",worker_type=\"decode\"} 1"
+            ),
+            "\nActual PEF:\n{output}"
+        );
+        assert!(
+            output.contains(
+                "dynamo_component_router_active_sequence_stride_mismatches_total{expected_stride=\"4\",received_stride=\"malformed\",worker_type=\"decode\"} 1"
             ),
             "\nActual PEF:\n{output}"
         );

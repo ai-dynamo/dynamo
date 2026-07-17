@@ -389,7 +389,7 @@ where
             indexer_peers: cli.indexer_peers,
             replica_sync_port: cli.replica_sync_port,
             replica_sync_peers: cli.replica_sync_peers,
-            kv_router_config: kv_router_config_from_dynamo_env(),
+            kv_router_config: kv_router_config_from_dynamo_env()?,
             selection_cache: selection_cache_config_from_overrides(
                 cli.selection_cache_ttl_secs,
                 cli.selection_cache_max_entries,
@@ -497,7 +497,9 @@ impl SelectionService {
                 "replica_sync_peers requires replica_sync_port",
             ));
         }
-        let mut builder = SelectionServiceBuilder::new(kv_router_config_from_dynamo_env())
+        let kv_router_config = kv_router_config_from_dynamo_env()
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let mut builder = SelectionServiceBuilder::new(kv_router_config)
             .indexer_threads(indexer_threads)
             .indexer_peers(indexer_peers.unwrap_or_default())
             .selection_cache(selection_cache.unwrap_or_default().inner);

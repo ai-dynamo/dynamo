@@ -10,6 +10,7 @@ use parking_lot::RwLock;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
+use crate::TrackedSequenceHashes;
 use crate::indexer::TieredMatchDetails;
 use crate::protocols::{
     ActiveSequenceEvent, LocalBlockHash, PrefillLoadHint, RoutingConstraints, WorkerId,
@@ -24,6 +25,7 @@ use crate::scheduling::{
 };
 use crate::sequences::{
     ActiveSequencesMultiWorker, ReplicaWorkerPolicy, SequenceError, SequenceRequest,
+    SequenceTrackerOptions,
 };
 use crate::services::common::replica_sync::{
     ReplicaSyncConfig, ScopedReplicaEvent, ScopedSequencePublisher, setup_scoped_replica_sync,
@@ -89,7 +91,7 @@ struct ReservationBooking {
     key: SelectionKey,
     selection_id: String,
     worker: WorkerWithDpRank,
-    sequence_hashes: Vec<SequenceHash>,
+    sequence_hashes: TrackedSequenceHashes,
     prefill_load_hint: Option<PrefillLoadHint>,
     expected_output_tokens: Option<u32>,
     track_prefill_tokens: bool,
@@ -443,14 +445,18 @@ impl SelectionCore {
             &key.routing_group,
             block_size,
         );
-        let slots = Arc::new(ActiveSequencesMultiWorker::new_with_replica_worker_policy(
+        let slots = Arc::new(ActiveSequencesMultiWorker::new_with_options(
             scoped_replica_sync.publisher,
             block_size as usize,
             HashMap::new(),
-            scoped_replica_sync.enabled,
             scoped_replica_sync.process_id,
             WORKER_TYPE,
-            ReplicaWorkerPolicy::RequireRegistered,
+            SequenceTrackerOptions {
+                replica_worker_policy: ReplicaWorkerPolicy::RequireRegistered,
+                replica_sync: scoped_replica_sync.enabled,
+                active_sequence_stride: self.kv_router_config.router_active_sequence_stride,
+                ..Default::default()
+            },
         ));
         let replica_tx = scoped_replica_sync.channel.map(|(replica_tx, subscriber)| {
             slots.start_replica_sync(subscriber, self.cancel_token.child_token());
@@ -689,6 +695,9 @@ impl SelectionCore {
             isl_tokens,
             overlap,
         } = self.prepare_selection_inputs(&entry, &prompt).await?;
+        let active_sequence_hashes = self
+            .kv_router_config
+            .sample_active_sequence_hashes(sequence_hashes);
         let mode = if book {
             ScheduleMode::Tracked {
                 request_id: selection_id.clone().ok_or_else(|| {
@@ -711,14 +720,14 @@ impl SelectionCore {
                 .unwrap_or(self.kv_router_config.router_track_prefill_tokens);
             (
                 id,
-                sequence_hashes.clone(),
+                active_sequence_hashes.clone(),
                 prompt.lora_name.clone(),
                 track_prefill_tokens,
             )
         });
         let schedule_request = ScheduleRequest {
             mode,
-            token_seq: Some(sequence_hashes),
+            token_seq: Some(active_sequence_hashes),
             block_hashes: Some(block_hashes),
             isl_tokens,
             overlap,
@@ -922,7 +931,9 @@ impl SelectionCore {
                 key,
                 selection_id: req.selection_id,
                 worker,
-                sequence_hashes: normalized.sequence_hashes,
+                sequence_hashes: self
+                    .kv_router_config
+                    .sample_active_sequence_hashes(normalized.sequence_hashes),
                 prefill_load_hint,
                 expected_output_tokens: req.expected_output_tokens,
                 track_prefill_tokens,
@@ -1076,8 +1087,11 @@ impl SelectionCore {
             .as_ref()
             .and_then(|cfg| cfg.track_prefill_tokens)
             .unwrap_or(self.kv_router_config.router_track_prefill_tokens);
+        let active_sequence_hashes = self
+            .kv_router_config
+            .sample_active_sequence_hashes(prepared.sequence_hashes);
         Ok(entry.scheduler.get_potential_loads(
-            Some(prepared.sequence_hashes),
+            Some(active_sequence_hashes),
             prepared.isl_tokens,
             prepared.overlap.effective_cached_tokens,
             track_prefill_tokens,

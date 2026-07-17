@@ -64,6 +64,10 @@ impl SelectionServiceBuilder {
     }
 
     pub async fn build(self) -> anyhow::Result<SelectionService> {
+        self.kv_router_config
+            .validate_config()
+            .map_err(|error| anyhow::anyhow!("invalid KV router configuration: {error}"))?;
+
         let cancel_token = CancellationToken::new();
         let mut startup_guard = StartupGuard::new(cancel_token.clone());
         let replica_runtime = setup_replica_sync(
@@ -399,6 +403,21 @@ mod tests {
         })
         .await
         .expect("replica port was not released")
+    }
+
+    #[tokio::test]
+    async fn builder_rejects_invalid_router_configuration() {
+        let mut config = test_config();
+        config.router_temperature = -1.0;
+
+        let error = SelectionServiceBuilder::new(config)
+            .build()
+            .await
+            .err()
+            .expect("invalid router configuration must fail during service construction");
+        let message = error.to_string();
+        assert!(message.contains("invalid KV router configuration"));
+        assert!(message.contains("router_temperature"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

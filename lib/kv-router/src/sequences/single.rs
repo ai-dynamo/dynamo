@@ -30,6 +30,7 @@ use rustc_hash::FxHashSet;
 use super::block_tracker::{BlockTracker, RequestBlockChain};
 use super::prefill_tracker::{PrefillLoadState, PrefillLoadTracker};
 use super::prompt_registry::WorkerLoadSnapshot;
+use crate::active_sequence::TrackedSequenceHashes;
 use crate::protocols::PrefillLoadHint;
 
 /// Duration after which stale requests may be expired (5 minutes).
@@ -155,6 +156,7 @@ impl ActiveSequences {
         self.assert_consistent();
     }
 
+    #[cfg(test)]
     pub(super) fn active_blocks(&self) -> usize {
         self.blocks.active_blocks()
     }
@@ -169,7 +171,7 @@ impl ActiveSequences {
     pub(super) fn add_request_with_prefill_tracking(
         &mut self,
         request_id: RequestId,
-        token_sequence: Option<Vec<SequenceHash>>,
+        token_sequence: Option<TrackedSequenceHashes>,
         expected_output_tokens: Option<u32>,
         track_prefill_tokens: bool,
         prefill_load_hint: Option<PrefillLoadHint>,
@@ -183,7 +185,9 @@ impl ActiveSequences {
         let mut outcome = self.force_expiry();
         let started_at = Instant::now();
 
-        let prompt_hashes = token_sequence.unwrap_or_default();
+        let prompt_hashes = token_sequence
+            .map(TrackedSequenceHashes::into_inner)
+            .unwrap_or_default();
         let (blocks, first_new_prompt_idx) = self.blocks.acquire_prompt(&prompt_hashes);
 
         if let Some(first_new_prompt_idx) = first_new_prompt_idx {
@@ -321,8 +325,10 @@ impl ActiveSequences {
     }
 
     pub(super) fn worker_load_snapshot(&self) -> WorkerLoadSnapshot {
+        let block_load = self.blocks.load();
         WorkerLoadSnapshot {
-            active_blocks: self.active_blocks(),
+            active_prompt_units: block_load.prompt_units,
+            active_output_blocks: block_load.output_blocks,
             active_requests: self.requests.len(),
             prefill: self.prefill.snapshot(),
         }
@@ -345,7 +351,12 @@ impl ActiveSequences {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::active_sequence::{TrackedSequenceHashes, tracked_sequence_hashes};
     use std::collections::VecDeque;
+
+    fn tracked(sequence: Vec<SequenceHash>) -> Option<TrackedSequenceHashes> {
+        Some(tracked_sequence_hashes(sequence))
+    }
 
     fn prefill_hint(tokens: usize, duration_secs: u64) -> PrefillLoadHint {
         PrefillLoadHint {
@@ -373,7 +384,7 @@ mod tests {
         let mut sequences = ActiveSequences::new_without_expiry(1);
         sequences.add_request_with_prefill_tracking(
             "long-lived".to_string(),
-            Some((1..=DEPTH as u64).collect()),
+            tracked((1..=DEPTH as u64).collect()),
             None,
             false,
             None,
@@ -390,7 +401,7 @@ mod tests {
 
         let first = seq_manager.add_request_with_prefill_tracking(
             "r1".to_string(),
-            Some(vec![1, 2]),
+            tracked(vec![1, 2]),
             None,
             true,
             tracking_hint(8),
@@ -410,7 +421,7 @@ mod tests {
 
         let second = seq_manager.add_request_with_prefill_tracking(
             "r2".to_string(),
-            Some(vec![1, 2, 3]),
+            tracked(vec![1, 2, 3]),
             None,
             true,
             tracking_hint(12),
@@ -449,7 +460,7 @@ mod tests {
 
         let outcome = seq_manager.add_request_with_prefill_tracking(
             "r1".to_string(),
-            Some(vec![1, 2, 3]),
+            tracked(vec![1, 2, 3]),
             None,
             true,
             tracking_hint(12),
@@ -500,7 +511,7 @@ mod tests {
 
         seq_manager.add_request_with_prefill_tracking(
             "request_1".to_string(),
-            Some(vec![1, 2, 3]),
+            tracked(vec![1, 2, 3]),
             None,
             true,
             tracking_hint(12),
@@ -511,7 +522,7 @@ mod tests {
 
         seq_manager.add_request_with_prefill_tracking(
             "request_2".to_string(),
-            Some(vec![5]),
+            tracked(vec![5]),
             None,
             true,
             tracking_hint(4),
@@ -522,7 +533,7 @@ mod tests {
 
         seq_manager.add_request_with_prefill_tracking(
             "request_3".to_string(),
-            Some(vec![1, 2, 3, 4]),
+            tracked(vec![1, 2, 3, 4]),
             None,
             true,
             tracking_hint(0),
@@ -552,7 +563,7 @@ mod tests {
 
         seq_manager.add_request_with_prefill_tracking(
             "r1".to_string(),
-            Some(vec![1, 2, 3]),
+            tracked(vec![1, 2, 3]),
             None,
             true,
             tracking_hint(12),
@@ -569,7 +580,7 @@ mod tests {
 
         seq_manager.add_request_with_prefill_tracking(
             "r2".to_string(),
-            Some(vec![1, 2]),
+            tracked(vec![1, 2]),
             None,
             true,
             tracking_hint(8),
@@ -598,7 +609,7 @@ mod tests {
 
         seq_manager.add_request_with_prefill_tracking(
             "r1".to_string(),
-            Some(vec![1, 2, 3]),
+            tracked(vec![1, 2, 3]),
             None,
             true,
             tracking_hint(12),
@@ -614,7 +625,7 @@ mod tests {
 
         seq_manager.add_request_with_prefill_tracking(
             "r2".to_string(),
-            Some(vec![4, 5]),
+            tracked(vec![4, 5]),
             None,
             true,
             tracking_hint(8),
@@ -633,7 +644,7 @@ mod tests {
 
         seq_manager.add_request_with_prefill_tracking(
             "r1".to_string(),
-            Some(vec![1, 2, 3]),
+            tracked(vec![1, 2, 3]),
             None,
             false,
             None,
@@ -657,7 +668,7 @@ mod tests {
 
         seq_manager.add_request_with_prefill_tracking(
             "r1".to_string(),
-            Some(vec![1]),
+            tracked(vec![1]),
             None,
             true,
             Some(prefill_hint(50, 10)),
@@ -665,7 +676,7 @@ mod tests {
         );
         seq_manager.add_request_with_prefill_tracking(
             "r2".to_string(),
-            Some(vec![2]),
+            tracked(vec![2]),
             None,
             true,
             Some(prefill_hint(30, 10)),
@@ -707,7 +718,7 @@ mod tests {
 
         seq_manager.add_request_with_prefill_tracking(
             "r1".to_string(),
-            Some(vec![1, 2]),
+            tracked(vec![1, 2]),
             None,
             true,
             tracking_hint(8),
@@ -715,7 +726,7 @@ mod tests {
         );
         seq_manager.add_request_with_prefill_tracking(
             "r2".to_string(),
-            Some(vec![3, 4]),
+            tracked(vec![3, 4]),
             None,
             true,
             tracking_hint(8),
@@ -753,7 +764,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(31)).await;
         let expired = seq_manager.add_request_with_prefill_tracking(
             "r3".to_string(),
-            Some(vec![5]),
+            tracked(vec![5]),
             None,
             true,
             tracking_hint(4),
@@ -772,7 +783,7 @@ mod tests {
 
         seq_manager.add_request_with_prefill_tracking(
             "r1".to_string(),
-            Some(vec![1]),
+            tracked(vec![1]),
             None,
             true,
             Some(prefill_hint(40, 100)),
@@ -781,7 +792,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(250)).await;
         seq_manager.add_request_with_prefill_tracking(
             "r2".to_string(),
-            Some(vec![2]),
+            tracked(vec![2]),
             None,
             true,
             Some(prefill_hint(30, 100)),

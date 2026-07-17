@@ -17,7 +17,7 @@ use active_sequences_open_loop::{
 use active_sequences_shared::{SequenceTrace, SequenceTraceEntry, generate_sequence_events};
 use dynamo_bench::kv_router_common::replay::{NoopSequencePublisher, process_mooncake_trace};
 use dynamo_kv_router::protocols::{PrefillLoadHint, WorkerWithDpRank};
-use dynamo_kv_router::{ActiveSequencesMultiWorker, SequenceRequest};
+use dynamo_kv_router::{ActiveSequenceStride, ActiveSequencesMultiWorker, SequenceRequest};
 
 const BLOCK_SIZE: u32 = 128;
 const NUM_GPU_BLOCKS: usize = 16384;
@@ -138,7 +138,7 @@ async fn active_sequences_replay_matches_sequential_direct_oracle() -> anyhow::R
         "bench",
     );
     let now = tokio::time::Instant::now();
-    let hashes = vec![1, 2];
+    let hashes = ActiveSequenceStride::ONE.sample_dense(vec![1, 2]);
     let projections = oracle.project_worker_loads(Some(&hashes), now);
     let projection_count = projections.len() as u64;
     let (projection_inspected, projection_digest) = summarize_worker_projections(&projections);

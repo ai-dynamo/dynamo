@@ -12,7 +12,8 @@ use dynamo_kv_router::protocols::{
 };
 use dynamo_kv_router::scheduling::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::{
-    ActiveSequencesMultiWorker, DefaultWorkerSelector, LocalScheduler, SequencePublisher,
+    ActiveSequenceStride, ActiveSequencesMultiWorker, DefaultWorkerSelector, LocalScheduler,
+    SequencePublisher, SequenceTrackerOptions,
 };
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -85,6 +86,7 @@ pub(super) fn replay_workers_with_configs(
 pub(super) fn replay_slots(
     args: &MockEngineArgs,
     workers_with_configs: &HashMap<WorkerId, ReplayWorkerConfig>,
+    active_sequence_stride: ActiveSequenceStride,
 ) -> Arc<ActiveSequencesMultiWorker<ReplayNoopPublisher>> {
     let dp_range = workers_with_configs
         .iter()
@@ -100,13 +102,17 @@ pub(super) fn replay_slots(
     // healthy replay may spend minutes of wall time advancing seconds of virtual time. Keep
     // expiry disabled here until replay has a liveness-aware definition of a stale request; do
     // not mask replay dead ends by expiring requests that are still live in virtual time.
-    Arc::new(ActiveSequencesMultiWorker::new_without_expiry(
+    Arc::new(ActiveSequencesMultiWorker::new_with_options(
         ReplayNoopPublisher,
         args.block_size,
         dp_range,
-        false,
         0,
         "replay",
+        SequenceTrackerOptions {
+            expiry_enabled: false,
+            active_sequence_stride,
+            ..Default::default()
+        },
     ))
 }
 

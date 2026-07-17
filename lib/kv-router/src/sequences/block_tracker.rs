@@ -60,6 +60,12 @@ pub(super) struct ReleasedPromptPath {
     pub(super) remove_from: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(super) struct BlockLoad {
+    pub(super) prompt_units: f64,
+    pub(super) output_blocks: f64,
+}
+
 /// Exact per-worker prompt liveness backed by compressed arena edges.
 #[derive(Debug, Default)]
 pub(super) struct BlockTracker {
@@ -299,7 +305,19 @@ impl BlockTracker {
     }
 
     pub(super) fn active_blocks(&self) -> usize {
-        (self.prompt_total + self.output_total).round() as usize
+        let load = self.load();
+        super::estimate_physical_active_blocks(
+            load.prompt_units,
+            load.output_blocks,
+            crate::ActiveSequenceStride::ONE,
+        )
+    }
+
+    pub(super) fn load(&self) -> BlockLoad {
+        BlockLoad {
+            prompt_units: self.prompt_total,
+            output_blocks: self.output_total,
+        }
     }
 
     #[cfg(any(test, debug_assertions))]

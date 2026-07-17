@@ -16,3 +16,13 @@ pub use multi_worker::*;
 pub use prefill_tracker::PrefillTokenDeltas;
 pub use prompt_registry::{PotentialLoadMaps, WorkerLoadProjection};
 pub use single::*;
+
+use crate::active_sequence::ActiveSequenceStride;
+
+pub(super) fn estimate_physical_active_blocks(
+    prompt_units: f64,
+    output_blocks: f64,
+    prompt_stride: ActiveSequenceStride,
+) -> usize {
+    (prompt_units * prompt_stride.get() as f64 + output_blocks).round() as usize
+}

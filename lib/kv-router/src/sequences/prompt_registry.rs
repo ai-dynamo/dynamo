@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(test)]
 use dynamo_tokens::SequenceHash;
 use indexmap::IndexMap;
 use parking_lot::RwLock;
@@ -18,6 +19,7 @@ use super::prefill_tracker::{PrefillLoadSnapshot, PrefillTimeLoadError};
 use super::prompt_membership_trie::PromptMembershipTrie;
 use super::single::PromptMembershipDelta;
 use super::topology::WorkerTopologyChange;
+use crate::active_sequence::{ActiveSequenceStride, TrackedSequenceHashes};
 use crate::protocols::WorkerWithDpRank;
 
 /// Ephemeral, request-specific view of worker load.
@@ -50,18 +52,29 @@ pub type PotentialLoadMaps = (
 
 /// Reusable snapshot of a worker's currently tracked execution state.
 ///
-/// `active_blocks` is the worker's unique active decode load in blocks.
-/// `prefill` retains the decay state needed to evaluate active prefill load in
-/// tokens at a caller-provided instant. Unlike [`WorkerLoadProjection`], this
-/// snapshot contains no incoming-request-specific state.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+/// Prompt load is retained in sampled units while output load remains in
+/// physical blocks. The outer registry applies the configured prompt stride
+/// before exposing decode-block estimates. `prefill` retains the decay state
+/// needed to evaluate active prefill load in tokens at a caller-provided
+/// instant. Unlike [`WorkerLoadProjection`], this snapshot contains no
+/// incoming-request-specific state.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub(super) struct WorkerLoadSnapshot {
-    pub(super) active_blocks: usize,
+    pub(super) active_prompt_units: f64,
+    pub(super) active_output_blocks: f64,
     pub(super) active_requests: usize,
     pub(super) prefill: PrefillLoadSnapshot,
 }
 
 impl WorkerLoadSnapshot {
+    pub(super) fn active_decode_blocks(&self, prompt_stride: ActiveSequenceStride) -> usize {
+        super::estimate_physical_active_blocks(
+            self.active_prompt_units,
+            self.active_output_blocks,
+            prompt_stride,
+        )
+    }
+
     pub(super) fn active_tokens(&self, decay_now: Instant) -> usize {
         self.prefill.active_tokens_at(decay_now)
     }
@@ -175,6 +188,7 @@ pub(super) struct PromptRegistry {
     // never existed atomically and make a suboptimal routing choice.
     membership: PromptMembershipTrie,
     loads: RwLock<WorkerLoadTable>,
+    active_sequence_stride: ActiveSequenceStride,
     #[cfg(test)]
     cleanup_attempts: AtomicUsize,
 }
@@ -184,6 +198,7 @@ impl Default for PromptRegistry {
         Self {
             membership: PromptMembershipTrie::new(),
             loads: RwLock::new(WorkerLoadTable::default()),
+            active_sequence_stride: ActiveSequenceStride::ONE,
             #[cfg(test)]
             cleanup_attempts: AtomicUsize::new(0),
         }
@@ -191,8 +206,14 @@ impl Default for PromptRegistry {
 }
 
 impl PromptRegistry {
-    pub(super) fn new(workers: impl IntoIterator<Item = WorkerWithDpRank>) -> Self {
-        let registry = Self::default();
+    pub(super) fn new(
+        workers: impl IntoIterator<Item = WorkerWithDpRank>,
+        active_sequence_stride: ActiveSequenceStride,
+    ) -> Self {
+        let registry = Self {
+            active_sequence_stride,
+            ..Self::default()
+        };
         let mut loads = registry.loads.write();
         for worker in workers {
             loads.ensure_worker(worker);
@@ -290,7 +311,11 @@ impl PromptRegistry {
             let active_tokens = load.active_tokens(decay_now);
             let added_tokens = prefill_token_deltas.tokens_for(worker);
 
-            potential_blocks.insert(worker, load.active_blocks + new_blocks);
+            potential_blocks.insert(
+                worker,
+                load.active_decode_blocks(self.active_sequence_stride)
+                    .saturating_add(new_blocks.saturating_mul(self.active_sequence_stride.get())),
+            );
             potential_tokens.insert(worker, active_tokens + added_tokens);
             if let Some(active_requests) = active_requests.as_mut() {
                 active_requests.insert(worker, load.active_requests);
@@ -302,10 +327,11 @@ impl PromptRegistry {
 
     pub(super) fn potential_blocks_and_tokens<const INCLUDE_ACTIVE_REQUESTS: bool>(
         &self,
-        token_sequence: Option<&[SequenceHash]>,
+        token_sequence: Option<&TrackedSequenceHashes>,
         prefill_token_deltas: &PrefillTokenDeltas,
         decay_now: Instant,
     ) -> PotentialLoadMaps {
+        let token_sequence = token_sequence.map(TrackedSequenceHashes::as_slice);
         let query_len = token_sequence.map_or(0, |query| query.len());
         let matched_depth = self.membership.compute_overlap_depths(token_sequence);
         self.project_loads_from_membership::<INCLUDE_ACTIVE_REQUESTS>(
@@ -318,9 +344,10 @@ impl PromptRegistry {
 
     pub(super) fn project_worker_loads(
         &self,
-        token_sequence: Option<&[SequenceHash]>,
+        token_sequence: Option<&TrackedSequenceHashes>,
         decay_now: Instant,
     ) -> FxHashMap<WorkerWithDpRank, WorkerLoadProjection> {
+        let token_sequence = token_sequence.map(TrackedSequenceHashes::as_slice);
         let query_len = token_sequence.map_or(0, |query| query.len());
         let matched_depth = self.membership.compute_overlap_depths(token_sequence);
         let loads = self.loads.read();
@@ -332,8 +359,10 @@ impl PromptRegistry {
                 worker,
                 WorkerLoadProjection {
                     active_prefill_tokens: load.active_tokens(decay_now),
-                    active_decode_blocks: load.active_blocks,
-                    additional_active_blocks: query_len.saturating_sub(overlap_depth),
+                    active_decode_blocks: load.active_decode_blocks(self.active_sequence_stride),
+                    additional_active_blocks: query_len
+                        .saturating_sub(overlap_depth)
+                        .saturating_mul(self.active_sequence_stride.get()),
                 },
             );
         }
@@ -345,7 +374,12 @@ impl PromptRegistry {
         self.loads
             .read()
             .iter()
-            .map(|(worker, load)| (worker, load.active_blocks))
+            .map(|(worker, load)| {
+                (
+                    worker,
+                    load.active_decode_blocks(self.active_sequence_stride),
+                )
+            })
             .collect()
     }
 
@@ -423,6 +457,10 @@ mod tests {
     use crate::sequences::single::{PromptMembershipRemove, PromptMembershipStore};
     use crate::sequences::topology::RemovedWorkerState;
 
+    fn tracked(sequence: Vec<SequenceHash>) -> TrackedSequenceHashes {
+        crate::active_sequence::tracked_sequence_hashes(sequence)
+    }
+
     fn worker(worker_id: u64, dp_rank: u32) -> WorkerWithDpRank {
         WorkerWithDpRank::new(worker_id, dp_rank)
     }
@@ -439,7 +477,8 @@ mod tests {
 
     fn worker_load_snapshot(active_blocks: usize) -> WorkerLoadSnapshot {
         WorkerLoadSnapshot {
-            active_blocks,
+            active_prompt_units: active_blocks as f64,
+            active_output_blocks: 0.0,
             active_requests: 0,
             prefill: PrefillLoadSnapshot::default(),
         }
@@ -453,7 +492,8 @@ mod tests {
         anchored_since: Instant,
     ) -> WorkerLoadSnapshot {
         WorkerLoadSnapshot {
-            active_blocks,
+            active_prompt_units: active_blocks as f64,
+            active_output_blocks: 0.0,
             active_requests: 0,
             prefill: PrefillLoadSnapshot {
                 prefill_full_tokens_sum,
@@ -501,7 +541,10 @@ mod tests {
                 token_sequence.map_or(0, |query| query.len().saturating_sub(overlap_depth));
             let added_tokens = prefill_token_deltas.tokens_for(worker);
 
-            potential_blocks.insert(worker, load.active_blocks + new_blocks);
+            potential_blocks.insert(
+                worker,
+                load.active_decode_blocks(ActiveSequenceStride::ONE) + new_blocks,
+            );
             potential_tokens.insert(worker, load.active_tokens(decay_now) + added_tokens);
         }
 
@@ -511,7 +554,7 @@ mod tests {
     #[test]
     fn removed_hash_can_be_restored_by_later_store() {
         let worker = worker(1, 0);
-        let registry = PromptRegistry::new([worker]);
+        let registry = PromptRegistry::new([worker], ActiveSequenceStride::ONE);
         let mut expected_loads = FxHashMap::default();
         let mut expected_blocks = FxHashMap::default();
 
@@ -540,9 +583,11 @@ mod tests {
         let worker_a = worker(1, 0);
         let worker_b = worker(2, 0);
         let worker_c = worker(3, 0);
-        let registry = PromptRegistry::new([worker_a, worker_b, worker_c]);
+        let registry =
+            PromptRegistry::new([worker_a, worker_b, worker_c], ActiveSequenceStride::ONE);
         let decay_now = Instant::now();
         let full_prompt: Vec<SequenceHash> = (1_u64..=96).collect();
+        let tracked_full_prompt = tracked(full_prompt.clone());
         let mut expected_loads = FxHashMap::default();
         let mut expected_blocks = FxHashMap::default();
 
@@ -564,7 +609,7 @@ mod tests {
             decay_now,
         );
         let actual = registry.potential_blocks_and_tokens::<false>(
-            Some(&full_prompt),
+            Some(&tracked_full_prompt),
             &PrefillTokenDeltas::none(),
             decay_now,
         );
@@ -576,7 +621,7 @@ mod tests {
     #[test]
     fn load_only_update_preserves_prompt_membership_and_active_token_projection() {
         let worker = worker(1, 0);
-        let registry = PromptRegistry::new([worker]);
+        let registry = PromptRegistry::new([worker], ActiveSequenceStride::ONE);
         let now = Instant::now();
         let anchored_since = now.checked_sub(Duration::from_secs(3)).unwrap_or(now);
         let mut expected_loads = FxHashMap::default();
@@ -598,7 +643,7 @@ mod tests {
         assert_eq!(registry.active_tokens(now).get(&worker).copied(), Some(9));
 
         let actual = registry.potential_blocks_and_tokens::<false>(
-            Some(&[1, 2, 3]),
+            Some(&tracked(vec![1, 2, 3])),
             &PrefillTokenDeltas::none(),
             now,
         );
@@ -610,7 +655,7 @@ mod tests {
     fn removing_worker_clears_prompt_membership_and_load_state() {
         let worker_a = worker(1, 0);
         let worker_b = worker(2, 0);
-        let registry = PromptRegistry::new([worker_a, worker_b]);
+        let registry = PromptRegistry::new([worker_a, worker_b], ActiveSequenceStride::ONE);
         let mut expected_loads = FxHashMap::default();
         let mut expected_blocks = FxHashMap::default();
 
@@ -634,7 +679,7 @@ mod tests {
         assert!(!registry.active_blocks().contains_key(&worker_a));
 
         let actual = registry.potential_blocks_and_tokens::<false>(
-            Some(&[1, 2, 3]),
+            Some(&tracked(vec![1, 2, 3])),
             &PrefillTokenDeltas::none(),
             Instant::now(),
         );
@@ -645,7 +690,7 @@ mod tests {
     fn dp_ranks_with_same_worker_id_remain_isolated() {
         let worker_a = worker(1, 0);
         let worker_b = worker(1, 1);
-        let registry = PromptRegistry::new([worker_a, worker_b]);
+        let registry = PromptRegistry::new([worker_a, worker_b], ActiveSequenceStride::ONE);
         let decay_now = Instant::now();
         let mut expected_loads = FxHashMap::default();
         let mut expected_blocks = FxHashMap::default();
@@ -669,12 +714,48 @@ mod tests {
             decay_now,
         );
         let actual = registry.potential_blocks_and_tokens::<false>(
-            Some(&[1, 2, 3]),
+            Some(&tracked(vec![1, 2, 3])),
             &PrefillTokenDeltas::none(),
             decay_now,
         );
 
         assert_eq!(actual.0, expected.0);
         assert_eq!(actual.1, expected.1);
+    }
+
+    #[test]
+    fn sparse_projection_scales_prompt_units_and_preserves_output_blocks() {
+        let worker = worker(1, 0);
+        let registry = PromptRegistry::new([worker], ActiveSequenceStride::new(4).unwrap());
+        let load = WorkerLoadSnapshot {
+            active_prompt_units: 2.5,
+            active_output_blocks: 1.5,
+            active_requests: 1,
+            prefill: PrefillLoadSnapshot::default(),
+        };
+        registry.apply_membership_delta_and_load(worker, store(&[10, 20], 0), load);
+
+        assert_eq!(registry.active_blocks().get(&worker), Some(&12));
+
+        let identical = registry.project_worker_loads(Some(&tracked(vec![10, 20])), Instant::now());
+        assert_eq!(
+            identical.get(&worker),
+            Some(&WorkerLoadProjection {
+                active_prefill_tokens: 0,
+                active_decode_blocks: 12,
+                additional_active_blocks: 0,
+            })
+        );
+
+        let diverged = registry.project_worker_loads(Some(&tracked(vec![10, 99])), Instant::now());
+        assert_eq!(diverged[&worker].active_decode_blocks, 12);
+        assert_eq!(diverged[&worker].additional_active_blocks, 4);
+
+        let (potential_blocks, _, _) = registry.potential_blocks_and_tokens::<false>(
+            Some(&tracked(vec![10, 99])),
+            &PrefillTokenDeltas::none(),
+            Instant::now(),
+        );
+        assert_eq!(potential_blocks.get(&worker), Some(&16));
     }
 }
