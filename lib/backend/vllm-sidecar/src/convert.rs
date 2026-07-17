@@ -1,25 +1,24 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{BTreeMap, BTreeSet};
-
 use dynamo_backend_common::{
-    DisaggregationMode, DynamoError, LLMEngineOutput, PreprocessedRequest, StopReason, TopLogprob,
-    usage,
+    DisaggregationMode, DynamoError, GuidedDecodingOptions, LLMEngineOutput, PrefillResult,
+    PreprocessedRequest, StopReason, TopLogprob, usage,
 };
 
 use crate::client;
 use crate::json::{json_to_struct, struct_to_json};
 use crate::proto as pb;
 
+const VLLM_LOGPROB_FLOOR: f64 = -9999.0;
+
 pub(crate) fn build_generate_request(
-    request: &PreprocessedRequest,
-    request_id: &str,
+    request: PreprocessedRequest,
+    request_id: String,
     mode: DisaggregationMode,
 ) -> Result<pb::GenerateRequest, DynamoError> {
-    validate_request(request, mode)?;
+    validate_request(&request, mode)?;
 
-    let sampling = &request.sampling_options;
     let prompt_logprobs = request.output_options.prompt_logprobs;
     let output_logprobs = request.output_options.logprobs;
     let max_new_tokens = if mode.is_prefill() {
@@ -32,12 +31,25 @@ pub(crate) fn build_generate_request(
     } else {
         request.stop_conditions.min_tokens.unwrap_or(0)
     };
+    let mut routing = request.routing;
+    let priority = routing
+        .as_ref()
+        .and_then(|routing| routing.priority)
+        .unwrap_or(0);
+    let cache_salt = routing
+        .as_mut()
+        .and_then(|routing| routing.cache_namespace.take())
+        .or(request.mdc_sum);
+
+    let sampling = request.sampling_options;
+    let stop_conditions = request.stop_conditions;
+    let kv = build_kv_parameters(request.extra_args, request.prefill_result, cache_salt, mode)?;
 
     Ok(pb::GenerateRequest {
-        request_id: request_id.to_string(),
+        request_id,
         model: String::new(),
         prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
-            ids: request.token_ids.clone(),
+            ids: request.token_ids,
         })),
         temperature: sampling.temperature,
         sampling: Some(pb::RandomSampling {
@@ -53,15 +65,18 @@ pub(crate) fn build_generate_request(
             repetition_penalty: sampling.repetition_penalty.unwrap_or(0.0),
             logit_bias: Default::default(),
             allowed_token_ids: Vec::new(),
-            structured_output: structured_output(request)?,
+            structured_output: structured_output(sampling.guided_decoding)?,
         }),
         stopping: Some(pb::StoppingCriteria {
             max_new_tokens,
             min_new_tokens,
-            stop_token_ids: stop_token_ids(request),
-            stop_strings: request.stop_conditions.stop.clone().unwrap_or_default(),
+            stop_token_ids: stop_token_ids(
+                stop_conditions.stop_token_ids,
+                stop_conditions.stop_token_ids_hidden,
+            ),
+            stop_strings: stop_conditions.stop.unwrap_or_default(),
             include_stop_strings: sampling.include_stop_str_in_output.unwrap_or(false),
-            ignore_eos: request.stop_conditions.ignore_eos.unwrap_or(false),
+            ignore_eos: stop_conditions.ignore_eos.unwrap_or(false),
         }),
         response: Some(pb::ResponseOptions {
             prompt_token_ids: prompt_logprobs.is_some(),
@@ -72,13 +87,9 @@ pub(crate) fn build_generate_request(
             output_logprobs: output_logprobs.is_some(),
             output_candidates: output_logprobs.map(top_n_candidates).transpose()?,
         }),
-        kv: Some(build_kv_parameters(request, mode)?),
+        kv: Some(kv),
         truncate_prompt_tokens: 0,
-        priority: request
-            .routing
-            .as_ref()
-            .and_then(|routing| routing.priority)
-            .unwrap_or(0),
+        priority,
     })
 }
 
@@ -103,24 +114,20 @@ fn normalize_top_k(top_k: Option<i32>) -> Result<u32, DynamoError> {
     }
 }
 
-fn stop_token_ids(request: &PreprocessedRequest) -> Vec<u32> {
-    let mut ids = BTreeSet::new();
-    for values in [
-        request.stop_conditions.stop_token_ids.as_ref(),
-        request.stop_conditions.stop_token_ids_hidden.as_ref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        ids.extend(values.iter().copied());
+fn stop_token_ids(visible: Option<Vec<u32>>, hidden: Option<Vec<u32>>) -> Vec<u32> {
+    let mut ids = visible.unwrap_or_default();
+    if let Some(hidden) = hidden {
+        ids.extend(hidden);
     }
-    ids.into_iter().collect()
+    ids.sort_unstable();
+    ids.dedup();
+    ids
 }
 
 fn structured_output(
-    request: &PreprocessedRequest,
+    guided: Option<GuidedDecodingOptions>,
 ) -> Result<Option<pb::decoding_parameters::StructuredOutput>, DynamoError> {
-    let Some(guided) = request.sampling_options.guided_decoding.as_ref() else {
+    let Some(guided) = guided else {
         return Ok(None);
     };
     if guided.backend.is_some() || guided.whitespace_pattern.is_some() {
@@ -131,25 +138,23 @@ fn structured_output(
 
     use pb::decoding_parameters::StructuredOutput;
     let mut values = Vec::new();
-    if let Some(json) = &guided.json {
+    if let Some(json) = guided.json {
         values.push(StructuredOutput::Json(json.to_string()));
     }
-    if let Some(regex) = &guided.regex {
-        values.push(StructuredOutput::Regex(regex.clone()));
+    if let Some(regex) = guided.regex {
+        values.push(StructuredOutput::Regex(regex));
     }
-    if let Some(choice) = &guided.choice {
+    if let Some(choice) = guided.choice {
         values.push(StructuredOutput::Choice(
-            pb::decoding_parameters::StringChoices {
-                choices: choice.clone(),
-            },
+            pb::decoding_parameters::StringChoices { choices: choice },
         ));
     }
-    if let Some(grammar) = &guided.grammar {
-        values.push(StructuredOutput::Grammar(grammar.clone()));
+    if let Some(grammar) = guided.grammar {
+        values.push(StructuredOutput::Grammar(grammar));
     }
-    if let Some(tag) = &guided.structural_tag {
+    if let Some(tag) = guided.structural_tag {
         values.push(StructuredOutput::StructuralTag(match tag {
-            serde_json::Value::String(tag) => tag.clone(),
+            serde_json::Value::String(tag) => tag,
             tag => tag.to_string(),
         }));
     }
@@ -162,17 +167,19 @@ fn structured_output(
 }
 
 fn build_kv_parameters(
-    request: &PreprocessedRequest,
+    extra_args: Option<serde_json::Value>,
+    prefill_result: Option<PrefillResult>,
+    cache_salt: Option<String>,
     mode: DisaggregationMode,
 ) -> Result<pb::KvCacheParameters, DynamoError> {
-    let extra = match request.extra_args.as_ref() {
+    let mut extra = match extra_args {
         None => None,
         Some(serde_json::Value::Object(extra)) => Some(extra),
         Some(_) => {
             return Err(client::invalid_argument("extra_args must be a JSON object"));
         }
     };
-    if let Some(extra) = extra {
+    if let Some(extra) = extra.as_ref() {
         for key in extra.keys() {
             if !matches!(
                 key.as_str(),
@@ -185,12 +192,12 @@ fn build_kv_parameters(
         }
     }
 
-    let bypass_prefix_cache = bool_extra(extra, "bypass_prefix_cache")?
-        .or(bool_extra(extra, "skip_reading_prefix_cache")?)
+    let bypass_prefix_cache = bool_extra(extra.as_ref(), "bypass_prefix_cache")?
+        .or(bool_extra(extra.as_ref(), "skip_reading_prefix_cache")?)
         .unwrap_or(false);
     let caller_kv = extra
-        .and_then(|extra| extra.get("kv_transfer_params"))
-        .cloned();
+        .as_mut()
+        .and_then(|extra| extra.remove("kv_transfer_params"));
 
     let kv_transfer_params = match mode {
         DisaggregationMode::Aggregated => caller_kv,
@@ -211,16 +218,13 @@ fn build_kv_parameters(
             Some(serde_json::Value::Object(params))
         }
         DisaggregationMode::Decode => Some(
-            request
-                .prefill_result
-                .as_ref()
+            prefill_result
                 .ok_or_else(|| {
                     client::invalid_argument(
                         "decode request is missing the prefill_result KV payload",
                     )
                 })?
-                .disaggregated_params
-                .clone(),
+                .disaggregated_params,
         ),
         DisaggregationMode::Encode => {
             return Err(client::invalid_argument(
@@ -231,16 +235,8 @@ fn build_kv_parameters(
 
     Ok(pb::KvCacheParameters {
         bypass_prefix_cache,
-        cache_salt: request
-            .routing
-            .as_ref()
-            .and_then(|routing| routing.cache_namespace.clone())
-            .or_else(|| request.mdc_sum.clone())
-            .unwrap_or_default(),
-        kv_transfer_params: kv_transfer_params
-            .as_ref()
-            .map(json_to_struct)
-            .transpose()?,
+        cache_salt: cache_salt.unwrap_or_default(),
+        kv_transfer_params: kv_transfer_params.map(json_to_struct).transpose()?,
     })
 }
 
@@ -351,9 +347,9 @@ pub(crate) struct ResponseState {
     prompt_tokens: u32,
     completion_tokens: u32,
     is_prefill: bool,
-    expect_output_logprobs: bool,
+    output_logprobs: Option<u32>,
     expect_prompt_logprobs: bool,
-    prompt_engine_data: Option<serde_json::Value>,
+    prompt_info: Option<pb::PromptInfo>,
 }
 
 impl ResponseState {
@@ -362,9 +358,9 @@ impl ResponseState {
             prompt_tokens: request.token_ids.len() as u32,
             completion_tokens: 0,
             is_prefill: mode.is_prefill(),
-            expect_output_logprobs: request.output_options.logprobs.is_some(),
+            output_logprobs: request.output_options.logprobs,
             expect_prompt_logprobs: request.output_options.prompt_logprobs.is_some(),
-            prompt_engine_data: None,
+            prompt_info: None,
         }
     }
 
@@ -404,25 +400,43 @@ impl ResponseState {
             )));
         }
 
-        self.completion_tokens = self.completion_tokens.saturating_add(output.num_tokens);
+        let mapped_logprobs = if let Some(count) = self.output_logprobs
+            && !self.is_prefill
+        {
+            Some(map_output_logprobs(&output, count > 0)?)
+        } else {
+            None
+        };
+        let pb::SequenceOutput {
+            text,
+            num_tokens,
+            token_ids,
+            finish_info,
+            ..
+        } = output;
+
+        self.completion_tokens = self.completion_tokens.saturating_add(num_tokens);
         let mut mapped = LLMEngineOutput {
             token_ids: if self.is_prefill {
                 Vec::new()
             } else {
-                output.token_ids.clone()
+                token_ids
             },
-            text: (!self.is_prefill && !output.text.is_empty()).then_some(output.text.clone()),
+            text: if self.is_prefill || text.is_empty() {
+                None
+            } else {
+                Some(text)
+            },
             index: Some(0),
             ..Default::default()
         };
-        if self.expect_output_logprobs && !self.is_prefill {
-            let (log_probs, top_logprobs) = map_output_logprobs(&output)?;
-            mapped.log_probs = Some(log_probs);
-            mapped.top_logprobs = Some(top_logprobs);
+        if let Some(logprobs) = mapped_logprobs {
+            mapped.log_probs = Some(logprobs.selected);
+            mapped.top_logprobs = logprobs.top;
         }
 
-        let Some(finish) = output.finish_info else {
-            return if self.is_prefill || output.num_tokens == 0 {
+        let Some(finish) = finish_info else {
+            return if self.is_prefill || num_tokens == 0 {
                 Ok(None)
             } else {
                 Ok(Some(mapped))
@@ -456,11 +470,7 @@ impl ResponseState {
             pb::finish_info::StopReason::StopString(value) => StopReason::String(value),
         });
         mapped.completion_usage = Some(usage(self.prompt_tokens, completion_tokens));
-        mapped.disaggregated_params = finish
-            .kv_transfer_params
-            .as_ref()
-            .map(struct_to_json)
-            .transpose()?;
+        mapped.disaggregated_params = finish.kv_transfer_params.map(struct_to_json).transpose()?;
         if self.is_prefill && mapped.disaggregated_params.is_none() {
             return Err(client::protocol_error(
                 "prefill terminal is missing kv_transfer_params",
@@ -472,7 +482,7 @@ impl ResponseState {
 
     fn attach_prompt_data(&mut self, output: &mut LLMEngineOutput) {
         if output.engine_data.is_none() {
-            output.engine_data = self.prompt_engine_data.take();
+            output.engine_data = self.prompt_info.take().map(prompt_logprobs_to_json);
         }
     }
 
@@ -497,43 +507,63 @@ impl ResponseState {
             ));
         }
 
-        let mut positions = Vec::with_capacity(count);
-        for index in 0..count {
-            if index == 0 {
-                positions.push(serde_json::Value::Null);
-                continue;
-            }
-            let mut entries = BTreeMap::new();
-            entries.insert(
-                prompt.token_ids[index].to_string(),
-                serde_json::json!({
-                    "logprob": prompt.logprobs[index],
-                    "rank": prompt.ranks[index],
-                }),
-            );
-            for candidate in &prompt.candidate_tokens[index].tokens {
-                entries.insert(
-                    candidate.id.to_string(),
-                    serde_json::json!({
-                        "logprob": candidate.logprob,
-                        "rank": candidate.rank,
-                    }),
-                );
-            }
-            positions.push(serde_json::to_value(entries).map_err(|error| {
-                client::protocol_error(format!("failed to encode prompt logprobs: {error}"))
-            })?);
-        }
-        self.prompt_engine_data = Some(serde_json::json!({
-            "prompt_logprobs": positions,
-        }));
+        self.prompt_info = Some(prompt);
         Ok(())
     }
 }
 
+fn prompt_logprobs_to_json(prompt: pb::PromptInfo) -> serde_json::Value {
+    let count = prompt.num_prompt_tokens as usize;
+    let mut positions = Vec::with_capacity(count);
+    let rows = prompt
+        .token_ids
+        .into_iter()
+        .zip(prompt.logprobs)
+        .zip(prompt.ranks)
+        .zip(prompt.candidate_tokens);
+    for (index, (((token_id, logprob), rank), candidates)) in rows.enumerate() {
+        if index == 0 {
+            positions.push(serde_json::Value::Null);
+            continue;
+        }
+        let mut entries = serde_json::Map::with_capacity(candidates.tokens.len() + 1);
+        entries.insert(token_id.to_string(), prompt_logprob_entry(logprob, rank));
+        for candidate in candidates.tokens {
+            entries.insert(
+                candidate.id.to_string(),
+                prompt_logprob_entry(candidate.logprob, candidate.rank),
+            );
+        }
+        positions.push(serde_json::Value::Object(entries));
+    }
+
+    let mut engine_data = serde_json::Map::with_capacity(1);
+    engine_data.insert(
+        "prompt_logprobs".to_string(),
+        serde_json::Value::Array(positions),
+    );
+    serde_json::Value::Object(engine_data)
+}
+
+fn prompt_logprob_entry(logprob: f32, rank: u32) -> serde_json::Value {
+    let mut entry = serde_json::Map::with_capacity(2);
+    entry.insert(
+        "logprob".to_string(),
+        serde_json::Value::from(normalize_logprob(logprob)),
+    );
+    entry.insert("rank".to_string(), serde_json::Value::from(rank));
+    serde_json::Value::Object(entry)
+}
+
+struct OutputLogprobs {
+    selected: Vec<f64>,
+    top: Option<Vec<Vec<TopLogprob>>>,
+}
+
 fn map_output_logprobs(
     output: &pb::SequenceOutput,
-) -> Result<(Vec<f64>, Vec<Vec<TopLogprob>>), DynamoError> {
+    include_top_logprobs: bool,
+) -> Result<OutputLogprobs, DynamoError> {
     let count = output.token_ids.len();
     if output.logprobs.len() != count
         || output.ranks.len() != count
@@ -543,34 +573,53 @@ fn map_output_logprobs(
             "output logprob arrays do not match token_ids",
         ));
     }
-    let log_probs = output.logprobs.iter().copied().map(f64::from).collect();
-    let top_logprobs = output
-        .token_ids
+    let log_probs = output
+        .logprobs
         .iter()
-        .enumerate()
-        .map(|(index, token_id)| {
-            let mut entries = Vec::with_capacity(output.candidate_tokens[index].tokens.len() + 1);
-            entries.push(TopLogprob {
-                rank: output.ranks[index],
-                token_id: *token_id,
-                token: None,
-                logprob: f64::from(output.logprobs[index]),
-                bytes: None,
-            });
-            entries.extend(
-                output.candidate_tokens[index]
-                    .tokens
-                    .iter()
-                    .map(|candidate| TopLogprob {
-                        rank: candidate.rank,
-                        token_id: candidate.id,
-                        token: None,
-                        logprob: f64::from(candidate.logprob),
-                        bytes: None,
-                    }),
-            );
-            entries
-        })
+        .copied()
+        .map(normalize_logprob)
         .collect();
-    Ok((log_probs, top_logprobs))
+    let top_logprobs = include_top_logprobs.then(|| {
+        output
+            .token_ids
+            .iter()
+            .enumerate()
+            .map(|(index, token_id)| {
+                let mut entries =
+                    Vec::with_capacity(output.candidate_tokens[index].tokens.len() + 1);
+                entries.push(TopLogprob {
+                    rank: output.ranks[index],
+                    token_id: *token_id,
+                    token: None,
+                    logprob: normalize_logprob(output.logprobs[index]),
+                    bytes: None,
+                });
+                entries.extend(
+                    output.candidate_tokens[index]
+                        .tokens
+                        .iter()
+                        .map(|candidate| TopLogprob {
+                            rank: candidate.rank,
+                            token_id: candidate.id,
+                            token: None,
+                            logprob: normalize_logprob(candidate.logprob),
+                            bytes: None,
+                        }),
+                );
+                entries
+            })
+            .collect()
+    });
+    Ok(OutputLogprobs {
+        selected: log_probs,
+        top: top_logprobs,
+    })
+}
+
+fn normalize_logprob(logprob: f32) -> f64 {
+    if logprob.is_finite() {
+        f64::from(logprob).max(VLLM_LOGPROB_FLOOR)
+    } else {
+        VLLM_LOGPROB_FLOOR
+    }
 }

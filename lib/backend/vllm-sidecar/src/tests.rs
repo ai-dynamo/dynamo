@@ -93,7 +93,7 @@ impl pb::generate_server::Generate for FakeGenerate {
         let request_kv = request
             .kv
             .as_ref()
-            .and_then(|kv| kv.kv_transfer_params.as_ref())
+            .and_then(|kv| kv.kv_transfer_params.clone())
             .map(struct_to_json)
             .transpose()
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
@@ -149,7 +149,9 @@ impl pb::generate_server::Generate for FakeGenerate {
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
             } else {
-                let kv = is_prefill.then(|| json_to_struct(&handoff).expect("encode handoff"));
+                let kv = is_prefill.then(|| {
+                    json_to_struct(handoff.clone()).expect("encode handoff")
+                });
                 yield sequence_response(true, wants_logprobs, kv);
             }
         };
@@ -228,14 +230,69 @@ fn prompt_logprobs_are_retained_for_the_terminal_chunk() {
 }
 
 #[test]
+fn negative_infinity_logprobs_are_normalized() {
+    let request = request();
+    let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated);
+    let mut response = sequence_response(true, true, None);
+    response.prompt_info = Some(pb::PromptInfo {
+        num_prompt_tokens: 3,
+        token_ids: vec![11, 22, 33],
+        logprobs: vec![0.0, f32::NEG_INFINITY, -0.3],
+        ranks: vec![0, 1, 2],
+        candidate_tokens: vec![
+            pb::CandidateTokenInfo::default(),
+            pb::CandidateTokenInfo {
+                tokens: vec![pb::candidate_token_info::TokenInfo {
+                    id: 23,
+                    logprob: f32::NEG_INFINITY,
+                    rank: 2,
+                }],
+            },
+            pb::CandidateTokenInfo::default(),
+        ],
+    });
+    let output = response.outputs.as_mut().unwrap();
+    output.logprobs[0] = f32::NEG_INFINITY;
+    output.candidate_tokens[0].tokens[0].logprob = f32::NEG_INFINITY;
+
+    let mapped = state
+        .convert(response)
+        .expect("convert response")
+        .expect("terminal output");
+    assert_eq!(mapped.log_probs.as_deref(), Some(&[-9999.0][..]));
+    assert!(
+        mapped.top_logprobs.as_ref().unwrap()[0]
+            .iter()
+            .all(|entry| entry.logprob == -9999.0)
+    );
+    let prompt = &mapped.engine_data.as_ref().unwrap()["prompt_logprobs"][1];
+    assert_eq!(prompt["22"]["logprob"], json!(-9999.0));
+    assert_eq!(prompt["23"]["logprob"], json!(-9999.0));
+}
+
+#[test]
+fn zero_output_logprobs_omits_top_logprobs() {
+    let mut request = request();
+    request.output_options.logprobs = Some(0);
+    let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated);
+    let mapped = state
+        .convert(sequence_response(true, true, None))
+        .expect("convert response")
+        .expect("terminal output");
+
+    assert_eq!(mapped.log_probs.as_deref(), Some(&[-0.25][..]));
+    assert!(mapped.top_logprobs.is_none());
+}
+
+#[test]
 fn oversized_logprob_counts_are_rejected() {
     let oversized = i32::MAX as u32 + 1;
 
     let mut output_request = request();
     output_request.output_options.logprobs = Some(oversized);
     let output_error = build_generate_request(
-        &output_request,
-        "output-logprobs",
+        output_request,
+        "output-logprobs".to_string(),
         DisaggregationMode::Aggregated,
     )
     .expect_err("oversized output logprobs must fail");
@@ -244,8 +301,8 @@ fn oversized_logprob_counts_are_rejected() {
     let mut prompt_request = request();
     prompt_request.output_options.prompt_logprobs = Some(oversized);
     let prompt_error = build_generate_request(
-        &prompt_request,
-        "prompt-logprobs",
+        prompt_request,
+        "prompt-logprobs".to_string(),
         DisaggregationMode::Aggregated,
     )
     .expect_err("oversized prompt logprobs must fail");
@@ -266,7 +323,11 @@ impl FakeServer {
         let server_service = service.clone();
         tokio::spawn(async move {
             tonic::transport::Server::builder()
-                .add_service(pb::generate_server::GenerateServer::new(server_service))
+                .add_service(
+                    pb::generate_server::GenerateServer::new(server_service)
+                        .max_encoding_message_size(64 * 1024 * 1024)
+                        .max_decoding_message_size(64 * 1024 * 1024),
+                )
                 .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
                     let _ = shutdown_rx.await;
                 })
@@ -411,7 +472,7 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     assert!(kv.bypass_prefix_cache);
     assert_eq!(kv.cache_salt, "cache-salt");
     assert_eq!(
-        struct_to_json(kv.kv_transfer_params.as_ref().unwrap()).unwrap(),
+        struct_to_json(kv.kv_transfer_params.clone().unwrap()).unwrap(),
         json!({"connector_data": {"values": [1, true, null]}})
     );
 }
@@ -459,7 +520,7 @@ async fn prefill_decode_handoff_is_opaque_and_repeatable() {
 
         let requests = server.service.requests.lock().await;
         let decode_wire = requests.last().unwrap().kv.as_ref().unwrap();
-        let decoded = struct_to_json(decode_wire.kv_transfer_params.as_ref().unwrap()).unwrap();
+        let decoded = struct_to_json(decode_wire.kv_transfer_params.clone().unwrap()).unwrap();
         assert_eq!(decoded, handoff);
     }
 }

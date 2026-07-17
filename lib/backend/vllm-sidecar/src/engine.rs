@@ -145,13 +145,19 @@ impl LLMEngine for VllmSidecarEngine {
             .get()
             .ok_or_else(|| client::engine_shutdown("vLLM sidecar is not started"))?;
         let request_id = ctx.id().to_string();
-        let proto_request = build_generate_request(&request, &request_id, self.mode)?;
         let mut state = ResponseState::new(&request, self.mode);
-        let cancel = self.cancel.clone();
+        let proto_request = build_generate_request(request, request_id, self.mode)?;
+        let stopped_ctx = ctx.inner_arc();
+        let shutdown = self.cancel.clone();
+        let mut cancelled = Box::pin(async move {
+            tokio::select! {
+                _ = stopped_ctx.stopped() => {}
+                _ = shutdown.cancelled() => {}
+            }
+        });
         let stream = tokio::select! {
             biased;
-            _ = ctx.stopped() => None,
-            _ = cancel.cancelled() => None,
+            _ = cancelled.as_mut() => None,
             result = client.generate_stream(proto_request) => Some(result?),
         };
         let Some(mut stream) = stream else {
@@ -166,14 +172,7 @@ impl LLMEngine for VllmSidecarEngine {
             loop {
                 tokio::select! {
                     biased;
-                    _ = ctx.stopped() => {
-                        yield Ok(LLMEngineOutput::cancelled().with_usage(usage(
-                            state.prompt_tokens(),
-                            state.reported_completion_tokens(),
-                        )));
-                        break;
-                    }
-                    _ = cancel.cancelled() => {
+                    _ = cancelled.as_mut() => {
                         yield Ok(LLMEngineOutput::cancelled().with_usage(usage(
                             state.prompt_tokens(),
                             state.reported_completion_tokens(),

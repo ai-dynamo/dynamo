@@ -10,6 +10,8 @@ use tonic::transport::{Channel, Endpoint};
 
 use crate::proto as pb;
 
+const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
+
 pub(crate) struct VllmClient {
     channels: Vec<Channel>,
     next: AtomicUsize,
@@ -52,7 +54,9 @@ impl VllmClient {
         request: pb::GenerateRequest,
     ) -> Result<tonic::Streaming<pb::GenerateResponse>, DynamoError> {
         let index = self.next.fetch_add(1, Ordering::Relaxed) % self.channels.len();
-        let mut client = pb::generate_client::GenerateClient::new(self.channels[index].clone());
+        let mut client = pb::generate_client::GenerateClient::new(self.channels[index].clone())
+            .max_encoding_message_size(MAX_MESSAGE_SIZE)
+            .max_decoding_message_size(MAX_MESSAGE_SIZE);
         client
             .generate_stream(request)
             .await
