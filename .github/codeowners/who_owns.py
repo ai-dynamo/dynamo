@@ -82,6 +82,7 @@ def _gh_fetch(org: str, slug: str) -> list[str]:
         ],
         text=True,
         stderr=subprocess.DEVNULL,
+        timeout=30,
     )
     return [line for line in out.splitlines() if line.strip()]
 
@@ -110,7 +111,7 @@ def team_members(team, fetch=_gh_fetch, cache=None):
     if parsed := _parse_team(team):
         try:
             members = sorted(fetch(*parsed))
-        except (OSError, subprocess.CalledProcessError):
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
             members = None
     cache[team] = members
     return members
@@ -155,7 +156,7 @@ def changed_files(repo: str, base: str) -> list[str]:
     error is surfaced instead of masquerading as "no changed files".
     """
     last_err: subprocess.CalledProcessError | None = None
-    any_ok = False
+    diff_ok = False
     changed: list[str] = []
     for args in ([f"{base}...HEAD"], [base], []):
         try:
@@ -167,22 +168,29 @@ def changed_files(repo: str, base: str) -> list[str]:
         except subprocess.CalledProcessError as err:
             last_err = err
             continue
-        any_ok = True
+        diff_ok = True
         changed = [p for p in out.splitlines() if p.strip()]
         if changed:
             break
     untracked: list[str] = []
     try:
         out = subprocess.check_output(
-            ["git", "-C", repo, "ls-files", "--others", "--exclude-standard"],
+            [
+                "git",
+                "-C",
+                repo,
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "--full-name",
+            ],
             text=True,
             stderr=subprocess.DEVNULL,
         )
         untracked = [p for p in out.splitlines() if p.strip()]
-        any_ok = True
     except (OSError, subprocess.CalledProcessError):
         pass
-    if not any_ok and last_err is not None:
+    if not diff_ok and last_err is not None:
         raise SystemExit(
             f"git diff failed in {repo!r} (not a checkout, or base "
             f"{base!r} unavailable): {last_err}"

@@ -939,6 +939,52 @@ class TestChangedFiles:
         files = who_owns.changed_files(str(repo), "HEAD")
         assert files == ["brand_new.txt", "tracked.txt"]
 
+    def test_bad_base_with_untracked_raises(self, monkeypatch) -> None:
+        # When ALL git-diff fallbacks fail AND ls-files succeeds, the diff
+        # failure must still be surfaced (not silently masked by ls-files
+        # succeeding). Tested via monkeypatch because the no-arg diff fallback
+        # always succeeds in a valid repo, making the scenario unreachable
+        # with a real git setup.
+        def fake_check_output(cmd, **kwargs):
+            if "diff" in cmd:
+                raise subprocess.CalledProcessError(128, cmd)
+            if "ls-files" in cmd:
+                return "untracked.txt\n"
+            raise subprocess.CalledProcessError(128, cmd)
+
+        monkeypatch.setattr(subprocess, "check_output", fake_check_output)
+
+        with pytest.raises(SystemExit):
+            who_owns.changed_files("/fake/repo", "nonexistent-base-ref")
+
+    def test_untracked_in_subdir_is_repo_root_relative(self, tmp_path) -> None:
+        # git ls-files without --full-name returns paths relative to cwd
+        # when run from a subdirectory. --full-name ensures repo-root-relative
+        # output so CODEOWNERS matching is always correct.
+        repo = tmp_path / "r"
+        repo.mkdir()
+
+        def git(*args: str) -> None:
+            subprocess.check_output(
+                ["git", "-C", str(repo), *args], stderr=subprocess.DEVNULL
+            )
+
+        git("init", "-q")
+        git("config", "user.email", "t@example.com")
+        git("config", "user.name", "t")
+        (repo / "seed.txt").write_text("x")
+        git("add", "seed.txt")
+        git("commit", "-q", "-m", "init")
+        subdir = repo / "subdir"
+        subdir.mkdir()
+        (subdir / "new.txt").write_text("z")  # untracked in a subdirectory
+
+        # Pass repo=subdir to simulate running from a subdirectory; the
+        # returned path must be repo-root-relative (subdir/new.txt), not
+        # the bare filename (new.txt).
+        files = who_owns.changed_files(str(subdir), "HEAD")
+        assert "subdir/new.txt" in files
+
 
 # ------------------------------------------------------------------
 # TypedDict / dataclass surface
