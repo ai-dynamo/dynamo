@@ -56,7 +56,8 @@ class DynamoWorkerProcess(ManagedProcess):
         timeout_s: int = 300,
     ):
         self.system_port = allocate_port(DynamoPortRange.SERVE.value)
-        request.addfinalizer(lambda port=self.system_port: deallocate_port(port))
+        self._ports_cleanup_done = False
+        request.addfinalizer(self._release_worker_ports)
         self.frontend_port = frontend_port
 
         # Determine max-model-len based on worker type:
@@ -120,18 +121,11 @@ class DynamoWorkerProcess(ManagedProcess):
 
         if is_prefill is not None:
             self.fpm_port = allocate_port(DynamoPortRange.FPM.value)
-            request.addfinalizer(lambda port=self.fpm_port: deallocate_port(port))
             env["DYN_FORWARDPASS_METRIC_PORT"] = str(self.fpm_port)
 
         if is_prefill is True:
             self.kv_event_port = allocate_port(DynamoPortRange.SERVE.value)
-            request.addfinalizer(
-                lambda port=self.kv_event_port: deallocate_port(port)
-            )
             self.nixl_side_channel_port = allocate_port(DynamoPortRange.NIXL.value)
-            request.addfinalizer(
-                lambda port=self.nixl_side_channel_port: deallocate_port(port)
-            )
             command.extend(
                 [
                     "--kv-events-config",
@@ -181,18 +175,52 @@ class DynamoWorkerProcess(ManagedProcess):
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Release allocated port when worker exits."""
+        super_error = None
         try:
-            deallocate_port(self.system_port)
-            if hasattr(self, "fpm_port"):
-                deallocate_port(self.fpm_port)
-            if hasattr(self, "kv_event_port"):
-                deallocate_port(self.kv_event_port)
-            if hasattr(self, "nixl_side_channel_port"):
-                deallocate_port(self.nixl_side_channel_port)
-        except Exception as e:
-            logging.warning(f"Failed to release vLLM worker ports: {e}")
+            result = super().__exit__(exc_type, exc_val, exc_tb)
+        except Exception as exc:
+            super_error = exc
+            result = None
 
-        return super().__exit__(exc_type, exc_val, exc_tb)
+        try:
+            self._release_worker_ports()
+        except Exception as exc:
+            if super_error is not None:
+                raise exc from super_error
+            raise
+
+        if super_error is not None:
+            raise super_error
+
+        return result
+
+    def _release_worker_ports(self):
+        if self._ports_cleanup_done:
+            return
+
+        cleanup_errors = []
+        for port_attr in (
+            "system_port",
+            "fpm_port",
+            "kv_event_port",
+            "nixl_side_channel_port",
+        ):
+            port = getattr(self, port_attr, None)
+            if port is None:
+                continue
+
+            try:
+                deallocate_port(port)
+            except Exception as exc:
+                logger.exception("Failed to release %s=%s", port_attr, port)
+                cleanup_errors.append(exc)
+            else:
+                setattr(self, port_attr, None)
+
+        if cleanup_errors:
+            raise cleanup_errors[0]
+
+        self._ports_cleanup_done = True
 
     def is_ready(self, response) -> bool:
         """Check the health of the worker process"""
