@@ -30,6 +30,7 @@ RESTORE_RUNTIME_ENV_NAMES = {
     "DYN_DISCOVERY_BACKEND",
     "DYN_REQUEST_PLANE",
     "DYN_EVENT_PLANE",
+    "DYN_EVENT_PLANE_HOST",
     # DistributedRuntime infrastructure env read after restore.
     "NATS_SERVER",
     "ETCD_ENDPOINTS",

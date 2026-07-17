@@ -48,12 +48,14 @@ def write_restore_context(monkeypatch, tmp_path, env):
 
 def test_apply_snapshot_restore_env_applies_and_clears_values(monkeypatch, tmp_path):
     monkeypatch.setenv("DYN_REQUEST_PLANE", "tcp")
+    monkeypatch.setenv("DYN_EVENT_PLANE_HOST", "192.0.2.10")
     write_restore_context(
         monkeypatch,
         tmp_path,
         {
             "DYN_DISCOVERY_BACKEND": "etcd",
             "DYN_REQUEST_PLANE": None,
+            "DYN_EVENT_PLANE_HOST": None,
             "UNSUPPORTED_ENV": "ignored",
         },
     )
@@ -63,9 +65,11 @@ def test_apply_snapshot_restore_env_applies_and_clears_values(monkeypatch, tmp_p
     assert restored == {
         "DYN_DISCOVERY_BACKEND": "etcd",
         "DYN_REQUEST_PLANE": None,
+        "DYN_EVENT_PLANE_HOST": None,
     }
     assert os.environ["DYN_DISCOVERY_BACKEND"] == "etcd"
     assert "DYN_REQUEST_PLANE" not in os.environ
+    assert "DYN_EVENT_PLANE_HOST" not in os.environ
     assert "UNSUPPORTED_ENV" not in os.environ
 
 
