@@ -290,15 +290,26 @@ class TestLoraEngineRouteRegistration:
             for call in runtime.register_engine_route.call_args_list
         }
 
-        assert set(registered) == {"load_lora", "unload_lora", "list_loras"}
+        # Routes should be registered with update/ prefix per unified worker convention
+        assert set(registered) == {
+            "update/load_lora",
+            "update/unload_lora",
+            "update/list_loras",
+        }
 
         body = {"lora_name": "adapterA"}
-        assert await registered["load_lora"](body) == {"status": "ok", "payload": body}
-        assert await registered["unload_lora"](body) == {
+        assert await registered["update/load_lora"](body) == {
             "status": "ok",
             "payload": body,
         }
-        assert await registered["list_loras"](body) == {"status": "ok", "payload": body}
+        assert await registered["update/unload_lora"](body) == {
+            "status": "ok",
+            "payload": body,
+        }
+        assert await registered["update/list_loras"](body) == {
+            "status": "ok",
+            "payload": body,
+        }
 
 
 class TestLoraRequestParsing:

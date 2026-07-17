@@ -48,9 +48,14 @@ def _register_lora_engine_routes(runtime, handler) -> None:
         ) -> dict:
             return await first_endpoint_response(endpoint_handler, body)
 
-        runtime.register_engine_route(route_name, _engine_route)
+        # Register under update/<name> prefix per unified worker convention
+        # to match system status server's call_lora_endpoint lookup
+        runtime.register_engine_route(f"update/{route_name}", _engine_route)
 
-    logger.info("Registered LoRA engine routes: %s", ", ".join(route_handlers))
+    logger.info(
+        "Registered LoRA engine routes: %s",
+        ", ".join(f"update/{name}" for name in route_handlers),
+    )
 
 
 async def init_omni(
