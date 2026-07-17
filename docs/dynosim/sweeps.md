@@ -81,31 +81,42 @@ The example uses AIC-backed timing by default:
 - AIC enumerates dense TP candidates
 - AIC-backed engine timing is used for candidate configs
 
-Install `aiconfigurator` into the project environment:
+Install the matching AIC upper and core packages, plus the Dynamo profiler. Until
+both split AIC packages are available from the release index, install them from
+the same AIC source checkout:
 
 ```bash
-uv pip install --python .venv/bin/python aiconfigurator
+AICONFIGURATOR_DIR=/path/to/aiconfigurator
+git -C "$AICONFIGURATOR_DIR" lfs pull
+uv pip install --python .venv/bin/python \
+  "$AICONFIGURATOR_DIR/aic-core" \
+  "$AICONFIGURATOR_DIR" \
+  --editable components/profiler
 ```
 
-If a regular install fails to load usable perf data, reinstall from a source checkout that has real systems data materialized:
+If an existing install fails to load usable perf data, materialize Git LFS data
+and reinstall both AIC packages from that same checkout:
 
 ```bash
-uv pip install --python .venv/bin/python --force-reinstall /path/to/aiconfigurator
+git -C "$AICONFIGURATOR_DIR" lfs pull
+uv pip install --python .venv/bin/python --force-reinstall \
+  "$AICONFIGURATOR_DIR/aic-core" \
+  "$AICONFIGURATOR_DIR"
 ```
 
 If DynoSim sweep setup fails with AIC errors about missing perf databases or parse failures such as `KeyError: 'gemm_dtype'`, inspect the installed files under:
 
 ```text
-.venv/lib/python*/site-packages/aiconfigurator/systems/data/...
+.venv/lib/python*/site-packages/aiconfigurator_core/systems/data/...
 ```
 
-If those files begin with `version https://git-lfs.github.com/spec/v1`, you have Git LFS pointer stubs instead of real perf tables. Install `aiconfigurator` from a checkout or wheel that includes the real LFS materialized payloads in `systems/`.
+If those files begin with `version https://git-lfs.github.com/spec/v1`, you have Git LFS pointer stubs instead of real perf tables. Install both AIC packages from a checkout or wheelhouse that includes the real LFS materialized payloads in `systems/`.
 
 When running directly from a source checkout, expose the in-repo Python components
 and runtime bindings:
 
 ```bash
-export PYTHONPATH=components/src:lib/bindings/python/src
+export PYTHONPATH=components/profiler/src:components/src:lib/bindings/python/src
 ```
 
 If the sweep uses multiple worker processes, prefer a real script file over a heredoc. On macOS, `ProcessPoolExecutor` child workers need a stable module path, and the driver module must guard its entry behind `if __name__ == "__main__":`.

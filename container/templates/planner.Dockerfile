@@ -16,8 +16,8 @@ ARG PYTHON_VERSION
 ARG TARGETARCH
 
 # Install only the packages needed to resolve and install the planner runtime
-# dependencies in the builder stage. The unpublished aiconfigurator-core wheel
-# is built from its pinned AIC source revision in the Rust wheel builder stage.
+# dependencies in the builder stage. The split AIC upper and core wheels are
+# built from one pinned source revision in the Rust wheel builder stage.
 # On arm64, gcc + libc6-dev are added so aiperf's `crick` dep can compile
 # from sdist (crick==0.0.8 publishes no manylinux aarch64 wheel); on amd64
 # the prebuilt wheel from PyPI is used and the toolchain is skipped
@@ -58,6 +58,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 COPY --from=dynamo_base /usr/local/bin/nats-server /usr/local/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd /usr/local/bin/etcd
 COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
+COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/aiconfigurator/verify_installed_package_layers.py /tmp/verify_installed_package_layers.py
 
 USER dynamo
 
@@ -67,16 +68,19 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sh
 
 # Install the local wheels and planner/profiler runtime dependencies before the
 # repo copies so changes in tests/configs don't invalidate the dependency layer.
-# The profiler wheel owns its upper-AIC and aiperf dependencies.
+# Install both AIC layers explicitly from the local wheelhouse. The verifier
+# catches overlapping ownership, version skew, and a stale monolithic upper.
 RUN --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/tmp/requirements.planner.txt \
     --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
         --requirement /tmp/requirements.planner.txt \
+        /opt/dynamo/wheelhouse/aiconfigurator-*.whl \
         /opt/dynamo/wheelhouse/aiconfigurator_core*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo-*-py3-none-any.whl \
-        /opt/dynamo/wheelhouse/ai_dynamo_profiler-*-py3-none-any.whl
+        /opt/dynamo/wheelhouse/ai_dynamo_profiler-*-py3-none-any.whl && \
+    ${VIRTUAL_ENV}/bin/python /tmp/verify_installed_package_layers.py --expect full
 
 # Copy only the subset of the repository needed for planner/profiler service
 # startup and the component-local planner-family test suites.

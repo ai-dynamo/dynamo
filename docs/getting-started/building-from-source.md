@@ -87,13 +87,33 @@ uv pip install -e .
 > [!NOTE]
 > The base `uv pip install -e .` installs only the Dynamo runtime and frontend. A backend extra (`[vllm]`, or `[sglang]`) will install the relevant framework dependencies to run an inference worker. For the TensorRT-LLM backend, use the `tensorrtllm-runtime` container instead of installing via `uv pip` to ensure the right dependencies are installed. See [Local Installation](local-installation.md) for more details.
 
-## 8. Verify the Build
+## 8. Install the Profiler (Optional)
+
+The profiler is a separate editable project. It needs the split AIC upper and
+core packages from one matching source checkout until both packages are
+available from the release index:
+
+```bash
+AICONFIGURATOR_DIR=/path/to/aiconfigurator
+git -C "$AICONFIGURATOR_DIR" lfs pull
+uv pip install \
+  "$AICONFIGURATOR_DIR/aic-core" \
+  "$AICONFIGURATOR_DIR" \
+  --editable components/profiler
+```
+
+This preserves the `dynamo.profiler` import path while keeping its dependencies
+out of the base `ai-dynamo` installation.
+
+## 9. Verify the Build
 
 ```bash
 python3 -m dynamo.frontend --help
+dynamo-profiler --help
 ```
 
-You should see the frontend command help output.
+If you skipped the optional profiler install, only run the frontend check. Each
+installed command should print its help output.
 
 ## DevContainer
 

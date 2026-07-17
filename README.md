@@ -204,6 +204,12 @@ uv pip install pip 'maturin[patchelf]'
 cd lib/bindings/python && maturin develop --uv && cd $PROJECT_ROOT
 uv pip install -e lib/gpu_memory_service
 uv pip install -e .
+
+# Optional: install the profiler with both AIC layers from one source checkout
+AICONFIGURATOR_DIR=/path/to/aiconfigurator
+git -C "$AICONFIGURATOR_DIR" lfs pull
+uv pip install "$AICONFIGURATOR_DIR/aic-core" "$AICONFIGURATOR_DIR" \
+  --editable components/profiler
 ```
 
 > VSCode/Cursor users: see the [`.devcontainer`](.devcontainer/README.md) for a pre-configured dev environment.
