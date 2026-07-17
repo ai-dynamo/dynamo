@@ -61,22 +61,6 @@ This starts a backend that generates rotating token IDs. Point a frontend at
 `dynamo.sample.generate` to test the full request flow without any ML
 dependencies.
 
-### Running a real engine
-
-```bash
-# vLLM
-python -m dynamo.vllm.unified_main --model Qwen/Qwen3-0.6B ...
-
-# SGLang
-python -m dynamo.sglang.unified_main --model-path Qwen/Qwen3-0.6B ...
-
-# TensorRT-LLM
-python -m dynamo.trtllm.unified_main --model Qwen/Qwen3-0.6B ...
-```
-
-Each `unified_main.py` calls `run(MyLLMEngine)` from the common
-`run.py` module.
-
 ## Implementing a New Engine
 
 Subclass `LLMEngine` and implement the required methods:
@@ -276,19 +260,6 @@ Spawns the frontend plus a sample prefill worker and a sample decode
 worker; the frontend's `PrefillRouter` forwards the synthetic
 `disaggregated_params` from prefill to decode.
 
-### Switching production backends to the unified path
-
-Each backend's `disagg.sh` accepts `--unified` to swap in the unified
-entry point. With it, the launch script exercises the same disagg flow
-through `dynamo.<backend>.unified_main` instead of the legacy
-`dynamo.<backend>` dispatch:
-
-```bash
-examples/backends/vllm/launch/disagg.sh --unified
-examples/backends/sglang/launch/disagg.sh --unified
-examples/backends/trtllm/launch/disagg.sh --unified
-```
-
 ### Helpers
 
 `dynamo.common.backend.disagg` ships small utilities engines can call
@@ -414,15 +385,6 @@ common/backend/
     tests/               # test_backend_bindings, test_disagg_helpers,
                          #   test_logprobs, test_sample_engine
     CLAUDE.md            # Design notes (rationale, invariants)
-
-vllm/llm_engine.py       # VllmLLMEngine (agg + disagg)
-vllm/unified_main.py     # Entry point -> run(VllmLLMEngine)
-
-sglang/llm_engine.py     # SglangLLMEngine (agg + disagg, bootstrap handshake)
-sglang/unified_main.py   # Entry point -> run(SglangLLMEngine)
-
-trtllm/llm_engine.py     # TrtllmLLMEngine (agg + disagg)
-trtllm/unified_main.py   # Entry point -> run(TrtllmLLMEngine)
 ```
 
 ## Feature Gaps

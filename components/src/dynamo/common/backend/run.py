@@ -1,16 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Common entry point for unified backends.
+"""Common entry point for backend workers.
 
-Each backend's ``unified_main.py`` calls :func:`run` with its
-``LLMEngine`` subclass.  Example::
+A backend's ``main`` calls :func:`run` with its ``BaseEngine`` subclass.
+Example::
 
     from dynamo.common.backend.run import run
-    from dynamo.vllm.llm_engine import VllmLLMEngine
+    from dynamo.common.backend.sample_engine import SampleLLMEngine
 
     def main():
-        run(VllmLLMEngine)
+        run(SampleLLMEngine)
 """
 
 import uvloop

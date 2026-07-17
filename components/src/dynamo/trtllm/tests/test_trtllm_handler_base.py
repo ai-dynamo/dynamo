@@ -22,7 +22,6 @@ from tensorrt_llm.executor.request import DEFAULT_REQUEST_PRIORITY
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
-from dynamo.trtllm.llm_engine import TrtllmLLMEngine
 from dynamo.trtllm.request_handlers.handler_base import HandlerBase
 
 pytestmark = [
@@ -186,28 +185,6 @@ class TestOverrideSamplingParams:
             HandlerBase._override_sampling_params(sampling_params, request)
 
         mock_post_init.assert_called_once()
-
-
-class TestLLMEngineOverrideSamplingParams:
-    """Tests for the unified LLMEngine _override_sampling_params path."""
-
-    def test_n_is_passed_through(self):
-        sampling_params = MockSamplingParams()
-        request = {"sampling_options": {"n": 2}}
-
-        result = TrtllmLLMEngine._override_sampling_params(sampling_params, request)
-
-        assert result.n == 2
-        assert result.best_of == 2
-
-    def test_existing_best_of_greater_than_n_is_preserved(self):
-        sampling_params = MockSamplingParams(best_of=4)
-        request = {"sampling_options": {"n": 2}}
-
-        result = TrtllmLLMEngine._override_sampling_params(sampling_params, request)
-
-        assert result.n == 2
-        assert result.best_of == 4
 
 
 class TestGuidedDecodingFromToolChoice:

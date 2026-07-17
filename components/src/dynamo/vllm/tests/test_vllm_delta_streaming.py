@@ -6,7 +6,6 @@ from types import SimpleNamespace
 import pytest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 
-from dynamo.common.constants import DisaggregationMode
 from dynamo.vllm.handlers import BaseWorkerHandler, build_sampling_params
 
 pytestmark = [
@@ -32,14 +31,6 @@ class _FakeEngineClient:
                 yield response
 
         return _stream()
-
-
-class _FakeContext:
-    def id(self):
-        return "req-1"
-
-    def trace_headers(self):
-        return None
 
 
 def _output(
@@ -239,46 +230,3 @@ async def test_generate_tokens_keeps_multichunk_delta_logprobs_aligned():
     assert [
         [entry[0]["token_id"] for entry in chunk["top_logprobs"]] for chunk in chunks
     ] == [[7], [8, 9]]
-
-
-@pytest.mark.asyncio
-async def test_unified_llm_engine_passes_delta_chunks_and_counts_usage():
-    pytest.importorskip("vllm.usage.usage_lib")
-    from dynamo.vllm.llm_engine import VllmLLMEngine
-
-    responses = [
-        _request_output([_output([1])], prompt_token_ids=[10, 11]),
-        _request_output(
-            [_output([2, 3], finish_reason="length")], prompt_token_ids=[10, 11]
-        ),
-    ]
-    engine = VllmLLMEngine.__new__(VllmLLMEngine)
-    engine.engine_client = _FakeEngineClient(responses)
-    engine._default_sampling_params = {}
-    engine._model_max_len = None
-    engine.disaggregation_mode = DisaggregationMode.AGGREGATED
-    engine.enable_rl = False
-    engine._dp_range = None
-
-    chunks = [
-        chunk
-        async for chunk in VllmLLMEngine.generate(
-            engine,
-            {
-                "token_ids": [10, 11],
-                "sampling_options": {},
-                "stop_conditions": {},
-                "output_options": {},
-            },
-            _FakeContext(),
-        )
-    ]
-
-    sampling_params = engine.engine_client.calls[0][0][1]
-    assert sampling_params.output_kind == RequestOutputKind.DELTA
-    assert [chunk["token_ids"] for chunk in chunks] == [[1], [2, 3]]
-    assert chunks[-1]["completion_usage"] == {
-        "prompt_tokens": 2,
-        "completion_tokens": 3,
-        "total_tokens": 5,
-    }

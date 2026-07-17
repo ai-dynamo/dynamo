@@ -94,8 +94,7 @@ The Python vLLM backend remains the recommended entry point for production
 deployments and examples. The Rust backend is a development preview for
 validating the Rust `LLMEngine` integration with vLLM's engine-core client.
 Use it when working on the Rust backend contract, cancellation, metrics,
-or P/D wiring; use `python -m dynamo.vllm` or
-`python -m dynamo.vllm.unified_main` for the most complete vLLM feature
+or P/D wiring; use `python -m dynamo.vllm` for the most complete vLLM feature
 coverage.
 
 > [!NOTE]
