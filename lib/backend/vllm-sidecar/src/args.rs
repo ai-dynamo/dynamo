@@ -19,7 +19,8 @@ pub(crate) struct Args {
     /// Hugging Face model ID or local path used by Dynamo for model-card
     /// registration, tokenization, and chat templates. The released vLLM gRPC
     /// API does not expose this metadata, so it cannot be inferred from the
-    /// endpoint.
+    /// endpoint. This flag is temporary and can be removed once vLLM exposes
+    /// model and tokenizer metadata over gRPC.
     #[arg(long)]
     pub model_path: String,
 }
