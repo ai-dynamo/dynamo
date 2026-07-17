@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Callable, List, Mapping, Optional, Sequence
 
 from gpu_memory_service.common import cuda_utils
+from gpu_memory_service.common.snapshot_profile import SnapshotProfile
 from gpu_memory_service.snapshot.backends.nixl_common import (
     DRAM_MEM_TYPE,
     FILE_MEM_TYPE,
@@ -53,6 +54,7 @@ NixlGroupingFn = Callable[
 
 @dataclass
 class _PreparedNixlGroup:
+    worker_index: int
     group_name: str
     file_groups: Sequence[NixlFileGroup]
     agent: object
@@ -92,11 +94,17 @@ class NixlPosixStagingTransferBackend:
             self._posix_backend_params.update(
                 {str(key): str(value) for key, value in posix_backend_params.items()}
             )
-        self._api_pool = ThreadPoolExecutor(max_workers=1)
-        self._api_future = self._api_pool.submit(load_nixl_api)
         self._group_sources = group_sources
         self._group_kind = group_kind
         self._warn_under_parallelized = warn_under_parallelized
+        configured_profile = config.backend_config.get("profile")
+        self._profile = (
+            configured_profile
+            if isinstance(configured_profile, SnapshotProfile)
+            else SnapshotProfile("loader", enabled=False)
+        )
+        self._api_pool = ThreadPoolExecutor(max_workers=1)
+        self._api_future = self._api_pool.submit(self._load_nixl_api)
         logger.info(
             "%s configured for device %d with %d workers using NIXL POSIX "
             "staging backend_params=%s; NIXL import is running in the "
@@ -107,6 +115,10 @@ class NixlPosixStagingTransferBackend:
             self._max_workers,
             self._posix_backend_params,
         )
+
+    def _load_nixl_api(self) -> object:
+        with self._profile.aggregate("nixl_api_import"):
+            return load_nixl_api()
 
     def start_restore(self, sources: Sequence[FileTransferSource]) -> TransferSession:
         return _NixlPosixStagingTransferSession(
@@ -119,6 +131,7 @@ class NixlPosixStagingTransferBackend:
             posix_backend_params=self._posix_backend_params,
             sources=sources,
             api_future=self._api_future,
+            profile=self._profile,
         )
 
     def close(self) -> None:
@@ -138,6 +151,7 @@ class _NixlPosixStagingTransferSession:
         posix_backend_params: Mapping[str, str],
         sources: Sequence[FileTransferSource],
         api_future: Optional[Future[object]] = None,
+        profile: SnapshotProfile | None = None,
     ) -> None:
         self._backend_name = backend_name
         self._device = device
@@ -146,17 +160,31 @@ class _NixlPosixStagingTransferSession:
         self._posix_backend_params = dict(posix_backend_params)
         self._sources = list(sources)
         self._api_future = api_future
+        self._profile = profile or SnapshotProfile("loader", enabled=False)
         self._agent_name_base = (
             f"gms_{backend_name.replace('-', '_')}_{device}_{os.getpid()}_{id(self):x}"
         )
         self._cancel_event = threading.Event()
         self._prep_started_at = time.monotonic()
-        grouped = group_sources(self._sources)
-        self._logical_group_count = len(grouped)
-        work_groups: List[NixlWorkGroup] = [
-            (group_name, file_groups) for group_name, file_groups in grouped.items()
-        ]
-        self._worker_count = min(self._max_workers, self._logical_group_count)
+        with self._profile.phase(
+            "restore_source_planning",
+            count=len(self._sources),
+            byte_count=sum(source.byte_count for source in self._sources),
+        ):
+            grouped = group_sources(self._sources)
+            self._logical_group_count = len(grouped)
+            work_groups: List[NixlWorkGroup] = [
+                (group_name, file_groups) for group_name, file_groups in grouped.items()
+            ]
+            self._worker_count = min(
+                self._max_workers,
+                self._logical_group_count,
+            )
+            self._work_groups = split_work_groups(
+                work_groups,
+                self._worker_count,
+            )
+            self._total_bytes = sum(source.byte_count for source in self._sources)
         if warn_under_parallelized and self._worker_count < self._logical_group_count:
             logger.warning(
                 "%s has %d active %s groups but only %d workers; "
@@ -166,8 +194,6 @@ class _NixlPosixStagingTransferSession:
                 self._group_kind,
                 self._worker_count,
             )
-        self._work_groups = split_work_groups(work_groups, self._worker_count)
-        self._total_bytes = sum(source.byte_count for source in self._sources)
         self._prep_pool: Optional[ThreadPoolExecutor] = None
         self._prep_futures: dict[Future[_PreparedNixlGroup], str] = {}
         if self._work_groups:
@@ -210,27 +236,32 @@ class _NixlPosixStagingTransferSession:
         try:
             with ThreadPoolExecutor(max_workers=self._worker_count) as pool:
                 transfer_futures: dict[Future[None], str] = {}
-                for prep_future in as_completed(self._prep_futures):
-                    group_name = self._prep_futures[prep_future]
-                    try:
-                        prepared = prep_future.result()
-                    except Exception as exc:
-                        self._cancel_event.set()
-                        raise RuntimeError(
-                            f"{self._backend_name} failed while preparing "
-                            f"{self._group_kind} group {group_name}: {exc}"
-                        ) from exc
-                    try:
-                        transfer_futures[
-                            pool.submit(
-                                self._restore_prepared_group,
-                                prepared,
-                                targets,
-                            )
-                        ] = group_name
-                    except Exception:
-                        self._close_prepared_group(prepared)
-                        raise
+                with self._profile.aggregate(
+                    "staging_prep_wait_and_transfer_scheduling",
+                    count=len(self._prep_futures),
+                    overlap="transfers_may_run_concurrently",
+                ):
+                    for prep_future in as_completed(self._prep_futures):
+                        group_name = self._prep_futures[prep_future]
+                        try:
+                            prepared = prep_future.result()
+                        except Exception as exc:
+                            self._cancel_event.set()
+                            raise RuntimeError(
+                                f"{self._backend_name} failed while preparing "
+                                f"{self._group_kind} group {group_name}: {exc}"
+                            ) from exc
+                        try:
+                            transfer_futures[
+                                pool.submit(
+                                    self._restore_prepared_group,
+                                    prepared,
+                                    targets,
+                                )
+                            ] = group_name
+                        except Exception:
+                            self._close_prepared_group(prepared)
+                            raise
 
                 for transfer_future in as_completed(transfer_futures):
                     group_name = transfer_futures[transfer_future]
@@ -244,7 +275,10 @@ class _NixlPosixStagingTransferSession:
                         ) from exc
         finally:
             if self._prep_pool is not None:
-                self._prep_pool.shutdown(wait=True, cancel_futures=True)
+                prep_pool = self._prep_pool
+                self._prep_pool = None
+                with self._profile.aggregate("staging_prep_pool_cleanup"):
+                    prep_pool.shutdown(wait=True, cancel_futures=True)
 
         elapsed = time.monotonic() - t0
         throughput = self._total_bytes / elapsed / (1024**3) if elapsed > 0 else 0.0
@@ -261,7 +295,10 @@ class _NixlPosixStagingTransferSession:
     def close(self) -> None:
         self._cancel_event.set()
         if self._prep_pool is not None:
-            self._prep_pool.shutdown(wait=True, cancel_futures=True)
+            prep_pool = self._prep_pool
+            self._prep_pool = None
+            with self._profile.aggregate("staging_prep_pool_cleanup"):
+                prep_pool.shutdown(wait=True, cancel_futures=True)
         for future in self._prep_futures:
             if not future.done() or future.cancelled():
                 continue
@@ -286,23 +323,39 @@ class _NixlPosixStagingTransferSession:
         try:
             if self._cancel_event.is_set():
                 raise CancelledError(f"{self._backend_name} cancelled")
-            api = (
-                self._api_future.result()
-                if self._api_future is not None
-                else load_nixl_api()
-            )
+            with self._profile.aggregate(
+                "nixl_api_import_wait",
+                worker=worker_index,
+            ):
+                api = (
+                    self._api_future.result()
+                    if self._api_future is not None
+                    else load_nixl_api()
+                )
             if self._cancel_event.is_set():
                 raise CancelledError(f"{self._backend_name} cancelled")
-            cuda_utils.cuda_runtime_set_device(self._device)
-            agent = create_nixl_agent(
-                api,
-                agent_name=agent_name,
-                backend_name=NIXL_POSIX_BACKEND,
-                backend_params=self._posix_backend_params,
-            )
+            with self._profile.aggregate(
+                "staging_worker_cuda_set_device",
+                worker=worker_index,
+            ):
+                cuda_utils.cuda_runtime_set_device(self._device)
+            with self._profile.aggregate(
+                "nixl_worker_agent_backend_creation",
+                worker=worker_index,
+            ):
+                agent = create_nixl_agent(
+                    api,
+                    agent_name=agent_name,
+                    backend_name=NIXL_POSIX_BACKEND,
+                    backend_params=self._posix_backend_params,
+                )
             if self._cancel_event.is_set():
                 raise CancelledError(f"{self._backend_name} cancelled")
-            slots = make_pinned_copy_slots(_PINNED_COPY_BUFFERS_PER_WORKER)
+            slots = make_pinned_copy_slots(
+                _PINNED_COPY_BUFFERS_PER_WORKER,
+                profile=self._profile,
+                worker=worker_index,
+            )
             prep_elapsed_s = time.monotonic() - prep_t0
             logger.info(
                 "%s prepared %s=%s files=%d prep_elapsed=%.3fs "
@@ -315,6 +368,7 @@ class _NixlPosixStagingTransferSession:
                 prep_started_after_s,
             )
             return _PreparedNixlGroup(
+                worker_index=worker_index,
                 group_name=group_name,
                 file_groups=file_groups,
                 agent=agent,
@@ -335,7 +389,11 @@ class _NixlPosixStagingTransferSession:
         prepared: _PreparedNixlGroup,
         targets: Mapping[str, GMSTransferTarget],
     ) -> None:
-        cuda_utils.cuda_runtime_set_device(self._device)
+        with self._profile.aggregate(
+            "transfer_worker_cuda_set_device",
+            worker=prepared.worker_index,
+        ):
+            cuda_utils.cuda_runtime_set_device(self._device)
         group_t0 = time.monotonic()
         group_bytes = 0
         try:
@@ -347,6 +405,8 @@ class _NixlPosixStagingTransferSession:
                 targets=targets,
                 cancel_event=self._cancel_event,
                 slots=prepared.slots,
+                profile=self._profile,
+                profile_fields={"worker": prepared.worker_index},
             )
         finally:
             elapsed = time.monotonic() - group_t0
@@ -386,7 +446,11 @@ def restore_file_groups_with_nixl_staging(
     cancel_event: Optional[threading.Event] = None,
     buffers_per_worker: int = _PINNED_COPY_BUFFERS_PER_WORKER,
     slots: Optional[List[PinnedCopySlot]] = None,
+    profile: SnapshotProfile | None = None,
+    profile_fields: Optional[Mapping[str, object]] = None,
 ) -> int:
+    profile = profile or SnapshotProfile("loader", enabled=False)
+    fields = dict(profile_fields or {})
     owned_slots = slots is None
     if slots is None:
         slots = []
@@ -394,7 +458,11 @@ def restore_file_groups_with_nixl_staging(
     next_slot = 0
     try:
         if owned_slots:
-            slots = make_pinned_copy_slots(buffers_per_worker)
+            slots = make_pinned_copy_slots(
+                buffers_per_worker,
+                profile=profile,
+                **fields,
+            )
         for file_path, sources in file_groups:
             fd = open_direct_read_fd(file_path, logger=logger, require_direct=True)
             try:
@@ -420,6 +488,8 @@ def restore_file_groups_with_nixl_staging(
                             slot.ptr,
                             chunk_size,
                             backend_name,
+                            profile=profile,
+                            profile_fields=fields,
                         )
                         slot.copy_to_device_async(target.va + done, chunk_size)
                         done += chunk_size
@@ -449,25 +519,83 @@ def _read_file_to_dram(
     host_ptr: int,
     size: int,
     backend_name: str,
+    *,
+    profile: SnapshotProfile | None = None,
+    profile_fields: Optional[Mapping[str, object]] = None,
 ) -> None:
+    profile = profile or SnapshotProfile("loader", enabled=False)
+    fields = dict(profile_fields or {})
     file_reg = None
     host_reg = None
     handle = None
+    if not profile.enabled:
+        try:
+            file_reg = agent.register_memory(
+                [(file_offset, size, fd, "")],
+                FILE_MEM_TYPE,
+            )
+            host_reg = agent.register_memory(
+                [(host_ptr, size, 0, "")],
+                DRAM_MEM_TYPE,
+            )
+            handle = agent.initialize_xfer(
+                "READ",
+                host_reg.trim(),
+                file_reg.trim(),
+                agent_name,
+            )
+            wait_for_transfer(agent, handle, file_path, backend_name)
+        finally:
+            release_transfer_resources(agent, handle, host_reg, file_reg)
+        return
     try:
-        file_reg = agent.register_memory(
-            [(file_offset, size, fd, "")],
-            FILE_MEM_TYPE,
-        )
-        host_reg = agent.register_memory(
-            [(host_ptr, size, 0, "")],
-            DRAM_MEM_TYPE,
-        )
-        handle = agent.initialize_xfer(
-            "READ",
-            host_reg.trim(),
-            file_reg.trim(),
-            agent_name,
-        )
-        wait_for_transfer(agent, handle, file_path, backend_name)
+        with profile.aggregate(
+            "file_to_dram_completed",
+            byte_count=size,
+            **fields,
+        ):
+            with profile.aggregate(
+                "nixl_register_file",
+                byte_count=size,
+                **fields,
+            ):
+                file_reg = agent.register_memory(
+                    [(file_offset, size, fd, "")],
+                    FILE_MEM_TYPE,
+                )
+            with profile.aggregate(
+                "nixl_register_dram",
+                byte_count=size,
+                **fields,
+            ):
+                host_reg = agent.register_memory(
+                    [(host_ptr, size, 0, "")],
+                    DRAM_MEM_TYPE,
+                )
+            with profile.aggregate(
+                "nixl_transfer_initialize",
+                **fields,
+            ):
+                handle = agent.initialize_xfer(
+                    "READ",
+                    host_reg.trim(),
+                    file_reg.trim(),
+                    agent_name,
+                )
+            wait_for_transfer(
+                agent,
+                handle,
+                file_path,
+                backend_name,
+                profile=profile,
+                profile_fields=fields,
+            )
     finally:
-        release_transfer_resources(agent, handle, host_reg, file_reg)
+        release_transfer_resources(
+            agent,
+            handle,
+            host_reg,
+            file_reg,
+            profile=profile,
+            profile_fields=fields,
+        )

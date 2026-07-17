@@ -19,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from gpu_memory_service.common import cuda_utils
+from gpu_memory_service.common.snapshot_profile import SnapshotProfile
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.snapshot.backends.sharded_ssd import parse_sharded_ssd_roots
 from gpu_memory_service.snapshot.storage_client import GMSStorageClient
@@ -39,6 +40,13 @@ def _load_device(
     sharded_ssd_roots: list[str],
     sharded_ssd_queues_per_root: int,
 ) -> None:
+    profile = SnapshotProfile(
+        "loader",
+        logger=logger,
+        device=device,
+        service="weights",
+    )
+    profile.ensure_profile_session_id()
     input_dir = os.path.join(checkpoint_dir, f"device-{device}")
     logger.info(
         "Loading GMS checkpoint: device=%d input_dir=%s transfer_backend=%s max_workers=%d",
@@ -52,19 +60,23 @@ def _load_device(
     # GMSStorageClient still publishes the restored layout from this thread.
     # Ensure the loader's main per-device thread has a current CUDA context for
     # the final synchronize/unmap/commit path.
-    cuda_utils.cuda_runtime_set_device(device)
-    client = GMSStorageClient(
-        socket_path=get_socket_path(device),
-        device=device,
-        transfer_backend=transfer_backend,
-        sharded_ssd_roots=sharded_ssd_roots,
-        sharded_ssd_queues_per_root=sharded_ssd_queues_per_root,
-    )
-    client.load_to_gms(
-        input_dir,
-        max_workers=max_workers,
-        clear_existing=True,
-    )
+    with profile.phase("per_device_load_total"):
+        with profile.phase("cuda_set_device"):
+            cuda_utils.cuda_runtime_set_device(device)
+        with profile.phase("storage_client_construction"):
+            client = GMSStorageClient(
+                socket_path=get_socket_path(device),
+                device=device,
+                transfer_backend=transfer_backend,
+                sharded_ssd_roots=sharded_ssd_roots,
+                sharded_ssd_queues_per_root=sharded_ssd_queues_per_root,
+                profile=profile,
+            )
+        client.load_to_gms(
+            input_dir,
+            max_workers=max_workers,
+            clear_existing=True,
+        )
     elapsed = time.monotonic() - t0
     logger.info("GMS checkpoint loaded: device=%d elapsed=%.2fs", device, elapsed)
 
@@ -145,8 +157,15 @@ def _list_checkpoint_devices(checkpoint_dir: str | None) -> list[int]:
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = _build_parser()
-    args = parser.parse_args(argv)
+    profile = SnapshotProfile(
+        "loader",
+        logger=logger,
+        scope="cli",
+        service="weights",
+    )
+    with profile.phase("cli_entry_and_argument_parse"):
+        parser = _build_parser()
+        args = parser.parse_args(argv)
     if not args.checkpoint_dir:
         parser.error(
             f"--checkpoint-dir is required for --transfer-backend={args.transfer_backend}"
@@ -166,26 +185,29 @@ def main(argv: list[str] | None = None) -> None:
         ",".join(sharded_ssd_roots) or "-",
         sharded_ssd_queues_per_root,
     )
-    devices = _list_checkpoint_devices(checkpoint_dir)
+    with profile.phase("device_and_checkpoint_discovery"):
+        devices = _list_checkpoint_devices(checkpoint_dir)
 
     t0 = time.monotonic()
-    with ThreadPoolExecutor(max_workers=len(devices)) as pool:
-        futures = {
-            pool.submit(
-                _load_device,
-                checkpoint_dir,
-                dev,
-                max_workers,
-                transfer_backend,
-                sharded_ssd_roots,
-                sharded_ssd_queues_per_root,
-            ): dev
-            for dev in devices
-        }
-        for future in as_completed(futures):
-            dev = futures[future]
-            future.result()
-            logger.info("Device %d load complete", dev)
+    with profile.phase("all_device_barrier", count=len(devices)):
+        with ThreadPoolExecutor(max_workers=len(devices)) as pool:
+            with profile.phase("per_device_thread_scheduling", count=len(devices)):
+                futures = {
+                    pool.submit(
+                        _load_device,
+                        checkpoint_dir,
+                        dev,
+                        max_workers,
+                        transfer_backend,
+                        sharded_ssd_roots,
+                        sharded_ssd_queues_per_root,
+                    ): dev
+                    for dev in devices
+                }
+            for future in as_completed(futures):
+                dev = futures[future]
+                future.result()
+                logger.info("Device %d load complete", dev)
     elapsed = time.monotonic() - t0
     logger.info("All %d devices loaded in %.2fs", len(devices), elapsed)
 

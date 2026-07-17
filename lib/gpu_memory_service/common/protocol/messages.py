@@ -12,6 +12,7 @@ from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 class HandshakeRequest(msgspec.Struct, tag="handshake_request"):
     lock_type: RequestedLockType
     timeout_ms: Optional[int] = None
+    profile_session_id: Optional[str] = None
 
 
 class HandshakeResponse(msgspec.Struct, tag="handshake_response"):

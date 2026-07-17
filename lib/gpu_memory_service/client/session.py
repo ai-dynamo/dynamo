@@ -51,6 +51,7 @@ class _GMSClientSession:
         socket_path: str,
         lock_type: RequestedLockType,
         timeout_ms: Optional[int],
+        profile_session_id: Optional[str] = None,
     ):
         self._requested_lock_type = lock_type
         self._transport = _GMSRPCTransport(socket_path)
@@ -73,7 +74,11 @@ class _GMSClientSession:
         #     server-availability ceiling on a workload-shaped wait.
         self._transport.connect(timeout_ms=30_000 if timeout_ms is None else timeout_ms)
         try:
-            response = self._transport.handshake(lock_type, timeout_ms)
+            response = self._transport.handshake(
+                lock_type,
+                timeout_ms,
+                profile_session_id,
+            )
         except Exception:
             try:
                 self._transport.close()

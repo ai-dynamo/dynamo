@@ -17,6 +17,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from gpu_memory_service.common import cuda_utils
+from gpu_memory_service.common.snapshot_profile import SnapshotProfile
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.snapshot.backends.sharded_ssd import (
     device_sharded_ssd_roots,
@@ -39,6 +40,13 @@ def _save_device(
     shard_size_bytes: int,
     sharded_ssd_roots: list[str],
 ) -> None:
+    profile = SnapshotProfile(
+        "saver",
+        logger=logger,
+        device=device,
+        service="weights",
+    )
+    profile.ensure_profile_session_id()
     output_dir = os.path.join(checkpoint_dir, f"device-{device}")
     shard_roots = device_sharded_ssd_roots(
         checkpoint_dir,
@@ -57,15 +65,20 @@ def _save_device(
     t0 = time.monotonic()
     # This runs on a ThreadPoolExecutor thread; bind its CUDA device before
     # any device work, mirroring the loader's _load_device.
-    cuda_utils.cuda_runtime_set_device(device)
-    GMSStorageClient(
-        output_dir,
-        socket_path=get_socket_path(device),
-        device=device,
-        timeout_ms=lock_timeout_ms,
-        shard_size_bytes=shard_size_bytes,
-        sharded_ssd_roots=shard_roots,
-    ).save(max_workers=max_workers)
+    with profile.phase("per_device_save_total"):
+        with profile.phase("cuda_set_device"):
+            cuda_utils.cuda_runtime_set_device(device)
+        with profile.phase("storage_client_construction"):
+            client = GMSStorageClient(
+                output_dir,
+                socket_path=get_socket_path(device),
+                device=device,
+                timeout_ms=lock_timeout_ms,
+                shard_size_bytes=shard_size_bytes,
+                sharded_ssd_roots=shard_roots,
+                profile=profile,
+            )
+        client.save(max_workers=max_workers)
     elapsed = time.monotonic() - t0
     logger.info("GMS checkpoint saved: device=%d elapsed=%.2fs", device, elapsed)
 
@@ -111,8 +124,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = _build_parser()
-    args = parser.parse_args(argv)
+    profile = SnapshotProfile(
+        "saver",
+        logger=logger,
+        scope="cli",
+        service="weights",
+    )
+    with profile.phase("cli_entry_and_argument_parse"):
+        parser = _build_parser()
+        args = parser.parse_args(argv)
     if not args.checkpoint_dir:
         parser.error("--checkpoint-dir is required for directory-backed saves")
     checkpoint_dir = args.checkpoint_dir
@@ -122,7 +142,8 @@ def main(argv: list[str] | None = None) -> None:
     shard_size_bytes = args.shard_size_bytes
     sharded_ssd_roots = parse_sharded_ssd_roots(args.sharded_ssd_roots)
 
-    devices = cuda_utils.list_devices()
+    with profile.phase("device_discovery"):
+        devices = cuda_utils.list_devices()
     logger.info(
         "Starting GMS save for %d devices lock_timeout_ms=%d sharded_ssd_roots=%s",
         len(devices),
@@ -130,21 +151,23 @@ def main(argv: list[str] | None = None) -> None:
         ",".join(sharded_ssd_roots) or "-",
     )
     t0 = time.monotonic()
-    with ThreadPoolExecutor(max_workers=len(devices)) as pool:
-        futures = {
-            pool.submit(
-                _save_device,
-                checkpoint_dir,
-                dev,
-                max_workers,
-                lock_timeout_ms,
-                shard_size_bytes,
-                sharded_ssd_roots,
-            ): dev
-            for dev in devices
-        }
-        for future in as_completed(futures):
-            future.result()
+    with profile.phase("all_device_barrier", count=len(devices)):
+        with ThreadPoolExecutor(max_workers=len(devices)) as pool:
+            with profile.phase("per_device_thread_scheduling", count=len(devices)):
+                futures = {
+                    pool.submit(
+                        _save_device,
+                        checkpoint_dir,
+                        dev,
+                        max_workers,
+                        lock_timeout_ms,
+                        shard_size_bytes,
+                        sharded_ssd_roots,
+                    ): dev
+                    for dev in devices
+                }
+            for future in as_completed(futures):
+                future.result()
     elapsed = time.monotonic() - t0
     logger.info("All %d devices saved in %.2fs", len(devices), elapsed)
     logger.info("Save complete; exiting")

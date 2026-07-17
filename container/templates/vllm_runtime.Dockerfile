@@ -46,6 +46,11 @@ WORKDIR /workspace
 
 ENV DYNAMO_HOME=/opt/dynamo
 ENV HOME=/home/dynamo
+{% if target == "runtime" and device == "cuda" %}
+# TEMPORARY: enable disposable snapshot timing instrumentation in this
+# experiment's vLLM runtime and the snapshot placeholder derived from it.
+ENV GMS_SNAPSHOT_PROFILE=1
+{% endif %}
 {% if device != "cuda" %}
 ENV PATH=/usr/local/ucx/bin:/usr/local/bin/etcd:${PATH}
 {% else %}

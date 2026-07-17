@@ -52,6 +52,7 @@ from gpu_memory_service.common.cuda_utils import (
 )
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import GetAllocationResponse
+from gpu_memory_service.common.snapshot_profile import SnapshotProfile
 
 logger = logging.getLogger(__name__)
 
@@ -166,11 +167,14 @@ class GMSClientMemoryManager:
         device: int = 0,
         tag: Optional[str] = None,
         scratch_size: int = 512 * 1024 * 1024,
+        profile: SnapshotProfile | None = None,
     ) -> None:
         self.socket_path = socket_path
         self.device = device
         self.tag = tag
         self.scratch_size = scratch_size
+        self._profile = profile or SnapshotProfile("loader", enabled=False)
+        self._profile_session_id = self._profile.ensure_profile_session_id()
 
         self._client: Optional[_GMSClientSession] = None
 
@@ -191,8 +195,10 @@ class GMSClientMemoryManager:
         self._va_preserved = False
         self._last_memory_layout_hash: str = ""
 
-        cuda_ensure_initialized()
-        self.granularity = cumem_get_allocation_granularity(device)
+        with self._profile.phase("client_cu_init"):
+            cuda_ensure_initialized()
+        with self._profile.phase("client_allocation_granularity"):
+            self.granularity = cumem_get_allocation_granularity(device)
 
     # ==================== Properties ====================
 
@@ -253,11 +259,16 @@ class GMSClientMemoryManager:
                 self.socket_path = new_path
             self._aborted = False
 
-        self._client = _GMSClientSession(
-            self.socket_path,
-            lock_type=lock_type,
-            timeout_ms=timeout_ms,
-        )
+        with self._profile.phase(
+            "server_connect_and_lock_wait",
+            requested_lock=lock_type.value,
+        ):
+            self._client = _GMSClientSession(
+                self.socket_path,
+                lock_type=lock_type,
+                timeout_ms=timeout_ms,
+                profile_session_id=self._profile_session_id,
+            )
         self._granted_lock_type = self._client.lock_type
         if self._granted_lock_type == GrantedLockType.RW:
             self._last_memory_layout_hash = ""
@@ -298,7 +309,19 @@ class GMSClientMemoryManager:
         """
         self._require_rw()
         aligned_size = align_to_granularity(size, self.granularity)
-        response = self._client_rpc.allocate_info(aligned_size, tag)
+        if not self._profile.enabled:
+            response = self._client_rpc.allocate_info(aligned_size, tag)
+            if int(response.aligned_size) != aligned_size:
+                raise RuntimeError(
+                    "GMS allocation alignment mismatch: "
+                    f"{aligned_size} vs {response.aligned_size}"
+                )
+            return response.allocation_id, int(response.layout_slot)
+        with self._profile.aggregate(
+            "allocate_rpc_wall",
+            byte_count=aligned_size,
+        ):
+            response = self._client_rpc.allocate_info(aligned_size, tag)
         if int(response.aligned_size) != aligned_size:
             raise RuntimeError(
                 "GMS allocation alignment mismatch: "
@@ -308,7 +331,10 @@ class GMSClientMemoryManager:
 
     def export_handle(self, allocation_id: str) -> int:
         """Export allocation as POSIX FD."""
-        return self._client_rpc.export(allocation_id)
+        if not self._profile.enabled:
+            return self._client_rpc.export(allocation_id)
+        with self._profile.aggregate("export_fd_rpc_wall"):
+            return self._client_rpc.export(allocation_id)
 
     def get_handle_info(self, allocation_id: str):
         """Query allocation info from server."""
@@ -335,16 +361,22 @@ class GMSClientMemoryManager:
         self._require_rw()
 
         # Publish barrier: all writer-side GPU work must be visible before commit.
-        cuda_synchronize()
+        with self._profile.phase("commit_context_sync"):
+            cuda_synchronize()
 
-        for mapping in list(self._mappings.values()):
-            if mapping.handle != 0:
-                self.unmap_va(mapping.va)
+        with self._profile.phase(
+            "commit_unmap_release_loop",
+            count=len(self._mappings),
+        ):
+            for mapping in list(self._mappings.values()):
+                if mapping.handle != 0:
+                    self.unmap_va(mapping.va)
 
         self._va_preserved = True
         self._unmapped = True
 
-        self._client_rpc.commit()
+        with self._profile.phase("commit_rpc"):
+            self._client_rpc.commit()
         self._client = None
         self._granted_lock_type = None
         return True
@@ -360,13 +392,41 @@ class GMSClientMemoryManager:
     def metadata_put(
         self, key: str, allocation_id: str, offset_bytes: int, value: bytes
     ) -> bool:
-        return self._client_rpc.metadata_put(key, allocation_id, offset_bytes, value)
+        if not self._profile.enabled:
+            return self._client_rpc.metadata_put(
+                key,
+                allocation_id,
+                offset_bytes,
+                value,
+            )
+        with self._profile.aggregate(
+            "metadata_put_rpc_wall",
+            byte_count=len(key.encode()) + len(value),
+        ):
+            return self._client_rpc.metadata_put(
+                key,
+                allocation_id,
+                offset_bytes,
+                value,
+            )
 
     def metadata_get(self, key: str) -> Optional[tuple[str, int, bytes]]:
-        return self._client_rpc.metadata_get(key)
+        if not self._profile.enabled:
+            return self._client_rpc.metadata_get(key)
+        with self._profile.aggregate(
+            "metadata_get_rpc_wall",
+            byte_count=len(key.encode()),
+        ):
+            return self._client_rpc.metadata_get(key)
 
     def metadata_list(self, prefix: str = "") -> List[str]:
-        return self._client_rpc.metadata_list(prefix)
+        if not self._profile.enabled:
+            return self._client_rpc.metadata_list(prefix)
+        with self._profile.phase(
+            "metadata_list_rpc_wall",
+            byte_count=len(prefix.encode()),
+        ):
+            return self._client_rpc.metadata_list(prefix)
 
     def metadata_delete(self, key: str) -> bool:
         return self._client_rpc.metadata_delete(key)
@@ -376,7 +436,13 @@ class GMSClientMemoryManager:
     def reserve_va(self, size: int) -> int:
         """Reserve virtual address space (cuMemAddressReserve). No tracking."""
         aligned_size = align_to_granularity(size, self.granularity)
-        return cumem_address_reserve(aligned_size, self.granularity)
+        if not self._profile.enabled:
+            return cumem_address_reserve(aligned_size, self.granularity)
+        with self._profile.aggregate(
+            "client_va_reserve",
+            byte_count=aligned_size,
+        ):
+            return cumem_address_reserve(aligned_size, self.granularity)
 
     def map_va(
         self,
@@ -393,20 +459,59 @@ class GMSClientMemoryManager:
         """
         assert self._granted_lock_type is not None
         aligned_size = align_to_granularity(size, self.granularity)
-        handle = cumem_import_from_shareable_handle_close_fd(fd)
-        cumem_map(va, aligned_size, handle)
-        cumem_set_access(va, aligned_size, self.device, self._granted_lock_type)
-        self._track_mapping(
-            LocalMapping(
-                allocation_id=allocation_id,
-                va=va,
-                size=size,
-                aligned_size=aligned_size,
-                handle=handle,
-                tag=tag,
-                layout_slot=layout_slot,
+        if not self._profile.enabled:
+            handle = cumem_import_from_shareable_handle_close_fd(fd)
+            cumem_map(va, aligned_size, handle)
+            cumem_set_access(
+                va,
+                aligned_size,
+                self.device,
+                self._granted_lock_type,
             )
-        )
+            self._track_mapping(
+                LocalMapping(
+                    allocation_id=allocation_id,
+                    va=va,
+                    size=size,
+                    aligned_size=aligned_size,
+                    handle=handle,
+                    tag=tag,
+                    layout_slot=layout_slot,
+                )
+            )
+            return handle
+        with self._profile.aggregate(
+            "client_handle_import",
+            byte_count=aligned_size,
+        ):
+            handle = cumem_import_from_shareable_handle_close_fd(fd)
+        with self._profile.aggregate(
+            "client_cu_mem_map",
+            byte_count=aligned_size,
+        ):
+            cumem_map(va, aligned_size, handle)
+        with self._profile.aggregate(
+            "client_cu_mem_set_access",
+            byte_count=aligned_size,
+        ):
+            cumem_set_access(
+                va,
+                aligned_size,
+                self.device,
+                self._granted_lock_type,
+            )
+        with self._profile.aggregate("client_mapping_bookkeeping"):
+            self._track_mapping(
+                LocalMapping(
+                    allocation_id=allocation_id,
+                    va=va,
+                    size=size,
+                    aligned_size=aligned_size,
+                    handle=handle,
+                    tag=tag,
+                    layout_slot=layout_slot,
+                )
+            )
         return handle
 
     def unmap_va(self, va: int) -> None:
@@ -418,8 +523,18 @@ class GMSClientMemoryManager:
         mapping = self._mappings.get(va)
         if mapping is None or mapping.handle == 0:
             return
-        cumem_unmap(va, mapping.aligned_size)
-        cumem_release(mapping.handle)
+        if not self._profile.enabled:
+            cumem_unmap(va, mapping.aligned_size)
+            cumem_release(mapping.handle)
+            self._mappings[va] = mapping.with_handle(0)
+            return
+        with self._profile.aggregate(
+            "client_cu_mem_unmap",
+            byte_count=mapping.aligned_size,
+        ):
+            cumem_unmap(va, mapping.aligned_size)
+        with self._profile.aggregate("client_imported_handle_release"):
+            cumem_release(mapping.handle)
         self._mappings[va] = mapping.with_handle(0)
 
     def free_va(self, va: int) -> None:
@@ -435,7 +550,16 @@ class GMSClientMemoryManager:
             mapping = self._mappings.get(va)
             if mapping is None:
                 return
-        cumem_address_free(va, mapping.va_reserved_size)
+        if not self._profile.enabled:
+            cumem_address_free(va, mapping.va_reserved_size)
+            self._mappings.pop(va, None)
+            self._inverse_mapping.pop(mapping.allocation_id, None)
+            return
+        with self._profile.aggregate(
+            "client_va_free",
+            byte_count=mapping.va_reserved_size,
+        ):
+            cumem_address_free(va, mapping.va_reserved_size)
         self._mappings.pop(va, None)
         self._inverse_mapping.pop(mapping.allocation_id, None)
 
@@ -586,8 +710,7 @@ class GMSClientMemoryManager:
                 )
             if str(alloc_info.tag) != mapping.tag:
                 raise StaleMemoryLayoutError(
-                    f"Layout rank {rank} tag changed: "
-                    f"{mapping.tag} vs {alloc_info.tag}"
+                    f"Layout rank {rank} tag changed: {mapping.tag} vs {alloc_info.tag}"
                 )
 
             fd = self.export_handle(alloc_info.allocation_id)
@@ -826,13 +949,19 @@ class GMSClientMemoryManager:
             self._inverse_mapping.clear()
             self._scratch_mappings.clear()
         else:
-            cuda_synchronize()
-            for base_va in list(self._scratch_mappings.keys()):
-                self.destroy_scratch_mapping(base_va)
-            for va in list(self._mappings.keys()):
-                self.unmap_va(va)
-                self.free_va(va)
-            self.abort()
+            with self._profile.phase("cleanup_context_sync"):
+                cuda_synchronize()
+            with self._profile.phase(
+                "cleanup_unmap_release_va_free",
+                count=len(self._mappings) + len(self._scratch_mappings),
+            ):
+                for base_va in list(self._scratch_mappings.keys()):
+                    self.destroy_scratch_mapping(base_va)
+                for va in list(self._mappings.keys()):
+                    self.unmap_va(va)
+                    self.free_va(va)
+            with self._profile.phase("cleanup_session_close"):
+                self.abort()
         self._unmapped = False
         self._va_preserved = False
         from gpu_memory_service.client.torch.allocator import (

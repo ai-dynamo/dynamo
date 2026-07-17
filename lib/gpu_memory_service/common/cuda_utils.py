@@ -272,6 +272,35 @@ def cuda_stream_synchronize(stream) -> None:
     )
 
 
+def cuda_event_create():
+    return cuda_runtime_check_result(
+        cuda_runtime.cudaEventCreate(),
+        "cudaEventCreate",
+    )
+
+
+def cuda_event_record(event, stream) -> None:
+    cuda_runtime_check_result(
+        cuda_runtime.cudaEventRecord(event, stream),
+        "cudaEventRecord",
+    )
+
+
+def cuda_event_elapsed_ns(start_event, end_event) -> int:
+    milliseconds = cuda_runtime_check_result(
+        cuda_runtime.cudaEventElapsedTime(start_event, end_event),
+        "cudaEventElapsedTime",
+    )
+    return int(float(milliseconds) * 1_000_000)
+
+
+def cuda_event_destroy(event) -> None:
+    cuda_runtime_check_result(
+        cuda_runtime.cudaEventDestroy(event),
+        "cudaEventDestroy",
+    )
+
+
 def cuda_memcpy_h2d_async(
     dst_ptr: int,
     src_ptr: int,

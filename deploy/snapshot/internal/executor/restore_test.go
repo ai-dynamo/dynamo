@@ -15,6 +15,7 @@ import (
 	"github.com/go-logr/logr/testr"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/profile"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
 
@@ -224,6 +225,13 @@ func TestInspectRestoreUsesContainerIDWhenProvided(t *testing.T) {
 			PodNamespace:       "default",
 			ContainerName:      "main",
 		},
+		profile.NewOperation(
+			"restore",
+			"checkpoint_id", "checkpoint-123",
+			"pod", "virtual-pod-name",
+			"namespace", "default",
+			"container", "main",
+		),
 	)
 	if err != nil {
 		t.Fatalf("inspectRestore: %v", err)

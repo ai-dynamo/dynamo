@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import json
+import logging
 import os
 import signal
 import socket
@@ -29,6 +31,10 @@ if not HAS_GMS:
         "gpu_memory_service package is not available in this test image",
         allow_module_level=True,
     )
+from gpu_memory_service.common.snapshot_profile import (
+    SNAPSHOT_PROFILE_ENV,
+    SnapshotProfile,
+)
 
 if HAS_PYNVML:
     import pynvml
@@ -228,7 +234,7 @@ class _WhiteBoxServerThread:
 
 
 @pytest.fixture
-def running_gms(monkeypatch, tmp_path):
+def running_gms(monkeypatch, tmp_path, request):
     server_handles = itertools.count(1000)
     client_handles = itertools.count(10000)
     next_va = itertools.count(0x100000, 0x10000)
@@ -305,14 +311,77 @@ def running_gms(monkeypatch, tmp_path):
         import_fd,
     )
 
+    profile_server = getattr(request, "param", False)
+    if profile_server:
+        monkeypatch.setenv(SNAPSHOT_PROFILE_ENV, "1")
+    else:
+        monkeypatch.delenv(SNAPSHOT_PROFILE_ENV, raising=False)
     socket_path = str(tmp_path / "gms.sock")
-    server = GMSRPCServer(socket_path, device=0, allocation_retry_interval=0.01)
+    server = GMSRPCServer(
+        socket_path,
+        device=0,
+        allocation_retry_interval=0.01,
+        service="weights" if profile_server else "unknown",
+    )
     thread = _WhiteBoxServerThread(server, socket_path)
     thread.start()
     try:
         yield server, socket_path
     finally:
         thread.stop()
+
+
+@pytest.mark.parametrize("running_gms", [True], indirect=True)
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_profile_events_correlate_client_and_server_session(running_gms, caplog):
+    server, socket_path = running_gms
+    profile = SnapshotProfile(
+        "loader",
+        logger=logging.getLogger("gpu_memory_service.tests.profile_correlation.client"),
+        enabled=True,
+        device=0,
+        service="weights",
+    )
+    caplog.set_level(logging.INFO)
+
+    manager = GMSClientMemoryManager(socket_path, device=0, profile=profile)
+    profile_session_id = profile.profile_session_id
+    assert profile_session_id is not None
+    try:
+        manager.connect(RequestedLockType.RW)
+    finally:
+        manager.abort()
+    _wait_for_server_state(server, ServerState.EMPTY)
+
+    deadline = time.monotonic() + _DEFAULT_WAIT_TIMEOUT_SECONDS
+    while True:
+        payloads = [
+            json.loads(record.getMessage().removeprefix("GMS_SNAPSHOT_PROFILE "))
+            for record in caplog.records
+            if record.getMessage().startswith("GMS_SNAPSHOT_PROFILE ")
+        ]
+        client_events = [
+            payload
+            for payload in payloads
+            if payload["component"] == "loader"
+            and payload.get("session") == profile_session_id
+        ]
+        server_events = [
+            payload
+            for payload in payloads
+            if payload["component"] == "server"
+            and payload.get("session") == profile_session_id
+        ]
+        if client_events and server_events:
+            break
+        if time.monotonic() > deadline:
+            raise TimeoutError("profile events were not emitted for both peers")
+        time.sleep(_FAST_POLL_INTERVAL_SECONDS)
+
+    for payload in client_events + server_events:
+        assert payload["session"] == profile_session_id
+        assert payload["device"] == 0
+        assert payload["service"] == "weights"
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)

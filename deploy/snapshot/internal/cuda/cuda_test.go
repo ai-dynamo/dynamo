@@ -18,6 +18,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 	podresourcesv1 "k8s.io/kubelet/pkg/apis/podresources/v1"
+
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/profile"
 )
 
 func TestBuildDeviceMap(t *testing.T) {
@@ -247,6 +249,7 @@ func TestDiscoverGPUUUIDsUsesPodResourcesForClassicPod(t *testing.T) {
 		"/proc",
 		123,
 		logr.Discard(),
+		profile.Operation{},
 	)
 	if err != nil {
 		t.Fatalf("DiscoverGPUUUIDs: %v", err)
@@ -296,6 +299,7 @@ func TestDiscoverGPUUUIDsFallsBackToPodResourcesAfterDRAAPILookupError(t *testin
 		"/proc",
 		123,
 		logr.Discard(),
+		profile.Operation{},
 	)
 	if err != nil {
 		t.Fatalf("DiscoverGPUUUIDs: %v", err)
@@ -393,6 +397,7 @@ func TestDiscoverGPUUUIDsOrdersDRAPodByContainerOrdinal(t *testing.T) {
 			return []string{uuid0, uuid1}, nil
 		},
 		logr.Discard(),
+		profile.Operation{},
 	)
 	if err != nil {
 		t.Fatalf("DiscoverGPUUUIDs: %v", err)

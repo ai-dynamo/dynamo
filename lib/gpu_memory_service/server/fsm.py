@@ -32,6 +32,7 @@ class Connection:
     writer: asyncio.StreamWriter
     mode: GrantedLockType
     session_id: str
+    profile_session_id: str
     recv_buffer: bytearray = field(default_factory=bytearray)
 
     def __hash__(self) -> int:

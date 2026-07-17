@@ -3,10 +3,19 @@
 
 """Unit tests for the GMS snapshot loader CLI."""
 
+import json
+import logging
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 try:
     from gpu_memory_service.cli.snapshot import loader
+    from gpu_memory_service.common.snapshot_profile import (
+        SNAPSHOT_PROFILE_ENV,
+        SnapshotProfile,
+        snapshot_profile_enabled,
+    )
 except ModuleNotFoundError:
     pytest.skip(
         "gpu_memory_service package is not available in this test image",
@@ -107,3 +116,142 @@ def test_load_device_sets_cuda_context_before_storage_client(monkeypatch):
             "clear_existing": True,
         },
     )
+
+
+def test_snapshot_profile_gating_and_event_schema(monkeypatch, caplog):
+    monkeypatch.delenv(SNAPSHOT_PROFILE_ENV, raising=False)
+    assert not snapshot_profile_enabled()
+    disabled = SnapshotProfile("loader", logger=loader.logger)
+    with disabled.phase("disabled"):
+        pass
+    assert "GMS_SNAPSHOT_PROFILE" not in caplog.text
+
+    monkeypatch.setenv(SNAPSHOT_PROFILE_ENV, "1")
+    assert snapshot_profile_enabled()
+    profile = SnapshotProfile("loader", logger=loader.logger, device=3)
+    with caplog.at_level(logging.INFO):
+        with profile.phase("manifest_read", count=2, byte_count=17):
+            pass
+
+    message = next(
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("GMS_SNAPSHOT_PROFILE ")
+    )
+    payload = json.loads(message.removeprefix("GMS_SNAPSHOT_PROFILE "))
+    assert payload["event"] == "gms_snapshot_profile"
+    assert payload["component"] == "loader"
+    assert payload["phase"] == "manifest_read"
+    assert payload["device"] == 3
+    assert payload["count"] == 2
+    assert payload["bytes"] == 17
+    assert payload["wall_end_ns"] >= payload["wall_start_ns"]
+    assert payload["duration_ns"] >= 0
+    assert payload["cpu_duration_ns"] >= 0
+    with pytest.raises(TypeError, match="JSON scalar"):
+        profile.phase("invalid", unsupported=[])
+
+
+def test_snapshot_profile_aggregate_accounting(caplog):
+    profile = SnapshotProfile("loader", logger=loader.logger, enabled=True, device=0)
+    profile.add_aggregate(
+        "allocate_rpc",
+        wall_start_ns=100,
+        wall_end_ns=200,
+        duration_ns=70,
+        cpu_duration_ns=20,
+        count=1,
+        byte_count=4096,
+    )
+    profile.add_aggregate(
+        "allocate_rpc",
+        wall_start_ns=150,
+        wall_end_ns=300,
+        duration_ns=90,
+        cpu_duration_ns=30,
+        count=2,
+        byte_count=8192,
+    )
+
+    with caplog.at_level(logging.INFO):
+        profile.emit_aggregates()
+
+    message = next(
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("GMS_SNAPSHOT_PROFILE ")
+    )
+    payload = json.loads(message.removeprefix("GMS_SNAPSHOT_PROFILE "))
+    assert payload["kind"] == "aggregate"
+    assert payload["wall_start_ns"] == 100
+    assert payload["wall_end_ns"] == 300
+    assert payload["duration_ns"] == 160
+    assert payload["cpu_duration_ns"] == 50
+    assert payload["count"] == 3
+    assert payload["bytes"] == 12288
+    assert payload["duration_semantics"] == "cumulative"
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        profile.emit_aggregates()
+    assert "GMS_SNAPSHOT_PROFILE" not in caplog.text
+
+
+def test_snapshot_profile_preserves_exceptions_and_aggregates_concurrently(caplog):
+    profile = SnapshotProfile("loader", logger=loader.logger, enabled=True)
+
+    with pytest.raises(ValueError, match="boom"):
+        with profile.phase("failing_phase"):
+            raise ValueError("boom")
+
+    def record() -> None:
+        with profile.aggregate("concurrent", byte_count=4):
+            pass
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(lambda _: record(), range(40)))
+
+    with caplog.at_level(logging.INFO):
+        profile.emit_aggregates()
+
+    payloads = [
+        json.loads(record.getMessage().removeprefix("GMS_SNAPSHOT_PROFILE "))
+        for record in caplog.records
+        if record.getMessage().startswith("GMS_SNAPSHOT_PROFILE ")
+    ]
+    failing = next(
+        payload for payload in payloads if payload["phase"] == "failing_phase"
+    )
+    aggregate = next(
+        payload for payload in payloads if payload["phase"] == "concurrent"
+    )
+    assert failing["status"] == "error"
+    assert failing["error_type"] == "ValueError"
+    assert aggregate["count"] == 40
+    assert aggregate["bytes"] == 160
+
+
+def test_snapshot_profile_flushes_only_matching_session(caplog):
+    profile = SnapshotProfile("server", logger=loader.logger, enabled=True)
+    for session in ("session_1", "session_2"):
+        with profile.aggregate("allocation", session=session):
+            pass
+
+    with caplog.at_level(logging.INFO):
+        profile.emit_aggregates(session="session_1")
+    first_payloads = [
+        json.loads(record.getMessage().removeprefix("GMS_SNAPSHOT_PROFILE "))
+        for record in caplog.records
+        if record.getMessage().startswith("GMS_SNAPSHOT_PROFILE ")
+    ]
+    assert [payload["session"] for payload in first_payloads] == ["session_1"]
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        profile.emit_aggregates()
+    remaining_payloads = [
+        json.loads(record.getMessage().removeprefix("GMS_SNAPSHOT_PROFILE "))
+        for record in caplog.records
+        if record.getMessage().startswith("GMS_SNAPSHOT_PROFILE ")
+    ]
+    assert [payload["session"] for payload in remaining_payloads] == ["session_2"]

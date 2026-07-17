@@ -180,6 +180,7 @@ RUN printf '%s\n' \
 FROM ${AGENT_BASE_IMAGE} AS agent
 
 ARG TARGETARCH=amd64
+ENV GMS_SNAPSHOT_PROFILE=1
 
 RUN if [ "${TARGETARCH}" != "amd64" ]; then \
       echo "ERROR: Dynamo Snapshot requires x86_64 (cuda-checkpoint has no ${TARGETARCH} binary)" >&2; exit 1; \
