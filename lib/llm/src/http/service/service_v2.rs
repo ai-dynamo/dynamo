@@ -909,6 +909,10 @@ impl HttpServiceConfigBuilder {
         let frontend_api_config = config.frontend_api_config.clone();
         let admission_gate_config = config.admission_gate_config.clone();
         let anthropic_endpoints_enabled = frontend_api_config.anthropic().enabled();
+        let anthropic_messages_path = var(HTTP_SVC_ANTHROPIC_PATH_ENV)
+            .unwrap_or_else(|_| super::anthropic::DEFAULT_MESSAGES_PATH.to_string());
+        let request_plane_exempt_path = anthropic_endpoints_enabled
+            .then(|| super::anthropic::count_tokens_path(&anthropic_messages_path));
         let generate_endpoint_enabled =
             config.enable_engine_apis || env_is_truthy(VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV);
 
@@ -1060,6 +1064,7 @@ impl HttpServiceConfigBuilder {
             &config.request_template,
             anthropic_endpoints_enabled,
             generate_endpoint_enabled,
+            anthropic_messages_path,
         );
         let mut inference_router = axum::Router::new();
         for (route_docs, route) in endpoint_routes {
@@ -1083,8 +1088,12 @@ impl HttpServiceConfigBuilder {
                 .request_plane_connection_limit()
                 .is_some()
         {
-            inference_router = inference_router.layer(axum::middleware::from_fn_with_state(
+            let gate_state = Arc::new(super::admission::FrontendLocalGateState::new(
                 state.clone(),
+                request_plane_exempt_path,
+            ));
+            inference_router = inference_router.layer(axum::middleware::from_fn_with_state(
+                gate_state,
                 super::admission::enforce_frontend_local_gates,
             ));
         }
@@ -1192,6 +1201,7 @@ impl HttpServiceConfigBuilder {
         request_template: &Option<RequestTemplate>,
         enable_anthropic_endpoints: bool,
         enable_generate_endpoint: bool,
+        anthropic_messages_path: String,
     ) -> Vec<(Vec<RouteDoc>, axum::Router)> {
         let mut routes = Vec::new();
         // Add chat completions route with conditional middleware
@@ -1228,7 +1238,7 @@ impl HttpServiceConfigBuilder {
             let (anthropic_docs, anthropic_route) = super::anthropic::anthropic_messages_router(
                 state.clone(),
                 request_template.clone(),
-                var(HTTP_SVC_ANTHROPIC_PATH_ENV).ok(),
+                Some(anthropic_messages_path),
             );
             endpoint_routes.insert(
                 EndpointType::AnthropicMessages,

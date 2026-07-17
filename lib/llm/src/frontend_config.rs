@@ -141,8 +141,8 @@ impl Default for StreamingDispatchConfig {
 ///
 /// Each gate is disabled when its limit is `None` and active only when
 /// explicitly configured. The HTTP service evaluates these before dispatching
-/// a request to the engine and rejects with HTTP 503 when admitting it would
-/// exceed a configured limit.
+/// a request to the engine and rejects with HTTP 503 at the gate's configured
+/// pressure boundary.
 ///
 /// - `request_concurrency_limit` is enforced separately for each served model.
 /// - `runtime_task_limit` and `request_plane_connection_limit` are

@@ -29,6 +29,7 @@ use dynamo_runtime::{
 };
 use reqwest::StatusCode;
 use std::sync::Arc;
+use tokio::sync::Barrier;
 
 #[path = "common/ports.rs"]
 mod ports;
@@ -96,6 +97,23 @@ impl Drop for GateTestService {
     }
 }
 
+/// Simulate one live request-plane stream and guarantee cleanup if a test
+/// assertion fails before the pressure is released explicitly.
+struct RequestPlanePressureGuard;
+
+impl RequestPlanePressureGuard {
+    fn new() -> Self {
+        REQUEST_PLANE_INFLIGHT.inc();
+        Self
+    }
+}
+
+impl Drop for RequestPlanePressureGuard {
+    fn drop(&mut self) {
+        REQUEST_PLANE_INFLIGHT.dec();
+    }
+}
+
 /// Start an HTTP service with the given gate config and the chat models
 /// `slow` and `fast`, both backed by [`DelayEngine`].
 async fn start_gate_service(config: AdmissionGateConfig) -> GateTestService {
@@ -103,6 +121,7 @@ async fn start_gate_service(config: AdmissionGateConfig) -> GateTestService {
     let service = HttpService::builder()
         .port(port)
         .enable_chat_endpoints(true)
+        .enable_anthropic_endpoints(true)
         .admission_gate_config(config)
         .build()
         .unwrap();
@@ -142,6 +161,18 @@ async fn post_chat(port: u16, body: &serde_json::Value) -> reqwest::Response {
     reqwest::Client::new()
         .post(format!("http://localhost:{}/v1/chat/completions", port))
         .json(body)
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn post_count_tokens(port: u16) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(format!("http://localhost:{port}/v1/messages/count_tokens"))
+        .json(&serde_json::json!({
+            "model": "fast",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
         .send()
         .await
         .unwrap()
@@ -333,6 +364,17 @@ async fn test_runtime_task_gate_rejects_all_inference_but_not_system_routes() {
         1
     );
 
+    // count_tokens does not open a request-plane stream, but it is still an
+    // inference route and remains subject to the runtime-task pressure gate.
+    let count_tokens = post_count_tokens(svc.port).await;
+    assert_eq!(count_tokens.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        svc.state
+            .metrics_clone()
+            .get_admission_rejection_count(admission_gate::RUNTIME_TASK, ""),
+        2
+    );
+
     // System routes bypass the inference admission middleware.
     let health = reqwest::get(format!("http://localhost:{}/health", svc.port))
         .await
@@ -342,20 +384,18 @@ async fn test_runtime_task_gate_rejects_all_inference_but_not_system_routes() {
 
 #[tokio::test]
 #[serial_test::serial]
-async fn test_request_plane_gate_rejects_at_capacity() {
+async fn test_request_plane_gate_rejects_at_observed_threshold() {
     // REQUEST_PLANE_INFLIGHT is a process-global gauge; no request-plane
     // traffic exists in this test binary, so simulate pressure directly.
     let svc = start_gate_service(
         AdmissionGateConfig::new(None, None, Some(1)).expect("valid admission gate config"),
     )
     .await;
-    REQUEST_PLANE_INFLIGHT.inc();
+    let pressure = RequestPlanePressureGuard::new();
 
     let rejected = post_chat(svc.port, &chat_request("fast", 1)).await;
     let status = rejected.status();
     let body = rejected.text().await.unwrap();
-
-    REQUEST_PLANE_INFLIGHT.dec();
 
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(
@@ -370,6 +410,71 @@ async fn test_request_plane_gate_rejects_at_capacity() {
     );
 
     // With the pressure gone the same request is admitted.
+    drop(pressure);
     let ok = post_chat(svc.port, &chat_request("fast", 1)).await;
     assert_eq!(ok.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn test_request_plane_gate_skips_local_count_tokens() {
+    let svc = start_gate_service(
+        AdmissionGateConfig::new(None, None, Some(1)).expect("valid admission gate config"),
+    )
+    .await;
+    let _pressure = RequestPlanePressureGuard::new();
+
+    // This route estimates tokens locally and never opens a request-plane
+    // stream, so request-plane pressure must not reject it.
+    let count_tokens = post_count_tokens(svc.port).await;
+    assert_eq!(count_tokens.status(), StatusCode::OK);
+    assert_eq!(
+        svc.state
+            .metrics_clone()
+            .get_admission_rejection_count(admission_gate::REQUEST_PLANE_CONNECTION, ""),
+        0
+    );
+
+    // A route that dispatches to a worker is still rejected by the same gate.
+    let chat = post_chat(svc.port, &chat_request("fast", 1)).await;
+    assert_eq!(chat.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        svc.state
+            .metrics_clone()
+            .get_admission_rejection_count(admission_gate::REQUEST_PLANE_CONNECTION, ""),
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+async fn test_request_plane_counter_returns_to_zero_after_concurrent_completion() {
+    const REQUEST_COUNT: usize = 100;
+
+    assert_eq!(REQUEST_PLANE_INFLIGHT.get(), 0.0);
+    let admitted = Arc::new(Barrier::new(REQUEST_COUNT + 1));
+    let complete = Arc::new(Barrier::new(REQUEST_COUNT + 1));
+    let mut tasks = Vec::with_capacity(REQUEST_COUNT);
+
+    for _ in 0..REQUEST_COUNT {
+        let admitted = admitted.clone();
+        let complete = complete.clone();
+        tasks.push(tokio::spawn(async move {
+            let _inflight = RequestPlanePressureGuard::new();
+            admitted.wait().await;
+            complete.wait().await;
+        }));
+    }
+
+    // All increments have completed before any guard is allowed to drop.
+    admitted.wait().await;
+    let peak = REQUEST_PLANE_INFLIGHT.get();
+
+    // Release all completions together and wait for every atomic decrement.
+    complete.wait().await;
+    for task in tasks {
+        task.await.unwrap();
+    }
+    assert_eq!(peak, REQUEST_COUNT as f64);
+    assert_eq!(REQUEST_PLANE_INFLIGHT.get(), 0.0);
 }

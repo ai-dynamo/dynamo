@@ -554,11 +554,13 @@ class FrontendArgGroup(ArgGroup):
             default=None,
             arg_type=int,
             help=(
-                "Frontend admission gate: maximum process-wide in-flight request-plane "
-                "requests/streams to workers before new requests are rejected with HTTP "
-                "503. This is an outbound transport-pressure proxy, not a physical TCP "
-                "connection count. Frontend-instance-local, not per-model. Disabled by "
-                "default; set to enable."
+                "Frontend admission gate: sampled threshold for process-wide in-flight "
+                "request-plane requests/streams to workers. At the threshold, requests "
+                "that use the request plane are rejected with HTTP 503 on a best-effort "
+                "basis; concurrent arrivals can exceed it. This is an outbound "
+                "transport-pressure proxy, not a physical TCP connection count. "
+                "Frontend-instance-local, not per-model. Disabled by default; set to "
+                "enable."
             ),
         )
 

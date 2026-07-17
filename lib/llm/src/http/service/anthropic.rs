@@ -64,14 +64,20 @@ use super::openai::{get_body_limit, get_or_create_request_id};
 // Router
 // ---------------------------------------------------------------------------
 
+pub(crate) const DEFAULT_MESSAGES_PATH: &str = "/v1/messages";
+
+pub(crate) fn count_tokens_path(messages_path: &str) -> String {
+    format!("{messages_path}/count_tokens")
+}
+
 /// Creates the router for the `/v1/messages` and `/v1/messages/count_tokens` endpoints.
 pub fn anthropic_messages_router(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
-    let path = path.unwrap_or("/v1/messages".to_string());
-    let count_tokens_path = format!("{}/count_tokens", &path);
+    let path = path.unwrap_or_else(|| DEFAULT_MESSAGES_PATH.to_string());
+    let count_tokens_path = count_tokens_path(&path);
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let count_doc = RouteDoc::new(axum::http::Method::POST, &count_tokens_path);
     let router = Router::new()

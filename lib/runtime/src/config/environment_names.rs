@@ -406,11 +406,12 @@ pub mod llm {
     pub const DYN_REJECTION_FRONTEND_RUNTIME_TASK_LIMIT: &str =
         "DYN_REJECTION_FRONTEND_RUNTIME_TASK_LIMIT";
 
-    /// Frontend admission gate: maximum process-wide in-flight request-plane
-    /// requests/streams to workers before new requests are rejected. This is
-    /// an outbound transport-pressure proxy, not a physical TCP connection
-    /// count. Frontend-instance-local (not per-model). Unset disables the gate;
-    /// must be >= 1 when set.
+    /// Frontend admission gate: sampled process-wide in-flight request-plane
+    /// request/stream threshold. Rejection is best-effort, so concurrent
+    /// arrivals can exceed the configured value. This is an outbound
+    /// transport-pressure proxy, not a physical TCP connection count.
+    /// Frontend-instance-local (not per-model). Unset disables the gate; must
+    /// be >= 1 when set.
     pub const DYN_REJECTION_FRONTEND_REQUEST_PLANE_CONNECTION_LIMIT: &str =
         "DYN_REJECTION_FRONTEND_REQUEST_PLANE_CONNECTION_LIMIT";
 

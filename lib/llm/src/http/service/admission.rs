@@ -16,13 +16,16 @@
 //! - **Request-plane pressure**
 //!   (`--rejection-frontend-request-plane-connection-limit`): process-wide
 //!   in-flight request-plane requests/streams to workers. This is an outbound
-//!   transport-pressure proxy, not a count of physical TCP connections.
+//!   transport-pressure proxy, not a count of physical TCP connections. The
+//!   gate samples current pressure and sheds load on a best-effort basis; it
+//!   does not reserve capacity or guarantee a strict upper bound.
 //!
 //! Every gate is disabled by default and active only when explicitly
-//! configured (see [`AdmissionGateConfig`]). A gate rejects when admitting the
-//! request would exceed its configured limit, returning HTTP 503 with a
-//! gate-specific message. Frontend rejection is distinct from router and worker
-//! rejection: it never inspects token counts, queue state, or SLO predictions.
+//! configured (see [`AdmissionGateConfig`]). A gate rejects when its observed
+//! pressure reaches the configured boundary, returning HTTP 503 with a
+//! gate-specific message. Frontend rejection is distinct from router and
+//! worker rejection: it never inspects token counts, queue state, or SLO
+//! predictions.
 
 use std::sync::Arc;
 
@@ -34,6 +37,28 @@ use crate::discovery::UNKNOWN_METRIC_MODEL;
 use crate::frontend_config::AdmissionGateConfig;
 use dynamo_runtime::metrics::prometheus_names::frontend_service::admission_gate;
 use dynamo_runtime::metrics::request_plane::REQUEST_PLANE_INFLIGHT;
+
+/// State used only by the frontend-local admission middleware.
+///
+/// `request_plane_exempt_path` names a local inference route that never opens
+/// a request-plane stream. It still passes through the runtime-task gate.
+pub(crate) struct FrontendLocalGateState {
+    state: Arc<State>,
+    request_plane_exempt_path: Option<Box<str>>,
+}
+
+impl FrontendLocalGateState {
+    pub(crate) fn new(state: Arc<State>, request_plane_exempt_path: Option<String>) -> Self {
+        Self {
+            state,
+            request_plane_exempt_path: request_plane_exempt_path.map(String::into_boxed_str),
+        }
+    }
+
+    fn route_uses_request_plane(&self, path: &str) -> bool {
+        self.request_plane_exempt_path.as_deref() != Some(path)
+    }
+}
 
 /// Per-served-model request concurrency gate, returning the rejection message
 /// so non-OpenAI surfaces (e.g. the Anthropic Messages API) can shape their
@@ -132,7 +157,10 @@ pub(crate) fn check_model_concurrency_gate(
 /// Frontend-local self-protection gates (runtime tasks and request-plane
 /// pressure). Model-independent, evaluated by middleware before the request
 /// body is parsed. Rejection metrics and logs are recorded here.
-pub(crate) fn check_frontend_local_gates(state: &State) -> Result<(), ErrorResponse> {
+fn check_frontend_local_gates(
+    state: &State,
+    route_uses_request_plane: bool,
+) -> Result<(), ErrorResponse> {
     let config = state.admission_gate_config();
 
     if let Some(limit) = config.runtime_task_limit() {
@@ -155,11 +183,14 @@ pub(crate) fn check_frontend_local_gates(state: &State) -> Result<(), ErrorRespo
         }
     }
 
-    if let Some(limit) = config.request_plane_connection_limit() {
+    if route_uses_request_plane && let Some(limit) = config.request_plane_connection_limit() {
         let inflight_streams = REQUEST_PLANE_INFLIGHT.get();
         // Unlike the model concurrency and runtime-task measurements, this
         // process-wide gauge does not yet include the candidate HTTP request.
-        // Reject at equality so admitting it cannot knowingly exceed capacity.
+        // Reject at equality, but do not reserve capacity: concurrent arrivals
+        // may observe the same value and proceed before their outbound streams
+        // increment the gauge. This is a best-effort pressure trigger, not a
+        // strict concurrency cap.
         if inflight_streams >= limit as f64 {
             return Err(ErrorMessage::service_unavailable_with_body(reject(
                 state,
@@ -180,11 +211,14 @@ pub(crate) fn check_frontend_local_gates(state: &State) -> Result<(), ErrorRespo
 /// Middleware enforcing the frontend-local gates on every inference route.
 /// Installed only when at least one frontend-local gate is configured.
 pub(crate) async fn enforce_frontend_local_gates(
-    axum::extract::State(state): axum::extract::State<Arc<State>>,
+    axum::extract::State(gate_state): axum::extract::State<Arc<FrontendLocalGateState>>,
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    if let Err(err_response) = check_frontend_local_gates(&state) {
+    let route_uses_request_plane = gate_state.route_uses_request_plane(request.uri().path());
+    if let Err(err_response) =
+        check_frontend_local_gates(&gate_state.state, route_uses_request_plane)
+    {
         return err_response.into_response();
     }
     next.run(request).await
