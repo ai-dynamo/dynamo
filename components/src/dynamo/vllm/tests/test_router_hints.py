@@ -72,7 +72,7 @@ def test_enable_router_hint_support_skips_without_router_hint_capability():
     runtime_config.set_engine_specific.assert_not_called()
 
 
-def test_enable_router_hint_support_skips_unadvertisable_endpoint():
+def test_enable_router_hint_support_fails_without_advertisable_endpoint():
     runtime_config = MagicMock()
     engine_args = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
@@ -89,8 +89,7 @@ def test_enable_router_hint_support_skips_unadvertisable_endpoint():
         )
     )
 
-    enable_router_hint_support(runtime_config, engine_args)
+    with pytest.raises(ValueError, match="router_hint support requires"):
+        enable_router_hint_support(runtime_config, engine_args)
 
-    runtime_config.set_engine_specific.assert_called_once_with(
-        ROUTER_HINT_RUNTIME_CAPABILITY_KEY, "true"
-    )
+    runtime_config.set_engine_specific.assert_not_called()
