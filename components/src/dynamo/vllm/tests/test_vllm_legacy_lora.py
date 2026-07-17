@@ -38,7 +38,7 @@ def _make_prefill_handler():
         model="/models/base",
         dyn_tool_call_parser=None,
         dyn_reasoning_parser=None,
-        engine_args=SimpleNamespace(block_size=16, max_loras=4),
+        engine_args=SimpleNamespace(block_size=16, max_loras=4, model="/models/base"),
     )
     handler.engine_client = SimpleNamespace(
         add_lora=AsyncMock(),
@@ -47,11 +47,16 @@ def _make_prefill_handler():
     )
     handler.generate_endpoint = object()
     handler.model_max_len = 8192
-    handler.loaded_loras = {}
+    # Initialize LoRA state
+    from dynamo.vllm.lora_state import LoRAState
+
+    handler.engine_args = handler.config.engine_args
+    handler._served_model_name = "llama2-7b"
+    handler._lora_state = LoRAState()
+    handler.loaded_loras = handler._lora_state.loaded_loras
+    handler._lora_load_locks = handler._lora_state.lora_load_locks
+    handler._lora_load_locks_guard = handler._lora_state.lora_load_locks_guard
     handler._engine_loaded_loras = set()
-    handler._lora_load_locks = [
-        asyncio.Lock() for _ in range(handlers_mod._LORA_LOCK_STRIPES)
-    ]
     return handler
 
 
