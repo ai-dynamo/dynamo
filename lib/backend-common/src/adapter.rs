@@ -300,9 +300,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .await
             .map_err(|e| {
                 span.record("error_kind", "setup_failed");
-                // Short, stable description — full error message is
-                // available via the trace_id-correlated log stream.
                 span.set_status(Status::error("setup_failed"));
+                tracing::debug!(
+                    request_id = ctx.id(),
+                    error = %e,
+                    error_type = ?e.error_type(),
+                    "engine.generate setup failed",
+                );
                 Error::from(e)
             })?;
         let request_start = Instant::now();
@@ -529,6 +533,12 @@ impl AsyncEngine<SingleIn<serde_json::Value>, ManyOut<Annotated<serde_json::Valu
             .map_err(|e| {
                 span.record("error_kind", "setup_failed");
                 span.set_status(Status::error("setup_failed"));
+                tracing::debug!(
+                    request_id = ctx.id(),
+                    error = %e,
+                    error_type = ?e.error_type(),
+                    "raw engine.generate setup failed",
+                );
                 Error::from(e)
             })?;
 

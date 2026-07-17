@@ -18,7 +18,6 @@
 package validation
 
 import (
-	"fmt"
 	"slices"
 	"testing"
 
@@ -27,7 +26,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	corev1 "k8s.io/api/core/v1"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -1048,43 +1046,11 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					dcdAdmissionBeta(t, tt.deployment),
 				)
 			}
-			assertDCDWebhookErrors(t, err, tt.wantWebhookErrs)
+			assertWebhookErrors(t, err, tt.wantWebhookErrs)
 			if !slices.Equal(warnings, tt.wantWarnings) {
 				t.Fatalf("webhook warnings = %v, want %v", warnings, tt.wantWarnings)
 			}
 		})
-	}
-}
-
-func assertDCDWebhookErrors(t *testing.T, err error, want []string) {
-	t.Helper()
-	if len(want) == 0 {
-		if err != nil {
-			t.Fatalf("webhook error = %v, want none", err)
-		}
-		return
-	}
-	if err == nil {
-		t.Fatalf("webhook errors = nil, want %v", want)
-	}
-	statusErr, ok := err.(*k8serrors.StatusError)
-	if !ok || !k8serrors.IsInvalid(err) {
-		t.Fatalf("error = %T %v, want typed Kubernetes invalid error", err, err)
-	}
-	if statusErr.ErrStatus.Details == nil {
-		t.Fatalf("error = %v, want typed field causes", err)
-	}
-
-	causes := statusErr.ErrStatus.Details.Causes
-	got := make([]string, len(causes))
-	for i, cause := range causes {
-		if cause.Field == "" {
-			t.Fatalf("error cause = %#v, want an exact field path", cause)
-		}
-		got[i] = fmt.Sprintf("%s: %s", cause.Field, cause.Message)
-	}
-	if !slices.Equal(got, want) {
-		t.Fatalf("webhook errors = %v, want %v", got, want)
 	}
 }
 
