@@ -652,5 +652,266 @@ class MainWriteGateTests(unittest.TestCase):
             self.assertFalse(data.exists())
 
 
+class ParseAuthorsTests(unittest.TestCase):
+    """Authors field -> [{label, handle}]. The canonical shape is a
+    comma-separated list of `[@handle](https://github.com/handle)` markdown
+    links; a bare `@handle` also resolves a login; plain text yields a label
+    with handle=None; a non-GitHub href contributes a label but no handle."""
+
+    def test_parses_single_github_link(self):
+        got = sync_deps.parse_authors("[@ryanolson](https://github.com/ryanolson)")
+        self.assertEqual(got, [{"label": "@ryanolson", "handle": "ryanolson"}])
+
+    def test_parses_multiple_authors(self):
+        got = sync_deps.parse_authors(
+            "[@grahamking](https://github.com/grahamking), "
+            "[@biswapanda](https://github.com/biswapanda)"
+        )
+        self.assertEqual(
+            got,
+            [
+                {"label": "@grahamking", "handle": "grahamking"},
+                {"label": "@biswapanda", "handle": "biswapanda"},
+            ],
+        )
+
+    def test_bare_handle_resolves_login(self):
+        got = sync_deps.parse_authors("@dagil-nvidia")
+        self.assertEqual(got, [{"label": "@dagil-nvidia", "handle": "dagil-nvidia"}])
+
+    def test_plain_text_has_no_handle(self):
+        got = sync_deps.parse_authors("Dynamo Docs Infrastructure (example)")
+        self.assertEqual(
+            got,
+            [{"label": "Dynamo Docs Infrastructure (example)", "handle": None}],
+        )
+
+    def test_non_github_href_keeps_label_drops_handle(self):
+        got = sync_deps.parse_authors("[Jane Doe](https://example.com/jane)")
+        self.assertEqual(got, [{"label": "Jane Doe", "handle": None}])
+
+    def test_empty_value_is_empty_list(self):
+        self.assertEqual(sync_deps.parse_authors(""), [])
+        self.assertEqual(sync_deps.parse_authors(None), [])
+
+
+class ExtractDepMetaPropTests(unittest.TestCase):
+    """Generic <DepMetadata> prop extractor: any prop, single/double quotes,
+    multi-line tags, and never misattributed to a different component."""
+
+    MULTILINE = (
+        '<DepMetadata\n  dep="0003"\n  status="Under Review"\n'
+        '  owningSig="SIG-Router"\n  category="Architecture"\n/>'
+    )
+
+    def test_extracts_owning_sig(self):
+        self.assertEqual(
+            sync_deps._extract_dep_meta_prop(self.MULTILINE, "owningSig"),
+            "SIG-Router",
+        )
+
+    def test_extracts_category(self):
+        self.assertEqual(
+            sync_deps._extract_dep_meta_prop(self.MULTILINE, "category"),
+            "Architecture",
+        )
+
+    def test_extracts_single_quoted_prop(self):
+        text = "<DepMetadata dep='0000' category='Process' />"
+        self.assertEqual(sync_deps._extract_dep_meta_prop(text, "category"), "Process")
+
+    def test_returns_none_when_prop_absent(self):
+        self.assertIsNone(sync_deps._extract_dep_meta_prop(self.MULTILINE, "sponsor"))
+
+    def test_not_misattributed_to_other_component(self):
+        text = '<SomethingElse owningSig="Nope" />'
+        self.assertIsNone(sync_deps._extract_dep_meta_prop(text, "owningSig"))
+
+
+class ExtractFrontmatterTitleTests(unittest.TestCase):
+    def test_extracts_quoted_title(self):
+        text = '---\ntitle: "DEP-0001: The DEP Process"\npr: 1\n---\nbody\n'
+        self.assertEqual(
+            sync_deps._extract_frontmatter_title(text), "DEP-0001: The DEP Process"
+        )
+
+    def test_extracts_unquoted_title(self):
+        text = "---\ntitle: Plain Title\n---\nbody\n"
+        self.assertEqual(sync_deps._extract_frontmatter_title(text), "Plain Title")
+
+    def test_returns_none_without_title(self):
+        text = "---\npr: 1\n---\nbody\n"
+        self.assertIsNone(sync_deps._extract_frontmatter_title(text))
+
+
+class DiscoverHandAuthoredDepsTests(unittest.TestCase):
+    """docs/proposals/*.mdx -> full index records. Same exclusions as the
+    status discovery (README + TEMPLATE dropped, _generated skipped, non-DEP
+    files skipped), but each record carries the card fields the grid needs."""
+
+    def _write(self, root: Path, rel: str, contents: str) -> None:
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents, encoding="utf-8")
+
+    def test_builds_records_with_fields(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self._write(
+                root,
+                "docs/proposals/0003-router.mdx",
+                '---\ntitle: "DEP-0003: Router v2"\n---\n'
+                '<DepMetadata\n  dep="0003"\n  status="Under Review"\n'
+                '  owningSig="SIG-Router"\n  category="Architecture"\n'
+                '  authors="[@tanmayv25](https://github.com/tanmayv25)"\n/>',
+            )
+            self._write(root, "docs/proposals/README.mdx", "# Overview")
+            self._write(
+                root,
+                "docs/proposals/TEMPLATE.mdx",
+                '<DepMetadata dep="NNNN" status="Draft" />',
+            )
+            got = sync_deps.discover_hand_authored_deps(root)
+        self.assertEqual(len(got), 1)
+        rec = got[0]
+        self.assertEqual(rec["slug"], "0003-router")
+        self.assertEqual(rec["dep"], "0003")
+        self.assertEqual(rec["title"], "DEP-0003: Router v2")
+        self.assertEqual(rec["status"], "Under Review")
+        self.assertEqual(rec["sig"], "SIG-Router")
+        self.assertEqual(rec["category"], "Architecture")
+        self.assertEqual(rec["submitter"], "tanmayv25")
+
+    def test_skips_generated_and_non_dep(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self._write(
+                root,
+                "docs/proposals/_generated/dep-nova-synced.mdx",
+                '<DepMetadata dep="Nova" status="Draft" />',
+            )
+            self._write(root, "docs/proposals/only-prose.mdx", "# Not a DEP")
+            got = sync_deps.discover_hand_authored_deps(root)
+        self.assertEqual(got, [])
+
+
+class SyncedIndexRecordTests(unittest.TestCase):
+    def test_builds_from_entry_and_parsed(self):
+        parsed = sync_deps.parse_dep_source(NOVA_LIKE)
+        entry = {"output": "dep-nova-synced", "dep": "Nova"}
+        rec = sync_deps.synced_index_record(entry, parsed)
+        self.assertEqual(rec["slug"], "dep-nova-synced")
+        self.assertEqual(rec["dep"], "Nova")
+        self.assertEqual(rec["status"], "Draft")
+        self.assertEqual(rec["category"], "Architecture")
+        self.assertEqual(rec["submitter"], "ryanolson")
+        # N/A owning SIG absent -> field omitted.
+        self.assertNotIn("sig", rec)
+
+
+class BuildIndexRecordsTests(unittest.TestCase):
+    def test_merges_sorted_by_slug_synced_wins(self):
+        hand = [
+            {"slug": "zzz", "dep": "9", "title": "Z", "status": "Draft"},
+            {"slug": "aaa", "dep": "1", "title": "A", "status": "Draft"},
+        ]
+        synced = [
+            {"slug": "aaa", "dep": "1", "title": "A-upstream", "status": "Accepted"}
+        ]
+        got = sync_deps.build_index_records(hand, synced)
+        self.assertEqual([r["slug"] for r in got], ["aaa", "zzz"])
+        # synced wins on the shared slug
+        self.assertEqual(got[0]["status"], "Accepted")
+        self.assertEqual(got[0]["title"], "A-upstream")
+
+
+class RenderIndexDataJsTests(unittest.TestCase):
+    def test_emits_valid_js_with_header(self):
+        js = sync_deps.render_index_data_js(
+            [{"slug": "0003-router", "dep": "0003", "title": "R", "status": "Draft"}]
+        )
+        self.assertIn("SPDX-License-Identifier: Apache-2.0", js)
+        self.assertIn("GENERATED FILE", js)
+        self.assertIn("window.__DEP_INDEX", js)
+        self.assertIn('"slug": "0003-router"', js)
+
+    def test_empty_list_emits_empty_array(self):
+        self.assertIn("window.__DEP_INDEX = [];", sync_deps.render_index_data_js([]))
+
+
+class WriteIndexDataJsTests(unittest.TestCase):
+    def test_writes_file_under_fern_js(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "fern" / "js").mkdir(parents=True)
+            out = sync_deps.write_index_data_js(
+                root, [{"slug": "a", "dep": "1", "title": "A", "status": "Draft"}]
+            )
+        self.assertEqual(out.name, "dep-index-data.js")
+        self.assertEqual(out.parent.name, "js")
+        self.assertEqual(out.parent.parent.name, "fern")
+
+
+class MainIndexWriteGateTests(unittest.TestCase):
+    """main() writes fern/js/dep-index-data.js on a full run only; a --dry-run
+    or --only run must not touch it (parallels MainWriteGateTests)."""
+
+    def _setup_root(self, td: str) -> Path:
+        root = Path(td)
+        (root / "fern").mkdir()
+        (root / "fern" / "docs.yml").write_text("x\n", encoding="utf-8")
+        (root / "fern" / "js").mkdir()
+        (root / "fern" / "scripts").mkdir()
+        (root / "docs" / "proposals").mkdir(parents=True)
+        manifest = {
+            "deps": [
+                {
+                    "output": "dep-nova-synced",
+                    "dep": "Nova",
+                    "source": {
+                        "owner": "ai-dynamo",
+                        "repo": "enhancements",
+                        "ref": "main",
+                        "path": "deps/0000-nova.md",
+                    },
+                }
+            ]
+        }
+        (root / "fern" / "scripts" / "deps.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        return root
+
+    def test_full_run_writes_index_data(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = self._setup_root(td)
+            index = root / "fern" / "js" / "dep-index-data.js"
+            with mock.patch.object(sync_deps, "fetch_source", return_value=NOVA_LIKE):
+                rc = sync_deps.main(["--root", str(root)])
+            self.assertEqual(rc, 0)
+            self.assertTrue(index.exists())
+            text = index.read_text(encoding="utf-8")
+            self.assertIn("window.__DEP_INDEX", text)
+            self.assertIn('"dep-nova-synced"', text)
+
+    def test_dry_run_does_not_write_index_data(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = self._setup_root(td)
+            index = root / "fern" / "js" / "dep-index-data.js"
+            with mock.patch.object(sync_deps, "fetch_source", return_value=NOVA_LIKE):
+                rc = sync_deps.main(["--root", str(root), "--dry-run"])
+            self.assertEqual(rc, 0)
+            self.assertFalse(index.exists())
+
+    def test_only_does_not_write_index_data(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = self._setup_root(td)
+            index = root / "fern" / "js" / "dep-index-data.js"
+            with mock.patch.object(sync_deps, "fetch_source", return_value=NOVA_LIKE):
+                rc = sync_deps.main(["--root", str(root), "--only", "nova"])
+            self.assertEqual(rc, 0)
+            self.assertFalse(index.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

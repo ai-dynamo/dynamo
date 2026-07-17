@@ -1,0 +1,23 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Dynamo Enhancement Proposals"
+subtitle: "Browse every DEP by status, owning SIG, and number. Each proposal is authored in the open, reviewed on GitHub, and rendered here with its live discussion."
+---
+
+{/*
+  DEP index landing page. The registry grid below is rendered at runtime by
+  fern/js/dep-index.js from window.__DEP_INDEX — the per-DEP dataset emitted on
+  every Fern build by fern/scripts/sync_deps.py (fern/js/dep-index-data.js).
+  Add a DEP and it appears here automatically; there is nothing to hand-edit on
+  this page. New to the process? See the Overview and the DEP Template in the
+  sidebar.
+*/}
+
+import { DepIndex } from "@/components/DepIndex";
+
+<DepIndex />
+
+{/* Fallback content for readers without the runtime (see the DepIndex noscript
+    block too): the sidebar lists every DEP, and the Overview explains the
+    end-to-end authoring + discussion workflow. */}

@@ -688,6 +688,15 @@ navigation:
       # status→variant mapping matches DepMetadata.statusVariant() verbatim
       # so the sidebar pill always agrees with the on-page <DepMetadata>
       # card.
+      # DEP index landing page — a filterable "registry" grid of every DEP,
+      # rendered at runtime by fern/js/dep-index.js from the build-time dataset
+      # (window.__DEP_INDEX in fern/js/dep-index-data.js, emitted by
+      # fern/scripts/sync_deps.py). Populated automatically from the same two
+      # sources as the sidebar status pills (synced upstream + hand-authored
+      # <DepMetadata> cards) — nothing on the page is hand-maintained.
+      - page: All Proposals
+        path: proposals/index.mdx
+        slug: index
       - page: Overview
         path: proposals/README.mdx
         slug: overview

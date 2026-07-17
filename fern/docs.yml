@@ -332,5 +332,17 @@ js:
   # fern/js/dep-status-pills.js for the SPA re-render + idempotency notes.
   - path: ./js/dep-status-pills.js
     strategy: afterInteractive
+  # DEP index registry dataset — build-time list of per-DEP records. MUST load
+  # BEFORE dep-index.js: the grid runtime reads window.__DEP_INDEX on boot.
+  # Regenerated on every Fern build by fern/scripts/sync_deps.py so new DEPs
+  # appear on the index page without a manual edit.
+  - path: ./js/dep-index-data.js
+    strategy: afterInteractive
+  # DEP index registry grid — renders the filterable/sortable DEP gallery into
+  # the <DepIndex /> mount on docs/proposals/index.mdx. Status colors mirror
+  # the <DepMetadata> pill; see fern/js/dep-index.js for the SPA re-render +
+  # idempotency notes.
+  - path: ./js/dep-index.js
+    strategy: afterInteractive
 css:
   - ./main.css

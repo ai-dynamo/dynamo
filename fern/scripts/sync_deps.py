@@ -28,6 +28,18 @@ its GitHub source (owner/repo/ref/path), the output slug, and the DEP number
 plus PR/tracking-issue overrides that feed the metadata card + comment mirror
 on the rendered page.
 
+Besides the generated MDX, a full run emits two committed build-time JS assets
+consumed at runtime (both regenerated on every Fern build, gated to full runs
+so a partial/dry run never truncates the committed snapshot):
+
+  * `fern/js/dep-status-data.js`  — `window.__DEP_STATUS` slug->status map for
+                                    the sidebar status pills.
+  * `fern/js/dep-index-data.js`   — `window.__DEP_INDEX` list of per-DEP records
+                                    for the Proposals index registry grid.
+
+Both draw from the same two sources: the synced upstream markdown and the
+hand-authored `<DepMetadata>` cards under docs/proposals/.
+
 Transforms applied to each source markdown (see PROPOSAL COPY IN THE BRANCH
 `docs/proposals/0000-nova.mdx` for the reference hand-copy the pipeline
 reproduces):
@@ -581,6 +593,243 @@ def write_status_data_js(root: Path, status_map: dict[str, str]) -> Path:
 
 
 # --------------------------------------------------------------------------- #
+# Index dataset                                                               #
+# --------------------------------------------------------------------------- #
+#
+# The Proposals index landing page (docs/proposals/index.mdx -> slug /proposals/
+# index) renders a filterable "registry" grid of every DEP. Like the sidebar
+# status pills, it is populated at runtime from a build-time asset: a list of
+# per-DEP records on `window.__DEP_INDEX`, materialised here into
+# fern/js/dep-index-data.js and consumed by fern/js/dep-index.js. Same two
+# sources as the status map (synced upstream markdown + hand-authored
+# <DepMetadata> props), but each record carries the fields the card needs:
+# slug, dep number, title, status, owning SIG, category, and author handles
+# (the first author is the "submitter" shown with an avatar).
+
+# Author/reviewer markdown-link shape emitted by the enhancements template and
+# hand-authored DEPs: `[@handle](https://github.com/handle)`. Mirrors
+# parseLinkedItems() in fern/components/DepMetadata.tsx.
+_AUTHOR_LINK_RE = re.compile(r"^\[([^\]]+)\]\((https?://[^\s)]+)\)$")
+# GitHub login inside a profile URL (github.com/<login>) or a bare @handle.
+_GH_LOGIN_IN_URL_RE = re.compile(
+    r"github\.com/([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)"
+)
+_BARE_HANDLE_RE = re.compile(r"^@?([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)$")
+
+# Front-matter `title:` line inside the leading `--- ... ---` block.
+_FRONTMATTER_BLOCK_RE = re.compile(r"^---\n(?P<body>.*?)\n---\n", re.DOTALL)
+_FM_TITLE_RE = re.compile(r"^title:\s*(?P<value>.+?)\s*$", re.MULTILINE)
+
+
+def _dep_meta_prop_re(prop: str) -> re.Pattern[str]:
+    """Compile a regex extracting `prop="..."` (or `'...'`) from <DepMetadata>.
+
+    Generalises _DEP_META_STATUS_RE to any prop name. Anchored to the
+    `<DepMetadata` opening tag and bounded to the tag (`[^>]*?`) so a prop of
+    the same name on a different component cannot be misattributed.
+    """
+    return re.compile(
+        r"<DepMetadata\b[^>]*?\b"
+        + re.escape(prop)
+        + r"\s*=\s*(?P<quote>[\"'])(?P<value>.*?)(?P=quote)",
+        re.DOTALL,
+    )
+
+
+def _extract_dep_meta_prop(text: str, prop: str) -> str | None:
+    """Return the value of `prop` on the first <DepMetadata /> tag, or None."""
+    match = _dep_meta_prop_re(prop).search(text)
+    return match.group("value") if match else None
+
+
+def _extract_frontmatter_title(text: str) -> str | None:
+    """Extract the `title:` value from a page's leading YAML front-matter.
+
+    Strips a single pair of matching surrounding quotes so a quoted
+    `title: "DEP-0001: ..."` yields the inner string. Returns None when no
+    front-matter title is present.
+    """
+    block_match = _FRONTMATTER_BLOCK_RE.match(text)
+    block = block_match.group("body") if block_match else text
+    title_match = _FM_TITLE_RE.search(block)
+    if not title_match:
+        return None
+    value = title_match.group("value").strip()
+    if len(value) >= 2 and value[0] in "\"'" and value[-1] == value[0]:
+        value = value[1:-1]
+    return value or None
+
+
+def parse_authors(value: str | None) -> list[dict[str, str | None]]:
+    """Parse an Authors field into `[{label, handle}]` entries.
+
+    Accepts the comma-separated `[@handle](https://github.com/handle)` markdown
+    link shape (label + GitHub login) or a plain-text fallback (handle=None).
+    A bare `@handle` / `handle` token also resolves a login so an avatar can
+    render. Non-GitHub hrefs contribute a label but no handle.
+    """
+    if not value:
+        return []
+    items: list[dict[str, str | None]] = []
+    for piece in str(value).split(","):
+        piece = piece.strip()
+        if not piece:
+            continue
+        label = piece
+        handle: str | None = None
+        link = _AUTHOR_LINK_RE.match(piece)
+        if link:
+            label = link.group(1).strip()
+            url_login = _GH_LOGIN_IN_URL_RE.search(link.group(2))
+            if url_login:
+                handle = url_login.group(1)
+        if handle is None:
+            bare = _BARE_HANDLE_RE.match(label)
+            if bare:
+                handle = bare.group(1)
+        items.append({"label": label, "handle": handle})
+    return items
+
+
+def _index_record(
+    *,
+    slug: str,
+    dep: str,
+    title: str | None,
+    status: str,
+    sig: str | None,
+    category: str | None,
+    authors_value: str | None,
+) -> dict[str, Any]:
+    """Assemble one DEP index record, omitting empty optional fields.
+
+    `submitter` is the first author's GitHub handle when known, else the
+    first author's display label — the identity shown next to the avatar on
+    the index card.
+    """
+    record: dict[str, Any] = {
+        "slug": slug,
+        "dep": dep or "",
+        "title": (title or "").strip(),
+        "status": status or "Draft",
+    }
+    if sig and sig.strip():
+        record["sig"] = sig.strip()
+    if category and category.strip():
+        record["category"] = category.strip()
+    authors = parse_authors(authors_value)
+    if authors:
+        record["authors"] = authors
+        record["submitter"] = authors[0]["handle"] or authors[0]["label"]
+    return record
+
+
+def synced_index_record(entry: dict[str, Any], parsed: ParsedDep) -> dict[str, Any]:
+    """Build the index record for a synced DEP from its manifest + parsed body."""
+    fields = useful_fields(parsed.fields)
+    return _index_record(
+        slug=entry["output"],
+        dep=str(entry.get("dep") or ""),
+        title=parsed.title,
+        status=entry_status(parsed),
+        sig=fields.get("Owning SIG"),
+        category=fields.get("Category"),
+        authors_value=fields.get("Authors"),
+    )
+
+
+def discover_hand_authored_deps(root: Path) -> list[dict[str, Any]]:
+    """Return index records for hand-authored DEPs under docs/proposals/.
+
+    Same discovery rules as discover_hand_authored_statuses (README + TEMPLATE
+    excluded, files without a <DepMetadata status="..."> card skipped,
+    _generated/ untouched), but each entry carries the full card fields the
+    index grid renders. Slug = filename stem (matches docs/index.yml).
+    """
+    proposals = root / "docs" / "proposals"
+    if not proposals.is_dir():
+        return []
+    out: list[dict[str, Any]] = []
+    for path in sorted(proposals.glob("*.mdx")):
+        if path.stem in _META_PAGE_STEMS:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        status = _extract_status_from_mdx(text)
+        if not status:
+            continue
+        out.append(
+            _index_record(
+                slug=path.stem,
+                dep=_extract_dep_meta_prop(text, "dep") or "",
+                title=_extract_frontmatter_title(text),
+                status=status,
+                sig=_extract_dep_meta_prop(text, "owningSig"),
+                category=_extract_dep_meta_prop(text, "category"),
+                authors_value=_extract_dep_meta_prop(text, "authors"),
+            )
+        )
+    return out
+
+
+def build_index_records(
+    hand_authored: list[dict[str, Any]], synced: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Combine hand-authored + synced index records, sorted by slug.
+
+    Synced entries win on a slug collision (upstream is authoritative for
+    synced DEPs), mirroring merge_status_maps. Sorting by slug keeps the
+    emitted data file's diffs stable across runs.
+    """
+    by_slug: dict[str, dict[str, Any]] = {}
+    for record in hand_authored:
+        by_slug[record["slug"]] = record
+    for record in synced:
+        by_slug[record["slug"]] = record
+    return [by_slug[slug] for slug in sorted(by_slug)]
+
+
+def render_index_data_js(records: list[dict[str, Any]]) -> str:
+    """Render the JS data file that fern/js/dep-index.js consumes.
+
+    Emits `window.__DEP_INDEX = [ ... ];`. An empty list is rendered as
+    `window.__DEP_INDEX = [];` (the runtime shows an empty state).
+    """
+    header = (
+        "/*\n"
+        " * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION "
+        "& AFFILIATES. All rights reserved.\n"
+        " * SPDX-License-Identifier: Apache-2.0\n"
+        " *\n"
+        " * GENERATED FILE — DO NOT EDIT.\n"
+        " *\n"
+        " * Regenerated on every Fern docs build by "
+        "fern/scripts/sync_deps.py.\n"
+        " * Consumed by fern/js/dep-index.js to render the filterable DEP\n"
+        " * registry grid on the Proposals index page "
+        "(docs/proposals/index.mdx).\n"
+        " *\n"
+        " * Each record: { slug, dep, title, status, sig?, category?,\n"
+        " *               authors?: [{label, handle}], submitter? }.\n"
+        " */\n"
+    )
+    if not records:
+        return header + "window.__DEP_INDEX = [];\n"
+    body = json.dumps(records, sort_keys=True, indent=2, ensure_ascii=False)
+    return header + f"window.__DEP_INDEX = {body};\n"
+
+
+def write_index_data_js(root: Path, records: list[dict[str, Any]]) -> Path:
+    """Write the rendered index data JS to fern/js/dep-index-data.js."""
+    out_path = root / "fern" / "js" / "dep-index-data.js"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(render_index_data_js(records), encoding="utf-8")
+    return out_path
+
+
+# --------------------------------------------------------------------------- #
 # Fetch + manifest driver                                                     #
 # --------------------------------------------------------------------------- #
 
@@ -653,11 +902,12 @@ def sync_entry(
     *,
     root: Path,
     dry_run: bool = False,
-) -> tuple[Path, str]:
-    """Sync one DEP entry, returning (output path, resolved status).
+) -> tuple[Path, str, ParsedDep]:
+    """Sync one DEP entry, returning (output path, resolved status, parsed).
 
-    The status is fed back to `main()` so it can build the sidebar status
-    map (fern/js/dep-status-data.js) without re-parsing generated MDX.
+    The status feeds the sidebar status map (fern/js/dep-status-data.js) and
+    the parsed body feeds the index dataset (fern/js/dep-index-data.js), so
+    `main()` builds both build-time assets without re-fetching or re-parsing.
     """
     text = fetch_source(entry)
     parsed = parse_dep_source(text)
@@ -667,11 +917,11 @@ def sync_entry(
     out_path = out_dir / f"{entry['output']}.mdx"
     if dry_run:
         print(f"[sync-deps] would write {out_path} ({len(mdx)} bytes)")
-        return out_path, status
+        return out_path, status, parsed
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path.write_text(mdx, encoding="utf-8")
     print(f"[sync-deps] wrote {out_path} ({len(mdx)} bytes)")
-    return out_path, status
+    return out_path, status, parsed
 
 
 def _resolve_root(cli_root: str | None) -> Path:
@@ -714,32 +964,40 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     synced_statuses: dict[str, str] = {}
+    synced_records: list[dict[str, Any]] = []
     for entry in entries:
-        _, status = sync_entry(entry, root=root, dry_run=args.dry_run)
+        _, status, parsed = sync_entry(entry, root=root, dry_run=args.dry_run)
         synced_statuses[entry["output"]] = status
+        synced_records.append(synced_index_record(entry, parsed))
 
-    # Build the sidebar status map. Hand-authored statuses are picked up from
-    # the tree regardless of whether --only filtered the manifest.
+    # Build the sidebar status map + index dataset. Hand-authored DEPs are
+    # picked up from the tree regardless of whether --only filtered the
+    # manifest.
     hand_authored = discover_hand_authored_statuses(root)
     status_map = merge_status_maps(hand_authored, synced_statuses)
+    hand_records = discover_hand_authored_deps(root)
+    index_records = build_index_records(hand_records, synced_records)
 
-    # Only a FULL run (no --only, no --dry-run) may write dep-status-data.js.
-    # A --only run synced just a subset, so its status_map omits the unsynced
-    # DEPs and would TRUNCATE the committed snapshot. A --dry-run must not touch
-    # the tree at all. In both cases, print the map a full run WOULD write and
-    # skip the write, so a partial or dry run never clobbers the committed
-    # fern/js/dep-status-data.js. (That file is committed, so `fern check` after
-    # a partial/dry run still resolves the docs.yml `js:` reference.)
+    # Only a FULL run (no --only, no --dry-run) may write the generated data
+    # files. A --only run synced just a subset, so its maps omit the unsynced
+    # DEPs and would TRUNCATE the committed snapshots. A --dry-run must not
+    # touch the tree at all. In both cases, print what a full run WOULD write
+    # and skip the write, so a partial or dry run never clobbers the committed
+    # fern/js/dep-status-data.js or fern/js/dep-index-data.js. (Both files are
+    # committed, so `fern check` after a partial/dry run still resolves the
+    # docs.yml `js:` references.)
     if args.dry_run or args.only:
         reason = "--dry-run" if args.dry_run else "--only (partial sync)"
         print(
-            f"[sync-deps] {reason}: NOT writing fern/js/dep-status-data.js — a "
-            f"partial or dry run must not clobber the committed snapshot. The "
-            f"status map a full run would write "
+            f"[sync-deps] {reason}: NOT writing fern/js/dep-status-data.js or "
+            f"fern/js/dep-index-data.js — a partial or dry run must not clobber "
+            f"the committed snapshots. The status map a full run would write "
             f"({len(status_map)} DEPs: {len(hand_authored)} hand-authored + "
             f"{len(synced_statuses)} synced):"
         )
         print(render_status_data_js(status_map))
+        print(f"[sync-deps] index dataset ({len(index_records)} DEPs):")
+        print(render_index_data_js(index_records))
         return 0
 
     data_path = write_status_data_js(root, status_map)
@@ -748,6 +1006,13 @@ def main(argv: list[str] | None = None) -> int:
         f"({len(status_map)} DEPs: "
         f"{len(hand_authored)} hand-authored + "
         f"{len(synced_statuses)} synced)"
+    )
+    index_path = write_index_data_js(root, index_records)
+    print(
+        f"[sync-deps] wrote {index_path} "
+        f"({len(index_records)} DEPs: "
+        f"{len(hand_records)} hand-authored + "
+        f"{len(synced_records)} synced)"
     )
 
     return 0
