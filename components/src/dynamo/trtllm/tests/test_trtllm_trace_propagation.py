@@ -25,6 +25,7 @@ pytestmark = [
     pytest.mark.asyncio,
     pytest.mark.unit,
     pytest.mark.trtllm,
+    pytest.mark.core,
     pytest.mark.gpu_1,
     pytest.mark.pre_merge,
 ]
@@ -58,6 +59,7 @@ def _make_engine(generate_async) -> TrtllmLLMEngine:
     engine._logits_processor_spec = None
     engine._default_sampling_params = SimpleNamespace()
     engine.disaggregation_mode = DisaggregationMode.AGGREGATED
+    engine._disagg_machine_id = 0
     engine.max_seq_len = 1024
     engine._active_requests = {}
     engine._additional_metrics = None
@@ -66,6 +68,9 @@ def _make_engine(generate_async) -> TrtllmLLMEngine:
     engine._no_inflight_requests = asyncio.Event()
     engine._no_inflight_requests.set()
     engine._reject_new_requests = False
+    # Match __init__ defaults; _generate_started reads both before dispatch.
+    engine._conversation_affinity = False
+    engine._engine_conversation_affinity_override = False
     # Single-rank default: validate_global_dp_rank(None, 0, 1, ...) -> None,
     # so scheduling_params stays None and never touches a real SchedulingParams.
     engine._attention_dp_size = 1
@@ -129,3 +134,77 @@ async def test_forwards_routing_cache_salt():
     )
 
     assert captured["cache_salt"] == "tenant-a"
+
+
+async def test_visible_stop_tokens_use_dynamo_stopping():
+    captured: dict = {}
+
+    def fake_generate_async(**kwargs):
+        captured.update(kwargs)
+        return _empty_async_iter()
+
+    sampling_params = SimpleNamespace(
+        max_tokens=None,
+        ignore_eos=False,
+        min_tokens=None,
+        stop_token_ids=[200, 300],
+    )
+    engine = _make_engine(fake_generate_async)
+    engine._override_sampling_params = lambda _default, _request: sampling_params
+
+    await _drain(
+        engine,
+        _FakeContext(),
+        {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {
+                "max_tokens": 4,
+                "stop_token_ids_hidden": [100, 200],
+                "stop_token_ids_visible": [200],
+            },
+        },
+    )
+
+    assert captured["sampling_params"] is sampling_params
+    assert sampling_params.ignore_eos is True
+    assert set(sampling_params.stop_token_ids) == {100, 300}
+
+
+async def test_prefill_skips_generation_stop_conditions():
+    captured: dict = {}
+
+    def fake_generate_async(**kwargs):
+        captured.update(kwargs)
+        return _empty_async_iter()
+
+    sampling_params = SimpleNamespace(
+        max_tokens=None,
+        ignore_eos=False,
+        min_tokens=None,
+        stop_token_ids=[300],
+    )
+    engine = _make_engine(fake_generate_async)
+    engine.disaggregation_mode = DisaggregationMode.PREFILL
+    engine._override_sampling_params = lambda _default, _request: sampling_params
+
+    await _drain(
+        engine,
+        _FakeContext(),
+        {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {
+                "max_tokens": 10,
+                "min_tokens": 8,
+                "ignore_eos": True,
+                "stop_token_ids_hidden": [100],
+                "stop_token_ids_visible": [200],
+            },
+        },
+    )
+
+    assert captured["sampling_params"] is sampling_params
+    assert sampling_params.max_tokens == 1
+    assert sampling_params.min_tokens is None
+    assert sampling_params.ignore_eos is False
+    assert sampling_params.stop_token_ids == [300]
+    assert captured["streaming"] is False
