@@ -2,18 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 
-use dynamo_backend_common::{BackendError, DynamoError, ErrorType};
+use dynamo_backend_common::{BackendError, DynamoError, ErrorType, GrpcTransportConfig};
 use futures::future::try_join_all;
-use tokio::time::Instant;
+use tokio::time::{Instant, sleep_until, timeout_at};
 use tonic::transport::{Channel, Endpoint};
 
 use crate::proto as pb;
-
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(300);
-const RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 pub(crate) struct VllmClient {
     channels: Vec<Channel>,
@@ -21,20 +16,24 @@ pub(crate) struct VllmClient {
 }
 
 impl VllmClient {
-    pub(crate) async fn connect(endpoint: &str, connections: usize) -> Result<Self, DynamoError> {
+    pub(crate) async fn connect(
+        endpoint: &str,
+        connections: usize,
+        transport: GrpcTransportConfig,
+    ) -> Result<Self, DynamoError> {
         if connections == 0 {
             return Err(invalid_argument(
                 "vLLM gRPC connection count must be greater than zero",
             ));
         }
         let endpoint = Endpoint::from_shared(endpoint.to_string())
-            .map_err(|error| invalid_argument(format!("invalid vLLM endpoint: {error}")))?
-            .connect_timeout(CONNECT_TIMEOUT);
-        let first = connect_until_ready(endpoint.clone()).await?;
+            .map_err(|error| invalid_argument(format!("invalid vLLM endpoint: {error}")))?;
+        let deadline = Instant::now() + transport.startup_deadline;
+        let first = connect_until_ready(endpoint.clone(), transport, deadline).await?;
         let mut channels = vec![first];
         let remaining = try_join_all((1..connections).map(|_| {
             let endpoint = endpoint.clone();
-            async move { connect_until_ready(endpoint).await }
+            async move { connect_until_ready(endpoint, transport, deadline).await }
         }))
         .await?;
         channels.extend(remaining);
@@ -62,22 +61,44 @@ impl VllmClient {
     }
 }
 
-async fn connect_until_ready(endpoint: Endpoint) -> Result<Channel, DynamoError> {
-    let deadline = Instant::now() + STARTUP_TIMEOUT;
+async fn connect_until_ready(
+    endpoint: Endpoint,
+    transport: GrpcTransportConfig,
+    deadline: Instant,
+) -> Result<Channel, DynamoError> {
+    let mut last_error = None;
     loop {
-        match endpoint.clone().connect().await {
-            Ok(channel) => return Ok(channel),
-            Err(error) if Instant::now() < deadline => {
-                tracing::debug!(%error, "waiting for vLLM gRPC");
-                tokio::time::sleep(RETRY_INTERVAL).await;
-            }
-            Err(error) => {
-                return Err(cannot_connect(format!(
-                    "failed to connect to vLLM within {STARTUP_TIMEOUT:?}: {error}"
-                )));
-            }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(startup_timeout(transport, last_error.as_deref()));
         }
+
+        let attempt_endpoint = endpoint
+            .clone()
+            .connect_timeout(transport.connect_attempt_timeout.min(remaining));
+        let attempt = attempt_endpoint.connect();
+        match timeout_at(deadline, attempt).await {
+            Ok(Ok(channel)) => return Ok(channel),
+            Ok(Err(error)) => {
+                tracing::debug!(%error, "waiting for vLLM gRPC");
+                last_error = Some(error.to_string());
+            }
+            Err(_) => return Err(startup_timeout(transport, last_error.as_deref())),
+        }
+
+        if Instant::now() >= deadline {
+            return Err(startup_timeout(transport, last_error.as_deref()));
+        }
+        sleep_until((Instant::now() + transport.retry_interval).min(deadline)).await;
     }
+}
+
+fn startup_timeout(transport: GrpcTransportConfig, last_error: Option<&str>) -> DynamoError {
+    let cause = last_error.unwrap_or("the connection attempt exceeded the startup deadline");
+    cannot_connect(format!(
+        "failed to establish the vLLM gRPC connection pool within {:?}: {cause}",
+        transport.startup_deadline
+    ))
 }
 
 fn backend(kind: BackendError, message: impl Into<String>) -> DynamoError {

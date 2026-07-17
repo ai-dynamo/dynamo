@@ -8,10 +8,15 @@
 //! with their own `clap` `Args` using `#[command(flatten)]`.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use clap::Args;
 
 use crate::disagg::DisaggregationMode;
+
+const DEFAULT_GRPC_CONNECT_ATTEMPT_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_GRPC_RETRY_INTERVAL_SECS: u64 = 1;
+const DEFAULT_GRPC_STARTUP_DEADLINE_SECS: u64 = 300;
 
 /// Normalize a plaintext gRPC client endpoint for tonic.
 ///
@@ -122,6 +127,60 @@ pub struct CommonArgs {
     /// shim does not read this env var.
     #[arg(long, default_value_t = false, env = "DYN_ROUTE_TO_ENCODER")]
     pub route_to_encoder: bool,
+
+    /// Maximum duration of one sidecar gRPC connection attempt.
+    #[arg(
+        long = "grpc-connect-attempt-timeout-secs",
+        env = "DYN_SIDECAR_GRPC_CONNECT_ATTEMPT_TIMEOUT_SECS",
+        default_value_t = DEFAULT_GRPC_CONNECT_ATTEMPT_TIMEOUT_SECS,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub grpc_connect_attempt_timeout_secs: u64,
+
+    /// Delay between sidecar gRPC connection attempts.
+    #[arg(
+        long = "grpc-retry-interval-secs",
+        env = "DYN_SIDECAR_GRPC_RETRY_INTERVAL_SECS",
+        default_value_t = DEFAULT_GRPC_RETRY_INTERVAL_SECS,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub grpc_retry_interval_secs: u64,
+
+    /// Maximum total duration for sidecar gRPC startup.
+    #[arg(
+        long = "grpc-startup-deadline-secs",
+        env = "DYN_SIDECAR_GRPC_STARTUP_DEADLINE_SECS",
+        default_value_t = DEFAULT_GRPC_STARTUP_DEADLINE_SECS,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub grpc_startup_deadline_secs: u64,
+}
+
+impl CommonArgs {
+    pub fn grpc_transport_config(&self) -> GrpcTransportConfig {
+        GrpcTransportConfig {
+            connect_attempt_timeout: Duration::from_secs(self.grpc_connect_attempt_timeout_secs),
+            retry_interval: Duration::from_secs(self.grpc_retry_interval_secs),
+            startup_deadline: Duration::from_secs(self.grpc_startup_deadline_secs),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct GrpcTransportConfig {
+    pub connect_attempt_timeout: Duration,
+    pub retry_interval: Duration,
+    pub startup_deadline: Duration,
+}
+
+impl Default for GrpcTransportConfig {
+    fn default() -> Self {
+        Self {
+            connect_attempt_timeout: Duration::from_secs(DEFAULT_GRPC_CONNECT_ATTEMPT_TIMEOUT_SECS),
+            retry_interval: Duration::from_secs(DEFAULT_GRPC_RETRY_INTERVAL_SECS),
+            startup_deadline: Duration::from_secs(DEFAULT_GRPC_STARTUP_DEADLINE_SECS),
+        }
+    }
 }
 
 #[cfg(test)]

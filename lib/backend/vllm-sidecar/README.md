@@ -42,5 +42,11 @@ dynamo-vllm-sidecar \
 Use `VLLM_GRPC_ENDPOINT` instead of `--vllm-endpoint` when the endpoint is
 provided through the environment.
 
+Connection startup uses a 30-second timeout per attempt, a one-second retry
+interval, and a five-minute deadline for establishing the full connection
+pool. Override them with `--grpc-connect-attempt-timeout-secs`,
+`--grpc-retry-interval-secs`, and `--grpc-startup-deadline-secs`, or with the
+corresponding `DYN_SIDECAR_GRPC_*` environment variables.
+
 Distribution and container packaging for the executable are intentionally
 deferred to a follow-up change.
