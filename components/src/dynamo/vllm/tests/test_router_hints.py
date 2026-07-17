@@ -21,14 +21,15 @@ pytestmark = [
 ]
 
 
-def test_enable_router_hint_support_extracts_kvcc_endpoint():
+def test_enable_router_hint_support_extracts_router_hint_endpoint():
     runtime_config = MagicMock()
     engine_args = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
             kv_connector_extra_config={
                 "secondary_tiers": [
                     {
-                        "type": "kvcc",
+                        "type": "custom",
+                        "router_capabilities": ["router_hint"],
                         "control_host": "0.0.0.0",
                         "control_advertise_host": "127.0.0.1",
                         "control_port": "23280",
@@ -49,6 +50,28 @@ def test_enable_router_hint_support_extracts_kvcc_endpoint():
     )
 
 
+def test_enable_router_hint_support_skips_without_router_hint_capability():
+    runtime_config = MagicMock()
+    engine_args = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector_extra_config={
+                "secondary_tiers": [
+                    {
+                        "type": "kvcc",
+                        "control_host": "0.0.0.0",
+                        "control_advertise_host": "127.0.0.1",
+                        "control_port": "23280",
+                    }
+                ]
+            }
+        )
+    )
+
+    enable_router_hint_support(runtime_config, engine_args)
+
+    runtime_config.set_engine_specific.assert_not_called()
+
+
 def test_enable_router_hint_support_skips_unadvertisable_endpoint():
     runtime_config = MagicMock()
     engine_args = SimpleNamespace(
@@ -57,6 +80,7 @@ def test_enable_router_hint_support_skips_unadvertisable_endpoint():
                 "secondary_tiers": [
                     {
                         "type": "kvcc",
+                        "router_capabilities": ["router_hint"],
                         "control_host": "0.0.0.0",
                         "control_port": 23280,
                     }

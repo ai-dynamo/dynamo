@@ -480,15 +480,10 @@ where
                             .get(&worker.worker_id)
                             .is_some_and(|config| config.supports_router_hints())
                 })?;
-            let source_config = configs.get(&source.worker_id)?;
-            let source_control_endpoint = source_config
-                .router_hint_source_control_endpoint()
-                .unwrap_or_else(|| {
-                    panic!(
-                        "router_hint-capable source worker {source:?} must advertise a control endpoint"
-                    )
-                })
-                .to_string();
+            let source_control_endpoint = configs
+                .get(&source.worker_id)
+                .and_then(|config| config.router_hint_source_control_endpoint())
+                .map(str::to_string);
             (block_hashes, source_control_endpoint)
         };
 

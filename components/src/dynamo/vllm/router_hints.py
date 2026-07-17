@@ -18,15 +18,25 @@ def _get(value: Any, key: str) -> Any:
     return getattr(value, key, None)
 
 
-def _router_hint_source_control_endpoint(engine_args: Any) -> str | None:
+def _secondary_tiers(engine_args: Any) -> list[Any]:
     kv_config = _get(engine_args, "kv_transfer_config")
     extra_config = _get(kv_config, "kv_connector_extra_config")
     secondary_tiers = _get(extra_config, "secondary_tiers")
     if not isinstance(secondary_tiers, list):
-        return None
+        return []
+    return secondary_tiers
 
-    for tier in secondary_tiers:
-        if str(_get(tier, "type") or "").lower() != "kvcc":
+
+def _supports_router_hint(tier: Any) -> bool:
+    capabilities = _get(tier, "router_capabilities")
+    if not isinstance(capabilities, list):
+        return False
+    return ROUTER_HINT_RUNTIME_CAPABILITY_KEY in capabilities
+
+
+def _router_hint_source_control_endpoint(engine_args: Any) -> str | None:
+    for tier in _secondary_tiers(engine_args):
+        if not _supports_router_hint(tier):
             continue
         try:
             control_port = int(_get(tier, "control_port"))
@@ -43,6 +53,9 @@ def _router_hint_source_control_endpoint(engine_args: Any) -> str | None:
 
 
 def enable_router_hint_support(runtime_config: Any, engine_args: Any) -> None:
+    if not any(_supports_router_hint(tier) for tier in _secondary_tiers(engine_args)):
+        return
+
     runtime_config.set_engine_specific(ROUTER_HINT_RUNTIME_CAPABILITY_KEY, "true")
     control_endpoint = _router_hint_source_control_endpoint(engine_args)
     if control_endpoint is not None:
