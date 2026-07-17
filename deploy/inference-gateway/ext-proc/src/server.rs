@@ -717,6 +717,9 @@ fn extract_candidate_subset(
 struct ExtProcError {
     status_code: StatusCode,
     message: String,
+    /// When set, emit a `Retry-After` header (seconds). Only used for shed (429)
+    /// responses so failover can back off before retrying.
+    retry_after_secs: Option<u64>,
 }
 
 impl ExtProcError {
@@ -725,20 +728,35 @@ impl ExtProcError {
             PickError::NoEndpoints => Self {
                 status_code: StatusCode::ServiceUnavailable,
                 message: e.to_string(),
+                retry_after_secs: None,
             },
             PickError::RoutingFailed(msg) => Self {
                 status_code: StatusCode::ServiceUnavailable,
                 message: msg,
+                retry_after_secs: None,
             },
             PickError::TokenizationFailed(msg) => Self {
                 status_code: StatusCode::BadRequest,
                 message: msg,
+                retry_after_secs: None,
+            },
+            // Explicit load-shedding verdict: distinct from a failure. Surface as
+            // HTTP 429 with an optional Retry-After so the gateway / client
+            // failover treats it as "back off and retry / route elsewhere".
+            PickError::Saturated { retry_after_secs } => Self {
+                status_code: StatusCode::TooManyRequests,
+                message: "service saturated: all workers overloaded".to_string(),
+                retry_after_secs,
             },
         }
     }
 
     fn into_processing_response(self) -> ProcessingResponse {
-        envoy_helpers::build_error_response(self.status_code, Some(&self.message))
+        if self.status_code == StatusCode::TooManyRequests {
+            envoy_helpers::build_shed_response(self.retry_after_secs, Some(&self.message))
+        } else {
+            envoy_helpers::build_error_response(self.status_code, Some(&self.message))
+        }
     }
 }
 

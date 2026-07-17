@@ -134,7 +134,65 @@ The common local environment variables are:
 | `DYN_COMPONENT_NAME` | `backend` | Dynamo component that exposes the `generate` endpoint. |
 | `DYN_ENFORCE_DISAGG` | `false` | Deprecated and ignored. Registered worker types determine routing topology and readiness. |
 | `DYN_KUBE_DISCOVERY_MODE` | `pod` | Kubernetes discovery identity mode. The Rust EPP currently rejects `container`. |
+| `DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD` | unset | Load-shedding: KV cache block utilization threshold (`0.0`–`1.0`). A worker is overloaded when `active_decode_blocks / kv_total_blocks` exceeds this. |
+| `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD` | unset | Load-shedding: absolute prefill token count threshold. A worker is overloaded when `active_prefill_tokens` exceeds this. |
+| `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC` | unset | Load-shedding: prefill token threshold as a fraction of `max_num_batched_tokens`. |
+| `DYN_SHED_RETRY_AFTER_SECS` | unset | Load-shedding: optional `Retry-After` header value (seconds) sent on a 429 shed response. |
 | `RUST_LOG` | `info` | Tracing log filter. |
+
+## Load Shedding (Request Rejection)
+
+The Rust EPP can proactively reject requests when every eligible worker is
+overloaded, instead of routing them and wasting prefill compute on requests that
+would time out. This is the gateway-path equivalent of the Dynamo frontend's
+HTTP 529 admission control, and it **reuses the exact same detection logic** —
+the `KvWorkerMonitor` from `lib/llm` (`dynamo-llm`).
+
+### How it works
+
+1. On startup the EPP constructs a `KvWorkerMonitor` bound to the decode
+   `KvRouter`'s `Client`, and (in disaggregated serving) hands it to the
+   `PrefillRouter` so the prefill `Client` is attached on activation.
+2. The monitor subscribes to the namespace `kv_metrics` event stream, tracks
+   per-worker load (`active_decode_blocks`, `kv_total_blocks`,
+   `active_prefill_tokens`), and publishes the overloaded worker set to the
+   router `Client`s. The KV/prefill schedulers already exclude overloaded workers
+   and cannot route to them.
+3. On each request, before tokenizing or routing, the EPP checks whether any
+   eligible worker is free. If all discovered workers are overloaded, it returns
+   an explicit **HTTP 429** (with an optional `Retry-After` header) via an Envoy
+   `ext_proc` immediate response — so the gateway rejects the request without
+   forwarding it to any worker, and the client / failover can back off and retry.
+
+Because the monitor lives in-process, the EPP reads Dynamo's own KV-router load
+signals directly (no metrics scraping and no CGO bridge).
+
+### Enabling it
+
+Load shedding is **opt-in and off by default**. If none of the
+`DYN_ACTIVE_*_THRESHOLD` variables are set, the monitor reports "not configured"
+and the EPP never sheds — behavior is identical to before. Set one or more
+thresholds (see the table above) to enable it, for example:
+
+```bash
+export DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD=0.85
+export DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD=10000
+export DYN_SHED_RETRY_AFTER_SECS=1
+```
+
+### Reference
+
+The threshold semantics, tuning guidance, dual-threshold (decode vs prefill)
+model, and Prometheus metrics are documented for the frontend and apply
+identically here, since the same `KvWorkerMonitor` computes overload:
+[Request Rejection (frontend)](../../../docs/fault-tolerance/request-rejection.md).
+
+The main differences on the EPP path are:
+
+- Configuration is via the environment variables above rather than frontend CLI
+  flags or the `/busy_threshold` HTTP endpoint.
+- Rejections surface as **HTTP 429** (with `Retry-After`) through the gateway,
+  rather than the frontend's HTTP 529.
 
 ## Cleaning
 

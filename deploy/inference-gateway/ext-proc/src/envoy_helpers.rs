@@ -302,6 +302,37 @@ pub fn build_eviction_response() -> ProcessingResponse {
     )
 }
 
+/// Build a load-shedding response (HTTP 429) with an optional `Retry-After`
+/// header. Used when the request is explicitly shed because every eligible
+/// worker is overloaded. The `Retry-After` header (seconds) lets the gateway /
+/// client failover back off before retrying, so a shed is a routing signal
+/// rather than an opaque error.
+pub fn build_shed_response(
+    retry_after_secs: Option<u64>,
+    body: Option<&str>,
+) -> ProcessingResponse {
+    let headers = retry_after_secs.map(|secs| HeaderMutation {
+        set_headers: vec![header_overwrite("retry-after", secs.to_string().as_bytes())],
+        remove_headers: vec![],
+    });
+
+    ProcessingResponse {
+        response: Some(
+            crate::proto::envoy::service::ext_proc::v3::processing_response::Response::ImmediateResponse(
+                ImmediateResponse {
+                    status: Some(HttpStatus {
+                        code: StatusCode::TooManyRequests.into(),
+                    }),
+                    headers,
+                    body: body.map(|b| b.as_bytes().to_vec()).unwrap_or_default(),
+                    ..Default::default()
+                },
+            ),
+        ),
+        ..Default::default()
+    }
+}
+
 /// Split body bytes into chunks of BODY_BYTE_LIMIT, wrapping each in a
 /// CommonResponse with StreamedBodyResponse. Mirrors the Go `BuildChunkedBodyResponses`.
 fn build_chunked_body_responses(body: &[u8], set_eos: bool) -> Vec<CommonResponse> {
