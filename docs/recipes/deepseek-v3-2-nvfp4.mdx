@@ -125,7 +125,7 @@ Because the replay is `--fixed-schedule`, throughput is fixed by the trace — t
 ## Notes
 
 - The aggregated round-robin configuration (`trtllm/agg-round-robin/`) is the benchmark control arm; it appears on the Feature Benchmark page, not as a recipe target here.
-- The benchmark job pins `transformers==4.57.6`: the trtllm-runtime base ships 4.55.0, and aiperf 0.6.0's `transformers>=4.56.0` floor would otherwise pull 5.x, which cannot load the `deepseek_v32` tokenizer (surfaces as "Failed to load tokenizer").
+- The benchmark job pins `transformers==4.57.6`: the trtllm-runtime base ships 4.55.0, and aiperf's `transformers>=4.56.0` floor would otherwise pull 5.x, which cannot load the `deepseek_v32` tokenizer (surfaces as "Failed to load tokenizer").
 - Decode workers run the WIDEEP MoE backend with `moe_expert_parallel_size: 8` and FP8 KV cache; prefill enables chunked prefill and KV block reuse (`tokens_per_block: 64`, matching `--kv-block-size 64`).
 - The trace tops out at 109,459 input tokens; both engine configs set `max_seq_len: 121000` to accommodate it.
 

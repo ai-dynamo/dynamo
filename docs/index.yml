@@ -398,6 +398,48 @@ navigation:
         path: recipes/llama-3-3-70b.mdx
         slug: llama-3-3-70b
 
+      # ==================== Feature Benchmarks ====================
+      # Evidence pages behind the recipes: controlled A/B benchmarks whose
+      # winning configs promote into recipes. Kept adjacent to Recipes so the
+      # cross-links between the two surfaces resolve. Detail pages are hidden
+      # from the sidebar (the Browse landing rows are the real index) — same
+      # pattern as main.
+      - section: Feature Benchmarks
+        path: benchmarks/README.mdx
+        slug: benchmarks
+        contents:
+          - page: Browse All Benchmarks
+            path: benchmarks/README.mdx
+            slug: browse
+          - page: Qwen3-32B KV Routing A/B
+            path: benchmarks/qwen3-32b-kv-routing.mdx
+            slug: qwen3-32b-kv-routing
+            hidden: true
+          - page: Agentic Coding Throughput Stack - Kimi-K2.5
+            path: benchmarks/kimi-k2-5-feature-stack.mdx
+            slug: kimi-k2-5-feature-stack
+            hidden: true
+          - page: Qwen3.6-35B Feature Stack
+            path: benchmarks/qwen3-6-35b-feature-stack.mdx
+            slug: qwen3-6-35b-feature-stack
+            hidden: true
+          - page: Qwen3-VL Embedding Cache
+            path: benchmarks/qwen3-vl-embedding-cache.mdx
+            slug: qwen3-vl-embedding-cache
+            hidden: true
+          - page: DeepSeek V3.2 WideEP Routing
+            path: benchmarks/deepseek-v3-2-wideep-routing.mdx
+            slug: deepseek-v3-2-wideep-routing
+            hidden: true
+          - page: Llama-3.3-70B Topology
+            path: benchmarks/llama-3-70b-topology.mdx
+            slug: llama-3-70b-topology
+            hidden: true
+          - page: KV Router A/B Testing
+            path: benchmarks/kv-router-ab-testing.md
+            slug: kv-router-ab-testing
+            hidden: true
+
   - tab: developer-guide
     layout:
       # ==================== Knowledge Base ====================
