@@ -11,10 +11,6 @@ homepage.workspace = true
 repository.workspace = true
 description = "Dynamo SGLang sidecar for an out-of-process engine exposed through its native gRPC service."
 
-[package.metadata.cargo-machete]
-# Referenced by the protobuf client generated into OUT_DIR at build time.
-ignored = ["prost"]
-
 [[bin]]
 name = "dynamo-sglang-sidecar"
 path = "src/main.rs"
@@ -22,6 +18,7 @@ path = "src/main.rs"
 [dependencies]
 dynamo-backend-common = { workspace = true }
 dynamo-runtime = { workspace = true }
+dynamo-sglang-grpc = { workspace = true }
 
 anyhow = { workspace = true }
 async-stream = { workspace = true }
@@ -35,15 +32,7 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 
-# tonic / prost are pinned per-crate (not workspace deps): tonic 0.13.1
-# depends on prost 0.13.5, matching `lib/llm`. tonic-build 0.13.1 still
-# bundles prost codegen via `compile_protos` (the 0.14 split to
-# tonic-prost-build does not apply here).
-prost = { version = "0.13.5" }
-tonic = { version = "0.13.1" }
-
-[build-dependencies]
-tonic-build = { version = "0.13.1" }
+tonic = { workspace = true }
 
 [dev-dependencies]
 dynamo-backend-common = { workspace = true, features = ["testing"] }

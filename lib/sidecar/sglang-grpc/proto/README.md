@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Temporary SGLang sidecar gRPC contract
+# Temporary SGLang gRPC contract
 
 This copy is temporary while Dynamo waits for SGLang to include
 `sglang/srt/grpc/sglang.proto` in a release wheel. Once the contract is
@@ -16,4 +16,7 @@ The contract was copied from SGLang commit
 The upstream file's SHA-256 is
 `a2e14952ddb2b34b6e22cbbc4e76d76d70c44f2dbf087cb9918aed3399d9ef42`.
 The local file adds SPDX and temporary-copy comments and applies Dynamo's
-`clang-format` style; these changes do not alter the protobuf descriptor.
+`clang-format` style; these changes do not alter the protobuf descriptor. The
+shared `dynamo-sglang-grpc` crate generates both the sidecar client and the
+Mocker server from this one copy. The formatted local source is pinned by the
+test checksum `f3d5bf6c18dd95248c311f1368a77631862d9c9f0febe748d19964b7e1154f07`.

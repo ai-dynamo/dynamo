@@ -28,6 +28,34 @@ use crate::scheduler::{
 
 type RequestOutputs = Arc<DashMap<Uuid, mpsc::UnboundedSender<OutputSignal>>>;
 
+/// Map a wire-protocol request ID to a deterministic scheduler UUID.
+pub fn stable_request_uuid(seed: u64, request_id: &str) -> Uuid {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&seed.to_le_bytes());
+    hasher.update(request_id.as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
+    // Mark the digest as an RFC 4122 variant/version-4 UUID. The identifier
+    // remains deterministic; these bits only make diagnostics parse cleanly.
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
+/// Produce deterministic, tokenizer-independent output token IDs.
+pub fn deterministic_output_tokens(seed: u64, request_id: &str, count: usize) -> Vec<u32> {
+    (0..count)
+        .map(|position| {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(&seed.to_le_bytes());
+            hasher.update(request_id.as_bytes());
+            hasher.update(&(position as u64).to_le_bytes());
+            let bytes = hasher.finalize();
+            1_000 + (u32::from_le_bytes(bytes.as_bytes()[..4].try_into().unwrap()) % 31_000)
+        })
+        .collect()
+}
+
 /// A running Mocker scheduler with request-scoped output streams.
 #[derive(Clone)]
 pub struct LiveEngine {
@@ -235,9 +263,9 @@ mod tests {
     use super::*;
     use crate::common::protocols::EngineType;
 
-    fn args() -> MockEngineArgs {
+    fn args(engine_type: EngineType) -> MockEngineArgs {
         MockEngineArgs::builder()
-            .engine_type(EngineType::Vllm)
+            .engine_type(engine_type)
             .block_size(4)
             .num_gpu_blocks(128)
             .max_num_seqs(Some(8))
@@ -250,36 +278,38 @@ mod tests {
 
     #[tokio::test]
     async fn streams_planned_tokens_to_the_owning_request() {
-        let engine = LiveEngine::start(args(), 0).unwrap();
-        let uuid = Uuid::from_u128(1);
-        let mut request = engine
-            .submit(DirectRequest {
-                tokens: vec![1, 2, 3],
-                max_output_tokens: 3,
-                output_token_ids: Some(vec![41, 42, 43]),
-                uuid: Some(uuid),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
+        for engine_type in [EngineType::Vllm, EngineType::Sglang] {
+            let engine = LiveEngine::start(args(engine_type), 0).unwrap();
+            let uuid = Uuid::from_u128(1);
+            let mut request = engine
+                .submit(DirectRequest {
+                    tokens: vec![1, 2, 3],
+                    max_output_tokens: 3,
+                    output_token_ids: Some(vec![41, 42, 43]),
+                    uuid: Some(uuid),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
 
-        let mut outputs = Vec::new();
-        while let Some(signal) = request.recv().await {
-            outputs.push((signal.token_id, signal.completed));
-            if signal.completed {
-                break;
+            let mut outputs = Vec::new();
+            while let Some(signal) = request.recv().await {
+                outputs.push((signal.token_id, signal.completed));
+                if signal.completed {
+                    break;
+                }
             }
+            assert_eq!(
+                outputs,
+                vec![(Some(41), false), (Some(42), false), (Some(43), true)]
+            );
+            assert_eq!(engine.active_request_count(), 0);
         }
-        assert_eq!(
-            outputs,
-            vec![(Some(41), false), (Some(42), false), (Some(43), true)]
-        );
-        assert_eq!(engine.active_request_count(), 0);
     }
 
     #[tokio::test]
     async fn dropping_a_stream_releases_scheduler_state() {
-        let mut slow_args = args();
+        let mut slow_args = args(EngineType::Vllm);
         slow_args.speedup_ratio = 1.0;
         let engine = LiveEngine::start(slow_args, 0).unwrap();
         let request = engine
@@ -310,7 +340,7 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_request_id_does_not_replace_the_original_stream() {
-        let engine = LiveEngine::start(args(), 0).unwrap();
+        let engine = LiveEngine::start(args(EngineType::Vllm), 0).unwrap();
         let uuid = Uuid::from_u128(3);
         let original = engine
             .submit(DirectRequest {
@@ -337,5 +367,21 @@ mod tests {
         assert_eq!(engine.active_request_count(), 1);
         original.cancel().await.unwrap();
         assert_eq!(engine.active_request_count(), 0);
+    }
+
+    #[test]
+    fn deterministic_identity_and_tokens_are_stable() {
+        assert_eq!(
+            stable_request_uuid(42, "request-1"),
+            stable_request_uuid(42, "request-1")
+        );
+        assert_ne!(
+            stable_request_uuid(42, "request-1"),
+            stable_request_uuid(42, "request-2")
+        );
+        assert_eq!(
+            deterministic_output_tokens(42, "request-1", 3),
+            deterministic_output_tokens(42, "request-1", 3)
+        );
     }
 }

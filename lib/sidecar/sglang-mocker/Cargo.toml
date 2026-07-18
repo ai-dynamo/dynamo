@@ -2,29 +2,29 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "dynamo-vllm-mocker"
+name = "dynamo-sglang-mocker"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "Mocker-backed implementation of vLLM's native Generate gRPC API"
+description = "Mocker-backed implementation of SGLang's native gRPC API"
 readme = "README.md"
 
 [[bin]]
-name = "dynamo-vllm-mocker-server"
+name = "dynamo-sglang-mocker-server"
 path = "src/main.rs"
 
 [dependencies]
 dynamo-mocker = { workspace = true }
-dynamo-vllm-grpc = { workspace = true }
+dynamo-sglang-grpc = { workspace = true }
 
 anyhow = { workspace = true }
 async-stream = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
-prost-types = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
@@ -33,7 +33,5 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 dynamo-backend-common = { workspace = true, features = ["testing"] }
-dynamo-sidecar-common = { workspace = true }
-dynamo-vllm-sidecar = { path = "../vllm" }
-serde_json = { workspace = true }
+dynamo-sglang-sidecar = { path = "../sglang" }
 tokio-stream = { workspace = true, features = ["net"] }
