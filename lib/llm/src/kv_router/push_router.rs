@@ -256,6 +256,13 @@ impl KvPushRouter {
         );
 
         let record_result: Result<(), Error> = async {
+            if let Some(hashes) = selection.routing_hashes.as_ref()
+                && let Some(tracker) = request.tracker.as_ref()
+                && tracker.kv_cache_sol_tracking_enabled()
+            {
+                tracker.record_kv_cache_sol_prompt_hashes(hashes.clone());
+            }
+
             if !is_query_only && self.chooser.indexer().records_routing_decisions() {
                 let worker = WorkerWithDpRank::new(selection.instance_id, selection.dp_rank);
                 let record_result = if let Some(hashes) = selection.routing_hashes.take() {

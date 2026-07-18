@@ -1215,6 +1215,20 @@ class KvEventPublisher:
         ...
 
 
+class KvCacheSolEstimator:
+    """CPU-only subscriber that estimates the workload KV-cache hit-rate upper bound."""
+
+    def __init__(
+        self,
+        endpoint: Endpoint,
+        horizon_secs: int = 3600,
+        max_cache_blocks: int = 5_000_000,
+        max_pending_requests: int = 100_000,
+    ) -> None: ...
+
+    def shutdown(self) -> None: ...
+
+
 class FpmEventRelay:
     """
     Relay that bridges ForwardPassMetrics from a local raw ZMQ PUB socket

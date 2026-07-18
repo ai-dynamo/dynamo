@@ -110,6 +110,14 @@ impl PrefillRouter {
             tokio::spawn(async move { while prefill_response.next().await.is_some() {} });
         }
 
+        if let Some(cached_tokens) = prompt_tokens_details
+            .as_ref()
+            .and_then(|details| details.cached_tokens)
+            && let Some(tracker) = tracker.as_ref()
+        {
+            tracker.record_worker_observed_cached_tokens(cached_tokens as usize);
+        }
+
         let Some(output) = &first_output.data else {
             return Err(PrefillError::NoDisaggregatedParams(
                 "Prefill router output has no data field".to_string(),

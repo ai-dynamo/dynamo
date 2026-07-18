@@ -143,8 +143,12 @@ impl KvPushRouter {
             .unwrap_or(0);
         let expected_output_tokens = routing.and_then(|routing| routing.expected_output_tokens);
         let allowed_worker_ids = routing.and_then(|routing| routing.allowed_worker_ids.clone());
-        let return_routing_hashes =
-            !is_query_only && self.chooser.indexer().records_routing_decisions();
+        let return_routing_hashes = !is_query_only
+            && (self.chooser.indexer().records_routing_decisions()
+                || request
+                    .tracker
+                    .as_ref()
+                    .is_some_and(|tracker| tracker.kv_cache_sol_tracking_enabled()));
         let routing_constraints = routing
             .and_then(|routing| routing.routing_constraints.clone())
             .unwrap_or_default();
