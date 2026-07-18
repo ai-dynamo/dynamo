@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # GPU Memory Control
 
 How vLLM, SGLang, and TensorRT-LLM allocate GPU memory, and how we override
@@ -23,7 +28,7 @@ Instead, we use **absolute KV cache caps**:
 | Engine | Deterministic override | Env var |
 |--------|----------------------|---------|
 | vLLM | `--kv-cache-memory-bytes N` | `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES` |
-| SGLang | `--max-total-tokens N` | `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` |
+| SGLang | `--max-total-tokens N --context-length N` | `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` |
 | TensorRT-LLM | `--override-engine-args '{"kv_cache_config":{"max_tokens":N}}'` | `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS` |
 
 ---
@@ -71,6 +76,10 @@ When set, the token cap is the binding constraint.
 `--context-length` and `--max-running-requests` affect request scheduling
 only — they do **not** change KV cache allocation.
 
+For profiling and tests, `build_sglang_gpu_mem_args` sets `--context-length`
+to the same value as `--max-total-tokens`. This keeps the maximum per-request
+context within the test-sized KV cache capacity.
+
 ### TensorRT-LLM
 
 `free_gpu_memory_fraction` is a fraction of **free** VRAM after model load.
@@ -112,7 +121,7 @@ Otherwise it returns empty and the engine uses its default allocation.
 | Env var | Function | Output |
 |---------|----------|--------|
 | `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES` | `build_vllm_gpu_mem_args` | `--kv-cache-memory-bytes N --gpu-memory-utilization 0.01` |
-| `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` | `build_sglang_gpu_mem_args` | `--max-total-tokens N` |
+| `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` | `build_sglang_gpu_mem_args` | `--max-total-tokens N --context-length N --mem-fraction-static 0.9` |
 | `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS` | `build_trtllm_override_args_with_mem` | `{"kv_cache_config": {"max_tokens": N}}` (JSON) |
 | `_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES` | `build_trtllm_override_args_with_mem` | `{"kv_cache_config": {"max_gpu_total_bytes": N}}` (JSON) |
 

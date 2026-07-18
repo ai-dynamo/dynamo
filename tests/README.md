@@ -125,8 +125,8 @@ Markers are required for all tests. They are used for test selection in CI and l
 | Hardware [required]     | gpu_0, gpu_1, gpu_2, gpu_4, gpu_8, h100                         | Number/type of GPUs required       |
 | VRAM (profiled)         | profiled_vram_gib(N)                                                         | Actual peak VRAM observed by nvidia-smi during profiling (includes CUDA overhead). Used for `--max-vram-gib=N` filtering and GPU-parallel scheduler budget tracking. |
 | vLLM KV cache bytes     | requested_vllm_kv_cache_bytes(N)                                             | (vLLM only) Exact KV cache bytes. Sets `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES` → `--kv-cache-memory-bytes`. Deterministic, parallel-safe. |
-| SGLang KV tokens        | requested_sglang_kv_tokens(N)                                                          | (SGLang only) Max KV cache tokens. Sets `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` → `--max-total-tokens`. Deterministic, parallel-safe. |
-| SGLang VRAM GiB         | requested_sglang_vram_gib(N)                                                           | (SGLang only) Max VRAM in GiB. For non-text workloads (video/image diffusion) where token-based control doesn't apply. |
+| SGLang KV tokens        | requested_sglang_kv_tokens(N)                                                          | (SGLang only) Max KV cache tokens and per-request context length. Sets `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` → `--max-total-tokens N --context-length N`. Deterministic, parallel-safe. |
+| SGLang VRAM GiB         | requested_sglang_vram_gib(N)                                                           | (SGLang only) Max VRAM in GiB. For workloads without token-based KV control, such as diffusion models. |
 | TRT-LLM KV tokens      | requested_trtllm_kv_tokens(N)                                                          | (TRT-LLM only) Max KV cache tokens. Sets `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS` → `KvCacheConfig.max_tokens` via `--override-engine-args`. Deterministic, parallel-safe. |
 | TRT-LLM VRAM GiB       | requested_trtllm_vram_gib(N)                                                           | (TRT-LLM only) Max VRAM in GiB. Sets `_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES` → `KvCacheConfig.max_gpu_total_bytes` via `--override-engine-args`. For non-text workloads (video/image diffusion) where token-based control doesn't apply. |
 | Framework               | vllm, trtllm, sglang                                             | Which backend the test runs against. Pair with a component marker. |
@@ -203,8 +203,8 @@ Markers differ by engine:
 
 **SGLang** uses token-based control:
 - **`profiled_vram_gib(N)`** — actual peak from nvidia-smi at the recommended token count. Used for `--max-vram-gib` filtering and scheduler budget.
-- **`requested_sglang_kv_tokens(N)`** — max KV cache tokens. Sets `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` → `--max-total-tokens N --mem-fraction-static 0.9`. The token cap controls actual KV allocation; `--mem-fraction-static 0.9` is also emitted to keep SGLang's pool-creation gate open on small GPUs (see PR #9238). Deterministic and parallel-safe (see `examples/common/gpu_utils.md`).
-- **`requested_sglang_vram_gib(N)`** — max VRAM in GiB for non-text workloads (video/image diffusion), where token-based control doesn't apply. Used for scheduler admission and display only.
+- **`requested_sglang_kv_tokens(N)`** — max KV cache tokens and per-request context length. Sets `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` → `--max-total-tokens N --context-length N --mem-fraction-static 0.9`. The token cap controls actual KV allocation, the context cap keeps a maximum-length request within that allocation, and `--mem-fraction-static 0.9` keeps SGLang's pool-creation gate open on small GPUs (see PR #9238). Deterministic and parallel-safe (see `examples/common/gpu_utils.md`).
+- **`requested_sglang_vram_gib(N)`** — max VRAM in GiB for workloads without token-based KV control, such as diffusion models. Used for scheduler admission and display only.
 
 **TRT-LLM** uses token-based control (text models) or byte-based control (diffusion models):
 - **`profiled_vram_gib(N)`** — actual peak from nvidia-smi. Used for `--max-vram-gib` filtering and scheduler budget.
@@ -222,7 +222,7 @@ GPU tests run concurrently via a custom VRAM-aware scheduler (`tests/utils/pytes
 2. **Profiling race**: engines snapshot free memory during init; concurrent startups corrupt each other. The scheduler staggers launches (VRAM stability check) and retries transient failures.
 3. **Engine-specific allocation**: each test gets a constrained allocation so it uses only its budgeted share. xdist has no mechanism for this.
    - **vLLM**: `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES = N` → `--kv-cache-memory-bytes` (from `requested_vllm_kv_cache_bytes` marker). Byte-based cap is deterministic and doesn't depend on current free memory, making it inherently parallel-safe. Uses `build_vllm_gpu_mem_args` in `gpu_utils.sh`.
-   - **SGLang**: `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS = N` → `--max-total-tokens N --mem-fraction-static 0.9` (from `requested_sglang_kv_tokens` marker). Token-based cap is deterministic and doesn't depend on current free memory, making it inherently parallel-safe; `--mem-fraction-static 0.9` is also emitted to keep SGLang's pool-creation gate open on small GPUs (see PR #9238). Non-text workloads may use `requested_sglang_vram_gib` for scheduler admission only.
+   - **SGLang**: `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS = N` → `--max-total-tokens N --context-length N --mem-fraction-static 0.9` (from `requested_sglang_kv_tokens` marker). Token-based caps are deterministic and don't depend on current free memory, making them inherently parallel-safe; `--mem-fraction-static 0.9` is also emitted to keep SGLang's pool-creation gate open on small GPUs (see PR #9238). Workloads without token-based KV control may use `requested_sglang_vram_gib` for scheduler admission only.
    - **TRT-LLM**: `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS = N` → `KvCacheConfig.max_tokens` via `--override-engine-args` JSON (from `requested_trtllm_kv_tokens` marker). Token-based cap is deterministic and parallel-safe. Uses `build_trtllm_override_args_with_mem` in `gpu_utils.sh` (separate function because TRT-LLM requires JSON merging).
 
 ```bash
@@ -645,12 +645,12 @@ When writing or reviewing GPU tests, use `tests/utils/profile_pytest.py` to meas
 The profiler automatically detects the engine type and uses the appropriate binary search:
 
 - **vLLM**: bisects `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES` (bytes) → `--kv-cache-memory-bytes`. Finds the minimum KV cache bytes where the test passes, applies a 2x safety factor. Outputs `profiled_vram_gib` and `requested_vllm_kv_cache_bytes` markers.
-- **SGLang**: bisects `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` (token count) → `--max-total-tokens`. Finds the minimum KV cache tokens where the test passes, applies a 2x safety factor, then runs a final probe at the safe token count to measure the actual VRAM. Outputs `profiled_vram_gib` and `requested_sglang_kv_tokens` markers.
+- **SGLang**: bisects `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` (token count) → `--max-total-tokens N --context-length N`. Finds the minimum token and context cap where the test passes, applies a 2x safety factor, then runs a final probe at the safe token count to measure the actual VRAM. Outputs `profiled_vram_gib` and `requested_sglang_kv_tokens` markers.
 - **TRT-LLM**: bisects `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS` (token count) → `KvCacheConfig.max_tokens` via `--override-engine-args` JSON. Same logic as SGLang (token-based bisection, 2x safety). Outputs `profiled_vram_gib` and `requested_trtllm_kv_tokens` markers. For non-text models (video/image diffusion) that don't use KV cache, use `--no-find-min-vram` for a single-pass VRAM measurement — binary search won't work because the model doesn't log KV token allocation.
 
 **Requirement (vLLM):** The launch script must honor `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES`. This is handled by `build_vllm_gpu_mem_args` in `gpu_utils.sh` (returns `--kv-cache-memory-bytes N`).
 
-**Requirement (SGLang):** The launch script must honor `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS`. This is handled by `build_sglang_gpu_mem_args` in `gpu_utils.sh` (returns `--max-total-tokens N --mem-fraction-static 0.9`).
+**Requirement (SGLang):** The launch script must honor `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS`. This is handled by `build_sglang_gpu_mem_args` in `gpu_utils.sh` (returns `--max-total-tokens N --context-length N --mem-fraction-static 0.9`).
 
 **Requirement (TRT-LLM):** The launch script must honor `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS` (and optionally `_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES`). This is handled by `build_trtllm_override_args_with_mem` in `gpu_utils.sh` (returns JSON for `--override-engine-args`). Note: this is a separate function from `build_vllm_gpu_mem_args` / `build_sglang_gpu_mem_args` because TRT-LLM requires JSON merging.
 
@@ -692,7 +692,7 @@ Env vars control engine allocation during profiling and parallel test execution:
 
 | Engine  | Returned CLI flag                                  | Notes |
 |---------|----------------------------------------------------|-------|
-| SGLang  | `--max-total-tokens N --mem-fraction-static 0.9`   | Token-based KV cache cap; `--mem-fraction-static 0.9` keeps the pool-creation gate open on small GPUs (see PR #9238) |
+| SGLang  | `--max-total-tokens N --context-length N --mem-fraction-static 0.9`   | Token-based KV cache and per-request context cap; `--mem-fraction-static 0.9` keeps the pool-creation gate open on small GPUs (see PR #9238) |
 
 **`_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS`** (integer) — TRT-LLM text models:
 

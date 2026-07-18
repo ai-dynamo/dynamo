@@ -15,6 +15,8 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 
 ARG MODELEXPRESS_VERSION
 
+USER root
+
 WORKDIR /workspace
 
 # Install NATS and ETCD
@@ -25,7 +27,11 @@ ENV PATH=/usr/local/bin/etcd:$PATH
 
 # Create dynamo user with group 0 for OpenShift compatibility
 RUN userdel -r ubuntu > /dev/null 2>&1 || true \
-    && useradd -m -s /bin/bash -g 0 dynamo \
+    && if id -u dynamo > /dev/null 2>&1; then \
+        usermod -s /bin/bash -g 0 dynamo; \
+    else \
+        useradd -m -s /bin/bash -g 0 dynamo; \
+    fi \
     && [ `id -u dynamo` -eq 1000 ] \
     && mkdir -p /home/dynamo/.cache /opt/dynamo \
     # Non-recursive chown - only the directories themselves, not contents
@@ -134,6 +140,49 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
     pip install --break-system-packages --force-reinstall --no-deps \
         --requirement /tmp/requirements.sglang.txt
 
+{% if device == "cuda" %}
+# Match the transformers/mistral_common pins required by the vendored patch.
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    export PIP_CACHE_DIR=/root/.cache/pip && \
+    pip install --break-system-packages --no-deps \
+        "transformers==5.12.1" \
+        "mistral_common==1.11.5"
+{% endif %}
+
+{%- if device != "xpu" %}
+# Precompile third-party Python bytecode while still root: the non-root `dynamo`
+# test user cannot write .pyc back, and per-test forks otherwise add ~8-10 min.
+# Keep this before workspace COPYs so source-only changes do not recompile deps.
+RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')" && \
+    python3 -m compileall -q -j0 "$SITE_PACKAGES"
+{%- endif %}
+
+{% if device == "cuda" %}
+# Apply pinned SGLang hotfixes to the source tree carried by the upstream runtime
+# image and assert the vendored patches contain no test-path hunks.
+RUN --mount=type=bind,source=./container/deps/sglang/patches,target=/tmp/sglang_patches \
+    set -eu; \
+    SGLANG_DIR="/sgl-workspace/sglang"; \
+    python3 -c "import importlib.util, os; spec = importlib.util.find_spec('sglang'); assert spec and spec.origin; assert os.path.realpath(spec.origin).startswith('${SGLANG_DIR}/'), spec.origin"; \
+    patch_series="$(find /tmp/sglang_patches -maxdepth 1 -type f -name '*.patch' | sort)"; \
+    test -n "${patch_series}"; \
+    set +e; \
+    grep -El '^(---|\+\+\+) [ab]/(test|tests|.*/test|.*/tests)/' ${patch_series} > /tmp/sglang_patch_test_hunks; \
+    grep_status="$?"; \
+    set -e; \
+    if [ "${grep_status}" -eq 0 ]; then \
+        echo "SGLang runtime patches contain test hunks:" >&2; \
+        cat /tmp/sglang_patch_test_hunks >&2; \
+        exit 1; \
+    elif [ "${grep_status}" -ne 1 ]; then \
+        exit "${grep_status}"; \
+    fi; \
+    git -C "${SGLANG_DIR}" apply ${patch_series}; \
+    python3 -m compileall -q -j0 \
+        -x '/(tests?|bench(marks?)?|docs?)/' \
+        "${SGLANG_DIR}/python"
+{% endif %}
+
 # Remove every codec-bearing component found in the upstream SGLang image and
 # fail the build if an executable or shared library for FFmpeg, H.264, H.265, or
 # AAC remains in the merged runtime filesystem.
@@ -216,18 +265,6 @@ RUN chmod 755 /opt/dynamo/.launch_screen && \
     if [ -n "$NSYS_BIN" ]; then ln -sf "$NSYS_BIN" /usr/local/bin/nsys; \
     else echo "WARNING: no bundled nsys found under /opt/nvidia/nsight-compute"; fi
 {% endif %}
-
-{%- if device != "xpu" %}
-# Precompile Python bytecode into the image while still root. CI runs tests as
-# the non-root `dynamo` user, which cannot write .pyc back to site-packages, and
-# the test harness forks a fresh process per test. Without baked .pyc, every test
-# process recompiles torch/transformers/sglang from source on first import (~+3.5s
-# each), which previously added ~8-10 min to the sglang CI job. This was implicitly
-# provided by the now-removed vendored-patch step that ran `import sglang` at build.
-RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')" && \
-    python3 -m compileall -q -j0 "$SITE_PACKAGES" && \
-    (python3 -m compileall -q -j0 /sgl-workspace/sglang/python || true)
-{%- endif %}
 
 # Keep this guard at the end of the populated runtime stage so later COPY/RUN
 # steps cannot silently reintroduce a codec. The extra AAC library names cover

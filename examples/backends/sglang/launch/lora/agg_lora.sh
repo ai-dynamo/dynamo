@@ -30,8 +30,9 @@ LORA_NAME="${LORA_NAME:-codelion/Qwen3-0.6B-accuracy-recovery-lora}"
 SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
-# Default to profiled KV token cap when not overridden by the test scheduler
-: "${GPU_MEM_ARGS:=--max-total-tokens 2848}"
+# Default to the profiled KV and context cap when the test scheduler does not
+# provide an override.
+: "${GPU_MEM_ARGS:=--max-total-tokens 2848 --context-length 2848}"
 
 print_launch_banner --no-curl "Launching Aggregated Serving + LoRA (1 GPU)" "$MODEL" "$HTTP_PORT"
 echo ""

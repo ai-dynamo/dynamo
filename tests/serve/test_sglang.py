@@ -555,8 +555,10 @@ sglang_configs = {
             pytest.mark.multimodal,
             pytest.mark.skip(reason="GLM-5.2 containers omit video codec dependencies"),
             pytest.mark.gpu_1,
-            # No profiled_vram_gib: multimodal_epd.sh uses explicit
-            # --mem-fraction-static via DYN_ENCODE_GPU_MEM / DYN_WORKER_GPU_MEM.
+            # Keep this test in the sequential stage. The analogous aggregated
+            # video test needs at least 4368 tokens; 8192 leaves headroom while
+            # keeping the context below Qwen3-VL's 262144-token model default.
+            pytest.mark.requested_sglang_kv_tokens(8192),
             pytest.mark.timeout(360),
             pytest.mark.pre_merge,
         ],
@@ -572,8 +574,6 @@ sglang_configs = {
         ],
         timeout=360,
         env={
-            "DYN_ENCODE_GPU_MEM": "0.1",
-            "DYN_WORKER_GPU_MEM": "0.4",
             "DYN_SGL_EMBEDDING_TRANSFER_MODE": "local",
         },
         frontend_port=DefaultPort.FRONTEND.value,

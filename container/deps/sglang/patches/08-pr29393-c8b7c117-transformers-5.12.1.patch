@@ -1,0 +1,162 @@
+diff --git a/3rdparty/amd/wheel/sglang/pyproject.toml b/3rdparty/amd/wheel/sglang/pyproject.toml
+index b34b3b0bf..a1e231c7d 100644
+--- a/3rdparty/amd/wheel/sglang/pyproject.toml
++++ b/3rdparty/amd/wheel/sglang/pyproject.toml
+@@ -32,6 +32,7 @@ runtime_common = [
+   "huggingface_hub",
+   "interegular",
+   "llguidance>=0.7.11,<0.8.0",
++  "mistral_common>=1.11.5",
+   "modelscope",
+   "msgspec",
+   "ninja",
+@@ -59,7 +60,7 @@ runtime_common = [
+   "timm==1.0.16",
+   "torchao==0.9.0",
+   "tqdm",
+-  "transformers==5.8.1",
++  "transformers==5.12.1",
+   "uvicorn",
+   "uvloop",
+   "xgrammar==0.2.1",
+diff --git a/python/pyproject.toml b/python/pyproject.toml
+index 580aa4f77..113e0ed1a 100755
+--- a/python/pyproject.toml
++++ b/python/pyproject.toml
+@@ -38,7 +38,7 @@ dependencies = [
+   "IPython",
+   "kernels>=0.14.1,<0.15",
+   "llguidance>=0.7.11,<0.8.0",
+-  "mistral_common>=1.11.0",
++  "mistral_common>=1.11.5",
+   "modelscope",
+   "msgspec",
+   "ninja",
+@@ -80,7 +80,7 @@ dependencies = [
+   "torchcodec==0.11.1 ; sys_platform != 'linux' or (sys_platform == 'linux' and platform_machine != 'aarch64' and platform_machine != 'arm64' and platform_machine != 'armv7l')", # torchcodec 0.11.1 for torch 2.11.x (0.10 is ABI-incompatible: references the pre-2.11 c10::MessageLogger ctor signature). Not available on Linux ARM.
+   "torchvision",
+   "tqdm",
+-  "transformers==5.8.1",
++  "transformers==5.12.1",
+   "uvicorn",
+   "uvloop",
+   "watchfiles",
+diff --git a/python/pyproject_cpu.toml b/python/pyproject_cpu.toml
+index f40064c55..0dfbfdc2d 100644
+--- a/python/pyproject_cpu.toml
++++ b/python/pyproject_cpu.toml
+@@ -31,7 +31,7 @@ dependencies = [
+   "interegular",
+   "IPython",
+   "llguidance>=0.7.11,<0.8.0",
+-  "mistral_common>=1.11.0",
++  "mistral_common>=1.11.5",
+   "modelscope",
+   "msgspec",
+   "ninja",
+@@ -64,7 +64,7 @@ dependencies = [
+   "torchaudio==2.11.0",
+   "torchvision==0.27.0",
+   "tqdm",
+-  "transformers==5.8.1",
++  "transformers==5.12.1",
+   "triton==3.7.0",
+   "uvicorn",
+   "uvloop",
+diff --git a/python/pyproject_npu.toml b/python/pyproject_npu.toml
+index 1fdda9a3a..e9a860268 100644
+--- a/python/pyproject_npu.toml
++++ b/python/pyproject_npu.toml
+@@ -33,7 +33,7 @@ dependencies = [
+   "interegular",
+   "IPython",
+   "llguidance>=0.7.11,<0.8.0",
+-  "mistral_common>=1.11.0",
++  "mistral_common>=1.11.5",
+   "modelscope",
+   "msgspec",
+   "ninja",
+@@ -62,7 +62,7 @@ dependencies = [
+   "timm==1.0.16",
+   "torchao==0.9.0",
+   "tqdm",
+-  "transformers==5.8.1",
++  "transformers==5.12.1",
+   "uvicorn",
+   "uvloop",
+   "xgrammar==0.2.1",
+diff --git a/python/pyproject_other.toml b/python/pyproject_other.toml
+index 1153356df..cb34d4275 100755
+--- a/python/pyproject_other.toml
++++ b/python/pyproject_other.toml
+@@ -33,7 +33,7 @@ runtime_common = [
+   "interegular",
+   "IPython",
+   "llguidance>=0.7.11,<0.8.0",
+-  "mistral_common>=1.11.0",
++  "mistral_common>=1.11.5",
+   "modelscope",
+   "msgspec",
+   "ninja",
+@@ -62,7 +62,7 @@ runtime_common = [
+   "timm==1.0.16",
+   "torchao==0.9.0",
+   "tqdm",
+-  "transformers==5.8.1",
++  "transformers==5.12.1",
+   "uvicorn",
+   "uvloop",
+   "xgrammar==0.2.1",
+diff --git a/python/pyproject_xpu.toml b/python/pyproject_xpu.toml
+index 989fec648..455d197eb 100644
+--- a/python/pyproject_xpu.toml
++++ b/python/pyproject_xpu.toml
+@@ -31,7 +31,7 @@ dependencies = [
+   "interegular",
+   "IPython",
+   "llguidance>=0.7.11,<0.8.0",
+-  "mistral_common>=1.11.0",
++  "mistral_common>=1.11.5",
+   "modelscope",
+   "msgspec",
+   "ninja",
+@@ -65,7 +65,7 @@ dependencies = [
+   "torchcodec==0.12.0 ; sys_platform != 'linux' or (sys_platform == 'linux' and platform_machine != 'aarch64' and platform_machine != 'arm64' and platform_machine != 'armv7l')", # torch==2.12.0 on XPU uses torchcodec 0.12.0
+   "torchvision==0.27.0+xpu",
+   "tqdm",
+-  "transformers==5.8.1",
++  "transformers==5.12.1",
+   "uvicorn",
+   "uvloop",
+   # "xgrammar==0.2.1", xgrammar depends on CUDA PyTorch and Triton only
+diff --git a/python/sglang/srt/utils/hf_transformers/config.py b/python/sglang/srt/utils/hf_transformers/config.py
+index 0214acc19..ff188b1cf 100644
+--- a/python/sglang/srt/utils/hf_transformers/config.py
++++ b/python/sglang/srt/utils/hf_transformers/config.py
+@@ -67,26 +67,6 @@ class HfModelConfigParser(ModelConfigParserBase):
+             **kwargs,
+         )
+ 
+-        if (
+-            config.architectures is not None
+-            and config.architectures[0] == "GlmMoeDsaForCausalLM"
+-        ):
+-            # GlmMoeDsaConfig drops/clobbers raw checkpoint fields the DSA path
+-            # needs, so re-read them from config.json and restore. Fixed upstream
+-            # by https://github.com/huggingface/transformers/pull/46338; remove
+-            # this block once SGLang requires transformers >= 5.10.
+-            from transformers import PretrainedConfig
+-
+-            raw_config, _ = PretrainedConfig.get_config_dict(model, revision=revision)
+-            for key in (
+-                "qk_rope_head_dim",
+-                "index_topk_freq",
+-            ):
+-                if key in raw_config:
+-                    setattr(config, key, raw_config[key])
+-            if hasattr(config, "qk_head_dim") and hasattr(config, "qk_nope_head_dim"):
+-                config.qk_head_dim = config.qk_nope_head_dim + config.qk_rope_head_dim
+-
+         if (
+             config.architectures is not None
+             and config.architectures[0] == "Phi4MMForCausalLM"
