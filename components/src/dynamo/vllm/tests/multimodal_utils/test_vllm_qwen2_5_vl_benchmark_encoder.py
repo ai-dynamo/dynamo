@@ -1,0 +1,376 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""CPU unit tests for the Qwen2.5-VL benchmark encoder."""
+
+from __future__ import annotations
+
+import base64
+import io
+from types import SimpleNamespace
+
+import pytest
+import torch
+from PIL import Image
+
+from dynamo.vllm.multimodal_utils.vision_encoder_backend import Preprocessed
+from examples.custom_encoder.qwen2_5_vl_benchmark_encoder import (
+    Qwen2_5VLBenchmarkEncoder,
+    Qwen2VLImageInputs,
+    _benchmark_output_hidden_size,
+    _decoder_hidden_size,
+    _parse_graph_buckets,
+    _parse_graph_image_sizes,
+    _parse_positive_int_env,
+    _VllmQwen2_5VisionAttention,
+)
+
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.pre_merge,
+    pytest.mark.vllm,
+    pytest.mark.gpu_0,
+    pytest.mark.multimodal,
+]
+
+
+class _FakeVisual(torch.nn.Module):
+    spatial_merge_size = 2
+    dtype = torch.bfloat16
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[tuple[torch.Size, torch.Tensor]] = []
+
+    def forward(
+        self, pixel_values: torch.Tensor, grid_thw: torch.Tensor
+    ) -> torch.Tensor:
+        self.calls.append((pixel_values.shape, grid_thw.cpu().clone()))
+        output_tokens = int((grid_thw.prod(dim=-1) // 4).sum().item())
+        return torch.arange(output_tokens * 4, dtype=torch.bfloat16).reshape(
+            output_tokens, 4
+        )
+
+
+class _FakeHFVisionAttention(torch.nn.Module):
+    num_heads = 2
+    head_dim = 2
+    scaling = head_dim**-0.5
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.qkv = torch.nn.Linear(4, 12)
+        self.proj = torch.nn.Linear(4, 4)
+
+
+class _FakeVisionBlock(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attn = _FakeHFVisionAttention()
+
+
+class _FakeAttentionVisual(torch.nn.Module):
+    dtype = torch.float32
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.blocks = torch.nn.ModuleList([_FakeVisionBlock(), _FakeVisionBlock()])
+
+    @property
+    def device(self) -> torch.device:
+        return next(self.parameters()).device
+
+
+class _RecordingVarlenAttention(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.call: dict[str, torch.Tensor] | None = None
+
+    def forward(self, **kwargs: torch.Tensor) -> torch.Tensor:
+        self.call = kwargs
+        return kwargs["value"]
+
+
+def _item(grid: tuple[int, int, int]) -> Qwen2VLImageInputs:
+    patch_count = grid[0] * grid[1] * grid[2]
+    return Qwen2VLImageInputs(
+        pixel_values=torch.ones((patch_count, 6)),
+        image_grid_thw=torch.tensor([grid]),
+    )
+
+
+def test_forward_batch_packs_and_splits_variable_resolution_inputs() -> None:
+    encoder = Qwen2_5VLBenchmarkEncoder()
+    encoder._device = torch.device("cpu")
+    encoder._visual = _FakeVisual()
+    encoder._output_hidden_size = 4
+
+    outputs = encoder.forward_batch([_item((1, 4, 4)), _item((1, 8, 8))])
+
+    assert [output.shape for output in outputs] == [(4, 4), (16, 4)]
+    assert all(output.device.type == "cpu" for output in outputs)
+    assert all(output.dtype == torch.bfloat16 for output in outputs)
+    assert encoder._visual.calls[0][0] == (80, 6)
+    assert encoder._visual.calls[0][1].tolist() == [[1, 4, 4], [1, 8, 8]]
+    assert outputs[1][0, 0] == 16
+
+
+def test_forward_batch_truncates_to_configured_decoder_width() -> None:
+    encoder = Qwen2_5VLBenchmarkEncoder()
+    encoder._device = torch.device("cpu")
+    encoder._visual = _FakeVisual()
+    encoder._output_hidden_size = 3
+
+    outputs = encoder.forward_batch([_item((1, 4, 4))])
+
+    assert outputs[0].shape == (4, 3)
+    assert torch.equal(
+        outputs[0],
+        torch.arange(16, dtype=torch.bfloat16).reshape(4, 4)[:, :3],
+    )
+
+
+def test_forward_batch_selects_smallest_compatible_graph(monkeypatch) -> None:
+    encoder = Qwen2_5VLBenchmarkEncoder()
+    encoder._device = torch.device("cpu")
+    encoder._visual = _FakeVisual()
+    encoder._output_hidden_size = 4
+    encoder.buckets = (1, 2, 4)
+    item = _item((1, 4, 4))
+    encoder._graphs = {((1, 4, 4), 2): object()}
+    monkeypatch.setattr(
+        encoder,
+        "_forward_graph",
+        lambda items, bucket: [torch.full((4, 4), float(bucket)) for _ in items],
+    )
+
+    outputs = encoder.forward_batch([item, item])
+
+    assert len(outputs) == 2
+    assert torch.all(outputs[0] == 2)
+
+
+def test_installs_vllm_attention_without_replacing_hf_projections() -> None:
+    visual = _FakeAttentionVisual()
+    original_qkv = [block.attn.qkv for block in visual.blocks]
+    original_proj = [block.attn.proj for block in visual.blocks]
+
+    Qwen2_5VLBenchmarkEncoder._install_vllm_attention(visual)
+
+    for layer_index, block in enumerate(visual.blocks):
+        assert isinstance(block.attn, _VllmQwen2_5VisionAttention)
+        assert block.attn.qkv is original_qkv[layer_index]
+        assert block.attn.proj is original_proj[layer_index]
+
+
+def test_vllm_attention_receives_packed_sequence_boundaries() -> None:
+    attention = _VllmQwen2_5VisionAttention(
+        _FakeHFVisionAttention(), prefix="test.attn"
+    )
+    recording_attention = _RecordingVarlenAttention()
+    attention.attn = recording_attention
+    hidden_states = torch.randn(6, 4)
+    cu_seqlens = torch.tensor([0, 2, 6], dtype=torch.int32)
+    position_embeddings = (torch.ones(6, 2), torch.zeros(6, 2))
+
+    output = attention(
+        hidden_states,
+        cu_seqlens=cu_seqlens,
+        position_embeddings=position_embeddings,
+    )
+
+    assert output.shape == (6, 4)
+    assert recording_attention.call is not None
+    assert recording_attention.call["query"].shape == (1, 6, 2, 2)
+    assert recording_attention.call["cu_seqlens"] is cu_seqlens
+    assert recording_attention.call["max_seqlen"].item() == 4
+
+
+@pytest.mark.parametrize(
+    ("items", "target_bucket", "message"),
+    [
+        ([], None, "at least one"),
+        ([_item((1, 4, 4))] * 65, None, "max_batch_cost"),
+        ([_item((1, 4, 4))], 8, "target_bucket"),
+    ],
+)
+def test_forward_batch_rejects_invalid_dispatches(
+    items: list[Qwen2VLImageInputs], target_bucket: int | None, message: str
+) -> None:
+    encoder = Qwen2_5VLBenchmarkEncoder()
+    encoder._device = torch.device("cpu")
+    encoder._visual = _FakeVisual()
+    encoder._output_hidden_size = 4
+
+    with pytest.raises(ValueError, match=message):
+        encoder.forward_batch(items, target_bucket=target_bucket)
+
+
+def test_forward_batch_requires_build() -> None:
+    with pytest.raises(RuntimeError, match="before build"):
+        Qwen2_5VLBenchmarkEncoder().forward_batch([_item((1, 4, 4))])
+
+
+def test_load_image_accepts_local_and_base64_sources(tmp_path) -> None:
+    path = tmp_path / "source.png"
+    Image.new("RGBA", (7, 5), color=(1, 2, 3, 255)).save(path)
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (11, 9), color=(4, 5, 6)).save(buffer, format="PNG")
+    data_url = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
+
+    local = Qwen2_5VLBenchmarkEncoder._load_image(str(path))
+    inline = Qwen2_5VLBenchmarkEncoder._load_image(data_url)
+
+    assert (local.mode, local.size) == ("RGB", (7, 5))
+    assert (inline.mode, inline.size) == ("RGB", (11, 9))
+
+
+def test_load_image_rejects_malformed_data_url() -> None:
+    with pytest.raises(ValueError, match="missing comma"):
+        Qwen2_5VLBenchmarkEncoder._load_image("data:image/png;base64")
+
+
+def test_preprocess_cache_disabled_hit_and_lru_eviction() -> None:
+    encoder = Qwen2_5VLBenchmarkEncoder()
+    calls: list[str] = []
+
+    def preprocess(raw: str) -> Preprocessed[str]:
+        calls.append(raw)
+        return Preprocessed(item=raw)
+
+    encoder._preprocess_uncached = preprocess  # type: ignore[method-assign]
+    encoder._configure_preprocess_cache(0)
+    assert encoder._cached_preprocess is None
+
+    encoder._configure_preprocess_cache(2)
+    cache = encoder._cached_preprocess
+    assert cache is not None
+    first = cache("image-a")
+    assert cache("image-a") is first
+    cache("image-b")
+    cache("image-a")
+    cache("image-c")
+    cache("image-b")
+
+    assert calls == ["image-a", "image-b", "image-c", "image-b"]
+    assert cache.cache_info().hits == 2
+    assert cache.cache_info().misses == 4
+    assert cache.cache_info().currsize == 2
+
+
+def test_preprocess_cache_rejects_negative_capacity() -> None:
+    with pytest.raises(ValueError, match="must be >= 0"):
+        Qwen2_5VLBenchmarkEncoder()._configure_preprocess_cache(-1)
+
+
+def test_build_failure_clears_partial_state(monkeypatch) -> None:
+    encoder = Qwen2_5VLBenchmarkEncoder()
+
+    def fail_after_setup(model_id: str) -> None:
+        del model_id
+        encoder._device = torch.device("cpu")
+        encoder._processor = object()
+        encoder._visual = _FakeVisual()
+        encoder.tokenizer = object()
+        raise RuntimeError("partial build failed")
+
+    monkeypatch.setattr(encoder, "_build", fail_after_setup)
+
+    with pytest.raises(RuntimeError, match="partial build failed"):
+        encoder.build("model")
+
+    assert encoder._processor is None
+    assert encoder._visual is None
+    assert encoder.tokenizer is None
+
+
+def test_visual_architecture_validation() -> None:
+    config = SimpleNamespace(
+        depth=32,
+        out_hidden_size=2048,
+        patch_size=14,
+        spatial_merge_size=2,
+        window_size=112,
+        fullatt_block_indexes=[7, 15, 23, 31],
+    )
+    Qwen2_5VLBenchmarkEncoder._validate_visual_architecture(
+        SimpleNamespace(config=config)
+    )
+
+    config.depth = 31
+    with pytest.raises(ValueError, match="window-attention architecture"):
+        Qwen2_5VLBenchmarkEncoder._validate_visual_architecture(
+            SimpleNamespace(config=config)
+        )
+
+
+@pytest.mark.parametrize("value", ["", "0", "2,1", "1,1", "one"])
+def test_graph_bucket_configuration_rejects_invalid_values(
+    monkeypatch, value: str
+) -> None:
+    monkeypatch.setenv("DYN_QWEN2_VL_GRAPH_BATCH_BUCKETS", value)
+    with pytest.raises(ValueError, match="GRAPH_BATCH_BUCKETS"):
+        _parse_graph_buckets()
+
+
+def test_graph_bucket_configuration(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_QWEN2_VL_GRAPH_BATCH_BUCKETS", "1,4,8")
+    assert _parse_graph_buckets() == (1, 4, 8)
+
+
+def test_positive_integer_configuration(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_QWEN2_VL_PREPROCESS_CONCURRENCY", "64")
+    assert _parse_positive_int_env("DYN_QWEN2_VL_PREPROCESS_CONCURRENCY", 1) == 64
+
+
+@pytest.mark.parametrize("value", ["", "0", "-1", "many"])
+def test_positive_integer_configuration_rejects_invalid_values(
+    monkeypatch, value: str
+) -> None:
+    monkeypatch.setenv("DYN_QWEN2_VL_MAX_BATCH_COST", value)
+    with pytest.raises(ValueError, match="DYN_QWEN2_VL_MAX_BATCH_COST"):
+        _parse_positive_int_env("DYN_QWEN2_VL_MAX_BATCH_COST", 64)
+
+
+def test_decoder_hidden_size_supports_text_and_text_only_configs() -> None:
+    assert (
+        _decoder_hidden_size(
+            SimpleNamespace(text_config=SimpleNamespace(hidden_size=1536))
+        )
+        == 1536
+    )
+    assert _decoder_hidden_size(SimpleNamespace(hidden_size=2048)) == 2048
+
+
+def test_decoder_hidden_size_rejects_missing_width() -> None:
+    with pytest.raises(ValueError, match="decoder hidden size"):
+        _decoder_hidden_size(SimpleNamespace())
+
+
+def test_benchmark_output_width_must_match_decoder(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_QWEN2_VL_OUTPUT_HIDDEN_SIZE", "1536")
+    assert _benchmark_output_hidden_size(2048, 1536) == 1536
+
+    with pytest.raises(ValueError, match="must match the served decoder"):
+        _benchmark_output_hidden_size(2048, 2048)
+
+
+def test_benchmark_output_width_cannot_exceed_vision_width(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_QWEN2_VL_OUTPUT_HIDDEN_SIZE", "4096")
+    with pytest.raises(ValueError, match="cannot exceed"):
+        _benchmark_output_hidden_size(2048, 4096)
+
+
+@pytest.mark.parametrize("value", ["", "500", "0x500", "axb"])
+def test_graph_image_size_configuration_rejects_invalid_values(
+    monkeypatch, value: str
+) -> None:
+    monkeypatch.setenv("DYN_QWEN2_VL_GRAPH_IMAGE_SIZES", value)
+    with pytest.raises(ValueError, match="GRAPH_IMAGE_SIZES"):
+        _parse_graph_image_sizes()
+
+
+def test_graph_image_size_configuration(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_QWEN2_VL_GRAPH_IMAGE_SIZES", "299x299,500x500")
+    assert _parse_graph_image_sizes() == ((299, 299), (500, 500))

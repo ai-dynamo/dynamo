@@ -10,7 +10,11 @@ from typing import Any, Optional, Type
 import pytest
 
 from dynamo.common.utils.paths import WORKSPACE_DIR
-from tests.serve.conftest import MULTIMODAL_IMG_URL, get_multimodal_test_image_bytes
+from tests.serve.conftest import (
+    MULTIMODAL_IMG_URL,
+    MULTIMODAL_WIDE_IMG_URL,
+    get_multimodal_test_image_bytes,
+)
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import chat_payload
 from tests.utils.payloads import BasePayload, CachedTokensChatPayload, ChatPayload
@@ -277,6 +281,65 @@ def make_custom_encoder_payload() -> ChatPayload:
         expected_response=["42"],
         expected_log=["Loaded CustomEncoder", "_LinearEmbedsAdapter"],
         max_tokens=32,
+        temperature=0.0,
+    )
+
+
+def make_custom_encoder_benchmark_payload() -> ChatPayload:
+    """Mechanics-only check for the Qwen2.5-VL-to-text-LM benchmark path."""
+    return chat_payload(
+        [
+            {
+                "type": "text",
+                "text": "Describe the following image briefly.",
+            },
+            {"type": "image_url", "image_url": {"url": MULTIMODAL_IMG_URL}},
+        ],
+        repeat_count=1,
+        expected_response=[],
+        expected_log=[
+            "Qwen2_5VLBenchmarkEncoder",
+            "PERFORMANCE-ONLY",
+            "_LinearEmbedsAdapter",
+        ],
+        max_tokens=8,
+        temperature=0.0,
+    )
+
+
+def make_custom_encoder_native_payload() -> ChatPayload:
+    """Semantic non-square-image check for the native Qwen adapter path."""
+    return chat_payload(
+        [
+            {
+                "type": "text",
+                "text": "What color is the large rectangle? Answer with one color.",
+            },
+            {"type": "image_url", "image_url": {"url": MULTIMODAL_WIDE_IMG_URL}},
+        ],
+        repeat_count=1,
+        expected_response=["blue"],
+        expected_log=["Qwen2_5VLNativeEncoder", "_Qwen2VLNativeAdapter"],
+        max_tokens=16,
+        temperature=0.0,
+    )
+
+
+def make_custom_encoder_native_multi_image_payload() -> ChatPayload:
+    """Two-image check for artifact ordering and placeholder expansion."""
+    return chat_payload(
+        [
+            {
+                "type": "text",
+                "text": "How many images are provided? Answer with only the number.",
+            },
+            {"type": "image_url", "image_url": {"url": MULTIMODAL_IMG_URL}},
+            {"type": "image_url", "image_url": {"url": MULTIMODAL_WIDE_IMG_URL}},
+        ],
+        repeat_count=1,
+        expected_response=["2", "two"],
+        expected_log=["Qwen2_5VLNativeEncoder", "_Qwen2VLNativeAdapter"],
+        max_tokens=16,
         temperature=0.0,
     )
 
