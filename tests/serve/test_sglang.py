@@ -511,6 +511,7 @@ sglang_configs = {
         script_name="agg_vision.sh",
         marks=[
             pytest.mark.multimodal,
+            pytest.mark.skip(reason="GLM-5.2 containers omit video codec dependencies"),
             pytest.mark.gpu_1,
             # Bisected with tests/utils/profile_pytest.py: minimum = 4368
             # tokens, 2x safety = 8736. Peak 20.5 GiB at 8736 tokens. Without
@@ -552,6 +553,7 @@ sglang_configs = {
         script_name="multimodal_epd.sh",
         marks=[
             pytest.mark.multimodal,
+            pytest.mark.skip(reason="GLM-5.2 containers omit video codec dependencies"),
             pytest.mark.gpu_1,
             # Keep this test in the sequential stage. The analogous aggregated
             # video test needs at least 4368 tokens; 8192 leaves headroom while

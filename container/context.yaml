@@ -43,7 +43,10 @@ dynamo:
   enable_kvbm: "true"
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
-  ffmpeg_version: "8.1"
+  # 8.1.2 is an upstream maintenance release that picks up security fixes over
+  # 8.1; combined with the narrowed decoder set in wheel_builder it trims the
+  # media decode surface. Keep in sync with native_packages.yaml's ffmpeg entry.
+  ffmpeg_version: "8.1.2"
   # ffmpeg build inputs (only consumed when ENABLE_MEDIA_FFMPEG=true).
   nv_codec_headers_ref: "n13.0.19.0"
   libvpx_ref: "v1.14.1"
@@ -100,9 +103,9 @@ sglang:
     # lmsysorg/sglang is built FROM this nvidia/cuda cudnn-devel base, so this
     # attributes everything sglang adds over the clean NVIDIA CUDA+cuDNN floor
     # (framework, python stack, system libs) rather than hiding it. Per-arch stem;
-    # the licenses stage appends -${TARGETARCH}.cdx.json. (sglang ships no system
-    # GPL ffmpeg/codec dpkgs; the GPL imageio-ffmpeg pip binary is replaced by an
-    # in-tree LGPL ffmpeg in sglang_runtime.Dockerfile — no dpkg purge needed.)
+    # the licenses stage appends -${TARGETARCH}.cdx.json. SGLang's codec-bearing
+    # Python wheels are purged in sglang_runtime.Dockerfile; FFmpeg is not copied
+    # into the image and the Dynamo Rust wheel is built without media-ffmpeg.
     baseline_sbom: cuda@8b2705ea
   xpu:
     base_image: intel/deep-learning-essentials
@@ -121,7 +124,7 @@ sglang:
   # NIXL Python stack — its wheel COPY is narrowed to ai_dynamo*.whl so the SDK
   # build doesn't leak into the runtime image.
   nixl_ref: v1.0.1
-  enable_media_ffmpeg: "true"
+  enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
   enable_kvbm: "false"
   enable_modelexpress: "true"
