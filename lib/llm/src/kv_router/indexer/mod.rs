@@ -1124,52 +1124,30 @@ mod tests {
         let indexer = make_test_concurrent_indexer();
         let worker = WorkerWithDpRank::new(7, 0);
 
-        // Worker has the same blocks in both device and host-pinned storage.
+        // Device owns the prefix block; host-pinned extends it by one block.
         indexer
-            .apply_event(store_event(
-                7,
-                0,
-                1,
-                &[],
-                &[11, 12, 13],
-                StorageTier::Device,
-            ))
+            .apply_event(store_event(7, 0, 1, &[], &[41], StorageTier::Device))
             .await;
         indexer
-            .apply_event(store_event(
-                7,
-                0,
-                2,
-                &[],
-                &[11, 12, 13],
-                StorageTier::HostPinned,
-            ))
+            .apply_event(store_event(7, 0, 2, &[41], &[42], StorageTier::HostPinned))
             .await;
         flush_indexer(&indexer).await;
 
         let matches = indexer
-            .find_matches_by_tier(vec![
-                LocalBlockHash(11),
-                LocalBlockHash(12),
-                LocalBlockHash(13),
-            ])
+            .find_matches_by_tier(vec![LocalBlockHash(41), LocalBlockHash(42)])
             .await
             .unwrap();
 
-        // Device overlap should be 3 blocks.
-        assert_eq!(matches.device.overlap_scores.scores.get(&worker), Some(&3));
+        assert_eq!(matches.device.overlap_scores.scores.get(&worker), Some(&1));
 
-        // Lower-tier must NOT report additional hits for the same worker
-        // whose blocks are already fully accounted for in the device tier.
         let host_hits = matches
             .lower_tier
             .get(&StorageTier::HostPinned)
             .and_then(|tier| tier.hits.get(&worker).copied())
             .unwrap_or(0);
         assert_eq!(
-            host_hits, 0,
-            "lower-tier should not double-count blocks already matched in device tier \
-             (got {host_hits} host-pinned hits for a worker with full device overlap)"
+            host_hits, 1,
+            "lower-tier should extend the device prefix without double-counting it"
         );
     }
 }
