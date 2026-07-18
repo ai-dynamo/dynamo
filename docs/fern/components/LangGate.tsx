@@ -11,11 +11,20 @@
  * Usage — swap one card between Slack (default) and WeChat (Chinese browsers):
  *
  *     <LangGate langs="zh" invert>   // everyone EXCEPT zh
- *       <Card title="Community Slack" ... />
+ *       {<Card title="Community Slack" ... />}
  *     </LangGate>
  *     <LangGate langs="zh">          // zh only
- *       <Card title="Community WeChat" ... />
+ *       {<Card title="Community WeChat" ... />}
  *     </LangGate>
+ *
+ * WRAP THE CARD IN `{ }`:
+ *   Fern's MDX pipeline auto-wraps any standalone `<Card>` flow element in its
+ *   own `<CardGroup>`. Nested inside <LangGate>, a bare `<Card>` therefore
+ *   renders as a single-column `.fern-card-group` — one grid cell that does not
+ *   stretch, so the card comes out short and vertically centered next to its
+ *   siblings. Passing the card as a JSX expression (`{<Card … />}`) makes it an
+ *   expression node the grouping transform ignores, so <LangGate> receives and
+ *   returns the bare <Card>, keeping it a direct child of the outer <CardGroup>.
  *
  * WHY "use client":
  *   `navigator.language` only exists in the browser. The component renders the
@@ -25,8 +34,9 @@
  *   single card. For whole translated pages, prefer Fern's native localization.
  *
  * NO WRAPPER ELEMENT:
- *   Returns a Fragment (or null), never a <div>, so a gated <Card> stays a
- *   direct child of <CardGroup> and the grid layout is preserved.
+ *   Returns a Fragment (or null), never a <div>, so a gated <Card> (passed as a
+ *   `{ }` expression per above) stays a direct child of <CardGroup> and the grid
+ *   layout is preserved.
  */
 "use client";
 
