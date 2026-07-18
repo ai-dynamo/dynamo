@@ -10,9 +10,13 @@ use super::filter::{RoutingEligibility, WorkerEligibilityError};
 use super::types::{KvSchedulerError, SchedulingRequest};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 
-/// A trait that users can implement to define custom selection logic.
+/// A trait that users can implement to define custom worker selection logic.
 ///
 /// Generic over `C` so that the scheduling layer does not depend on a concrete config type.
+/// This is the original low-level selector contract; implementations own both target selection
+/// and the associated accounting snapshot. New selectors should implement
+/// [`TargetWorkerSelector`] and use [`ValidatedWorkerSelector`] so Dynamo owns validation and
+/// accounting.
 pub trait WorkerSelector<C: WorkerConfigLike> {
     fn select_worker(
         &self,
@@ -21,6 +25,94 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
         eligibility: RoutingEligibility<'_>,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
+}
+
+/// Target-only worker selection logic.
+///
+/// The scheduler resolves pinned requests before invoking this trait. Dynamo validates the
+/// returned target and derives the accounting snapshot before booking it.
+pub trait TargetWorkerSelector<C: WorkerConfigLike> {
+    fn select_worker(
+        &self,
+        workers: &HashMap<WorkerId, C>,
+        request: &SchedulingRequest,
+        eligibility: RoutingEligibility<'_>,
+        block_size: u32,
+    ) -> Result<WorkerWithDpRank, KvSchedulerError>;
+}
+
+/// A target-only selector wrapped with Dynamo-owned validation and accounting.
+#[derive(Debug)]
+pub struct ValidatedWorkerSelector<S>(S);
+
+impl<S> ValidatedWorkerSelector<S> {
+    pub fn new(selector: S) -> Self {
+        Self(selector)
+    }
+}
+
+impl<C, S> WorkerSelector<C> for ValidatedWorkerSelector<S>
+where
+    C: WorkerConfigLike,
+    S: TargetWorkerSelector<C>,
+{
+    fn select_worker(
+        &self,
+        workers: &HashMap<WorkerId, C>,
+        request: &SchedulingRequest,
+        eligibility: RoutingEligibility<'_>,
+        block_size: u32,
+    ) -> Result<WorkerSelectionResult, KvSchedulerError> {
+        if let Some(worker) = eligibility.pinned_worker() {
+            eligibility.validate_pinned_worker_allowed()?;
+            match eligibility.validate_worker_rank(workers, worker) {
+                Ok(_) => {
+                    return Ok(WorkerSelectionResult {
+                        worker,
+                        required_blocks: request.request_blocks(block_size),
+                        effective_overlap_blocks: request.effective_overlap_blocks_for(worker),
+                        cached_tokens: request.effective_cached_tokens_for(worker),
+                    });
+                }
+                Err(WorkerEligibilityError::WorkerOverloaded { .. }) => {
+                    return Err(KvSchedulerError::PinnedWorkerOverloaded {
+                        worker_id: worker.worker_id,
+                    });
+                }
+                Err(_) => return Err(KvSchedulerError::NoEndpoints),
+            }
+        }
+
+        let worker = match self
+            .0
+            .select_worker(workers, request, eligibility, block_size)
+        {
+            Err(KvSchedulerError::NoEndpoints)
+                if !eligibility.has_eligible_worker(
+                    workers
+                        .iter()
+                        .map(|(&worker_id, config)| (worker_id, config)),
+                ) =>
+            {
+                return Err(eligibility.no_eligible_worker_error(workers));
+            }
+            result => result?,
+        };
+        eligibility
+            .validate_worker_rank(workers, worker)
+            .map_err(|error| {
+                tracing::warn!(?worker, %error, "worker selector returned invalid target");
+                KvSchedulerError::InitFailed(format!(
+                    "worker selector returned ineligible target {worker:?}: {error}"
+                ))
+            })?;
+        Ok(WorkerSelectionResult {
+            worker,
+            required_blocks: request.request_blocks(block_size),
+            effective_overlap_blocks: request.effective_overlap_blocks_for(worker),
+            cached_tokens: request.effective_cached_tokens_for(worker),
+        })
+    }
 }
 
 /// Helper function for softmax sampling.
@@ -504,6 +596,34 @@ mod tests {
         }
     }
 
+    struct FixedSelection(WorkerWithDpRank);
+
+    impl<C: WorkerConfigLike> TargetWorkerSelector<C> for FixedSelection {
+        fn select_worker(
+            &self,
+            _workers: &HashMap<WorkerId, C>,
+            _request: &SchedulingRequest,
+            _eligibility: RoutingEligibility<'_>,
+            _block_size: u32,
+        ) -> Result<WorkerWithDpRank, KvSchedulerError> {
+            Ok(self.0)
+        }
+    }
+
+    struct NoSelection;
+
+    impl<C: WorkerConfigLike> TargetWorkerSelector<C> for NoSelection {
+        fn select_worker(
+            &self,
+            _workers: &HashMap<WorkerId, C>,
+            _request: &SchedulingRequest,
+            _eligibility: RoutingEligibility<'_>,
+            _block_size: u32,
+        ) -> Result<WorkerWithDpRank, KvSchedulerError> {
+            Err(KvSchedulerError::NoEndpoints)
+        }
+    }
+
     fn base_request(isl_tokens: usize) -> SchedulingRequest {
         SchedulingRequest {
             mode: ScheduleMode::QueryOnly {
@@ -776,6 +896,61 @@ mod tests {
             16,
         );
 
+        assert!(matches!(
+            result,
+            Err(KvSchedulerError::AllEligibleWorkersOverloaded)
+        ));
+    }
+
+    #[test]
+    fn validated_selector_keeps_pins_host_owned_and_rejects_invalid_targets() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        let workers = HashMap::from([
+            (0, SimpleWorkerConfig::default()),
+            (1, SimpleWorkerConfig::default()),
+        ]);
+        let pinned = WorkerWithDpRank::from_worker_id(0);
+        let mut request = base_request(16);
+        request.pinned_worker = Some(pinned);
+
+        let result = ValidatedWorkerSelector::new(NoSelection)
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .expect("the host should resolve the pin before invoking the selector");
+        assert_eq!(result.worker, pinned);
+
+        request.pinned_worker = None;
+        let invalid = WorkerWithDpRank::from_worker_id(99);
+        let result = ValidatedWorkerSelector::new(FixedSelection(invalid)).select_worker(
+            &workers,
+            &request,
+            request.eligibility(),
+            16,
+        );
+        assert!(matches!(result, Err(KvSchedulerError::InitFailed(_))));
+    }
+
+    #[test]
+    fn validated_selector_classifies_empty_candidate_sets() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        let selector = ValidatedWorkerSelector::new(NoSelection);
+        let workers = HashMap::from([
+            (0, SimpleWorkerConfig::default()),
+            (1, SimpleWorkerConfig::default()),
+        ]);
+        let request = base_request(16);
+
+        let result = selector.select_worker(&workers, &request, request.eligibility(), 16);
+        assert!(matches!(result, Err(KvSchedulerError::NoEndpoints)));
+
+        let overloaded_worker_ids = HashSet::from([0, 1]);
+        let result = selector.select_worker(
+            &workers,
+            &request,
+            request.eligibility_with_overloaded(Some(&overloaded_worker_ids)),
+            16,
+        );
         assert!(matches!(
             result,
             Err(KvSchedulerError::AllEligibleWorkersOverloaded)

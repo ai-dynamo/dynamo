@@ -270,7 +270,8 @@ impl SchedulingRequest {
         )
     }
 
-    pub(crate) fn effective_cached_tokens_for(&self, worker: WorkerWithDpRank) -> usize {
+    /// Effective cached tokens currently attributed to a worker/rank.
+    pub fn effective_cached_tokens_for(&self, worker: WorkerWithDpRank) -> usize {
         self.overlap
             .effective_cached_tokens
             .get(&worker)
@@ -278,7 +279,8 @@ impl SchedulingRequest {
             .unwrap_or(0)
     }
 
-    pub(crate) fn effective_overlap_blocks_for(&self, worker: WorkerWithDpRank) -> f64 {
+    /// Effective cache overlap currently attributed to a worker/rank.
+    pub fn effective_overlap_blocks_for(&self, worker: WorkerWithDpRank) -> f64 {
         self.overlap
             .effective_overlap_blocks
             .get(&worker)
