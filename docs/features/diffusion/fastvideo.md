@@ -24,7 +24,7 @@ This guide covers deploying [FastVideo](https://github.com/hao-ai-lab/FastVideo)
 
 ## Docker Image Build
 
-The local Docker workflow builds a runtime image from the [`Dockerfile`](https://github.com/ai-dynamo/dynamo/tree/main/examples/diffusers/Dockerfile):
+The local Docker workflow builds a runtime image from the [`Dockerfile`](https://github.com/ai-dynamo/dynamo/blob/main/examples/diffusers/Dockerfile):
 
 - Base image: `nvidia/cuda:13.1.1-devel-ubuntu24.04`
 - Installs [FastVideo](https://github.com/hao-ai-lab/FastVideo) `0.2.0` from PyPI, which provides the `fastvideo.api` typed surface and NVFP4 transformer quantization support
@@ -217,7 +217,7 @@ jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 
 ### FullHD Video with Audio (LTX-2)
 
-LTX-2 models support native audio generation alongside video. To generate a FullHD clip with audio:
+LTX-2 models support native audio generation alongside video. LTX-2 requires width and height divisible by 32, so FullHD requests use `1920x1088` rather than `1920x1080`. To generate a FullHD clip with audio:
 
 Start the local example with an LTX-2 model:
 
@@ -237,7 +237,7 @@ curl -s -X POST http://localhost:8000/v1/videos \
   -d '{
     "model": "FastVideo/LTX2-Distilled-Diffusers",
     "prompt": "A waterfall cascading into a forest pool, birds singing",
-    "size": "1920x1080",
+    "size": "1920x1088",
     "response_format": "b64_json",
     "nvext": {
       "fps": 24,
@@ -269,6 +269,8 @@ FastVideo exposes generated audio and `audio_sample_rate` on its Python result o
 | `--enable-optimizations` | off | Backward-compatible shortcut for `--torch-compile --fp4-quantization` |
 | `--dit-cpu-offload`, `--vae-cpu-offload`, `--text-encoder-cpu-offload`, `--image-encoder-cpu-offload`, `--pin-cpu-memory` | on | CPU offload controls; each has a `--no-*` variant |
 | `--max-video-width`, `--max-video-height` | `4096`, `4096` | Reject request dimensions above these caps before calling FastVideo |
+| `--max-num-frames` | `1024` | Reject requests whose resolved `num_frames` (explicit or `fps * seconds`) exceeds this cap before calling FastVideo |
+| `--max-num-inference-steps` | `200` | Reject requests whose `num_inference_steps` exceeds this cap before calling FastVideo |
 | `--output-dir` | `$XDG_RUNTIME_DIR/dynamo-fastvideo/outputs` or `~/.cache/dynamo/fastvideo/outputs` | Directory for generated MP4 staging files |
 
 ### Request Parameters (`nvext`)
@@ -293,6 +295,16 @@ FastVideo exposes generated audio and `audio_sample_rate` on its Python result o
 | `FASTVIDEO_LOG_LEVEL` | — | Set to `DEBUG` for verbose logging |
 
 ## Troubleshooting
+
+### Hardware Support
+
+The worker checks the GPU compute capability at startup and fails fast with an actionable error when the selected attention backend cannot run on the detected hardware:
+
+| Configuration | Minimum compute capability | Notes |
+|---|---|---|
+| FastWan2.1 + `VIDEO_SPARSE_ATTN` (default) | 9.0 | `fastvideo-kernel` compiles its VSA kernels for sm90a and falls back to a Triton implementation on other architectures; pre-Hopper GPUs (for example sm86) fail at runtime. FastWan2.1 checkpoints contain VSA-specific layers, so `TORCH_SDPA` is not a fallback for this model. Validated on B300 (sm103) and RTX 5090 (sm120) |
+| LTX2 + `TORCH_SDPA` | none specific | Compatibility path for GPUs below compute capability 9.0 |
+| `--fp4-quantization` (NVFP4) | 10.0 | On older GPUs the worker logs a warning and continues without NVFP4 quantization |
 
 | Symptom | Cause | Fix |
 |---|---|---|
