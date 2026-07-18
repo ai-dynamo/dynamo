@@ -23,6 +23,7 @@ from gpu_memory_service.common.cuda_utils import (
     device_memory_info,
 )
 from gpu_memory_service.common.snapshot_profile import SnapshotProfile
+from gpu_memory_service.common.utils import ENV_SERVER_DEVICE_UUID
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,7 @@ class GMSAllocationManager:
             )
 
         self._device = device
+        self._device_uuid = os.environ.get(ENV_SERVER_DEVICE_UUID)
         self._profile = profile or SnapshotProfile("server", enabled=False)
         self._allocations: dict[str, AllocationInfo] = {}
         self._next_layout_slot = 0
@@ -153,7 +155,10 @@ class GMSAllocationManager:
             # rather than silent.
             free_b, total_b = -1, -1
             try:
-                free_b, total_b = device_memory_info(self._device)
+                free_b, total_b = device_memory_info(
+                    self._device,
+                    device_uuid=self._device_uuid,
+                )
             except Exception:
                 logger.debug(
                     "NVML memory info failed for device %d",

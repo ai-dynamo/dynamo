@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from types import SimpleNamespace
 
 import pytest
 from _deps import HAS_GMS
@@ -20,6 +21,7 @@ if not HAS_GMS:
 from gpu_memory_service.cli import args as cli_args
 from gpu_memory_service.cli import runner, server
 from gpu_memory_service.cli.args import parse_args
+from gpu_memory_service.common import cuda_utils
 from gpu_memory_service.common.utils import (
     ENV_SERVER_DEVICE_UUID,
     ENV_SERVER_GPU_UUID_ISOLATION,
@@ -267,6 +269,24 @@ def test_physical_uuid_socket_path_uses_shared_socket_directory(monkeypatch):
     assert get_socket_path_for_uuid("GPU-assigned", "weights") == (
         "/gms-intrapod-control/gms_GPU-assigned_weights.sock"
     )
+
+
+def test_device_memory_info_prefers_physical_uuid(monkeypatch):
+    calls = []
+    fake_pynvml = SimpleNamespace(
+        nvmlInit=lambda: calls.append("init"),
+        nvmlShutdown=lambda: calls.append("shutdown"),
+        nvmlDeviceGetHandleByUUID=lambda uuid: calls.append(("uuid", uuid)) or "handle",
+        nvmlDeviceGetHandleByIndex=lambda device: calls.append(("index", device)),
+        nvmlDeviceGetMemoryInfo=lambda handle: SimpleNamespace(free=17, total=23),
+    )
+    monkeypatch.setitem(sys.modules, "pynvml", fake_pynvml)
+
+    assert cuda_utils.device_memory_info(
+        0,
+        device_uuid="GPU-assigned",
+    ) == (17, 23)
+    assert calls == ["init", ("uuid", "GPU-assigned"), "shutdown"]
 
 
 def test_parse_args_single_tag_honors_explicit_socket_path():

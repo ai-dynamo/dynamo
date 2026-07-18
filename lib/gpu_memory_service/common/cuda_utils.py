@@ -69,13 +69,21 @@ def list_device_uuids() -> list[str]:
     return uuids
 
 
-def device_memory_info(device: int) -> tuple[int, int]:
+def device_memory_info(
+    device: int,
+    *,
+    device_uuid: str | None = None,
+) -> tuple[int, int]:
     """Return ``(free_bytes, total_bytes)`` for a CUDA device via NVML."""
     import pynvml
 
     pynvml.nvmlInit()
     try:
-        handle = pynvml.nvmlDeviceGetHandleByIndex(device)
+        handle = (
+            pynvml.nvmlDeviceGetHandleByUUID(device_uuid)
+            if device_uuid is not None
+            else pynvml.nvmlDeviceGetHandleByIndex(device)
+        )
         info = pynvml.nvmlDeviceGetMemoryInfo(handle)
         return int(info.free), int(info.total)
     finally:
