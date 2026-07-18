@@ -33,21 +33,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-_first_cudart_call_lock = threading.Lock()
-_first_cudart_call_claimed = False
+_first_cuda_set_device_claim_lock = threading.Lock()
+_first_cuda_set_device_claimed = False
 
 
-def _reset_cudart_profile_state() -> None:
-    global _first_cudart_call_claimed
-    with _first_cudart_call_lock:
-        _first_cudart_call_claimed = False
+def _reset_cuda_set_device_profile_state() -> None:
+    global _first_cuda_set_device_claimed
+    with _first_cuda_set_device_claim_lock:
+        _first_cuda_set_device_claimed = False
 
 
-def _claim_first_cudart_call() -> bool:
-    global _first_cudart_call_claimed
-    with _first_cudart_call_lock:
-        first = not _first_cudart_call_claimed
-        _first_cudart_call_claimed = True
+def _claim_first_cuda_set_device_profile() -> bool:
+    global _first_cuda_set_device_claimed
+    with _first_cuda_set_device_claim_lock:
+        first = not _first_cuda_set_device_claimed
+        _first_cuda_set_device_claimed = True
     return first
 
 
@@ -82,17 +82,19 @@ def _load_device(
     # the final synchronize/unmap/commit path.
     with profile.phase("per_device_load_total"):
         try:
-            first_cudart_call = profile.enabled and _claim_first_cudart_call()
+            first_claimed = (
+                profile.enabled and _claim_first_cuda_set_device_profile()
+            )
             with profile.phase(
                 "cuda_set_device",
                 api="cudaSetDevice",
-                first_process_cudart_invocation=first_cudart_call,
+                first_claimed_for_process_profile=first_claimed,
             ):
-                if first_cudart_call:
+                if first_claimed:
                     with profile.phase(
-                        "first_process_cudart_call",
+                        "first_claimed_cuda_set_device",
                         api="cudaSetDevice",
-                        semantics="first_claimed_invocation",
+                        semantics="bookkeeping_claim_before_unsynchronized_call",
                     ):
                         cuda_utils.cuda_runtime_set_device(device)
                 else:
@@ -237,7 +239,7 @@ def main(argv: list[str] | None = None) -> None:
     with profile.phase("device_and_checkpoint_discovery"):
         devices = _list_checkpoint_devices(checkpoint_dir)
 
-    _reset_cudart_profile_state()
+    _reset_cuda_set_device_profile_state()
     initialization_lock = threading.Lock()
     initialization_remaining = len(devices)
     initialization_complete = threading.Event()
@@ -259,6 +261,7 @@ def main(argv: list[str] | None = None) -> None:
                 "all_device_cuda_initialization",
                 count=len(devices),
                 semantics="concurrent_envelope",
+                includes="task_scheduling,cuda_set_device,current_context_query",
             ):
                 with profile.phase("per_device_thread_scheduling", count=len(devices)):
                     futures = {

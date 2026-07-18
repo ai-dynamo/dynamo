@@ -19,10 +19,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import Sequence
 
 import uvloop
-from gpu_memory_service.common.snapshot_profile import SnapshotProfile
+from gpu_memory_service.common.cuda_utils import list_device_uuids
+from gpu_memory_service.common.snapshot_profile import (
+    SnapshotProfile,
+    snapshot_profile_enabled,
+)
+from gpu_memory_service.common.utils import ENV_SERVER_DEVICE_UUID
 from gpu_memory_service.server.rpc import GMSRPCServer
 
 from .args import Config, parse_args
@@ -54,6 +60,10 @@ async def serve_configs(configs: Sequence[Config]) -> None:
         logging.getLogger().setLevel(logging.DEBUG)
         logging.getLogger("gpu_memory_service").setLevel(logging.DEBUG)
 
+    physical_uuid = os.environ.get(ENV_SERVER_DEVICE_UUID)
+    if physical_uuid is None and snapshot_profile_enabled() and configs:
+        physical_uuid = list_device_uuids()[configs[0].device]
+
     servers = []
     for config in configs:
         logger.info("Starting GPU Memory Service Server for device %d", config.device)
@@ -74,6 +84,7 @@ async def serve_configs(configs: Sequence[Config]) -> None:
                 device=config.device,
                 allocation_retry_interval=config.alloc_retry_interval,
                 allocation_retry_timeout=config.alloc_retry_timeout,
+                physical_uuid=physical_uuid,
                 service=config.tag,
             )
         )

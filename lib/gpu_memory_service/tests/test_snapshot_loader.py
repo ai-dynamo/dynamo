@@ -119,7 +119,7 @@ def test_load_device_sets_cuda_context_before_storage_client(monkeypatch):
     )
 
 
-def test_load_device_profiles_first_cudart_call_and_current_context(
+def test_load_device_profiles_first_claimed_cuda_set_device_and_current_context(
     monkeypatch,
     caplog,
 ):
@@ -145,7 +145,7 @@ def test_load_device_profiles_first_cudart_call_and_current_context(
         "cuda_current_context",
         lambda: calls.append("cuCtxGetCurrent") or 17,
     )
-    loader._reset_cudart_profile_state()
+    loader._reset_cuda_set_device_profile_state()
 
     with caplog.at_level(logging.INFO):
         loader._load_device(
@@ -168,10 +168,10 @@ def test_load_device_profiles_first_cudart_call_and_current_context(
         if record.getMessage().startswith("GMS_SNAPSHOT_PROFILE ")
     ]
     phases = {payload["phase"]: payload for payload in payloads}
-    assert phases["cuda_set_device"]["first_process_cudart_invocation"]
+    assert phases["cuda_set_device"]["first_claimed_for_process_profile"]
     assert (
-        phases["first_process_cudart_call"]["semantics"]
-        == "first_claimed_invocation"
+        phases["first_claimed_cuda_set_device"]["semantics"]
+        == "bookkeeping_claim_before_unsynchronized_call"
     )
     assert phases["current_context_established"]["current_context"] == 17
 

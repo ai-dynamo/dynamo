@@ -1,0 +1,466 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+set -euo pipefail
+
+if [[ $# -ne 2 || ! "$1" =~ ^[ab]$ ]]; then
+    echo "usage: $0 {a|b} EVIDENCE_DIRECTORY" >&2
+    exit 2
+fi
+
+VARIANT=$1
+ART=$2
+ROOT=$(git rev-parse --show-toplevel)
+EXP="$ROOT/benchmarks/gms_cuda_init_ab"
+OVERLAY="$EXP/manifests/variant-$VARIANT"
+CTX=nv-prd-dgxc.teleport.sh-dynamo-nscale-dev-cluster
+NS=schwinns
+DGD=g52-t8-gms-prof-r29604929787-r2
+COMPONENT=VllmDecodeWorker
+CKPT=checkpoint-57a124961e2a47a2cf9c2712e58a0a2b
+CKPT_UID=1fb182f1-1a4c-4c51-aff0-67ab530437ea
+CKPT_ID=57a124961e2a47a2cf9c2712e58a0a2b
+FRONT=g52-t8-gms-prof-r29604929787-r2-frontend
+MODEL=nvidia/GLM-5.2-NVFP4
+NODE=cluster-0967a26d-pool-14bee067-prctr-s2877
+CACHE_HELPER=gms-cuda-init-cache-helper
+OP_SELECTOR=app.kubernetes.io/instance=gmsprof-op-760e
+POD_SELECTOR="nvidia.com/dynamo-graph-deployment-name=$DGD,nvidia.com/dynamo-component=$COMPONENT"
+CLAIM_PREFIX="${DGD}-vllmdecode-intrapod-"
+TIMES="$ART/timestamps.tsv"
+PIDS=()
+WORKER_POD=
+CLAIM=
+SCALED_UP=0
+
+mkdir -p "$ART"/{cache,inference,logs,metrics,objects,preflight,teardown}
+printf 'utc\tevent\tdetails\n' > "$TIMES"
+cat > "$ART/expected-uuids.txt" <<'EOF'
+GPU-02ff0cc1-647f-dee7-8365-921738e945a6
+GPU-0d5ad102-eb8f-922a-173e-e91033320e0f
+GPU-9c595f65-4651-0b25-f95c-09a0abd5f5fa
+GPU-4fba7684-5a96-6280-91ff-b41f7484564c
+GPU-3ef7c092-d55c-ca6c-0018-9fc89ed28683
+GPU-32a6c51c-d07d-7513-86b5-813b64e452d2
+GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f
+GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51
+EOF
+
+now() {
+    date -u +%FT%T.%NZ
+}
+
+stamp() {
+    printf '%s\t%s\t%s\n' "$(now)" "$1" "${2:-}" | tee -a "$TIMES"
+}
+
+k() {
+    kubectl --context "$CTX" -n "$NS" "$@"
+}
+
+stop_background() {
+    local pid
+    for pid in "${PIDS[@]:-}"; do
+        kill -TERM "$pid" 2>/dev/null || true
+        pkill -TERM -P "$pid" 2>/dev/null || true
+    done
+    sleep 1
+    for pid in "${PIDS[@]:-}"; do
+        kill -KILL "$pid" 2>/dev/null || true
+        pkill -KILL -P "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+    done
+    PIDS=()
+}
+
+matching_claims() {
+    k get resourceclaims -o json |
+        jq -r --arg prefix "$CLAIM_PREFIX" \
+            '.items[].metadata.name | select(startswith($prefix))'
+}
+
+wait_for_zero() {
+    local attempt dcd_nonzero deployment_nonzero pods claims
+    for attempt in $(seq 1 300); do
+        dcd_nonzero=$(
+            k get dynamocomponentdeployments -l "$POD_SELECTOR" -o json |
+                jq '[.items[] | select((.spec.replicas // 0) != 0)] | length'
+        )
+        deployment_nonzero=$(
+            k get deployments -l "$POD_SELECTOR" -o json |
+                jq '[.items[] | select((.spec.replicas // 0) != 0)] | length'
+        )
+        pods=$(k get pods -l "$POD_SELECTOR" -o name)
+        claims=$(matching_claims)
+        if [[ "$dcd_nonzero" == 0 && "$deployment_nonzero" == 0 &&
+              -z "$pods" && -z "$claims" ]]; then
+            stamp ZERO_AND_DRA_RELEASED
+            return
+        fi
+        sleep 1
+    done
+    echo "timed out waiting for DCD/deployment zero, pod deletion, and claim release" >&2
+    return 1
+}
+
+scale_down() {
+    if [[ "$SCALED_UP" -ne 1 ]]; then
+        return
+    fi
+    stamp SCALE_DOWN_SENT
+    k patch dynamographdeployment "$DGD" --type=json \
+        -p='[{"op":"replace","path":"/spec/components/1/replicas","value":0}]' \
+        > "$ART/teardown/scale-down.txt"
+    wait_for_zero
+    SCALED_UP=0
+    WORKER_POD=
+    CLAIM=
+    stamp SCALE_DOWN_CONFIRMED
+}
+
+cleanup() {
+    local status=$?
+    trap - EXIT INT TERM
+    stop_background
+    if [[ "$SCALED_UP" -eq 1 ]]; then
+        scale_down || status=1
+    fi
+    stamp RUNNER_EXIT "status=$status"
+    exit "$status"
+}
+trap cleanup EXIT INT TERM
+
+checkpoint_json() {
+    k get dynamocheckpoint "$CKPT" -o json
+}
+
+validate_checkpoint() {
+    local output=$1
+    checkpoint_json | tee "$output" | jq -e \
+        --arg uid "$CKPT_UID" --arg id "$CKPT_ID" '
+        .metadata.uid == $uid and
+        .metadata.ownerReferences == null and
+        .metadata.deletionTimestamp == null and
+        .status.phase == "Ready" and
+        .status.checkpointID == $id
+    ' >/dev/null
+}
+
+capture_objects() {
+    local prefix=$1
+    k get dynamographdeployment "$DGD" -o yaml \
+        > "$ART/objects/$prefix-dgd.yaml"
+    k get dynamocomponentdeployments -l "$POD_SELECTOR" -o yaml \
+        > "$ART/objects/$prefix-dcds.yaml"
+    k get deployments -l "$POD_SELECTOR" -o yaml \
+        > "$ART/objects/$prefix-deployments.yaml"
+    k get resourceclaims -o yaml > "$ART/objects/$prefix-resourceclaims.yaml"
+    k get events --sort-by=.metadata.creationTimestamp \
+        > "$ART/objects/$prefix-events.txt"
+    if [[ -n "$WORKER_POD" ]]; then
+        k get pod "$WORKER_POD" -o yaml \
+            > "$ART/objects/$prefix-worker-pod.yaml"
+        k describe pod "$WORKER_POD" \
+            > "$ART/objects/$prefix-worker-pod.describe.txt"
+    fi
+}
+
+stamp PREFLIGHT_BEGIN "variant=${VARIANT^^}"
+for command in kubectl jq yq curl; do
+    command -v "$command" >/dev/null
+done
+validate_checkpoint "$ART/preflight/checkpoint.json"
+k get pods --field-selector "spec.nodeName=$NODE" -o wide \
+    > "$ART/preflight/node-pods.txt"
+k get resourceclaimtemplate "${DGD}-vllmdecodeworker-gpu" -o json \
+    > "$ART/preflight/resourceclaimtemplate.json"
+jq -e '
+    .spec.spec.devices.requests[] |
+    select(.name == "gpus") |
+    .exactly.allocationMode == "ExactCount" and
+    .exactly.count == 8 and
+    .exactly.deviceClassName == "gpu.nvidia.com"
+' "$ART/preflight/resourceclaimtemplate.json" >/dev/null
+kubectl --context "$CTX" get resourceslices -o json |
+    jq --arg node "$NODE" '
+        [
+            .items[] |
+            select(.spec.nodeName == $node and .spec.driver == "gpu.nvidia.com") |
+            .spec.devices[].attributes.uuid.string
+        ] | sort[]
+    ' -r > "$ART/preflight/resourceslice-uuids.txt"
+diff -u \
+    <(sort "$ART/expected-uuids.txt") \
+    "$ART/preflight/resourceslice-uuids.txt"
+stamp NODE_DRA_UUIDS_VALIDATED "count=8"
+wait_for_zero
+
+k kustomize "$OVERLAY" > "$ART/preflight/rendered.yaml"
+EXPECTED_IMAGE=$(
+    yq -r '.spec.components[1].podTemplate.spec.containers[]
+        | select(.name == "main") | .image' "$ART/preflight/rendered.yaml"
+)
+EXPECTED_DIGEST=${EXPECTED_IMAGE##*@}
+[[ "$EXPECTED_DIGEST" == sha256:* ]]
+[[ $(
+    yq -r '.spec.components[1].experimental.checkpoint.checkpointRef' \
+        "$ART/preflight/rendered.yaml"
+) == "$CKPT" ]]
+[[ $(
+    yq -r '.spec.components[1].experimental.checkpoint.startupPolicy' \
+        "$ART/preflight/rendered.yaml"
+) == WaitForCheckpoint ]]
+[[ $(
+    yq -r '.spec.components[1].replicas' "$ART/preflight/rendered.yaml"
+) == 0 ]]
+if yq -e '.spec.components[1].experimental.checkpoint.job' \
+    "$ART/preflight/rendered.yaml" >/dev/null 2>&1; then
+    echo "rendered overlay unexpectedly contains a checkpoint job" >&2
+    exit 1
+fi
+
+stamp APPLY_ZERO_REPLICA_VARIANT
+k apply -k "$OVERLAY" > "$ART/preflight/apply.txt"
+wait_for_zero
+capture_objects pre
+
+k apply -f "$EXP/cache-helper.yaml" > "$ART/preflight/cache-helper-apply.txt"
+k wait --for=condition=Ready "pod/$CACHE_HELPER" --timeout=300s
+k get pod "$CACHE_HELPER" -o yaml > "$ART/preflight/cache-helper.yaml"
+
+stamp FADVISE_NFS_BEGIN
+k exec -i "$CACHE_HELPER" -c helper -- python3 - \
+    "/checkpoints/$CKPT_ID/versions/1" \
+    "/checkpoints/gms/$DGD/versions/1" \
+    < "$EXP/gms-fadvise-exact.py" \
+    > "$ART/cache/nfs.txt" 2> "$ART/cache/nfs.err"
+stamp FADVISE_NFS_DONE "$(tail -1 "$ART/cache/nfs.txt")"
+
+stamp FADVISE_NVME_BEGIN
+k exec -i "$CACHE_HELPER" -c helper -- python3 - \
+    "/cache/nvme2/schwinns/$DGD" \
+    "/cache/nvme4/schwinns/$DGD" \
+    "/cache/nvme5/schwinns/$DGD" \
+    "/cache/nvme6/schwinns/$DGD" \
+    "/cache/nvme7/schwinns/$DGD" \
+    "/cache/nvme8/schwinns/$DGD" \
+    "/cache/nvme9/schwinns/$DGD" \
+    < "$EXP/gms-fadvise-exact.py" \
+    > "$ART/cache/nvme.txt" 2> "$ART/cache/nvme.err"
+stamp FADVISE_NVME_DONE "$(tail -1 "$ART/cache/nvme.txt")"
+
+START=$(now)
+printf '%s\n' "$START" > "$ART/start.txt"
+AGENT=$(
+    k get pods -l app.kubernetes.io/component=snapshot-agent \
+        --field-selector "spec.nodeName=$NODE" \
+        -o jsonpath='{.items[0].metadata.name}'
+)
+OP_POD=$(
+    k get pods -l "$OP_SELECTOR" -o jsonpath='{.items[0].metadata.name}'
+)
+
+stamp SAMPLERS_BEGIN
+k exec -i "$AGENT" -c agent -- sh -s -- 6000 \
+    < "$EXP/gms-host-sampler.sh" \
+    > "$ART/metrics/host-proc-200ms.raw" \
+    2> "$ART/metrics/host-proc-200ms.err" &
+PIDS+=("$!")
+k logs "$AGENT" -c agent --timestamps --since-time="$START" -f \
+    > "$ART/logs/snapshot-agent.follow.log" 2>&1 &
+PIDS+=("$!")
+k logs "$OP_POD" -c manager --timestamps --since-time="$START" -f \
+    > "$ART/logs/operator.follow.log" 2>&1 &
+PIDS+=("$!")
+
+stamp SCALE_UP_SENT
+k patch dynamographdeployment "$DGD" --type=json \
+    -p='[{"op":"replace","path":"/spec/components/1/replicas","value":1}]' \
+    > "$ART/scale-up.txt"
+SCALED_UP=1
+
+for attempt in $(seq 1 300); do
+    WORKER_POD=$(
+        k get pods -l "$POD_SELECTOR" \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
+    )
+    [[ -n "$WORKER_POD" ]] && break
+    sleep 1
+done
+[[ -n "$WORKER_POD" ]]
+stamp POD_SEEN "$WORKER_POD"
+
+for attempt in $(seq 1 120); do
+    CLAIM=$(
+        k get pod "$WORKER_POD" \
+            -o jsonpath='{.status.resourceClaimStatuses[0].resourceClaimName}' \
+            2>/dev/null || true
+    )
+    [[ -n "$CLAIM" ]] && break
+    sleep 1
+done
+[[ "$CLAIM" == "$CLAIM_PREFIX"* ]]
+k get resourceclaim "$CLAIM" -o yaml > "$ART/objects/allocated-resourceclaim.yaml"
+stamp DRA_CLAIM_SEEN "$CLAIM"
+
+for container in main gms-loader gms-server; do
+    k logs "$WORKER_POD" -c "$container" --timestamps --since-time="$START" -f \
+        > "$ART/logs/$container.follow.log" 2>&1 &
+    PIDS+=("$!")
+done
+
+(
+    while true; do
+        printf '%s\t' "$(now)"
+        k get pod "$WORKER_POD" \
+            -o jsonpath='phase={.status.phase} scheduled={.status.conditions[?(@.type=="PodScheduled")].status} initialized={.status.conditions[?(@.type=="Initialized")].status} ready={.status.conditions[?(@.type=="Ready")].status}{"\n"}' \
+            2>/dev/null || true
+        sleep 1
+    done
+) > "$ART/metrics/lifecycle.tsv" 2>&1 &
+PIDS+=("$!")
+
+(
+    for attempt in $(seq 1 120); do
+        if k exec "$WORKER_POD" -c gms-server -- nvidia-smi \
+            --query-gpu=timestamp,index,uuid,utilization.gpu,utilization.memory,memory.used,power.draw \
+            --format=csv,noheader,nounits -lms 200; then
+            exit 0
+        fi
+        sleep 1
+    done
+) > "$ART/metrics/nvidia-smi-200ms.csv" \
+    2> "$ART/metrics/nvidia-smi-200ms.err" &
+PIDS+=("$!")
+
+k wait --for=condition=Ready "pod/$WORKER_POD" --timeout=900s
+stamp WORKER_READY
+k get pod "$WORKER_POD" -o json > "$ART/objects/ready-worker-pod.json"
+
+jq -r '
+    (
+        [.status.containerStatuses[]
+            | select(.name == "main" or .name == "gms-loader")]
+        +
+        [.status.initContainerStatuses[]
+            | select(.name == "gms-server")]
+    )[] | [.name, .image, .imageID] | @tsv
+' "$ART/objects/ready-worker-pod.json" | sort \
+    > "$ART/preflight/live-images.tsv"
+for container in main gms-loader gms-server; do
+    image_id=$(
+        awk -F '\t' -v name="$container" '$1 == name {print $3}' \
+            "$ART/preflight/live-images.tsv"
+    )
+    [[ "$image_id" == *"@$EXPECTED_DIGEST" ]]
+done
+stamp LIVE_IMAGES_VALIDATED "$EXPECTED_DIGEST"
+
+k exec "$WORKER_POD" -c gms-loader -- \
+    nvidia-smi --query-gpu=uuid --format=csv,noheader \
+    | tr -d ' ' > "$ART/preflight/loader-uuids.txt"
+[[ $(wc -l < "$ART/preflight/loader-uuids.txt") -eq 8 ]]
+diff -u \
+    <(sort "$ART/expected-uuids.txt") \
+    <(sort "$ART/preflight/loader-uuids.txt")
+stamp LOADER_VISIBILITY_VALIDATED "count=8"
+
+PORT=$(
+    python3 -c \
+        'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0); print(s.getsockname()[1]); s.close()'
+)
+k port-forward --address 127.0.0.1 "service/$FRONT" "$PORT:8000" \
+    > "$ART/inference/port-forward.log" 2>&1 &
+PIDS+=("$!")
+for attempt in $(seq 1 120); do
+    if curl -fsS --max-time 2 "http://127.0.0.1:$PORT/health" \
+        > "$ART/inference/health.json" 2>/dev/null; then
+        break
+    fi
+    sleep 1
+done
+curl -fsS --max-time 5 "http://127.0.0.1:$PORT/v1/models" \
+    > "$ART/inference/models.json"
+jq -e --arg model "$MODEL" '.data[] | select(.id == $model)' \
+    "$ART/inference/models.json" >/dev/null
+
+jq -n --arg model "$MODEL" '{
+    model: $model,
+    messages: [{
+        role: "user",
+        content: "In one concise sentence, explain why the sky appears blue."
+    }],
+    temperature: 0,
+    max_tokens: 512
+}' > "$ART/inference/request.json"
+stamp INFERENCE_SENT
+curl --silent --show-error --max-time 180 \
+    -D "$ART/inference/headers.txt" \
+    -o "$ART/inference/response.json" \
+    -w 'http_code=%{http_code}\ntime_total_s=%{time_total}\n' \
+    -H 'Content-Type: application/json' \
+    --data-binary @"$ART/inference/request.json" \
+    "http://127.0.0.1:$PORT/v1/chat/completions" \
+    > "$ART/inference/curl-metrics.txt"
+stamp INFERENCE_DONE
+[[ $(
+    awk -F= '$1 == "http_code" {print $2}' "$ART/inference/curl-metrics.txt"
+) == 200 ]]
+[[ $(jq -r '.choices[0].finish_reason' "$ART/inference/response.json") == stop ]]
+content=$(jq -r '.choices[0].message.content // empty' "$ART/inference/response.json")
+[[ -n "$content" ]]
+printf '%s\n' "$content" > "$ART/inference/content.txt"
+grep -Eqi 'blue' "$ART/inference/content.txt"
+grep -Eqi 'atmosphere' "$ART/inference/content.txt"
+grep -Eqi 'scatter' "$ART/inference/content.txt"
+stamp COHERENT_INFERENCE_VALIDATED "chars=${#content}"
+
+for container in main gms-loader gms-server; do
+    k logs "$WORKER_POD" -c "$container" --timestamps --since-time="$START" \
+        > "$ART/logs/$container.final.log"
+done
+k logs "$AGENT" -c agent --timestamps --since-time="$START" \
+    > "$ART/logs/snapshot-agent.final.log"
+k logs "$OP_POD" -c manager --timestamps --since-time="$START" \
+    > "$ART/logs/operator.final.log"
+
+python3 "$EXP/validate-server-profile.py" \
+    "$ART/logs/gms-server.final.log" \
+    "$ART/expected-uuids.txt" \
+    "$VARIANT" | tee "$ART/preflight/server-profile-validation.txt"
+python3 - "$ART/logs/snapshot-agent.final.log" "$ART/expected-uuids.txt" \
+    "$WORKER_POD" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+log_path, expected_path, pod = sys.argv[1:]
+expected = Path(expected_path).read_text(encoding="utf-8").splitlines()
+observed = None
+for line in Path(log_path).read_text(encoding="utf-8").splitlines():
+    if "resolved DRA GPU UUIDs in container ordinal order" not in line:
+        continue
+    record = json.loads(line[line.index("{") :])
+    if record.get("pod", "").endswith(f"/{pod}"):
+        observed = record["uuids"]
+if observed != expected:
+    raise SystemExit(f"DRA UUID order mismatch: observed={observed} expected={expected}")
+print(f"validated DRA ordinal UUIDs: {len(observed)}")
+PY
+stamp PHYSICAL_UUID_PROFILES_VALIDATED
+
+capture_objects final
+validate_checkpoint "$ART/objects/final-checkpoint.json"
+stop_background
+scale_down
+validate_checkpoint "$ART/objects/post-teardown-checkpoint.json"
+capture_objects post-teardown
+sha256sum \
+    "$EXP/gms-fadvise-exact.py" \
+    "$EXP/gms-host-sampler.sh" \
+    "$EXP/validate-server-profile.py" \
+    > "$ART/helper-checksums.txt"
+find "$ART" -type f ! -name SHA256SUMS -print0 | sort -z |
+    xargs -0 sha256sum > "$ART/SHA256SUMS"
+stamp RUN_COMPLETE

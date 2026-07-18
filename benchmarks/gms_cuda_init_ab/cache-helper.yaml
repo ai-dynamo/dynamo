@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gms-cuda-init-cache-helper
+  namespace: schwinns
+  labels:
+    schwinns.ai-dynamo.io/purpose: gms-cuda-init-cache-fadvise
+spec:
+  restartPolicy: Never
+  nodeSelector:
+    kubernetes.io/hostname: cluster-0967a26d-pool-14bee067-prctr-s2877
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+    - key: dra
+      operator: Exists
+      effect: NoSchedule
+    - key: schwinns.ai-dynamo.io/gms-bench
+      operator: Exists
+      effect: NoSchedule
+    - key: autopilot/2026-05-29-qwen06b-tp2-p2p-reserved
+      operator: Exists
+      effect: NoSchedule
+  imagePullSecrets:
+    - name: acr-token-secret
+  containers:
+    - name: helper
+      image: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:44ade91e2dc09c9732ea038b9db81bff7b3fcdc7b5a692ab1142d2ee7bde0ca2
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-c", "exec sleep infinity"]
+      volumeMounts:
+        - name: checkpoint-storage
+          mountPath: /checkpoints
+          readOnly: true
+        - {name: nvme2, mountPath: /cache/nvme2, readOnly: true}
+        - {name: nvme4, mountPath: /cache/nvme4, readOnly: true}
+        - {name: nvme5, mountPath: /cache/nvme5, readOnly: true}
+        - {name: nvme6, mountPath: /cache/nvme6, readOnly: true}
+        - {name: nvme7, mountPath: /cache/nvme7, readOnly: true}
+        - {name: nvme8, mountPath: /cache/nvme8, readOnly: true}
+        - {name: nvme9, mountPath: /cache/nvme9, readOnly: true}
+  volumes:
+    - name: checkpoint-storage
+      persistentVolumeClaim:
+        claimName: snapshot-pvc
+    - {name: nvme2, hostPath: {path: /mnt/dynamo-gms-nvme2, type: Directory}}
+    - {name: nvme4, hostPath: {path: /mnt/dynamo-gms-nvme4, type: Directory}}
+    - {name: nvme5, hostPath: {path: /mnt/dynamo-gms-nvme5, type: Directory}}
+    - {name: nvme6, hostPath: {path: /mnt/dynamo-gms-nvme6, type: Directory}}
+    - {name: nvme7, hostPath: {path: /mnt/dynamo-gms-nvme7, type: Directory}}
+    - {name: nvme8, hostPath: {path: /mnt/dynamo-gms-nvme8, type: Directory}}
+    - {name: nvme9, hostPath: {path: /mnt/dynamo-gms-nvme9, type: Directory}}

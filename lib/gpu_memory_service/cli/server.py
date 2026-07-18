@@ -22,6 +22,7 @@ from collections.abc import Mapping
 from gpu_memory_service.common.cuda_utils import list_device_uuids, list_devices
 from gpu_memory_service.common.utils import (
     ENV_SERVER_DEVICE_UUID,
+    ENV_SERVER_EXPECTED_GPU_UUIDS,
     ENV_SERVER_GPU_UUID_ISOLATION,
     is_truthy_env,
 )
@@ -88,6 +89,30 @@ def _assigned_device_uuids(environ: Mapping[str, str]) -> list[str]:
     if any(not uuid.startswith("GPU-") for uuid in available_uuids):
         raise ValueError("UUID-isolated GMS requires full physical GPUs")
     nvidia_visibility = environ.get("NVIDIA_VISIBLE_DEVICES")
+    normalized_nvidia = (
+        nvidia_visibility.strip().lower()
+        if nvidia_visibility is not None
+        else None
+    )
+    if normalized_nvidia == "none":
+        cuda_visibility = environ.get("CUDA_VISIBLE_DEVICES")
+        if cuda_visibility is not None and cuda_visibility.strip().lower() not in {
+            "",
+            "none",
+            "void",
+        }:
+            raise ValueError(
+                "CUDA_VISIBLE_DEVICES contradicts NVIDIA_VISIBLE_DEVICES=none"
+            )
+        return []
+
+    expected_uuids = None
+    expected_visibility = environ.get(ENV_SERVER_EXPECTED_GPU_UUIDS)
+    if expected_visibility is not None:
+        expected_uuids = _resolve_visible_device_uuids(
+            available_uuids,
+            expected_visibility,
+        )
     nvidia_uuids = None
     if nvidia_visibility and any(
         token.strip().startswith("GPU-") for token in nvidia_visibility.split(",")
@@ -96,32 +121,53 @@ def _assigned_device_uuids(environ: Mapping[str, str]) -> list[str]:
             available_uuids,
             nvidia_visibility,
         )
-    cuda_visibility = environ.get("CUDA_VISIBLE_DEVICES")
-    if cuda_visibility is not None:
-        cuda_tokens = [token.strip() for token in cuda_visibility.split(",")]
-        if (
-            nvidia_uuids is None
-            and all(token.isdigit() for token in cuda_tokens)
-            and [int(token) for token in cuda_tokens]
-            == list(range(len(available_uuids)))
+        if expected_uuids is not None and any(
+            uuid not in expected_uuids for uuid in nvidia_uuids
         ):
-            return available_uuids
-        if cuda_visibility.lower() == "all" and nvidia_uuids is not None:
+            raise ValueError(
+                "NVIDIA_VISIBLE_DEVICES contradicts the declared DRA allocation"
+            )
+    elif normalized_nvidia in {"all", "void"}:
+        nvidia_uuids = expected_uuids
+    elif normalized_nvidia is None:
+        nvidia_uuids = expected_uuids
+    else:
+        raise ValueError(
+            "numeric or unsupported NVIDIA_VISIBLE_DEVICES is ambiguous "
+            "without an explicit UUID allocation"
+        )
+    cuda_visibility = environ.get("CUDA_VISIBLE_DEVICES")
+    if nvidia_uuids is not None:
+        if cuda_visibility is None or cuda_visibility.strip().lower() == "all":
             return nvidia_uuids
         return _resolve_visible_device_uuids(
-            available_uuids,
+            nvidia_uuids,
             cuda_visibility,
             ordinal_uuids=nvidia_uuids,
         )
 
-    if nvidia_uuids is not None:
-        return nvidia_uuids
-    if nvidia_visibility and nvidia_visibility.lower() not in {"all", "none", "void"}:
-        raise ValueError(
-            "numeric or unsupported NVIDIA_VISIBLE_DEVICES is ambiguous "
-            "without CUDA UUID visibility"
+    if cuda_visibility is not None:
+        cuda_tokens = [token.strip() for token in cuda_visibility.split(",")]
+        if all(token.startswith("GPU-") for token in cuda_tokens):
+            return _resolve_visible_device_uuids(
+                available_uuids,
+                cuda_visibility,
+            )
+        if cuda_visibility.strip().lower() in {"", "none", "void"}:
+            return []
+        if all(token.isdigit() for token in cuda_tokens):
+            raise ValueError(
+                "numeric CUDA_VISIBLE_DEVICES is ambiguous without an explicit "
+                "UUID allocation"
+            )
+        return _resolve_visible_device_uuids(
+            available_uuids,
+            cuda_visibility,
         )
-    return available_uuids
+
+    raise ValueError(
+        "GPU allocation is ambiguous without explicit UUID visibility"
+    )
 
 
 def _child_launch(

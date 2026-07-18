@@ -22,6 +22,9 @@ patches:
         path: /spec/components/1/podTemplate/spec/nodeSelector/kubernetes.io~1hostname
         value: cluster-0967a26d-pool-14bee067-prctr-s2877
       - op: replace
+        path: /spec/components/1/replicas
+        value: 0
+      - op: replace
         path: /spec/components/1/experimental/checkpoint
         value:
           checkpointRef: checkpoint-57a124961e2a47a2cf9c2712e58a0a2b

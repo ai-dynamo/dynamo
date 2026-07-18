@@ -21,8 +21,11 @@ from gpu_memory_service.common.protocol.messages import (
     HandshakeResponse,
 )
 from gpu_memory_service.common.protocol.wire import recv_message, send_message
-from gpu_memory_service.common.snapshot_profile import SnapshotProfile
-from gpu_memory_service.common.utils import fail
+from gpu_memory_service.common.snapshot_profile import (
+    SnapshotProfile,
+    snapshot_profile_enabled,
+)
+from gpu_memory_service.common.utils import ENV_SERVER_DEVICE_UUID, fail
 
 from .allocations import AllocationNotFoundError
 from .fsm import Connection, InvalidTransition
@@ -65,15 +68,24 @@ class GMSRPCServer:
         *,
         allocation_retry_interval: float = 0.5,
         allocation_retry_timeout: Optional[float] = None,
+        physical_uuid: str | None = None,
         service: str = "unknown",
     ):
         self.socket_path = socket_path
         self.device = device
         self.service = service
+        profile_enabled = snapshot_profile_enabled()
+        self.physical_uuid = (
+            physical_uuid or os.environ.get(ENV_SERVER_DEVICE_UUID) or "-"
+        )
+        self.pid = os.getpid()
         self._profile = SnapshotProfile(
             "server",
             logger=logger,
+            enabled=profile_enabled,
             device=device,
+            physical_uuid=self.physical_uuid,
+            pid=self.pid,
             service=service,
         )
         with self._profile.phase("service_initialization"):
@@ -84,7 +96,12 @@ class GMSRPCServer:
                 profile=self._profile,
             )
         self._server: Optional[asyncio.Server] = None
-        logger.info("GMSRPCServer initialized: device=%d", device)
+        logger.info(
+            "GMSRPCServer initialized: device=%d physical_uuid=%s pid=%d",
+            device,
+            self.physical_uuid,
+            self.pid,
+        )
 
     def _prepare_socket_path(self) -> None:
         if not os.path.exists(self.socket_path):
@@ -384,5 +401,11 @@ class GMSRPCServer:
             )
         with self._profile.phase("socket_ready", socket_path=self.socket_path):
             pass
-        logger.info("Server started: %s", self.socket_path)
+        logger.info(
+            "Server started: socket_path=%s device=%d physical_uuid=%s pid=%d",
+            self.socket_path,
+            self.device,
+            self.physical_uuid,
+            self.pid,
+        )
         await self._server.serve_forever()
