@@ -219,10 +219,13 @@ pub(crate) fn publish_deferred_kv_events(
         })
         .collect();
 
-    for event in &raw_events {
-        if let Err(error) = sinks.publish_event_sink_only(event.event.clone(), event.storage_tier) {
-            tracing::warn!("Failed to forward buffered KV event: {error}");
-        }
+    let normal_events = raw_events
+        .iter()
+        .map(|event| (event.event.clone(), event.storage_tier))
+        .collect();
+
+    if let Err(error) = sinks.publish_event_sink_batch_only(normal_events) {
+        tracing::warn!("Failed to forward buffered KV event batch: {error}");
     }
 
     if let Err(error) = sinks.publish_raw_batch(raw_events) {
@@ -255,13 +258,20 @@ mod tests {
 
     #[derive(Default)]
     struct CapturingSink {
-        normal_events: Mutex<Vec<KvCacheEvent>>,
+        normal_batches: Mutex<Vec<Vec<(KvCacheEvent, StorageTier)>>>,
         raw_batches: Mutex<Vec<Vec<RawKvEvent>>>,
     }
 
     impl KvCacheEventSink for CapturingSink {
         fn publish(&self, event: KvCacheEvent) -> Result<()> {
-            self.normal_events.lock().unwrap().push(event);
+            self.publish_batch_with_storage_tiers(vec![(event, StorageTier::Device)])
+        }
+
+        fn publish_batch_with_storage_tiers(
+            &self,
+            events: Vec<(KvCacheEvent, StorageTier)>,
+        ) -> Result<()> {
+            self.normal_batches.lock().unwrap().push(events);
             Ok(())
         }
     }
@@ -278,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn deferred_visibility_boundary_emits_one_native_zmq_batch() {
+    fn deferred_visibility_boundary_emits_one_normal_and_raw_batch() {
         let sink = Arc::new(CapturingSink::default());
         let sinks = KvEventPublishers::new(Some(sink.clone()), Some(sink.clone()));
         let stored_data = KvCacheEventData::Stored(KvCacheStoreData {
@@ -292,7 +302,7 @@ mod tests {
         });
 
         publish_deferred_kv_events(&sinks, Vec::new());
-        assert!(sink.normal_events.lock().unwrap().is_empty());
+        assert!(sink.normal_batches.lock().unwrap().is_empty());
         assert!(sink.raw_batches.lock().unwrap().is_empty());
 
         publish_deferred_kv_events(
@@ -311,14 +321,19 @@ mod tests {
                 .collect(),
         );
 
+        let normal_batches = sink.normal_batches.lock().unwrap();
+        assert_eq!(normal_batches.len(), 1);
         assert_eq!(
-            sink.normal_events
-                .lock()
-                .unwrap()
+            normal_batches[0]
                 .iter()
-                .map(|event| event.event_id)
+                .map(|(event, _)| event.event_id)
                 .collect::<Vec<_>>(),
             vec![1, 2]
+        );
+        assert!(
+            normal_batches[0]
+                .iter()
+                .all(|(_, storage_tier)| *storage_tier == StorageTier::Device)
         );
 
         let raw_batches = sink.raw_batches.lock().unwrap();

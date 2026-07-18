@@ -44,6 +44,23 @@ pub trait KvCacheEventSink: Send + Sync {
     ) -> anyhow::Result<()> {
         self.publish(event)
     }
+
+    /// Publishes events that share one source visibility boundary.
+    ///
+    /// Implementations that do not have a native batch representation retain
+    /// singleton delivery semantics by default.
+    fn publish_batch_with_storage_tiers(
+        &self,
+        events: Vec<(KvCacheEvent, StorageTier)>,
+    ) -> anyhow::Result<()> {
+        let mut first_error = None;
+        for (event, storage_tier) in events {
+            if let Err(error) = self.publish_with_storage_tier(event, storage_tier) {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
 }
 
 /// Raw KV event payload used by transport-specific publishers such as the
@@ -129,18 +146,16 @@ impl KvEventPublishers {
         Ok(())
     }
 
-    /// Publishes a normal KV event without also forwarding it to a raw sink.
+    /// Publishes normal KV events without also forwarding them to a raw sink.
     ///
-    /// Deferred live-scheduler forwarding uses this to preserve existing
-    /// per-event error handling for normal sinks while sending the matching raw
-    /// events as one native batch.
-    pub(crate) fn publish_event_sink_only(
+    /// Deferred live-scheduler forwarding uses this to preserve its source
+    /// visibility boundary for normal and raw sinks independently.
+    pub(crate) fn publish_event_sink_batch_only(
         &self,
-        event: KvCacheEvent,
-        storage_tier: StorageTier,
+        events: Vec<(KvCacheEvent, StorageTier)>,
     ) -> anyhow::Result<()> {
         if let Some(sink) = self.event_sink.as_ref() {
-            sink.publish_with_storage_tier(event, storage_tier)?;
+            sink.publish_batch_with_storage_tiers(events)?;
         }
         Ok(())
     }

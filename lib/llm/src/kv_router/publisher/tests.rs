@@ -45,6 +45,57 @@ mod test_event_processing {
         assert_eq!(batch[0].event.dp_rank, 2);
     }
 
+    #[test]
+    fn test_publish_batch_preserves_source_boundary() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let publisher = KvEventPublisher {
+            kv_block_size: 1,
+            source: None,
+            cancellation_token: CancellationToken::new(),
+            worker_id: 7,
+            tx,
+            next_event_id: Arc::new(AtomicU64::new(0)),
+        };
+
+        publisher
+            .publish_batch_with_storage_tiers(vec![
+                (
+                    KvCacheEvent {
+                        event_id: 10,
+                        data: KvCacheEventData::Cleared,
+                        dp_rank: 2,
+                    },
+                    StorageTier::Device,
+                ),
+                (
+                    KvCacheEvent {
+                        event_id: 11,
+                        data: KvCacheEventData::Cleared,
+                        dp_rank: 3,
+                    },
+                    StorageTier::HostPinned,
+                ),
+            ])
+            .unwrap();
+
+        let batch = rx.try_recv().unwrap();
+        assert_eq!(
+            batch
+                .iter()
+                .map(|event| event.event.event_id)
+                .collect::<Vec<_>>(),
+            vec![10, 11]
+        );
+        assert_eq!(
+            batch[0].placement,
+            Placement::local_worker(7, 2, StorageTier::Device)
+        );
+        assert_eq!(
+            batch[1].placement,
+            Placement::local_worker(7, 3, StorageTier::HostPinned)
+        );
+    }
+
     // ---------------------------------------------------------------------
     // create_stored_block_from_parts --------------------------------------
     // ---------------------------------------------------------------------
