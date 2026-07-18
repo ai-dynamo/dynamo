@@ -89,6 +89,33 @@ def test_base_model_lora_capacity(enable_lora, model_type, expected):
     assert _load_vllm_main()._base_model_lora_capacity(config, model_type) == expected
 
 
+def test_kv_event_block_size_prefers_cached_main_attention_value():
+    """LoRA MDC registration relies on this: the cached main-attention block
+    size (configured at engine setup) wins over cache_config.block_size, so
+    adapter cards carry the same block size as the base-model card on
+    hybrid-attention models where vLLM inflates the attention block size."""
+    from dynamo.vllm.cache_info import (
+        DYNAMO_KV_EVENT_BLOCK_SIZE_KEY,
+        get_configured_kv_event_block_size,
+    )
+
+    vllm_config = SimpleNamespace(
+        additional_config={DYNAMO_KV_EVENT_BLOCK_SIZE_KEY: 1056},
+        cache_config=SimpleNamespace(block_size=16),
+    )
+    assert get_configured_kv_event_block_size(vllm_config) == 1056
+
+
+def test_kv_event_block_size_falls_back_to_cache_config():
+    from dynamo.vllm.cache_info import get_configured_kv_event_block_size
+
+    vllm_config = SimpleNamespace(
+        additional_config=None,
+        cache_config=SimpleNamespace(block_size=16),
+    )
+    assert get_configured_kv_event_block_size(vllm_config) == 16
+
+
 def test_custom_jinja_template_invalid_path(mock_vllm_cli):
     """Test that invalid file path raises FileNotFoundError."""
     invalid_path = "/nonexistent/path/to/template.jinja"

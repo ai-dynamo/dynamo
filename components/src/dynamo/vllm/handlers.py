@@ -85,6 +85,7 @@ from dynamo.vllm.kv_connector_protocols import (
 )
 
 from .args import Config
+from .cache_info import get_configured_kv_event_block_size
 from .constants import DisaggregationMode, EmbeddingTransferMode
 from .engine_monitor import VllmEngineMonitor
 from .multimodal_utils.async_vision_encoder import AsyncVisionEncoder
@@ -2277,12 +2278,22 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             )
 
                             # Publish with format: v1/mdc/dynamo/backend/generate/{instance_id}/{lora_slug}
+                            # Use the engine's main-attention KV block size — the
+                            # same value the base-model registration publishes —
+                            # not the CLI arg. On hybrid-attention models vLLM
+                            # inflates the attention block size at engine init
+                            # (e.g. 16 -> 1056), so a card that carries the CLI
+                            # value makes the frontend's KV router book blocks in
+                            # units far smaller than the worker's real blocks and
+                            # falsely mark the worker overloaded.
                             await register_model(
                                 model_input=ModelInput.Tokens,
                                 model_type=lora_model_type,
                                 endpoint=self.generate_endpoint,
                                 model_path=self.config.model,
-                                kv_cache_block_size=self.config.engine_args.block_size,
+                                kv_cache_block_size=get_configured_kv_event_block_size(
+                                    self.engine_client.vllm_config
+                                ),
                                 runtime_config=runtime_config,
                                 user_data=user_data,
                                 lora_name=lora_name,
