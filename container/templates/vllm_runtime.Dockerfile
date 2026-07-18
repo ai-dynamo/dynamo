@@ -296,8 +296,14 @@ RUN set -eux; \
         "${SITE_PACKAGES}"/torchcodec "${SITE_PACKAGES}"/torchcodec-*.dist-info \
         "${SITE_PACKAGES}"/PyNvVideoCodec "${SITE_PACKAGES}"/PyNvVideoCodec-*.dist-info "${SITE_PACKAGES}"/PyNvVideoCodec.libs \
         /root/.cache/pip; \
+    # Guard EVERY purged wheel: the uninstall above is `|| true`, so a package
+    # that survived (rename, new bundling) would otherwise pass silently. decord2
+    # imports as `decord`, so both are covered by the one check.
     ! python3 -c "import cv2" 2>/dev/null; \
-    ! python3 -c "import av" 2>/dev/null
+    ! python3 -c "import av" 2>/dev/null; \
+    ! python3 -c "import decord" 2>/dev/null; \
+    ! python3 -c "import torchcodec" 2>/dev/null; \
+    ! python3 -c "import PyNvVideoCodec" 2>/dev/null
 
 USER dynamo
 

@@ -137,3 +137,53 @@ def test_fail_on_findings_exit_code(tmp_path: Path):
 def test_clean_tree_passes(tmp_path: Path):
     _touch(tmp_path, "usr/local/lib/libavcodec.so.62")  # ours -> allowed
     assert main(["--root", str(tmp_path), "--fail-on-findings"]) == 0
+
+
+# --- Fail-closed policy loading: a malformed policy must abort, not allow-list ---
+
+
+def _write_policy(tmp_path: Path, text: str) -> Path:
+    p = tmp_path / "policy.yaml"
+    p.write_text(text, encoding="utf-8")
+    return p
+
+
+def test_load_rejects_missing_deny_globs(tmp_path: Path):
+    # No deny_globs -> nothing is classified -> every image would pass silently.
+    pol = _write_policy(tmp_path, "allow_paths: ['/usr/local/lib/libav']\n")
+    with pytest.raises(ValueError, match="deny_globs"):
+        CodecPolicy.load(pol)
+
+
+def test_load_rejects_empty_deny_globs(tmp_path: Path):
+    pol = _write_policy(tmp_path, "deny_globs: []\n")
+    with pytest.raises(ValueError, match="deny_globs"):
+        CodecPolicy.load(pol)
+
+
+def test_load_rejects_non_mapping(tmp_path: Path):
+    pol = _write_policy(tmp_path, "- just\n- a\n- list\n")
+    with pytest.raises(ValueError, match="mapping"):
+        CodecPolicy.load(pol)
+
+
+def test_load_rejects_exception_missing_owner(tmp_path: Path):
+    pol = _write_policy(
+        tmp_path,
+        "deny_globs: ['**/libavcodec.so*']\n"
+        "exceptions:\n"
+        "  - glob: '**/foo/*'\n"
+        "    reason: because\n",  # owner intentionally omitted
+    )
+    with pytest.raises(ValueError, match="owner"):
+        CodecPolicy.load(pol)
+
+
+def test_wheel_renamed_codec_lib_is_denied(tmp_path: Path):
+    # auditwheel hash-renamed libx264-<hash>.so vendored under a wheel .libs/ must
+    # be caught by the hashed deny-glob, not just the plain soname.
+    _touch(
+        tmp_path,
+        "usr/local/lib/python3.12/dist-packages/foo.libs/libx264-abc123.so",
+    )
+    assert main(["--root", str(tmp_path), "--fail-on-findings"]) == 1

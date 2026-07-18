@@ -69,7 +69,20 @@ class CodecPolicy:
 
     @classmethod
     def load(cls, path: Path) -> "CodecPolicy":
-        return cls(yaml.safe_load(path.read_text(encoding="utf-8")) or {})
+        # Fail closed: a compliance gate that silently passes every image because
+        # of a typo'd/missing key is worse than no gate. Validate the shape up
+        # front so a malformed policy aborts the scan instead of allow-listing.
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if not isinstance(doc, dict):
+            raise ValueError(f"codec policy {path} must be a YAML mapping")
+        if not isinstance(doc.get("deny_globs"), list) or not doc["deny_globs"]:
+            raise ValueError(f"codec policy {path} requires a non-empty deny_globs list")
+        for exc in doc.get("exceptions") or []:
+            if not all(exc.get(k) for k in ("glob", "reason", "owner")):
+                raise ValueError(
+                    f"codec policy {path}: each exception needs glob, reason, and owner"
+                )
+        return cls(doc)
 
     def classify(self, abspath: str) -> tuple[str, str | None]:
         """Return (verdict, detail) for a path already known to hit a deny glob.

@@ -23,9 +23,14 @@
 # wholesale and re-permitted only for our in-tree copy via allow_paths, so any
 # THIRD-PARTY bundled libavcodec (distro, a vendored wheel) is caught.
 deny_globs:
+  # Both the plain soname and the auditwheel hash-renamed variant (e.g. a wheel
+  # that vendors libx264-<hash>.so under its .libs/) must be caught.
   - "**/libx264.so*"
+  - "**/libx264-*.so*"
   - "**/libx265.so*"
+  - "**/libx265-*.so*"
   - "**/libfdk-aac.so*"
+  - "**/libfdk-aac-*.so*"
   - "**/libavcodec.so*"
   - "**/libavcodec-*.so*"
   - "**/libavdevice.so*"
@@ -41,6 +46,7 @@ deny_globs:
   - "**/libswresample.so*"
   - "**/libswresample-*.so*"
   - "**/libpostproc.so*"
+  - "**/libpostproc-*.so*"
   # Standalone ffmpeg/ffprobe CLIs (e.g. a distro /usr/bin/ffmpeg). Our own copy
   # at /usr/local/bin/ffmpeg is re-permitted by allow_paths below.
   - "**/bin/ffmpeg"
