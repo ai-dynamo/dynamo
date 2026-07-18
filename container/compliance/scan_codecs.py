@@ -76,7 +76,9 @@ class CodecPolicy:
         if not isinstance(doc, dict):
             raise ValueError(f"codec policy {path} must be a YAML mapping")
         if not isinstance(doc.get("deny_globs"), list) or not doc["deny_globs"]:
-            raise ValueError(f"codec policy {path} requires a non-empty deny_globs list")
+            raise ValueError(
+                f"codec policy {path} requires a non-empty deny_globs list"
+            )
         for exc in doc.get("exceptions") or []:
             if not all(exc.get(k) for k in ("glob", "reason", "owner")):
                 raise ValueError(
