@@ -14,7 +14,7 @@ patches:
     patch: |-
       - op: replace
         path: /spec/components/1/podTemplate/spec/containers/1/image
-        value: REPLACE_LOADER_IMAGE
+        value: dynamoci.azurecr.io/ai-dynamo/dynamo:gms-vmm-host-arena-3f4878de9@sha256:a18e58c93d88a8410871f561725146e699ec98cff25bc85f491be332084d668a
       - op: add
         path: /spec/components/1/podTemplate/spec/containers/1/env/-
         value:

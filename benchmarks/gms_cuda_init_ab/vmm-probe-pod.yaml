@@ -32,7 +32,7 @@ spec:
     - name: acr-token-secret
   containers:
     - name: probe
-      image: REPLACE_LOADER_IMAGE
+      image: dynamoci.azurecr.io/ai-dynamo/dynamo:gms-vmm-host-arena-3f4878de9@sha256:a18e58c93d88a8410871f561725146e699ec98cff25bc85f491be332084d668a
       command:
         - /bin/bash
         - /opt/gms-experiment/run-vmm-slab-probe.sh
