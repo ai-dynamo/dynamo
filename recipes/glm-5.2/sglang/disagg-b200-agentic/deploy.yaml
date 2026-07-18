@@ -114,7 +114,7 @@ spec:
                       fieldPath: metadata.uid
                 - name: DYN_ROUTER_MODE
                   value: kv
-              image: nvcr.io/nvstaging/nim/alexandrem:sglang-glm5.2-rc4-30723
+              image: nvcr.io/nvstaging/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1-rc.0
               imagePullPolicy: Always
               resources: {}
       replicas: 1
@@ -166,7 +166,7 @@ spec:
               envFrom:
                 - secretRef:
                     name: hf-token-secret
-              image: nvcr.io/nvstaging/nim/alexandrem:sglang-glm5.2-rc4-30723
+              image: nvcr.io/nvstaging/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1-rc.0
               imagePullPolicy: Always
               resources:
                 requests:
@@ -268,7 +268,7 @@ spec:
               envFrom:
                 - secretRef:
                     name: hf-token-secret
-              image: nvcr.io/nvstaging/nim/alexandrem:sglang-glm5.2-rc4-30723
+              image: nvcr.io/nvstaging/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1-rc.0
               imagePullPolicy: Always
               resources:
                 requests:
