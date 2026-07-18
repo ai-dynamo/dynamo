@@ -52,8 +52,51 @@ async fn generate_preserves_selected_token_logprobs() {
     .await;
     assert_eq!(chunks[0].token_ids, vec![1000]);
     assert_eq!(chunks[0].log_probs, Some(vec![-0.25]));
+    let first_top = chunks[0].top_logprobs.as_ref().expect("top logprobs");
+    assert_eq!(first_top[0][0].token_id, 1000);
+    assert_eq!(first_top[0][0].rank, 1);
+    assert_eq!(first_top[0][1].token_id, 2000);
+    assert_eq!(first_top[0][1].rank, 2);
     assert_eq!(chunks[1].token_ids, vec![1001]);
     assert_eq!(chunks[1].log_probs, Some(vec![-1.25]));
+    engine.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn generate_emits_prompt_logprobs_as_engine_data() {
+    let handle = spawn_fake_engine(FakeConfig {
+        tokens: 1,
+        ..FakeConfig::default()
+    });
+    let engine = engine_for(&handle, DisaggregationMode::Aggregated);
+    engine.start(0).await.unwrap();
+    let mut input = request(Some(1));
+    input.output_options.prompt_logprobs = Some(1);
+
+    let chunks = collect_ok(
+        engine
+            .generate(input, gen_ctx(fresh_ctx()))
+            .await
+            .expect("stream"),
+    )
+    .await;
+    assert_eq!(
+        chunks[0]
+            .engine_data
+            .as_ref()
+            .and_then(|value| value.get("prompt_logprobs")),
+        Some(&serde_json::json!([
+            null,
+            {
+                "11": {"logprob": f64::from(-0.1_f32), "rank": 1},
+                "21": {"logprob": f64::from(-0.3_f32), "rank": 2}
+            },
+            {
+                "12": {"logprob": f64::from(-0.2_f32), "rank": 1},
+                "22": {"logprob": f64::from(-0.4_f32), "rank": 2}
+            }
+        ]))
+    );
     engine.cleanup().await.unwrap();
 }
 
@@ -170,6 +213,8 @@ fn request_rejects_unsupported_sampling_and_output_options() {
     assert!(build_generate_request(&input, "req-guided", false).is_err());
 
     let mut input = request(Some(8));
-    input.output_options.prompt_logprobs = Some(1);
-    assert!(build_generate_request(&input, "req-logprobs", false).is_err());
+    input.extra_args = Some(serde_json::json!({
+        "vllm_tito": {"sampling_params": {"prompt_logprobs": -2}}
+    }));
+    assert!(build_generate_request(&input, "req-prompt-logprobs", false).is_err());
 }

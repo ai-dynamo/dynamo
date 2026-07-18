@@ -1192,6 +1192,7 @@ mod tests_startup_helpers {
                 endpoint,
                 String::new(),
                 1,
+                None,
                 tx,
                 token,
                 4,
@@ -1347,7 +1348,7 @@ mod tests_startup_helpers {
         authoritative_dp_rank: Option<DpRank>,
         worker_id: WorkerId,
     ) -> DpRank {
-        let (tx, mut rx) = mpsc::unbounded_channel::<PlacementEvent>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
         let reserved_listener = reserve_open_port();
         let endpoint = format!(
             "tcp://127.0.0.1:{}",
@@ -1387,6 +1388,7 @@ mod tests_startup_helpers {
                 block_size: 4,
                 medium: None,
                 lora_name: None,
+                cache_namespace: None,
                 block_mm_infos: None,
                 is_eagle: None,
                 group_idx: None,
@@ -1401,8 +1403,12 @@ mod tests_startup_helpers {
             let mut publish_interval = tokio::time::interval(Duration::from_millis(50));
             loop {
                 tokio::select! {
-                    event = rx.recv() => {
-                        return event.expect("listener channel closed");
+                    event_batch = rx.recv() => {
+                        return event_batch
+                            .expect("listener channel closed")
+                            .into_iter()
+                            .next()
+                            .expect("listener emitted empty batch");
                     }
                     _ = publish_interval.tick() => {
                         send_multipart(

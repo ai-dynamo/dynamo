@@ -174,7 +174,7 @@ mod tests {
     }
 
     #[test]
-    fn routes_request_describes_direct_vllm_admin_surface() {
+    fn routes_request_describes_dynamo_system_routes_and_vllm_admin_surface() {
         assert_eq!(
             handler().dispatch(&json!({"method": "routes"})),
             json!({

@@ -19,6 +19,7 @@ pub(crate) struct BootstrapIdentity {
     served_model_name: String,
     reasoning_parser: String,
     tool_call_parser: String,
+    parallelism: Option<pb::ParallelismInfo>,
 }
 
 impl BootstrapIdentity {
@@ -29,6 +30,7 @@ impl BootstrapIdentity {
             served_model_name: discovery.model.served_model_name.clone(),
             reasoning_parser: discovery.model.reasoning_parser.clone(),
             tool_call_parser: discovery.model.tool_call_parser.clone(),
+            parallelism: discovery.server.parallelism,
         }
     }
 
@@ -39,10 +41,16 @@ impl BootstrapIdentity {
             || self.served_model_name != live.served_model_name
             || self.reasoning_parser != live.reasoning_parser
             || self.tool_call_parser != live.tool_call_parser
+            || self.parallelism != live.parallelism
         {
             return Err(client::invalid_arg(format!(
-                "engine identity changed since bootstrap: model `{}` -> `{}`, served name `{}` -> `{}`",
-                self.model_id, live.model_id, self.served_model_name, live.served_model_name
+                "engine identity or topology changed since bootstrap: model `{}` -> `{}`, served name `{}` -> `{}`, parallelism {:?} -> {:?}",
+                self.model_id,
+                live.model_id,
+                self.served_model_name,
+                live.served_model_name,
+                self.parallelism,
+                live.parallelism,
             )));
         }
         Ok(())
@@ -108,7 +116,7 @@ pub(crate) fn inference_world_size(parallelism: &pb::ParallelismInfo) -> Result<
     let sizes = [
         parallelism.tensor_parallel_size,
         parallelism.pipeline_parallel_size,
-        parallelism.data_parallel_size,
+        parallelism.managed_data_parallel_size,
     ];
     if sizes.contains(&0) {
         return Err(client::invalid_arg(
@@ -132,7 +140,7 @@ pub(crate) fn component_for_mode(mode: DisaggregationMode) -> &'static str {
 pub(crate) fn build_engine_config(discovery: &Discovery, mode: DisaggregationMode) -> EngineConfig {
     let model = &discovery.model;
     let server = &discovery.server;
-    let parallelism = server.parallelism.clone().unwrap_or_default();
+    let parallelism = server.parallelism.unwrap_or_default();
     let served_model_name =
         (!model.served_model_name.is_empty()).then(|| model.served_model_name.clone());
 
@@ -156,8 +164,8 @@ pub(crate) fn build_engine_config(discovery: &Discovery, mode: DisaggregationMod
             max_num_seqs: (server.max_running_requests != 0).then_some(server.max_running_requests),
             max_num_batched_tokens: (server.max_batched_tokens != 0)
                 .then_some(server.max_batched_tokens),
-            data_parallel_size: (parallelism.data_parallel_size != 0)
-                .then_some(parallelism.data_parallel_size),
+            data_parallel_size: (parallelism.managed_data_parallel_size != 0)
+                .then_some(parallelism.managed_data_parallel_size),
             data_parallel_start_rank: (parallelism.data_parallel_start_rank != 0)
                 .then_some(parallelism.data_parallel_start_rank),
             supports_lora: model.supports_lora,
@@ -246,16 +254,61 @@ mod tests {
             tensor_parallel_size: 2,
             pipeline_parallel_size: 3,
             data_parallel_size: 4,
+            data_parallel_start_rank: 2,
+            managed_data_parallel_size: 2,
             ..Default::default()
         };
-        assert_eq!(inference_world_size(&parallelism).unwrap(), 24);
+        assert_eq!(inference_world_size(&parallelism).unwrap(), 12);
 
         let invalid = pb::ParallelismInfo {
             tensor_parallel_size: 0,
             pipeline_parallel_size: 1,
             data_parallel_size: 1,
+            managed_data_parallel_size: 0,
             ..Default::default()
         };
         assert!(inference_world_size(&invalid).is_err());
+    }
+
+    #[test]
+    fn engine_registration_uses_only_data_parallel_ranks_managed_by_endpoint() {
+        let mut discovery = valid_discovery();
+        discovery.server.parallelism = Some(pb::ParallelismInfo {
+            tensor_parallel_size: 1,
+            pipeline_parallel_size: 1,
+            data_parallel_size: 4,
+            data_parallel_start_rank: 2,
+            managed_data_parallel_size: 2,
+            ..Default::default()
+        });
+
+        let llm = build_engine_config(&discovery, DisaggregationMode::Aggregated)
+            .llm
+            .expect("LLM registration");
+        assert_eq!(llm.data_parallel_size, Some(2));
+        assert_eq!(llm.data_parallel_start_rank, Some(2));
+    }
+
+    #[test]
+    fn bootstrap_identity_rejects_parallelism_drift() {
+        let mut bootstrap = valid_discovery();
+        bootstrap.server.parallelism = Some(pb::ParallelismInfo {
+            tensor_parallel_size: 2,
+            pipeline_parallel_size: 1,
+            data_parallel_size: 4,
+            managed_data_parallel_size: 2,
+            ..Default::default()
+        });
+        let identity = BootstrapIdentity::from_discovery(&bootstrap);
+
+        let mut live = bootstrap;
+        live.server
+            .parallelism
+            .as_mut()
+            .unwrap()
+            .managed_data_parallel_size = 1;
+
+        let error = identity.validate(&live).unwrap_err();
+        assert!(error.to_string().contains("topology changed"));
     }
 }

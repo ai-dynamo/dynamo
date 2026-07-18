@@ -10,6 +10,7 @@ use crate::proto as pb;
 use crate::wire::json_to_prost_struct;
 
 const CACHE_SALT_PREFIX: &str = "dynamo-cache-salt:";
+const PROMPT_LOGPROBS_HANDOFF_KEY: &str = "prompt_logprobs";
 
 #[derive(Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,7 +30,7 @@ struct TitoSampling {
     ignore_eos: Option<bool>,
     include_stop_str_in_output: Option<bool>,
     logprobs: Option<u32>,
-    prompt_logprobs: Option<u32>,
+    prompt_logprobs: Option<i32>,
     skip_special_tokens: Option<bool>,
     // Prime's renderer requests token IDs explicitly. TITO always returns
     // them, so this is a compatibility hint rather than a wire-level option.
@@ -78,9 +79,9 @@ pub(crate) fn build_generate_request(
     let tito = tito_envelope(request)?;
     let tito_sampling = tito.as_ref().map(|value| &value.sampling_params);
     if let Some(options) = tito_sampling {
-        if options.prompt_logprobs.is_some() {
+        if options.prompt_logprobs.is_some_and(|value| value < -1) {
             return Err(client::invalid_arg(
-                "TITO prompt_logprobs are not yet supported by the vLLM sidecar",
+                "TITO prompt_logprobs must be non-negative or -1",
             ));
         }
         if options.n.unwrap_or(1) != 1 || options.best_of.unwrap_or(1) != 1 {
@@ -135,7 +136,12 @@ pub(crate) fn build_generate_request(
         .prefill_result
         .as_ref()
         .map(|result| {
-            json_to_prost_struct(&result.disaggregated_params).ok_or_else(|| {
+            let mut params = result.disaggregated_params.clone();
+            let fields = params.as_object_mut().ok_or_else(|| {
+                client::invalid_arg("prefill_result.disaggregated_params must be an object")
+            })?;
+            fields.remove(PROMPT_LOGPROBS_HANDOFF_KEY);
+            json_to_prost_struct(&params).ok_or_else(|| {
                 client::invalid_arg("prefill_result.disaggregated_params must be an object")
             })
         })
@@ -165,6 +171,38 @@ pub(crate) fn build_generate_request(
         .as_ref()
         .and_then(|routing| routing.lora_name.clone())
         .unwrap_or_default();
+    let requested_prompt_logprobs = match tito_sampling.and_then(|value| value.prompt_logprobs) {
+        Some(value) => Some(value),
+        None => request
+            .output_options
+            .prompt_logprobs
+            .map(i32::try_from)
+            .transpose()
+            .map_err(|_| client::invalid_arg("prompt_logprobs exceeds the supported range"))?,
+    };
+    let prompt_logprobs = if !is_prefill && request.prefill_result.is_some() {
+        if requested_prompt_logprobs.is_some()
+            && request
+                .prefill_result
+                .as_ref()
+                .and_then(|result| result.disaggregated_params.get(PROMPT_LOGPROBS_HANDOFF_KEY))
+                .is_none()
+        {
+            return Err(client::invalid_arg(
+                "decode request is missing the requested prefill prompt_logprobs handoff",
+            ));
+        }
+        None
+    } else {
+        requested_prompt_logprobs
+    };
+    let prompt_candidates = prompt_logprobs.map(|count| pb::CandidateTokens {
+        select: Some(if count == -1 {
+            pb::candidate_tokens::Select::All(true)
+        } else {
+            pb::candidate_tokens::Select::TopN(count as u32)
+        }),
+    });
 
     Ok(pb::GenerateRequest {
         request_id: request_id.to_string(),
@@ -233,9 +271,9 @@ pub(crate) fn build_generate_request(
                 .unwrap_or(false),
         }),
         response: Some(pb::ResponseOptions {
-            prompt_token_ids: false,
-            prompt_logprobs: false,
-            prompt_candidates: None,
+            prompt_token_ids: prompt_logprobs.is_some(),
+            prompt_logprobs: prompt_logprobs.is_some(),
+            prompt_candidates,
             output_text: Some(false),
             output_token_ids: true,
             output_logprobs: tito_sampling
@@ -274,6 +312,38 @@ pub(crate) fn build_generate_request(
         media: build_media(request)?,
         lora_name,
     })
+}
+
+pub(crate) fn handed_off_prompt_logprobs(
+    request: &PreprocessedRequest,
+) -> Result<Option<serde_json::Value>, DynamoError> {
+    let Some(value) = request
+        .prefill_result
+        .as_ref()
+        .and_then(|result| result.disaggregated_params.get(PROMPT_LOGPROBS_HANDOFF_KEY))
+    else {
+        return Ok(None);
+    };
+    let positions = value
+        .as_array()
+        .ok_or_else(|| client::invalid_arg("prefill prompt_logprobs handoff must be an array"))?;
+    if positions.is_empty() || !positions[0].is_null() {
+        return Err(client::invalid_arg(
+            "prefill prompt_logprobs handoff must begin with null",
+        ));
+    }
+    Ok(Some(value.clone()))
+}
+
+pub(crate) fn attach_prompt_logprobs_to_handoff(
+    mut handoff: serde_json::Value,
+    prompt_logprobs: serde_json::Value,
+) -> Result<serde_json::Value, DynamoError> {
+    let fields = handoff.as_object_mut().ok_or_else(|| {
+        client::protocol_error("prefill kv_transfer_params must be a JSON object")
+    })?;
+    fields.insert(PROMPT_LOGPROBS_HANDOFF_KEY.to_string(), prompt_logprobs);
+    Ok(handoff)
 }
 
 fn validate_generate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
@@ -316,11 +386,6 @@ fn validate_generate_request(request: &PreprocessedRequest) -> Result<(), Dynamo
     if sampling.guided_decoding.is_some() {
         return Err(client::invalid_arg(
             "guided decoding is not supported by the vLLM sidecar",
-        ));
-    }
-    if request.output_options.prompt_logprobs.is_some() {
-        return Err(client::invalid_arg(
-            "prompt_logprobs are not supported by the vLLM sidecar",
         ));
     }
     if request.output_options.skip_special_tokens == Some(false) {

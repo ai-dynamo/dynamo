@@ -2977,6 +2977,7 @@ dependencies = [
  "prost-types 0.13.5",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -2984,6 +2985,7 @@ dependencies = [
  "tonic-build 0.13.1",
  "tonic-health",
  "tracing",
+ "url",
 ]
 
 [[package]]

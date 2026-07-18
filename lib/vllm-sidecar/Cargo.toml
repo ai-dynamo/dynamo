@@ -28,6 +28,7 @@ serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+url = { workspace = true }
 
 # tonic / prost are pinned per-crate (not workspace deps): tonic 0.13.1
 # depends on prost 0.13.5, matching `lib/llm`. tonic-build 0.13.1 still
@@ -41,6 +42,7 @@ tonic = { version = "0.13.1" }
 tonic-health = { workspace = true }
 
 [build-dependencies]
+sha2 = "0.10"
 tonic-build = { version = "0.13.1" }
 
 [dev-dependencies]

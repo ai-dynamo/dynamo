@@ -260,6 +260,7 @@ message ParallelismInfo {
   uint32 data_parallel_rank = 4;
   uint32 data_parallel_start_rank = 5;
   uint32 decode_context_parallel_size = 6;
+  uint32 managed_data_parallel_size = 7;
 }
 
 message GetModelInfoRequest {}

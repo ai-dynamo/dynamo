@@ -3,15 +3,33 @@
 
 //! vLLM gRPC response validation and protobuf/JSON conversion.
 
-use dynamo_backend_common::DynamoError;
+use std::collections::HashSet;
+
+use dynamo_backend_common::{DynamoError, TopLogprob, TopLogprobs};
 
 use crate::client;
 use crate::proto as pb;
 
+const MIN_FINITE_LOGPROB: f64 = -1e30;
+
+fn finite_logprob(value: f32) -> Result<f64, DynamoError> {
+    if value.is_finite() {
+        Ok(f64::from(value))
+    } else if value == f32::NEG_INFINITY {
+        Ok(MIN_FINITE_LOGPROB)
+    } else {
+        Err(client::protocol_error(
+            "logprob metadata contains NaN or positive infinity",
+        ))
+    }
+}
+
 pub(crate) enum GenerateEvent {
+    PromptLogprobs(serde_json::Value),
     Token {
         token_ids: Vec<u32>,
         logprobs: Option<Vec<f64>>,
+        top_logprobs: Option<TopLogprobs>,
     },
     Finished(pb::finish_info::FinishReason),
     PrefillReady(serde_json::Value),
@@ -27,30 +45,87 @@ pub(crate) fn validate_generate_response(
     response: pb::GenerateResponse,
     is_prefill: bool,
 ) -> Result<ValidatedGenerateResponse, DynamoError> {
-    let prompt_tokens = response.prompt_info.map(|info| info.num_prompt_tokens);
     let mut events = Vec::new();
+    let prompt_tokens = match response.prompt_info {
+        Some(info) => {
+            let prompt_tokens = info.num_prompt_tokens;
+            if let Some(prompt_logprobs) = prompt_logprobs_to_json(&info)? {
+                events.push(GenerateEvent::PromptLogprobs(prompt_logprobs));
+            }
+            Some(prompt_tokens)
+        }
+        None => None,
+    };
     if let Some(output) = response.outputs {
         if output.index != 0 {
             return Err(client::protocol_error(
                 "multiple output sequences are not supported",
             ));
         }
-        if !is_prefill && !output.token_ids.is_empty() {
-            if !output.logprobs.is_empty() && output.logprobs.len() != output.token_ids.len() {
+        let has_logprob_metadata = !output.logprobs.is_empty()
+            || !output.ranks.is_empty()
+            || !output.candidate_tokens.is_empty();
+        let top_logprobs = if has_logprob_metadata {
+            let position_count = output.token_ids.len();
+            if output.logprobs.len() != position_count
+                || output.ranks.len() != position_count
+                || output.candidate_tokens.len() != position_count
+            {
                 return Err(client::protocol_error(
-                    "token_ids and selected-token logprobs are not positionally aligned",
+                    "token_ids, logprobs, ranks, and candidate_tokens are not positionally aligned",
                 ));
             }
+            let mut positions = Vec::with_capacity(position_count);
+            for (((token_id, logprob), rank), candidates) in output
+                .token_ids
+                .iter()
+                .zip(&output.logprobs)
+                .zip(&output.ranks)
+                .zip(&output.candidate_tokens)
+            {
+                let mut seen = HashSet::with_capacity(candidates.tokens.len() + 1);
+                seen.insert(*token_id);
+                let mut position = Vec::with_capacity(candidates.tokens.len() + 1);
+                position.push(TopLogprob {
+                    rank: *rank,
+                    token_id: *token_id,
+                    token: None,
+                    logprob: finite_logprob(*logprob)?,
+                    bytes: None,
+                });
+                for candidate in &candidates.tokens {
+                    if !seen.insert(candidate.id) {
+                        return Err(client::protocol_error(
+                            "output logprob metadata contains duplicate token IDs at one position",
+                        ));
+                    }
+                    position.push(TopLogprob {
+                        rank: candidate.rank,
+                        token_id: candidate.id,
+                        token: None,
+                        logprob: finite_logprob(candidate.logprob)?,
+                        bytes: None,
+                    });
+                }
+                positions.push(position);
+            }
+            Some(positions)
+        } else {
+            None
+        };
+        if !is_prefill && !output.token_ids.is_empty() {
             let logprobs = (!output.logprobs.is_empty()).then(|| {
                 output
                     .logprobs
                     .into_iter()
-                    .map(f64::from)
-                    .collect::<Vec<_>>()
+                    .map(finite_logprob)
+                    .collect::<Result<Vec<_>, _>>()
             });
+            let logprobs = logprobs.transpose()?;
             events.push(GenerateEvent::Token {
                 token_ids: output.token_ids,
                 logprobs,
+                top_logprobs,
             });
         }
         if let Some(finish) = output.finish_info {
@@ -89,6 +164,69 @@ pub(crate) fn validate_generate_response(
         prompt_tokens,
         events,
     })
+}
+
+fn prompt_logprobs_to_json(
+    info: &pb::PromptInfo,
+) -> Result<Option<serde_json::Value>, DynamoError> {
+    let has_logprob_metadata =
+        !info.logprobs.is_empty() || !info.ranks.is_empty() || !info.candidate_tokens.is_empty();
+    if !has_logprob_metadata {
+        return Ok(None);
+    }
+
+    let position_count = info.num_prompt_tokens as usize;
+    if info.token_ids.len() != position_count
+        || info.logprobs.len() != position_count
+        || info.ranks.len() != position_count
+        || info.candidate_tokens.len() != position_count
+    {
+        return Err(client::protocol_error(
+            "prompt token_ids, logprobs, ranks, and candidate_tokens are not positionally aligned",
+        ));
+    }
+    if position_count == 0 {
+        return Err(client::protocol_error(
+            "prompt logprob metadata cannot describe an empty prompt",
+        ));
+    }
+    if !info.candidate_tokens[0].tokens.is_empty() {
+        return Err(client::protocol_error(
+            "the first prompt token cannot have logprob candidates",
+        ));
+    }
+
+    let mut positions = Vec::with_capacity(position_count);
+    positions.push(serde_json::Value::Null);
+    for position in 1..position_count {
+        let selected_logprob = finite_logprob(info.logprobs[position])?;
+        let mut entries = serde_json::Map::new();
+        entries.insert(
+            info.token_ids[position].to_string(),
+            serde_json::json!({
+                "logprob": selected_logprob,
+                "rank": info.ranks[position],
+            }),
+        );
+        for candidate in &info.candidate_tokens[position].tokens {
+            if entries
+                .insert(
+                    candidate.id.to_string(),
+                    serde_json::json!({
+                        "logprob": finite_logprob(candidate.logprob)?,
+                        "rank": candidate.rank,
+                    }),
+                )
+                .is_some()
+            {
+                return Err(client::protocol_error(
+                    "prompt logprob metadata contains duplicate token IDs at one position",
+                ));
+            }
+        }
+        positions.push(serde_json::Value::Object(entries));
+    }
+    Ok(Some(serde_json::Value::Array(positions)))
 }
 
 /// Convert a JSON object into a `google.protobuf.Struct`. Non-object inputs

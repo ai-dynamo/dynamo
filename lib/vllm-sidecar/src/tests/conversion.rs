@@ -8,7 +8,9 @@ use dynamo_backend_common::{
 use super::request;
 use crate::proto as pb;
 use crate::request::build_generate_request;
-use crate::wire::{json_to_prost_struct, prost_struct_to_json, validate_generate_response};
+use crate::wire::{
+    GenerateEvent, json_to_prost_struct, prost_struct_to_json, validate_generate_response,
+};
 
 fn request_with_media(map: MultimodalDataMap) -> PreprocessedRequest {
     let mut req = request(Some(16));
@@ -194,6 +196,311 @@ fn generate_response_validation_fails_closed() {
 }
 
 #[test]
+fn generate_response_reconstructs_positionally_aligned_top_logprobs() {
+    let response = validate_generate_response(
+        pb::GenerateResponse {
+            outputs: Some(pb::SequenceOutput {
+                token_ids: vec![11, 22],
+                logprobs: vec![-0.1, -0.2],
+                ranks: vec![1, 3],
+                candidate_tokens: vec![
+                    pb::CandidateTokenInfo {
+                        tokens: vec![pb::candidate_token_info::TokenInfo {
+                            id: 12,
+                            logprob: -0.3,
+                            rank: 2,
+                        }],
+                    },
+                    pb::CandidateTokenInfo {
+                        tokens: vec![pb::candidate_token_info::TokenInfo {
+                            id: 23,
+                            logprob: -0.4,
+                            rank: 1,
+                        }],
+                    },
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        false,
+    )
+    .expect("aligned logprob response");
+
+    let GenerateEvent::Token {
+        token_ids,
+        logprobs,
+        top_logprobs,
+    } = &response.events[0]
+    else {
+        panic!("expected token event");
+    };
+    assert_eq!(token_ids, &[11, 22]);
+    assert_eq!(
+        logprobs.as_deref(),
+        Some(&[f64::from(-0.1_f32), f64::from(-0.2_f32)][..])
+    );
+
+    let positions = top_logprobs.as_ref().expect("top logprobs");
+    assert_eq!(positions.len(), 2);
+    assert_eq!(positions[0][0].token_id, 11);
+    assert_eq!(positions[0][0].rank, 1);
+    assert_eq!(positions[0][1].token_id, 12);
+    assert_eq!(positions[0][1].rank, 2);
+    assert_eq!(positions[1][0].token_id, 22);
+    assert_eq!(positions[1][0].rank, 3);
+    assert_eq!(positions[1][1].token_id, 23);
+    assert_eq!(positions[1][1].rank, 1);
+}
+
+#[test]
+fn generate_response_reconstructs_prompt_logprobs_with_candidates_and_ranks() {
+    let response = validate_generate_response(
+        pb::GenerateResponse {
+            prompt_info: Some(pb::PromptInfo {
+                num_prompt_tokens: 3,
+                token_ids: vec![10, 11, 12],
+                logprobs: vec![0.0, -0.1, -0.2],
+                ranks: vec![0, 1, 3],
+                candidate_tokens: vec![
+                    Default::default(),
+                    pb::CandidateTokenInfo {
+                        tokens: vec![pb::candidate_token_info::TokenInfo {
+                            id: 21,
+                            logprob: -0.3,
+                            rank: 2,
+                        }],
+                    },
+                    pb::CandidateTokenInfo {
+                        tokens: vec![pb::candidate_token_info::TokenInfo {
+                            id: 22,
+                            logprob: -0.4,
+                            rank: 1,
+                        }],
+                    },
+                ],
+            }),
+            ..Default::default()
+        },
+        false,
+    )
+    .expect("aligned prompt logprob response");
+
+    let GenerateEvent::PromptLogprobs(prompt_logprobs) = &response.events[0] else {
+        panic!("expected prompt-logprobs event");
+    };
+    assert_eq!(
+        prompt_logprobs,
+        &serde_json::json!([
+            null,
+            {
+                "11": {"logprob": f64::from(-0.1_f32), "rank": 1},
+                "21": {"logprob": f64::from(-0.3_f32), "rank": 2}
+            },
+            {
+                "12": {"logprob": f64::from(-0.2_f32), "rank": 3},
+                "22": {"logprob": f64::from(-0.4_f32), "rank": 1}
+            }
+        ])
+    );
+}
+
+#[test]
+fn generate_response_clamps_non_finite_prompt_logprobs() {
+    let response = validate_generate_response(
+        pb::GenerateResponse {
+            prompt_info: Some(pb::PromptInfo {
+                num_prompt_tokens: 2,
+                token_ids: vec![10, 11],
+                logprobs: vec![0.0, f32::NEG_INFINITY],
+                ranks: vec![0, 1],
+                candidate_tokens: vec![
+                    Default::default(),
+                    pb::CandidateTokenInfo {
+                        tokens: vec![pb::candidate_token_info::TokenInfo {
+                            id: 21,
+                            logprob: f32::NEG_INFINITY,
+                            rank: 2,
+                        }],
+                    },
+                ],
+            }),
+            ..Default::default()
+        },
+        false,
+    )
+    .expect("non-finite prompt logprobs use Dynamo's finite sentinel");
+
+    let GenerateEvent::PromptLogprobs(prompt_logprobs) = &response.events[0] else {
+        panic!("expected prompt-logprobs event");
+    };
+    assert_eq!(
+        prompt_logprobs,
+        &serde_json::json!([
+            null,
+            {
+                "11": {"logprob": -1e30, "rank": 1},
+                "21": {"logprob": -1e30, "rank": 2}
+            }
+        ])
+    );
+}
+
+#[test]
+fn generate_response_rejects_nan_and_positive_infinite_logprobs() {
+    for invalid in [f32::NAN, f32::INFINITY] {
+        let prompt = pb::GenerateResponse {
+            prompt_info: Some(pb::PromptInfo {
+                num_prompt_tokens: 2,
+                token_ids: vec![10, 11],
+                logprobs: vec![0.0, invalid],
+                ranks: vec![0, 1],
+                candidate_tokens: vec![Default::default(), Default::default()],
+            }),
+            ..Default::default()
+        };
+        assert!(validate_generate_response(prompt, false).is_err());
+
+        let output = pb::GenerateResponse {
+            outputs: Some(pb::SequenceOutput {
+                token_ids: vec![11],
+                logprobs: vec![-0.1],
+                ranks: vec![1],
+                candidate_tokens: vec![pb::CandidateTokenInfo {
+                    tokens: vec![pb::candidate_token_info::TokenInfo {
+                        id: 21,
+                        logprob: invalid,
+                        rank: 2,
+                    }],
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(validate_generate_response(output, false).is_err());
+    }
+}
+
+#[test]
+fn generate_response_rejects_duplicate_output_logprob_token_ids() {
+    for candidate_id in [11, 21] {
+        let duplicate_candidates = if candidate_id == 11 {
+            vec![candidate_id]
+        } else {
+            vec![candidate_id, candidate_id]
+        };
+        let response = pb::GenerateResponse {
+            outputs: Some(pb::SequenceOutput {
+                token_ids: vec![11],
+                logprobs: vec![-0.1],
+                ranks: vec![1],
+                candidate_tokens: vec![pb::CandidateTokenInfo {
+                    tokens: duplicate_candidates
+                        .into_iter()
+                        .map(|id| pb::candidate_token_info::TokenInfo {
+                            id,
+                            logprob: -0.2,
+                            rank: 2,
+                        })
+                        .collect(),
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(validate_generate_response(response, false).is_err());
+    }
+}
+
+#[test]
+fn generate_response_rejects_misaligned_prompt_logprob_metadata() {
+    for prompt_info in [
+        pb::PromptInfo {
+            num_prompt_tokens: 2,
+            token_ids: vec![10],
+            logprobs: vec![0.0, -0.1],
+            ranks: vec![0, 1],
+            candidate_tokens: vec![Default::default(), Default::default()],
+        },
+        pb::PromptInfo {
+            num_prompt_tokens: 2,
+            token_ids: vec![10, 11],
+            logprobs: vec![0.0],
+            ranks: vec![0, 1],
+            candidate_tokens: vec![Default::default(), Default::default()],
+        },
+        pb::PromptInfo {
+            num_prompt_tokens: 2,
+            token_ids: vec![10, 11],
+            logprobs: vec![0.0, -0.1],
+            ranks: vec![0],
+            candidate_tokens: vec![Default::default(), Default::default()],
+        },
+        pb::PromptInfo {
+            num_prompt_tokens: 2,
+            token_ids: vec![10, 11],
+            logprobs: vec![0.0, -0.1],
+            ranks: vec![0, 1],
+            candidate_tokens: vec![Default::default()],
+        },
+    ] {
+        let error = validate_generate_response(
+            pb::GenerateResponse {
+                prompt_info: Some(prompt_info),
+                ..Default::default()
+            },
+            false,
+        )
+        .err()
+        .expect("misaligned prompt metadata must fail closed");
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::Unknown)
+        );
+    }
+}
+
+#[test]
+fn generate_response_rejects_misaligned_logprob_metadata() {
+    for output in [
+        pb::SequenceOutput {
+            token_ids: vec![11, 22],
+            logprobs: vec![-0.1, -0.2],
+            ranks: vec![1],
+            candidate_tokens: vec![Default::default(), Default::default()],
+            ..Default::default()
+        },
+        pb::SequenceOutput {
+            token_ids: vec![11, 22],
+            logprobs: vec![-0.1, -0.2],
+            ranks: vec![1, 2],
+            candidate_tokens: vec![Default::default()],
+            ..Default::default()
+        },
+        pb::SequenceOutput {
+            token_ids: vec![11, 22],
+            logprobs: vec![],
+            ranks: vec![1, 2],
+            candidate_tokens: vec![Default::default(), Default::default()],
+            ..Default::default()
+        },
+    ] {
+        let result = validate_generate_response(
+            pb::GenerateResponse {
+                outputs: Some(output),
+                ..Default::default()
+            },
+            false,
+        );
+        let error = result.err().expect("misaligned response must fail closed");
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::Unknown)
+        );
+    }
+}
+
+#[test]
 fn build_request_forwards_hidden_stops_and_priority() {
     let mut request = request(Some(8));
     request.stop_conditions.stop_token_ids_hidden = Some(vec![17, 19]);
@@ -257,6 +564,35 @@ fn build_request_preserves_prime_tito_sampling_logprobs_and_cache_salt() {
     assert!(response.output_candidates.is_some());
     assert_eq!(wire.kv.unwrap().cache_salt, "dynamo-cache-salt:rollout-7");
     assert_eq!(wire.priority, -7);
+}
+
+#[test]
+fn build_request_forwards_prompt_logprob_selectors() {
+    let mut input = request(Some(8));
+    input.output_options.prompt_logprobs = Some(3);
+    let response = build_generate_request(&input, "req-prompt", false)
+        .expect("prompt logprobs request")
+        .response
+        .expect("response options");
+    assert!(response.prompt_token_ids);
+    assert!(response.prompt_logprobs);
+    assert_eq!(
+        response.prompt_candidates.and_then(|value| value.select),
+        Some(pb::candidate_tokens::Select::TopN(3))
+    );
+
+    let mut input = request(Some(8));
+    input.extra_args = Some(serde_json::json!({
+        "vllm_tito": {"sampling_params": {"prompt_logprobs": -1}}
+    }));
+    let response = build_generate_request(&input, "req-prompt-all", false)
+        .expect("all prompt logprobs request")
+        .response
+        .expect("response options");
+    assert_eq!(
+        response.prompt_candidates.and_then(|value| value.select),
+        Some(pb::candidate_tokens::Select::All(true))
+    );
 }
 
 #[test]

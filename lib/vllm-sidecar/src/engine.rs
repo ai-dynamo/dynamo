@@ -46,7 +46,10 @@ use crate::discovery::{
     inference_world_size, lora_from_proto, nonempty, validate_discovery,
 };
 use crate::proto as pb;
-use crate::request::{build_generate_request, finish_output};
+use crate::request::{
+    attach_prompt_logprobs_to_handoff, build_generate_request, finish_output,
+    handed_off_prompt_logprobs,
+};
 use crate::wire::{GenerateEvent, validate_generate_response};
 
 /// A Dynamo backend that proxies inference to vLLM's gRPC server.
@@ -345,6 +348,7 @@ impl LLMEngine for VllmSidecarEngine {
 
         let is_prefill = self.disaggregation_mode.is_prefill();
         let prompt_len = request.token_ids.len() as u32;
+        let handed_off_prompt_logprobs = handed_off_prompt_logprobs(&request)?;
         let mut grpc_req = build_generate_request(&request, ctx.id(), is_prefill)?;
         grpc_req.model = self
             .served_model_name
@@ -385,6 +389,16 @@ impl LLMEngine for VllmSidecarEngine {
             // holds by construction.
             let mut generated: u32 = 0;
             let mut prompt_tokens = prompt_len;
+            let mut pending_prefill_prompt_logprobs = None;
+
+            if let Some(prompt_logprobs) = handed_off_prompt_logprobs {
+                yield Ok(LLMEngineOutput {
+                    engine_data: Some(serde_json::json!({
+                        "prompt_logprobs": prompt_logprobs,
+                    })),
+                    ..Default::default()
+                });
+            }
 
             loop {
                 tokio::select! {
@@ -417,11 +431,28 @@ impl LLMEngine for VllmSidecarEngine {
                                 let mut terminal = false;
                                 for event in response.events {
                                     match event {
-                                        GenerateEvent::Token { token_ids, logprobs } => {
+                                        GenerateEvent::PromptLogprobs(prompt_logprobs) => {
+                                            if is_prefill {
+                                                pending_prefill_prompt_logprobs = Some(prompt_logprobs);
+                                            } else {
+                                                yield Ok(LLMEngineOutput {
+                                                    engine_data: Some(serde_json::json!({
+                                                        "prompt_logprobs": prompt_logprobs,
+                                                    })),
+                                                    ..Default::default()
+                                                });
+                                            }
+                                        }
+                                        GenerateEvent::Token {
+                                            token_ids,
+                                            logprobs,
+                                            top_logprobs,
+                                        } => {
                                             generated += token_ids.len() as u32;
                                             yield Ok(LLMEngineOutput {
                                                 token_ids,
                                                 log_probs: logprobs,
+                                                top_logprobs,
                                                 ..Default::default()
                                             });
                                         }
@@ -432,6 +463,23 @@ impl LLMEngine for VllmSidecarEngine {
                                             terminal = true;
                                         }
                                         GenerateEvent::PrefillReady(disagg) => {
+                                            let disagg = if let Some(prompt_logprobs) =
+                                                pending_prefill_prompt_logprobs.take()
+                                            {
+                                                match attach_prompt_logprobs_to_handoff(
+                                                    disagg,
+                                                    prompt_logprobs,
+                                                ) {
+                                                    Ok(disagg) => disagg,
+                                                    Err(error) => {
+                                                        yield Err(error);
+                                                        terminal = true;
+                                                        break;
+                                                    }
+                                                }
+                                            } else {
+                                                disagg
+                                            };
                                             yield Ok(finish_output(
                                                 pb::finish_info::FinishReason::Stop,
                                                 prompt_tokens,

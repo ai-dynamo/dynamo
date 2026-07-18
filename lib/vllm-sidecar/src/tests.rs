@@ -63,6 +63,7 @@ struct FakeConfig {
     max_loras: u32,
     mismatch_lora_load_reply: bool,
     hang_list_loras: bool,
+    non_finite_prompt_logprobs: bool,
     reasoning_parser: String,
     tool_call_parser: String,
 }
@@ -78,6 +79,7 @@ impl Default for FakeConfig {
             max_loras: 0,
             mismatch_lora_load_reply: false,
             hang_list_loras: false,
+            non_finite_prompt_logprobs: false,
             reasoning_parser: String::new(),
             tool_call_parser: String::new(),
         }
@@ -93,6 +95,44 @@ struct FakeEngine {
     last_kv_transfer_params: Arc<Mutex<Option<prost_types::Struct>>>,
     last_lora_name: Arc<Mutex<Option<String>>>,
     adapters: Arc<Mutex<BTreeMap<String, pb::LoraAdapter>>>,
+}
+
+fn fake_prompt_info(include_logprobs: bool, non_finite_logprobs: bool) -> pb::PromptInfo {
+    if include_logprobs {
+        let mut info = pb::PromptInfo {
+            num_prompt_tokens: 3,
+            token_ids: vec![10, 11, 12],
+            logprobs: vec![0.0, -0.1, -0.2],
+            ranks: vec![0, 1, 1],
+            candidate_tokens: vec![
+                Default::default(),
+                pb::CandidateTokenInfo {
+                    tokens: vec![pb::candidate_token_info::TokenInfo {
+                        id: 21,
+                        logprob: -0.3,
+                        rank: 2,
+                    }],
+                },
+                pb::CandidateTokenInfo {
+                    tokens: vec![pb::candidate_token_info::TokenInfo {
+                        id: 22,
+                        logprob: -0.4,
+                        rank: 2,
+                    }],
+                },
+            ],
+        };
+        if non_finite_logprobs {
+            info.logprobs[1] = f32::NEG_INFINITY;
+            info.candidate_tokens[2].tokens[0].logprob = f32::NEG_INFINITY;
+        }
+        info
+    } else {
+        pb::PromptInfo {
+            num_prompt_tokens: 3,
+            ..Default::default()
+        }
+    }
 }
 
 #[tonic::async_trait]
@@ -116,6 +156,10 @@ impl Generate for FakeEngine {
         *self.last_kv_transfer_params.lock().unwrap() =
             req.kv.as_ref().and_then(|kv| kv.kv_transfer_params.clone());
         *self.last_lora_name.lock().unwrap() = Some(req.lora_name.clone());
+        let include_prompt_logprobs = req
+            .response
+            .as_ref()
+            .is_some_and(|options| options.prompt_logprobs);
         let cfg = self.cfg.clone();
 
         let stream = async_stream::stream! {
@@ -126,10 +170,10 @@ impl Generate for FakeEngine {
                             "remote_block_ids": [1, 2, 3],
                         }));
                     yield Ok(pb::GenerateResponse {
-                        prompt_info: Some(pb::PromptInfo {
-                            num_prompt_tokens: 3,
-                            ..Default::default()
-                        }),
+                        prompt_info: Some(fake_prompt_info(
+                            include_prompt_logprobs,
+                            cfg.non_finite_prompt_logprobs,
+                        )),
                         outputs: Some(pb::SequenceOutput {
                             finish_info: Some(pb::FinishInfo {
                                 num_output_tokens: 1,
@@ -143,10 +187,10 @@ impl Generate for FakeEngine {
                 }
                 _ => {
                     yield Ok(pb::GenerateResponse {
-                        prompt_info: Some(pb::PromptInfo {
-                            num_prompt_tokens: 3,
-                            ..Default::default()
-                        }),
+                        prompt_info: Some(fake_prompt_info(
+                            include_prompt_logprobs,
+                            cfg.non_finite_prompt_logprobs,
+                        )),
                         outputs: None,
                     });
                     for i in 0..cfg.tokens {
@@ -157,6 +201,13 @@ impl Generate for FakeEngine {
                                 token_ids: vec![1000 + i],
                                 logprobs: vec![-0.25 - f64::from(i) as f32],
                                 ranks: vec![1],
+                                candidate_tokens: vec![pb::CandidateTokenInfo {
+                                    tokens: vec![pb::candidate_token_info::TokenInfo {
+                                        id: 2000 + i,
+                                        logprob: -2.0,
+                                        rank: 2,
+                                    }],
+                                }],
                                 text: format!("t{i}"),
                                 num_tokens: 1,
                                 ..Default::default()
@@ -198,6 +249,7 @@ impl Control for FakeEngine {
                 data_parallel_rank: 0,
                 data_parallel_start_rank: 0,
                 decode_context_parallel_size: 1,
+                managed_data_parallel_size: 1,
             }),
             max_model_len: 4096,
             kv_block_size: 16,

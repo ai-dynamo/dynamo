@@ -12,7 +12,7 @@
 //!
 //! This crate exposes a read-only frontend route. The frontend discovers live
 //! `rl` endpoint instances from Dynamo discovery, then asks each worker for its
-//! available RL admin routes with `{"method": "routes"}` over the request
+//! available Dynamo system routes with `{"method": "routes"}` over the request
 //! plane. It does not expose a frontend fan-out method endpoint.
 
 use std::{
@@ -40,6 +40,7 @@ const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 /// Global cap on concurrent per-worker probes (across all in-flight discovery
 /// requests), so a large fleet or many concurrent callers can't fan out without bound.
 const DEFAULT_MAX_CONCURRENT_PROBES: usize = 32;
+pub const RL_WORKERS_PROTOCOL_VERSION: u32 = 1;
 
 type ModelKey = (String, String, u64);
 
@@ -109,13 +110,14 @@ pub struct RlWorkerInfo {
     pub world_size: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    pub routes: Vec<String>,
+    pub system_routes: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RlWorkersResponse {
+    pub protocol_version: u32,
     pub namespace: String,
     pub workers: Vec<RlWorkerInfo>,
 }
@@ -199,6 +201,7 @@ pub fn rl_router(state: RlDiscoveryState) -> Router {
 async fn workers_handler(State(state): State<RlDiscoveryState>) -> impl IntoResponse {
     match list_workers(&state).await {
         Ok(workers) => Json(RlWorkersResponse {
+            protocol_version: RL_WORKERS_PROTOCOL_VERSION,
             namespace: state.config.namespace.clone(),
             workers,
         })
@@ -494,14 +497,14 @@ fn parse_worker_routes(value: serde_json::Value) -> anyhow::Result<WorkerRoutes>
 fn worker_info(
     endpoint: Instance,
     model: Option<String>,
-    mut routes: Vec<String>,
+    mut system_routes: Vec<String>,
     system_url: Option<String>,
     admin_base_url: Option<String>,
     world_size: Option<u32>,
     error: Option<String>,
 ) -> RlWorkerInfo {
-    routes.sort();
-    routes.dedup();
+    system_routes.sort();
+    system_routes.dedup();
 
     RlWorkerInfo {
         request_plane_url: request_plane_url(&endpoint),
@@ -514,7 +517,7 @@ fn worker_info(
         admin_base_url,
         world_size,
         model,
-        routes,
+        system_routes,
         error,
     }
 }
@@ -565,6 +568,39 @@ fn model_map(instances: Vec<DiscoveryInstance>) -> HashMap<ModelKey, String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn worker_response_names_dynamo_capabilities_system_routes() {
+        let worker = RlWorkerInfo {
+            namespace: "dynamo".to_string(),
+            component: "backend".to_string(),
+            endpoint: "rl".to_string(),
+            instance_id: 1,
+            transport: TransportType::Tcp("127.0.0.1:1".to_string()),
+            request_plane_url: "dyn://dynamo.backend.rl".to_string(),
+            system_url: Some("http://worker:8181".to_string()),
+            admin_base_url: Some("http://worker:8120".to_string()),
+            world_size: Some(2),
+            model: Some("model".to_string()),
+            system_routes: vec!["update/load_lora".to_string()],
+            error: None,
+        };
+
+        let value = serde_json::to_value(worker).unwrap();
+        assert_eq!(value["system_routes"], json!(["update/load_lora"]));
+        assert!(value.get("routes").is_none());
+    }
+
+    #[test]
+    fn workers_response_advertises_protocol_version() {
+        let response = RlWorkersResponse {
+            protocol_version: RL_WORKERS_PROTOCOL_VERSION,
+            namespace: "dynamo".to_string(),
+            workers: Vec::new(),
+        };
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["protocol_version"], json!(1));
+    }
 
     fn model_instance(
         namespace: &str,

@@ -222,7 +222,7 @@ impl LoraController {
         };
         let existing = { self.loaded.lock().await.get(&name).cloned() };
         if let Some(existing) = existing {
-            if existing.adapter == adapter {
+            if existing.adapter == adapter && !load_inplace {
                 if !existing.published {
                     self.discovery
                         .attach(&existing.adapter)
@@ -744,6 +744,38 @@ mod tests {
             std::fs::canonicalize(second).unwrap().to_string_lossy()
         );
         assert_eq!(discovery.attached.lock().await.as_slice(), ["adapter-a"]);
+    }
+
+    #[tokio::test]
+    async fn load_inplace_reloads_the_same_stable_source() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("stable");
+        std::fs::create_dir(&source).unwrap();
+        let engine = MockEngine::new(Vec::new());
+        let controller = LoraController::new_with(
+            engine.clone(),
+            Arc::new(MockDiscovery::default()),
+            Some(downloader(&root.path().join("cache"))),
+            HashSet::new(),
+        )
+        .await
+        .unwrap();
+
+        for load_inplace in [false, true] {
+            controller
+                .load(json!({
+                    "lora_name": "adapter-a",
+                    "source": { "uri": format!("file://{}", source.display()) },
+                    "load_inplace": load_inplace,
+                }))
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(
+            engine.events.lock().await.as_slice(),
+            ["load:adapter-a", "load:adapter-a"]
+        );
     }
 
     #[tokio::test]

@@ -872,7 +872,7 @@ impl Worker {
                 model_type,
                 self.config.model_input,
                 None,
-                Some(worker_type.clone()),
+                Some(worker_type),
                 needs.clone(),
             )
             .await
@@ -887,11 +887,10 @@ impl Worker {
         self.register_engine_controls(&endpoint).await?;
         self.register_engine_updates(&endpoint).await?;
 
-        if engine_config
-            .llm
-            .as_ref()
-            .is_some_and(|llm| llm.supports_lora)
-        {
+        if should_register_lora_updates(
+            engine_config,
+            dynamo_runtime::config::env_is_truthy("DYN_LORA_ENABLED"),
+        ) {
             let EngineKind::Llm(engine) = &self.engine else {
                 return Err(err(
                     ErrorType::Backend(BackendError::InvalidArgument),
@@ -1169,6 +1168,17 @@ impl Worker {
         )
         .await;
     }
+}
+
+fn should_register_lora_updates(
+    engine_config: &EngineConfig,
+    runtime_updates_enabled: bool,
+) -> bool {
+    runtime_updates_enabled
+        && engine_config
+            .llm
+            .as_ref()
+            .is_some_and(|llm| llm.supports_lora)
 }
 
 /// Drain-budget resolver: `DYN_PREFILL_DRAIN_TIMEOUT_S` with the same
@@ -1786,6 +1796,29 @@ mod tests {
 
     fn error_type_of(result: Result<ModelType, DynamoError>) -> ErrorType {
         result.unwrap_err().error_type()
+    }
+
+    #[test]
+    fn lora_update_routes_require_engine_and_runtime_support() {
+        let supported = EngineConfig {
+            llm: Some(crate::engine::LlmRegistration {
+                supports_lora: true,
+                ..Default::default()
+            }),
+            ..EngineConfig::default()
+        };
+        let unsupported = EngineConfig {
+            llm: Some(crate::engine::LlmRegistration::default()),
+            ..EngineConfig::default()
+        };
+
+        assert!(should_register_lora_updates(&supported, true));
+        assert!(!should_register_lora_updates(&supported, false));
+        assert!(!should_register_lora_updates(&unsupported, true));
+        assert!(!should_register_lora_updates(
+            &EngineConfig::default(),
+            true
+        ));
     }
 
     #[test]

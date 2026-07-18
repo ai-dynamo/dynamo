@@ -126,35 +126,68 @@ impl Default for TransportConfig {
 /// A bare `host:port` gets an `http://` scheme. TLS is not configured for this
 /// private pod-local control channel, so other schemes are rejected.
 pub fn normalize_endpoint(raw: &str) -> Result<String, String> {
-    let trimmed = raw.trim();
-    if trimmed.starts_with("http://") {
-        Ok(trimmed.to_string())
-    } else if trimmed.contains("://") {
-        Err(format!(
-            "unsupported vLLM gRPC endpoint scheme in `{trimmed}`; use pod-local http://"
-        ))
-    } else {
-        Ok(format!("http://{trimmed}"))
-    }
+    normalize_pod_local_http_endpoint(raw, EndpointPath::AuthorityOnly)
+        .map_err(|_| invalid_grpc_endpoint(raw))
 }
 
 pub fn normalize_admin_endpoint(raw: &str) -> Result<String, String> {
-    let normalized = normalize_endpoint(raw)?;
-    let remainder = normalized
-        .strip_prefix("http://")
-        .expect("normalize_endpoint always returns plain HTTP");
-    let (authority, path) = remainder.split_once('/').unwrap_or((remainder, ""));
-    if authority.is_empty()
-        || authority.contains('@')
-        || authority.contains('?')
-        || authority.contains('#')
-        || !matches!(path.trim_end_matches('/'), "" | "v1")
+    normalize_pod_local_http_endpoint(raw, EndpointPath::Admin)
+        .map_err(|_| invalid_admin_endpoint(raw))
+}
+
+#[derive(Clone, Copy)]
+enum EndpointPath {
+    AuthorityOnly,
+    Admin,
+}
+
+fn normalize_pod_local_http_endpoint(raw: &str, endpoint_path: EndpointPath) -> Result<String, ()> {
+    let trimmed = raw.trim();
+    let candidate = if trimmed.contains("://") {
+        trimmed.to_string()
+    } else {
+        format!("http://{trimmed}")
+    };
+    let parsed = url::Url::parse(&candidate).map_err(|_| ())?;
+    let authority_start = candidate.find("://").ok_or(())? + 3;
+    let authority_end = candidate[authority_start..]
+        .find(['/', '?', '#'])
+        .map_or(candidate.len(), |offset| authority_start + offset);
+    let explicit_port = candidate[authority_start..authority_end]
+        .rsplit_once(':')
+        .and_then(|(_, port)| port.parse::<u16>().ok())
+        .filter(|port| *port != 0)
+        .ok_or(())?;
+    let valid_path = match endpoint_path {
+        EndpointPath::AuthorityOnly => matches!(parsed.path(), "" | "/"),
+        EndpointPath::Admin => matches!(parsed.path(), "" | "/" | "/v1" | "/v1/"),
+    };
+    if parsed.scheme() != "http"
+        || parsed.host().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || !valid_path
     {
-        return Err(format!(
-            "invalid vLLM admin endpoint `{raw}`; expected pod-local host:port with optional /v1"
-        ));
+        return Err(());
     }
-    Ok(format!("http://{authority}"))
+    let origin = parsed.origin().ascii_serialization();
+    Ok(if parsed.port().is_some() {
+        origin
+    } else {
+        format!("{origin}:{explicit_port}")
+    })
+}
+
+fn invalid_grpc_endpoint(raw: &str) -> String {
+    format!("invalid vLLM gRPC endpoint `{raw}`; expected pod-local http://host:port with no path")
+}
+
+fn invalid_admin_endpoint(raw: &str) -> String {
+    format!(
+        "invalid vLLM admin endpoint `{raw}`; expected pod-local http://host:port with optional /v1"
+    )
 }
 
 #[cfg(test)]
@@ -177,11 +210,32 @@ mod tests {
             normalize_endpoint("http://host:1").unwrap(),
             "http://host:1"
         );
+        assert_eq!(
+            normalize_endpoint("http://host:80").unwrap(),
+            "http://host:80"
+        );
     }
 
     #[test]
     fn whitespace_is_trimmed() {
         assert_eq!(normalize_endpoint("  host:9  ").unwrap(), "http://host:9");
+    }
+
+    #[test]
+    fn grpc_endpoint_requires_an_authority_with_explicit_port_only() {
+        for invalid in [
+            "host",
+            ":50051",
+            "host:port",
+            "host :50051",
+            "host:0",
+            "http://user@host:50051",
+            "http://host:50051/v1",
+            "http://host:50051?query=1",
+            "http://host:50051#fragment",
+        ] {
+            assert!(normalize_endpoint(invalid).is_err(), "accepted {invalid}");
+        }
     }
 
     #[test]
@@ -191,5 +245,12 @@ mod tests {
             "http://127.0.0.1:8120"
         );
         assert!(normalize_admin_endpoint("https://worker:8120").is_err());
+        assert!(normalize_admin_endpoint("worker").is_err());
+        assert!(normalize_admin_endpoint(":8120").is_err());
+        assert!(normalize_admin_endpoint("worker:port").is_err());
+        assert!(normalize_admin_endpoint("worker :8120").is_err());
+        assert!(normalize_admin_endpoint("http://user@worker:8120").is_err());
+        assert!(normalize_admin_endpoint("http://worker:8120/path").is_err());
+        assert!(normalize_admin_endpoint("http://worker:8120?query=1").is_err());
     }
 }
