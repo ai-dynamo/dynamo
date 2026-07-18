@@ -187,6 +187,25 @@ def _write_result(path: str, result: dict[str, Any]) -> None:
     temporary.replace(destination)
 
 
+def _wait_for_start(
+    args: argparse.Namespace, phases: dict[str, dict[str, int]]
+) -> None:
+    Path(args.ready_file).touch()
+    _timed(
+        phases,
+        "start_barrier_wait",
+        lambda: _wait_for_file(Path(args.release_file)),
+    )
+
+
+def _wait_for_file(path: Path) -> None:
+    deadline = time.monotonic() + 120
+    while not path.exists():
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"VMM probe start barrier not released: {path}")
+        time.sleep(0.001)
+
+
 def exporter(args: argparse.Namespace) -> None:
     distribution = json.loads(Path(args.sizes).read_text(encoding="utf-8"))
     logical_sizes = [
@@ -200,6 +219,7 @@ def exporter(args: argparse.Namespace) -> None:
     Path(args.socket).unlink(missing_ok=True)
     try:
         _timed(phases, "cu_init", _cu_init)
+        _wait_for_start(args, phases)
         prop = _allocation_property()
         wall_start_ns, monotonic_start_ns = _stamp()
         for size in physical_sizes:
@@ -281,6 +301,7 @@ def importer(args: argparse.Namespace) -> None:
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     try:
         _timed(phases, "cuda_set_device", _runtime_set_device)
+        _wait_for_start(args, phases)
         deadline = time.monotonic() + 120
         while True:
             try:
@@ -385,6 +406,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sizes", required=True)
     parser.add_argument("--socket", required=True)
     parser.add_argument("--result", required=True)
+    parser.add_argument("--ready-file", required=True)
+    parser.add_argument("--release-file", required=True)
     return parser
 
 

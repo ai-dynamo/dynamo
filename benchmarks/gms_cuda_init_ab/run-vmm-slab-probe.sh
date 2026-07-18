@@ -41,6 +41,8 @@ for count in "${counts[@]}"; do
     for repeat in $(seq 1 "$REPEATS"); do
         run="$ART/count-$count-repeat-$repeat"
         mkdir "$run"
+        barrier="$run/start-barrier"
+        mkdir "$barrier"
         nvidia-smi --query-gpu=uuid,memory.used --format=csv,noheader,nounits \
             > "$run/memory-before.csv"
         PIDS=()
@@ -53,6 +55,8 @@ for count in "${counts[@]}"; do
                 --physical-count "$count" \
                 --sizes "$SIZES" \
                 --socket "$socket_path" \
+                --ready-file "$barrier/exporter-$device.ready" \
+                --release-file "$barrier/release" \
                 --result "$run/exporter-$device.json" &
             PIDS+=("$!")
         done
@@ -65,9 +69,20 @@ for count in "${counts[@]}"; do
                 --physical-count "$count" \
                 --sizes "$SIZES" \
                 --socket "$socket_path" \
+                --ready-file "$barrier/importer-$device.ready" \
+                --release-file "$barrier/release" \
                 --result "$run/importer-$device.json" &
             PIDS+=("$!")
         done
+        deadline=$((SECONDS + 120))
+        while [[ "$(find "$barrier" -name '*.ready' | wc -l)" -ne 16 ]]; do
+            if (( SECONDS >= deadline )); then
+                echo "timed out waiting for VMM probe start barrier" >&2
+                exit 1
+            fi
+            sleep 0.01
+        done
+        date +%s%N > "$barrier/release"
         status=0
         for pid in "${PIDS[@]}"; do
             wait "$pid" || status=$?
