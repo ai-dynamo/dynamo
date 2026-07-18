@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 # constants in deploy/operator/internal/gms/gms.go.
 ENV_SCRATCH_KV_ENABLED = "DYN_GMS_SCRATCH_KV_ENABLED"
 ENV_VMM_GRANULARITY = "DYN_GMS_VMM_GRANULARITY"
+ENV_SERVER_GPU_UUID_ISOLATION = "DYN_GMS_SERVER_GPU_UUID_ISOLATION"
+ENV_SERVER_DEVICE_UUID = "DYN_GMS_SERVER_DEVICE_UUID"
 
 # Production GMS tags: the per-GPU server child and every engine integration
 # serve exactly these logical memory pools, one UDS socket per (device, tag).
@@ -49,6 +51,12 @@ def invalidate_uuid_cache() -> None:
     _uuid_cache.clear()
 
 
+def get_socket_path_for_uuid(uuid: str, tag: str = "weights") -> str:
+    """Get a GMS socket path from a physical GPU UUID."""
+    socket_dir = os.environ.get("GMS_SOCKET_DIR") or tempfile.gettempdir()
+    return os.path.join(socket_dir, f"gms_{uuid}_{tag}.sock")
+
+
 def get_socket_path(device: int, tag: str = "weights") -> str:
     """Get GMS socket path for the given CUDA device and tag.
 
@@ -73,5 +81,4 @@ def get_socket_path(device: int, tag: str = "weights") -> str:
         finally:
             pynvml.nvmlShutdown()
         _uuid_cache[device] = uuid
-    socket_dir = os.environ.get("GMS_SOCKET_DIR") or tempfile.gettempdir()
-    return os.path.join(socket_dir, f"gms_{uuid}_{tag}.sock")
+    return get_socket_path_for_uuid(uuid, tag)

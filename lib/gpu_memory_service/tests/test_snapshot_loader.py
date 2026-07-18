@@ -70,6 +70,7 @@ def test_list_checkpoint_devices_rejects_mismatched_checkpoints(
 
 def test_load_device_sets_cuda_context_before_storage_client(monkeypatch):
     calls = []
+    monkeypatch.delenv(SNAPSHOT_PROFILE_ENV, raising=False)
 
     class FakeStorageClient:
         def __init__(self, **kwargs):
@@ -116,6 +117,63 @@ def test_load_device_sets_cuda_context_before_storage_client(monkeypatch):
             "clear_existing": True,
         },
     )
+
+
+def test_load_device_profiles_first_cudart_call_and_current_context(
+    monkeypatch,
+    caplog,
+):
+    calls = []
+
+    class FakeStorageClient:
+        def __init__(self, **_kwargs):
+            calls.append("storage_client")
+
+        def load_to_gms(self, *_args, **_kwargs):
+            calls.append("load")
+
+    monkeypatch.setenv(SNAPSHOT_PROFILE_ENV, "1")
+    monkeypatch.setattr(loader, "get_socket_path", lambda device: f"/tmp/gms-{device}")
+    monkeypatch.setattr(loader, "GMSStorageClient", FakeStorageClient)
+    monkeypatch.setattr(
+        loader.cuda_utils,
+        "cuda_runtime_set_device",
+        lambda device: calls.append(("cudaSetDevice", device)),
+    )
+    monkeypatch.setattr(
+        loader.cuda_utils,
+        "cuda_current_context",
+        lambda: calls.append("cuCtxGetCurrent") or 17,
+    )
+    loader._reset_cudart_profile_state()
+
+    with caplog.at_level(logging.INFO):
+        loader._load_device(
+            "/checkpoints/run/versions/1",
+            3,
+            16,
+            "nixl",
+            [],
+            2,
+        )
+
+    assert calls[:3] == [
+        ("cudaSetDevice", 3),
+        "cuCtxGetCurrent",
+        "storage_client",
+    ]
+    payloads = [
+        json.loads(record.getMessage().removeprefix("GMS_SNAPSHOT_PROFILE "))
+        for record in caplog.records
+        if record.getMessage().startswith("GMS_SNAPSHOT_PROFILE ")
+    ]
+    phases = {payload["phase"]: payload for payload in payloads}
+    assert phases["cuda_set_device"]["first_process_cudart_invocation"]
+    assert (
+        phases["first_process_cudart_call"]["semantics"]
+        == "first_claimed_invocation"
+    )
+    assert phases["current_context_established"]["current_context"] == 17
 
 
 def test_snapshot_profile_gating_and_event_schema(monkeypatch, caplog):

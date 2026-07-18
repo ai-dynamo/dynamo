@@ -14,7 +14,9 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -31,6 +33,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+_first_cudart_call_lock = threading.Lock()
+_first_cudart_call_claimed = False
+
+
+def _reset_cudart_profile_state() -> None:
+    global _first_cudart_call_claimed
+    with _first_cudart_call_lock:
+        _first_cudart_call_claimed = False
+
+
+def _claim_first_cudart_call() -> bool:
+    global _first_cudart_call_claimed
+    with _first_cudart_call_lock:
+        first = not _first_cudart_call_claimed
+        _first_cudart_call_claimed = True
+    return first
+
 
 def _load_device(
     checkpoint_dir: str,
@@ -39,6 +58,7 @@ def _load_device(
     transfer_backend: str,
     sharded_ssd_roots: list[str],
     sharded_ssd_queues_per_root: int,
+    cuda_initialization_complete: Callable[[], None] | None = None,
 ) -> None:
     profile = SnapshotProfile(
         "loader",
@@ -61,8 +81,37 @@ def _load_device(
     # Ensure the loader's main per-device thread has a current CUDA context for
     # the final synchronize/unmap/commit path.
     with profile.phase("per_device_load_total"):
-        with profile.phase("cuda_set_device"):
-            cuda_utils.cuda_runtime_set_device(device)
+        try:
+            first_cudart_call = profile.enabled and _claim_first_cudart_call()
+            with profile.phase(
+                "cuda_set_device",
+                api="cudaSetDevice",
+                first_process_cudart_invocation=first_cudart_call,
+            ):
+                if first_cudart_call:
+                    with profile.phase(
+                        "first_process_cudart_call",
+                        api="cudaSetDevice",
+                        semantics="first_claimed_invocation",
+                    ):
+                        cuda_utils.cuda_runtime_set_device(device)
+                else:
+                    cuda_utils.cuda_runtime_set_device(device)
+            if profile.enabled:
+                with profile.phase("current_context_query", api="cuCtxGetCurrent"):
+                    current_context = cuda_utils.cuda_current_context()
+                if current_context == 0:
+                    raise RuntimeError(
+                        f"cudaSetDevice({device}) did not establish a current context"
+                    )
+                with profile.phase(
+                    "current_context_established",
+                    current_context=current_context,
+                ):
+                    pass
+        finally:
+            if cuda_initialization_complete is not None:
+                cuda_initialization_complete()
         with profile.phase("storage_client_construction"):
             client = GMSStorageClient(
                 socket_path=get_socket_path(device),
@@ -188,22 +237,45 @@ def main(argv: list[str] | None = None) -> None:
     with profile.phase("device_and_checkpoint_discovery"):
         devices = _list_checkpoint_devices(checkpoint_dir)
 
+    _reset_cudart_profile_state()
+    initialization_lock = threading.Lock()
+    initialization_remaining = len(devices)
+    initialization_complete = threading.Event()
+
+    def mark_cuda_initialization_complete() -> None:
+        nonlocal initialization_remaining
+        with initialization_lock:
+            initialization_remaining -= 1
+            if initialization_remaining == 0:
+                initialization_complete.set()
+
+    initialization_callback = (
+        mark_cuda_initialization_complete if profile.enabled else None
+    )
     t0 = time.monotonic()
     with profile.phase("all_device_barrier", count=len(devices)):
         with ThreadPoolExecutor(max_workers=len(devices)) as pool:
-            with profile.phase("per_device_thread_scheduling", count=len(devices)):
-                futures = {
-                    pool.submit(
-                        _load_device,
-                        checkpoint_dir,
-                        dev,
-                        max_workers,
-                        transfer_backend,
-                        sharded_ssd_roots,
-                        sharded_ssd_queues_per_root,
-                    ): dev
-                    for dev in devices
-                }
+            with profile.phase(
+                "all_device_cuda_initialization",
+                count=len(devices),
+                semantics="concurrent_envelope",
+            ):
+                with profile.phase("per_device_thread_scheduling", count=len(devices)):
+                    futures = {
+                        pool.submit(
+                            _load_device,
+                            checkpoint_dir,
+                            dev,
+                            max_workers,
+                            transfer_backend,
+                            sharded_ssd_roots,
+                            sharded_ssd_queues_per_root,
+                            initialization_callback,
+                        ): dev
+                        for dev in devices
+                    }
+                if profile.enabled:
+                    initialization_complete.wait()
             for future in as_completed(futures):
                 dev = futures[future]
                 future.result()

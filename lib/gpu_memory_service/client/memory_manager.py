@@ -195,7 +195,7 @@ class GMSClientMemoryManager:
         self._va_preserved = False
         self._last_memory_layout_hash: str = ""
 
-        with self._profile.phase("client_cu_init"):
+        with self._profile.phase("client_cu_init", api="cuInit", explicit=True):
             cuda_ensure_initialized()
         with self._profile.phase("client_allocation_granularity"):
             self.granularity = cumem_get_allocation_granularity(device)

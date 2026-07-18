@@ -361,7 +361,14 @@ class GMSStorageClient:
                 if clear_existing:
                     logger.info("RW connect cleared any previously committed GMS state")
 
-                id_map, targets = self._allocate_restore_targets(mm, manifest)
+                with self._profile.phase(
+                    "restore_target_mapping_envelope",
+                    count=len(manifest.allocations),
+                    byte_count=sum(
+                        allocation.aligned_size for allocation in manifest.allocations
+                    ),
+                ):
+                    id_map, targets = self._allocate_restore_targets(mm, manifest)
                 with self._profile.phase(
                     "payload_restore_total",
                     backend=backend_name,

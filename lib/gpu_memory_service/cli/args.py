@@ -5,10 +5,16 @@
 
 import argparse
 import logging
+import os
 from dataclasses import dataclass
 from typing import Optional
 
-from gpu_memory_service.common.utils import GMS_TAGS, get_socket_path
+from gpu_memory_service.common.utils import (
+    ENV_SERVER_DEVICE_UUID,
+    GMS_TAGS,
+    get_socket_path,
+    get_socket_path_for_uuid,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -84,13 +90,32 @@ def parse_args(argv: Optional[list[str]] = None) -> list[Config]:
     if args.alloc_retry_timeout is not None and args.alloc_retry_timeout <= 0:
         parser.error("--alloc-retry-timeout must be > 0 when set")
 
+    server_device_uuid = os.environ.get(ENV_SERVER_DEVICE_UUID)
+    if server_device_uuid is not None:
+        if not server_device_uuid.startswith("GPU-"):
+            parser.error(f"{ENV_SERVER_DEVICE_UUID} must be a physical GPU UUID")
+        if os.environ.get("CUDA_VISIBLE_DEVICES") != server_device_uuid:
+            parser.error(
+                f"{ENV_SERVER_DEVICE_UUID} must match the isolated "
+                "CUDA_VISIBLE_DEVICES value"
+            )
+        if args.device != 0:
+            parser.error(
+                f"{ENV_SERVER_DEVICE_UUID} requires the isolated CUDA device ordinal 0"
+            )
+
     return [
         Config(
             device=args.device,
             tag=tag,
             # Use UUID-based socket path by default (stable across
             # CUDA_VISIBLE_DEVICES).
-            socket_path=args.socket_path or get_socket_path(args.device, tag),
+            socket_path=args.socket_path
+            or (
+                get_socket_path_for_uuid(server_device_uuid, tag)
+                if server_device_uuid is not None
+                else get_socket_path(args.device, tag)
+            ),
             alloc_retry_interval=args.alloc_retry_interval,
             alloc_retry_timeout=args.alloc_retry_timeout,
             verbose=args.verbose,

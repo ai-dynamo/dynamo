@@ -382,5 +382,7 @@ class GMSRPCServer:
                 self._handle_connection,
                 path=self.socket_path,
             )
+        with self._profile.phase("socket_ready", socket_path=self.socket_path):
+            pass
         logger.info("Server started: %s", self.socket_path)
         await self._server.serve_forever()

@@ -51,6 +51,24 @@ def list_devices() -> list[int]:
     return list(range(count))
 
 
+def list_device_uuids() -> list[str]:
+    """Return the full physical UUID of each GPU visible through NVML."""
+    import pynvml
+
+    pynvml.nvmlInit()
+    try:
+        uuids = []
+        for device in range(pynvml.nvmlDeviceGetCount()):
+            handle = pynvml.nvmlDeviceGetHandleByIndex(device)
+            uuid = pynvml.nvmlDeviceGetUUID(handle)
+            uuids.append(uuid.decode() if isinstance(uuid, bytes) else str(uuid))
+    finally:
+        pynvml.nvmlShutdown()
+    if not uuids:
+        raise SystemExit("no nvidia devices found")
+    return uuids
+
+
 def device_memory_info(device: int) -> tuple[int, int]:
     """Return ``(free_bytes, total_bytes)`` for a CUDA device via NVML."""
     import pynvml
@@ -77,6 +95,13 @@ def cuda_check_result(result: cuda.CUresult, name: str) -> None:
 def cuda_ensure_initialized() -> None:
     (result,) = cuda.cuInit(0)
     cuda_check_result(result, "cuInit")
+
+
+def cuda_current_context() -> int:
+    """Return the calling thread's current CUDA Driver context."""
+    result, context = cuda.cuCtxGetCurrent()
+    cuda_check_result(result, "cuCtxGetCurrent")
+    return int(context)
 
 
 def cumem_get_allocation_granularity(device: int) -> int:

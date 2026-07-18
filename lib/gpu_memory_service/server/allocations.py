@@ -68,12 +68,14 @@ class GMSAllocationManager:
         self._allocations: dict[str, AllocationInfo] = {}
         self._next_layout_slot = 0
         with self._profile.phase("allocation_manager_initialization"):
-            with self._profile.phase("server_cu_init"):
+            with self._profile.phase("server_cu_init", api="cuInit", explicit=True):
                 cuda_ensure_initialized()
             with self._profile.phase("server_allocation_granularity"):
                 self._granularity = cumem_get_allocation_granularity(device)
         self._allocation_retry_interval = allocation_retry_interval
         self._allocation_retry_timeout = allocation_retry_timeout
+        with self._profile.phase("allocation_manager_ready", device=device):
+            pass
         logger.info(
             "GMSAllocationManager initialized: device=%d, granularity=%d, "
             "alloc_retry_interval=%.3f, alloc_retry_timeout=%s",
