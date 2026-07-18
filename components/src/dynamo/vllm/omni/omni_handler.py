@@ -429,6 +429,17 @@ class OmniHandler(BaseOmniHandler):
         Yields:
             Dicts with 'stage_output' and 'formatted_chunk' for output formatting.
         """
+        previous_text = ""
+
+        def update_previous_text(stage_output: Any, current: str) -> str:
+            if getattr(stage_output, "final_output_type", None) == "text" and getattr(
+                stage_output, "request_output", None
+            ):
+                outputs = stage_output.request_output.outputs
+                if outputs:
+                    return outputs[0].text
+            return current
+
         if lora_request is None or self._preload_lora_into_engine():
             # Base model or preloaded adapters: no lock needed
             async for stage_output in self.engine_client.generate(**generate_kwargs):
@@ -439,9 +450,10 @@ class OmniHandler(BaseOmniHandler):
                     fps=inputs.fps,
                     response_format=inputs.response_format,
                     output_format=inputs.output_format,
-                    previous_text="",
+                    previous_text=previous_text,
                     speed=inputs.speed,
                 )
+                previous_text = update_previous_text(stage_output, previous_text)
                 yield {"stage_output": stage_output, "formatted_chunk": chunk}
             return
 
@@ -476,9 +488,10 @@ class OmniHandler(BaseOmniHandler):
                 fps=inputs.fps,
                 response_format=inputs.response_format,
                 output_format=inputs.output_format,
-                previous_text="",
+                previous_text=previous_text,
                 speed=inputs.speed,
             )
+            previous_text = update_previous_text(first_output, previous_text)
             yield {"stage_output": first_output, "formatted_chunk": first_chunk}
 
         # Release lock; stream remaining results
@@ -490,9 +503,10 @@ class OmniHandler(BaseOmniHandler):
                 fps=inputs.fps,
                 response_format=inputs.response_format,
                 output_format=inputs.output_format,
-                previous_text="",
+                previous_text=previous_text,
                 speed=inputs.speed,
             )
+            previous_text = update_previous_text(stage_output, previous_text)
             yield {"stage_output": stage_output, "formatted_chunk": chunk}
 
     async def build_engine_inputs(
