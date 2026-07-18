@@ -16,7 +16,12 @@ SCRIPT=${SCRIPT:-/opt/gms-experiment/vmm-slab-probe.py}
 SIZES=/opt/gms-experiment/allocation-sizes.json
 PIDS=()
 
-mkdir -- "$ART"
+if [[ ! -d "$ART" ]]; then
+    mkdir -- "$ART"
+elif [[ -n "$(find "$ART" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+    echo "refusing non-empty evidence directory: $ART" >&2
+    exit 1
+fi
 
 cleanup() {
     local status=$?
