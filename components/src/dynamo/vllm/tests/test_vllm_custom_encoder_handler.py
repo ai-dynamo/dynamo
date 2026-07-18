@@ -51,7 +51,7 @@ async def test_custom_encoder_handler_returns_adapter_prepared_prompt():
         encode=AsyncMock(return_value=[torch.ones((2, 4), dtype=torch.bfloat16)])
     )
 
-    prepared, error = await handler._assemble_custom_encoder_prompt(
+    prompt, error = await handler._assemble_custom_encoder_prompt(
         {
             "token_ids": [1, 99, 2],
             "multi_modal_data": {
@@ -62,9 +62,9 @@ async def test_custom_encoder_handler_returns_adapter_prepared_prompt():
     )
 
     assert error is None
-    assert prepared is not None
-    assert tuple(prepared.prompt["prompt_embeds"].shape) == (4, 4)
-    assert prepared.prompt["prompt_token_ids"] == [1, 99, 99, 2]
+    assert prompt is not None
+    assert tuple(prompt["prompt_embeds"].shape) == (4, 4)
+    assert prompt["prompt_token_ids"] == [1, 99, 99, 2]
 
 
 async def test_custom_encoder_handler_preserves_string_error_contract():
@@ -74,7 +74,7 @@ async def test_custom_encoder_handler_preserves_string_error_contract():
         encode=AsyncMock(side_effect=RuntimeError("encoder failed"))
     )
 
-    prepared, error = await handler._assemble_custom_encoder_prompt(
+    prompt, error = await handler._assemble_custom_encoder_prompt(
         {
             "token_ids": [99],
             "multi_modal_data": {
@@ -84,6 +84,6 @@ async def test_custom_encoder_handler_preserves_string_error_contract():
         "request-id",
     )
 
-    assert prepared is None
+    assert prompt is None
     assert error is not None
     assert error["finish_reason"] == "error: CustomEncoder failed: encoder failed"

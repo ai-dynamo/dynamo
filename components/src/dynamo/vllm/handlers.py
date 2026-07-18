@@ -90,7 +90,6 @@ from .engine_monitor import VllmEngineMonitor
 from .multimodal_utils.async_vision_encoder import AsyncVisionEncoder
 from .multimodal_utils.custom_encoder_adapter import (
     CustomEncoderAdapter,
-    PreparedCustomEncoderPrompt,
     create_custom_encoder_adapter,
 )
 from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
@@ -2926,7 +2925,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         self,
         request: Dict[str, Any],
         request_id: str,
-    ) -> tuple[PreparedCustomEncoderPrompt | None, Dict[str, Any] | None]:
+    ) -> tuple[EmbedsPrompt | TokensPrompt | None, Dict[str, Any] | None]:
         """Run the in-process CustomEncoder and prepare its engine prompt.
 
         The CustomEncoder consumes image URLs directly and emits artifacts. Returns
@@ -3023,7 +3022,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         mode = cast(DisaggregationMode, self.config.disaggregation_mode)
         is_decode_only = mode == DisaggregationMode.DECODE
         has_mm_data = request.get("multi_modal_data") is not None
-        custom_prompt: PreparedCustomEncoderPrompt | None = None
+        custom_prompt: EmbedsPrompt | TokensPrompt | None = None
 
         if (
             mode == DisaggregationMode.AGGREGATED
@@ -3072,7 +3071,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         prompt: Any
         with _nvtx.annotate("mm_backend:build_prompt", color="yellow"):
             if custom_prompt is not None:
-                prompt = custom_prompt.prompt
+                prompt = custom_prompt
                 error = None
             elif pre_rendered is not None:
                 # pre_rendered is a MultiModalInput dict with "type": "multimodal".

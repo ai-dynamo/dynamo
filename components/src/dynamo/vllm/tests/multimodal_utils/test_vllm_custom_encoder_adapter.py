@@ -47,14 +47,14 @@ def _engine_args(*, enable_prompt_embeds: bool = True):
 def test_text_decoder_selects_linear_adapter_and_builds_final_prompt():
     adapter = create_custom_encoder_adapter(_Backend(), _model_config(), _engine_args())
 
-    prepared = adapter.prepare_prompt(
+    prompt = adapter.prepare_prompt(
         [1, _IMAGE_TOKEN_ID, 2],
         [torch.ones((2, 4), dtype=torch.bfloat16)],
     )
 
-    assert tuple(prepared.prompt["prompt_embeds"].shape) == (4, 4)
-    assert prepared.prompt["prompt_token_ids"] == [1, 99, 99, 2]
-    assert prepared.prompt["prompt_is_token_ids"] == [True, False, False, True]
+    assert tuple(prompt["prompt_embeds"].shape) == (4, 4)
+    assert prompt["prompt_token_ids"] == [1, 99, 99, 2]
+    assert prompt["prompt_is_token_ids"] == [True, False, False, True]
 
 
 def test_linear_adapter_requires_prompt_embeds_flag():

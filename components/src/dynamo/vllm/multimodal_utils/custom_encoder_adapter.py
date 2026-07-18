@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from typing import Any, Sequence
 
 import torch
@@ -14,13 +13,6 @@ from vllm.inputs import EmbedsPrompt, TokensPrompt
 
 from dynamo.vllm.multimodal_utils.embed_assembler import build_mixed_embeds
 from dynamo.vllm.multimodal_utils.vision_encoder_backend import VisionEncoderBackend
-
-
-@dataclass(frozen=True)
-class PreparedCustomEncoderPrompt:
-    """Final vLLM prompt prepared by a decoder-specific adapter."""
-
-    prompt: EmbedsPrompt | TokensPrompt
 
 
 class CustomEncoderAdapter(ABC):
@@ -31,7 +23,7 @@ class CustomEncoderAdapter(ABC):
         self,
         token_ids: list[int],
         encodings: Sequence[torch.Tensor],
-    ) -> PreparedCustomEncoderPrompt:
+    ) -> EmbedsPrompt | TokensPrompt:
         """Validate encoder artifacts and build the final vLLM prompt."""
 
 
@@ -89,7 +81,7 @@ class _LinearEmbedsAdapter(CustomEncoderAdapter):
         self,
         token_ids: list[int],
         encodings: Sequence[torch.Tensor],
-    ) -> PreparedCustomEncoderPrompt:
+    ) -> EmbedsPrompt | TokensPrompt:
         rows = list(encodings)
         for index, tensor in enumerate(rows):
             if not isinstance(tensor, torch.Tensor):
@@ -111,12 +103,10 @@ class _LinearEmbedsAdapter(CustomEncoderAdapter):
         prompt_embeds, prompt_token_ids, prompt_is_token_ids = build_mixed_embeds(
             token_ids, rows, self._image_token_id
         )
-        return PreparedCustomEncoderPrompt(
-            prompt=EmbedsPrompt(
-                prompt_embeds=prompt_embeds,
-                prompt_token_ids=prompt_token_ids,
-                prompt_is_token_ids=prompt_is_token_ids,
-            )
+        return EmbedsPrompt(
+            prompt_embeds=prompt_embeds,
+            prompt_token_ids=prompt_token_ids,
+            prompt_is_token_ids=prompt_is_token_ids,
         )
 
 
