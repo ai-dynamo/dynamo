@@ -158,13 +158,16 @@ def test_assigned_device_uuids_accepts_exact_eight_device_dra_allocation(
     available = [f"GPU-{device}" for device in range(8)]
     monkeypatch.setattr(server, "list_device_uuids", lambda: available)
 
-    assert server._assigned_device_uuids(
-        {
-            "NVIDIA_VISIBLE_DEVICES": "all",
-            "CUDA_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7",
-            ENV_SERVER_EXPECTED_GPU_UUIDS: ",".join(available),
-        }
-    ) == available
+    assert (
+        server._assigned_device_uuids(
+            {
+                "NVIDIA_VISIBLE_DEVICES": "all",
+                "CUDA_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7",
+                ENV_SERVER_EXPECTED_GPU_UUIDS: ",".join(available),
+            }
+        )
+        == available
+    )
 
 
 @pytest.mark.parametrize("nvidia_visibility", ["all", "void"])
@@ -175,12 +178,15 @@ def test_assigned_device_uuids_accepts_declared_all_eight_dra_allocation(
     available = [f"GPU-{device}" for device in range(8)]
     monkeypatch.setattr(server, "list_device_uuids", lambda: available)
 
-    assert server._assigned_device_uuids(
-        {
-            "NVIDIA_VISIBLE_DEVICES": nvidia_visibility,
-            ENV_SERVER_EXPECTED_GPU_UUIDS: ",".join(available),
-        }
-    ) == available
+    assert (
+        server._assigned_device_uuids(
+            {
+                "NVIDIA_VISIBLE_DEVICES": nvidia_visibility,
+                ENV_SERVER_EXPECTED_GPU_UUIDS: ",".join(available),
+            }
+        )
+        == available
+    )
 
 
 def test_assigned_device_uuids_restricts_host_wide_nvml_to_declared_dra_uuids(
@@ -466,9 +472,7 @@ async def test_runner_passes_physical_uuid_to_profiled_feature_off_server(
 
     assert len(servers) == 2
     assert all(server_config["device"] == 1 for server_config in servers)
-    assert all(
-        server_config["physical_uuid"] == "GPU-b" for server_config in servers
-    )
+    assert all(server_config["physical_uuid"] == "GPU-b" for server_config in servers)
 
 
 @pytest.mark.asyncio

@@ -90,9 +90,7 @@ def _assigned_device_uuids(environ: Mapping[str, str]) -> list[str]:
         raise ValueError("UUID-isolated GMS requires full physical GPUs")
     nvidia_visibility = environ.get("NVIDIA_VISIBLE_DEVICES")
     normalized_nvidia = (
-        nvidia_visibility.strip().lower()
-        if nvidia_visibility is not None
-        else None
+        nvidia_visibility.strip().lower() if nvidia_visibility is not None else None
     )
     if normalized_nvidia == "none":
         cuda_visibility = environ.get("CUDA_VISIBLE_DEVICES")
@@ -170,9 +168,7 @@ def _assigned_device_uuids(environ: Mapping[str, str]) -> list[str]:
             cuda_visibility,
         )
 
-    raise ValueError(
-        "GPU allocation is ambiguous without explicit UUID visibility"
-    )
+    raise ValueError("GPU allocation is ambiguous without explicit UUID visibility")
 
 
 def _child_launch(

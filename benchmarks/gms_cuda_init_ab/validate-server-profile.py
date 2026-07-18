@@ -13,8 +13,7 @@ from pathlib import Path
 PROFILE_PREFIX = "GMS_SNAPSHOT_PROFILE "
 PHASES = {"server_cu_init", "allocation_manager_ready", "socket_ready"}
 LAUNCH = re.compile(
-    r"Started GMS device=\d+ physical_uuid=(GPU-[^ ]+) "
-    r"child_device=0 pid=(\d+)"
+    r"Started GMS device=\d+ physical_uuid=(GPU-[^ ]+) " r"child_device=0 pid=(\d+)"
 )
 
 
@@ -74,7 +73,5 @@ def main(log_path: str, expected_path: str, variant: str) -> int:
 
 if __name__ == "__main__":
     if len(sys.argv) != 4 or sys.argv[3] not in {"a", "b"}:
-        raise SystemExit(
-            f"usage: {sys.argv[0]} SERVER_LOG EXPECTED_UUIDS {{a|b}}"
-        )
+        raise SystemExit(f"usage: {sys.argv[0]} SERVER_LOG EXPECTED_UUIDS {{a|b}}")
     raise SystemExit(main(sys.argv[1], sys.argv[2], sys.argv[3]))

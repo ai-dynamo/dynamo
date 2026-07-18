@@ -82,9 +82,7 @@ def _load_device(
     # the final synchronize/unmap/commit path.
     with profile.phase("per_device_load_total"):
         try:
-            first_claimed = (
-                profile.enabled and _claim_first_cuda_set_device_profile()
-            )
+            first_claimed = profile.enabled and _claim_first_cuda_set_device_profile()
             with profile.phase(
                 "cuda_set_device",
                 api="cudaSetDevice",
