@@ -277,6 +277,14 @@ class OmniHandler(BaseOmniHandler):
         OmniDiffusionSamplingParams.lora_request (omni_handler.py:100-102),
         not through this engine method. This engine path handles LLM and
         other stage adapters.
+
+        Concurrency Safety (P1 Race Condition Fix):
+            In-flight generation requests hold the per-adapter lock through
+            the first result via _generate_with_lora_admission_lock().
+            This prevents concurrent unload_lora() from removing the adapter
+            while it is actively being used. The lock pattern mirrors
+            handlers.py:_generate_with_lora_admission_lock for consistency
+            with standard vLLM workers.
         """
         async for response in super().load_lora(request):
             yield response
@@ -286,6 +294,10 @@ class OmniHandler(BaseOmniHandler):
 
         Delegates to BaseWorkerHandler which calls AsyncOmni.remove_lora().
         AsyncOmni supports the vLLM LoRA interface (add_lora/remove_lora).
+
+        Concurrency Safety (P1 Race Condition Fix):
+            See load_lora() for details on the per-adapter lock mechanism
+            that serializes unload_lora() against in-flight generation.
         """
         async for response in super().unload_lora(request):
             yield response
@@ -371,31 +383,16 @@ class OmniHandler(BaseOmniHandler):
         if inputs.lora_request is not None and inputs.sampling_params_list is None:
             generate_kwargs["lora_request"] = inputs.lora_request
 
-        previous_text = ""
-
         async with self._abort_monitor(context, request_id):
             try:
-                async for stage_output in self.engine_client.generate(
-                    **generate_kwargs,
+                async for chunk in self._generate_with_lora_admission_lock(
+                    inputs.lora_request,
+                    generate_kwargs,
+                    inputs,
+                    request_id,
                 ):
-                    chunk = await self.output_formatter.format(
-                        stage_output,
-                        request_id,
-                        request_type=inputs.request_type,
-                        fps=inputs.fps,
-                        response_format=inputs.response_format,
-                        output_format=inputs.output_format,
-                        previous_text=previous_text,
-                        speed=inputs.speed,
-                    )
                     if chunk:
-                        # Track text state for streaming delta
-                        if (
-                            stage_output.final_output_type == "text"
-                            and stage_output.request_output
-                        ):
-                            previous_text = stage_output.request_output.outputs[0].text
-                        yield chunk
+                        yield chunk["formatted_chunk"]
 
             except EngineShutdown:
                 logger.info(f"Request {request_id} aborted due to shutdown")
@@ -403,6 +400,100 @@ class OmniHandler(BaseOmniHandler):
             except Exception as e:
                 logger.error(f"Error during generation for request {request_id}: {e}")
                 yield self._error_chunk(request_id, str(e), inputs.request_type)
+
+    async def _generate_with_lora_admission_lock(
+        self,
+        lora_request: LoRARequest | None,
+        generate_kwargs: Dict[str, Any],
+        inputs: EngineInputs,
+        request_id: str,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Yield engine outputs after atomically admitting a LoRA request.
+
+        For preloaded adapters, AsyncOmni does not lazily activate like vLLM.
+        However, a concurrent unload_lora could race and call remove_lora while
+        this request is in-flight. Holding the per-adapter lock through the first
+        result ensures the adapter cannot be removed mid-operation.
+
+        This mirrors handlers.py:_generate_with_lora_admission_lock pattern:
+        - Hold lock through first result to ensure vLLM admission completes
+        - Re-resolve adapter under lock in case it was unloaded while waiting
+        - Yield remaining results after lock is released
+
+        Args:
+            lora_request: Original LoRA request, or None for base model.
+            generate_kwargs: Arguments to pass to engine_client.generate().
+            inputs: Parsed engine inputs (needed for output formatting).
+            request_id: Request ID for logging.
+
+        Yields:
+            Dicts with 'stage_output' and 'formatted_chunk' for output formatting.
+        """
+        if lora_request is None or self._preload_lora_into_engine():
+            # Base model or preloaded adapters: no lock needed
+            async for stage_output in self.engine_client.generate(**generate_kwargs):
+                chunk = await self.output_formatter.format(
+                    stage_output,
+                    request_id,
+                    request_type=inputs.request_type,
+                    fps=inputs.fps,
+                    response_format=inputs.response_format,
+                    output_format=inputs.output_format,
+                    previous_text="",
+                    speed=inputs.speed,
+                )
+                yield {"stage_output": stage_output, "formatted_chunk": chunk}
+            return
+
+        # Hold lock through first result to prevent concurrent unload
+        lock = self._get_lora_lock(lora_request.lora_name)
+        async with lock:
+            # Re-resolve adapter while holding lock; may have been unloaded/reloaded
+            admitted_lora_request = self._resolve_lora_request(lora_request.lora_name)
+            if admitted_lora_request is None:
+                logger.warning(
+                    "LoRA adapter %s was unloaded before generation; "
+                    "rejecting the request",
+                    lora_request.lora_name,
+                )
+                raise ValueError(
+                    f"unknown model or LoRA adapter: '{lora_request.lora_name}'"
+                )
+
+            # Update generate_kwargs with re-resolved adapter
+            generate_kwargs["lora_request"] = admitted_lora_request
+            generator = self.engine_client.generate(**generate_kwargs)
+            try:
+                first_output = await anext(generator)
+            except StopAsyncIteration:
+                return
+
+            # Format first result while lock is held
+            first_chunk = await self.output_formatter.format(
+                first_output,
+                request_id,
+                request_type=inputs.request_type,
+                fps=inputs.fps,
+                response_format=inputs.response_format,
+                output_format=inputs.output_format,
+                previous_text="",
+                speed=inputs.speed,
+            )
+            yield {"stage_output": first_output, "formatted_chunk": first_chunk}
+
+        # Release lock; stream remaining results
+        async for stage_output in generator:
+            chunk = await self.output_formatter.format(
+                stage_output,
+                request_id,
+                request_type=inputs.request_type,
+                fps=inputs.fps,
+                response_format=inputs.response_format,
+                output_format=inputs.output_format,
+                previous_text="",
+                speed=inputs.speed,
+            )
+            yield {"stage_output": stage_output, "formatted_chunk": chunk}
 
     async def build_engine_inputs(
         self,
