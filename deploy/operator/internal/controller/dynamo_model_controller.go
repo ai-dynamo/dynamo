@@ -78,6 +78,7 @@ type DynamoModelReconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamomodels,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamomodels/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamomodels/finalizers,verbs=update
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch
 // +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
 
@@ -126,6 +127,7 @@ func (r *DynamoModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		model.Status.Endpoints = nil
 		model.Status.TotalEndpoints = 0
 		model.Status.ReadyEndpoints = 0
+		model.Status.LoRAFallbackCoveredEndpoints = 0
 		if err := r.Status().Update(ctx, model); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -137,11 +139,12 @@ func (r *DynamoModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	allEndpoints, probeErr := r.EndpointClient.LoadLoRA(ctx, candidates, model)
 
 	// Determine if we need to requeue based on model type
-	// For LoRA models: requeue if there were probe errors OR if not all endpoints are ready
+	// For LoRA models: requeue if there were probe errors OR if not all endpoints
+	// are directly ready or covered by a capable prefill during a rolling upgrade.
 	// For base models: only requeue if there were probe errors (Ready is expected to be false)
 	hasFailures := probeErr != nil
 	if model.IsLoRA() {
-		hasFailures = hasFailures || countReadyEndpoints(allEndpoints) < len(allEndpoints)
+		hasFailures = hasFailures || countServingEndpoints(allEndpoints) < len(allEndpoints)
 	}
 
 	if probeErr != nil {
@@ -163,18 +166,21 @@ func (r *DynamoModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	model.Status.Endpoints = allEndpoints
 	model.Status.TotalEndpoints = len(allEndpoints)
 	model.Status.ReadyEndpoints = countReadyEndpoints(allEndpoints)
+	model.Status.LoRAFallbackCoveredEndpoints = countLoRAFallbackCoveredEndpoints(allEndpoints)
 
 	// Update conditions based on model type
 	if model.IsLoRA() {
-		// For LoRA models, check readiness - condition is True only when ALL endpoints are ready
-		if model.Status.ReadyEndpoints == model.Status.TotalEndpoints && model.Status.TotalEndpoints > 0 {
+		// For LoRA models, the model is ready only when every endpoint is
+		// directly ready or a legacy prefill is covered by a capable peer. Keep
+		// ReadyEndpoints truthful: it counts only endpoints that serve directly.
+		if countServingEndpoints(allEndpoints) == model.Status.TotalEndpoints && model.Status.TotalEndpoints > 0 {
 			r.updateCondition(model, ConditionTypeEndpointsReady, metav1.ConditionTrue, ReasonAllEndpointsReady,
-				fmt.Sprintf("All %d endpoint(s) are ready", model.Status.TotalEndpoints))
+				fmt.Sprintf("All %d endpoint(s) are ready or covered by a capable prefill", model.Status.TotalEndpoints))
 			r.Recorder.Eventf(model, corev1.EventTypeNormal, "EndpointsReady",
-				"All %d endpoints ready for base model %s", model.Status.TotalEndpoints, model.Spec.BaseModelName)
+				"All %d endpoints ready or fallback-covered for base model %s", model.Status.TotalEndpoints, model.Spec.BaseModelName)
 		} else if model.Status.TotalEndpoints > 0 {
 			r.updateCondition(model, ConditionTypeEndpointsReady, metav1.ConditionFalse, ReasonNotReady,
-				fmt.Sprintf("Found %d ready endpoint(s) out of %d total", model.Status.ReadyEndpoints, model.Status.TotalEndpoints))
+				fmt.Sprintf("Found %d ready endpoint(s) and %d fallback-covered endpoint(s) out of %d total", model.Status.ReadyEndpoints, model.Status.LoRAFallbackCoveredEndpoints, model.Status.TotalEndpoints))
 			r.Recorder.Eventf(model, corev1.EventTypeWarning, "NotReady",
 				"Only %d of %d endpoints ready for base model %s", model.Status.ReadyEndpoints, model.Status.TotalEndpoints, model.Spec.BaseModelName)
 		} else {
@@ -221,6 +227,76 @@ func countReadyEndpoints(endpoints []v1alpha1.EndpointInfo) int {
 		}
 	}
 	return count
+}
+
+// countLoRAFallbackCoveredEndpoints counts legacy prefill endpoints covered by
+// a capable prefill during a rolling upgrade. These are intentionally separate
+// from ready endpoints because they do not serve the adapter themselves.
+func countLoRAFallbackCoveredEndpoints(endpoints []v1alpha1.EndpointInfo) int {
+	count := 0
+	for _, ep := range endpoints {
+		if ep.LoRAFallbackCovered {
+			count++
+		}
+	}
+	return count
+}
+
+// countServingEndpoints counts endpoints ready to serve directly plus legacy
+// prefill endpoints covered by a capable prefill in the same topology.
+func countServingEndpoints(endpoints []v1alpha1.EndpointInfo) int {
+	return countReadyEndpoints(endpoints) + countLoRAFallbackCoveredEndpoints(endpoints)
+}
+
+func withPodIdentity(candidate modelendpoint.Candidate, pod *corev1.Pod) modelendpoint.Candidate {
+	identified := candidate
+	identified.KubernetesReady = false
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodReady {
+			identified.KubernetesReady = condition.Status == corev1.ConditionTrue
+			break
+		}
+	}
+	identified.WorkloadName = ""
+	if graphName := pod.Labels[consts.KubeLabelDynamoGraphDeploymentName]; graphName != "" {
+		identified.GraphDeploymentName = graphName
+	}
+	if componentDeployment := pod.Labels[consts.KubeLabelDynamoSelector]; componentDeployment != "" {
+		identified.WorkloadName = componentDeployment
+	} else {
+		for _, owner := range pod.OwnerReferences {
+			if owner.Controller != nil && *owner.Controller {
+				identified.WorkloadName = owner.Name
+				break
+			}
+		}
+	}
+
+	componentType := pod.Labels[consts.KubeLabelDynamoComponentType]
+	if componentType == consts.ComponentTypeWorker {
+		componentType = pod.Labels[consts.KubeLabelDynamoSubComponentType]
+	}
+	if componentType != consts.ComponentTypePrefill {
+		return identified
+	}
+	for i := range pod.Spec.Containers {
+		container := &pod.Spec.Containers[i]
+		if container.Name != consts.MainContainerName {
+			continue
+		}
+		backend, err := dynamo.DetectBackendFrameworkFromArgs(container.Command, container.Args)
+		if err != nil || backend != dynamo.BackendFrameworkVLLM {
+			return identified
+		}
+		if identified.GraphDeploymentName != "" {
+			identified.LoRAFallbackGroup = "graph:" + identified.GraphDeploymentName
+		} else if identified.WorkloadName != "" {
+			identified.LoRAFallbackGroup = "workload:" + identified.WorkloadName
+		}
+		identified.AllowLoRAManagementUnavailable = identified.LoRAFallbackGroup != ""
+		return identified
+	}
+	return identified
 }
 
 // updateCondition updates or adds a condition to the model's status
@@ -373,6 +449,20 @@ func (r *DynamoModelReconciler) getEndpointCandidates(
 
 	// Extract pod-ready endpoint candidates from all EndpointSlices
 	candidates, serviceNames := modelendpoint.ExtractCandidates(endpointSlices, int32(consts.DynamoSystemPort))
+	if model.IsLoRA() && len(candidates) > 0 {
+		for i := range candidates {
+			pod := &corev1.Pod{}
+			if err := r.Get(ctx, client.ObjectKey{Namespace: model.Namespace, Name: candidates[i].PodName}, pod); err != nil {
+				if k8serrors.IsNotFound(err) {
+					candidates[i].KubernetesReady = false
+					continue
+				}
+				logs.Error(err, "Failed to get endpoint pod for LoRA lifecycle classification", "podName", candidates[i].PodName)
+				return nil, nil, err
+			}
+			candidates[i] = withPodIdentity(candidates[i], pod)
+		}
+	}
 
 	return candidates, serviceNames, nil
 }

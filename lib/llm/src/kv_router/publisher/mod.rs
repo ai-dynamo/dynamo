@@ -13,12 +13,8 @@ use dynamo_kv_router::protocols::*;
 pub use dynamo_kv_router::zmq_wire::create_stored_blocks;
 #[cfg(test)]
 use dynamo_kv_router::zmq_wire::*;
-use dynamo_runtime::config::environment_names::nats as env_nats;
+use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
-use dynamo_runtime::{
-    component::Component,
-    transports::nats::{NatsQueue, Slug},
-};
 
 use crate::kv_router::{
     KV_EVENT_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE, indexer::start_worker_kv_query_endpoint,
@@ -41,7 +37,7 @@ use batching::BatchingState;
 use dedup::EventDedupFilter;
 #[cfg(test)]
 use event_processor::run_event_processor_loop;
-use event_processor::{start_event_processor, start_event_processor_jetstream};
+use event_processor::start_event_processor;
 pub use multimodal_embedding_cache::{
     MultimodalEmbeddingCacheEvent, MultimodalEmbeddingCachePublisher,
     MultimodalEmbeddingCacheUpdate,
@@ -53,21 +49,6 @@ use zmq_listener::start_zmq_listener;
 const MAX_BATCHING_TIMEOUT_MS: u64 = 15_000;
 pub const DEFAULT_BATCHING_TIMEOUT_MS: Option<u64> = None;
 const DEFAULT_MAX_BATCH_BLOCKS: usize = 128;
-
-/// Helper function to create a KV stream name from a component and subject.
-///
-/// Generates a slugified stream name in the format:
-/// `namespace-{namespace}-component-{component}-{subject}`
-fn create_kv_stream_name(component: &Component, subject: &str) -> String {
-    Slug::slugify(&format!(
-        "namespace.{}.component.{}.{}",
-        component.namespace().name(),
-        component.name(),
-        subject
-    ))
-    .to_string()
-    .replace("_", "-")
-}
 
 /// Configure the source of KV events.
 /// Currently, only ZMQ is supported.
@@ -270,60 +251,33 @@ impl KvEventPublisher {
         let cancellation_token_clone = cancellation_token.clone();
         let local_indexer_clone = local_indexer.clone();
 
-        if enable_local_indexer {
-            tracing::info!("Using event plane for KV event publishing (local_indexer mode)");
-            let component_clone = component.clone();
-            component.drt().runtime().secondary().spawn(async move {
-                let event_publisher =
-                    match dynamo_runtime::transports::event_plane::EventPublisher::for_component(
-                        &component_clone,
-                        KV_EVENT_SUBJECT,
-                    )
-                    .await
-                    {
-                        Ok(publisher) => publisher,
-                        Err(e) => {
-                            tracing::error!("Failed to create event publisher: {}", e);
-                            return;
-                        }
-                    };
-
-                start_event_processor(
-                    EventPlanePublisher(event_publisher),
-                    worker_id,
-                    cancellation_token_clone,
-                    rx,
-                    local_indexer_clone,
-                    batching_timeout_ms,
+        tracing::info!("Using event plane for KV event publishing");
+        let component_clone = component.clone();
+        component.drt().runtime().secondary().spawn(async move {
+            let event_publisher =
+                match dynamo_runtime::transports::event_plane::EventPublisher::for_component(
+                    &component_clone,
+                    KV_EVENT_SUBJECT,
                 )
                 .await
-            });
-        } else {
-            let stream_name = create_kv_stream_name(&component, KV_EVENT_SUBJECT);
-            let nats_server = std::env::var(env_nats::NATS_SERVER)
-                .unwrap_or_else(|_| "nats://localhost:4222".to_string());
-            let mut nats_queue = NatsQueue::new_without_consumer(
-                stream_name,
-                nats_server,
-                std::time::Duration::from_secs(60),
-            );
+                {
+                    Ok(publisher) => publisher,
+                    Err(e) => {
+                        tracing::error!("Failed to create event publisher: {}", e);
+                        return;
+                    }
+                };
 
-            component.drt().runtime().secondary().spawn(async move {
-                if let Err(e) = nats_queue.connect().await {
-                    tracing::error!("Failed to connect NatsQueue: {e}");
-                    return;
-                }
-                start_event_processor_jetstream(
-                    nats_queue,
-                    worker_id,
-                    cancellation_token_clone,
-                    rx,
-                    local_indexer_clone,
-                    batching_timeout_ms,
-                )
-                .await
-            });
-        }
+            start_event_processor(
+                EventPlanePublisher(event_publisher),
+                worker_id,
+                cancellation_token_clone,
+                rx,
+                local_indexer_clone,
+                batching_timeout_ms,
+            )
+            .await
+        });
 
         Ok(Self {
             kv_block_size,

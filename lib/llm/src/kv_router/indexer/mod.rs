@@ -21,7 +21,6 @@ pub(crate) use dynamo_kv_router::indexer::TieredMatchDetails;
 #[allow(unused_imports)]
 pub(crate) use dynamo_kv_router::indexer::WireTieredMatchDetails;
 use dynamo_runtime::component::Component;
-use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 mod embedding_cache;
@@ -348,22 +347,6 @@ impl Indexer {
                 }
             }
             Self::None => {}
-        }
-    }
-
-    pub(crate) async fn get_workers(&self) -> Vec<WorkerId> {
-        match self {
-            Self::KvIndexer { primary, .. } => {
-                let (resp_tx, resp_rx) = oneshot::channel();
-                let req = dynamo_kv_router::indexer::GetWorkersRequest { resp: resp_tx };
-                if let Err(e) = primary.get_workers_sender().send(req).await {
-                    tracing::warn!("Failed to send get_workers request: {e}");
-                    return Vec::new();
-                }
-                resp_rx.await.unwrap_or_default()
-            }
-            Self::Concurrent { primary, .. } => primary.get_workers().await,
-            Self::Remote { .. } | Self::None => Vec::new(),
         }
     }
 }

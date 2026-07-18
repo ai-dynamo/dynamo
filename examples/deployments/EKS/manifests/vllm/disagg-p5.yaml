@@ -41,7 +41,7 @@ spec:
           - /bin/bash
           - -c
           - |
-            exec python3 -m dynamo.frontend --router-mode kv --router-reset-states
+            exec python3 -m dynamo.frontend --router-mode kv
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker
