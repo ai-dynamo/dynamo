@@ -6,56 +6,93 @@ SPDX-License-Identifier: Apache-2.0
 # GMS CUDA initialization A/B
 
 This directory contains a narrow, switchable experiment for GMS server CUDA
-initialization. The variants use the same source and workload:
+initialization. Both variants use the same source, root filesystem, retained
+checkpoint, and workload:
 
-- **A:** `DYN_GMS_SERVER_GPU_UUID_ISOLATION=0`. This preserves the prior
-  behavior: one child per GPU, each child receives its physical ordinal in
-  `--device` and inherits the server container's full GPU visibility.
+- **A:** `DYN_GMS_SERVER_GPU_UUID_ISOLATION=0`. This preserves prior behavior:
+  one child per GPU, each child receives its physical ordinal in `--device` and
+  inherits the server container's full GPU visibility.
 - **B:** `DYN_GMS_SERVER_GPU_UUID_ISOLATION=1`. This preserves one
-  allocation-owning OS child per physical GPU, but each child receives exactly
-  its assigned full GPU UUID in `CUDA_VISIBLE_DEVICES` and uses `--device 0`
-  inside that single-device view.
+  allocation-owning OS child per physical GPU, but each fresh-exec child
+  receives one full physical UUID in `CUDA_VISIBLE_DEVICES` and uses
+  `--device 0` inside that one-device view.
 
-The loader remains one process with the same full eight-GPU DRA allocation in
-both variants. The flag is consumed only by
-`gpu_memory_service.cli.server`; setting it in the shared worker image does not
-filter the loader, main worker, or any transfer thread.
+The loader remains one all-visible process with the same eight-GPU DRA
+allocation in both variants. The flag is consumed only by
+`gpu_memory_service.cli.server`; it does not filter the main worker, loader, or
+transfer threads. The experiment does not combine server children, move
+transfers into the server, create a CUDA context in the supervisor, or change
+VMM layout, storage, checkpoint, model, vLLM, FlashInfer, NCCL, or compile-cache
+behavior.
 
-This experiment does not combine GMS children, move transfers into the server,
-create a CUDA context in the supervisor, change VMM layout, or change storage,
-transfer, model, vLLM, FlashInfer, NCCL, or compile-cache settings.
+## Visibility and profile identity
 
-## Source behavior and instrumentation
+The isolated supervisor discovers physical UUIDs through NVML but does not
+assume NVML scope proves allocation scope:
 
-The server supervisor discovers devices through NVML and starts children with
-`subprocess.Popen`. It does not call CUDA before launching them. Every child is
-a fresh Python process.
+- `NVIDIA_VISIBLE_DEVICES=none` resolves to no GPUs.
+- An explicit NVIDIA UUID allocation is authoritative. CUDA UUIDs and ordinals
+  may only select GPUs within that allocation.
+- Numeric visibility without an explicit UUID allocation is rejected.
+- `all` or `void` without authoritative UUIDs is rejected.
+- This node-pinned experiment declares the exact known-good eight-UUID DRA
+  allocation through `DYN_GMS_SERVER_EXPECTED_GPU_UUIDS`. Startup resolves
+  those UUIDs against NVML and fails if any are absent. A host-wide NVML view
+  therefore cannot add GPUs outside the declared allocation.
 
-Before this change, the loader did not explicitly call `cuInit` before loading.
-Its first CUDA call in each per-device loader thread was `cudaSetDevice`. The
-first of those concurrent calls initializes CUDART and the Driver implicitly.
-`cudaSetDevice` remains necessary in every loader thread because the selected
-device and current CUDA context are host-thread state. The later
-synchronize/unmap/commit and transfer paths run from those threads and require
-the assigned device's primary context to be current. Replacing it with Driver
-API calls is intentionally left to a separate experiment.
+The exact ordinal-order UUIDs for
+`cluster-0967a26d-pool-14bee067-prctr-s2877` are:
 
-With `GMS_SNAPSHOT_PROFILE=1`, the images add these timing records:
+```text
+GPU-02ff0cc1-647f-dee7-8365-921738e945a6
+GPU-0d5ad102-eb8f-922a-173e-e91033320e0f
+GPU-9c595f65-4651-0b25-f95c-09a0abd5f5fa
+GPU-4fba7684-5a96-6280-91ff-b41f7484564c
+GPU-3ef7c092-d55c-ca6c-0018-9fc89ed28683
+GPU-32a6c51c-d07d-7513-86b5-813b64e452d2
+GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f
+GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51
+```
 
-- loader: `first_process_cudart_call`, each `cuda_set_device`,
-  `current_context_query`, `current_context_established`, and the concurrent
-  `all_device_cuda_initialization` envelope;
+Every server `SnapshotProfile` record includes the physical UUID, process PID,
+and CUDA child ordinal. In B, `server_cu_init`,
+`allocation_manager_ready`, and `socket_ready` therefore retain
+`device=0` while remaining attributable to one physical GPU and process.
+Launch and readiness logs include the same UUID/PID identity. In A, the profile
+includes each physical ordinal and UUID.
+
+## Timing semantics
+
+Before this experiment, the loader's first CUDA call in each concurrent
+per-device thread was `cudaSetDevice`. That call remains in every loader thread
+because device selection and the current CUDA context are thread state needed
+by later synchronize, unmap, commit, and transfer operations.
+
+With `GMS_SNAPSHOT_PROFILE=1`, the images emit:
+
+- loader: `first_claimed_cuda_set_device`, each `cuda_set_device`,
+  `current_context_query`, `current_context_established`, and
+  `all_device_cuda_initialization`;
 - loader client: the later explicit, normally idempotent `client_cu_init`;
-- server child: explicit `server_cu_init`, `allocation_manager_ready`, and
+- server child: `server_cu_init`, `allocation_manager_ready`, and
   `socket_ready`;
 - restore: `restore_target_mapping_envelope`, whose `wall_start_ns` marks
   mapping start.
 
-`first_process_cudart_call` means the first invocation claimed under the
-profiling lock; concurrent scheduling means it is not asserted to be the first
-call to finish.
+`first_claimed_cuda_set_device` means only that a thread won the profiling
+bookkeeping claim before making its unsynchronized `cudaSetDevice` call. The
+lock is released before CUDA entry. Another thread may enter CUDART first, so
+this phase does **not** identify the first actual CUDART entrant or the thread
+that incurred process initialization. The CUDA calls are intentionally not
+serialized or reordered.
 
-## Known-good workload provenance
+`all_device_cuda_initialization` begins before task submission and ends after
+each profiled thread's `cuCtxGetCurrent` validation. It includes task
+scheduling, all `cudaSetDevice` calls, and current-context queries; it is not a
+pure CUDART duration. The context query is profile-only instrumentation applied
+equally to A and B.
+
+## Known-good workload
 
 `manifests/base/dgd.yaml` is the exact payload copied from:
 
@@ -63,153 +100,264 @@ call to finish.
 gms-profile-evidence-20260717T195352Z/manifests/tep8-profile-dgd-r2.yaml
 ```
 
-Its source payload SHA-256 is
+Its source payload SHA-256, excluding the added three-line SPDX preamble, is
 `13172fe4d83929ba94ab9ff2768e70a77afd7fdb010f1e9cbf6b82a75a067d9e`.
-Only an SPDX header was prepended in this directory.
-
 The overlays preserve:
 
 - DGD `g52-t8-gms-prof-r29604929787-r2` in namespace `schwinns`;
 - node `cluster-0967a26d-pool-14bee067-prctr-s2877`;
 - model `nvidia/GLM-5.2-NVFP4`, TP8, DP1, and EP8;
 - FlashInfer MNNVL all-reduce and `flashinfer_nvlink_one_sided` MoE A2A;
-- NCCL over TCP/socket with the source NCCL environment unchanged;
+- the source TCP/socket NCCL environment;
 - `--gpu-memory-utilization 0.80`;
 - `VLLM_DISABLE_COMPILE_CACHE=1`;
-- PVC `snapshot-pvc`, the seven NVMe roots, and sharded-SSD queue settings;
-- frontend image digest
+- PVC `snapshot-pvc`, seven NVMe roots, and sharded-SSD queue settings;
+- frontend digest
   `sha256:ffc100b5511b5c3f5f73f5edf01e44895b531fcd192aa94761158867c5f17291`;
-- checkpoint CR `checkpoint-57a124961e2a47a2cf9c2712e58a0a2b`,
-  checkpoint ID `57a124961e2a47a2cf9c2712e58a0a2b`, and GMS artifact
+- retained checkpoint `checkpoint-57a124961e2a47a2cf9c2712e58a0a2b`;
+- checkpoint ID `57a124961e2a47a2cf9c2712e58a0a2b`; and
+- GMS artifact
   `/checkpoints/gms/g52-t8-gms-prof-r29604929787-r2/versions/1`.
 
-Both overlays replace the source auto-capture job with the same retained,
-explicit `checkpointRef` and preserve `startupPolicy: WaitForCheckpoint`.
-Consequently, they use the normal DynamoCheckpoint restore path, create no
-checkpoint job, and cannot own or delete the referenced checkpoint. Do not run
-`snapshotctl` for this experiment.
-
-The source restore evidence is under:
+The checkpoint's retained identity is:
 
 ```text
-gms-profile-evidence-20260717T195352Z/capture-r2/restore-profile-r3-parent
+UID:    1fb182f1-1a4c-4c51-aff0-67ab530437ea
+phase:  Ready
+ownerReferences: null
+deletionTimestamp: null
 ```
 
-Its lifecycle record shows:
+Both overlays set worker replicas to zero on apply, use only the normal
+`checkpointRef` restore path with `startupPolicy: WaitForCheckpoint`, and omit
+the checkpoint job. `run-variant.sh` scales the existing worker component to
+one only after preflight and cache eviction. Never run `snapshotctl`, and never
+delete or recreate the retained checkpoint.
 
-- preflight began `2026-07-17T21:52:49.181418925Z`;
-- scale-up patch was sent `2026-07-17T21:53:08.145101754Z`;
-- the worker became ready `2026-07-17T21:53:45.931761605Z`;
-- inference ran from `2026-07-17T21:53:50.154645636Z` through
-  `2026-07-17T21:53:57.085633419Z`;
-- the run completed `2026-07-17T21:55:19.633165811Z`.
+## Final images and provenance
 
-The semantic response is
-`capture-r2/restore-profile-r3-parent/inference/response.json`: HTTP 200,
-`finish_reason=stop`, with a coherent answer. In that baseline, the eight
-server allocation-manager initializations took about 7.87-8.11 seconds, the
-eight first loader-thread `cudaSetDevice` calls took about 6.82-6.90 seconds,
-and all eight devices loaded in 28.83 seconds.
+The exact image source is commit:
 
-The older retained GLM 5.2 TP8/EP8 checkpoint documented in
-`HANDOFF-dynamo-glm52-snapshot-gms-filter-20260713.md` remains untouched:
-`glm52-tep8-gms-ssd-top-29213270567-source-v2`, checkpoint ID
-`dbde5ab07f1ee977`.
+```text
+SOURCE_COMMIT=16380149695c9731c1d82efbd277e3e7fd0e6e96
+```
 
-## Images
+The base image is pinned to:
 
-The images are built from source commit
-`b4b23ff041f92285c8f6ceb19c54a2217a43eb43` on branch
-`experiment/gms-cuda-init-uuid-isolation-20260718`, over the exact known-good
-worker base digest
-`sha256:44ade91e2dc09c9732ea038b9db81bff7b3fcdc7b5a692ab1142d2ee7bde0ca2`.
+```text
+dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:44ade91e2dc09c9732ea038b9db81bff7b3fcdc7b5a692ab1142d2ee7bde0ca2
+```
 
-| Variant | Image |
+| Variant | Final image |
 |---|---|
-| A | `dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-b4b23ff041f9-a@sha256:6d8c8ce078d82b47c33924c60040b813d106176a26565b205f42e55f6cb8224c` |
-| B | `dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-b4b23ff041f9-b@sha256:43dc7c520bd4b019d796623e31c4544bb348ca1acb8282206a39330fa63266bf` |
+| A | `dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-16380149695c-a@sha256:869d40f0b02fa6a74f9db94d9ed6e8ec5d614244dd1e4ea947967ec9aad601fb` |
+| B | `dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-16380149695c-b@sha256:e0905e82bf68480bbc341a84325323eca4d6c9200cbf4ddd4a2509ca14c6d1a4` |
 
-Both images have `org.opencontainers.image.revision=b4b23ff04...`, identical
-root filesystem layers, and byte-identical installed experiment source:
+Both images have 79 identical OCI filesystem layer descriptors and these
+labels:
+
+```text
+org.opencontainers.image.revision=16380149695c9731c1d82efbd277e3e7fd0e6e96
+com.nvidia.dynamo.source-archive-sha256=ed62756a9f9483e703526850186a686d614c4e7a887af4cd1a310180d03d8268
+com.nvidia.dynamo.dockerfile-sha256=c5d72e01a8d660a46c962b928d38cfdf7f0bdf50f7ac8f144fcfce521d9e4ac7
+```
+
+Their OCI config digests differ because A and B intentionally set different
+isolation env/label values:
+
+```text
+A config: sha256:ce7dabf6905c0adca4fca93735d8c5c10a5e9f69f79a370c9af1655f364b8956
+B config: sha256:3e27b63a98513683b783ea7903426a5904373e5a158810dc6faa3c27fcadbc69
+```
+
+Installed source hashes are identical in A and B and match `SOURCE_COMMIT`:
 
 | File | SHA-256 |
 |---|---|
-| `gpu_memory_service/cli/server.py` | `9f7aaf19638e880b51c48bf6b8a8e6182c5cfa8bb14f1b2a5f5d10056fb73517` |
-| `gpu_memory_service/cli/snapshot/loader.py` | `3af0b7f0c6dcd7040933312a385f2ae060a96abc63e7f2fd84fd233eacca7ef6` |
-| `gpu_memory_service/common/utils.py` | `cffe255b930f56725f50b8e6b0bee76fbce49a61f1bbf020ae6218a7f918b5f0` |
-| `gpu_memory_service/common/cuda_utils.py` | `db3d25994173dd584d5a0a04daf6261997263ae5b8c188298d7d15d26f9efa87` |
-| `gpu_memory_service/server/allocations.py` | `fb7f1d947c8391fc5a8140c39f33a90e98329bf52f2ba71d54d6e98942b4f47a` |
+| `cli/server.py` | `7dad76f84e145c0d4f52bd2b4ed2476c6a3f3d4c7bf15237bab977a0d943db8e` |
+| `cli/runner.py` | `18ba0fca9afc6259c305e88017e9c055d7b70824b355170ed3b09f7ca0cef02e` |
+| `cli/snapshot/loader.py` | `e80f438858a6a6d6f901b21b5ebb36bb1ab410e48955c277d92fb3563040a139` |
+| `common/utils.py` | `4f574d19467c8328d4ff1fb01914bac341418b269dde4ff350f91b50dd050fad` |
+| `common/cuda_utils.py` | `db3d25994173dd584d5a0a04daf6261997263ae5b8c188298d7d15d26f9efa87` |
+| `server/allocations.py` | `fb7f1d947c8391fc5a8140c39f33a90e98329bf52f2ba71d54d6e98942b4f47a` |
+| `server/rpc.py` | `c81688e68b1bbd1df2353293b96be3aa81c7343cf6092168855622c5a4c57844` |
 
-The image config and audit label are `0` for A and `1` for B. The operator's
-`EnsureServerSidecar` constructs `gms-server` from the worker main image, while
-the loader is the explicit `gms-loader` container. The overlays therefore
-replace those two worker images. The frontend, snapshot agent, and operator do
-not contain either process and are not rebuilt.
+The operator constructs generated `gms-server` from the worker main image.
+The overlays replace the main and explicit `gms-loader` images; the generated
+server therefore receives the same final digest. Frontend, snapshot-agent, and
+operator images remain unchanged.
 
-To reproduce the builds:
+### Reproduce and inspect
+
+Build only from the pinned commit. The script archives both GMS source and the
+Dockerfile from that commit, so a working-tree Dockerfile cannot drift from the
+revision label:
 
 ```bash
-./benchmarks/gms_cuda_init_ab/build-images.sh
-docker push dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-b4b23ff041f9-a
-docker push dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-b4b23ff041f9-b
+SOURCE_COMMIT=16380149695c9731c1d82efbd277e3e7fd0e6e96 \
+  ./benchmarks/gms_cuda_init_ab/build-images.sh
+
+docker push \
+  dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-16380149695c-a
+docker push \
+  dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-16380149695c-b
 ```
 
-## Tester procedure
-
-The variants use the same DGD name and must run sequentially. Set the context
-explicitly; never change the current context:
+Inspect the live registry digests and compare OCI layers:
 
 ```bash
-export CTX=nv-prd-dgxc.teleport.sh-dynamo-nscale-dev-cluster
-export NS=schwinns
-export DGD=g52-t8-gms-prof-r29604929787-r2
-export CKPT=checkpoint-57a124961e2a47a2cf9c2712e58a0a2b
+docker manifest inspect --verbose \
+  dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-16380149695c-a \
+  > /tmp/gms-init-a.manifest.json
+docker manifest inspect --verbose \
+  dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-16380149695c-b \
+  > /tmp/gms-init-b.manifest.json
+
+jq -r '.Descriptor.digest' /tmp/gms-init-{a,b}.manifest.json
+jq -r '.OCIManifest.layers[].digest' \
+  /tmp/gms-init-a.manifest.json > /tmp/gms-init-a.layers
+jq -r '.OCIManifest.layers[].digest' \
+  /tmp/gms-init-b.manifest.json > /tmp/gms-init-b.layers
+diff -u /tmp/gms-init-a.layers /tmp/gms-init-b.layers
+jq -r '.OCIManifest.config.digest' \
+  /tmp/gms-init-{a,b}.manifest.json
 ```
 
-First confirm the retained checkpoint is still `Ready`, then render and inspect
-both variants:
+Inspect source labels, filesystem diff IDs, and installed hashes:
 
 ```bash
-kubectl --context "$CTX" -n "$NS" get dynamocheckpoint "$CKPT"
+for variant in a b; do
+  image="dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-16380149695c-$variant"
+  docker pull "$image"
+  docker image inspect "$image" |
+    jq '.[0] | {RepoDigests, labels:.Config.Labels, env:.Config.Env,
+      layers:.RootFS.Layers}'
+  docker run --rm --entrypoint python3 "$image" -c '
+import hashlib
+import pathlib
+import gpu_memory_service
+
+root = pathlib.Path(gpu_memory_service.__file__).parent
+files = [
+    "cli/server.py",
+    "cli/runner.py",
+    "cli/snapshot/loader.py",
+    "common/utils.py",
+    "common/cuda_utils.py",
+    "server/allocations.py",
+    "server/rpc.py",
+]
+for name in files:
+    print(hashlib.sha256((root / name).read_bytes()).hexdigest(), name)
+'
+done
+
+git show \
+  16380149695c9731c1d82efbd277e3e7fd0e6e96:benchmarks/gms_cuda_init_ab/Dockerfile |
+  sha256sum
+git archive 16380149695c9731c1d82efbd277e3e7fd0e6e96 \
+  lib/gpu_memory_service | sha256sum
+```
+
+## Deterministic tester procedure
+
+Run A and B sequentially from the repository root. Every cluster operation in
+`run-variant.sh` uses the explicit context
+`nv-prd-dgxc.teleport.sh-dynamo-nscale-dev-cluster` and namespace `schwinns`;
+it never changes the active kube context.
+
+First render and inspect both zero-replica overlays:
+
+```bash
+CTX=nv-prd-dgxc.teleport.sh-dynamo-nscale-dev-cluster
+NS=schwinns
+CKPT=checkpoint-57a124961e2a47a2cf9c2712e58a0a2b
+
+kubectl --context "$CTX" -n "$NS" get dynamocheckpoint "$CKPT" \
+  -o json |
+  jq '{uid:.metadata.uid, ownerReferences:.metadata.ownerReferences,
+    deletionTimestamp:.metadata.deletionTimestamp, phase:.status.phase,
+    checkpointID:.status.checkpointID}'
 kubectl --context "$CTX" -n "$NS" kustomize \
-  benchmarks/gms_cuda_init_ab/manifests/variant-a > /tmp/gms-init-a.yaml
+  benchmarks/gms_cuda_init_ab/manifests/variant-a \
+  > /tmp/gms-init-a.yaml
 kubectl --context "$CTX" -n "$NS" kustomize \
-  benchmarks/gms_cuda_init_ab/manifests/variant-b > /tmp/gms-init-b.yaml
+  benchmarks/gms_cuda_init_ab/manifests/variant-b \
+  > /tmp/gms-init-b.yaml
 diff -u /tmp/gms-init-a.yaml /tmp/gms-init-b.yaml
 ```
 
-The expected rendered diff consists only of two image references and two
-variant annotations. Run A and collect server, loader, snapshot-agent, worker,
-and lifecycle logs before scaling the worker to zero. Then run B with the same
-cache-conditioning and measurement procedure:
+The raw rendered diff must contain only two worker image references and two
+variant annotations. Both rendered worker replica counts must be zero.
+
+Run A:
 
 ```bash
-kubectl --context "$CTX" -n "$NS" apply -k \
-  benchmarks/gms_cuda_init_ab/manifests/variant-a
-
-# Collect A evidence and validate inference before proceeding.
-
-kubectl --context "$CTX" -n "$NS" patch dynamographdeployment "$DGD" \
-  --type=json \
-  -p='[{"op":"replace","path":"/spec/components/1/replicas","value":0}]'
-
-kubectl --context "$CTX" -n "$NS" apply -k \
-  benchmarks/gms_cuda_init_ab/manifests/variant-b
+./benchmarks/gms_cuda_init_ab/run-variant.sh \
+  a evidence/gms-cuda-init-a
 ```
 
-Do not delete/recreate the DGD or checkpoint, do not apply both variants
-concurrently, and do not use `snapshotctl`.
+Do not begin B unless A exits zero. A's teardown waits for all matching DCD and
+Deployment replica specs to reach zero, the old worker pod to disappear, and
+the generated DRA `ResourceClaim` to be released. Then run B:
+
+```bash
+./benchmarks/gms_cuda_init_ab/run-variant.sh \
+  b evidence/gms-cuda-init-b
+```
+
+For each variant, the runner:
+
+1. Verifies checkpoint UID, `Ready` status, checkpoint ID, retained ownership,
+   and absence of a deletion timestamp before apply, before teardown, and after
+   teardown.
+2. Verifies the live s2877 `ResourceSlice` has exactly the expected eight UUIDs
+   and that the worker claim template requests exactly eight
+   `gpu.nvidia.com` devices.
+3. Applies the selected overlay at zero replicas, then confirms no old
+   DCD/Deployment replica, worker pod, or matching DRA claim remains.
+4. Starts/reuses `cache-helper.yaml` on s2877 and streams
+   `gms-fadvise-exact.py` into it. The helper calls
+   `POSIX_FADV_DONTNEED` on exactly these trees:
+   - `/checkpoints/57a124961e2a47a2cf9c2712e58a0a2b/versions/1`
+   - `/checkpoints/gms/g52-t8-gms-prof-r29604929787-r2/versions/1`
+   - the seven
+     `/cache/nvme{2,4,5,6,7,8,9}/schwinns/g52-t8-gms-prof-r29604929787-r2`
+     trees.
+5. Starts timestamped snapshot-agent/operator/container log capture, a 200 ms
+   host sampler, a 200 ms `nvidia-smi` sampler, and one-second pod lifecycle
+   records before scaling the worker to one.
+6. Captures the allocated DRA claim and waits up to 900 seconds for worker
+   readiness.
+7. Verifies the live `main`, `gms-loader`, and generated `gms-server`
+   `imageID` fields all equal the selected registry digest.
+8. Runs `nvidia-smi --query-gpu=uuid` in the loader, requires exactly eight
+   devices, and compares the UUID set with the expected allocation.
+9. Runs the same deterministic chat-completion request after normal
+   `DynamoCheckpoint` restore, requires HTTP 200, `finish_reason=stop`, nonempty
+   output, and coherent references to blue light, atmosphere, and scattering.
+10. Validates every `server_cu_init`, `allocation_manager_ready`, and
+    `socket_ready` profile against the expected physical UUID set and a valid
+    PID. For B it also requires `device=0` and PID agreement with the
+    supervisor's per-UUID launch records.
+11. Validates the snapshot-agent's ordinal-order DRA UUID record, collects all
+    final objects/logs, scales to zero, performs the teardown waits, and writes
+    `SHA256SUMS`.
+
+The helper pod contains no checkpoint lifecycle commands and mounts checkpoint
+and NVMe trees read-only. Do not delete the retained checkpoint. Do not use
+`snapshotctl`.
 
 ## Expected comparison
 
 The primary comparison is A versus B for `server_cu_init`, followed by
 `allocation_manager_ready` and `socket_ready`, per physical GPU and as an
 eight-child wall-clock envelope. B is expected to reduce Driver initialization
-work or contention if full inherited visibility is the cause.
+work or contention if inherited all-GPU visibility is the cause.
 
-The loader's `first_process_cudart_call`, every `cuda_set_device`,
+The loader's `first_claimed_cuda_set_device`, every `cuda_set_device`,
 `current_context_established`, `all_device_cuda_initialization`, and
 `restore_target_mapping_envelope` should remain within run-to-run noise because
-the loader still sees all eight DRA GPUs and its code path is identical. A
-change in loader visibility, device count, transfer time, checkpoint identity,
-or inference output invalidates the comparison.
+the loader sees all eight DRA GPUs and follows the same code path. A change in
+loader visibility, device count, transfer time, checkpoint identity, live image
+digest, UUID attribution, or inference coherence invalidates the comparison.

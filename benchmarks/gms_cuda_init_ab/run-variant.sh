@@ -182,7 +182,7 @@ jq -e '
     .exactly.count == 8 and
     .exactly.deviceClassName == "gpu.nvidia.com"
 ' "$ART/preflight/resourceclaimtemplate.json" >/dev/null
-kubectl --context "$CTX" get resourceslices -o json |
+kubectl --context "$CTX" -n "$NS" get resourceslices -o json |
     jq --arg node "$NODE" '
         [
             .items[] |
