@@ -272,6 +272,7 @@ impl Indexer {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) async fn apply_event(&self, event: RouterEvent) {
         if let Err(error) = self.try_apply_event(event).await {
             tracing::error!(%error, "Failed to enqueue KV event");
@@ -536,12 +537,19 @@ mod tests {
         let reset_rank = WorkerWithDpRank::new(7, 0);
         let retained_rank = WorkerWithDpRank::new(7, 1);
 
-        for storage_tier in [StorageTier::Device, StorageTier::HostPinned] {
+        for dp_rank in [reset_rank.dp_rank, retained_rank.dp_rank] {
             indexer
-                .apply_event(store_event(7, 0, 1, &[], &[41], storage_tier))
+                .apply_event(store_event(7, dp_rank, 1, &[], &[41], StorageTier::Device))
                 .await;
             indexer
-                .apply_event(store_event(7, 1, 1, &[], &[41], storage_tier))
+                .apply_event(store_event(
+                    7,
+                    dp_rank,
+                    2,
+                    &[41],
+                    &[42],
+                    StorageTier::HostPinned,
+                ))
                 .await;
         }
 
@@ -551,7 +559,7 @@ mod tests {
             .unwrap();
 
         let matches = indexer
-            .find_matches_by_tier(vec![LocalBlockHash(41)])
+            .find_matches_by_tier(vec![LocalBlockHash(41), LocalBlockHash(42)])
             .await
             .unwrap();
         assert!(
