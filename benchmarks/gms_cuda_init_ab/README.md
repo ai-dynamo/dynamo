@@ -119,17 +119,17 @@ The older retained GLM 5.2 TP8/EP8 checkpoint documented in
 ## Images
 
 The images are built from source commit
-`3050aba94dd8fbabd026bd4f52ace40403cf8bea` on branch
+`b4b23ff041f92285c8f6ceb19c54a2217a43eb43` on branch
 `experiment/gms-cuda-init-uuid-isolation-20260718`, over the exact known-good
 worker base digest
 `sha256:44ade91e2dc09c9732ea038b9db81bff7b3fcdc7b5a692ab1142d2ee7bde0ca2`.
 
 | Variant | Image |
 |---|---|
-| A | `dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-3050aba94dd8-a@sha256:3ef35ee41743e3b93cabc508722b6fd211015b598b2a828a3d532a58ff4eed01` |
-| B | `dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-3050aba94dd8-b@sha256:e2675f96c6ce3682175abad7f7db7417d05b748400e7ed276b5b76eb80bf46b1` |
+| A | `dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-b4b23ff041f9-a@sha256:6d8c8ce078d82b47c33924c60040b813d106176a26565b205f42e55f6cb8224c` |
+| B | `dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-b4b23ff041f9-b@sha256:43dc7c520bd4b019d796623e31c4544bb348ca1acb8282206a39330fa63266bf` |
 
-Both images have `org.opencontainers.image.revision=3050aba94...`, identical
+Both images have `org.opencontainers.image.revision=b4b23ff04...`, identical
 root filesystem layers, and byte-identical installed experiment source:
 
 | File | SHA-256 |
@@ -137,6 +137,8 @@ root filesystem layers, and byte-identical installed experiment source:
 | `gpu_memory_service/cli/server.py` | `9f7aaf19638e880b51c48bf6b8a8e6182c5cfa8bb14f1b2a5f5d10056fb73517` |
 | `gpu_memory_service/cli/snapshot/loader.py` | `3af0b7f0c6dcd7040933312a385f2ae060a96abc63e7f2fd84fd233eacca7ef6` |
 | `gpu_memory_service/common/utils.py` | `cffe255b930f56725f50b8e6b0bee76fbce49a61f1bbf020ae6218a7f918b5f0` |
+| `gpu_memory_service/common/cuda_utils.py` | `db3d25994173dd584d5a0a04daf6261997263ae5b8c188298d7d15d26f9efa87` |
+| `gpu_memory_service/server/allocations.py` | `fb7f1d947c8391fc5a8140c39f33a90e98329bf52f2ba71d54d6e98942b4f47a` |
 
 The image config and audit label are `0` for A and `1` for B. The operator's
 `EnsureServerSidecar` constructs `gms-server` from the worker main image, while
@@ -148,8 +150,8 @@ To reproduce the builds:
 
 ```bash
 ./benchmarks/gms_cuda_init_ab/build-images.sh
-docker push dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-3050aba94dd8-a
-docker push dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-3050aba94dd8-b
+docker push dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-b4b23ff041f9-a
+docker push dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-b4b23ff041f9-b
 ```
 
 ## Tester procedure
