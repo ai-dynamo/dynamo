@@ -10,6 +10,7 @@ WORKLOAD_DIR="${WORKLOAD_DIR:-$RUN_ROOT/workload}"
 MEASURED_DIR="$RUN_ROOT/measured"
 SMOKE_DIR="$RUN_ROOT/smoke"
 IMAGE_SIZE="${DYN_QWEN2_VL_BENCHMARK_IMAGE_SIZE:-500}"
+UNIQUE_IMAGES="${DYN_QWEN2_VL_BENCHMARK_UNIQUE_IMAGES:-9}"
 GRAPH_IMAGE_SIZE="${IMAGE_SIZE}x${IMAGE_SIZE}"
 
 : "${DYNAMO_BENCHMARK_COMMIT:?set DYNAMO_BENCHMARK_COMMIT}"
@@ -21,7 +22,6 @@ export DYN_QWEN2_VL_GRAPH_IMAGE_SIZES="$GRAPH_IMAGE_SIZE"
 export DYN_QWEN2_VL_PREPROCESS_CONCURRENCY=4
 export DYN_QWEN2_VL_MAX_BATCH_COST=8
 export DYN_QWEN2_VL_PREPROCESS_CACHE_SIZE=0
-export DYN_CUSTOM_ENCODER_QUEUE_WAIT_MS=1
 
 mkdir -p "$WORKLOAD_DIR" "$MEASURED_DIR" "$SMOKE_DIR"
 
@@ -30,11 +30,13 @@ run_workload() {
         python -m examples.custom_encoder.benchmark.safeguard_proxy_workload \
             generate \
             --output-dir "$WORKLOAD_DIR" \
-            --image-size "$IMAGE_SIZE"
+            --image-size "$IMAGE_SIZE" \
+            --unique-images "$UNIQUE_IMAGES"
     fi
     python -m examples.custom_encoder.benchmark.safeguard_proxy_workload \
         validate "$WORKLOAD_DIR" \
-        --image-size "$IMAGE_SIZE"
+        --image-size "$IMAGE_SIZE" \
+        --unique-images "$UNIQUE_IMAGES"
 }
 
 run_graphs() {
