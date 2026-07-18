@@ -382,9 +382,11 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     # Compliance guard: fail the build if any royalty-bearing / HW codec surface
     # leaked into the in-tree ffmpeg. By construction this build is VP9-only, so a
     # match here means a config regression. Check the implementation-carrying
-    # surfaces (encoders/decoders/parsers/bsfs), not -codecs (which lists names
-    # even when no implementation is built).
-    for surface in encoders decoders parsers bsfs; do \
+    # surfaces (encoders/decoders/parsers), not -codecs (lists names even when no
+    # implementation is built) and not -bsfs: bitstream filters (e.g.
+    # aac_adtstoasc, h264_mp4toannexb) only reframe an already-encoded stream, are
+    # pulled in as mov/mp4 muxer dependencies, and carry no codec implementation.
+    for surface in encoders decoders parsers; do \
         if /usr/local/bin/ffmpeg -hide_banner "-${surface}" 2>/dev/null \
              | grep -qiE 'h\.?264|h\.?265|hevc|(^| )aac|nvenc|cuvid|nvdec'; then \
             echo "ERROR: in-tree ffmpeg exposes a disallowed codec via -${surface}" >&2; \
