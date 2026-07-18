@@ -23,6 +23,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Literal
 
+import torch
 import uvloop
 from fastvideo import VideoGenerator
 from fastvideo.api import (
@@ -39,12 +40,7 @@ from fastvideo.api import (
 from pydantic import BaseModel, Field
 
 from dynamo.common.configuration import add_negatable_bool_argument
-from dynamo.llm import (  # type: ignore[attr-defined]
-    ModelInput,
-    ModelType,
-    WorkerType,
-    register_llm,
-)
+from dynamo.llm import ModelInput, ModelType, register_llm  # type: ignore[attr-defined]
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint
 
 logger = logging.getLogger(__name__)
@@ -76,10 +72,19 @@ DEFAULT_GUIDANCE_SCALE = 1.0
 DEFAULT_SEED = None
 DEFAULT_MAX_VIDEO_WIDTH = 4096
 DEFAULT_MAX_VIDEO_HEIGHT = 4096
+# Generous multiples of the largest clips the supported models produce
+# (FastWan2.1: 125 frames, LTX2 FullHD: 121 frames, both at <= 50 steps);
+# they bound how long one request can hold the single-request worker.
+DEFAULT_MAX_NUM_FRAMES = 1024
+DEFAULT_MAX_NUM_INFERENCE_STEPS = 200
 DEFAULT_RESPONSE_FORMAT = "b64_json"
 DEFAULT_OUTPUT_FORMAT = "mp4"
 DEFAULT_OUTPUT_DIR = _default_output_dir()
 DEFAULT_VSA_SPARSITY = 0.8
+# fastvideo-kernel ships its compiled VSA kernels as sm_90a-only cubins and
+# dispatches to a Triton fallback on other architectures; that fallback fails
+# at runtime on pre-Hopper GPUs (e.g. sm86), so gate on Hopper as the floor.
+VSA_MIN_COMPUTE_CAPABILITY = (9, 0)
 ATTENTION_BACKEND_CHOICES = (
     "FLASH_ATTN",
     "TORCH_SDPA",
@@ -242,7 +247,36 @@ class FastVideoBackend:
         os.environ["FASTVIDEO_STAGE_LOGGING"] = "1"
         os.environ["FASTVIDEO_ENABLE_RMSNORM_FP4_PREQUANT"] = "0"
 
+    def _check_attention_backend_support(self) -> None:
+        """Fail fast before weight loading when the GPU cannot run the backend.
+
+        Without this check, FastVideo loads weights and then dies inside its
+        multiprocess worker with an opaque background-process error.
+        """
+        if self.args.attention_backend != "VIDEO_SPARSE_ATTN":
+            return
+        if not torch.cuda.is_available():
+            # No CUDA device to inspect; let FastVideo report its own error.
+            return
+        major, minor = torch.cuda.get_device_capability()
+        if (major, minor) >= VSA_MIN_COMPUTE_CAPABILITY:
+            return
+        min_major, min_minor = VSA_MIN_COMPUTE_CAPABILITY
+        raise RuntimeError(
+            f"Attention backend VIDEO_SPARSE_ATTN requires an NVIDIA GPU with "
+            f"compute capability >= {min_major}.{min_minor}, but "
+            f"'{torch.cuda.get_device_name()}' reports sm{major}{minor}. "
+            f"FastVideo's compiled VSA kernels only target sm90a, and its "
+            f"Triton fallback fails on older architectures. FastWan2.1 "
+            f"checkpoints contain VSA-specific layers (to_gate_compress), so "
+            f"TORCH_SDPA is not a fallback for that model. On older GPUs use "
+            f"an LTX2 model with the SDPA backend instead, e.g. "
+            f"--model FastVideo/LTX2-Distilled-Diffusers "
+            f"--attention-backend TORCH_SDPA."
+        )
+
     async def initialize_model(self) -> None:
+        self._check_attention_backend_support()
         logger.info("Loading VideoGenerator model=%s", self.model_name)
         self.generator = await asyncio.to_thread(
             VideoGenerator.from_config,
@@ -333,6 +367,11 @@ class FastVideoBackend:
 
         if num_frames <= 0:
             raise ValueError("num_frames must be positive")
+        if num_frames > self.args.max_num_frames:
+            raise ValueError(
+                f"Invalid num_frames {num_frames}, exceeds maximum "
+                f"{self.args.max_num_frames}"
+            )
         return num_frames
 
     def _resolve_response_format(self, response_format: str | None) -> str:
@@ -433,17 +472,20 @@ class FastVideoBackend:
         )
         try:
             result = self.generator.generate(generation_request)
+            result = self._coerce_single_result(result)
+            video_path = Path(getattr(result, "video_path", None) or output_path)
+            generation_time = _coerce_optional_float(
+                getattr(result, "generation_time", None)
+            )
+            if not video_path.is_file():
+                raise FileNotFoundError(
+                    f"FastVideo output video not found: {video_path}"
+                )
         except Exception:
+            # Covers post-generate failures too (unexpected result shape,
+            # missing output file), so a staged MP4 never outlives its request.
             self._cleanup_staging_file(output_path, video_id)
             raise
-        result = self._coerce_single_result(result)
-        video_path = Path(getattr(result, "video_path", None) or output_path)
-        generation_time = _coerce_optional_float(
-            getattr(result, "generation_time", None)
-        )
-
-        if not video_path.is_file():
-            raise FileNotFoundError(f"FastVideo output video not found: {video_path}")
         return video_path, generation_time
 
     def _cleanup_staging_file(self, video_path: Path | None, video_id: str) -> None:
@@ -516,6 +558,11 @@ class FastVideoBackend:
             )
             if num_inference_steps <= 0:
                 raise ValueError("num_inference_steps must be positive")
+            if num_inference_steps > self.args.max_num_inference_steps:
+                raise ValueError(
+                    f"Invalid num_inference_steps {num_inference_steps}, exceeds "
+                    f"maximum {self.args.max_num_inference_steps}"
+                )
 
             guidance_scale = (
                 nvext.guidance_scale
@@ -646,7 +693,6 @@ async def _register_model(endpoint, model_name: str) -> None:
             endpoint,
             model_name,
             model_name,
-            worker_type=WorkerType.Aggregated,
         )
         logger.info("Successfully registered model: %s", model_name)
     except Exception as e:
@@ -841,6 +887,18 @@ def _parse_args() -> argparse.Namespace:
         help="Maximum request video height accepted by the worker.",
     )
     parser.add_argument(
+        "--max-num-frames",
+        type=int,
+        default=DEFAULT_MAX_NUM_FRAMES,
+        help="Maximum request num_frames accepted by the worker.",
+    )
+    parser.add_argument(
+        "--max-num-inference-steps",
+        type=int,
+        default=DEFAULT_MAX_NUM_INFERENCE_STEPS,
+        help="Maximum request num_inference_steps accepted by the worker.",
+    )
+    parser.add_argument(
         "--output-dir",
         default=DEFAULT_OUTPUT_DIR,
         help="Directory for generated MP4 staging files.",
@@ -853,6 +911,10 @@ def _parse_args() -> argparse.Namespace:
         parser.error("--max-video-width must be > 0")
     if args.max_video_height <= 0:
         parser.error("--max-video-height must be > 0")
+    if args.max_num_frames <= 0:
+        parser.error("--max-num-frames must be > 0")
+    if args.max_num_inference_steps <= 0:
+        parser.error("--max-num-inference-steps must be > 0")
     return args
 
 

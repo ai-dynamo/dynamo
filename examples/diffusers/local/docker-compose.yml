@@ -9,7 +9,9 @@ x-backend-base: &backend-base
     context: ..
     dockerfile: Dockerfile
   image: dynamo-fastvideo-diffusers:latest
-  restart: on-failure
+  # Bounded so a deterministic startup failure (e.g. the compute-capability
+  # gate on pre-Hopper GPUs) stops instead of crash-looping forever.
+  restart: on-failure:3
   command: python worker.py
   cap_add:
     # SYS_PTRACE lets PyTorch's torch.compile profiler/autotuner
