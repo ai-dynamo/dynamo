@@ -460,6 +460,74 @@ def test_live_image_validation_rejects_wrong_main_or_server_digest(tmp_path, ent
     assert result.returncode != 0
 
 
+def test_ephemeral_port_helper_runs_before_cluster_access_and_returns_valid_port(
+    tmp_path,
+):
+    source = RUNNER_PATH.read_text(encoding="utf-8")
+    functions = source.partition("\nstamp PREFLIGHT_BEGIN")[0]
+    harness = tmp_path / "ephemeral-port-harness.sh"
+    harness.write_text(
+        f"{functions}\ntrap - EXIT INT TERM\nchoose_ephemeral_port\n",
+        encoding="utf-8",
+    )
+    harness.chmod(0o755)
+
+    result = subprocess.run(
+        [harness, "a", tmp_path / "evidence"],
+        cwd=Path(__file__).parents[2],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().isdigit()
+    assert 1 <= int(result.stdout) <= 65535
+    preflight_probe = source.index("choose_ephemeral_port >/dev/null")
+    preflight_start = source.index('stamp PREFLIGHT_BEGIN "variant=${VARIANT^^}"')
+    assert preflight_probe < source.index("validate_checkpoint", preflight_start)
+    assert preflight_probe < source.index(
+        'k get pods --field-selector "spec.nodeName', preflight_start
+    )
+    real_selection = source.index("PORT=$(choose_ephemeral_port)")
+    assert real_selection < source.index("k port-forward", real_selection)
+    assert "python3 -c" not in source
+
+
+@pytest.mark.parametrize("invalid_port", ["not-a-port", "0", "65536", "000001"])
+def test_ephemeral_port_helper_rejects_invalid_python_output(tmp_path, invalid_port):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    python = bin_dir / "python3"
+    python.write_text(
+        f"#!/bin/sh\nprintf '%s\\n' {invalid_port!r}\n",
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    source = RUNNER_PATH.read_text(encoding="utf-8")
+    functions = source.partition("\nstamp PREFLIGHT_BEGIN")[0]
+    harness = tmp_path / "invalid-ephemeral-port-harness.sh"
+    harness.write_text(
+        f"{functions}\ntrap - EXIT INT TERM\nchoose_ephemeral_port\n",
+        encoding="utf-8",
+    )
+    harness.chmod(0o755)
+
+    result = subprocess.run(
+        [harness, "a", tmp_path / "evidence"],
+        cwd=Path(__file__).parents[2],
+        env=os.environ | {"PATH": f"{bin_dir}:{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode != 0
+    assert "invalid ephemeral port returned by Python" in result.stderr
+
+
 def test_runner_rejects_non_empty_evidence_directory(tmp_path):
     stale = tmp_path / "evidence" / "stale.txt"
     stale.parent.mkdir()
@@ -602,6 +670,105 @@ def run_cleanup_harness(tmp_path, patch_failures):
     return result, evidence, state
 
 
+def write_racing_sha256sum(bin_dir, mode):
+    fake_sha256sum = bin_dir / "sha256sum"
+    fake_sha256sum.write_text(
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${{1:-}}" != "-c" && "$*" == *"$RACING_EVIDENCE_FILE"* ]]; then
+    attempts=$(cat "$RACING_ATTEMPTS_FILE")
+    attempts=$((attempts + 1))
+    printf '%s\\n' "$attempts" > "$RACING_ATTEMPTS_FILE"
+    /usr/bin/sha256sum "$@"
+    case {mode!r} in
+        stabilize)
+            if [[ "$attempts" -eq 1 ]]; then
+                printf 'stable\\n' > "$RACING_EVIDENCE_FILE"
+            fi
+            ;;
+        persistent)
+            printf 'change-%s\\n' "$attempts" > "$RACING_EVIDENCE_FILE"
+            ;;
+    esac
+    exit
+fi
+exec /usr/bin/sha256sum "$@"
+""",
+        encoding="utf-8",
+    )
+    fake_sha256sum.chmod(0o755)
+
+
+def run_checksum_race_harness(tmp_path, mode):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_racing_sha256sum(bin_dir, mode)
+
+    runner_source = RUNNER_PATH.read_text(encoding="utf-8")
+    functions = runner_source.partition("\nstamp PREFLIGHT_BEGIN")[0]
+    harness = tmp_path / "checksum-race-harness.sh"
+    harness.write_text(
+        f"""{functions}
+trap - EXIT INT TERM
+printf 'initial\\n' > "$ART/metrics/racing.log"
+finalize_evidence
+""",
+        encoding="utf-8",
+    )
+    harness.chmod(0o755)
+    evidence = tmp_path / "evidence"
+    attempts_file = tmp_path / "checksum-attempts"
+    attempts_file.write_text("0\n", encoding="utf-8")
+    env = os.environ | {
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "RACING_ATTEMPTS_FILE": str(attempts_file),
+        "RACING_EVIDENCE_FILE": str(evidence / "metrics" / "racing.log"),
+    }
+
+    result = subprocess.run(
+        [harness, "a", evidence],
+        cwd=Path(__file__).parents[2],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    return result, evidence, attempts_file
+
+
+def test_checksum_finalization_retries_a_transient_change_until_stable(tmp_path):
+    result, evidence, attempts_file = run_checksum_race_harness(tmp_path, "stabilize")
+
+    assert result.returncode == 0, result.stderr
+    assert int(attempts_file.read_text(encoding="utf-8")) >= 3
+    assert "files changed during first snapshot" in result.stderr
+    manifest = evidence / "SHA256SUMS"
+    verification = subprocess.run(
+        ["sha256sum", "-c", manifest],
+        cwd=Path(__file__).parents[2],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert verification.returncode == 0, verification.stderr
+    assert (evidence / "metrics" / "racing.log").read_text(
+        encoding="utf-8"
+    ) == "stable\n"
+    assert not list(tmp_path.glob("evidence.SHA256SUMS.*.tmp"))
+
+
+def test_checksum_finalization_rejects_persistently_changing_evidence(tmp_path):
+    result, evidence, attempts_file = run_checksum_race_harness(tmp_path, "persistent")
+
+    assert result.returncode != 0
+    assert int(attempts_file.read_text(encoding="utf-8")) == 3
+    assert "evidence did not stabilize after 3 attempts" in result.stderr
+    assert not (evidence / "SHA256SUMS").exists()
+    assert not list(tmp_path.glob("evidence.SHA256SUMS.*.tmp"))
+
+
 def test_cleanup_patch_failure_does_not_confirm_or_finalize(tmp_path):
     result, evidence, state = run_cleanup_harness(tmp_path, patch_failures=3)
 
@@ -712,9 +879,7 @@ def test_runner_owns_cleanup_before_scale_up_and_finalizes_last():
     cleanup_owned = source.index("CLEANUP_OWNED=1")
     assert cleanup_owned < scale_up
     assert source.rfind("ZERO_CONFIRMED=0", 0, scale_up) > cleanup_owned
-    assert source.index("stamp RUNNER_EXIT") < source.index(
-        "finalize_evidence || status=1"
-    )
+    assert source.index("stamp RUNNER_EXIT") < source.index("if ! finalize_evidence")
     assert source.index("if ! stop_background") < source.index("stamp RUNNER_EXIT")
     assert source.index("stamp RUN_COMPLETE") > source.index(
         "capture_objects post-teardown"

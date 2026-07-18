@@ -35,6 +35,7 @@ MAIN_IMAGE=dynamoci.azurecr.io/ai-dynamo/dynamo:760e55e21e14f76d7c204920f00ea914
 MAIN_DIGEST=sha256:44ade91e2dc09c9732ea038b9db81bff7b3fcdc7b5a692ab1142d2ee7bde0ca2
 TIMES="$ART/timestamps.tsv"
 PIDS=()
+TRACKED_PIDS=()
 WORKER_POD=
 CLAIM=
 CLEANUP_OWNED=0
@@ -118,6 +119,28 @@ stamp() {
 
 k() {
     kubectl --context "$CTX" -n "$NS" "$@"
+}
+
+choose_ephemeral_port() {
+    local port
+    if ! port=$(
+        python3 - <<'PY'
+import socket
+
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+    listener.bind(("127.0.0.1", 0))
+    print(listener.getsockname()[1])
+PY
+    ); then
+        echo "failed to ask the local kernel for an ephemeral port" >&2
+        return 1
+    fi
+    if [[ ! "$port" =~ ^[0-9]+$ ]] || ((${#port} > 5)) ||
+        ((10#$port < 1 || 10#$port > 65535)); then
+        echo "invalid ephemeral port returned by Python: $port" >&2
+        return 1
+    fi
+    printf '%s\n' "$port"
 }
 
 descendant_pids() {
@@ -291,10 +314,24 @@ scale_down() {
     return 1
 }
 
+write_evidence_checksums() {
+    local destination=$1
+    find "$ART" -type f ! -path "$ART/SHA256SUMS" -print0 |
+        sort -z |
+        xargs -0 --no-run-if-empty sha256sum > "$destination"
+}
+
 finalize_evidence() {
-    local sums="$ART/.SHA256SUMS.tmp"
+    local attempt
+    local first="${ART}.SHA256SUMS.$$.first.tmp"
+    local second="${ART}.SHA256SUMS.$$.second.tmp"
+    local max_attempts=3
     if [[ -e "$ART/SHA256SUMS" ]]; then
-        echo "refusing to replace existing checksum manifest" >&2
+        echo "evidence finalization failed: refusing to replace existing checksum manifest" >&2
+        return 1
+    fi
+    if ((${#PIDS[@]} != 0 || ${#TRACKED_PIDS[@]} != 0)); then
+        echo "evidence finalization failed: tracked background writers are not stopped" >&2
         return 1
     fi
     if ! sha256sum \
@@ -302,24 +339,50 @@ finalize_evidence() {
         "$EXP/gms-host-sampler.sh" \
         "$EXP/validate-server-profile.py" \
         > "$ART/helper-checksums.txt"; then
+        echo "evidence finalization failed: unable to checksum runner helpers" >&2
         return 1
     fi
-    if ! find "$ART" -type f \
-        ! -path "$ART/SHA256SUMS" ! -path "$sums" -print0 |
-        sort -z | xargs -0 --no-run-if-empty sha256sum > "$sums"; then
-        rm -f "$sums"
-        return 1
-    fi
-    if [[ ! -s "$sums" ]]; then
-        echo "no evidence files found for checksum manifest" >&2
-        rm -f "$sums"
-        return 1
-    fi
-    if ! sha256sum -c "$sums" >/dev/null; then
-        rm -f "$sums"
-        return 1
-    fi
-    mv -- "$sums" "$ART/SHA256SUMS"
+    for attempt in $(seq 1 "$max_attempts"); do
+        rm -f -- "$first" "$second"
+        if ! write_evidence_checksums "$first"; then
+            echo "evidence checksum attempt $attempt/$max_attempts: generation failed" >&2
+            continue
+        fi
+        if [[ ! -s "$first" ]]; then
+            echo "evidence checksum attempt $attempt/$max_attempts: no evidence files found" >&2
+            continue
+        fi
+        if ! sha256sum -c "$first" >/dev/null; then
+            echo "evidence checksum attempt $attempt/$max_attempts: files changed during first snapshot" >&2
+            continue
+        fi
+        if ! write_evidence_checksums "$second"; then
+            echo "evidence checksum attempt $attempt/$max_attempts: second generation failed" >&2
+            continue
+        fi
+        if ! sha256sum -c "$second" >/dev/null; then
+            echo "evidence checksum attempt $attempt/$max_attempts: files changed during second snapshot" >&2
+            continue
+        fi
+        if ! cmp -s -- "$first" "$second"; then
+            echo "evidence checksum attempt $attempt/$max_attempts: file set or content did not stabilize" >&2
+            continue
+        fi
+        if ! sha256sum -c "$second" >/dev/null; then
+            echo "evidence checksum attempt $attempt/$max_attempts: final verification failed" >&2
+            continue
+        fi
+        rm -f -- "$first"
+        if ! mv -- "$second" "$ART/SHA256SUMS"; then
+            echo "evidence finalization failed: unable to publish stable checksum manifest" >&2
+            rm -f -- "$second"
+            return 1
+        fi
+        return 0
+    done
+    rm -f -- "$first" "$second"
+    echo "evidence finalization failed: evidence did not stabilize after $max_attempts attempts" >&2
+    return 1
 }
 
 cleanup() {
@@ -338,7 +401,12 @@ cleanup() {
     fi
     stamp RUNNER_EXIT "status=$status"
     if [[ "$cleanup_complete" -eq 1 ]]; then
-        finalize_evidence || status=1
+        if ! finalize_evidence; then
+            echo "SHA256SUMS was not published for evidence directory: $ART" >&2
+            status=1
+        fi
+    else
+        echo "evidence finalization skipped because cleanup did not stop all tracked writers and confirm zero state: $ART" >&2
     fi
     exit "$status"
 }
@@ -480,9 +548,11 @@ validate_live_images() {
 }
 
 stamp PREFLIGHT_BEGIN "variant=${VARIANT^^}"
-for command in kubectl jq yq curl pgrep; do
+for command in kubectl jq yq curl pgrep python3 sha256sum cmp; do
     command -v "$command" >/dev/null
 done
+choose_ephemeral_port >/dev/null
+stamp LOCAL_EPHEMERAL_PORT_SELECTION_VALIDATED
 validate_checkpoint "$ART/preflight/checkpoint.json"
 k get pods --field-selector "spec.nodeName=$NODE" -o wide \
     > "$ART/preflight/node-pods.txt"
@@ -753,10 +823,7 @@ diff -u \
     <(sort "$ART/preflight/loader-uuids.txt")
 stamp LOADER_VISIBILITY_VALIDATED "count=8"
 
-PORT=$(
-    python3 -c \
-        'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0); print(s.getsockname()[1]); s.close()'
-)
+PORT=$(choose_ephemeral_port)
 k port-forward --address 127.0.0.1 "service/$FRONT" "$PORT:8000" \
     > "$ART/inference/port-forward.log" 2>&1 &
 PIDS+=("$!")
