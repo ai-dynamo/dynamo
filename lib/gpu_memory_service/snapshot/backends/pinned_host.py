@@ -51,11 +51,20 @@ class PinnedCopySlot:
         size: int = PINNED_COPY_CHUNK_SIZE,
         *,
         profile: SnapshotProfile | None = None,
+        cuda_operations: Any = None,
         **profile_fields: Any,
     ) -> None:
         size = int(size)
         self._profile = profile or SnapshotProfile("loader", enabled=False)
         self._profile_fields = profile_fields
+        self._cuda = (
+            cuda_utils.RUNTIME_CUDA_TRANSFER_OPERATIONS
+            if cuda_operations is None
+            else cuda_operations
+        )
+        self._cuda_profile_fields = (
+            {"cuda_api": self._cuda.api} if self._cuda.api == "driver" else {}
+        )
         with self._profile.aggregate(
             "pinned_slot_allocation",
             byte_count=size,
@@ -74,23 +83,26 @@ class PinnedCopySlot:
         try:
             with self._profile.aggregate(
                 "cuda_stream_create",
+                **self._cuda_profile_fields,
                 **self._profile_fields,
             ):
-                self.stream = cuda_utils.cuda_stream_create_nonblocking()
+                self.stream = self._cuda.stream_create_nonblocking()
             if self._profile.enabled:
                 with self._profile.aggregate(
                     "cuda_event_create",
                     count=2,
+                    **self._cuda_profile_fields,
                     **self._profile_fields,
                 ):
-                    self._start_event = cuda_utils.cuda_event_create()
-                    self._end_event = cuda_utils.cuda_event_create()
+                    self._start_event = self._cuda.event_create()
+                    self._end_event = self._cuda.event_create()
             with self._profile.aggregate(
                 "cuda_host_register",
                 byte_count=size,
+                **self._cuda_profile_fields,
                 **self._profile_fields,
             ):
-                cuda_utils.cuda_host_register(self.ptr, size)
+                self._cuda.host_register(self.ptr, size)
             self._registered = True
         except Exception:
             try:
@@ -101,29 +113,25 @@ class PinnedCopySlot:
 
     def copy_to_device_async(self, dst_ptr: int, size: int) -> None:
         if not self._profile.enabled:
-            cuda_utils.cuda_memcpy_h2d_async(dst_ptr, self.ptr, size, self.stream)
+            self._cuda.memcpy_h2d_async(dst_ptr, self.ptr, size, self.stream)
             self.busy = True
             return
         self._enqueue_copy(
             "h2d",
             size,
-            lambda: cuda_utils.cuda_memcpy_h2d_async(
-                dst_ptr, self.ptr, size, self.stream
-            ),
+            lambda: self._cuda.memcpy_h2d_async(dst_ptr, self.ptr, size, self.stream),
         )
         self.busy = True
 
     def copy_from_device_async(self, src_ptr: int, size: int) -> None:
         if not self._profile.enabled:
-            cuda_utils.cuda_memcpy_d2h_async(self.ptr, src_ptr, size, self.stream)
+            self._cuda.memcpy_d2h_async(self.ptr, src_ptr, size, self.stream)
             self.busy = True
             return
         self._enqueue_copy(
             "d2h",
             size,
-            lambda: cuda_utils.cuda_memcpy_d2h_async(
-                self.ptr, src_ptr, size, self.stream
-            ),
+            lambda: self._cuda.memcpy_d2h_async(self.ptr, src_ptr, size, self.stream),
         )
         self.busy = True
 
@@ -142,27 +150,27 @@ class PinnedCopySlot:
             **self._profile_fields,
         ):
             if self._start_event is not None:
-                cuda_utils.cuda_event_record(self._start_event, self.stream)
+                self._cuda.event_record(self._start_event, self.stream)
             copy()
             self.busy = True
             if self._end_event is not None:
-                cuda_utils.cuda_event_record(self._end_event, self.stream)
+                self._cuda.event_record(self._end_event, self.stream)
 
     def wait(self) -> None:
         if not self.busy:
             return
         if not self._profile.enabled:
-            cuda_utils.cuda_stream_synchronize(self.stream)
+            self._cuda.stream_synchronize(self.stream)
             self.busy = False
             return
         with self._profile.aggregate(
             "cuda_stream_wait_cpu",
             **self._profile_fields,
         ):
-            cuda_utils.cuda_stream_synchronize(self.stream)
+            self._cuda.stream_synchronize(self.stream)
         if self._end_event is not None:
             wall_end_ns = time.time_ns()
-            duration_ns = cuda_utils.cuda_event_elapsed_ns(
+            duration_ns = self._cuda.event_elapsed_ns(
                 self._start_event,
                 self._end_event,
             )
@@ -187,9 +195,10 @@ class PinnedCopySlot:
             try:
                 with self._profile.aggregate(
                     "cuda_event_destroy",
+                    **self._cuda_profile_fields,
                     **self._profile_fields,
                 ):
-                    cuda_utils.cuda_event_destroy(event)
+                    self._cuda.event_destroy(event)
             except Exception as exc:  # noqa: BLE001
                 if first_error is None:
                     first_error = exc
@@ -199,9 +208,10 @@ class PinnedCopySlot:
             try:
                 with self._profile.aggregate(
                     "cuda_stream_destroy",
+                    **self._cuda_profile_fields,
                     **self._profile_fields,
                 ):
-                    cuda_utils.cuda_stream_destroy(self.stream)
+                    self._cuda.stream_destroy(self.stream)
             except Exception as exc:  # noqa: BLE001
                 if first_error is None:
                     first_error = exc
@@ -222,9 +232,10 @@ class PinnedCopySlot:
             if self._registered:
                 with self._profile.aggregate(
                     "cuda_host_unregister",
+                    **self._cuda_profile_fields,
                     **self._profile_fields,
                 ):
-                    cuda_utils.cuda_host_unregister(self.ptr)
+                    self._cuda.host_unregister(self.ptr)
                 self._registered = False
         except Exception as exc:  # noqa: BLE001
             if error is None:
@@ -260,6 +271,7 @@ def make_pinned_copy_slots(
     count: int,
     *,
     profile: SnapshotProfile | None = None,
+    cuda_operations: Any = None,
     **profile_fields: Any,
 ) -> List[PinnedCopySlot]:
     slots: List[PinnedCopySlot] = []
@@ -268,6 +280,7 @@ def make_pinned_copy_slots(
             slots.append(
                 PinnedCopySlot(
                     profile=profile,
+                    cuda_operations=cuda_operations,
                     **profile_fields,
                 )
             )

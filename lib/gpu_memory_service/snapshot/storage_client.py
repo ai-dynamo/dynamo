@@ -52,6 +52,7 @@ class GMSStorageClient:
         sharded_ssd_queues_per_root: int = 2,
         posix_backend_params: Optional[Mapping[str, str]] = None,
         profile: SnapshotProfile | None = None,
+        cuda_operations: Any = None,
     ) -> None:
         self.output_dir = output_dir
         self.device = device
@@ -70,6 +71,7 @@ class GMSStorageClient:
             enabled=False,
             device=device,
         )
+        self._cuda_operations = cuda_operations
         self._sharded_ssd_queues_per_root = int(sharded_ssd_queues_per_root)
         if self._sharded_ssd_queues_per_root <= 0:
             raise ValueError("sharded_ssd_queues_per_root must be positive")
@@ -92,9 +94,11 @@ class GMSStorageClient:
                 "output_dir must be set to call save(); pass it to GMSStorageClient()"
             )
         with self._profile.phase("checkpoint_output_preparation"):
-            output_dir, shard_dirs, use_absolute_shard_paths = (
-                self._prepare_output_dir()
-            )
+            (
+                output_dir,
+                shard_dirs,
+                use_absolute_shard_paths,
+            ) = self._prepare_output_dir()
 
         with self._profile.phase("client_memory_manager_construction"):
             mm = GMSClientMemoryManager(
@@ -325,6 +329,7 @@ class GMSStorageClient:
                         ),
                         "posix_backend_params": self._posix_backend_params,
                         "profile": self._profile,
+                        "cuda_operations": self._cuda_operations,
                     },
                 ),
             )
@@ -355,6 +360,7 @@ class GMSStorageClient:
                     self._socket_path,
                     device=self.device,
                     profile=self._profile,
+                    cuda_initialized=self._cuda_operations is not None,
                 )
             with mm:
                 mm.connect(RequestedLockType.RW, timeout_ms=self._timeout_ms)

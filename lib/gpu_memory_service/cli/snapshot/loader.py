@@ -33,6 +33,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+SHARDED_SSD_CUDA_MODE_ENV = "DYN_GMS_SHARDED_SSD_CUDA_MODE"
+CUDA_MODE_RUNTIME = "runtime"
+CUDA_MODE_DRIVER = "driver"
+
 _first_cuda_set_device_claim_lock = threading.Lock()
 _first_cuda_set_device_claimed = False
 
@@ -59,6 +63,10 @@ def _load_device(
     sharded_ssd_roots: list[str],
     sharded_ssd_queues_per_root: int,
     cuda_initialization_complete: Callable[[], None] | None = None,
+    *,
+    sharded_ssd_cuda_mode: str = CUDA_MODE_RUNTIME,
+    primary_context_retain_complete: Callable[[], None] | None = None,
+    driver_process: cuda_utils.DriverCudaProcess | None = None,
 ) -> None:
     profile = SnapshotProfile(
         "loader",
@@ -81,32 +89,66 @@ def _load_device(
     # Ensure the loader's main per-device thread has a current CUDA context for
     # the final synchronize/unmap/commit path.
     with profile.phase("per_device_load_total"):
+        cuda_operations = None
         try:
-            first_claimed = profile.enabled and _claim_first_cuda_set_device_profile()
-            with profile.phase(
-                "cuda_set_device",
-                api="cudaSetDevice",
-                first_claimed_for_process_profile=first_claimed,
-            ):
-                if first_claimed:
-                    with profile.phase(
-                        "first_claimed_cuda_set_device",
-                        api="cudaSetDevice",
-                        semantics="bookkeeping_claim_before_unsynchronized_call",
-                    ):
+            if sharded_ssd_cuda_mode == CUDA_MODE_RUNTIME:
+                first_claimed = (
+                    profile.enabled and _claim_first_cuda_set_device_profile()
+                )
+                with profile.phase(
+                    "cuda_set_device",
+                    api="cudaSetDevice",
+                    first_claimed_for_process_profile=first_claimed,
+                ):
+                    if first_claimed:
+                        with profile.phase(
+                            "first_claimed_cuda_set_device",
+                            api="cudaSetDevice",
+                            semantics="bookkeeping_claim_before_unsynchronized_call",
+                        ):
+                            cuda_utils.cuda_runtime_set_device(device)
+                    else:
                         cuda_utils.cuda_runtime_set_device(device)
-                else:
-                    cuda_utils.cuda_runtime_set_device(device)
-            if profile.enabled:
-                with profile.phase("current_context_query", api="cuCtxGetCurrent"):
-                    current_context = cuda_utils.cuda_current_context()
-                if current_context == 0:
-                    raise RuntimeError(
-                        f"cudaSetDevice({device}) did not establish a current context"
-                    )
+                if profile.enabled:
+                    with profile.phase("current_context_query", api="cuCtxGetCurrent"):
+                        current_context = cuda_utils.cuda_current_context()
+                    if current_context == 0:
+                        raise RuntimeError(
+                            f"cudaSetDevice({device}) did not establish a current "
+                            "context"
+                        )
+                    with profile.phase(
+                        "current_context_established",
+                        current_context=current_context,
+                    ):
+                        pass
+            else:
+                if driver_process is None:
+                    raise RuntimeError("Driver CUDA mode requires a DriverCudaProcess")
+                try:
+                    with profile.phase("cu_device_get", api="cuDeviceGet"):
+                        cuda_device = driver_process.device_get(device)
+                    with profile.phase(
+                        "primary_context_retain",
+                        api="cuDevicePrimaryCtxRetain",
+                    ):
+                        driver_process.primary_context_retain(
+                            device,
+                            cuda_device,
+                        )
+                finally:
+                    if primary_context_retain_complete is not None:
+                        primary_context_retain_complete()
+                cuda_operations = driver_process.operations(device, profile)
+                with profile.phase(
+                    "loader_cu_ctx_set_current",
+                    api="cuCtxSetCurrent",
+                ):
+                    current_context = cuda_operations.set_current_device(device)
                 with profile.phase(
                     "current_context_established",
                     current_context=current_context,
+                    api="cuCtxSetCurrent",
                 ):
                     pass
         finally:
@@ -120,6 +162,7 @@ def _load_device(
                 sharded_ssd_roots=sharded_ssd_roots,
                 sharded_ssd_queues_per_root=sharded_ssd_queues_per_root,
                 profile=profile,
+                cuda_operations=cuda_operations,
             )
         client.load_to_gms(
             input_dir,
@@ -165,6 +208,15 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=2,
         help="Number of independent sharded-ssd restore queues per SSD root.",
+    )
+    parser.add_argument(
+        "--sharded-ssd-cuda-mode",
+        choices=[CUDA_MODE_RUNTIME, CUDA_MODE_DRIVER],
+        default=os.environ.get(SHARDED_SSD_CUDA_MODE_ENV, CUDA_MODE_RUNTIME),
+        help=(
+            "CUDA API used only by the sharded-SSD snapshot loader staging path. "
+            f"May also be set with {SHARDED_SSD_CUDA_MODE_ENV}."
+        ),
     )
     return parser
 
@@ -221,18 +273,36 @@ def main(argv: list[str] | None = None) -> None:
         )
     if args.sharded_ssd_queues_per_root <= 0:
         parser.error("--sharded-ssd-queues-per-root must be a positive integer")
+    if args.sharded_ssd_cuda_mode not in (CUDA_MODE_RUNTIME, CUDA_MODE_DRIVER):
+        parser.error(
+            "--sharded-ssd-cuda-mode must be one of: "
+            f"{CUDA_MODE_RUNTIME}, {CUDA_MODE_DRIVER}"
+        )
+    if (
+        args.sharded_ssd_cuda_mode != CUDA_MODE_RUNTIME
+        and args.transfer_backend != TransferBackendKind.SHARDED_SSD.value
+    ):
+        parser.error(
+            "--sharded-ssd-cuda-mode=driver requires "
+            f"--transfer-backend={TransferBackendKind.SHARDED_SSD.value}"
+        )
     checkpoint_dir = args.checkpoint_dir
     max_workers = args.max_workers
     transfer_backend = args.transfer_backend
     sharded_ssd_roots = parse_sharded_ssd_roots(args.sharded_ssd_roots)
     sharded_ssd_queues_per_root = args.sharded_ssd_queues_per_root
+    sharded_ssd_cuda_mode = args.sharded_ssd_cuda_mode
+    if sharded_ssd_cuda_mode == CUDA_MODE_DRIVER:
+        cuda_utils.forbid_cuda_runtime_calls()
     logger.info(
         "Starting GMS load: transfer_backend=%s max_workers=%d "
-        "sharded_ssd_roots=%s sharded_ssd_queues_per_root=%d",
+        "sharded_ssd_roots=%s sharded_ssd_queues_per_root=%d "
+        "sharded_ssd_cuda_mode=%s",
         transfer_backend,
         max_workers,
         ",".join(sharded_ssd_roots) or "-",
         sharded_ssd_queues_per_root,
+        sharded_ssd_cuda_mode,
     )
     with profile.phase("device_and_checkpoint_discovery"):
         devices = _list_checkpoint_devices(checkpoint_dir)
@@ -241,6 +311,8 @@ def main(argv: list[str] | None = None) -> None:
     initialization_lock = threading.Lock()
     initialization_remaining = len(devices)
     initialization_complete = threading.Event()
+    primary_context_remaining = len(devices)
+    primary_context_complete = threading.Event()
 
     def mark_cuda_initialization_complete() -> None:
         nonlocal initialization_remaining
@@ -249,38 +321,139 @@ def main(argv: list[str] | None = None) -> None:
             if initialization_remaining == 0:
                 initialization_complete.set()
 
+    def mark_primary_context_retain_complete() -> None:
+        nonlocal primary_context_remaining
+        with initialization_lock:
+            primary_context_remaining -= 1
+            if primary_context_remaining == 0:
+                primary_context_complete.set()
+
     initialization_callback = (
         mark_cuda_initialization_complete if profile.enabled else None
     )
+    primary_context_callback = (
+        mark_primary_context_retain_complete
+        if profile.enabled and sharded_ssd_cuda_mode == CUDA_MODE_DRIVER
+        else None
+    )
+    driver_process = (
+        cuda_utils.DriverCudaProcess()
+        if sharded_ssd_cuda_mode == CUDA_MODE_DRIVER
+        else None
+    )
     t0 = time.monotonic()
-    with profile.phase("all_device_barrier", count=len(devices)):
-        with ThreadPoolExecutor(max_workers=len(devices)) as pool:
+    try:
+        with profile.phase("all_device_barrier", count=len(devices)):
+            with ThreadPoolExecutor(max_workers=len(devices)) as pool:
+                if driver_process is None:
+                    with profile.phase(
+                        "all_device_cuda_initialization",
+                        count=len(devices),
+                        semantics="concurrent_envelope",
+                        includes=(
+                            "task_scheduling,cuda_set_device,current_context_query"
+                        ),
+                    ):
+                        with profile.phase(
+                            "per_device_thread_scheduling",
+                            count=len(devices),
+                        ):
+                            futures = {
+                                pool.submit(
+                                    _load_device,
+                                    checkpoint_dir,
+                                    dev,
+                                    max_workers,
+                                    transfer_backend,
+                                    sharded_ssd_roots,
+                                    sharded_ssd_queues_per_root,
+                                    initialization_callback,
+                                ): dev
+                                for dev in devices
+                            }
+                        if profile.enabled:
+                            initialization_complete.wait()
+                else:
+                    with profile.phase(
+                        "loader_cuda_initialization_total",
+                        count=len(devices),
+                        cuda_api=CUDA_MODE_DRIVER,
+                        includes=(
+                            "loader_cu_init,task_scheduling,cu_device_get,"
+                            "primary_context_retain,cu_ctx_set_current"
+                        ),
+                    ):
+                        with profile.phase(
+                            "loader_cu_init",
+                            api="cuInit",
+                            explicit=True,
+                            once_per_process=True,
+                        ):
+                            driver_process.initialize()
+                        with profile.phase(
+                            "all_device_driver_initialization",
+                            count=len(devices),
+                            semantics="concurrent_envelope",
+                        ):
+                            with profile.phase(
+                                "all_device_cu_ctx_set_current_envelope",
+                                count=len(devices),
+                                semantics="concurrent_envelope",
+                                includes=(
+                                    "task_scheduling,cu_device_get,"
+                                    "primary_context_retain,cu_ctx_set_current"
+                                ),
+                            ):
+                                with profile.phase(
+                                    "all_device_primary_context_retain_envelope",
+                                    count=len(devices),
+                                    semantics="concurrent_envelope",
+                                    includes=(
+                                        "task_scheduling,cu_device_get,"
+                                        "primary_context_retain"
+                                    ),
+                                ):
+                                    with profile.phase(
+                                        "per_device_thread_scheduling",
+                                        count=len(devices),
+                                    ):
+                                        futures = {
+                                            pool.submit(
+                                                _load_device,
+                                                checkpoint_dir,
+                                                dev,
+                                                max_workers,
+                                                transfer_backend,
+                                                sharded_ssd_roots,
+                                                sharded_ssd_queues_per_root,
+                                                initialization_callback,
+                                                sharded_ssd_cuda_mode=(
+                                                    sharded_ssd_cuda_mode
+                                                ),
+                                                primary_context_retain_complete=(
+                                                    primary_context_callback
+                                                ),
+                                                driver_process=driver_process,
+                                            ): dev
+                                            for dev in devices
+                                        }
+                                    if profile.enabled:
+                                        primary_context_complete.wait()
+                                if profile.enabled:
+                                    initialization_complete.wait()
+                for future in as_completed(futures):
+                    dev = futures[future]
+                    future.result()
+                    logger.info("Device %d load complete", dev)
+    finally:
+        if driver_process is not None:
             with profile.phase(
-                "all_device_cuda_initialization",
+                "primary_context_release",
+                api="cuDevicePrimaryCtxRelease",
                 count=len(devices),
-                semantics="concurrent_envelope",
-                includes="task_scheduling,cuda_set_device,current_context_query",
+                after_all_dependent_work=True,
             ):
-                with profile.phase("per_device_thread_scheduling", count=len(devices)):
-                    futures = {
-                        pool.submit(
-                            _load_device,
-                            checkpoint_dir,
-                            dev,
-                            max_workers,
-                            transfer_backend,
-                            sharded_ssd_roots,
-                            sharded_ssd_queues_per_root,
-                            initialization_callback,
-                        ): dev
-                        for dev in devices
-                    }
-                if profile.enabled:
-                    initialization_complete.wait()
-            for future in as_completed(futures):
-                dev = futures[future]
-                future.result()
-                logger.info("Device %d load complete", dev)
+                driver_process.close()
     elapsed = time.monotonic() - t0
     logger.info("All %d devices loaded in %.2fs", len(devices), elapsed)
 

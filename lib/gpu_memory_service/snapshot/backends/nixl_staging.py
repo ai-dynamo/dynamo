@@ -97,6 +97,10 @@ class NixlPosixStagingTransferBackend:
         self._group_sources = group_sources
         self._group_kind = group_kind
         self._warn_under_parallelized = warn_under_parallelized
+        self._cuda_operations = (
+            config.backend_config.get("cuda_operations")
+            or cuda_utils.RUNTIME_CUDA_TRANSFER_OPERATIONS
+        )
         configured_profile = config.backend_config.get("profile")
         self._profile = (
             configured_profile
@@ -132,6 +136,7 @@ class NixlPosixStagingTransferBackend:
             sources=sources,
             api_future=self._api_future,
             profile=self._profile,
+            cuda_operations=self._cuda_operations,
         )
 
     def close(self) -> None:
@@ -152,6 +157,7 @@ class _NixlPosixStagingTransferSession:
         sources: Sequence[FileTransferSource],
         api_future: Optional[Future[object]] = None,
         profile: SnapshotProfile | None = None,
+        cuda_operations: object = cuda_utils.RUNTIME_CUDA_TRANSFER_OPERATIONS,
     ) -> None:
         self._backend_name = backend_name
         self._device = device
@@ -161,6 +167,12 @@ class _NixlPosixStagingTransferSession:
         self._sources = list(sources)
         self._api_future = api_future
         self._profile = profile or SnapshotProfile("loader", enabled=False)
+        self._cuda_operations = cuda_operations
+        self._cuda_profile_fields = (
+            {"cuda_api": self._cuda_operations.api}
+            if self._cuda_operations.api == "driver"
+            else {}
+        )
         self._agent_name_base = (
             f"gms_{backend_name.replace('-', '_')}_{device}_{os.getpid()}_{id(self):x}"
         )
@@ -334,11 +346,22 @@ class _NixlPosixStagingTransferSession:
                 )
             if self._cancel_event.is_set():
                 raise CancelledError(f"{self._backend_name} cancelled")
+            context_phase = (
+                "staging_worker_cu_ctx_set_current"
+                if self._cuda_operations.api == "driver"
+                else "staging_worker_cuda_set_device"
+            )
             with self._profile.aggregate(
-                "staging_worker_cuda_set_device",
+                context_phase,
+                api=(
+                    "cuCtxSetCurrent"
+                    if self._cuda_operations.api == "driver"
+                    else "cudaSetDevice"
+                ),
+                **self._cuda_profile_fields,
                 worker=worker_index,
             ):
-                cuda_utils.cuda_runtime_set_device(self._device)
+                self._cuda_operations.set_current_device(self._device)
             with self._profile.aggregate(
                 "nixl_worker_agent_backend_creation",
                 worker=worker_index,
@@ -354,6 +377,7 @@ class _NixlPosixStagingTransferSession:
             slots = make_pinned_copy_slots(
                 _PINNED_COPY_BUFFERS_PER_WORKER,
                 profile=self._profile,
+                cuda_operations=self._cuda_operations,
                 worker=worker_index,
             )
             prep_elapsed_s = time.monotonic() - prep_t0
@@ -389,11 +413,22 @@ class _NixlPosixStagingTransferSession:
         prepared: _PreparedNixlGroup,
         targets: Mapping[str, GMSTransferTarget],
     ) -> None:
+        context_phase = (
+            "transfer_worker_cu_ctx_set_current"
+            if self._cuda_operations.api == "driver"
+            else "transfer_worker_cuda_set_device"
+        )
         with self._profile.aggregate(
-            "transfer_worker_cuda_set_device",
+            context_phase,
+            api=(
+                "cuCtxSetCurrent"
+                if self._cuda_operations.api == "driver"
+                else "cudaSetDevice"
+            ),
+            **self._cuda_profile_fields,
             worker=prepared.worker_index,
         ):
-            cuda_utils.cuda_runtime_set_device(self._device)
+            self._cuda_operations.set_current_device(self._device)
         group_t0 = time.monotonic()
         group_bytes = 0
         try:
@@ -407,6 +442,7 @@ class _NixlPosixStagingTransferSession:
                 slots=prepared.slots,
                 profile=self._profile,
                 profile_fields={"worker": prepared.worker_index},
+                cuda_operations=self._cuda_operations,
             )
         finally:
             elapsed = time.monotonic() - group_t0
@@ -448,6 +484,7 @@ def restore_file_groups_with_nixl_staging(
     slots: Optional[List[PinnedCopySlot]] = None,
     profile: SnapshotProfile | None = None,
     profile_fields: Optional[Mapping[str, object]] = None,
+    cuda_operations: object = cuda_utils.RUNTIME_CUDA_TRANSFER_OPERATIONS,
 ) -> int:
     profile = profile or SnapshotProfile("loader", enabled=False)
     fields = dict(profile_fields or {})
@@ -461,6 +498,7 @@ def restore_file_groups_with_nixl_staging(
             slots = make_pinned_copy_slots(
                 buffers_per_worker,
                 profile=profile,
+                cuda_operations=cuda_operations,
                 **fields,
             )
         for file_path, sources in file_groups:
