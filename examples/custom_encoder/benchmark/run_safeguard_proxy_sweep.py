@@ -320,7 +320,8 @@ def _dispatch_counts(root: Path) -> dict[int, Counter[tuple[int, int]]]:
     counts: dict[int, Counter[tuple[int, int]]] = defaultdict(Counter)
     cell_pattern = re.compile(r"Config: .*\bconcurrency=(\d+)\b")
     dispatch_pattern = re.compile(
-        r"custom_encoder_graph selected_bucket=(\d+) actual_cost=(\d+) batch_size=(\d+)"
+        r"custom_encoder_timing stage=vit_forward .*?"
+        r"batch_size=(\d+) bucket=(\d+) cost=(\d+)"
     )
     for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
         cell = cell_pattern.search(line)
@@ -328,7 +329,7 @@ def _dispatch_counts(root: Path) -> dict[int, Counter[tuple[int, int]]]:
             active = int(cell.group(1))
         dispatch = dispatch_pattern.search(line)
         if active is not None and dispatch:
-            bucket, _cost, batch_size = (int(value) for value in dispatch.groups())
+            batch_size, bucket, _cost = (int(value) for value in dispatch.groups())
             counts[active][(batch_size, bucket)] += 1
     return dict(counts)
 
