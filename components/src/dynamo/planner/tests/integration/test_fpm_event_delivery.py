@@ -63,8 +63,13 @@ class _DecodePlanner(NativePlannerBase):
     require_decode = True
 
 
-@pytest.mark.asyncio
-async def test_endpoint_fpm_reaches_planner_and_drives_scale_up(tmp_path, monkeypatch):
+def test_endpoint_fpm_reaches_planner_and_drives_scale_up(tmp_path, monkeypatch):
+    asyncio.run(
+        _endpoint_fpm_reaches_planner_and_drives_scale_up(tmp_path, monkeypatch)
+    )
+
+
+async def _endpoint_fpm_reaches_planner_and_drives_scale_up(tmp_path, monkeypatch):
     monkeypatch.setenv("DYN_FILE_KV", str(tmp_path))
     namespace = "fpm-test"
     endpoint_path = f"{namespace}.worker.generate"
