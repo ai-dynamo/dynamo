@@ -93,7 +93,12 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
             ),
             "agg_video": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
+                marks=[
+                    pytest.mark.pre_merge,
+                    pytest.mark.skip(
+                        reason="GLM-5.2 containers omit video codec dependencies"
+                    ),
+                ],
                 timeout_s=600,
                 delayed_start=60,
                 profiled_vram_gib=8.2,
@@ -171,7 +176,12 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 tests=[MmCase(payload=make_image_payload(["green"]))],
             ),
             "epd_video": TopologyConfig(
-                marks=[pytest.mark.post_merge],
+                marks=[
+                    pytest.mark.post_merge,
+                    pytest.mark.skip(
+                        reason="GLM-5.2 containers omit video codec dependencies"
+                    ),
+                ],
                 timeout_s=600,
                 delayed_start=60,
                 single_gpu=True,
