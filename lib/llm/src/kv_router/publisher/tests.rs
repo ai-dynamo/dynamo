@@ -1649,7 +1649,7 @@ mod test_event_dedup_filter {
     }
 
     #[test]
-    fn clear_resets_all_ranks() {
+    fn clear_resets_only_the_emitting_rank() {
         let mut filter = EventDedupFilter::new();
 
         // Store on rank 0 and rank 1
@@ -1658,16 +1658,15 @@ mod test_event_dedup_filter {
         filter.track_store(1, StorageTier::Device, &store_data(&[1, 2]));
         filter.track_store(1, StorageTier::Device, &store_data(&[1, 2]));
 
-        // Clear wipes all ranks (matches indexer semantics where Cleared
-        // from any rank removes all blocks for the entire worker).
-        filter.clear();
+        filter.clear_rank(0);
 
-        // Both ranks pass through defensively after clear
+        // The cleared rank passes through defensively because its refcounts are gone.
         let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1]));
         assert!(result.is_some());
 
+        // The sibling rank still has two references and filters its first remove.
         let result = filter.filter_remove(1, StorageTier::Device, remove_data(&[1]));
-        assert!(result.is_some());
+        assert!(result.is_none());
     }
 
     #[test]

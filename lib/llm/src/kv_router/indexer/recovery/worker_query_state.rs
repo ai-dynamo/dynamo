@@ -21,6 +21,7 @@ pub(super) enum LiveEventAction {
     },
     Clear {
         event_id: u64,
+        event: RouterEvent,
     },
     Recover {
         start_event_id: Option<u64>,
@@ -77,7 +78,7 @@ impl RankState {
             {
                 return LiveEventAction::Ignore;
             }
-            return LiveEventAction::Clear { event_id };
+            return LiveEventAction::Clear { event_id, event };
         }
 
         match self.cursor.observe(event_id) {
@@ -88,7 +89,6 @@ impl RankState {
                     CursorObservation::Initial { .. }
                         | CursorObservation::Contiguous { .. }
                         | CursorObservation::Gap { .. }
-                        | CursorObservation::FreshAfterBarrier { .. }
                 ) {
                     self.observe_and_buffer(event);
                 }
@@ -113,12 +113,12 @@ impl RankState {
                 }
             }
             CursorObservation::Gap { .. } => LiveEventAction::ResetDegraded { event },
-            CursorObservation::Initial { got }
-            | CursorObservation::Contiguous { got }
-            | CursorObservation::FreshAfterBarrier { got, .. } => LiveEventAction::Apply {
-                event_id: got,
-                event,
-            },
+            CursorObservation::Initial { got } | CursorObservation::Contiguous { got } => {
+                LiveEventAction::Apply {
+                    event_id: got,
+                    event,
+                }
+            }
         }
     }
 
@@ -132,12 +132,7 @@ impl RankState {
         self.recovery_inflight = true;
     }
 
-    pub(super) fn apply_worker_clear_barrier(&mut self, event_id: u64, emitter: bool) {
-        self.cursor = if emitter {
-            self.cursor.apply_barrier(event_id)
-        } else {
-            self.cursor.invalidate_by_barrier()
-        };
+    pub(super) fn discard_recovery_before_clear(&mut self) {
         self.recovery_inflight = false;
         self.pending_live_events.clear();
         self.max_seen_live_id = None;
@@ -355,5 +350,34 @@ mod tests {
         state.commit_pending_drain(plan.cursor, plan.next_recovery_start);
         assert_eq!(state.last_admitted_id(), Some(4));
         assert!(!state.recovery_inflight);
+    }
+
+    #[test]
+    fn clear_supersedes_same_rank_gap_recovery() {
+        let mut state = RankState::default();
+        assert!(matches!(
+            state.observe_live_event(store(1), false),
+            LiveEventAction::Apply { event_id: 1, .. }
+        ));
+        state.commit_live_admission(1);
+        assert!(matches!(
+            state.observe_live_event(store(4), true),
+            LiveEventAction::Recover { reset: true, .. }
+        ));
+
+        let mut clear = store(5);
+        clear.event.data = KvCacheEventData::Cleared;
+        assert!(matches!(
+            state.observe_live_event(clear, true),
+            LiveEventAction::Clear { event_id: 5, .. }
+        ));
+        state.discard_recovery_before_clear();
+        state.commit_live_admission(5);
+
+        assert!(!state.recovery_inflight);
+        assert!(matches!(
+            state.observe_live_event(store(6), true),
+            LiveEventAction::Apply { event_id: 6, .. }
+        ));
     }
 }

@@ -340,54 +340,6 @@ impl Indexer {
         }
         Ok(())
     }
-
-    /// Wait until every applicable local tier has completed this worker's FIFO lane.
-    /// All DP ranks and worker-wide `Cleared` events share the stable WorkerId assignment. This is
-    /// a progress barrier and does not report ordinary event-application results.
-    pub(crate) async fn flush_worker_and_wait(
-        &self,
-        worker_id: WorkerId,
-    ) -> Result<(), KvRouterError> {
-        match self {
-            Self::KvIndexer {
-                primary,
-                lower_tier,
-                approx,
-                ..
-            } => {
-                // KvIndexer has one mutation lane; lower and approximate concurrent indexers can
-                // wait only for the stable lane assigned to this WorkerId.
-                primary.flush_and_wait().await?;
-                for indexer in lower_tier.all() {
-                    indexer.flush_worker_and_wait(worker_id).await?;
-                }
-                if let Some(approx) = approx {
-                    approx.flush_worker_and_wait(worker_id).await?;
-                }
-            }
-            Self::Concurrent {
-                primary,
-                lower_tier,
-                approx,
-                ..
-            } => {
-                primary.flush_worker_and_wait(worker_id).await?;
-                for indexer in lower_tier.all() {
-                    indexer.flush_worker_and_wait(worker_id).await?;
-                }
-                if let Some(approx) = approx {
-                    approx.flush_worker_and_wait(worker_id).await?;
-                }
-            }
-            Self::Remote { approx, .. } => {
-                if let Some(approx) = approx {
-                    approx.flush_worker_and_wait(worker_id).await?;
-                }
-            }
-            Self::None => {}
-        }
-        Ok(())
-    }
 }
 
 #[cfg(test)]

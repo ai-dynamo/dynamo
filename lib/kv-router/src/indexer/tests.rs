@@ -1715,7 +1715,7 @@ mod interface_tests {
 
     #[tokio::test]
     #[apply(matching_indexer_template)]
-    async fn test_clear_clears_all_dp_ranks(variant: &str) {
+    async fn test_clear_only_removes_target_dp_rank(variant: &str) {
         let workers = [WorkerWithDpRank::new(0, 0), WorkerWithDpRank::new(0, 1)];
         let index = make_matching_indexer(variant, &workers);
 
@@ -1741,14 +1741,21 @@ mod interface_tests {
             MatchSemantics::Exact,
         );
 
-        // Clear event clears ALL blocks for the worker_id, regardless of dp_rank
+        // A clear is ordered within and applies only to its emitting rank.
         index.apply_event(make_clear_event_with_dp_rank(0, 0)).await;
 
         flush_and_settle(index.as_ref()).await;
 
-        // Both dp_ranks should be cleared
+        // Rank 0 is cleared while rank 1 retains the same sequence.
         let scores = index.find_matches(seq).await.unwrap();
-        assert_scores_with_semantics(variant, &scores, 3, &workers, &[], MatchSemantics::Exact);
+        assert_scores_with_semantics(
+            variant,
+            &scores,
+            3,
+            &workers,
+            &[(workers[1], 3)],
+            MatchSemantics::Exact,
+        );
     }
 }
 

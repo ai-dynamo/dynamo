@@ -689,6 +689,10 @@ pub struct KvCacheEvent {
 pub enum KvCacheEventData {
     Stored(KvCacheStoreData),
     Removed(KvCacheRemoveData),
+    /// Remove all KV ownership for the emitting `(worker_id, dp_rank)`.
+    ///
+    /// This is ordered only within that rank publisher's event sequence. Worker-wide removal is
+    /// a separate serving-membership lifecycle operation.
     Cleared,
 }
 

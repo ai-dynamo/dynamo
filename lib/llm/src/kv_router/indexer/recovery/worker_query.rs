@@ -6,9 +6,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use anyhow::{Context, Result};
 use dashmap::DashMap;
 use dynamo_kv_router::{
-    indexer::WorkerKvQueryResponse,
-    protocols::{RouterEvent, WorkerId},
-    recovery::CursorState,
+    indexer::WorkerKvQueryResponse, protocols::RouterEvent, recovery::CursorState,
 };
 use dynamo_runtime::component::{Component, Instance};
 use rand::Rng;
@@ -384,11 +382,6 @@ impl WorkerQueryClient {
         }
 
         for event in events {
-            let clear_event = matches!(
-                &event.event.data,
-                dynamo_kv_router::protocols::KvCacheEventData::Cleared
-            )
-            .then(|| event.clone());
             let recoverable = binding.recovery_target().is_some();
             match slot.rank.observe_live_event(event, recoverable) {
                 LiveEventAction::Ignore => {}
@@ -400,28 +393,18 @@ impl WorkerQueryClient {
                     }
                     slot.rank.commit_live_admission(event_id);
                 }
-                LiveEventAction::Clear { event_id } => {
-                    drop(slot);
-                    if let Err(error) = self
-                        .apply_live_worker_clear(
-                            key,
-                            event_id,
-                            binding.clone(),
-                            clear_event.expect("clear action preserves the clear event"),
-                        )
-                        .await
-                    {
-                        tracing::error!(%error, worker_id = key.0, dp_rank = key.1, event_id, "Failed to acknowledge live clear; affected ranks remain fenced");
+                LiveEventAction::Clear { event_id, event } => {
+                    // NOTE: A clear is ordered only in this publisher's rank stream. It may
+                    // supersede this rank's gap recovery, but it has no causal cutoff for sibling
+                    // ranks and must never scan, lock, cancel, or mutate their slots.
+                    self.cancel_recovery(key).await;
+                    slot.rank.discard_recovery_before_clear();
+                    if let Err(error) = self.indexer.try_apply_event(event).await {
+                        slot.fence_for_reset();
+                        tracing::error!(%error, worker_id = key.0, dp_rank = key.1, event_id, "KV event queue rejected a rank clear; rank remains fenced pending reset");
                         return;
                     }
-                    slot = slot_handle.lock().await;
-                    if !slot
-                        .active
-                        .as_ref()
-                        .is_some_and(|active| Arc::ptr_eq(active, &binding))
-                    {
-                        return;
-                    }
+                    slot.rank.commit_live_admission(event_id);
                 }
                 LiveEventAction::Recover {
                     start_event_id,
@@ -456,57 +439,6 @@ impl WorkerQueryClient {
         }
     }
 
-    async fn apply_live_worker_clear(
-        &self,
-        emitter: RecoveryKey,
-        event_id: u64,
-        binding: Arc<SourceBinding>,
-        event: RouterEvent,
-    ) -> Result<()> {
-        let mut worker_slots: Vec<_> = self
-            .slots
-            .iter()
-            .filter(|entry| entry.key().0 == emitter.0)
-            .map(|entry| (*entry.key(), entry.value().clone()))
-            .collect();
-        worker_slots.sort_by_key(|(key, _)| key.1);
-        let mut guards = Vec::with_capacity(worker_slots.len());
-        for (key, slot) in worker_slots {
-            guards.push((key, slot.lock_owned().await));
-        }
-        let Some(emitter_slot) = guards
-            .iter()
-            .find(|(slot_key, _)| *slot_key == emitter)
-            .map(|(_, slot)| slot)
-        else {
-            return Ok(());
-        };
-        if !emitter_slot
-            .active
-            .as_ref()
-            .is_some_and(|active| Arc::ptr_eq(active, &binding))
-        {
-            return Ok(());
-        }
-        for (key, _) in &mut guards {
-            self.cancel_recovery(*key).await;
-        }
-        if let Err(error) = self
-            .admit_events_and_wait_for_worker_lane(emitter.0, [event])
-            .await
-        {
-            for (_, slot) in &mut guards {
-                slot.fence_for_reset();
-            }
-            return Err(error);
-        }
-        for (key, slot) in &mut guards {
-            slot.rank
-                .apply_worker_clear_barrier(event_id, *key == emitter);
-        }
-        Ok(())
-    }
-
     async fn admit_events(&self, events: impl IntoIterator<Item = RouterEvent>) -> Result<()> {
         for event in events {
             self.indexer
@@ -515,18 +447,6 @@ impl WorkerQueryClient {
                 .context("KV indexer rejected event queue admission")?;
         }
         Ok(())
-    }
-
-    async fn admit_events_and_wait_for_worker_lane(
-        &self,
-        worker_id: WorkerId,
-        events: impl IntoIterator<Item = RouterEvent>,
-    ) -> Result<()> {
-        self.admit_events(events).await?;
-        self.indexer
-            .flush_worker_and_wait(worker_id)
-            .await
-            .context("KV indexer failed to complete worker-lane lifecycle mutations")
     }
 
     async fn cancel_recovery(&self, key: RecoveryKey) {
@@ -643,50 +563,6 @@ impl WorkerQueryClient {
         if cancel.is_cancelled() {
             return;
         }
-        let contains_clear = match &result {
-            Ok(WorkerKvQueryResponse::Events { events, .. })
-            | Ok(WorkerKvQueryResponse::TreeDump { events, .. }) => events.iter().any(|event| {
-                matches!(
-                    &event.event.data,
-                    dynamo_kv_router::protocols::KvCacheEventData::Cleared
-                )
-            }),
-            _ => false,
-        };
-        if contains_clear {
-            match result {
-                Ok(WorkerKvQueryResponse::Events {
-                    events,
-                    last_event_id,
-                }) => {
-                    self.finish_recovery_with_clear(
-                        key,
-                        binding,
-                        cancel,
-                        events,
-                        last_event_id,
-                        false,
-                    )
-                    .await;
-                }
-                Ok(WorkerKvQueryResponse::TreeDump {
-                    events,
-                    last_event_id,
-                }) => {
-                    self.finish_recovery_with_clear(
-                        key,
-                        binding,
-                        cancel,
-                        events,
-                        last_event_id,
-                        true,
-                    )
-                    .await;
-                }
-                _ => unreachable!("contains_clear only matches event-bearing recovery responses"),
-            }
-            return;
-        }
         let Some(slot) = self.slots.get(&key).map(|entry| entry.clone()) else {
             return;
         };
@@ -760,7 +636,7 @@ impl WorkerQueryClient {
         };
 
         // See RankState::cursor for the admission-based cursor contract. Planning against a clone
-        // preserves the old cursor and buffer until the complete clear-free group is admitted.
+        // preserves the old cursor and buffer until the complete recovery group is admitted.
         let mut rank_after_admission = slot.rank.clone();
         rank_after_admission.begin_successful_recovery_drain(recovered_cursor);
         let PendingDrainPlan {
@@ -775,7 +651,7 @@ impl WorkerQueryClient {
             .await
         {
             slot.fence_for_reset();
-            tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "KV indexer rejected a clear-free recovery event; rank remains fenced");
+            tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "KV indexer rejected a recovery event; rank remains fenced");
             return;
         }
         slot.rank = rank_after_admission;
@@ -806,134 +682,6 @@ impl WorkerQueryClient {
             tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to reset rank after corrupt recovery response");
         }
         slot.fence_for_reset();
-    }
-
-    async fn finish_recovery_with_clear(
-        self: &Arc<Self>,
-        key: RecoveryKey,
-        binding: Arc<SourceBinding>,
-        cancel: CancellationToken,
-        events: Vec<RouterEvent>,
-        last_event_id: u64,
-        tree_dump: bool,
-    ) {
-        let mut worker_slots: Vec<_> = self
-            .slots
-            .iter()
-            .filter(|entry| entry.key().0 == key.0)
-            .map(|entry| (*entry.key(), entry.value().clone()))
-            .collect();
-        worker_slots.sort_by_key(|(key, _)| key.1);
-        let mut guards = Vec::with_capacity(worker_slots.len());
-        for (slot_key, slot) in worker_slots {
-            guards.push((slot_key, slot.lock_owned().await));
-        }
-        let Some(emitter_index) = guards.iter().position(|(slot_key, _)| *slot_key == key) else {
-            return;
-        };
-        if cancel.is_cancelled()
-            || !guards[emitter_index]
-                .1
-                .active
-                .as_ref()
-                .is_some_and(|active| Arc::ptr_eq(active, &binding))
-        {
-            return;
-        }
-        if !recovery_events_match_source(key, &events) {
-            tracing::error!(
-                worker_id = key.0,
-                dp_rank = key.1,
-                "Discarding recovery batch containing a foreign clear barrier"
-            );
-            self.fence_corrupt_recovery_locked(key, &mut guards[emitter_index].1)
-                .await;
-            return;
-        }
-
-        if tree_dump
-            && let Err(error) = self
-                .reset_rank_or_fence(key, &mut guards[emitter_index].1)
-                .await
-        {
-            tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to reset rank before recovery tree dump; rank remains fenced");
-            return;
-        }
-
-        let mut cursor = if tree_dump {
-            CursorState::Initial
-        } else {
-            guards[emitter_index].1.rank.cursor
-        };
-        let mut clear_event_ids = Vec::new();
-        for event in &events {
-            let event_id = event.event.event_id;
-            if matches!(
-                &event.event.data,
-                dynamo_kv_router::protocols::KvCacheEventData::Cleared
-            ) {
-                for (slot_key, _) in &mut guards {
-                    if *slot_key != key {
-                        self.cancel_recovery(*slot_key).await;
-                    }
-                }
-                clear_event_ids.push(event_id);
-                cursor = cursor.apply_barrier(event_id);
-            } else {
-                cursor = cursor.advance_to(event_id);
-            }
-        }
-        if let Err(error) = self
-            .admit_events_and_wait_for_worker_lane(key.0, events)
-            .await
-        {
-            for (_, slot) in &mut guards {
-                slot.fence_for_reset();
-            }
-            tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to complete worker lane for recovery batch containing clear; affected ranks remain fenced");
-            return;
-        }
-        if cancel.is_cancelled()
-            || !guards[emitter_index]
-                .1
-                .active
-                .as_ref()
-                .is_some_and(|active| Arc::ptr_eq(active, &binding))
-        {
-            return;
-        }
-        for event_id in clear_event_ids {
-            for (slot_key, slot) in &mut guards {
-                slot.rank
-                    .apply_worker_clear_barrier(event_id, *slot_key == key);
-            }
-        }
-        guards[emitter_index]
-            .1
-            .rank
-            .begin_successful_recovery_drain(cursor.advance_to(last_event_id));
-        let PendingDrainPlan {
-            events,
-            cursor,
-            next_recovery_start,
-        } = guards[emitter_index].1.rank.plan_pending_drain();
-        if !events.is_empty()
-            && let Err(error) = self
-                .admit_events_and_wait_for_worker_lane(key.0, events)
-                .await
-        {
-            guards[emitter_index].1.fence_for_reset();
-            tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to complete worker lane after clear recovery; rank remains fenced");
-            return;
-        }
-        guards[emitter_index]
-            .1
-            .rank
-            .commit_pending_drain(cursor, next_recovery_start);
-        drop(guards);
-        if let Some(start_event_id) = next_recovery_start {
-            self.schedule_recovery_after_current(key, binding, start_event_id);
-        }
     }
 
     async fn fetch_recovery_response(
@@ -1242,10 +990,17 @@ mod tests {
             .await;
         release.notify_waiters();
         client.handle_live_batch(100, vec![store(101)]).await;
+        client
+            .handle_live_batch(205, vec![store_for(worker, 1)])
+            .await;
+        client
+            .handle_live_batch(100, vec![clear_for(worker, 102)])
+            .await;
         kv_indexer.flush().await;
         let events = kv_indexer.dump_events().await.unwrap();
         assert!(events.iter().all(|event| event.event.event_id != 100));
         assert!(events.iter().all(|event| event.event.event_id != 101));
+        assert!(contains_rank_block(&events, worker, 1));
     }
 
     #[tokio::test]
@@ -1336,7 +1091,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_enqueue_failure_does_not_advance_cursor_and_fences_rank() {
+    async fn live_clear_enqueue_failure_does_not_advance_cursor_and_fences_rank() {
         let serving = EndpointId::from("test.router.generate");
         let kv_endpoint = EndpointId::from("test.router.kv");
         let worker = WorkerWithDpRank::new(42, 4);
@@ -1357,7 +1112,9 @@ mod tests {
         kv_indexer.shutdown();
         kv_indexer.event_sender().closed().await;
 
-        client.handle_live_batch(100, vec![store(1)]).await;
+        client
+            .handle_live_batch(100, vec![clear_for(worker, 1)])
+            .await;
 
         let slot = client
             .slots
@@ -1610,7 +1367,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_clear_preserves_worker_wide_barrier_semantics() {
+    async fn live_clear_only_removes_the_emitting_rank() {
         let serving = EndpointId::from("test.router.generate");
         let kv_endpoint = EndpointId::from("test.router.kv");
         let (kv_indexer, indexer) = indexer();
@@ -1644,7 +1401,63 @@ mod tests {
             .handle_live_batch(100, vec![clear_for(rank_4, 2)])
             .await;
         kv_indexer.flush().await;
-        assert!(kv_indexer.dump_events().await.unwrap().is_empty());
+        let events = kv_indexer.dump_events().await.unwrap();
+        assert!(!contains_rank_block(&events, rank_4, 1));
+        assert!(contains_rank_block(&events, rank_5, 1));
+    }
+
+    #[tokio::test]
+    async fn recovered_clear_only_removes_the_recovered_rank() {
+        let serving = EndpointId::from("test.router.generate");
+        let kv_endpoint = EndpointId::from("test.router.kv");
+        let (kv_indexer, indexer) = indexer();
+        let rank_4 = WorkerWithDpRank::new(42, 4);
+        let rank_5 = WorkerWithDpRank::new(42, 5);
+        let view = membership_view(
+            &serving,
+            &kv_endpoint,
+            [
+                (
+                    rank_4,
+                    KvSourceStatus::ActiveLiveOnly(source_for(&kv_endpoint, rank_4, 100, None)),
+                    0,
+                ),
+                (
+                    rank_5,
+                    KvSourceStatus::ActiveLiveOnly(source_for(&kv_endpoint, rank_5, 205, None)),
+                    0,
+                ),
+            ],
+        );
+        let (_tx, rx) = watch::channel(view.clone());
+        let client =
+            WorkerQueryClient::new_for_test(indexer, rx, Arc::new(MockTransport::default()));
+        client.reconcile_view(view).await;
+        client
+            .handle_live_batch(100, vec![store_for(rank_4, 1)])
+            .await;
+        client
+            .handle_live_batch(205, vec![store_for(rank_5, 1)])
+            .await;
+
+        let binding = client.publisher_bindings.get(&100).unwrap().clone();
+        client
+            .clone()
+            .finish_recovery(
+                (rank_4.worker_id, rank_4.dp_rank),
+                binding,
+                CancellationToken::new(),
+                Ok(WorkerKvQueryResponse::Events {
+                    events: vec![clear_for(rank_4, 2)],
+                    last_event_id: 2,
+                }),
+            )
+            .await;
+
+        kv_indexer.flush().await;
+        let events = kv_indexer.dump_events().await.unwrap();
+        assert!(!contains_rank_block(&events, rank_4, 1));
+        assert!(contains_rank_block(&events, rank_5, 1));
     }
 
     struct ControlledRecoveryEngine {
@@ -1814,6 +1627,16 @@ mod tests {
                     event_id,
                     block_base + u64::from(source.worker.dp_rank),
                 )])
+                .await
+                .unwrap();
+        }
+    }
+
+    async fn publish_rank_clears(sources: &[RegisteredTestSource], event_id: u64) {
+        for source in sources {
+            source
+                .publisher
+                .publish(&vec![clear_for(source.worker, event_id)])
                 .await
                 .unwrap();
         }
@@ -2062,6 +1885,37 @@ mod tests {
                     .collect()
             );
 
+            publish_rank_clears(&old_node_1_sources, 2).await;
+            wait_for_index_state(
+                &kv_indexer,
+                |events| {
+                    (0..4).all(|dp_rank| {
+                        contains_rank_block(
+                            events,
+                            WorkerWithDpRank::new(logical_worker_id, dp_rank),
+                            100 + u64::from(dp_rank),
+                        )
+                    }) && events.iter().all(|event| event.event.dp_rank < 4)
+                },
+                "clearing node-1 ranks disturbed the surviving node-0 rank slice",
+            )
+            .await;
+            publish_rank_blocks(&old_node_1_sources, 3, 150).await;
+            wait_for_index_state(
+                &kv_indexer,
+                |events| {
+                    (4..8).all(|dp_rank| {
+                        contains_rank_block(
+                            events,
+                            WorkerWithDpRank::new(logical_worker_id, dp_rank),
+                            150 + u64::from(dp_rank),
+                        )
+                    })
+                },
+                "node-1 ranks did not resume after their rank-local clears",
+            )
+            .await;
+
             let old_rank_4 = old_node_1_sources
                 .iter()
                 .find(|source| source.worker == delayed_rank)
@@ -2070,7 +1924,7 @@ mod tests {
                 loop {
                     old_rank_4
                         .publisher
-                        .publish(&vec![store_block_for(delayed_rank, 3, 903)])
+                        .publish(&vec![store_block_for(delayed_rank, 5, 903)])
                         .await
                         .unwrap();
                     if recovery_engine.calls.load(Ordering::SeqCst) >= 2 {

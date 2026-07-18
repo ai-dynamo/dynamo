@@ -210,10 +210,10 @@ class ZmqKvEventPublisher:
 
         self._publish_event(event, attention_dp_rank)
 
-    def publish_all_cleared(self) -> None:
-        """Publish an AllBlocksCleared event."""
+    def publish_all_cleared(self, attention_dp_rank: int = 0) -> None:
+        """Publish an AllBlocksCleared event for one attention DP rank."""
         event = {"type": "AllBlocksCleared"}
-        self._publish_event(event)
+        self._publish_event(event, attention_dp_rank)
 
     def _publish_event(self, event: dict, attention_dp_rank: int = 0):
         """Publish a single event to ZMQ in vLLM batch format."""
