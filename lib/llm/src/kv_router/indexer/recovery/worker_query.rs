@@ -991,24 +991,31 @@ mod tests {
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
         component::TransportType,
-        discovery::{DiscoverySpec, EventTransportKind},
-        distributed::DistributedConfig,
+        discovery::{
+            Discovery, DiscoveryInstance, DiscoverySpec, EventTransportKind, MockDiscovery,
+            SharedMockRegistry,
+        },
+        distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode},
         pipeline::{
             AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn,
             network::Ingress,
         },
         protocols::EndpointId,
+        storage::kv::Selector,
         stream,
-        traits::DistributedRuntimeProvider,
         transports::event_plane::{EventPublisher, EventScope},
     };
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::{
+        collections::HashSet,
+        path::Path,
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
     use tokio::sync::{Notify, watch};
 
     use crate::{
         discovery::{
-            KvSourceAmbiguity, KvSourceMembershipView, KvStateEndpointResolution, ModelManager,
-            runtime_config_watch,
+            KvSourceAmbiguity, KvSourceMembershipCoordinator, KvSourceMembershipView,
+            KvStateEndpointResolution, runtime_config_watch,
         },
         kv_router::indexer::LowerTierIndexers,
         local_model::runtime_config::ModelRuntimeConfig,
@@ -1095,12 +1102,24 @@ mod tests {
         }
     }
 
-    async fn component(name: &str) -> Component {
-        let runtime = Runtime::from_current().unwrap();
-        let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
-            .await
-            .unwrap();
-        drt.namespace(format!("test-{name}"))
+    async fn shared_drt(store_path: &Path) -> DistributedRuntime {
+        DistributedRuntime::new(
+            Runtime::from_current().unwrap(),
+            DistributedConfig {
+                discovery_backend: DiscoveryBackend::KvStore(Selector::File(
+                    store_path.to_path_buf(),
+                )),
+                nats_config: None,
+                request_plane: RequestPlaneMode::Tcp,
+                event_transport_kind: EventTransportKind::Zmq,
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    fn shared_component(drt: &DistributedRuntime, namespace: &str) -> Component {
+        drt.namespace(namespace)
             .unwrap()
             .component("router")
             .unwrap()
@@ -1669,6 +1688,15 @@ mod tests {
         calls: AtomicUsize,
         delayed_started: Notify,
         delayed_release: Notify,
+        delayed_finished: Notify,
+    }
+
+    struct NotifyOnDrop<'a>(&'a Notify);
+
+    impl Drop for NotifyOnDrop<'_> {
+        fn drop(&mut self) {
+            self.0.notify_one();
+        }
     }
 
     #[async_trait]
@@ -1688,6 +1716,7 @@ mod tests {
                     last_event_id: 0,
                 }
             } else {
+                let _finished = NotifyOnDrop(&self.delayed_finished);
                 self.delayed_started.notify_waiters();
                 self.delayed_release.notified().await;
                 WorkerKvQueryResponse::Events {
@@ -1709,6 +1738,16 @@ mod tests {
         event
     }
 
+    fn store_block_for(worker: WorkerWithDpRank, event_id: u64, block_hash: u64) -> RouterEvent {
+        let mut event = store_for(worker, event_id);
+        let KvCacheEventData::Stored(data) = &mut event.event.data else {
+            unreachable!("store_for always returns a stored event");
+        };
+        data.blocks[0].block_hash = ExternalSequenceBlockHash(block_hash);
+        data.blocks[0].tokens_hash = LocalBlockHash(block_hash);
+        event
+    }
+
     fn contains_block(events: &[RouterEvent], block: u64) -> bool {
         events.iter().any(|event| match &event.event.data {
             KvCacheEventData::Stored(data) => data
@@ -1717,6 +1756,122 @@ mod tests {
                 .any(|stored| stored.block_hash == ExternalSequenceBlockHash(block)),
             _ => false,
         })
+    }
+
+    fn contains_rank_block(events: &[RouterEvent], worker: WorkerWithDpRank, block: u64) -> bool {
+        events.iter().any(|event| {
+            event.worker_id == worker.worker_id
+                && event.event.dp_rank == worker.dp_rank
+                && match &event.event.data {
+                    KvCacheEventData::Stored(data) => data
+                        .blocks
+                        .iter()
+                        .any(|stored| stored.block_hash == ExternalSequenceBlockHash(block)),
+                    _ => false,
+                }
+        })
+    }
+
+    struct RegisteredTestSource {
+        worker: WorkerWithDpRank,
+        publisher: EventPublisher,
+        instance: DiscoveryInstance,
+    }
+
+    struct TestSourcePublisher {
+        worker: WorkerWithDpRank,
+        publisher: EventPublisher,
+    }
+
+    async fn create_test_source_publisher(
+        drt: &DistributedRuntime,
+        kv_endpoint: &EndpointId,
+        worker: WorkerWithDpRank,
+    ) -> TestSourcePublisher {
+        let publisher = EventPublisher::for_endpoint_id_with_transport(
+            drt,
+            kv_endpoint,
+            KV_EVENT_TOPIC,
+            EventTransportKind::Zmq,
+        )
+        .await
+        .unwrap();
+        TestSourcePublisher { worker, publisher }
+    }
+
+    async fn advertise_test_source(
+        discovery: &dyn Discovery,
+        kv_endpoint: &EndpointId,
+        source_publisher: TestSourcePublisher,
+        recovery_target: Option<Instance>,
+    ) -> RegisteredTestSource {
+        let TestSourcePublisher { worker, publisher } = source_publisher;
+        let source = source_for(
+            kv_endpoint,
+            worker,
+            publisher.publisher_id(),
+            recovery_target,
+        );
+        let instance = discovery
+            .register(DiscoverySpec::EventSource {
+                scope: EventScope::Endpoint {
+                    endpoint: kv_endpoint.clone(),
+                },
+                topic: KV_EVENT_TOPIC.to_string(),
+                publisher_id: source.publisher_id,
+                metadata: serde_json::to_value(&source).unwrap(),
+            })
+            .await
+            .unwrap();
+        RegisteredTestSource {
+            worker,
+            publisher,
+            instance,
+        }
+    }
+
+    async fn register_test_source(
+        source_drt: &DistributedRuntime,
+        discovery: &dyn Discovery,
+        kv_endpoint: &EndpointId,
+        worker: WorkerWithDpRank,
+        recovery_target: Option<Instance>,
+    ) -> RegisteredTestSource {
+        let publisher = create_test_source_publisher(source_drt, kv_endpoint, worker).await;
+        advertise_test_source(discovery, kv_endpoint, publisher, recovery_target).await
+    }
+
+    async fn publish_rank_blocks(sources: &[RegisteredTestSource], event_id: u64, block_base: u64) {
+        for source in sources {
+            source
+                .publisher
+                .publish(&vec![store_block_for(
+                    source.worker,
+                    event_id,
+                    block_base + u64::from(source.worker.dp_rank),
+                )])
+                .await
+                .unwrap();
+        }
+    }
+
+    async fn wait_for_index_state(
+        kv_indexer: &KvIndexer,
+        predicate: impl Fn(&[RouterEvent]) -> bool,
+        failure: &'static str,
+    ) -> Vec<RouterEvent> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                kv_indexer.flush().await;
+                let events = kv_indexer.dump_events().await.unwrap();
+                if predicate(&events) {
+                    return events;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect(failure)
     }
 
     fn membership_view(
@@ -1740,20 +1895,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_zmq_source_overlap_fences_stale_recovery_and_events() {
-        tokio::time::timeout(Duration::from_secs(20), async {
-            let component = component("direct-zmq-source-lifecycle").await;
-            let drt = component.drt().clone();
-            let serving = component.endpoint("generate");
+    async fn direct_zmq_multi_node_replacement_isolated_by_global_rank() {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let store = tempfile::tempdir().unwrap();
+            let frontend_drt = shared_drt(store.path()).await;
+            let leader_drt = shared_drt(store.path()).await;
+            let node_0_drt = shared_drt(store.path()).await;
+            let old_node_1_drt = shared_drt(store.path()).await;
+            let namespace = "test-direct-zmq-multi-node";
+            let frontend = shared_component(&frontend_drt, namespace);
+            let old_node_1 = shared_component(&old_node_1_drt, namespace);
+            let serving = frontend.endpoint("generate");
+            let serving_id = serving.id();
             let kv_endpoint = EndpointId {
-                namespace: component.namespace().name().to_string(),
-                component: component.name().to_string(),
+                namespace: namespace.to_string(),
+                component: "router".to_string(),
                 name: "kv-state".to_string(),
             };
-            let worker = WorkerWithDpRank::new(drt.connection_id(), 4);
-            let discovery = drt.discovery();
+            let logical_worker_id = leader_drt.connection_id();
+            let source_discovery: Arc<dyn Discovery> = Arc::new(MockDiscovery::new(
+                Some(frontend_drt.connection_id()),
+                SharedMockRegistry::new(),
+            ));
+            assert_eq!(
+                HashSet::from([
+                    frontend_drt.connection_id(),
+                    logical_worker_id,
+                    node_0_drt.connection_id(),
+                    old_node_1_drt.connection_id(),
+                ])
+                .len(),
+                4
+            );
 
-            let serving_id = serving.id();
+            let discovery = leader_drt.discovery();
             let serving_instance = discovery
                 .register(DiscoverySpec::Endpoint {
                     namespace: serving_id.namespace.clone(),
@@ -1766,8 +1941,8 @@ mod tests {
                 .unwrap();
             let mut card = ModelDeploymentCard::with_name_only("test-model");
             card.runtime_config = ModelRuntimeConfig {
-                data_parallel_start_rank: worker.dp_rank,
-                data_parallel_size: 1,
+                data_parallel_start_rank: 0,
+                data_parallel_size: 8,
                 enable_local_indexer: true,
                 kv_state_endpoint: Some(kv_endpoint.clone()),
                 ..Default::default()
@@ -1786,56 +1961,88 @@ mod tests {
                 .unwrap();
             let mut configs = runtime_config_watch(&serving).await.unwrap();
             configs
-                .wait_for(|configs| configs.contains_key(&worker.worker_id))
+                .wait_for(|configs| configs.contains_key(&logical_worker_id))
                 .await
                 .unwrap();
 
+            let delayed_rank = WorkerWithDpRank::new(logical_worker_id, 4);
             let recovery_engine = Arc::new(ControlledRecoveryEngine {
-                worker,
+                worker: delayed_rank,
                 calls: AtomicUsize::new(0),
                 delayed_started: Notify::new(),
                 delayed_release: Notify::new(),
+                delayed_finished: Notify::new(),
             });
-            let recovery_endpoint = component
+            let recovery_endpoint = old_node_1
                 .endpoint("controlled-kv-recovery")
                 .endpoint_builder()
                 .handler(Ingress::for_engine(recovery_engine.clone()).unwrap())
                 .start_with_registration()
                 .await
                 .unwrap();
-            let publisher_a = EventPublisher::for_endpoint_id_with_transport(
-                &drt,
-                &kv_endpoint,
-                KV_EVENT_TOPIC,
-                EventTransportKind::Zmq,
-            )
-            .await
-            .unwrap();
-            let source_a = source_for(
-                &kv_endpoint,
-                worker,
-                publisher_a.publisher_id(),
-                Some(recovery_endpoint.instance().clone()),
+
+            let mut node_0_sources = Vec::new();
+            for dp_rank in 0..4 {
+                node_0_sources.push(
+                    register_test_source(
+                        &node_0_drt,
+                        source_discovery.as_ref(),
+                        &kv_endpoint,
+                        WorkerWithDpRank::new(logical_worker_id, dp_rank),
+                        None,
+                    )
+                    .await,
+                );
+            }
+            let mut old_node_1_sources = Vec::new();
+            for dp_rank in 4..8 {
+                let worker = WorkerWithDpRank::new(logical_worker_id, dp_rank);
+                let recovery_target =
+                    (worker == delayed_rank).then(|| recovery_endpoint.instance().clone());
+                old_node_1_sources.push(
+                    register_test_source(
+                        &old_node_1_drt,
+                        source_discovery.as_ref(),
+                        &kv_endpoint,
+                        worker,
+                        recovery_target,
+                    )
+                    .await,
+                );
+            }
+
+            let replacement_node_1_drt = shared_drt(store.path()).await;
+            let _replacement_node_1 = shared_component(&replacement_node_1_drt, namespace);
+            assert!(
+                ![
+                    frontend_drt.connection_id(),
+                    logical_worker_id,
+                    node_0_drt.connection_id(),
+                    old_node_1_drt.connection_id(),
+                ]
+                .contains(&replacement_node_1_drt.connection_id())
             );
-            let source_a_instance = discovery
-                .register(DiscoverySpec::EventSource {
-                    scope: EventScope::Endpoint {
-                        endpoint: kv_endpoint.clone(),
-                    },
-                    topic: KV_EVENT_TOPIC.to_string(),
-                    publisher_id: source_a.publisher_id,
-                    metadata: serde_json::to_value(&source_a).unwrap(),
-                })
-                .await
-                .unwrap();
+            let mut pending_replacement_sources = Vec::new();
+            for dp_rank in 4..8 {
+                pending_replacement_sources.push(
+                    create_test_source_publisher(
+                        &replacement_node_1_drt,
+                        &kv_endpoint,
+                        WorkerWithDpRank::new(logical_worker_id, dp_rank),
+                    )
+                    .await,
+                );
+            }
 
             let (kv_indexer, indexer) = indexer();
             let cancel = CancellationToken::new();
-            let model_manager = ModelManager::new();
-            let membership_watch = model_manager
-                .get_or_create_kv_source_membership_watch(&serving)
-                .await
-                .unwrap();
+            let membership_coordinator = KvSourceMembershipCoordinator::start(
+                serving_id.clone(),
+                configs.clone(),
+                source_discovery.clone(),
+            );
+            let membership_watch = membership_coordinator.subscribe();
+            let mut membership_observer = membership_watch.clone();
             crate::kv_router::indexer::recovery::subscriber::start_subscriber(
                 serving.clone(),
                 indexer,
@@ -1847,28 +2054,61 @@ mod tests {
             .await
             .unwrap();
 
-            tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                membership_observer.wait_for(|view| {
+                    (0..8).all(|dp_rank| {
+                        view.sources
+                            .get(&WorkerWithDpRank::new(logical_worker_id, dp_rank))
+                            .is_some_and(|status| status.active_source().is_some())
+                    })
+                }),
+            )
+            .await
+            .expect("all eight logical ranks did not become active")
+            .unwrap();
+
+            let initial_events = tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
-                    publisher_a
-                        .publish(&vec![store_for(worker, 1)])
-                        .await
-                        .unwrap();
+                    publish_rank_blocks(&node_0_sources, 1, 100).await;
+                    publish_rank_blocks(&old_node_1_sources, 1, 100).await;
                     kv_indexer.flush().await;
-                    if contains_block(&kv_indexer.dump_events().await.unwrap(), 1) {
-                        break;
+                    let events = kv_indexer.dump_events().await.unwrap();
+                    if (0..8).all(|dp_rank| {
+                        contains_rank_block(
+                            &events,
+                            WorkerWithDpRank::new(logical_worker_id, dp_rank),
+                            100 + u64::from(dp_rank),
+                        )
+                    }) {
+                        break events;
                     }
                     tokio::task::yield_now().await;
                 }
             })
             .await
-            .expect("source A did not become active");
+            .expect("distinct state for all eight global ranks was not indexed");
+            assert_eq!(
+                initial_events
+                    .iter()
+                    .map(|event| WorkerWithDpRank::new(event.worker_id, event.event.dp_rank))
+                    .collect::<HashSet<_>>(),
+                (0..8)
+                    .map(|dp_rank| WorkerWithDpRank::new(logical_worker_id, dp_rank))
+                    .collect()
+            );
+
+            let old_rank_4 = old_node_1_sources
+                .iter()
+                .find(|source| source.worker == delayed_rank)
+                .unwrap();
             tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
-                    publisher_a
-                        .publish(&vec![store_for(worker, 3)])
+                    old_rank_4
+                        .publisher
+                        .publish(&vec![store_block_for(delayed_rank, 3, 903)])
                         .await
                         .unwrap();
-                    kv_indexer.flush().await;
                     if recovery_engine.calls.load(Ordering::SeqCst) >= 2 {
                         break;
                     }
@@ -1876,83 +2116,210 @@ mod tests {
                 }
             })
             .await
-            .expect("source A gap recovery did not start");
+            .expect("old node-1 recovery did not become in flight");
 
-            let publisher_b = EventPublisher::for_endpoint_id_with_transport(
-                &drt,
-                &kv_endpoint,
-                KV_EVENT_TOPIC,
-                EventTransportKind::Zmq,
-            )
-            .await
-            .unwrap();
-            let source_b = source_for(&kv_endpoint, worker, publisher_b.publisher_id(), None);
-            let source_b_instance = discovery
-                .register(DiscoverySpec::EventSource {
-                    scope: EventScope::Endpoint {
-                        endpoint: kv_endpoint.clone(),
-                    },
-                    topic: KV_EVENT_TOPIC.to_string(),
-                    publisher_id: source_b.publisher_id,
-                    metadata: serde_json::to_value(&source_b).unwrap(),
-                })
+            let mut replacement_node_1_sources = Vec::new();
+            for source_publisher in pending_replacement_sources {
+                let dp_rank = source_publisher.worker.dp_rank;
+                replacement_node_1_sources.push(
+                    advertise_test_source(
+                        source_discovery.as_ref(),
+                        &kv_endpoint,
+                        source_publisher,
+                        None,
+                    )
+                    .await,
+                );
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    membership_observer.wait_for(|view| {
+                        matches!(
+                            view.sources
+                                .get(&WorkerWithDpRank::new(logical_worker_id, dp_rank)),
+                            Some(KvSourceStatus::Ambiguous(_))
+                        )
+                    }),
+                )
                 .await
+                .unwrap_or_else(|_| panic!("rank {dp_rank} did not observe source overlap"))
                 .unwrap();
+            }
+            assert!(old_node_1_sources.iter().all(|old| {
+                replacement_node_1_sources
+                    .iter()
+                    .all(|new| old.publisher.publisher_id() != new.publisher.publisher_id())
+            }));
+
             let ambiguity = tokio::time::timeout(Duration::from_secs(5), async {
-                loop {
-                    kv_indexer.flush().await;
-                    if kv_indexer.dump_events().await.unwrap().is_empty() {
-                        break;
-                    }
-                    tokio::task::yield_now().await;
-                }
+                membership_observer
+                    .wait_for(|view| {
+                        (0..4).all(|dp_rank| {
+                            view.sources
+                                .get(&WorkerWithDpRank::new(logical_worker_id, dp_rank))
+                                .is_some_and(|status| status.active_source().is_some())
+                        }) && (4..8).all(|dp_rank| {
+                            matches!(
+                                view.sources
+                                    .get(&WorkerWithDpRank::new(logical_worker_id, dp_rank)),
+                                Some(KvSourceStatus::Ambiguous(_))
+                            )
+                        })
+                    })
+                    .await
+                    .map(|view| view.clone())
             })
             .await;
-            if ambiguity.is_err() {
-                panic!(
-                    "overlapping source advertisements did not fail closed: {:?}",
-                    kv_indexer.dump_events().await.unwrap()
-                );
+            match ambiguity {
+                Ok(result) => {
+                    result.unwrap();
+                }
+                Err(_) => panic!(
+                    "node-1 publisher overlap did not become rank-local ambiguity: {:?}",
+                    membership_observer.borrow()
+                ),
             }
+            let ambiguous_events = wait_for_index_state(
+                &kv_indexer,
+                |events| {
+                    (0..4).all(|dp_rank| {
+                        contains_rank_block(
+                            events,
+                            WorkerWithDpRank::new(logical_worker_id, dp_rank),
+                            100 + u64::from(dp_rank),
+                        )
+                    }) && events.iter().all(|event| event.event.dp_rank < 4)
+                },
+                "only the overlapping node-1 rank slice should fail KV closed",
+            )
+            .await;
+            assert_eq!(
+                ambiguous_events
+                    .iter()
+                    .map(|event| event.event.dp_rank)
+                    .collect::<HashSet<_>>(),
+                HashSet::from([0, 1, 2, 3])
+            );
+            assert!(configs.borrow().contains_key(&logical_worker_id));
 
-            discovery.unregister(source_a_instance).await.unwrap();
+            for source in &old_node_1_sources {
+                source_discovery
+                    .unregister(source.instance.clone())
+                    .await
+                    .unwrap();
+            }
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                membership_observer.wait_for(|view| {
+                    (0..8).all(|dp_rank| {
+                        view.sources
+                            .get(&WorkerWithDpRank::new(logical_worker_id, dp_rank))
+                            .is_some_and(|status| status.active_source().is_some())
+                    })
+                }),
+            )
+            .await
+            .expect("replacement node-1 rank slice did not become selectable")
+            .unwrap();
+
             tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
-                    publisher_b
-                        .publish(&vec![store_for(worker, 10)])
-                        .await
-                        .unwrap();
+                    publish_rank_blocks(&replacement_node_1_sources, 1, 200).await;
                     kv_indexer.flush().await;
-                    if contains_block(&kv_indexer.dump_events().await.unwrap(), 10) {
+                    let events = kv_indexer.dump_events().await.unwrap();
+                    if (4..8).all(|dp_rank| {
+                        contains_rank_block(
+                            &events,
+                            WorkerWithDpRank::new(logical_worker_id, dp_rank),
+                            200 + u64::from(dp_rank),
+                        )
+                    }) {
                         break;
                     }
                     tokio::task::yield_now().await;
                 }
             })
             .await
-            .expect("source B did not activate after exact source A removal");
+            .expect("replacement node-1 state was not activated after the cold reset");
+
             recovery_engine.delayed_release.notify_waiters();
-            publisher_a
-                .publish(&vec![store_for(worker, 11)])
-                .await
-                .unwrap();
-            for _ in 0..100 {
-                tokio::task::yield_now().await;
-            }
-            kv_indexer.flush().await;
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                recovery_engine.delayed_finished.notified(),
+            )
+            .await
+            .expect("old node-1 recovery did not finish or cancel after release");
+            publish_rank_blocks(&old_node_1_sources, 4, 400).await;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    publish_rank_blocks(&replacement_node_1_sources, 2, 300).await;
+                    kv_indexer.flush().await;
+                    let events = kv_indexer.dump_events().await.unwrap();
+                    if (4..8).all(|dp_rank| {
+                        contains_rank_block(
+                            &events,
+                            WorkerWithDpRank::new(logical_worker_id, dp_rank),
+                            300 + u64::from(dp_rank),
+                        )
+                    }) {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("replacement node-1 publishers stopped applying live state");
             let final_events = kv_indexer.dump_events().await.unwrap();
-            assert!(contains_block(&final_events, 10));
-            assert!(!contains_block(&final_events, 2));
-            assert!(!contains_block(&final_events, 11));
-            assert!(configs.borrow().contains_key(&worker.worker_id));
+            for dp_rank in 0..4 {
+                assert!(contains_rank_block(
+                    &final_events,
+                    WorkerWithDpRank::new(logical_worker_id, dp_rank),
+                    100 + u64::from(dp_rank),
+                ));
+            }
+            for dp_rank in 4..8 {
+                let worker = WorkerWithDpRank::new(logical_worker_id, dp_rank);
+                assert!(contains_rank_block(
+                    &final_events,
+                    worker,
+                    200 + u64::from(dp_rank),
+                ));
+                assert!(contains_rank_block(
+                    &final_events,
+                    worker,
+                    300 + u64::from(dp_rank),
+                ));
+                assert!(!contains_rank_block(
+                    &final_events,
+                    worker,
+                    100 + u64::from(dp_rank),
+                ));
+                assert!(!contains_rank_block(
+                    &final_events,
+                    worker,
+                    400 + u64::from(dp_rank),
+                ));
+            }
+            assert!(!contains_rank_block(&final_events, delayed_rank, 2));
+            assert!(configs.borrow().contains_key(&logical_worker_id));
 
             cancel.cancel();
-            discovery.unregister(source_b_instance).await.unwrap();
+            for source in &replacement_node_1_sources {
+                source_discovery
+                    .unregister(source.instance.clone())
+                    .await
+                    .unwrap();
+            }
+            for source in &node_0_sources {
+                source_discovery
+                    .unregister(source.instance.clone())
+                    .await
+                    .unwrap();
+            }
             discovery.unregister(model_instance).await.unwrap();
             discovery.unregister(serving_instance).await.unwrap();
             recovery_endpoint.shutdown().await.unwrap();
         })
         .await
-        .expect("direct ZMQ KV source lifecycle test timed out");
+        .expect("direct ZMQ multi-node KV source lifecycle test timed out");
     }
 }
