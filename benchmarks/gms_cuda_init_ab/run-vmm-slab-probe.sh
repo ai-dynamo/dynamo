@@ -12,7 +12,7 @@ fi
 ART=$1
 COUNTS=${COUNTS:-585,64,16,4,1}
 REPEATS=${REPEATS:-3}
-SCRIPT=/opt/gms-experiment/vmm-slab-probe.py
+SCRIPT=${SCRIPT:-/opt/gms-experiment/vmm-slab-probe.py}
 SIZES=/opt/gms-experiment/allocation-sizes.json
 PIDS=()
 
@@ -71,6 +71,31 @@ for count in "${counts[@]}"; do
         [[ "$status" -eq 0 ]]
         nvidia-smi --query-gpu=uuid,memory.used --format=csv,noheader,nounits \
             > "$run/memory-after.csv"
+        python3 - "$run/memory-before.csv" "$run/memory-after.csv" <<'PY'
+import sys
+from pathlib import Path
+
+
+def load(path):
+    records = {}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        uuid, used = [field.strip() for field in line.split(",")]
+        records[uuid] = int(used)
+    return records
+
+
+before = load(sys.argv[1])
+after = load(sys.argv[2])
+if len(before) != 8 or set(after) != set(before):
+    raise SystemExit(f"GPU memory UUID mismatch: before={before} after={after}")
+regressions = {
+    uuid: (before[uuid], after[uuid])
+    for uuid in before
+    if after[uuid] > before[uuid]
+}
+if regressions:
+    raise SystemExit(f"GPU memory did not return to baseline: {regressions}")
+PY
         python3 - "$run" "$count" "$repeat" <<'PY'
 import json
 import sys

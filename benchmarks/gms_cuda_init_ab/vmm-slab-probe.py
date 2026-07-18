@@ -196,7 +196,7 @@ def exporter(args: argparse.Namespace) -> None:
     phases: dict[str, dict[str, int]] = {}
     handles: list[int] = []
     export_fds: list[int] = []
-    listen_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listen_socket = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     Path(args.socket).unlink(missing_ok=True)
     try:
         _timed(phases, "cu_init", _cu_init)
@@ -278,7 +278,7 @@ def importer(args: argparse.Namespace) -> None:
     handles: list[int] = []
     va = 0
     total_size = 0
-    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    connection = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     try:
         _timed(phases, "cuda_set_device", _runtime_set_device)
         deadline = time.monotonic() + 120
