@@ -228,7 +228,19 @@ impl Decoder for VideoDecoder {
         mem_file.add_seals(Seal::Write | Seal::Shrink | Seal::Grow)?;
         let fd_path = format!("/proc/self/fd/{}", mem_file.as_raw_fd());
         let location = Location::File(fd_path.into());
-        let mut decoder = video_rs::decode::Decoder::new(location)?;
+        // The in-tree FFmpeg decodes only VP8/VP9 (royalty-free); H.264, H.265 and
+        // other codecs are intentionally not built in. Translate the low-level
+        // "decoder not found" into an actionable message rather than leaking a raw
+        // FFmpeg error to the caller.
+        let mut decoder = video_rs::decode::Decoder::new(location).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to open the video for decoding ({e}). This deployment \
+                 decodes only VP8/VP9 video — H.264, H.265, and other codecs are \
+                 not built into the in-tree FFmpeg. Re-encode the input to VP9, \
+                 e.g. `ffmpeg -i input.mp4 -c:v libvpx-vp9 -an output.webm`, or run \
+                 a deployment image built with the required decoder enabled."
+            )
+        })?;
 
         let requested_frames = get_num_requested_frames(self, &decoder)?;
         let source_duration = decoder.duration()?.as_secs() as f64;

@@ -31,6 +31,21 @@ async def test_load_video_rejects_http_by_default():
 
 
 @pytest.mark.asyncio
+async def test_load_video_missing_opencv_gives_install_guidance():
+    """A missing backend decoder (OpenCV) yields actionable install guidance,
+    not a bare ``No module named 'cv2'``."""
+    loader = VideoLoader()
+    loader._url_policy = UrlValidationPolicy()
+    # vLLM's VideoMediaIO imports cv2 lazily; simulate that failing.
+    loader._load_video_with_vllm = AsyncMock(  # type: ignore[method-assign]
+        side_effect=ModuleNotFoundError("No module named 'cv2'", name="cv2")
+    )
+
+    with pytest.raises(RuntimeError, match="opencv-python-headless"):
+        await loader.load_video("data:video/mp4;base64,Zm9v")
+
+
+@pytest.mark.asyncio
 async def test_load_video_uses_vllm_media_connector():
     loader = VideoLoader()
     # data: scheme is in the default allowlist regardless of env flags.

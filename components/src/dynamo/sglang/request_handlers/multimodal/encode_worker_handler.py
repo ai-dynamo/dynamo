@@ -55,6 +55,24 @@ IMAGE_URL_KEY = "image_url"
 VIDEO_URL_KEY = "video_url"
 
 
+def _ensure_video_decoder_available() -> None:
+    """Fail fast with actionable guidance when the SGLang video decoder is absent.
+
+    SGLang decodes video with ``decord`` (via ``MMEncoder``). The runtime image
+    ships without it for media-licensing reasons, so a video request would
+    otherwise fail deep inside SGLang with a bare ``No module named 'decord'``.
+    """
+    import importlib.util
+
+    if importlib.util.find_spec("decord") is None:
+        raise RuntimeError(
+            "Video decoding is unavailable in this image: the SGLang video path "
+            "requires the 'decord' decoder, which is not installed. Install it "
+            "with `pip install decord2` (it provides the `decord` module), or "
+            "send images instead of video."
+        )
+
+
 class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
     """
     Handler for multimodal encode worker component that processes images/videos
@@ -446,6 +464,11 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             raise ValueError(
                 "multi_modal_data must contain image_url or video_url entries."
             )
+
+        # Preflight the video decoder so a video request fails with actionable
+        # guidance rather than a bare "No module named 'decord'" from SGLang.
+        if video_items:
+            _ensure_video_decoder_available()
 
         image_urls: list[str] = []
         video_urls: list[str] = []

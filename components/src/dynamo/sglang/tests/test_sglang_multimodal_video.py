@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from unittest.mock import patch
+
 import pytest
 import torch
 
@@ -31,19 +33,25 @@ pytestmark = [
 ]
 
 
+# Where the video-decoder preflight lives; patched to a no-op below to simulate a
+# decord-enabled image (the runtime image ships without it).
+_HANDLER_MOD = "dynamo.sglang.request_handlers.multimodal.encode_worker_handler"
+
+
 def test_extract_media_urls_supports_video_urls():
     handler = MultimodalEncodeWorkerHandler.__new__(MultimodalEncodeWorkerHandler)
 
-    image_urls, video_urls = handler._extract_media_urls(
-        {
-            "multi_modal_data": {
-                "video_url": [
-                    {"Url": "https://example.com/clip.mp4"},
-                    "file:///tmp/local.mp4",
-                ]
+    with patch(f"{_HANDLER_MOD}._ensure_video_decoder_available"):
+        image_urls, video_urls = handler._extract_media_urls(
+            {
+                "multi_modal_data": {
+                    "video_url": [
+                        {"Url": "https://example.com/clip.mp4"},
+                        "file:///tmp/local.mp4",
+                    ]
+                }
             }
-        }
-    )
+        )
 
     assert image_urls == []
     assert video_urls == ["https://example.com/clip.mp4", "file:///tmp/local.mp4"]
@@ -52,17 +60,29 @@ def test_extract_media_urls_supports_video_urls():
 def test_extract_media_urls_supports_mixed_image_and_video():
     handler = MultimodalEncodeWorkerHandler.__new__(MultimodalEncodeWorkerHandler)
 
-    image_urls, video_urls = handler._extract_media_urls(
-        {
-            "multi_modal_data": {
-                "image_url": [{"Url": "https://example.com/image.png"}],
-                "video_url": [{"Url": "https://example.com/clip.mp4"}],
+    with patch(f"{_HANDLER_MOD}._ensure_video_decoder_available"):
+        image_urls, video_urls = handler._extract_media_urls(
+            {
+                "multi_modal_data": {
+                    "image_url": [{"Url": "https://example.com/image.png"}],
+                    "video_url": [{"Url": "https://example.com/clip.mp4"}],
+                }
             }
-        }
-    )
+        )
 
     assert image_urls == ["https://example.com/image.png"]
     assert video_urls == ["https://example.com/clip.mp4"]
+
+
+def test_extract_media_urls_video_without_decord_raises_actionable_error():
+    handler = MultimodalEncodeWorkerHandler.__new__(MultimodalEncodeWorkerHandler)
+
+    # Simulate an image built without the video decoder.
+    with patch("importlib.util.find_spec", return_value=None):
+        with pytest.raises(RuntimeError, match="decord2"):
+            handler._extract_media_urls(
+                {"multi_modal_data": {"video_url": [{"Url": "https://x/c.mp4"}]}}
+            )
 
 
 @pytest.mark.asyncio
