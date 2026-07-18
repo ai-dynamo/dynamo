@@ -9,13 +9,17 @@
 # @pytest.mark.parallel until DRT endpoint registration is confirmed thread-safe.
 #
 import asyncio
+import contextlib
+import json
 import logging
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import aiohttp
 import pytest
 
 from tests.router.common import (
@@ -52,7 +56,9 @@ from tests.router.mocker_process import (
     DisaggMockerProcess,
     MockerProcess,
     launch_disagg_workers,
+    wait_for_disagg_workers,
 )
+from tests.router.router_process import KVRouterProcess
 from tests.utils.constants import ROUTER_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
 
@@ -155,6 +161,38 @@ ROUTER_DISAGG_OVERLOAD_529_CASES = (
             },
         },
         id="decode-blocks",
+    ),
+)
+DISAGG_STARTUP_CASES = (
+    pytest.param(
+        ("frontend", "decode", "prefill"),
+        False,
+        id="frontend-decode-prefill",
+    ),
+    pytest.param(
+        ("frontend", "prefill", "decode"),
+        False,
+        id="frontend-prefill-decode",
+    ),
+    pytest.param(
+        ("decode", "frontend", "prefill"),
+        False,
+        id="decode-frontend-prefill",
+    ),
+    pytest.param(
+        ("prefill", "frontend", "decode"),
+        False,
+        id="prefill-frontend-decode",
+    ),
+    pytest.param(
+        ("prefill", "decode", "frontend"),
+        False,
+        id="workers-before-frontend",
+    ),
+    pytest.param(
+        ("frontend", "decode", "prefill"),
+        True,
+        id="frontend-decode-prefill-bootstrap",
     ),
 )
 ROUND_ROBIN_MOCKER_SKIP_REASON = (
@@ -851,7 +889,159 @@ def test_router_decisions_router_aic(
     )
 
 
-@pytest.mark.parametrize("registration_order", ["prefill_first", "decode_first"])
+def _wait_for_frontend_to_observe_single_pd_role(
+    frontend: KVRouterProcess,
+    worker_type: str,
+    timeout: float = 30,
+) -> None:
+    patterns = {
+        "decode": "No prefill endpoint for namespace yet, storing sender for future activation",
+        "prefill": "Stored prefill endpoint for future decode WorkerSet registration",
+    }
+    pattern = patterns[worker_type]
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pattern in frontend.read_logs():
+            return
+        time.sleep(0.1)
+
+    raise AssertionError(
+        f"Frontend did not observe the standalone {worker_type} WorkerSet within {timeout}s"
+    )
+
+
+async def _wait_for_disagg_worker_ids(
+    frontend_port: int,
+    timeout: float = 60,
+) -> dict[str, int]:
+    payload = {
+        **TEST_PAYLOAD,
+        "max_tokens": 1,
+        "nvext": {"extra_fields": ["worker_id"]},
+    }
+    deadline = asyncio.get_running_loop().time() + timeout
+    last_worker_ids: dict[str, int | None] = {
+        "prefill_worker_id": None,
+        "decode_worker_id": None,
+    }
+    client_timeout = aiohttp.ClientTimeout(total=10)
+    async with aiohttp.ClientSession(timeout=client_timeout) as session:
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                async with session.post(
+                    f"http://localhost:{frontend_port}/v1/chat/completions",
+                    json=payload,
+                ) as response:
+                    if response.status != 200:
+                        await response.read()
+                        await asyncio.sleep(0.25)
+                        continue
+
+                    async for raw_line in response.content:
+                        for line in raw_line.decode(
+                            "utf-8", errors="replace"
+                        ).splitlines():
+                            if not line.startswith("data:"):
+                                continue
+                            data = line[5:].strip()
+                            if not data or data == "[DONE]":
+                                continue
+                            try:
+                                chunk = json.loads(data)
+                            except json.JSONDecodeError:
+                                continue
+                            worker_ids = chunk.get("nvext", {}).get("worker_id", {})
+                            for key in last_worker_ids:
+                                if key in worker_ids:
+                                    last_worker_ids[key] = worker_ids[key]
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                pass
+
+            if all(worker_id is not None for worker_id in last_worker_ids.values()):
+                return {
+                    key: worker_id
+                    for key, worker_id in last_worker_ids.items()
+                    if worker_id is not None
+                }
+            await asyncio.sleep(0.25)
+
+    raise AssertionError(
+        f"P/D routing did not become active within {timeout}s; last worker IDs: "
+        f"{last_worker_ids}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("startup_order", "enable_disagg_bootstrap"), DISAGG_STARTUP_CASES
+)
+@pytest.mark.timeout(120)
+def test_mocker_disagg_startup_lifecycle(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    monkeypatch,
+    startup_order,
+    enable_disagg_bootstrap,
+):
+    """A unique P/D topology activates for every meaningful discovery order."""
+    monkeypatch.setenv("DYN_LOG", "info,dynamo_llm::discovery=debug")
+    namespace = f"test-namespace-{generate_random_suffix()}"
+    frontend_port = allocate_frontend_ports(request, 1)[0]
+    mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+    }
+    frontend = None
+    workers: dict[str, DisaggMockerProcess] = {}
+    expected_worker_ids: dict[str, int] = {}
+
+    with contextlib.ExitStack() as stack:
+        for actor in startup_order:
+            if actor == "frontend":
+                frontend = stack.enter_context(
+                    KVRouterProcess(
+                        request,
+                        BLOCK_SIZE,
+                        frontend_port,
+                        namespace,
+                        "etcd",
+                        request_plane="nats",
+                        min_initial_workers=1,
+                    )
+                )
+            else:
+                worker = stack.enter_context(
+                    DisaggMockerProcess(
+                        request,
+                        namespace=namespace,
+                        worker_type=actor,
+                        mocker_args=mocker_args,
+                        num_mockers=1,
+                        enable_bootstrap=(
+                            enable_disagg_bootstrap and actor == "prefill"
+                        ),
+                    )
+                )
+                workers[actor] = worker
+                expected_worker_ids[actor] = wait_for_disagg_workers(
+                    worker,
+                    store_backend="etcd",
+                    request_plane="nats",
+                    event_plane=None,
+                )[0]
+
+            if frontend is not None and len(workers) == 1:
+                _wait_for_frontend_to_observe_single_pd_role(
+                    frontend, next(iter(workers))
+                )
+
+        assert frontend is not None
+        actual_worker_ids = asyncio.run(_wait_for_disagg_worker_ids(frontend_port))
+
+    assert actual_worker_ids["prefill_worker_id"] == expected_worker_ids["prefill"]
+    assert actual_worker_ids["decode_worker_id"] == expected_worker_ids["decode"]
+
+
 @pytest.mark.parametrize(
     "enable_disagg_bootstrap", [False, True], ids=["no_bootstrap", "with_bootstrap"]
 )
@@ -860,7 +1050,6 @@ def test_router_decisions_disagg(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
-    registration_order,
     enable_disagg_bootstrap,
 ):
     """Validate KV cache prefix reuse in disaggregated prefill-decode setup.
@@ -868,14 +1057,13 @@ def test_router_decisions_disagg(
     Tests that progressive requests with overlapping prefixes are routed to the
     same prefill worker due to KV cache reuse.
 
-    Parameterized to test:
-    - registration_order: prefill_first vs decode_first
-    - enable_disagg_bootstrap: without vs with bootstrap rendezvous
+    Parameterized with and without bootstrap rendezvous. Startup lifecycle
+    ordering is covered separately by ``test_mocker_disagg_startup_lifecycle``.
     """
     # runtime_services_dynamic_ports handles NATS and etcd startup
     logger.info(
-        f"Starting disaggregated router prefix reuse test "
-        f"(registration_order={registration_order}, bootstrap={enable_disagg_bootstrap})"
+        "Starting disaggregated router prefix reuse test "
+        f"(bootstrap={enable_disagg_bootstrap})"
     )
 
     mocker_args = {
@@ -896,7 +1084,7 @@ def test_router_decisions_disagg(
         worker_context_factory=lambda namespace: launch_disagg_workers(
             request,
             namespace,
-            registration_order,
+            "prefill_first",
             prefill_mocker_args=mocker_args,
             decode_mocker_args=mocker_args,
             num_prefill_mockers=4,
@@ -1051,7 +1239,6 @@ def test_disagg_topology_required_prefill_pin_match_and_mismatch(
                 )
 
 
-@pytest.mark.parametrize("registration_order", ["prefill_first", "decode_first"])
 @pytest.mark.parametrize(
     "enable_disagg_bootstrap", [False, True], ids=["no_bootstrap", "with_bootstrap"]
 )
@@ -1060,14 +1247,11 @@ def test_router_decisions_disagg_round_robin_prefill_dp_rank(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
-    registration_order,
     enable_disagg_bootstrap,
 ):
     """Verify round-robin disagg prefill requests spread KV stores across DP ranks."""
     logger.info(
-        "Starting disaggregated round-robin prefill dp-rank test "
-        "(registration_order=%s, bootstrap=%s)",
-        registration_order,
+        "Starting disaggregated round-robin prefill dp-rank test (bootstrap=%s)",
         enable_disagg_bootstrap,
     )
 
@@ -1099,7 +1283,7 @@ def test_router_decisions_disagg_round_robin_prefill_dp_rank(
     with launch_disagg_workers(
         request,
         shared_namespace,
-        registration_order,
+        "prefill_first",
         prefill_mocker_args=prefill_mocker_args,
         decode_mocker_args=decode_mocker_args,
         num_prefill_mockers=1,
