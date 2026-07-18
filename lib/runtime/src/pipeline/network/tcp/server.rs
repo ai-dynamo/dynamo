@@ -53,6 +53,10 @@ use anyhow::{Context, Result, anyhow as error};
 pub trait IpResolver {
     fn local_ip(&self) -> Result<std::net::IpAddr, Error>;
     fn local_ipv6(&self) -> Result<std::net::IpAddr, Error>;
+
+    fn list_afinet_netifas(&self) -> Result<Vec<(String, std::net::IpAddr)>, Error> {
+        list_afinet_netifas()
+    }
 }
 
 // Default implementation using the real local_ip_address crate
@@ -66,6 +70,32 @@ impl IpResolver for DefaultIpResolver {
     fn local_ipv6(&self) -> Result<std::net::IpAddr, Error> {
         local_ipv6()
     }
+}
+
+fn resolve_configured_host<R: IpResolver>(
+    host_or_interface: &str,
+    resolver: &R,
+) -> Result<IpAddr, PipelineError> {
+    if let Ok(ip) = host_or_interface.parse::<IpAddr>() {
+        return Ok(ip);
+    }
+
+    let interfaces = resolver.list_afinet_netifas()?;
+    let interface_found = interfaces.iter().any(|(name, _)| name == host_or_interface);
+    let mut ipv4_addresses: Vec<_> = interfaces
+        .into_iter()
+        .filter_map(|(name, ip)| (name == host_or_interface && ip.is_ipv4()).then_some(ip))
+        .collect();
+    ipv4_addresses.sort_unstable();
+
+    ipv4_addresses.into_iter().next().ok_or_else(|| {
+        let message = if interface_found {
+            format!("Interface has no IPv4 address: {host_or_interface}")
+        } else {
+            format!("Interface not found: {host_or_interface}")
+        };
+        PipelineError::Generic(message)
+    })
 }
 
 #[allow(dead_code)]
@@ -90,7 +120,7 @@ impl ServerOptions {
 /// A Response connection is a connection that is established by a client with the intention of sending
 /// specific data back to the server.
 pub struct TcpStreamServer {
-    local_ip: String,
+    local_ip: IpAddr,
     local_port: u16,
     state: Arc<Mutex<State>>,
 }
@@ -185,19 +215,8 @@ impl TcpStreamServer {
         options: ServerOptions,
         resolver: R,
     ) -> Result<Arc<Self>, PipelineError> {
-        let local_ip = match options.interface {
-            Some(interface) => {
-                let interfaces: HashMap<String, std::net::IpAddr> =
-                    list_afinet_netifas()?.into_iter().collect();
-
-                interfaces
-                    .get(&interface)
-                    .ok_or(PipelineError::Generic(format!(
-                        "Interface not found: {}",
-                        interface
-                    )))?
-                    .to_string()
-            }
+        let local_ip = match options.interface.as_deref() {
+            Some(host) => resolve_configured_host(host, &resolver)?,
             None => {
                 let resolved_ip = resolver.local_ip().or_else(|err| match err {
                     Error::LocalIpAddressNotFound => resolver.local_ipv6(),
@@ -222,7 +241,6 @@ impl TcpStreamServer {
                         )));
                     }
                 }
-                .to_string()
             }
         };
 
@@ -233,7 +251,7 @@ impl TcpStreamServer {
             PipelineError::Generic(format!("Failed to build TCP TLS acceptor: {}", e))
         })?;
 
-        let local_port = Self::start(local_ip.clone(), options.port, state.clone(), tls_acceptor)
+        let local_port = Self::start(local_ip, options.port, state.clone(), tls_acceptor)
             .await
             .map_err(|e| {
                 PipelineError::Generic(format!("Failed to start TcpStreamServer: {}", e))
@@ -387,12 +405,12 @@ impl TcpStreamServer {
     }
 
     async fn start(
-        local_ip: String,
+        local_ip: IpAddr,
         local_port: u16,
         state: Arc<Mutex<State>>,
         tls_acceptor: Option<TlsAcceptor>,
     ) -> Result<u16> {
-        let addr = format!("{}:{}", local_ip, local_port);
+        let addr = SocketAddr::new(local_ip, local_port);
         let state_clone = state.clone();
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<u16>>();
         {
@@ -477,7 +495,7 @@ impl ResponseService for TcpStreamServer {
     async fn register(&self, options: StreamOptions) -> PendingConnections {
         // oneshot channels to pass back the sender and receiver objects
 
-        let address = format!("{}:{}", self.local_ip, self.local_port);
+        let address = SocketAddr::new(self.local_ip, self.local_port).to_string();
         tracing::debug!("Registering new TcpStream on {address}");
 
         let send_stream = if options.enable_request_stream {
@@ -769,12 +787,12 @@ type BoxWrite = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
 // the sender, then we spawn a task to forward all bytes from the tcp stream
 // to the sender
 async fn tcp_listener(
-    addr: String,
+    addr: SocketAddr,
     state: Arc<Mutex<State>>,
     tls_acceptor: Option<TlsAcceptor>,
     read_tx: tokio::sync::oneshot::Sender<Result<u16>>,
 ) -> Result<()> {
-    let listener = tokio::net::TcpListener::bind(&addr)
+    let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to start TcpListender on {}: {}", addr, e));
 
@@ -1438,6 +1456,74 @@ mod tests {
         fn local_ipv6(&self) -> Result<std::net::IpAddr, Error> {
             Err(Error::LocalIpAddressNotFound)
         }
+    }
+
+    struct InterfaceIpResolver {
+        interfaces: Vec<(String, IpAddr)>,
+    }
+
+    impl IpResolver for InterfaceIpResolver {
+        fn local_ip(&self) -> Result<IpAddr, Error> {
+            Ok(IpAddr::from([127, 0, 0, 1]))
+        }
+
+        fn local_ipv6(&self) -> Result<IpAddr, Error> {
+            Ok(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST))
+        }
+
+        fn list_afinet_netifas(&self) -> Result<Vec<(String, IpAddr)>, Error> {
+            Ok(self.interfaces.clone())
+        }
+    }
+
+    #[test]
+    fn configured_ip_literal_is_used_directly() {
+        let resolver = InterfaceIpResolver {
+            interfaces: Vec::new(),
+        };
+
+        assert_eq!(
+            resolve_configured_host("172.16.0.87", &resolver).unwrap(),
+            "172.16.0.87".parse::<IpAddr>().unwrap()
+        );
+        assert_eq!(
+            resolve_configured_host("2001:db8::1", &resolver).unwrap(),
+            "2001:db8::1".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn configured_interface_selects_ipv4_deterministically() {
+        let resolver = InterfaceIpResolver {
+            interfaces: vec![
+                ("ib0".to_string(), "fe80::1".parse().unwrap()),
+                ("ib0".to_string(), "172.16.96.87".parse().unwrap()),
+                ("eth0".to_string(), "10.52.1.2".parse().unwrap()),
+                ("ib0".to_string(), "172.16.0.87".parse().unwrap()),
+            ],
+        };
+
+        assert_eq!(
+            resolve_configured_host("ib0", &resolver).unwrap(),
+            "172.16.0.87".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn configured_interface_requires_ipv4() {
+        let resolver = InterfaceIpResolver {
+            interfaces: vec![("ib0".to_string(), "fe80::1".parse().unwrap())],
+        };
+
+        let error = resolve_configured_host("ib0", &resolver).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Interface has no IPv4 address: ib0")
+        );
+
+        let error = resolve_configured_host("missing0", &resolver).unwrap_err();
+        assert!(error.to_string().contains("Interface not found: missing0"));
     }
 
     #[tokio::test]
