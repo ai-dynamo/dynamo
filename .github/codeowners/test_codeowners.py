@@ -595,9 +595,8 @@ class TestEmissionIsTreeIndependent:
         import inspect
 
         sig = inspect.signature(_render_codeowners)
-        assert "tree" not in sig.parameters, (
-            "emit tree parameter reintroduced -- see TestEmissionIsTreeIndependent"
-        )
+        msg = "emit tree parameter reintroduced -- see TestEmissionIsTreeIndependent"
+        assert "tree" not in sig.parameters, msg
         sig_base = inspect.signature(compute_resolution)
         # tree is still accepted (backward-compat) but must default to None
         # so callers that omit it get pure behavior for free.
