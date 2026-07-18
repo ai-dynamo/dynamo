@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../base
+patches:
+  - target:
+      group: nvidia.com
+      version: v1beta1
+      kind: DynamoGraphDeployment
+      name: g52-t8-gms-prof-r29604929787-r2
+    patch: |-
+      - op: test
+        path: /spec/components/1/podTemplate/spec/containers/0/name
+        value: main
+      - op: test
+        path: /spec/components/1/podTemplate/spec/containers/1/name
+        value: gms-loader
+      - op: test
+        path: /spec/components/1/podTemplate/spec/nodeSelector/kubernetes.io~1hostname
+        value: cluster-0967a26d-pool-14bee067-prctr-s2877
+      - op: replace
+        path: /spec/components/1/experimental/checkpoint
+        value:
+          checkpointRef: checkpoint-57a124961e2a47a2cf9c2712e58a0a2b
+          deletionPolicy: Retain
+          enabled: true
+          startupPolicy: WaitForCheckpoint
+          targetContainerName: main
+      - op: replace
+        path: /spec/components/1/podTemplate/spec/containers/0/image
+        value: dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-3050aba94dd8-a@sha256:3ef35ee41743e3b93cabc508722b6fd211015b598b2a828a3d532a58ff4eed01
+      - op: replace
+        path: /spec/components/1/podTemplate/spec/containers/1/image
+        value: dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-3050aba94dd8-a@sha256:3ef35ee41743e3b93cabc508722b6fd211015b598b2a828a3d532a58ff4eed01
+      - op: add
+        path: /metadata/annotations/schwinns.ai-dynamo.io~1cuda-init-variant
+        value: A-prior-child-visibility
+      - op: add
+        path: /metadata/annotations/schwinns.ai-dynamo.io~1experiment-commit
+        value: 3050aba94dd8fbabd026bd4f52ace40403cf8bea
+      - op: add
+        path: /spec/components/1/podTemplate/metadata/annotations/schwinns.ai-dynamo.io~1cuda-init-variant
+        value: A-prior-child-visibility

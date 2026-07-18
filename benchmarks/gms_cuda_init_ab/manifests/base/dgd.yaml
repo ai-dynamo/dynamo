@@ -1,0 +1,712 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+{
+  "apiVersion": "nvidia.com/v1beta1",
+  "kind": "DynamoGraphDeployment",
+  "metadata": {
+    "name": "g52-t8-gms-prof-r29604929787-r2",
+    "namespace": "schwinns",
+    "annotations": {
+      "nvidia.com/enable-grove": "false",
+      "schwinns.ai-dynamo.io/build-run": "29604929787",
+      "schwinns.ai-dynamo.io/dynamo-sha": "760e55e21e14f76d7c204920f00ea9144d819b4b",
+      "schwinns.ai-dynamo.io/dynamo-base-sha": "0ddb5c218f39ea7572b58e25d01c6c649b05799b",
+      "schwinns.ai-dynamo.io/dynamo-11566-sha": "ab764d8c67f5fbb845ca12df5dfe854f8a82e423",
+      "schwinns.ai-dynamo.io/dynamo-11639-sha": "8f9548ac40fa1fa27fc27e8b23eb73b938188b39",
+      "schwinns.ai-dynamo.io/dynamo-gms-backend-sha": "b19686ab6747957bdba10c392a9d5ea069b5630f",
+      "schwinns.ai-dynamo.io/flashinfer-sha": "243d56c12cf1c724bdb128a4575ebf6ce1e8a1a9",
+      "schwinns.ai-dynamo.io/vllm-overlay-sha": "274603f228c16a7b899fe22eb109c5f49f105696",
+      "schwinns.ai-dynamo.io/flashinfer-allreduce-scope": "tp-only",
+      "schwinns.ai-dynamo.io/gms-backend": "sharded-ssd",
+      "schwinns.ai-dynamo.io/topology": "TP8-DP1-EP8-IntraPod-GMS",
+      "schwinns.ai-dynamo.io/profile": "GMS_SNAPSHOT_PROFILE=1",
+      "schwinns.ai-dynamo.io/profile-commit": "760e55e21e14f76d7c204920f00ea9144d819b4b"
+    }
+  },
+  "spec": {
+    "backendFramework": "vllm",
+    "components": [
+      {
+        "name": "Frontend",
+        "podTemplate": {
+          "metadata": {
+            "annotations": {
+              "nvidia.com/enable-grove": "false",
+              "schwinns.ai-dynamo.io/build-run": "29604929787",
+              "schwinns.ai-dynamo.io/dynamo-sha": "760e55e21e14f76d7c204920f00ea9144d819b4b",
+              "schwinns.ai-dynamo.io/dynamo-base-sha": "0ddb5c218f39ea7572b58e25d01c6c649b05799b",
+              "schwinns.ai-dynamo.io/dynamo-11566-sha": "ab764d8c67f5fbb845ca12df5dfe854f8a82e423",
+              "schwinns.ai-dynamo.io/dynamo-11639-sha": "8f9548ac40fa1fa27fc27e8b23eb73b938188b39",
+              "schwinns.ai-dynamo.io/dynamo-gms-backend-sha": "b19686ab6747957bdba10c392a9d5ea069b5630f",
+              "schwinns.ai-dynamo.io/flashinfer-sha": "243d56c12cf1c724bdb128a4575ebf6ce1e8a1a9",
+              "schwinns.ai-dynamo.io/vllm-overlay-sha": "274603f228c16a7b899fe22eb109c5f49f105696",
+              "schwinns.ai-dynamo.io/flashinfer-allreduce-scope": "tp-only",
+              "schwinns.ai-dynamo.io/gms-backend": "sharded-ssd",
+              "schwinns.ai-dynamo.io/topology": "TP8-DP1-EP8-IntraPod-GMS",
+              "schwinns.ai-dynamo.io/profile": "GMS_SNAPSHOT_PROFILE=1",
+              "schwinns.ai-dynamo.io/profile-commit": "760e55e21e14f76d7c204920f00ea9144d819b4b"
+            }
+          },
+          "spec": {
+            "containers": [
+              {
+                "args": [
+                  "--http-port",
+                  "8000"
+                ],
+                "command": [
+                  "python3",
+                  "-m",
+                  "dynamo.frontend"
+                ],
+                "env": [
+                  {
+                    "name": "HF_HOME",
+                    "value": "/home/dynamo/.cache/huggingface"
+                  },
+                  {
+                    "name": "HF_HUB_OFFLINE",
+                    "value": "1"
+                  },
+                  {
+                    "name": "TRANSFORMERS_OFFLINE",
+                    "value": "1"
+                  }
+                ],
+                "image": "dynamoci.azurecr.io/ai-dynamo/dynamo:760e55e21e14f76d7c204920f00ea9144d819b4b-vllm-runtime-run-29604929787-1@sha256:ffc100b5511b5c3f5f73f5edf01e44895b531fcd192aa94761158867c5f17291",
+                "imagePullPolicy": "Always",
+                "name": "main",
+                "ports": [
+                  {
+                    "containerPort": 8000,
+                    "name": "http",
+                    "protocol": "TCP"
+                  }
+                ],
+                "readinessProbe": {
+                  "httpGet": {
+                    "path": "/health",
+                    "port": 8000
+                  },
+                  "periodSeconds": 5
+                },
+                "volumeMounts": [
+                  {
+                    "mountPath": "/home/dynamo/.cache/huggingface",
+                    "name": "hf-cache"
+                  }
+                ]
+              }
+            ],
+            "imagePullSecrets": [
+              {
+                "name": "acr-token-secret"
+              }
+            ],
+            "volumes": [
+              {
+                "name": "hf-cache",
+                "persistentVolumeClaim": {
+                  "claimName": "shared-model-cache"
+                }
+              }
+            ]
+          }
+        },
+        "replicas": 1,
+        "type": "frontend"
+      },
+      {
+        "experimental": {
+          "checkpoint": {
+            "deletionPolicy": "Retain",
+            "enabled": true,
+            "job": {
+              "gmsClientContainers": [
+                "gms-saver"
+              ],
+              "podTemplate": {
+                "metadata": {
+                  "annotations": {
+                    "nvidia.com/enable-grove": "false",
+                    "schwinns.ai-dynamo.io/build-run": "29604929787",
+                    "schwinns.ai-dynamo.io/dynamo-sha": "760e55e21e14f76d7c204920f00ea9144d819b4b",
+                    "schwinns.ai-dynamo.io/dynamo-base-sha": "0ddb5c218f39ea7572b58e25d01c6c649b05799b",
+                    "schwinns.ai-dynamo.io/dynamo-11566-sha": "ab764d8c67f5fbb845ca12df5dfe854f8a82e423",
+                    "schwinns.ai-dynamo.io/dynamo-11639-sha": "8f9548ac40fa1fa27fc27e8b23eb73b938188b39",
+                    "schwinns.ai-dynamo.io/dynamo-gms-backend-sha": "b19686ab6747957bdba10c392a9d5ea069b5630f",
+                    "schwinns.ai-dynamo.io/flashinfer-sha": "243d56c12cf1c724bdb128a4575ebf6ce1e8a1a9",
+                    "schwinns.ai-dynamo.io/vllm-overlay-sha": "274603f228c16a7b899fe22eb109c5f49f105696",
+                    "schwinns.ai-dynamo.io/flashinfer-allreduce-scope": "tp-only",
+                    "schwinns.ai-dynamo.io/gms-backend": "sharded-ssd",
+                    "schwinns.ai-dynamo.io/topology": "TP8-DP1-EP8-IntraPod-GMS",
+                    "schwinns.ai-dynamo.io/profile": "GMS_SNAPSHOT_PROFILE=1",
+                    "schwinns.ai-dynamo.io/profile-commit": "760e55e21e14f76d7c204920f00ea9144d819b4b"
+                  }
+                },
+                "spec": {
+                  "containers": [
+                    {
+                      "args": [
+                        "--checkpoint-dir",
+                        "/checkpoints/gms/g52-t8-gms-prof-r29604929787-r2/versions/1",
+                        "--sharded-ssd-roots",
+                        "/mnt/gms-ssd/nvme2/schwinns/g52-t8-gms-prof-r29604929787-r2,/mnt/gms-ssd/nvme4/schwinns/g52-t8-gms-prof-r29604929787-r2,/mnt/gms-ssd/nvme5/schwinns/g52-t8-gms-prof-r29604929787-r2,/mnt/gms-ssd/nvme6/schwinns/g52-t8-gms-prof-r29604929787-r2,/mnt/gms-ssd/nvme7/schwinns/g52-t8-gms-prof-r29604929787-r2,/mnt/gms-ssd/nvme8/schwinns/g52-t8-gms-prof-r29604929787-r2,/mnt/gms-ssd/nvme9/schwinns/g52-t8-gms-prof-r29604929787-r2"
+                      ],
+                      "command": [
+                        "python3",
+                        "-m",
+                        "gpu_memory_service.cli.snapshot.saver"
+                      ],
+                      "image": "dynamoci.azurecr.io/ai-dynamo/dynamo:760e55e21e14f76d7c204920f00ea9144d819b4b-vllm-placeholder-run-29604929787-1@sha256:44ade91e2dc09c9732ea038b9db81bff7b3fcdc7b5a692ab1142d2ee7bde0ca2",
+                      "imagePullPolicy": "Always",
+                      "name": "gms-saver",
+                      "securityContext": {
+                        "runAsUser": 0
+                      },
+                      "volumeMounts": [
+                        {
+                          "mountPath": "/checkpoints",
+                          "name": "checkpoint-storage"
+                        },
+                        {
+                          "mountPath": "/mnt/gms-ssd/nvme2",
+                          "name": "gms-ssd-nvme2"
+                        },
+                        {
+                          "mountPath": "/mnt/gms-ssd/nvme4",
+                          "name": "gms-ssd-nvme4"
+                        },
+                        {
+                          "mountPath": "/mnt/gms-ssd/nvme5",
+                          "name": "gms-ssd-nvme5"
+                        },
+                        {
+                          "mountPath": "/mnt/gms-ssd/nvme6",
+                          "name": "gms-ssd-nvme6"
+                        },
+                        {
+                          "mountPath": "/mnt/gms-ssd/nvme7",
+                          "name": "gms-ssd-nvme7"
+                        },
+                        {
+                          "mountPath": "/mnt/gms-ssd/nvme8",
+                          "name": "gms-ssd-nvme8"
+                        },
+                        {
+                          "mountPath": "/mnt/gms-ssd/nvme9",
+                          "name": "gms-ssd-nvme9"
+                        }
+                      ],
+                      "env": [
+                        {
+                          "name": "GMS_SNAPSHOT_PROFILE",
+                          "value": "1"
+                        }
+                      ]
+                    }
+                  ],
+                  "imagePullSecrets": [
+                    {
+                      "name": "acr-token-secret"
+                    }
+                  ],
+                  "nodeSelector": {
+                    "kubernetes.io/hostname": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+                  },
+                  "securityContext": {
+                    "fsGroup": 1000,
+                    "fsGroupChangePolicy": "OnRootMismatch"
+                  },
+                  "tolerations": [
+                    {
+                      "effect": "NoSchedule",
+                      "key": "nvidia.com/gpu",
+                      "operator": "Exists"
+                    },
+                    {
+                      "effect": "NoSchedule",
+                      "key": "dra",
+                      "operator": "Exists"
+                    },
+                    {
+                      "effect": "NoSchedule",
+                      "key": "schwinns.ai-dynamo.io/gms-bench",
+                      "operator": "Exists"
+                    },
+                    {
+                      "effect": "NoSchedule",
+                      "key": "autopilot/2026-05-29-qwen06b-tp2-p2p-reserved",
+                      "operator": "Exists"
+                    }
+                  ],
+                  "volumes": [
+                    {
+                      "name": "hf-cache",
+                      "persistentVolumeClaim": {
+                        "claimName": "shared-model-cache"
+                      }
+                    },
+                    {
+                      "name": "checkpoint-storage",
+                      "persistentVolumeClaim": {
+                        "claimName": "snapshot-pvc"
+                      }
+                    },
+                    {
+                      "emptyDir": {},
+                      "name": "criu-work"
+                    },
+                    {
+                      "hostPath": {
+                        "path": "/mnt/dynamo-gms-nvme2",
+                        "type": "Directory"
+                      },
+                      "name": "gms-ssd-nvme2"
+                    },
+                    {
+                      "hostPath": {
+                        "path": "/mnt/dynamo-gms-nvme4",
+                        "type": "Directory"
+                      },
+                      "name": "gms-ssd-nvme4"
+                    },
+                    {
+                      "hostPath": {
+                        "path": "/mnt/dynamo-gms-nvme5",
+                        "type": "Directory"
+                      },
+                      "name": "gms-ssd-nvme5"
+                    },
+                    {
+                      "hostPath": {
+                        "path": "/mnt/dynamo-gms-nvme6",
+                        "type": "Directory"
+                      },
+                      "name": "gms-ssd-nvme6"
+                    },
+                    {
+                      "hostPath": {
+                        "path": "/mnt/dynamo-gms-nvme7",
+                        "type": "Directory"
+                      },
+                      "name": "gms-ssd-nvme7"
+                    },
+                    {
+                      "hostPath": {
+                        "path": "/mnt/dynamo-gms-nvme8",
+                        "type": "Directory"
+                      },
+                      "name": "gms-ssd-nvme8"
+                    },
+                    {
+                      "hostPath": {
+                        "path": "/mnt/dynamo-gms-nvme9",
+                        "type": "Directory"
+                      },
+                      "name": "gms-ssd-nvme9"
+                    }
+                  ]
+                }
+              }
+            },
+            "startupPolicy": "WaitForCheckpoint",
+            "targetContainerName": "main"
+          },
+          "gpuMemoryService": {
+            "deviceClassName": "gpu.nvidia.com",
+            "extraClientContainers": [
+              "gms-loader"
+            ],
+            "mode": "IntraPod"
+          }
+        },
+        "name": "VllmDecodeWorker",
+        "podTemplate": {
+          "metadata": {
+            "annotations": {
+              "nvidia.com/enable-grove": "false",
+              "schwinns.ai-dynamo.io/build-run": "29604929787",
+              "schwinns.ai-dynamo.io/dynamo-sha": "760e55e21e14f76d7c204920f00ea9144d819b4b",
+              "schwinns.ai-dynamo.io/dynamo-base-sha": "0ddb5c218f39ea7572b58e25d01c6c649b05799b",
+              "schwinns.ai-dynamo.io/dynamo-11566-sha": "ab764d8c67f5fbb845ca12df5dfe854f8a82e423",
+              "schwinns.ai-dynamo.io/dynamo-11639-sha": "8f9548ac40fa1fa27fc27e8b23eb73b938188b39",
+              "schwinns.ai-dynamo.io/dynamo-gms-backend-sha": "b19686ab6747957bdba10c392a9d5ea069b5630f",
+              "schwinns.ai-dynamo.io/flashinfer-sha": "243d56c12cf1c724bdb128a4575ebf6ce1e8a1a9",
+              "schwinns.ai-dynamo.io/vllm-overlay-sha": "274603f228c16a7b899fe22eb109c5f49f105696",
+              "schwinns.ai-dynamo.io/flashinfer-allreduce-scope": "tp-only",
+              "schwinns.ai-dynamo.io/gms-backend": "sharded-ssd",
+              "schwinns.ai-dynamo.io/topology": "TP8-DP1-EP8-IntraPod-GMS",
+              "schwinns.ai-dynamo.io/profile": "GMS_SNAPSHOT_PROFILE=1",
+              "schwinns.ai-dynamo.io/profile-commit": "760e55e21e14f76d7c204920f00ea9144d819b4b"
+            }
+          },
+          "spec": {
+            "containers": [
+              {
+                "args": [
+                  "--model",
+                  "nvidia/GLM-5.2-NVFP4",
+                  "--trust-remote-code",
+                  "--load-format",
+                  "gms",
+                  "--tensor-parallel-size",
+                  "8",
+                  "--enable-expert-parallel",
+                  "--moe-backend",
+                  "flashinfer_trtllm",
+                  "--all2all-backend",
+                  "flashinfer_nvlink_one_sided",
+                  "--no-enable-flashinfer-autotune",
+                  "--disable-custom-all-reduce",
+                  "--reasoning-parser",
+                  "glm45",
+                  "--max-model-len",
+                  "4096",
+                  "--max-num-seqs",
+                  "8",
+                  "--max-num-batched-tokens",
+                  "4096",
+                  "--gpu-memory-utilization",
+                  "0.80",
+                  "--kv-cache-memory-bytes",
+                  "8G",
+                  "--kv-cache-dtype",
+                  "fp8_e4m3"
+                ],
+                "command": [
+                  "python3",
+                  "-m",
+                  "dynamo.vllm"
+                ],
+                "env": [
+                  {
+                    "name": "HF_HOME",
+                    "value": "/home/dynamo/.cache/huggingface"
+                  },
+                  {
+                    "name": "HF_HUB_OFFLINE",
+                    "value": "1"
+                  },
+                  {
+                    "name": "TRANSFORMERS_OFFLINE",
+                    "value": "1"
+                  },
+                  {
+                    "name": "VLLM_ENGINE_READY_TIMEOUT_S",
+                    "value": "7200"
+                  },
+                  {
+                    "name": "NCCL_NET",
+                    "value": "Socket"
+                  },
+                  {
+                    "name": "NCCL_SOCKET_IFNAME",
+                    "value": "eth0"
+                  },
+                  {
+                    "name": "GLOO_SOCKET_IFNAME",
+                    "value": "eth0"
+                  },
+                  {
+                    "name": "NCCL_IB_DISABLE",
+                    "value": "1"
+                  },
+                  {
+                    "name": "NCCL_P2P_DISABLE",
+                    "value": "1"
+                  },
+                  {
+                    "name": "NCCL_SHM_DISABLE",
+                    "value": "1"
+                  },
+                  {
+                    "name": "NCCL_NVLS_ENABLE",
+                    "value": "0"
+                  },
+                  {
+                    "name": "NCCL_CUMEM_ENABLE",
+                    "value": "0"
+                  },
+                  {
+                    "name": "NCCL_RAS_ENABLE",
+                    "value": "0"
+                  },
+                  {
+                    "name": "NCCL_DEBUG",
+                    "value": "INFO"
+                  },
+                  {
+                    "name": "NCCL_DEBUG_SUBSYS",
+                    "value": "INIT,ENV,GRAPH,P2P,SHM,NET,COLL"
+                  },
+                  {
+                    "name": "TORCH_NCCL_ENABLE_MONITORING",
+                    "value": "0"
+                  },
+                  {
+                    "name": "VLLM_ALLREDUCE_USE_SYMM_MEM",
+                    "value": "0"
+                  },
+                  {
+                    "name": "VLLM_USE_NCCL_SYMM_MEM",
+                    "value": "0"
+                  },
+                  {
+                    "name": "VLLM_DISTRIBUTED_USE_SPLIT_GROUP",
+                    "value": "0"
+                  },
+                  {
+                    "name": "VLLM_ALLREDUCE_USE_FLASHINFER",
+                    "value": "1"
+                  },
+                  {
+                    "name": "VLLM_FLASHINFER_ALLREDUCE_BACKEND",
+                    "value": "mnnvl"
+                  },
+                  {
+                    "name": "VLLM_DISABLE_COMPILE_CACHE",
+                    "value": "1"
+                  },
+                  {
+                    "name": "GMS_SNAPSHOT_PROFILE",
+                    "value": "1"
+                  }
+                ],
+                "image": "dynamoci.azurecr.io/ai-dynamo/dynamo:760e55e21e14f76d7c204920f00ea9144d819b4b-vllm-placeholder-run-29604929787-1@sha256:44ade91e2dc09c9732ea038b9db81bff7b3fcdc7b5a692ab1142d2ee7bde0ca2",
+                "imagePullPolicy": "Always",
+                "livenessProbe": {
+                  "failureThreshold": 1,
+                  "httpGet": {
+                    "path": "/live",
+                    "port": 9090
+                  },
+                  "periodSeconds": 5
+                },
+                "name": "main",
+                "ports": [
+                  {
+                    "containerPort": 9090,
+                    "name": "system",
+                    "protocol": "TCP"
+                  }
+                ],
+                "readinessProbe": {
+                  "httpGet": {
+                    "path": "/health",
+                    "port": 9090
+                  },
+                  "periodSeconds": 10
+                },
+                "resources": {
+                  "limits": {
+                    "memory": "1536Gi",
+                    "nvidia.com/gpu": "8"
+                  },
+                  "requests": {
+                    "memory": "128Gi",
+                    "nvidia.com/gpu": "8"
+                  }
+                },
+                "securityContext": {
+                  "capabilities": {
+                    "add": [
+                      "SYS_PTRACE"
+                    ]
+                  },
+                  "runAsUser": 0
+                },
+                "startupProbe": {
+                  "failureThreshold": 720,
+                  "httpGet": {
+                    "path": "/health",
+                    "port": 9090
+                  },
+                  "periodSeconds": 10
+                },
+                "volumeMounts": [
+                  {
+                    "mountPath": "/home/dynamo/.cache/huggingface",
+                    "name": "hf-cache"
+                  },
+                  {
+                    "mountPath": "/checkpoints",
+                    "name": "checkpoint-storage"
+                  },
+                  {
+                    "mountPath": "/var/criu-work",
+                    "name": "criu-work"
+                  }
+                ]
+              },
+              {
+                "args": [
+                  "echo \"GMS loader start $(date -u +%FT%TZ)\"\npython3 -m gpu_memory_service.cli.snapshot.loader \\\n  --checkpoint-dir /checkpoints/gms/g52-t8-gms-prof-r29604929787-r2/versions/1 \\\n  --transfer-backend sharded-ssd \\\n  --sharded-ssd-roots /mnt/gms-ssd/nvme2/schwinns/g52-t8-gms-prof-r29604929787-r2,/mnt/gms-ssd/nvme4/schwinns/g52-t8-gms-prof-r29604929787-r2,/mnt/gms-ssd/nvme5/schwinns/g52-t8-gms-prof-r29604929787-r2,/mnt/gms-ssd/nvme6/schwinns/g52-t8-gms-prof-r29604929787-r2,/mnt/gms-ssd/nvme7/schwinns/g52-t8-gms-prof-r29604929787-r2,/mnt/gms-ssd/nvme8/schwinns/g52-t8-gms-prof-r29604929787-r2,/mnt/gms-ssd/nvme9/schwinns/g52-t8-gms-prof-r29604929787-r2 \\\n  --sharded-ssd-queues-per-root 2\nrc=$?\necho \"GMS loader exit $(date -u +%FT%TZ) rc=${rc}\"\n[ \"${rc}\" -eq 0 ] || exit \"${rc}\"\nexec sleep infinity\n"
+                ],
+                "command": [
+                  "/bin/sh",
+                  "-c"
+                ],
+                "image": "dynamoci.azurecr.io/ai-dynamo/dynamo:760e55e21e14f76d7c204920f00ea9144d819b4b-vllm-placeholder-run-29604929787-1@sha256:44ade91e2dc09c9732ea038b9db81bff7b3fcdc7b5a692ab1142d2ee7bde0ca2",
+                "imagePullPolicy": "Always",
+                "name": "gms-loader",
+                "securityContext": {
+                  "runAsUser": 0
+                },
+                "volumeMounts": [
+                  {
+                    "mountPath": "/checkpoints",
+                    "name": "checkpoint-storage"
+                  },
+                  {
+                    "mountPath": "/var/criu-work",
+                    "name": "criu-work"
+                  },
+                  {
+                    "mountPath": "/mnt/gms-ssd/nvme2",
+                    "name": "gms-ssd-nvme2"
+                  },
+                  {
+                    "mountPath": "/mnt/gms-ssd/nvme4",
+                    "name": "gms-ssd-nvme4"
+                  },
+                  {
+                    "mountPath": "/mnt/gms-ssd/nvme5",
+                    "name": "gms-ssd-nvme5"
+                  },
+                  {
+                    "mountPath": "/mnt/gms-ssd/nvme6",
+                    "name": "gms-ssd-nvme6"
+                  },
+                  {
+                    "mountPath": "/mnt/gms-ssd/nvme7",
+                    "name": "gms-ssd-nvme7"
+                  },
+                  {
+                    "mountPath": "/mnt/gms-ssd/nvme8",
+                    "name": "gms-ssd-nvme8"
+                  },
+                  {
+                    "mountPath": "/mnt/gms-ssd/nvme9",
+                    "name": "gms-ssd-nvme9"
+                  }
+                ],
+                "env": [
+                  {
+                    "name": "GMS_SNAPSHOT_PROFILE",
+                    "value": "1"
+                  }
+                ]
+              }
+            ],
+            "imagePullSecrets": [
+              {
+                "name": "acr-token-secret"
+              }
+            ],
+            "nodeSelector": {
+              "kubernetes.io/hostname": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+            },
+            "securityContext": {
+              "fsGroup": 1000,
+              "fsGroupChangePolicy": "OnRootMismatch"
+            },
+            "tolerations": [
+              {
+                "effect": "NoSchedule",
+                "key": "nvidia.com/gpu",
+                "operator": "Exists"
+              },
+              {
+                "effect": "NoSchedule",
+                "key": "dra",
+                "operator": "Exists"
+              },
+              {
+                "effect": "NoSchedule",
+                "key": "schwinns.ai-dynamo.io/gms-bench",
+                "operator": "Exists"
+              },
+              {
+                "effect": "NoSchedule",
+                "key": "autopilot/2026-05-29-qwen06b-tp2-p2p-reserved",
+                "operator": "Exists"
+              }
+            ],
+            "volumes": [
+              {
+                "name": "hf-cache",
+                "persistentVolumeClaim": {
+                  "claimName": "shared-model-cache"
+                }
+              },
+              {
+                "name": "checkpoint-storage",
+                "persistentVolumeClaim": {
+                  "claimName": "snapshot-pvc"
+                }
+              },
+              {
+                "emptyDir": {},
+                "name": "criu-work"
+              },
+              {
+                "hostPath": {
+                  "path": "/mnt/dynamo-gms-nvme2",
+                  "type": "Directory"
+                },
+                "name": "gms-ssd-nvme2"
+              },
+              {
+                "hostPath": {
+                  "path": "/mnt/dynamo-gms-nvme4",
+                  "type": "Directory"
+                },
+                "name": "gms-ssd-nvme4"
+              },
+              {
+                "hostPath": {
+                  "path": "/mnt/dynamo-gms-nvme5",
+                  "type": "Directory"
+                },
+                "name": "gms-ssd-nvme5"
+              },
+              {
+                "hostPath": {
+                  "path": "/mnt/dynamo-gms-nvme6",
+                  "type": "Directory"
+                },
+                "name": "gms-ssd-nvme6"
+              },
+              {
+                "hostPath": {
+                  "path": "/mnt/dynamo-gms-nvme7",
+                  "type": "Directory"
+                },
+                "name": "gms-ssd-nvme7"
+              },
+              {
+                "hostPath": {
+                  "path": "/mnt/dynamo-gms-nvme8",
+                  "type": "Directory"
+                },
+                "name": "gms-ssd-nvme8"
+              },
+              {
+                "hostPath": {
+                  "path": "/mnt/dynamo-gms-nvme9",
+                  "type": "Directory"
+                },
+                "name": "gms-ssd-nvme9"
+              }
+            ]
+          }
+        },
+        "replicas": 1,
+        "sharedMemorySize": "64Gi",
+        "type": "worker"
+      }
+    ]
+  }
+}
