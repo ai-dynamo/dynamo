@@ -103,11 +103,17 @@ Modified Mooncake traces are provided to showcase the value of KV-aware routing 
 | Agentic (15% subset) | Aggregated (4 workers) | B200 | 64          | 176.420                 | 57.493                  | 355.555    |
 | Agentic (15% subset) | Disaggregated (3P1D)   | B200 | 128         | 320.907                 | 65.105                  | 1938.059   |
 | Agentic (15% subset) | Aggregated (3 workers) | H200 | 32          | 54.550                  | 52.370                  | 1.790 s    |
-| Agentic (15% subset) | Disaggregated (1P1D)   | H200 | TBD         | TBD                     | TBD                     | TBD        |
+| Agentic (15% subset) | Disaggregated (1P1D)   | H200 | 24          | 68.860                  | 53.880                  | 1.874 s    |
 
 The H200 aggregate result used 24 GPUs across three 8-GPU workers. Aggregate
 output throughput was 1,309.20 tok/s; raw user throughput was 51.06 tok/s
 average and 52.37 tok/s P50; TTFT was 12.45 s average and 1.79 s P50.
+
+The H200 disaggregated result used one 8-GPU prefill worker and one 8-GPU
+decode worker. Aggregate output throughput was 1,101.78 tok/s; raw user
+throughput was 53.88 tok/s P50; TTFT was 1.874 s P50; request throughput was
+0.4661 req/s. Of 1,000 requests, 997 were valid, three errored, and none were
+cancelled.
 
 
 
