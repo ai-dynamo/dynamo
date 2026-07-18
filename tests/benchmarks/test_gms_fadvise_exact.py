@@ -5,6 +5,7 @@
 
 import importlib.util
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -122,6 +123,172 @@ def test_runner_rejects_non_empty_evidence_directory(tmp_path):
     assert "refusing to reuse non-empty evidence directory" in result.stderr
     assert stale.read_text(encoding="utf-8") == "keep"
     assert sorted(stale.parent.iterdir()) == [stale]
+
+
+def test_runner_rejects_symlink_to_non_empty_evidence_directory(tmp_path):
+    stale = tmp_path / "stale-evidence" / "stale.txt"
+    stale.parent.mkdir()
+    stale.write_text("keep", encoding="utf-8")
+    evidence_link = tmp_path / "evidence"
+    evidence_link.symlink_to(stale.parent, target_is_directory=True)
+
+    result = subprocess.run(
+        [RUNNER_PATH, "a", evidence_link],
+        cwd=Path(__file__).parents[2],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "refusing evidence path symlink" in result.stderr
+    assert stale.read_text(encoding="utf-8") == "keep"
+    assert sorted(stale.parent.iterdir()) == [stale]
+    assert evidence_link.is_symlink()
+
+
+def write_fake_cleanup_commands(bin_dir):
+    kubectl = bin_dir / "kubectl"
+    kubectl.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$1" != "--context" ||
+      "$2" != "nv-prd-dgxc.teleport.sh-dynamo-nscale-dev-cluster" ||
+      "$3" != "-n" || "$4" != "schwinns" ]]; then
+    echo "kubectl call is not explicitly scoped: $*" >&2
+    exit 90
+fi
+printf '%s\\n' "$*" >> "$FAKE_KUBECTL_LOG"
+shift 4
+
+if [[ "$1" == patch && "$2" == dynamographdeployment ]]; then
+    attempts=$(cat "$FAKE_PATCH_ATTEMPTS")
+    attempts=$((attempts + 1))
+    printf '%s\\n' "$attempts" > "$FAKE_PATCH_ATTEMPTS"
+    if [[ "$attempts" -le "$FAKE_PATCH_FAILURES" ]]; then
+        echo "injected patch failure" >&2
+        exit 7
+    fi
+    printf '0\\n' > "$FAKE_DGD_REPLICAS"
+    printf 'patched\\n'
+    exit
+fi
+
+if [[ "$1" != get ]]; then
+    echo "unexpected kubectl call: $*" >&2
+    exit 91
+fi
+case "$2" in
+    dynamographdeployment)
+        replicas=$(cat "$FAKE_DGD_REPLICAS")
+        printf '{"spec":{"components":['
+        printf '{"name":"Frontend","replicas":1},'
+        printf '{"name":"VllmDecodeWorker","replicas":%s}' "$replicas"
+        printf ']}}\\n'
+        ;;
+    dynamocomponentdeployments|deployments|resourceclaims)
+        printf '{"items":[]}\\n'
+        ;;
+    pods)
+        ;;
+    *)
+        echo "unexpected kubectl get: $*" >&2
+        exit 92
+        ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    kubectl.chmod(0o755)
+
+    (bin_dir / "sleep").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (bin_dir / "sleep").chmod(0o755)
+    (bin_dir / "seq").write_text("#!/bin/sh\nprintf '1\\n2\\n3\\n'\n", encoding="utf-8")
+    (bin_dir / "seq").chmod(0o755)
+
+
+def run_cleanup_harness(tmp_path, patch_failures):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_fake_cleanup_commands(bin_dir)
+
+    runner_source = RUNNER_PATH.read_text(encoding="utf-8")
+    functions = runner_source.partition("\nstamp PREFLIGHT_BEGIN")[0]
+    harness = tmp_path / "cleanup-harness.sh"
+    harness.write_text(
+        f"{functions}\nCLEANUP_OWNED=1\nZERO_CONFIRMED=0\nexit 0\n",
+        encoding="utf-8",
+    )
+    harness.chmod(0o755)
+
+    state = {
+        "FAKE_DGD_REPLICAS": tmp_path / "dgd-replicas",
+        "FAKE_PATCH_ATTEMPTS": tmp_path / "patch-attempts",
+        "FAKE_KUBECTL_LOG": tmp_path / "kubectl.log",
+    }
+    state["FAKE_DGD_REPLICAS"].write_text("1\n", encoding="utf-8")
+    state["FAKE_PATCH_ATTEMPTS"].write_text("0\n", encoding="utf-8")
+    state["FAKE_KUBECTL_LOG"].touch()
+    evidence = tmp_path / "evidence"
+    env = os.environ | {
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "FAKE_PATCH_FAILURES": str(patch_failures),
+        **{name: str(path) for name, path in state.items()},
+    }
+
+    result = subprocess.run(
+        [harness, "a", evidence],
+        cwd=Path(__file__).parents[2],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result, evidence, state
+
+
+def test_cleanup_patch_failure_does_not_confirm_or_finalize(tmp_path):
+    result, evidence, state = run_cleanup_harness(tmp_path, patch_failures=3)
+
+    assert result.returncode != 0
+    assert state["FAKE_DGD_REPLICAS"].read_text(encoding="utf-8").strip() == "1"
+    assert state["FAKE_PATCH_ATTEMPTS"].read_text(encoding="utf-8").strip() == "3"
+    timestamps = (evidence / "timestamps.tsv").read_text(encoding="utf-8")
+    assert "SCALE_DOWN_CONFIRMED" not in timestamps
+    assert "RUNNER_EXIT\tstatus=1" in timestamps
+    assert not (evidence / "SHA256SUMS").exists()
+
+
+def test_cleanup_retries_until_dgd_zero_and_checksums_all_evidence(tmp_path):
+    result, evidence, state = run_cleanup_harness(tmp_path, patch_failures=1)
+
+    assert result.returncode == 0, result.stderr
+    assert state["FAKE_DGD_REPLICAS"].read_text(encoding="utf-8").strip() == "0"
+    assert state["FAKE_PATCH_ATTEMPTS"].read_text(encoding="utf-8").strip() == "2"
+    timestamps = (evidence / "timestamps.tsv").read_text(encoding="utf-8")
+    assert "SCALE_DOWN_CONFIRMED\tattempt=2 patch_status=0" in timestamps
+    assert "RUNNER_EXIT\tstatus=0" in timestamps
+
+    manifest = evidence / "SHA256SUMS"
+    verification = subprocess.run(
+        ["sha256sum", "-c", manifest],
+        cwd=Path(__file__).parents[2],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert verification.returncode == 0, verification.stderr
+
+    evidence_files = {
+        str(path) for path in evidence.rglob("*") if path.is_file() and path != manifest
+    }
+    checksummed_files = {
+        line.split("  ", maxsplit=1)[1]
+        for line in manifest.read_text(encoding="utf-8").splitlines()
+    }
+    assert checksummed_files == evidence_files
+    assert not (evidence / ".SHA256SUMS.tmp").exists()
 
 
 def test_runner_owns_cleanup_before_scale_up_and_finalizes_last():

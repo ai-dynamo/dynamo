@@ -11,6 +11,9 @@ fi
 
 VARIANT=$1
 ART=$2
+while [[ "$ART" != / && "$ART" == */ ]]; do
+    ART=${ART%/}
+done
 ROOT=$(git rev-parse --show-toplevel)
 EXP="$ROOT/benchmarks/gms_cuda_init_ab"
 OVERLAY="$EXP/manifests/variant-$VARIANT"
@@ -35,6 +38,29 @@ CLAIM=
 CLEANUP_OWNED=0
 ZERO_CONFIRMED=0
 
+ART_LOCK="${ART}.run-variant.lock"
+ART_LOCK_HELD=0
+
+release_evidence_lock() {
+    if [[ "$ART_LOCK_HELD" -eq 1 ]]; then
+        rmdir -- "$ART_LOCK"
+        ART_LOCK_HELD=0
+    fi
+}
+
+mkdir -p -- "$(dirname -- "$ART")"
+if ! mkdir -- "$ART_LOCK" 2>/dev/null; then
+    echo "unable to acquire evidence directory lock: $ART_LOCK" >&2
+    exit 1
+fi
+ART_LOCK_HELD=1
+trap release_evidence_lock EXIT
+trap 'release_evidence_lock; exit 1' INT TERM
+
+if [[ -L "$ART" ]]; then
+    echo "refusing evidence path symlink: $ART" >&2
+    exit 1
+fi
 if [[ -e "$ART" && ! -d "$ART" ]]; then
     echo "evidence path exists and is not a directory: $ART" >&2
     exit 1
@@ -48,7 +74,13 @@ if [[ -d "$ART" ]]; then
         exit 1
     fi
 fi
+if [[ ! -e "$ART" ]]; then
+    mkdir -- "$ART"
+fi
 mkdir -p "$ART"/{cache,inference,logs,metrics,objects,preflight,teardown}
+release_evidence_lock
+trap - EXIT INT TERM
+
 printf 'utc\tevent\tdetails\n' > "$TIMES"
 cat > "$ART/expected-uuids.txt" <<'EOF'
 GPU-02ff0cc1-647f-dee7-8365-921738e945a6
@@ -107,52 +139,88 @@ matching_claims() {
             '.items[].metadata.name | select(startswith($prefix))'
 }
 
+zero_reached() {
+    local dcd_nonzero deployment_nonzero pods claims
+    if ! k get dynamographdeployment "$DGD" -o json |
+        jq -e --arg component "$COMPONENT" '
+            [
+                .spec.components[] |
+                select(.name == $component) |
+                .replicas
+            ] == [0]
+        ' >/dev/null; then
+        return 1
+    fi
+    if ! dcd_nonzero=$(
+        k get dynamocomponentdeployments -l "$POD_SELECTOR" -o json |
+            jq '[.items[] | select((.spec.replicas // 0) != 0)] | length'
+    ); then
+        return 1
+    fi
+    if ! deployment_nonzero=$(
+        k get deployments -l "$POD_SELECTOR" -o json |
+            jq '[.items[] | select((.spec.replicas // 0) != 0)] | length'
+    ); then
+        return 1
+    fi
+    if ! pods=$(k get pods -l "$POD_SELECTOR" -o name); then
+        return 1
+    fi
+    if ! claims=$(matching_claims); then
+        return 1
+    fi
+    [[ "$dcd_nonzero" == 0 && "$deployment_nonzero" == 0 &&
+        -z "$pods" && -z "$claims" ]]
+}
+
 wait_for_zero() {
-    local attempt dcd_nonzero deployment_nonzero pods claims
+    local attempt
     for attempt in $(seq 1 300); do
-        dcd_nonzero=$(
-            k get dynamocomponentdeployments -l "$POD_SELECTOR" -o json |
-                jq '[.items[] | select((.spec.replicas // 0) != 0)] | length'
-        )
-        deployment_nonzero=$(
-            k get deployments -l "$POD_SELECTOR" -o json |
-                jq '[.items[] | select((.spec.replicas // 0) != 0)] | length'
-        )
-        pods=$(k get pods -l "$POD_SELECTOR" -o name)
-        claims=$(matching_claims)
-        if [[ "$dcd_nonzero" == 0 && "$deployment_nonzero" == 0 &&
-              -z "$pods" && -z "$claims" ]]; then
+        if zero_reached; then
             stamp ZERO_AND_DRA_RELEASED
             return
         fi
         sleep 1
     done
-    echo "timed out waiting for DCD/deployment zero, pod deletion, and claim release" >&2
+    echo "timed out waiting for DGD/DCD/deployment zero, pod deletion, and claim release" >&2
     return 1
 }
 
 scale_down() {
-    local patch_status=0
+    local attempt patch_status
     if [[ "$CLEANUP_OWNED" -ne 1 || "$ZERO_CONFIRMED" -eq 1 ]]; then
         return
     fi
     stamp SCALE_DOWN_SENT
-    k patch dynamographdeployment "$DGD" --type=json \
-        -p='[{"op":"replace","path":"/spec/components/1/replicas","value":0}]' \
-        > "$ART/teardown/scale-down.txt" || patch_status=$?
-    if ! wait_for_zero; then
-        return 1
-    fi
-    ZERO_CONFIRMED=1
-    WORKER_POD=
-    CLAIM=
-    stamp SCALE_DOWN_CONFIRMED "patch_status=$patch_status"
+    : > "$ART/teardown/scale-down.txt"
+    for attempt in $(seq 1 300); do
+        patch_status=0
+        k patch dynamographdeployment "$DGD" --type=json \
+            -p='[
+                {"op":"test","path":"/spec/components/1/name","value":"VllmDecodeWorker"},
+                {"op":"replace","path":"/spec/components/1/replicas","value":0}
+            ]' \
+            >> "$ART/teardown/scale-down.txt" 2>&1 || patch_status=$?
+        if zero_reached; then
+            ZERO_CONFIRMED=1
+            WORKER_POD=
+            CLAIM=
+            stamp ZERO_AND_DRA_RELEASED
+            stamp SCALE_DOWN_CONFIRMED \
+                "attempt=$attempt patch_status=$patch_status"
+            return
+        fi
+        sleep 1
+    done
+    echo "timed out retrying scale-down and waiting for zero resources" >&2
+    return 1
 }
 
 finalize_evidence() {
     local sums="$ART/.SHA256SUMS.tmp"
     if [[ -e "$ART/SHA256SUMS" ]]; then
-        return
+        echo "refusing to replace existing checksum manifest" >&2
+        return 1
     fi
     if ! sha256sum \
         "$EXP/gms-fadvise-exact.py" \
@@ -162,12 +230,21 @@ finalize_evidence() {
         return 1
     fi
     if ! find "$ART" -type f \
-        ! -name SHA256SUMS ! -name .SHA256SUMS.tmp -print0 |
-        sort -z | xargs -0 sha256sum > "$sums"; then
+        ! -path "$ART/SHA256SUMS" ! -path "$sums" -print0 |
+        sort -z | xargs -0 --no-run-if-empty sha256sum > "$sums"; then
         rm -f "$sums"
         return 1
     fi
-    mv "$sums" "$ART/SHA256SUMS"
+    if [[ ! -s "$sums" ]]; then
+        echo "no evidence files found for checksum manifest" >&2
+        rm -f "$sums"
+        return 1
+    fi
+    if ! sha256sum -c "$sums" >/dev/null; then
+        rm -f "$sums"
+        return 1
+    fi
+    mv -- "$sums" "$ART/SHA256SUMS"
 }
 
 cleanup() {
@@ -368,7 +445,10 @@ PIDS+=("$!")
 ZERO_CONFIRMED=0
 stamp SCALE_UP_SENT
 k patch dynamographdeployment "$DGD" --type=json \
-    -p='[{"op":"replace","path":"/spec/components/1/replicas","value":1}]' \
+    -p='[
+        {"op":"test","path":"/spec/components/1/name","value":"VllmDecodeWorker"},
+        {"op":"replace","path":"/spec/components/1/replicas","value":1}
+    ]' \
     > "$ART/scale-up.txt"
 
 for attempt in $(seq 1 300); do
