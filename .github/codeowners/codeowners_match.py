@@ -46,7 +46,7 @@ import functools
 import re
 import subprocess
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypedDict
@@ -65,7 +65,7 @@ class Area(TypedDict, total=False):
 
 
 class SharedSpec(TypedDict):
-    """Multi-owner override (``shared:``/``advisory:`` entry)."""
+    """Validated owner rule used by the resolved model and emitter."""
 
     glob: str
     owners: list[str]
@@ -112,6 +112,7 @@ class ResolvedModel:
 
     catch_all: str
     areas: list[ResolvedArea]
+    required_owners: list[SharedSpec]
     shared: list[SharedSpec]
     advisory: list[SharedSpec]
     filetype_shared: list[FiletypeShared]
@@ -305,6 +306,96 @@ def changed_paths(repo: Path, base: str) -> list[str]:
 # back into the emitted rules.
 
 
+def _valid_owner_token(owner: object, known_labels: set[str]) -> bool:
+    """Whether an owner is an area label, @ principal, or email address."""
+    if not isinstance(owner, str) or not owner or owner != owner.strip():
+        return False
+    if owner in known_labels:
+        return True
+    if owner.startswith("@"):
+        return len(owner) > 1
+    local, separator, domain = owner.partition("@")
+    return bool(local and separator and domain)
+
+
+def _owner_rule_values(rule: object, section: str) -> tuple[str, list[object]]:
+    """Extract a structurally valid owner rule from untrusted YAML."""
+    if not isinstance(rule, Mapping):
+        raise SystemExit(f"areas.yaml: {section} entry {rule!r} must be a mapping")
+    glob = rule.get("glob")
+    owners = rule.get("owners", []) or []
+    inherits = rule.get("inherits", []) or []
+    if not isinstance(glob, str) or not glob.strip():
+        raise SystemExit(f"areas.yaml: {section} entry {rule!r} has invalid 'glob'")
+    if not isinstance(owners, list) or not isinstance(inherits, list):
+        raise SystemExit(
+            f"areas.yaml: {section} entry {rule!r} requires list "
+            "'owners'/'inherits' values"
+        )
+    return glob, [*inherits, *owners]
+
+
+def _normalize_owner_rules(
+    rules: object, areas: list[ResolvedArea], section: str
+) -> list[SharedSpec]:
+    """Validate principals and normalize additive owner authoring."""
+    if not isinstance(rules, list):
+        raise SystemExit(f"areas.yaml: {section} must be a list")
+    known_labels = {area.label for area in areas}
+    normalized: list[SharedSpec] = []
+    for rule in rules:
+        glob, declared = _owner_rule_values(rule, section)
+        invalid = [o for o in declared if not _valid_owner_token(o, known_labels)]
+        if invalid:
+            raise SystemExit(
+                f"areas.yaml: {section} entry {rule!r} has unknown owner labels "
+                f"or invalid principals: {invalid!r}"
+            )
+        owners = list(dict.fromkeys(declared))
+        if not owners:
+            raise SystemExit(f"areas.yaml: {section} entry {rule!r} has no owners")
+        normalized.append({"glob": glob, "owners": owners})
+    return normalized
+
+
+def _normalize_filetype_rule(rule: object, known_labels: set[str]) -> FiletypeRule:
+    """Validate one blocking or advisory file-type rule."""
+    if not isinstance(rule, Mapping):
+        raise SystemExit(f"areas.yaml: filetype_rules entry {rule!r} must be a mapping")
+    pattern = rule.get("pattern")
+    coowner = rule.get("coowner")
+    advisory = rule.get("advisory", False)
+    if not isinstance(pattern, str) or not pattern.strip():
+        raise SystemExit(
+            f"areas.yaml: filetype_rules entry {rule!r} has invalid pattern"
+        )
+    if not _valid_owner_token(coowner, known_labels):
+        raise SystemExit(
+            f"areas.yaml: filetype_rules entry {rule!r} has invalid coowner"
+        )
+    if not isinstance(advisory, bool):
+        raise SystemExit(
+            f"areas.yaml: filetype_rules entry {rule!r} has invalid advisory"
+        )
+    return {"pattern": pattern, "coowner": coowner, "advisory": advisory}
+
+
+def _normalize_filetype_rules(
+    rules: object, areas: list[ResolvedArea]
+) -> tuple[list[FiletypeShared], list[FiletypeRule]]:
+    """Split validated file-type rules into blocking and advisory outputs."""
+    if not isinstance(rules, list):
+        raise SystemExit("areas.yaml: classify.filetype_rules must be a list")
+    labels = {area.label for area in areas}
+    normalized = [_normalize_filetype_rule(rule, labels) for rule in rules]
+    blocking = [
+        FiletypeShared(glob=rule["pattern"], owners=[rule["coowner"]])
+        for rule in normalized
+        if not rule["advisory"]
+    ]
+    return blocking, [rule for rule in normalized if rule["advisory"]]
+
+
 def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> ResolvedModel:
     """Resolve an ``areas.yaml`` spec into the model the emitter renders.
 
@@ -316,8 +407,9 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
     Semantics per section:
 
     * ``areas``       -- ``path_globs`` are emitted verbatim (sorted).
-    * ``shared``      -- passed through as declared.
-    * ``advisory``    -- passed through as declared.
+    * ``required_owners`` -- validated owner-presence contracts; not emitted.
+    * ``shared``      -- ``inherits`` + ``owners`` normalize into one owner list.
+    * ``advisory``    -- normalized like shared, then emitted separately.
     * ``classify.filetype_rules`` -- each blocking rule becomes one stable
       row with the coowner as the sole owner (a single ``*Dockerfile*``
       line owns every Dockerfile at any depth unless a later explicit path
@@ -344,10 +436,6 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
             "areas.yaml: classify.keyword_rules is no longer supported; "
             "use explicit area path_globs or shared entries"
         )
-    filetype_rules: list[FiletypeRule] = classify.get("filetype_rules", []) or []
-
-    spec_shared: list[SharedSpec] = spec.get("shared", []) or []
-
     areas = [
         ResolvedArea(
             label=a["label"],
@@ -357,31 +445,28 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
         for a in raw_areas
     ]
 
-    # Blocking filetype rule -> one stable coowner-only row (bare pattern
-    # matches by basename at any depth per GitHub CODEOWNERS semantics).
-    # The old "enclosing area + coowner" behavior required walking the
-    # tree; if a specific subtree wants that co-ownership, declare it
-    # explicitly in ``shared`` with a path glob.
-    filetype_shared: list[FiletypeShared] = []
-    for rule in filetype_rules:
-        if rule.get("advisory"):
-            continue
-        pattern = rule.get("pattern")
-        coowner = rule.get("coowner")
-        if not pattern or not coowner:
-            raise SystemExit(
-                f"areas.yaml: filetype_rules entry {rule!r} missing "
-                "'pattern' or 'coowner'"
-            )
-        filetype_shared.append(FiletypeShared(glob=pattern, owners=[coowner]))
+    # A CODEOWNERS row always replaces earlier rows.  ``inherits`` makes the
+    # additive intent explicit without attempting unsafe, tree-dependent
+    # discovery of whichever rule happened to match before it.  Normalize to
+    # the legacy internal shape so emission remains a pure policy function.
+    normalized_shared = _normalize_owner_rules(spec.get("shared", []), areas, "shared")
+    required_owners = _normalize_owner_rules(
+        spec.get("required_owners", []), areas, "required_owners"
+    )
+    advisory = _normalize_owner_rules(spec.get("advisory", []), areas, "advisory")
 
-    filetype_advisory = [r for r in filetype_rules if r.get("advisory")]
+    # Blocking filetype rules become stable coowner-only rows. The old
+    # "enclosing area + coowner" behavior required walking the live tree.
+    filetype_shared, filetype_advisory = _normalize_filetype_rules(
+        classify.get("filetype_rules", []), areas
+    )
 
     return ResolvedModel(
         catch_all=catch_all,
         areas=areas,
-        shared=list(spec_shared),
-        advisory=spec.get("advisory", []) or [],
+        required_owners=required_owners,
+        shared=normalized_shared,
+        advisory=advisory,
         filetype_shared=filetype_shared,
         filetype_advisory=filetype_advisory,
         meta=dict(spec.get("meta", {})),

@@ -3,7 +3,8 @@
 Reads an ``areas.yaml`` (each area declares its path globs directly), asks the
 pure resolver in ``codeowners_match`` what the emitted CODEOWNERS would cover,
 and reports how much of the live tree is EXPLICITLY owned vs. falls to the
-catch-all.
+catch-all. It also verifies that final last-match resolution retains every
+owner promised by required, shared, and blocking file-type declarations.
 
 This is the ONLY place in the pipeline that reads ``git ls-files``. Emission
 is a pure function of the policy YAML; the tree only enters here, in the
@@ -28,11 +29,16 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).parent))
 from codeowners_match import (  # noqa: E402
+    ResolvedModel,
+    anchor,
     changed_paths,
     compute_resolution,
     load_tree,
     match,
+    parse_codeowners,
+    resolve_owners,
 )
+from emit_codeowners import render_codeowners  # noqa: E402
 
 
 @dataclass
@@ -41,6 +47,110 @@ class CoverageGate:
 
     blocking: list[str]
     warnings: list[str]
+
+
+@dataclass(frozen=True)
+class OwnershipContractViolation:
+    """A declared owner that final CODEOWNERS precedence removed."""
+
+    glob: str
+    path: str
+    missing: tuple[str, ...]
+    actual: tuple[str, ...]
+
+
+OwnershipContract = tuple[str, str, list[str]]
+
+
+def _ownership_contracts(model: ResolvedModel) -> list[OwnershipContract]:
+    """Flatten required, shared, and file-type contracts for validation."""
+    path_contracts = [*model.required_owners, *model.shared]
+    contracts = [
+        (anchor(rule["glob"]), rule["glob"], rule["owners"]) for rule in path_contracts
+    ]
+    contracts.extend(
+        (rule.glob, rule.glob, rule.owners) for rule in model.filetype_shared
+    )
+    return contracts
+
+
+def _contract_violation(
+    contract: OwnershipContract,
+    path: str,
+    rules: list[tuple[str, list[str]]],
+    label_to_team: dict[str, str],
+) -> OwnershipContractViolation | None:
+    """Return the owner loss for one contract/path pair, if any."""
+    pattern, declared_glob, declared_owners = contract
+    if not match(pattern, path):
+        return None
+    actual = set(resolve_owners(rules, path))
+    required = {label_to_team.get(owner, owner) for owner in declared_owners}
+    missing = required - actual
+    if not missing:
+        return None
+    return OwnershipContractViolation(
+        glob=declared_glob,
+        path=path,
+        missing=tuple(sorted(missing)),
+        actual=tuple(sorted(actual)),
+    )
+
+
+def ownership_contract_violations(
+    model: ResolvedModel, tree: list[str]
+) -> list[OwnershipContractViolation]:
+    """Find declared owners removed by final last-match routing."""
+    lines, _ = render_codeowners(model, group=True, external=[])
+    rules = parse_codeowners("\n".join(lines))
+    label_to_team = model.label_to_team()
+    violations: list[OwnershipContractViolation] = []
+    for contract in _ownership_contracts(model):
+        for path in tree:
+            violation = _contract_violation(contract, path, rules, label_to_team)
+            if violation:
+                violations.append(violation)
+    return violations
+
+
+def print_ownership_violations(
+    violations: list[OwnershipContractViolation],
+) -> None:
+    """Print a bounded ownership-loss report."""
+    if not violations:
+        return
+    print(
+        f"ownership contract violations: {len(violations)} "
+        "(a later rule removed declared co-owners):"
+    )
+    for violation in violations[:15]:
+        print(
+            f"    {violation.path} (declared by {violation.glob}): "
+            f"missing {list(violation.missing)}; actual {list(violation.actual)}"
+        )
+
+
+def strict_failure(
+    strict: bool,
+    gate: CoverageGate,
+    changed: list[str] | None,
+    ownership_violations: list[OwnershipContractViolation],
+) -> str | None:
+    """Return the fail-closed message for the active strict gate."""
+    if not strict:
+        return None
+    if gate.blocking:
+        scope = "changed" if changed is not None else "tree"
+        return (
+            f"!! strict: {len(gate.blocking)} {scope} file(s) fall to the "
+            "catch-all -- cover them in areas.yaml"
+        )
+    if ownership_violations:
+        return (
+            f"!! strict: {len(ownership_violations)} path(s) lost declared "
+            "owners after final CODEOWNERS precedence"
+        )
+    return None
 
 
 def split_coverage(unmatched: list[str], changed: list[str] | None) -> CoverageGate:
@@ -99,7 +209,7 @@ def main() -> int:
     ap.add_argument(
         "--strict",
         action="store_true",
-        help="exit non-zero if any file falls to the catch-all (CI gate)",
+        help="exit non-zero on catch-all coverage or ownership contract failures",
     )
     ap.add_argument(
         "--changed-only",
@@ -122,6 +232,7 @@ def main() -> int:
     model = compute_resolution(spec)
     tree = load_tree(Path(args.repo))
     unmatched = model.unmatched_paths(tree)
+    ownership_violations = ownership_contract_violations(model, tree)
     # Deletions never fail a gate (coverage counts files, and the drift check
     # forces the CODEOWNERS regeneration), so stale claims would otherwise
     # accumulate silently in areas.yaml. Surface them; never block on them.
@@ -145,6 +256,7 @@ def main() -> int:
         )
         for g in dead[:10]:
             print(f"    {g}")
+    print_ownership_violations(ownership_violations)
     print("\nper-area glob counts:")
     counts = Counter({a.label: len(a.path_globs) for a in model.areas})
     for lbl, c in counts.most_common():
@@ -171,12 +283,9 @@ def main() -> int:
         )
         print("   ", gate.warnings[:15])
 
-    if args.strict and gate.blocking:
-        scope = "changed" if changed is not None else "tree"
-        print(
-            f"!! strict: {len(gate.blocking)} {scope} file(s) fall to the catch-all "
-            "-- cover them in areas.yaml"
-        )
+    failure = strict_failure(args.strict, gate, changed, ownership_violations)
+    if failure:
+        print(failure)
         return 1
     return 0
 

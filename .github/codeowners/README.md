@@ -49,6 +49,38 @@ adding required approvals.
 
 3. Commit `areas.yaml` and `CODEOWNERS` together.
 
+### Add owners without dropping existing accountability
+
+GitHub uses last-match-wins semantics, so a narrower row replaces the complete
+owner set from earlier rows. For an additive change, use `inherits` to name the
+area owners the new rule must retain and `owners` for the owners being added:
+
+```yaml
+shared:
+  - glob: deploy/inference-gateway/epp/Dockerfile
+    inherits: [epp, ops]
+    owners: [operator]
+```
+
+The resolver stably combines those labels and emits one ordinary CODEOWNERS
+row containing EPP, Ops, and Operator. `inherits` is deliberately explicit:
+the generator does not guess an enclosing owner from the live tree, so output
+remains a pure function of the policy files.
+
+For an invariant that should not emit another CODEOWNERS row, use
+`required_owners`. The strict gate checks every matching tracked file against
+the final generated artifact:
+
+```yaml
+required_owners:
+  - glob: deploy/operator/
+    owners: [operator]
+```
+
+This is appropriate for parent-team guarantees. A narrower specialist rule
+under `deploy/operator/` may add GMS or Observability, but it cannot silently
+remove Operator.
+
 ## External contributors
 
 An external individual who has earned ownership of an area is granted it by
@@ -84,6 +116,9 @@ generated outputs together.
 
 - any tracked file falls through to no owner (**coverage gate**) - a new
   directory no area claims blocks the PR until `areas.yaml` is updated; or
+- final last-match resolution removes an owner promised by `required_owners`,
+  `shared`, or a blocking file-type declaration (**ownership contract gate**)
+  - coverage by the wrong team no longer counts as success; or
 - the committed `CODEOWNERS` or `CONTRIBUTORS.md` differs from what the sources
   produce (**drift check**) - so the outputs always match their sources.
 
