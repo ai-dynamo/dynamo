@@ -172,10 +172,9 @@ class TestUsageStatistics:
         [
             ([0] * 10, 5, 10, 15),
             ([1, 2, 3, 4, 5, 6, 7], 3, 7, 10),
-            # Zero sequence length edge case
-            ([], 2, 0, 2),
+            ([], 2, None, None),
         ],
-        ids=["embeddings", "text", "zero-seq-len"],
+        ids=["embeddings", "text", "empty-token-ids"],
     )
     def test_build_completion_usage(
         self,

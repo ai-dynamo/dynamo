@@ -2649,7 +2649,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         """
         prompt_tokens = (
             len(request_output.prompt_token_ids)
-            if request_output.prompt_token_ids is not None
+            if request_output.prompt_token_ids
             else None
         )
 
