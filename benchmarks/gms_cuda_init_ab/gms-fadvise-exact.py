@@ -3,24 +3,56 @@
 
 """Evict exact checkpoint trees from the filesystem page cache."""
 
+import json
 import os
+import stat
 import sys
 
 
-def evict_tree(root: str) -> tuple[int, int, int]:
+def evict_tree(root: str) -> dict[str, int | str]:
     files = 0
     total_bytes = 0
     errors = 0
-    if not os.path.exists(root):
-        print(f"root={root}\tmissing=true")
-        return files, total_bytes, errors
+    try:
+        root_stat = os.lstat(root)
+    except FileNotFoundError:
+        return {
+            "root": root,
+            "status": "missing",
+            "files": files,
+            "bytes": total_bytes,
+            "errors": 1,
+        }
+    except OSError as error:
+        print(f"error\tpath={root}\terror={error}", file=sys.stderr)
+        return {
+            "root": root,
+            "status": "error",
+            "files": files,
+            "bytes": total_bytes,
+            "errors": 1,
+        }
 
-    for directory, _, names in os.walk(root):
+    if not stat.S_ISDIR(root_stat.st_mode):
+        return {
+            "root": root,
+            "status": "not_directory",
+            "files": files,
+            "bytes": total_bytes,
+            "errors": 1,
+        }
+
+    def walk_error(error: OSError) -> None:
+        nonlocal errors
+        errors += 1
+        print(f"error\tpath={error.filename or root}\terror={error}", file=sys.stderr)
+
+    for directory, _, names in os.walk(root, onerror=walk_error):
         for name in names:
             path = os.path.join(directory, name)
             try:
-                stat = os.stat(path, follow_symlinks=False)
-                if not os.path.isfile(path):
+                file_stat = os.stat(path, follow_symlinks=False)
+                if not stat.S_ISREG(file_stat.st_mode):
                     continue
                 fd = os.open(path, os.O_RDONLY)
                 try:
@@ -28,29 +60,37 @@ def evict_tree(root: str) -> tuple[int, int, int]:
                 finally:
                     os.close(fd)
                 files += 1
-                total_bytes += stat.st_size
+                total_bytes += file_stat.st_size
             except OSError as error:
                 errors += 1
                 print(f"error\tpath={path}\terror={error}", file=sys.stderr)
 
-    print(
-        f"root={root}\tfiles={files}\tbytes={total_bytes}\terrors={errors}",
-        flush=True,
-    )
-    return files, total_bytes, errors
+    status = "error" if errors else "ok" if files else "empty"
+    return {
+        "root": root,
+        "status": status,
+        "files": files,
+        "bytes": total_bytes,
+        "errors": errors,
+    }
 
 
 def main(arguments: list[str]) -> int:
-    totals = [0, 0, 0]
-    for argument in arguments:
-        result = evict_tree(argument)
-        totals = [left + right for left, right in zip(totals, result)]
-
-    print(
-        f"total\tfiles={totals[0]}\tbytes={totals[1]}\terrors={totals[2]}",
-        flush=True,
-    )
-    return 1 if totals[2] else 0
+    results = [evict_tree(argument) for argument in arguments]
+    ok = bool(results) and all(result["status"] == "ok" for result in results)
+    payload = {
+        "ok": ok,
+        "roots": results,
+        "total": {
+            "roots": len(results),
+            "files": sum(int(result["files"]) for result in results),
+            "bytes": sum(int(result["bytes"]) for result in results),
+            "errors": sum(int(result["errors"]) for result in results),
+        },
+    }
+    json.dump(payload, sys.stdout, separators=(",", ":"))
+    print(flush=True)
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

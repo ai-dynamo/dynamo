@@ -32,8 +32,22 @@ TIMES="$ART/timestamps.tsv"
 PIDS=()
 WORKER_POD=
 CLAIM=
-SCALED_UP=0
+CLEANUP_OWNED=0
+ZERO_CONFIRMED=0
 
+if [[ -e "$ART" && ! -d "$ART" ]]; then
+    echo "evidence path exists and is not a directory: $ART" >&2
+    exit 1
+fi
+if [[ -d "$ART" ]]; then
+    first_evidence_entry=$(
+        find "$ART" -mindepth 1 -maxdepth 1 -print -quit
+    )
+    if [[ -n "$first_evidence_entry" ]]; then
+        echo "refusing to reuse non-empty evidence directory: $ART" >&2
+        exit 1
+    fi
+fi
 mkdir -p "$ART"/{cache,inference,logs,metrics,objects,preflight,teardown}
 printf 'utc\tevent\tdetails\n' > "$TIMES"
 cat > "$ART/expected-uuids.txt" <<'EOF'
@@ -46,6 +60,19 @@ GPU-32a6c51c-d07d-7513-86b5-813b64e452d2
 GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f
 GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51
 EOF
+NFS_CACHE_ROOTS=(
+    "/checkpoints/$CKPT_ID/versions/1"
+    "/checkpoints/gms/$DGD/versions/1"
+)
+NVME_CACHE_ROOTS=(
+    "/cache/nvme2/schwinns/$DGD"
+    "/cache/nvme4/schwinns/$DGD"
+    "/cache/nvme5/schwinns/$DGD"
+    "/cache/nvme6/schwinns/$DGD"
+    "/cache/nvme7/schwinns/$DGD"
+    "/cache/nvme8/schwinns/$DGD"
+    "/cache/nvme9/schwinns/$DGD"
+)
 
 now() {
     date -u +%FT%T.%NZ
@@ -105,28 +132,59 @@ wait_for_zero() {
 }
 
 scale_down() {
-    if [[ "$SCALED_UP" -ne 1 ]]; then
+    local patch_status=0
+    if [[ "$CLEANUP_OWNED" -ne 1 || "$ZERO_CONFIRMED" -eq 1 ]]; then
         return
     fi
     stamp SCALE_DOWN_SENT
     k patch dynamographdeployment "$DGD" --type=json \
         -p='[{"op":"replace","path":"/spec/components/1/replicas","value":0}]' \
-        > "$ART/teardown/scale-down.txt"
-    wait_for_zero
-    SCALED_UP=0
+        > "$ART/teardown/scale-down.txt" || patch_status=$?
+    if ! wait_for_zero; then
+        return 1
+    fi
+    ZERO_CONFIRMED=1
     WORKER_POD=
     CLAIM=
-    stamp SCALE_DOWN_CONFIRMED
+    stamp SCALE_DOWN_CONFIRMED "patch_status=$patch_status"
+}
+
+finalize_evidence() {
+    local sums="$ART/.SHA256SUMS.tmp"
+    if [[ -e "$ART/SHA256SUMS" ]]; then
+        return
+    fi
+    if ! sha256sum \
+        "$EXP/gms-fadvise-exact.py" \
+        "$EXP/gms-host-sampler.sh" \
+        "$EXP/validate-server-profile.py" \
+        > "$ART/helper-checksums.txt"; then
+        return 1
+    fi
+    if ! find "$ART" -type f \
+        ! -name SHA256SUMS ! -name .SHA256SUMS.tmp -print0 |
+        sort -z | xargs -0 sha256sum > "$sums"; then
+        rm -f "$sums"
+        return 1
+    fi
+    mv "$sums" "$ART/SHA256SUMS"
 }
 
 cleanup() {
     local status=$?
+    local cleanup_complete=1
     trap - EXIT INT TERM
     stop_background
-    if [[ "$SCALED_UP" -eq 1 ]]; then
-        scale_down || status=1
+    if [[ "$CLEANUP_OWNED" -eq 1 && "$ZERO_CONFIRMED" -ne 1 ]]; then
+        if ! scale_down; then
+            status=1
+            cleanup_complete=0
+        fi
     fi
     stamp RUNNER_EXIT "status=$status"
+    if [[ "$cleanup_complete" -eq 1 ]]; then
+        finalize_evidence || status=1
+    fi
     exit "$status"
 }
 trap cleanup EXIT INT TERM
@@ -163,6 +221,48 @@ capture_objects() {
             > "$ART/objects/$prefix-worker-pod.yaml"
         k describe pod "$WORKER_POD" \
             > "$ART/objects/$prefix-worker-pod.describe.txt"
+    fi
+}
+
+validate_eviction_results() {
+    local output=$1
+    shift
+    local expected
+    expected=$(jq -cn --args '$ARGS.positional' "$@")
+    jq -e --argjson expected "$expected" '
+        .ok == true and
+        (.roots | type) == "array" and
+        [.roots[].root] == $expected and
+        all(.roots[];
+            .status == "ok" and
+            (.files | type) == "number" and .files > 0 and
+            (.bytes | type) == "number" and .bytes >= 0 and
+            .errors == 0
+        ) and
+        .total == {
+            roots: ($expected | length),
+            files: ([.roots[].files] | add),
+            bytes: ([.roots[].bytes] | add),
+            errors: 0
+        }
+    ' "$output" >/dev/null
+}
+
+evict_cache_roots() {
+    local output=$1
+    local error_output=$2
+    shift 2
+    local status=0
+    k exec -i "$CACHE_HELPER" -c helper -- python3 - "$@" \
+        < "$EXP/gms-fadvise-exact.py" \
+        > "$output" 2> "$error_output" || status=$?
+    if ! validate_eviction_results "$output" "$@"; then
+        echo "cache eviction returned invalid per-root results: $output" >&2
+        return 1
+    fi
+    if [[ "$status" -ne 0 ]]; then
+        echo "cache eviction exited with status $status: $output" >&2
+        return 1
     fi
 }
 
@@ -222,7 +322,9 @@ fi
 
 stamp APPLY_ZERO_REPLICA_VARIANT
 k apply -k "$OVERLAY" > "$ART/preflight/apply.txt"
+CLEANUP_OWNED=1
 wait_for_zero
+ZERO_CONFIRMED=1
 capture_objects pre
 
 k apply -f "$EXP/cache-helper.yaml" > "$ART/preflight/cache-helper-apply.txt"
@@ -230,24 +332,13 @@ k wait --for=condition=Ready "pod/$CACHE_HELPER" --timeout=300s
 k get pod "$CACHE_HELPER" -o yaml > "$ART/preflight/cache-helper.yaml"
 
 stamp FADVISE_NFS_BEGIN
-k exec -i "$CACHE_HELPER" -c helper -- python3 - \
-    "/checkpoints/$CKPT_ID/versions/1" \
-    "/checkpoints/gms/$DGD/versions/1" \
-    < "$EXP/gms-fadvise-exact.py" \
-    > "$ART/cache/nfs.txt" 2> "$ART/cache/nfs.err"
+evict_cache_roots \
+    "$ART/cache/nfs.txt" "$ART/cache/nfs.err" "${NFS_CACHE_ROOTS[@]}"
 stamp FADVISE_NFS_DONE "$(tail -1 "$ART/cache/nfs.txt")"
 
 stamp FADVISE_NVME_BEGIN
-k exec -i "$CACHE_HELPER" -c helper -- python3 - \
-    "/cache/nvme2/schwinns/$DGD" \
-    "/cache/nvme4/schwinns/$DGD" \
-    "/cache/nvme5/schwinns/$DGD" \
-    "/cache/nvme6/schwinns/$DGD" \
-    "/cache/nvme7/schwinns/$DGD" \
-    "/cache/nvme8/schwinns/$DGD" \
-    "/cache/nvme9/schwinns/$DGD" \
-    < "$EXP/gms-fadvise-exact.py" \
-    > "$ART/cache/nvme.txt" 2> "$ART/cache/nvme.err"
+evict_cache_roots \
+    "$ART/cache/nvme.txt" "$ART/cache/nvme.err" "${NVME_CACHE_ROOTS[@]}"
 stamp FADVISE_NVME_DONE "$(tail -1 "$ART/cache/nvme.txt")"
 
 START=$(now)
@@ -274,11 +365,11 @@ k logs "$OP_POD" -c manager --timestamps --since-time="$START" -f \
     > "$ART/logs/operator.follow.log" 2>&1 &
 PIDS+=("$!")
 
+ZERO_CONFIRMED=0
 stamp SCALE_UP_SENT
 k patch dynamographdeployment "$DGD" --type=json \
     -p='[{"op":"replace","path":"/spec/components/1/replicas","value":1}]' \
     > "$ART/scale-up.txt"
-SCALED_UP=1
 
 for attempt in $(seq 1 300); do
     WORKER_POD=$(
@@ -456,11 +547,4 @@ stop_background
 scale_down
 validate_checkpoint "$ART/objects/post-teardown-checkpoint.json"
 capture_objects post-teardown
-sha256sum \
-    "$EXP/gms-fadvise-exact.py" \
-    "$EXP/gms-host-sampler.sh" \
-    "$EXP/validate-server-profile.py" \
-    > "$ART/helper-checksums.txt"
-find "$ART" -type f ! -name SHA256SUMS -print0 | sort -z |
-    xargs -0 sha256sum > "$ART/SHA256SUMS"
 stamp RUN_COMPLETE
