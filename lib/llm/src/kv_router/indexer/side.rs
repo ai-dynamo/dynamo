@@ -129,7 +129,7 @@ impl SideIndexer {
     ) -> Result<(), KvRouterError> {
         match self {
             // The legacy indexer has one mutation lane, so its existing flush is already the
-            // narrowest FIFO acknowledgement it can provide.
+            // narrowest FIFO completion barrier it can provide.
             Self::KvIndexer(indexer) => {
                 indexer.flush_and_wait().await?;
             }

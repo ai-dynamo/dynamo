@@ -279,8 +279,10 @@ impl Indexer {
         }
     }
 
-    /// Cold-reset one logical rank and wait until all local index tiers have
-    /// acknowledged the removal.
+    /// Cold-reset one logical rank and wait until all local index tiers have completed the removal.
+    ///
+    /// NOTE: Unlike ordinary event application, rank removal is an infallible lane operation.
+    /// Its FIFO completion must be visible before source activation or clearing `reset_pending`.
     pub(crate) async fn reset_worker_dp_rank_and_wait(
         &self,
         worker_id: WorkerId,
@@ -339,8 +341,9 @@ impl Indexer {
         Ok(())
     }
 
-    /// Wait until every applicable local tier has acknowledged this worker's FIFO lane.
-    /// All DP ranks and worker-wide `Cleared` events share the stable WorkerId assignment.
+    /// Wait until every applicable local tier has completed this worker's FIFO lane.
+    /// All DP ranks and worker-wide `Cleared` events share the stable WorkerId assignment. This is
+    /// a progress barrier and does not report ordinary event-application results.
     pub(crate) async fn flush_worker_and_wait(
         &self,
         worker_id: WorkerId,
@@ -353,7 +356,7 @@ impl Indexer {
                 ..
             } => {
                 // KvIndexer has one mutation lane; lower and approximate concurrent indexers can
-                // acknowledge only the stable lane assigned to this WorkerId.
+                // wait only for the stable lane assigned to this WorkerId.
                 primary.flush_and_wait().await?;
                 for indexer in lower_tier.all() {
                     indexer.flush_worker_and_wait(worker_id).await?;

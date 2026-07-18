@@ -40,6 +40,11 @@ pub(super) struct PendingDrainPlan {
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct RankState {
+    /// NOTE: This coordinator tracks the last event successfully admitted to the indexer's
+    /// per-worker FIFO, not confirmed backend application. A trailing `Flush` proves queue
+    /// progress, not event success. Stronger applied-state semantics require an explicit
+    /// batch-result acknowledgement. Plan without mutating this cursor, advance only after every
+    /// event in the commit group is admitted, and fence/reset on partial admission failure.
     pub(super) cursor: CursorState,
     pub(super) recovery_inflight: bool,
     pending_live_events: VecDeque<RouterEvent>,
@@ -54,7 +59,7 @@ impl RankState {
         };
     }
 
-    pub(super) fn last_applied_id(&self) -> Option<u64> {
+    pub(super) fn last_admitted_id(&self) -> Option<u64> {
         self.cursor.last_applied_id()
     }
 
@@ -67,8 +72,8 @@ impl RankState {
 
         if matches!(&event.event.data, KvCacheEventData::Cleared) {
             if self
-                .last_applied_id()
-                .is_some_and(|last_applied_id| event_id <= last_applied_id)
+                .last_admitted_id()
+                .is_some_and(|last_admitted_id| event_id <= last_admitted_id)
             {
                 return LiveEventAction::Ignore;
             }
@@ -117,7 +122,7 @@ impl RankState {
         }
     }
 
-    pub(super) fn commit_live_event(&mut self, event_id: u64) {
+    pub(super) fn commit_live_admission(&mut self, event_id: u64) {
         self.cursor = self.cursor.advance_to(event_id);
         self.clear_max_seen_if_caught_up(event_id);
     }
@@ -139,12 +144,12 @@ impl RankState {
     }
 
     pub(super) fn plan_pending_drain(&mut self) -> PendingDrainPlan {
-        let mut last_applied_id = self.last_applied_id().unwrap_or(0);
+        let mut last_admitted_id = self.last_admitted_id().unwrap_or(0);
         let mut cursor = self.cursor;
         self.pending_live_events
             .make_contiguous()
             .sort_unstable_by_key(|event| event.event.event_id);
-        self.fast_prune_stale_pending_prefix(last_applied_id);
+        self.fast_prune_stale_pending_prefix(last_admitted_id);
         let mut events = Vec::new();
 
         loop {
@@ -153,15 +158,15 @@ impl RankState {
                 .front()
                 .map(|event| event.event.event_id)
             else {
-                self.clear_max_seen_if_caught_up(last_applied_id);
+                self.clear_max_seen_if_caught_up(last_admitted_id);
                 if self
                     .max_seen_live_id
-                    .is_some_and(|max_seen| max_seen > last_applied_id)
+                    .is_some_and(|max_seen| max_seen > last_admitted_id)
                 {
                     return PendingDrainPlan {
                         events,
                         cursor,
-                        next_recovery_start: Some(last_applied_id.saturating_add(1)),
+                        next_recovery_start: Some(last_admitted_id.saturating_add(1)),
                     };
                 }
                 return PendingDrainPlan {
@@ -171,12 +176,12 @@ impl RankState {
                 };
             };
 
-            if front_event_id <= last_applied_id {
+            if front_event_id <= last_admitted_id {
                 self.pending_live_events.pop_front();
                 continue;
             }
 
-            let expected = last_applied_id.saturating_add(1);
+            let expected = last_admitted_id.saturating_add(1);
             if front_event_id != expected {
                 return PendingDrainPlan {
                     events,
@@ -189,7 +194,7 @@ impl RankState {
                 .pending_live_events
                 .pop_front()
                 .expect("front event exists while draining pending live events");
-            last_applied_id = front_event_id;
+            last_admitted_id = front_event_id;
             cursor = cursor.advance_to(front_event_id);
             events.push(event);
         }
@@ -201,7 +206,7 @@ impl RankState {
         next_recovery_start: Option<u64>,
     ) {
         self.cursor = cursor;
-        self.clear_max_seen_if_caught_up(self.last_applied_id().unwrap_or(0));
+        self.clear_max_seen_if_caught_up(self.last_admitted_id().unwrap_or(0));
         self.recovery_inflight = next_recovery_start.is_some();
     }
 
@@ -212,11 +217,11 @@ impl RankState {
     }
 
     pub(super) fn take_failed_recovery_degraded(&mut self) -> Vec<RouterEvent> {
-        let last_applied_id = self.last_applied_id().unwrap_or(0);
+        let last_admitted_id = self.last_admitted_id().unwrap_or(0);
         let mut events: Vec<_> = self.pending_live_events.drain(..).collect();
         events.sort_unstable_by_key(|event| event.event.event_id);
         events.dedup_by_key(|event| event.event.event_id);
-        events.retain(|event| event.event.event_id > last_applied_id);
+        events.retain(|event| event.event.event_id > last_admitted_id);
         events
     }
 
@@ -237,16 +242,16 @@ impl RankState {
         }
     }
 
-    fn clear_max_seen_if_caught_up(&mut self, last_applied_id: u64) {
+    fn clear_max_seen_if_caught_up(&mut self, last_admitted_id: u64) {
         if self
             .max_seen_live_id
-            .is_some_and(|max_seen| max_seen <= last_applied_id)
+            .is_some_and(|max_seen| max_seen <= last_admitted_id)
         {
             self.max_seen_live_id = None;
         }
     }
 
-    fn fast_prune_stale_pending_prefix(&mut self, last_applied_id: u64) {
+    fn fast_prune_stale_pending_prefix(&mut self, last_admitted_id: u64) {
         if self.pending_live_events.len() <= RECOVERY_PENDING_FAST_PRUNE_MARGIN {
             return;
         }
@@ -254,7 +259,7 @@ impl RankState {
         if self
             .pending_live_events
             .get(split_at)
-            .is_some_and(|event| event.event.event_id <= last_applied_id)
+            .is_some_and(|event| event.event.event_id <= last_admitted_id)
         {
             self.pending_live_events.drain(..split_at);
         }
@@ -293,9 +298,9 @@ mod tests {
         let mut state = RankState::default();
         let action = state.observe_live_event(store(9), false);
         assert!(matches!(action, LiveEventAction::Apply { event_id: 9, .. }));
-        assert_eq!(state.last_applied_id(), None);
-        state.commit_live_event(9);
-        assert_eq!(state.last_applied_id(), Some(9));
+        assert_eq!(state.last_admitted_id(), None);
+        state.commit_live_admission(9);
+        assert_eq!(state.last_admitted_id(), Some(9));
     }
 
     #[test]
@@ -319,7 +324,7 @@ mod tests {
             state.observe_live_event(store(1), false),
             LiveEventAction::Apply { event_id: 1, .. }
         ));
-        state.commit_live_event(1);
+        state.commit_live_admission(1);
 
         assert!(matches!(
             state.observe_live_event(store(4), true),
@@ -333,7 +338,7 @@ mod tests {
             state.observe_live_event(store(3), true),
             LiveEventAction::Ignore
         ));
-        assert_eq!(state.last_applied_id(), Some(1));
+        assert_eq!(state.last_admitted_id(), Some(1));
 
         state.begin_successful_recovery_drain(CursorState::Initial.advance_to(2));
         let plan = state.plan_pending_drain();
@@ -346,9 +351,9 @@ mod tests {
         );
         assert_eq!(plan.cursor.last_applied_id(), Some(4));
         assert_eq!(plan.next_recovery_start, None);
-        assert_eq!(state.last_applied_id(), Some(2));
+        assert_eq!(state.last_admitted_id(), Some(2));
         state.commit_pending_drain(plan.cursor, plan.next_recovery_start);
-        assert_eq!(state.last_applied_id(), Some(4));
+        assert_eq!(state.last_admitted_id(), Some(4));
         assert!(!state.recovery_inflight);
     }
 }

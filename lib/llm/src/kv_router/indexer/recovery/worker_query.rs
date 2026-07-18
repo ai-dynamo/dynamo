@@ -306,6 +306,8 @@ impl WorkerQueryClient {
     }
 
     async fn reset_rank(&self, key: RecoveryKey) -> Result<()> {
+        // NOTE: This completion barrier is intentional. Rank reset is an infallible lane operation
+        // whose removal must be visible before activation or clearing reset_pending.
         self.indexer
             .reset_worker_dp_rank_and_wait(key.0, key.1)
             .await
@@ -396,7 +398,7 @@ impl WorkerQueryClient {
                         tracing::error!(%error, worker_id = key.0, dp_rank = key.1, event_id, "KV event queue rejected a live event; rank remains fenced pending reset");
                         return;
                     }
-                    slot.rank.commit_live_event(event_id);
+                    slot.rank.commit_live_admission(event_id);
                 }
                 LiveEventAction::Clear { event_id } => {
                     drop(slot);
@@ -443,12 +445,12 @@ impl WorkerQueryClient {
                         return;
                     }
                     let event_id = event.event.event_id;
-                    if let Err(error) = self.apply_events_and_flush(key.0, [event]).await {
+                    if let Err(error) = self.admit_events([event]).await {
                         slot.fence_for_reset();
-                        tracing::error!(%error, worker_id = key.0, dp_rank = key.1, event_id, "Failed to acknowledge degraded gap event; rank remains fenced");
+                        tracing::error!(%error, worker_id = key.0, dp_rank = key.1, event_id, "KV indexer rejected degraded gap event; rank remains fenced");
                         return;
                     }
-                    slot.rank.commit_live_event(event_id);
+                    slot.rank.commit_live_admission(event_id);
                 }
             }
         }
@@ -489,7 +491,10 @@ impl WorkerQueryClient {
         for (key, _) in &mut guards {
             self.cancel_recovery(*key).await;
         }
-        if let Err(error) = self.apply_events_and_flush(emitter.0, [event]).await {
+        if let Err(error) = self
+            .admit_events_and_wait_for_worker_lane(emitter.0, [event])
+            .await
+        {
             for (_, slot) in &mut guards {
                 slot.fence_for_reset();
             }
@@ -502,21 +507,26 @@ impl WorkerQueryClient {
         Ok(())
     }
 
-    async fn apply_events_and_flush(
-        &self,
-        worker_id: WorkerId,
-        events: impl IntoIterator<Item = RouterEvent>,
-    ) -> Result<()> {
+    async fn admit_events(&self, events: impl IntoIterator<Item = RouterEvent>) -> Result<()> {
         for event in events {
             self.indexer
                 .try_apply_event(event)
                 .await
                 .context("KV indexer rejected event queue admission")?;
         }
+        Ok(())
+    }
+
+    async fn admit_events_and_wait_for_worker_lane(
+        &self,
+        worker_id: WorkerId,
+        events: impl IntoIterator<Item = RouterEvent>,
+    ) -> Result<()> {
+        self.admit_events(events).await?;
         self.indexer
             .flush_worker_and_wait(worker_id)
             .await
-            .context("KV indexer failed to acknowledge worker-lane cold-path mutations")
+            .context("KV indexer failed to complete worker-lane lifecycle mutations")
     }
 
     async fn cancel_recovery(&self, key: RecoveryKey) {
@@ -707,13 +717,9 @@ impl WorkerQueryClient {
                 }
                 (
                     events,
-                    slot.rank.cursor.advance_to(
-                        slot.rank
-                            .cursor
-                            .last_applied_id()
-                            .unwrap_or(0)
-                            .max(last_event_id),
-                    ),
+                    slot.rank
+                        .cursor
+                        .advance_to(slot.rank.last_admitted_id().unwrap_or(0).max(last_event_id)),
                 )
             }
             Ok(WorkerKvQueryResponse::TreeDump {
@@ -753,26 +759,26 @@ impl WorkerQueryClient {
             }
         };
 
-        // NOTE: Clear-free recovery is planned against a clone so neither the cursor nor buffered
-        // live-event state becomes authoritative before the combined FIFO acknowledgement.
-        let mut rank_after_ack = slot.rank.clone();
-        rank_after_ack.begin_successful_recovery_drain(recovered_cursor);
+        // See RankState::cursor for the admission-based cursor contract. Planning against a clone
+        // preserves the old cursor and buffer until the complete clear-free group is admitted.
+        let mut rank_after_admission = slot.rank.clone();
+        rank_after_admission.begin_successful_recovery_drain(recovered_cursor);
         let PendingDrainPlan {
             events: buffered_tail,
             cursor,
             next_recovery_start,
-        } = rank_after_ack.plan_pending_drain();
-        rank_after_ack.commit_pending_drain(cursor, next_recovery_start);
+        } = rank_after_admission.plan_pending_drain();
+        rank_after_admission.commit_pending_drain(cursor, next_recovery_start);
 
         if let Err(error) = self
-            .apply_events_and_flush(key.0, recovered_events.into_iter().chain(buffered_tail))
+            .admit_events(recovered_events.into_iter().chain(buffered_tail))
             .await
         {
             slot.fence_for_reset();
-            tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to acknowledge recovered and buffered events; rank remains fenced");
+            tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "KV indexer rejected a clear-free recovery event; rank remains fenced");
             return;
         }
-        slot.rank = rank_after_ack;
+        slot.rank = rank_after_admission;
         drop(slot);
         if let Some(start_event_id) = next_recovery_start {
             self.schedule_recovery_after_current(key, binding, start_event_id);
@@ -783,10 +789,10 @@ impl WorkerQueryClient {
         let pending = slot.rank.take_failed_recovery_degraded();
         let last_event_id = pending.last().map(|event| event.event.event_id);
         if !pending.is_empty()
-            && let Err(error) = self.apply_events_and_flush(key.0, pending).await
+            && let Err(error) = self.admit_events(pending).await
         {
             slot.fence_for_reset();
-            tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to acknowledge degraded live events; rank remains fenced");
+            tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "KV indexer rejected degraded live events; rank remains fenced");
             return;
         }
         slot.rank.commit_failed_recovery_degraded(last_event_id);
@@ -877,11 +883,14 @@ impl WorkerQueryClient {
                 cursor = cursor.advance_to(event_id);
             }
         }
-        if let Err(error) = self.apply_events_and_flush(key.0, events).await {
+        if let Err(error) = self
+            .admit_events_and_wait_for_worker_lane(key.0, events)
+            .await
+        {
             for (_, slot) in &mut guards {
                 slot.fence_for_reset();
             }
-            tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to acknowledge recovery batch containing clear; affected ranks remain fenced");
+            tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to complete worker lane for recovery batch containing clear; affected ranks remain fenced");
             return;
         }
         if cancel.is_cancelled()
@@ -909,10 +918,12 @@ impl WorkerQueryClient {
             next_recovery_start,
         } = guards[emitter_index].1.rank.plan_pending_drain();
         if !events.is_empty()
-            && let Err(error) = self.apply_events_and_flush(key.0, events).await
+            && let Err(error) = self
+                .admit_events_and_wait_for_worker_lane(key.0, events)
+                .await
         {
             guards[emitter_index].1.fence_for_reset();
-            tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to acknowledge buffered events after clear recovery; rank remains fenced");
+            tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to complete worker lane after clear recovery; rank remains fenced");
             return;
         }
         guards[emitter_index]
@@ -1354,7 +1365,7 @@ mod tests {
             .unwrap()
             .clone();
         let slot = slot.lock().await;
-        assert_eq!(slot.rank.last_applied_id(), None);
+        assert_eq!(slot.rank.last_admitted_id(), None);
         assert!(slot.reset_pending);
     }
 
@@ -1497,7 +1508,7 @@ mod tests {
             .clone();
         let slot = slot.lock().await;
         assert!(!slot.rank.recovery_inflight);
-        assert_eq!(slot.rank.last_applied_id(), None);
+        assert_eq!(slot.rank.last_admitted_id(), None);
         assert!(slot.reset_pending);
     }
 
@@ -1545,7 +1556,7 @@ mod tests {
             .get(&(worker.worker_id, worker.dp_rank))
             .unwrap()
             .clone();
-        assert_eq!(slot.lock().await.rank.last_applied_id(), Some(1));
+        assert_eq!(slot.lock().await.rank.last_admitted_id(), Some(1));
         assert!(kv_indexer.dump_events().await.unwrap().is_empty());
 
         client
@@ -1566,7 +1577,7 @@ mod tests {
             assert!(contains_block(&events, block));
         }
         let slot = slot.lock().await;
-        assert_eq!(slot.rank.last_applied_id(), Some(4));
+        assert_eq!(slot.rank.last_admitted_id(), Some(4));
         assert!(!slot.rank.recovery_inflight);
         drop(slot);
         client.shutdown().await;

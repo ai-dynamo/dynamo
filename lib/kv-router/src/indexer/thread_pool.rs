@@ -487,7 +487,10 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         Ok(())
     }
 
-    /// Wait until all worker queues have applied tasks accepted before this call.
+    /// Wait until every worker queue has completed tasks accepted before this call.
+    ///
+    /// This is a FIFO progress barrier, not an event-result acknowledgement. Ordinary
+    /// `WorkerTask::Event` application errors are logged by the worker and are not returned here.
     pub async fn flush_and_wait(&self) -> Result<(), KvRouterError> {
         let mut receivers = Vec::with_capacity(self.worker_event_channels.len());
         for channel in &self.worker_event_channels {
@@ -505,11 +508,12 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         Ok(())
     }
 
-    /// Wait until the FIFO lane for `worker_id` has applied tasks accepted before this call.
+    /// Wait until the FIFO lane for `worker_id` has completed tasks accepted before this call.
     ///
     /// NOTE: Worker-to-queue assignment is stable for the indexer's lifetime. Every DP rank and
-    /// worker-wide `Cleared` mutation therefore shares this lane, so this acknowledgement must
-    /// never be replaced with a non-FIFO or recomputed assignment.
+    /// worker-wide `Cleared` mutation therefore shares this lane, so this barrier must never use a
+    /// non-FIFO or recomputed assignment. It proves queue progress only: ordinary
+    /// `WorkerTask::Event` application errors are logged by the worker and are not returned here.
     pub async fn flush_worker_and_wait(&self, worker_id: WorkerId) -> Result<(), KvRouterError> {
         let thread_idx = Self::get_or_assign_thread_idx(
             &self.worker_assignments,
@@ -528,8 +532,9 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
 
     /// Wait until all previously queued worker tasks have completed.
     ///
-    /// Used primarily for testing and benchmarking to ensure writes are visible
-    /// before checking results.
+    /// Used primarily for testing and benchmarking to stop at a stable queue boundary before
+    /// checking results. Individual event-application errors are observable only through logs and
+    /// metrics, not this barrier.
     pub async fn flush(&self) {
         if let Err(error) = self.flush_and_wait().await {
             tracing::error!(%error, "Failed to flush thread-pool indexer");
