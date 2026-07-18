@@ -19,7 +19,7 @@ SGLANG_TOPOLOGY_SCRIPTS: dict[str, str] = {
 
 # VLM coverage mirrors the vLLM profile registry. SINGLE_GPU=true packs both
 # workers on GPU 0 for the gpu_1 CI box. requested_sglang_kv_tokens caps
-# `--max-total-tokens`.
+# `--max-total-tokens` and `--context-length`.
 SGLANG_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
     MultimodalModelProfile(
         name="Qwen/Qwen3.5-0.8B",

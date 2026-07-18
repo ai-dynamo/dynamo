@@ -109,9 +109,9 @@ else
     _WORKER_CUDA_PIN="CUDA_VISIBLE_DEVICES=$DYN_WORKER_GPU"
 fi
 
-# Worker KV is sized by --max-total-tokens (build_sglang_gpu_mem_args reads
-# _PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS), so this script is portable across
-# 24 / 48 / 80 GiB GPUs. No --mem-fraction-static — fractions don't translate.
+# build_sglang_gpu_mem_args reads _PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS and
+# caps both the worker KV pool and context length. This keeps test launches
+# portable across 24 / 48 / 80 GiB GPUs.
 GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 
 ENCODE_EXTRA_ARGS="$GPU_MEM_ARGS"

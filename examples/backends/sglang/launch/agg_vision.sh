@@ -83,8 +83,8 @@ fi
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 
 # Profiler/test-harness override: when _PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS is
-# set, build_sglang_gpu_mem_args emits --max-total-tokens N. Empty when unset, so
-# direct invocations behave identically to before this hook was added.
+# set, build_sglang_gpu_mem_args caps both total KV tokens and context length.
+# Empty when unset, so direct invocations behave identically to before this hook.
 GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 
 FD_ARGS=()

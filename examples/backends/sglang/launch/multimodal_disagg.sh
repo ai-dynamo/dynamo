@@ -110,8 +110,8 @@ if [[ "$SINGLE_GPU" == "true" ]]; then
     # functional-test size so the last worker can initialize without OOM.
     # --context-length keeps the per-request token pool allocation small.
     ENCODE_EXTRA_ARGS=""
-    PREFILL_EXTRA_ARGS="--mem-fraction-static ${DYN_PREFILL_GPU_MEM} --delete-ckpt-after-loading --max-running-requests 2 --context-length 2048 --max-total-tokens 1024 $GPU_MEM_ARGS"
-    DECODE_EXTRA_ARGS="--mem-fraction-static ${DYN_DECODE_GPU_MEM} --delete-ckpt-after-loading --max-running-requests 2 --context-length 2048 --max-total-tokens 1024 $GPU_MEM_ARGS"
+    PREFILL_EXTRA_ARGS="--mem-fraction-static ${DYN_PREFILL_GPU_MEM} --delete-ckpt-after-loading --max-running-requests 2 --context-length 1024 --max-total-tokens 1024 $GPU_MEM_ARGS"
+    DECODE_EXTRA_ARGS="--mem-fraction-static ${DYN_DECODE_GPU_MEM} --delete-ckpt-after-loading --max-running-requests 2 --context-length 1024 --max-total-tokens 1024 $GPU_MEM_ARGS"
 fi
 
 # Prevent port collisions: the test framework exports DYN_SYSTEM_PORT which all
