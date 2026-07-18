@@ -326,6 +326,8 @@ navigation:
           - section: Multimodal
             path: features/multimodal/README.md
             contents:
+              - page: Supported Media Codecs
+                path: features/multimodal/supported-media-codecs.md
               - page: Embedding Cache
                 path: features/multimodal/embedding-cache.md
               - page: Encoder Disaggregation

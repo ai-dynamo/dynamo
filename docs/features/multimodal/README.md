@@ -49,6 +49,8 @@ Dynamo provides support for improving latency and throughput for vision-and-lang
 
 **Status:** ✅ Supported | 🧪 Experimental | ❌ Not supported
 
+For the specific codecs each stack decodes — and how to enable additional ones — see [Supported Media Codecs](supported-media-codecs.md).
+
 ## Security: URL Validation
 
 All multimodal loaders route remote fetches through a shared URL policy
