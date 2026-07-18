@@ -19,7 +19,9 @@ from examples.custom_encoder.benchmark.run_safeguard_proxy_sweep import (
 from examples.custom_encoder.benchmark.safeguard_proxy_workload import (
     _calculate_custom_isl_components,
     _calibrate_prompt,
+    _generate_jpeg,
     _request_schedule,
+    validate_workload,
 )
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
@@ -40,6 +42,22 @@ def test_prompt_calibration_requires_exact_target() -> None:
     )
     assert observed == 644
     assert prompt.count("benchmark") == 44
+
+
+def test_jpeg_generator_supports_300_pixel_workload(tmp_path: Path) -> None:
+    path = tmp_path / "image_300x300.jpg"
+    record = _generate_jpeg(path, seed=42, image_size=(300, 300))
+    assert record["width"] == record["height"] == 300
+    assert 50 * 1024 <= path.stat().st_size <= 60 * 1024
+
+
+def test_workload_validation_rejects_requested_size_mismatch(tmp_path: Path) -> None:
+    (tmp_path / "workload_manifest.json").write_text(
+        json.dumps({"decoded_image": {"width": 500, "height": 500}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(AssertionError, match="does not match requested 300x300"):
+        validate_workload(tmp_path, expected_image_size=300)
 
 
 def test_custom_isl_replaces_one_placeholder_with_image_tokens() -> None:
@@ -72,7 +90,13 @@ def test_config_is_closed_loop_and_uses_requested_encoder_limits(
 ) -> None:
     input_file = tmp_path / "input.jsonl"
     input_file.write_text('{"session_id":"one"}\n', encoding="utf-8")
-    config = build_config(input_file, (1, 2, 3), tmp_path / "output", smoke=False)
+    config = build_config(
+        input_file,
+        (1, 2, 3),
+        tmp_path / "output",
+        smoke=False,
+        image_size=(300, 300),
+    )
     assert config.request_rates is None
     assert config.concurrencies == [1, 2, 3]
     assert config.conversation_num == 100
@@ -81,7 +105,7 @@ def test_config_is_closed_loop_and_uses_requested_encoder_limits(
     assert config.env["DYN_QWEN2_VL_PREPROCESS_CONCURRENCY"] == "4"
     assert config.env["DYN_QWEN2_VL_MAX_BATCH_COST"] == "8"
     assert config.env["DYN_QWEN2_VL_GRAPH_BATCH_BUCKETS"] == "1,2,3,4,5,6,7,8"
-    assert config.env["DYN_QWEN2_VL_GRAPH_IMAGE_SIZES"] == "500x500"
+    assert config.env["DYN_QWEN2_VL_GRAPH_IMAGE_SIZES"] == "300x300"
     assert "--use-server-token-count" in config.aiperf_extra_args
 
 
@@ -144,7 +168,7 @@ def test_validation_and_report_cover_all_ten_cells(tmp_path: Path) -> None:
             "max_batch_cost": 8,
             "queue_wait_ms": 1,
             "graph_buckets": list(range(1, 9)),
-            "graph_image_sizes": ["500x500"],
+            "graph_image_sizes": ["300x300"],
         },
     }
     (tmp_path / "benchmark_metadata.json").write_text(
@@ -162,6 +186,7 @@ def test_validation_and_report_cover_all_ten_cells(tmp_path: Path) -> None:
     summarize(tmp_path, markdown, csv_path)
     report = markdown.read_text(encoding="utf-8")
     assert "Performance proxy only" in report
+    assert "nine reused 300×300 JPEGs" in report
     assert "| 10 | 35.97 | 418.5 | 20.00 | 102.0 |" in report
     assert "| 10 | 8 | `[8]` | 8→8: 1 |" in report
     assert report.count("[artifact]") == 10

@@ -34,6 +34,7 @@ TARGET_OSL = 7
 SEED = 42
 JPEG_MIN_BYTES = 50 * 1024
 JPEG_MAX_BYTES = 60 * 1024
+DEFAULT_IMAGE_SIZE = 500
 BASE_PROMPT = "Classify the image and briefly explain the label."
 CUSTOM_IMAGE_TOKEN = "<|image_pad|>"
 CUSTOM_CHAT_TEMPLATE = (
@@ -69,10 +70,12 @@ def _encode_resampled_noise_jpeg(
 def _generate_jpeg(
     path: Path,
     seed: int,
+    image_size: tuple[int, int] = (DEFAULT_IMAGE_SIZE, DEFAULT_IMAGE_SIZE),
     min_bytes: int = JPEG_MIN_BYTES,
     max_bytes: int = JPEG_MAX_BYTES,
 ) -> dict[str, Any]:
-    image_size = (500, 500)
+    if min(image_size) < 1:
+        raise ValueError("image dimensions must be positive")
     pixels = np.random.default_rng(seed).integers(
         0, 256, (image_size[1], image_size[0], 3), dtype=np.uint8
     )
@@ -87,7 +90,7 @@ def _generate_jpeg(
         candidates.append((texture_side, payload))
         return payload
 
-    payload = encode(180)
+    payload = encode(min(180, min(image_size)))
     if not min_bytes <= len(payload) <= max_bytes:
         lower, upper = 8, min(image_size)
         while lower <= upper:
@@ -116,8 +119,8 @@ def _generate_jpeg(
         decoded_hash = hashlib.sha256(decoded.tobytes()).hexdigest()
     return {
         "path": str(path.resolve()),
-        "width": 500,
-        "height": 500,
+        "width": image_size[0],
+        "height": image_size[1],
         "size_bytes": len(payload),
         "jpeg_quality": 85,
         "texture_side": texture_side,
@@ -193,15 +196,20 @@ def generate_workload(
     unique_images: int = UNIQUE_IMAGES,
     target_isl: int = TARGET_ISL,
     seed: int = SEED,
+    image_size: int = DEFAULT_IMAGE_SIZE,
 ) -> Path:
+    if image_size < 1:
+        raise ValueError("image_size must be positive")
     output_dir.mkdir(parents=True, exist_ok=True)
     tokenizer = AutoTokenizer.from_pretrained(decoder_model)
     processor = AutoProcessor.from_pretrained(encoder_model)
+    dimensions = (image_size, image_size)
 
     records = [
         _generate_jpeg(
-            output_dir / "images" / f"image_{index:02d}_500x500.jpg",
+            output_dir / "images" / f"image_{index:02d}_{image_size}x{image_size}.jpg",
             seed + index,
+            dimensions,
         )
         for index in range(unique_images)
     ]
@@ -261,7 +269,11 @@ def generate_workload(
         "target_osl": TARGET_OSL,
         "prompt": prompt,
         "prompt_policy": "byte-identical calibrated synthetic prompt",
-        "decoded_image": {"mode": "RGB", "width": 500, "height": 500},
+        "decoded_image": {
+            "mode": "RGB",
+            "width": image_size,
+            "height": image_size,
+        },
         "encoding": {
             "format": "JPEG",
             "quality": 85,
@@ -295,12 +307,29 @@ def generate_workload(
     return manifest_path
 
 
-def validate_workload(root: Path) -> dict[str, Any]:
+def validate_workload(
+    root: Path,
+    expected_image_size: int | None = None,
+) -> dict[str, Any]:
     manifest_path = root / "workload_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    decoded_image = manifest["decoded_image"]
+    image_size = (int(decoded_image["width"]), int(decoded_image["height"]))
+    if min(image_size) < 1:
+        raise AssertionError("manifest image dimensions must be positive")
+    if expected_image_size is not None and image_size != (
+        expected_image_size,
+        expected_image_size,
+    ):
+        raise AssertionError(
+            f"workload image size {image_size} does not match requested "
+            f"{expected_image_size}x{expected_image_size}"
+        )
     requests = int(manifest["requests_per_concurrency"])
     unique_images = int(manifest["unique_images"])
     target_isl = int(manifest["target_isl"])
+    min_bytes = int(manifest["encoding"]["min_bytes"])
+    max_bytes = int(manifest["encoding"]["max_bytes"])
     input_path = Path(manifest["input"]["path"])
     rows = [
         json.loads(line) for line in input_path.read_text(encoding="utf-8").splitlines()
@@ -334,13 +363,13 @@ def validate_workload(root: Path) -> dict[str, Any]:
     for record in manifest["images"]:
         path = Path(record["path"])
         payload = path.read_bytes()
-        if not JPEG_MIN_BYTES <= len(payload) <= JPEG_MAX_BYTES:
+        if not min_bytes <= len(payload) <= max_bytes:
             raise AssertionError(f"JPEG size out of range: {path}")
         encoded_hash = hashlib.sha256(payload).hexdigest()
         if encoded_hash != record["encoded_sha256"]:
             raise AssertionError(f"encoded hash mismatch: {path}")
         with Image.open(path) as encoded:
-            if encoded.format != "JPEG" or encoded.size != (500, 500):
+            if encoded.format != "JPEG" or encoded.size != image_size:
                 raise AssertionError(f"invalid JPEG shape or format: {path}")
             image = encoded.convert("RGB")
         decoded_hash = hashlib.sha256(image.tobytes()).hexdigest()
@@ -363,6 +392,7 @@ def validate_workload(root: Path) -> dict[str, Any]:
         "input_sha256": _sha256(input_path),
         "requests": requests,
         "images": unique_images,
+        "image_size": list(image_size),
         "target_isl": target_isl,
         "reuse_counts": actual_counts,
     }
@@ -378,17 +408,22 @@ def main() -> None:
     generate.add_argument("--output-dir", type=Path, required=True)
     generate.add_argument("--decoder-model", default=DECODER_MODEL)
     generate.add_argument("--encoder-model", default=ENCODER_MODEL)
+    generate.add_argument("--image-size", type=int, default=DEFAULT_IMAGE_SIZE)
     validate = subparsers.add_parser("validate")
     validate.add_argument("workload_dir", type=Path)
+    validate.add_argument("--image-size", type=int)
     args = parser.parse_args()
     if args.command == "generate":
         generate_workload(
             args.output_dir.resolve(),
             decoder_model=args.decoder_model,
             encoder_model=args.encoder_model,
+            image_size=args.image_size,
         )
     else:
-        validate_workload(args.workload_dir.resolve())
+        validate_workload(
+            args.workload_dir.resolve(), expected_image_size=args.image_size
+        )
 
 
 if __name__ == "__main__":

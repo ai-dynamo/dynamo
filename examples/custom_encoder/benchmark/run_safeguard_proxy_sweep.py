@@ -31,6 +31,7 @@ from benchmarks.multimodal.sweep.orchestrator import run_sweep  # noqa: E402
 from examples.custom_encoder.benchmark.safeguard_proxy_workload import (  # noqa: E402
     CONCURRENCIES,
     DECODER_MODEL,
+    DEFAULT_IMAGE_SIZE,
     ENCODER_MODEL,
     INPUT_NAME,
     REQUESTS,
@@ -102,12 +103,25 @@ def _gpu_metadata() -> str | None:
     return _command_output(command)
 
 
+def _workload_image_size(workload_dir: Path) -> tuple[int, int]:
+    manifest = json.loads(
+        (workload_dir / "workload_manifest.json").read_text(encoding="utf-8")
+    )
+    decoded_image = manifest["decoded_image"]
+    width = int(decoded_image["width"])
+    height = int(decoded_image["height"])
+    if width < 1 or height < 1:
+        raise ValueError("workload image dimensions must be positive")
+    return width, height
+
+
 def _metadata(
     concurrencies: tuple[int, ...],
     smoke: bool,
     workload_dir: Path,
 ) -> dict[str, Any]:
     manifest_path = workload_dir / "workload_manifest.json"
+    width, height = _workload_image_size(workload_dir)
     return {
         "axis": "concurrency",
         "concurrencies": list(concurrencies),
@@ -128,7 +142,7 @@ def _metadata(
             "preprocess_concurrency": 4,
             "max_batch_cost": 8,
             "graph_buckets": list(range(1, 9)),
-            "graph_image_sizes": ["500x500"],
+            "graph_image_sizes": [f"{width}x{height}"],
             "preprocess_cache_size": 0,
             "queue_wait_ms": 1,
             "max_num_seqs": 64,
@@ -162,6 +176,7 @@ def build_config(
     concurrencies: tuple[int, ...],
     output_dir: Path,
     smoke: bool,
+    image_size: tuple[int, int] = (DEFAULT_IMAGE_SIZE, DEFAULT_IMAGE_SIZE),
 ) -> SweepConfig:
     workflow = REPO_ROOT / (
         "examples/custom_encoder/launch/agg_qwen2_5_vl_benchmark.sh"
@@ -190,7 +205,7 @@ def build_config(
             "DYN_QWEN2_VL_PREPROCESS_CONCURRENCY": "4",
             "DYN_QWEN2_VL_MAX_BATCH_COST": "8",
             "DYN_QWEN2_VL_GRAPH_BATCH_BUCKETS": "1,2,3,4,5,6,7,8",
-            "DYN_QWEN2_VL_GRAPH_IMAGE_SIZES": "500x500",
+            "DYN_QWEN2_VL_GRAPH_IMAGE_SIZES": (f"{image_size[0]}x{image_size[1]}"),
             "DYN_QWEN2_VL_PREPROCESS_CACHE_SIZE": "0",
             "DYN_CUSTOM_ENCODER_QUEUE_WAIT_MS": "1",
             "DYN_CUSTOM_ENCODER_TIMING": "1",
@@ -219,7 +234,14 @@ def run_matrix(
         metadata_path.write_text(
             json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
         )
-    config = build_config(workload_dir / INPUT_NAME, concurrencies, output_dir, smoke)
+    image_size = _workload_image_size(workload_dir)
+    config = build_config(
+        workload_dir / INPUT_NAME,
+        concurrencies,
+        output_dir,
+        smoke,
+        image_size=image_size,
+    )
     config.validate(repo_root=REPO_ROOT)
     run_sweep(config, repo_root=REPO_ROOT)
 
@@ -365,6 +387,7 @@ def summarize(root: Path, markdown_path: Path, csv_path: Path) -> None:
         (root / "benchmark_metadata.json").read_text(encoding="utf-8")
     )
     settings = metadata["settings"]
+    image_shape = settings["graph_image_sizes"][0]
     lines = [
         "# Qwen custom-encoder proxy versus supplied Triton baseline",
         "",
@@ -373,8 +396,9 @@ def summarize(root: Path, markdown_path: Path, csv_path: Path) -> None:
         "Qwen2.5-1.5B decoder. The supplied Triton baseline used different "
         "encoder weights, so this table is not a same-model or quality comparison.",
         "",
-        "Each Dynamo cell uses the same 100-request JSONL, nine reused 500×500 "
-        "JPEGs, exact ISL 644, exact OSL 7, and 20 excluded warmups.",
+        f"Each Dynamo cell uses the same 100-request JSONL, nine reused "
+        f"{image_shape.replace('x', '×')} JPEGs, exact ISL 644, exact OSL 7, "
+        "and 20 excluded warmups.",
         "",
         "## Runtime",
         "",
