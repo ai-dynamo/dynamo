@@ -100,10 +100,6 @@ impl SglangScheduler {
         let cancel_token = cancellation_token.unwrap_or_default();
         let cancel_token_clone = cancel_token.clone();
         let cancel_guard = Arc::new(CancelGuard(cancel_token));
-        // Ordinary live users also need the ordered command channel for
-        // request cancellation. Disaggregated workers additionally use it for
-        // handoff lifecycle commands.
-        let controls_enabled = true;
 
         tokio::spawn(async move {
             let (deferred_kv_events, buffering_publishers) = capture_deferred_kv_publish_sink(
@@ -131,7 +127,6 @@ impl SglangScheduler {
                     &publisher,
                     &scheduler_start,
                     &cancel_token_clone,
-                    controls_enabled,
                 )
                 .await
                 {
@@ -148,69 +143,50 @@ impl SglangScheduler {
                     total_time.is_zero() && !pending.made_progress_since(&metrics_before);
                 if total_time > std::time::Duration::ZERO {
                     let deadline = iteration_start + total_time;
-                    if controls_enabled {
-                        if !wait_for_pass_boundary(
-                            &mut core,
-                            &mut command_rx,
-                            &mut deferred_commands,
-                            &publisher,
-                            &scheduler_start,
-                            &cancel_token_clone,
-                            deadline,
-                        )
-                        .await
-                        {
-                            break;
-                        }
-                    } else {
-                        sleep_until_precise(deadline).await;
-                    }
-                }
-                publisher.publish_pass(&mut core, pending).await;
-                if controls_enabled {
-                    let mut command_processed = false;
-                    while let Some(command) = deferred_commands.pop_front() {
-                        command_processed = true;
-                        publisher
-                            .apply_command(
-                                &mut core,
-                                command,
-                                true,
-                                scheduler_elapsed_ms(&scheduler_start),
-                            )
-                            .await;
-                    }
-                    while let Ok(command) = command_rx.try_recv() {
-                        command_processed = true;
-                        publisher
-                            .apply_command(
-                                &mut core,
-                                command,
-                                true,
-                                scheduler_elapsed_ms(&scheduler_start),
-                            )
-                            .await;
-                    }
-                    let retry_progress = publisher
-                        .retry_destinations(&mut core, scheduler_elapsed_ms(&scheduler_start))
-                        .await;
-                    if zero_progress
-                        && !command_processed
-                        && !retry_progress
-                        && !wait_for_progress_wake(
-                            &mut core,
-                            &mut request_rx,
-                            &mut command_rx,
-                            &publisher,
-                            &scheduler_start,
-                            &cancel_token_clone,
-                            true,
-                        )
-                        .await
+                    if !wait_for_pass_boundary(
+                        &mut core,
+                        &mut command_rx,
+                        &mut deferred_commands,
+                        &publisher,
+                        &scheduler_start,
+                        &cancel_token_clone,
+                        deadline,
+                    )
+                    .await
                     {
                         break;
                     }
-                } else if zero_progress
+                }
+                publisher.publish_pass(&mut core, pending).await;
+                let mut command_processed = false;
+                while let Some(command) = deferred_commands.pop_front() {
+                    command_processed = true;
+                    publisher
+                        .apply_command(
+                            &mut core,
+                            command,
+                            true,
+                            scheduler_elapsed_ms(&scheduler_start),
+                        )
+                        .await;
+                }
+                while let Ok(command) = command_rx.try_recv() {
+                    command_processed = true;
+                    publisher
+                        .apply_command(
+                            &mut core,
+                            command,
+                            true,
+                            scheduler_elapsed_ms(&scheduler_start),
+                        )
+                        .await;
+                }
+                let retry_progress = publisher
+                    .retry_destinations(&mut core, scheduler_elapsed_ms(&scheduler_start))
+                    .await;
+                if zero_progress
+                    && !command_processed
+                    && !retry_progress
                     && !wait_for_progress_wake(
                         &mut core,
                         &mut request_rx,
@@ -218,7 +194,6 @@ impl SglangScheduler {
                         &publisher,
                         &scheduler_start,
                         &cancel_token_clone,
-                        false,
                     )
                     .await
                 {
@@ -270,30 +245,7 @@ async fn receive_until_schedulable(
     publisher: &LiveEffectsPublisher,
     scheduler_start: &Instant,
     cancel_token: &CancellationToken,
-    controls_enabled: bool,
 ) -> bool {
-    if !controls_enabled {
-        if cancel_token.is_cancelled() {
-            return false;
-        }
-        if core.is_empty() {
-            tokio::select! {
-                biased;
-                _ = cancel_token.cancelled() => return false,
-                request = request_rx.recv() => {
-                    let Some(request) = request else {
-                        return false;
-                    };
-                    core.receive(request);
-                }
-            }
-        }
-        while let Ok(request) = request_rx.try_recv() {
-            core.receive(request);
-        }
-        return true;
-    }
-
     while core.is_empty() {
         tokio::select! {
             biased;
@@ -378,40 +330,25 @@ async fn wait_for_progress_wake(
     publisher: &LiveEffectsPublisher,
     scheduler_start: &Instant,
     cancel_token: &CancellationToken,
-    controls_enabled: bool,
 ) -> bool {
-    if controls_enabled {
-        tokio::select! {
-            biased;
-            _ = cancel_token.cancelled() => false,
-            command = command_rx.recv() => {
-                let Some(command) = command else {
-                    return false;
-                };
-                publisher
-                    .apply_command(core, command, true, scheduler_elapsed_ms(scheduler_start))
-                    .await;
-                true
-            }
-            request = request_rx.recv() => {
-                let Some(request) = request else {
-                    return false;
-                };
-                core.receive(request);
-                true
-            }
+    tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => false,
+        command = command_rx.recv() => {
+            let Some(command) = command else {
+                return false;
+            };
+            publisher
+                .apply_command(core, command, true, scheduler_elapsed_ms(scheduler_start))
+                .await;
+            true
         }
-    } else {
-        tokio::select! {
-            biased;
-            _ = cancel_token.cancelled() => false,
-            request = request_rx.recv() => {
-                let Some(request) = request else {
-                    return false;
-                };
-                core.receive(request);
-                true
-            }
+        request = request_rx.recv() => {
+            let Some(request) = request else {
+                return false;
+            };
+            core.receive(request);
+            true
         }
     }
 }

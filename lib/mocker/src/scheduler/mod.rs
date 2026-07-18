@@ -438,7 +438,7 @@ pub trait SchedulerHandle: Send + Sync {
     /// Get a watch receiver for scheduler metrics (active decode blocks, etc.).
     fn metrics_receiver(&self) -> tokio::sync::watch::Receiver<MockerMetrics>;
 
-    /// Bounded lifecycle-control channel for disaggregated handoff sessions.
+    /// Bounded ordered channel for request and disaggregated lifecycle commands.
     fn command_sender(&self) -> mpsc::Sender<SchedulerCommandEnvelope>;
 
     /// Take the single lifecycle-event stream owned by this DP-rank scheduler.
