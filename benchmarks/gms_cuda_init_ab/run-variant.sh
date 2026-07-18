@@ -4,8 +4,8 @@
 
 set -euo pipefail
 
-if [[ $# -ne 2 || ! "$1" =~ ^[ab]$ ]]; then
-    echo "usage: $0 {a|b} EVIDENCE_DIRECTORY" >&2
+if [[ $# -ne 2 || ! "$1" =~ ^[abc]$ ]]; then
+    echo "usage: $0 {a|b|c} EVIDENCE_DIRECTORY" >&2
     exit 2
 fi
 
@@ -33,6 +33,8 @@ POD_SELECTOR="nvidia.com/dynamo-graph-deployment-name=$DGD,nvidia.com/dynamo-com
 CLAIM_PREFIX="${DGD}-vllmdecode-intrapod-"
 MAIN_IMAGE=dynamoci.azurecr.io/ai-dynamo/dynamo:760e55e21e14f76d7c204920f00ea9144d819b4b-vllm-placeholder-run-29604929787-1@sha256:44ade91e2dc09c9732ea038b9db81bff7b3fcdc7b5a692ab1142d2ee7bde0ca2
 MAIN_DIGEST=sha256:44ade91e2dc09c9732ea038b9db81bff7b3fcdc7b5a692ab1142d2ee7bde0ca2
+B_DIGEST=sha256:f0e3d788dca28715674705a7f151636dae3ee868f4df5575c1e284a777a7ab0a
+C_LOADER_DIGEST=sha256:592b70a87779348ce90a53ce7034ec84ea3f8274fc2b4b59177e53e7a4a99fe7
 TIMES="$ART/timestamps.tsv"
 PIDS=()
 TRACKED_PIDS=()
@@ -337,6 +339,7 @@ finalize_evidence() {
     if ! sha256sum \
         "$EXP/gms-fadvise-exact.py" \
         "$EXP/gms-host-sampler.sh" \
+        "$EXP/validate-loader-profile.py" \
         "$EXP/validate-server-profile.py" \
         > "$ART/helper-checksums.txt"; then
         echo "evidence finalization failed: unable to checksum runner helpers" >&2
@@ -537,14 +540,17 @@ validate_live_images() {
             main)
                 expected_digest=$MAIN_DIGEST
                 ;;
-            gms-loader|gms-server)
-                expected_digest=$EXPECTED_EXPERIMENT_DIGEST
+            gms-loader)
+                expected_digest=$EXPECTED_LOADER_DIGEST
+                ;;
+            gms-server)
+                expected_digest=$EXPECTED_SERVER_DIGEST
                 ;;
         esac
         [[ "$image_id" == *"@$expected_digest" ]]
     done
     stamp LIVE_IMAGES_VALIDATED \
-        "main=$MAIN_DIGEST loader_server=$EXPECTED_EXPERIMENT_DIGEST"
+        "main=$MAIN_DIGEST loader=$EXPECTED_LOADER_DIGEST server=$EXPECTED_SERVER_DIGEST"
 }
 
 stamp PREFLIGHT_BEGIN "variant=${VARIANT^^}"
@@ -584,27 +590,32 @@ RENDERED_MAIN_IMAGE=$(
     yq -r '.spec.components[1].podTemplate.spec.containers[]
         | select(.name == "main") | .image' "$ART/preflight/rendered.yaml"
 )
-EXPECTED_EXPERIMENT_IMAGE=$(
+EXPECTED_LOADER_IMAGE=$(
     yq -r '.spec.components[1].podTemplate.spec.containers[]
         | select(.name == "gms-loader") | .image' "$ART/preflight/rendered.yaml"
 )
-export EXPECTED_EXPERIMENT_IMAGE
-EXPECTED_EXPERIMENT_DIGEST=${EXPECTED_EXPERIMENT_IMAGE##*@}
+EXPECTED_SERVER_IMAGE=$(
+    yq -r '.spec.components[1].podTemplate.spec.initContainers[]
+        | select(.name == "gms-server") | .image' "$ART/preflight/rendered.yaml"
+)
+EXPECTED_LOADER_DIGEST=${EXPECTED_LOADER_IMAGE##*@}
+EXPECTED_SERVER_DIGEST=${EXPECTED_SERVER_IMAGE##*@}
 case "$VARIANT" in
     a)
-        [[ "$EXPECTED_EXPERIMENT_DIGEST" == \
+        [[ "$EXPECTED_LOADER_DIGEST" == \
             sha256:d0ea4cc1aceeeeef5825c418999ceca00fcde20dbdbc203d4b2bc683a874708a ]]
+        [[ "$EXPECTED_SERVER_DIGEST" == "$EXPECTED_LOADER_DIGEST" ]]
         ;;
     b)
-        [[ "$EXPECTED_EXPERIMENT_DIGEST" == \
-            sha256:f0e3d788dca28715674705a7f151636dae3ee868f4df5575c1e284a777a7ab0a ]]
+        [[ "$EXPECTED_LOADER_DIGEST" == "$B_DIGEST" ]]
+        [[ "$EXPECTED_SERVER_DIGEST" == "$B_DIGEST" ]]
+        ;;
+    c)
+        [[ "$EXPECTED_LOADER_DIGEST" == "$C_LOADER_DIGEST" ]]
+        [[ "$EXPECTED_SERVER_DIGEST" == "$B_DIGEST" ]]
         ;;
 esac
 [[ "$RENDERED_MAIN_IMAGE" == "$MAIN_IMAGE" ]]
-[[ $(
-    yq -r '.spec.components[1].podTemplate.spec.initContainers[]
-        | select(.name == "gms-server") | .image' "$ART/preflight/rendered.yaml"
-) == "$EXPECTED_EXPERIMENT_IMAGE" ]]
 [[ $(
     yq '[.spec.components[1].podTemplate.spec.initContainers[]
         | select(.name == "gms-server")] | length' "$ART/preflight/rendered.yaml"
@@ -615,10 +626,10 @@ esac
 ) == 0 ]]
 yq -o=json '.spec.components[1].podTemplate.spec' \
     "$ART/preflight/rendered.yaml" |
-    jq -e --arg experiment_image "$EXPECTED_EXPERIMENT_IMAGE" '
+    jq -e --arg server_image "$EXPECTED_SERVER_IMAGE" '
         [.initContainers[] | select(.name == "gms-server")] == [{
             name: "gms-server",
-            image: $experiment_image,
+            image: $server_image,
             command: ["python3", "-m", "gpu_memory_service.cli.server"],
             env: [{
                 name: "GMS_SOCKET_DIR",
@@ -655,6 +666,20 @@ if yq -e '.spec.components[1].experimental.checkpoint.job' \
     "$ART/preflight/rendered.yaml" >/dev/null 2>&1; then
     echo "rendered overlay unexpectedly contains a checkpoint job" >&2
     exit 1
+fi
+if [[ "$VARIANT" == c ]]; then
+    [[ $(
+        yq -o=json '.spec.components[1].podTemplate.spec.containers[]
+            | select(.name == "gms-loader")
+            | [.env[] | select(.name == "DYN_GMS_SHARDED_SSD_CUDA_MODE")]
+            | length' "$ART/preflight/rendered.yaml"
+    ) == 1 ]]
+    [[ $(
+        yq -r '.spec.components[1].podTemplate.spec.containers[]
+            | select(.name == "gms-loader")
+            | .env[] | select(.name == "DYN_GMS_SHARDED_SSD_CUDA_MODE")
+            | .value' "$ART/preflight/rendered.yaml"
+    ) == driver ]]
 fi
 
 stamp APPLY_ZERO_REPLICA_VARIANT
@@ -776,15 +801,16 @@ k get pod "$WORKER_POD" -o json > "$ART/objects/ready-worker-pod.json"
 
 jq -e \
     --arg main_image "$MAIN_IMAGE" \
-    --arg experiment_image "$EXPECTED_EXPERIMENT_IMAGE" '
+    --arg loader_image "$EXPECTED_LOADER_IMAGE" \
+    --arg server_image "$EXPECTED_SERVER_IMAGE" '
     [.spec.containers[] | select(.name == "main") | .image] ==
         [$main_image] and
     [.spec.containers[] | select(.name == "gms-loader") | .image] ==
-        [$experiment_image] and
+        [$loader_image] and
     [.spec.containers[] | select(.name == "gms-server")] == [] and
     ([.spec.initContainers[] | select(.name == "gms-server")] | length) == 1 and
     ([.spec.initContainers[] | select(.name == "gms-server")][0] as $server |
-        $server.image == $experiment_image and
+        $server.image == $server_image and
         $server.command ==
             ["python3", "-m", "gpu_memory_service.cli.server"] and
         ([$server.env[] | select(
@@ -883,6 +909,9 @@ python3 "$EXP/validate-server-profile.py" \
     "$ART/logs/gms-server.final.log" \
     "$ART/expected-uuids.txt" \
     "$VARIANT" | tee "$ART/preflight/server-profile-validation.txt"
+python3 "$EXP/validate-loader-profile.py" \
+    "$ART/logs/gms-loader.final.log" \
+    "$VARIANT" | tee "$ART/preflight/loader-profile-validation.txt"
 python3 - "$ART/logs/snapshot-agent.final.log" "$ART/expected-uuids.txt" \
     "$WORKER_POD" <<'PY'
 import json

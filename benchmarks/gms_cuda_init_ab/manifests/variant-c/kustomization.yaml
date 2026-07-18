@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../base
+patches:
+  - target:
+      group: nvidia.com
+      version: v1beta1
+      kind: DynamoGraphDeployment
+      name: g52-t8-gms-prof-r29604929787-r2
+    patch: |-
+      - op: test
+        path: /spec/components/1/podTemplate/spec/containers/0/name
+        value: main
+      - op: test
+        path: /spec/components/1/podTemplate/spec/containers/0/image
+        value: dynamoci.azurecr.io/ai-dynamo/dynamo:760e55e21e14f76d7c204920f00ea9144d819b4b-vllm-placeholder-run-29604929787-1@sha256:44ade91e2dc09c9732ea038b9db81bff7b3fcdc7b5a692ab1142d2ee7bde0ca2
+      - op: test
+        path: /spec/components/1/podTemplate/spec/containers/1/name
+        value: gms-loader
+      - op: test
+        path: /spec/components/1/podTemplate/spec/nodeSelector/kubernetes.io~1hostname
+        value: cluster-0967a26d-pool-14bee067-prctr-s2877
+      - op: replace
+        path: /spec/components/1/replicas
+        value: 0
+      - op: replace
+        path: /spec/components/1/experimental/checkpoint
+        value:
+          checkpointRef: checkpoint-57a124961e2a47a2cf9c2712e58a0a2b
+          deletionPolicy: Retain
+          enabled: true
+          startupPolicy: WaitForCheckpoint
+          targetContainerName: main
+      - op: replace
+        path: /spec/components/1/podTemplate/spec/containers/1/image
+        value: dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-driver-loader-eec758c4e-c@sha256:592b70a87779348ce90a53ce7034ec84ea3f8274fc2b4b59177e53e7a4a99fe7
+      - op: add
+        path: /spec/components/1/podTemplate/spec/containers/1/env/-
+        value:
+          name: DYN_GMS_SHARDED_SSD_CUDA_MODE
+          value: driver
+      - op: add
+        path: /spec/components/1/podTemplate/spec/initContainers
+        value:
+          - name: gms-server
+            image: dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-324c14408b2c-b@sha256:f0e3d788dca28715674705a7f151636dae3ee868f4df5575c1e284a777a7ab0a
+            command:
+              - python3
+              - -m
+              - gpu_memory_service.cli.server
+            env:
+              - name: GMS_SOCKET_DIR
+                value: /gms-intrapod-control
+            volumeMounts:
+              - name: gms-intrapod-control
+                mountPath: /gms-intrapod-control
+            resources:
+              claims:
+                - name: intrapod-shared-gpu
+            restartPolicy: Always
+      - op: add
+        path: /spec/components/1/podTemplate/spec/volumes/-
+        value:
+          name: gms-intrapod-control
+          emptyDir: {}
+      - op: add
+        path: /metadata/annotations/schwinns.ai-dynamo.io~1cuda-init-variant
+        value: C-driver-api-sharded-ssd-loader
+      - op: add
+        path: /metadata/annotations/schwinns.ai-dynamo.io~1experiment-commit
+        value: eec758c4ec76d58a6e4368388f13948aa5aabd2a
+      - op: add
+        path: /spec/components/1/podTemplate/metadata/annotations/schwinns.ai-dynamo.io~1cuda-init-variant
+        value: C-driver-api-sharded-ssd-loader

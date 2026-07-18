@@ -30,7 +30,7 @@ def main(log_path: str, expected_path: str, variant: str) -> int:
             records.append(record)
 
     errors = []
-    if variant == "b" and set(launches) != expected:
+    if variant in {"b", "c"} and set(launches) != expected:
         errors.append(
             f"isolated launch UUIDs mismatch: got={sorted(launches)} "
             f"expected={sorted(expected)}"
@@ -44,15 +44,15 @@ def main(log_path: str, expected_path: str, variant: str) -> int:
                 f"expected={sorted(expected)}"
             )
         for record in phase_records:
-            if variant == "b" and record.get("device") != 0:
+            if variant in {"b", "c"} and record.get("device") != 0:
                 errors.append(f"{phase} has nonzero child device: {record}")
             if not isinstance(record.get("pid"), int) or record["pid"] <= 0:
                 errors.append(f"{phase} has invalid PID: {record}")
             uuid = record.get("physical_uuid")
-            if variant == "b" and launches.get(uuid) != record.get("pid"):
+            if variant in {"b", "c"} and launches.get(uuid) != record.get("pid"):
                 errors.append(f"{phase} PID does not match launch: {record}")
 
-    readiness_device = "0" if variant == "b" else r"\d+"
+    readiness_device = "0" if variant in {"b", "c"} else r"\d+"
     for uuid in expected:
         if not re.search(
             rf"Server started: .*device={readiness_device} "
@@ -72,6 +72,6 @@ def main(log_path: str, expected_path: str, variant: str) -> int:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 4 or sys.argv[3] not in {"a", "b"}:
-        raise SystemExit(f"usage: {sys.argv[0]} SERVER_LOG EXPECTED_UUIDS {{a|b}}")
+    if len(sys.argv) != 4 or sys.argv[3] not in {"a", "b", "c"}:
+        raise SystemExit(f"usage: {sys.argv[0]} SERVER_LOG EXPECTED_UUIDS {{a|b|c}}")
     raise SystemExit(main(sys.argv[1], sys.argv[2], sys.argv[3]))

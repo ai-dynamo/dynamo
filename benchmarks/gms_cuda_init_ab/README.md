@@ -3,12 +3,11 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# GMS CUDA initialization A/B
+# GMS CUDA initialization A/B/C
 
 This directory contains a narrow, switchable experiment for GMS server CUDA
-initialization. Both variants use the exact retained-checkpoint `main` image,
-retained checkpoint, and workload. Only `gms-loader` and `gms-server` use the
-A/B experiment images:
+initialization and loader CUDA API selection. All variants use the exact
+retained-checkpoint `main` image, retained checkpoint, and workload:
 
 - **A:** `DYN_GMS_SERVER_GPU_UUID_ISOLATION=0`. This preserves prior behavior:
   one child per GPU, each child receives its physical ordinal in `--device` and
@@ -17,14 +16,43 @@ A/B experiment images:
   allocation-owning OS child per physical GPU, but each fresh-exec child
   receives one full physical UUID in `CUDA_VISIBLE_DEVICES` and uses
   `--device 0` inside that one-device view.
+- **C:** keeps the exact B server image and changes only `gms-loader`. It sets
+  `DYN_GMS_SHARDED_SSD_CUDA_MODE=driver`, explicitly calls `cuInit(0)` once,
+  retains each device's primary context, binds it in every participating
+  thread, and uses Driver API host registration, streams, events, copies,
+  synchronization, and cleanup for sharded-SSD NIXL POSIX staging.
 
 The loader remains one all-visible process with the same eight-GPU DRA
-allocation in both variants. The flag is consumed only by
-`gpu_memory_service.cli.server`; it does not filter the main worker, loader, or
-transfer threads. The experiment does not combine server children, move
-transfers into the server, create a CUDA context in the supervisor, or change
-VMM layout, storage, checkpoint, model, vLLM, FlashInfer, NCCL, or compile-cache
-behavior.
+allocation in all variants. The server isolation flag is consumed only by
+`gpu_memory_service.cli.server`. The loader CUDA mode is consumed only by the
+snapshot loader and is rejected unless the transfer backend is `sharded-ssd`;
+NIXL GDS and GDS_MT are not changed. The experiment does not combine server
+children, move transfers into the server, create private CUDA contexts, or
+change VMM layout, storage, checkpoint, model, vLLM, FlashInfer, NCCL, or
+compile-cache behavior.
+
+## Driver-only loader lifecycle
+
+Runtime mode remains the default and preserves the existing CUDART path. In
+Driver mode:
+
+1. The loader records one explicit `loader_cu_init` around `cuInit(0)`.
+2. Each per-device loader thread records `cuDeviceGet`,
+   `cuDevicePrimaryCtxRetain`, and `cuCtxSetCurrent`.
+3. Each NIXL POSIX staging preparation and transfer thread binds the same
+   retained primary context before creating or using pinned buffers, streams,
+   events, or copies.
+4. `GMSClientMemoryManager` uses the already-initialized Driver context for VMM
+   mapping and Driver `cuCtxSynchronize` during commit.
+5. Primary contexts remain retained until every device finishes mapping,
+   staging, H2D copies, synchronization, unmapping, commit, publication, and
+   cleanup. They are released only after the all-device future barrier.
+
+The selected process also enables a fail-closed guard on every GMS CUDART
+wrapper. Reaching `cudaSetDevice`, host registration, stream/event operations,
+or `cudaMemcpyAsync` through a Runtime wrapper raises a clear fatal loader
+error. Importing the Runtime binding is allowed, but no Runtime call may
+execute.
 
 ## Visibility and profile identity
 
@@ -56,7 +84,7 @@ GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51
 ```
 
 Every server `SnapshotProfile` record includes the physical UUID, process PID,
-and CUDA child ordinal. In B, `server_cu_init`,
+and CUDA child ordinal. In B and C, `server_cu_init`,
 `allocation_manager_ready`, and `socket_ready` therefore retain
 `device=0` while remaining attributable to one physical GPU and process.
 Launch and readiness logs include the same UUID/PID identity. In A, the profile
@@ -79,6 +107,24 @@ With `GMS_SNAPSHOT_PROFILE=1`, the images emit:
   `socket_ready`;
 - restore: `restore_target_mapping_envelope`, whose `wall_start_ns` marks
   mapping start.
+
+C additionally emits:
+
+- `loader_cu_init`;
+- per-device `cu_device_get` and `primary_context_retain`;
+- `all_device_primary_context_retain_envelope`;
+- per-loader-thread `loader_cu_ctx_set_current`;
+- `all_device_cu_ctx_set_current_envelope`;
+- `all_device_driver_initialization` and `loader_cuda_initialization_total`;
+- Driver-tagged `cuda_host_register`, `cuda_stream_create`,
+  `cuda_event_create`, staging/transfer worker context records, and cleanup;
+- one `first_h2d_submission` per device; and
+- `primary_context_release` after all dependent work.
+
+`validate-loader-profile.py` rejects missing phases and rejects Runtime-only
+phases or `cuda*` API records in C. It also validates the unchanged Runtime
+profile surface for A and B. `first_claimed_cuda_set_device` remains only a
+Runtime bookkeeping event and is not treated as the initialization owner.
 
 `first_claimed_cuda_set_device` means only that a thread won the profiling
 bookkeeping claim before making its unsynchronized `cudaSetDevice` call. The
@@ -129,7 +175,7 @@ ownerReferences: null
 deletionTimestamp: null
 ```
 
-Both overlays set worker replicas to zero on apply, use only the normal
+All overlays set worker replicas to zero on apply, use only the normal
 `checkpointRef` restore path with `startupPolicy: WaitForCheckpoint`, and omit
 the checkpoint job. `run-variant.sh` scales the existing worker component to
 one only after preflight and cache eviction. Never run `snapshotctl`, and never
@@ -141,8 +187,9 @@ The retained checkpoint's successful target container used exactly:
 dynamoci.azurecr.io/ai-dynamo/dynamo:760e55e21e14f76d7c204920f00ea9144d819b4b-vllm-placeholder-run-29604929787-1@sha256:44ade91e2dc09c9732ea038b9db81bff7b3fcdc7b5a692ab1142d2ee7bde0ca2
 ```
 
-Both overlays leave `main` at that exact image reference. This is a
-checkpoint-root-filesystem compatibility requirement, not an A/B variable.
+All overlays leave `main` at that exact image reference. This is a
+checkpoint-root-filesystem compatibility requirement, not an experiment
+variable.
 
 ## Invalid prior retries
 
@@ -171,8 +218,29 @@ dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:44ade91e2dc09c9732ea038b9db81bff7b3f
 |---|---|
 | A | `dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-324c14408b2c-a@sha256:d0ea4cc1aceeeeef5825c418999ceca00fcde20dbdbc203d4b2bc683a874708a` |
 | B | `dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-324c14408b2c-b@sha256:f0e3d788dca28715674705a7f151636dae3ee868f4df5575c1e284a777a7ab0a` |
+| C loader | `dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-driver-loader-eec758c4e-c@sha256:592b70a87779348ce90a53ce7034ec84ea3f8274fc2b4b59177e53e7a4a99fe7` |
 
-Both images have 79 identical OCI filesystem layer descriptors and these
+C uses the B image above for the explicit `gms-server`; only `gms-loader` uses
+the C image. Its immutable provenance is:
+
+```text
+SOURCE_COMMIT=eec758c4ec76d58a6e4368388f13948aa5aabd2a
+SOURCE_ARCHIVE_SHA256=683051bf969fe4d4eb02f57c0971aa5178a4f3432dc4289311e1f5d9a64bd9c3
+DOCKERFILE_SHA256=c5d72e01a8d660a46c962b928d38cfdf7f0bdf50f7ac8f144fcfce521d9e4ac7
+OCI_CONFIG=sha256:ca2f6d87d686f09f23706e49531093d534e26af4395126c34db3e33ce154008e
+```
+
+Build and push exactly one C loader image:
+
+```bash
+SOURCE_COMMIT=eec758c4ec76d58a6e4368388f13948aa5aabd2a \
+IMAGE_TAG=gms-cuda-driver-loader-eec758c4e-c \
+  ./benchmarks/gms_cuda_init_ab/build-driver-loader.sh
+docker push \
+  dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-driver-loader-eec758c4e-c
+```
+
+The A and B images have 79 identical OCI filesystem layer descriptors and these
 labels:
 
 ```text
@@ -189,7 +257,8 @@ A config: sha256:99f7e36945d1af741e1c0fc8c752e6e4f106b5e689614220bf9c5a0292e4055
 B config: sha256:5857baf8f6ecb1180fc5ecf45785b0478f5bae94d929a769dc739d2b175e2b82
 ```
 
-Installed source hashes are identical in A and B and match `SOURCE_COMMIT`:
+Installed source hashes are identical in A and B and match their
+`SOURCE_COMMIT`:
 
 | File | SHA-256 |
 |---|---|
@@ -201,8 +270,8 @@ Installed source hashes are identical in A and B and match `SOURCE_COMMIT`:
 | `server/allocations.py` | `fb7f1d947c8391fc5a8140c39f33a90e98329bf52f2ba71d54d6e98942b4f47a` |
 | `server/rpc.py` | `c81688e68b1bbd1df2353293b96be3aa81c7343cf6092168855622c5a4c57844` |
 
-Each overlay assigns its final image only to the explicit `gms-loader` and
-explicit native-init-sidecar `gms-server`. It does not assign this derivative
+Each overlay assigns its final image only to the explicit `gms-loader` or
+explicit native-init-sidecar `gms-server`. It does not assign a derivative
 image to `main`. The custom server mirrors the operator-generated shape:
 
 - name `gms-server`;
@@ -290,9 +359,9 @@ git archive 324c14408b2cb79f39d80a8d90fe4ae54182bef2 \
   lib/gpu_memory_service | sha256sum
 ```
 
-## Deterministic tester procedure
+## Deterministic B/C tester procedure
 
-Run A and B sequentially from the repository root. Every cluster operation in
+Run B, C, C, and B sequentially from the repository root. Every cluster operation in
 `run-variant.sh` uses the explicit context
 `nv-prd-dgxc.teleport.sh-dynamo-nscale-dev-cluster` and namespace `schwinns`;
 it never changes the active kube context.
@@ -310,34 +379,36 @@ kubectl --context "$CTX" -n "$NS" get dynamocheckpoint "$CKPT" \
     deletionTimestamp:.metadata.deletionTimestamp, phase:.status.phase,
     checkpointID:.status.checkpointID}'
 kubectl --context "$CTX" -n "$NS" kustomize \
-  benchmarks/gms_cuda_init_ab/manifests/variant-a \
-  > /tmp/gms-init-a.yaml
-kubectl --context "$CTX" -n "$NS" kustomize \
   benchmarks/gms_cuda_init_ab/manifests/variant-b \
   > /tmp/gms-init-b.yaml
-diff -u /tmp/gms-init-a.yaml /tmp/gms-init-b.yaml
+kubectl --context "$CTX" -n "$NS" kustomize \
+  benchmarks/gms_cuda_init_ab/manifests/variant-c \
+  > /tmp/gms-init-c.yaml
+diff -u /tmp/gms-init-b.yaml /tmp/gms-init-c.yaml
 ```
 
-The raw rendered diff must contain only the `gms-loader` and `gms-server`
-experiment image references and the two variant annotations. It must never
-contain a `main` image difference. Both rendered worker replica counts must be
-zero.
+The raw rendered diff must contain only the `gms-loader` image, its explicit
+Driver mode environment variable, and the variant annotations. It must not
+contain a `main` or `gms-server` difference. Both rendered worker replica
+counts must be zero.
 
-Run A:
+Use four fresh evidence directories and stop immediately if a run does not
+exit zero:
 
 ```bash
 ./benchmarks/gms_cuda_init_ab/run-variant.sh \
-  a evidence/gms-cuda-init-a
-```
-
-Do not begin B unless A exits zero. A's teardown waits for all matching DCD and
-Deployment replica specs to reach zero, the old worker pod to disappear, and
-the generated DRA `ResourceClaim` to be released. Then run B:
-
-```bash
+  b evidence/gms-cuda-driver-b1-$(date -u +%Y%m%dT%H%M%SZ)
 ./benchmarks/gms_cuda_init_ab/run-variant.sh \
-  b evidence/gms-cuda-init-b
+  c evidence/gms-cuda-driver-c1-$(date -u +%Y%m%dT%H%M%SZ)
+./benchmarks/gms_cuda_init_ab/run-variant.sh \
+  c evidence/gms-cuda-driver-c2-$(date -u +%Y%m%dT%H%M%SZ)
+./benchmarks/gms_cuda_init_ab/run-variant.sh \
+  b evidence/gms-cuda-driver-b2-$(date -u +%Y%m%dT%H%M%SZ)
 ```
+
+Each teardown waits for all matching DCD and Deployment replica specs to reach
+zero, the old worker pod to disappear, and the generated DRA `ResourceClaim`
+to be released before the next cache eviction and run.
 
 For each variant, the runner:
 
@@ -370,10 +441,10 @@ For each variant, the runner:
    readiness.
 7. Verifies the live `main` `imageID` equals
    `sha256:44ade91e2dc09c9732ea038b9db81bff7b3fcdc7b5a692ab1142d2ee7bde0ca2`.
-   It separately verifies that `gms-loader` and the sole native-init-sidecar
-   `gms-server` use A's `sha256:d0ea4cc1...` or B's
-   `sha256:f0e3d788...` digest, including the exact command, socket
-   environment, shared mount, DRA claim, and restart policy.
+   It separately verifies B's loader and server digest. In C it verifies the
+   C loader digest and the unchanged B server digest, including the exact
+   server command, socket environment, shared mount, DRA claim, and restart
+   policy.
 8. Runs `nvidia-smi --query-gpu=uuid` in the loader, requires exactly eight
    devices, and compares the UUID set with the expected allocation.
 9. Runs the same deterministic chat-completion request after normal
@@ -381,9 +452,11 @@ For each variant, the runner:
    output, and coherent references to blue light, atmosphere, and scattering.
 10. Validates every `server_cu_init`, `allocation_manager_ready`, and
     `socket_ready` profile against the expected physical UUID set and a valid
-    PID. For B it also requires `device=0` and PID agreement with the
+    PID. For B and C it also requires `device=0` and PID agreement with the
     supervisor's per-UUID launch records.
-11. Validates the snapshot-agent's ordinal-order DRA UUID record, collects all
+11. Validates the loader Runtime/Driver profile contract, including no CUDART
+    profile records in C.
+12. Validates the snapshot-agent's ordinal-order DRA UUID record, collects all
     final objects/logs, terminates and waits for sampler/log-follower process
     trees, scales to zero, performs the teardown waits, and writes
     `SHA256SUMS`. The same descendant cleanup runs on failure, and checksum
@@ -397,14 +470,16 @@ change does not require rebuilding either A/B image.
 
 ## Expected comparison
 
-The primary comparison is A versus B for `server_cu_init`, followed by
-`allocation_manager_ready` and `socket_ready`, per physical GPU and as an
-eight-child wall-clock envelope. B is expected to reduce Driver initialization
-work or contention if inherited all-GPU visibility is the cause.
+The primary comparison is B versus C. Server timing should remain within
+run-to-run noise because both variants use the same B server image. Compare
+the bracketed B samples and duplicate C samples using individual values and
+means for server initialization, loader `cuInit`, primary-context retain,
+total loader initialization, mapping, host registration, payload, commit and
+publication, all-device barrier, snapshot restore, scale-up to Ready, and
+inference.
 
-The loader's `first_claimed_cuda_set_device`, every `cuda_set_device`,
-`current_context_established`, `all_device_cuda_initialization`, and
-`restore_target_mapping_envelope` should remain within run-to-run noise because
-the loader sees all eight DRA GPUs and follows the same code path. A change in
-loader visibility, device count, transfer time, checkpoint identity, live image
-digest, UUID attribution, or inference coherence invalidates the comparison.
+C is useful only if it eliminates or materially reduces loader initialization
+cost without shifting the same latency into primary-context retain, host
+registration, first H2D submission, or mapping. A change in loader visibility,
+payload bytes/count, cold-cache roots, checkpoint identity, live image digest,
+UUID attribution, or inference coherence invalidates the comparison.
