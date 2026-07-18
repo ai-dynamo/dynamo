@@ -71,8 +71,7 @@ areas:
   - components/src/dynamo/vllm/
   - components/src/dynamo/vllm/tests/
   - examples/backends/vllm/
-  - lib/vllm-rs-backend/Cargo.toml
-  - lib/vllm-rs-backend/src/
+  - lib/backend/vllm-sidecar/
 - label: backend-trtllm
   github_team: '@ai-dynamo/dynamo-backend-trtllm-codeowners'
   path_globs:
