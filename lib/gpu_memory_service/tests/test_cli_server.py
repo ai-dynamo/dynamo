@@ -311,6 +311,11 @@ def test_assigned_device_uuids_restricts_host_wide_nvml_to_explicit_allocation(
             "NVIDIA_VISIBLE_DEVICES": "all",
             "CUDA_VISIBLE_DEVICES": "0,1",
         },
+        {"CUDA_VISIBLE_DEVICES": "all"},
+        {
+            "NVIDIA_VISIBLE_DEVICES": "all",
+            "CUDA_VISIBLE_DEVICES": "all",
+        },
         {"CUDA_VISIBLE_DEVICES": "0,1"},
     ],
 )

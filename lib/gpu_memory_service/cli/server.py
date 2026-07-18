@@ -155,6 +155,11 @@ def _assigned_device_uuids(environ: Mapping[str, str]) -> list[str]:
             )
         if cuda_visibility.strip().lower() in {"", "none", "void"}:
             return []
+        if cuda_visibility.strip().lower() == "all":
+            raise ValueError(
+                "CUDA_VISIBLE_DEVICES=all is ambiguous without an explicit "
+                "UUID allocation"
+            )
         if all(token.isdigit() for token in cuda_tokens):
             raise ValueError(
                 "numeric CUDA_VISIBLE_DEVICES is ambiguous without an explicit "
