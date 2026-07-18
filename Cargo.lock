@@ -2913,6 +2913,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-vllm-grpc"
+version = "1.3.0"
+dependencies = [
+ "prost 0.13.5",
+ "prost-types 0.13.5",
+ "tonic 0.13.1",
+ "tonic-build 0.13.1",
+]
+
+[[package]]
+name = "dynamo-vllm-mocker"
+version = "1.3.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "blake3",
+ "clap",
+ "dynamo-backend-common",
+ "dynamo-mocker",
+ "dynamo-sidecar-common",
+ "dynamo-vllm-grpc",
+ "dynamo-vllm-sidecar",
+ "futures",
+ "prost-types 0.13.5",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tonic 0.13.1",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "dynamo-vllm-sidecar"
 version = "1.3.0"
 dependencies = [
@@ -2922,15 +2956,14 @@ dependencies = [
  "clap",
  "dynamo-backend-common",
  "dynamo-sidecar-common",
+ "dynamo-vllm-grpc",
  "futures",
- "prost 0.13.5",
  "prost-types 0.13.5",
  "serde_json",
  "tokio",
  "tokio-stream",
  "tokio-util",
  "tonic 0.13.1",
- "tonic-build 0.13.1",
  "tracing",
 ]
 

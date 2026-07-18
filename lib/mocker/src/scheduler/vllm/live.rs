@@ -151,7 +151,10 @@ impl Scheduler {
         let cancel_token = cancellation_token.unwrap_or_default();
         let cancel_token_clone = cancel_token.clone();
         let cancel_guard = Arc::new(CancelGuard(cancel_token));
-        let controls_enabled = args.is_prefill() || args.is_decode();
+        // Ordinary live users also need the ordered command channel for
+        // request cancellation. Disaggregated workers additionally use it for
+        // handoff lifecycle commands.
+        let controls_enabled = true;
 
         tokio::spawn(async move {
             let (deferred_kv_events, buffering_publishers) = capture_deferred_kv_publish_sink(
@@ -534,7 +537,9 @@ fn scheduler_elapsed_ms(scheduler_start: &Instant) -> f64 {
 fn command_can_apply_during_pass(command: &SchedulerCommand) -> bool {
     matches!(
         command,
-        SchedulerCommand::SubmitHandoffPrefill { .. } | SchedulerCommand::ReserveDestination { .. }
+        SchedulerCommand::CancelRequest { .. }
+            | SchedulerCommand::SubmitHandoffPrefill { .. }
+            | SchedulerCommand::ReserveDestination { .. }
     )
 }
 

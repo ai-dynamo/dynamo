@@ -573,6 +573,19 @@ impl VllmCore {
                     SchedulerCommandResult::Submitted(self.submit(request)?),
                 ))
             }
+            SchedulerCommand::CancelRequest { request_id } => {
+                let result = if self.state.requests.contains_key(&request_id) {
+                    self.drop_request(request_id);
+                    SchedulerCommandResult::Applied
+                } else {
+                    SchedulerCommandResult::Noop
+                };
+                if allow_destination_admission {
+                    Ok(self.effects_after_capacity_change(result, reservation_now_ms))
+                } else {
+                    Ok(SchedulerCommandEffects::new(result))
+                }
+            }
             SchedulerCommand::SubmitHandoffPrefill {
                 handoff_id,
                 mut request,

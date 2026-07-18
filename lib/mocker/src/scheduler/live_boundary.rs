@@ -207,6 +207,7 @@ impl LiveEffectsPublisher {
         now_ms: f64,
     ) {
         let SchedulerCommandEnvelope { command, reply } = envelope;
+        let publish_midpass_metrics = matches!(&command, SchedulerCommand::CancelRequest { .. });
         let result = core.apply_live_command(command, allow_destination_admission, now_ms);
         match result {
             Ok(mut effects) => {
@@ -223,6 +224,8 @@ impl LiveEffectsPublisher {
                 let _ = reply.send(Ok(effects));
                 if allow_destination_admission {
                     self.publish_lifecycle(lifecycle_events).await;
+                }
+                if allow_destination_admission || publish_midpass_metrics {
                     self.record(PublishedEffect::Metrics);
                     let _ = self.metrics_tx.send(core.live_metrics());
                 }
