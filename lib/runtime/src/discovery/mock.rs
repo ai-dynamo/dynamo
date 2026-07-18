@@ -184,12 +184,21 @@ impl Discovery for MockDiscovery {
 
     async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
         let instance = spec.into_instance(self.instance_id);
-
-        self.registry
-            .instances
-            .lock()
-            .unwrap()
-            .push(instance.clone());
+        let mut instances = self.registry.instances.lock().unwrap();
+        if matches!(&instance, DiscoveryInstance::EventSource { .. })
+            && let Some(existing) = instances
+                .iter()
+                .find(|existing| existing.id() == instance.id())
+        {
+            if existing == &instance {
+                return Ok(existing.clone());
+            }
+            anyhow::bail!(
+                "Event source incarnation '{:?}' cannot change its descriptor",
+                instance.id()
+            );
+        }
+        instances.push(instance.clone());
 
         Ok(instance)
     }
@@ -378,17 +387,21 @@ mod tests {
             endpoint.clone(),
             "kv-events",
         ));
-        let spec = |publisher_id| DiscoverySpec::EventSource {
+        let spec = |publisher_id, worker_id| DiscoverySpec::EventSource {
             scope: EventScope::Endpoint {
                 endpoint: endpoint.clone(),
             },
             topic: "kv-events".to_string(),
             publisher_id,
-            metadata: serde_json::json!({"worker_id": 7, "dp_rank": 0}),
+            metadata: serde_json::json!({"worker_id": worker_id, "dp_rank": 0}),
         };
 
-        let old = client.register(spec(100)).await.unwrap();
-        let current = client.register(spec(205)).await.unwrap();
+        let old = client.register(spec(100, 7)).await.unwrap();
+        assert_eq!(client.register(spec(100, 7)).await.unwrap(), old);
+        assert!(client.register(spec(100, 8)).await.is_err());
+        assert_eq!(client.list(query.clone()).await.unwrap(), vec![old.clone()]);
+
+        let current = client.register(spec(205, 7)).await.unwrap();
         assert_eq!(client.list(query.clone()).await.unwrap().len(), 2);
 
         client.unregister(old).await.unwrap();

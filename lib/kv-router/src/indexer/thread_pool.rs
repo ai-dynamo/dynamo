@@ -471,20 +471,47 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         Ok(())
     }
 
+    /// Enqueue an event and report whether the worker queue accepted it.
+    pub fn enqueue_event(&self, event: RouterEvent) -> Result<(), KvRouterError> {
+        let worker_id = event.worker_id;
+        let thread_idx = Self::get_or_assign_thread_idx(
+            &self.worker_assignments,
+            &self.worker_assignment_count,
+            worker_id,
+            self.num_workers,
+        );
+        self.worker_event_channels[thread_idx]
+            .send(WorkerTask::Event(event))
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+        self.maybe_enqueue_cleanup(thread_idx);
+        Ok(())
+    }
+
+    /// Wait until all worker queues have applied tasks accepted before this call.
+    pub async fn flush_and_wait(&self) -> Result<(), KvRouterError> {
+        let mut receivers = Vec::with_capacity(self.worker_event_channels.len());
+        for channel in &self.worker_event_channels {
+            let (resp_tx, resp_rx) = oneshot::channel();
+            channel
+                .send(WorkerTask::Flush(resp_tx))
+                .map_err(|_| KvRouterError::IndexerOffline)?;
+            receivers.push(resp_rx);
+        }
+        for receiver in receivers {
+            receiver
+                .await
+                .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+        }
+        Ok(())
+    }
+
     /// Wait until all previously queued worker tasks have completed.
     ///
     /// Used primarily for testing and benchmarking to ensure writes are visible
     /// before checking results.
     pub async fn flush(&self) {
-        let mut receivers = Vec::new();
-        for channel in &self.worker_event_channels {
-            let (resp_tx, resp_rx) = oneshot::channel();
-            if channel.send(WorkerTask::Flush(resp_tx)).is_ok() {
-                receivers.push(resp_rx);
-            }
-        }
-        for receiver in receivers {
-            let _ = receiver.await;
+        if let Err(error) = self.flush_and_wait().await {
+            tracing::error!(%error, "Failed to flush thread-pool indexer");
         }
     }
 
@@ -898,27 +925,9 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
     }
 
     async fn apply_event(&self, event: RouterEvent) {
-        let worker_id = event.worker_id;
-
-        // Get or assign worker thread index using sticky round-robin
-        let thread_idx = Self::get_or_assign_thread_idx(
-            &self.worker_assignments,
-            &self.worker_assignment_count,
-            worker_id,
-            self.num_workers,
-        );
-
-        // Send event to the assigned worker thread
-        if let Err(e) = self.worker_event_channels[thread_idx].send(WorkerTask::Event(event)) {
-            tracing::error!(
-                "Failed to send event to worker thread {}: {:?}",
-                thread_idx,
-                e
-            );
-            return;
+        if let Err(error) = self.enqueue_event(event) {
+            tracing::error!(%error, "Failed to enqueue event to thread-pool indexer");
         }
-
-        self.maybe_enqueue_cleanup(thread_idx);
     }
 
     async fn remove_worker(&self, worker_id: WorkerId) {

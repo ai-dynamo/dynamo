@@ -345,6 +345,7 @@ impl Discovery for KVStoreDiscovery {
     async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
         let instance = spec.into_instance(self.instance_id());
         let instance_id = instance.instance_id();
+        let is_event_source = matches!(&instance, DiscoveryInstance::EventSource { .. });
 
         let (bucket_name, key_path) = match &instance {
             DiscoveryInstance::Endpoint(inst) => {
@@ -456,13 +457,40 @@ impl Discovery for KVStoreDiscovery {
         let bucket = self.store.get_or_create_bucket(bucket_name, None).await?;
         let key = kv::Key::new(key_path.clone());
 
+        if is_event_source && let Some(existing) = bucket.get(&key).await? {
+            let existing: DiscoveryInstance = serde_json::from_slice(existing.as_ref())?;
+            if existing == instance {
+                return Ok(existing);
+            }
+            anyhow::bail!(
+                "Event source incarnation '{}' cannot change its descriptor",
+                key_path
+            );
+        }
+
         tracing::debug!(
             "KVStoreDiscovery::register: Inserting into bucket={}, key={}",
             bucket_name,
             key_path
         );
         // Use revision 0 for initial registration
-        let outcome = bucket.insert(&key, instance_json.into(), 0).await?;
+        let outcome = match bucket.insert(&key, instance_json.into(), 0).await {
+            Ok(outcome) => outcome,
+            Err(error) if is_event_source => {
+                let Some(existing) = bucket.get(&key).await? else {
+                    return Err(error.into());
+                };
+                let existing: DiscoveryInstance = serde_json::from_slice(existing.as_ref())?;
+                if existing == instance {
+                    return Ok(existing);
+                }
+                anyhow::bail!(
+                    "Event source incarnation '{}' cannot change its descriptor",
+                    key_path
+                );
+            }
+            Err(error) => return Err(error.into()),
+        };
         tracing::debug!(
             "KVStoreDiscovery::register: Registration insert completed instance_id={}, key={}, outcome={:?}",
             instance_id,
@@ -902,17 +930,24 @@ mod tests {
             endpoint.clone(),
             "kv/events",
         ));
-        let spec = |publisher_id| DiscoverySpec::EventSource {
+        let spec = |publisher_id, worker_id| DiscoverySpec::EventSource {
             scope: EventScope::Endpoint {
                 endpoint: endpoint.clone(),
             },
             topic: "kv/events".to_string(),
             publisher_id,
-            metadata: serde_json::json!({"worker_id": 7, "dp_rank": 0}),
+            metadata: serde_json::json!({"worker_id": worker_id, "dp_rank": 0}),
         };
 
-        let first = client.register(spec(100)).await.unwrap();
-        let second = client.register(spec(205)).await.unwrap();
+        let first = client.register(spec(100, 7)).await.unwrap();
+        assert_eq!(client.register(spec(100, 7)).await.unwrap(), first);
+        assert!(client.register(spec(100, 8)).await.is_err());
+        assert_eq!(
+            client.list(query.clone()).await.unwrap(),
+            vec![first.clone()]
+        );
+
+        let second = client.register(spec(205, 7)).await.unwrap();
         assert_eq!(client.list(query.clone()).await.unwrap().len(), 2);
 
         client.unregister(first).await.unwrap();

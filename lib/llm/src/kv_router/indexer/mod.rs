@@ -215,7 +215,7 @@ impl Indexer {
         }
     }
 
-    pub(crate) async fn apply_event(&self, event: RouterEvent) {
+    pub(crate) async fn try_apply_event(&self, event: RouterEvent) -> Result<(), KvRouterError> {
         match self {
             Self::KvIndexer {
                 primary,
@@ -223,24 +223,27 @@ impl Indexer {
                 ..
             } => match &event.event.data {
                 dynamo_kv_router::protocols::KvCacheEventData::Cleared => {
-                    if let Err(e) = primary.event_sender().send(event.clone()).await {
-                        tracing::warn!("Failed to send event to indexer: {e}");
-                    }
+                    primary
+                        .event_sender()
+                        .send(event.clone())
+                        .await
+                        .map_err(|_| KvRouterError::IndexerOffline)?;
 
                     for indexer in lower_tier.all() {
-                        indexer.apply_event(event.clone()).await;
+                        indexer.enqueue_event(event.clone())?;
                     }
                 }
                 _ if event.storage_tier.is_gpu() => {
-                    if let Err(e) = primary.event_sender().send(event).await {
-                        tracing::warn!("Failed to send event to indexer: {e}");
-                    }
+                    primary
+                        .event_sender()
+                        .send(event)
+                        .await
+                        .map_err(|_| KvRouterError::IndexerOffline)?;
                 }
                 _ => {
                     lower_tier
                         .get_or_create(event.storage_tier)
-                        .apply_event(event)
-                        .await;
+                        .enqueue_event(event)?;
                 }
             },
             Self::Concurrent {
@@ -249,23 +252,29 @@ impl Indexer {
                 ..
             } => match &event.event.data {
                 dynamo_kv_router::protocols::KvCacheEventData::Cleared => {
-                    primary.apply_event(event.clone()).await;
+                    primary.enqueue_event(event.clone())?;
 
                     for indexer in lower_tier.all() {
-                        indexer.apply_event(event.clone()).await;
+                        indexer.enqueue_event(event.clone())?;
                     }
                 }
                 _ if event.storage_tier.is_gpu() => {
-                    primary.apply_event(event).await;
+                    primary.enqueue_event(event)?;
                 }
                 _ => {
                     lower_tier
                         .get_or_create(event.storage_tier)
-                        .apply_event(event)
-                        .await;
+                        .enqueue_event(event)?;
                 }
             },
             Self::Remote { .. } | Self::None => {}
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn apply_event(&self, event: RouterEvent) {
+        if let Err(error) = self.try_apply_event(event).await {
+            tracing::error!(%error, "Failed to enqueue KV event");
         }
     }
 
@@ -331,7 +340,7 @@ impl Indexer {
 
     /// Wait until all local tiers have applied mutations accepted before this call.
     /// Recovery uses this cold-path barrier before committing its source cursor.
-    pub(crate) async fn flush_and_wait(&self) {
+    pub(crate) async fn flush_and_wait(&self) -> Result<(), KvRouterError> {
         match self {
             Self::KvIndexer {
                 primary,
@@ -339,12 +348,12 @@ impl Indexer {
                 approx,
                 ..
             } => {
-                primary.flush().await;
+                primary.flush_and_wait().await?;
                 for indexer in lower_tier.all() {
-                    indexer.flush().await;
+                    indexer.flush_and_wait().await?;
                 }
                 if let Some(approx) = approx {
-                    approx.flush_and_wait().await;
+                    approx.flush_and_wait().await?;
                 }
             }
             Self::Concurrent {
@@ -353,21 +362,22 @@ impl Indexer {
                 approx,
                 ..
             } => {
-                primary.flush().await;
+                primary.flush_and_wait().await?;
                 for indexer in lower_tier.all() {
-                    indexer.flush().await;
+                    indexer.flush_and_wait().await?;
                 }
                 if let Some(approx) = approx {
-                    approx.flush_and_wait().await;
+                    approx.flush_and_wait().await?;
                 }
             }
             Self::Remote { approx, .. } => {
                 if let Some(approx) = approx {
-                    approx.flush_and_wait().await;
+                    approx.flush_and_wait().await?;
                 }
             }
             Self::None => {}
         }
+        Ok(())
     }
 }
 

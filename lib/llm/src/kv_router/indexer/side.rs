@@ -123,14 +123,15 @@ impl SideIndexer {
         }
     }
 
-    pub(super) async fn flush_and_wait(&self) {
+    pub(super) async fn flush_and_wait(&self) -> Result<(), KvRouterError> {
         match self {
             Self::KvIndexer(indexer) => {
-                indexer.flush().await;
+                indexer.flush_and_wait().await?;
             }
             Self::Concurrent(indexer) => {
-                indexer.flush().await;
+                indexer.flush_and_wait().await?;
             }
         }
+        Ok(())
     }
 }

@@ -15,23 +15,27 @@ const RECOVERY_PENDING_FAST_PRUNE_MARGIN: usize = 10;
 
 pub(super) enum LiveEventAction {
     Ignore,
-    Apply(RouterEvent),
+    Apply {
+        event_id: u64,
+        event: RouterEvent,
+    },
     Clear {
         event_id: u64,
     },
     Recover {
         start_event_id: Option<u64>,
+        end_event_id: Option<u64>,
+        reset: bool,
     },
     ResetDegraded {
         event: RouterEvent,
-        recover_from: Option<u64>,
     },
 }
 
-pub(super) enum PendingDrainAction {
-    Apply(RouterEvent),
-    RecoverFrom(u64),
-    Complete,
+pub(super) struct PendingDrainPlan {
+    pub(super) events: Vec<RouterEvent>,
+    pub(super) cursor: CursorState,
+    pub(super) next_recovery_start: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -68,10 +72,6 @@ impl RankState {
             {
                 return LiveEventAction::Ignore;
             }
-            self.cursor = self.cursor.apply_barrier(event_id);
-            self.recovery_inflight = false;
-            self.pending_live_events.clear();
-            self.max_seen_live_id = None;
             return LiveEventAction::Clear { event_id };
         }
 
@@ -94,31 +94,32 @@ impl RankState {
                 self.recovery_inflight = true;
                 LiveEventAction::Recover {
                     start_event_id: None,
+                    end_event_id: None,
+                    reset: false,
                 }
             }
-            CursorObservation::Gap { expected, got } if recoverable => {
-                self.cursor = self.cursor.advance_to(got);
+            CursorObservation::Gap { .. } if recoverable => {
+                self.observe_and_buffer(event);
                 self.recovery_inflight = true;
-                LiveEventAction::ResetDegraded {
-                    event,
-                    recover_from: Some(expected),
+                LiveEventAction::Recover {
+                    start_event_id: None,
+                    end_event_id: None,
+                    reset: true,
                 }
             }
-            CursorObservation::Gap { .. } => {
-                self.cursor = self.cursor.advance_to(event_id);
-                LiveEventAction::ResetDegraded {
-                    event,
-                    recover_from: None,
-                }
-            }
+            CursorObservation::Gap { .. } => LiveEventAction::ResetDegraded { event },
             CursorObservation::Initial { got }
             | CursorObservation::Contiguous { got }
-            | CursorObservation::FreshAfterBarrier { got, .. } => {
-                self.cursor = self.cursor.advance_to(got);
-                self.clear_max_seen_if_caught_up(got);
-                LiveEventAction::Apply(event)
-            }
+            | CursorObservation::FreshAfterBarrier { got, .. } => LiveEventAction::Apply {
+                event_id: got,
+                event,
+            },
         }
+    }
+
+    pub(super) fn commit_live_event(&mut self, event_id: u64) {
+        self.cursor = self.cursor.advance_to(event_id);
+        self.clear_max_seen_if_caught_up(event_id);
     }
 
     pub(super) fn begin_successful_recovery_drain(&mut self, cursor: CursorState) {
@@ -137,9 +138,14 @@ impl RankState {
         self.max_seen_live_id = None;
     }
 
-    pub(super) fn next_pending_drain_action(&mut self) -> PendingDrainAction {
+    pub(super) fn plan_pending_drain(&mut self) -> PendingDrainPlan {
         let mut last_applied_id = self.last_applied_id().unwrap_or(0);
+        let mut cursor = self.cursor;
+        self.pending_live_events
+            .make_contiguous()
+            .sort_unstable_by_key(|event| event.event.event_id);
         self.fast_prune_stale_pending_prefix(last_applied_id);
+        let mut events = Vec::new();
 
         loop {
             let Some(front_event_id) = self
@@ -152,10 +158,17 @@ impl RankState {
                     .max_seen_live_id
                     .is_some_and(|max_seen| max_seen > last_applied_id)
                 {
-                    return PendingDrainAction::RecoverFrom(last_applied_id.saturating_add(1));
+                    return PendingDrainPlan {
+                        events,
+                        cursor,
+                        next_recovery_start: Some(last_applied_id.saturating_add(1)),
+                    };
                 }
-                self.recovery_inflight = false;
-                return PendingDrainAction::Complete;
+                return PendingDrainPlan {
+                    events,
+                    cursor,
+                    next_recovery_start: None,
+                };
             };
 
             if front_event_id <= last_applied_id {
@@ -165,18 +178,31 @@ impl RankState {
 
             let expected = last_applied_id.saturating_add(1);
             if front_event_id != expected {
-                return PendingDrainAction::RecoverFrom(expected);
+                return PendingDrainPlan {
+                    events,
+                    cursor,
+                    next_recovery_start: Some(expected),
+                };
             }
 
             let event = self
                 .pending_live_events
                 .pop_front()
                 .expect("front event exists while draining pending live events");
-            self.cursor = self.cursor.advance_to(front_event_id);
             last_applied_id = front_event_id;
-            self.clear_max_seen_if_caught_up(last_applied_id);
-            return PendingDrainAction::Apply(event);
+            cursor = cursor.advance_to(front_event_id);
+            events.push(event);
         }
+    }
+
+    pub(super) fn commit_pending_drain(
+        &mut self,
+        cursor: CursorState,
+        next_recovery_start: Option<u64>,
+    ) {
+        self.cursor = cursor;
+        self.clear_max_seen_if_caught_up(self.last_applied_id().unwrap_or(0));
+        self.recovery_inflight = next_recovery_start.is_some();
     }
 
     pub(super) fn finish_failed_recovery(&mut self) {
@@ -185,22 +211,21 @@ impl RankState {
         self.max_seen_live_id = None;
     }
 
-    pub(super) fn finish_failed_recovery_degraded(&mut self) -> Vec<RouterEvent> {
+    pub(super) fn take_failed_recovery_degraded(&mut self) -> Vec<RouterEvent> {
+        let last_applied_id = self.last_applied_id().unwrap_or(0);
+        let mut events: Vec<_> = self.pending_live_events.drain(..).collect();
+        events.sort_unstable_by_key(|event| event.event.event_id);
+        events.dedup_by_key(|event| event.event.event_id);
+        events.retain(|event| event.event.event_id > last_applied_id);
+        events
+    }
+
+    pub(super) fn commit_failed_recovery_degraded(&mut self, last_event_id: Option<u64>) {
+        if let Some(last_event_id) = last_event_id {
+            self.cursor = self.cursor.advance_to(last_event_id);
+        }
         self.recovery_inflight = false;
         self.max_seen_live_id = None;
-        let mut events = Vec::with_capacity(self.pending_live_events.len());
-        while let Some(event) = self.pending_live_events.pop_front() {
-            let event_id = event.event.event_id;
-            if self
-                .last_applied_id()
-                .is_some_and(|last_applied_id| event_id <= last_applied_id)
-            {
-                continue;
-            }
-            self.cursor = self.cursor.advance_to(event_id);
-            events.push(event);
-        }
-        events
     }
 
     fn observe_and_buffer(&mut self, event: RouterEvent) {
@@ -266,10 +291,10 @@ mod tests {
     #[test]
     fn live_only_source_accepts_first_event_without_recovery() {
         let mut state = RankState::default();
-        assert!(matches!(
-            state.observe_live_event(store(9), false),
-            LiveEventAction::Apply(_)
-        ));
+        let action = state.observe_live_event(store(9), false);
+        assert!(matches!(action, LiveEventAction::Apply { event_id: 9, .. }));
+        assert_eq!(state.last_applied_id(), None);
+        state.commit_live_event(9);
         assert_eq!(state.last_applied_id(), Some(9));
     }
 
@@ -280,8 +305,50 @@ mod tests {
             state.observe_live_event(store(9), true),
             LiveEventAction::Recover {
                 start_event_id: None,
+                end_event_id: None,
+                reset: false,
             }
         ));
         assert!(state.recovery_inflight);
+    }
+
+    #[test]
+    fn gap_recovery_buffers_and_drains_live_events_in_event_id_order() {
+        let mut state = RankState::default();
+        assert!(matches!(
+            state.observe_live_event(store(1), false),
+            LiveEventAction::Apply { event_id: 1, .. }
+        ));
+        state.commit_live_event(1);
+
+        assert!(matches!(
+            state.observe_live_event(store(4), true),
+            LiveEventAction::Recover {
+                start_event_id: None,
+                end_event_id: None,
+                reset: true,
+            }
+        ));
+        assert!(matches!(
+            state.observe_live_event(store(3), true),
+            LiveEventAction::Ignore
+        ));
+        assert_eq!(state.last_applied_id(), Some(1));
+
+        state.begin_successful_recovery_drain(CursorState::Initial.advance_to(2));
+        let plan = state.plan_pending_drain();
+        assert_eq!(
+            plan.events
+                .iter()
+                .map(|event| event.event.event_id)
+                .collect::<Vec<_>>(),
+            vec![3, 4]
+        );
+        assert_eq!(plan.cursor.last_applied_id(), Some(4));
+        assert_eq!(plan.next_recovery_start, None);
+        assert_eq!(state.last_applied_id(), Some(2));
+        state.commit_pending_drain(plan.cursor, plan.next_recovery_start);
+        assert_eq!(state.last_applied_id(), Some(4));
+        assert!(!state.recovery_inflight);
     }
 }

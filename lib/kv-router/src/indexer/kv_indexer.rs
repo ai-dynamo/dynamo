@@ -489,6 +489,20 @@ impl KvIndexer {
         }
     }
 
+    /// Wait until all mutations accepted before this call have been applied.
+    pub async fn flush_and_wait(&self) -> Result<usize, KvRouterError> {
+        let curr_size = self.mutation_tx.max_capacity() - self.mutation_tx.capacity();
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.flush_tx
+            .send(FlushRequest { resp: resp_tx })
+            .await
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+        resp_rx
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+        Ok(curr_size)
+    }
+
     pub async fn find_match_details(
         &self,
         sequence: Vec<LocalBlockHash>,
@@ -657,17 +671,13 @@ impl KvIndexerInterface for KvIndexer {
             .await
     }
     async fn flush(&self) -> usize {
-        let curr_size = self.mutation_tx.max_capacity() - self.mutation_tx.capacity();
-        let (resp_tx, resp_rx) = oneshot::channel();
-        let flush_req = FlushRequest { resp: resp_tx };
-
-        if let Err(error) = self.flush_tx.send(flush_req).await {
-            tracing::error!("Failed to send flush request: {:?}", error);
-            return curr_size;
+        match self.flush_and_wait().await {
+            Ok(curr_size) => curr_size,
+            Err(error) => {
+                tracing::error!(%error, "Failed to flush KV indexer");
+                0
+            }
         }
-
-        let _ = resp_rx.await;
-        curr_size
     }
 }
 
