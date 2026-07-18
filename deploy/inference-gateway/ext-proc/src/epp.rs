@@ -26,7 +26,7 @@ use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
 use crate::envoy_helpers::find_header;
-use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo};
+use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo, ResponseUsage};
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
 const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
@@ -1094,9 +1094,22 @@ impl EndpointPicker for Router {
         }
     }
 
-    async fn on_request_complete(&self, request_id: &str) {
+    async fn on_request_complete(&self, request_id: &str, usage: Option<ResponseUsage>) {
         if request_id.is_empty() {
             return;
+        }
+        // Surface observed token usage (notably `cached_tokens`) for calibration.
+        // The stock Router only logs it; a decorating picker can consume it to
+        // compare predicted prefix overlap against the actual cache hit.
+        if let Some(usage) = usage {
+            tracing::debug!(
+                request_id,
+                prompt_tokens = ?usage.prompt_tokens,
+                completion_tokens = ?usage.completion_tokens,
+                total_tokens = ?usage.total_tokens,
+                cached_tokens = ?usage.cached_tokens,
+                "Request complete with usage"
+            );
         }
         if let Err(e) = self.free_request(request_id).await {
             tracing::debug!(
