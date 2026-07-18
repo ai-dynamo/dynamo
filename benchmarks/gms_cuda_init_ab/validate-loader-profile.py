@@ -23,6 +23,7 @@ DRIVER_COUNTS = {
     "loader_cuda_initialization_total": 1,
     "primary_context_release": 1,
 }
+DRIVER_ONLY_COUNTS = set(DRIVER_COUNTS) - {"first_h2d_submission"}
 RUNTIME_COUNTS = {
     "cuda_set_device": 8,
     "current_context_query": 8,
@@ -107,7 +108,7 @@ def main(log_path: str, variant: str) -> int:
                 "Runtime mode first_claimed_cuda_set_device count mismatch: "
                 f"got={counts['first_claimed_cuda_set_device']} expected=1"
             )
-        unexpected = sorted(phase for phase in DRIVER_COUNTS if counts[phase])
+        unexpected = sorted(phase for phase in DRIVER_ONLY_COUNTS if counts[phase])
         if unexpected:
             errors.append(f"Runtime mode emitted Driver-only phases: {unexpected}")
 
