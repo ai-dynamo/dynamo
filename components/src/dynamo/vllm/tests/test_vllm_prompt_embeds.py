@@ -170,7 +170,6 @@ class TestUsageStatistics:
     @pytest.mark.parametrize(
         "prompt_token_ids,completion_tokens,expected_prompt,expected_total",
         [
-            # vLLM uses placeholder IDs for pure embeddings.
             ([0] * 10, 5, 10, 15),
             ([1, 2, 3, 4, 5, 6, 7], 3, 7, 10),
             # Zero sequence length edge case

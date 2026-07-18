@@ -266,10 +266,6 @@ class TestPromptEmbedsE2E:
         """
         CRITICAL REGRESSION TEST: Ensure prompt_tokens is correctly reported.
 
-        vLLM represents a pure embedding prompt with one placeholder token ID
-        per embedding row. The worker derives usage from those returned IDs,
-        so this assertion verifies that contract end to end.
-
         Rust tests cannot verify this - it requires E2E validation.
         """
         sequence_length = 20
