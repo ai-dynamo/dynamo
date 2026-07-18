@@ -412,6 +412,8 @@ class TestAggConfigValidation:
         )
         with pytest.raises(ValueError, match="isl_min, isl_max, and isl_resolution"):
             config.validate()
+        with pytest.raises(ValueError, match="isl_min, isl_max, and isl_resolution"):
+            strategy.select_pool()
 
     def test_agg_priorities_default_to_pool_order(self):
         config = GlobalRouterConfig(
@@ -538,4 +540,6 @@ class TestLoadAggConfig:
         strategy = config.agg_pool_selection_strategy
         assert strategy is not None
         assert strategy.select_pool(isl=4096, ttft_target_ms=100, itl_target_ms=10) == 0
-        assert strategy.select_pool(isl=16384, ttft_target_ms=100, itl_target_ms=10) == 1
+        assert (
+            strategy.select_pool(isl=16384, ttft_target_ms=100, itl_target_ms=10) == 1
+        )

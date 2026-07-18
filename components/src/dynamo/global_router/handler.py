@@ -370,9 +370,15 @@ class GlobalRouterHandler:
         )
 
         logger.info(
-            f"Routing agg request: ISL={isl}, TTFT_target={ttft_target_ms}ms, "
-            f"ITL_target={itl_target_ms}ms, priority={priority} -> "
-            f"pool {pool_idx} ({namespace}); retry_order={pool_order}"
+            "Routing agg request: ISL=%s, TTFT_target=%sms, ITL_target=%sms, "
+            "priority=%s -> pool %s (%s); retry_order=%s",
+            isl,
+            ttft_target_ms,
+            itl_target_ms,
+            priority,
+            pool_idx,
+            namespace,
+            pool_order,
         )
 
         # Forward request to local router and stream back responses

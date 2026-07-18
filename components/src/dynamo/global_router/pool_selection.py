@@ -305,14 +305,6 @@ class AggPoolSelectionStrategy:
         """Step size for ITL grid."""
         return (self.itl_max_ms - self.itl_min_ms) / self.itl_resolution
 
-    @property
-    def isl_step(self) -> float:
-        """Step size for the optional ISL grid."""
-        assert self.isl_min is not None
-        assert self.isl_max is not None
-        assert self.isl_resolution is not None
-        return (self.isl_max - self.isl_min) / self.isl_resolution
-
     def select_pool(
         self,
         ttft_target_ms: Optional[float] = None,
@@ -347,16 +339,23 @@ class AggPoolSelectionStrategy:
             (itl_target_ms - self.itl_min_ms) / self.itl_step_ms, self.itl_resolution
         )
 
-        if self.isl_resolution is None:
+        isl_min, isl_max, isl_resolution = (
+            self.isl_min,
+            self.isl_max,
+            self.isl_resolution,
+        )
+        if isl_min is None or isl_max is None or isl_resolution is None:
+            if any(field is not None for field in (isl_min, isl_max, isl_resolution)):
+                raise ValueError(
+                    "isl_min, isl_max, and isl_resolution must be configured together"
+                )
             mapping = cast(List[List[int]], self.agg_pool_mapping)
             pool_idx = mapping[ttft_idx][itl_idx]
         else:
-            assert self.isl_min is not None
-            assert self.isl_max is not None
             if isl is None:
-                isl = (self.isl_min + self.isl_max) // 2
+                isl = (isl_min + isl_max) // 2
             isl_idx = self._clamp_index(
-                (isl - self.isl_min) / self.isl_step, self.isl_resolution
+                (isl - isl_min) / ((isl_max - isl_min) / isl_resolution), isl_resolution
             )
             mapping = cast(List[List[List[int]]], self.agg_pool_mapping)
             pool_idx = mapping[isl_idx][ttft_idx][itl_idx]
@@ -364,8 +363,12 @@ class AggPoolSelectionStrategy:
             pool_idx, priority, self.priority_overrides
         )
         logger.debug(
-            f"Agg pool selection: ISL={isl}, TTFT={ttft_target_ms}ms, ITL={itl_target_ms}ms, "
-            f"priority={priority} -> pool {pool_idx}"
+            "Agg pool selection: ISL=%s, TTFT=%sms, ITL=%sms, priority=%s -> pool %s",
+            isl,
+            ttft_target_ms,
+            itl_target_ms,
+            priority,
+            pool_idx,
         )
         return pool_idx
 
@@ -613,19 +616,16 @@ class GlobalRouterConfig:
                 f"itl_max_ms ({agg_strategy.itl_max_ms})"
             )
 
-        isl_fields = (
+        isl_min, isl_max, isl_resolution = (
             agg_strategy.isl_min,
             agg_strategy.isl_max,
             agg_strategy.isl_resolution,
         )
-        if any(field is not None for field in isl_fields) and not all(
-            field is not None for field in isl_fields
-        ):
-            raise ValueError(
-                "isl_min, isl_max, and isl_resolution must be configured together"
-            )
-
-        if agg_strategy.isl_resolution is None:
+        if isl_min is None or isl_max is None or isl_resolution is None:
+            if any(field is not None for field in (isl_min, isl_max, isl_resolution)):
+                raise ValueError(
+                    "isl_min, isl_max, and isl_resolution must be configured together"
+                )
             mapping = cast(List[List[int]], agg_strategy.agg_pool_mapping)
             if len(mapping) != agg_strategy.ttft_resolution:
                 raise ValueError(
@@ -645,24 +645,20 @@ class GlobalRouterConfig:
                             f"(must be 0 to {self.num_agg_pools - 1})"
                         )
         else:
-            assert agg_strategy.isl_min is not None
-            assert agg_strategy.isl_max is not None
-            if agg_strategy.isl_resolution <= 0:
+            if isl_resolution <= 0:
                 raise ValueError(
-                    "isl_resolution must be positive, "
-                    f"got {agg_strategy.isl_resolution}"
+                    "isl_resolution must be positive, " f"got {isl_resolution}"
                 )
-            if agg_strategy.isl_min >= agg_strategy.isl_max:
+            if isl_min >= isl_max:
                 raise ValueError(
-                    f"isl_min ({agg_strategy.isl_min}) must be less than "
-                    f"isl_max ({agg_strategy.isl_max})"
+                    f"isl_min ({isl_min}) must be less than isl_max ({isl_max})"
                 )
 
             mapping = cast(List[List[List[int]]], agg_strategy.agg_pool_mapping)
-            if len(mapping) != agg_strategy.isl_resolution:
+            if len(mapping) != isl_resolution:
                 raise ValueError(
                     f"agg_pool_mapping ISL rows ({len(mapping)}) "
-                    f"does not match isl_resolution ({agg_strategy.isl_resolution})"
+                    f"does not match isl_resolution ({isl_resolution})"
                 )
             for isl_idx, isl_row in enumerate(mapping):
                 if len(isl_row) != agg_strategy.ttft_resolution:

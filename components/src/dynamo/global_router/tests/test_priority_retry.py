@@ -260,8 +260,12 @@ async def test_agg_handler_routes_by_input_sequence_length(tmp_path):
     long = FakeClient("agg-long", outputs=[{"pool": "agg-long"}])
     handler.agg_clients = {"agg-short": short, "agg-long": long}
 
-    short_outputs = await _collect_outputs(handler.handle_generate({"token_ids": [1] * 4096}))
-    long_outputs = await _collect_outputs(handler.handle_generate({"token_ids": [1] * 16384}))
+    short_outputs = await _collect_outputs(
+        handler.handle_generate({"token_ids": [1] * 4096})
+    )
+    long_outputs = await _collect_outputs(
+        handler.handle_generate({"token_ids": [1] * 16384})
+    )
 
     assert short_outputs == [{"pool": "agg-short"}]
     assert long_outputs == [{"pool": "agg-long"}]
