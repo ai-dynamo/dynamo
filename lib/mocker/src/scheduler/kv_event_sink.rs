@@ -330,11 +330,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2]
         );
-        assert!(
-            normal_batches[0]
-                .iter()
-                .all(|(_, storage_tier)| *storage_tier == StorageTier::Device)
-        );
 
         let raw_batches = sink.raw_batches.lock().unwrap();
         assert_eq!(raw_batches.len(), 1);

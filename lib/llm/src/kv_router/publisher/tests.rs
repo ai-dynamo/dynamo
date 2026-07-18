@@ -21,7 +21,7 @@ mod test_event_processing {
     use dynamo_kv_router::zmq_wire::StoredBlockOptions;
 
     #[test]
-    fn test_publish_wraps_event_in_singleton_batch() {
+    fn test_publish_wraps_events_in_batches() {
         let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
         let publisher = KvEventPublisher {
             kv_block_size: 1,
@@ -43,19 +43,6 @@ mod test_event_processing {
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[0].event.event_id, 10);
         assert_eq!(batch[0].event.dp_rank, 2);
-    }
-
-    #[test]
-    fn test_publish_batch_preserves_source_boundary() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
-        let publisher = KvEventPublisher {
-            kv_block_size: 1,
-            source: None,
-            cancellation_token: CancellationToken::new(),
-            worker_id: 7,
-            tx,
-            next_event_id: Arc::new(AtomicU64::new(0)),
-        };
 
         publisher
             .publish_batch_with_storage_tiers(vec![
