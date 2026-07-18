@@ -1485,6 +1485,10 @@ impl ModelManager {
                                 namespace
                             )
                         })?;
+                        // Structural reconciliation deactivates an incomplete P/D
+                        // topology while this waiter is pending. The now-unique
+                        // prefill leaf makes it eligible again.
+                        reactivate_if_needed();
                         tracing::info!(
                             model_name = %model_name,
                             namespace = %namespace,
@@ -3077,6 +3081,52 @@ mod tests {
         assert!(!router.is_deactivated());
         assert_eq!(mm.get_model("llama").unwrap().worker_set_count(), 3);
         assert!(mm.get_model("llama").unwrap().has_worker_set("ordinary"));
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn completing_initial_pd_handshake_reactivates_decode_router() {
+        use crate::worker_type::WorkerType;
+
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let mm = ModelManager::new();
+        let activation = mm
+            .register_prefill_router("llama", "ns1", &decode_endpoint_id("ns1"))
+            .unwrap()
+            .expect("decode activation receiver");
+
+        mm.add_worker_set(
+            "llama",
+            "decode",
+            make_endpoint_worker_set_with_prefill_router("ns1", "decode"),
+        );
+        let router = mm
+            .get_model("llama")
+            .and_then(|model| model.get_worker_set("decode"))
+            .and_then(|worker_set| worker_set.prefill_router.clone())
+            .expect("decode router");
+        assert!(router.is_deactivated());
+
+        mm.add_worker_set(
+            "llama",
+            "prefill",
+            make_typed_endpoint_worker_set("ns1", "prefill", WorkerType::Prefill),
+        );
+        let endpoint = distributed
+            .namespace("ns1".to_string())
+            .unwrap()
+            .component("prefill".to_string())
+            .unwrap()
+            .endpoint("generate".to_string());
+        mm.activate_prefill_router("llama", "ns1", endpoint)
+            .unwrap();
+
+        assert!(!router.is_deactivated());
+        drop(activation);
         runtime.shutdown();
     }
 
