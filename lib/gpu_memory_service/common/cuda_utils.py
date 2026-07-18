@@ -386,6 +386,11 @@ class RuntimeCudaTransferOperations:
 
     api = "runtime"
 
+    def __init__(self, profile: SnapshotProfile | None = None) -> None:
+        self._profile = profile or SnapshotProfile("loader", enabled=False)
+        self._first_h2d_submitted = False
+        self._first_h2d_lock = threading.Lock()
+
     @staticmethod
     def set_current_device(device: int) -> None:
         cuda_runtime_set_device(device)
@@ -426,14 +431,31 @@ class RuntimeCudaTransferOperations:
     def event_destroy(event) -> None:
         cuda_event_destroy(event)
 
-    @staticmethod
     def memcpy_h2d_async(
+        self,
         dst_ptr: int,
         src_ptr: int,
         size: int,
         stream,
     ) -> None:
-        cuda_memcpy_h2d_async(dst_ptr, src_ptr, size, stream)
+        with self._first_h2d_lock:
+            first = not self._first_h2d_submitted
+            self._first_h2d_submitted = True
+        span = (
+            self._profile.phase(
+                "first_h2d_submission",
+                api="cudaMemcpyAsync",
+                cuda_api=self.api,
+                byte_count=size,
+            )
+            if first
+            else None
+        )
+        if span is None:
+            cuda_memcpy_h2d_async(dst_ptr, src_ptr, size, stream)
+        else:
+            with span:
+                cuda_memcpy_h2d_async(dst_ptr, src_ptr, size, stream)
 
     @staticmethod
     def memcpy_d2h_async(

@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../variant-b
+patches:
+  - target:
+      group: nvidia.com
+      version: v1beta1
+      kind: DynamoGraphDeployment
+      name: g52-t8-gms-prof-r29604929787-r2
+    patch: |-
+      - op: replace
+        path: /spec/components/1/podTemplate/spec/containers/1/image
+        value: REPLACE_LOADER_IMAGE
+      - op: add
+        path: /spec/components/1/podTemplate/spec/containers/1/env/-
+        value:
+          name: DYN_GMS_MAPPING_FIRST
+          value: "1"
+      - op: add
+        path: /spec/components/1/podTemplate/spec/containers/1/env/-
+        value:
+          name: DYN_GMS_PINNED_REGISTRATION_GROUPS
+          value: "1"
+      - op: replace
+        path: /metadata/annotations/schwinns.ai-dynamo.io~1cuda-init-variant
+        value: MP-runtime-mapping-first-one-pinned-arena
+      - op: replace
+        path: /spec/components/1/podTemplate/metadata/annotations/schwinns.ai-dynamo.io~1cuda-init-variant
+        value: MP-runtime-mapping-first-one-pinned-arena

@@ -10,15 +10,18 @@ SOURCE_COMMIT=$(git -C "$ROOT" rev-parse "${SOURCE_COMMIT}^{commit}")
 SOURCE_DATE_EPOCH=$(git -C "$ROOT" show -s --format=%ct "$SOURCE_COMMIT")
 BASE_IMAGE=${BASE_IMAGE:-dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:44ade91e2dc09c9732ea038b9db81bff7b3fcdc7b5a692ab1142d2ee7bde0ca2}
 IMAGE_REPOSITORY=${IMAGE_REPOSITORY:-dynamoci.azurecr.io/ai-dynamo/dynamo}
-IMAGE_TAG=${IMAGE_TAG:-gms-cuda-driver-loader-${SOURCE_COMMIT:0:12}-c}
+IMAGE_TAG=${IMAGE_TAG:-gms-vmm-host-arena-${SOURCE_COMMIT:0:12}}
 CONTEXT=$(mktemp -d)
 trap 'rm -rf "$CONTEXT"' EXIT
 
 git -C "$ROOT" archive "$SOURCE_COMMIT" \
-    lib/gpu_memory_service benchmarks/gms_cuda_init_ab/Dockerfile \
+    lib/gpu_memory_service \
+    benchmarks/gms_cuda_init_ab/Dockerfile \
+    benchmarks/gms_cuda_init_ab/allocation-sizes.json \
+    benchmarks/gms_cuda_init_ab/run-vmm-slab-probe.sh \
+    benchmarks/gms_cuda_init_ab/vmm-slab-probe.py \
     | tar -x -C "$CONTEXT"
 mv "$CONTEXT/benchmarks/gms_cuda_init_ab/Dockerfile" "$CONTEXT/Dockerfile"
-rm -rf "$CONTEXT/benchmarks"
 SOURCE_ARCHIVE_SHA256=$(
     git -C "$ROOT" archive "$SOURCE_COMMIT" lib/gpu_memory_service \
         | sha256sum | cut -d' ' -f1
@@ -41,4 +44,4 @@ printf 'SOURCE_COMMIT=%s\nSOURCE_ARCHIVE_SHA256=%s\nDOCKERFILE_SHA256=%s\n' \
     "$SOURCE_COMMIT" \
     "$SOURCE_ARCHIVE_SHA256" \
     "$DOCKERFILE_SHA256"
-printf 'C_LOADER=%s\n' "$IMAGE"
+printf 'EXPERIMENT_LOADER=%s\n' "$IMAGE"

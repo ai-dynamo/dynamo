@@ -322,6 +322,7 @@ class GMSClientMemoryManager:
         with self._profile.aggregate(
             "allocate_rpc_wall",
             byte_count=aligned_size,
+            operation="allocate_request_response",
         ):
             response = self._client_rpc.allocate_info(aligned_size, tag)
         if int(response.aligned_size) != aligned_size:
@@ -331,11 +332,15 @@ class GMSClientMemoryManager:
             )
         return response.allocation_id, int(response.layout_slot)
 
-    def export_handle(self, allocation_id: str) -> int:
+    def export_handle(self, allocation_id: str, byte_count: int = 0) -> int:
         """Export allocation as POSIX FD."""
         if not self._profile.enabled:
             return self._client_rpc.export(allocation_id)
-        with self._profile.aggregate("export_fd_rpc_wall"):
+        with self._profile.aggregate(
+            "client_export_fd_rpc_receive",
+            api="SCM_RIGHTS",
+            byte_count=byte_count,
+        ):
             return self._client_rpc.export(allocation_id)
 
     def get_handle_info(self, allocation_id: str):
@@ -443,6 +448,7 @@ class GMSClientMemoryManager:
         with self._profile.aggregate(
             "client_va_reserve",
             byte_count=aligned_size,
+            api="cuMemAddressReserve",
         ):
             return cumem_address_reserve(aligned_size, self.granularity)
 
@@ -483,18 +489,21 @@ class GMSClientMemoryManager:
             )
             return handle
         with self._profile.aggregate(
-            "client_handle_import",
+            "client_cu_mem_import",
             byte_count=aligned_size,
+            api="cuMemImportFromShareableHandle",
         ):
             handle = cumem_import_from_shareable_handle_close_fd(fd)
         with self._profile.aggregate(
             "client_cu_mem_map",
             byte_count=aligned_size,
+            api="cuMemMap",
         ):
             cumem_map(va, aligned_size, handle)
         with self._profile.aggregate(
             "client_cu_mem_set_access",
             byte_count=aligned_size,
+            api="cuMemSetAccess",
         ):
             cumem_set_access(
                 va,
@@ -599,7 +608,7 @@ class GMSClientMemoryManager:
             alloc_tag = str(getattr(info, "tag", "default"))
             layout_slot = int(info.layout_slot)
 
-            fd = self.export_handle(allocation_id)
+            fd = self.export_handle(allocation_id, aligned_size)
             va = self.reserve_va(aligned_size)
             self.map_va(fd, va, alloc_size, allocation_id, alloc_tag, layout_slot)
             return va
@@ -608,8 +617,8 @@ class GMSClientMemoryManager:
         if size <= 0:
             raise ValueError("size must be > 0 when allocation_id is None")
         alloc_id, layout_slot = self.allocate_handle(size, tag)
-        fd = self.export_handle(alloc_id)
         aligned_size = align_to_granularity(size, self.granularity)
+        fd = self.export_handle(alloc_id, aligned_size)
         va = self.reserve_va(aligned_size)
         self.map_va(fd, va, size, alloc_id, tag, layout_slot)
         return va
@@ -715,7 +724,10 @@ class GMSClientMemoryManager:
                     f"Layout rank {rank} tag changed: {mapping.tag} vs {alloc_info.tag}"
                 )
 
-            fd = self.export_handle(alloc_info.allocation_id)
+            fd = self.export_handle(
+                alloc_info.allocation_id,
+                int(alloc_info.aligned_size),
+            )
             handle = cumem_import_from_shareable_handle_close_fd(fd)
             cumem_map(va, mapping.aligned_size, handle)
             cumem_set_access(

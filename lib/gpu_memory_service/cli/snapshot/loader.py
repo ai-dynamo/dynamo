@@ -34,11 +34,102 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 SHARDED_SSD_CUDA_MODE_ENV = "DYN_GMS_SHARDED_SSD_CUDA_MODE"
+MAPPING_FIRST_ENV = "DYN_GMS_MAPPING_FIRST"
+PINNED_REGISTRATION_GROUPS_ENV = "DYN_GMS_PINNED_REGISTRATION_GROUPS"
 CUDA_MODE_RUNTIME = "runtime"
 CUDA_MODE_DRIVER = "driver"
 
 _first_cuda_set_device_claim_lock = threading.Lock()
 _first_cuda_set_device_claimed = False
+
+
+class _MappingCoordinator:
+    """Failure-aware all-device mapping completion coordinator."""
+
+    def __init__(self, participants: int) -> None:
+        self._remaining = int(participants)
+        self._condition = threading.Condition()
+        self._error: BaseException | None = None
+        self._wall_start_ns: int | None = None
+        self._wall_end_ns: int | None = None
+        self._monotonic_start_ns: int | None = None
+        self._monotonic_end_ns: int | None = None
+
+    def start(self) -> None:
+        wall_ns = time.time_ns()
+        monotonic_ns = time.monotonic_ns()
+        with self._condition:
+            if self._wall_start_ns is None or wall_ns < self._wall_start_ns:
+                self._wall_start_ns = wall_ns
+                self._monotonic_start_ns = monotonic_ns
+
+    def arrive(self, error: BaseException | None = None) -> None:
+        wall_ns = time.time_ns()
+        monotonic_ns = time.monotonic_ns()
+        with self._condition:
+            if self._remaining <= 0:
+                raise RuntimeError("mapping coordinator received too many arrivals")
+            if error is not None and self._error is None:
+                self._error = error
+            self._wall_end_ns = max(self._wall_end_ns or wall_ns, wall_ns)
+            self._monotonic_end_ns = max(
+                self._monotonic_end_ns or monotonic_ns,
+                monotonic_ns,
+            )
+            self._remaining -= 1
+            if self._remaining == 0 or self._error is not None:
+                self._condition.notify_all()
+
+    def wait(self) -> None:
+        with self._condition:
+            self._condition.wait_for(
+                lambda: self._remaining == 0 or self._error is not None
+            )
+            if self._error is not None:
+                raise RuntimeError(
+                    "another device failed before mapping completed"
+                ) from (self._error)
+
+    def envelope(self) -> tuple[int, int, int]:
+        with self._condition:
+            if (
+                self._remaining != 0
+                or self._wall_start_ns is None
+                or self._wall_end_ns is None
+                or self._monotonic_start_ns is None
+                or self._monotonic_end_ns is None
+            ):
+                raise RuntimeError("mapping envelope requested before completion")
+            return (
+                self._wall_start_ns,
+                self._wall_end_ns,
+                self._monotonic_end_ns - self._monotonic_start_ns,
+            )
+
+
+class _MappingParticipant:
+    """Idempotently contributes one device result to a coordinator."""
+
+    def __init__(self, coordinator: _MappingCoordinator) -> None:
+        self._coordinator = coordinator
+        self._lock = threading.Lock()
+        self._arrived = False
+
+    def complete(self) -> None:
+        self._arrive()
+
+    def start(self) -> None:
+        self._coordinator.start()
+
+    def fail(self, error: BaseException) -> None:
+        self._arrive(error)
+
+    def _arrive(self, error: BaseException | None = None) -> None:
+        with self._lock:
+            if self._arrived:
+                return
+            self._arrived = True
+        self._coordinator.arrive(error)
 
 
 def _reset_cuda_set_device_profile_state() -> None:
@@ -55,7 +146,7 @@ def _claim_first_cuda_set_device_profile() -> bool:
     return first
 
 
-def _load_device(
+def _load_device_impl(
     checkpoint_dir: str,
     device: int,
     max_workers: int,
@@ -67,6 +158,9 @@ def _load_device(
     sharded_ssd_cuda_mode: str = CUDA_MODE_RUNTIME,
     primary_context_retain_complete: Callable[[], None] | None = None,
     driver_process: cuda_utils.DriverCudaProcess | None = None,
+    mapping_participant: _MappingParticipant | None = None,
+    mapping_gate: _MappingCoordinator | None = None,
+    pinned_registration_groups: int = 0,
 ) -> None:
     profile = SnapshotProfile(
         "loader",
@@ -163,6 +257,18 @@ def _load_device(
                 sharded_ssd_queues_per_root=sharded_ssd_queues_per_root,
                 profile=profile,
                 cuda_operations=cuda_operations,
+                mapping_completion=(
+                    mapping_participant.complete
+                    if mapping_participant is not None
+                    else None
+                ),
+                mapping_starting=(
+                    mapping_participant.start
+                    if mapping_participant is not None
+                    else None
+                ),
+                mapping_gate=mapping_gate,
+                pinned_registration_groups=pinned_registration_groups,
             )
         client.load_to_gms(
             input_dir,
@@ -171,6 +277,51 @@ def _load_device(
         )
     elapsed = time.monotonic() - t0
     logger.info("GMS checkpoint loaded: device=%d elapsed=%.2fs", device, elapsed)
+
+
+def _load_device(
+    checkpoint_dir: str,
+    device: int,
+    max_workers: int,
+    transfer_backend: str,
+    sharded_ssd_roots: list[str],
+    sharded_ssd_queues_per_root: int,
+    cuda_initialization_complete: Callable[[], None] | None = None,
+    *,
+    sharded_ssd_cuda_mode: str = CUDA_MODE_RUNTIME,
+    primary_context_retain_complete: Callable[[], None] | None = None,
+    driver_process: cuda_utils.DriverCudaProcess | None = None,
+    mapping_participant: _MappingParticipant | None = None,
+    mapping_gate: _MappingCoordinator | None = None,
+    pinned_registration_groups: int = 0,
+) -> None:
+    try:
+        _load_device_impl(
+            checkpoint_dir,
+            device,
+            max_workers,
+            transfer_backend,
+            sharded_ssd_roots,
+            sharded_ssd_queues_per_root,
+            cuda_initialization_complete,
+            sharded_ssd_cuda_mode=sharded_ssd_cuda_mode,
+            primary_context_retain_complete=primary_context_retain_complete,
+            driver_process=driver_process,
+            mapping_participant=mapping_participant,
+            mapping_gate=mapping_gate,
+            pinned_registration_groups=pinned_registration_groups,
+        )
+    except BaseException as error:
+        if mapping_participant is not None:
+            mapping_participant.fail(error)
+        raise
+
+
+def _environment_flag(name: str) -> bool:
+    value = os.environ.get(name, "0")
+    if value not in {"0", "1"}:
+        raise ValueError(f"{name} must be 0 or 1, got {value!r}")
+    return value == "1"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -216,6 +367,26 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "CUDA API used only by the sharded-SSD snapshot loader staging path. "
             f"May also be set with {SHARDED_SSD_CUDA_MODE_ENV}."
+        ),
+    )
+    parser.add_argument(
+        "--mapping-first",
+        action=argparse.BooleanOptionalAction,
+        default=_environment_flag(MAPPING_FIRST_ENV),
+        help=(
+            "Wait for every device's VMM mapping to complete before any "
+            "sharded-SSD staging host registration. May also be set with "
+            f"{MAPPING_FIRST_ENV}=1."
+        ),
+    )
+    parser.add_argument(
+        "--pinned-registration-groups",
+        type=int,
+        default=int(os.environ.get(PINNED_REGISTRATION_GROUPS_ENV, "0")),
+        help=(
+            "Contiguous pinned-host registration groups per GPU; 0 preserves "
+            "independent slot allocations. May also be set with "
+            f"{PINNED_REGISTRATION_GROUPS_ENV}."
         ),
     )
     return parser
@@ -273,6 +444,8 @@ def main(argv: list[str] | None = None) -> None:
         )
     if args.sharded_ssd_queues_per_root <= 0:
         parser.error("--sharded-ssd-queues-per-root must be a positive integer")
+    if args.pinned_registration_groups < 0:
+        parser.error("--pinned-registration-groups must not be negative")
     if args.sharded_ssd_cuda_mode not in (CUDA_MODE_RUNTIME, CUDA_MODE_DRIVER):
         parser.error(
             "--sharded-ssd-cuda-mode must be one of: "
@@ -286,23 +459,35 @@ def main(argv: list[str] | None = None) -> None:
             "--sharded-ssd-cuda-mode=driver requires "
             f"--transfer-backend={TransferBackendKind.SHARDED_SSD.value}"
         )
+    if (
+        args.mapping_first or args.pinned_registration_groups
+    ) and args.transfer_backend != TransferBackendKind.SHARDED_SSD.value:
+        parser.error(
+            "--mapping-first and --pinned-registration-groups require "
+            f"--transfer-backend={TransferBackendKind.SHARDED_SSD.value}"
+        )
     checkpoint_dir = args.checkpoint_dir
     max_workers = args.max_workers
     transfer_backend = args.transfer_backend
     sharded_ssd_roots = parse_sharded_ssd_roots(args.sharded_ssd_roots)
     sharded_ssd_queues_per_root = args.sharded_ssd_queues_per_root
     sharded_ssd_cuda_mode = args.sharded_ssd_cuda_mode
+    mapping_first = args.mapping_first
+    pinned_registration_groups = args.pinned_registration_groups
     if sharded_ssd_cuda_mode == CUDA_MODE_DRIVER:
         cuda_utils.forbid_cuda_runtime_calls()
     logger.info(
         "Starting GMS load: transfer_backend=%s max_workers=%d "
         "sharded_ssd_roots=%s sharded_ssd_queues_per_root=%d "
-        "sharded_ssd_cuda_mode=%s",
+        "sharded_ssd_cuda_mode=%s mapping_first=%s "
+        "pinned_registration_groups=%d",
         transfer_backend,
         max_workers,
         ",".join(sharded_ssd_roots) or "-",
         sharded_ssd_queues_per_root,
         sharded_ssd_cuda_mode,
+        mapping_first,
+        pinned_registration_groups,
     )
     with profile.phase("device_and_checkpoint_discovery"):
         devices = _list_checkpoint_devices(checkpoint_dir)
@@ -313,6 +498,11 @@ def main(argv: list[str] | None = None) -> None:
     initialization_complete = threading.Event()
     primary_context_remaining = len(devices)
     primary_context_complete = threading.Event()
+    mapping_coordinator = _MappingCoordinator(len(devices))
+    mapping_participants = {
+        device: _MappingParticipant(mapping_coordinator) for device in devices
+    }
+    mapping_gate = mapping_coordinator if mapping_first else None
 
     def mark_cuda_initialization_complete() -> None:
         nonlocal initialization_remaining
@@ -368,6 +558,11 @@ def main(argv: list[str] | None = None) -> None:
                                     sharded_ssd_roots,
                                     sharded_ssd_queues_per_root,
                                     initialization_callback,
+                                    mapping_participant=mapping_participants[dev],
+                                    mapping_gate=mapping_gate,
+                                    pinned_registration_groups=(
+                                        pinned_registration_groups
+                                    ),
                                 ): dev
                                 for dev in devices
                             }
@@ -434,6 +629,13 @@ def main(argv: list[str] | None = None) -> None:
                                                     primary_context_callback
                                                 ),
                                                 driver_process=driver_process,
+                                                mapping_participant=(
+                                                    mapping_participants[dev]
+                                                ),
+                                                mapping_gate=mapping_gate,
+                                                pinned_registration_groups=(
+                                                    pinned_registration_groups
+                                                ),
                                             ): dev
                                             for dev in devices
                                         }
@@ -441,6 +643,25 @@ def main(argv: list[str] | None = None) -> None:
                                         primary_context_complete.wait()
                                 if profile.enabled:
                                     initialization_complete.wait()
+                with profile.phase(
+                    "all_device_mapping_barrier_wait",
+                    count=len(devices),
+                    mapping_first=mapping_first,
+                ):
+                    mapping_coordinator.wait()
+                if profile.enabled:
+                    wall_start_ns, wall_end_ns, duration_ns = (
+                        mapping_coordinator.envelope()
+                    )
+                    profile.emit(
+                        "all_device_mapping_envelope",
+                        wall_start_ns=wall_start_ns,
+                        wall_end_ns=wall_end_ns,
+                        duration_ns=duration_ns,
+                        count=len(devices),
+                        semantics="concurrent_envelope",
+                        mapping_first=mapping_first,
+                    )
                 for future in as_completed(futures):
                     dev = futures[future]
                     future.result()

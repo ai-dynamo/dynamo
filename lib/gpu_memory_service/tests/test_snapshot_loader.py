@@ -5,6 +5,7 @@
 
 import json
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -28,6 +29,44 @@ pytestmark = [
     pytest.mark.none,
     pytest.mark.gpu_0,
 ]
+
+
+def test_mapping_coordinator_orders_staging_after_every_device():
+    coordinator = loader._MappingCoordinator(2)
+    participants = [
+        loader._MappingParticipant(coordinator),
+        loader._MappingParticipant(coordinator),
+    ]
+    staging_started = threading.Event()
+    waiting_started = threading.Event()
+
+    def wait_for_mapping() -> None:
+        waiting_started.set()
+        coordinator.wait()
+        staging_started.set()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        waiting = pool.submit(wait_for_mapping)
+        assert waiting_started.wait(timeout=1)
+        participants[0].complete()
+        assert not waiting.done()
+        participants[1].complete()
+        waiting.result(timeout=1)
+
+    assert staging_started.is_set()
+
+
+def test_mapping_coordinator_failure_releases_waiters_without_deadlock():
+    coordinator = loader._MappingCoordinator(2)
+    participant = loader._MappingParticipant(coordinator)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        waiting = pool.submit(coordinator.wait)
+        participant.fail(ValueError("mapping failed"))
+        with pytest.raises(RuntimeError, match="another device failed"):
+            waiting.result(timeout=1)
+
+    participant.complete()
 
 
 def test_list_checkpoint_devices_requires_exact_visible_device_match(

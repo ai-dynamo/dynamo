@@ -12,6 +12,8 @@ from pathlib import Path
 
 PROFILE_PREFIX = "GMS_SNAPSHOT_PROFILE "
 PHASES = {"server_cu_init", "allocation_manager_ready", "socket_ready"}
+ALLOCATION_COUNT = 4680
+ALLOCATION_BYTES = 469_963_374_592
 LAUNCH = re.compile(
     r"Started GMS device=\d+ physical_uuid=(GPU-[^ ]+) " r"child_device=0 pid=(\d+)"
 )
@@ -30,7 +32,8 @@ def main(log_path: str, expected_path: str, variant: str) -> int:
             records.append(record)
 
     errors = []
-    if variant in {"b", "c"} and set(launches) != expected:
+    isolated_variants = {"b", "c", "m", "p", "mp"}
+    if variant in isolated_variants and set(launches) != expected:
         errors.append(
             f"isolated launch UUIDs mismatch: got={sorted(launches)} "
             f"expected={sorted(expected)}"
@@ -44,15 +47,44 @@ def main(log_path: str, expected_path: str, variant: str) -> int:
                 f"expected={sorted(expected)}"
             )
         for record in phase_records:
-            if variant in {"b", "c"} and record.get("device") != 0:
+            if variant in isolated_variants and record.get("device") != 0:
                 errors.append(f"{phase} has nonzero child device: {record}")
             if not isinstance(record.get("pid"), int) or record["pid"] <= 0:
                 errors.append(f"{phase} has invalid PID: {record}")
             uuid = record.get("physical_uuid")
-            if variant in {"b", "c"} and launches.get(uuid) != record.get("pid"):
+            if variant in isolated_variants and launches.get(uuid) != record.get("pid"):
                 errors.append(f"{phase} PID does not match launch: {record}")
 
-    readiness_device = "0" if variant in {"b", "c"} else r"\d+"
+    allocation_records = {}
+    for line in text.splitlines():
+        if PROFILE_PREFIX not in line:
+            continue
+        record = json.loads(line.split(PROFILE_PREFIX, 1)[1])
+        phase = record.get("phase")
+        if record.get("component") == "server" and phase in {
+            "server_cu_mem_create",
+            "server_initial_cuda_export",
+            "server_export_fd_dup",
+        }:
+            allocation_records.setdefault(phase, []).append(record)
+    for phase in (
+        "server_cu_mem_create",
+        "server_initial_cuda_export",
+        "server_export_fd_dup",
+    ):
+        phase_records = allocation_records.get(phase, [])
+        if sum(int(record.get("count", 0)) for record in phase_records) != (
+            ALLOCATION_COUNT
+        ):
+            errors.append(f"{phase} allocation count mismatch")
+        expected_bytes = 0 if phase == "server_export_fd_dup" else ALLOCATION_BYTES
+        if (
+            sum(int(record.get("bytes", 0)) for record in phase_records)
+            != expected_bytes
+        ):
+            errors.append(f"{phase} allocation byte count mismatch")
+
+    readiness_device = "0" if variant in isolated_variants else r"\d+"
     for uuid in expected:
         if not re.search(
             rf"Server started: .*device={readiness_device} "
@@ -72,6 +104,8 @@ def main(log_path: str, expected_path: str, variant: str) -> int:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 4 or sys.argv[3] not in {"a", "b", "c"}:
-        raise SystemExit(f"usage: {sys.argv[0]} SERVER_LOG EXPECTED_UUIDS {{a|b|c}}")
+    if len(sys.argv) != 4 or sys.argv[3] not in {"a", "b", "c", "m", "p", "mp"}:
+        raise SystemExit(
+            f"usage: {sys.argv[0]} SERVER_LOG EXPECTED_UUIDS {{a|b|c|m|p|mp}}"
+        )
     raise SystemExit(main(sys.argv[1], sys.argv[2], sys.argv[3]))

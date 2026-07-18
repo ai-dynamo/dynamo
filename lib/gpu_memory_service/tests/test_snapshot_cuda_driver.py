@@ -19,7 +19,7 @@ try:
         SnapshotProfile,
     )
     from gpu_memory_service.snapshot import storage_client
-    from gpu_memory_service.snapshot.backends import pinned_host
+    from gpu_memory_service.snapshot.backends import nixl_staging, pinned_host
 except ModuleNotFoundError:
     pytest.skip(
         "gpu_memory_service package is not available in this test image",
@@ -242,6 +242,155 @@ def test_driver_pinned_slot_uses_driver_for_copy_timing_and_cleanup(
 
 
 @pytest.mark.parametrize(
+    ("slot_count", "registration_groups", "expected_group_slots"),
+    [
+        (28, 28, [1] * 28),
+        (28, 14, [2] * 14),
+        (28, 7, [4] * 7),
+        (28, 4, [7] * 4),
+        (28, 2, [14] * 2),
+        (28, 1, [28]),
+    ],
+)
+def test_pinned_arena_registration_curve_offsets_and_cleanup(
+    monkeypatch,
+    slot_count,
+    registration_groups,
+    expected_group_slots,
+):
+    slot_size = 4096
+    total_size = slot_count * slot_size
+    raw = bytearray(total_size)
+    freed = []
+    calls = []
+
+    class FakeCuda:
+        api = "runtime"
+
+        @staticmethod
+        def host_register(ptr, size):
+            calls.append(("register", ptr, size))
+
+        @staticmethod
+        def host_unregister(ptr):
+            calls.append(("unregister", ptr))
+
+    monkeypatch.setattr(
+        pinned_host,
+        "_allocate_aligned_buffer",
+        lambda size: (memoryview(raw), raw, 0x100000) if size == total_size else None,
+    )
+    monkeypatch.setattr(
+        pinned_host,
+        "_free_aligned_buffer",
+        lambda view, ptr: (view.release(), freed.append(ptr)),
+    )
+    arena = pinned_host.PinnedCopyArena(
+        slot_count,
+        registration_groups,
+        slot_size=slot_size,
+        cuda_operations=FakeCuda(),
+    )
+    claimed = [arena.claim_slot(slot, slot_size) for slot in range(slot_count)]
+
+    pointers = [ptr for _view, _raw, ptr in claimed]
+    assert pointers == [0x100000 + slot * slot_size for slot in range(slot_count)]
+    assert len(set(pointers)) == slot_count
+    assert [size // slot_size for op, _ptr, size in calls if op == "register"] == (
+        expected_group_slots
+    )
+    with pytest.raises(RuntimeError, match="logical slots remain active"):
+        arena.close()
+
+    for view, _raw, ptr in claimed:
+        arena.release_slot(ptr, view)
+    arena.close()
+
+    assert [ptr for op, ptr, *_rest in calls if op == "unregister"] == [
+        ptr for op, ptr, *_rest in reversed(calls) if op == "register"
+    ]
+    assert freed == [0x100000]
+
+
+def test_pinned_arena_slot_cleanup_precedes_arena_unregister(monkeypatch):
+    raw = bytearray(8192)
+    calls = []
+
+    class FakeCuda:
+        api = "runtime"
+
+        @staticmethod
+        def host_register(ptr, size):
+            calls.append(("register", ptr, size))
+
+        @staticmethod
+        def host_unregister(ptr):
+            calls.append(("unregister", ptr))
+
+        @staticmethod
+        def stream_create_nonblocking():
+            calls.append(("stream_create",))
+            return 7
+
+        @staticmethod
+        def stream_destroy(stream):
+            calls.append(("stream_destroy", stream))
+
+    monkeypatch.setattr(
+        pinned_host,
+        "_allocate_aligned_buffer",
+        lambda _size: (memoryview(raw), raw, 0x200000),
+    )
+    monkeypatch.setattr(
+        pinned_host,
+        "_free_aligned_buffer",
+        lambda view, ptr: (view.release(), calls.append(("free", ptr))),
+    )
+    arena = pinned_host.PinnedCopyArena(
+        2,
+        1,
+        slot_size=4096,
+        cuda_operations=FakeCuda(),
+    )
+    slots = [
+        pinned_host.PinnedCopySlot(
+            size=4096,
+            profile=SnapshotProfile("loader", enabled=False),
+            cuda_operations=FakeCuda(),
+            arena=arena,
+            arena_slot=slot,
+        )
+        for slot in range(2)
+    ]
+    for slot in slots:
+        slot.close()
+    arena.close()
+
+    assert calls.index(("stream_destroy", 7)) < calls.index(("unregister", 0x200000))
+    assert calls[-1] == ("free", 0x200000)
+
+
+def test_staging_default_keeps_independent_pinned_slots(monkeypatch):
+    captured = []
+    session = nixl_staging._NixlPosixStagingTransferSession.__new__(
+        nixl_staging._NixlPosixStagingTransferSession
+    )
+    session._pinned_registration_groups = 0
+    session._worker_count = 14
+    session._arena = None
+    session._arena_lock = threading.Lock()
+    monkeypatch.setattr(
+        nixl_staging,
+        "make_pinned_copy_slots",
+        lambda count, **kwargs: captured.append((count, kwargs)) or [],
+    )
+
+    assert session._get_arena() is None
+    nixl_staging.make_pinned_copy_slots(2, worker=0)
+    assert captured == [(2, {"worker": 0})]
+
+
+@pytest.mark.parametrize(
     "runtime_call",
     [
         lambda: cuda_utils.cuda_runtime_set_device(0),
@@ -362,12 +511,16 @@ def test_driver_main_profiles_initialization_and_releases_after_loads(
         sharded_ssd_cuda_mode,
         primary_context_retain_complete,
         driver_process,
+        mapping_participant,
+        **_kwargs,
     ):
         assert sharded_ssd_cuda_mode == loader.CUDA_MODE_DRIVER
         assert driver_process is process
         calls.append(("load", device))
         primary_context_retain_complete()
         initialization_complete()
+        mapping_participant.start()
+        mapping_participant.complete()
         calls.append(("loaded", device))
 
     monkeypatch.setenv(SNAPSHOT_PROFILE_ENV, "1")

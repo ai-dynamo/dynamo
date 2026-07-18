@@ -27,6 +27,8 @@ RUNTIME_COUNTS = {
     "cuda_set_device": 8,
     "current_context_query": 8,
     "all_device_cuda_initialization": 1,
+    "all_device_mapping_envelope": 1,
+    "first_h2d_submission": 8,
 }
 RUNTIME_ONLY_PHASES = {
     "client_cu_init",
@@ -109,6 +111,59 @@ def main(log_path: str, variant: str) -> int:
         if unexpected:
             errors.append(f"Runtime mode emitted Driver-only phases: {unexpected}")
 
+        expected_registration_count = 8 if variant in {"p", "mp"} else 224
+        registration_records = [
+            record for record in records if record.get("phase") == "cuda_host_register"
+        ]
+        registration_count = sum(
+            int(record.get("count", 0)) for record in registration_records
+        )
+        registration_bytes = sum(
+            int(record.get("bytes", 0)) for record in registration_records
+        )
+        if registration_count != expected_registration_count:
+            errors.append(
+                "cuda_host_register count mismatch: "
+                f"got={registration_count} expected={expected_registration_count}"
+            )
+        if registration_bytes != 15_032_385_536:
+            errors.append(
+                "cuda_host_register bytes mismatch: "
+                f"got={registration_bytes} expected=15032385536"
+            )
+        mapping_first_records = [
+            record
+            for record in records
+            if record.get("phase") == "all_device_mapping_envelope"
+        ]
+        expected_mapping_first = variant in {"m", "mp"}
+        if mapping_first_records and (
+            mapping_first_records[0].get("mapping_first") is not expected_mapping_first
+        ):
+            errors.append(
+                "all_device_mapping_envelope mapping_first mismatch: "
+                f"got={mapping_first_records[0].get('mapping_first')} "
+                f"expected={expected_mapping_first}"
+            )
+
+        for phase in (
+            "allocate_rpc_wall",
+            "client_export_fd_rpc_receive",
+            "client_cu_mem_import",
+            "client_va_reserve",
+            "client_cu_mem_map",
+            "client_cu_mem_set_access",
+        ):
+            phase_records = [
+                record for record in records if record.get("phase") == phase
+            ]
+            if sum(int(record.get("count", 0)) for record in phase_records) != 4680:
+                errors.append(f"{phase} count mismatch")
+            if sum(int(record.get("bytes", 0)) for record in phase_records) != (
+                469_963_374_592
+            ):
+                errors.append(f"{phase} byte count mismatch")
+
     failed_required = [
         record
         for record in records
@@ -128,6 +183,6 @@ def main(log_path: str, variant: str) -> int:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3 or sys.argv[2] not in {"a", "b", "c"}:
-        raise SystemExit(f"usage: {sys.argv[0]} LOADER_LOG {{a|b|c}}")
+    if len(sys.argv) != 3 or sys.argv[2] not in {"a", "b", "c", "m", "p", "mp"}:
+        raise SystemExit(f"usage: {sys.argv[0]} LOADER_LOG {{a|b|c|m|p|mp}}")
     raise SystemExit(main(sys.argv[1], sys.argv[2]))

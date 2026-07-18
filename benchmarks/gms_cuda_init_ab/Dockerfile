@@ -20,6 +20,13 @@ RUN UV_CACHE_DIR=/tmp/uv-cache SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH} \
         --out-dir /tmp/gms-wheel /tmp/gpu_memory_service \
     && uv pip install --system --reinstall --no-deps /tmp/gms-wheel/*.whl \
     && rm -rf /tmp/gpu_memory_service /tmp/gms-wheel /tmp/uv-cache
+COPY benchmarks/gms_cuda_init_ab/vmm-slab-probe.py \
+    /opt/gms-experiment/vmm-slab-probe.py
+COPY benchmarks/gms_cuda_init_ab/allocation-sizes.json \
+    /opt/gms-experiment/allocation-sizes.json
+COPY benchmarks/gms_cuda_init_ab/run-vmm-slab-probe.sh \
+    /opt/gms-experiment/run-vmm-slab-probe.sh
+RUN chmod 0555 /opt/gms-experiment/run-vmm-slab-probe.sh
 USER dynamo
 
 ARG GMS_SERVER_GPU_UUID_ISOLATION=0

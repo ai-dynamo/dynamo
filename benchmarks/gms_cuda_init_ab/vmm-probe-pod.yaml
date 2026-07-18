@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gms-vmm-slab-probe
+  namespace: schwinns
+  labels:
+    schwinns.ai-dynamo.io/experiment: gms-vmm-slab-probe
+spec:
+  restartPolicy: Never
+  nodeSelector:
+    kubernetes.io/hostname: cluster-0967a26d-pool-14bee067-prctr-s2877
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+    - key: dra
+      operator: Exists
+      effect: NoSchedule
+    - key: schwinns.ai-dynamo.io/gms-bench
+      operator: Exists
+      effect: NoSchedule
+    - key: autopilot/2026-05-29-qwen06b-tp2-p2p-reserved
+      operator: Exists
+      effect: NoSchedule
+  resourceClaims:
+    - name: gpus
+      resourceClaimTemplateName: g52-t8-gms-prof-r29604929787-r2-vllmdecodeworker-gpu
+  imagePullSecrets:
+    - name: acr-token-secret
+  containers:
+    - name: probe
+      image: REPLACE_LOADER_IMAGE
+      command:
+        - /bin/bash
+        - /opt/gms-experiment/run-vmm-slab-probe.sh
+        - /evidence
+      resources:
+        claims:
+          - name: gpus
+      volumeMounts:
+        - name: evidence
+          mountPath: /evidence
+  volumes:
+    - name: evidence
+      emptyDir: {}

@@ -11,6 +11,7 @@ import logging
 import os
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
@@ -53,6 +54,10 @@ class GMSStorageClient:
         posix_backend_params: Optional[Mapping[str, str]] = None,
         profile: SnapshotProfile | None = None,
         cuda_operations: Any = None,
+        mapping_starting: Callable[[], None] | None = None,
+        mapping_completion: Callable[[], None] | None = None,
+        mapping_gate: Any = None,
+        pinned_registration_groups: int = 0,
     ) -> None:
         self.output_dir = output_dir
         self.device = device
@@ -72,6 +77,10 @@ class GMSStorageClient:
             device=device,
         )
         self._cuda_operations = cuda_operations
+        self._mapping_starting = mapping_starting
+        self._mapping_completion = mapping_completion
+        self._mapping_gate = mapping_gate
+        self._pinned_registration_groups = int(pinned_registration_groups)
         self._sharded_ssd_queues_per_root = int(sharded_ssd_queues_per_root)
         if self._sharded_ssd_queues_per_root <= 0:
             raise ValueError("sharded_ssd_queues_per_root must be positive")
@@ -289,6 +298,10 @@ class GMSStorageClient:
                 byte_count=entry.aligned_size,
             ):
                 va = mm.create_mapping(size=entry.size, tag=entry.tag)
+            with self._profile.aggregate(
+                "restore_mapping_entry_bookkeeping",
+                byte_count=entry.aligned_size,
+            ):
                 id_map[old_id] = mm.mappings[va].allocation_id
                 targets[old_id] = GMSTransferTarget(
                     allocation_id=old_id,
@@ -330,6 +343,10 @@ class GMSStorageClient:
                         "posix_backend_params": self._posix_backend_params,
                         "profile": self._profile,
                         "cuda_operations": self._cuda_operations,
+                        "mapping_gate": self._mapping_gate,
+                        "pinned_registration_groups": (
+                            self._pinned_registration_groups
+                        ),
                     },
                 ),
             )
@@ -374,7 +391,12 @@ class GMSStorageClient:
                         allocation.aligned_size for allocation in manifest.allocations
                     ),
                 ):
+                    if self._mapping_starting is not None:
+                        self._mapping_starting()
                     id_map, targets = self._allocate_restore_targets(mm, manifest)
+                with self._profile.phase("mapping_completion"):
+                    if self._mapping_completion is not None:
+                        self._mapping_completion()
                 with self._profile.phase(
                     "payload_restore_total",
                     backend=backend_name,

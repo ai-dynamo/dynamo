@@ -128,6 +128,7 @@ class GMSAllocationManager:
                 with self._profile.aggregate(
                     "server_cu_mem_create",
                     byte_count=aligned_size,
+                    api="cuMemCreate",
                     session=session_id or "-",
                 ):
                     allocated, handle = cumem_create_tolerate_oom(
@@ -184,6 +185,7 @@ class GMSAllocationManager:
             with self._profile.aggregate(
                 "server_initial_cuda_export",
                 byte_count=aligned_size,
+                api="cuMemExportToShareableHandle",
                 session=session_id or "-",
             ):
                 export_fd = int(cumem_export_to_shareable_handle(int(handle)))
@@ -220,6 +222,8 @@ class GMSAllocationManager:
             return os.dup(info.export_fd)
         with self._profile.aggregate(
             "server_export_fd_dup",
+            byte_count=info.aligned_size,
+            api="dup",
             session=session_id or "-",
         ):
             return os.dup(info.export_fd)

@@ -4,8 +4,8 @@
 
 set -euo pipefail
 
-if [[ $# -ne 2 || ! "$1" =~ ^[abc]$ ]]; then
-    echo "usage: $0 {a|b|c} EVIDENCE_DIRECTORY" >&2
+if [[ $# -ne 2 || ! "$1" =~ ^(a|b|c|m|p|mp)$ ]]; then
+    echo "usage: $0 {a|b|c|m|p|mp} EVIDENCE_DIRECTORY" >&2
     exit 2
 fi
 
@@ -34,6 +34,7 @@ CLAIM_PREFIX="${DGD}-vllmdecode-intrapod-"
 MAIN_IMAGE=dynamoci.azurecr.io/ai-dynamo/dynamo:760e55e21e14f76d7c204920f00ea9144d819b4b-vllm-placeholder-run-29604929787-1@sha256:44ade91e2dc09c9732ea038b9db81bff7b3fcdc7b5a692ab1142d2ee7bde0ca2
 MAIN_DIGEST=sha256:44ade91e2dc09c9732ea038b9db81bff7b3fcdc7b5a692ab1142d2ee7bde0ca2
 B_DIGEST=sha256:f0e3d788dca28715674705a7f151636dae3ee868f4df5575c1e284a777a7ab0a
+EXPERIMENT_LOADER_DIGEST=REPLACE_LOADER_DIGEST
 C_LOADER_DIGEST=sha256:592b70a87779348ce90a53ce7034ec84ea3f8274fc2b4b59177e53e7a4a99fe7
 TIMES="$ART/timestamps.tsv"
 PIDS=()
@@ -607,11 +608,15 @@ case "$VARIANT" in
         [[ "$EXPECTED_SERVER_DIGEST" == "$EXPECTED_LOADER_DIGEST" ]]
         ;;
     b)
-        [[ "$EXPECTED_LOADER_DIGEST" == "$B_DIGEST" ]]
+        [[ "$EXPECTED_LOADER_DIGEST" == "$EXPERIMENT_LOADER_DIGEST" ]]
         [[ "$EXPECTED_SERVER_DIGEST" == "$B_DIGEST" ]]
         ;;
     c)
         [[ "$EXPECTED_LOADER_DIGEST" == "$C_LOADER_DIGEST" ]]
+        [[ "$EXPECTED_SERVER_DIGEST" == "$B_DIGEST" ]]
+        ;;
+    m | p | mp)
+        [[ "$EXPECTED_LOADER_DIGEST" == "$EXPERIMENT_LOADER_DIGEST" ]]
         [[ "$EXPECTED_SERVER_DIGEST" == "$B_DIGEST" ]]
         ;;
 esac
@@ -680,6 +685,22 @@ if [[ "$VARIANT" == c ]]; then
             | .env[] | select(.name == "DYN_GMS_SHARDED_SSD_CUDA_MODE")
             | .value' "$ART/preflight/rendered.yaml"
     ) == driver ]]
+fi
+if [[ "$VARIANT" == m || "$VARIANT" == mp ]]; then
+    [[ $(
+        yq -r '.spec.components[1].podTemplate.spec.containers[]
+            | select(.name == "gms-loader")
+            | .env[] | select(.name == "DYN_GMS_MAPPING_FIRST")
+            | .value' "$ART/preflight/rendered.yaml"
+    ) == 1 ]]
+fi
+if [[ "$VARIANT" == p || "$VARIANT" == mp ]]; then
+    [[ $(
+        yq -r '.spec.components[1].podTemplate.spec.containers[]
+            | select(.name == "gms-loader")
+            | .env[] | select(.name == "DYN_GMS_PINNED_REGISTRATION_GROUPS")
+            | .value' "$ART/preflight/rendered.yaml"
+    ) == 1 ]]
 fi
 
 stamp APPLY_ZERO_REPLICA_VARIANT

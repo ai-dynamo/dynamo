@@ -37,7 +37,7 @@ patches:
           targetContainerName: main
       - op: replace
         path: /spec/components/1/podTemplate/spec/containers/1/image
-        value: dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-324c14408b2c-b@sha256:f0e3d788dca28715674705a7f151636dae3ee868f4df5575c1e284a777a7ab0a
+        value: REPLACE_LOADER_IMAGE
       - op: add
         path: /spec/components/1/podTemplate/spec/initContainers
         value:
