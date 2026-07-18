@@ -10,7 +10,6 @@
 #
 import asyncio
 import contextlib
-import json
 import logging
 import os
 import sys
@@ -49,6 +48,7 @@ from tests.router.helper import (
     generate_random_suffix,
     get_runtime,
     managed_runtime,
+    parse_sse_json_chunks,
     poll_for_worker_instances,
     topology_env,
 )
@@ -927,6 +927,10 @@ async def _wait_for_disagg_worker_ids(
     client_timeout = aiohttp.ClientTimeout(total=10)
     async with aiohttp.ClientSession(timeout=client_timeout) as session:
         while asyncio.get_running_loop().time() < deadline:
+            worker_ids: dict[str, int | None] = {
+                "prefill_worker_id": None,
+                "decode_worker_id": None,
+            }
             try:
                 async with session.post(
                     f"http://localhost:{frontend_port}/v1/chat/completions",
@@ -937,31 +941,22 @@ async def _wait_for_disagg_worker_ids(
                         await asyncio.sleep(0.25)
                         continue
 
-                    async for raw_line in response.content:
-                        for line in raw_line.decode(
-                            "utf-8", errors="replace"
-                        ).splitlines():
-                            if not line.startswith("data:"):
-                                continue
-                            data = line[5:].strip()
-                            if not data or data == "[DONE]":
-                                continue
-                            try:
-                                chunk = json.loads(data)
-                            except json.JSONDecodeError:
-                                continue
-                            worker_ids = chunk.get("nvext", {}).get("worker_id", {})
-                            for key in last_worker_ids:
-                                if key in worker_ids:
-                                    last_worker_ids[key] = worker_ids[key]
+                    body = await response.text()
+                    for chunk in parse_sse_json_chunks(body):
+                        attribution = chunk.get("nvext", {}).get("worker_id", {})
+                        for key in worker_ids:
+                            if key in attribution:
+                                worker_ids[key] = attribution[key]
             except (aiohttp.ClientError, asyncio.TimeoutError):
                 pass
 
-            if all(worker_id is not None for worker_id in last_worker_ids.values()):
+            last_worker_ids = worker_ids
+            prefill_worker_id = worker_ids["prefill_worker_id"]
+            decode_worker_id = worker_ids["decode_worker_id"]
+            if prefill_worker_id is not None and decode_worker_id is not None:
                 return {
-                    key: worker_id
-                    for key, worker_id in last_worker_ids.items()
-                    if worker_id is not None
+                    "prefill_worker_id": prefill_worker_id,
+                    "decode_worker_id": decode_worker_id,
                 }
             await asyncio.sleep(0.25)
 
