@@ -9,6 +9,7 @@
 use anyhow::Error;
 use async_stream::stream;
 use dynamo_llm::discovery::UNKNOWN_METRIC_MODEL;
+use dynamo_llm::endpoint_type::EndpointType;
 use dynamo_llm::frontend_config::AdmissionGateConfig;
 use dynamo_llm::http::service::metrics::Endpoint;
 use dynamo_llm::http::service::service_v2::HttpService;
@@ -18,6 +19,7 @@ use dynamo_llm::protocols::{
     openai::chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
     },
+    openai::images::{NvCreateImageRequest, NvImagesResponse},
 };
 use dynamo_runtime::metrics::prometheus_names::frontend_service::admission_gate;
 use dynamo_runtime::metrics::request_plane::REQUEST_PLANE_INFLIGHT;
@@ -69,6 +71,29 @@ impl
     }
 }
 
+/// Holds an image request long enough to overlap a request made through an
+/// alias of the same model.
+struct DelayImageEngine;
+
+#[async_trait]
+impl AsyncEngine<SingleIn<NvCreateImageRequest>, ManyOut<Annotated<NvImagesResponse>>, Error>
+    for DelayImageEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateImageRequest>,
+    ) -> Result<ManyOut<Annotated<NvImagesResponse>>, Error> {
+        let (_request, context) = request.transfer(());
+        let ctx = context.context();
+        let stream = stream! {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            yield Annotated::from_data(NvImagesResponse::empty());
+        };
+
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
 async fn wait_for_service_ready(port: u16) {
     let start = tokio::time::Instant::now();
     let timeout = tokio::time::Duration::from_secs(5);
@@ -114,8 +139,8 @@ impl Drop for RequestPlanePressureGuard {
     }
 }
 
-/// Start an HTTP service with the given gate config and the chat models
-/// `slow` and `fast`, both backed by [`DelayEngine`].
+/// Start an HTTP service with chat models `slow` and `fast`, plus an image
+/// model and alias backed by the same WorkerSet.
 async fn start_gate_service(config: AdmissionGateConfig) -> GateTestService {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
@@ -125,6 +150,7 @@ async fn start_gate_service(config: AdmissionGateConfig) -> GateTestService {
         .admission_gate_config(config)
         .build()
         .unwrap();
+    service.enable_model_endpoint(EndpointType::Images, true);
     let state = service.state_clone();
     let manager = state.manager();
 
@@ -134,6 +160,21 @@ async fn start_gate_service(config: AdmissionGateConfig) -> GateTestService {
             .add_chat_completions_model(model, card.mdcsum(), Arc::new(DelayEngine {}))
             .unwrap();
     }
+
+    const PRIMARY: &str = "image-primary";
+    const ALIAS: &str = "image-alias";
+    let card = ModelDeploymentCard::with_name_only(PRIMARY);
+    manager
+        .add_images_model(PRIMARY, card.mdcsum(), Arc::new(DelayImageEngine))
+        .unwrap();
+
+    let namespace = format!("__local_images_{PRIMARY}");
+    let worker_set = manager
+        .get_model(PRIMARY)
+        .and_then(|model| model.get_worker_set(&namespace))
+        .expect("primary image WorkerSet should be registered");
+    assert!(manager.register_alias(ALIAS, PRIMARY));
+    assert!(manager.add_worker_set_arc(ALIAS, &namespace, worker_set));
 
     let token = CancellationToken::new();
     let cancel_token = token.clone();
@@ -161,6 +202,18 @@ async fn post_chat(port: u16, body: &serde_json::Value) -> reqwest::Response {
     reqwest::Client::new()
         .post(format!("http://localhost:{}/v1/chat/completions", port))
         .json(body)
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn post_image(port: u16, model: &str) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(format!("http://localhost:{port}/v1/images/generations"))
+        .json(&serde_json::json!({
+            "model": model,
+            "prompt": "draw a small square"
+        }))
         .send()
         .await
         .unwrap()
@@ -264,6 +317,39 @@ async fn test_concurrency_gate_rejects_over_limit_per_model() {
     finish_held_request(holder, &metrics, "slow").await;
     let after = post_chat(svc.port, &chat_request("slow", 1)).await;
     assert_eq!(after.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_concurrency_gate_alias_shares_primary_image_limit() {
+    const PRIMARY: &str = "image-primary";
+    const ALIAS: &str = "image-alias";
+
+    let svc = start_gate_service(
+        AdmissionGateConfig::new(Some(1), None, None).expect("valid admission gate config"),
+    )
+    .await;
+    let metrics = svc.state.metrics_clone();
+    let port = svc.port;
+
+    let holder = tokio::spawn(async move { post_image(port, PRIMARY).await });
+    wait_for_inflight(&metrics, PRIMARY, 1).await;
+
+    let rejected = post_image(port, ALIAS).await;
+    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = rejected.text().await.unwrap();
+    assert!(
+        body.contains(PRIMARY),
+        "rejection should identify the canonical model: {body}"
+    );
+    assert_eq!(metrics.get_inflight_count(PRIMARY), 1);
+    assert_eq!(metrics.get_inflight_count(ALIAS), 0);
+    assert_eq!(
+        metrics.get_admission_rejection_count(admission_gate::REQUEST_CONCURRENCY, PRIMARY),
+        1
+    );
+
+    assert_eq!(holder.await.unwrap().status(), StatusCode::OK);
+    wait_for_inflight(&metrics, PRIMARY, 0).await;
 }
 
 /// Register a chat model whose MDC carries a per-model concurrency override.

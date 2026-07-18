@@ -137,11 +137,28 @@ def test_worker_concurrency_override_parses(_clear_override_env):
     assert config.rejection_frontend_request_concurrency_limit == 64
 
 
+def test_worker_concurrency_override_accepts_u64_max(_clear_override_env):
+    value = str(2**64 - 1)
+
+    config, _ = _parse_runtime_args(
+        ["--rejection-frontend-request-concurrency-limit", value]
+    )
+
+    assert config.rejection_frontend_request_concurrency_limit == 2**64 - 1
+
+
 @pytest.mark.parametrize("value", ["0", "-1"])
 def test_worker_concurrency_override_rejects_non_positive(
     _clear_override_env, value: str
 ):
     with pytest.raises(ValueError, match="must be a positive integer"):
+        _parse_runtime_args(["--rejection-frontend-request-concurrency-limit", value])
+
+
+def test_worker_concurrency_override_rejects_above_u64_max(_clear_override_env):
+    value = str(2**64)
+
+    with pytest.raises(ValueError, match="must be at most"):
         _parse_runtime_args(["--rejection-frontend-request-concurrency-limit", value])
 
 

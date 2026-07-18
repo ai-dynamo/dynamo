@@ -17,6 +17,7 @@ from dynamo.common.utils.output_modalities import OutputModality
 
 logger = logging.getLogger(__name__)
 _FPM_TRACE_VALUES = {"1", "0", "true", "false", "on", "off", "yes", "no"}
+_U64_MAX = 2**64 - 1
 _fpm_trace_invalid_warning_emitted = False
 
 
@@ -100,6 +101,15 @@ class DynamoRuntimeConfig(ConfigBase):
             raise ValueError(
                 "--rejection-frontend-request-concurrency-limit must be a "
                 "positive integer, got "
+                f"{self.rejection_frontend_request_concurrency_limit}"
+            )
+        if (
+            self.rejection_frontend_request_concurrency_limit is not None
+            and self.rejection_frontend_request_concurrency_limit > _U64_MAX
+        ):
+            raise ValueError(
+                "--rejection-frontend-request-concurrency-limit must be at most "
+                f"{_U64_MAX}, got "
                 f"{self.rejection_frontend_request_concurrency_limit}"
             )
 
