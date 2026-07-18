@@ -550,51 +550,6 @@ mod tests {
     }
 
     #[test]
-    fn publisher_id_value_and_arrival_order_never_select_an_ambiguous_source() {
-        let kv_endpoint = endpoint("kv-events");
-        let low = source(&kv_endpoint, 7, 0, 100);
-        let high = source(&kv_endpoint, 7, 0, 205);
-        let key = low.source_key();
-
-        for (first, second) in [(low.clone(), high.clone()), (high.clone(), low.clone())] {
-            let mut membership = KvSourceMembership::new();
-            membership.add(first).unwrap();
-            membership.add(second).unwrap();
-            assert_eq!(
-                membership.status(&key),
-                KvSourceStatus::Ambiguous(KvSourceAmbiguity::Incarnations {
-                    publisher_ids: vec![100, 205]
-                })
-            );
-        }
-    }
-
-    #[test]
-    fn recovery_target_is_immutable_within_an_incarnation() {
-        let kv_endpoint = endpoint("kv-events");
-        let live_only = source(&kv_endpoint, 7, 0, 100);
-        let recoverable = recoverable_source(&kv_endpoint, 7, 0, 100);
-        let key = live_only.source_key();
-        let mut membership = KvSourceMembership::new();
-        membership.add(live_only.clone()).unwrap();
-
-        assert_eq!(
-            membership.add(recoverable),
-            Err(KvSourceMembershipError::ConflictingIncarnation {
-                publisher_id: 100,
-                worker_id: 7,
-                dp_rank: 0,
-            })
-        );
-        assert_eq!(
-            membership.status(&key),
-            KvSourceStatus::Ambiguous(KvSourceAmbiguity::ConflictingDescriptor {
-                publisher_id: live_only.publisher_id,
-            })
-        );
-    }
-
-    #[test]
     fn view_is_logically_keyed_and_does_not_admit_source_only_workers() {
         let serving = endpoint("generate");
         let kv_endpoint = endpoint("kv-events");

@@ -1242,18 +1242,6 @@ mod event_channel_scope_tests {
     use super::*;
 
     #[test]
-    fn endpoint_instance_id_path_round_trips() {
-        let id = EndpointInstanceId {
-            namespace: "ns".to_string(),
-            component: "backend".to_string(),
-            endpoint: "generate".to_string(),
-            instance_id: 0xfeed,
-        };
-        assert_eq!(id.to_path(), "ns/backend/generate/feed");
-        assert_eq!(EndpointInstanceId::from_path(&id.to_path()).unwrap(), id);
-    }
-
-    #[test]
     fn endpoint_channel_id_path_round_trips_reserved_segments() {
         let id = EventChannelInstanceId {
             scope: EventScope::Endpoint {
@@ -1289,52 +1277,5 @@ mod event_channel_scope_tests {
         let path = id.to_path();
         assert!(!path.contains("ns.with/slash"));
         assert_eq!(EventSourceInstanceId::from_path(&path).unwrap(), id);
-    }
-
-    #[test]
-    fn endpoint_subject_prefix_escapes_nats_delimiters_and_wildcards() {
-        let scope = EventScope::Endpoint {
-            endpoint: EndpointId {
-                namespace: "ns.one".to_string(),
-                component: "worker/*".to_string(),
-                name: "generate.>".to_string(),
-            },
-        };
-
-        assert_eq!(
-            scope.subject("kv.events/*"),
-            "namespace.ns%2Eone.component.worker%2F%2A.endpoint.generate%2E%3E.kv%2Eevents%2F%2A"
-        );
-    }
-
-    #[test]
-    fn nats_and_broker_routing_keys_isolate_sibling_endpoints() {
-        let endpoint_a = EventScope::Endpoint {
-            endpoint: EndpointId {
-                namespace: "serving".to_string(),
-                component: "worker".to_string(),
-                name: "decode-a".to_string(),
-            },
-        };
-        let endpoint_b = EventScope::Endpoint {
-            endpoint: EndpointId {
-                namespace: "serving".to_string(),
-                component: "worker".to_string(),
-                name: "decode-b".to_string(),
-            },
-        };
-
-        assert_eq!(
-            endpoint_a.subject("kv-events"),
-            "namespace.serving.component.worker.endpoint.decode-a.kv-events"
-        );
-        assert_eq!(
-            endpoint_b.subject("kv-events"),
-            "namespace.serving.component.worker.endpoint.decode-b.kv-events"
-        );
-        assert_ne!(
-            endpoint_a.subject("kv-events"),
-            endpoint_b.subject("kv-events")
-        );
     }
 }

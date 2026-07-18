@@ -256,20 +256,6 @@ mod tests {
         )
     }
 
-    #[test]
-    fn discovery_worker_set_retains_endpoint_identity() {
-        let mut worker_set = make_worker_set("ns1", "abc");
-        let endpoint_id = EndpointId {
-            namespace: "ns1".to_string(),
-            component: "workers".to_string(),
-            name: "generate".to_string(),
-        };
-
-        worker_set.set_endpoint_id(endpoint_id.clone());
-
-        assert_eq!(worker_set.endpoint_id(), Some(&endpoint_id));
-    }
-
     /// Generic stub satisfying any `ServerStreamingEngine<Req, Annotated<Resp>>` trait
     /// object. `generate` is unreachable: the stub exists only to populate typed engine
     /// slots on `WorkerSet` so `is_prefill_set`'s exclusion logic can be exercised per

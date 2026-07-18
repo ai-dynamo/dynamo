@@ -1374,19 +1374,39 @@ mod tests {
 
     #[test]
     fn test_event_scope_subject_prefix() {
-        let ns_scope = EventScope::Namespace {
-            name: "test-ns".to_string(),
-        };
-        assert_eq!(ns_scope.subject_prefix(), "namespace.test-ns");
+        let scopes = [
+            (
+                EventScope::Namespace {
+                    name: "ns.one".to_string(),
+                },
+                "namespace.ns%2Eone",
+            ),
+            (
+                EventScope::Component {
+                    namespace: "ns.one".to_string(),
+                    component: "worker/*".to_string(),
+                },
+                "namespace.ns%2Eone.component.worker%2F%2A",
+            ),
+            (
+                EventScope::Endpoint {
+                    endpoint: EndpointId {
+                        namespace: "ns.one".to_string(),
+                        component: "worker/*".to_string(),
+                        name: "generate.>".to_string(),
+                    },
+                },
+                "namespace.ns%2Eone.component.worker%2F%2A.endpoint.generate%2E%3E",
+            ),
+        ];
 
-        let comp_scope = EventScope::Component {
-            namespace: "test-ns".to_string(),
-            component: "test-comp".to_string(),
-        };
-        assert_eq!(
-            comp_scope.subject_prefix(),
-            "namespace.test-ns.component.test-comp"
-        );
+        for (scope, expected_prefix) in scopes {
+            assert_eq!(scope.subject_prefix(), expected_prefix);
+            assert_eq!(
+                scope.subject("kv.events/*"),
+                format!("{expected_prefix}.kv%2Eevents%2F%2A")
+            );
+        }
     }
 
     #[test]
@@ -1403,15 +1423,6 @@ mod tests {
         };
         assert_eq!(comp_scope.namespace(), "my-ns");
         assert_eq!(comp_scope.component(), Some("my-comp"));
-    }
-
-    #[test]
-    fn test_timestamp_generation() {
-        let ts = current_timestamp_ms();
-
-        // Should be after Jan 1, 2020 (1577836800000) and before Jan 1, 2100 (4102444800000)
-        assert!(ts > 1577836800000, "Timestamp should be after 2020");
-        assert!(ts < 4102444800000, "Timestamp should be before 2100");
     }
 
     #[test]

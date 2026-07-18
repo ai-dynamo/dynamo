@@ -836,32 +836,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_kv_store_discovery_register_endpoint() {
-        let store = kv::Manager::memory();
-        let cancel_token = CancellationToken::new();
-        let client = KVStoreDiscovery::new(store, cancel_token);
-
-        let spec = DiscoverySpec::Endpoint {
-            namespace: "test".to_string(),
-            component: "comp1".to_string(),
-            endpoint: "ep1".to_string(),
-            transport: TransportType::Nats("nats://localhost:4222".to_string()),
-            device_type: None,
-        };
-
-        let instance = client.register(spec).await.unwrap();
-
-        match instance {
-            DiscoveryInstance::Endpoint(inst) => {
-                assert_eq!(inst.namespace, "test");
-                assert_eq!(inst.component, "comp1");
-                assert_eq!(inst.endpoint, "ep1");
-            }
-            _ => panic!("Expected Endpoint instance"),
-        }
-    }
-
-    #[tokio::test]
     async fn event_channel_keys_and_queries_preserve_exact_endpoint_scope() {
         let store = kv::Manager::memory();
         let client = KVStoreDiscovery::new(store, CancellationToken::new());

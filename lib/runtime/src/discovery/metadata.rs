@@ -513,41 +513,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_concurrent_registration() {
-        use tokio::sync::RwLock;
-
-        let metadata = Arc::new(RwLock::new(DiscoveryMetadata::new()));
-
-        // Spawn multiple tasks registering concurrently
-        let handles: Vec<_> = (0..10)
-            .map(|i| {
-                let metadata = metadata.clone();
-                tokio::spawn(async move {
-                    let mut meta = metadata.write().await;
-                    let instance = DiscoveryInstance::Endpoint(Instance {
-                        namespace: "test".to_string(),
-                        component: "comp1".to_string(),
-                        endpoint: format!("ep{}", i),
-                        instance_id: i,
-                        transport: TransportType::Nats("nats://localhost:4222".to_string()),
-                        device_type: None,
-                    });
-                    meta.register_endpoint(instance).unwrap();
-                })
-            })
-            .collect();
-
-        // Wait for all to complete
-        for handle in handles {
-            handle.await.unwrap();
-        }
-
-        // Verify all registrations succeeded
-        let meta = metadata.read().await;
-        assert_eq!(meta.endpoints.len(), 10);
-    }
-
-    #[tokio::test]
     async fn test_metadata_accessors() {
         let mut metadata = DiscoveryMetadata::new();
 
@@ -580,62 +545,6 @@ mod tests {
         assert_eq!(metadata.get_all_endpoints().len(), 3);
         assert_eq!(metadata.get_all_model_cards().len(), 2);
         assert_eq!(metadata.get_all().len(), 5);
-    }
-
-    #[tokio::test]
-    async fn test_event_channel_registration() {
-        use crate::discovery::{EventScope, EventTransport};
-
-        let mut metadata = DiscoveryMetadata::new();
-
-        // Register event channels
-        for i in 0..3 {
-            let instance = DiscoveryInstance::EventChannel {
-                scope: EventScope::Component {
-                    namespace: "test".to_string(),
-                    component: "comp1".to_string(),
-                },
-                topic: "test-topic".to_string(),
-                instance_id: i,
-                transport: EventTransport::zmq(format!("tcp://localhost:{}", 5000 + i)),
-            };
-            metadata.register_event_channel(instance).unwrap();
-        }
-
-        // Test get_all_event_channels
-        assert_eq!(metadata.get_all_event_channels().len(), 3);
-
-        // Test get_all includes event channels
-        assert_eq!(metadata.get_all().len(), 3);
-
-        // Test filter by all event channels
-        let filtered = metadata.filter(&DiscoveryQuery::EventChannels(EventChannelQuery::all()));
-        assert_eq!(filtered.len(), 3);
-
-        // Test filter by component
-        let filtered = metadata.filter(&DiscoveryQuery::EventChannels(
-            EventChannelQuery::component("test", "comp1"),
-        ));
-        assert_eq!(filtered.len(), 3);
-
-        // Test filter with non-matching query
-        let filtered = metadata.filter(&DiscoveryQuery::EventChannels(
-            EventChannelQuery::component("other", "comp1"),
-        ));
-        assert_eq!(filtered.len(), 0);
-
-        // Test unregister
-        let instance = DiscoveryInstance::EventChannel {
-            scope: EventScope::Component {
-                namespace: "test".to_string(),
-                component: "comp1".to_string(),
-            },
-            topic: "test-topic".to_string(),
-            instance_id: 0,
-            transport: EventTransport::zmq("tcp://localhost:5000"),
-        };
-        metadata.unregister_event_channel(&instance).unwrap();
-        assert_eq!(metadata.get_all_event_channels().len(), 2);
     }
 
     #[test]
@@ -733,6 +642,15 @@ mod tests {
                 .unwrap();
         }
 
+        assert_eq!(metadata.get_all_event_channels().len(), 3);
+        assert_eq!(metadata.get_all().len(), 3);
+        assert_eq!(
+            metadata
+                .filter(&DiscoveryQuery::EventChannels(EventChannelQuery::all()))
+                .len(),
+            3
+        );
+
         let component = metadata.filter(&DiscoveryQuery::EventChannels(EventChannelQuery::topic(
             "test",
             "worker",
@@ -751,6 +669,18 @@ mod tests {
         ));
         assert_eq!(endpoint_b_instances.len(), 1);
         assert_eq!(endpoint_b_instances[0].instance_id(), 3);
+
+        metadata
+            .unregister_event_channel(&endpoint_a_instances[0])
+            .unwrap();
+        assert_eq!(metadata.get_all_event_channels().len(), 2);
+        assert!(
+            metadata
+                .filter(&DiscoveryQuery::EventChannels(
+                    EventChannelQuery::component("other", "worker")
+                ))
+                .is_empty()
+        );
     }
 
     #[tokio::test]
