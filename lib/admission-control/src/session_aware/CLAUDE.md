@@ -26,8 +26,7 @@ This policy is inspired by the [ThunderAgent paper](https://arxiv.org/abs/2602.1
 | Change | Why |
 |---|---|
 | Require a stable `session_id`; bypass sessionless traffic instead of grouping it under a default program. | Identity is the working-set ownership key, and bypass keeps unrelated non-agent traffic out of session-aware admission-control state. |
-| Preserve the assigned worker across normal pressure suspension; upstream clears the backend and BFD may resume elsewhere. Structural worker removal and the starvation timeout remain escape paths. | In the matched replay this removed 219 migrations, improved turns by 12.4%, and raised physical cache reuse by 2.26 percentage points. |
-| Dispatch the next turn of an assigned active session without reapplying retained-capacity admission, while still fitting concurrent Running context within device capacity; periodic pressure handling pauses idle victims or marks running victims after completion. | This preserves upstream's active-program continuation semantics without allowing native-offload retention capacity to over-admit live GPU work, and prevents sustained backend underfill while retaining exact-worker cache locality. |
+| Dispatch the next turn of an assigned active session without reapplying retained-capacity admission, while still fitting concurrent Running context within device capacity; periodic pressure handling pauses idle victims or marks running victims after completion. | This preserves upstream's active-program continuation semantics without allowing native-offload retention capacity to over-admit live GPU work. Pressure suspension clears affinity so the existing global packer can rebalance resumed work. |
 | Trigger pressure at 0.95, drain to 0.80, and also use 0.80 as the resume ceiling; upstream pauses only after projected overflow and resumes against remaining capacity. | The proactive high/low pair avoids engine-cache saturation, while earlier pausing and a separate resume ceiling both lost throughput or reuse. |
 | Account exact live logical context from `RequestProgress`; use device capacity to admit Running requests and device plus native-offload capacity for retained sessions. Omit upstream's character estimate, unused shared-token hook, per-program buffer, ACTING weight, and optional decay. | Host HiCache can retain an idle session, but must not be treated as room to enqueue more backend work. Exact Dynamo observations remove interacting heuristics. |
 | Consume Dynamo's session-final signal instead of requiring upstream's separate `/programs/release` call, with a 30-minute inactivity lease as fallback. | The terminal request releases accounting immediately and is still forwarded normally; the lease bounds retained state for clients that cannot signal completion. |
@@ -126,11 +125,11 @@ Within a group, sessions with fewer eligible workers are considered first, then 
 
 ### Forced resume
 
-A current request suspended for `resume_timeout_seconds` bypasses the normal fit test, clears its assignment, and returns to normal worker selection with `WorkerPlacement::Any`. This is the starvation backstop and the only pressure-policy path that relaxes an otherwise structurally valid assignment. A session waiting only because every structurally valid worker is temporarily overloaded remains deferred.
+A current request suspended for `resume_timeout_seconds` bypasses the normal fit test and returns to normal worker selection with `WorkerPlacement::Any`. This is the starvation backstop. A session waiting only because every structurally valid worker is temporarily overloaded retains its assignment and remains deferred.
 
 ### Pause
 
-When a worker exceeds `pause_threshold * capacity`, Session-Aware Admission Control suspends the smallest IdleResident sessions until usage reaches `pause_target * capacity`. Running sessions cannot be interrupted, so if those suspensions are insufficient they are marked and become Suspended only after their current request completes.
+When a worker exceeds `pause_threshold * capacity`, Session-Aware Admission Control suspends the smallest IdleResident sessions until usage reaches `pause_target * capacity`. Running sessions cannot be interrupted, so if those suspensions are insufficient they are marked and become Suspended only after their current request completes. Actual pressure suspension clears the assigned worker so greedy resume can globally repack the program.
 
 ## Primitive mapping
 
@@ -141,7 +140,7 @@ When a worker exceeds `pause_threshold * capacity`, Session-Aware Admission Cont
 | Block and resume | `Defer` keeps the request in the KV-router policy queue; `MakeReady` releases it. |
 | Retention capacity | Static device KV plus native-offload capacity from worker configuration. |
 | Pack and fairness | New-session fairness, grouped resume, largest-first placement, smallest-resident suspension, deferred Running suspension, high/low watermarks, and timeout. |
-| Sticky placement | `WorkerPlacement::Exact` preserves the selected worker/rank across turns and pressure suspension. Structural worker removal or the starvation timeout can clear it. |
+| Sticky placement | `WorkerPlacement::Exact` preserves the selected worker/rank across active turns. Pressure suspension clears it so global resume packing can rebalance workers. |
 | Session release | A session-final request forgets retained state immediately; inactivity expiry is the fallback for clients without that signal. |
 
 ## Invariants
@@ -149,7 +148,7 @@ When a worker exceeds `pause_threshold * capacity`, Session-Aware Admission Cont
 - Sessionless requests allocate no session-aware admission-control state.
 - At most one request per session mutates program state at a time.
 - Placement never widens the request's router-owned eligibility.
-- Temporary overload does not migrate a sticky session before the configured starvation timeout.
+- Transient router overload alone does not migrate a sticky session; an actual pressure suspension may.
 - A request is released at most once.
 - Abort restores the exact program state that existed before admission, except that a session-final request never recreates released state.
 - Deferred requests remain owned and accounted for by the KV-router queue, not this module.

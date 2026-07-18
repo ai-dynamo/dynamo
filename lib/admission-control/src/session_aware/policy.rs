@@ -1058,6 +1058,7 @@ impl<P: WorkerCapacityProvider> SessionAwareAdmissionControl<P> {
             footprint,
             since: last_activity,
         };
+        program.assigned_worker = None;
     }
 
     fn resume_program(
@@ -1865,7 +1866,7 @@ mod tests {
     }
 
     #[test]
-    fn pressure_pauses_smallest_acting_program_then_resumes_deferred_turn() {
+    fn pressure_pause_clears_affinity_and_repacks_deferred_turn() {
         let current = Arc::new(Mutex::new(capacities(&[(1, 300)])));
         let provider = {
             let current = Arc::clone(&current);
@@ -1897,19 +1898,19 @@ mod tests {
         assert!(policy.programs["small"].is_idle_resident());
         assert!(reconcile_now(&mut policy).is_empty());
         assert!(policy.programs["small"].is_suspended());
-        assert_eq!(policy.programs["small"].assigned_worker, Some(worker(1)));
+        assert_eq!(policy.programs["small"].assigned_worker, None);
         assert_eq!(
             policy.admit(request(3, Some("small"), 110)),
             AdmissionDecision::Defer
         );
-        assert_eq!(policy.programs["small"].assigned_worker, Some(worker(1)));
+        assert_eq!(policy.programs["small"].assigned_worker, None);
 
-        *current.lock().unwrap() = capacities(&[(1, 600)]);
+        *current.lock().unwrap() = capacities(&[(1, 200), (2, 600)]);
         assert_eq!(
             reconcile_now(&mut policy),
             vec![AdmissionAction::MakeReady {
                 id: AdmissionId::new(3),
-                placement: WorkerPlacement::Exact(worker(1)),
+                placement: WorkerPlacement::Exact(worker(2)),
             }]
         );
     }
