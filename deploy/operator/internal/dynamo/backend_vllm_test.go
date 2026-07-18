@@ -713,7 +713,6 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 		}
 	}
 
-	trueVal := true
 	tests := []struct {
 		name                string
 		numberOfNodes       int32
@@ -771,7 +770,7 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialPodSpec: &corev1.PodSpec{
 				SecurityContext: &corev1.PodSecurityContext{
-					RunAsNonRoot: &trueVal,
+					RunAsNonRoot: new(true),
 				},
 				Containers: []corev1.Container{
 					{
