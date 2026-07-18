@@ -4,11 +4,14 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: gms-cuda-init-cache-helper
+  name: gms-cuda-init-cache-helper-root-v2
   namespace: schwinns
   labels:
     schwinns.ai-dynamo.io/purpose: gms-cuda-init-cache-fadvise
 spec:
+  automountServiceAccountToken: false
+  hostNetwork: false
+  hostPID: false
   restartPolicy: Never
   nodeSelector:
     kubernetes.io/hostname: cluster-0967a26d-pool-14bee067-prctr-s2877
@@ -32,6 +35,16 @@ spec:
       image: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:44ade91e2dc09c9732ea038b9db81bff7b3fcdc7b5a692ab1142d2ee7bde0ca2
       imagePullPolicy: IfNotPresent
       command: ["/bin/sh", "-c", "exec sleep infinity"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        privileged: false
+        readOnlyRootFilesystem: true
+        runAsGroup: 0
+        runAsUser: 0
+        seccompProfile:
+          type: RuntimeDefault
       volumeMounts:
         - name: checkpoint-storage
           mountPath: /checkpoints

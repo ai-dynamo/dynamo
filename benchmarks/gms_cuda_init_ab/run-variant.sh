@@ -27,7 +27,7 @@ CKPT_ID=57a124961e2a47a2cf9c2712e58a0a2b
 FRONT=g52-t8-gms-prof-r29604929787-r2-frontend
 MODEL=nvidia/GLM-5.2-NVFP4
 NODE=cluster-0967a26d-pool-14bee067-prctr-s2877
-CACHE_HELPER=gms-cuda-init-cache-helper
+CACHE_HELPER=gms-cuda-init-cache-helper-root-v2
 OP_SELECTOR=app.kubernetes.io/instance=gmsprof-op-760e
 POD_SELECTOR="nvidia.com/dynamo-graph-deployment-name=$DGD,nvidia.com/dynamo-component=$COMPONENT"
 CLAIM_PREFIX="${DGD}-vllmdecode-intrapod-"
@@ -343,6 +343,37 @@ evict_cache_roots() {
     fi
 }
 
+validate_cache_helper_access() {
+    local output=$1
+    local error_output=$2
+    shift 2
+    local status=0
+    k exec "$CACHE_HELPER" -c helper -- sh -eu -c '
+        uid=$(id -u)
+        gid=$(id -g)
+        printf "uid=%s gid=%s\n" "$uid" "$gid"
+        [ "$uid" -eq 0 ]
+        [ "$gid" -eq 0 ]
+        for root do
+            find "$root" -print >/dev/null
+            printf "traversable\t%s\n" "$root"
+        done
+    ' sh "$@" > "$output" 2> "$error_output" || status=$?
+    if ! diff -u \
+        <(
+            printf 'uid=0 gid=0\n'
+            printf 'traversable\t%s\n' "$@"
+        ) \
+        "$output"; then
+        echo "cache helper identity or exact-root traversal is invalid: $output" >&2
+        return 1
+    fi
+    if [[ "$status" -ne 0 ]]; then
+        echo "cache helper access preflight exited with status $status: $output" >&2
+        return 1
+    fi
+}
+
 stamp PREFLIGHT_BEGIN "variant=${VARIANT^^}"
 for command in kubectl jq yq curl; do
     command -v "$command" >/dev/null
@@ -407,6 +438,11 @@ capture_objects pre
 k apply -f "$EXP/cache-helper.yaml" > "$ART/preflight/cache-helper-apply.txt"
 k wait --for=condition=Ready "pod/$CACHE_HELPER" --timeout=300s
 k get pod "$CACHE_HELPER" -o yaml > "$ART/preflight/cache-helper.yaml"
+validate_cache_helper_access \
+    "$ART/preflight/cache-helper-access.txt" \
+    "$ART/preflight/cache-helper-access.err" \
+    "${NFS_CACHE_ROOTS[@]}"
+stamp CACHE_HELPER_ACCESS_VALIDATED "uid=0 gid=0 roots=2"
 
 stamp FADVISE_NFS_BEGIN
 evict_cache_roots \

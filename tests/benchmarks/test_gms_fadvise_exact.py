@@ -10,11 +10,13 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.parallel,
     pytest.mark.pre_merge,
+    pytest.mark.timeout(30),
     pytest.mark.unit,
 ]
 
@@ -25,6 +27,7 @@ HELPER_PATH = (
     / "gms-fadvise-exact.py"
 )
 RUNNER_PATH = HELPER_PATH.with_name("run-variant.sh")
+CACHE_HELPER_PATH = HELPER_PATH.with_name("cache-helper.yaml")
 SPEC = importlib.util.spec_from_file_location("gms_fadvise_exact", HELPER_PATH)
 assert SPEC is not None and SPEC.loader is not None
 HELPER = importlib.util.module_from_spec(SPEC)
@@ -104,6 +107,164 @@ def test_rejects_per_root_eviction_error(tmp_path, capsys, monkeypatch):
         }
     ]
     assert "injected fadvise failure" in captured.err
+
+
+def test_cache_helper_is_root_with_least_privilege_read_only_mounts():
+    pod = yaml.safe_load(CACHE_HELPER_PATH.read_text(encoding="utf-8"))
+    spec = pod["spec"]
+    container = spec["containers"][0]
+    security = container["securityContext"]
+
+    assert pod["metadata"]["name"] == "gms-cuda-init-cache-helper-root-v2"
+    assert spec["automountServiceAccountToken"] is False
+    assert spec["hostNetwork"] is False
+    assert spec["hostPID"] is False
+    assert "resourceClaims" not in spec
+    assert "resources" not in container
+    assert security == {
+        "allowPrivilegeEscalation": False,
+        "capabilities": {"drop": ["ALL"]},
+        "privileged": False,
+        "readOnlyRootFilesystem": True,
+        "runAsGroup": 0,
+        "runAsUser": 0,
+        "seccompProfile": {"type": "RuntimeDefault"},
+    }
+    assert {mount["name"] for mount in container["volumeMounts"]} == {
+        "checkpoint-storage",
+        "nvme2",
+        "nvme4",
+        "nvme5",
+        "nvme6",
+        "nvme7",
+        "nvme8",
+        "nvme9",
+    }
+    assert all(mount["readOnly"] is True for mount in container["volumeMounts"])
+
+
+def run_access_preflight_harness(tmp_path, uid="0", gid="0", blocked_root=""):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "id").write_text(
+        """#!/bin/sh
+case "$1" in
+    -u) printf '%s\\n' "$FAKE_UID" ;;
+    -g) printf '%s\\n' "$FAKE_GID" ;;
+    *) exit 2 ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    (bin_dir / "id").chmod(0o755)
+    (bin_dir / "find").write_text(
+        """#!/bin/sh
+printf '%s\\n' "$1" >> "$FAKE_FIND_LOG"
+test "$1" != "$FAKE_BLOCKED_ROOT"
+""",
+        encoding="utf-8",
+    )
+    (bin_dir / "find").chmod(0o755)
+
+    runner_source = RUNNER_PATH.read_text(encoding="utf-8")
+    functions = runner_source.partition("\nstamp PREFLIGHT_BEGIN")[0]
+    harness = tmp_path / "access-preflight-harness.sh"
+    harness.write_text(
+        f"""{functions}
+trap - EXIT INT TERM
+k() {{
+    while [[ "$1" != -- ]]; do
+        shift
+    done
+    shift
+    "$@"
+}}
+validate_cache_helper_access \\
+    "$ART/preflight/cache-helper-access.txt" \\
+    "$ART/preflight/cache-helper-access.err" \\
+    "${{NFS_CACHE_ROOTS[@]}}"
+""",
+        encoding="utf-8",
+    )
+    harness.chmod(0o755)
+
+    evidence = tmp_path / "evidence"
+    find_log = tmp_path / "find.log"
+    env = os.environ | {
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "FAKE_UID": uid,
+        "FAKE_GID": gid,
+        "FAKE_BLOCKED_ROOT": blocked_root,
+        "FAKE_FIND_LOG": str(find_log),
+    }
+    result = subprocess.run(
+        [harness, "a", evidence],
+        cwd=Path(__file__).parents[2],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    return result, evidence, find_log
+
+
+def test_cache_helper_access_preflight_records_root_and_both_exact_roots(tmp_path):
+    result, evidence, find_log = run_access_preflight_harness(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert (evidence / "preflight" / "cache-helper-access.txt").read_text(
+        encoding="utf-8"
+    ).splitlines() == [
+        "uid=0 gid=0",
+        "traversable\t/checkpoints/57a124961e2a47a2cf9c2712e58a0a2b/versions/1",
+        ("traversable\t/checkpoints/gms/" "g52-t8-gms-prof-r29604929787-r2/versions/1"),
+    ]
+    assert find_log.read_text(encoding="utf-8").splitlines() == [
+        "/checkpoints/57a124961e2a47a2cf9c2712e58a0a2b/versions/1",
+        "/checkpoints/gms/g52-t8-gms-prof-r29604929787-r2/versions/1",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("uid", "gid", "blocked_root"),
+    [
+        ("1000", "0", ""),
+        ("0", "1000", ""),
+        ("0", "0", "/checkpoints/57a124961e2a47a2cf9c2712e58a0a2b/versions/1"),
+        (
+            "0",
+            "0",
+            "/checkpoints/gms/g52-t8-gms-prof-r29604929787-r2/versions/1",
+        ),
+    ],
+)
+def test_cache_helper_access_preflight_fails_closed(tmp_path, uid, gid, blocked_root):
+    result, _, _ = run_access_preflight_harness(
+        tmp_path, uid=uid, gid=gid, blocked_root=blocked_root
+    )
+
+    assert result.returncode != 0
+
+
+def test_runner_validates_root_identity_and_exact_nfs_traversal_before_fadvise():
+    source = RUNNER_PATH.read_text(encoding="utf-8")
+    invocation = source.index(
+        "validate_cache_helper_access \\\n", source.index("k apply")
+    )
+    fadvise = source.index("stamp FADVISE_NFS_BEGIN")
+
+    assert "CACHE_HELPER=gms-cuda-init-cache-helper-root-v2" in source
+    assert invocation < fadvise
+    assert source.count('"${NFS_CACHE_ROOTS[@]}"') == 2
+    preflight = source[source.index("validate_cache_helper_access()") : invocation]
+    assert "uid=$(id -u)" in preflight
+    assert "gid=$(id -g)" in preflight
+    assert '[ "$uid" -eq 0 ]' in preflight
+    assert '[ "$gid" -eq 0 ]' in preflight
+    assert 'find "$root" -print >/dev/null' in preflight
+    assert "printf 'uid=0 gid=0\\n'" in preflight
+    assert "printf 'traversable\\t%s\\n' \"$@\"" in preflight
 
 
 def test_runner_rejects_non_empty_evidence_directory(tmp_path):

@@ -316,9 +316,15 @@ For each variant, the runner:
    `gpu.nvidia.com` devices.
 3. Applies the selected overlay at zero replicas, then confirms no old
    DCD/Deployment replica, worker pod, or matching DRA claim remains.
-4. Starts/reuses `cache-helper.yaml` on s2877 and streams
-   `gms-fadvise-exact.py` into it. The helper calls
-   `POSIX_FADV_DONTNEED` on exactly these trees:
+4. Starts/reuses the `gms-cuda-init-cache-helper-root-v2` Pod from
+   `cache-helper.yaml` on s2877. The helper runs as UID/GID 0 so it can
+   traverse the root-owned retained checkpoint, while dropping every
+   capability and disabling privilege escalation. It has no GPU or DRA claim,
+   service-account token, privileged access, or host PID/network access, and
+   all checkpoint/NVMe mounts remain read-only. Before cache eviction, the
+   runner records and strictly validates UID/GID 0 and full traversal of both
+   exact checkpoint roots. It then streams `gms-fadvise-exact.py` into the
+   helper, which calls `POSIX_FADV_DONTNEED` on exactly these trees:
    - `/checkpoints/57a124961e2a47a2cf9c2712e58a0a2b/versions/1`
    - `/checkpoints/gms/g52-t8-gms-prof-r29604929787-r2/versions/1`
    - the seven
@@ -344,9 +350,11 @@ For each variant, the runner:
     final objects/logs, scales to zero, performs the teardown waits, and writes
     `SHA256SUMS`.
 
-The helper pod contains no checkpoint lifecycle commands and mounts checkpoint
-and NVMe trees read-only. Do not delete the retained checkpoint. Do not use
-`snapshotctl`.
+The helper Pod contains no checkpoint lifecycle commands. `posix_fadvise` on
+read-only file descriptors requires no Linux capability, so the helper adds
+none. Do not delete the old `gms-cuda-init-cache-helper` Pod, the retained
+checkpoint, or any checkpoint data. Do not use `snapshotctl`. This harness-only
+change does not require rebuilding either A/B image.
 
 ## Expected comparison
 
