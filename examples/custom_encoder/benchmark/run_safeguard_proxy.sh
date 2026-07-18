@@ -9,13 +9,15 @@ RUN_ROOT="${OUTPUT_DIR:-/dynamo-tmp/logs/$(date -u +%m-%d)/qwen25-safeguard-prox
 WORKLOAD_DIR="${WORKLOAD_DIR:-$RUN_ROOT/workload}"
 MEASURED_DIR="$RUN_ROOT/measured"
 SMOKE_DIR="$RUN_ROOT/smoke"
+IMAGE_SIZE="${DYN_QWEN2_VL_BENCHMARK_IMAGE_SIZE:-500}"
+GRAPH_IMAGE_SIZE="${IMAGE_SIZE}x${IMAGE_SIZE}"
 
 : "${DYNAMO_BENCHMARK_COMMIT:?set DYNAMO_BENCHMARK_COMMIT}"
 : "${DYNAMO_BENCHMARK_BRANCH:?set DYNAMO_BENCHMARK_BRANCH}"
 : "${DYNAMO_BENCHMARK_IMAGE:?set DYNAMO_BENCHMARK_IMAGE}"
 
 export DYN_QWEN2_VL_GRAPH_BATCH_BUCKETS=1,2,3,4,5,6,7,8
-export DYN_QWEN2_VL_GRAPH_IMAGE_SIZES=500x500
+export DYN_QWEN2_VL_GRAPH_IMAGE_SIZES="$GRAPH_IMAGE_SIZE"
 export DYN_QWEN2_VL_PREPROCESS_CONCURRENCY=4
 export DYN_QWEN2_VL_MAX_BATCH_COST=8
 export DYN_QWEN2_VL_PREPROCESS_CACHE_SIZE=0
@@ -27,10 +29,12 @@ run_workload() {
     if [[ ! -f "$WORKLOAD_DIR/workload_manifest.json" ]]; then
         python -m examples.custom_encoder.benchmark.safeguard_proxy_workload \
             generate \
-            --output-dir "$WORKLOAD_DIR"
+            --output-dir "$WORKLOAD_DIR" \
+            --image-size "$IMAGE_SIZE"
     fi
     python -m examples.custom_encoder.benchmark.safeguard_proxy_workload \
-        validate "$WORKLOAD_DIR"
+        validate "$WORKLOAD_DIR" \
+        --image-size "$IMAGE_SIZE"
 }
 
 run_graphs() {
