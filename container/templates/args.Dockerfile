@@ -52,7 +52,9 @@ ARG ETCD_VERSION={{ context.dynamo.etcd_version }}
 
 ARG ENABLE_MEDIA_FFMPEG={{ context[framework].enable_media_ffmpeg }}
 ARG FFMPEG_VERSION={{ context.dynamo.ffmpeg_version }}
+{% if framework != "vllm" -%}
 ARG NV_CODEC_HEADERS_REF={{ context.dynamo.nv_codec_headers_ref }}
+{% endif %}
 ARG LIBVPX_REF={{ context.dynamo.libvpx_ref }}
 {% if device == "cuda" -%}
 ARG ENABLE_GPU_MEMORY_SERVICE={{ context[framework].enable_gpu_memory_service }}

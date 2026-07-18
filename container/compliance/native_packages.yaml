@@ -77,18 +77,15 @@ packages:
   # NOTE: NIXL ships as the `nixl` Python wheel (attributed by the python
   # generator), so it is intentionally NOT duplicated here.
 
-  # LGPL media stack — built --disable-gpl in wheel_builder (h264_nvenc + libvpx)
-  # and copied into vllm/sglang runtime (container/templates/vllm_runtime.Dockerfile
-  # + sglang_runtime.Dockerfile). Replaces the purged GPL apt ffmpeg.
+  # LGPL media stack — built --disable-gpl in wheel_builder with libvpx and no
+  # H.264 capability, then copied into vLLM. SGLang contains no FFmpeg.
   - name: ffmpeg
-    version: "8.1"
+    version: "8.1.2"
     license: LGPL-2.1-or-later
     source: https://ffmpeg.org/
     images:
       - vllm-runtime
       - vllm-runtime-efa
-      - sglang-runtime
-      - sglang-runtime-efa
 
   - name: libvpx
     # VP8/VP9 codec library, ffmpeg's only non-NVIDIA encoder dependency.
@@ -98,8 +95,6 @@ packages:
     images:
       - vllm-runtime
       - vllm-runtime-efa
-      - sglang-runtime
-      - sglang-runtime-efa
 
   # UCX — Unified Communication X, built from source in wheel_builder and used by
   # the NIXL transport. Installed to /usr/local (no dpkg metadata).
