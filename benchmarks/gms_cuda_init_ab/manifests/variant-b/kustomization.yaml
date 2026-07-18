@@ -16,6 +16,9 @@ patches:
         path: /spec/components/1/podTemplate/spec/containers/0/name
         value: main
       - op: test
+        path: /spec/components/1/podTemplate/spec/containers/0/image
+        value: dynamoci.azurecr.io/ai-dynamo/dynamo:760e55e21e14f76d7c204920f00ea9144d819b4b-vllm-placeholder-run-29604929787-1@sha256:44ade91e2dc09c9732ea038b9db81bff7b3fcdc7b5a692ab1142d2ee7bde0ca2
+      - op: test
         path: /spec/components/1/podTemplate/spec/containers/1/name
         value: gms-loader
       - op: test
@@ -33,11 +36,32 @@ patches:
           startupPolicy: WaitForCheckpoint
           targetContainerName: main
       - op: replace
-        path: /spec/components/1/podTemplate/spec/containers/0/image
-        value: dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-324c14408b2c-b@sha256:f0e3d788dca28715674705a7f151636dae3ee868f4df5575c1e284a777a7ab0a
-      - op: replace
         path: /spec/components/1/podTemplate/spec/containers/1/image
         value: dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-324c14408b2c-b@sha256:f0e3d788dca28715674705a7f151636dae3ee868f4df5575c1e284a777a7ab0a
+      - op: add
+        path: /spec/components/1/podTemplate/spec/initContainers
+        value:
+          - name: gms-server
+            image: dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-324c14408b2c-b@sha256:f0e3d788dca28715674705a7f151636dae3ee868f4df5575c1e284a777a7ab0a
+            command:
+              - python3
+              - -m
+              - gpu_memory_service.cli.server
+            env:
+              - name: GMS_SOCKET_DIR
+                value: /gms-intrapod-control
+            volumeMounts:
+              - name: gms-intrapod-control
+                mountPath: /gms-intrapod-control
+            resources:
+              claims:
+                - name: intrapod-shared-gpu
+            restartPolicy: Always
+      - op: add
+        path: /spec/components/1/podTemplate/spec/volumes/-
+        value:
+          name: gms-intrapod-control
+          emptyDir: {}
       - op: add
         path: /metadata/annotations/schwinns.ai-dynamo.io~1cuda-init-variant
         value: B-physical-uuid-isolated-children

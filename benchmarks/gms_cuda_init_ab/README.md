@@ -6,8 +6,9 @@ SPDX-License-Identifier: Apache-2.0
 # GMS CUDA initialization A/B
 
 This directory contains a narrow, switchable experiment for GMS server CUDA
-initialization. Both variants use the same source, root filesystem, retained
-checkpoint, and workload:
+initialization. Both variants use the exact retained-checkpoint `main` image,
+retained checkpoint, and workload. Only `gms-loader` and `gms-server` use the
+A/B experiment images:
 
 - **A:** `DYN_GMS_SERVER_GPU_UUID_ISOLATION=0`. This preserves prior behavior:
   one child per GPU, each child receives its physical ordinal in `--device` and
@@ -134,6 +135,24 @@ the checkpoint job. `run-variant.sh` scales the existing worker component to
 one only after preflight and cache eviction. Never run `snapshotctl`, and never
 delete or recreate the retained checkpoint.
 
+The retained checkpoint's successful target container used exactly:
+
+```text
+dynamoci.azurecr.io/ai-dynamo/dynamo:760e55e21e14f76d7c204920f00ea9144d819b4b-vllm-placeholder-run-29604929787-1@sha256:44ade91e2dc09c9732ea038b9db81bff7b3fcdc7b5a692ab1142d2ee7bde0ca2
+```
+
+Both overlays leave `main` at that exact image reference. This is a
+checkpoint-root-filesystem compatibility requirement, not an A/B variable.
+
+## Invalid prior retries
+
+Two prior retries replaced `main` with a derivative image that added a GMS
+wheel layer, then failed while CRIU reconstructed a TUN device. Those runs
+changed the checkpoint target root filesystem and are invalid measurements for
+this experiment. They do not establish a node runtime fault. Discard their
+diagnostic conclusion; retain the checkpoint and rerun only with the exact
+`main` image above.
+
 ## Final images and provenance
 
 The exact image source is commit:
@@ -142,7 +161,7 @@ The exact image source is commit:
 SOURCE_COMMIT=324c14408b2cb79f39d80a8d90fe4ae54182bef2
 ```
 
-The base image is pinned to:
+The A/B GMS images were built from:
 
 ```text
 dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:44ade91e2dc09c9732ea038b9db81bff7b3fcdc7b5a692ab1142d2ee7bde0ca2
@@ -182,10 +201,22 @@ Installed source hashes are identical in A and B and match `SOURCE_COMMIT`:
 | `server/allocations.py` | `fb7f1d947c8391fc5a8140c39f33a90e98329bf52f2ba71d54d6e98942b4f47a` |
 | `server/rpc.py` | `c81688e68b1bbd1df2353293b96be3aa81c7343cf6092168855622c5a4c57844` |
 
-The operator constructs generated `gms-server` from the worker main image.
-The overlays replace the main and explicit `gms-loader` images; the generated
-server therefore receives the same final digest. Frontend, snapshot-agent, and
-operator images remain unchanged.
+Each overlay assigns its final image only to the explicit `gms-loader` and
+explicit native-init-sidecar `gms-server`. It does not assign this derivative
+image to `main`. The custom server mirrors the operator-generated shape:
+
+- name `gms-server`;
+- command `python3 -m gpu_memory_service.cli.server`;
+- `GMS_SOCKET_DIR=/gms-intrapod-control`;
+- the `gms-intrapod-control` shared `emptyDir` mount;
+- the `intrapod-shared-gpu` DRA claim; and
+- `restartPolicy: Always`.
+
+The existing operator first applies client socket and claim wiring to `main`,
+then returns without adding a server when an init container named
+`gms-server` already exists. Reconciliation therefore preserves the custom
+experiment image and produces exactly one server. Frontend, `main`,
+snapshot-agent, and operator images remain unchanged.
 
 ### Reproduce and inspect
 
@@ -287,8 +318,10 @@ kubectl --context "$CTX" -n "$NS" kustomize \
 diff -u /tmp/gms-init-a.yaml /tmp/gms-init-b.yaml
 ```
 
-The raw rendered diff must contain only two worker image references and two
-variant annotations. Both rendered worker replica counts must be zero.
+The raw rendered diff must contain only the `gms-loader` and `gms-server`
+experiment image references and the two variant annotations. It must never
+contain a `main` image difference. Both rendered worker replica counts must be
+zero.
 
 Run A:
 
@@ -335,8 +368,12 @@ For each variant, the runner:
    records before scaling the worker to one.
 6. Captures the allocated DRA claim and waits up to 900 seconds for worker
    readiness.
-7. Verifies the live `main`, `gms-loader`, and generated `gms-server`
-   `imageID` fields all equal the selected registry digest.
+7. Verifies the live `main` `imageID` equals
+   `sha256:44ade91e2dc09c9732ea038b9db81bff7b3fcdc7b5a692ab1142d2ee7bde0ca2`.
+   It separately verifies that `gms-loader` and the sole native-init-sidecar
+   `gms-server` use A's `sha256:d0ea4cc1...` or B's
+   `sha256:f0e3d788...` digest, including the exact command, socket
+   environment, shared mount, DRA claim, and restart policy.
 8. Runs `nvidia-smi --query-gpu=uuid` in the loader, requires exactly eight
    devices, and compares the UUID set with the expected allocation.
 9. Runs the same deterministic chat-completion request after normal
@@ -347,8 +384,10 @@ For each variant, the runner:
     PID. For B it also requires `device=0` and PID agreement with the
     supervisor's per-UUID launch records.
 11. Validates the snapshot-agent's ordinal-order DRA UUID record, collects all
-    final objects/logs, scales to zero, performs the teardown waits, and writes
-    `SHA256SUMS`.
+    final objects/logs, terminates and waits for sampler/log-follower process
+    trees, scales to zero, performs the teardown waits, and writes
+    `SHA256SUMS`. The same descendant cleanup runs on failure, and checksum
+    generation is skipped if cleanup cannot confirm that descendants stopped.
 
 The helper Pod contains no checkpoint lifecycle commands. `posix_fadvise` on
 read-only file descriptors requires no Linux capability, so the helper adds

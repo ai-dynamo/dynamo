@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/utils/ptr"
 )
 
 func TestEnsureServerSidecar(t *testing.T) {
@@ -56,6 +57,38 @@ func TestEnsureServerSidecarIdempotent(t *testing.T) {
 	EnsureServerSidecar(podSpec, &podSpec.Containers[0])
 
 	assert.Len(t, podSpec.InitContainers, 1)
+}
+
+func TestEnsureServerSidecarPreservesPredeclaredServer(t *testing.T) {
+	customServer := Container(
+		ServerContainerName,
+		ServerModule,
+		"experiment@sha256:custom",
+	)
+	customServer.RestartPolicy = ptr.To(corev1.ContainerRestartPolicyAlways)
+	podSpec := &corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name:  "main",
+			Image: "checkpoint-rootfs@sha256:known-good",
+		}},
+		InitContainers: []corev1.Container{customServer},
+	}
+
+	EnsureServerSidecar(podSpec, &podSpec.Containers[0])
+	EnsureServerSidecar(podSpec, &podSpec.Containers[0])
+
+	require.Len(t, podSpec.InitContainers, 1)
+	assert.Equal(t, customServer, podSpec.InitContainers[0])
+	assert.Equal(
+		t,
+		SharedMountPath,
+		envValue(t, &podSpec.Containers[0], EnvSocketDir),
+	)
+	assert.Contains(
+		t,
+		podSpec.Containers[0].Resources.Claims,
+		corev1.ResourceClaim{Name: dra.ClaimName},
+	)
 }
 
 func TestEnsureServerSidecarDoesNotAddCheckpointControl(t *testing.T) {

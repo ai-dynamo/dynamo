@@ -28,10 +28,128 @@ HELPER_PATH = (
 )
 RUNNER_PATH = HELPER_PATH.with_name("run-variant.sh")
 CACHE_HELPER_PATH = HELPER_PATH.with_name("cache-helper.yaml")
+MANIFESTS_PATH = HELPER_PATH.parent / "manifests"
+MAIN_IMAGE = (
+    "dynamoci.azurecr.io/ai-dynamo/dynamo:"
+    "760e55e21e14f76d7c204920f00ea9144d819b4b-"
+    "vllm-placeholder-run-29604929787-1@"
+    "sha256:44ade91e2dc09c9732ea038b9db81bff7b3fcdc7b5a692ab1142d2ee7bde0ca2"
+)
+EXPERIMENT_IMAGES = {
+    "a": (
+        "dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-324c14408b2c-a@"
+        "sha256:d0ea4cc1aceeeeef5825c418999ceca00fcde20dbdbc203d4b2bc683a874708a"
+    ),
+    "b": (
+        "dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-324c14408b2c-b@"
+        "sha256:f0e3d788dca28715674705a7f151636dae3ee868f4df5575c1e284a777a7ab0a"
+    ),
+}
 SPEC = importlib.util.spec_from_file_location("gms_fadvise_exact", HELPER_PATH)
 assert SPEC is not None and SPEC.loader is not None
 HELPER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(HELPER)
+
+
+def render_variant(variant):
+    return yaml.safe_load(
+        subprocess.run(
+            ["kubectl", "kustomize", MANIFESTS_PATH / f"variant-{variant}"],
+            cwd=Path(__file__).parents[2],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        ).stdout
+    )
+
+
+def worker_component(manifest):
+    return next(
+        component
+        for component in manifest["spec"]["components"]
+        if component["name"] == "VllmDecodeWorker"
+    )
+
+
+def named_item(items, name):
+    return next(item for item in items if item["name"] == name)
+
+
+@pytest.mark.parametrize("variant", ["a", "b"])
+def test_variant_render_pins_main_and_custom_gms_images(variant):
+    worker = worker_component(render_variant(variant))
+    pod_spec = worker["podTemplate"]["spec"]
+    main = named_item(pod_spec["containers"], "main")
+    loader = named_item(pod_spec["containers"], "gms-loader")
+    servers = [
+        container
+        for container in pod_spec["initContainers"]
+        if container["name"] == "gms-server"
+    ]
+
+    assert main["image"] == MAIN_IMAGE
+    assert loader["image"] == EXPERIMENT_IMAGES[variant]
+    assert servers == [
+        {
+            "name": "gms-server",
+            "image": EXPERIMENT_IMAGES[variant],
+            "command": ["python3", "-m", "gpu_memory_service.cli.server"],
+            "env": [
+                {
+                    "name": "GMS_SOCKET_DIR",
+                    "value": "/gms-intrapod-control",
+                }
+            ],
+            "volumeMounts": [
+                {
+                    "name": "gms-intrapod-control",
+                    "mountPath": "/gms-intrapod-control",
+                }
+            ],
+            "resources": {"claims": [{"name": "intrapod-shared-gpu"}]},
+            "restartPolicy": "Always",
+        }
+    ]
+    assert not any(
+        container["name"] == "gms-server" for container in pod_spec["containers"]
+    )
+    assert [
+        volume
+        for volume in pod_spec["volumes"]
+        if volume["name"] == "gms-intrapod-control"
+    ] == [{"name": "gms-intrapod-control", "emptyDir": {}}]
+
+
+def test_variant_render_diff_is_limited_to_experiment_fields():
+    variant_a = render_variant("a")
+    variant_b = render_variant("b")
+    worker_a = worker_component(variant_a)
+    worker_b = worker_component(variant_b)
+
+    assert (
+        worker_a["podTemplate"]["spec"]["containers"][0]
+        == worker_b["podTemplate"]["spec"]["containers"][0]
+    )
+
+    variant_b["metadata"]["annotations"][
+        "schwinns.ai-dynamo.io/cuda-init-variant"
+    ] = variant_a["metadata"]["annotations"]["schwinns.ai-dynamo.io/cuda-init-variant"]
+    worker_b["podTemplate"]["metadata"]["annotations"][
+        "schwinns.ai-dynamo.io/cuda-init-variant"
+    ] = worker_a["podTemplate"]["metadata"]["annotations"][
+        "schwinns.ai-dynamo.io/cuda-init-variant"
+    ]
+    named_item(worker_b["podTemplate"]["spec"]["containers"], "gms-loader")[
+        "image"
+    ] = named_item(worker_a["podTemplate"]["spec"]["containers"], "gms-loader")["image"]
+    named_item(worker_b["podTemplate"]["spec"]["initContainers"], "gms-server")[
+        "image"
+    ] = named_item(worker_a["podTemplate"]["spec"]["initContainers"], "gms-server")[
+        "image"
+    ]
+
+    assert variant_b == variant_a
 
 
 def test_reports_machine_readable_per_root_success(tmp_path, capsys):
@@ -267,6 +385,81 @@ def test_runner_validates_root_identity_and_exact_nfs_traversal_before_fadvise()
     assert "printf 'traversable\\t%s\\n' \"$@\"" in preflight
 
 
+def run_live_image_validation_harness(tmp_path, entries, variant="a"):
+    runner_source = RUNNER_PATH.read_text(encoding="utf-8")
+    functions = runner_source.partition("\nstamp PREFLIGHT_BEGIN")[0]
+    harness = tmp_path / "live-image-validation-harness.sh"
+    harness.write_text(
+        f"""{functions}
+trap - EXIT INT TERM
+EXPECTED_EXPERIMENT_DIGEST={EXPERIMENT_IMAGES[variant].rsplit("@", maxsplit=1)[1]}
+cat > "$ART/preflight/live-images.tsv" <<'EOF'
+{entries}
+EOF
+validate_live_images "$ART/preflight/live-images.tsv"
+""",
+        encoding="utf-8",
+    )
+    harness.chmod(0o755)
+    evidence = tmp_path / "evidence"
+    return subprocess.run(
+        [harness, "a", evidence],
+        cwd=Path(__file__).parents[2],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+
+
+@pytest.mark.parametrize("variant", ["a", "b"])
+def test_live_image_validation_expects_original_main_and_experiment_gms(
+    tmp_path, variant
+):
+    experiment_digest = EXPERIMENT_IMAGES[variant].rsplit("@", maxsplit=1)[1]
+    entries = "\n".join(
+        [
+            f"main\tignored\tregistry/repo@{MAIN_IMAGE.rsplit('@', maxsplit=1)[1]}",
+            f"gms-loader\tignored\tregistry/repo@{experiment_digest}",
+            f"gms-server\tignored\tregistry/repo@{experiment_digest}",
+        ]
+    )
+
+    result = run_live_image_validation_harness(tmp_path, entries, variant)
+
+    assert result.returncode == 0, result.stderr
+    assert (
+        "LIVE_IMAGES_VALIDATED\t"
+        "main=sha256:44ade91e2dc09c9732ea038b9db81bff7b3fcdc7b5a692ab1142d2ee7bde0ca2 "
+        f"loader_server={experiment_digest}"
+    ) in result.stdout
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        "\n".join(
+            [
+                f"main\tignored\tregistry/repo@{EXPERIMENT_IMAGES['a'].rsplit('@', maxsplit=1)[1]}",
+                f"gms-loader\tignored\tregistry/repo@{EXPERIMENT_IMAGES['a'].rsplit('@', maxsplit=1)[1]}",
+                f"gms-server\tignored\tregistry/repo@{EXPERIMENT_IMAGES['a'].rsplit('@', maxsplit=1)[1]}",
+            ]
+        ),
+        "\n".join(
+            [
+                f"main\tignored\tregistry/repo@{MAIN_IMAGE.rsplit('@', maxsplit=1)[1]}",
+                f"gms-loader\tignored\tregistry/repo@{EXPERIMENT_IMAGES['a'].rsplit('@', maxsplit=1)[1]}",
+                f"gms-server\tignored\tregistry/repo@{MAIN_IMAGE.rsplit('@', maxsplit=1)[1]}",
+            ]
+        ),
+    ],
+)
+def test_live_image_validation_rejects_wrong_main_or_server_digest(tmp_path, entries):
+    result = run_live_image_validation_harness(tmp_path, entries)
+
+    assert result.returncode != 0
+
+
 def test_runner_rejects_non_empty_evidence_directory(tmp_path):
     stale = tmp_path / "evidence" / "stale.txt"
     stale.parent.mkdir()
@@ -452,6 +645,65 @@ def test_cleanup_retries_until_dgd_zero_and_checksums_all_evidence(tmp_path):
     assert not (evidence / ".SHA256SUMS.tmp").exists()
 
 
+def test_failure_cleanup_terminates_descendant_before_checksums(tmp_path):
+    runner_source = RUNNER_PATH.read_text(encoding="utf-8")
+    functions = runner_source.partition("\nstamp PREFLIGHT_BEGIN")[0]
+    harness = tmp_path / "descendant-cleanup-harness.sh"
+    harness.write_text(
+        f"""{functions}
+(
+    (
+        trap '' TERM
+        printf '%s\\n' "$BASHPID" > "$ART/metrics/descendant.pid"
+        while true; do
+            printf x >> "$ART/metrics/descendant.log"
+        done
+    ) &
+    wait
+) &
+PIDS+=("$!")
+for attempt in $(seq 1 1000); do
+    [[ -s "$ART/metrics/descendant.pid" ]] && break
+done
+[[ -s "$ART/metrics/descendant.pid" ]]
+exit 7
+""",
+        encoding="utf-8",
+    )
+    harness.chmod(0o755)
+    evidence = tmp_path / "evidence"
+
+    result = subprocess.run(
+        [harness, "a", evidence],
+        cwd=Path(__file__).parents[2],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode == 7, result.stderr
+    descendant_pid = int(
+        (evidence / "metrics" / "descendant.pid").read_text(encoding="utf-8")
+    )
+    stat_path = Path(f"/proc/{descendant_pid}/stat")
+    assert (
+        not stat_path.exists()
+        or stat_path.read_text(encoding="utf-8").split()[2] == "Z"
+    )
+    manifest = evidence / "SHA256SUMS"
+    verification = subprocess.run(
+        ["sha256sum", "-c", manifest],
+        cwd=Path(__file__).parents[2],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert verification.returncode == 0, verification.stderr
+    timestamps = (evidence / "timestamps.tsv").read_text(encoding="utf-8")
+    assert "RUNNER_EXIT\tstatus=7" in timestamps
+
+
 def test_runner_owns_cleanup_before_scale_up_and_finalizes_last():
     source = RUNNER_PATH.read_text(encoding="utf-8")
     scale_up = source.index("stamp SCALE_UP_SENT")
@@ -463,6 +715,7 @@ def test_runner_owns_cleanup_before_scale_up_and_finalizes_last():
     assert source.index("stamp RUNNER_EXIT") < source.index(
         "finalize_evidence || status=1"
     )
+    assert source.index("if ! stop_background") < source.index("stamp RUNNER_EXIT")
     assert source.index("stamp RUN_COMPLETE") > source.index(
         "capture_objects post-teardown"
     )

@@ -31,6 +31,8 @@ CACHE_HELPER=gms-cuda-init-cache-helper-root-v2
 OP_SELECTOR=app.kubernetes.io/instance=gmsprof-op-760e
 POD_SELECTOR="nvidia.com/dynamo-graph-deployment-name=$DGD,nvidia.com/dynamo-component=$COMPONENT"
 CLAIM_PREFIX="${DGD}-vllmdecode-intrapod-"
+MAIN_IMAGE=dynamoci.azurecr.io/ai-dynamo/dynamo:760e55e21e14f76d7c204920f00ea9144d819b4b-vllm-placeholder-run-29604929787-1@sha256:44ade91e2dc09c9732ea038b9db81bff7b3fcdc7b5a692ab1142d2ee7bde0ca2
+MAIN_DIGEST=sha256:44ade91e2dc09c9732ea038b9db81bff7b3fcdc7b5a692ab1142d2ee7bde0ca2
 TIMES="$ART/timestamps.tsv"
 PIDS=()
 WORKER_POD=
@@ -118,19 +120,92 @@ k() {
     kubectl --context "$CTX" -n "$NS" "$@"
 }
 
-stop_background() {
-    local pid
-    for pid in "${PIDS[@]:-}"; do
-        kill -TERM "$pid" 2>/dev/null || true
-        pkill -TERM -P "$pid" 2>/dev/null || true
+descendant_pids() {
+    local child parent=$1
+    while read -r child; do
+        [[ -n "$child" ]] || continue
+        descendant_pids "$child"
+        printf '%s\n' "$child"
+    done < <(pgrep -P "$parent" 2>/dev/null || true)
+}
+
+pid_is_running() {
+    local pid=$1 state
+    [[ -r "/proc/$pid/stat" ]] || return 1
+    state=$(awk '{print $3}' "/proc/$pid/stat" 2>/dev/null) || return 1
+    [[ "$state" != Z ]]
+}
+
+append_unique_pid() {
+    local candidate=$1 existing
+    for existing in "${TRACKED_PIDS[@]}"; do
+        [[ "$existing" == "$candidate" ]] && return
     done
-    sleep 1
-    for pid in "${PIDS[@]:-}"; do
+    TRACKED_PIDS+=("$candidate")
+}
+
+refresh_background_descendants() {
+    local child pid
+    local -a children=()
+    for pid in "${PIDS[@]}"; do
+        mapfile -t children < <(descendant_pids "$pid")
+        for child in "${children[@]}"; do
+            append_unique_pid "$child"
+        done
+    done
+}
+
+stop_background() {
+    local attempt pid running=0
+    local -a descendants=()
+    TRACKED_PIDS=()
+    for pid in "${PIDS[@]}"; do
+        append_unique_pid "$pid"
+    done
+    refresh_background_descendants
+    for pid in "${TRACKED_PIDS[@]}"; do
+        kill -TERM "$pid" 2>/dev/null || true
+    done
+    for attempt in $(seq 1 50); do
+        refresh_background_descendants
+        running=0
+        for pid in "${TRACKED_PIDS[@]}"; do
+            if pid_is_running "$pid"; then
+                running=1
+                break
+            fi
+        done
+        [[ "$running" -eq 0 ]] && break
+        sleep 0.1
+    done
+    refresh_background_descendants
+    descendants=("${TRACKED_PIDS[@]:${#PIDS[@]}}")
+    for pid in "${PIDS[@]}"; do
         kill -KILL "$pid" 2>/dev/null || true
-        pkill -KILL -P "$pid" 2>/dev/null || true
+    done
+    for pid in "${descendants[@]}"; do
+        kill -KILL "$pid" 2>/dev/null || true
+    done
+    for pid in "${PIDS[@]}"; do
         wait "$pid" 2>/dev/null || true
     done
+    for attempt in $(seq 1 50); do
+        running=0
+        for pid in "${TRACKED_PIDS[@]}"; do
+            if pid_is_running "$pid"; then
+                running=1
+                break
+            fi
+        done
+        [[ "$running" -eq 0 ]] && break
+        sleep 0.1
+    done
+    if [[ "$running" -ne 0 ]]; then
+        echo "background processes remain after termination" >&2
+        return 1
+    fi
     PIDS=()
+    TRACKED_PIDS=()
 }
 
 matching_claims() {
@@ -251,7 +326,10 @@ cleanup() {
     local status=$?
     local cleanup_complete=1
     trap - EXIT INT TERM
-    stop_background
+    if ! stop_background; then
+        status=1
+        cleanup_complete=0
+    fi
     if [[ "$CLEANUP_OWNED" -eq 1 && "$ZERO_CONFIRMED" -ne 1 ]]; then
         if ! scale_down; then
             status=1
@@ -374,8 +452,35 @@ validate_cache_helper_access() {
     fi
 }
 
+validate_live_images() {
+    local live_images=$1
+    local container count expected_digest image_id
+    for container in main gms-loader gms-server; do
+        count=$(
+            awk -F '\t' -v name="$container" \
+                '$1 == name {count++} END {print count + 0}' "$live_images"
+        )
+        [[ "$count" -eq 1 ]]
+        image_id=$(
+            awk -F '\t' -v name="$container" '$1 == name {print $3}' \
+                "$live_images"
+        )
+        case "$container" in
+            main)
+                expected_digest=$MAIN_DIGEST
+                ;;
+            gms-loader|gms-server)
+                expected_digest=$EXPECTED_EXPERIMENT_DIGEST
+                ;;
+        esac
+        [[ "$image_id" == *"@$expected_digest" ]]
+    done
+    stamp LIVE_IMAGES_VALIDATED \
+        "main=$MAIN_DIGEST loader_server=$EXPECTED_EXPERIMENT_DIGEST"
+}
+
 stamp PREFLIGHT_BEGIN "variant=${VARIANT^^}"
-for command in kubectl jq yq curl; do
+for command in kubectl jq yq curl pgrep; do
     command -v "$command" >/dev/null
 done
 validate_checkpoint "$ART/preflight/checkpoint.json"
@@ -405,12 +510,66 @@ stamp NODE_DRA_UUIDS_VALIDATED "count=8"
 wait_for_zero
 
 k kustomize "$OVERLAY" > "$ART/preflight/rendered.yaml"
-EXPECTED_IMAGE=$(
+RENDERED_MAIN_IMAGE=$(
     yq -r '.spec.components[1].podTemplate.spec.containers[]
         | select(.name == "main") | .image' "$ART/preflight/rendered.yaml"
 )
-EXPECTED_DIGEST=${EXPECTED_IMAGE##*@}
-[[ "$EXPECTED_DIGEST" == sha256:* ]]
+EXPECTED_EXPERIMENT_IMAGE=$(
+    yq -r '.spec.components[1].podTemplate.spec.containers[]
+        | select(.name == "gms-loader") | .image' "$ART/preflight/rendered.yaml"
+)
+export EXPECTED_EXPERIMENT_IMAGE
+EXPECTED_EXPERIMENT_DIGEST=${EXPECTED_EXPERIMENT_IMAGE##*@}
+case "$VARIANT" in
+    a)
+        [[ "$EXPECTED_EXPERIMENT_DIGEST" == \
+            sha256:d0ea4cc1aceeeeef5825c418999ceca00fcde20dbdbc203d4b2bc683a874708a ]]
+        ;;
+    b)
+        [[ "$EXPECTED_EXPERIMENT_DIGEST" == \
+            sha256:f0e3d788dca28715674705a7f151636dae3ee868f4df5575c1e284a777a7ab0a ]]
+        ;;
+esac
+[[ "$RENDERED_MAIN_IMAGE" == "$MAIN_IMAGE" ]]
+[[ $(
+    yq -r '.spec.components[1].podTemplate.spec.initContainers[]
+        | select(.name == "gms-server") | .image' "$ART/preflight/rendered.yaml"
+) == "$EXPECTED_EXPERIMENT_IMAGE" ]]
+[[ $(
+    yq '[.spec.components[1].podTemplate.spec.initContainers[]
+        | select(.name == "gms-server")] | length' "$ART/preflight/rendered.yaml"
+) == 1 ]]
+[[ $(
+    yq '[.spec.components[1].podTemplate.spec.containers[]
+        | select(.name == "gms-server")] | length' "$ART/preflight/rendered.yaml"
+) == 0 ]]
+yq -o=json '.spec.components[1].podTemplate.spec' \
+    "$ART/preflight/rendered.yaml" |
+    jq -e --arg experiment_image "$EXPECTED_EXPERIMENT_IMAGE" '
+        [.initContainers[] | select(.name == "gms-server")] == [{
+            name: "gms-server",
+            image: $experiment_image,
+            command: ["python3", "-m", "gpu_memory_service.cli.server"],
+            env: [{
+                name: "GMS_SOCKET_DIR",
+                value: "/gms-intrapod-control"
+            }],
+            volumeMounts: [{
+                name: "gms-intrapod-control",
+                mountPath: "/gms-intrapod-control"
+            }],
+            resources: {
+                claims: [{
+                    name: "intrapod-shared-gpu"
+                }]
+            },
+            restartPolicy: "Always"
+        }] and
+        [.volumes[] | select(.name == "gms-intrapod-control")] == [{
+            name: "gms-intrapod-control",
+            emptyDir: {}
+        }]
+    ' >/dev/null
 [[ $(
     yq -r '.spec.components[1].experimental.checkpoint.checkpointRef' \
         "$ART/preflight/rendered.yaml"
@@ -545,6 +704,34 @@ k wait --for=condition=Ready "pod/$WORKER_POD" --timeout=900s
 stamp WORKER_READY
 k get pod "$WORKER_POD" -o json > "$ART/objects/ready-worker-pod.json"
 
+jq -e \
+    --arg main_image "$MAIN_IMAGE" \
+    --arg experiment_image "$EXPECTED_EXPERIMENT_IMAGE" '
+    [.spec.containers[] | select(.name == "main") | .image] ==
+        [$main_image] and
+    [.spec.containers[] | select(.name == "gms-loader") | .image] ==
+        [$experiment_image] and
+    [.spec.containers[] | select(.name == "gms-server")] == [] and
+    ([.spec.initContainers[] | select(.name == "gms-server")] | length) == 1 and
+    ([.spec.initContainers[] | select(.name == "gms-server")][0] as $server |
+        $server.image == $experiment_image and
+        $server.command ==
+            ["python3", "-m", "gpu_memory_service.cli.server"] and
+        ([$server.env[] | select(
+            .name == "GMS_SOCKET_DIR" and
+            .value == "/gms-intrapod-control"
+        )] | length) == 1 and
+        ([$server.resources.claims[] | select(
+            .name == "intrapod-shared-gpu"
+        )] | length) == 1 and
+        ([$server.volumeMounts[] | select(
+            .name == "gms-intrapod-control" and
+            .mountPath == "/gms-intrapod-control"
+        )] | length) == 1 and
+        $server.restartPolicy == "Always"
+    )
+' "$ART/objects/ready-worker-pod.json" >/dev/null
+
 jq -r '
     (
         [.status.containerStatuses[]
@@ -555,14 +742,7 @@ jq -r '
     )[] | [.name, .image, .imageID] | @tsv
 ' "$ART/objects/ready-worker-pod.json" | sort \
     > "$ART/preflight/live-images.tsv"
-for container in main gms-loader gms-server; do
-    image_id=$(
-        awk -F '\t' -v name="$container" '$1 == name {print $3}' \
-            "$ART/preflight/live-images.tsv"
-    )
-    [[ "$image_id" == *"@$EXPECTED_DIGEST" ]]
-done
-stamp LIVE_IMAGES_VALIDATED "$EXPECTED_DIGEST"
+validate_live_images "$ART/preflight/live-images.tsv"
 
 k exec "$WORKER_POD" -c gms-loader -- \
     nvidia-smi --query-gpu=uuid --format=csv,noheader \
