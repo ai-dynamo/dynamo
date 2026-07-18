@@ -23,7 +23,7 @@ members = [
     "lib/bench",
     "lib/backend-common",
     "lib/backend-common/examples/mocker",
-    "lib/vllm-rs-backend",
+    "lib/backend/vllm-sidecar",
     "lib/backend/sglang-sidecar",
     "lib/bindings/c",
     "lib/bindings/python/codegen",
