@@ -38,7 +38,7 @@ pub(super) struct PendingDrainPlan {
     pub(super) next_recovery_start: Option<u64>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(super) struct RankState {
     pub(super) cursor: CursorState,
     pub(super) recovery_inflight: bool,

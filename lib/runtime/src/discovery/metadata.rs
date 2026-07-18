@@ -6,7 +6,9 @@ use serde::Deserialize as _;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use super::{DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery};
+use super::{
+    DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery, validate_event_source_reregistration,
+};
 
 /// Deserializes a JSON `null` or missing field as `T::default()`.
 ///
@@ -182,15 +184,9 @@ impl DiscoveryMetadata {
                         entry.insert(instance);
                         Ok(())
                     }
-                    std::collections::hash_map::Entry::Occupied(entry)
-                        if entry.get() == &instance =>
-                    {
-                        Ok(())
+                    std::collections::hash_map::Entry::Occupied(entry) => {
+                        validate_event_source_reregistration(entry.get(), &instance)
                     }
-                    std::collections::hash_map::Entry::Occupied(entry) => anyhow::bail!(
-                        "Event source incarnation '{}' cannot change its descriptor",
-                        entry.key()
-                    ),
                 }
             }
             DiscoveryInstanceId::Endpoint(_) => {

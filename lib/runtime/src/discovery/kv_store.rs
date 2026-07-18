@@ -14,6 +14,7 @@ use super::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
     DiscoverySpec, DiscoveryStream, EndpointInstanceId, EventChannelInstanceId, EventScope,
     EventSourceInstanceId, ModelCardInstanceId, encode_event_segment,
+    validate_event_source_reregistration,
 };
 use crate::storage::kv;
 
@@ -459,13 +460,8 @@ impl Discovery for KVStoreDiscovery {
 
         if is_event_source && let Some(existing) = bucket.get(&key).await? {
             let existing: DiscoveryInstance = serde_json::from_slice(existing.as_ref())?;
-            if existing == instance {
-                return Ok(existing);
-            }
-            anyhow::bail!(
-                "Event source incarnation '{}' cannot change its descriptor",
-                key_path
-            );
+            validate_event_source_reregistration(&existing, &instance)?;
+            return Ok(existing);
         }
 
         tracing::debug!(
@@ -481,13 +477,8 @@ impl Discovery for KVStoreDiscovery {
                     return Err(error.into());
                 };
                 let existing: DiscoveryInstance = serde_json::from_slice(existing.as_ref())?;
-                if existing == instance {
-                    return Ok(existing);
-                }
-                anyhow::bail!(
-                    "Event source incarnation '{}' cannot change its descriptor",
-                    key_path
-                );
+                validate_event_source_reregistration(&existing, &instance)?;
+                return Ok(existing);
             }
             Err(error) => return Err(error.into()),
         };

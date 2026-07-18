@@ -3,7 +3,7 @@
 
 use super::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
-    DiscoverySpec, DiscoveryStream,
+    DiscoverySpec, DiscoveryStream, validate_event_source_reregistration,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -190,13 +190,8 @@ impl Discovery for MockDiscovery {
                 .iter()
                 .find(|existing| existing.id() == instance.id())
         {
-            if existing == &instance {
-                return Ok(existing.clone());
-            }
-            anyhow::bail!(
-                "Event source incarnation '{:?}' cannot change its descriptor",
-                instance.id()
-            );
+            validate_event_source_reregistration(existing, &instance)?;
+            return Ok(existing.clone());
         }
         instances.push(instance.clone());
 

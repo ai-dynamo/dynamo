@@ -22,7 +22,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    KvEventSource, KvSourceId, KvSourceMembership, KvSourceMembershipView, KvSourceStatus,
+    KvEventSource, KvSourceMembership, KvSourceMembershipView, KvSourceStatus,
     KvStateEndpointResolution, RuntimeConfigWatch, resolve_kv_state_endpoint,
 };
 
@@ -196,7 +196,6 @@ async fn run_membership_coordinator(
     let mut configs = runtime_configs.borrow_and_update().clone();
     let mut resolution = resolve_kv_state_endpoint(&serving_endpoint, configs.values());
     let mut membership = KvSourceMembership::new();
-    let mut source_ids = HashMap::new();
     let mut lifecycle = LifecycleTracker::default();
     let mut source_stream = bind_source_stream(&discovery, &resolution, &cancel).await;
     let mut retry_delay = Duration::from_millis(100);
@@ -237,7 +236,6 @@ async fn run_membership_coordinator(
                 if next_resolution != resolution {
                     resolution = next_resolution;
                     membership = KvSourceMembership::new();
-                    source_ids.clear();
                     drop(source_stream.take());
                     publish_view(
                         &sender,
@@ -258,7 +256,7 @@ async fn run_membership_coordinator(
             }
             CoordinatorInput::Source(Some(event)) => {
                 let stream_is_healthy =
-                    reconcile_discovery_event(event, &resolution, &mut membership, &mut source_ids);
+                    reconcile_discovery_event(event, &resolution, &mut membership);
                 publish_view(
                     &sender,
                     &mut lifecycle,
@@ -270,7 +268,6 @@ async fn run_membership_coordinator(
             }
             CoordinatorInput::Source(None) => {
                 membership = KvSourceMembership::new();
-                source_ids.clear();
                 publish_view(
                     &sender,
                     &mut lifecycle,
@@ -324,7 +321,6 @@ fn reconcile_discovery_event(
     event: anyhow::Result<DiscoveryEvent>,
     resolution: &KvStateEndpointResolution,
     membership: &mut KvSourceMembership,
-    source_ids: &mut HashMap<u64, KvSourceId>,
 ) -> bool {
     let KvStateEndpointResolution::Resolved(expected_endpoint) = resolution else {
         return true;
@@ -347,18 +343,14 @@ fn reconcile_discovery_event(
             let source = match serde_json::from_value::<KvEventSource>(metadata) {
                 Ok(source) => source,
                 Err(error) => {
-                    if let Some(existing) = source_ids.get(&publisher_id) {
-                        membership.invalidate_descriptor(existing.clone());
-                    }
+                    membership.invalidate_publisher(publisher_id);
                     tracing::warn!(publisher_id, %error, "Ignoring malformed KV event source");
                     return true;
                 }
             };
             if source.kv_state_endpoint != *expected_endpoint || source.publisher_id != publisher_id
             {
-                if let Some(existing) = source_ids.get(&publisher_id) {
-                    membership.invalidate_descriptor(existing.clone());
-                }
+                membership.invalidate_publisher(publisher_id);
                 tracing::warn!(
                     publisher_id,
                     "Ignoring KV event source with inconsistent attribution"
@@ -366,21 +358,8 @@ fn reconcile_discovery_event(
                 return true;
             }
 
-            let source_id = source.source_id();
-            if let Some(existing) = source_ids.get(&publisher_id) {
-                if existing != &source_id {
-                    membership.invalidate_descriptor(existing.clone());
-                    tracing::warn!(
-                        publisher_id,
-                        "KV publisher changed its immutable logical source attribution"
-                    );
-                    return true;
-                }
-            } else {
-                source_ids.insert(publisher_id, source_id);
-            }
             if let Err(error) = membership.add(source) {
-                tracing::warn!(%error, "KV publisher changed its immutable source descriptor");
+                tracing::warn!(%error, "KV publisher changed its immutable typed source attribution");
             }
         }
         Ok(DiscoveryEvent::Removed(DiscoveryInstanceId::EventSource(EventSourceInstanceId {
@@ -391,16 +370,12 @@ fn reconcile_discovery_event(
             if scope != expected_scope || topic != KV_EVENT_SUBJECT {
                 return true;
             }
-            let Some(source_id) = source_ids.remove(&publisher_id) else {
-                return true;
-            };
-            membership.remove(&source_id);
+            membership.remove_publisher(publisher_id);
         }
         Ok(DiscoveryEvent::Added(_)) | Ok(DiscoveryEvent::Removed(_)) => {}
         Err(error) => {
             tracing::error!(%error, "KV event-source discovery stream failed; rebinding");
             *membership = KvSourceMembership::new();
-            source_ids.clear();
             return false;
         }
     }
@@ -430,7 +405,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::discovery::{KvSourceAmbiguity, KvSourceKey};
+    use crate::discovery::{KvSourceAmbiguity, KvSourceId, KvSourceKey};
     use crate::local_model::runtime_config::ModelRuntimeConfig;
 
     fn endpoint(name: &str) -> EndpointId {
@@ -684,18 +659,15 @@ mod tests {
         let worker = WorkerWithDpRank::new(42, 4);
         let source = source(&kv, 42, 100);
         let mut membership = KvSourceMembership::new();
-        membership.add(source.clone()).unwrap();
-        let mut source_ids = HashMap::from([(source.publisher_id, source.source_id())]);
+        membership.add(source).unwrap();
 
         let stream_is_healthy = reconcile_discovery_event(
             Err(anyhow::anyhow!("watch failed")),
             &KvStateEndpointResolution::Resolved(kv),
             &mut membership,
-            &mut source_ids,
         );
 
         assert!(!stream_is_healthy);
-        assert!(source_ids.is_empty());
         assert_eq!(
             membership.view(&serving, &configs).status(&worker),
             Some(&KvSourceStatus::Missing)

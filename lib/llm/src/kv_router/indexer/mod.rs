@@ -339,9 +339,12 @@ impl Indexer {
         Ok(())
     }
 
-    /// Wait until all local tiers have applied mutations accepted before this call.
-    /// Recovery uses this cold-path barrier before committing its source cursor.
-    pub(crate) async fn flush_and_wait(&self) -> Result<(), KvRouterError> {
+    /// Wait until every applicable local tier has acknowledged this worker's FIFO lane.
+    /// All DP ranks and worker-wide `Cleared` events share the stable WorkerId assignment.
+    pub(crate) async fn flush_worker_and_wait(
+        &self,
+        worker_id: WorkerId,
+    ) -> Result<(), KvRouterError> {
         match self {
             Self::KvIndexer {
                 primary,
@@ -349,12 +352,14 @@ impl Indexer {
                 approx,
                 ..
             } => {
+                // KvIndexer has one mutation lane; lower and approximate concurrent indexers can
+                // acknowledge only the stable lane assigned to this WorkerId.
                 primary.flush_and_wait().await?;
                 for indexer in lower_tier.all() {
-                    indexer.flush_and_wait().await?;
+                    indexer.flush_worker_and_wait(worker_id).await?;
                 }
                 if let Some(approx) = approx {
-                    approx.flush_and_wait().await?;
+                    approx.flush_worker_and_wait(worker_id).await?;
                 }
             }
             Self::Concurrent {
@@ -363,17 +368,17 @@ impl Indexer {
                 approx,
                 ..
             } => {
-                primary.flush_and_wait().await?;
+                primary.flush_worker_and_wait(worker_id).await?;
                 for indexer in lower_tier.all() {
-                    indexer.flush_and_wait().await?;
+                    indexer.flush_worker_and_wait(worker_id).await?;
                 }
                 if let Some(approx) = approx {
-                    approx.flush_and_wait().await?;
+                    approx.flush_worker_and_wait(worker_id).await?;
                 }
             }
             Self::Remote { approx, .. } => {
                 if let Some(approx) = approx {
-                    approx.flush_and_wait().await?;
+                    approx.flush_worker_and_wait(worker_id).await?;
                 }
             }
             Self::None => {}

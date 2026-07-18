@@ -123,13 +123,18 @@ impl SideIndexer {
         }
     }
 
-    pub(super) async fn flush_and_wait(&self) -> Result<(), KvRouterError> {
+    pub(super) async fn flush_worker_and_wait(
+        &self,
+        worker_id: WorkerId,
+    ) -> Result<(), KvRouterError> {
         match self {
+            // The legacy indexer has one mutation lane, so its existing flush is already the
+            // narrowest FIFO acknowledgement it can provide.
             Self::KvIndexer(indexer) => {
                 indexer.flush_and_wait().await?;
             }
             Self::Concurrent(indexer) => {
-                indexer.flush_and_wait().await?;
+                indexer.flush_worker_and_wait(worker_id).await?;
             }
         }
         Ok(())

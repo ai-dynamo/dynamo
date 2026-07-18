@@ -505,6 +505,27 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         Ok(())
     }
 
+    /// Wait until the FIFO lane for `worker_id` has applied tasks accepted before this call.
+    ///
+    /// NOTE: Worker-to-queue assignment is stable for the indexer's lifetime. Every DP rank and
+    /// worker-wide `Cleared` mutation therefore shares this lane, so this acknowledgement must
+    /// never be replaced with a non-FIFO or recomputed assignment.
+    pub async fn flush_worker_and_wait(&self, worker_id: WorkerId) -> Result<(), KvRouterError> {
+        let thread_idx = Self::get_or_assign_thread_idx(
+            &self.worker_assignments,
+            &self.worker_assignment_count,
+            worker_id,
+            self.num_workers,
+        );
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.worker_event_channels[thread_idx]
+            .send(WorkerTask::Flush(resp_tx))
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+        resp_rx
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)
+    }
+
     /// Wait until all previously queued worker tasks have completed.
     ///
     /// Used primarily for testing and benchmarking to ensure writes are visible
@@ -982,13 +1003,7 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
             })
             .map_err(|_| KvRouterError::IndexerOffline)?;
 
-        let (resp_tx, resp_rx) = oneshot::channel();
-        self.worker_event_channels[thread_idx]
-            .send(WorkerTask::Flush(resp_tx))
-            .map_err(|_| KvRouterError::IndexerOffline)?;
-        resp_rx
-            .await
-            .map_err(|_| KvRouterError::IndexerDroppedRequest)
+        self.flush_worker_and_wait(worker_id).await
     }
 
     fn shutdown(&self) {
@@ -1143,6 +1158,64 @@ mod tests {
         ConcurrentRadixTreeCompressed,
         test_utils::{assert_score, make_store_event},
     };
+    use std::time::Duration;
+
+    struct BlockingBackend {
+        blocked_worker: WorkerId,
+        entered: flume::Sender<()>,
+        release: flume::Receiver<()>,
+    }
+
+    impl SyncIndexer for BlockingBackend {
+        fn worker(
+            &self,
+            event_receiver: flume::Receiver<WorkerTask>,
+            _metrics: Option<Arc<KvIndexerMetrics>>,
+        ) -> anyhow::Result<()> {
+            for task in event_receiver {
+                match task {
+                    WorkerTask::Event(event) if event.worker_id == self.blocked_worker => {
+                        self.entered.send(())?;
+                        self.release.recv()?;
+                    }
+                    WorkerTask::Flush(response) => {
+                        let _ = response.send(());
+                    }
+                    WorkerTask::Terminate => break,
+                    _ => {}
+                }
+            }
+            Ok(())
+        }
+
+        fn find_matches(&self, _sequence: &[LocalBlockHash], _early_exit: bool) -> OverlapScores {
+            OverlapScores::default()
+        }
+    }
+
+    fn blocking_indexer(
+        blocked_worker: WorkerId,
+    ) -> (
+        ThreadPoolIndexer<BlockingBackend>,
+        flume::Receiver<()>,
+        flume::Sender<()>,
+    ) {
+        let (entered_tx, entered_rx) = flume::bounded(1);
+        let (release_tx, release_rx) = flume::bounded(1);
+        (
+            ThreadPoolIndexer::new(
+                BlockingBackend {
+                    blocked_worker,
+                    entered: entered_tx,
+                    release: release_rx,
+                },
+                2,
+                16,
+            ),
+            entered_rx,
+            release_tx,
+        )
+    }
 
     fn assigned_thread(
         indexer: &ThreadPoolIndexer<ConcurrentRadixTreeCompressed>,
@@ -1184,6 +1257,39 @@ mod tests {
     #[tokio::test]
     async fn cold_rank_remove_reserves_sticky_queue() {
         assert_cold_remove_reserves_sticky_queue(ColdRemoval::DpRank).await;
+    }
+
+    #[tokio::test]
+    async fn worker_flush_waits_for_its_fifo_lane() {
+        let (indexer, entered, release) = blocking_indexer(1);
+        indexer.enqueue_event(make_store_event(1, &[1])).unwrap();
+        entered.recv_async().await.unwrap();
+
+        let mut flush = Box::pin(indexer.flush_worker_and_wait(1));
+        let completed_early = tokio::time::timeout(Duration::from_millis(25), &mut flush).await;
+        release.send(()).unwrap();
+        if completed_early.is_err() {
+            flush.await.unwrap();
+        }
+        assert!(
+            completed_early.is_err(),
+            "flush passed its blocked FIFO event"
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_flush_ignores_an_unrelated_blocked_lane() {
+        let (indexer, entered, release) = blocking_indexer(2);
+        indexer.enqueue_event(make_store_event(1, &[1])).unwrap();
+        indexer.enqueue_event(make_store_event(2, &[2])).unwrap();
+        entered.recv_async().await.unwrap();
+
+        let result =
+            tokio::time::timeout(Duration::from_secs(1), indexer.flush_worker_and_wait(1)).await;
+        release.send(()).unwrap();
+        result
+            .expect("worker flush waited on an unrelated lane")
+            .unwrap();
     }
 
     #[cfg(feature = "bench")]

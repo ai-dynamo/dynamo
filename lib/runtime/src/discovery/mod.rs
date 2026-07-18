@@ -728,6 +728,30 @@ pub enum DiscoveryInstance {
     },
 }
 
+/// Validate an idempotent registration for one semantic event-source incarnation.
+///
+/// NOTE: Descriptor immutability belongs to the generic discovery contract. Backends still
+/// perform their own atomic lookup/insert, but all of them use this comparison so an identical
+/// registration succeeds and a changed descriptor preserves the original record.
+pub(crate) fn validate_event_source_reregistration(
+    existing: &DiscoveryInstance,
+    candidate: &DiscoveryInstance,
+) -> Result<()> {
+    let DiscoveryInstanceId::EventSource(existing_id) = existing.id() else {
+        anyhow::bail!("existing discovery record is not an event source")
+    };
+    if candidate.id() != DiscoveryInstanceId::EventSource(existing_id.clone()) {
+        anyhow::bail!("event source re-registration changed its identity")
+    }
+    if existing != candidate {
+        anyhow::bail!(
+            "Event source incarnation '{}' cannot change its descriptor",
+            existing_id.to_path()
+        )
+    }
+    Ok(())
+}
+
 impl DiscoveryInstance {
     /// Returns the instance ID for this discovery instance
     pub fn instance_id(&self) -> u64 {

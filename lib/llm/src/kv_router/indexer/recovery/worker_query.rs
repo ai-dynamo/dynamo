@@ -6,7 +6,9 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use anyhow::{Context, Result};
 use dashmap::DashMap;
 use dynamo_kv_router::{
-    indexer::WorkerKvQueryResponse, protocols::RouterEvent, recovery::CursorState,
+    indexer::WorkerKvQueryResponse,
+    protocols::{RouterEvent, WorkerId},
+    recovery::CursorState,
 };
 use dynamo_runtime::component::{Component, Instance};
 use rand::Rng;
@@ -50,10 +52,28 @@ impl SourceBinding {
 struct SourceSlot {
     active: Option<Arc<SourceBinding>>,
     rank: RankState,
-    lifecycle_generation: u64,
-    ever_activated: bool,
-    was_ambiguous: bool,
+    /// NOTE: The coordinator's cumulative generation is the sole history of reset-relevant
+    /// membership transitions. Keep it optional so the first observed source does not reset.
+    lifecycle_generation: Option<u64>,
+    /// This flag represents only a failed acknowledged reset, not membership history.
     reset_pending: bool,
+}
+
+impl SourceSlot {
+    fn generation_changed(&self, generation: u64) -> bool {
+        self.lifecycle_generation
+            .is_some_and(|current| current != generation)
+    }
+
+    fn accept_generation(&mut self, generation: u64) {
+        self.lifecycle_generation = Some(generation);
+        self.reset_pending = false;
+    }
+
+    fn fence_for_reset(&mut self) {
+        self.reset_pending = true;
+        self.rank.finish_failed_recovery();
+    }
 }
 
 /// Coordinates KV recovery for sources advertised under one exact KV-state endpoint.
@@ -193,7 +213,7 @@ impl WorkerQueryClient {
         let mut slot = slot.lock().await;
 
         let selected = status.active_source().cloned();
-        let generation_changed = slot.lifecycle_generation != lifecycle_generation;
+        let generation_changed = slot.generation_changed(lifecycle_generation);
         if let (Some(active), Some(selected)) = (&slot.active, &selected)
             && active.source.publisher_id == selected.publisher_id
             && !generation_changed
@@ -202,48 +222,32 @@ impl WorkerQueryClient {
             return;
         }
 
-        let had_active = self.deactivate_locked(key, &mut slot).await;
+        self.deactivate_locked(key, &mut slot).await;
         match selected {
             None => {
-                if slot.reset_pending || had_active || generation_changed {
-                    if let Err(error) = self.reset_rank(key).await {
-                        slot.reset_pending = true;
-                        tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to clear inactive KV source state; reset remains pending");
-                        return;
-                    }
-                    slot.reset_pending = false;
+                if (slot.reset_pending || generation_changed)
+                    && let Err(error) = self.reset_rank_or_fence(key, &mut slot).await
+                {
+                    tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to clear inactive KV source state; reset remains pending");
+                    return;
                 }
-                slot.lifecycle_generation = lifecycle_generation;
+                slot.accept_generation(lifecycle_generation);
                 slot.rank = RankState::default();
-                slot.was_ambiguous = matches!(status, KvSourceStatus::Ambiguous(_));
             }
             Some(source) => {
-                if slot.reset_pending
-                    || generation_changed
-                    || slot.ever_activated
-                    || slot.was_ambiguous
+                if (slot.reset_pending || generation_changed)
+                    && let Err(error) = self.reset_rank_or_fence(key, &mut slot).await
                 {
-                    if let Err(error) = self.reset_rank(key).await {
-                        slot.reset_pending = true;
-                        tracing::error!(%error, worker_id = key.0, dp_rank = key.1, publisher_id = source.publisher_id, "KV source activation remains disabled because cold reset failed");
-                        return;
-                    }
-                    slot.reset_pending = false;
+                    tracing::error!(%error, worker_id = key.0, dp_rank = key.1, publisher_id = source.publisher_id, "KV source activation remains disabled because cold reset failed");
+                    return;
                 }
-                slot.lifecycle_generation = lifecycle_generation;
+                slot.accept_generation(lifecycle_generation);
                 let binding = Arc::new(SourceBinding {
                     lifetime: self.cancellation_token.child_token(),
                     source,
                 });
-                if let Some(target) = binding.recovery_target() {
-                    self.transport
-                        .clear_instance_tombstone(&target.endpoint_instance_id())
-                        .await;
-                }
                 slot.rank.activate(binding.recovery_target().is_some());
                 slot.active = Some(binding.clone());
-                slot.ever_activated = true;
-                slot.was_ambiguous = false;
                 self.publisher_bindings
                     .insert(binding.source.publisher_id, binding.clone());
                 if binding.recovery_target().is_some() {
@@ -271,10 +275,9 @@ impl WorkerQueryClient {
             });
         binding.lifetime.cancel();
         self.cancel_recovery(key).await;
-        if let Some(target) = binding.recovery_target() {
-            let target = target.endpoint_instance_id();
-            self.transport.cancel_instance_streams(&target).await;
-        }
+        // NOTE: Recovery targets need no separate tombstone lifecycle. Aborting and joining the
+        // source-bound task happens before rebinding, and slot serialization plus publisher and
+        // generation checks fence every stale completion.
         true
     }
 
@@ -291,13 +294,11 @@ impl WorkerQueryClient {
         };
         let mut slot = slot_handle.lock().await;
         let had_active = self.deactivate_locked(key, &mut slot).await;
-        if slot.reset_pending || had_active {
-            if let Err(error) = self.reset_rank(key).await {
-                slot.reset_pending = true;
-                tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to clear KV state for a worker removed from serving membership; retaining reset-pending slot");
-                return;
-            }
-            slot.reset_pending = false;
+        if (slot.reset_pending || had_active)
+            && let Err(error) = self.reset_rank_or_fence(key, &mut slot).await
+        {
+            tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to clear KV state for a worker removed from serving membership; retaining reset-pending slot");
+            return;
         }
         drop(slot);
         self.slots
@@ -314,6 +315,16 @@ impl WorkerQueryClient {
                     key.0, key.1
                 )
             })
+    }
+
+    async fn reset_rank_or_fence(&self, key: RecoveryKey, slot: &mut SourceSlot) -> Result<()> {
+        match self.reset_rank(key).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                slot.fence_for_reset();
+                Err(error)
+            }
+        }
     }
 
     pub(crate) async fn shutdown(self: &Arc<Self>) {
@@ -381,8 +392,7 @@ impl WorkerQueryClient {
                 LiveEventAction::Ignore => {}
                 LiveEventAction::Apply { event_id, event } => {
                     if let Err(error) = self.indexer.try_apply_event(event).await {
-                        slot.reset_pending = true;
-                        slot.rank.finish_failed_recovery();
+                        slot.fence_for_reset();
                         tracing::error!(%error, worker_id = key.0, dp_rank = key.1, event_id, "KV event queue rejected a live event; rank remains fenced pending reset");
                         return;
                     }
@@ -418,9 +428,7 @@ impl WorkerQueryClient {
                 } => {
                     if reset {
                         self.cancel_recovery(key).await;
-                        if let Err(error) = self.reset_rank(key).await {
-                            slot.reset_pending = true;
-                            slot.rank.finish_failed_recovery();
+                        if let Err(error) = self.reset_rank_or_fence(key, &mut slot).await {
                             tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to clear KV state before gap recovery; rank remains fenced");
                             return;
                         }
@@ -430,16 +438,13 @@ impl WorkerQueryClient {
                 }
                 LiveEventAction::ResetDegraded { event } => {
                     self.cancel_recovery(key).await;
-                    if let Err(error) = self.reset_rank(key).await {
-                        slot.reset_pending = true;
-                        slot.rank.finish_failed_recovery();
+                    if let Err(error) = self.reset_rank_or_fence(key, &mut slot).await {
                         tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to clear KV state after an event sequence gap; rank remains fenced");
                         return;
                     }
                     let event_id = event.event.event_id;
-                    if let Err(error) = self.apply_events_and_flush([event]).await {
-                        slot.reset_pending = true;
-                        slot.rank.finish_failed_recovery();
+                    if let Err(error) = self.apply_events_and_flush(key.0, [event]).await {
+                        slot.fence_for_reset();
                         tracing::error!(%error, worker_id = key.0, dp_rank = key.1, event_id, "Failed to acknowledge degraded gap event; rank remains fenced");
                         return;
                     }
@@ -484,10 +489,9 @@ impl WorkerQueryClient {
         for (key, _) in &mut guards {
             self.cancel_recovery(*key).await;
         }
-        if let Err(error) = self.apply_events_and_flush([event]).await {
+        if let Err(error) = self.apply_events_and_flush(emitter.0, [event]).await {
             for (_, slot) in &mut guards {
-                slot.reset_pending = true;
-                slot.rank.finish_failed_recovery();
+                slot.fence_for_reset();
             }
             return Err(error);
         }
@@ -500,6 +504,7 @@ impl WorkerQueryClient {
 
     async fn apply_events_and_flush(
         &self,
+        worker_id: WorkerId,
         events: impl IntoIterator<Item = RouterEvent>,
     ) -> Result<()> {
         for event in events {
@@ -509,9 +514,9 @@ impl WorkerQueryClient {
                 .context("KV indexer rejected event queue admission")?;
         }
         self.indexer
-            .flush_and_wait()
+            .flush_worker_and_wait(worker_id)
             .await
-            .context("KV indexer failed to acknowledge cold-path mutations")
+            .context("KV indexer failed to acknowledge worker-lane cold-path mutations")
     }
 
     async fn cancel_recovery(&self, key: RecoveryKey) {
@@ -685,7 +690,7 @@ impl WorkerQueryClient {
             return;
         }
 
-        let recovered_cursor = match result {
+        let (recovered_events, recovered_cursor) = match result {
             Ok(WorkerKvQueryResponse::Events {
                 events,
                 last_event_id,
@@ -697,24 +702,19 @@ impl WorkerQueryClient {
                         publisher_id = binding.source.publisher_id,
                         "Discarding recovery events for another logical source"
                     );
-                    None
-                } else {
-                    if let Err(error) = self.apply_events_and_flush(events).await {
-                        slot.reset_pending = true;
-                        slot.rank.finish_failed_recovery();
-                        tracing::error!(%error, worker_id = key.0, dp_rank = key.1, publisher_id = binding.source.publisher_id, "Failed to acknowledge recovered events; rank remains fenced");
-                        return;
-                    }
-                    Some(
-                        slot.rank.cursor.advance_to(
-                            slot.rank
-                                .cursor
-                                .last_applied_id()
-                                .unwrap_or(0)
-                                .max(last_event_id),
-                        ),
-                    )
+                    self.fence_corrupt_recovery_locked(key, &mut slot).await;
+                    return;
                 }
+                (
+                    events,
+                    slot.rank.cursor.advance_to(
+                        slot.rank
+                            .cursor
+                            .last_applied_id()
+                            .unwrap_or(0)
+                            .max(last_event_id),
+                    ),
+                )
             }
             Ok(WorkerKvQueryResponse::TreeDump {
                 events,
@@ -727,21 +727,14 @@ impl WorkerQueryClient {
                         publisher_id = binding.source.publisher_id,
                         "Discarding recovery tree dump for another logical source"
                     );
-                    None
-                } else if let Err(error) = self.reset_rank(key).await {
-                    slot.reset_pending = true;
-                    slot.rank.finish_failed_recovery();
+                    self.fence_corrupt_recovery_locked(key, &mut slot).await;
+                    return;
+                }
+                if let Err(error) = self.reset_rank_or_fence(key, &mut slot).await {
                     tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to reset rank before applying recovery tree dump; rank remains fenced");
                     return;
-                } else {
-                    if let Err(error) = self.apply_events_and_flush(events).await {
-                        slot.reset_pending = true;
-                        slot.rank.finish_failed_recovery();
-                        tracing::error!(%error, worker_id = key.0, dp_rank = key.1, publisher_id = binding.source.publisher_id, "Failed to acknowledge recovery tree dump; rank remains fenced");
-                        return;
-                    }
-                    Some(CursorState::Initial.advance_to(last_event_id))
                 }
+                (events, CursorState::Initial.advance_to(last_event_id))
             }
             Ok(response) => {
                 tracing::warn!(
@@ -750,34 +743,36 @@ impl WorkerQueryClient {
                     ?response,
                     "KV recovery returned no applicable state"
                 );
-                None
+                self.finish_degraded_locked(key, &mut slot).await;
+                return;
             }
             Err(error) => {
                 tracing::warn!(%error, worker_id = key.0, dp_rank = key.1, publisher_id = binding.source.publisher_id, "KV recovery failed; continuing with degraded live events");
-                None
+                self.finish_degraded_locked(key, &mut slot).await;
+                return;
             }
         };
 
-        let Some(recovered_cursor) = recovered_cursor else {
-            self.finish_degraded_locked(key, &mut slot).await;
-            return;
-        };
-
-        slot.rank.begin_successful_recovery_drain(recovered_cursor);
+        // NOTE: Clear-free recovery is planned against a clone so neither the cursor nor buffered
+        // live-event state becomes authoritative before the combined FIFO acknowledgement.
+        let mut rank_after_ack = slot.rank.clone();
+        rank_after_ack.begin_successful_recovery_drain(recovered_cursor);
         let PendingDrainPlan {
-            events,
+            events: buffered_tail,
             cursor,
             next_recovery_start,
-        } = slot.rank.plan_pending_drain();
-        if !events.is_empty()
-            && let Err(error) = self.apply_events_and_flush(events).await
+        } = rank_after_ack.plan_pending_drain();
+        rank_after_ack.commit_pending_drain(cursor, next_recovery_start);
+
+        if let Err(error) = self
+            .apply_events_and_flush(key.0, recovered_events.into_iter().chain(buffered_tail))
+            .await
         {
-            slot.reset_pending = true;
-            slot.rank.finish_failed_recovery();
-            tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to acknowledge buffered live events after recovery; rank remains fenced");
+            slot.fence_for_reset();
+            tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to acknowledge recovered and buffered events; rank remains fenced");
             return;
         }
-        slot.rank.commit_pending_drain(cursor, next_recovery_start);
+        slot.rank = rank_after_ack;
         drop(slot);
         if let Some(start_event_id) = next_recovery_start {
             self.schedule_recovery_after_current(key, binding, start_event_id);
@@ -788,35 +783,23 @@ impl WorkerQueryClient {
         let pending = slot.rank.take_failed_recovery_degraded();
         let last_event_id = pending.last().map(|event| event.event.event_id);
         if !pending.is_empty()
-            && let Err(error) = self.apply_events_and_flush(pending).await
+            && let Err(error) = self.apply_events_and_flush(key.0, pending).await
         {
-            slot.reset_pending = true;
-            slot.rank.finish_failed_recovery();
+            slot.fence_for_reset();
             tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to acknowledge degraded live events; rank remains fenced");
             return;
         }
         slot.rank.commit_failed_recovery_degraded(last_event_id);
     }
 
-    async fn finish_failed_recovery_degraded(
-        &self,
-        key: RecoveryKey,
-        binding: &Arc<SourceBinding>,
-        cancel: &CancellationToken,
-    ) {
-        let Some(slot) = self.slots.get(&key).map(|entry| entry.clone()) else {
-            return;
-        };
-        let mut slot = slot.lock().await;
-        if cancel.is_cancelled()
-            || !slot
-                .active
-                .as_ref()
-                .is_some_and(|active| Arc::ptr_eq(active, binding))
-        {
-            return;
+    async fn fence_corrupt_recovery_locked(&self, key: RecoveryKey, slot: &mut SourceSlot) {
+        // NOTE: A foreign/corrupt response is not a recoverable transport failure. Do not replay
+        // buffered live events around untrusted history; clear the rank and keep KV handling
+        // fenced while ordinary serving continues.
+        if let Err(error) = self.reset_rank_or_fence(key, slot).await {
+            tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to reset rank after corrupt recovery response");
         }
-        self.finish_degraded_locked(key, &mut slot).await;
+        slot.fence_for_reset();
     }
 
     async fn finish_recovery_with_clear(
@@ -828,17 +811,6 @@ impl WorkerQueryClient {
         last_event_id: u64,
         tree_dump: bool,
     ) {
-        if !recovery_events_match_source(key, &events) {
-            tracing::error!(
-                worker_id = key.0,
-                dp_rank = key.1,
-                "Discarding recovery batch containing a foreign clear barrier"
-            );
-            self.finish_failed_recovery_degraded(key, &binding, &cancel)
-                .await;
-            return;
-        }
-
         let mut worker_slots: Vec<_> = self
             .slots
             .iter()
@@ -862,10 +834,22 @@ impl WorkerQueryClient {
         {
             return;
         }
+        if !recovery_events_match_source(key, &events) {
+            tracing::error!(
+                worker_id = key.0,
+                dp_rank = key.1,
+                "Discarding recovery batch containing a foreign clear barrier"
+            );
+            self.fence_corrupt_recovery_locked(key, &mut guards[emitter_index].1)
+                .await;
+            return;
+        }
 
-        if tree_dump && let Err(error) = self.reset_rank(key).await {
-            guards[emitter_index].1.reset_pending = true;
-            guards[emitter_index].1.rank.finish_failed_recovery();
+        if tree_dump
+            && let Err(error) = self
+                .reset_rank_or_fence(key, &mut guards[emitter_index].1)
+                .await
+        {
             tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to reset rank before recovery tree dump; rank remains fenced");
             return;
         }
@@ -893,10 +877,9 @@ impl WorkerQueryClient {
                 cursor = cursor.advance_to(event_id);
             }
         }
-        if let Err(error) = self.apply_events_and_flush(events).await {
+        if let Err(error) = self.apply_events_and_flush(key.0, events).await {
             for (_, slot) in &mut guards {
-                slot.reset_pending = true;
-                slot.rank.finish_failed_recovery();
+                slot.fence_for_reset();
             }
             tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to acknowledge recovery batch containing clear; affected ranks remain fenced");
             return;
@@ -926,10 +909,9 @@ impl WorkerQueryClient {
             next_recovery_start,
         } = guards[emitter_index].1.rank.plan_pending_drain();
         if !events.is_empty()
-            && let Err(error) = self.apply_events_and_flush(events).await
+            && let Err(error) = self.apply_events_and_flush(key.0, events).await
         {
-            guards[emitter_index].1.reset_pending = true;
-            guards[emitter_index].1.rank.finish_failed_recovery();
+            guards[emitter_index].1.fence_for_reset();
             tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to acknowledge buffered events after clear recovery; rank remains fenced");
             return;
         }
@@ -1053,9 +1035,6 @@ mod tests {
     struct OrderedCancellationTransport {
         query_started: Notify,
         query_dropped: AtomicBool,
-        cancel_started: Notify,
-        cancel_release: Notify,
-        tombstone_clears: AtomicUsize,
     }
 
     struct QueryDropFlag<'a>(&'a AtomicBool);
@@ -1079,26 +1058,6 @@ mod tests {
             let _drop_flag = QueryDropFlag(&self.query_dropped);
             self.query_started.notify_one();
             std::future::pending().await
-        }
-
-        async fn cancel_instance_streams(
-            &self,
-            _endpoint_id: &dynamo_runtime::discovery::EndpointInstanceId,
-        ) -> usize {
-            assert!(
-                self.query_dropped.load(Ordering::SeqCst),
-                "old recovery task must be joined before transport cancellation"
-            );
-            self.cancel_started.notify_one();
-            self.cancel_release.notified().await;
-            1
-        }
-
-        async fn clear_instance_tombstone(
-            &self,
-            _endpoint_id: &dynamo_runtime::discovery::EndpointInstanceId,
-        ) {
-            self.tombstone_clears.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -1354,7 +1313,7 @@ mod tests {
         let slot = slot.lock().await;
         assert!(slot.active.is_none());
         assert!(slot.reset_pending);
-        assert_eq!(slot.lifecycle_generation, 0);
+        assert_eq!(slot.lifecycle_generation, Some(0));
         drop(slot);
         assert!(!client.publisher_bindings.contains_key(&205));
 
@@ -1400,7 +1359,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replacement_waits_for_old_target_stream_cancellation() {
+    async fn replacement_joins_old_recovery_before_rebinding() {
         let serving = EndpointId::from("test.router.generate");
         let kv_endpoint = EndpointId::from("test.router.kv");
         let worker = WorkerWithDpRank::new(42, 4);
@@ -1424,7 +1383,6 @@ mod tests {
         let transport = Arc::new(OrderedCancellationTransport::default());
         let client = WorkerQueryClient::new_for_test(indexer, rx, transport.clone());
         client.reconcile_view(initial).await;
-        assert_eq!(transport.tombstone_clears.load(Ordering::SeqCst), 1);
         transport.query_started.notified().await;
 
         let replacement = membership_view(
@@ -1441,20 +1399,13 @@ mod tests {
                 1,
             )],
         );
-        let reconcile = tokio::spawn({
-            let client = client.clone();
-            async move { client.reconcile_view(replacement).await }
-        });
-        transport.cancel_started.notified().await;
-        assert_eq!(transport.tombstone_clears.load(Ordering::SeqCst), 1);
-        transport.cancel_release.notify_waiters();
-        reconcile.await.unwrap();
-        assert_eq!(transport.tombstone_clears.load(Ordering::SeqCst), 2);
+        client.reconcile_view(replacement).await;
+        assert!(transport.query_dropped.load(Ordering::SeqCst));
         assert!(client.publisher_bindings.contains_key(&205));
     }
 
     #[tokio::test]
-    async fn foreign_clear_recovery_failure_drains_buffered_live_events() {
+    async fn foreign_clear_recovery_fences_rank_without_live_event_salvage() {
         let serving = EndpointId::from("test.router.generate");
         let kv_endpoint = EndpointId::from("test.router.kv");
         let worker = WorkerWithDpRank::new(42, 4);
@@ -1490,13 +1441,15 @@ mod tests {
             .await;
 
         let events = kv_indexer.dump_events().await.unwrap();
-        assert!(contains_block(&events, 1));
+        assert!(!contains_block(&events, 1));
         let slot = client
             .slots
             .get(&(worker.worker_id, worker.dp_rank))
             .unwrap()
             .clone();
-        assert!(!slot.lock().await.rank.recovery_inflight);
+        let slot = slot.lock().await;
+        assert!(!slot.rank.recovery_inflight);
+        assert!(slot.reset_pending);
     }
 
     #[tokio::test]

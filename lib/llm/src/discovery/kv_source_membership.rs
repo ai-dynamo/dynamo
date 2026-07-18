@@ -115,12 +115,14 @@ impl<S> KvSourceStatus<S> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Descriptive membership change only.
+///
+/// NOTE: Reset requirements are intentionally absent here. The shared coordinator derives and
+/// publishes a cumulative lifecycle generation so coalescing watch receivers cannot miss a fence.
 pub struct KvSourceTransition<S = KvEventSource> {
     pub key: KvSourceKey,
     pub previous: KvSourceStatus<S>,
     pub current: KvSourceStatus<S>,
-    /// The lifecycle owner must acknowledge a logical-rank reset before accepting the new state.
-    pub requires_cold_reset: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,6 +207,7 @@ pub enum KvSourceMembershipError {
 #[derive(Debug, Clone)]
 pub struct KvSourceMembership<S = KvEventSource> {
     advertisements: HashMap<KvSourceKey, HashMap<PublisherId, S>>,
+    publisher_sources: HashMap<PublisherId, KvSourceId>,
     conflicting_descriptors: HashSet<KvSourceId>,
 }
 
@@ -212,6 +215,7 @@ impl<S> Default for KvSourceMembership<S> {
     fn default() -> Self {
         Self {
             advertisements: HashMap::new(),
+            publisher_sources: HashMap::new(),
             conflicting_descriptors: HashSet::new(),
         }
     }
@@ -232,35 +236,50 @@ where
         let key = source.source_key();
         let publisher_id = source.publisher_id();
         let previous = self.status(&key);
+        let source_id = KvSourceId {
+            key: key.clone(),
+            publisher_id,
+        };
 
-        let incarnations = self.advertisements.entry(key.clone()).or_default();
-        if let Some(existing) = incarnations.get(&publisher_id) {
-            if existing == &source {
+        // NOTE: Runtime discovery owns generic descriptor immutability. This one typed check is
+        // still required to fail LLM membership closed if an external/corrupt watch reuses a
+        // publisher for another logical rank or changes typed metadata.
+        if let Some(existing_id) = self.publisher_sources.get(&publisher_id) {
+            let existing = self
+                .advertisements
+                .get(&existing_id.key)
+                .and_then(|incarnations| incarnations.get(&publisher_id));
+            if existing_id == &source_id && existing == Some(&source) {
                 return Ok(None);
             }
-            self.conflicting_descriptors.insert(KvSourceId {
-                key: key.clone(),
-                publisher_id,
-            });
+            self.conflicting_descriptors.insert(existing_id.clone());
             return Err(KvSourceMembershipError::ConflictingIncarnation {
                 publisher_id,
-                worker_id: key.worker.worker_id,
-                dp_rank: key.worker.dp_rank,
+                worker_id: existing_id.key.worker.worker_id,
+                dp_rank: existing_id.key.worker.dp_rank,
             });
         }
-        incarnations.insert(publisher_id, source);
+        self.publisher_sources.insert(publisher_id, source_id);
+        self.advertisements
+            .entry(key.clone())
+            .or_default()
+            .insert(publisher_id, source);
 
         let current = self.status(&key);
         Ok(Some(transition(key, previous, current)))
     }
 
     pub fn remove(&mut self, source_id: &KvSourceId) -> Option<KvSourceTransition<S>> {
+        if self.publisher_sources.get(&source_id.publisher_id) != Some(source_id) {
+            return None;
+        }
         let previous = self.status(&source_id.key);
         let incarnations = self.advertisements.get_mut(&source_id.key)?;
 
         // Removal is fenced by the exact random incarnation; a delayed removal cannot erase its
         // replacement or otherwise mutate another publisher's lifecycle.
         incarnations.remove(&source_id.publisher_id)?;
+        self.publisher_sources.remove(&source_id.publisher_id);
         self.conflicting_descriptors.remove(source_id);
         if incarnations.is_empty() {
             self.advertisements.remove(&source_id.key);
@@ -271,8 +290,15 @@ where
     }
 
     /// Fail one logical source closed after its publisher violates immutable attribution.
-    pub fn invalidate_descriptor(&mut self, source_id: KvSourceId) {
-        self.conflicting_descriptors.insert(source_id);
+    pub fn invalidate_publisher(&mut self, publisher_id: PublisherId) {
+        if let Some(source_id) = self.publisher_sources.get(&publisher_id) {
+            self.conflicting_descriptors.insert(source_id.clone());
+        }
+    }
+
+    pub fn remove_publisher(&mut self, publisher_id: PublisherId) -> Option<KvSourceTransition<S>> {
+        let source_id = self.publisher_sources.get(&publisher_id)?.clone();
+        self.remove(&source_id)
     }
 
     pub fn status(&self, key: &KvSourceKey) -> KvSourceStatus<S> {
@@ -406,18 +432,10 @@ fn transition<S>(
     previous: KvSourceStatus<S>,
     current: KvSourceStatus<S>,
 ) -> KvSourceTransition<S> {
-    let requires_cold_reset = !matches!(
-        (&previous, &current),
-        (
-            KvSourceStatus::Missing,
-            KvSourceStatus::ActiveRecoverable(_) | KvSourceStatus::ActiveLiveOnly(_)
-        )
-    );
     KvSourceTransition {
         key,
         previous,
         current,
-        requires_cold_reset,
     }
 }
 
@@ -526,11 +544,9 @@ mod tests {
         let mut membership = KvSourceMembership::new();
 
         let initial = membership.add(old.clone()).unwrap().unwrap();
-        assert!(!initial.requires_cold_reset);
         assert_eq!(initial.current, KvSourceStatus::ActiveLiveOnly(old.clone()));
 
         let overlap = membership.add(new.clone()).unwrap().unwrap();
-        assert!(overlap.requires_cold_reset);
         assert_eq!(
             overlap.current,
             KvSourceStatus::Ambiguous(KvSourceAmbiguity::Incarnations {
@@ -539,7 +555,6 @@ mod tests {
         );
 
         let resolved = membership.remove(&old.source_id()).unwrap();
-        assert!(resolved.requires_cold_reset);
         assert_eq!(
             resolved.current,
             KvSourceStatus::ActiveLiveOnly(new.clone())
