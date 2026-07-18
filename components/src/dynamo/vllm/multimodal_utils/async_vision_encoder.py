@@ -5,7 +5,7 @@
 
 ``AsyncVisionEncoder`` is the **Dynamo-owned** layer the worker talks to. It
 turns the author's synchronous, thread-affine backend into an awaitable
-``encode(raws) -> list[tensor]`` by:
+``encode(raws) -> list[encoder artifact]`` by:
 
 - running ``backend.preprocess`` **off the event loop** on a bounded
   ``ThreadPoolExecutor`` (CPU-heavy fetch / resize / patchify must not serialize
@@ -32,10 +32,9 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from typing import Generic, List
 
-import torch
-
 from dynamo.vllm.multimodal_utils.threaded_micro_batcher import ThreadedMicroBatcher
 from dynamo.vllm.multimodal_utils.vision_encoder_backend import (
+    EncoderOutput,
     ItemT,
     Preprocessed,
     RawT,
@@ -142,8 +141,9 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
             raise
 
     def validate(self) -> None:
-        """Fail-fast check run by ``load`` after ``build``: the author hardcoded a
-        usable ``image_token_id``."""
+        """Fail fast on the legacy tensor placeholder contract."""
+        if self._backend.output_format != "tensor":
+            return
         tid = getattr(self._backend, "image_token_id", None)
         if not isinstance(tid, int) or isinstance(tid, bool):
             raise ValueError(
@@ -153,19 +153,22 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
 
     def get_image_placeholder_token_id(self) -> int:
         """The token id marking image positions (the backend's hardcoded value)."""
+        if self._backend.output_format != "tensor":
+            raise RuntimeError(
+                "native Qwen CustomEncoder output does not use the linear splice"
+            )
         return self._backend.image_token_id
 
     # ---- request path ------------------------------------------------------
 
-    async def encode(self, raws: List[RawT]) -> List[torch.Tensor]:
+    async def encode(self, raws: List[RawT]) -> List[EncoderOutput]:
         """Optionally preprocess (off-loop, with a request-atomicity barrier) then
         batched-encode.
 
         With no preprocess pool (``preprocess_concurrency == 0``) raws go straight
         to the batcher (the backend folds any prep into ``forward_batch``). Returns
-        one ``(n_visual_tokens, lm_hidden_dim)`` tensor per raw input, in order.
-        Raises if any image's preprocess fails (submitting nothing) or if the
-        batched forward fails.
+        one encoder artifact per raw input, in order. Raises if any image's
+        preprocess fails (submitting nothing) or if the batched forward fails.
         """
         if self._batcher is None:
             raise RuntimeError("AsyncVisionEncoder.encode() called before load()")

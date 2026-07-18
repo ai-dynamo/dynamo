@@ -17,6 +17,7 @@ import torch
 from dynamo.vllm.multimodal_utils.async_vision_encoder import AsyncVisionEncoder
 from dynamo.vllm.multimodal_utils.vision_encoder_backend import (
     Preprocessed,
+    Qwen2VLImageEncoding,
     VisionEncoderBackend,
 )
 
@@ -179,6 +180,28 @@ def test_load_fails_fast_on_missing_image_token_id():
         enc.load("m")
     assert enc._batcher is None
     assert enc._pool is None
+
+
+def test_native_output_format_does_not_require_linear_placeholder():
+    class _NativeBackend(_FakeBackend):
+        output_format = "qwen2_vl_projected_grid"
+        image_token_id = None
+
+        def forward_batch(self, items, target_bucket=None):
+            return [
+                Qwen2VLImageEncoding(
+                    torch.zeros((1, 4), dtype=torch.bfloat16), (1, 2, 2)
+                )
+                for _ in items
+            ]
+
+    enc = AsyncVisionEncoder(_NativeBackend())
+    enc.load("m")
+    try:
+        with pytest.raises(RuntimeError, match="does not use the linear splice"):
+            enc.get_image_placeholder_token_id()
+    finally:
+        enc.shutdown()
 
 
 def test_shutdown_before_load_is_safe():
