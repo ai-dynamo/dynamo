@@ -36,6 +36,10 @@ def test_request_schedule_reuses_nine_images_across_one_hundred_requests() -> No
     assert counts == [11, 11, 11, 11, 11, 11, 11, 11, 12]
 
 
+def test_request_schedule_reuses_one_image_for_every_request() -> None:
+    assert _request_schedule(["image"], requests=100, seed=42) == ["image"] * 100
+
+
 def test_prompt_calibration_requires_exact_target() -> None:
     prompt, observed = _calibrate_prompt(
         644, lambda text: 600 + text.count("benchmark")
@@ -58,6 +62,23 @@ def test_workload_validation_rejects_requested_size_mismatch(tmp_path: Path) -> 
     )
     with pytest.raises(AssertionError, match="does not match requested 300x300"):
         validate_workload(tmp_path, expected_image_size=300)
+
+
+def test_workload_validation_rejects_requested_image_count_mismatch(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "workload_manifest.json").write_text(
+        json.dumps(
+            {
+                "decoded_image": {"width": 300, "height": 300},
+                "requests_per_concurrency": 100,
+                "unique_images": 9,
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(AssertionError, match="has 9 unique images; requested 1"):
+        validate_workload(tmp_path, expected_unique_images=1)
 
 
 def test_custom_isl_replaces_one_placeholder_with_image_tokens() -> None:
@@ -106,6 +127,7 @@ def test_config_is_closed_loop_and_uses_requested_encoder_limits(
     assert config.env["DYN_QWEN2_VL_MAX_BATCH_COST"] == "8"
     assert config.env["DYN_QWEN2_VL_GRAPH_BATCH_BUCKETS"] == "1,2,3,4,5,6,7,8"
     assert config.env["DYN_QWEN2_VL_GRAPH_IMAGE_SIZES"] == "300x300"
+    assert "DYN_CUSTOM_ENCODER_QUEUE_WAIT_MS" not in config.env
     assert "--use-server-token-count" in config.aiperf_extra_args
 
 
@@ -166,9 +188,10 @@ def test_validation_and_report_cover_all_ten_cells(tmp_path: Path) -> None:
         "settings": {
             "preprocess_concurrency": 4,
             "max_batch_cost": 8,
-            "queue_wait_ms": 1,
+            "batching_policy": "eager drain with no timed queue hold",
             "graph_buckets": list(range(1, 9)),
             "graph_image_sizes": ["300x300"],
+            "unique_images": 1,
         },
     }
     (tmp_path / "benchmark_metadata.json").write_text(
@@ -186,7 +209,9 @@ def test_validation_and_report_cover_all_ten_cells(tmp_path: Path) -> None:
     summarize(tmp_path, markdown, csv_path)
     report = markdown.read_text(encoding="utf-8")
     assert "Performance proxy only" in report
-    assert "nine reused 300×300 JPEGs" in report
+    assert "all requests share one 300×300 JPEG" in report
+    assert "Triton baseline used nine unique images" in report
+    assert "eager drain with no timed queue hold" in report
     assert "| 10 | 35.97 | 418.5 | 20.00 | 102.0 |" in report
     assert "| 10 | 8 | `[8]` | 8→8: 1 |" in report
     assert report.count("[artifact]") == 10

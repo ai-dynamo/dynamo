@@ -200,6 +200,10 @@ def generate_workload(
 ) -> Path:
     if image_size < 1:
         raise ValueError("image_size must be positive")
+    if unique_images < 1:
+        raise ValueError("unique_images must be positive")
+    if unique_images > requests:
+        raise ValueError("unique_images must not exceed requests")
     output_dir.mkdir(parents=True, exist_ok=True)
     tokenizer = AutoTokenizer.from_pretrained(decoder_model)
     processor = AutoProcessor.from_pretrained(encoder_model)
@@ -310,6 +314,7 @@ def generate_workload(
 def validate_workload(
     root: Path,
     expected_image_size: int | None = None,
+    expected_unique_images: int | None = None,
 ) -> dict[str, Any]:
     manifest_path = root / "workload_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -327,6 +332,11 @@ def validate_workload(
         )
     requests = int(manifest["requests_per_concurrency"])
     unique_images = int(manifest["unique_images"])
+    if expected_unique_images is not None and unique_images != expected_unique_images:
+        raise AssertionError(
+            f"workload has {unique_images} unique images; requested "
+            f"{expected_unique_images}"
+        )
     target_isl = int(manifest["target_isl"])
     min_bytes = int(manifest["encoding"]["min_bytes"])
     max_bytes = int(manifest["encoding"]["max_bytes"])
@@ -409,9 +419,11 @@ def main() -> None:
     generate.add_argument("--decoder-model", default=DECODER_MODEL)
     generate.add_argument("--encoder-model", default=ENCODER_MODEL)
     generate.add_argument("--image-size", type=int, default=DEFAULT_IMAGE_SIZE)
+    generate.add_argument("--unique-images", type=int, default=UNIQUE_IMAGES)
     validate = subparsers.add_parser("validate")
     validate.add_argument("workload_dir", type=Path)
     validate.add_argument("--image-size", type=int)
+    validate.add_argument("--unique-images", type=int)
     args = parser.parse_args()
     if args.command == "generate":
         generate_workload(
@@ -419,10 +431,13 @@ def main() -> None:
             decoder_model=args.decoder_model,
             encoder_model=args.encoder_model,
             image_size=args.image_size,
+            unique_images=args.unique_images,
         )
     else:
         validate_workload(
-            args.workload_dir.resolve(), expected_image_size=args.image_size
+            args.workload_dir.resolve(),
+            expected_image_size=args.image_size,
+            expected_unique_images=args.unique_images,
         )
 
 

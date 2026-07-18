@@ -115,6 +115,16 @@ def _workload_image_size(workload_dir: Path) -> tuple[int, int]:
     return width, height
 
 
+def _workload_unique_images(workload_dir: Path) -> int:
+    manifest = json.loads(
+        (workload_dir / "workload_manifest.json").read_text(encoding="utf-8")
+    )
+    unique_images = int(manifest["unique_images"])
+    if unique_images < 1:
+        raise ValueError("workload unique image count must be positive")
+    return unique_images
+
+
 def _metadata(
     concurrencies: tuple[int, ...],
     smoke: bool,
@@ -122,6 +132,7 @@ def _metadata(
 ) -> dict[str, Any]:
     manifest_path = workload_dir / "workload_manifest.json"
     width, height = _workload_image_size(workload_dir)
+    unique_images = _workload_unique_images(workload_dir)
     return {
         "axis": "concurrency",
         "concurrencies": list(concurrencies),
@@ -143,8 +154,9 @@ def _metadata(
             "max_batch_cost": 8,
             "graph_buckets": list(range(1, 9)),
             "graph_image_sizes": [f"{width}x{height}"],
+            "unique_images": unique_images,
             "preprocess_cache_size": 0,
-            "queue_wait_ms": 1,
+            "batching_policy": "eager drain with no timed queue hold",
             "max_num_seqs": 64,
             "max_model_len": 2048,
             "vllm_gpu_memory_utilization": 0.4,
@@ -207,7 +219,6 @@ def build_config(
             "DYN_QWEN2_VL_GRAPH_BATCH_BUCKETS": "1,2,3,4,5,6,7,8",
             "DYN_QWEN2_VL_GRAPH_IMAGE_SIZES": (f"{image_size[0]}x{image_size[1]}"),
             "DYN_QWEN2_VL_PREPROCESS_CACHE_SIZE": "0",
-            "DYN_CUSTOM_ENCODER_QUEUE_WAIT_MS": "1",
             "DYN_CUSTOM_ENCODER_TIMING": "1",
         },
         aiperf_extra_args=AIPERF_EXTRA_ARGS,
@@ -388,17 +399,31 @@ def summarize(root: Path, markdown_path: Path, csv_path: Path) -> None:
     )
     settings = metadata["settings"]
     image_shape = settings["graph_image_sizes"][0]
+    unique_images = int(settings["unique_images"])
+    workload_description = (
+        f"all requests share one {image_shape.replace('x', '×')} JPEG"
+        if unique_images == 1
+        else f"requests reuse {unique_images} unique "
+        f"{image_shape.replace('x', '×')} JPEGs"
+    )
+    baseline_workload_note = (
+        " The supplied Triton baseline used nine unique images, unlike this "
+        "single-image reuse run."
+        if unique_images == 1
+        else ""
+    )
     lines = [
         "# Qwen custom-encoder proxy versus supplied Triton baseline",
         "",
         "> **Performance proxy only:** Dynamo uses the Qwen2.5-VL-3B vision "
         "tower with its 2048-wide output truncated to 1536 columns for the "
         "Qwen2.5-1.5B decoder. The supplied Triton baseline used different "
-        "encoder weights, so this table is not a same-model or quality comparison.",
+        "encoder weights, so this table is not a same-model or quality comparison."
+        f"{baseline_workload_note}",
         "",
-        f"Each Dynamo cell uses the same 100-request JSONL, nine reused "
-        f"{image_shape.replace('x', '×')} JPEGs, exact ISL 644, exact OSL 7, "
-        "and 20 excluded warmups.",
+        f"Each Dynamo cell uses the same 100-request JSONL; "
+        f"{workload_description}; ISL is exactly 644, OSL is exactly 7, and "
+        "20 warmups are excluded.",
         "",
         "## Runtime",
         "",
@@ -411,8 +436,8 @@ def summarize(root: Path, markdown_path: Path, csv_path: Path) -> None:
         f"`{metadata['transformers_version']}`; PyTorch: "
         f"`{metadata['torch_version']}`; AIPerf: `{metadata['aiperf_version']}`",
         f"- Preprocess concurrency: {settings['preprocess_concurrency']}; "
-        f"maximum batch cost: {settings['max_batch_cost']}; queue wait: "
-        f"{settings['queue_wait_ms']} ms",
+        f"maximum batch cost: {settings['max_batch_cost']}; batching: "
+        f"{settings['batching_policy']}",
         f"- CUDA graph buckets: `{settings['graph_buckets']}`; image shape: "
         f"`{settings['graph_image_sizes']}`; preprocessing cache: disabled",
         "",
