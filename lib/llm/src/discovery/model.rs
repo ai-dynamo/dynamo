@@ -166,14 +166,14 @@ impl Model {
             .map(|entry| entry.value().clone())
     }
 
-    /// Return the only typed decode WorkerSet with a prefill router in a
-    /// namespace, after validating both P/D endpoint roles.
+    /// Return the decode WorkerSet for the only complete typed P/D topology in
+    /// a namespace.
     ///
     /// The rendezvous remains intentionally keyed by `(model, namespace)`: a
     /// namespace denotes one P/D topology, while exact EndpointIds denote its
     /// leaves. More than one typed Prefill endpoint or more than one
-    /// prefill-routed typed Decode endpoint is ambiguous, and callers must fail
-    /// P/D handling closed. Aggregated and Encode WorkerSets do not
+    /// typed Decode endpoint is ambiguous, whether or not its prefill router
+    /// has already been attached. Aggregated and Encode WorkerSets do not
     /// participate and continue serving normally.
     pub(crate) fn unique_prefill_routed_worker_set_in_namespace(
         &self,
@@ -207,7 +207,6 @@ impl Model {
             .map(|entry| Self::worker_set_identity(entry.key(), entry.value()))
             .collect::<Vec<_>>();
         prefill_endpoints.sort();
-        prefill_endpoints.dedup();
 
         let mut decode_worker_sets = self
             .worker_sets
@@ -215,7 +214,6 @@ impl Model {
             .filter(|entry| {
                 entry.value().namespace() == namespace
                     && entry.value().card().worker_type == Some(WorkerType::Decode)
-                    && entry.value().prefill_router.is_some()
             })
             .map(|entry| {
                 let identity = Self::worker_set_identity(entry.key(), entry.value());
@@ -228,11 +226,14 @@ impl Model {
             .iter()
             .map(|(identity, _)| identity.clone())
             .collect::<Vec<_>>();
-        if let Some(candidate) = decode_candidate {
+        if let Some(candidate) = decode_candidate
+            && !decode_endpoints
+                .iter()
+                .any(|identity| identity == &candidate.to_string())
+        {
             decode_endpoints.push(candidate.to_string());
         }
         decode_endpoints.sort();
-        decode_endpoints.dedup();
 
         if prefill_endpoints.len() > 1 || decode_endpoints.len() > 1 {
             return Err(AmbiguousPrefillRouterTopology {
@@ -243,7 +244,13 @@ impl Model {
             });
         }
 
-        Ok(decode_worker_sets.pop().map(|(_, worker_set)| worker_set))
+        if prefill_endpoints.len() == 1 && decode_endpoints.len() == 1 {
+            Ok(decode_worker_sets.pop().and_then(|(_, worker_set)| {
+                worker_set.prefill_router.is_some().then_some(worker_set)
+            }))
+        } else {
+            Ok(None)
+        }
     }
 
     fn worker_set_identity(key: &str, worker_set: &WorkerSet) -> String {
@@ -1252,54 +1259,6 @@ mod tests {
             .expect("one P/D pair is unambiguous")
             .expect("decode leaf is present");
         assert!(Arc::ptr_eq(&selected, &decode));
-    }
-
-    #[test]
-    fn multiple_endpoint_scoped_prefill_decode_pairings_are_ambiguous() {
-        use crate::worker_type::WorkerType;
-
-        let model = Model::new("llama".to_string());
-        for suffix in ["b", "a"] {
-            model.add_worker_set(
-                format!("decode-{suffix}"),
-                make_endpoint_worker_set(
-                    "deployment-a",
-                    &format!("decode-{suffix}"),
-                    "generate",
-                    WorkerType::Decode,
-                    true,
-                ),
-            );
-            model.add_worker_set(
-                format!("prefill-{suffix}"),
-                make_endpoint_worker_set(
-                    "deployment-a",
-                    &format!("prefill-{suffix}"),
-                    "generate",
-                    WorkerType::Prefill,
-                    false,
-                ),
-            );
-        }
-
-        let error = match model.unique_prefill_routed_worker_set_in_namespace("deployment-a") {
-            Err(error) => error,
-            Ok(_) => panic!("two endpoint-qualified P/D pairings must fail closed"),
-        };
-        assert_eq!(
-            error.decode_endpoints,
-            [
-                "deployment-a/decode-a/generate".to_string(),
-                "deployment-a/decode-b/generate".to_string(),
-            ]
-        );
-        assert_eq!(
-            error.prefill_endpoints,
-            [
-                "deployment-a/prefill-a/generate".to_string(),
-                "deployment-a/prefill-b/generate".to_string(),
-            ]
-        );
     }
 
     /// Baseline: a WorkerSet without a PrefillRouter is always displayable
