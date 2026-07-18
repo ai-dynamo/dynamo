@@ -152,7 +152,8 @@ def test_validation_and_report_cover_all_ten_cells(tmp_path: Path) -> None:
     )
     (tmp_path / "sweep.log").write_text(
         "[input] Config: dynamo-custom-encoder concurrency=10\n"
-        "custom_encoder_graph selected_bucket=8 actual_cost=8 batch_size=8\n",
+        "custom_encoder_timing stage=vit_forward elapsed_ms=12.3 "
+        "batch_size=8 bucket=8 cost=8\n",
         encoding="utf-8",
     )
     assert len(validate_matrix(tmp_path)) == 10
@@ -162,5 +163,6 @@ def test_validation_and_report_cover_all_ten_cells(tmp_path: Path) -> None:
     report = markdown.read_text(encoding="utf-8")
     assert "Performance proxy only" in report
     assert "| 10 | 35.97 | 418.5 | 20.00 | 102.0 |" in report
+    assert "| 10 | 8 | `[8]` | 8→8: 1 |" in report
     assert report.count("[artifact]") == 10
     assert csv_path.read_text(encoding="utf-8").count("\n") == 11
