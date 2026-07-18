@@ -34,16 +34,16 @@ patches:
           targetContainerName: main
       - op: replace
         path: /spec/components/1/podTemplate/spec/containers/0/image
-        value: dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-16380149695c-b@sha256:e0905e82bf68480bbc341a84325323eca4d6c9200cbf4ddd4a2509ca14c6d1a4
+        value: dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-324c14408b2c-b@sha256:f0e3d788dca28715674705a7f151636dae3ee868f4df5575c1e284a777a7ab0a
       - op: replace
         path: /spec/components/1/podTemplate/spec/containers/1/image
-        value: dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-16380149695c-b@sha256:e0905e82bf68480bbc341a84325323eca4d6c9200cbf4ddd4a2509ca14c6d1a4
+        value: dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-324c14408b2c-b@sha256:f0e3d788dca28715674705a7f151636dae3ee868f4df5575c1e284a777a7ab0a
       - op: add
         path: /metadata/annotations/schwinns.ai-dynamo.io~1cuda-init-variant
         value: B-physical-uuid-isolated-children
       - op: add
         path: /metadata/annotations/schwinns.ai-dynamo.io~1experiment-commit
-        value: 16380149695c9731c1d82efbd277e3e7fd0e6e96
+        value: 324c14408b2cb79f39d80a8d90fe4ae54182bef2
       - op: add
         path: /spec/components/1/podTemplate/metadata/annotations/schwinns.ai-dynamo.io~1cuda-init-variant
         value: B-physical-uuid-isolated-children

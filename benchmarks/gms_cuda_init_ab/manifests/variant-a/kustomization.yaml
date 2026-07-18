@@ -34,16 +34,16 @@ patches:
           targetContainerName: main
       - op: replace
         path: /spec/components/1/podTemplate/spec/containers/0/image
-        value: dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-16380149695c-a@sha256:869d40f0b02fa6a74f9db94d9ed6e8ec5d614244dd1e4ea947967ec9aad601fb
+        value: dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-324c14408b2c-a@sha256:d0ea4cc1aceeeeef5825c418999ceca00fcde20dbdbc203d4b2bc683a874708a
       - op: replace
         path: /spec/components/1/podTemplate/spec/containers/1/image
-        value: dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-16380149695c-a@sha256:869d40f0b02fa6a74f9db94d9ed6e8ec5d614244dd1e4ea947967ec9aad601fb
+        value: dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-324c14408b2c-a@sha256:d0ea4cc1aceeeeef5825c418999ceca00fcde20dbdbc203d4b2bc683a874708a
       - op: add
         path: /metadata/annotations/schwinns.ai-dynamo.io~1cuda-init-variant
         value: A-prior-child-visibility
       - op: add
         path: /metadata/annotations/schwinns.ai-dynamo.io~1experiment-commit
-        value: 16380149695c9731c1d82efbd277e3e7fd0e6e96
+        value: 324c14408b2cb79f39d80a8d90fe4ae54182bef2
       - op: add
         path: /spec/components/1/podTemplate/metadata/annotations/schwinns.ai-dynamo.io~1cuda-init-variant
         value: A-prior-child-visibility

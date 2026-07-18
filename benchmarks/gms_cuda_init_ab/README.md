@@ -139,7 +139,7 @@ delete or recreate the retained checkpoint.
 The exact image source is commit:
 
 ```text
-SOURCE_COMMIT=16380149695c9731c1d82efbd277e3e7fd0e6e96
+SOURCE_COMMIT=324c14408b2cb79f39d80a8d90fe4ae54182bef2
 ```
 
 The base image is pinned to:
@@ -150,15 +150,15 @@ dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:44ade91e2dc09c9732ea038b9db81bff7b3f
 
 | Variant | Final image |
 |---|---|
-| A | `dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-16380149695c-a@sha256:869d40f0b02fa6a74f9db94d9ed6e8ec5d614244dd1e4ea947967ec9aad601fb` |
-| B | `dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-16380149695c-b@sha256:e0905e82bf68480bbc341a84325323eca4d6c9200cbf4ddd4a2509ca14c6d1a4` |
+| A | `dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-324c14408b2c-a@sha256:d0ea4cc1aceeeeef5825c418999ceca00fcde20dbdbc203d4b2bc683a874708a` |
+| B | `dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-324c14408b2c-b@sha256:f0e3d788dca28715674705a7f151636dae3ee868f4df5575c1e284a777a7ab0a` |
 
 Both images have 79 identical OCI filesystem layer descriptors and these
 labels:
 
 ```text
-org.opencontainers.image.revision=16380149695c9731c1d82efbd277e3e7fd0e6e96
-com.nvidia.dynamo.source-archive-sha256=ed62756a9f9483e703526850186a686d614c4e7a887af4cd1a310180d03d8268
+org.opencontainers.image.revision=324c14408b2cb79f39d80a8d90fe4ae54182bef2
+com.nvidia.dynamo.source-archive-sha256=f744868db122a1dd43ee56291c7390e8ca937b059acaf174a24953bf9bcdce9f
 com.nvidia.dynamo.dockerfile-sha256=c5d72e01a8d660a46c962b928d38cfdf7f0bdf50f7ac8f144fcfce521d9e4ac7
 ```
 
@@ -166,17 +166,17 @@ Their OCI config digests differ because A and B intentionally set different
 isolation env/label values:
 
 ```text
-A config: sha256:ce7dabf6905c0adca4fca93735d8c5c10a5e9f69f79a370c9af1655f364b8956
-B config: sha256:3e27b63a98513683b783ea7903426a5904373e5a158810dc6faa3c27fcadbc69
+A config: sha256:99f7e36945d1af741e1c0fc8c752e6e4f106b5e689614220bf9c5a0292e40555
+B config: sha256:5857baf8f6ecb1180fc5ecf45785b0478f5bae94d929a769dc739d2b175e2b82
 ```
 
 Installed source hashes are identical in A and B and match `SOURCE_COMMIT`:
 
 | File | SHA-256 |
 |---|---|
-| `cli/server.py` | `7dad76f84e145c0d4f52bd2b4ed2476c6a3f3d4c7bf15237bab977a0d943db8e` |
+| `cli/server.py` | `8bda1b32f7a9d5ccab9bd977a08e1afbc2511640991f79218b6654ca177c5f0f` |
 | `cli/runner.py` | `18ba0fca9afc6259c305e88017e9c055d7b70824b355170ed3b09f7ca0cef02e` |
-| `cli/snapshot/loader.py` | `e80f438858a6a6d6f901b21b5ebb36bb1ab410e48955c277d92fb3563040a139` |
+| `cli/snapshot/loader.py` | `f63462f01c3a65da116eb1ddc9c26fa51c80e0e219f4f9674b6295596a5f78fa` |
 | `common/utils.py` | `4f574d19467c8328d4ff1fb01914bac341418b269dde4ff350f91b50dd050fad` |
 | `common/cuda_utils.py` | `db3d25994173dd584d5a0a04daf6261997263ae5b8c188298d7d15d26f9efa87` |
 | `server/allocations.py` | `fb7f1d947c8391fc5a8140c39f33a90e98329bf52f2ba71d54d6e98942b4f47a` |
@@ -194,23 +194,23 @@ Dockerfile from that commit, so a working-tree Dockerfile cannot drift from the
 revision label:
 
 ```bash
-SOURCE_COMMIT=16380149695c9731c1d82efbd277e3e7fd0e6e96 \
+SOURCE_COMMIT=324c14408b2cb79f39d80a8d90fe4ae54182bef2 \
   ./benchmarks/gms_cuda_init_ab/build-images.sh
 
 docker push \
-  dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-16380149695c-a
+  dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-324c14408b2c-a
 docker push \
-  dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-16380149695c-b
+  dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-324c14408b2c-b
 ```
 
 Inspect the live registry digests and compare OCI layers:
 
 ```bash
 docker manifest inspect --verbose \
-  dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-16380149695c-a \
+  dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-324c14408b2c-a \
   > /tmp/gms-init-a.manifest.json
 docker manifest inspect --verbose \
-  dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-16380149695c-b \
+  dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-324c14408b2c-b \
   > /tmp/gms-init-b.manifest.json
 
 jq -r '.Descriptor.digest' /tmp/gms-init-{a,b}.manifest.json
@@ -227,7 +227,7 @@ Inspect source labels, filesystem diff IDs, and installed hashes:
 
 ```bash
 for variant in a b; do
-  image="dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-16380149695c-$variant"
+  image="dynamoci.azurecr.io/ai-dynamo/dynamo:gms-cuda-init-ab-324c14408b2c-$variant"
   docker pull "$image"
   docker image inspect "$image" |
     jq '.[0] | {RepoDigests, labels:.Config.Labels, env:.Config.Env,
@@ -253,9 +253,9 @@ for name in files:
 done
 
 git show \
-  16380149695c9731c1d82efbd277e3e7fd0e6e96:benchmarks/gms_cuda_init_ab/Dockerfile |
+  324c14408b2cb79f39d80a8d90fe4ae54182bef2:benchmarks/gms_cuda_init_ab/Dockerfile |
   sha256sum
-git archive 16380149695c9731c1d82efbd277e3e7fd0e6e96 \
+git archive 324c14408b2cb79f39d80a8d90fe4ae54182bef2 \
   lib/gpu_memory_service | sha256sum
 ```
 
