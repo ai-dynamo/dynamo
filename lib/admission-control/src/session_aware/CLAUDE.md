@@ -14,10 +14,14 @@ This module implements Session-Aware Admission Control as one `PolicyClassAdmiss
 | Field | Default | Role |
 |---|---:|---|
 | `pause_threshold` | `0.95` | Start pressure handling above this fraction of logical worker capacity. |
-| `pause_target` | `0.80` | Pause down to, and greedily resume up to, this fraction. There is no separate resume watermark. |
-| `resume_timeout_seconds` | `1800` | Bound starvation by releasing a timed-out request to normal worker selection. |
+| `pause_target` | `0.80` | Pause down to this fraction of logical worker capacity. |
+| `resume_hysteresis` | `0.10` | Greedily resume up to `pause_threshold - resume_hysteresis`. |
+| `resume_timeout_seconds` | `1800` | Bound starvation by pinning a timed-out request to the least-loaded eligible worker. |
 | `session_retention_seconds` | `1800` | Retain quiescent placement and footprint state after the last successful turn. |
 | `scheduler_interval_seconds` | `5` | Minimum interval between reconciliation passes. |
+| `acting_token_weight` | `1.0` | Scale IdleResident tokens in normal capacity accounting. |
+| `acting_decay_tau_seconds` | `1.0` | Exponentially decay IdleResident tokens when choosing a forced-resume worker. |
+| `buffer_per_program` | `100` | Add fixed headroom to every active program's token footprint. |
 
 ## Inspiration and comparison
 
@@ -26,9 +30,9 @@ This policy is inspired by the [ThunderAgent paper](https://arxiv.org/abs/2602.1
 | Change | Why |
 |---|---|
 | Require a stable `session_id`; bypass sessionless traffic instead of grouping it under a default program. | Identity is the working-set ownership key, and bypass keeps unrelated non-agent traffic out of session-aware admission-control state. |
-| Dispatch the next turn of an assigned active session without reapplying retained-capacity admission, while still fitting concurrent Running context within device capacity; periodic pressure handling pauses idle victims or marks running victims after completion. | This preserves upstream's active-program continuation semantics without allowing native-offload retention capacity to over-admit live GPU work. Pressure suspension clears affinity so the existing global packer can rebalance resumed work. |
-| Trigger pressure at 0.95, drain to 0.80, and also use 0.80 as the resume ceiling; upstream pauses only after projected overflow and resumes against remaining capacity. | The proactive high/low pair avoids engine-cache saturation, while earlier pausing and a separate resume ceiling both lost throughput or reuse. |
-| Account exact live logical context from `RequestProgress`; use device capacity to admit Running requests and device plus native-offload capacity for retained sessions. Omit upstream's character estimate, unused shared-token hook, per-program buffer, ACTING weight, and optional decay. | Host HiCache can retain an idle session, but must not be treated as room to enqueue more backend work. Exact Dynamo observations remove interacting heuristics. |
+| Dispatch the next turn of an assigned active session without reapplying a physical or retained-capacity fit test; periodic pressure handling pauses idle victims or marks running victims after completion. | This preserves the source algorithm's active-program continuation semantics. Pressure suspension clears affinity so global resume packing can rebalance resumed work. |
+| Trigger pressure at 0.95, drain to 0.80, and resume to `pause_threshold - resume_hysteresis`. | This preserves the source algorithm's separate pause target and resume watermark. |
+| Account exact live logical context from `RequestProgress` instead of the reference implementation's character estimate or unused shared-token hook. | Dynamo observes real request progress, so the same buffer, ACTING weight, and decay policy can operate on an authoritative footprint. |
 | Consume Dynamo's session-final signal instead of requiring upstream's separate `/programs/release` call, with a 30-minute inactivity lease as fallback. | The terminal request releases accounting immediately and is still forwarded normally; the lease bounds retained state for clients that cannot signal completion. |
 | Encode only `Running`, `IdleResident`, and `Suspended`, with waiters and rollback owned by native queue admission. | This removes invalid status/lifecycle combinations and gives cancellation and same-session concurrency one authoritative owner without changing the retained pause/resume policy. |
 
@@ -58,7 +62,7 @@ AdmissionRequest
        -> sticky worker temporarily overloaded: Defer without migration
        -> new session while any session is suspended: Defer for fairness
        -> no eligible worker has usable capacity metadata: Ready(Any), letting the normal router fail open
-       -> enough device running capacity and total retention capacity: Ready(Exact) on least-used eligible worker
+       -> enough logical retention capacity: Ready(Exact) on least-used eligible worker
        -> otherwise: Defer
   -> router queue and selector
   -> Dispatched: commit the selected worker
@@ -86,12 +90,13 @@ Registration rejects `session_aware` on a class in a multi-bucket family. Those 
 
 ## Logical capacity accounting
 
-Total retention capacity is `total_kv_blocks * block_size + native_offloading_capacity_tokens` for each worker/rank. A Running request must additionally fit in `total_kv_blocks * block_size` device capacity; this keeps the deferred queue ahead of SGLang even when host HiCache has room. Workers with missing or zero device capacity are excluded from session-aware admission-control capacity gating, with a one-time warning. If no worker reports usable metadata, capacity gating is disabled and requests continue through normal router selection.
+Logical capacity is `total_kv_blocks * block_size + native_offloading_capacity_tokens` for each worker/rank. The source-equivalent policy does not separately gate Running requests against device-only capacity: an assigned active continuation proceeds immediately, while periodic pressure reconciliation controls the logical working set. Workers with missing or zero device capacity are excluded from session-aware admission-control capacity gating, with a one-time warning. If no worker reports usable metadata, capacity gating is disabled and requests continue through normal router selection.
 
 Only Running or IdleResident programs with an assigned worker contribute usage:
 
 ```text
-normal usage = program tokens
+Running usage = live context tokens + buffer_per_program
+IdleResident usage = completed context tokens * acting_token_weight + buffer_per_program
 ```
 
 Running programs read their full logical context directly from the retained `RequestProgress` handle. The response path updates that handle with one relaxed atomic operation and sends no per-output actor event. Completion remains authoritative.
@@ -115,21 +120,21 @@ Resume-before-pause is intentional source behavior.
 
 ### Greedy resume
 
-The usable ceiling is `pause_target * capacity`. Suspended programs are considered in these groups:
+The usable ceiling is `(pause_threshold - resume_hysteresis) * capacity`. Suspended programs are considered in these groups:
 
 1. A waiting continuation after at least one completed turn.
 2. A first-step program, whether waiting or idle.
 3. An idle multi-step program with no waiting request.
 
-Within a group, sessions with fewer eligible workers are considered first, then by increasing context size. This preserves the source small-context preference when routing constraints are equal without letting flexible work consume a constrained session's only worker. Candidates reserve actual per-worker retention and device capacity as they are selected; the feasible set is then placed largest-context first onto the eligible worker with the most remaining capacity. If that final repack is incompatible with routing constraints, the feasible selection placement is retained. Resuming a session with a deferred request emits `MakeReady`; resuming an idle session only changes its program state.
+For ordinary homogeneous traffic, candidates are selected by group and increasing context size against the scalar sum of remaining worker capacity, then the selected set is packed globally largest-context-first onto the worker with the most room. This deliberately matches the source algorithm. If requests have constrained worker eligibility, selection reserves concrete eligible-worker capacity as a Dynamo safety extension; if final repacking is incompatible with those constraints, the feasible selection placement is retained. Resuming a session with a deferred request emits `MakeReady`; resuming an idle session only changes its program state.
 
 ### Forced resume
 
-A current request suspended for `resume_timeout_seconds` bypasses the normal fit test and returns to normal worker selection with `WorkerPlacement::Any`. This is the starvation backstop. A session waiting only because every structurally valid worker is temporarily overloaded retains its assignment and remains deferred.
+A current request suspended for `resume_timeout_seconds` bypasses the normal fit test and is pinned to the eligible worker with the most remaining capacity. Worker load for this decision uses exponentially decayed IdleResident tokens plus the per-program buffer, matching the source algorithm. This is the starvation backstop. A session waiting only because every structurally valid worker is temporarily overloaded retains its assignment and remains deferred.
 
 ### Pause
 
-When a worker exceeds `pause_threshold * capacity`, Session-Aware Admission Control suspends the smallest IdleResident sessions until usage reaches `pause_target * capacity`. Running sessions cannot be interrupted, so if those suspensions are insufficient they are marked and become Suspended only after their current request completes. Actual pressure suspension clears the assigned worker so greedy resume can globally repack the program.
+When a worker exceeds `pause_threshold * capacity`, Session-Aware Admission Control suspends the smallest IdleResident sessions until usage reaches `pause_target * capacity`. Running sessions cannot be interrupted. If immediate suspensions are insufficient, every remaining unmarked Running session on that worker is marked and becomes Suspended after its current request completes; marking does not reduce current usage. Actual pressure suspension clears the assigned worker so greedy resume can globally repack the program.
 
 ## Primitive mapping
 
