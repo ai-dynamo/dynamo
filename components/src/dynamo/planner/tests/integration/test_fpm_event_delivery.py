@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import os
+import subprocess
+import sys
 from contextlib import AsyncExitStack
 
 import pytest
@@ -34,7 +37,6 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.integration,
     pytest.mark.planner,
-    pytest.mark.forked,
 ]
 
 
@@ -63,14 +65,18 @@ class _DecodePlanner(NativePlannerBase):
     require_decode = True
 
 
-def test_endpoint_fpm_reaches_planner_and_drives_scale_up(tmp_path, monkeypatch):
-    asyncio.run(
-        _endpoint_fpm_reaches_planner_and_drives_scale_up(tmp_path, monkeypatch)
+def test_endpoint_fpm_reaches_planner_and_drives_scale_up(tmp_path):
+    # Keep binding runtimes out of pytest's process without pytest-forked, whose parent setup
+    # stack is not advanced when a forked item is the last test in its module.
+    subprocess.run(
+        [sys.executable, __file__],
+        check=True,
+        env={**os.environ, "DYN_FILE_KV": str(tmp_path)},
+        timeout=30,
     )
 
 
-async def _endpoint_fpm_reaches_planner_and_drives_scale_up(tmp_path, monkeypatch):
-    monkeypatch.setenv("DYN_FILE_KV", str(tmp_path))
+async def _endpoint_fpm_reaches_planner_and_drives_scale_up():
     namespace = "fpm-test"
     endpoint_path = f"{namespace}.worker.generate"
     async with AsyncExitStack() as stack:
@@ -219,3 +225,7 @@ async def _endpoint_fpm_reaches_planner_and_drives_scale_up(tmp_path, monkeypatc
         assert decision is not None
         assert decision.num_decode is not None
         assert decision.num_decode > 1
+
+
+if __name__ == "__main__":
+    asyncio.run(_endpoint_fpm_reaches_planner_and_drives_scale_up())
