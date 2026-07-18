@@ -34,6 +34,7 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.integration,
     pytest.mark.planner,
+    pytest.mark.forked,
 ]
 
 
