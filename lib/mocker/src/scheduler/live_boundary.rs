@@ -761,6 +761,9 @@ pub(crate) async fn wait_for_live_pass_boundary<C: LiveBoundaryCore>(
                 if discard_pending_output || outcome != Some(SchedulerCommandResult::Noop) {
                     pending.suppress_request_outputs(request_id);
                 }
+                if core.live_is_empty() {
+                    return true;
+                }
             }
             _ = &mut internal_deadline, if internal_deadline_ms.is_some() => {
                 #[cfg(feature = "kvbm-offload")]

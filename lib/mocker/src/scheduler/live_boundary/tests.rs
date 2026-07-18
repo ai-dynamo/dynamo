@@ -176,7 +176,7 @@ async fn cancel_pending_pass(
         command_effects: false,
         midpass_kv_effects: false,
         execute_count: 0,
-        live_pass_limit: None,
+        live_pass_limit: Some(1),
         refill_command_tx: None,
         applied_command_count: 0,
     };

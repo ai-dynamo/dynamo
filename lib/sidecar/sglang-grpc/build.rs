@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Compiles sidecar client stubs from the temporarily vendored SGLang gRPC contract.
+//! Compiles shared client and server stubs from the vendored SGLang gRPC contract.
 
 use std::env;
 use std::path::PathBuf;
@@ -16,6 +16,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // (e.g. `routed_dp_rank`). The flag was added in protoc 3.12 for exactly
     // this and is a no-op on 3.15+ where proto3 optional is stable.
     tonic_build::configure()
+        .build_client(true)
+        .build_server(true)
         .protoc_arg("--experimental_allow_proto3_optional")
         .compile_protos(&[proto_path.as_path()], &[proto_dir.as_path()])?;
 
