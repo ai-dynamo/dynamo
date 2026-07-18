@@ -20,6 +20,7 @@ import logging
 import os
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -173,6 +174,22 @@ class VideoCreateResponse(BaseModel):
     inference_time_s: float | None = None
 
 
+@dataclass
+class ResolvedRequestParams:
+    """Request parameters after validation and default resolution."""
+
+    nvext: NvExtVideoCreateRequest
+    width: int
+    height: int
+    fps: int
+    num_frames: int
+    num_inference_steps: int
+    guidance_scale: float
+    seed: int | None
+    response_format: str
+    output_format: str
+
+
 # ── Backend ───────────────────────────────────────────────────────────────────
 
 
@@ -187,16 +204,6 @@ def _coerce_optional_float(value: object) -> float | None:
 
 
 def _supports_fp4_quantization() -> bool:
-    try:
-        import torch
-    except ImportError as exc:
-        logger.warning(
-            "NVFP4 quantization requested but torch is unavailable. "
-            "Continuing without NVFP4 quantization: %s",
-            exc,
-        )
-        return False
-
     try:
         major, minor = torch.cuda.get_device_capability()
     except (AssertionError, RuntimeError) as exc:
@@ -301,8 +308,11 @@ class FastVideoBackend:
 
         quantization = None
         experimental: dict[str, object] = {}
-        if self.args.vsa_sparsity is not None:
-            experimental["VSA_sparsity"] = self.args.vsa_sparsity
+        vsa_sparsity = self.args.vsa_sparsity
+        if vsa_sparsity is None and self.args.attention_backend == "VIDEO_SPARSE_ATTN":
+            vsa_sparsity = DEFAULT_VSA_SPARSITY
+        if vsa_sparsity is not None:
+            experimental["VSA_sparsity"] = vsa_sparsity
         if enable_fp4_quantization and _supports_fp4_quantization():
             quantization = QuantizationConfig(transformer_quant="NVFP4")
 
@@ -525,6 +535,81 @@ class FastVideoBackend:
         finally:
             self._cleanup_staging_file(video_path, video_id)
 
+    def _failed_response(
+        self,
+        *,
+        video_id: str,
+        created_ts: int,
+        model: str,
+        error: str,
+        started_at: float,
+    ) -> dict[str, Any]:
+        return VideoCreateResponse(
+            id=video_id,
+            created=created_ts,
+            model=model,
+            status="failed",
+            progress=0,
+            data=[],
+            error=error,
+            inference_time_s=time.time() - started_at,
+        ).model_dump()
+
+    def _resolve_request_params(
+        self, request: VideoCreateRequest
+    ) -> ResolvedRequestParams:
+        """Validate the request and resolve defaults.
+
+        Raises ValueError for every client-side validation failure, and is the
+        only place such ValueErrors may come from: create_video runs it before
+        generation starts so that exceptions raised inside FastVideo are never
+        misattributed to the client.
+        """
+        if request.input_reference is not None:
+            raise ValueError(
+                "FastVideo example worker does not support input_reference "
+                "(image-to-video) requests"
+            )
+
+        nvext = request.nvext or NvExtVideoCreateRequest()
+        width, height = self._parse_size(request.size)
+        fps = nvext.fps if nvext.fps is not None else self.args.default_fps
+        if fps <= 0:
+            raise ValueError("fps must be positive")
+
+        num_frames = self._compute_num_frames(request, nvext)
+        num_inference_steps = (
+            nvext.num_inference_steps
+            if nvext.num_inference_steps is not None
+            else self.args.default_num_inference_steps
+        )
+        if num_inference_steps <= 0:
+            raise ValueError("num_inference_steps must be positive")
+        if num_inference_steps > self.args.max_num_inference_steps:
+            raise ValueError(
+                f"Invalid num_inference_steps {num_inference_steps}, exceeds "
+                f"maximum {self.args.max_num_inference_steps}"
+            )
+
+        guidance_scale = (
+            nvext.guidance_scale
+            if nvext.guidance_scale is not None
+            else self.args.default_guidance_scale
+        )
+        seed = nvext.seed if nvext.seed is not None else self.args.default_seed
+        return ResolvedRequestParams(
+            nvext=nvext,
+            width=width,
+            height=height,
+            fps=fps,
+            num_frames=num_frames,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            seed=seed,
+            response_format=self._resolve_response_format(request.response_format),
+            output_format=self._resolve_output_format(request.output_format),
+        )
+
     # ── Dynamo endpoint ───────────────────────────────────────────────────────
 
     @dynamo_endpoint(VideoCreateRequest, VideoCreateResponse)
@@ -536,51 +621,31 @@ class FastVideoBackend:
         video_path: Path | None = None
 
         try:
+            params = self._resolve_request_params(request)
+        except ValueError as exc:
+            # Client-side request validation failure; generation never started.
+            logger.warning("[%s] Invalid request: %s", video_id, exc)
+            yield self._failed_response(
+                video_id=video_id,
+                created_ts=created_ts,
+                model=request.model,
+                error=str(exc),
+                started_at=started_at,
+            )
+            return
+
+        try:
             if self.generator is None:
                 raise RuntimeError("Generator is not initialized")
-            if request.input_reference is not None:
-                raise ValueError(
-                    "FastVideo example worker does not support input_reference "
-                    "(image-to-video) requests"
-                )
-
-            nvext = request.nvext or NvExtVideoCreateRequest()
-            width, height = self._parse_size(request.size)
-            fps = nvext.fps if nvext.fps is not None else self.args.default_fps
-            if fps <= 0:
-                raise ValueError("fps must be positive")
-
-            num_frames = self._compute_num_frames(request, nvext)
-            num_inference_steps = (
-                nvext.num_inference_steps
-                if nvext.num_inference_steps is not None
-                else self.args.default_num_inference_steps
-            )
-            if num_inference_steps <= 0:
-                raise ValueError("num_inference_steps must be positive")
-            if num_inference_steps > self.args.max_num_inference_steps:
-                raise ValueError(
-                    f"Invalid num_inference_steps {num_inference_steps}, exceeds "
-                    f"maximum {self.args.max_num_inference_steps}"
-                )
-
-            guidance_scale = (
-                nvext.guidance_scale
-                if nvext.guidance_scale is not None
-                else self.args.default_guidance_scale
-            )
-            seed = nvext.seed if nvext.seed is not None else self.args.default_seed
-            response_format = self._resolve_response_format(request.response_format)
-            output_format = self._resolve_output_format(request.output_format)
 
             logger.info(
                 "[%s] create_video size=%dx%d frames=%d fps=%d steps=%d",
                 video_id,
-                width,
-                height,
-                num_frames,
-                fps,
-                num_inference_steps,
+                params.width,
+                params.height,
+                params.num_frames,
+                params.fps,
+                params.num_inference_steps,
             )
             logger.info(
                 "[%s] Waiting for generate lock (locked=%s)",
@@ -594,14 +659,14 @@ class FastVideoBackend:
                         self._generate_video,
                         prompt=request.prompt,
                         video_id=video_id,
-                        width=width,
-                        height=height,
-                        num_frames=num_frames,
-                        fps=fps,
-                        num_inference_steps=num_inference_steps,
-                        guidance_scale=guidance_scale,
-                        seed=seed,
-                        nvext=nvext,
+                        width=params.width,
+                        height=params.height,
+                        num_frames=params.num_frames,
+                        fps=params.fps,
+                        num_inference_steps=params.num_inference_steps,
+                        guidance_scale=params.guidance_scale,
+                        seed=params.seed,
+                        nvext=params.nvext,
                     )
                 )
                 try:
@@ -658,8 +723,8 @@ class FastVideoBackend:
                 data=[
                     await self._make_video_data(
                         video_id=video_id,
-                        output_format=output_format,
-                        response_format=response_format,
+                        output_format=params.output_format,
+                        response_format=params.response_format,
                         video_path=video_path,
                     )
                 ],
@@ -669,17 +734,21 @@ class FastVideoBackend:
             self._cleanup_staging_file(video_path, video_id)
             raise
         except Exception as exc:
+            # Server-side failure: request validation already finished, so any
+            # exception here — including ValueError raised inside FastVideo —
+            # is a generation fault. Deliberately broad without re-raise:
+            # FastVideo internals can raise arbitrary exception types, and
+            # re-raising would surface to /v1/videos clients as an opaque
+            # transport error instead of the documented VideoCreateResponse
+            # with status="failed".
             logger.exception("[%s] Generation failed", video_id)
-            yield VideoCreateResponse(
-                id=video_id,
-                created=created_ts,
+            yield self._failed_response(
+                video_id=video_id,
+                created_ts=created_ts,
                 model=request.model,
-                status="failed",
-                progress=0,
-                data=[],
                 error=str(exc),
-                inference_time_s=time.time() - started_at,
-            ).model_dump()
+                started_at=started_at,
+            )
 
 
 # ── Dynamo wiring ─────────────────────────────────────────────────────────────
@@ -747,8 +816,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--vsa-sparsity",
         type=float,
-        default=DEFAULT_VSA_SPARSITY,
-        help="VSA_sparsity value routed through PipelineSelection.experimental.",
+        default=None,
+        help=(
+            "VSA_sparsity value routed through PipelineSelection.experimental. "
+            f"When unset, defaults to {DEFAULT_VSA_SPARSITY} for the "
+            "VIDEO_SPARSE_ATTN backend and is omitted for other backends."
+        ),
     )
     parser.add_argument(
         "--enable-optimizations",

@@ -263,7 +263,7 @@ FastVideo exposes generated audio and `audio_sample_rate` on its Python result o
 | `--model`, `--model-path` | `FastVideo/FastWan2.1-T2V-1.3B-Diffusers` | HuggingFace model path |
 | `--num-gpus` | `1` | Number of GPUs for distributed inference |
 | `--attention-backend` | `VIDEO_SPARSE_ATTN` | Sets `FASTVIDEO_ATTENTION_BACKEND`; choices: `FLASH_ATTN`, `TORCH_SDPA`, `SAGE_ATTN`, `SAGE_ATTN_THREE`, `VIDEO_SPARSE_ATTN`, `VMOBA_ATTN`, `SLA_ATTN`, `SAGE_SLA_ATTN` |
-| `--vsa-sparsity` | `0.8` | Sets `PipelineSelection.experimental["VSA_sparsity"]` |
+| `--vsa-sparsity` | unset (`0.8` for `VIDEO_SPARSE_ATTN`) | Sets `PipelineSelection.experimental["VSA_sparsity"]`; when the flag is unset, `0.8` is applied only for the `VIDEO_SPARSE_ATTN` backend and no value is set for other backends |
 | `--torch-compile` | off | Enables FastVideo `CompileConfig` |
 | `--fp4-quantization` | off | Requests FastVideo NVFP4 transformer quantization through `QuantizationConfig(transformer_quant="NVFP4")`; confirm actual activation in worker logs before reporting FP4 results |
 | `--enable-optimizations` | off | Backward-compatible shortcut for `--torch-compile --fp4-quantization` |
