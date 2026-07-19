@@ -131,6 +131,17 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>json</Badge> <Badge intent="note" minimal>msgpack</Badge></span>
 </ParamField>
 
+<ParamField path="DYN_TCP_RESPONSE_STREAM_HOST" type="string" default="auto-detected local address">
+  IPv4 address or network interface name used to bind and advertise the TCP response stream server.
+  An interface name resolves to its lowest usable IPv4 address. Dynamo rejects explicit IPv6 and
+  unspecified addresses such as `0.0.0.0`.
+</ParamField>
+
+<ParamField path="DYN_TCP_RESPONSE_STREAM_PORT" type="integer" default="0">
+  Port used by the TCP response stream server. When unset or set to `0`, the operating system assigns
+  a free port. Values must be between `0` and `65535`.
+</ParamField>
+
 <ParamField path="--event-plane" type="string" default="zmq">
   Event publishing transport. ZMQ is the default for every discovery backend; select `nats`
   explicitly to use NATS Core. See [Event Plane](../../developer-guide/knowledge-base/concepts/system-architecture/architecture.md#event-plane) for design details.
@@ -140,10 +151,10 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   Environment variable: `DYN_EVENT_PLANE`
 </ParamField>
 
-<ParamField path="DYN_EVENT_PLANE_HOST" type="string" default="auto-detected local IP">
-  IPv4 or IPv6 address advertised by direct ZMQ event publishers. Set this variable to an address
-  on the network interface that subscribers use to reach the publisher. Dynamo rejects hostnames.
-  This variable does not affect NATS or ZMQ broker mode.
+<ParamField path="DYN_EVENT_PLANE_HOST" type="string" default="auto-detected local IPv4 address">
+  IPv4 address or network interface name advertised by direct ZMQ event publishers. An interface
+  name resolves to its lowest usable IPv4 address. Dynamo rejects IPv6 and unspecified addresses
+  such as `0.0.0.0`. This variable does not affect NATS or ZMQ broker mode.
 </ParamField>
 
 <ParamField path="--connector" type="string" default="null">
