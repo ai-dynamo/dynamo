@@ -8,7 +8,7 @@ mod worker_query_endpoint;
 mod worker_query_state;
 mod worker_query_transport;
 
-pub(crate) use subscriber::{start_kv_dc_relay_subscriber, start_subscriber};
-pub(crate) use target::{IndexerRecoveryTarget, RecoveryTarget};
-pub(crate) use worker_query::WorkerQueryClient;
+pub(crate) use subscriber::{RecoverySupervisor, start_subscriber, start_target_subscriber};
+pub(crate) use target::{IndexerRecoveryTarget, RecoveryResetReason, RecoveryTarget};
+pub(crate) use worker_query::{TargetFaultDisposition, WorkerQueryHealthSnapshot};
 pub(crate) use worker_query_endpoint::start_worker_kv_query_endpoint;

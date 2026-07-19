@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Model-scoped, single-DC Dynamo KV DC Relay component."""
+"""DC-scoped, multi-endpoint Dynamo KV Relay component."""
 
 import argparse
 import asyncio
@@ -20,13 +20,15 @@ logger = logging.getLogger(__name__)
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Dynamo model-scoped KV DC Relay")
+    parser = argparse.ArgumentParser(description="Dynamo DC-scoped KV Relay")
     parser.add_argument(
-        "--endpoint",
-        required=True,
-        help="Worker endpoint in namespace.component.endpoint form",
+        "--namespace-filter",
+        help="Optional discovery namespace filter; the default watches all namespaces",
     )
-    parser.add_argument("--model-name", required=True)
+    parser.add_argument(
+        "--endpoint-prefix",
+        help="Optional prefix filter over namespace.component.endpoint",
+    )
     parser.add_argument("--dc-id", required=True)
     return parser.parse_args()
 
@@ -38,8 +40,11 @@ class KvDcRelayDiagnostics:
     async def stats(self, _request):
         yield await self._relay.stats()
 
-    async def snapshot(self, _request):
-        yield await self._relay.snapshot()
+    async def snapshot(self, request):
+        serving_endpoint = request.get("serving_endpoint")
+        if not serving_endpoint:
+            raise ValueError("snapshot requests require serving_endpoint")
+        yield await self._relay.snapshot(serving_endpoint)
 
     async def health(self, _request):
         yield await self._relay.health()
@@ -48,24 +53,24 @@ class KvDcRelayDiagnostics:
 @dynamo_worker()
 async def worker(runtime: DistributedRuntime) -> None:
     args = parse_args()
-    if len(args.endpoint.split(".")) != 3:
-        raise ValueError("--endpoint must use namespace.component.endpoint form")
-
-    worker_endpoint = runtime.endpoint(args.endpoint)
-    relay = KvDcRelay(worker_endpoint, args.model_name, args.dc_id)
+    namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
+    relay_endpoint = runtime.endpoint(f"{namespace}.kv_dc_relay.control")
+    relay = KvDcRelay(
+        relay_endpoint,
+        args.dc_id,
+        args.namespace_filter,
+        args.endpoint_prefix,
+    )
     await relay.start()
     diagnostics = KvDcRelayDiagnostics(relay)
-    namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
-    relay_identity = hashlib.sha256(
-        f"{args.model_name}\0{args.dc_id}".encode()
-    ).hexdigest()[:32]
+    relay_identity = hashlib.sha256(args.dc_id.encode()).hexdigest()[:32]
     diagnostics_component = f"kv_dc_relay_{relay_identity}"
 
     logger.info(
-        "KV DC Relay started for model=%s dc_id=%s endpoint=%s",
-        args.model_name,
+        "KV DC Relay started for dc_id=%s namespace_filter=%s endpoint_prefix=%s",
         args.dc_id,
-        args.endpoint,
+        args.namespace_filter,
+        args.endpoint_prefix,
     )
     endpoint_tasks = []
     try:

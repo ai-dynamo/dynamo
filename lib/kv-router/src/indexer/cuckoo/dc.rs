@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Exact, lane-free CKF aggregation for one model in one data center.
+//! Exact, lane-free CKF aggregation for one cache domain in one data center.
 //!
 //! Event replay is logically idempotent: applying an ordered history through the
 //! same watermark converges to the same member ownership and DC refcounts. It is
@@ -207,19 +207,20 @@ impl DirtyWindow {
             .try_reserve_exact(word_count)
             .map_err(|_| CkfBuildError::AllocationFailed)?;
         words.resize(word_count, 0);
-        let mut buckets = Vec::new();
-        let mut originals = Vec::new();
-        buckets
-            .try_reserve_exact(bucket_count)
-            .map_err(|_| CkfBuildError::AllocationFailed)?;
-        originals
-            .try_reserve_exact(bucket_count)
-            .map_err(|_| CkfBuildError::AllocationFailed)?;
         Ok(Self {
             words: words.into_boxed_slice(),
-            buckets,
-            originals,
+            buckets: Vec::new(),
+            originals: Vec::new(),
         })
+    }
+
+    fn try_reserve(&mut self, additional: usize) -> Result<(), KvCacheEventError> {
+        self.buckets
+            .try_reserve(additional)
+            .map_err(|_| KvCacheEventError::CapacityExhausted)?;
+        self.originals
+            .try_reserve(additional)
+            .map_err(|_| KvCacheEventError::CapacityExhausted)
     }
 
     fn mark(&mut self, bucket: usize, original: PackedBucket) {
@@ -265,6 +266,7 @@ impl DirtyWindow {
 #[derive(Debug)]
 struct PublicationWindow {
     dirty: DirtyWindow,
+    images: Vec<DcCkfBucketImage>,
     sequence: u64,
     pending_events: usize,
     published_nonempty: bool,
@@ -274,6 +276,7 @@ impl PublicationWindow {
     fn new(bucket_count: usize) -> Result<Self, CkfBuildError> {
         Ok(Self {
             dirty: DirtyWindow::new(bucket_count)?,
+            images: Vec::new(),
             sequence: 0,
             pending_events: 0,
             published_nonempty: false,
@@ -290,9 +293,10 @@ struct DcCkfTelemetry {
     emitted_images: u64,
     net_reverted_buckets: u64,
     reset_count: u64,
+    published_occupied_buckets: usize,
 }
 
-/// Exact and physical CKF state for one model-local DC aggregation domain.
+/// Exact and physical CKF state for one DC-local cache domain.
 #[derive(Debug)]
 pub struct DcCkfState {
     member_blocks: FxHashMap<WorkerWithDpRank, FxHashSet<ExternalSequenceBlockHash>>,
@@ -312,17 +316,9 @@ impl DcCkfState {
     pub fn new(config: CkfConfig) -> Result<Self, CkfBuildError> {
         validate_config(config)?;
         let bucket_count = bucket_count(config.expected_blocks_per_dc)?;
-        let mut dc_refcounts = FxHashMap::default();
-        dc_refcounts
-            .try_reserve(config.expected_blocks_per_dc)
-            .map_err(|_| CkfBuildError::AllocationFailed)?;
-        let mut remove_scratch = Vec::new();
-        remove_scratch
-            .try_reserve_exact(config.expected_blocks_per_dc)
-            .map_err(|_| CkfBuildError::AllocationFailed)?;
         Ok(Self {
             member_blocks: FxHashMap::default(),
-            dc_refcounts,
+            dc_refcounts: FxHashMap::default(),
             filter: OwnedPackedCkfLane::new(bucket_count)?,
             addressing: CkfAddressing::new(bucket_count, config.seed),
             config,
@@ -338,7 +334,7 @@ impl DcCkfState {
                 .map_err(|_| CkfBuildError::AllocationFailed)?,
             publication: PublicationWindow::new(bucket_count)?,
             telemetry: DcCkfTelemetry::default(),
-            remove_scratch,
+            remove_scratch: Vec::new(),
         })
     }
 
@@ -383,16 +379,8 @@ impl DcCkfState {
                 }
             }
             KvCacheEventData::Cleared => {
-                let members: Vec<_> = self
-                    .member_blocks
-                    .keys()
-                    .copied()
-                    .filter(|member| member.worker_id == event.worker_id)
-                    .collect();
-                for member in members {
-                    if let Err(error) = self.remove_member(member) {
-                        retain_first_error(&mut first_error, error);
-                    }
+                if let Err(error) = self.remove_member(worker) {
+                    retain_first_error(&mut first_error, error);
                 }
             }
         }
@@ -458,6 +446,15 @@ impl DcCkfState {
         }
 
         replacement.publication.dirty.clear();
+        replacement
+            .publication
+            .dirty
+            .try_reserve(self.format.bucket_count)?;
+        replacement
+            .publication
+            .images
+            .try_reserve(self.format.bucket_count)
+            .map_err(|_| KvCacheEventError::CapacityExhausted)?;
         for (bucket, published) in self.publication.dirty.touched_with_originals() {
             if replacement.filter.load_bucket(bucket) != published {
                 replacement.publication.dirty.mark(bucket, published);
@@ -484,6 +481,8 @@ impl DcCkfState {
         replacement.telemetry.emitted_images = self.telemetry.emitted_images;
         replacement.telemetry.net_reverted_buckets = self.telemetry.net_reverted_buckets;
         replacement.telemetry.reset_count = self.telemetry.reset_count;
+        replacement.telemetry.published_occupied_buckets =
+            self.telemetry.published_occupied_buckets;
         *self = replacement;
         Ok(self.drain_publication())
     }
@@ -512,17 +511,6 @@ impl DcCkfState {
     }
 
     pub fn stats(&self) -> DcCkfStats {
-        let mut occupied_bucket_count = 0;
-        let mut occupied_slot_count = 0;
-        for bucket in 0..self.format.bucket_count {
-            let value = self.filter.load_bucket(bucket);
-            if value != PackedBucket::default() {
-                occupied_bucket_count += 1;
-            }
-            occupied_slot_count += (0..SLOTS_PER_BUCKET as usize)
-                .filter(|&slot| value.slot(slot) != 0)
-                .count();
-        }
         DcCkfStats {
             aggregation: DcCkfAggregationStats {
                 member_count: self.member_blocks.len(),
@@ -530,8 +518,8 @@ impl DcCkfState {
                 unique_block_count: self.dc_refcounts.len(),
                 unknown_removals: self.telemetry.unknown_removals,
                 capacity_failures: self.telemetry.capacity_failures,
-                occupied_bucket_count,
-                occupied_slot_count,
+                occupied_bucket_count: self.current_occupied_bucket_count(),
+                occupied_slot_count: self.dc_refcounts.len(),
             },
             publication: DcCkfPublicationStats {
                 sequence: self.publication.sequence,
@@ -619,6 +607,7 @@ impl DcCkfState {
             self.dc_refcounts
                 .try_reserve(1)
                 .map_err(|_| KvCacheEventError::CapacityExhausted)?;
+            self.reserve_publication_scratch(self.config.max_kicks.saturating_add(1))?;
             let dirty = &mut self.publication.dirty;
             let physical_touches = &mut self.telemetry.physical_touches;
             CuckooMutator::new(&self.filter, &self.addressing, self.config.max_kicks)
@@ -669,6 +658,7 @@ impl DcCkfState {
             .copied()
             .ok_or(KvCacheEventError::IndexerInvariantViolation)?;
         if current == 1 {
+            self.reserve_publication_scratch(1)?;
             let dirty = &mut self.publication.dirty;
             let physical_touches = &mut self.telemetry.physical_touches;
             CuckooMutator::new(&self.filter, &self.addressing, self.config.max_kicks)
@@ -722,15 +712,19 @@ impl DcCkfState {
         }
         let reset = self.dc_refcounts.is_empty() && self.publication.published_nonempty;
         let distinct_touched = self.publication.dirty.buckets.len() as u64;
-        let mut images = Vec::with_capacity(self.publication.dirty.buckets.len());
+        let occupied_bucket_count = self.current_occupied_bucket_count();
+        self.publication.images.clear();
         if !reset {
             for (index, &bucket) in self.publication.dirty.buckets.iter().enumerate() {
                 let value = self.filter.load_bucket(bucket).0;
                 if value != self.publication.dirty.originals[index] {
-                    images.push(DcCkfBucketImage { bucket, value });
+                    self.publication
+                        .images
+                        .push(DcCkfBucketImage { bucket, value });
                 }
             }
         }
+        let images = std::mem::take(&mut self.publication.images);
         self.publication.dirty.clear();
         self.telemetry.distinct_touched_buckets = self
             .telemetry
@@ -750,6 +744,7 @@ impl DcCkfState {
         }
         self.publication.pending_events = 0;
         self.publication.published_nonempty = !self.dc_refcounts.is_empty();
+        self.telemetry.published_occupied_buckets = if reset { 0 } else { occupied_bucket_count };
         if !reset && images.is_empty() {
             return None;
         }
@@ -761,6 +756,32 @@ impl DcCkfState {
             reset,
             images,
         })
+    }
+
+    fn reserve_publication_scratch(
+        &mut self,
+        maximum_new_touches: usize,
+    ) -> Result<(), KvCacheEventError> {
+        self.publication.dirty.try_reserve(maximum_new_touches)?;
+        let maximum_images = self
+            .publication
+            .dirty
+            .buckets
+            .len()
+            .saturating_add(maximum_new_touches);
+        self.publication
+            .images
+            .try_reserve(maximum_images)
+            .map_err(|_| KvCacheEventError::CapacityExhausted)
+    }
+
+    fn current_occupied_bucket_count(&self) -> usize {
+        let mut count = self.telemetry.published_occupied_buckets as isize;
+        for (bucket, original) in self.publication.dirty.touched_with_originals() {
+            count += isize::from(self.filter.load_bucket(bucket) != PackedBucket::default())
+                - isize::from(original != PackedBucket::default());
+        }
+        usize::try_from(count).expect("occupied CKF bucket count cannot be negative")
     }
 }
 
@@ -854,7 +875,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_clear_spans_ranks_and_preserves_another_workers_shared_hash() {
+    fn rank_clear_preserves_sibling_rank_and_another_workers_shared_hash() {
         let first_rank = WorkerWithDpRank::new(1, 0);
         let second_rank = WorkerWithDpRank::new(1, 1);
         let other_worker = WorkerWithDpRank::new(2, 0);
@@ -864,12 +885,12 @@ mod tests {
         state.apply_event(stored(first_rank, 1, &[shared.0]));
         state.apply_event(stored(second_rank, 1, &[12]));
         state.apply_event(stored(other_worker, 1, &[shared.0]));
-        state.apply_event(cleared(first_rank.worker_id, 99, 2));
+        state.apply_event(cleared(first_rank.worker_id, first_rank.dp_rank, 2));
 
         assert_eq!(state.member_block_count(first_rank), 0);
-        assert_eq!(state.member_block_count(second_rank), 0);
+        assert_eq!(state.member_block_count(second_rank), 1);
         assert_eq!(state.member_block_count(other_worker), 1);
-        assert_eq!(state.stats().aggregation().unique_block_count(), 1);
+        assert_eq!(state.stats().aggregation().unique_block_count(), 2);
         assert!(state.contains(shared));
     }
 
@@ -939,6 +960,29 @@ mod tests {
         assert!(state.replace_rank(worker, replacement).is_err());
         assert_eq!(state.member_counts(), before_counts);
         assert!(state.contains(original));
+    }
+
+    #[test]
+    fn replacing_one_shared_owner_preserves_the_other_without_an_intermediate_reset() {
+        let replaced = WorkerWithDpRank::new(1, 0);
+        let survivor = WorkerWithDpRank::new(2, 0);
+        let shared = ExternalSequenceBlockHash(77);
+        let mut state = DcCkfState::new(CkfConfig::new(32)).unwrap();
+        state.apply_event(stored(replaced, 1, &[shared.0]));
+        state.apply_event(stored(survivor, 1, &[shared.0]));
+        let base_sequence = state.snapshot().unwrap().1.sequence();
+
+        let delta = state.replace_rank(replaced, FxHashSet::default()).unwrap();
+
+        assert_eq!(state.member_block_count(replaced), 0);
+        assert_eq!(state.member_block_count(survivor), 1);
+        assert_eq!(state.stats().aggregation().unique_block_count(), 1);
+        assert!(state.contains(shared));
+        assert!(
+            delta.is_none(),
+            "shared ownership needs no physical CKF change"
+        );
+        assert_eq!(state.stats().publication().sequence(), base_sequence);
     }
 
     #[test]

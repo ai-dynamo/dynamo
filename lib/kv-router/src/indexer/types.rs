@@ -78,10 +78,16 @@ pub struct WorkerKvQueryRequest {
     /// Successful buffer-backed recovery may still return through the current
     /// newest buffered event.
     pub end_event_id: Option<u64>,
+
+    /// Opt in to an explicit [`WorkerKvQueryResponse::TreeDumpFailed`] result.
+    /// Named MessagePack clients that predate this field deserialize it as false.
+    #[serde(default)]
+    pub supports_tree_dump_failed: bool,
 }
 
 /// Response from a worker's local KV indexer.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[non_exhaustive]
 pub enum WorkerKvQueryResponse {
     /// Events served from the circular buffer with original event IDs. The batch
     /// is recovery-equivalent to replaying the requested `start_event_id` through

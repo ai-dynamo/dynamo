@@ -1,40 +1,42 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use async_trait::async_trait;
 use dynamo_kv_router::protocols::{DpRank, RouterEvent, WorkerId};
+use std::future::Future;
 
 use crate::kv_router::Indexer;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecoveryResetReason {
+    Lifecycle,
+    TreeDumpFailed,
+    TargetFault,
+}
+
 /// Destination semantics required by worker-local KV recovery.
 ///
-/// The source remains a worker's exact `LocalKvIndexer`; a target only applies
-/// live/ring events and rank lifecycle or replacement operations. Targets do not
-/// expose event dumps of their own.
-#[async_trait]
-pub(crate) trait RecoveryTarget: Send + Sync {
-    async fn apply_event(&self, event: RouterEvent) -> anyhow::Result<()>;
+/// Ordinary events complete when the destination queue accepts them. Exact-rank
+/// reset and replacement are completion barriers. Targets never provide recovery
+/// state themselves; the source remains the worker's exact local indexer.
+pub(crate) trait RecoveryTarget: Send + Sync + 'static {
+    fn admit_event(&self, event: RouterEvent) -> impl Future<Output = anyhow::Result<()>> + Send;
 
-    async fn replace_rank(
+    fn replace_rank(
         &self,
         worker_id: WorkerId,
         dp_rank: DpRank,
         events: Vec<RouterEvent>,
-    ) -> anyhow::Result<()>;
+    ) -> impl Future<Output = anyhow::Result<()>> + Send;
 
-    async fn remove_rank(&self, worker_id: WorkerId, dp_rank: DpRank) -> anyhow::Result<()>;
-
-    async fn degraded_reset_rank(
+    fn reset_rank(
         &self,
         worker_id: WorkerId,
         dp_rank: DpRank,
-    ) -> anyhow::Result<()> {
-        self.remove_rank(worker_id, dp_rank).await
-    }
-
-    async fn remove_worker(&self, worker_id: WorkerId) -> anyhow::Result<()>;
+        reason: RecoveryResetReason,
+    ) -> impl Future<Output = anyhow::Result<()>> + Send;
 }
 
+#[derive(Clone)]
 pub(crate) struct IndexerRecoveryTarget {
     indexer: Indexer,
 }
@@ -45,11 +47,12 @@ impl IndexerRecoveryTarget {
     }
 }
 
-#[async_trait]
 impl RecoveryTarget for IndexerRecoveryTarget {
-    async fn apply_event(&self, event: RouterEvent) -> anyhow::Result<()> {
-        self.indexer.apply_event(event).await;
-        Ok(())
+    async fn admit_event(&self, event: RouterEvent) -> anyhow::Result<()> {
+        self.indexer
+            .try_apply_event(event)
+            .await
+            .map_err(Into::into)
     }
 
     async fn replace_rank(
@@ -58,23 +61,23 @@ impl RecoveryTarget for IndexerRecoveryTarget {
         dp_rank: DpRank,
         events: Vec<RouterEvent>,
     ) -> anyhow::Result<()> {
-        // Preserve the existing router indexer's replacement behavior. Targets
-        // with an exact aggregate (such as the DC Relay) override this as one
-        // transactional actor command.
-        self.indexer.remove_worker_dp_rank(worker_id, dp_rank).await;
+        self.reset_rank(worker_id, dp_rank, RecoveryResetReason::Lifecycle)
+            .await?;
         for event in events {
-            self.indexer.apply_event(event).await;
+            self.admit_event(event).await?;
         }
         Ok(())
     }
 
-    async fn remove_rank(&self, worker_id: WorkerId, dp_rank: DpRank) -> anyhow::Result<()> {
-        self.indexer.remove_worker_dp_rank(worker_id, dp_rank).await;
-        Ok(())
-    }
-
-    async fn remove_worker(&self, worker_id: WorkerId) -> anyhow::Result<()> {
-        self.indexer.remove_worker(worker_id).await;
-        Ok(())
+    async fn reset_rank(
+        &self,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+        _reason: RecoveryResetReason,
+    ) -> anyhow::Result<()> {
+        self.indexer
+            .reset_worker_dp_rank_and_wait(worker_id, dp_rank)
+            .await
+            .map_err(Into::into)
     }
 }

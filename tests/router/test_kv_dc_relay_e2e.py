@@ -27,6 +27,14 @@ pytestmark = [
 BLOCK_SIZE = 16
 
 
+def _endpoint_stats(stats: dict, serving_endpoint: str) -> dict:
+    return next(
+        endpoint
+        for endpoint in stats["endpoints"]
+        if endpoint["serving_endpoint"] == serving_endpoint
+    )
+
+
 def _member_blocks(stats: dict) -> dict[int, int]:
     return {
         member["worker_id"]: member["blocks"]
@@ -75,11 +83,26 @@ def test_kv_dc_relay_deduplicates_workers_and_restores_missed_events(
             mocker_args=mocker_args,
             num_mockers=2,
             request_plane=request_plane,
-        ) as mockers,
+        ) as primary_mockers,
+        MockerProcess(
+            request,
+            mocker_args=mocker_args,
+            num_mockers=1,
+            request_plane=request_plane,
+        ) as secondary_mockers,
         managed_runtime(request_plane=request_plane) as runtime,
     ):
         endpoint = runtime.endpoint(
-            f"{mockers.namespace}.{mockers.component_name}.generate"
+            f"{primary_mockers.namespace}.{primary_mockers.component_name}.generate"
+        )
+        endpoint_id = (
+            f"{primary_mockers.namespace}/{primary_mockers.component_name}/generate"
+        )
+        secondary_endpoint = runtime.endpoint(
+            f"{secondary_mockers.namespace}.{secondary_mockers.component_name}.generate"
+        )
+        secondary_endpoint_id = (
+            f"{secondary_mockers.namespace}/{secondary_mockers.component_name}/generate"
         )
         router = _create_kv_router_with_timeout(
             router_factory=lambda: KvRouter(
@@ -88,7 +111,16 @@ def test_kv_dc_relay_deduplicates_workers_and_restores_missed_events(
                 kv_router_config=KvRouterConfig(),
             ),
             num_workers=2,
-            engine_workers=mockers,
+            engine_workers=primary_mockers,
+        )
+        secondary_router = _create_kv_router_with_timeout(
+            router_factory=lambda: KvRouter(
+                endpoint=secondary_endpoint,
+                block_size=BLOCK_SIZE,
+                kv_router_config=KvRouterConfig(),
+            ),
+            num_workers=1,
+            engine_workers=secondary_mockers,
         )
 
         async def run() -> None:
@@ -100,27 +132,58 @@ def test_kv_dc_relay_deduplicates_workers_and_restores_missed_events(
                     model_name=ROUTER_MODEL_NAME,
                 )
             )
-            relay = KvDcRelay(endpoint, ROUTER_MODEL_NAME, "test-dc")
+            secondary_worker_ids = sorted(
+                await wait_for_workers_ready(
+                    secondary_endpoint,
+                    secondary_router,
+                    expected_num_workers=1,
+                    model_name=ROUTER_MODEL_NAME,
+                )
+            )
+            relay = KvDcRelay(endpoint, "test-dc")
             await relay.start()
             try:
-                baseline = await _wait_for_stats(
+                baseline_host = await _wait_for_stats(
                     relay,
                     lambda stats: (
-                        stats["recovery"]["rank_count"] == 2
-                        and stats["recovery"]["recovering_rank_count"] == 0
+                        {item["serving_endpoint"] for item in stats["endpoints"]}
+                        >= {endpoint_id, secondary_endpoint_id}
+                        and _endpoint_stats(stats, endpoint_id)["recovery"][
+                            "rank_count"
+                        ]
+                        == 2
+                        and _endpoint_stats(stats, endpoint_id)["recovery"][
+                            "recovering_rank_count"
+                        ]
+                        == 0
+                        and _endpoint_stats(stats, secondary_endpoint_id)["recovery"][
+                            "rank_count"
+                        ]
+                        == 1
+                        and _endpoint_stats(stats, secondary_endpoint_id)["recovery"][
+                            "recovering_rank_count"
+                        ]
+                        == 0
                     ),
+                )
+                baseline = _endpoint_stats(baseline_host, endpoint_id)
+                secondary_baseline = _endpoint_stats(
+                    baseline_host, secondary_endpoint_id
                 )
                 baseline_members = _member_blocks(baseline)
                 common_tokens = list(range(100_000, 100_000 + BLOCK_SIZE * 4))
 
                 await _send(router, worker_ids[0], common_tokens)
-                first = await _wait_for_stats(
+                first_host = await _wait_for_stats(
                     relay,
                     lambda stats: (
-                        _member_blocks(stats).get(worker_ids[0], 0)
+                        _member_blocks(_endpoint_stats(stats, endpoint_id)).get(
+                            worker_ids[0], 0
+                        )
                         > baseline_members.get(worker_ids[0], 0)
                     ),
                 )
+                first = _endpoint_stats(first_host, endpoint_id)
                 first_members = _member_blocks(first)
                 first_member_delta = first_members[
                     worker_ids[0]
@@ -132,13 +195,16 @@ def test_kv_dc_relay_deduplicates_workers_and_restores_missed_events(
                 assert first_member_delta == first_unique_delta > 0
 
                 await _send(router, worker_ids[1], common_tokens)
-                shared = await _wait_for_stats(
+                shared_host = await _wait_for_stats(
                     relay,
                     lambda stats: (
-                        _member_blocks(stats).get(worker_ids[1], 0)
+                        _member_blocks(_endpoint_stats(stats, endpoint_id)).get(
+                            worker_ids[1], 0
+                        )
                         > baseline_members.get(worker_ids[1], 0)
                     ),
                 )
+                shared = _endpoint_stats(shared_host, endpoint_id)
                 shared_members = _member_blocks(shared)
                 assert (
                     shared_members[worker_ids[1]]
@@ -149,24 +215,46 @@ def test_kv_dc_relay_deduplicates_workers_and_restores_missed_events(
                     shared["aggregation"]["unique_block_count"]
                     == first["aggregation"]["unique_block_count"]
                 )
+
+                secondary_tokens = list(range(300_000, 300_000 + BLOCK_SIZE * 2))
+                await _send(secondary_router, secondary_worker_ids[0], secondary_tokens)
+                isolated_host = await _wait_for_stats(
+                    relay,
+                    lambda stats: (
+                        _endpoint_stats(stats, secondary_endpoint_id)["aggregation"][
+                            "unique_block_count"
+                        ]
+                        > secondary_baseline["aggregation"]["unique_block_count"]
+                    ),
+                )
+                assert (
+                    _endpoint_stats(isolated_host, endpoint_id)["aggregation"][
+                        "unique_block_count"
+                    ]
+                    == shared["aggregation"]["unique_block_count"]
+                )
             finally:
                 await relay.shutdown()
 
             missed_tokens = list(range(200_000, 200_000 + BLOCK_SIZE * 3))
             await _send(router, worker_ids[0], missed_tokens)
 
-            restored = KvDcRelay(endpoint, ROUTER_MODEL_NAME, "test-dc")
+            restored = KvDcRelay(endpoint, "test-dc")
             await restored.start()
             try:
-                recovered = await _wait_for_stats(
+                recovered_host = await _wait_for_stats(
                     restored,
                     lambda stats: (
-                        stats["recovery"]["rebuild_count"] >= 2
-                        and stats["recovery"]["recovering_rank_count"] == 0
-                        and stats["aggregation"]["contribution_count"]
+                        (relay_stats := _endpoint_stats(stats, endpoint_id))[
+                            "recovery"
+                        ]["rebuild_count"]
+                        >= 2
+                        and relay_stats["recovery"]["recovering_rank_count"] == 0
+                        and relay_stats["aggregation"]["contribution_count"]
                         > shared["aggregation"]["contribution_count"]
                     ),
                 )
+                recovered = _endpoint_stats(recovered_host, endpoint_id)
                 recovered_members = _member_blocks(recovered)
                 assert recovered_members[worker_ids[0]] > shared_members[worker_ids[0]]
                 assert recovered_members[worker_ids[1]] == shared_members[worker_ids[1]]

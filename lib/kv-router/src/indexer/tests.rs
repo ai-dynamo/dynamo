@@ -2904,6 +2904,31 @@ mod local_indexer_tests {
         }
     }
 
+    #[test]
+    fn legacy_named_messagepack_query_defaults_explicit_dump_failure_capability_off() {
+        #[derive(serde::Serialize)]
+        struct LegacyWorkerKvQueryRequest {
+            worker_id: WorkerId,
+            dp_rank: DpRank,
+            start_event_id: Option<u64>,
+            end_event_id: Option<u64>,
+        }
+
+        let encoded = rmp_serde::to_vec_named(&LegacyWorkerKvQueryRequest {
+            worker_id: 7,
+            dp_rank: 3,
+            start_event_id: None,
+            end_event_id: Some(9),
+        })
+        .unwrap();
+        let decoded: WorkerKvQueryRequest = rmp_serde::from_slice(&encoded).unwrap();
+
+        assert_eq!(decoded.worker_id, 7);
+        assert_eq!(decoded.dp_rank, 3);
+        assert_eq!(decoded.end_event_id, Some(9));
+        assert!(!decoded.supports_tree_dump_failed);
+    }
+
     #[tokio::test]
     async fn test_local_indexer_remove_worker_dp_rank_only_clears_target_rank() {
         let local_indexer = LocalKvIndexer::new(

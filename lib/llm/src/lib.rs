@@ -20,6 +20,7 @@ pub mod http;
 pub mod hub;
 // pub mod key_value_store;
 pub mod kv_dc_relay;
+mod kv_dc_relay_discovery;
 pub mod kv_router;
 pub mod local_model;
 pub mod lora;

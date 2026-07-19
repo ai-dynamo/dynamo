@@ -12,7 +12,6 @@ pub use kv_source_membership::{
 };
 
 mod kv_source_watch;
-#[cfg(test)]
 pub(crate) use kv_source_watch::KvSourceMembershipCoordinator;
 pub use kv_source_watch::KvSourceMembershipWatch;
 

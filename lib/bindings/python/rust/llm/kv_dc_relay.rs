@@ -13,34 +13,50 @@ use crate::{Endpoint, to_pyerr};
 #[pyclass]
 pub struct KvDcRelay {
     endpoint: dynamo_runtime::component::Endpoint,
-    model_name: String,
     dc_id: String,
-    inner: Arc<OnceCell<Arc<llm_rs::kv_dc_relay::ModelKvDcRelay>>>,
+    namespace_filter: Option<String>,
+    endpoint_prefix: Option<String>,
+    inner: Arc<OnceCell<Arc<llm_rs::kv_dc_relay::KvDcRelay>>>,
 }
 
 #[pymethods]
 impl KvDcRelay {
     #[new]
-    fn new(endpoint: Endpoint, model_name: String, dc_id: String) -> Self {
+    #[pyo3(signature = (endpoint, dc_id, namespace_filter=None, endpoint_prefix=None))]
+    fn new(
+        endpoint: Endpoint,
+        dc_id: String,
+        namespace_filter: Option<String>,
+        endpoint_prefix: Option<String>,
+    ) -> Self {
         Self {
             endpoint: endpoint.inner,
-            model_name,
             dc_id,
+            namespace_filter,
+            endpoint_prefix,
             inner: Arc::new(OnceCell::new()),
         }
     }
 
     fn start<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let endpoint = self.endpoint.clone();
-        let model_name = self.model_name.clone();
         let dc_id = self.dc_id.clone();
+        let namespace_filter = self.namespace_filter.clone();
+        let endpoint_prefix = self.endpoint_prefix.clone();
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             inner
                 .get_or_try_init(|| async move {
-                    llm_rs::kv_dc_relay::ModelKvDcRelay::start(endpoint, model_name, dc_id)
-                        .await
-                        .map(Arc::new)
+                    llm_rs::kv_dc_relay::KvDcRelay::start(
+                        endpoint.component().clone(),
+                        dc_id,
+                        llm_rs::kv_dc_relay::KvDcRelayConfig {
+                            namespace_filter,
+                            endpoint_prefix,
+                        },
+                    )
+                    .await
+                    .map(Arc::new)
                 })
                 .await
                 .map_err(to_pyerr)?;
@@ -72,10 +88,31 @@ impl KvDcRelay {
         })
     }
 
-    fn snapshot<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn flush<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.started()?;
+        pyo3_async_runtimes::tokio::future_into_py(
+            py,
+            async move { inner.flush().await.map_err(to_pyerr) },
+        )
+    }
+
+    fn snapshot<'py>(
+        &self,
+        py: Python<'py>,
+        serving_endpoint: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.started()?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let diagnostic = inner.diagnostic_snapshot().await.map_err(to_pyerr)?;
+            if serving_endpoint.split('.').count() != 3 {
+                return Err(PyRuntimeError::new_err(
+                    "serving_endpoint must use namespace.component.endpoint form",
+                ));
+            }
+            let endpoint = dynamo_runtime::protocols::EndpointId::from(serving_endpoint.as_str());
+            let diagnostic = inner
+                .diagnostic_snapshot(&endpoint)
+                .await
+                .map_err(to_pyerr)?;
             Python::with_gil(|py| {
                 pythonize::pythonize(py, &diagnostic)
                     .map(|value| value.unbind())
@@ -93,7 +130,7 @@ impl KvDcRelay {
 }
 
 impl KvDcRelay {
-    fn started(&self) -> PyResult<Arc<llm_rs::kv_dc_relay::ModelKvDcRelay>> {
+    fn started(&self) -> PyResult<Arc<llm_rs::kv_dc_relay::KvDcRelay>> {
         self.inner
             .get()
             .cloned()
