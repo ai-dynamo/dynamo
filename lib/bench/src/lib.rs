@@ -6,12 +6,5 @@ pub mod coding;
 #[cfg(feature = "multiturn")]
 pub mod common;
 
-#[cfg(any(
-    feature = "active-sequences",
-    feature = "dc-ckf-consumer",
-    feature = "dc-ckf-relay",
-    feature = "mooncake",
-    feature = "router-test-support"
-))]
 #[path = "../kv_router/common/mod.rs"]
 pub mod kv_router_common;

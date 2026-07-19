@@ -17,8 +17,6 @@ description = "Lightweight HTTP benchmarks for Dynamo endpoints"
 default = ["claude-trace-export", "test-support"]
 active-sequences = [
   "router-bench",
-  "dep:dynamo-mocker",
-  "dep:indicatif",
   "dep:dynamo-tokens",
   "dep:libc",
   "dep:rustc-hash",
@@ -33,37 +31,15 @@ claude-trace-export = [
   "dep:sha2",
   "dep:tokenizers",
 ]
-dc-ckf-consumer = []
-dc-ckf-relay = [
-  "dep:crossbeam-channel",
-  "dep:dynamo-mocker",
-  "dep:indicatif",
-  "dep:libc",
-  "dep:rustc-hash",
-  "dep:sha2",
-]
-mooncake = [
-  "router-bench",
-  "dep:dynamo-mocker",
-  "dep:indicatif",
-  "dep:libc",
-  "dep:tokio-util",
-]
-multiturn = [
-  "dep:dynamo-mocker",
-  "dep:futures-util",
-  "dep:indicatif",
-  "dep:rand",
-  "dep:reqwest",
-]
-offline-replay = ["dep:dynamo-mocker"]
+dc-ckf-bench = []
+mooncake = ["router-bench", "dep:libc", "dep:tokio-util"]
+multiturn = ["dep:futures-util", "dep:rand", "dep:reqwest"]
+offline-replay = []
 router-bench = ["dynamo-kv-router/bench"]
 router-metrics = ["dynamo-kv-router/metrics"]
 router-test-support = [
   "router-bench",
   "router-metrics",
-  "dep:dynamo-mocker",
-  "dep:indicatif",
   "dep:dynamo-tokens",
   "dep:libc",
   "dep:rustc-hash",
@@ -112,7 +88,7 @@ required-features = ["mooncake"]
 [[bin]]
 name = "dc_ckf_consumer_bench"
 path = "kv_router/dc_ckf_consumer_bench.rs"
-required-features = ["dc-ckf-consumer"]
+required-features = ["dc-ckf-bench"]
 
 [[bench]]
 name = "active_sequences_bench"
@@ -124,7 +100,7 @@ required-features = ["active-sequences"]
 name = "dc_ckf_relay_bench"
 path = "kv_router/dc_ckf_relay_bench.rs"
 harness = false
-required-features = ["dc-ckf-relay"]
+required-features = ["dc-ckf-bench"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -134,7 +110,7 @@ crossbeam-channel = { version = "0.5", optional = true }
 flate2 = { version = "1", optional = true }
 futures-util = { workspace = true, optional = true }
 hf-hub = { workspace = true, features = ["ureq"], optional = true }
-indicatif = { version = "0.18", optional = true }
+indicatif = "0.18"
 rand = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 rustc-hash = { version = "2", optional = true }
@@ -152,7 +128,7 @@ tracing-subscriber = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 dynamo-tokens = { workspace = true, optional = true }
 dynamo-data-gen = { workspace = true, optional = true }
-dynamo-mocker = { workspace = true, optional = true }
+dynamo-mocker = { workspace = true }
 dynamo-kv-router = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -26,13 +26,6 @@ Build each entrypoint with `--no-default-features` and its matching feature:
 | `offline_replay_bench` | `offline-replay` |
 | `mooncake_bench` | `mooncake` |
 | `active_sequences_bench` | `active-sequences` |
-| `dc_ckf_consumer_bench` | `dc-ckf-consumer` |
-| `dc_ckf_relay_bench` | `dc-ckf-relay` |
-
-The CKF consumer feature contains only the endpoint-scoped consumer and its
-dependency-light protocol metadata. The Relay feature additionally owns its
-Mooncake replay generation dependencies, without enabling mocker's optional
-TMQ/ZeroMQ services.
 
 ## Quick start
 
