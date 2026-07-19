@@ -90,10 +90,9 @@ impl KvDcRelay {
 
     fn flush<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.started()?;
-        pyo3_async_runtimes::tokio::future_into_py(
-            py,
-            async move { inner.flush().await.map_err(to_pyerr) },
-        )
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            inner.flush().await.map_err(to_pyerr)
+        })
     }
 
     fn snapshot<'py>(
