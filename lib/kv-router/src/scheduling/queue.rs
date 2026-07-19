@@ -80,8 +80,8 @@ enum AdmissionCommand {
     EnqueueLeased {
         request: SchedulingRequest,
         block_hashes: Option<Vec<LocalBlockHash>>,
-        lease: Box<AdmissionLease>,
-        ack_tx: oneshot::Sender<Box<AdmissionLease>>,
+        lease: AdmissionLease,
+        ack_tx: oneshot::Sender<AdmissionLease>,
     },
     Update {
         worker: Option<WorkerWithDpRank>,
@@ -154,6 +154,10 @@ impl AdmissionCleanup {
 /// either phase queues one terminal outcome and coalesces the actor wakeup.
 #[must_use = "dropping the lease reports the request outcome to the scheduler actor"]
 pub struct AdmissionLease {
+    state: Box<AdmissionLeaseState>,
+}
+
+struct AdmissionLeaseState {
     cleanup: Arc<AdmissionCleanup>,
     actor_tx: mpsc::Sender<AdmissionCommand>,
     generation: LifecycleGeneration,
@@ -167,52 +171,52 @@ impl std::fmt::Debug for AdmissionLease {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("AdmissionLease")
-            .field("generation", &self.generation)
-            .field("request_id", &self.request_id)
-            .field("outcome", &self.outcome)
-            .field("dispatched", &self.dispatched)
-            .field("armed", &self.armed)
+            .field("generation", &self.state.generation)
+            .field("request_id", &self.state.request_id)
+            .field("outcome", &self.state.outcome)
+            .field("dispatched", &self.state.dispatched)
+            .field("armed", &self.state.armed)
             .finish_non_exhaustive()
     }
 }
 
 impl AdmissionLease {
     pub fn mark_completed(&mut self, context_tokens: usize) {
-        self.outcome = RequestOutcome::Completed { context_tokens };
+        self.state.outcome = RequestOutcome::Completed { context_tokens };
     }
 
     pub fn mark_aborted(&mut self) {
-        self.outcome = RequestOutcome::Aborted;
+        self.state.outcome = RequestOutcome::Aborted;
     }
 
     pub fn mark_dispatched(&mut self) {
-        self.dispatched = true;
+        self.state.dispatched = true;
     }
 
     pub fn disarm(&mut self) {
-        self.request_id = None;
+        self.state.request_id = None;
     }
 
     fn arm(&mut self) {
-        self.armed = true;
+        self.state.armed = true;
     }
 }
 
 impl Drop for AdmissionLease {
     fn drop(&mut self) {
-        if !self.armed {
+        if !self.state.armed {
             return;
         }
-        let Some(request_id) = self.request_id.take() else {
+        let Some(request_id) = self.state.request_id.take() else {
             return;
         };
-        if self.cleanup.enqueue(AdmissionCleanupEntry {
-            generation: self.generation,
+        if self.state.cleanup.enqueue(AdmissionCleanupEntry {
+            generation: self.state.generation,
             request_id,
-            outcome: self.outcome,
-            dispatched: self.dispatched,
+            outcome: self.state.outcome,
+            dispatched: self.state.dispatched,
         }) {
-            let _ = self.actor_tx.try_send(AdmissionCommand::Cleanup);
+            let _ = self.state.actor_tx.try_send(AdmissionCommand::Cleanup);
         }
     }
 }
@@ -592,8 +596,8 @@ impl<
         &self,
         mut request: SchedulingRequest,
         block_hashes: Option<Vec<LocalBlockHash>>,
-        lease: Option<Box<AdmissionLease>>,
-    ) -> Option<Box<AdmissionLease>> {
+        lease: Option<AdmissionLease>,
+    ) -> Option<AdmissionLease> {
         let Some(lease) = lease else {
             self.enqueue_with_block_hashes(request, block_hashes).await;
             return None;
@@ -630,26 +634,25 @@ impl<
         }
     }
 
-    pub(crate) fn cancellation_guard(
-        &self,
-        request_id: Option<&str>,
-    ) -> Option<Box<AdmissionLease>> {
+    pub(crate) fn cancellation_guard(&self, request_id: Option<&str>) -> Option<AdmissionLease> {
         if !self.queueing_enabled {
             return None;
         }
         let request_id = request_id?.to_owned();
-        Some(Box::new(AdmissionLease {
-            cleanup: Arc::clone(&self.cleanup),
-            actor_tx: self.admission_tx.clone(),
-            generation: LifecycleGeneration(
-                self.next_lifecycle_generation
-                    .fetch_add(1, AtomicOrdering::Relaxed),
-            ),
-            request_id: Some(request_id),
-            outcome: RequestOutcome::Aborted,
-            dispatched: false,
-            armed: false,
-        }))
+        Some(AdmissionLease {
+            state: Box::new(AdmissionLeaseState {
+                cleanup: Arc::clone(&self.cleanup),
+                actor_tx: self.admission_tx.clone(),
+                generation: LifecycleGeneration(
+                    self.next_lifecycle_generation
+                        .fetch_add(1, AtomicOrdering::Relaxed),
+                ),
+                request_id: Some(request_id),
+                outcome: RequestOutcome::Aborted,
+                dispatched: false,
+                armed: false,
+            }),
+        })
     }
 
     /// Called on prefill_complete/free. Drains pending requests while workers have capacity.
@@ -788,9 +791,9 @@ impl<
                     mut lease,
                     ack_tx,
                 } => {
-                    let generation = lease.generation;
+                    let generation = lease.state.generation;
                     debug_assert_eq!(
-                        lease.request_id.as_deref(),
+                        lease.state.request_id.as_deref(),
                         request.mode.tracked_request_id()
                     );
                     let (enqueue_ready, owns_lifecycle) =
@@ -1106,7 +1109,7 @@ impl<
         let mut ready_by_class: HashMap<usize, FxHashSet<_>> = HashMap::new();
         let mut unmanaged_request_ids = HashSet::new();
         for cleanup in dirty {
-            let request_id = cleanup.request_id.as_str();
+            let request_id = &cleanup.request_id;
             let tracked = self.tracked_admissions.get(request_id).copied();
             if tracked.is_some_and(|tracked| tracked.generation != Some(cleanup.generation)) {
                 continue;
@@ -1115,14 +1118,13 @@ impl<
                 made_ready |= self.handle_dispatched(request_id);
             }
 
-            if tracked.is_none_or(|tracked| tracked.worker.is_some()) {
-                let owned_request_id = request_id.to_owned();
-                if self.slots.request_worker(&owned_request_id).is_some() {
-                    if let Err(error) = self.slots.free(&owned_request_id, Instant::now()) {
-                        tracing::error!(%request_id, %error, "Failed to release dropped scheduler booking");
-                    }
-                    made_ready = true;
+            if tracked.is_none_or(|tracked| tracked.worker.is_some())
+                && self.slots.request_worker(request_id).is_some()
+            {
+                if let Err(error) = self.slots.free(request_id, Instant::now()) {
+                    tracing::error!(%request_id, %error, "Failed to release dropped scheduler booking");
                 }
+                made_ready = true;
             }
 
             let Some(tracked) = tracked else {
@@ -2381,7 +2383,7 @@ mod tests {
     async fn enqueue_with_lease(
         queue: &SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>,
         request: SchedulingRequest,
-    ) -> Box<AdmissionLease> {
+    ) -> AdmissionLease {
         let request_id = request
             .mode
             .admission_request_id()
@@ -2742,13 +2744,15 @@ policy_classes:
         let cleanup = Arc::new(AdmissionCleanup::default());
         let (actor_tx, mut actor_rx) = mpsc::channel(1);
         let lease = |generation: u64, request_id: &str| AdmissionLease {
-            cleanup: Arc::clone(&cleanup),
-            actor_tx: actor_tx.clone(),
-            generation: LifecycleGeneration(generation),
-            request_id: Some(request_id.to_owned()),
-            outcome: RequestOutcome::Aborted,
-            dispatched: false,
-            armed: true,
+            state: Box::new(AdmissionLeaseState {
+                cleanup: Arc::clone(&cleanup),
+                actor_tx: actor_tx.clone(),
+                generation: LifecycleGeneration(generation),
+                request_id: Some(request_id.to_owned()),
+                outcome: RequestOutcome::Aborted,
+                dispatched: false,
+                armed: true,
+            }),
         };
 
         drop(lease(1, "fast-path"));
@@ -2791,13 +2795,15 @@ policy_classes:
         let cleanup = Arc::new(AdmissionCleanup::default());
         let (actor_tx, _) = mpsc::channel(1);
         let mut lease = AdmissionLease {
-            cleanup: Arc::clone(&cleanup),
-            actor_tx,
-            generation: LifecycleGeneration(1),
-            request_id: Some("late-error".to_owned()),
-            outcome: RequestOutcome::Aborted,
-            dispatched: false,
-            armed: true,
+            state: Box::new(AdmissionLeaseState {
+                cleanup: Arc::clone(&cleanup),
+                actor_tx,
+                generation: LifecycleGeneration(1),
+                request_id: Some("late-error".to_owned()),
+                outcome: RequestOutcome::Aborted,
+                dispatched: false,
+                armed: true,
+            }),
         };
 
         lease.mark_completed(96);
