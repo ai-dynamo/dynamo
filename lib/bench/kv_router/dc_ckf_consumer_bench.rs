@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, ensure};
 use clap::{Parser, ValueEnum};
-use dynamo_bench::kv_router_common::dc_ckf_shared::DcCkfCorpusMetadata;
+use dynamo_bench::kv_router_common::dc_ckf_metadata::DcCkfCorpusMetadata;
 use dynamo_kv_router::indexer::cuckoo::{
     CacheDomainId, CacheDomainIdentity, CkfConfig, ConsumerDrainMarker, ConsumerInstanceId,
     DcCkfDelta, DcCkfDeltaSink, DcCkfPublisher, DcCkfSnapshot, DcCkfState, DcId, EndpointId,
