@@ -68,7 +68,11 @@ fn preprocessed_multimodal_cache_keys(request: &PreprocessedRequest) -> Vec<Stri
         match item {
             MultimodalData::Url(url) => keys.push(multimodal_cache_key_from_url(url.as_str())),
             MultimodalData::RawUrl(url) => keys.push(multimodal_cache_key_from_url(url)),
-            MultimodalData::Decoded(_) => {}
+            MultimodalData::Decoded(descriptor) => {
+                if let Some(key) = descriptor.content_hash_key() {
+                    keys.push(key.to_string());
+                }
+            }
         }
     }
     keys.sort();

@@ -1,25 +1,39 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
+import gc
+import json
+import weakref
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any, AsyncGenerator, Dict
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import numpy as np
 import pytest
+import torch
 from PIL import Image
 
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
+from dynamo.common.memory.multimodal_embedding_cache_manager import (
+    MultimodalEmbeddingCacheManager,
+)
+from dynamo.common.multimodal import TransferRequest
 from dynamo.sglang.backend_args import DynamoSGLangConfig
 from dynamo.sglang.request_handlers.llm.decode_handler import (
     DecodeWorkerHandler,
     FrontendDecodedVideo,
 )
+from dynamo.sglang.request_handlers.multimodal.encode_worker_handler import (
+    Modality,
+    MultimodalEncodeWorkerHandler,
+)
 
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
+    pytest.mark.multimodal,
     pytest.mark.gpu_0,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
@@ -31,6 +45,7 @@ def _make_config(
     frontend_decoding: bool = False,
     multimodal_encode_worker: bool = False,
     multimodal_worker: bool = False,
+    dedicated_mm_encoder: bool = False,
 ) -> DynamoSGLangConfig:
     # ConfigBase has no kwargs __init__; sibling tests (test_backend_args.py)
     # construct via no-arg + setattr.
@@ -38,6 +53,10 @@ def _make_config(
     config.use_sglang_tokenizer = False
     config.multimodal_encode_worker = multimodal_encode_worker
     config.multimodal_worker = multimodal_worker
+    config.enable_multimodal = bool(
+        multimodal_encode_worker or multimodal_worker or dedicated_mm_encoder
+    )
+    config.dedicated_mm_encoder = dedicated_mm_encoder
     config.embedding_transfer_mode = EmbeddingTransferMode.NIXL_WRITE
     config.embedding_worker = False
     config.image_diffusion_worker = False
@@ -47,21 +66,351 @@ def _make_config(
     return config
 
 
-def test_validate_rejects_frontend_decoding_with_encode_worker():
+def test_validate_accepts_frontend_decoding_with_encode_worker():
     config = _make_config(frontend_decoding=True, multimodal_encode_worker=True)
-    with pytest.raises(ValueError, match="--frontend-decoding is incompatible"):
+
+    with pytest.warns(DeprecationWarning, match="--multimodal-encode-worker"):
         config.validate()
+
+    assert config.enable_multimodal is True
 
 
 def test_validate_rejects_frontend_decoding_with_multimodal_worker():
     config = _make_config(frontend_decoding=True, multimodal_worker=True)
-    with pytest.raises(ValueError, match="--frontend-decoding is incompatible"):
+    with pytest.raises(ValueError, match="not supported on internal EPD workers"):
+        config.validate()
+
+
+def test_validate_rejects_frontend_decoding_with_dedicated_mm_encoder():
+    config = _make_config(frontend_decoding=True, dedicated_mm_encoder=True)
+    with pytest.raises(ValueError, match="not supported on internal EPD workers"):
         config.validate()
 
 
 def test_validate_accepts_frontend_decoding_alone():
     config = _make_config(frontend_decoding=True)
     config.validate()
+
+
+@pytest.mark.asyncio
+async def test_encode_worker_prepares_mixed_url_and_decoded_images_in_order():
+    handler = MultimodalEncodeWorkerHandler.__new__(MultimodalEncodeWorkerHandler)
+    handler._embedding_cache = MultimodalEmbeddingCacheManager(1024 * 1024)
+    handler._decoded_content_hash_warning_emitted = False
+    decoded_metadata = {
+        "shape": [4, 4, 3],
+        "dtype": "UINT8",
+        "content_hash": "0123456789abcdef",
+    }
+    decoded_image = Image.new("RGB", (4, 4), (255, 0, 0))
+    handler._image_loader = SimpleNamespace(
+        load_image_batch=AsyncMock(return_value=[decoded_image])
+    )
+
+    image_items, video_urls = handler._extract_media_inputs(
+        {
+            "multi_modal_data": {
+                "image_url": [
+                    {"Url": "https://example.com/image.png"},
+                    {"Decoded": decoded_metadata},
+                ]
+            }
+        }
+    )
+    image_inputs, cache_keys, prechecked_entries = await handler._prepare_image_inputs(
+        image_items
+    )
+
+    assert image_inputs == ["https://example.com/image.png", decoded_image]
+    assert cache_keys == [
+        handler._url_hash("https://example.com/image.png"),
+        "0123456789abcdef",
+    ]
+    assert prechecked_entries == {1: None}
+    assert video_urls == []
+    handler._image_loader.load_image_batch.assert_awaited_once_with(
+        [{"Decoded": decoded_metadata}]
+    )
+
+
+@pytest.mark.asyncio
+async def test_encode_worker_rejects_decoded_images_without_frontend_decoding():
+    handler = MultimodalEncodeWorkerHandler.__new__(MultimodalEncodeWorkerHandler)
+    handler._embedding_cache = None
+    handler._decoded_content_hash_warning_emitted = False
+    handler._image_loader = None
+
+    with pytest.raises(ValueError, match="--frontend-decoding is not enabled"):
+        await handler._prepare_image_inputs(
+            [{"Decoded": {"shape": [4, 4, 3], "dtype": "UINT8"}}]
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(Modality is None, reason="SGLang Modality is required")
+async def test_encode_worker_caches_frontend_decoded_image(caplog):
+    handler = MultimodalEncodeWorkerHandler.__new__(MultimodalEncodeWorkerHandler)
+    handler._decoded_content_hash_warning_emitted = False
+    handler._missing_video_cache_key_config_warned = False
+    handler._cache_publisher = None
+    handler._embedding_cache = MultimodalEmbeddingCacheManager(1024 * 1024)
+    handler.image_token_id = 42
+    handler.video_token_id = None
+
+    content_hash = "7a9bbcb11a898630"
+    decoded_metadata = {
+        "shape": [4, 4, 3],
+        "dtype": "UINT8",
+        "content_hash": content_hash,
+    }
+    decoded_image = Image.new("RGB", (4, 4), (0, 255, 0))
+    handler._image_loader = SimpleNamespace(
+        load_image_batch=AsyncMock(return_value=[decoded_image])
+    )
+    handler.encoder = SimpleNamespace(
+        _encode=AsyncMock(
+            return_value=(
+                torch.tensor([1, 2, 2]),
+                torch.arange(12, dtype=torch.float32).reshape(4, 3),
+                None,
+            )
+        )
+    )
+
+    transfer_future = asyncio.get_running_loop().create_future()
+    transfer_future.set_result(None)
+
+    class _EmbeddingSender:
+        async def send_embeddings(self, embeddings):
+            return (
+                TransferRequest(
+                    embeddings_shape=list(embeddings.shape),
+                    embedding_dtype_str=str(embeddings.dtype),
+                    serialized_request={"kind": "test"},
+                ),
+                transfer_future,
+            )
+
+    class _PdWorkerClient:
+        def __init__(self):
+            self.request = None
+
+        async def round_robin(self, request_json, context=None):
+            self.request = json.loads(request_json)
+
+            async def responses():
+                yield json.dumps({"token_ids": [7], "finished": True, "text": ""})
+
+            return responses()
+
+    handler.embedding_sender = _EmbeddingSender()
+    handler.pd_worker_client = _PdWorkerClient()
+
+    raw_request = {
+        "token_ids": [1, handler.image_token_id, 2],
+        "stop_conditions": {"max_tokens": 8},
+        "sampling_options": {"temperature": 0.0},
+        "multi_modal_data": {
+            "image_url": [{"Decoded": decoded_metadata}],
+        },
+    }
+
+    first_outputs = [
+        output async for output in handler.generate(raw_request, context=None)
+    ]
+    second_outputs = [
+        output async for output in handler.generate(raw_request, context=None)
+    ]
+
+    assert first_outputs == [{"token_ids": [7]}]
+    assert second_outputs == first_outputs
+    handler._image_loader.load_image_batch.assert_awaited_once_with(
+        [{"Decoded": decoded_metadata}]
+    )
+    handler.encoder._encode.assert_awaited_once_with([decoded_image], Modality.IMAGE)
+    assert handler._embedding_cache.get(content_hash) is not None
+    assert "bypass the Dynamo embedding cache" not in caplog.text
+
+    pd_request = handler.pd_worker_client.request
+    assert pd_request["request"]["token_ids"] == [1, 42, 42, 42, 42, 2]
+    assert pd_request["multimodal_inputs"][0]["image_grid_thw"] == [1, 2, 2]
+    assert pd_request["multimodal_inputs"][0]["num_mm_tokens"] == 4
+    assert "Decoded" not in json.dumps(pd_request)
+
+
+@pytest.mark.asyncio
+async def test_encode_worker_missing_decoded_hash_bypasses_cache_and_warns_once(caplog):
+    handler = MultimodalEncodeWorkerHandler.__new__(MultimodalEncodeWorkerHandler)
+    handler._decoded_content_hash_warning_emitted = False
+    handler._embedding_cache = MultimodalEmbeddingCacheManager(1024 * 1024)
+    decoded_metadata = {"shape": [4, 4, 3], "dtype": "UINT8"}
+    decoded_image = Image.new("RGB", (4, 4), (0, 0, 255))
+    handler._image_loader = SimpleNamespace(
+        load_image_batch=AsyncMock(return_value=[decoded_image])
+    )
+
+    for _ in range(2):
+        (
+            image_inputs,
+            cache_keys,
+            prechecked_entries,
+        ) = await handler._prepare_image_inputs([{"Decoded": decoded_metadata}])
+        assert image_inputs == [decoded_image]
+        assert cache_keys == [None]
+        assert prechecked_entries == {}
+
+    warning = "descriptor has a missing or invalid canonical content_hash"
+    assert caplog.text.count(warning) == 1
+    assert "compatible Dynamo versions" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "content_hash",
+    [
+        "0x12345678901234",
+        "+123456789abcdef",
+        "01_23456789abcde",
+        "0123456789abcdeF",
+        "",
+        None,
+    ],
+)
+def test_encode_worker_rejects_noncanonical_decoded_content_hash(content_hash):
+    assert (
+        MultimodalEncodeWorkerHandler._decoded_content_cache_key(
+            {"content_hash": content_hash}
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_encode_worker_skips_image_cache_keys_when_cache_is_disabled():
+    handler = MultimodalEncodeWorkerHandler.__new__(MultimodalEncodeWorkerHandler)
+    handler._embedding_cache = None
+    handler._decoded_content_hash_warning_emitted = False
+    handler._image_loader = None
+    handler._url_hash = Mock(side_effect=AssertionError("URL hash must not run"))
+
+    image_inputs, cache_keys, prechecked_entries = await handler._prepare_image_inputs(
+        [{"Url": "data:image/png;base64," + "A" * 4096}]
+    )
+
+    assert image_inputs == ["data:image/png;base64," + "A" * 4096]
+    assert cache_keys == [None]
+    assert prechecked_entries == {}
+    handler._url_hash.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("media_key", ["image_url", "video_url"])
+async def test_encode_worker_rejects_ambiguous_media_variant(media_key):
+    handler = MultimodalEncodeWorkerHandler.__new__(MultimodalEncodeWorkerHandler)
+    handler._embedding_cache = None
+    handler._decoded_content_hash_warning_emitted = False
+    handler._image_loader = None
+    request = {
+        "multi_modal_data": {
+            media_key: [
+                {
+                    "Url": "https://example.com/media",
+                    "Decoded": {"shape": [4, 4, 3], "dtype": "UINT8"},
+                }
+            ]
+        }
+    }
+
+    message = f"Unsupported {media_key[:-4]} data variant"
+    if media_key == "image_url":
+        image_items, _ = handler._extract_media_inputs(request)
+        with pytest.raises(ValueError, match=message):
+            await handler._prepare_image_inputs(image_items)
+    else:
+        with pytest.raises(ValueError, match="Unsupported video_url item"):
+            handler._extract_media_inputs(request)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(Modality is None, reason="SGLang Modality is required")
+async def test_encode_worker_releases_decoded_image_before_streaming():
+    handler = MultimodalEncodeWorkerHandler.__new__(MultimodalEncodeWorkerHandler)
+    handler._decoded_content_hash_warning_emitted = False
+    handler._missing_video_cache_key_config_warned = False
+    handler._cache_publisher = None
+    handler._embedding_cache = None
+    handler.image_token_id = 42
+    handler.video_token_id = None
+
+    class _ImageLoader:
+        image_ref = None
+
+        async def load_image_batch(self, items):
+            image = Image.new("RGB", (4, 4), (1, 2, 3))
+            self.image_ref = weakref.ref(image)
+            return [image]
+
+    class _Encoder:
+        async def _encode(self, media_inputs, modality):
+            assert len(media_inputs) == 1
+            assert isinstance(media_inputs[0], Image.Image)
+            assert modality == Modality.IMAGE
+            return (
+                torch.tensor([1, 2, 2]),
+                torch.arange(12, dtype=torch.float32).reshape(4, 3),
+                None,
+            )
+
+    transfer_future = asyncio.get_running_loop().create_future()
+    transfer_future.set_result(None)
+
+    class _EmbeddingSender:
+        async def send_embeddings(self, embeddings):
+            return (
+                TransferRequest(
+                    embeddings_shape=list(embeddings.shape),
+                    embedding_dtype_str=str(embeddings.dtype),
+                    serialized_request={"kind": "test"},
+                ),
+                transfer_future,
+            )
+
+    image_loader = _ImageLoader()
+
+    class _PdWorkerClient:
+        async def round_robin(self, request_json, context=None):
+            gc.collect()
+            assert image_loader.image_ref is not None
+            assert image_loader.image_ref() is None
+
+            async def responses():
+                yield json.dumps({"token_ids": [7], "finished": True, "text": ""})
+
+            return responses()
+
+    handler._image_loader = image_loader
+    handler.encoder = _Encoder()
+    handler.embedding_sender = _EmbeddingSender()
+    handler.pd_worker_client = _PdWorkerClient()
+
+    raw_request = {
+        "token_ids": [1, handler.image_token_id, 2],
+        "stop_conditions": {"max_tokens": 8},
+        "sampling_options": {"temperature": 0.0},
+        "multi_modal_data": {
+            "image_url": [
+                {
+                    "Decoded": {
+                        "shape": [4, 4, 3],
+                        "dtype": "UINT8",
+                        "content_hash": "0123456789abcdef",
+                    }
+                }
+            ]
+        },
+    }
+
+    outputs = [output async for output in handler.generate(raw_request, context=None)]
+    assert outputs == [{"token_ids": [7]}]
 
 
 class _Context:
