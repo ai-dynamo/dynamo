@@ -14,7 +14,7 @@ use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 use std::env;
-use std::future::{self, Future};
+use std::future::Future;
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -119,22 +119,6 @@ pub trait SequencePublisher: Send + Sync {
 
     /// Observe that a worker/dp_rank was removed from the router.
     fn observe_worker_removed(&self, _worker: &WorkerWithDpRank, _worker_type: &str) {}
-}
-
-/// No-op publisher for callers that do not need active-sequence event transport.
-pub struct NoopSequencePublisher;
-
-impl SequencePublisher for NoopSequencePublisher {
-    fn publish_event(
-        &self,
-        _event: &ActiveSequenceEvent,
-    ) -> impl Future<Output = anyhow::Result<()>> + Send {
-        future::ready(Ok(()))
-    }
-
-    fn publish_load(&self, _load: ActiveLoad) {}
-
-    fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize) {}
 }
 
 /// Abstraction over event subscription for replica sync.

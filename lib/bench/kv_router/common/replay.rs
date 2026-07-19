@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#[allow(unused_imports)]
-pub use dynamo_kv_router::NoopSequencePublisher;
 use dynamo_kv_router::protocols::KvCacheEventData;
+#[allow(unused_imports)]
+pub use dynamo_kv_router::test_utils::NoopSequencePublisher;
 use dynamo_mocker::common::protocols::MockEngineArgs;
 use dynamo_mocker::loadgen::{SessionPartitionSpec, Trace};
 use dynamo_mocker::replay::ReplayKvEventVisibility;
