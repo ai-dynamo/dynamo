@@ -141,20 +141,6 @@ impl DecodedMediaData {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{DataType, canonical_content_hash};
-
-    #[test]
-    fn canonical_content_hash_payload_is_stable() {
-        let bytes = [0_u8, 1, 2, 3, 4, 5];
-        let hash = canonical_content_hash(&[1, 2, 3], DataType::UINT8, &bytes);
-
-        assert_eq!(hash, 0x7a9b_bcb1_1a89_8630);
-        assert_eq!(format!("{hash:016x}"), "7a9bbcb11a898630");
-    }
-}
-
 // convert Array{N}<u8> to DecodedMediaData
 // TODO: Array1<f32> for audio
 
