@@ -29,6 +29,7 @@ dynamo-runtime = { workspace = true, optional = true }
 dynamo-kv-hashing = { workspace = true }
 dynamo-tokens = { workspace = true }
 dynamo-truthy = { workspace = true }
+dynamo-worker-selector-plugin-api = { workspace = true }
 
 # workspace
 anyhow = { workspace = true }
@@ -36,6 +37,7 @@ arc-swap = "1.9.1"
 async-trait = { workspace = true }
 dashmap = { workspace = true }
 indexmap = { workspace = true }
+libloading = "0.8"
 ordered-float = { workspace = true }
 derive_builder = { workspace = true }
 fastrand = "2"

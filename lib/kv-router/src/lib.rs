@@ -63,6 +63,10 @@ pub use radix_tree::RadixTree;
 pub use scheduling::LocalScheduler;
 pub use scheduling::PrefillLoadEstimator;
 pub use scheduling::policy::{FcfsPolicy, RouterSchedulingPolicy, SchedulingPolicy, WsptPolicy};
+pub use scheduling::runtime_plugin::{
+    DYN_ROUTER_WORKER_SELECTOR_CONFIG, DYN_ROUTER_WORKER_SELECTOR_PLUGIN, RuntimePluginConfig,
+    RuntimePluginRouterRole, RuntimePluginSelector,
+};
 pub use scheduling::{KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse};
 pub use selector::{
     DefaultWorkerSelector, TargetWorkerSelector, ValidatedWorkerSelector, WorkerSelector,

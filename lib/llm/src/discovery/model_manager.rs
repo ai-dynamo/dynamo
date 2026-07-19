@@ -11,10 +11,10 @@ use std::{
 
 use dashmap::{DashMap, mapref::entry::Entry};
 use dynamo_kv_router::{
-    PrefillLoadEstimator,
+    PrefillLoadEstimator, RuntimePluginConfig, RuntimePluginRouterRole,
     config::KvRouterConfig,
     protocols::{KvTransferEnforcement, RoutingConstraints, WorkerId},
-    selector::{TargetWorkerSelector, ValidatedWorkerSelector, WorkerSelector},
+    selector::{ValidatedWorkerSelector, WorkerSelector},
 };
 use tokio::sync::oneshot;
 
@@ -1061,6 +1061,41 @@ impl ModelManager {
         model_name: Option<String>,
         is_eagle: bool,
     ) -> anyhow::Result<Arc<KvRouter>> {
+        if let Some(plugin) = RuntimePluginConfig::from_env()? {
+            let router_role = match worker_type {
+                crate::protocols::common::timing::WORKER_TYPE_DECODE => {
+                    RuntimePluginRouterRole::Decode
+                }
+                crate::protocols::common::timing::WORKER_TYPE_PREFILL => {
+                    RuntimePluginRouterRole::Prefill
+                }
+                _ => anyhow::bail!(
+                    "runtime worker-selector plugin does not support worker type {worker_type:?}"
+                ),
+            };
+            // SAFETY: Configuring the environment variable explicitly opts this process into
+            // loading trusted native code that implements the documented plugin ABI.
+            let selector =
+                unsafe { plugin.load(router_role, kv_router_config.clone().unwrap_or_default()) }?;
+            tracing::info!(
+                ?selector,
+                worker_type,
+                "Using runtime worker-selector plugin"
+            );
+            return self
+                .kv_chooser_for_scheduler_selector(
+                    endpoint,
+                    kv_cache_block_size,
+                    kv_router_config,
+                    prefill_load_estimator,
+                    worker_type,
+                    model_name,
+                    is_eagle,
+                    ValidatedWorkerSelector::new(selector),
+                )
+                .await;
+        }
+
         let selector = DefaultWorkerSelector::new(kv_router_config.clone(), worker_type);
         self.kv_chooser_for_scheduler_selector(
             endpoint,
@@ -1071,35 +1106,6 @@ impl ModelManager {
             model_name,
             is_eagle,
             selector,
-        )
-        .await
-    }
-
-    /// Build a KV chooser with caller-provided worker selection logic.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn kv_chooser_for_with_selector<Sel>(
-        &self,
-        endpoint: &Endpoint,
-        kv_cache_block_size: u32,
-        kv_router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-        worker_type: &'static str,
-        model_name: Option<String>,
-        is_eagle: bool,
-        selector: Sel,
-    ) -> anyhow::Result<Arc<KvRouter>>
-    where
-        Sel: TargetWorkerSelector<ModelRuntimeConfig> + Send + 'static,
-    {
-        self.kv_chooser_for_scheduler_selector(
-            endpoint,
-            kv_cache_block_size,
-            kv_router_config,
-            prefill_load_estimator,
-            worker_type,
-            model_name,
-            is_eagle,
-            ValidatedWorkerSelector::new(selector),
         )
         .await
     }

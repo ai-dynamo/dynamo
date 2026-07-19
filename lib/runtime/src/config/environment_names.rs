@@ -607,6 +607,12 @@ pub mod router {
 
     /// Stale active-request cleanup guard in seconds; this is not a request timeout.
     pub const DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS: &str = "DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS";
+
+    /// Path to a trusted runtime worker-selector plugin.
+    pub const DYN_ROUTER_WORKER_SELECTOR_PLUGIN: &str = "DYN_ROUTER_WORKER_SELECTOR_PLUGIN";
+
+    /// Opaque configuration passed to the runtime worker-selector plugin.
+    pub const DYN_ROUTER_WORKER_SELECTOR_CONFIG: &str = "DYN_ROUTER_WORKER_SELECTOR_CONFIG";
 }
 
 /// Request plane transport environment variables
@@ -868,6 +874,8 @@ mod tests {
             router::DYN_ROUTER_QUEUE_POLICY,
             router::DYN_ROUTER_POLICY_CONFIG,
             router::DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
+            router::DYN_ROUTER_WORKER_SELECTOR_PLUGIN,
+            router::DYN_ROUTER_WORKER_SELECTOR_CONFIG,
             request_plane::DYN_REQUEST_PLANE_CODEC,
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,

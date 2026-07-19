@@ -1549,9 +1549,11 @@ dependencies = [
  "dynamo-runtime",
  "dynamo-tokens",
  "dynamo-truthy",
+ "dynamo-worker-selector-plugin-api",
  "fastrand",
  "flume",
  "indexmap 2.14.0",
+ "libloading 0.8.9",
  "ordered-float 4.6.0",
  "parking_lot",
  "prometheus",
@@ -1907,6 +1909,10 @@ version = "1.3.0"
 dependencies = [
  "anyhow",
 ]
+
+[[package]]
+name = "dynamo-worker-selector-plugin-api"
+version = "1.3.0"
 
 [[package]]
 name = "ed25519"

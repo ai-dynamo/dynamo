@@ -12,6 +12,7 @@ pub mod policy_queue;
 pub mod prefill_load;
 pub mod queue;
 mod queue_admission;
+pub mod runtime_plugin;
 pub mod selector;
 
 mod types;
