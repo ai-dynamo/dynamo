@@ -29,6 +29,9 @@ cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]
 media-ffmpeg = ["dep:video-rs", "dep:ffmpeg-next", "dep:memfile"]
 bench = ["dynamo-kv-router/bench"]
+# Pull-only CKF Relay stats and snapshots. Keep this separate from `metrics`, which
+# is enabled by normal `dynamo-llm` builds and must not retain diagnostic hot-path work.
+ckf-diagnostics = []
 kv-router-stress = ["dep:clap", "dep:indicatif", "bench"]
 mm-routing = ["dep:llm-multimodal", "dep:llm-tokenizer"]
 request-trace-bench = []

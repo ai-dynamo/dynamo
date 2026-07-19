@@ -66,6 +66,7 @@ pub(crate) enum TargetFaultDisposition {
     Stale,
 }
 
+#[cfg(feature = "ckf-diagnostics")]
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct WorkerQueryHealthSnapshot {
     pub(crate) worker_count: usize,
@@ -367,6 +368,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
         self.deactivate_all().await;
     }
 
+    #[cfg(feature = "ckf-diagnostics")]
     pub(crate) async fn health_snapshot(&self) -> WorkerQueryHealthSnapshot {
         let slots: Vec<_> = self.slots.iter().map(|entry| entry.clone()).collect();
         let mut workers = std::collections::HashSet::new();

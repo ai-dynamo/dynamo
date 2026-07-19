@@ -74,6 +74,7 @@ impl KvDcRelay {
         })
     }
 
+    #[cfg(feature = "ckf-diagnostics")]
     fn stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.started()?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -105,6 +106,7 @@ impl KvDcRelay {
         })
     }
 
+    #[cfg(feature = "ckf-diagnostics")]
     fn snapshot<'py>(
         &self,
         py: Python<'py>,

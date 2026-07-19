@@ -16,6 +16,12 @@ from tests.router.helper import (
 from tests.router.mocker_process import MockerProcess
 from tests.utils.constants import ROUTER_MODEL_NAME
 
+if not hasattr(KvDcRelay, "stats"):
+    pytest.skip(
+        "KV DC Relay diagnostic E2E requires a wheel built with ckf-diagnostics",
+        allow_module_level=True,
+    )
+
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,

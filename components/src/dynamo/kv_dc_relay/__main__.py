@@ -38,13 +38,13 @@ class KvDcRelayDiagnostics:
         self._relay = relay
 
     async def stats(self, _request):
-        yield await self._relay.stats()
+        yield await getattr(self._relay, "stats")()
 
     async def snapshot(self, request):
         serving_endpoint = request.get("serving_endpoint")
         if not serving_endpoint:
             raise ValueError("snapshot requests require serving_endpoint")
-        yield await self._relay.snapshot(serving_endpoint)
+        yield await getattr(self._relay, "snapshot")(serving_endpoint)
 
     async def health(self, _request):
         yield await self._relay.health()
@@ -74,28 +74,34 @@ async def worker(runtime: DistributedRuntime) -> None:
     )
     endpoint_tasks = []
     try:
-        endpoint_tasks.append(
-            asyncio.create_task(
-                runtime.endpoint(
-                    f"{namespace}.{diagnostics_component}.stats"
-                ).serve_endpoint(
-                    diagnostics.stats,
-                    graceful_shutdown=True,
-                    metrics_labels=[("service", "kv_dc_relay")],
+        if hasattr(relay, "stats") and hasattr(relay, "snapshot"):
+            endpoint_tasks.append(
+                asyncio.create_task(
+                    runtime.endpoint(
+                        f"{namespace}.{diagnostics_component}.stats"
+                    ).serve_endpoint(
+                        diagnostics.stats,
+                        graceful_shutdown=True,
+                        metrics_labels=[("service", "kv_dc_relay")],
+                    )
                 )
             )
-        )
-        endpoint_tasks.append(
-            asyncio.create_task(
-                runtime.endpoint(
-                    f"{namespace}.{diagnostics_component}.snapshot"
-                ).serve_endpoint(
-                    diagnostics.snapshot,
-                    graceful_shutdown=True,
-                    metrics_labels=[("service", "kv_dc_relay")],
+            endpoint_tasks.append(
+                asyncio.create_task(
+                    runtime.endpoint(
+                        f"{namespace}.{diagnostics_component}.snapshot"
+                    ).serve_endpoint(
+                        diagnostics.snapshot,
+                        graceful_shutdown=True,
+                        metrics_labels=[("service", "kv_dc_relay")],
+                    )
                 )
             )
-        )
+        else:
+            logger.info(
+                "KV DC Relay rich diagnostics are disabled in this build; "
+                "enable the ckf-diagnostics Cargo feature to expose them"
+            )
         endpoint_tasks.append(
             asyncio.create_task(
                 runtime.endpoint(

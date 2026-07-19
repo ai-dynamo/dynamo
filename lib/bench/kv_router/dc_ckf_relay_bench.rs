@@ -693,7 +693,7 @@ fn discover_host_topology(args: &Args) -> anyhow::Result<HostTopology> {
     let issuer_start = logical_cpus - max_issuers;
     Ok(HostTopology {
         logical_cpus,
-        physical_cores: discover_physical_cores(logical_cpus),
+        physical_cores: discover_physical_cores(&allowed_cpus),
         reserved_control_cores: args.reserved_control_cores,
         actor_threads,
         // Sequencing is serialized inside each actor thread; there are no extra publisher threads.
@@ -734,7 +734,7 @@ fn allowed_cpu_ids() -> anyhow::Result<Vec<usize>> {
     }
 }
 
-fn discover_physical_cores(logical_cpus: usize) -> Option<usize> {
+fn discover_physical_cores(allowed_cpus: &[usize]) -> Option<usize> {
     if cfg!(target_os = "macos") {
         let output = Command::new("sysctl")
             .args(["-n", "hw.physicalcpu"])
@@ -746,7 +746,7 @@ fn discover_physical_cores(logical_cpus: usize) -> Option<usize> {
         return None;
     }
     let mut cores = BTreeSet::new();
-    for cpu in 0..logical_cpus {
+    for cpu in allowed_cpus {
         let topology = PathBuf::from(format!("/sys/devices/system/cpu/cpu{cpu}/topology"));
         let package = std::fs::read_to_string(topology.join("physical_package_id")).ok()?;
         let core = std::fs::read_to_string(topology.join("core_id")).ok()?;

@@ -17,14 +17,22 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
+#[cfg(feature = "ckf-diagnostics")]
+use std::sync::atomic::AtomicU64;
+#[cfg(feature = "ckf-diagnostics")]
+use std::time::Instant;
+
+#[cfg(any(test, feature = "ckf-diagnostics"))]
+use dynamo_kv_router::indexer::cuckoo::DcCkfStats;
+#[cfg(feature = "ckf-diagnostics")]
+use dynamo_kv_router::indexer::cuckoo::PublisherEmitOutcome;
 use dynamo_kv_router::indexer::cuckoo::{
     CacheDomainId, CacheDomainIdentity, CkfConfig, CkfFailureAction, CkfFailureDisposition,
     CkfFailurePoint, DcCkfDelta, DcCkfDeltaSink, DcCkfPublisher, DcCkfSnapshot, DcCkfState,
-    DcCkfStats, DcId as CkfDcId, EndpointId as CkfEndpointId, LaneLease, ProducerIdentity,
-    PublisherEmitOutcome,
+    DcId as CkfDcId, EndpointId as CkfEndpointId, LaneLease, ProducerIdentity,
 };
 use dynamo_kv_router::protocols::{
     DpRank, ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, RouterEvent,
@@ -44,9 +52,11 @@ use crate::discovery::{KvSourceMembershipCoordinator, KvSourceMembershipWatch};
 use crate::kv_dc_relay_discovery::{
     DcDiscoveryFilter, DcMembershipView, DcMembershipWatch, EndpointMembership, KvCacheDomainKey,
 };
+#[cfg(feature = "ckf-diagnostics")]
+use crate::kv_router::indexer::WorkerQueryHealthSnapshot;
 use crate::kv_router::indexer::{
     RecoveryResetReason, RecoverySupervisor, RecoveryTarget, SourceEpoch, TargetFaultDisposition,
-    WorkerQueryHealthSnapshot, start_target_subscriber,
+    start_target_subscriber,
 };
 
 pub const DEFAULT_EXPECTED_UNIQUE_BLOCKS: usize = 1_048_576;
@@ -65,6 +75,7 @@ pub enum KvDcRelayError {
     ShuttingDown,
     #[error("KV DC Relay actor stopped before completing an accepted command")]
     ActorStopped,
+    #[cfg(feature = "ckf-diagnostics")]
     #[error("unknown or inactive serving endpoint {0}")]
     UnknownEndpoint(String),
     #[error(
@@ -115,6 +126,7 @@ struct ActorPublicationConfig {
     delay: Duration,
 }
 
+#[cfg(feature = "ckf-diagnostics")]
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct KvDcRelayStats {
@@ -122,6 +134,7 @@ pub struct KvDcRelayStats {
     pub endpoints: Vec<KvDcRelayEndpointStats>,
 }
 
+#[cfg(feature = "ckf-diagnostics")]
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct KvDcRelayIdentityStats {
@@ -129,6 +142,7 @@ pub struct KvDcRelayIdentityStats {
     pub process_incarnation: u64,
 }
 
+#[cfg(feature = "ckf-diagnostics")]
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct KvDcRelayEndpointStats {
@@ -147,6 +161,7 @@ pub struct KvDcRelayEndpointStats {
     pub actor: KvDcRelayActorStats,
 }
 
+#[cfg(feature = "ckf-diagnostics")]
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct KvDcRelayCacheDomainStats {
@@ -155,6 +170,7 @@ pub struct KvDcRelayCacheDomainStats {
     pub event_hash_format: u16,
 }
 
+#[cfg(feature = "ckf-diagnostics")]
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct KvDcRelayMemberStats {
@@ -163,6 +179,7 @@ pub struct KvDcRelayMemberStats {
     pub blocks: usize,
 }
 
+#[cfg(feature = "ckf-diagnostics")]
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct KvDcRelayAggregationStats {
@@ -175,6 +192,7 @@ pub struct KvDcRelayAggregationStats {
     pub occupied_slot_count: usize,
 }
 
+#[cfg(feature = "ckf-diagnostics")]
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct KvDcRelayPublicationStats {
@@ -189,6 +207,7 @@ pub struct KvDcRelayPublicationStats {
     pub reset_count: u64,
 }
 
+#[cfg(feature = "ckf-diagnostics")]
 #[derive(Debug, Clone, Default, Serialize)]
 #[non_exhaustive]
 pub struct KvDcRelayRecoveryStats {
@@ -203,6 +222,7 @@ pub struct KvDcRelayRecoveryStats {
     pub discovered_endpoint_count: usize,
 }
 
+#[cfg(feature = "ckf-diagnostics")]
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct KvDcRelayMemoryStats {
@@ -213,6 +233,7 @@ pub struct KvDcRelayMemoryStats {
     pub insertion_scratch_capacity: usize,
 }
 
+#[cfg(feature = "ckf-diagnostics")]
 #[derive(Debug, Clone, Default, Serialize)]
 #[non_exhaustive]
 pub struct KvDcRelayActorStats {
@@ -237,6 +258,7 @@ pub struct KvDcRelayHealth {
     pub fenced_endpoint_count: usize,
 }
 
+#[cfg(feature = "ckf-diagnostics")]
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct KvDcRelayDiagnosticSnapshot {
@@ -265,6 +287,10 @@ pub(crate) struct DcCkfSubscription {
     pub(crate) deltas: broadcast::Receiver<DcCkfDelta>,
 }
 
+// NOTE: `dynamo-llm` enables the router's general metrics feature in production. Keep these
+// pull-only diagnostics on a separate feature so ordinary commands do not acquire an activity
+// mutex, read the clock, or update mailbox/publication atomics.
+#[cfg(feature = "ckf-diagnostics")]
 #[derive(Debug, Default)]
 struct ActorCounters {
     mailbox_wait_ns: AtomicU64,
@@ -277,12 +303,136 @@ struct ActorCounters {
     rebuild_max_ns: AtomicU64,
 }
 
+#[cfg(feature = "ckf-diagnostics")]
 #[derive(Debug, Default)]
 struct ActorActivity {
     active_command: Option<&'static str>,
     active_since: Option<Instant>,
     shutting_down: bool,
     last_error: Option<String>,
+}
+
+#[cfg(feature = "ckf-diagnostics")]
+#[derive(Debug, Default)]
+struct ActorDiagnostics {
+    counters: ActorCounters,
+    activity: Mutex<ActorActivity>,
+}
+
+#[cfg(feature = "ckf-diagnostics")]
+#[derive(Debug, Clone, Default)]
+struct ActorDiagnosticsHandle(Arc<ActorDiagnostics>);
+
+#[cfg(not(feature = "ckf-diagnostics"))]
+#[derive(Debug, Clone, Default)]
+struct ActorDiagnosticsHandle;
+
+#[cfg(feature = "ckf-diagnostics")]
+impl ActorDiagnosticsHandle {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn start_command(&self, command: &ActorCommand) {
+        let mut activity = self.0.activity.lock();
+        activity.active_command = Some(command.kind());
+        activity.active_since = Some(Instant::now());
+    }
+
+    fn finish_command(&self) {
+        let mut activity = self.0.activity.lock();
+        activity.active_command = None;
+        activity.active_since = None;
+    }
+
+    fn record_error(&self, error: &impl std::fmt::Display) {
+        self.0.activity.lock().last_error = Some(error.to_string());
+    }
+
+    fn record_shutdown(&self) {
+        self.0.activity.lock().shutting_down = true;
+    }
+
+    fn record_mailbox_wait(&self, started: Instant) {
+        let waited = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        self.0
+            .counters
+            .mailbox_wait_ns
+            .fetch_add(waited, Ordering::Relaxed);
+        self.0
+            .counters
+            .mailbox_max_wait_ns
+            .fetch_max(waited, Ordering::Relaxed);
+    }
+
+    fn record_publish_outcome(&self, outcome: &PublisherEmitOutcome) {
+        match outcome {
+            PublisherEmitOutcome::Published { .. } => {
+                self.0.counters.publications.fetch_add(1, Ordering::Relaxed);
+            }
+            PublisherEmitOutcome::NoSubscriber { .. } => {
+                self.record_no_publication();
+            }
+        }
+    }
+
+    fn record_no_publication(&self) {
+        self.0
+            .counters
+            .unchanged_publications
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_degraded_reset(&self) {
+        self.0
+            .counters
+            .degraded_resets
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_rebuild(&self, started: Instant) {
+        let elapsed = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        self.0
+            .counters
+            .rebuild_count
+            .fetch_add(1, Ordering::Relaxed);
+        self.0
+            .counters
+            .rebuild_ns
+            .fetch_add(elapsed, Ordering::Relaxed);
+        self.0
+            .counters
+            .rebuild_max_ns
+            .fetch_max(elapsed, Ordering::Relaxed);
+    }
+}
+
+#[cfg(not(feature = "ckf-diagnostics"))]
+impl ActorDiagnosticsHandle {
+    fn new() -> Self {
+        Self
+    }
+
+    #[inline(always)]
+    fn start_command(&self, _command: &ActorCommand) {}
+
+    #[inline(always)]
+    fn finish_command(&self) {}
+
+    #[inline(always)]
+    fn record_error(&self, _error: &impl std::fmt::Display) {}
+
+    #[inline(always)]
+    fn record_shutdown(&self) {}
+
+    #[inline(always)]
+    fn record_publish_outcome<T>(&self, _outcome: &T) {}
+
+    #[inline(always)]
+    fn record_no_publication(&self) {}
+
+    #[inline(always)]
+    fn record_degraded_reset(&self) {}
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -358,8 +508,8 @@ impl DcCkfDeltaSink for BroadcastDeltaSink {
 pub(crate) struct KvDcRelayHandle {
     sender: mpsc::Sender<ActorCommand>,
     payload_permits: Arc<Semaphore>,
-    counters: Arc<ActorCounters>,
-    activity: Arc<Mutex<ActorActivity>>,
+    #[cfg(feature = "ckf-diagnostics")]
+    diagnostics: ActorDiagnosticsHandle,
     scope: StreamScope,
 }
 
@@ -445,23 +595,21 @@ impl KvDcRelayHandle {
             },
         );
         let (fault_tx, fault_rx) = mpsc::channel(DEFAULT_FAULT_CAPACITY);
-        let counters = Arc::new(ActorCounters::default());
-        let activity = Arc::new(Mutex::new(ActorActivity::default()));
+        let diagnostics = ActorDiagnosticsHandle::new();
         tokio::spawn(run_actor(
             state,
             publisher,
             receiver,
             publication_timer_armed,
             fault_tx,
-            counters.clone(),
-            activity.clone(),
+            diagnostics.clone(),
         ));
         Ok((
             Self {
                 sender,
                 payload_permits: Arc::new(Semaphore::new(DEFAULT_PENDING_BLOCK_PERMITS)),
-                counters,
-                activity,
+                #[cfg(feature = "ckf-diagnostics")]
+                diagnostics,
                 scope,
             },
             fault_rx,
@@ -473,12 +621,14 @@ impl KvDcRelayHandle {
         make_command: impl FnOnce(oneshot::Sender<Result<T, KvDcRelayError>>) -> ActorCommand,
     ) -> Result<T, KvDcRelayError> {
         let (response_tx, response_rx) = oneshot::channel();
+        #[cfg(feature = "ckf-diagnostics")]
         let wait_started = Instant::now();
         self.sender
             .send(make_command(response_tx))
             .await
             .map_err(|_| KvDcRelayError::ShuttingDown)?;
-        self.record_mailbox_wait(wait_started);
+        #[cfg(feature = "ckf-diagnostics")]
+        self.diagnostics.record_mailbox_wait(wait_started);
         response_rx
             .await
             .map_err(|_| KvDcRelayError::ActorStopped)?
@@ -490,6 +640,7 @@ impl KvDcRelayHandle {
         event: RouterEvent,
     ) -> Result<(), KvDcRelayError> {
         let weight = event_payload_weight(&event).min(DEFAULT_PENDING_BLOCK_PERMITS) as u32;
+        #[cfg(feature = "ckf-diagnostics")]
         let wait_started = Instant::now();
         let permit = self
             .payload_permits
@@ -505,7 +656,8 @@ impl KvDcRelayHandle {
             })
             .await
             .map_err(|_| KvDcRelayError::ShuttingDown)?;
-        self.record_mailbox_wait(wait_started);
+        #[cfg(feature = "ckf-diagnostics")]
+        self.diagnostics.record_mailbox_wait(wait_started);
         Ok(())
     }
 
@@ -560,11 +712,13 @@ impl KvDcRelayHandle {
             .await
     }
 
+    #[cfg(feature = "ckf-diagnostics")]
     async fn snapshot(&self) -> Result<ActorSnapshot, KvDcRelayError> {
         self.submit(|response| ActorCommand::Snapshot { response })
             .await
     }
 
+    #[cfg(any(test, feature = "ckf-diagnostics"))]
     async fn state_stats(
         &self,
     ) -> Result<(DcCkfStats, u64, Vec<(WorkerWithDpRank, usize)>), KvDcRelayError> {
@@ -592,20 +746,11 @@ impl KvDcRelayHandle {
             .await
     }
 
+    #[cfg(any(test, feature = "ckf-diagnostics"))]
     fn mailbox_depth(&self) -> usize {
         self.sender
             .max_capacity()
             .saturating_sub(self.sender.capacity())
-    }
-
-    fn record_mailbox_wait(&self, started: Instant) {
-        let waited = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
-        self.counters
-            .mailbox_wait_ns
-            .fetch_add(waited, Ordering::Relaxed);
-        self.counters
-            .mailbox_max_wait_ns
-            .fetch_max(waited, Ordering::Relaxed);
     }
 }
 
@@ -675,6 +820,7 @@ enum SlotLifecycle {
 }
 
 impl SlotLifecycle {
+    #[cfg(feature = "ckf-diagnostics")]
     fn as_str(self) -> &'static str {
         match self {
             Self::Discovered => "discovered",
@@ -693,6 +839,7 @@ struct EndpointSlotStatus {
     layout_generation: u64,
     membership: Option<EndpointMembership>,
     actor: Option<KvDcRelayHandle>,
+    #[cfg(feature = "ckf-diagnostics")]
     recovery: WorkerQueryHealthSnapshot,
 }
 
@@ -703,6 +850,7 @@ impl Default for EndpointSlotStatus {
             layout_generation: 0,
             membership: None,
             actor: None,
+            #[cfg(feature = "ckf-diagnostics")]
             recovery: WorkerQueryHealthSnapshot::default(),
         }
     }
@@ -731,7 +879,9 @@ struct ActorBinding {
 
 /// DC-wide Relay host. It is intentionally not scoped to a model, namespace, or endpoint.
 pub struct KvDcRelay {
+    #[cfg(feature = "ckf-diagnostics")]
     dc_id: Arc<str>,
+    #[cfg(feature = "ckf-diagnostics")]
     process_incarnation: u64,
     cancel: CancellationToken,
     membership: Mutex<Option<DcMembershipWatch>>,
@@ -781,7 +931,9 @@ impl KvDcRelay {
             cancel.child_token(),
         ));
         Ok(Self {
+            #[cfg(feature = "ckf-diagnostics")]
             dc_id,
+            #[cfg(feature = "ckf-diagnostics")]
             process_incarnation,
             cancel,
             membership: Mutex::new(Some(membership)),
@@ -790,6 +942,7 @@ impl KvDcRelay {
         })
     }
 
+    #[cfg(feature = "ckf-diagnostics")]
     pub async fn stats(&self) -> Result<KvDcRelayStats, KvDcRelayError> {
         let statuses: Vec<_> = self
             .statuses
@@ -813,6 +966,7 @@ impl KvDcRelay {
         })
     }
 
+    #[cfg(feature = "ckf-diagnostics")]
     pub async fn diagnostic_snapshot(
         &self,
         endpoint: &EndpointId,
@@ -1058,7 +1212,10 @@ async fn run_endpoint_slot(
                 source_watch = None;
                 let mut current = status.write().await;
                 current.lifecycle = SlotLifecycle::Lightweight;
-                current.recovery = WorkerQueryHealthSnapshot::default();
+                #[cfg(feature = "ckf-diagnostics")]
+                {
+                    current.recovery = WorkerQueryHealthSnapshot::default();
+                }
             }
         }
 
@@ -1142,7 +1299,7 @@ async fn run_endpoint_slot(
                     None => SlotInput::Metadata,
                 }
             }
-            _ = tokio::time::sleep(std::time::Duration::from_secs(1)), if actor.is_some() => SlotInput::Health,
+            _ = diagnostic_tick(), if actor.is_some() => SlotInput::Health,
         };
         match input {
             SlotInput::Metadata | SlotInput::Source | SlotInput::Health => {}
@@ -1188,6 +1345,7 @@ async fn run_endpoint_slot(
             SlotInput::Cancelled => break,
         }
 
+        #[cfg(feature = "ckf-diagnostics")]
         if let Some(active) = &actor {
             status.write().await.recovery = active.recovery.client().health_snapshot().await;
         }
@@ -1200,6 +1358,13 @@ async fn run_endpoint_slot(
     let mut current = status.write().await;
     current.actor = None;
     current.lifecycle = SlotLifecycle::Lightweight;
+}
+
+async fn diagnostic_tick() {
+    #[cfg(feature = "ckf-diagnostics")]
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    #[cfg(not(feature = "ckf-diagnostics"))]
+    std::future::pending::<()>().await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1297,6 +1462,7 @@ async fn stop_endpoint_actor(active: EndpointActorRuntime) {
     }
 }
 
+#[cfg(feature = "ckf-diagnostics")]
 async fn endpoint_stats(
     endpoint: EndpointId,
     status: SharedEndpointStatus,
@@ -1328,8 +1494,15 @@ async fn endpoint_stats(
             Some(KvDcRelayPublicationStats {
                 sequence,
                 pending_events: publication.pending_events(),
-                publication_count: actor.counters.publications.load(Ordering::Relaxed),
+                publication_count: actor
+                    .diagnostics
+                    .0
+                    .counters
+                    .publications
+                    .load(Ordering::Relaxed),
                 unchanged_publication_count: actor
+                    .diagnostics
+                    .0
                     .counters
                     .unchanged_publications
                     .load(Ordering::Relaxed),
@@ -1378,17 +1551,36 @@ async fn endpoint_stats(
         publication,
         recovery: KvDcRelayRecoveryStats {
             degraded_resets: status.actor.as_ref().map_or(0, |actor| {
-                actor.counters.degraded_resets.load(Ordering::Relaxed)
+                actor
+                    .diagnostics
+                    .0
+                    .counters
+                    .degraded_resets
+                    .load(Ordering::Relaxed)
             }),
             rebuild_count: status.actor.as_ref().map_or(0, |actor| {
-                actor.counters.rebuild_count.load(Ordering::Relaxed)
+                actor
+                    .diagnostics
+                    .0
+                    .counters
+                    .rebuild_count
+                    .load(Ordering::Relaxed)
             }),
-            rebuild_ns: status
-                .actor
-                .as_ref()
-                .map_or(0, |actor| actor.counters.rebuild_ns.load(Ordering::Relaxed)),
+            rebuild_ns: status.actor.as_ref().map_or(0, |actor| {
+                actor
+                    .diagnostics
+                    .0
+                    .counters
+                    .rebuild_ns
+                    .load(Ordering::Relaxed)
+            }),
             rebuild_max_ns: status.actor.as_ref().map_or(0, |actor| {
-                actor.counters.rebuild_max_ns.load(Ordering::Relaxed)
+                actor
+                    .diagnostics
+                    .0
+                    .counters
+                    .rebuild_max_ns
+                    .load(Ordering::Relaxed)
             }),
             worker_count: status.recovery.worker_count,
             rank_count: status.recovery.rank_count,
@@ -1401,6 +1593,7 @@ async fn endpoint_stats(
     })
 }
 
+#[cfg(feature = "ckf-diagnostics")]
 fn cache_domain_stats(domain: &KvCacheDomainKey) -> KvDcRelayCacheDomainStats {
     KvDcRelayCacheDomainStats {
         model_artifact: domain.model_artifact.clone(),
@@ -1409,13 +1602,24 @@ fn cache_domain_stats(domain: &KvCacheDomainKey) -> KvDcRelayCacheDomainStats {
     }
 }
 
+#[cfg(feature = "ckf-diagnostics")]
 fn actor_health(handle: &KvDcRelayHandle) -> KvDcRelayActorStats {
-    let activity = handle.activity.lock();
+    let activity = handle.diagnostics.0.activity.lock();
     KvDcRelayActorStats {
         mailbox_depth: handle.mailbox_depth(),
         mailbox_capacity: handle.sender.max_capacity(),
-        mailbox_wait_ns: handle.counters.mailbox_wait_ns.load(Ordering::Relaxed),
-        mailbox_max_wait_ns: handle.counters.mailbox_max_wait_ns.load(Ordering::Relaxed),
+        mailbox_wait_ns: handle
+            .diagnostics
+            .0
+            .counters
+            .mailbox_wait_ns
+            .load(Ordering::Relaxed),
+        mailbox_max_wait_ns: handle
+            .diagnostics
+            .0
+            .counters
+            .mailbox_max_wait_ns
+            .load(Ordering::Relaxed),
         active_command: activity.active_command.map(str::to_string),
         active_command_age_ms: activity
             .active_since
@@ -1426,12 +1630,7 @@ fn actor_health(handle: &KvDcRelayHandle) -> KvDcRelayActorStats {
     }
 }
 
-fn clear_actor_activity(activity: &Mutex<ActorActivity>) {
-    let mut active = activity.lock();
-    active.active_command = None;
-    active.active_since = None;
-}
-
+#[cfg(any(test, feature = "ckf-diagnostics"))]
 type ActorStatsResult = Result<(DcCkfStats, u64, Vec<(WorkerWithDpRank, usize)>), KvDcRelayError>;
 
 enum ActorCommand {
@@ -1459,6 +1658,7 @@ enum ActorCommand {
         response: oneshot::Sender<Result<(), KvDcRelayError>>,
     },
     PublishTimer,
+    #[cfg(feature = "ckf-diagnostics")]
     Snapshot {
         response: oneshot::Sender<Result<ActorSnapshot, KvDcRelayError>>,
     },
@@ -1466,6 +1666,7 @@ enum ActorCommand {
         lease: LaneLease,
         response: oneshot::Sender<Result<ActorSubscription, KvDcRelayError>>,
     },
+    #[cfg(any(test, feature = "ckf-diagnostics"))]
     Stats {
         response: oneshot::Sender<ActorStatsResult>,
     },
@@ -1479,6 +1680,7 @@ enum ActorCommand {
     },
 }
 
+#[cfg(feature = "ckf-diagnostics")]
 struct ActorSnapshot {
     identity: ProducerIdentity,
     sequence: u64,
@@ -1492,6 +1694,7 @@ struct ActorSubscription {
 }
 
 impl ActorCommand {
+    #[cfg(feature = "ckf-diagnostics")]
     fn kind(&self) -> &'static str {
         match self {
             Self::Apply { .. } => "apply_event",
@@ -1501,6 +1704,7 @@ impl ActorCommand {
             Self::PublishTimer => "publish_timer",
             Self::Snapshot { .. } => "snapshot",
             Self::Subscribe { .. } => "subscribe",
+            #[cfg(any(test, feature = "ckf-diagnostics"))]
             Self::Stats { .. } => "stats",
             Self::Shutdown { .. } => "shutdown",
             #[cfg(test)]
@@ -1515,19 +1719,13 @@ async fn run_actor(
     mut receiver: mpsc::Receiver<ActorCommand>,
     publication_timer_armed: Arc<AtomicBool>,
     fault_tx: mpsc::Sender<ActorFault>,
-    counters: Arc<ActorCounters>,
-    activity: Arc<Mutex<ActorActivity>>,
+    diagnostics: ActorDiagnosticsHandle,
 ) {
     let mut source_epochs = FxHashMap::<WorkerWithDpRank, SourceEpoch>::default();
     let mut capacity_omission_events = 0u64;
     let mut shutdown_response = None;
     while let Some(command) = receiver.recv().await {
-        let kind = command.kind();
-        {
-            let mut active = activity.lock();
-            active.active_command = Some(kind);
-            active.active_since = Some(Instant::now());
-        }
+        diagnostics.start_command(&command);
         match command {
             ActorCommand::Apply {
                 source_epoch,
@@ -1548,7 +1746,7 @@ async fn run_actor(
                         current_epoch = current_epoch.expect("guarded current epoch").get(),
                         "Dropping an admitted KV mutation from a superseded source epoch"
                     );
-                    clear_actor_activity(activity.as_ref());
+                    diagnostics.finish_command();
                     continue;
                 }
                 if let Some(current_epoch) = current_epoch
@@ -1560,7 +1758,7 @@ async fn run_actor(
                         current_epoch.get(),
                         source_epoch.get()
                     );
-                    activity.lock().last_error = Some(message.clone());
+                    diagnostics.record_error(&message);
                     if fault_tx
                         .send(ActorFault {
                             worker_id,
@@ -1576,7 +1774,7 @@ async fn run_actor(
                     {
                         break;
                     }
-                    clear_actor_activity(activity.as_ref());
+                    diagnostics.finish_command();
                     continue;
                 }
                 source_epochs.entry(key).or_insert(source_epoch);
@@ -1593,13 +1791,11 @@ async fn run_actor(
                     );
                 }
                 if let Some(batch) = outcome.into_publication() {
-                    if let Err(error) = publish_batch(batch, &mut publisher, &counters) {
-                        activity.lock().last_error = Some(error.to_string());
+                    if let Err(error) = publish_batch(batch, &mut publisher, &diagnostics) {
+                        diagnostics.record_error(&error);
                     }
                 } else if publication_boundary {
-                    counters
-                        .unchanged_publications
-                        .fetch_add(1, Ordering::Relaxed);
+                    diagnostics.record_no_publication();
                 }
                 if publication_boundary {
                     publication_timer_armed.store(false, Ordering::Release);
@@ -1608,7 +1804,6 @@ async fn run_actor(
                 }
                 if let Some(error) = first_error {
                     let disposition = event_failure_point(error).disposition();
-                    let message = error.to_string();
                     if disposition.action == CkfFailureAction::ContinueCapacityOmission {
                         // NOTE: A bounded relocation miss is a pre-commit lossy-index omission.
                         // Do not turn it into a lifecycle fault: the affected block is unchanged,
@@ -1632,11 +1827,12 @@ async fn run_actor(
                                 "KV DC Relay continues after repeated capacity omissions"
                             );
                         }
-                        clear_actor_activity(activity.as_ref());
+                        diagnostics.finish_command();
                         continue;
                     }
+                    let message = error.to_string();
                     let category = actor_fault_category(disposition);
-                    activity.lock().last_error = Some(message.clone());
+                    diagnostics.record_error(&message);
                     if fault_tx
                         .send(ActorFault {
                             worker_id,
@@ -1672,9 +1868,10 @@ async fn run_actor(
                         current: current.get(),
                         received: source_epoch.get(),
                     }));
-                    clear_actor_activity(activity.as_ref());
+                    diagnostics.finish_command();
                     continue;
                 }
+                #[cfg(feature = "ckf-diagnostics")]
                 let rebuild_started = Instant::now();
                 let result = replacement_hashes(worker_id, dp_rank, events)
                     .and_then(|hashes| {
@@ -1684,23 +1881,17 @@ async fn run_actor(
                     })
                     .and_then(|publication| {
                         if let Some(batch) = publication {
-                            publish_batch(batch, &mut publisher, &counters)?;
+                            publish_batch(batch, &mut publisher, &diagnostics)?;
                         } else {
-                            counters
-                                .unchanged_publications
-                                .fetch_add(1, Ordering::Relaxed);
+                            diagnostics.record_no_publication();
                         }
                         Ok(())
                     });
                 if result.is_ok() {
                     source_epochs.insert(key, source_epoch);
                 }
-                let elapsed = rebuild_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
-                counters.rebuild_count.fetch_add(1, Ordering::Relaxed);
-                counters.rebuild_ns.fetch_add(elapsed, Ordering::Relaxed);
-                counters
-                    .rebuild_max_ns
-                    .fetch_max(elapsed, Ordering::Relaxed);
+                #[cfg(feature = "ckf-diagnostics")]
+                diagnostics.record_rebuild(rebuild_started);
                 // Replacement is built off-side. A pre-swap failure leaves the old generation
                 // unchanged, so its strong response carries the barrier error without an
                 // asynchronous producer-recovery fault.
@@ -1723,7 +1914,7 @@ async fn run_actor(
                         current: current.get(),
                         received: source_epoch.get(),
                     }));
-                    clear_actor_activity(activity.as_ref());
+                    diagnostics.finish_command();
                     continue;
                 }
                 let mut removal = state.remove_rank(key);
@@ -1744,14 +1935,12 @@ async fn run_actor(
                     .map_err(KvDcRelayError::from)
                     .and_then(|publication| {
                         if degraded {
-                            counters.degraded_resets.fetch_add(1, Ordering::Relaxed);
+                            diagnostics.record_degraded_reset();
                         }
                         if let Some(batch) = publication {
-                            publish_batch(batch, &mut publisher, &counters)?;
+                            publish_batch(batch, &mut publisher, &diagnostics)?;
                         } else {
-                            counters
-                                .unchanged_publications
-                                .fetch_add(1, Ordering::Relaxed);
+                            diagnostics.record_no_publication();
                         }
                         Ok(())
                     });
@@ -1761,18 +1950,19 @@ async fn run_actor(
                 let _ = response.send(result);
             }
             ActorCommand::Flush { response } => {
-                let result = publish_pending(&mut state, &mut publisher, &counters);
+                let result = publish_pending(&mut state, &mut publisher, &diagnostics);
                 let _ = response.send(result);
             }
             ActorCommand::PublishTimer => {
                 if state.has_pending_publication()
-                    && let Err(error) = publish_pending(&mut state, &mut publisher, &counters)
+                    && let Err(error) = publish_pending(&mut state, &mut publisher, &diagnostics)
                 {
-                    activity.lock().last_error = Some(error.to_string());
+                    diagnostics.record_error(&error);
                 }
             }
+            #[cfg(feature = "ckf-diagnostics")]
             ActorCommand::Snapshot { response } => {
-                let result = diagnostic_barrier_snapshot(&mut state, &mut publisher, &counters);
+                let result = diagnostic_barrier_snapshot(&mut state, &mut publisher, &diagnostics);
                 let _ = response.send(result);
             }
             ActorCommand::Subscribe { lease, response } => {
@@ -1788,6 +1978,7 @@ async fn run_actor(
                     });
                 let _ = response.send(result);
             }
+            #[cfg(any(test, feature = "ckf-diagnostics"))]
             ActorCommand::Stats { response } => {
                 let _ = response.send(Ok((
                     state.stats(),
@@ -1800,7 +1991,7 @@ async fn run_actor(
                     let _ = response.send(Err(KvDcRelayError::ShuttingDown));
                 } else {
                     receiver.close();
-                    activity.lock().shutting_down = true;
+                    diagnostics.record_shutdown();
                     shutdown_response = Some(response);
                 }
             }
@@ -1810,11 +2001,11 @@ async fn run_actor(
                 let _ = release.await;
             }
         }
-        clear_actor_activity(activity.as_ref());
+        diagnostics.finish_command();
     }
 
-    if let Err(error) = publish_pending(&mut state, &mut publisher, &counters) {
-        activity.lock().last_error = Some(error.to_string());
+    if let Err(error) = publish_pending(&mut state, &mut publisher, &diagnostics) {
+        diagnostics.record_error(&error);
     }
     publisher.retire_lease();
     drop(fault_tx);
@@ -1860,42 +2051,35 @@ fn replacement_hashes(
 fn publish_batch(
     batch: dynamo_kv_router::indexer::cuckoo::DcCkfPublicationBatch,
     publisher: &mut DcCkfPublisher<BroadcastDeltaSink>,
-    counters: &ActorCounters,
+    diagnostics: &ActorDiagnosticsHandle,
 ) -> Result<(), KvDcRelayError> {
-    match publisher.publish(batch) {
-        Ok(PublisherEmitOutcome::Published { .. }) => {
-            counters.publications.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        }
-        Ok(PublisherEmitOutcome::NoSubscriber { .. }) => {
-            counters
-                .unchanged_publications
-                .fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        }
-        Err(error) => Err(KvDcRelayError::Publisher(format!("{error:?}"))),
-    }
+    let outcome = publisher
+        .publish(batch)
+        .map_err(|error| KvDcRelayError::Publisher(format!("{error:?}")))?;
+    diagnostics.record_publish_outcome(&outcome);
+    Ok(())
 }
 
 fn publish_pending(
     state: &mut DcCkfState,
     publisher: &mut DcCkfPublisher<BroadcastDeltaSink>,
-    counters: &ActorCounters,
+    diagnostics: &ActorDiagnosticsHandle,
 ) -> Result<(), KvDcRelayError> {
     let Some(batch) = state.flush() else {
         return Ok(());
     };
-    publish_batch(batch, publisher, counters)
+    publish_batch(batch, publisher, diagnostics)
 }
 
+#[cfg(feature = "ckf-diagnostics")]
 fn diagnostic_barrier_snapshot(
     state: &mut DcCkfState,
     publisher: &mut DcCkfPublisher<BroadcastDeltaSink>,
-    counters: &ActorCounters,
+    diagnostics: &ActorDiagnosticsHandle,
 ) -> Result<ActorSnapshot, KvDcRelayError> {
     let (publication, buckets) = state.barrier_snapshot()?;
     if let Some(batch) = publication {
-        publish_batch(batch, publisher, counters)?;
+        publish_batch(batch, publisher, diagnostics)?;
     }
     Ok(ActorSnapshot {
         identity: publisher.identity(),
@@ -1976,6 +2160,40 @@ mod tests {
             .unwrap();
         entered_rx.await.unwrap();
         release_tx
+    }
+
+    #[cfg(feature = "ckf-diagnostics")]
+    #[tokio::test]
+    async fn diagnostic_feature_exposes_rich_actor_and_snapshot_state() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let (handle, _faults) =
+            KvDcRelayHandle::spawn(CkfConfig::new(32), scope("diagnostics")).unwrap();
+
+        handle
+            .admit_event(SourceEpoch::new(0), stored(worker, 1, &[1, 2]))
+            .await
+            .unwrap();
+        handle.flush().await.unwrap();
+        let snapshot = handle.snapshot().await.unwrap();
+
+        assert_eq!(snapshot.stats.aggregation().unique_block_count(), 2);
+        assert_eq!(
+            snapshot.buckets.len(),
+            snapshot.identity.format().bucket_count()
+        );
+        assert_eq!(
+            actor_health(&handle).mailbox_capacity,
+            DEFAULT_MAILBOX_CAPACITY
+        );
+        assert!(
+            handle
+                .diagnostics
+                .0
+                .counters
+                .unchanged_publications
+                .load(Ordering::Relaxed)
+                > 0
+        );
     }
 
     #[tokio::test]
@@ -2192,7 +2410,6 @@ mod tests {
         assert!(stats.aggregation().unique_block_count() > 0);
         assert!(stats.aggregation().capacity_failures() > 0);
 
-        assert!(!actor_health(&handle).faulted);
         assert!(
             tokio::time::timeout(Duration::from_millis(20), faults.recv())
                 .await
@@ -2205,7 +2422,6 @@ mod tests {
             .await
             .unwrap();
         handle.flush().await.unwrap();
-        assert!(!actor_health(&handle).faulted);
         assert!(
             tokio::time::timeout(Duration::from_millis(20), faults.recv())
                 .await

@@ -2820,22 +2820,18 @@ class KvDcRelay:
         dc_id: str,
         namespace_filter: Optional[str] = None,
         endpoint_prefix: Optional[str] = None,
+        publication_threshold: int = 16,
+        publication_delay_ms: int = 1,
     ) -> None:
         ...
 
     async def start(self) -> None:
         ...
 
-    async def stats(self) -> Dict[str, Any]:
-        ...
-
     async def health(self) -> Dict[str, Any]:
         ...
 
     async def flush(self) -> None:
-        ...
-
-    async def snapshot(self, serving_endpoint: str) -> Dict[str, Any]:
         ...
 
     async def shutdown(self) -> None:

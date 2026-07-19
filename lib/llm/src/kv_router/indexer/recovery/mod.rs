@@ -10,5 +10,7 @@ mod worker_query_transport;
 
 pub(crate) use subscriber::{RecoverySupervisor, start_subscriber, start_target_subscriber};
 pub(crate) use target::{IndexerRecoveryTarget, RecoveryResetReason, RecoveryTarget, SourceEpoch};
-pub(crate) use worker_query::{TargetFaultDisposition, WorkerQueryHealthSnapshot};
+pub(crate) use worker_query::TargetFaultDisposition;
+#[cfg(feature = "ckf-diagnostics")]
+pub(crate) use worker_query::WorkerQueryHealthSnapshot;
 pub(crate) use worker_query_endpoint::start_worker_kv_query_endpoint;

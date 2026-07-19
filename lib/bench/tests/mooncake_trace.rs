@@ -359,7 +359,7 @@ async fn collect_prepared_corpus_overlap_scores_with_metrics(
     ))
 }
 
-async fn collect_direct_ckf_overlap_scores(
+fn collect_direct_ckf_overlap_scores(
     artifacts: &[WorkerReplayArtifacts],
     publish_every_n_events: usize,
     match_mode: DirectCkfParityMatchMode,
@@ -788,8 +788,7 @@ async fn measure_ckf_parity(
             &artifact_set.artifacts,
             publish_every_n_events,
             DirectCkfParityMatchMode::FullMap,
-        )
-        .await?;
+        )?;
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         assert_eq!(
@@ -804,8 +803,7 @@ async fn measure_ckf_parity(
             &artifact_set.artifacts,
             publish_every_n_events,
             DirectCkfParityMatchMode::MaxDepthMatches,
-        )
-        .await?;
+        )?;
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(
             warning_count.load(Ordering::Relaxed),

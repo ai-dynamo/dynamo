@@ -34,9 +34,11 @@ pub use self::embedding_cache::{EmbeddingCacheIndexer, try_build_cache_indexer};
 use self::remote::RemoteIndexer;
 pub use self::remote::{ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use self::side::SideIndexer;
+#[cfg(feature = "ckf-diagnostics")]
+pub(crate) use recovery::WorkerQueryHealthSnapshot;
 pub(crate) use recovery::{
     RecoveryResetReason, RecoverySupervisor, RecoveryTarget, SourceEpoch, TargetFaultDisposition,
-    WorkerQueryHealthSnapshot, start_target_subscriber,
+    start_target_subscriber,
 };
 pub(crate) use recovery::{start_subscriber, start_worker_kv_query_endpoint};
 
