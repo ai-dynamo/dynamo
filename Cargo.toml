@@ -12,6 +12,7 @@ members = [
     "lib/kv-hashing",
     "lib/mocker",
     "lib/kv-router",
+    "lib/worker-selector-plugin-api",
     "lib/memory",
     "lib/kvbm-common",
     "lib/kvbm-config",
@@ -55,6 +56,7 @@ dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.3.0" }
 dynamo-memory = { path = "lib/memory", version = "1.3.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.3.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.3.0" }
+dynamo-worker-selector-plugin-api = { path = "lib/worker-selector-plugin-api", version = "1.3.0" }
 dynamo-protocols = { version = "=2.0.2" }
 dynamo-parsers = { version = "5.0.0" }
 # Published on crates.io. To see all available versions:
