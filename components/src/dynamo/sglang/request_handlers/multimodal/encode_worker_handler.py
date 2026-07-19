@@ -465,11 +465,6 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                 "multi_modal_data must contain image_url or video_url entries."
             )
 
-        # Preflight the video decoder so a video request fails with actionable
-        # guidance rather than a bare "No module named 'decord'" from SGLang.
-        if video_items:
-            _ensure_video_decoder_available()
-
         image_urls: list[str] = []
         video_urls: list[str] = []
 
@@ -505,6 +500,13 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                 )
             else:
                 raise ValueError(f"Unsupported video data variant: {item}")
+
+        # Only after the payload is validated (malformed / Decoded-variant items
+        # already rejected above) preflight the video decoder, so a genuine video
+        # URL request fails with actionable guidance instead of a bare
+        # "No module named 'decord'" from SGLang.
+        if video_urls:
+            _ensure_video_decoder_available()
 
         return image_urls, video_urls
 

@@ -151,9 +151,11 @@ class VideoLoader:
             )
             raise RuntimeError(
                 f"Video decoding is unavailable in this image: the backend decoder "
-                f"'{missing}' is not installed. The vLLM backend decodes video via "
-                f"OpenCV — install it with `pip install opencv-python-headless` — "
-                f"or send VP8/VP9 video, which the frontend decodes without it."
+                f"'{missing}' is not installed. This backend path decodes every "
+                f"`video_url` (any codec, including VP8/VP9) via OpenCV — install it "
+                f"with `pip install opencv-python-headless`. Alternatively, enable "
+                f"frontend decoding so the frontend decodes the video (VP8/VP9) and "
+                f"sends decoded frames, and the backend no longer needs OpenCV."
             ) from exc
         except Exception as exc:
             logger.error("Error loading video from %s: %s", video_url, exc)
