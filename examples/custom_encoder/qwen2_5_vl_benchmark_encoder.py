@@ -122,6 +122,9 @@ _TIMING_ENABLED = os.environ.get("DYN_CUSTOM_ENCODER_TIMING", "").lower() in {
     "true",
     "yes",
 }
+_DISPATCH_LOG_ENABLED = os.environ.get(
+    "DYN_CUSTOM_ENCODER_DISPATCH_LOG", ""
+).lower() in {"1", "true", "yes"}
 
 
 @dataclass(frozen=True)
@@ -745,6 +748,11 @@ class Qwen2_5VLBenchmarkEncoder(QwenVisionEncoderBackend):
         host_embeds = image_embeds.to(dtype=torch.bfloat16).cpu()
         outputs = list(torch.split(host_embeds, split_sizes))
         self._dispatch_counts[("eager", len(items), None)] += 1
+        if _DISPATCH_LOG_ENABLED:
+            logger.info(
+                "custom_encoder_dispatch mode=eager batch_size=%d bucket=None",
+                len(items),
+            )
         self._log_cuda_timings(events, len(items), None, len(items))
         logger.debug(
             "[Qwen2_5VLBenchmarkEncoder] forward_batch n=%d tokens=%s",
@@ -796,6 +804,14 @@ class Qwen2_5VLBenchmarkEncoder(QwenVisionEncoderBackend):
         host_output = real_output.to(dtype=torch.bfloat16).cpu()
         outputs = list(torch.split(host_output, entry.tokens_per_item))
         self._dispatch_counts[("graph", len(items), target_bucket)] += 1
+        if _DISPATCH_LOG_ENABLED:
+            logger.info(
+                "custom_encoder_dispatch mode=graph batch_size=%d bucket=%d "
+                "grid=%dx%dx%d",
+                len(items),
+                target_bucket,
+                *grid_key,
+            )
         self._log_cuda_timings(events, len(items), target_bucket, len(items))
         logger.debug(
             "[Qwen2_5VLBenchmarkEncoder] replayed CUDA graph: "

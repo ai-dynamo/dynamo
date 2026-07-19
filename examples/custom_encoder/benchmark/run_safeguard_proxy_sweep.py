@@ -39,7 +39,10 @@ from examples.custom_encoder.benchmark.safeguard_proxy_workload import (  # noqa
     TARGET_OSL,
 )
 
-RUNTIME = "dynamo-custom-encoder"
+RUNTIME_DELAYS_US = {
+    "dynamo-custom-encoder-wait-0us": 0,
+    "dynamo-custom-encoder-wait-1000us": 1000,
+}
 WARMUP_REQUESTS = 20
 TRITON_BASELINE: dict[int, tuple[float, float]] = {
     1: (16.61, 152.0),
@@ -136,7 +139,7 @@ def _metadata(
     return {
         "axis": "concurrency",
         "concurrencies": list(concurrencies),
-        "runtime": RUNTIME,
+        "runtimes": RUNTIME_DELAYS_US,
         "decoder_model": DECODER_MODEL,
         "encoder_model": ENCODER_MODEL,
         "requests_per_cell": 1 if smoke else REQUESTS,
@@ -156,7 +159,11 @@ def _metadata(
             "graph_image_sizes": [f"{width}x{height}"],
             "unique_images": unique_images,
             "preprocess_cache_size": 0,
-            "batching_policy": "eager drain with no timed queue hold",
+            "batching_policy": (
+                "drain immediately available work, then hold up to the configured "
+                "deadline unless max_batch_cost is reached"
+            ),
+            "queue_delays_us": list(RUNTIME_DELAYS_US.values()),
             "max_num_seqs": 64,
             "max_model_len": 2048,
             "vllm_gpu_memory_utilization": 0.4,
@@ -202,7 +209,17 @@ def build_config(
         port=8000,
         timeout=1800,
         input_files=[str(input_file.resolve())],
-        configs=[BenchmarkConfig(label=RUNTIME, workflow=str(workflow))],
+        configs=[
+            BenchmarkConfig(
+                label=label,
+                workflow=str(workflow),
+                extra_args=[
+                    "--custom-encoder-max-queue-delay-us",
+                    str(delay_us),
+                ],
+            )
+            for label, delay_us in RUNTIME_DELAYS_US.items()
+        ],
         output_dir=str(output_dir),
         skip_plots=True,
         restart_server_every_benchmark=True,
@@ -219,7 +236,7 @@ def build_config(
             "DYN_QWEN2_VL_GRAPH_BATCH_BUCKETS": "1,2,3,4,5,6,7,8",
             "DYN_QWEN2_VL_GRAPH_IMAGE_SIZES": (f"{image_size[0]}x{image_size[1]}"),
             "DYN_QWEN2_VL_PREPROCESS_CACHE_SIZE": "0",
-            "DYN_CUSTOM_ENCODER_TIMING": "1",
+            "DYN_CUSTOM_ENCODER_DISPATCH_LOG": "1",
         },
         aiperf_extra_args=AIPERF_EXTRA_ARGS,
     )
@@ -274,7 +291,7 @@ def validate_result(
     loadgen = data.get("input_config", {}).get("loadgen", {})
     concurrency = int(loadgen.get("concurrency", -1))
     command = str(data.get("input_config", {}).get("cli_command", ""))
-    if runtime != RUNTIME:
+    if runtime not in RUNTIME_DELAYS_US:
         failures.append("runtime")
     if concurrency not in expected_concurrencies:
         failures.append("concurrency")
@@ -301,6 +318,8 @@ def validate_result(
                 failures.append(f"{metric_name}_{statistic}")
     if _metric(data, "request_latency", "p95") is None:
         failures.append("request_latency_p95")
+    if _metric(data, "time_to_first_token", "p95") is None:
+        failures.append("time_to_first_token_p95")
     if _metric(data, "request_throughput") is None:
         failures.append("request_throughput")
     command_path = path.parent / "command.txt"
@@ -313,7 +332,8 @@ def validate_result(
         "accepted": not failures,
         "failures": failures,
         "request_throughput": _metric(data, "request_throughput"),
-        "p95_ms": _metric(data, "request_latency", "p95"),
+        "ttft_p95_ms": _metric(data, "time_to_first_token", "p95"),
+        "e2e_p95_ms": _metric(data, "request_latency", "p95"),
         "command": str(command_path),
     }
 
@@ -322,10 +342,16 @@ def validate_matrix(root: Path) -> list[dict[str, Any]]:
     results = [
         validate_result(path)
         for path in sorted(root.rglob("profile_export_aiperf.json"))
-        if path.parents[1].name == RUNTIME
+        if path.parents[1].name in RUNTIME_DELAYS_US
     ]
-    expected = set(CONCURRENCIES)
-    observed = {int(result["concurrency"]) for result in results}
+    expected = {
+        (runtime, concurrency)
+        for runtime in RUNTIME_DELAYS_US
+        for concurrency in CONCURRENCIES
+    }
+    observed = {
+        (str(result["runtime"]), int(result["concurrency"])) for result in results
+    }
     if observed != expected or len(results) != len(expected):
         raise AssertionError(
             f"expected {len(expected)} unique cells; found {len(results)}, "
@@ -334,59 +360,150 @@ def validate_matrix(root: Path) -> list[dict[str, Any]]:
     rejected = [result for result in results if not result["accepted"]]
     if rejected:
         details = "; ".join(
-            f"concurrency{result['concurrency']}=" f"{','.join(result['failures'])}"
+            f"{result['runtime']}/concurrency{result['concurrency']}="
+            f"{','.join(result['failures'])}"
             for result in rejected
         )
         raise AssertionError(f"rejected benchmark artifacts: {details}")
-    results.sort(key=lambda result: int(result["concurrency"]))
+    results.sort(
+        key=lambda result: (
+            RUNTIME_DELAYS_US[str(result["runtime"])],
+            int(result["concurrency"]),
+        )
+    )
     validation_path = root / "validation.json"
     validation_path.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
     print(f"BENCHMARK_AUDIT=PASS cells={len(results)} validation={validation_path}")
     return results
 
 
-def _dispatch_counts(root: Path) -> dict[int, Counter[tuple[int, int]]]:
+DispatchKey = tuple[str, int, int | None]
+CellKey = tuple[str, int]
+
+
+def _dispatch_counts(root: Path) -> dict[CellKey, Counter[DispatchKey]]:
     log_path = root / "sweep.log"
     if not log_path.exists():
         return {}
-    active: int | None = None
-    counts: dict[int, Counter[tuple[int, int]]] = defaultdict(Counter)
-    cell_pattern = re.compile(r"Config: .*\bconcurrency=(\d+)\b")
+    active: CellKey | None = None
+    counts: dict[CellKey, Counter[DispatchKey]] = defaultdict(Counter)
+    cell_pattern = re.compile(
+        r"Config: (dynamo-custom-encoder-wait-(?:0|1000)us)\s+" r"concurrency=(\d+)\b"
+    )
     dispatch_pattern = re.compile(
-        r"custom_encoder_timing stage=vit_forward .*?"
-        r"batch_size=(\d+) bucket=(\d+) cost=(\d+)"
+        r"custom_encoder_dispatch mode=(graph|eager) "
+        r"batch_size=(\d+) bucket=(\d+|None)"
     )
     for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
         cell = cell_pattern.search(line)
         if cell:
-            active = int(cell.group(1))
+            active = (cell.group(1), int(cell.group(2)))
         dispatch = dispatch_pattern.search(line)
         if active is not None and dispatch:
-            batch_size, bucket, _cost = (int(value) for value in dispatch.groups())
-            counts[active][(batch_size, bucket)] += 1
+            mode, batch_size_raw, bucket_raw = dispatch.groups()
+            bucket = None if bucket_raw == "None" else int(bucket_raw)
+            calls_match = re.search(r"\bcalls=(\d+)", line)
+            counts[active][(mode, int(batch_size_raw), bucket)] += int(
+                calls_match.group(1) if calls_match else 1
+            )
     return dict(counts)
+
+
+def _dispatch_rows(root: Path) -> list[dict[str, Any]]:
+    counts = _dispatch_counts(root)
+    expected_items = REQUESTS + WARMUP_REQUESTS
+    rows: list[dict[str, Any]] = []
+    for runtime, delay_us in RUNTIME_DELAYS_US.items():
+        for concurrency in CONCURRENCIES:
+            counter = counts.get((runtime, concurrency), Counter())
+            total_calls = sum(counter.values())
+            total_items = sum(
+                batch_size * calls
+                for (_mode, batch_size, _bucket), calls in counter.items()
+            )
+            if total_items != expected_items:
+                raise AssertionError(
+                    f"dispatch log for {runtime}/concurrency{concurrency} accounts "
+                    f"for {total_items} items; expected {expected_items}"
+                )
+            eager_calls = sum(
+                calls
+                for (mode, _batch_size, _bucket), calls in counter.items()
+                if mode == "eager"
+            )
+            if eager_calls:
+                raise AssertionError(
+                    f"dispatch log for {runtime}/concurrency{concurrency} contains "
+                    f"{eager_calls} eager calls"
+                )
+            padded_slots = sum(
+                (bucket or batch_size) * calls
+                for (_mode, batch_size, bucket), calls in counter.items()
+            )
+            distribution = {
+                f"{batch_size}->{bucket}": calls
+                for (_mode, batch_size, bucket), calls in sorted(counter.items())
+            }
+            rows.append(
+                {
+                    "runtime": runtime,
+                    "queue_delay_us": delay_us,
+                    "concurrency": concurrency,
+                    "forward_calls": total_calls,
+                    "items": total_items,
+                    "average_batch_size": total_items / total_calls,
+                    "graph_utilization_pct": total_items / padded_slots * 100.0,
+                    "distribution": distribution,
+                }
+            )
+    (root / "dispatch_distribution.json").write_text(
+        json.dumps(rows, indent=2) + "\n", encoding="utf-8"
+    )
+    return rows
 
 
 def _comparison_rows(root: Path) -> list[dict[str, Any]]:
     validated = validate_matrix(root)
+    by_cell = {
+        (str(result["runtime"]), int(result["concurrency"])): result
+        for result in validated
+    }
+    runtimes = list(RUNTIME_DELAYS_US)
     rows: list[dict[str, Any]] = []
-    for result in validated:
-        concurrency = int(result["concurrency"])
+    for concurrency in CONCURRENCIES:
+        no_wait = by_cell[(runtimes[0], concurrency)]
+        wait = by_cell[(runtimes[1], concurrency)]
         triton_req_s, triton_p95 = TRITON_BASELINE[concurrency]
-        dynamo_req_s = float(result["request_throughput"])
-        dynamo_p95 = float(result["p95_ms"])
-        path = Path(str(result["path"]))
+        no_wait_req_s = float(no_wait["request_throughput"])
+        wait_req_s = float(wait["request_throughput"])
+        no_wait_ttft = float(no_wait["ttft_p95_ms"])
+        wait_ttft = float(wait["ttft_p95_ms"])
+        no_wait_e2e = float(no_wait["e2e_p95_ms"])
+        wait_e2e = float(wait["e2e_p95_ms"])
         rows.append(
             {
                 "concurrency": concurrency,
                 "triton_req_s": triton_req_s,
                 "triton_p95_ms": triton_p95,
-                "dynamo_req_s": dynamo_req_s,
-                "dynamo_p95_ms": dynamo_p95,
-                "delta_req_s_pct": (dynamo_req_s / triton_req_s - 1.0) * 100.0,
-                "delta_p95_pct": (dynamo_p95 / triton_p95 - 1.0) * 100.0,
-                "artifact": str(path.relative_to(root)),
-                "command": str((path.parent / "command.txt").relative_to(root)),
+                "no_wait_req_s": no_wait_req_s,
+                "wait_1000us_req_s": wait_req_s,
+                "delta_req_s_pct": (wait_req_s / no_wait_req_s - 1.0) * 100.0,
+                "no_wait_ttft_p95_ms": no_wait_ttft,
+                "wait_1000us_ttft_p95_ms": wait_ttft,
+                "delta_ttft_p95_pct": (wait_ttft / no_wait_ttft - 1.0) * 100.0,
+                "no_wait_e2e_p95_ms": no_wait_e2e,
+                "wait_1000us_e2e_p95_ms": wait_e2e,
+                "delta_e2e_p95_pct": (wait_e2e / no_wait_e2e - 1.0) * 100.0,
+                "no_wait_artifact": str(Path(str(no_wait["path"])).relative_to(root)),
+                "wait_1000us_artifact": str(Path(str(wait["path"])).relative_to(root)),
+                "no_wait_command": str(
+                    (Path(str(no_wait["path"])).parent / "command.txt").relative_to(
+                        root
+                    )
+                ),
+                "wait_1000us_command": str(
+                    (Path(str(wait["path"])).parent / "command.txt").relative_to(root)
+                ),
             }
         )
     return rows
@@ -394,6 +511,7 @@ def _comparison_rows(root: Path) -> list[dict[str, Any]]:
 
 def summarize(root: Path, markdown_path: Path, csv_path: Path) -> None:
     rows = _comparison_rows(root)
+    dispatch_rows = _dispatch_rows(root)
     metadata = json.loads(
         (root / "benchmark_metadata.json").read_text(encoding="utf-8")
     )
@@ -413,7 +531,7 @@ def summarize(root: Path, markdown_path: Path, csv_path: Path) -> None:
         else ""
     )
     lines = [
-        "# Qwen custom-encoder proxy versus supplied Triton baseline",
+        "# Qwen custom-encoder queue-delay comparison",
         "",
         "> **Performance proxy only:** Dynamo uses the Qwen2.5-VL-3B vision "
         "tower with its 2048-wide output truncated to 1536 columns for the "
@@ -421,9 +539,11 @@ def summarize(root: Path, markdown_path: Path, csv_path: Path) -> None:
         "encoder weights, so this table is not a same-model or quality comparison."
         f"{baseline_workload_note}",
         "",
-        f"Each Dynamo cell uses the same 100-request JSONL; "
+        f"Each Dynamo cell uses the same {REQUESTS:,}-request JSONL; "
         f"{workload_description}; ISL is exactly 644, OSL is exactly 7, and "
-        "20 warmups are excluded.",
+        f"{WARMUP_REQUESTS} warmups are excluded from performance metrics. "
+        f"Dispatch distributions include all {REQUESTS + WARMUP_REQUESTS:,} "
+        "forwarded items.",
         "",
         "## Runtime",
         "",
@@ -436,45 +556,57 @@ def summarize(root: Path, markdown_path: Path, csv_path: Path) -> None:
         f"`{metadata['transformers_version']}`; PyTorch: "
         f"`{metadata['torch_version']}`; AIPerf: `{metadata['aiperf_version']}`",
         f"- Preprocess concurrency: {settings['preprocess_concurrency']}; "
-        f"maximum batch cost: {settings['max_batch_cost']}; batching: "
-        f"{settings['batching_policy']}",
+        f"maximum batch cost: {settings['max_batch_cost']}; queue delays: "
+        f"`{settings['queue_delays_us']}` microseconds",
+        f"- Batching: {settings['batching_policy']}",
         f"- CUDA graph buckets: `{settings['graph_buckets']}`; image shape: "
         f"`{settings['graph_image_sizes']}`; preprocessing cache: disabled",
         "",
-        "## Results",
+        "## Queue-delay results",
         "",
-        "| Concurrency | Triton req/s | Triton p95 (ms) | Dynamo req/s | "
-        "Dynamo p95 (ms) | Δ req/s | Δ p95 |",
-        "| ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Concurrency | 0 us req/s | 1000 us req/s | Δ req/s | "
+        "0 us TTFT p95 | 1000 us TTFT p95 | Δ TTFT | 0 us E2E p95 | "
+        "1000 us E2E p95 | Δ E2E |",
+        "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in rows:
         lines.append(
-            f"| {row['concurrency']} | {row['triton_req_s']:.2f} | "
-            f"{row['triton_p95_ms']:.1f} | {row['dynamo_req_s']:.2f} | "
-            f"{row['dynamo_p95_ms']:.1f} | {row['delta_req_s_pct']:+.1f}% | "
-            f"{row['delta_p95_pct']:+.1f}% |"
+            f"| {row['concurrency']} | {row['no_wait_req_s']:.2f} | "
+            f"{row['wait_1000us_req_s']:.2f} | {row['delta_req_s_pct']:+.1f}% | "
+            f"{row['no_wait_ttft_p95_ms']:.1f} ms | "
+            f"{row['wait_1000us_ttft_p95_ms']:.1f} ms | "
+            f"{row['delta_ttft_p95_pct']:+.1f}% | "
+            f"{row['no_wait_e2e_p95_ms']:.1f} ms | "
+            f"{row['wait_1000us_e2e_p95_ms']:.1f} ms | "
+            f"{row['delta_e2e_p95_pct']:+.1f}% |"
         )
 
-    dispatch = _dispatch_counts(root)
     lines.extend(
         [
             "",
             "## Observed CUDA graph dispatch",
             "",
-            "| Concurrency | Maximum batch | Selected buckets | Dispatches |",
-            "| ---: | ---: | --- | --- |",
+            "Distribution percentages are shares of forward calls and forwarded "
+            "items, respectively.",
+            "",
+            "| Queue delay | Concurrency | Forward calls | Average batch | "
+            "Graph utilization | Batch→bucket distribution |",
+            "| ---: | ---: | ---: | ---: | ---: | --- |",
         ]
     )
-    for concurrency in CONCURRENCIES:
-        counter = dispatch.get(concurrency, Counter())
-        maximum = max((batch for batch, _bucket in counter), default=0)
-        buckets = sorted({bucket for _batch, bucket in counter})
+    for dispatch_row in dispatch_rows:
+        total_calls = int(dispatch_row["forward_calls"])
+        total_items = int(dispatch_row["items"])
         details = ", ".join(
-            f"{batch}→{bucket}: {calls}"
-            for (batch, bucket), calls in sorted(counter.items())
+            f"{key}: {calls} ({calls / total_calls * 100:.1f}% calls, "
+            f"{int(key.split('->', 1)[0]) * calls / total_items * 100:.1f}% items)"
+            for key, calls in dispatch_row["distribution"].items()
         )
         lines.append(
-            f"| {concurrency} | {maximum} | `{buckets}` | {details or 'none'} |"
+            f"| {dispatch_row['queue_delay_us']} us | "
+            f"{dispatch_row['concurrency']} | {total_calls} | "
+            f"{dispatch_row['average_batch_size']:.2f} | "
+            f"{dispatch_row['graph_utilization_pct']:.1f}% | {details} |"
         )
 
     lines.extend(
@@ -482,19 +614,23 @@ def summarize(root: Path, markdown_path: Path, csv_path: Path) -> None:
             "",
             "## Artifacts",
             "",
-            "| Concurrency | AIPerf JSON | Exact command |",
+            "| Concurrency | 0 us artifacts | 1000 us artifacts |",
             "| ---: | --- | --- |",
         ]
     )
     for row in rows:
         lines.append(
-            f"| {row['concurrency']} | [artifact]({row['artifact']}) | "
-            f"[command]({row['command']}) |"
+            f"| {row['concurrency']} | "
+            f"[AIPerf]({row['no_wait_artifact']}) / "
+            f"[command]({row['no_wait_command']}) | "
+            f"[AIPerf]({row['wait_1000us_artifact']}) / "
+            f"[command]({row['wait_1000us_command']}) |"
         )
     lines.extend(
         [
             "",
             "- [Validation](validation.json)",
+            "- [Dispatch distribution](dispatch_distribution.json)",
             "- [Workload manifest](../workload/workload_manifest.json)",
             "- [CUDA graph verification](graph_verification.log)",
             "- [Full sweep log](sweep.log)",

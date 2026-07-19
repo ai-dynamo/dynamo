@@ -16,7 +16,9 @@ thread, coalescing items from concurrent async ``submit()`` calls into batches.
   runs the next loop, and batch size auto-scales with load. Pass ``max_batch_cost``
   to **micro-batch** instead: the drained items are split into batches whose
   summed per-item ``cost`` stays within that budget (one-dimensional packing by
-  ``cost`` alone; item shape is never inspected).
+  ``cost`` alone; item shape is never inspected). ``max_queue_delay_us`` can add
+  a bounded coalescing window after the first item arrives; the default ``0``
+  preserves eager drain.
 
 The caller speaks in opaque items plus an optional per-item scalar ``cost``
 (computed off-thread, see ``Preprocessed``), so all model knowledge stays in the
@@ -38,6 +40,7 @@ import concurrent.futures
 import logging
 import queue
 import threading
+import time
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Callable, Generic, List, Optional, TypeVar
@@ -93,6 +96,9 @@ class ThreadedMicroBatcher(Generic[T, R]):
         max_batch_cost: Max summed ``cost`` of a single ``fn`` batch (>= 1).
             ``None`` (default) ⇒ **pass-through**: no cap — the whole drained set
             runs as one ``fn`` call (``cost`` ignored).
+        max_queue_delay_us: Maximum time to collect more work after dequeuing the
+            first item. ``0`` (default) preserves eager drain. A cost-bounded
+            batch dispatches immediately once it reaches ``max_batch_cost``.
         on_start: Optional callable run once on the worker thread before serving
             (model build / warmup); its failure surfaces from ``start()``.
         on_stop: Optional callable run once on the worker thread at teardown (after
@@ -107,6 +113,7 @@ class ThreadedMicroBatcher(Generic[T, R]):
         fn: Callable[[List[T]], List[R]],
         *,
         max_batch_cost: Optional[int] = None,
+        max_queue_delay_us: int = 0,
         on_start: Optional[Callable[[], None]] = None,
         on_stop: Optional[Callable[[], None]] = None,
         name: str = "micro-batcher",
@@ -114,8 +121,11 @@ class ThreadedMicroBatcher(Generic[T, R]):
     ) -> None:
         if max_batch_cost is not None and max_batch_cost < 1:
             raise ValueError("max_batch_cost must be >= 1 (or None for pass-through)")
+        if max_queue_delay_us < 0:
+            raise ValueError("max_queue_delay_us must be >= 0")
         self._fn = fn
         self._max_batch_cost = max_batch_cost
+        self._max_queue_delay_us = max_queue_delay_us
         self._on_start = on_start
         self._on_stop = on_stop
         self._name = name
@@ -317,13 +327,32 @@ class ThreadedMicroBatcher(Generic[T, R]):
             )
 
     def _collect(self) -> Optional[List[_Work]]:
-        """Block for one item, then eager-drain everything else already queued.
+        """Block for one item, then collect work according to the delay policy.
 
-        No timed hold: pull only what is immediately available, then run."""
+        The zero-delay path is the original eager drain. With a positive delay,
+        wait only until the deadline or until the collected cost reaches the
+        dispatch ceiling."""
         first = self._queue.get()
         if first is _SHUTDOWN:
             return None
         works: List[_Work] = [first]
+        if self._max_queue_delay_us > 0:
+            deadline = time.monotonic() + self._max_queue_delay_us / 1_000_000
+            collected_cost = first.cost
+            while self._max_batch_cost is None or collected_cost < self._max_batch_cost:
+                remaining_s = deadline - time.monotonic()
+                if remaining_s <= 0:
+                    break
+                try:
+                    item = self._queue.get(timeout=remaining_s)
+                except queue.Empty:
+                    break
+                if item is _SHUTDOWN:
+                    self._queue.put(_SHUTDOWN)
+                    break
+                works.append(item)
+                collected_cost += item.cost
+            return works
         # Eager drain: pull everything immediately available, then run.
         while True:
             try:

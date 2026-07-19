@@ -165,6 +165,56 @@ async def test_eager_drain_pulls_all_queued_when_free():
     assert ["a", "b", "c"] in batches
 
 
+async def test_timed_hold_collects_work_arriving_before_deadline():
+    batches: list[list[str]] = []
+
+    def fn(items):
+        batches.append(list(items))
+        return list(items)
+
+    b = ThreadedMicroBatcher(fn, max_queue_delay_us=100_000)
+    b.start()
+    try:
+        first = asyncio.create_task(b.submit(["a"]))
+        await asyncio.sleep(0.01)
+        second = asyncio.create_task(b.submit(["b"]))
+        assert await asyncio.gather(first, second) == [["a"], ["b"]]
+        assert batches == [["a", "b"]]
+    finally:
+        b.shutdown()
+
+
+async def test_timed_hold_dispatches_immediately_at_cost_ceiling():
+    b = ThreadedMicroBatcher(
+        _echo,
+        max_batch_cost=1,
+        max_queue_delay_us=500_000,
+    )
+    b.start()
+    try:
+        assert await asyncio.wait_for(b.submit(["a"]), timeout=0.2) == ["a"]
+    finally:
+        b.shutdown()
+
+
+def test_negative_queue_delay_rejected():
+    with pytest.raises(ValueError, match="max_queue_delay_us"):
+        ThreadedMicroBatcher(_echo, max_queue_delay_us=-1)
+
+
+async def test_shutdown_wakes_timed_collection():
+    b = ThreadedMicroBatcher(_echo, max_queue_delay_us=5_000_000)
+    b.start()
+    task = asyncio.create_task(b.submit(["a"]))
+    await _wait_until(
+        lambda: bool(b._live) and b._queue.empty(),
+        "worker did not enter timed collection",
+    )
+    b.shutdown()
+    with pytest.raises(RuntimeError, match="shut down"):
+        await task
+
+
 async def test_cost_budget_caps_each_batch():
     """costs ride on submit; with budget 5, batches never exceed summed cost 5.
 

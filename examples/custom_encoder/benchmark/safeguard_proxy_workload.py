@@ -27,8 +27,8 @@ if str(REPO_ROOT) not in sys.path:
 DECODER_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 ENCODER_MODEL = "Qwen/Qwen2.5-VL-3B-Instruct"
 CONCURRENCIES = tuple(range(1, 11))
-REQUESTS = 100
-UNIQUE_IMAGES = 9
+REQUESTS = 1000
+UNIQUE_IMAGES = 1
 TARGET_ISL = 644
 TARGET_OSL = 7
 SEED = 42

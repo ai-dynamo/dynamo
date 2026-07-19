@@ -1110,17 +1110,21 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             config.engine_args,
             self.engine_client.vllm_config,
         )
-        encoder = AsyncVisionEncoder(backend)
+        encoder = AsyncVisionEncoder(
+            backend,
+            max_queue_delay_us=config.custom_encoder_max_queue_delay_us,
+        )
         encoder.load(config.model)
         # Assign only after a successful load so a failed load (which already shut
         # its own thread down) leaves _custom_encoder None.
         self._custom_encoder = encoder
         self._custom_encoder_adapter = adapter
         logger.info(
-            "Loaded CustomEncoder %s from %s with %s",
+            "Loaded CustomEncoder %s from %s with %s (max_queue_delay_us=%d)",
             custom_encoder_class,
             config.model,
             type(adapter).__name__,
+            config.custom_encoder_max_queue_delay_us,
         )
 
     def _shutdown_worker(self) -> NoReturn:
@@ -3235,14 +3239,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # the unsafe pre-first-token window, and the admin abort_request route can
         # reach this request via self._deferred_aborts.
         is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
-        async with _deferred_abort_guard(
-            self.engine_client,
-            request_id,
-            is_decode_only,
-            self._deferred_aborts,
-            self._shutdown_on_engine_dead,
-        ) as abort_guard, self._abort_monitor(
-            context, request_id, abort_guard=abort_guard
+        async with (
+            _deferred_abort_guard(
+                self.engine_client,
+                request_id,
+                is_decode_only,
+                self._deferred_aborts,
+                self._shutdown_on_engine_dead,
+            ) as abort_guard,
+            self._abort_monitor(context, request_id, abort_guard=abort_guard),
         ):
             try:
                 gen = self.engine_client.generate(
