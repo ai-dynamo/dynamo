@@ -16,18 +16,14 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use super::resolution::{ResolvedIndexerDomain, resolve_indexer_domain};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_card::ModelDeploymentCard;
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 const KV_EVENT_HASH_FORMAT_VERSION: u16 = 1;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct KvCacheDomainKey {
-    pub(crate) model_artifact: String,
-    pub(crate) kv_block_size: u32,
-    pub(crate) event_hash_format: u16,
-}
+pub(crate) type KvCacheDomainKey = ResolvedIndexerDomain;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DcDiscoveryFilter {
@@ -178,14 +174,11 @@ impl MembershipState {
                 if id.model_suffix.is_some() || card.lora.is_some() {
                     continue;
                 }
-                domains.insert(KvCacheDomainKey {
-                    model_artifact: card
-                        .source_path
-                        .clone()
-                        .unwrap_or_else(|| card.name().to_string()),
-                    kv_block_size: card.kv_cache_block_size,
-                    event_hash_format: KV_EVENT_HASH_FORMAT_VERSION,
-                });
+                domains.insert(resolve_indexer_domain(
+                    card,
+                    &endpoint,
+                    KV_EVENT_HASH_FORMAT_VERSION,
+                ));
                 runtime_configs.insert(id.instance_id, card.runtime_config.clone());
             }
 
@@ -394,7 +387,7 @@ mod tests {
         assert_eq!(view.endpoints.len(), 2);
         let generate = &view.endpoints[&EndpointId::from("prod.backend.generate")];
         assert_eq!(
-            generate.domain.as_ref().unwrap().model_artifact,
+            generate.domain.as_ref().unwrap().diagnostic_model_artifact,
             "meta/llama"
         );
         assert!(!generate.compatibility_conflict);
@@ -439,7 +432,7 @@ mod tests {
         let generate = &view.endpoints[&EndpointId::from("prod.backend.generate")];
         assert!(!generate.compatibility_conflict);
         assert_eq!(
-            generate.domain.as_ref().unwrap().model_artifact,
+            generate.domain.as_ref().unwrap().diagnostic_model_artifact,
             "meta/llama"
         );
         assert_eq!(generate.runtime_configs.len(), 2);

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Stage-2 benchmark for endpoint-scoped global CKF ingestion and queries.
+//! Stage-2 benchmark for indexer-domain-scoped global CKF ingestion and queries.
 //!
 //! The serialized corpus contains barrier snapshots plus a finite, contiguous sequence of
 //! absolute bucket-image deltas. The finite stream ends at its starting physical state, so a
@@ -21,11 +21,14 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, ensure};
 use clap::{Parser, ValueEnum};
 use dynamo_bench::kv_router_common::dc_ckf_shared::DcCkfCorpusMetadata;
+use dynamo_kv_router::identity::{
+    CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
+};
 use dynamo_kv_router::indexer::cuckoo::{
-    CacheDomainId, CacheDomainIdentity, CkfConfig, ConsumerDrainMarker, ConsumerInstanceId,
-    DcCkfDelta, DcCkfDeltaSink, DcCkfPublisher, DcCkfSnapshot, DcCkfState, DcId, EndpointId,
-    GlobalCkfIndexer, GlobalCkfIngestOutcome, GlobalCkfIngestionPool, GlobalCkfIngestionPoolConfig,
-    GlobalCkfLaneOwner, GlobalCkfManifest, LaneLease, PrefixSearchConfig, ProducerIdentity,
+    CkfConfig, ConsumerDrainMarker, ConsumerInstanceId, DcCkfDelta, DcCkfDeltaSink, DcCkfPublisher,
+    DcCkfSnapshot, DcCkfState, GlobalCkfIndexer, GlobalCkfIngestOutcome, GlobalCkfIngestionPool,
+    GlobalCkfIngestionPoolConfig, GlobalCkfManifest, LaneLease, PrefixSearchConfig,
+    ProducerIdentity,
 };
 use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
@@ -34,7 +37,7 @@ use dynamo_kv_router::protocols::{
 };
 use serde::{Deserialize, Serialize};
 
-const CORPUS_SCHEMA_VERSION: u32 = 2;
+const CORPUS_SCHEMA_VERSION: u32 = 3;
 const RESULT_SCHEMA_VERSION: u32 = 2;
 const MAX_LANES: usize = 16;
 const DEFAULT_EXPECTED_BLOCKS_PER_LANE: usize = 4_096;
@@ -56,7 +59,7 @@ enum BenchmarkMode {
 #[derive(Debug, Parser)]
 #[command(
     version,
-    about = "Benchmark endpoint-scoped global CKF ingestion and concurrent queries"
+    about = "Benchmark global CKF pool-lane ingestion and concurrent queries"
 )]
 struct Args {
     /// Load a frozen JSON corpus instead of generating a deterministic one.
@@ -71,7 +74,7 @@ struct Args {
     #[arg(long)]
     topology_metadata: Option<PathBuf>,
 
-    /// Number of endpoint lanes to activate (1, 2, 4, 8, or 16).
+    /// Number of DC pool lanes to activate (1, 2, 4, 8, or 16).
     #[arg(long, default_value_t = 4)]
     lanes: usize,
 
@@ -260,7 +263,7 @@ fn main() -> anyhow::Result<()> {
         .map(read_json::<DcCkfCorpusMetadata>)
         .transpose()?;
     let corpus = match args.corpus_input.as_deref() {
-        Some(path) => read_json(path)?,
+        Some(path) => read_consumer_corpus(path)?,
         None => generate_corpus(&args, source_topology)?,
     };
     validate_corpus(&corpus)?;
@@ -365,13 +368,11 @@ fn generate_corpus(
         .map(|bound| bound.max(args.expected_blocks_per_lane))
         .unwrap_or(args.expected_blocks_per_lane);
     let baseline_hashes = args.baseline_hashes_per_lane.min(expected_blocks);
-    let endpoint = EndpointId::new(
-        source_topology
-            .as_ref()
-            .map_or(1, |topology| topology.endpoint_ordinal as u64 + 1),
+    let domain = IndexerDomainId::new(
+        CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
+        RoutingScopeId::new([2; 16], IdentitySource::Explicit),
     );
     let consumer = ConsumerInstanceId::new(0xC0DE_CAFE);
-    let cache_domain = CacheDomainIdentity::new(CacheDomainId::new(1), 512, 1);
     let mut generated = Vec::with_capacity(args.lanes);
     let query_count = 256usize;
     let query_depth = 32usize.min(baseline_hashes);
@@ -383,17 +384,15 @@ fn generate_corpus(
             baseline_hashes,
             query_depth,
             args.delta_frames_per_lane,
-            cache_domain,
-            endpoint,
+            domain,
             consumer,
         )?);
     }
     let format = generated[0].snapshot.identity().format();
-    let owners: [Option<GlobalCkfLaneOwner>; MAX_LANES] = std::array::from_fn(|lane| {
-        (lane < args.lanes)
-            .then(|| GlobalCkfLaneOwner::new(cache_domain, DcId::new(lane as u64 + 1), endpoint))
+    let pools: [Option<PoolId>; MAX_LANES] = std::array::from_fn(|lane| {
+        (lane < args.lanes).then(|| PoolId::new(domain, DcId::new(lane as u64 + 1)))
     });
-    let manifest = GlobalCkfManifest::new(consumer, endpoint, format, owners)?;
+    let manifest = GlobalCkfManifest::new(consumer, domain, format, pools)?;
     let mut lanes = Vec::with_capacity(args.lanes);
     for lane_state in generated {
         ensure!(
@@ -463,8 +462,7 @@ fn generate_lane_state(
     baseline_hashes: usize,
     query_depth: usize,
     delta_frames: usize,
-    cache_domain: CacheDomainIdentity,
-    endpoint: EndpointId,
+    domain: IndexerDomainId,
     consumer: ConsumerInstanceId,
 ) -> anyhow::Result<GeneratedLaneState> {
     let mut state = DcCkfState::new(CkfConfig {
@@ -497,9 +495,7 @@ fn generate_lane_state(
         );
     }
     let identity = ProducerIdentity::new(
-        cache_domain,
-        DcId::new(lane as u64 + 1),
-        endpoint,
+        PoolId::new(domain, DcId::new(lane as u64 + 1)),
         1,
         1,
         state.format(),
@@ -645,7 +641,7 @@ fn validate_corpus(corpus: &FrozenConsumerCorpus) -> anyhow::Result<()> {
             lane_corpus.lane
         );
         ensure!(
-            corpus.manifest.owner(lane_corpus.lane).is_some(),
+            corpus.manifest.pool_id(lane_corpus.lane).is_some(),
             "corpus lane {} is not configured in its manifest",
             lane_corpus.lane
         );
@@ -661,9 +657,9 @@ fn validate_lane_corpus(
     let snapshot = &lane_corpus.snapshot;
     let identity = snapshot.identity();
     let lease = snapshot.lease();
-    let owner = manifest
-        .owner(lane_corpus.lane)
-        .context("validated lane lost immutable owner")?;
+    let pool_id = manifest
+        .pool_id(lane_corpus.lane)
+        .context("validated lane lost immutable pool")?;
     ensure!(
         lease.physical_lane() as usize == lane_corpus.lane,
         "snapshot lease targets wrong lane"
@@ -677,11 +673,7 @@ fn validate_lane_corpus(
         "snapshot format differs from manifest"
     );
     ensure!(
-        identity.endpoint_id() == manifest.endpoint_id(),
-        "snapshot endpoint differs from manifest"
-    );
-    ensure!(
-        identity.cache_domain() == owner.cache_domain() && identity.dc_id() == owner.dc_id(),
+        identity.pool_id() == pool_id,
         "snapshot producer does not own lane {}",
         lane_corpus.lane
     );
@@ -766,17 +758,17 @@ fn select_corpus(
         .iter()
         .map(|lane| lane.lane)
         .collect::<BTreeSet<_>>();
-    let owners = std::array::from_fn(|lane| {
+    let pools = std::array::from_fn(|lane| {
         selected_set
             .contains(&lane)
-            .then(|| corpus.manifest.owner(lane))
+            .then(|| corpus.manifest.pool_id(lane))
             .flatten()
     });
     let manifest = GlobalCkfManifest::new(
         corpus.manifest.consumer_instance(),
-        corpus.manifest.endpoint_id(),
+        corpus.manifest.indexer_domain(),
         corpus.manifest.format(),
-        owners,
+        pools,
     )?;
     let mut queries = Vec::new();
     let mut query_lanes = Vec::new();
@@ -1263,6 +1255,28 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> anyhow::Result<T> {
         .with_context(|| format!("failed to parse JSON input {}", path.display()))
 }
 
+fn read_consumer_corpus(path: &Path) -> anyhow::Result<FrozenConsumerCorpus> {
+    let file = File::open(path)
+        .with_context(|| format!("failed to open consumer corpus {}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_reader(BufReader::new(file))
+        .with_context(|| format!("failed to parse consumer corpus {}", path.display()))?;
+    let version = value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        .context("consumer corpus is missing numeric schema_version")?;
+    if version == 2 {
+        anyhow::bail!(
+            "consumer corpus schema v2 uses retired endpoint/cache-domain identity; regenerate it as v3"
+        );
+    }
+    ensure!(
+        version == u64::from(CORPUS_SCHEMA_VERSION),
+        "unsupported consumer corpus schema version {version}; expected {CORPUS_SCHEMA_VERSION}"
+    );
+    serde_json::from_value(value)
+        .with_context(|| format!("failed to decode consumer corpus {}", path.display()))
+}
+
 fn write_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
     let file = File::create(path)
         .with_context(|| format!("failed to create JSON output {}", path.display()))?;
@@ -1322,6 +1336,22 @@ mod tests {
         let encoded = serde_json::to_vec(&corpus)?;
         let decoded: FrozenConsumerCorpus = serde_json::from_slice(&encoded)?;
         validate_corpus(&decoded)
+    }
+
+    #[test]
+    fn v2_corpus_requires_identity_regeneration() -> anyhow::Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "dynamo-dc-ckf-v2-corpus-{}.json",
+            std::process::id()
+        ));
+        let file = File::create(&path)?;
+        serde_json::to_writer(file, &serde_json::json!({ "schema_version": 2 }))?;
+
+        let error = read_consumer_corpus(&path).unwrap_err();
+        let _ = std::fs::remove_file(path);
+
+        assert!(error.to_string().contains("regenerate it as v3"));
+        Ok(())
     }
 
     #[test]

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Exact, lane-free CKF aggregation for one cache domain in one data center.
+//! Exact, lane-free CKF aggregation for one indexer pool.
 //!
 //! Event replay is logically idempotent: applying an ordered history through the
 //! same watermark converges to the same member ownership and DC refcounts. It is
@@ -348,7 +348,7 @@ struct DcCkfTelemetry {
     published_occupied_buckets: usize,
 }
 
-/// Exact and physical CKF state for one DC-local cache domain.
+/// Exact and physical CKF state for one DC-local indexer pool.
 #[derive(Debug)]
 pub struct DcCkfState {
     member_blocks: FxHashMap<WorkerWithDpRank, FxHashSet<ExternalSequenceBlockHash>>,

@@ -26,10 +26,12 @@ use dynamo_bench::kv_router_common::issuer::{
     contiguous_worker_issuer, pin_current_thread, pin_current_thread_to_cpus,
 };
 use dynamo_bench::kv_router_common::replay::generate_replay_artifacts;
+use dynamo_kv_router::identity::{
+    CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
+};
 use dynamo_kv_router::indexer::cuckoo::{
-    CacheDomainId, CacheDomainIdentity, CkfConfig, ConsumerInstanceId, DcCkfDelta, DcCkfDeltaSink,
-    DcCkfPublicationBatch, DcCkfPublisher, DcCkfState, DcId, EndpointId, LaneLease,
-    ProducerIdentity,
+    CkfConfig, ConsumerInstanceId, DcCkfDelta, DcCkfDeltaSink, DcCkfPublicationBatch,
+    DcCkfPublisher, DcCkfState, LaneLease, ProducerIdentity,
 };
 use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError, RouterEvent,
@@ -419,10 +421,14 @@ fn actor_loop(
     publish_after: Option<Duration>,
 ) {
     let mut state = DcCkfState::new(config).expect("validated CKF actor configuration");
+    let mut semantic_digest = [0; 16];
+    semantic_digest[..u32::BITS as usize / 8].copy_from_slice(&block_size.to_le_bytes());
+    let domain = IndexerDomainId::new(
+        CacheSemanticsId::new(semantic_digest, IdentitySource::Explicit),
+        RoutingScopeId::new([1; 16], IdentitySource::Explicit),
+    );
     let identity = ProducerIdentity::new(
-        CacheDomainIdentity::new(CacheDomainId::new(1), block_size, 1),
-        DcId::new(dc_ordinal as u64),
-        EndpointId::new(0),
+        PoolId::new(domain, DcId::new(dc_ordinal as u64)),
         1,
         1,
         state.format(),

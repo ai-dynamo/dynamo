@@ -4,7 +4,7 @@
 //! Correctness-only end-to-end CKF façade for `lib/bench` parity replays.
 //!
 //! Every configured lane is an actor-owned [`DcCkfState`] and serialized [`DcCkfPublisher`]. All
-//! lanes feed one real endpoint-scoped global consumer. This keeps replay parity coverage after
+//! pool lanes feed one real indexer-domain-scoped global consumer. This keeps replay parity coverage after
 //! retirement of the router-local hybrid without reintroducing a combined performance benchmark
 //! or pretending that the façade is a production transport.
 
@@ -12,18 +12,19 @@ use std::collections::VecDeque;
 use std::convert::Infallible;
 
 use anyhow::{Context, Result, anyhow, bail};
+use dynamo_kv_router::identity::{
+    CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
+};
+use dynamo_kv_router::indexer::cuckoo::{CkfConfig, PrefixSearchConfig};
 use dynamo_kv_router::indexer::cuckoo::{
-    CacheDomainId, CacheDomainIdentity, ConsumerInstanceId, DcCkfDelta, DcCkfDeltaSink,
-    DcCkfPublicationBatch, DcCkfPublishError, DcCkfPublisher, DcCkfState, EndpointId,
-    GlobalCkfIndexer, GlobalCkfIngestOutcome, GlobalCkfLaneIngestor, GlobalCkfLaneOwner,
+    ConsumerInstanceId, DcCkfDelta, DcCkfDeltaSink, DcCkfPublicationBatch, DcCkfPublishError,
+    DcCkfPublisher, DcCkfState, GlobalCkfIndexer, GlobalCkfIngestOutcome, GlobalCkfLaneIngestor,
     GlobalCkfManifest, LaneLease, ProducerIdentity,
 };
-use dynamo_kv_router::indexer::cuckoo::{CkfConfig, DcId, PrefixSearchConfig};
 use dynamo_kv_router::protocols::{OverlapScores, RouterEvent, WorkerWithDpRank};
 use rustc_hash::FxHashMap;
 
 const MAX_LANES: usize = 16;
-const PARITY_ENDPOINT: EndpointId = EndpointId::new(1);
 const PARITY_CONSUMER: ConsumerInstanceId = ConsumerInstanceId::new(1);
 const PARITY_LAYOUT_GENERATION: u64 = 1;
 const PARITY_ASSIGNMENT_EPOCH: u64 = 1;
@@ -176,25 +177,22 @@ impl DirectCkfParityIndexer {
             states.push(DcCkfState::new(ckf_config)?);
         }
         let format = states[0].format();
-        let cache_domain = CacheDomainIdentity::new(CacheDomainId::new(1), config.kv_block_size, 1);
-        let mut owners = [None; MAX_LANES];
-        for (lane, owner) in owners.iter_mut().enumerate().take(configured_workers.len()) {
-            *owner = Some(GlobalCkfLaneOwner::new(
-                cache_domain,
-                DcId::new(lane as u64),
-                PARITY_ENDPOINT,
-            ));
+        let domain = IndexerDomainId::new(
+            CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
+            RoutingScopeId::new([2; 16], IdentitySource::Explicit),
+        );
+        let mut pools = [None; MAX_LANES];
+        for (lane, pool) in pools.iter_mut().enumerate().take(configured_workers.len()) {
+            *pool = Some(PoolId::new(domain, DcId::new(lane as u64)));
         }
-        let manifest = GlobalCkfManifest::new(PARITY_CONSUMER, PARITY_ENDPOINT, format, owners)?;
+        let manifest = GlobalCkfManifest::new(PARITY_CONSUMER, domain, format, pools)?;
         let indexer = GlobalCkfIndexer::new(manifest, PrefixSearchConfig::default())?;
 
         let mut lanes = Vec::with_capacity(configured_workers.len());
         for (lane, (owner, mut state)) in configured_workers.iter().copied().zip(states).enumerate()
         {
             let identity = ProducerIdentity::new(
-                cache_domain,
-                DcId::new(lane as u64),
-                PARITY_ENDPOINT,
+                PoolId::new(domain, DcId::new(lane as u64)),
                 lane as u64 + 1,
                 PARITY_LAYOUT_GENERATION,
                 format,

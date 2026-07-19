@@ -3,7 +3,7 @@
 
 //! In-process adapter between one actor-owned CKF producer and the global ingestion pool.
 //!
-//! This is the production boundary used when Relay and the endpoint-scoped global indexer share a
+//! This is the production boundary used when Relay and the domain-scoped global indexer share a
 //! process. The adapter does not weaken either side's ownership model: [`DcCkfState`] remains
 //! actor-owned, [`DcCkfPublisher`] alone owns the stream sequence, and the lane-sticky ingestion
 //! worker owns consumer validation and its installed sequence. Producer batches are sampled only
@@ -171,7 +171,8 @@ struct TestSinkFaults {
     drop_next: AtomicBool,
 }
 
-/// Actor-backed local producer-to-consumer composition for one `(DC, endpoint)` lane.
+/// Actor-backed local producer-to-consumer composition for one [`PoolId`](crate::identity::PoolId)
+/// lane.
 pub struct LocalCkfAdapter {
     state: DcCkfState,
     publisher: DcCkfPublisher<IngestionDeltaSink>,
@@ -411,15 +412,15 @@ fn map_publish_error(error: DcCkfPublishError<LocalCkfDeltaSinkError>) -> LocalC
 
 #[cfg(test)]
 mod tests {
+    use crate::identity::{
+        CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
+    };
     use crate::protocols::{
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData,
         KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash,
     };
 
-    use super::super::global::{
-        CacheDomainId, CacheDomainIdentity, ConsumerInstanceId, DcId, EndpointId,
-        GlobalCkfLaneOwner, GlobalCkfManifest,
-    };
+    use super::super::global::{ConsumerInstanceId, GlobalCkfManifest};
     use super::super::ingestion_pool::GlobalCkfIngestionPoolConfig;
     use super::*;
 
@@ -428,15 +429,18 @@ mod tests {
     fn build_adapter(mut config: CkfConfig) -> LocalCkfAdapter {
         config.publish_every_n_events = 1;
         let format = DcCkfState::new(config).unwrap().format();
-        let domain = CacheDomainIdentity::new(CacheDomainId::new(7), 512, 1);
+        let domain = IndexerDomainId::new(
+            CacheSemanticsId::new([7; 16], IdentitySource::Explicit),
+            RoutingScopeId::new([13; 16], IdentitySource::Explicit),
+        );
         let dc = DcId::new(11);
-        let endpoint = EndpointId::new(13);
+        let pool_id = PoolId::new(domain, dc);
         let consumer = ConsumerInstanceId::new(17);
-        let identity = ProducerIdentity::new(domain, dc, endpoint, 19, 1, format);
+        let identity = ProducerIdentity::new(pool_id, 19, 1, format);
         let lease = LaneLease::new(consumer, LANE, 1);
         let mut lanes = [None; super::super::DC_COUNT];
-        lanes[usize::from(LANE)] = Some(GlobalCkfLaneOwner::new(domain, dc, endpoint));
-        let manifest = GlobalCkfManifest::new(consumer, endpoint, format, lanes).unwrap();
+        lanes[usize::from(LANE)] = Some(pool_id);
+        let manifest = GlobalCkfManifest::new(consumer, domain, format, lanes).unwrap();
         let indexer = GlobalCkfIndexer::new(manifest, config.search).unwrap();
         let ingestion = Arc::new(
             GlobalCkfIngestionPool::new(

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Logically serialized publication for one actor-owned `(DC, endpoint)` pool.
+//! Logically serialized publication for one actor-owned [`PoolId`](crate::identity::PoolId).
 //!
 //! The actor core emits unsequenced absolute bucket-image batches. This publisher alone owns the
 //! ordinary `last_sequence`, current consumer lease, and reliable FIFO handoff. Mutation handling
@@ -205,14 +205,15 @@ where
 
 #[cfg(test)]
 mod tests {
+    use crate::identity::{
+        CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
+    };
     use crate::protocols::{
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
         KvCacheStoredBlockData, LocalBlockHash, RouterEvent, WorkerWithDpRank,
     };
 
-    use super::super::global::{
-        CacheDomainId, CacheDomainIdentity, ConsumerInstanceId, DcId, EndpointId,
-    };
+    use super::super::global::ConsumerInstanceId;
     use super::super::{CkfConfig, DcCkfFormatIdentity};
     use super::*;
 
@@ -235,14 +236,11 @@ mod tests {
     }
 
     fn identity(format: DcCkfFormatIdentity, generation: u64) -> ProducerIdentity {
-        ProducerIdentity::new(
-            CacheDomainIdentity::new(CacheDomainId::new(1), 512, 1),
-            DcId::new(2),
-            EndpointId::new(3),
-            4,
-            generation,
-            format,
-        )
+        let domain = IndexerDomainId::new(
+            CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
+            RoutingScopeId::new([3; 16], IdentitySource::Explicit),
+        );
+        ProducerIdentity::new(PoolId::new(domain, DcId::new(2)), 4, generation, format)
     }
 
     fn lease(epoch: u64) -> LaneLease {

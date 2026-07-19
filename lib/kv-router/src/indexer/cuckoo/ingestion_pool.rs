@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Bounded lane-sticky dispatch for endpoint-scoped global CKF ingestion.
+//! Bounded lane-sticky dispatch for indexer-domain-scoped global CKF ingestion.
 //!
 //! A physical lane has exactly one ingestion-worker owner. Deltas are admitted asynchronously,
 //! while assignment, snapshot installation, and exact-drain markers await the same FIFO. Queue
@@ -562,7 +562,7 @@ struct IngestionWorkerHandle {
     join: Option<JoinHandle<()>>,
 }
 
-/// Shared bounded ingestion pool for one endpoint-scoped [`GlobalCkfIndexer`].
+/// Shared bounded ingestion pool for one indexer-domain-scoped [`GlobalCkfIndexer`].
 pub struct GlobalCkfIngestionPool {
     indexer: GlobalCkfIndexer,
     workers: Vec<IngestionWorkerHandle>,
@@ -606,7 +606,7 @@ impl GlobalCkfIngestionPool {
         let mut routes: [Option<LaneRoute>; super::DC_COUNT] = std::array::from_fn(|_| None);
         let consumer = indexer.manifest().consumer_instance();
         for lane in 0..super::DC_COUNT {
-            if indexer.manifest().owner(lane).is_none() {
+            if indexer.manifest().pool_id(lane).is_none() {
                 continue;
             }
             let worker = sticky_worker(consumer.get(), lane as u8, config.worker_count);
@@ -1344,10 +1344,12 @@ fn report_fault(fault_tx: &flume::Sender<GlobalCkfIngestionFault>, fault: Global
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::{
+        CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
+    };
     use crate::indexer::cuckoo::{
-        CacheDomainId, CacheDomainIdentity, CkfCommitState, CkfConfig, CkfFailureAction,
-        CkfFailureDomain, ConsumerInstanceId, DcCkfState, DcId, EndpointId, GlobalCkfBucketImage,
-        GlobalCkfLaneOwner, GlobalCkfManifest, PrefixSearchConfig,
+        CkfCommitState, CkfConfig, CkfFailureAction, CkfFailureDomain, ConsumerInstanceId,
+        DcCkfState, GlobalCkfBucketImage, GlobalCkfManifest, PrefixSearchConfig,
     };
 
     struct Fixture {
@@ -1370,14 +1372,17 @@ mod tests {
         ) -> Self {
             let producer = DcCkfState::new(CkfConfig::new(64)).unwrap();
             let format = producer.format();
-            let cache_domain = CacheDomainIdentity::new(CacheDomainId::new(1), 512, 1);
+            let domain = IndexerDomainId::new(
+                CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
+                RoutingScopeId::new([9; 16], IdentitySource::Explicit),
+            );
             let dc = DcId::new(7);
-            let endpoint = EndpointId::new(9);
+            let pool_id = PoolId::new(domain, dc);
             let consumer = ConsumerInstanceId::new(11);
             let lane = 3;
             let mut lanes = [None; super::super::DC_COUNT];
-            lanes[lane] = Some(GlobalCkfLaneOwner::new(cache_domain, dc, endpoint));
-            let manifest = GlobalCkfManifest::new(consumer, endpoint, format, lanes).unwrap();
+            lanes[lane] = Some(pool_id);
+            let manifest = GlobalCkfManifest::new(consumer, domain, format, lanes).unwrap();
             let indexer = GlobalCkfIndexer::new(manifest, PrefixSearchConfig::default()).unwrap();
             let pool = GlobalCkfIngestionPool::new(
                 indexer,
@@ -1390,7 +1395,7 @@ mod tests {
                 },
             )
             .unwrap();
-            let identity = ProducerIdentity::new(cache_domain, dc, endpoint, 13, 1, format);
+            let identity = ProducerIdentity::new(pool_id, 13, 1, format);
             let lease = LaneLease::new(consumer, lane as u8, 1);
             Self {
                 pool,
@@ -1522,10 +1527,12 @@ mod tests {
     fn foreign_assignment_validation_preserves_ready_lane() {
         let fixture = Fixture::new(8);
         fixture.assign_and_snapshot(4);
+        let foreign_domain = IndexerDomainId::new(
+            CacheSemanticsId::new([99; 16], IdentitySource::Explicit),
+            fixture.identity.indexer_domain().routing_scope(),
+        );
         let foreign_identity = ProducerIdentity::new(
-            CacheDomainIdentity::new(CacheDomainId::new(999), 512, 1),
-            fixture.identity.dc_id(),
-            fixture.identity.endpoint_id(),
+            PoolId::new(foreign_domain, fixture.identity.dc_id()),
             fixture.identity.producer_incarnation(),
             fixture.identity.layout_generation(),
             fixture.identity.format(),

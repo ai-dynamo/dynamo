@@ -24,12 +24,11 @@ pub use failure::{
     CkfCommitState, CkfFailureAction, CkfFailureDisposition, CkfFailureDomain, CkfFailurePoint,
 };
 pub use global::{
-    CacheDomainId, CacheDomainIdentity, ConsumerDrainMarker, ConsumerInstanceId, DcCkfBucketImage,
-    DcCkfDelta, DcCkfSnapshot, DcId, EndpointId, GlobalCkfAssignmentError, GlobalCkfBucketImage,
-    GlobalCkfBuildError, GlobalCkfDelta, GlobalCkfIndexer, GlobalCkfIngestOutcome,
-    GlobalCkfLaneFault, GlobalCkfLaneIngestor, GlobalCkfLaneMatch, GlobalCkfLaneOwner,
-    GlobalCkfManifest, GlobalCkfQueryError, GlobalCkfQueryResult, GlobalCkfSnapshot, LaneLease,
-    ProducerIdentity,
+    ConsumerDrainMarker, ConsumerInstanceId, DcCkfBucketImage, DcCkfDelta, DcCkfSnapshot,
+    GlobalCkfAssignmentError, GlobalCkfBucketImage, GlobalCkfBuildError, GlobalCkfDelta,
+    GlobalCkfIndexer, GlobalCkfIngestOutcome, GlobalCkfLaneFault, GlobalCkfLaneIngestor,
+    GlobalCkfLaneMatch, GlobalCkfManifest, GlobalCkfQueryError, GlobalCkfQueryResult,
+    GlobalCkfSnapshot, LaneLease, ProducerIdentity,
 };
 pub use ingestion_pool::{
     DEFAULT_GLOBAL_INGESTION_CONTROL_TIMEOUT, DEFAULT_GLOBAL_INGESTION_QUEUE_CAPACITY,

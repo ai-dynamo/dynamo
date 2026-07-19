@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Endpoint-scoped storage and ingestion for Relay-published CKF lanes.
+//! Indexer-domain-scoped storage and ingestion for Relay-published DC pool lanes.
 //!
 //! The indexer shares only immutable addressing, atomic packed buckets, and an atomic ready mask
 //! with query threads. Each [`GlobalCkfLaneIngestor`] is owned by one logically serialized
@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 
+use crate::identity::{DcId, IdentitySource, IndexerDomainId, PoolId};
 use crate::protocols::LocalBlockHash;
 
 use super::addressing::{CkfAddressing, CkfProbe};
@@ -25,45 +26,6 @@ use super::failure::{CkfFailureDisposition, CkfFailurePoint};
 use super::{
     CkfBuildError, DC_COUNT, DcCkfFormatIdentity, MAX_VERIFICATION_WINDOW, PrefixSearchConfig,
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct CacheDomainId(u64);
-
-impl CacheDomainId {
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    pub const fn get(self) -> u64 {
-        self.0
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct DcId(u64);
-
-impl DcId {
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    pub const fn get(self) -> u64 {
-        self.0
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct EndpointId(u64);
-
-impl EndpointId {
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    pub const fn get(self) -> u64 {
-        self.0
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ConsumerInstanceId(u64);
@@ -78,45 +40,9 @@ impl ConsumerInstanceId {
     }
 }
 
-/// Interned cache-domain identity used by the CKF hot path.
-///
-/// The Relay integration owns the cold mapping from model artifact strings to
-/// [`CacheDomainId`]. The remaining fields make accidental reuse across incompatible block or
-/// event-hash formats observable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct CacheDomainIdentity {
-    id: CacheDomainId,
-    kv_block_size: u32,
-    event_hash_format: u16,
-}
-
-impl CacheDomainIdentity {
-    pub const fn new(id: CacheDomainId, kv_block_size: u32, event_hash_format: u16) -> Self {
-        Self {
-            id,
-            kv_block_size,
-            event_hash_format,
-        }
-    }
-
-    pub const fn id(self) -> CacheDomainId {
-        self.id
-    }
-
-    pub const fn kv_block_size(self) -> u32 {
-        self.kv_block_size
-    }
-
-    pub const fn event_hash_format(self) -> u16 {
-        self.event_hash_format
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProducerIdentity {
-    cache_domain: CacheDomainIdentity,
-    dc_id: DcId,
-    endpoint_id: EndpointId,
+    pool_id: PoolId,
     producer_incarnation: u64,
     layout_generation: u64,
     format: DcCkfFormatIdentity,
@@ -124,33 +50,29 @@ pub struct ProducerIdentity {
 
 impl ProducerIdentity {
     pub const fn new(
-        cache_domain: CacheDomainIdentity,
-        dc_id: DcId,
-        endpoint_id: EndpointId,
+        pool_id: PoolId,
         producer_incarnation: u64,
         layout_generation: u64,
         format: DcCkfFormatIdentity,
     ) -> Self {
         Self {
-            cache_domain,
-            dc_id,
-            endpoint_id,
+            pool_id,
             producer_incarnation,
             layout_generation,
             format,
         }
     }
 
-    pub const fn cache_domain(self) -> CacheDomainIdentity {
-        self.cache_domain
+    pub const fn pool_id(self) -> PoolId {
+        self.pool_id
+    }
+
+    pub const fn indexer_domain(self) -> IndexerDomainId {
+        self.pool_id.indexer_domain()
     }
 
     pub const fn dc_id(self) -> DcId {
-        self.dc_id
-    }
-
-    pub const fn endpoint_id(self) -> EndpointId {
-        self.endpoint_id
+        self.pool_id.dc_id()
     }
 
     pub const fn producer_incarnation(self) -> u64 {
@@ -199,74 +121,53 @@ impl LaneLease {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct GlobalCkfLaneOwner {
-    cache_domain: CacheDomainIdentity,
-    dc_id: DcId,
-    endpoint_id: EndpointId,
-}
-
-impl GlobalCkfLaneOwner {
-    pub const fn new(
-        cache_domain: CacheDomainIdentity,
-        dc_id: DcId,
-        endpoint_id: EndpointId,
-    ) -> Self {
-        Self {
-            cache_domain,
-            dc_id,
-            endpoint_id,
-        }
-    }
-
-    pub const fn cache_domain(self) -> CacheDomainIdentity {
-        self.cache_domain
-    }
-
-    pub const fn dc_id(self) -> DcId {
-        self.dc_id
-    }
-
-    pub const fn endpoint_id(self) -> EndpointId {
-        self.endpoint_id
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GlobalCkfManifest {
     consumer_instance: ConsumerInstanceId,
-    endpoint_id: EndpointId,
+    indexer_domain: IndexerDomainId,
     format: DcCkfFormatIdentity,
-    lanes: [Option<GlobalCkfLaneOwner>; DC_COUNT],
+    lanes: [Option<PoolId>; DC_COUNT],
     configured_lanes: u16,
 }
 
 impl GlobalCkfManifest {
     pub fn new(
         consumer_instance: ConsumerInstanceId,
-        endpoint_id: EndpointId,
+        indexer_domain: IndexerDomainId,
         format: DcCkfFormatIdentity,
-        lanes: [Option<GlobalCkfLaneOwner>; DC_COUNT],
+        lanes: [Option<PoolId>; DC_COUNT],
     ) -> Result<Self, GlobalCkfBuildError> {
         let mut configured_lanes = 0u16;
-        let mut owners = FxHashSet::default();
-        owners
+        let mut pools = FxHashSet::default();
+        pools
+            .try_reserve(lanes.len())
+            .map_err(|_| GlobalCkfBuildError::AllocationFailed)?;
+        let mut dc_ids = FxHashSet::default();
+        dc_ids
             .try_reserve(lanes.len())
             .map_err(|_| GlobalCkfBuildError::AllocationFailed)?;
 
-        for (lane, owner) in lanes.iter().copied().enumerate() {
-            let Some(owner) = owner else {
+        for (lane, pool_id) in lanes.iter().copied().enumerate() {
+            let Some(pool_id) = pool_id else {
                 continue;
             };
-            if owner.endpoint_id != endpoint_id {
-                return Err(GlobalCkfBuildError::EndpointMismatch {
+            if pool_id.indexer_domain() != indexer_domain {
+                return Err(GlobalCkfBuildError::MixedIndexerDomain {
                     lane: lane as u8,
-                    expected: endpoint_id,
-                    actual: owner.endpoint_id,
+                    expected: indexer_domain,
+                    actual: pool_id.indexer_domain(),
                 });
             }
-            if !owners.insert(owner) {
-                return Err(GlobalCkfBuildError::DuplicateOwner { owner });
+            if !pools.insert(pool_id) {
+                // Within one immutable IndexerDomainId, PoolId is exactly (domain, DC), so a
+                // duplicate pool is also the duplicate-DC-lane case. Keep both checks explicit
+                // because the DC check remains a guard if PoolId gains another dimension later.
+                return Err(GlobalCkfBuildError::DuplicatePool { pool_id });
+            }
+            if !dc_ids.insert(pool_id.dc_id()) {
+                return Err(GlobalCkfBuildError::DuplicateDcLane {
+                    dc_id: pool_id.dc_id(),
+                });
             }
             configured_lanes |= 1u16 << lane;
         }
@@ -274,9 +175,31 @@ impl GlobalCkfManifest {
             return Err(GlobalCkfBuildError::NoConfiguredLanes);
         }
 
+        // NOTE: One global indexer is exactly one logical domain. DC remains an orthogonal pool
+        // dimension: lanes differ by DcId, never by endpoint identity or routing scope.
+        if dc_ids.len() > 1 && indexer_domain.relies_on_defaults() {
+            let defaulted_dimensions = match (
+                indexer_domain.cache_semantics().source(),
+                indexer_domain.routing_scope().source(),
+            ) {
+                (IdentitySource::DefaultDerived, IdentitySource::DefaultDerived) => {
+                    "cache_semantics,routing_scope"
+                }
+                (IdentitySource::DefaultDerived, IdentitySource::Explicit) => "cache_semantics",
+                (IdentitySource::Explicit, IdentitySource::DefaultDerived) => "routing_scope",
+                (IdentitySource::Explicit, IdentitySource::Explicit) => unreachable!(),
+            };
+            tracing::warn!(
+                %indexer_domain,
+                dc_count = dc_ids.len(),
+                defaulted_dimensions,
+                "joining multiple DC CKF pools using default-derived identity"
+            );
+        }
+
         Ok(Self {
             consumer_instance,
-            endpoint_id,
+            indexer_domain,
             format,
             lanes,
             configured_lanes,
@@ -287,8 +210,8 @@ impl GlobalCkfManifest {
         self.consumer_instance
     }
 
-    pub const fn endpoint_id(&self) -> EndpointId {
-        self.endpoint_id
+    pub const fn indexer_domain(&self) -> IndexerDomainId {
+        self.indexer_domain
     }
 
     pub const fn format(&self) -> DcCkfFormatIdentity {
@@ -299,7 +222,7 @@ impl GlobalCkfManifest {
         self.configured_lanes
     }
 
-    pub fn owner(&self, lane: usize) -> Option<GlobalCkfLaneOwner> {
+    pub fn pool_id(&self, lane: usize) -> Option<PoolId> {
         self.lanes.get(lane).copied().flatten()
     }
 }
@@ -309,15 +232,18 @@ pub enum GlobalCkfBuildError {
     #[error("global CKF manifest must configure at least one lane")]
     NoConfiguredLanes,
 
-    #[error("lane {lane} has endpoint {actual:?}, expected {expected:?}")]
-    EndpointMismatch {
+    #[error("lane {lane} has indexer domain {actual}, expected {expected}")]
+    MixedIndexerDomain {
         lane: u8,
-        expected: EndpointId,
-        actual: EndpointId,
+        expected: IndexerDomainId,
+        actual: IndexerDomainId,
     },
 
-    #[error("duplicate global CKF lane owner {owner:?}")]
-    DuplicateOwner { owner: GlobalCkfLaneOwner },
+    #[error("duplicate global CKF pool {pool_id}")]
+    DuplicatePool { pool_id: PoolId },
+
+    #[error("global CKF manifest contains more than one lane for DC {dc_id}")]
+    DuplicateDcLane { dc_id: DcId },
 
     #[error("global CKF lane {lane} is outside 0..{DC_COUNT}")]
     InvalidLane { lane: usize },
@@ -548,9 +474,7 @@ pub enum GlobalCkfQueryError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GlobalCkfLaneMatch {
     physical_lane: u8,
-    cache_domain: CacheDomainIdentity,
-    dc_id: DcId,
-    endpoint_id: EndpointId,
+    pool_id: PoolId,
     prefix_depth: u32,
 }
 
@@ -559,16 +483,8 @@ impl GlobalCkfLaneMatch {
         self.physical_lane
     }
 
-    pub const fn cache_domain(self) -> CacheDomainIdentity {
-        self.cache_domain
-    }
-
-    pub const fn dc_id(self) -> DcId {
-        self.dc_id
-    }
-
-    pub const fn endpoint_id(self) -> EndpointId {
-        self.endpoint_id
+    pub const fn pool_id(self) -> PoolId {
+        self.pool_id
     }
 
     pub const fn prefix_depth(self) -> u32 {
@@ -673,7 +589,7 @@ impl GlobalCkfIndexer {
         if lane >= DC_COUNT {
             return Err(GlobalCkfBuildError::InvalidLane { lane });
         }
-        if self.shared.manifest.owner(lane).is_none() {
+        if self.shared.manifest.pool_id(lane).is_none() {
             return Err(GlobalCkfBuildError::UnconfiguredLane { lane });
         }
 
@@ -722,7 +638,7 @@ impl GlobalCkfIndexer {
         })
     }
 
-    /// Search the immutable endpoint's currently ready DC lanes.
+    /// Search the immutable indexer domain's currently ready DC pool lanes.
     ///
     /// Readiness is captured exactly once with Acquire ordering. A query may therefore finish
     /// after a lane is retired, and it never retries to manufacture a multi-bucket table cut.
@@ -763,16 +679,14 @@ impl GlobalCkfIndexer {
             if captured_ready & (1u16 << lane) == 0 {
                 return None;
             }
-            let owner = self
+            let pool_id = self
                 .shared
                 .manifest
-                .owner(lane)
-                .expect("captured ready lane must have an immutable owner");
+                .pool_id(lane)
+                .expect("captured ready lane must have an immutable pool");
             Some(GlobalCkfLaneMatch {
                 physical_lane: lane as u8,
-                cache_domain: owner.cache_domain,
-                dc_id: owner.dc_id,
-                endpoint_id: owner.endpoint_id,
+                pool_id,
                 prefix_depth: depths[lane],
             })
         });
@@ -1132,13 +1046,10 @@ fn validate_assignment(
             actual: lease.physical_lane,
         });
     }
-    let owner = manifest
-        .owner(lane)
+    let pool_id = manifest
+        .pool_id(lane)
         .expect("an ingestor can only claim a configured lane");
-    if owner.cache_domain != identity.cache_domain
-        || owner.dc_id != identity.dc_id
-        || owner.endpoint_id != identity.endpoint_id
-    {
+    if pool_id != identity.pool_id {
         return Err(GlobalCkfAssignmentError::WrongLaneOwner { lane: lane as u8 });
     }
     if identity.format != manifest.format {
@@ -1167,6 +1078,7 @@ impl Drop for GlobalCkfLaneIngestor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::{CacheSemanticsId, RoutingScopeId};
     use crate::indexer::cuckoo::{
         CkfCommitState, CkfConfig, CkfFailureAction, CkfFailureDomain, DcCkfState,
     };
@@ -1184,16 +1096,17 @@ mod tests {
             let producer = DcCkfState::new(CkfConfig::new(64)).unwrap();
             let format = producer.format();
             let consumer = ConsumerInstanceId::new(17);
-            let endpoint = EndpointId::new(29);
-            let cache_domain = CacheDomainIdentity::new(CacheDomainId::new(31), 512, 1);
-            let owner = GlobalCkfLaneOwner::new(cache_domain, DcId::new(41), endpoint);
+            let domain = IndexerDomainId::new(
+                CacheSemanticsId::new([31; 16], IdentitySource::Explicit),
+                RoutingScopeId::new([29; 16], IdentitySource::Explicit),
+            );
+            let pool_id = PoolId::new(domain, DcId::new(41));
             let mut lanes = [None; DC_COUNT];
-            lanes[3] = Some(owner);
-            let manifest = GlobalCkfManifest::new(consumer, endpoint, format, lanes).unwrap();
+            lanes[3] = Some(pool_id);
+            let manifest = GlobalCkfManifest::new(consumer, domain, format, lanes).unwrap();
             let indexer = GlobalCkfIndexer::new(manifest, PrefixSearchConfig::default()).unwrap();
             let mut ingestor = indexer.claim_lane(3).unwrap();
-            let identity =
-                ProducerIdentity::new(cache_domain, owner.dc_id(), endpoint, 43, 47, format);
+            let identity = ProducerIdentity::new(pool_id, 43, 47, format);
             let lease = LaneLease::new(consumer, 3, 1);
             ingestor.assign(identity, lease).unwrap();
             Self {
@@ -1232,6 +1145,57 @@ mod tests {
     }
 
     #[test]
+    fn manifest_enforces_one_domain_and_one_pool_per_dc() {
+        let producer = DcCkfState::new(CkfConfig::new(8)).unwrap();
+        let format = producer.format();
+        let consumer = ConsumerInstanceId::new(1);
+        let domain = IndexerDomainId::new(
+            CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
+            RoutingScopeId::new([2; 16], IdentitySource::Explicit),
+        );
+        let foreign_domain = IndexerDomainId::new(
+            CacheSemanticsId::new([3; 16], IdentitySource::Explicit),
+            RoutingScopeId::new([4; 16], IdentitySource::Explicit),
+        );
+
+        let mut mixed = [None; DC_COUNT];
+        mixed[0] = Some(PoolId::new(domain, DcId::new(10)));
+        mixed[1] = Some(PoolId::new(foreign_domain, DcId::new(11)));
+        assert!(matches!(
+            GlobalCkfManifest::new(consumer, domain, format, mixed),
+            Err(GlobalCkfBuildError::MixedIndexerDomain { lane: 1, .. })
+        ));
+
+        let pool = PoolId::new(domain, DcId::new(10));
+        let mut duplicate = [None; DC_COUNT];
+        duplicate[0] = Some(pool);
+        duplicate[1] = Some(pool);
+        assert_eq!(
+            GlobalCkfManifest::new(consumer, domain, format, duplicate),
+            Err(GlobalCkfBuildError::DuplicatePool { pool_id: pool })
+        );
+    }
+
+    #[test]
+    fn default_derived_domains_may_join_across_dcs() {
+        let producer = DcCkfState::new(CkfConfig::new(8)).unwrap();
+        let format = producer.format();
+        let domain = IndexerDomainId::new(
+            CacheSemanticsId::new([5; 16], IdentitySource::DefaultDerived),
+            RoutingScopeId::new([6; 16], IdentitySource::Explicit),
+        );
+        let mut lanes = [None; DC_COUNT];
+        lanes[0] = Some(PoolId::new(domain, DcId::new(1)));
+        lanes[1] = Some(PoolId::new(domain, DcId::new(2)));
+
+        let manifest =
+            GlobalCkfManifest::new(ConsumerInstanceId::new(2), domain, format, lanes).unwrap();
+
+        assert_eq!(manifest.configured_lanes(), 0b11);
+        assert_eq!(manifest.indexer_domain(), domain);
+    }
+
+    #[test]
     fn validation_scratch_scales_with_bitmap_words_not_bucket_count() {
         let fixture = Fixture::new();
         let word_count = fixture.bucket_count.div_ceil(u64::BITS as usize);
@@ -1248,9 +1212,7 @@ mod tests {
 
         let captured = fixture.indexer.ready_lanes();
         let replacement_identity = ProducerIdentity::new(
-            fixture.identity.cache_domain(),
-            fixture.identity.dc_id(),
-            fixture.identity.endpoint_id(),
+            fixture.identity.pool_id(),
             fixture.identity.producer_incarnation() + 1,
             fixture.identity.layout_generation() + 1,
             fixture.identity.format(),
@@ -1341,7 +1303,7 @@ mod tests {
     }
 
     #[test]
-    fn query_result_preserves_lane_owner_and_captured_mask() {
+    fn query_result_preserves_pool_and_captured_mask() {
         let mut fixture = Fixture::new();
         fixture.install(7);
 
@@ -1349,9 +1311,7 @@ mod tests {
         assert_eq!(result.captured_ready_lanes(), 1 << 3);
         let lane = result.lanes()[3].unwrap();
         assert_eq!(lane.physical_lane(), 3);
-        assert_eq!(lane.cache_domain(), fixture.identity.cache_domain());
-        assert_eq!(lane.dc_id(), fixture.identity.dc_id());
-        assert_eq!(lane.endpoint_id(), fixture.identity.endpoint_id());
+        assert_eq!(lane.pool_id(), fixture.identity.pool_id());
         assert_eq!(lane.prefix_depth(), 0);
     }
 
@@ -1503,9 +1463,7 @@ mod tests {
         let mut fixture = Fixture::new();
         fixture.install(1);
         let wrong_identity = ProducerIdentity::new(
-            fixture.identity.cache_domain(),
-            fixture.identity.dc_id(),
-            fixture.identity.endpoint_id(),
+            fixture.identity.pool_id(),
             fixture.identity.producer_incarnation() + 1,
             fixture.identity.layout_generation(),
             fixture.identity.format(),
@@ -1580,9 +1538,7 @@ mod tests {
         let mut fixture = Fixture::new();
         fixture.install(1);
         let wrong_identity = ProducerIdentity::new(
-            fixture.identity.cache_domain(),
-            fixture.identity.dc_id(),
-            fixture.identity.endpoint_id(),
+            fixture.identity.pool_id(),
             fixture.identity.producer_incarnation(),
             fixture.identity.layout_generation() + 1,
             fixture.identity.format(),
