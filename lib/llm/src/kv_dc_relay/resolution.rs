@@ -13,6 +13,7 @@ use crate::model_card::ModelDeploymentCard;
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedIndexerDomain {
     pub(crate) id: IndexerDomainId,
+    #[cfg(any(test, feature = "ckf-diagnostics"))]
     pub(crate) diagnostic_model_artifact: String,
     pub(crate) kv_block_size: u32,
     pub(crate) event_hash_format: u16,
@@ -120,6 +121,7 @@ pub(crate) fn resolve_indexer_domain(
     );
     ResolvedIndexerDomain {
         id: IndexerDomainId::new(cache_semantics, routing_scope),
+        #[cfg(any(test, feature = "ckf-diagnostics"))]
         diagnostic_model_artifact: card.source_path().to_string(),
         kv_block_size: card.kv_cache_block_size,
         event_hash_format,

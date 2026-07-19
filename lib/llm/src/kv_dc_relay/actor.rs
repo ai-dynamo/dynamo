@@ -38,6 +38,7 @@ const DEFAULT_MAILBOX_CAPACITY: usize = 256;
 const DEFAULT_PENDING_BLOCK_PERMITS: usize = 65_536;
 const DEFAULT_PUBLICATION_CAPACITY: usize = 64;
 const DEFAULT_FAULT_CAPACITY: usize = 16;
+#[cfg(test)]
 const DEFAULT_PUBLICATION_DELAY: Duration = Duration::from_millis(1);
 const RECOVERY_REBUILD_BATCH_WINDOW: Duration = Duration::from_millis(5);
 
