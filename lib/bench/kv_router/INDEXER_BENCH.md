@@ -14,8 +14,8 @@ Supported backends are:
 - `concurrent-radix-tree-compressed`
 
 The benchmark rejects single-threaded radix, branch-sharded CRTC, approximate
-writes, shard sampling, extra read stress, and in-process repetitions. Run each
-repetition in a fresh process.
+writes, extra read stress, and in-process repetitions. Run each repetition in a
+fresh process.
 
 ### Preparation and timing
 
@@ -74,7 +74,8 @@ curl -L \
 echo 'b434f1816a707f4bac697235588184ebc374c9907cb981bb65fb0643471fe711  '"$TRACE" \
   | shasum -a 256 -c -
 
-cargo bench --package dynamo-bench --bench mooncake_bench --no-run
+cargo bench --package dynamo-bench --bench mooncake_bench \
+  --no-default-features --features mooncake --no-run
 BIN=$(find target/release/deps -maxdepth 1 -type f -perm -111 \
   -name 'mooncake_bench-*' | head -n1)
 ```
@@ -157,7 +158,8 @@ Sweep cells use the same completion-correct implementation. Each cell regenerate
 and consumes a fresh corpus and constructs fresh backend state.
 
 ```bash
-cargo bench --package dynamo-bench --bench mooncake_bench -- \
+cargo bench --package dynamo-bench --bench mooncake_bench \
+  --no-default-features --features mooncake -- \
   "$TRACE" \
   --sweep --sweep-min-ms 750 --sweep-max-ms 24000 --sweep-steps 6 \
   --result-json-output /path/to/sweep.json \
@@ -226,9 +228,11 @@ succeed, every lane drains, and the final sequence state is empty.
 Build and run one cell from the repository root:
 
 ```bash
-cargo bench --package dynamo-bench --bench active_sequences_bench --no-run
+cargo bench --package dynamo-bench --bench active_sequences_bench \
+  --no-default-features --features active-sequences --no-run
 
-cargo bench --package dynamo-bench --bench active_sequences_bench -- \
+cargo bench --package dynamo-bench --bench active_sequences_bench \
+  --no-default-features --features active-sequences -- \
   "$TRACE" \
   --operation-lanes 128 \
   --issuer-spin-us 75 \
@@ -241,7 +245,8 @@ cargo bench --package dynamo-bench --bench active_sequences_bench -- \
 Sweep cells rebuild the prepared corpus and Active Sequences state independently:
 
 ```bash
-cargo bench --package dynamo-bench --bench active_sequences_bench -- \
+cargo bench --package dynamo-bench --bench active_sequences_bench \
+  --no-default-features --features active-sequences -- \
   "$TRACE" \
   --operation-lanes 128 \
   --sweep --sweep-min-ms 1000 --sweep-max-ms 16000 --sweep-steps 5 \
