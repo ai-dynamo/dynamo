@@ -89,20 +89,27 @@ spec:
           echo "Concurrency:  ${CONCURRENCY}"
           echo "Artifact root:${ROOT_DIR}"
           echo "=============================================="
-          # Warmup (fills prefix cache; not scored)
+          # Warmup (fills prefix cache; not scored). Replays a slice of the SAME trace at the
+          # benchmark concurrency, so every worker warms under the ISL/OSL distribution that will
+          # be scored — a c1 / synthetic-ISL warmup leaves most of an 8-worker agg deployment cold.
           WARMUP_DIR="${ROOT_DIR}/warmup"
           mkdir -p "$WARMUP_DIR"
+          WARMUP_REQUESTS=$(( CONCURRENCY * 2 ))   # >= a couple per worker so none stay cold
           aiperf profile \
           -m "${TARGET_MODEL}" \
           --tokenizer "${TARGET_MODEL}" \
           --tokenizer-trust-remote-code \
+          --input-file "${TRACE_FILE}" \
+          --custom-dataset-type mooncake_trace \
+          --num-requests "${WARMUP_REQUESTS}" \
+          --prompt-input-tokens-block-size 512 \
           --url "http://${ENDPOINT}" \
           --streaming \
+          --use-server-token-count \
+          --extra-inputs ignore_eos:true \
+          --concurrency "${CONCURRENCY}" \
+          --random-seed 7 \
           --ui simple \
-          --isl 8000 \
-          --osl 1000 \
-          --concurrency 1 \
-          --request-count 5 \
           --artifact-dir "${WARMUP_DIR}"
           echo "Warmup complete"
           MODEL_BASE="${TARGET_MODEL##*/}"
