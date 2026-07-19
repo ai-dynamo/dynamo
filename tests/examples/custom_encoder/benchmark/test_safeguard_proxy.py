@@ -12,6 +12,7 @@ import torch
 
 from examples.custom_encoder.benchmark.run_safeguard_proxy_sweep import (
     CONCURRENCIES,
+    RUNTIME_DELAYS_US,
     build_config,
     summarize,
     validate_matrix,
@@ -37,7 +38,7 @@ def test_request_schedule_reuses_nine_images_across_one_hundred_requests() -> No
 
 
 def test_request_schedule_reuses_one_image_for_every_request() -> None:
-    assert _request_schedule(["image"], requests=100, seed=42) == ["image"] * 100
+    assert _request_schedule(["image"], requests=1000, seed=42) == ["image"] * 1000
 
 
 def test_prompt_calibration_requires_exact_target() -> None:
@@ -120,14 +121,17 @@ def test_config_is_closed_loop_and_uses_requested_encoder_limits(
     )
     assert config.request_rates is None
     assert config.concurrencies == [1, 2, 3]
-    assert config.conversation_num == 100
+    assert config.conversation_num == 1000
     assert config.warmup_count == 20
     assert config.osl == 7
     assert config.env["DYN_QWEN2_VL_PREPROCESS_CONCURRENCY"] == "4"
     assert config.env["DYN_QWEN2_VL_MAX_BATCH_COST"] == "8"
     assert config.env["DYN_QWEN2_VL_GRAPH_BATCH_BUCKETS"] == "1,2,3,4,5,6,7,8"
     assert config.env["DYN_QWEN2_VL_GRAPH_IMAGE_SIZES"] == "300x300"
-    assert "DYN_CUSTOM_ENCODER_QUEUE_WAIT_MS" not in config.env
+    assert config.env["DYN_CUSTOM_ENCODER_DISPATCH_LOG"] == "1"
+    assert "DYN_CUSTOM_ENCODER_TIMING" not in config.env
+    assert [item.label for item in config.configs] == list(RUNTIME_DELAYS_US)
+    assert [item.extra_args[-1] for item in config.configs] == ["0", "1000"]
     assert "--use-server-token-count" in config.aiperf_extra_args
 
 
@@ -142,17 +146,12 @@ def _latency(value: float) -> dict[str, float | str]:
     }
 
 
-def _write_result(root: Path, concurrency: int) -> None:
-    artifact = (
-        root
-        / "image_custom_100_isl644"
-        / "dynamo-custom-encoder"
-        / f"concurrency{concurrency}"
-    )
+def _write_result(root: Path, runtime: str, concurrency: int) -> None:
+    artifact = root / "image_custom_1000_isl644" / runtime / f"concurrency{concurrency}"
     artifact.mkdir(parents=True)
     command = f"aiperf profile --concurrency {concurrency} --random-seed 42"
     document = {
-        "request_count": {"avg": 100},
+        "request_count": {"avg": 1000},
         "error_summary": [],
         "was_cancelled": False,
         "input_config": {
@@ -172,9 +171,10 @@ def _write_result(root: Path, concurrency: int) -> None:
     (artifact / "command.txt").write_text(command + "\n", encoding="utf-8")
 
 
-def test_validation_and_report_cover_all_ten_cells(tmp_path: Path) -> None:
-    for concurrency in CONCURRENCIES:
-        _write_result(tmp_path, concurrency)
+def test_validation_and_report_cover_all_twenty_cells(tmp_path: Path) -> None:
+    for runtime in RUNTIME_DELAYS_US:
+        for concurrency in CONCURRENCIES:
+            _write_result(tmp_path, runtime, concurrency)
     metadata = {
         "dynamo_commit": "abc123",
         "container_image": "test-image",
@@ -188,7 +188,8 @@ def test_validation_and_report_cover_all_ten_cells(tmp_path: Path) -> None:
         "settings": {
             "preprocess_concurrency": 4,
             "max_batch_cost": 8,
-            "batching_policy": "eager drain with no timed queue hold",
+            "batching_policy": "bounded queue hold",
+            "queue_delays_us": [0, 1000],
             "graph_buckets": list(range(1, 9)),
             "graph_image_sizes": ["300x300"],
             "unique_images": 1,
@@ -197,13 +198,18 @@ def test_validation_and_report_cover_all_ten_cells(tmp_path: Path) -> None:
     (tmp_path / "benchmark_metadata.json").write_text(
         json.dumps(metadata), encoding="utf-8"
     )
-    (tmp_path / "sweep.log").write_text(
-        "[input] Config: dynamo-custom-encoder concurrency=10\n"
-        "custom_encoder_timing stage=vit_forward elapsed_ms=12.3 "
-        "batch_size=8 bucket=8 cost=8\n",
-        encoding="utf-8",
-    )
-    assert len(validate_matrix(tmp_path)) == 10
+    log_lines: list[str] = []
+    for runtime in RUNTIME_DELAYS_US:
+        for concurrency in CONCURRENCIES:
+            log_lines.extend(
+                [
+                    f"[input] Config: {runtime}  concurrency={concurrency}",
+                    "custom_encoder_dispatch mode=graph batch_size=1 "
+                    "bucket=1 calls=1020",
+                ]
+            )
+    (tmp_path / "sweep.log").write_text("\n".join(log_lines) + "\n", encoding="utf-8")
+    assert len(validate_matrix(tmp_path)) == 20
     markdown = tmp_path / "benchmark.md"
     csv_path = tmp_path / "benchmark.csv"
     summarize(tmp_path, markdown, csv_path)
@@ -211,8 +217,9 @@ def test_validation_and_report_cover_all_ten_cells(tmp_path: Path) -> None:
     assert "Performance proxy only" in report
     assert "all requests share one 300×300 JPEG" in report
     assert "Triton baseline used nine unique images" in report
-    assert "eager drain with no timed queue hold" in report
-    assert "| 10 | 35.97 | 418.5 | 20.00 | 102.0 |" in report
-    assert "| 10 | 8 | `[8]` | 8→8: 1 |" in report
-    assert report.count("[artifact]") == 10
+    assert "queue delays: `[0, 1000]` microseconds" in report
+    assert "| 10 | 20.00 | 20.00 | +0.0% |" in report
+    assert "| 1000 us | 10 | 1020 | 1.00 | 100.0% |" in report
+    assert report.count("[AIPerf]") == 20
     assert csv_path.read_text(encoding="utf-8").count("\n") == 11
+    assert (tmp_path / "dispatch_distribution.json").is_file()

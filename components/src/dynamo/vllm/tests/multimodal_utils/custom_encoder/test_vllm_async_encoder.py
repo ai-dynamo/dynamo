@@ -258,6 +258,21 @@ def test_preprocess_concurrency_rejects_negative():
         AsyncVisionEncoder(_FakeBackend(), preprocess_concurrency=-1)
 
 
+def test_queue_delay_rejects_negative():
+    with pytest.raises(ValueError, match="max_queue_delay_us"):
+        AsyncVisionEncoder(_FakeBackend(), max_queue_delay_us=-1)
+
+
+def test_queue_delay_is_forwarded_to_batcher():
+    enc = AsyncVisionEncoder(_FakeBackend(), max_queue_delay_us=1000)
+    enc.load("m")
+    try:
+        assert enc._batcher is not None
+        assert enc._batcher._max_queue_delay_us == 1000
+    finally:
+        enc.shutdown()
+
+
 def test_load_bad_batch_cost_fails_without_spawning_pool():
     """A backend whose max_batch_cost the batcher rejects fails load() cleanly: the
     batcher ctor raises before the preprocess pool is ever spawned (nothing to reap)."""
