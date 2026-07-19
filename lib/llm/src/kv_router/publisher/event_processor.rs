@@ -123,7 +123,7 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
                         }
                         KvCacheEventData::Cleared => {
                             batching_state.flush(&local_indexer, worker_id, &mut dedup, &mut output).await;
-                            dedup.clear();
+                            dedup.clear_rank(event.dp_rank);
                             emit(
                                 &local_indexer,
                                 worker_id,

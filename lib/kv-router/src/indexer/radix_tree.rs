@@ -218,7 +218,7 @@ impl RadixTree {
             KvCacheEventData::Stored(store) => self.apply_stored(worker, store, event_id, counters),
             KvCacheEventData::Removed(remove) => self.apply_removed(worker, remove, event_id),
             KvCacheEventData::Cleared => {
-                self.clear_all_blocks(worker.worker_id);
+                self.remove_worker_dp_rank(worker.worker_id, worker.dp_rank);
                 Ok(())
             }
         }

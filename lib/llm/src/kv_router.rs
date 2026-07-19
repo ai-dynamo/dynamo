@@ -10,7 +10,7 @@ use dynamo_kv_router::{
     indexer::{KvRouterError, RoutingDecisionHashes},
     protocols::KV_EVENT_SUBJECT,
     protocols::{
-        BlockExtraInfo, BlockHashOptions, DpRank, LocalBlockHash, PrefillLoadHint, RouterEvent,
+        BlockExtraInfo, BlockHashOptions, LocalBlockHash, PrefillLoadHint, RouterEvent,
         RouterRequest, RouterResponse, RoutingConstraints, TokensWithHashes, WorkerConfigLike,
         WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
@@ -62,7 +62,7 @@ pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};
 
 use crate::{
-    discovery::RuntimeConfigWatch,
+    discovery::{KvSourceMembershipWatch, RuntimeConfigWatch},
     kv_router::{
         scheduler::{DefaultWorkerSelector, KvScheduler, PotentialLoad},
         sequence::{SequenceError, SequenceRequest},
@@ -154,20 +154,6 @@ fn cancelled_error(context_id: &str) -> anyhow::Error {
         .into()
 }
 
-/// Generates a dp_rank-specific endpoint name for the worker KV indexer query service.
-/// Each dp_rank has its own LocalKvIndexer and query endpoint to ensure per-dp_rank monotonicity.
-pub fn worker_kv_indexer_query_endpoint(dp_rank: DpRank) -> String {
-    format!("worker_kv_indexer_query_dp{dp_rank}")
-}
-
-/// Generates a query endpoint name for a dp_rank whose events are attributed to `worker_id`.
-pub fn worker_kv_indexer_query_endpoint_for_worker(worker_id: WorkerId, dp_rank: DpRank) -> String {
-    format!(
-        "{}_worker{worker_id}",
-        worker_kv_indexer_query_endpoint(dp_rank)
-    )
-}
-
 fn log_routing_input_hashes(
     request_id: Option<&str>,
     block_size: u32,
@@ -245,6 +231,7 @@ where
         endpoint: Endpoint,
         client: Client,
         workers_with_configs: RuntimeConfigWatch,
+        kv_source_membership: Option<KvSourceMembershipWatch>,
         block_size: u32,
         selector: Sel,
         kv_router_config: Option<KvRouterConfig>,
@@ -297,7 +284,7 @@ where
             Arc::new(move || client_for_overload.overloaded_instance_ids());
 
         let scheduler = KvScheduler::start(
-            component.clone(),
+            endpoint.clone(),
             block_size,
             workers_with_configs.clone(),
             selector,
@@ -315,10 +302,15 @@ where
         if kv_router_config.use_remote_indexer {
             tracing::info!("Skipping KV event subscription (using remote indexer)");
         } else if kv_router_config.should_subscribe_to_kv_events() {
+            let membership_watch = kv_source_membership.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "KV source membership watch is required when local KV event subscription is enabled"
+                )
+            })?;
             indexer::start_subscriber(
-                component.clone(),
+                endpoint.clone(),
                 indexer.clone(),
-                workers_with_configs.clone(),
+                membership_watch,
                 model_name.clone().unwrap_or_else(|| "unknown".to_string()),
                 worker_type,
                 cancellation_token.child_token(),
@@ -1460,6 +1452,7 @@ mod tests {
             endpoint,
             client,
             rx,
+            None,
             2,
             selector,
             Some(config),

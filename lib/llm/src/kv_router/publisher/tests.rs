@@ -1649,7 +1649,7 @@ mod test_event_dedup_filter {
     }
 
     #[test]
-    fn clear_resets_all_ranks() {
+    fn clear_resets_only_the_emitting_rank() {
         let mut filter = EventDedupFilter::new();
 
         // Store on rank 0 and rank 1
@@ -1658,16 +1658,15 @@ mod test_event_dedup_filter {
         filter.track_store(1, StorageTier::Device, &store_data(&[1, 2]));
         filter.track_store(1, StorageTier::Device, &store_data(&[1, 2]));
 
-        // Clear wipes all ranks (matches indexer semantics where Cleared
-        // from any rank removes all blocks for the entire worker).
-        filter.clear();
+        filter.clear_rank(0);
 
-        // Both ranks pass through defensively after clear
+        // The cleared rank passes through defensively because its refcounts are gone.
         let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1]));
         assert!(result.is_some());
 
+        // The sibling rank still has two references and filters its first remove.
         let result = filter.filter_remove(1, StorageTier::Device, remove_data(&[1]));
-        assert!(result.is_some());
+        assert!(result.is_none());
     }
 
     #[test]
@@ -1722,17 +1721,20 @@ mod test_integration_publisher {
     use crate::kv_router::KV_METRICS_SUBJECT;
     use dynamo_kv_router::protocols::ActiveLoad;
     use dynamo_runtime::distributed_test_utils::create_test_drt_async;
-    use dynamo_runtime::transports::event_plane::EventSubscriber;
+    use dynamo_runtime::transports::event_plane::{EventPublisher, EventSubscriber};
 
     #[tokio::test]
     #[ignore] // Mark as ignored as requested, because CI's integrations still don't have NATS
     async fn test_metrics_publishing_behavior() -> Result<()> {
         // Set up runtime and namespace
         let drt = create_test_drt_async().await;
-        let namespace = drt.namespace("ns2001".to_string())?;
+        let endpoint = drt
+            .namespace("ns2001".to_string())?
+            .component("worker")?
+            .endpoint("generate");
 
         // Create a subscriber for the metrics events
-        let mut subscriber = EventSubscriber::for_namespace(&namespace, KV_METRICS_SUBJECT)
+        let mut subscriber = EventSubscriber::for_endpoint(&endpoint, KV_METRICS_SUBJECT)
             .await
             .unwrap()
             .typed::<ActiveLoad>();
@@ -1741,8 +1743,9 @@ mod test_integration_publisher {
         let publisher = WorkerMetricsPublisher::new().unwrap();
         let worker_id = 1234;
 
-        // Start NATS metrics publishing
-        publisher.start_nats_metrics_publishing(namespace.clone(), worker_id);
+        // Start event-plane metrics publishing
+        let event_publisher = EventPublisher::for_endpoint(&endpoint, KV_METRICS_SUBJECT).await?;
+        publisher.start_metrics_publishing(event_publisher, worker_id);
 
         // Allow some time for the background task to start
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -3799,15 +3802,16 @@ mod event_plane_batch_tests {
                     .expect("create namespace")
                     .component("worker")
                     .expect("create component");
-                let publisher = EventPublisher::for_component_with_transport(
-                    &component,
+                let endpoint = component.endpoint("generate");
+                let publisher = EventPublisher::for_endpoint_with_transport(
+                    &endpoint,
                     KV_EVENT_SUBJECT,
                     EventTransportKind::Zmq,
                 )
                 .await
                 .expect("create publisher");
-                let mut subscriber = EventSubscriber::for_component_with_transport(
-                    &component,
+                let mut subscriber = EventSubscriber::for_endpoint_with_transport(
+                    &endpoint,
                     KV_EVENT_SUBJECT,
                     EventTransportKind::Zmq,
                 )

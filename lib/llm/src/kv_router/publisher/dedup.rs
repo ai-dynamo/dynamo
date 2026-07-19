@@ -16,7 +16,7 @@ use dynamo_kv_router::protocols::{
 ///
 /// - **Store**: always passes through; increments refcount for the rank.
 /// - **Remove**: only passes through when refcount decrements to 0.
-/// - **Cleared**: resets refcounts for all ranks.
+/// - **Cleared**: resets refcounts for the emitting rank across storage tiers.
 pub(super) struct EventDedupFilter {
     /// Per-(dp_rank, storage_tier) refcounts.
     per_rank_tier: HashMap<(u32, StorageTier), HashMap<ExternalSequenceBlockHash, usize>>,
@@ -83,10 +83,9 @@ impl EventDedupFilter {
         }
     }
 
-    /// Clear refcounts for all DP ranks and tiers. A `Cleared` event from any
-    /// rank causes the indexer to wipe all blocks for the entire worker, so we
-    /// must reset all refcounts to stay consistent.
-    pub(super) fn clear(&mut self) {
-        self.per_rank_tier.clear();
+    /// Clear refcounts for one DP rank across all storage tiers.
+    pub(super) fn clear_rank(&mut self, dp_rank: u32) {
+        self.per_rank_tier
+            .retain(|(tracked_dp_rank, _), _| *tracked_dp_rank != dp_rank);
     }
 }

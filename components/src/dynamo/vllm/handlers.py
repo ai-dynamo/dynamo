@@ -2518,7 +2518,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     def _create_prompt_from_embeddings(
         self, prompt_embeds_base64: str
-    ) -> tuple[EmbedsPrompt, int, torch.Tensor]:
+    ) -> tuple[EmbedsPrompt, torch.Tensor]:
         """
         Decode prompt embeddings and create EmbedsPrompt for vLLM.
 
@@ -2526,9 +2526,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             prompt_embeds_base64: Base64-encoded PyTorch tensor
 
         Returns:
-            Tuple of (EmbedsPrompt, sequence_length, tensor) where:
+            Tuple of (EmbedsPrompt, tensor) where:
             - EmbedsPrompt: The vLLM prompt input
-            - sequence_length: Extracted from tensor shape for usage statistics
             - tensor: The decoded tensor (for logging shape/dtype)
 
         Raises:
@@ -2540,13 +2539,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 f"prompt embeds should have dim 2 after vllm processing, but found dim {embeddings_tensor.dim()}"
             )
 
-        # Extract sequence length from tensor shape for usage reporting
-        sequence_length = embeddings_tensor.shape[0]
-
         # EmbedsInputs TypedDict has: {type: 'embeds', prompt_embeds: Tensor, cache_salt?: str}
         prompt = EmbedsPrompt(prompt_embeds=embeddings_tensor)
 
-        return prompt, sequence_length, embeddings_tensor
+        return prompt, embeddings_tensor
 
     def _build_prompt_from_request(
         self,
@@ -2556,7 +2552,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         log_prefix: str = "",
         mm_processor_kwargs: Dict[str, Any] | None = None,
         mixed_embeds: tuple[torch.Tensor, list[int], list[bool]] | None = None,
-    ) -> tuple[TokensPrompt | EmbedsPrompt | None, int | None, Dict[str, Any] | None]:
+    ) -> tuple[TokensPrompt | EmbedsPrompt | None, Dict[str, Any] | None]:
         """
         Build a prompt from request, handling both prompt_embeds and token_ids.
 
@@ -2572,12 +2568,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 path. When present, takes the EmbedsPrompt fast path below.
 
         Returns:
-            Tuple of (prompt, embedding_sequence_length, error_dict) where:
-            - On success: (prompt, embedding_sequence_length or None, None)
-            - On failure: (None, None, error_dict to yield)
+            Tuple of (prompt, error_dict) where:
+            - On success: (prompt, None)
+            - On failure: (None, error_dict to yield)
         """
-        embedding_sequence_length = None
-
         # Fast path: mixed token-ids/embeds prompt from the aggregated
         # CustomEncoder path, assembled in _generate_token_mode and passed in
         # explicitly. The image embeds ride on the EmbedsPrompt itself and the
@@ -2586,14 +2580,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # intentionally skipped for this path.
         if mixed_embeds is not None:
             prompt_embeds, prompt_token_ids, prompt_is_token_ids = mixed_embeds
-            seq_len = prompt_embeds.shape[0]
             return (
                 EmbedsPrompt(
                     prompt_embeds=prompt_embeds,
                     prompt_token_ids=prompt_token_ids,
                     prompt_is_token_ids=prompt_is_token_ids,
                 ),
-                seq_len,
                 None,
             )
 
@@ -2608,31 +2600,27 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 )
                 return (
                     None,
-                    None,
                     {
                         "finish_reason": f"error: Invalid prompt_embeds: {msg}",
                         "token_ids": [],
                     },
                 )
             try:
-                (
-                    prompt,
-                    embedding_sequence_length,
-                    tensor,
-                ) = self._create_prompt_from_embeddings(request["prompt_embeds"])
+                prompt, tensor = self._create_prompt_from_embeddings(
+                    request["prompt_embeds"]
+                )
                 logger.info(
                     f"{log_prefix}Using prompt embeddings: shape={tensor.shape}, "
-                    f"dtype={tensor.dtype}, sequence_length={embedding_sequence_length}, "
+                    f"dtype={tensor.dtype}, sequence_length={tensor.shape[0]}, "
                     f"request_id={request_id}"
                 )
-                return prompt, embedding_sequence_length, None
+                return prompt, None
             except Exception as e:
                 logger.error(
                     f"Failed to process prompt_embeds for {log_prefix.lower().strip() or 'request'} "
                     f"{request_id}: {e}"
                 )
                 return (
-                    None,
                     None,
                     {
                         "finish_reason": f"error: Invalid prompt_embeds: {e}",
@@ -2651,12 +2639,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             multi_modal_data,
             mm_processor_kwargs,
         )
-        return prompt, embedding_sequence_length, None
+        return prompt, None
 
     @staticmethod
     def _build_completion_usage(
         request_output: RequestOutput,
-        embedding_sequence_length: int | None = None,
         completion_token_counts: dict[int, int] | None = None,
     ) -> Dict[str, Any]:
         """
@@ -2664,8 +2651,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
         Args:
             request_output: vLLM RequestOutput object
-            embedding_sequence_length: If using prompt embeddings, the sequence length
-                                     extracted from the embeddings tensor shape
             completion_token_counts: Optional cumulative generated-token counts by
                                      output index. DELTA-mode streams need this
                                      because the final vLLM chunk is not cumulative.
@@ -2673,15 +2658,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         Returns:
             Dict with prompt_tokens, completion_tokens, total_tokens, prompt_tokens_details
         """
-        # Determine prompt token count:
-        # - For embeddings: use embedding_sequence_length from tensor shape
-        # - For normal text: use len(prompt_token_ids)
-        if embedding_sequence_length is not None:
-            prompt_tokens = embedding_sequence_length
-        elif request_output.prompt_token_ids:
-            prompt_tokens = len(request_output.prompt_token_ids)
-        else:
-            prompt_tokens = None
+        prompt_tokens = (
+            len(request_output.prompt_token_ids)
+            if request_output.prompt_token_ids
+            else None
+        )
 
         if completion_token_counts is not None:
             completion_tokens = sum(completion_token_counts.values())
@@ -2755,7 +2736,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         request_id,
         data_parallel_rank=None,
         lora_request=None,
-        embedding_sequence_length=None,
         trace_headers=None,
         priority=0,
         reasoning_ended=None,
@@ -2868,7 +2848,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             "completion_usage"
                         ] = BaseWorkerHandler._build_completion_usage(
                             request_output=res,
-                            embedding_sequence_length=embedding_sequence_length,
                             completion_token_counts=total_output_tokens_by_index,
                         )
                         if prompt_logprobs_payload is not None:
@@ -3132,18 +3111,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # The engine's InputProcessor.process_inputs() will see the "type"
                 # key and skip the HF processor entirely.
                 prompt = pre_rendered
-                embedding_sequence_length = None
                 error = None
                 logger.debug(
                     "[mm-routing] Request %s: using pre-rendered MultiModalInput",
                     request_id,
                 )
             else:
-                (
-                    prompt,
-                    embedding_sequence_length,
-                    error,
-                ) = self._build_prompt_from_request(
+                prompt, error = self._build_prompt_from_request(
                     request,
                     request_id,
                     multi_modal_data,
@@ -3236,7 +3210,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         request_id,
                         data_parallel_rank=dp_rank,
                         lora_request=lora_request,
-                        embedding_sequence_length=embedding_sequence_length,
                         trace_headers=trace_headers,
                         priority=priority,
                         reasoning_ended=reasoning_ended,
@@ -3440,7 +3413,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         mm_processor_kwargs = prepared_input.mm_processor_kwargs
 
         # Build prompt from request (handles both prompt_embeds and token_ids)
-        prompt, embedding_sequence_length, error = self._build_prompt_from_request(
+        prompt, error = self._build_prompt_from_request(
             request,
             request_id,
             multi_modal_data,
@@ -3545,7 +3518,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     ),
                     "completion_usage": BaseWorkerHandler._build_completion_usage(
                         request_output=res,
-                        embedding_sequence_length=embedding_sequence_length,
                     ),
                 }
 
