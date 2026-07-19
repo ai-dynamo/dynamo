@@ -58,6 +58,16 @@ pub(crate) trait RecoveryTarget: Send + Sync + 'static {
         dp_rank: DpRank,
         reason: RecoveryResetReason,
     ) -> impl Future<Output = anyhow::Result<()>> + Send;
+
+    /// Mark a source's initial recovery attempt complete when it did not install a tree dump.
+    /// Targets that batch cold-start replacements use this to close the initial recovery wave.
+    fn complete_initial_recovery(
+        &self,
+        _worker_id: WorkerId,
+        _dp_rank: DpRank,
+    ) -> impl Future<Output = ()> + Send {
+        async {}
+    }
 }
 
 #[derive(Clone)]

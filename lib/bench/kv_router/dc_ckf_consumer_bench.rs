@@ -30,11 +30,12 @@ use dynamo_kv_router::indexer::cuckoo::{
 use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash, RouterEvent, WorkerWithDpRank,
+    compute_seq_hash_for_block,
 };
 use serde::{Deserialize, Serialize};
 
-const CORPUS_SCHEMA_VERSION: u32 = 1;
-const RESULT_SCHEMA_VERSION: u32 = 1;
+const CORPUS_SCHEMA_VERSION: u32 = 2;
+const RESULT_SCHEMA_VERSION: u32 = 2;
 const MAX_LANES: usize = 16;
 const DEFAULT_EXPECTED_BLOCKS_PER_LANE: usize = 4_096;
 const DEFAULT_BASELINE_HASHES_PER_LANE: usize = 2_048;
@@ -168,6 +169,7 @@ struct BenchmarkReport {
     max_outstanding_images: usize,
     query_operations: u64,
     query_unavailable: u64,
+    query_result_checksum: u64,
     delta_throughput_per_second: f64,
     query_throughput_per_second: f64,
     expected_ready_mask: u16,
@@ -237,6 +239,7 @@ struct RunMetrics {
 struct QueryThreadMetrics {
     operations: u64,
     unavailable: u64,
+    result_checksum: u64,
     latency_ns: Vec<u64>,
 }
 
@@ -244,6 +247,7 @@ struct SelectedCorpus<'a> {
     manifest: GlobalCkfManifest,
     lanes: Vec<&'a FrozenLaneCorpus>,
     queries: Arc<Vec<Vec<LocalBlockHash>>>,
+    query_lanes: Arc<Vec<usize>>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -369,12 +373,15 @@ fn generate_corpus(
     let consumer = ConsumerInstanceId::new(0xC0DE_CAFE);
     let cache_domain = CacheDomainIdentity::new(CacheDomainId::new(1), 512, 1);
     let mut generated = Vec::with_capacity(args.lanes);
+    let query_count = 256usize;
+    let query_depth = 32usize.min(baseline_hashes);
 
     for lane in 0..args.lanes {
         generated.push(generate_lane_state(
             lane,
             expected_blocks,
             baseline_hashes,
+            query_depth,
             args.delta_frames_per_lane,
             cache_domain,
             endpoint,
@@ -401,14 +408,12 @@ fn generate_corpus(
         });
     }
 
-    let query_count = 256usize;
-    let query_depth = 32usize.min(baseline_hashes);
     let mut queries = Vec::with_capacity(query_count);
     for query_index in 0..query_count {
         let lane = query_index % args.lanes;
         let start = lane_hash_base(lane)?;
-        let offset =
-            (query_index / args.lanes) % baseline_hashes.saturating_sub(query_depth).max(1);
+        let group_count = (baseline_hashes / query_depth).max(1);
+        let offset = ((query_index / args.lanes) % group_count) * query_depth;
         queries.push(
             (0..query_depth)
                 .map(|position| start + (offset + position) as u64)
@@ -451,10 +456,12 @@ impl DcCkfDeltaSink for CorpusDeltaSink {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generate_lane_state(
     lane: usize,
     expected_blocks: usize,
     baseline_hashes: usize,
+    query_depth: usize,
     delta_frames: usize,
     cache_domain: CacheDomainIdentity,
     endpoint: EndpointId,
@@ -467,11 +474,21 @@ fn generate_lane_state(
     })?;
     let member = WorkerWithDpRank::new(lane as u64 + 1, 0);
     let base = lane_hash_base(lane)?;
-    for hash_offset in 0..baseline_hashes {
+    let local_hashes = (0..baseline_hashes)
+        .map(|offset| LocalBlockHash(base + offset as u64))
+        .collect::<Vec<_>>();
+    let sequence_hashes = local_hashes
+        .chunks(query_depth)
+        .flat_map(compute_seq_hash_for_block)
+        .collect::<Vec<_>>();
+    for (hash_offset, (&local_hash, &sequence_hash)) in
+        local_hashes.iter().zip(&sequence_hashes).enumerate()
+    {
         let outcome = state.apply_event(stored_event(
             member,
             hash_offset as u64 + 1,
-            base + hash_offset as u64,
+            sequence_hash,
+            local_hash,
         ));
         ensure!(
             outcome.first_error().is_none(),
@@ -495,7 +512,7 @@ fn generate_lane_state(
 
     for frame_pair in 0..(delta_frames / 2) {
         let hash_offset = frame_pair % baseline_hashes;
-        let hash = base + hash_offset as u64;
+        let hash = sequence_hashes[hash_offset];
         let remove = state.apply_event(removed_event(
             member,
             baseline_hashes as u64 + frame_pair as u64 * 2 + 1,
@@ -516,6 +533,7 @@ fn generate_lane_state(
             member,
             baseline_hashes as u64 + frame_pair as u64 * 2 + 2,
             hash,
+            local_hashes[hash_offset],
         ));
         ensure!(
             store.first_error().is_none(),
@@ -554,7 +572,12 @@ fn lane_hash_base(lane: usize) -> anyhow::Result<u64> {
         .context("synthetic lane hash namespace overflow")
 }
 
-fn stored_event(member: WorkerWithDpRank, event_id: u64, hash: u64) -> RouterEvent {
+fn stored_event(
+    member: WorkerWithDpRank,
+    event_id: u64,
+    sequence_hash: u64,
+    local_hash: LocalBlockHash,
+) -> RouterEvent {
     RouterEvent::new(
         member.worker_id,
         KvCacheEvent {
@@ -563,8 +586,8 @@ fn stored_event(member: WorkerWithDpRank, event_id: u64, hash: u64) -> RouterEve
                 parent_hash: None,
                 start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
-                    block_hash: ExternalSequenceBlockHash(hash),
-                    tokens_hash: LocalBlockHash(hash),
+                    block_hash: ExternalSequenceBlockHash(sequence_hash),
+                    tokens_hash: local_hash,
                     mm_extra_info: None,
                 }],
             }),
@@ -755,17 +778,21 @@ fn select_corpus(
         corpus.manifest.format(),
         owners,
     )?;
-    let queries = Arc::new(
-        corpus
-            .queries
-            .iter()
-            .map(|query| query.iter().copied().map(LocalBlockHash).collect())
-            .collect(),
-    );
+    let mut queries = Vec::new();
+    let mut query_lanes = Vec::new();
+    for (query_index, query) in corpus.queries.iter().enumerate() {
+        let lane = corpus.lanes[query_index % corpus.lanes.len()].lane;
+        if !selected_set.contains(&lane) {
+            continue;
+        }
+        queries.push(query.iter().copied().map(LocalBlockHash).collect());
+        query_lanes.push(lane);
+    }
     Ok(SelectedCorpus {
         manifest,
         lanes: selected_lanes,
-        queries,
+        queries: Arc::new(queries),
+        query_lanes: Arc::new(query_lanes),
     })
 }
 
@@ -840,6 +867,7 @@ fn execute_run(
             lane.lane
         );
     }
+    validate_expected_query_depths(&indexer, corpus)?;
 
     let stop_queries = Arc::new(AtomicBool::new(false));
     let active_query_issuers = if matches!(
@@ -1024,7 +1052,14 @@ fn spawn_query_threads(
                         let start = Instant::now();
                         match indexer.find_prefix_matches(&queries[query_index]) {
                             Ok(result) => {
-                                black_box(result.captured_ready_lanes());
+                                let mut checksum = u64::from(result.captured_ready_lanes());
+                                for lane_match in result.lanes().iter().flatten() {
+                                    checksum = checksum
+                                        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                                        .wrapping_add(u64::from(lane_match.physical_lane()))
+                                        .wrapping_add(u64::from(lane_match.prefix_depth()));
+                                }
+                                metrics.result_checksum ^= black_box(checksum);
                             }
                             Err(_) => metrics.unavailable += 1,
                         }
@@ -1043,6 +1078,26 @@ fn spawn_query_threads(
         );
     }
     Ok(handles)
+}
+
+fn validate_expected_query_depths(
+    indexer: &GlobalCkfIndexer,
+    corpus: &SelectedCorpus<'_>,
+) -> anyhow::Result<()> {
+    for (query_index, query) in corpus.queries.iter().enumerate() {
+        let lane = corpus.query_lanes[query_index];
+        let result = indexer.find_prefix_matches(query)?;
+        let depth = result.lanes()[lane]
+            .as_ref()
+            .context("expected query lane is not ready")?
+            .prefix_depth();
+        ensure!(
+            depth as usize == query.len(),
+            "synthetic query {query_index} matched lane {lane} to depth {depth}, expected {}",
+            query.len()
+        );
+    }
+    Ok(())
 }
 
 fn join_query_threads(
@@ -1087,6 +1142,10 @@ fn build_report(
         .iter()
         .map(|item| item.unavailable)
         .sum();
+    let query_result_checksum = metrics
+        .query_metrics
+        .iter()
+        .fold(0u64, |checksum, item| checksum ^ item.result_checksum);
     let mut query_ns = metrics
         .query_metrics
         .into_iter()
@@ -1149,6 +1208,7 @@ fn build_report(
         max_outstanding_images: metrics.max_outstanding_images,
         query_operations,
         query_unavailable,
+        query_result_checksum,
         delta_throughput_per_second: metrics.delta_submissions as f64 / elapsed_seconds,
         query_throughput_per_second: query_operations as f64 / elapsed_seconds,
         expected_ready_mask,

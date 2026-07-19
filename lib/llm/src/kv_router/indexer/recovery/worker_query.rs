@@ -26,6 +26,7 @@ use crate::discovery::{
 const RECOVERY_MAX_RETRIES: u32 = 8;
 const RECOVERY_INITIAL_BACKOFF_MS: u64 = 200;
 const RECOVERY_CONCURRENCY_LIMIT: usize = 16;
+pub(crate) const DEFAULT_RECOVERY_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(test)]
 const KV_EVENT_TOPIC: &str = dynamo_kv_router::protocols::KV_EVENT_SUBJECT;
 
@@ -56,6 +57,8 @@ struct SourceSlot {
     lifecycle_generation: Option<u64>,
     /// This flag represents only a failed acknowledged reset, not membership history.
     reset_pending: bool,
+    /// A protocol-faulted incarnation remains ineligible until discovery advances generation.
+    rejected_generation: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +88,7 @@ impl SourceSlot {
     fn accept_generation(&mut self, generation: u64) {
         self.lifecycle_generation = Some(generation);
         self.reset_pending = false;
+        self.rejected_generation = None;
     }
 
     fn fence_for_reset(&mut self) {
@@ -105,10 +109,12 @@ pub(crate) struct WorkerQueryClient<T = IndexerRecoveryTarget> {
     _membership_guard: Option<KvSourceMembershipWatch>,
     membership_sync: Mutex<()>,
     slots: DashMap<RecoveryKey, Arc<Mutex<SourceSlot>>>,
+    generation_tombstones: DashMap<RecoveryKey, u64>,
     /// Immutable publisher binding lookup performed once per event envelope.
     publisher_bindings: DashMap<u64, Arc<SourceBinding>>,
     recovery_tasks: DashMap<RecoveryKey, RecoveryTask>,
     recovery_semaphore: Arc<Semaphore>,
+    recovery_attempt_timeout: Duration,
     cancellation_token: CancellationToken,
 }
 
@@ -124,6 +130,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             target,
             membership_watch,
             Arc::new(Semaphore::new(RECOVERY_CONCURRENCY_LIMIT)),
+            DEFAULT_RECOVERY_ATTEMPT_TIMEOUT,
             cancellation_token,
         )
         .await
@@ -134,6 +141,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
         target: T,
         membership_watch: KvSourceMembershipWatch,
         recovery_semaphore: Arc<Semaphore>,
+        recovery_attempt_timeout: Duration,
         cancellation_token: CancellationToken,
     ) -> Result<Arc<Self>> {
         let transport = Arc::new(RuntimeWorkerQueryTransport::new(&component).await?);
@@ -145,9 +153,11 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             _membership_guard: Some(membership_watch),
             membership_sync: Mutex::new(()),
             slots: DashMap::new(),
+            generation_tombstones: DashMap::new(),
             publisher_bindings: DashMap::new(),
             recovery_tasks: DashMap::new(),
             recovery_semaphore,
+            recovery_attempt_timeout,
             cancellation_token,
         });
 
@@ -160,6 +170,23 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
         membership_rx: watch::Receiver<KvSourceMembershipView>,
         transport: Arc<dyn WorkerQueryTransport>,
     ) -> Arc<Self> {
+        Self::new_target_for_test_with_recovery(
+            target,
+            membership_rx,
+            transport,
+            Arc::new(Semaphore::new(RECOVERY_CONCURRENCY_LIMIT)),
+            DEFAULT_RECOVERY_ATTEMPT_TIMEOUT,
+        )
+    }
+
+    #[cfg(test)]
+    fn new_target_for_test_with_recovery(
+        target: T,
+        membership_rx: watch::Receiver<KvSourceMembershipView>,
+        transport: Arc<dyn WorkerQueryTransport>,
+        recovery_semaphore: Arc<Semaphore>,
+        recovery_attempt_timeout: Duration,
+    ) -> Arc<Self> {
         Arc::new(Self {
             transport,
             target,
@@ -167,9 +194,11 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             _membership_guard: None,
             membership_sync: Mutex::new(()),
             slots: DashMap::new(),
+            generation_tombstones: DashMap::new(),
             publisher_bindings: DashMap::new(),
             recovery_tasks: DashMap::new(),
-            recovery_semaphore: Arc::new(Semaphore::new(RECOVERY_CONCURRENCY_LIMIT)),
+            recovery_semaphore,
+            recovery_attempt_timeout,
             cancellation_token: CancellationToken::new(),
         })
     }
@@ -212,15 +241,27 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
         status: KvSourceStatus,
         lifecycle_generation: u64,
     ) {
+        let previous_generation = self
+            .generation_tombstones
+            .remove(&key)
+            .map(|(_, generation)| generation);
         let slot = self
             .slots
             .entry(key)
-            .or_insert_with(|| Arc::new(Mutex::new(SourceSlot::default())))
+            .or_insert_with(|| {
+                Arc::new(Mutex::new(SourceSlot {
+                    lifecycle_generation: previous_generation,
+                    ..SourceSlot::default()
+                }))
+            })
             .clone();
         let mut slot = slot.lock().await;
 
         let selected = status.active_source().cloned();
         let generation_changed = slot.generation_changed(lifecycle_generation);
+        if slot.rejected_generation == Some(lifecycle_generation) {
+            return;
+        }
         if let (Some(active), Some(selected)) = (&slot.active, &selected)
             && active.source.publisher_id == selected.publisher_id
             && !generation_changed
@@ -287,9 +328,6 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             });
         binding.lifetime.cancel();
         self.cancel_recovery(key).await;
-        // NOTE: Recovery targets need no separate tombstone lifecycle. Aborting and joining the
-        // source-bound task happens before rebinding, and slot serialization plus publisher and
-        // generation checks fence every stale completion.
         true
     }
 
@@ -312,6 +350,11 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
         {
             tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to clear KV state for a worker removed from serving membership; retaining reset-pending slot");
             return;
+        }
+        if let Some(generation) = slot.lifecycle_generation {
+            // Preserve reset-relevant history after the active slot is removed. A later source
+            // incarnation must compare against this tombstone before it can admit events.
+            self.generation_tombstones.insert(key, generation);
         }
         drop(slot);
         self.slots
@@ -439,6 +482,40 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
         }
         slot.rank.activate(false);
         TargetFaultDisposition::ResetLiveOnly
+    }
+
+    pub(crate) async fn reject_source(
+        &self,
+        worker_id: u64,
+        dp_rank: u32,
+        source_epoch: SourceEpoch,
+    ) -> TargetFaultDisposition {
+        let key = (worker_id, dp_rank);
+        let Some(slot_handle) = self.slots.get(&key).map(|entry| entry.clone()) else {
+            return TargetFaultDisposition::Stale;
+        };
+        let mut slot = slot_handle.lock().await;
+        let Some(binding) = slot.active.clone() else {
+            return TargetFaultDisposition::Stale;
+        };
+        if binding.epoch != source_epoch {
+            return TargetFaultDisposition::Stale;
+        }
+        self.deactivate_locked(key, &mut slot).await;
+        if let Err(error) = self
+            .reset_rank_for_reason_or_fence(
+                key,
+                source_epoch,
+                &mut slot,
+                RecoveryResetReason::TargetFault,
+            )
+            .await
+        {
+            tracing::error!(%error, worker_id, dp_rank, "Failed to clear a protocol-faulted KV source");
+        }
+        slot.rank = RankState::default();
+        slot.rejected_generation = Some(source_epoch.get());
+        TargetFaultDisposition::Fenced
     }
 
     /// Handle one event envelope after a single immutable publisher lookup.
@@ -608,22 +685,14 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
         let cancel = binding.lifetime.child_token();
         let task_cancel = cancel.clone();
         let client = self.clone();
+        let initial_recovery = start_event_id.is_none();
         let handle = tokio::spawn(async move {
             if start_event_id.is_none() {
                 let jitter_us = rand::rng().random_range(0..3000u64);
                 tokio::time::sleep(Duration::from_micros(jitter_us)).await;
             }
-            let recovery = async {
-                let _permit = client
-                    .recovery_semaphore
-                    .clone()
-                    .acquire_owned()
-                    .await
-                    .context("recovery semaphore closed")?;
-                client
-                    .fetch_recovery_response(key, target, start_event_id, end_event_id)
-                    .await
-            };
+            let recovery =
+                client.fetch_recovery_response(key, target, start_event_id, end_event_id);
             let result = tokio::select! {
                 biased;
                 _ = task_cancel.cancelled() => return,
@@ -633,8 +702,12 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                 return;
             }
             client
+                .clone()
                 .finish_recovery(key, binding, task_cancel, result)
                 .await;
+            if initial_recovery {
+                client.target.complete_initial_recovery(key.0, key.1).await;
+            }
         });
         self.recovery_tasks
             .insert(key, RecoveryTask { cancel, handle });
@@ -859,11 +932,35 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
     ) -> Result<WorkerKvQueryResponse> {
         let mut last_error = None;
         for attempt in 0..RECOVERY_MAX_RETRIES {
-            match self
-                .transport
-                .query_worker(key.0, key.1, target.clone(), start_event_id, end_event_id)
+            let result = {
+                // Limit only the in-flight RPC. The shared permit is deliberately released
+                // before retry backoff so unresponsive targets cannot starve unrelated pools.
+                let _permit = self
+                    .recovery_semaphore
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .context("recovery semaphore closed")?;
+                tokio::time::timeout(
+                    self.recovery_attempt_timeout,
+                    self.transport.query_worker(
+                        key.0,
+                        key.1,
+                        target.clone(),
+                        start_event_id,
+                        end_event_id,
+                    ),
+                )
                 .await
-            {
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "KV recovery attempt timed out after {:?}",
+                        self.recovery_attempt_timeout
+                    )
+                })
+                .and_then(|result| result)
+            };
+            match result {
                 Ok(response) => return Ok(response),
                 Err(error) => {
                     last_error = Some(error);
@@ -1036,6 +1133,33 @@ mod tests {
     impl Drop for QueryDropFlag<'_> {
         fn drop(&mut self) {
             self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[derive(Default)]
+    struct SelectiveTimeoutTransport {
+        slow_started: Notify,
+    }
+
+    #[async_trait]
+    impl WorkerQueryTransport for SelectiveTimeoutTransport {
+        async fn query_worker(
+            &self,
+            worker_id: WorkerId,
+            _dp_rank: DpRank,
+            _target: Instance,
+            _start_event_id: Option<u64>,
+            _end_event_id: Option<u64>,
+        ) -> Result<WorkerKvQueryResponse> {
+            if worker_id == 1 {
+                self.slow_started.notify_one();
+                std::future::pending().await
+            } else {
+                Ok(WorkerKvQueryResponse::TreeDumpFailed {
+                    last_event_id: 0,
+                    message: "test".to_string(),
+                })
+            }
         }
     }
 
@@ -1276,6 +1400,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn removed_rank_tombstone_forces_reset_before_new_generation_reappears() {
+        let serving = EndpointId::from("test.router.generate");
+        let kv_endpoint = EndpointId::from("test.router.kv");
+        let worker = WorkerWithDpRank::new(42, 4);
+        let initial = membership_view(
+            &serving,
+            &kv_endpoint,
+            [(
+                worker,
+                KvSourceStatus::ActiveLiveOnly(source_for(&kv_endpoint, worker, 100, None)),
+                3,
+            )],
+        );
+        let (_tx, rx) = watch::channel(initial.clone());
+        let target = RecordingTarget::default();
+        let client = WorkerQueryClient::new_target_for_test(
+            target.clone(),
+            rx,
+            Arc::new(MockTransport::default()),
+        );
+
+        client.reconcile_view(initial).await;
+        target.calls.lock().await.clear();
+        client
+            .reconcile_view(membership_view(&serving, &kv_endpoint, std::iter::empty()))
+            .await;
+        assert_eq!(
+            target.calls.lock().await.as_slice(),
+            &[TargetCall::Reset(
+                SourceEpoch::new(3),
+                RecoveryResetReason::Lifecycle
+            )]
+        );
+
+        target.calls.lock().await.clear();
+        client
+            .reconcile_view(membership_view(
+                &serving,
+                &kv_endpoint,
+                [(
+                    worker,
+                    KvSourceStatus::ActiveLiveOnly(source_for(&kv_endpoint, worker, 205, None)),
+                    4,
+                )],
+            ))
+            .await;
+        assert_eq!(
+            target.calls.lock().await.as_slice(),
+            &[TargetCall::Reset(
+                SourceEpoch::new(4),
+                RecoveryResetReason::Lifecycle
+            )]
+        );
+        assert!(client.publisher_bindings.contains_key(&205));
+    }
+
+    #[tokio::test]
+    async fn timed_out_recovery_releases_shared_permit_before_backoff() {
+        let serving = EndpointId::from("test.router.generate");
+        let kv_endpoint = EndpointId::from("test.router.kv");
+        let (_tx, rx) = watch::channel(membership_view(&serving, &kv_endpoint, std::iter::empty()));
+        let transport = Arc::new(SelectiveTimeoutTransport::default());
+        let client = WorkerQueryClient::new_target_for_test_with_recovery(
+            RecordingTarget::default(),
+            rx,
+            transport.clone(),
+            Arc::new(Semaphore::new(1)),
+            Duration::from_millis(20),
+        );
+        let slow_target = source(&kv_endpoint, 1).recovery_target.unwrap();
+        let healthy_target = source(&kv_endpoint, 2).recovery_target.unwrap();
+        let slow_client = client.clone();
+        let slow = tokio::spawn(async move {
+            slow_client
+                .fetch_recovery_response((1, 0), slow_target, None, None)
+                .await
+        });
+        transport.slow_started.notified().await;
+
+        let response = tokio::time::timeout(
+            Duration::from_millis(100),
+            client.fetch_recovery_response((2, 0), healthy_target, None, None),
+        )
+        .await
+        .expect("healthy recovery remained blocked behind another target's retry backoff")
+        .unwrap();
+        assert!(matches!(
+            response,
+            WorkerKvQueryResponse::TreeDumpFailed { .. }
+        ));
+        slow.abort();
+    }
+
+    #[tokio::test]
     async fn stale_target_fault_does_not_reset_or_fence_the_replacement_epoch() {
         let serving = EndpointId::from("test.router.generate");
         let kv_endpoint = EndpointId::from("test.router.kv");
@@ -1305,6 +1523,43 @@ mod tests {
             TargetFaultDisposition::Stale
         );
         assert!(target.calls.lock().await.is_empty());
+        assert!(client.publisher_bindings.contains_key(&205));
+    }
+
+    #[tokio::test]
+    async fn rejected_source_stays_ineligible_until_generation_advances() {
+        let serving = EndpointId::from("test.router.generate");
+        let kv_endpoint = EndpointId::from("test.router.kv");
+        let worker = WorkerWithDpRank::new(42, 4);
+        let source = source_for(&kv_endpoint, worker, 205, None);
+        let view = membership_view(
+            &serving,
+            &kv_endpoint,
+            [(worker, KvSourceStatus::ActiveLiveOnly(source.clone()), 3)],
+        );
+        let (_tx, rx) = watch::channel(view.clone());
+        let target = RecordingTarget::default();
+        let client =
+            WorkerQueryClient::new_target_for_test(target, rx, Arc::new(MockTransport::default()));
+        client.reconcile_view(view.clone()).await;
+
+        assert_eq!(
+            client
+                .reject_source(worker.worker_id, worker.dp_rank, SourceEpoch::new(3))
+                .await,
+            TargetFaultDisposition::Fenced
+        );
+        assert!(!client.publisher_bindings.contains_key(&205));
+        client.reconcile_view(view).await;
+        assert!(!client.publisher_bindings.contains_key(&205));
+
+        client
+            .reconcile_view(membership_view(
+                &serving,
+                &kv_endpoint,
+                [(worker, KvSourceStatus::ActiveLiveOnly(source), 4)],
+            ))
+            .await;
         assert!(client.publisher_bindings.contains_key(&205));
     }
 

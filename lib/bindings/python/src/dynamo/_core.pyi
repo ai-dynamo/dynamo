@@ -2822,6 +2822,7 @@ class KvDcRelay:
         endpoint_prefix: Optional[str] = None,
         publication_threshold: int = 16,
         publication_delay_ms: int = 1,
+        recovery_attempt_timeout_ms: int = 30_000,
     ) -> None:
         ...
 

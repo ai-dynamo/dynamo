@@ -278,6 +278,8 @@ pub struct DcCkfState {
     publication: PublicationWindow,
     telemetry: DcCkfTelemetry,
     remove_scratch: Vec<ExternalSequenceBlockHash>,
+    #[cfg(test)]
+    fail_next_snapshot_allocation: bool,
 }
 
 impl DcCkfState {
@@ -297,6 +299,8 @@ impl DcCkfState {
             publication: PublicationWindow::new(bucket_count)?,
             telemetry: DcCkfTelemetry::default(),
             remove_scratch: Vec::new(),
+            #[cfg(test)]
+            fail_next_snapshot_allocation: false,
         })
     }
 
@@ -393,20 +397,32 @@ impl DcCkfState {
         worker: WorkerWithDpRank,
         hashes: FxHashSet<ExternalSequenceBlockHash>,
     ) -> Result<Option<DcCkfPublicationBatch>, KvCacheEventError> {
+        let mut replacements = FxHashMap::default();
+        replacements.insert(worker, hashes);
+        self.replace_ranks(replacements)
+    }
+
+    /// Transactionally replace several ranks through one off-side pool rebuild.
+    pub fn replace_ranks(
+        &mut self,
+        replacements: FxHashMap<WorkerWithDpRank, FxHashSet<ExternalSequenceBlockHash>>,
+    ) -> Result<Option<DcCkfPublicationBatch>, KvCacheEventError> {
         let mut replacement = Self::new(self.config).map_err(|error| match error {
             CkfBuildError::AllocationFailed => KvCacheEventError::AllocationFailed,
             _ => KvCacheEventError::IndexerInvariantViolation,
         })?;
         for (&member, blocks) in &self.member_blocks {
-            if member == worker {
+            if replacements.contains_key(&member) {
                 continue;
             }
             for &hash in blocks {
                 replacement.store(member, hash)?;
             }
         }
-        for hash in hashes {
-            replacement.store(worker, hash)?;
+        for (member, hashes) in replacements {
+            for hash in hashes {
+                replacement.store(member, hash)?;
+            }
         }
 
         replacement.publication.dirty.clear();
@@ -462,21 +478,33 @@ impl DcCkfState {
         self.publication.pending_events
     }
 
-    /// Drain the pending absolute-image tail, then copy one actor-serialized barrier snapshot.
+    /// Copy one actor-serialized barrier snapshot, then drain its pending absolute-image tail.
     ///
     /// The core deliberately does not tag the snapshot with a lease or sequence. Its publisher
     /// must first enqueue the returned tail, record its terminal sequence, then install the copy.
     pub fn barrier_snapshot(
         &mut self,
     ) -> Result<(Option<DcCkfPublicationBatch>, Box<[u64]>), CkfBuildError> {
-        let publication = self.drain_publication();
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_next_snapshot_allocation) {
+            return Err(CkfBuildError::AllocationFailed);
+        }
         let mut buckets = Vec::new();
         buckets
             .try_reserve_exact(self.format.bucket_count)
             .map_err(|_| CkfBuildError::AllocationFailed)?;
         buckets
             .extend((0..self.format.bucket_count).map(|bucket| self.filter.load_bucket(bucket).0));
+        // Keep the dirty tail owned by the producer until every fallible snapshot allocation is
+        // complete. Otherwise an allocation failure could discard unpublished images while the
+        // old lease and sequence remain valid.
+        let publication = self.drain_publication();
         Ok((publication, buckets.into_boxed_slice()))
+    }
+
+    #[cfg(test)]
+    fn fail_next_snapshot_allocation(&mut self) {
+        self.fail_next_snapshot_allocation = true;
     }
 
     pub fn stats(&self) -> DcCkfStats {
@@ -992,6 +1020,44 @@ mod tests {
     }
 
     #[test]
+    fn batched_rank_replacement_rebuilds_the_pool_once_transactionally() {
+        let first = WorkerWithDpRank::new(1, 0);
+        let second = WorkerWithDpRank::new(2, 0);
+        let retained = WorkerWithDpRank::new(3, 0);
+        let mut state = DcCkfState::new(CkfConfig::new(64)).unwrap();
+        state.apply_event(stored(first, 1, &[1]));
+        state.apply_event(stored(second, 1, &[2]));
+        state.apply_event(stored(retained, 1, &[3]));
+
+        let replacements = [
+            (
+                first,
+                [10, 11]
+                    .into_iter()
+                    .map(ExternalSequenceBlockHash)
+                    .collect(),
+            ),
+            (
+                second,
+                [20].into_iter().map(ExternalSequenceBlockHash).collect(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        state.replace_ranks(replacements).unwrap();
+
+        assert!(!state.contains(ExternalSequenceBlockHash(1)));
+        assert!(!state.contains(ExternalSequenceBlockHash(2)));
+        assert!(state.contains(ExternalSequenceBlockHash(3)));
+        assert!(state.contains(ExternalSequenceBlockHash(10)));
+        assert!(state.contains(ExternalSequenceBlockHash(11)));
+        assert!(state.contains(ExternalSequenceBlockHash(20)));
+        assert_eq!(state.member_block_count(first), 2);
+        assert_eq!(state.member_block_count(second), 1);
+        assert_eq!(state.member_block_count(retained), 1);
+    }
+
+    #[test]
     fn barrier_snapshot_and_absolute_batches_reconstruct_producer_bytes() {
         let worker = WorkerWithDpRank::new(1, 0);
         let mut state = DcCkfState::new(CkfConfig::new(32)).unwrap();
@@ -1007,6 +1073,31 @@ mod tests {
         let (_, current) = state.barrier_snapshot().unwrap();
 
         assert_eq!(reconstructed, current.as_ref());
+    }
+
+    #[test]
+    fn barrier_snapshot_allocation_failure_preserves_dirty_tail() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let mut config = CkfConfig::new(32);
+        config.publish_every_n_events = 16;
+        let mut state = DcCkfState::new(config).unwrap();
+        assert!(
+            state
+                .apply_event(stored(worker, 1, &[1, 2, 3]))
+                .publication()
+                .is_none()
+        );
+
+        state.fail_next_snapshot_allocation();
+        assert!(matches!(
+            state.barrier_snapshot(),
+            Err(CkfBuildError::AllocationFailed)
+        ));
+        assert!(state.has_pending_publication());
+
+        let (tail, _) = state.barrier_snapshot().unwrap();
+        assert!(tail.is_some_and(|batch| !batch.images().is_empty()));
+        assert!(!state.has_pending_publication());
     }
 
     #[test]

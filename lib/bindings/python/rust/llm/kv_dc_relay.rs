@@ -18,13 +18,14 @@ pub struct KvDcRelay {
     endpoint_prefix: Option<String>,
     publication_threshold: usize,
     publication_delay_ms: u64,
+    recovery_attempt_timeout_ms: u64,
     inner: Arc<OnceCell<Arc<llm_rs::kv_dc_relay::KvDcRelay>>>,
 }
 
 #[pymethods]
 impl KvDcRelay {
     #[new]
-    #[pyo3(signature = (endpoint, dc_id, namespace_filter=None, endpoint_prefix=None, publication_threshold=16, publication_delay_ms=1))]
+    #[pyo3(signature = (endpoint, dc_id, namespace_filter=None, endpoint_prefix=None, publication_threshold=16, publication_delay_ms=1, recovery_attempt_timeout_ms=30_000))]
     fn new(
         endpoint: Endpoint,
         dc_id: String,
@@ -32,6 +33,7 @@ impl KvDcRelay {
         endpoint_prefix: Option<String>,
         publication_threshold: usize,
         publication_delay_ms: u64,
+        recovery_attempt_timeout_ms: u64,
     ) -> Self {
         Self {
             endpoint: endpoint.inner,
@@ -40,6 +42,7 @@ impl KvDcRelay {
             endpoint_prefix,
             publication_threshold,
             publication_delay_ms,
+            recovery_attempt_timeout_ms,
             inner: Arc::new(OnceCell::new()),
         }
     }
@@ -51,6 +54,7 @@ impl KvDcRelay {
         let endpoint_prefix = self.endpoint_prefix.clone();
         let publication_threshold = self.publication_threshold;
         let publication_delay_ms = self.publication_delay_ms;
+        let recovery_attempt_timeout_ms = self.recovery_attempt_timeout_ms;
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             inner
@@ -63,6 +67,7 @@ impl KvDcRelay {
                             endpoint_prefix,
                             publication_threshold,
                             publication_delay_ms,
+                            recovery_attempt_timeout_ms,
                         },
                     )
                     .await
@@ -114,11 +119,6 @@ impl KvDcRelay {
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.started()?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            if serving_endpoint.split('.').count() != 3 {
-                return Err(PyRuntimeError::new_err(
-                    "serving_endpoint must use namespace.component.endpoint form",
-                ));
-            }
             let endpoint = dynamo_runtime::protocols::EndpointId::from(serving_endpoint.as_str());
             let diagnostic = inner
                 .diagnostic_snapshot(&endpoint)

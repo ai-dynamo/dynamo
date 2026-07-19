@@ -625,7 +625,13 @@ impl GlobalCkfIngestionPool {
         }
 
         let health = Arc::new(WorkerHealth::new(config.worker_count));
-        let (fault_tx, fault_rx) = flume::unbounded();
+        // Readiness is the authoritative failure signal. Keep notifications bounded and
+        // best-effort so an adapter that does not consume diagnostics cannot retain an
+        // unbounded stream of repeated faults for an already-retired lane.
+        let fault_capacity = super::DC_COUNT
+            .saturating_mul(2)
+            .saturating_add(config.worker_count);
+        let (fault_tx, fault_rx) = flume::bounded(fault_capacity);
         let mut workers: Vec<IngestionWorkerHandle> = Vec::with_capacity(config.worker_count);
         for (worker_index, lanes) in worker_lanes.into_iter().enumerate() {
             let (sender, receiver) = flume::bounded(config.queue_capacity);
@@ -646,9 +652,12 @@ impl GlobalCkfIngestionPool {
                         // publishing the fault so observers cannot see failure with live lanes.
                         worker.retire_all();
                         worker_health.record_failure(worker_index);
-                        let _ = worker_fault_tx.send(GlobalCkfIngestionFault::WorkerFailed {
-                            worker: worker_index,
-                        });
+                        report_fault(
+                            &worker_fault_tx,
+                            GlobalCkfIngestionFault::WorkerFailed {
+                                worker: worker_index,
+                            },
+                        );
                     }
                 });
             let join = match spawn {
@@ -905,23 +914,25 @@ impl GlobalCkfIngestionPool {
         {
             let lease = admission.lease;
             let _ = retire_admission_locked(&self.indexer, &route.control, lane, &mut admission);
-            let _ = self
-                .fault_tx
-                .send(GlobalCkfIngestionFault::DirtyToAppliedAgeExceeded { lane, lease });
+            report_fault(
+                &self.fault_tx,
+                GlobalCkfIngestionFault::DirtyToAppliedAgeExceeded { lane, lease },
+            );
             return Err(GlobalCkfIngestionError::DirtyToAppliedAgeExceeded { lane });
         }
         let requested = admission.outstanding_images.saturating_add(image_count);
         if requested > route.control.max_outstanding_images {
             let lease = admission.lease;
             let _ = retire_admission_locked(&self.indexer, &route.control, lane, &mut admission);
-            let _ = self
-                .fault_tx
-                .send(GlobalCkfIngestionFault::OutstandingImageLimit {
+            report_fault(
+                &self.fault_tx,
+                GlobalCkfIngestionFault::OutstandingImageLimit {
                     lane,
                     lease,
                     requested,
                     limit: route.control.max_outstanding_images,
-                });
+                },
+            );
             return Err(GlobalCkfIngestionError::OutstandingImageLimit {
                 lane,
                 requested,
@@ -962,8 +973,10 @@ impl GlobalCkfIngestionPool {
                 drop(admission);
                 drop(command);
                 retirement?;
-                let fault = GlobalCkfIngestionFault::Saturated { lane, lease };
-                let _ = self.fault_tx.send(fault);
+                report_fault(
+                    &self.fault_tx,
+                    GlobalCkfIngestionFault::Saturated { lane, lease },
+                );
                 Err(GlobalCkfIngestionError::Saturated { lane })
             }
             Err(flume::TrySendError::Disconnected(command)) => {
@@ -1093,9 +1106,10 @@ impl GlobalCkfIngestionPool {
                 self.indexer.retire_lane_readiness(lane);
             }
         }
-        let _ = self
-            .fault_tx
-            .send(GlobalCkfIngestionFault::WorkerFailed { worker });
+        report_fault(
+            &self.fault_tx,
+            GlobalCkfIngestionFault::WorkerFailed { worker },
+        );
     }
 
     #[cfg(test)]
@@ -1237,12 +1251,15 @@ fn observe_outcome(
             panic!("unexpected consumer-lane failure action {unexpected:?}")
         }
     }
-    let _ = fault_tx.send(GlobalCkfIngestionFault::LaneDeactivated {
-        lane: scope.lane,
-        lease: Some(scope.lease),
-        fault,
-        disposition,
-    });
+    report_fault(
+        fault_tx,
+        GlobalCkfIngestionFault::LaneDeactivated {
+            lane: scope.lane,
+            lease: Some(scope.lease),
+            fault,
+            disposition,
+        },
+    );
 }
 
 fn retire_generation(indexer: &GlobalCkfIndexer, control: &LaneControl, lane: usize, epoch: u64) {
@@ -1311,9 +1328,17 @@ fn fence_expired_lanes(
         let lease = admission.lease;
         let _ = retire_admission_locked(indexer, control, *lane, &mut admission);
         drop(admission);
-        let _ = fault_tx
-            .send(GlobalCkfIngestionFault::DirtyToAppliedAgeExceeded { lane: *lane, lease });
+        report_fault(
+            fault_tx,
+            GlobalCkfIngestionFault::DirtyToAppliedAgeExceeded { lane: *lane, lease },
+        );
     }
+}
+
+fn report_fault(fault_tx: &flume::Sender<GlobalCkfIngestionFault>, fault: GlobalCkfIngestionFault) {
+    // Lane retirement/readiness is authoritative. Repeated notification traffic is deliberately
+    // coalesced when the bounded diagnostic channel is full.
+    let _ = fault_tx.try_send(fault);
 }
 
 #[cfg(test)]

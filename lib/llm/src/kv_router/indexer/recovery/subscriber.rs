@@ -339,6 +339,7 @@ pub(crate) async fn start_target_subscriber<T: RecoveryTarget>(
     model: String,
     worker_type: &'static str,
     recovery_semaphore: Arc<Semaphore>,
+    recovery_attempt_timeout: Duration,
     cancellation_token: CancellationToken,
 ) -> Result<RecoverySupervisor<T>> {
     let transport_kind = component.drt().default_event_transport_kind();
@@ -348,6 +349,7 @@ pub(crate) async fn start_target_subscriber<T: RecoveryTarget>(
         target,
         membership_watch.clone(),
         recovery_semaphore,
+        recovery_attempt_timeout,
         cancel.child_token(),
     )
     .await?;

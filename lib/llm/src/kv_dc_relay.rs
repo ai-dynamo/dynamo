@@ -17,11 +17,12 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 #[cfg(feature = "ckf-diagnostics")]
 use std::sync::atomic::AtomicU64;
+#[cfg(feature = "ckf-diagnostics")]
+use std::sync::atomic::Ordering;
 #[cfg(feature = "ckf-diagnostics")]
 use std::time::Instant;
 
@@ -55,8 +56,8 @@ use crate::kv_dc_relay_discovery::{
 #[cfg(feature = "ckf-diagnostics")]
 use crate::kv_router::indexer::WorkerQueryHealthSnapshot;
 use crate::kv_router::indexer::{
-    RecoveryResetReason, RecoverySupervisor, RecoveryTarget, SourceEpoch, TargetFaultDisposition,
-    start_target_subscriber,
+    DEFAULT_RECOVERY_ATTEMPT_TIMEOUT, RecoveryResetReason, RecoverySupervisor, RecoveryTarget,
+    SourceEpoch, TargetFaultDisposition, start_target_subscriber,
 };
 
 pub const DEFAULT_EXPECTED_UNIQUE_BLOCKS: usize = 1_048_576;
@@ -67,6 +68,7 @@ const DEFAULT_FAULT_CAPACITY: usize = 16;
 const DEFAULT_RECOVERY_FETCH_CONCURRENCY: usize = 16;
 const DEFAULT_PUBLICATION_THRESHOLD: usize = 16;
 const DEFAULT_PUBLICATION_DELAY: Duration = Duration::from_millis(1);
+const RECOVERY_REBUILD_BATCH_WINDOW: Duration = Duration::from_millis(5);
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -107,6 +109,7 @@ pub struct KvDcRelayConfig {
     pub endpoint_prefix: Option<String>,
     pub publication_threshold: usize,
     pub publication_delay_ms: u64,
+    pub recovery_attempt_timeout_ms: u64,
 }
 
 impl Default for KvDcRelayConfig {
@@ -116,6 +119,7 @@ impl Default for KvDcRelayConfig {
             endpoint_prefix: None,
             publication_threshold: DEFAULT_PUBLICATION_THRESHOLD,
             publication_delay_ms: DEFAULT_PUBLICATION_DELAY.as_millis() as u64,
+            recovery_attempt_timeout_ms: DEFAULT_RECOVERY_ATTEMPT_TIMEOUT.as_millis() as u64,
         }
     }
 }
@@ -453,6 +457,14 @@ struct ActorFault {
     message: String,
 }
 
+struct CancelOnDrop(CancellationToken);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
 // NOTE: Recovery is selected from the state whose commit became uncertain—not merely from the
 // error's name.
 fn event_failure_point(error: KvCacheEventError) -> CkfFailurePoint {
@@ -508,6 +520,8 @@ impl DcCkfDeltaSink for BroadcastDeltaSink {
 pub(crate) struct KvDcRelayHandle {
     sender: mpsc::Sender<ActorCommand>,
     payload_permits: Arc<Semaphore>,
+    fence: CancellationToken,
+    stopped: CancellationToken,
     #[cfg(feature = "ckf-diagnostics")]
     diagnostics: ActorDiagnosticsHandle,
     scope: StreamScope,
@@ -557,27 +571,6 @@ impl KvDcRelayHandle {
     ) -> Result<(Self, mpsc::Receiver<ActorFault>), KvDcRelayError> {
         let state = DcCkfState::new(config)?;
         let (sender, receiver) = mpsc::channel(capacity);
-        let timer_sender = sender.clone();
-        let publication_timer_armed = Arc::new(AtomicBool::new(false));
-        let timer_armed = Arc::clone(&publication_timer_armed);
-        tokio::spawn(async move {
-            let mut timer = tokio::time::interval(publication_delay);
-            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            timer.tick().await;
-            loop {
-                timer.tick().await;
-                if !timer_armed.swap(false, Ordering::AcqRel) {
-                    continue;
-                }
-                match timer_sender.try_send(ActorCommand::PublishTimer) {
-                    Ok(()) => {}
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        timer_armed.store(true, Ordering::Release);
-                    }
-                    Err(mpsc::error::TrySendError::Closed(_)) => return,
-                }
-            }
-        });
         let (publication_tx, _) = broadcast::channel(DEFAULT_PUBLICATION_CAPACITY);
         let identity = ProducerIdentity::new(
             scope.cache_domain,
@@ -596,18 +589,24 @@ impl KvDcRelayHandle {
         );
         let (fault_tx, fault_rx) = mpsc::channel(DEFAULT_FAULT_CAPACITY);
         let diagnostics = ActorDiagnosticsHandle::new();
+        let fence = CancellationToken::new();
+        let stopped = CancellationToken::new();
         tokio::spawn(run_actor(
             state,
             publisher,
             receiver,
-            publication_timer_armed,
+            publication_delay,
             fault_tx,
             diagnostics.clone(),
+            fence.clone(),
+            stopped.clone(),
         ));
         Ok((
             Self {
                 sender,
                 payload_permits: Arc::new(Semaphore::new(DEFAULT_PENDING_BLOCK_PERMITS)),
+                fence,
+                stopped,
                 #[cfg(feature = "ckf-diagnostics")]
                 diagnostics,
                 scope,
@@ -661,15 +660,13 @@ impl KvDcRelayHandle {
         Ok(())
     }
 
-    async fn replace_rank(
+    async fn replace_ranks(
         &self,
-        source_epoch: SourceEpoch,
-        worker_id: WorkerId,
-        dp_rank: DpRank,
-        events: Vec<RouterEvent>,
+        replacements: Vec<RankReplacement>,
     ) -> Result<(), KvDcRelayError> {
-        let weight = events
+        let weight = replacements
             .iter()
+            .flat_map(|replacement| &replacement.events)
             .map(event_payload_weight)
             .fold(0usize, usize::saturating_add)
             .min(DEFAULT_PENDING_BLOCK_PERMITS) as u32;
@@ -679,14 +676,28 @@ impl KvDcRelayHandle {
             .acquire_many_owned(weight.max(1))
             .await
             .map_err(|_| KvDcRelayError::ShuttingDown)?;
-        self.submit(|response| ActorCommand::ReplaceRank {
+        self.submit(|response| ActorCommand::ReplaceRanks {
+            replacements,
+            _payload_permit: permit,
+            response,
+        })
+        .await
+    }
+
+    #[cfg(test)]
+    async fn replace_rank(
+        &self,
+        source_epoch: SourceEpoch,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+        events: Vec<RouterEvent>,
+    ) -> Result<(), KvDcRelayError> {
+        self.replace_ranks(vec![RankReplacement {
             source_epoch,
             worker_id,
             dp_rank,
             events,
-            _payload_permit: permit,
-            response,
-        })
+        }])
         .await
     }
 
@@ -746,6 +757,12 @@ impl KvDcRelayHandle {
             .await
     }
 
+    async fn fence(&self) -> Result<(), KvDcRelayError> {
+        self.fence.cancel();
+        self.stopped.cancelled().await;
+        Ok(())
+    }
+
     #[cfg(any(test, feature = "ckf-diagnostics"))]
     fn mailbox_depth(&self) -> usize {
         self.sender
@@ -754,10 +771,142 @@ impl KvDcRelayHandle {
     }
 }
 
+#[derive(Debug)]
+struct RankReplacement {
+    source_epoch: SourceEpoch,
+    worker_id: WorkerId,
+    dp_rank: DpRank,
+    events: Vec<RouterEvent>,
+}
+
+struct PendingRankReplacement {
+    replacement: RankReplacement,
+    response: oneshot::Sender<Result<(), String>>,
+}
+
+struct RankReplacementBatcher {
+    state: tokio::sync::Mutex<RankReplacementBatchState>,
+    initial_deadline: Duration,
+}
+
+#[derive(Default)]
+struct RankReplacementBatchState {
+    pending: Vec<PendingRankReplacement>,
+    flush_scheduled: bool,
+    initial_timer_scheduled: bool,
+    initial_expected: Option<FxHashSet<WorkerWithDpRank>>,
+    initial_completed: FxHashSet<WorkerWithDpRank>,
+}
+
 #[derive(Clone)]
 struct KvDcRelayRecoveryTarget {
     handle: KvDcRelayHandle,
     rebuild_permit: Arc<Semaphore>,
+    replacement_batcher: Arc<RankReplacementBatcher>,
+}
+
+impl KvDcRelayRecoveryTarget {
+    async fn flush_replacement_batch(self, wait_for_quiet: bool) {
+        if wait_for_quiet {
+            let mut observed = 0usize;
+            loop {
+                tokio::time::sleep(RECOVERY_REBUILD_BATCH_WINDOW).await;
+                let current = self.replacement_batcher.state.lock().await.pending.len();
+                if current == observed {
+                    break;
+                }
+                observed = current;
+            }
+        }
+        let pending = {
+            let mut state = self.replacement_batcher.state.lock().await;
+            state.flush_scheduled = false;
+            std::mem::take(&mut state.pending)
+        };
+        let (replacements, responses): (Vec<_>, Vec<_>) = pending
+            .into_iter()
+            .map(|pending| (pending.replacement, pending.response))
+            .unzip();
+        let batch_result = match self.rebuild_permit.acquire().await {
+            Ok(_permit) => self
+                .handle
+                .replace_ranks(replacements)
+                .await
+                .map_err(|error| error.to_string()),
+            Err(_) => Err(KvDcRelayError::ShuttingDown.to_string()),
+        };
+        for response_tx in responses {
+            let response = match &batch_result {
+                Ok(()) => Ok(()),
+                Err(error) => Err(error.clone()),
+            };
+            let _ = response_tx.send(response);
+        }
+    }
+
+    async fn expire_initial_recovery_batch(self) {
+        tokio::time::sleep(self.replacement_batcher.initial_deadline).await;
+        let schedule_flush = {
+            let mut state = self.replacement_batcher.state.lock().await;
+            let initial_open = state.initial_expected.take().is_some();
+            if initial_open {
+                state.initial_completed.clear();
+            }
+            if !initial_open || state.pending.is_empty() || state.flush_scheduled {
+                false
+            } else {
+                state.flush_scheduled = true;
+                true
+            }
+        };
+        if schedule_flush {
+            self.flush_replacement_batch(false).await;
+        }
+    }
+
+    fn new_replacement_batcher(
+        expected: FxHashSet<WorkerWithDpRank>,
+        initial_deadline: Duration,
+    ) -> Arc<RankReplacementBatcher> {
+        Arc::new(RankReplacementBatcher {
+            state: tokio::sync::Mutex::new(RankReplacementBatchState {
+                initial_expected: (!expected.is_empty()).then_some(expected),
+                ..RankReplacementBatchState::default()
+            }),
+            initial_deadline,
+        })
+    }
+
+    async fn mark_initial_complete(&self, member: WorkerWithDpRank) {
+        let schedule_flush = {
+            let mut state = self.replacement_batcher.state.lock().await;
+            let Some(expected) = state.initial_expected.as_ref() else {
+                return;
+            };
+            if !expected.contains(&member) {
+                return;
+            }
+            state.initial_completed.insert(member);
+            let complete = state
+                .initial_expected
+                .as_ref()
+                .is_some_and(|expected| expected.is_subset(&state.initial_completed));
+            if !complete {
+                return;
+            }
+            state.initial_expected = None;
+            state.initial_completed.clear();
+            if state.pending.is_empty() || state.flush_scheduled {
+                false
+            } else {
+                state.flush_scheduled = true;
+                true
+            }
+        };
+        if schedule_flush {
+            tokio::spawn(self.clone().flush_replacement_batch(false));
+        }
+    }
 }
 
 impl RecoveryTarget for KvDcRelayRecoveryTarget {
@@ -779,15 +928,61 @@ impl RecoveryTarget for KvDcRelayRecoveryTarget {
         dp_rank: DpRank,
         events: Vec<RouterEvent>,
     ) -> anyhow::Result<()> {
-        let _permit = self
-            .rebuild_permit
-            .acquire()
+        let (response, result) = oneshot::channel();
+        let member = WorkerWithDpRank::new(worker_id, dp_rank);
+        let (schedule_flush, schedule_deadline, wait_for_quiet) = {
+            let mut state = self.replacement_batcher.state.lock().await;
+            state.pending.push(PendingRankReplacement {
+                replacement: RankReplacement {
+                    source_epoch,
+                    worker_id,
+                    dp_rank,
+                    events,
+                },
+                response,
+            });
+            let initial = state
+                .initial_expected
+                .as_ref()
+                .is_some_and(|expected| expected.contains(&member));
+            if initial {
+                state.initial_completed.insert(member);
+            }
+            let initial_complete = initial
+                && state
+                    .initial_expected
+                    .as_ref()
+                    .is_some_and(|expected| expected.is_subset(&state.initial_completed));
+            if initial_complete {
+                state.initial_expected = None;
+                state.initial_completed.clear();
+            }
+            let initial_wave_open = state.initial_expected.is_some();
+            let schedule_deadline = initial
+                && !initial_complete
+                && !std::mem::replace(&mut state.initial_timer_scheduled, true);
+            if state.flush_scheduled || initial_wave_open {
+                (false, schedule_deadline, false)
+            } else {
+                state.flush_scheduled = true;
+                (true, schedule_deadline, !initial)
+            }
+        };
+        if schedule_flush {
+            tokio::spawn(self.clone().flush_replacement_batch(wait_for_quiet));
+        }
+        if schedule_deadline {
+            tokio::spawn(self.clone().expire_initial_recovery_batch());
+        }
+        result
             .await
-            .map_err(|_| KvDcRelayError::ShuttingDown)?;
-        self.handle
-            .replace_rank(source_epoch, worker_id, dp_rank, events)
-            .await
-            .map_err(Into::into)
+            .map_err(|_| anyhow::anyhow!("rank replacement batch coordinator stopped"))?
+            .map_err(anyhow::Error::msg)
+    }
+
+    async fn complete_initial_recovery(&self, worker_id: WorkerId, dp_rank: DpRank) {
+        self.mark_initial_complete(WorkerWithDpRank::new(worker_id, dp_rank))
+            .await;
     }
 
     async fn reset_rank(
@@ -903,6 +1098,10 @@ impl KvDcRelay {
             config.publication_delay_ms != 0,
             "KV DC Relay publication_delay_ms must be positive"
         );
+        anyhow::ensure!(
+            config.recovery_attempt_timeout_ms != 0,
+            "KV DC Relay recovery_attempt_timeout_ms must be positive"
+        );
         let publication = ActorPublicationConfig {
             threshold: config.publication_threshold,
             delay: Duration::from_millis(config.publication_delay_ms),
@@ -928,6 +1127,7 @@ impl KvDcRelay {
             membership_rx,
             statuses.clone(),
             publication,
+            Duration::from_millis(config.recovery_attempt_timeout_ms),
             cancel.child_token(),
         ));
         Ok(Self {
@@ -1055,6 +1255,7 @@ impl KvDcRelay {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_host_supervisor(
     component: Component,
     dc_id: Arc<str>,
@@ -1062,9 +1263,9 @@ async fn run_host_supervisor(
     mut membership_rx: watch::Receiver<DcMembershipView>,
     statuses: Arc<RwLock<HashMap<EndpointId, SharedEndpointStatus>>>,
     publication: ActorPublicationConfig,
+    recovery_attempt_timeout: Duration,
     cancel: CancellationToken,
 ) {
-    let rebuild_permit = Arc::new(Semaphore::new(1));
     let recovery_fetch_permit = Arc::new(Semaphore::new(DEFAULT_RECOVERY_FETCH_CONCURRENCY));
     let mut slots: HashMap<EndpointId, EndpointSlotTask> = HashMap::new();
 
@@ -1081,9 +1282,10 @@ async fn run_host_supervisor(
                     endpoint.clone(),
                     metadata_rx,
                     status.clone(),
-                    rebuild_permit.clone(),
+                    Arc::new(Semaphore::new(1)),
                     recovery_fetch_permit.clone(),
                     publication,
+                    recovery_attempt_timeout,
                     cancel.child_token(),
                 ));
                 EndpointSlotTask {
@@ -1141,6 +1343,7 @@ async fn run_endpoint_slot(
     rebuild_permit: Arc<Semaphore>,
     recovery_fetch_permit: Arc<Semaphore>,
     publication: ActorPublicationConfig,
+    recovery_attempt_timeout: Duration,
     cancel: CancellationToken,
 ) {
     let mut config_tx: Option<
@@ -1240,6 +1443,7 @@ async fn run_endpoint_slot(
                 rebuild_permit.clone(),
                 recovery_fetch_permit.clone(),
                 publication,
+                recovery_attempt_timeout,
                 cancel.child_token(),
             )
             .await
@@ -1282,6 +1486,7 @@ async fn run_endpoint_slot(
             Metadata,
             Source,
             Fault(ActorFault),
+            ActorExited,
             Health,
             Cancelled,
         }
@@ -1296,17 +1501,23 @@ async fn run_endpoint_slot(
             fault = async { actor.as_mut().expect("guarded actor").faults.recv().await }, if actor.is_some() => {
                 match fault {
                     Some(fault) => SlotInput::Fault(fault),
-                    None => SlotInput::Metadata,
+                    None => SlotInput::ActorExited,
                 }
             }
             _ = diagnostic_tick(), if actor.is_some() => SlotInput::Health,
         };
         match input {
             SlotInput::Metadata | SlotInput::Source | SlotInput::Health => {}
+            SlotInput::ActorExited => {
+                tracing::error!(%endpoint, "KV DC Relay actor exited unexpectedly; rebuilding its producer generation");
+                status.write().await.lifecycle = SlotLifecycle::Fenced;
+                if let Some(active) = actor.take() {
+                    stop_endpoint_actor(active).await;
+                }
+                let mut current = status.write().await;
+                current.actor = None;
+            }
             SlotInput::Fault(fault) => {
-                let Some(active) = actor.as_ref() else {
-                    continue;
-                };
                 tracing::error!(
                     %endpoint,
                     worker_id = fault.worker_id,
@@ -1318,27 +1529,52 @@ async fn run_endpoint_slot(
                 );
                 match fault.disposition.action {
                     CkfFailureAction::ContinueCapacityOmission => {}
-                    CkfFailureAction::ReportResourceFailure
-                    | CkfFailureAction::RejectSource
-                    | CkfFailureAction::DeactivateAndSnapshot
-                    | CkfFailureAction::RetrySnapshot => {
-                        // These failures are already observable at their known commit boundary.
-                        // They must not be converted into an exact-state producer rebuild.
+                    CkfFailureAction::ReportResourceFailure => {
+                        if let Some(active) = actor.as_ref() {
+                            let disposition = active
+                                .recovery
+                                .client()
+                                .handle_target_fault(
+                                    fault.worker_id,
+                                    fault.dp_rank,
+                                    fault.source_epoch,
+                                    false,
+                                )
+                                .await;
+                            if disposition == TargetFaultDisposition::Fenced {
+                                active
+                                    .recovery
+                                    .client()
+                                    .reject_source(
+                                        fault.worker_id,
+                                        fault.dp_rank,
+                                        fault.source_epoch,
+                                    )
+                                    .await;
+                                status.write().await.lifecycle = SlotLifecycle::Fenced;
+                            }
+                        }
+                    }
+                    CkfFailureAction::RejectSource => {
+                        if let Some(active) = actor.as_ref() {
+                            active
+                                .recovery
+                                .client()
+                                .reject_source(fault.worker_id, fault.dp_rank, fault.source_epoch)
+                                .await;
+                        }
                     }
                     CkfFailureAction::FenceAndRebuildProducer => {
-                        let disposition = active
-                            .recovery
-                            .client()
-                            .handle_target_fault(
-                                fault.worker_id,
-                                fault.dp_rank,
-                                fault.source_epoch,
-                                true,
-                            )
-                            .await;
-                        if disposition == TargetFaultDisposition::Fenced {
-                            status.write().await.lifecycle = SlotLifecycle::Fenced;
+                        // The producer's exact state is suspect. Retire its publisher and source
+                        // bindings before the slot loop constructs a fresh layout generation.
+                        status.write().await.lifecycle = SlotLifecycle::Fenced;
+                        if let Some(active) = actor.take() {
+                            fence_endpoint_actor(active).await;
                         }
+                        status.write().await.actor = None;
+                    }
+                    CkfFailureAction::DeactivateAndSnapshot | CkfFailureAction::RetrySnapshot => {
+                        unreachable!("consumer-lane disposition cannot originate from Relay actor")
                     }
                 }
             }
@@ -1379,6 +1615,7 @@ async fn start_endpoint_actor(
     rebuild_permit: Arc<Semaphore>,
     recovery_fetch_permit: Arc<Semaphore>,
     publication: ActorPublicationConfig,
+    recovery_attempt_timeout: Duration,
     cancel: CancellationToken,
 ) -> anyhow::Result<EndpointActorRuntime> {
     let mut config = CkfConfig::new(DEFAULT_EXPECTED_UNIQUE_BLOCKS);
@@ -1407,9 +1644,24 @@ async fn start_endpoint_actor(
     };
     let (handle, faults) =
         KvDcRelayHandle::spawn_with_publication_delay(config, scope, publication.delay)?;
+    let initial_recoveries = membership_watch
+        .borrow()
+        .sources
+        .iter()
+        .filter_map(|(worker, status)| {
+            status
+                .active_source()
+                .is_some_and(|source| source.recovery_target.is_some())
+                .then_some(*worker)
+        })
+        .collect();
     let target = KvDcRelayRecoveryTarget {
         handle: handle.clone(),
         rebuild_permit,
+        replacement_batcher: KvDcRelayRecoveryTarget::new_replacement_batcher(
+            initial_recoveries,
+            recovery_attempt_timeout,
+        ),
     };
     let recovery = match start_target_subscriber(
         component,
@@ -1419,6 +1671,7 @@ async fn start_endpoint_actor(
         "kv-dc-relay".to_string(),
         "kv_dc_relay",
         recovery_fetch_permit,
+        recovery_attempt_timeout,
         cancel,
     )
     .await
@@ -1460,6 +1713,15 @@ async fn stop_endpoint_actor(active: EndpointActorRuntime) {
     if let Err(error) = active.handle.shutdown().await {
         tracing::warn!(%error, endpoint = %active.handle.scope.serving_endpoint, "Failed to drain KV DC Relay endpoint actor");
     }
+}
+
+async fn fence_endpoint_actor(active: EndpointActorRuntime) {
+    // Stop publication first. Recovery shutdown may attempt rank resets, but a producer whose
+    // exact state is suspect must not emit another apparently valid delta while being retired.
+    if let Err(error) = active.handle.fence().await {
+        tracing::warn!(%error, endpoint = %active.handle.scope.serving_endpoint, "Failed to fence KV DC Relay endpoint actor cleanly");
+    }
+    active.recovery.shutdown().await;
 }
 
 #[cfg(feature = "ckf-diagnostics")]
@@ -1639,11 +1901,8 @@ enum ActorCommand {
         event: RouterEvent,
         _payload_permit: OwnedSemaphorePermit,
     },
-    ReplaceRank {
-        source_epoch: SourceEpoch,
-        worker_id: WorkerId,
-        dp_rank: DpRank,
-        events: Vec<RouterEvent>,
+    ReplaceRanks {
+        replacements: Vec<RankReplacement>,
         _payload_permit: OwnedSemaphorePermit,
         response: oneshot::Sender<Result<(), KvDcRelayError>>,
     },
@@ -1657,7 +1916,6 @@ enum ActorCommand {
     Flush {
         response: oneshot::Sender<Result<(), KvDcRelayError>>,
     },
-    PublishTimer,
     #[cfg(feature = "ckf-diagnostics")]
     Snapshot {
         response: oneshot::Sender<Result<ActorSnapshot, KvDcRelayError>>,
@@ -1698,10 +1956,9 @@ impl ActorCommand {
     fn kind(&self) -> &'static str {
         match self {
             Self::Apply { .. } => "apply_event",
-            Self::ReplaceRank { .. } => "replace_rank",
+            Self::ReplaceRanks { .. } => "replace_ranks",
             Self::ResetRank { .. } => "reset_rank",
             Self::Flush { .. } => "flush",
-            Self::PublishTimer => "publish_timer",
             Self::Snapshot { .. } => "snapshot",
             Self::Subscribe { .. } => "subscribe",
             #[cfg(any(test, feature = "ckf-diagnostics"))]
@@ -1713,18 +1970,55 @@ impl ActorCommand {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_actor(
     mut state: DcCkfState,
     mut publisher: DcCkfPublisher<BroadcastDeltaSink>,
     mut receiver: mpsc::Receiver<ActorCommand>,
-    publication_timer_armed: Arc<AtomicBool>,
+    publication_delay: Duration,
     fault_tx: mpsc::Sender<ActorFault>,
     diagnostics: ActorDiagnosticsHandle,
+    fence: CancellationToken,
+    stopped: CancellationToken,
 ) {
+    let _stopped_guard = CancelOnDrop(stopped);
     let mut source_epochs = FxHashMap::<WorkerWithDpRank, SourceEpoch>::default();
     let mut capacity_omission_events = 0u64;
     let mut shutdown_response = None;
-    while let Some(command) = receiver.recv().await {
+    let mut discard_tail = false;
+    let mut publication_deadline = None;
+    loop {
+        let command = if let Some(deadline) = publication_deadline {
+            tokio::select! {
+                biased;
+                _ = fence.cancelled() => {
+                    discard_tail = true;
+                    break;
+                }
+                command = receiver.recv() => command,
+                _ = tokio::time::sleep_until(deadline) => {
+                    publication_deadline = None;
+                    if state.has_pending_publication()
+                        && let Err(error) = publish_pending(&mut state, &mut publisher, &diagnostics)
+                    {
+                        diagnostics.record_error(&error);
+                    }
+                    continue;
+                }
+            }
+        } else {
+            tokio::select! {
+                biased;
+                _ = fence.cancelled() => {
+                    discard_tail = true;
+                    break;
+                }
+                command = receiver.recv() => command,
+            }
+        };
+        let Some(command) = command else {
+            break;
+        };
         diagnostics.start_command(&command);
         match command {
             ActorCommand::Apply {
@@ -1798,9 +2092,9 @@ async fn run_actor(
                     diagnostics.record_no_publication();
                 }
                 if publication_boundary {
-                    publication_timer_armed.store(false, Ordering::Release);
-                } else if state.pending_event_count() == 1 {
-                    publication_timer_armed.store(true, Ordering::Release);
+                    publication_deadline = None;
+                } else if state.pending_event_count() == 1 && publication_deadline.is_none() {
+                    publication_deadline = Some(tokio::time::Instant::now() + publication_delay);
                 }
                 if let Some(error) = first_error {
                     let disposition = event_failure_point(error).disposition();
@@ -1850,35 +2144,31 @@ async fn run_actor(
                     }
                 }
             }
-            ActorCommand::ReplaceRank {
-                source_epoch,
-                worker_id,
-                dp_rank,
-                events,
+            ActorCommand::ReplaceRanks {
+                replacements,
                 _payload_permit: _,
                 response,
             } => {
-                let key = WorkerWithDpRank::new(worker_id, dp_rank);
-                if let Some(current) = source_epochs.get(&key).copied()
-                    && source_epoch < current
-                {
+                let stale = replacements.iter().find_map(|replacement| {
+                    let key = WorkerWithDpRank::new(replacement.worker_id, replacement.dp_rank);
+                    let current = source_epochs.get(&key).copied()?;
+                    (replacement.source_epoch < current).then_some((replacement, current))
+                });
+                if let Some((replacement, current)) = stale {
                     let _ = response.send(Err(KvDcRelayError::StaleSourceEpoch {
-                        worker_id,
-                        dp_rank,
+                        worker_id: replacement.worker_id,
+                        dp_rank: replacement.dp_rank,
                         current: current.get(),
-                        received: source_epoch.get(),
+                        received: replacement.source_epoch.get(),
                     }));
                     diagnostics.finish_command();
                     continue;
                 }
                 #[cfg(feature = "ckf-diagnostics")]
                 let rebuild_started = Instant::now();
-                let result = replacement_hashes(worker_id, dp_rank, events)
-                    .and_then(|hashes| {
-                        state
-                            .replace_rank(WorkerWithDpRank::new(worker_id, dp_rank), hashes)
-                            .map_err(Into::into)
-                    })
+                let mut committed_epochs = Vec::with_capacity(replacements.len());
+                let result = replacement_batch_hashes(replacements, &mut committed_epochs)
+                    .and_then(|hashes| state.replace_ranks(hashes).map_err(Into::into))
                     .and_then(|publication| {
                         if let Some(batch) = publication {
                             publish_batch(batch, &mut publisher, &diagnostics)?;
@@ -1888,13 +2178,12 @@ async fn run_actor(
                         Ok(())
                     });
                 if result.is_ok() {
-                    source_epochs.insert(key, source_epoch);
+                    source_epochs.extend(committed_epochs);
                 }
                 #[cfg(feature = "ckf-diagnostics")]
                 diagnostics.record_rebuild(rebuild_started);
-                // Replacement is built off-side. A pre-swap failure leaves the old generation
-                // unchanged, so its strong response carries the barrier error without an
-                // asynchronous producer-recovery fault.
+                // The whole cold-start batch is built off-side. A pre-swap failure leaves every
+                // prior rank unchanged; the strong responses all observe the same atomic result.
                 let _ = response.send(result);
             }
             ActorCommand::ResetRank {
@@ -1953,13 +2242,6 @@ async fn run_actor(
                 let result = publish_pending(&mut state, &mut publisher, &diagnostics);
                 let _ = response.send(result);
             }
-            ActorCommand::PublishTimer => {
-                if state.has_pending_publication()
-                    && let Err(error) = publish_pending(&mut state, &mut publisher, &diagnostics)
-                {
-                    diagnostics.record_error(&error);
-                }
-            }
             #[cfg(feature = "ckf-diagnostics")]
             ActorCommand::Snapshot { response } => {
                 let result = diagnostic_barrier_snapshot(&mut state, &mut publisher, &diagnostics);
@@ -2001,10 +2283,13 @@ async fn run_actor(
                 let _ = release.await;
             }
         }
+        if !state.has_pending_publication() {
+            publication_deadline = None;
+        }
         diagnostics.finish_command();
     }
 
-    if let Err(error) = publish_pending(&mut state, &mut publisher, &diagnostics) {
+    if !discard_tail && let Err(error) = publish_pending(&mut state, &mut publisher, &diagnostics) {
         diagnostics.record_error(&error);
     }
     publisher.retire_lease();
@@ -2046,6 +2331,31 @@ fn replacement_hashes(
         hashes.extend(store.blocks.into_iter().map(|block| block.block_hash));
     }
     Ok(hashes)
+}
+
+fn replacement_batch_hashes(
+    replacements: Vec<RankReplacement>,
+    committed_epochs: &mut Vec<(WorkerWithDpRank, SourceEpoch)>,
+) -> Result<FxHashMap<WorkerWithDpRank, FxHashSet<ExternalSequenceBlockHash>>, KvDcRelayError> {
+    let mut hashes_by_rank = FxHashMap::default();
+    for replacement in replacements {
+        let member = WorkerWithDpRank::new(replacement.worker_id, replacement.dp_rank);
+        if hashes_by_rank.contains_key(&member) {
+            return Err(KvDcRelayError::InvalidTreeDump {
+                worker_id: replacement.worker_id,
+                dp_rank: replacement.dp_rank,
+                message: "replacement batch contains the same rank more than once".to_string(),
+            });
+        }
+        let hashes = replacement_hashes(
+            replacement.worker_id,
+            replacement.dp_rank,
+            replacement.events,
+        )?;
+        hashes_by_rank.insert(member, hashes);
+        committed_epochs.push((member, replacement.source_epoch));
+    }
+    Ok(hashes_by_rank)
 }
 
 fn publish_batch(
@@ -2278,6 +2588,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn initial_rank_recoveries_share_one_transactional_pool_rebuild() {
+        let first = WorkerWithDpRank::new(1, 0);
+        let second = WorkerWithDpRank::new(2, 0);
+        let expected = [first, second].into_iter().collect();
+        let (handle, _faults) =
+            KvDcRelayHandle::spawn(CkfConfig::new(32), scope("batch-replace")).unwrap();
+        let target = KvDcRelayRecoveryTarget {
+            handle: handle.clone(),
+            rebuild_permit: Arc::new(Semaphore::new(1)),
+            replacement_batcher: KvDcRelayRecoveryTarget::new_replacement_batcher(
+                expected,
+                Duration::from_millis(100),
+            ),
+        };
+
+        let first_target = target.clone();
+        let mut first_replacement = tokio::spawn(async move {
+            first_target
+                .replace_rank(
+                    SourceEpoch::new(1),
+                    first.worker_id,
+                    first.dp_rank,
+                    vec![stored(first, 0, &[1, 2])],
+                )
+                .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut first_replacement)
+                .await
+                .is_err(),
+            "the first cold-start rank must wait for the recovery wave"
+        );
+        target
+            .replace_rank(
+                SourceEpoch::new(1),
+                second.worker_id,
+                second.dp_rank,
+                vec![stored(second, 0, &[3])],
+            )
+            .await
+            .unwrap();
+        first_replacement.await.unwrap().unwrap();
+
+        let (stats, _, members) = handle.state_stats().await.unwrap();
+        assert_eq!(stats.aggregation().unique_block_count(), 3);
+        assert_eq!(members.len(), 2);
+    }
+
+    #[tokio::test]
     async fn shutdown_drains_admitted_events_and_rejects_new_admission() {
         let worker = WorkerWithDpRank::new(1, 0);
         let (handle, _faults) =
@@ -2292,6 +2651,36 @@ mod tests {
         release.send(()).unwrap();
 
         shutdown.await.unwrap().unwrap();
+        assert!(matches!(
+            handle
+                .admit_event(SourceEpoch::new(0), stored(worker, 2, &[2]))
+                .await,
+            Err(KvDcRelayError::ShuttingDown)
+        ));
+    }
+
+    #[tokio::test]
+    async fn producer_fence_retires_stream_without_publishing_uncertain_tail() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let mut config = CkfConfig::new(32);
+        config.publish_every_n_events = 16;
+        let (handle, _faults) = KvDcRelayHandle::spawn_with_publication_delay(
+            config,
+            scope("fence"),
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        let mut subscription = handle.subscribe(lease(1)).await.unwrap();
+        handle
+            .admit_event(SourceEpoch::new(0), stored(worker, 1, &[1]))
+            .await
+            .unwrap();
+
+        handle.fence().await.unwrap();
+        assert!(matches!(
+            subscription.deltas.recv().await,
+            Err(broadcast::error::RecvError::Closed)
+        ));
         assert!(matches!(
             handle
                 .admit_event(SourceEpoch::new(0), stored(worker, 2, &[2]))

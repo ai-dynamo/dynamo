@@ -698,8 +698,11 @@ impl GlobalCkfIndexer {
             return Err(GlobalCkfBuildError::AllocationFailed);
         }
         validation_words.resize(bucket_count.div_ceil(u64::BITS as usize), 0);
-        let mut validation_touched = Vec::new();
-        if validation_touched.try_reserve_exact(bucket_count).is_err() {
+        let mut validation_touched_words = Vec::new();
+        if validation_touched_words
+            .try_reserve_exact(validation_words.len())
+            .is_err()
+        {
             self.shared
                 .claimed_lanes
                 .fetch_and(!lane_bit, Ordering::Release);
@@ -715,7 +718,7 @@ impl GlobalCkfIndexer {
             ready: false,
             last_failure_disposition: None,
             validation_words: validation_words.into_boxed_slice(),
-            validation_touched,
+            validation_touched_words,
         })
     }
 
@@ -807,7 +810,7 @@ pub struct GlobalCkfLaneIngestor {
     ready: bool,
     last_failure_disposition: Option<CkfFailureDisposition>,
     validation_words: Box<[u64]>,
-    validation_touched: Vec<usize>,
+    validation_touched_words: Vec<usize>,
 }
 
 impl GlobalCkfLaneIngestor {
@@ -1055,17 +1058,18 @@ impl GlobalCkfLaneIngestor {
                     bucket: image.bucket,
                 });
             }
+            if self.validation_words[word] == 0 {
+                self.validation_touched_words.push(word);
+            }
             self.validation_words[word] |= bit;
-            self.validation_touched.push(image.bucket);
         }
         self.clear_validation();
         Ok(())
     }
 
     fn clear_validation(&mut self) {
-        for bucket in self.validation_touched.drain(..) {
-            let word = bucket / u64::BITS as usize;
-            self.validation_words[word] &= !(1u64 << (bucket % u64::BITS as usize));
+        for word in self.validation_touched_words.drain(..) {
+            self.validation_words[word] = 0;
         }
     }
 
@@ -1225,6 +1229,14 @@ mod tests {
         ) -> GlobalCkfDelta {
             GlobalCkfDelta::new(self.identity, self.lease, base_sequence, sequence, images)
         }
+    }
+
+    #[test]
+    fn validation_scratch_scales_with_bitmap_words_not_bucket_count() {
+        let fixture = Fixture::new();
+        let word_count = fixture.bucket_count.div_ceil(u64::BITS as usize);
+        assert_eq!(fixture.ingestor.validation_words.len(), word_count);
+        assert!(fixture.ingestor.validation_touched_words.capacity() < fixture.bucket_count);
     }
 
     #[test]

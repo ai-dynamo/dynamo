@@ -998,10 +998,13 @@ async fn drive_phase(
                 let started = Arc::clone(&started);
                 let cpu = issuer_cpus[issuer];
                 handles.push(scope.spawn(move || -> anyhow::Result<IssuerPhaseResult> {
-                    pin_current_thread(Some(cpu))
-                        .map_err(|_| anyhow::anyhow!("failed to pin write issuer to CPU {cpu}"))?;
+                    let pin_result = pin_current_thread(Some(cpu))
+                        .map_err(|_| anyhow::anyhow!("failed to pin write issuer to CPU {cpu}"));
+                    // Every issuer reaches both rendezvous points even if affinity setup fails,
+                    // so the coordinator and healthy issuers cannot remain blocked forever.
                     ready.wait();
                     start.wait();
+                    pin_result?;
                     let phase_started = *started.get().expect("coordinator publishes start");
                     let deadline = phase_started + duration;
                     let issuer_load = offered_load / issuer_count as f64;
@@ -1013,15 +1016,21 @@ async fn drive_phase(
                     let mut latencies_ns = Vec::new();
                     let mut lane_waits = BTreeMap::<usize, LaneWaitSamples>::new();
                     loop {
-                        if admission.issued.is_multiple_of(64) && Instant::now() >= deadline {
-                            break;
-                        }
                         if let Some(interval) = interval {
                             let now = Instant::now();
+                            if now >= deadline {
+                                break;
+                            }
                             if now < next_issue {
-                                std::thread::sleep(next_issue - now);
+                                std::thread::sleep(next_issue.min(deadline) - now);
+                            }
+                            if Instant::now() >= deadline {
+                                break;
                             }
                             next_issue = next_issue.checked_add(interval).unwrap_or(deadline);
+                        } else if admission.issued.is_multiple_of(64) && Instant::now() >= deadline
+                        {
+                            break;
                         }
                         let frozen = &events[shard[cursor]];
                         cursor += 1;
@@ -1034,11 +1043,19 @@ async fn drive_phase(
                         .then(Instant::now);
                         let lane = lane_waits.entry(frozen.dc_ordinal).or_default();
                         lane.operations = lane.operations.saturating_add(1);
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        if remaining.is_zero() {
+                            break;
+                        }
                         match senders[frozen.dc_ordinal]
-                            .send(ActorCommand::Event(frozen.event.clone()))
+                            .send_timeout(ActorCommand::Event(frozen.event.clone()), remaining)
                         {
                             Ok(()) => admission.admitted = admission.admitted.saturating_add(1),
-                            Err(_) => admission.errors = admission.errors.saturating_add(1),
+                            Err(crossbeam_channel::SendTimeoutError::Timeout(_)) => break,
+                            Err(crossbeam_channel::SendTimeoutError::Disconnected(_)) => {
+                                admission.errors = admission.errors.saturating_add(1);
+                                break;
+                            }
                         }
                         if let Some(admission_started) = admission_started {
                             let wait = u64::try_from(admission_started.elapsed().as_nanos())
