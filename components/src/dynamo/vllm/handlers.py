@@ -1149,17 +1149,21 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             self.model_config,
             config.engine_args,
         )
-        encoder = AsyncVisionEncoder(backend)
+        encoder = AsyncVisionEncoder(
+            backend,
+            max_queue_delay_us=config.custom_encoder_max_queue_delay_us,
+        )
         encoder.load(config.model)
         # Assign only after a successful load so a failed load (which already shut
         # its own thread down) leaves _custom_encoder None.
         self._custom_encoder = encoder
         self._custom_encoder_adapter = adapter
         logger.info(
-            "Loaded CustomEncoder %s from %s with %s",
+            "Loaded CustomEncoder %s from %s with %s (max_queue_delay_us=%d)",
             custom_encoder_class,
             config.model,
             type(adapter).__name__,
+            config.custom_encoder_max_queue_delay_us,
         )
 
     def _shutdown_worker(self) -> NoReturn:

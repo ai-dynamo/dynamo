@@ -59,6 +59,8 @@ class AsyncVisionEncoder(Generic[RawT, ItemT, ArtifactT]):
         backend: The author-written ``VisionEncoderBackend``.
         preprocess_concurrency: Off-loop ``preprocess`` pool size; ``None`` ⇒ use
             the backend's value (default 0 ⇒ no pool / passthrough).
+        max_queue_delay_us: Maximum cross-request batching hold after the first
+            item arrives. ``0`` preserves immediate eager drain.
         name: Base name for the actor thread / preprocess pool.
     """
 
@@ -67,6 +69,7 @@ class AsyncVisionEncoder(Generic[RawT, ItemT, ArtifactT]):
         backend: VisionEncoderBackend[RawT, ItemT, ArtifactT],
         *,
         preprocess_concurrency: int | None = None,
+        max_queue_delay_us: int = 0,
         name: str = "vision-encoder",
     ) -> None:
         # The backend declares whether it needs off-loop preprocessing; the
@@ -80,6 +83,8 @@ class AsyncVisionEncoder(Generic[RawT, ItemT, ArtifactT]):
         )
         if conc < 0:
             raise ValueError("preprocess_concurrency must be >= 0")
+        if max_queue_delay_us < 0:
+            raise ValueError("max_queue_delay_us must be >= 0")
         # Fail fast on the silent mismatch: an overridden preprocess that the
         # effective concurrency of 0 would skip forever.
         overrides_preprocess = (
@@ -95,6 +100,7 @@ class AsyncVisionEncoder(Generic[RawT, ItemT, ArtifactT]):
             )
         self._backend = backend
         self._preprocess_concurrency = conc
+        self._max_queue_delay_us = max_queue_delay_us
         self._name = name
         self._batcher: ThreadedMicroBatcher[ItemT, ArtifactT] | None = None
         self._pool: ThreadPoolExecutor | None = None
@@ -118,6 +124,7 @@ class AsyncVisionEncoder(Generic[RawT, ItemT, ArtifactT]):
             self._batcher = ThreadedMicroBatcher(
                 self._backend.forward_batch,
                 max_batch_cost=self._backend.max_batch_cost,
+                max_queue_delay_us=self._max_queue_delay_us,
                 on_start=lambda: self._backend.build(model_id),
                 on_stop=self._backend.close,
                 name=self._name,
