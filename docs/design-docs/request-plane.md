@@ -92,6 +92,8 @@ DYN_REQUEST_PLANE=tcp python -m dynamo.vllm --model Qwen/Qwen3-0.6B
 Additional TCP-specific environment variables:
 - `DYN_TCP_RPC_HOST`: Server host address (default: auto-detected)
 - `DYN_TCP_RPC_PORT`: Server port. If not set, the OS assigns a free port automatically (recommended for most deployments). Set explicitly only if you need a specific port for firewall rules.
+- `DYN_TCP_RESPONSE_STREAM_HOST`: IPv4 address or interface advertised for TCP response streams. Interface names resolve to the lowest usable IPv4 address. IPv6 literals and `0.0.0.0` are rejected. If unset, Dynamo auto-detects a local address.
+- `DYN_TCP_RESPONSE_STREAM_PORT`: TCP response stream port. If unset or `0`, the OS assigns a free port.
 - `DYN_TCP_MAX_MESSAGE_SIZE`: Maximum message size for TCP client (default: 32MB)
 - `DYN_TCP_SHRINK_MESSAGE_SIZE`: Threshold for shrinking the zero-copy decoder buffer back to initial size after processing large messages (default: 8MB, max: DYN_TCP_MAX_MESSAGE_SIZE)
 - `DYN_TCP_REQUEST_TIMEOUT`: Request timeout for TCP client (default: 10 seconds)

@@ -20,7 +20,7 @@ const TOMBSTONE_TTL: Duration = Duration::from_secs(5);
 use bytes::Bytes;
 use derive_builder::Builder;
 use futures::{SinkExt, StreamExt};
-use local_ip_address::{Error, list_afinet_netifas, local_ip, local_ipv6};
+use local_ip_address::Error;
 use parking_lot::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -45,56 +45,10 @@ use crate::pipeline::{
         tcp::StreamType,
     },
 };
+use crate::utils::ip_resolver::resolve_advertised_ipv4;
 use anyhow::{Context, Result, anyhow as error};
 
-// Trait for IP address resolution - allows dependency injection for testing
-pub trait IpResolver {
-    fn local_ip(&self) -> Result<std::net::IpAddr, Error>;
-    fn local_ipv6(&self) -> Result<std::net::IpAddr, Error>;
-
-    fn list_afinet_netifas(&self) -> Result<Vec<(String, std::net::IpAddr)>, Error> {
-        list_afinet_netifas()
-    }
-}
-
-// Default implementation using the real local_ip_address crate
-pub struct DefaultIpResolver;
-
-impl IpResolver for DefaultIpResolver {
-    fn local_ip(&self) -> Result<std::net::IpAddr, Error> {
-        local_ip()
-    }
-
-    fn local_ipv6(&self) -> Result<std::net::IpAddr, Error> {
-        local_ipv6()
-    }
-}
-
-fn resolve_configured_host<R: IpResolver>(
-    host_or_interface: &str,
-    resolver: &R,
-) -> Result<IpAddr, PipelineError> {
-    if let Ok(ip) = host_or_interface.parse::<IpAddr>() {
-        return Ok(ip);
-    }
-
-    let interfaces = resolver.list_afinet_netifas()?;
-    let interface_found = interfaces.iter().any(|(name, _)| name == host_or_interface);
-    let mut ipv4_addresses: Vec<_> = interfaces
-        .into_iter()
-        .filter_map(|(name, ip)| (name == host_or_interface && ip.is_ipv4()).then_some(ip))
-        .collect();
-    ipv4_addresses.sort_unstable();
-
-    ipv4_addresses.into_iter().next().ok_or_else(|| {
-        let message = if interface_found {
-            format!("Interface has no IPv4 address: {host_or_interface}")
-        } else {
-            format!("Interface not found: {host_or_interface}")
-        };
-        PipelineError::Generic(message)
-    })
-}
+pub use crate::utils::ip_resolver::{DefaultIpResolver, IpResolver};
 
 #[allow(dead_code)]
 type ResponseType = TwoPartMessage;
@@ -214,7 +168,10 @@ impl TcpStreamServer {
         resolver: R,
     ) -> Result<Arc<Self>, PipelineError> {
         let local_ip = match options.interface.as_deref() {
-            Some(host) => resolve_configured_host(host, &resolver)?,
+            Some(host) => IpAddr::V4(
+                resolve_advertised_ipv4(host, &resolver)
+                    .map_err(|error| PipelineError::Generic(error.to_string()))?,
+            ),
             None => {
                 let resolved_ip = resolver.local_ip().or_else(|err| match err {
                     Error::LocalIpAddressNotFound => resolver.local_ipv6(),
@@ -250,7 +207,8 @@ impl TcpStreamServer {
                 PipelineError::Generic(format!("Failed to start TcpStreamServer: {}", e))
             })?;
 
-        tracing::debug!("tcp transport service on {local_ip}:{local_port}");
+        let local_addr = SocketAddr::new(local_ip, local_port);
+        tracing::debug!("tcp transport service on {local_addr}");
 
         Ok(Arc::new(Self {
             local_ip,
@@ -1095,74 +1053,6 @@ mod tests {
         fn local_ipv6(&self) -> Result<std::net::IpAddr, Error> {
             Err(Error::LocalIpAddressNotFound)
         }
-    }
-
-    struct InterfaceIpResolver {
-        interfaces: Vec<(String, IpAddr)>,
-    }
-
-    impl IpResolver for InterfaceIpResolver {
-        fn local_ip(&self) -> Result<IpAddr, Error> {
-            Ok(IpAddr::from([127, 0, 0, 1]))
-        }
-
-        fn local_ipv6(&self) -> Result<IpAddr, Error> {
-            Ok(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST))
-        }
-
-        fn list_afinet_netifas(&self) -> Result<Vec<(String, IpAddr)>, Error> {
-            Ok(self.interfaces.clone())
-        }
-    }
-
-    #[test]
-    fn configured_ip_literal_is_used_directly() {
-        let resolver = InterfaceIpResolver {
-            interfaces: Vec::new(),
-        };
-
-        assert_eq!(
-            resolve_configured_host("172.16.0.87", &resolver).unwrap(),
-            "172.16.0.87".parse::<IpAddr>().unwrap()
-        );
-        assert_eq!(
-            resolve_configured_host("2001:db8::1", &resolver).unwrap(),
-            "2001:db8::1".parse::<IpAddr>().unwrap()
-        );
-    }
-
-    #[test]
-    fn configured_interface_selects_ipv4_deterministically() {
-        let resolver = InterfaceIpResolver {
-            interfaces: vec![
-                ("ib0".to_string(), "fe80::1".parse().unwrap()),
-                ("ib0".to_string(), "172.16.96.87".parse().unwrap()),
-                ("eth0".to_string(), "10.52.1.2".parse().unwrap()),
-                ("ib0".to_string(), "172.16.0.87".parse().unwrap()),
-            ],
-        };
-
-        assert_eq!(
-            resolve_configured_host("ib0", &resolver).unwrap(),
-            "172.16.0.87".parse::<IpAddr>().unwrap()
-        );
-    }
-
-    #[test]
-    fn configured_interface_requires_ipv4() {
-        let resolver = InterfaceIpResolver {
-            interfaces: vec![("ib0".to_string(), "fe80::1".parse().unwrap())],
-        };
-
-        let error = resolve_configured_host("ib0", &resolver).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("Interface has no IPv4 address: ib0")
-        );
-
-        let error = resolve_configured_host("missing0", &resolver).unwrap_err();
-        assert!(error.to_string().contains("Interface not found: missing0"));
     }
 
     #[tokio::test]
