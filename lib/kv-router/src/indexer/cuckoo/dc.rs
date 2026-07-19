@@ -10,7 +10,8 @@
 //! A snapshot therefore establishes one physical base, and only that producer's
 //! ordered absolute-image deltas may extend it byte-for-byte.
 
-use derive_getters::Getters;
+use std::collections::{HashMap, HashSet};
+
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
@@ -29,17 +30,12 @@ const FORMAT_VERSION: u16 = 1;
 const FINGERPRINT_BITS: u8 = 16;
 const SLOTS_PER_BUCKET: u8 = 4;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Getters, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DcCkfFormatIdentity {
-    #[getter(copy)]
     format_version: u16,
-    #[getter(copy)]
     seed: u64,
-    #[getter(copy)]
     bucket_count: usize,
-    #[getter(copy)]
     fingerprint_bits: u8,
-    #[getter(copy)]
     slots_per_bucket: u8,
 }
 
@@ -52,6 +48,26 @@ impl DcCkfFormatIdentity {
             fingerprint_bits: FINGERPRINT_BITS,
             slots_per_bucket: SLOTS_PER_BUCKET,
         }
+    }
+
+    pub const fn format_version(&self) -> u16 {
+        self.format_version
+    }
+
+    pub const fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    pub const fn bucket_count(&self) -> usize {
+        self.bucket_count
+    }
+
+    pub const fn fingerprint_bits(&self) -> u8 {
+        self.fingerprint_bits
+    }
+
+    pub const fn slots_per_bucket(&self) -> u8 {
+        self.slots_per_bucket
     }
 }
 
@@ -75,64 +91,132 @@ impl DcCkfPublicationBatch {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Getters)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DcCkfStats {
-    #[getter(copy)]
     aggregation: DcCkfAggregationStats,
-    #[getter(copy)]
     publication: DcCkfPublicationStats,
-    #[getter(copy)]
     memory: DcCkfMemoryStats,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Getters)]
+impl DcCkfStats {
+    pub const fn aggregation(&self) -> DcCkfAggregationStats {
+        self.aggregation
+    }
+
+    pub const fn publication(&self) -> DcCkfPublicationStats {
+        self.publication
+    }
+
+    pub const fn memory(&self) -> DcCkfMemoryStats {
+        self.memory
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DcCkfAggregationStats {
-    #[getter(copy)]
     member_count: usize,
-    #[getter(copy)]
     contribution_count: usize,
-    #[getter(copy)]
     unique_block_count: usize,
-    #[getter(copy)]
     unknown_removals: u64,
-    #[getter(copy)]
     capacity_failures: u64,
-    #[getter(copy)]
     occupied_bucket_count: usize,
-    #[getter(copy)]
     occupied_slot_count: usize,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Getters)]
+impl DcCkfAggregationStats {
+    pub const fn member_count(&self) -> usize {
+        self.member_count
+    }
+
+    pub const fn contribution_count(&self) -> usize {
+        self.contribution_count
+    }
+
+    pub const fn unique_block_count(&self) -> usize {
+        self.unique_block_count
+    }
+
+    pub const fn unknown_removals(&self) -> u64 {
+        self.unknown_removals
+    }
+
+    pub const fn capacity_failures(&self) -> u64 {
+        self.capacity_failures
+    }
+
+    pub const fn occupied_bucket_count(&self) -> usize {
+        self.occupied_bucket_count
+    }
+
+    pub const fn occupied_slot_count(&self) -> usize {
+        self.occupied_slot_count
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DcCkfPublicationStats {
-    #[getter(copy)]
     pending_events: usize,
-    #[getter(copy)]
     physical_touches: u64,
-    #[getter(copy)]
     distinct_touched_buckets: u64,
-    #[getter(copy)]
     emitted_images: u64,
-    #[getter(copy)]
     net_reverted_buckets: u64,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Getters)]
+impl DcCkfPublicationStats {
+    pub const fn pending_events(&self) -> usize {
+        self.pending_events
+    }
+
+    pub const fn physical_touches(&self) -> u64 {
+        self.physical_touches
+    }
+
+    pub const fn distinct_touched_buckets(&self) -> u64 {
+        self.distinct_touched_buckets
+    }
+
+    pub const fn emitted_images(&self) -> u64 {
+        self.emitted_images
+    }
+
+    pub const fn net_reverted_buckets(&self) -> u64 {
+        self.net_reverted_buckets
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DcCkfMemoryStats {
-    #[getter(copy)]
     member_set_capacity: usize,
-    #[getter(copy)]
     refcount_capacity: usize,
-    #[getter(copy)]
     filter_bytes: usize,
-    #[getter(copy)]
     dirty_tracking_bytes: usize,
-    #[getter(copy)]
     insertion_scratch_capacity: usize,
+}
+
+impl DcCkfMemoryStats {
+    pub const fn member_set_capacity(&self) -> usize {
+        self.member_set_capacity
+    }
+
+    pub const fn refcount_capacity(&self) -> usize {
+        self.refcount_capacity
+    }
+
+    pub const fn filter_bytes(&self) -> usize {
+        self.filter_bytes
+    }
+
+    pub const fn dirty_tracking_bytes(&self) -> usize {
+        self.dirty_tracking_bytes
+    }
+
+    pub const fn insertion_scratch_capacity(&self) -> usize {
+        self.insertion_scratch_capacity
+    }
 }
 
 #[derive(Debug)]
@@ -395,9 +479,9 @@ impl DcCkfState {
     pub fn replace_rank(
         &mut self,
         worker: WorkerWithDpRank,
-        hashes: FxHashSet<ExternalSequenceBlockHash>,
+        hashes: HashSet<ExternalSequenceBlockHash>,
     ) -> Result<Option<DcCkfPublicationBatch>, KvCacheEventError> {
-        let mut replacements = FxHashMap::default();
+        let mut replacements = HashMap::new();
         replacements.insert(worker, hashes);
         self.replace_ranks(replacements)
     }
@@ -405,7 +489,7 @@ impl DcCkfState {
     /// Transactionally replace several ranks through one off-side pool rebuild.
     pub fn replace_ranks(
         &mut self,
-        replacements: FxHashMap<WorkerWithDpRank, FxHashSet<ExternalSequenceBlockHash>>,
+        replacements: HashMap<WorkerWithDpRank, HashSet<ExternalSequenceBlockHash>>,
     ) -> Result<Option<DcCkfPublicationBatch>, KvCacheEventError> {
         let mut replacement = Self::new(self.config).map_err(|error| match error {
             CkfBuildError::AllocationFailed => KvCacheEventError::AllocationFailed,
@@ -954,7 +1038,7 @@ mod tests {
         state.apply_event(stored(survivor, 1, &[shared.0]));
         let (_, before) = state.barrier_snapshot().unwrap();
 
-        let publication = state.replace_rank(replaced, FxHashSet::default()).unwrap();
+        let publication = state.replace_rank(replaced, HashSet::new()).unwrap();
 
         assert_eq!(state.member_block_count(replaced), 0);
         assert_eq!(state.member_block_count(survivor), 1);
@@ -1012,7 +1096,7 @@ mod tests {
         );
         assert!(
             state
-                .replace_rank(worker, FxHashSet::default())
+                .replace_rank(worker, HashSet::new())
                 .unwrap()
                 .is_none()
         );

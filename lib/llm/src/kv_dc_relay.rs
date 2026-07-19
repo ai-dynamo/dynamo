@@ -15,7 +15,7 @@
 //! dedicated Relay campaign before changing this ownership model; further producer optimization
 //! will likely be needed for substantially larger DC-scale pools.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -43,7 +43,6 @@ use dynamo_runtime::component::Component;
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use parking_lot::Mutex;
-use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
@@ -794,8 +793,8 @@ struct RankReplacementBatchState {
     pending: Vec<PendingRankReplacement>,
     flush_scheduled: bool,
     initial_timer_scheduled: bool,
-    initial_expected: Option<FxHashSet<WorkerWithDpRank>>,
-    initial_completed: FxHashSet<WorkerWithDpRank>,
+    initial_expected: Option<HashSet<WorkerWithDpRank>>,
+    initial_completed: HashSet<WorkerWithDpRank>,
 }
 
 #[derive(Clone)]
@@ -865,7 +864,7 @@ impl KvDcRelayRecoveryTarget {
     }
 
     fn new_replacement_batcher(
-        expected: FxHashSet<WorkerWithDpRank>,
+        expected: HashSet<WorkerWithDpRank>,
         initial_deadline: Duration,
     ) -> Arc<RankReplacementBatcher> {
         Arc::new(RankReplacementBatcher {
@@ -1982,7 +1981,7 @@ async fn run_actor(
     stopped: CancellationToken,
 ) {
     let _stopped_guard = CancelOnDrop(stopped);
-    let mut source_epochs = FxHashMap::<WorkerWithDpRank, SourceEpoch>::default();
+    let mut source_epochs = HashMap::<WorkerWithDpRank, SourceEpoch>::new();
     let mut capacity_omission_events = 0u64;
     let mut shutdown_response = None;
     let mut discard_tail = false;
@@ -2303,8 +2302,8 @@ fn replacement_hashes(
     worker_id: WorkerId,
     dp_rank: DpRank,
     events: Vec<RouterEvent>,
-) -> Result<FxHashSet<ExternalSequenceBlockHash>, KvDcRelayError> {
-    let mut hashes = FxHashSet::default();
+) -> Result<HashSet<ExternalSequenceBlockHash>, KvDcRelayError> {
+    let mut hashes = HashSet::new();
     for event in events {
         if event.worker_id != worker_id || event.event.dp_rank != dp_rank {
             return Err(KvDcRelayError::InvalidTreeDump {
@@ -2336,8 +2335,8 @@ fn replacement_hashes(
 fn replacement_batch_hashes(
     replacements: Vec<RankReplacement>,
     committed_epochs: &mut Vec<(WorkerWithDpRank, SourceEpoch)>,
-) -> Result<FxHashMap<WorkerWithDpRank, FxHashSet<ExternalSequenceBlockHash>>, KvDcRelayError> {
-    let mut hashes_by_rank = FxHashMap::default();
+) -> Result<HashMap<WorkerWithDpRank, HashSet<ExternalSequenceBlockHash>>, KvDcRelayError> {
+    let mut hashes_by_rank = HashMap::new();
     for replacement in replacements {
         let member = WorkerWithDpRank::new(replacement.worker_id, replacement.dp_rank);
         if hashes_by_rank.contains_key(&member) {

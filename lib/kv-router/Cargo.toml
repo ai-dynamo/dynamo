@@ -35,7 +35,6 @@ anyhow = { workspace = true }
 arc-swap = "1.9.1"
 async-trait = { workspace = true }
 dashmap = { workspace = true }
-derive-getters = { workspace = true }
 indexmap = { workspace = true }
 ordered-float = { workspace = true }
 derive_builder = { workspace = true }

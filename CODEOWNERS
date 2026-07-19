@@ -72,7 +72,6 @@
 /lib/kv-router/src/sequences/                                                @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/router/                                               @ai-dynamo/dynamo-router-codeowners
 /lib/kv-router/src/scheduling/                                               @ai-dynamo/dynamo-router-codeowners
-/components/src/dynamo/kv_dc_relay/                                          @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/global_router/                                        @ai-dynamo/dynamo-router-codeowners
 /examples/router/policy-class-queues.yaml                                    @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/global_router/tests/                                  @ai-dynamo/dynamo-router-codeowners
