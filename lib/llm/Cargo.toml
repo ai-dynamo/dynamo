@@ -72,6 +72,7 @@ dynamo-tokens = { workspace = true }
 
 # workspace
 anyhow = { workspace = true }
+arc-swap = "1.9.1"
 dynamo-protocols = { workspace = true }
 dynamo-parsers = { workspace = true }
 dynamo-parsers-v2 = { workspace = true }

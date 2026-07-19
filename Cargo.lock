@@ -2475,6 +2475,7 @@ dependencies = [
  "aligned-vec",
  "anyhow",
  "approx",
+ "arc-swap",
  "assert_matches",
  "async-nats 0.49.1",
  "async-stream",

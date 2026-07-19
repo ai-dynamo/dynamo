@@ -2,10 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
+use arc_swap::{ArcSwap, Guard};
 use dynamo_kv_router::identity::{
     CacheSemanticsId, CanonicalIdentityMaterial, DcId, IndexerDomainId, PoolId, RoutingScopeId,
 };
+use dynamo_kv_router::indexer::cuckoo::{CKF_LANE_COUNT, GlobalCkfIndexer};
 use dynamo_runtime::protocols::EndpointId;
 
 use crate::model_card::ModelDeploymentCard;
@@ -91,6 +94,109 @@ impl PoolBinding {
     }
 }
 
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub(crate) enum PublishedIndexerBundleError {
+    #[error("global CKF lane {lane} for pool {pool_id} has no runtime binding")]
+    MissingBinding { lane: usize, pool_id: PoolId },
+
+    #[error("runtime binding for pool {pool_id} targets unconfigured global CKF lane {lane}")]
+    UnexpectedBinding { lane: usize, pool_id: PoolId },
+
+    #[error(
+        "global CKF lane {lane} has pool {expected}, but its runtime binding has pool {actual}"
+    )]
+    WrongPool {
+        lane: usize,
+        expected: PoolId,
+        actual: PoolId,
+    },
+}
+
+/// One immutable query generation: CKF storage and its lane-to-runtime resolution.
+///
+/// Keeping both in one publication unit prevents a replacement from exposing a new consumer with
+/// old endpoint bindings, or vice versa. Physical lanes are fixed, so direct array indexing keeps
+/// endpoint resolution off hash maps on the query path.
+#[derive(Debug)]
+pub(crate) struct PublishedIndexerBundle {
+    consumer: Arc<GlobalCkfIndexer>,
+    lane_bindings: [Option<PoolBinding>; CKF_LANE_COUNT],
+}
+
+#[allow(dead_code)]
+impl PublishedIndexerBundle {
+    pub(crate) fn new(
+        consumer: Arc<GlobalCkfIndexer>,
+        lane_bindings: [Option<PoolBinding>; CKF_LANE_COUNT],
+    ) -> Result<Self, PublishedIndexerBundleError> {
+        let manifest = consumer.manifest();
+        for (lane, binding) in lane_bindings.iter().enumerate() {
+            match (manifest.pool_id(lane), binding) {
+                (Some(expected), None) => {
+                    return Err(PublishedIndexerBundleError::MissingBinding {
+                        lane,
+                        pool_id: expected,
+                    });
+                }
+                (None, Some(binding)) => {
+                    return Err(PublishedIndexerBundleError::UnexpectedBinding {
+                        lane,
+                        pool_id: binding.pool_id(),
+                    });
+                }
+                (Some(expected), Some(binding)) if expected != binding.pool_id() => {
+                    return Err(PublishedIndexerBundleError::WrongPool {
+                        lane,
+                        expected,
+                        actual: binding.pool_id(),
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        Ok(Self {
+            consumer,
+            lane_bindings,
+        })
+    }
+
+    pub(crate) fn consumer(&self) -> &GlobalCkfIndexer {
+        &self.consumer
+    }
+
+    pub(crate) fn binding(&self, lane: usize) -> Option<&PoolBinding> {
+        self.lane_bindings.get(lane).and_then(Option::as_ref)
+    }
+}
+
+/// Atomically publishes a complete consumer generation with its matching runtime bindings.
+///
+/// Query callers should use `load`, not `load_full`: the ArcSwap guard captures one coherent
+/// generation without an unconditional `Arc` refcount operation. A query holding an old guard may
+/// finish against the old consumer and old bindings after replacement.
+#[allow(dead_code)]
+pub(crate) struct PublishedGlobalCkfIndexer {
+    active: ArcSwap<PublishedIndexerBundle>,
+}
+
+#[allow(dead_code)]
+impl PublishedGlobalCkfIndexer {
+    pub(crate) fn new(initial: PublishedIndexerBundle) -> Self {
+        Self {
+            active: ArcSwap::from_pointee(initial),
+        }
+    }
+
+    pub(crate) fn load(&self) -> Guard<Arc<PublishedIndexerBundle>> {
+        self.active.load()
+    }
+
+    pub(crate) fn replace(&self, next: PublishedIndexerBundle) -> Arc<PublishedIndexerBundle> {
+        self.active.swap(Arc::new(next))
+    }
+}
+
 pub(crate) fn resolve_indexer_domain(
     card: &ModelDeploymentCard,
     serving_endpoint: &EndpointId,
@@ -152,6 +258,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use dynamo_kv_router::identity::{ExplicitIdentityMap, IdentitySource, IndexerIdentitySpec};
+    use dynamo_kv_router::indexer::cuckoo::{
+        CkfConfig, ConsumerInstanceId, DcCkfState, GlobalCkfManifest, PrefixSearchConfig,
+    };
 
     use super::*;
 
@@ -160,6 +269,41 @@ mod tests {
         card.source_path = Some(source_path.to_string());
         card.kv_cache_block_size = 512;
         card
+    }
+
+    fn domain(seed: u8) -> IndexerDomainId {
+        IndexerDomainId::new(
+            CacheSemanticsId::new([seed; 16], IdentitySource::Explicit),
+            RoutingScopeId::new([seed.wrapping_add(1); 16], IdentitySource::Explicit),
+        )
+    }
+
+    fn published_bundle(
+        domain: IndexerDomainId,
+        dc: u64,
+        endpoint: &str,
+        consumer_instance: u64,
+    ) -> PublishedIndexerBundle {
+        let state = DcCkfState::new(CkfConfig::new(16)).unwrap();
+        let pool_id = PoolId::new(domain, DcId::new(dc));
+        let mut lanes = [None; CKF_LANE_COUNT];
+        lanes[0] = Some(pool_id);
+        let manifest = GlobalCkfManifest::new(
+            ConsumerInstanceId::new(consumer_instance),
+            domain,
+            state.format(),
+            lanes,
+        )
+        .unwrap();
+        let consumer =
+            Arc::new(GlobalCkfIndexer::new(manifest, PrefixSearchConfig::default()).unwrap());
+        let mut bindings = std::array::from_fn(|_| None);
+        bindings[0] = Some(PoolBinding::new(
+            pool_id,
+            EndpointLocator::new(DcId::new(dc), EndpointId::from(endpoint)),
+            None,
+        ));
+        PublishedIndexerBundle::new(consumer, bindings).unwrap()
     }
 
     #[test]
@@ -232,5 +376,63 @@ mod tests {
             resolved.id.routing_scope().to_string(),
             "18270d3ba03effaec8d167ba02c7752d"
         );
+    }
+
+    #[test]
+    fn published_consumer_and_bindings_replace_as_one_generation() {
+        let published =
+            PublishedGlobalCkfIndexer::new(published_bundle(domain(1), 11, "ns/router/old", 101));
+        let old_query = published.load();
+
+        let retired = published.replace(published_bundle(domain(2), 22, "ns/router/new", 202));
+        let new_query = published.load();
+
+        assert_eq!(
+            old_query.consumer().manifest().consumer_instance(),
+            ConsumerInstanceId::new(101)
+        );
+        assert_eq!(
+            old_query
+                .binding(0)
+                .unwrap()
+                .serving_endpoint()
+                .endpoint_id(),
+            &EndpointId::from("ns/router/old")
+        );
+        assert_eq!(
+            new_query.consumer().manifest().consumer_instance(),
+            ConsumerInstanceId::new(202)
+        );
+        assert_eq!(
+            new_query
+                .binding(0)
+                .unwrap()
+                .serving_endpoint()
+                .endpoint_id(),
+            &EndpointId::from("ns/router/new")
+        );
+        assert!(Arc::ptr_eq(&retired, &*old_query));
+    }
+
+    #[test]
+    fn published_bundle_rejects_binding_from_another_pool() {
+        let bundle = published_bundle(domain(3), 33, "ns/router/expected", 303);
+        let consumer = Arc::new(bundle.consumer().clone());
+        let wrong_pool = PoolId::new(domain(3), DcId::new(44));
+        let mut bindings = std::array::from_fn(|_| None);
+        bindings[0] = Some(PoolBinding::new(
+            wrong_pool,
+            EndpointLocator::new(DcId::new(44), EndpointId::from("ns/router/wrong")),
+            None,
+        ));
+
+        assert!(matches!(
+            PublishedIndexerBundle::new(consumer, bindings),
+            Err(PublishedIndexerBundleError::WrongPool {
+                lane: 0,
+                expected,
+                actual,
+            }) if expected == PoolId::new(domain(3), DcId::new(33)) && actual == wrong_pool
+        ));
     }
 }
