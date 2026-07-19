@@ -206,7 +206,9 @@ class Base64LazyChatPayload(ChatPayload):
             object.__setattr__(self, "_b64_materialized", True)
 
 
-def make_image_payload_b64(expected_response: list[str]) -> ChatPayload:
+def make_image_payload_b64(
+    expected_response: list[str], *, repeat_count: int = 1
+) -> ChatPayload:
     """Inline-base64 PNG variant of :func:`make_image_payload`.
 
     The image bytes are read lazily on first `.body` access so pytest
@@ -217,7 +219,7 @@ def make_image_payload_b64(expected_response: list[str]) -> ChatPayload:
         expected_response=expected_response,
         max_tokens=100,
         temperature=0.0,
-        repeat_count=1,
+        repeat_count=repeat_count,
     )
 
 

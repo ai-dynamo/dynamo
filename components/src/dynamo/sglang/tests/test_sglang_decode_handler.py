@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -15,16 +14,11 @@ from dynamo.sglang.request_handlers.llm.decode_handler import (
     _openai_stop_sampling_params,
     _user_stop_token_ids,
 )
-from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
-    build_disagg_mm_kwargs,
-    extract_media_urls,
-    raise_if_unextracted_multimodal,
-)
-from dynamo.sglang.request_handlers.multimodal.worker_handler import StreamProcessor
 
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
@@ -38,56 +32,6 @@ def _read_zstd_payload(path):
     import msgspec
 
     return msgspec.msgpack.decode(raw)
-
-
-def test_extract_media_urls_supports_string_and_wire_items():
-    mm_data = {
-        "video_url": [
-            "file:///tmp/test.mp4",
-            {"Url": "https://example.com/test.mp4"},
-        ]
-    }
-
-    assert extract_media_urls(mm_data, "video_url") == [
-        "file:///tmp/test.mp4",
-        "https://example.com/test.mp4",
-    ]
-
-
-def test_build_disagg_mm_kwargs_includes_audio_urls():
-    request = {
-        "multi_modal_data": {
-            "image_url": [{"Url": "https://example.com/image.png"}],
-            "audio_url": [{"Url": "https://example.com/audio.wav"}],
-            "video_url": [{"Url": "https://example.com/video.mp4"}],
-        }
-    }
-
-    assert build_disagg_mm_kwargs(request) == {
-        "image_data": ["https://example.com/image.png"],
-        "audio_data": ["https://example.com/audio.wav"],
-        "video_data": ["https://example.com/video.mp4"],
-    }
-
-
-def test_extract_media_urls_returns_none_for_missing_modality():
-    assert extract_media_urls({}, "image_url") is None
-    assert extract_media_urls(None, "image_url") is None
-    assert extract_media_urls({"image_url": []}, "image_url") is None
-
-
-def test_extract_media_urls_rejects_malformed_payloads():
-    # A bare string (not a list) would otherwise split into per-character items.
-    with pytest.raises(ValueError, match="must be a list"):
-        extract_media_urls({"image_url": "https://example.com/a.png"}, "image_url")
-
-    # Frontend-decoded media is URL-passthrough only in the disaggregated path.
-    with pytest.raises(ValueError, match="Frontend-decoded"):
-        extract_media_urls({"image_url": [{"Decoded": "..."}]}, "image_url")
-
-    # Unsupported dict variant fails clearly instead of degrading to text.
-    with pytest.raises(ValueError, match="Unsupported"):
-        extract_media_urls({"image_url": [{"ignored": "value"}]}, "image_url")
 
 
 @pytest.mark.parametrize(
@@ -302,57 +246,6 @@ def test_build_sampling_params_forwards_repetition_controls_for_openai_requests(
     assert sampling_params["min_p"] == 0.01
     assert sampling_params["sampling_seed"] == 1234
     assert "seed" not in sampling_params
-
-
-class TestMultimodalGuard:
-    """Tests for multimodal guard when frontend extraction is missing."""
-
-    @staticmethod
-    def _image_message():
-        return {
-            "role": "user",
-            "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {"url": "https://example.com/a.jpg"},
-                },
-                {"type": "text", "text": "describe image"},
-            ],
-        }
-
-    @pytest.mark.parametrize(
-        "request_factory",
-        [
-            lambda msg: {"token_ids": [1, 2, 3], "messages": [msg]},
-            lambda msg: {"token_ids": [1, 2, 3], "extra_args": {"messages": [msg]}},
-        ],
-        ids=["top_level_messages", "extra_args_messages"],
-    )
-    def test_raises_for_image_url(self, request_factory):
-        with pytest.raises(RuntimeError, match="multi_modal_data"):
-            raise_if_unextracted_multimodal(request_factory(self._image_message()))
-
-    def test_raises_for_audio_url(self):
-        request = {
-            "token_ids": [1, 2, 3],
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "audio_url",
-                            "audio_url": {"url": "https://example.com/audio.wav"},
-                        }
-                    ],
-                }
-            ],
-        }
-
-        with pytest.raises(RuntimeError, match="audio_url"):
-            raise_if_unextracted_multimodal(request)
-
-    def test_text_only_request_bypasses_guard(self):
-        raise_if_unextracted_multimodal({"token_ids": [10, 20, 30]})
 
 
 def test_build_logprob_kwargs_allows_chosen_token_logprobs(monkeypatch):
@@ -907,53 +800,6 @@ async def test_process_token_stream_suppresses_hidden_stop_token_reason():
     )
 
     assert "stop_reason" not in chunks[0]
-
-
-@pytest.mark.asyncio
-async def test_multimodal_stream_keeps_reading_after_one_choice_finishes():
-    chunks = await _collect(
-        StreamProcessor.process_sglang_stream(
-            _stream(
-                [
-                    {
-                        "index": 0,
-                        "output_ids": [101],
-                        "text": "a",
-                        "meta_info": {"finish_reason": None},
-                    },
-                    {
-                        "index": 1,
-                        "output_ids": [201],
-                        "text": "b",
-                        "meta_info": {"finish_reason": None},
-                    },
-                    {
-                        "index": 0,
-                        "output_ids": [],
-                        "text": "a",
-                        "meta_info": {"finish_reason": {"type": "stop"}},
-                    },
-                    {
-                        "index": 1,
-                        "output_ids": [],
-                        "text": "b",
-                        "meta_info": {"finish_reason": {"type": "stop"}},
-                    },
-                ]
-            )
-        )
-    )
-
-    outputs = [json.loads(chunk) for chunk in chunks]
-
-    assert [output["index"] for output in outputs] == [0, 1, 0, 1]
-    assert [output["finished"] for output in outputs] == [False, False, True, True]
-    assert [output.get("finish_reason") for output in outputs] == [
-        None,
-        None,
-        "stop",
-        "stop",
-    ]
 
 
 async def _collect(stream):

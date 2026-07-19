@@ -31,6 +31,7 @@ pub struct MediaTensorInfo {
 pub struct DecodedMediaData {
     pub(crate) data: SystemStorage,
     pub(crate) tensor_info: MediaTensorInfo,
+    pub(crate) content_hash: Option<u64>,
 }
 
 // Decoded media data NIXL descriptor (sent to the next step in the pipeline / NATS)
@@ -45,6 +46,12 @@ pub struct RdmaMediaDataDescriptor {
     #[serde(flatten)]
     pub(crate) tensor_info: MediaTensorInfo,
 
+    /// Canonical xxh3-64 key for `(shape, dtype, decoded image byte payload)`.
+    /// Serialized once so routing and backend embedding caches consume the
+    /// exact same hash without reimplementing the payload contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) content_hash: Option<String>,
+
     // reference to the actual data, kept alive while the rdma descriptor is alive
     #[serde(skip, default)]
     #[allow(dead_code)]
@@ -52,55 +59,71 @@ pub struct RdmaMediaDataDescriptor {
 }
 
 impl RdmaMediaDataDescriptor {
-    /// xxh3-64 of `(shape, dtype, decoded byte payload)`. Returns `None` if
-    /// the descriptor was deserialized from the wire and no longer holds
-    /// local storage. Used by MM-aware KV routing to produce a
-    /// content-addressed `mm_hash` so the same image reached through
-    /// different (signed) URLs collides on the same routing key.
-    ///
-    /// `shape` + `dtype` are included in the preimage so two images that
-    /// happen to share a raw byte buffer but differ in dimensions or
-    /// element layout (e.g. `3x224x224` vs `224x224x3`) don't collide on
-    /// the same routing hash.
+    /// Canonical cache/routing key serialized on the descriptor.
+    pub(crate) fn content_hash_key(&self) -> Option<&str> {
+        self.content_hash.as_deref()
+    }
+
+    /// Numeric form used by MM-aware KV routing.
     #[cfg(feature = "mm-routing")]
     pub(crate) fn content_hash(&self) -> Option<u64> {
-        use dynamo_memory::MemoryDescriptor;
-        use xxhash_rust::xxh3::Xxh3;
-        let registered = self.source_storage.as_ref()?;
-        let storage = registered.storage();
-        let len = storage.size();
-        if len == 0 {
-            return None;
-        }
-        let mut hasher = Xxh3::new();
-        // shape (rank + per-dim u64s) — fixed width so distinct shapes
-        // can't alias each other after concatenation.
-        hasher.update(&(self.tensor_info.shape.len() as u64).to_le_bytes());
-        for &dim in &self.tensor_info.shape {
-            hasher.update(&(dim as u64).to_le_bytes());
-        }
-        // dtype as a single discriminant byte; widen if DataType ever grows.
-        let dtype_byte: u8 = match self.tensor_info.dtype {
-            DataType::UINT8 => 0,
-        };
-        hasher.update(&[dtype_byte]);
-        // raw payload via SystemStorage's Slice impl.
-        // SAFETY: `storage` is borrowed for the duration of this call;
-        // SystemStorage owns the malloc'd buffer and won't free or
-        // relocate it while the borrow is alive. The Slice trait's
-        // safety contract about no concurrent mutable access is upheld
-        // because `content_hash` is only invoked on descriptors during
-        // request building, before they're sent to NIXL.
-        use dynamo_memory::actions::Slice;
-        let bytes = unsafe { storage.as_slice().ok()? };
-        hasher.update(bytes);
-        Some(hasher.digest())
+        self.content_hash_key()
+            .and_then(|key| u64::from_str_radix(key, 16).ok())
     }
 }
 
+fn canonical_content_hash(shape: &[usize], dtype: DataType, bytes: &[u8]) -> u64 {
+    use xxhash_rust::xxh3::Xxh3;
+
+    let mut hasher = Xxh3::new();
+    // Rank and dimensions are fixed-width so distinct shapes cannot alias
+    // after concatenation.
+    hasher.update(&(shape.len() as u64).to_le_bytes());
+    for &dim in shape {
+        hasher.update(&(dim as u64).to_le_bytes());
+    }
+    // Widen this discriminant if DataType gains another variant.
+    let dtype_byte: u8 = match dtype {
+        DataType::UINT8 => 0,
+    };
+    hasher.update(&[dtype_byte]);
+    hasher.update(bytes);
+    hasher.digest()
+}
+
+fn content_hash_for_storage(tensor_info: &MediaTensorInfo, storage: &SystemStorage) -> Option<u64> {
+    use dynamo_memory::{MemoryDescriptor, actions::Slice};
+
+    // The current consumers cache and route images only. Avoid an otherwise
+    // unused full-buffer pass over decoded videos.
+    if !matches!(
+        tensor_info.metadata.as_ref(),
+        Some(DecodedMediaMetadata::Image(_))
+    ) || storage.size() == 0
+    {
+        return None;
+    }
+
+    // SAFETY: storage owns this stable buffer and is only read while the
+    // descriptor is being built, before NIXL can access it concurrently.
+    let bytes = unsafe { storage.as_slice().ok()? };
+    Some(canonical_content_hash(
+        &tensor_info.shape,
+        tensor_info.dtype,
+        bytes,
+    ))
+}
+
 impl DecodedMediaData {
+    /// Precompute the canonical image hash while still running on the decode
+    /// thread. Videos and empty buffers intentionally remain unkeyed.
+    pub(crate) fn compute_content_hash(&mut self) {
+        self.content_hash = content_hash_for_storage(&self.tensor_info, &self.data);
+    }
+
     pub fn into_rdma_descriptor(self, nixl_agent: &NixlAgent) -> Result<RdmaMediaDataDescriptor> {
         let source_storage = self.data;
+        let content_hash = self.content_hash.map(|hash| format!("{hash:016x}"));
         let registered = nixl::register_with_nixl(source_storage, nixl_agent, None)
             .map_err(|_| anyhow::anyhow!("Failed to register storage with NIXL"))?;
 
@@ -111,9 +134,24 @@ impl DecodedMediaData {
             nixl_metadata,
             nixl_descriptor,
             tensor_info: self.tensor_info,
+            content_hash,
             // Keep registered storage alive
             source_storage: Some(Arc::new(registered)),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DataType, canonical_content_hash};
+
+    #[test]
+    fn canonical_content_hash_payload_is_stable() {
+        let bytes = [0_u8, 1, 2, 3, 4, 5];
+        let hash = canonical_content_hash(&[1, 2, 3], DataType::UINT8, &bytes);
+
+        assert_eq!(hash, 0x7a9b_bcb1_1a89_8630);
+        assert_eq!(format!("{hash:016x}"), "7a9bbcb11a898630");
     }
 }
 
@@ -139,6 +177,7 @@ impl<D: Dimension> TryFrom<ArrayBase<OwnedRepr<u8>, D>> for DecodedMediaData {
                 dtype: DataType::UINT8,
                 metadata: None,
             },
+            content_hash: None,
         })
     }
 }

@@ -24,6 +24,7 @@ from dynamo.sglang.request_handlers.multimodal.worker_handler import (
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
+    pytest.mark.multimodal,
     pytest.mark.gpu_0,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
@@ -31,10 +32,10 @@ pytestmark = [
 ]
 
 
-def test_extract_media_urls_supports_video_urls():
+def test_extract_media_inputs_supports_video_urls():
     handler = MultimodalEncodeWorkerHandler.__new__(MultimodalEncodeWorkerHandler)
 
-    image_urls, video_urls = handler._extract_media_urls(
+    image_items, video_urls = handler._extract_media_inputs(
         {
             "multi_modal_data": {
                 "video_url": [
@@ -45,14 +46,14 @@ def test_extract_media_urls_supports_video_urls():
         }
     )
 
-    assert image_urls == []
+    assert image_items == []
     assert video_urls == ["https://example.com/clip.mp4", "file:///tmp/local.mp4"]
 
 
-def test_extract_media_urls_supports_mixed_image_and_video():
+def test_extract_media_inputs_supports_mixed_image_and_video():
     handler = MultimodalEncodeWorkerHandler.__new__(MultimodalEncodeWorkerHandler)
 
-    image_urls, video_urls = handler._extract_media_urls(
+    image_items, video_urls = handler._extract_media_inputs(
         {
             "multi_modal_data": {
                 "image_url": [{"Url": "https://example.com/image.png"}],
@@ -61,7 +62,7 @@ def test_extract_media_urls_supports_mixed_image_and_video():
         }
     )
 
-    assert image_urls == ["https://example.com/image.png"]
+    assert image_items == [{"Url": "https://example.com/image.png"}]
     assert video_urls == ["https://example.com/clip.mp4"]
 
 
