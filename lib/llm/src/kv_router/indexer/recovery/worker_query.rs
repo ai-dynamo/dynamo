@@ -42,6 +42,12 @@ struct RecoveryTask {
     handle: JoinHandle<()>,
 }
 
+#[derive(Debug, Clone)]
+struct ActivePublisherBinding {
+    binding: Arc<SourceBinding>,
+    slot: Arc<Mutex<SourceSlot>>,
+}
+
 impl SourceBinding {
     fn recovery_target(&self) -> Option<&Instance> {
         self.source.recovery_target.as_ref()
@@ -110,8 +116,8 @@ pub(crate) struct WorkerQueryClient<T = IndexerRecoveryTarget> {
     membership_sync: Mutex<()>,
     slots: DashMap<RecoveryKey, Arc<Mutex<SourceSlot>>>,
     generation_tombstones: DashMap<RecoveryKey, u64>,
-    /// Immutable publisher binding lookup performed once per event envelope.
-    publisher_bindings: DashMap<u64, Arc<SourceBinding>>,
+    /// Immutable publisher binding and rank slot lookup performed once per event envelope.
+    publisher_bindings: DashMap<u64, ActivePublisherBinding>,
     recovery_tasks: DashMap<RecoveryKey, RecoveryTask>,
     recovery_semaphore: Arc<Semaphore>,
     recovery_attempt_timeout: Duration,
@@ -245,7 +251,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             .generation_tombstones
             .remove(&key)
             .map(|(_, generation)| generation);
-        let slot = self
+        let slot_handle = self
             .slots
             .entry(key)
             .or_insert_with(|| {
@@ -255,7 +261,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                 }))
             })
             .clone();
-        let mut slot = slot.lock().await;
+        let mut slot = slot_handle.lock().await;
 
         let selected = status.active_source().cloned();
         let generation_changed = slot.generation_changed(lifecycle_generation);
@@ -301,8 +307,13 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                 });
                 slot.rank.activate(binding.recovery_target().is_some());
                 slot.active = Some(binding.clone());
-                self.publisher_bindings
-                    .insert(binding.source.publisher_id, binding.clone());
+                self.publisher_bindings.insert(
+                    binding.source.publisher_id,
+                    ActivePublisherBinding {
+                        binding: binding.clone(),
+                        slot: slot_handle.clone(),
+                    },
+                );
                 if binding.recovery_target().is_some() {
                     self.spawn_recovery(key, binding, None, None).await;
                 } else {
@@ -324,7 +335,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
         };
         self.publisher_bindings
             .remove_if(&binding.source.publisher_id, |_, current| {
-                Arc::ptr_eq(current, &binding)
+                Arc::ptr_eq(&current.binding, &binding)
             });
         binding.lifetime.cancel();
         self.cancel_recovery(key).await;
@@ -524,7 +535,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
         publisher_id: u64,
         events: Vec<RouterEvent>,
     ) {
-        let Some(binding) = self
+        let Some(active) = self
             .publisher_bindings
             .get(&publisher_id)
             .map(|entry| entry.clone())
@@ -535,6 +546,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             );
             return;
         };
+        let binding = active.binding;
         let expected = binding.source.worker;
         if let Some(event) = events.iter().find(|event| {
             event.worker_id != expected.worker_id || event.event.dp_rank != expected.dp_rank
@@ -554,10 +566,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             return;
         }
         let key = (expected.worker_id, expected.dp_rank);
-        let Some(slot_handle) = self.slots.get(&key).map(|entry| entry.clone()) else {
-            return;
-        };
-        let mut slot = slot_handle.lock().await;
+        let mut slot = active.slot.lock().await;
         if !slot
             .active
             .as_ref()
@@ -1308,6 +1317,7 @@ mod tests {
             .publisher_bindings
             .get(&100)
             .expect("source A should be active")
+            .binding
             .clone();
         client
             .reconcile_view(membership_view(
@@ -1749,7 +1759,7 @@ mod tests {
         let client = WorkerQueryClient::new_for_test(indexer, rx, transport);
         client.reconcile_view(view).await;
         client.handle_live_batch(100, vec![store(1)]).await;
-        let binding = client.publisher_bindings.get(&100).unwrap().clone();
+        let binding = client.publisher_bindings.get(&100).unwrap().binding.clone();
 
         client
             .clone()
@@ -1797,7 +1807,7 @@ mod tests {
         let client = WorkerQueryClient::new_for_test(indexer, rx, transport);
         client.reconcile_view(view).await;
         client.handle_live_batch(100, vec![store(1)]).await;
-        let binding = client.publisher_bindings.get(&100).unwrap().clone();
+        let binding = client.publisher_bindings.get(&100).unwrap().binding.clone();
         kv_indexer.shutdown();
         kv_indexer.event_sender().closed().await;
 
@@ -1846,7 +1856,7 @@ mod tests {
         let client = WorkerQueryClient::new_target_for_test(target.clone(), rx, transport);
         client.reconcile_view(view).await;
         client.handle_live_batch(100, vec![store(2)]).await;
-        let binding = client.publisher_bindings.get(&100).unwrap().clone();
+        let binding = client.publisher_bindings.get(&100).unwrap().binding.clone();
 
         client
             .clone()
@@ -1901,7 +1911,7 @@ mod tests {
         *transport.release.lock().await = Some(Arc::new(Notify::new()));
         let client = WorkerQueryClient::new_for_test(indexer, rx, transport);
         client.reconcile_view(view).await;
-        let binding = client.publisher_bindings.get(&100).unwrap().clone();
+        let binding = client.publisher_bindings.get(&100).unwrap().binding.clone();
 
         client.handle_live_batch(100, vec![store(1)]).await;
         client
@@ -2052,7 +2062,7 @@ mod tests {
             .handle_live_batch(205, vec![store_for(rank_5, 1)])
             .await;
 
-        let binding = client.publisher_bindings.get(&100).unwrap().clone();
+        let binding = client.publisher_bindings.get(&100).unwrap().binding.clone();
         client
             .clone()
             .finish_recovery(

@@ -546,6 +546,10 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         worker_id: WorkerId,
         num_workers: usize,
     ) -> usize {
+        if let Some(thread_idx) = worker_assignments.get(&worker_id).map(|entry| *entry) {
+            return thread_idx;
+        }
+
         *worker_assignments.entry(worker_id).or_insert_with(|| {
             let idx = worker_assignment_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             idx % num_workers
