@@ -501,6 +501,8 @@ pub enum WorkerTask {
         worker_id: WorkerId,
         /// True for the one shared-state backend task that owns structural cleanup.
         sweep_tree: bool,
+        /// Acknowledges completion of this lane's cold-path removal phase.
+        resp: oneshot::Sender<()>,
     },
     /// Remove a single dp_rank for a worker.
     RemoveWorkerDpRank {

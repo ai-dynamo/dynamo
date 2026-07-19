@@ -77,12 +77,14 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                 WorkerTask::RemoveWorker {
                     worker_id,
                     sweep_tree,
+                    resp,
                 } => {
                     self.erase_worker_coverage(
                         &mut lookup,
                         WorkerRemovalTarget::WorkerId(worker_id),
                         sweep_tree,
                     );
+                    let _ = resp.send(());
                 }
                 WorkerTask::RemoveWorkerDpRank {
                     worker_id,
