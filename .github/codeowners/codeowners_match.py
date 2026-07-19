@@ -156,6 +156,15 @@ class ResolvedModel:
 # ----------------------------------------------------------------------
 
 
+def _star_fragment(pattern: str, index: int) -> tuple[str, int]:
+    """Translate one ``*`` token and return its regex plus the next index."""
+    if pattern.startswith("**/", index):
+        return "(?:.*/)?", index + 3
+    if pattern.startswith("**", index):
+        return ".*", index + 2
+    return "[^/]*", index + 1
+
+
 def _glob_to_re(pattern: str) -> str:
     """Translate a CODEOWNERS glob to a regex: ``*``/``?`` stop at ``/``,
     ``**`` crosses directories. fnmatch is wrong here -- its ``*`` greedily
@@ -165,11 +174,9 @@ def _glob_to_re(pattern: str) -> str:
     while i < len(pattern):
         c = pattern[i]
         if c == "*":
-            if pattern[i : i + 2] == "**":
-                out.append(".*")
-                i += 2
-                continue
-            out.append("[^/]*")
+            fragment, i = _star_fragment(pattern, i)
+            out.append(fragment)
+            continue
         elif c == "?":
             out.append("[^/]")
         elif c == "[":
@@ -308,7 +315,7 @@ def changed_paths(repo: Path, base: str) -> list[str]:
 
 def _valid_owner_token(owner: object, known_labels: set[str]) -> bool:
     """Whether an owner is an area label, @ principal, or email address."""
-    if not isinstance(owner, str) or not owner or owner != owner.strip():
+    if not isinstance(owner, str) or not owner or any(char.isspace() for char in owner):
         return False
     if owner in known_labels:
         return True
@@ -325,7 +332,7 @@ def _owner_rule_values(rule: object, section: str) -> tuple[str, list[object]]:
     glob = rule.get("glob")
     owners = rule.get("owners", []) or []
     inherits = rule.get("inherits", []) or []
-    if not isinstance(glob, str) or not glob.strip():
+    if not isinstance(glob, str) or not glob or any(char.isspace() for char in glob):
         raise SystemExit(f"areas.yaml: {section} entry {rule!r} has invalid 'glob'")
     if not isinstance(owners, list) or not isinstance(inherits, list):
         raise SystemExit(
@@ -365,7 +372,11 @@ def _normalize_filetype_rule(rule: object, known_labels: set[str]) -> FiletypeRu
     pattern = rule.get("pattern")
     coowner = rule.get("coowner")
     advisory = rule.get("advisory", False)
-    if not isinstance(pattern, str) or not pattern.strip():
+    if (
+        not isinstance(pattern, str)
+        or not pattern
+        or any(char.isspace() for char in pattern)
+    ):
         raise SystemExit(
             f"areas.yaml: filetype_rules entry {rule!r} has invalid pattern"
         )

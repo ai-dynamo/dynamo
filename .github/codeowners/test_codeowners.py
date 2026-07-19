@@ -96,6 +96,13 @@ class TestMatchAnchoredFile:
         assert match("/lib/**.rs", "lib/sub/foo.rs")
         assert match("/lib/**/foo.rs", "lib/a/b/foo.rs")
 
+    def test_double_star_slash_matches_zero_or_more_directories(self) -> None:
+        pattern = "/recipes/**/vllm/**"
+        assert match(pattern, "recipes/vllm/deploy.yaml")
+        assert match(pattern, "recipes/nested/vllm/deploy.yaml")
+        assert match(pattern, "recipes/a/b/vllm/deploy.yaml")
+        assert not match(pattern, "recipes/sglang/deploy.yaml")
+
     def test_question_mark_stays_in_segment(self) -> None:
         assert match("/lib/?.rs", "lib/a.rs")
         assert not match("/lib/?.rs", "lib/ab.rs")
@@ -403,6 +410,9 @@ class TestComputeResolution:
             {"coowner": "docs", "advisory": False},
             {"pattern": "Dockerfile", "advisory": False},
             {"pattern": "Dockerfile", "coowner": "typoed-owner"},
+            {"pattern": "Docker file", "coowner": "docs", "advisory": False},
+            {"pattern": "Dockerfile", "coowner": "@org/team extra"},
+            {"pattern": "Dockerfile", "coowner": "owner @example.com"},
             {"pattern": "Dockerfile", "coowner": "docs", "advisory": "yes"},
             ["not", "a", "mapping"],
         ],
@@ -490,6 +500,10 @@ class TestComputeResolution:
             {"glob": "lib/llm/metrics/", "owners": "runtime"},
             {"glob": "lib/llm/metrics/", "owners": [], "inherits": []},
             {"glob": "lib/llm/metrics/", "owners": ["typoed-owner"]},
+            {"glob": "lib/llm/ metrics/", "owners": ["runtime"]},
+            {"glob": "lib/llm/metrics/", "owners": ["@org/team extra"]},
+            {"glob": "lib/llm/metrics/", "owners": ["owner @example.com"]},
+            {"glob": "lib/llm/metrics/", "inherits": ["runtime docs"]},
             {"glob": "lib/llm/metrics/", "owners": [["not-hashable"]]},
             ["not", "a", "mapping"],
         ],
@@ -517,6 +531,24 @@ class TestComputeResolution:
             "@org/team",
             "owner@example.com",
         ]
+
+    @pytest.mark.parametrize("section", ["shared", "required_owners", "advisory"])
+    @pytest.mark.parametrize(
+        "rule",
+        [
+            {"glob": "lib/llm/ metrics/", "owners": ["runtime"]},
+            {"glob": "lib/llm/metrics/", "owners": ["@org/team extra"]},
+            {"glob": "lib/llm/metrics/", "owners": ["owner @example.com"]},
+            {"glob": "lib/llm/metrics/", "inherits": ["runtime docs"]},
+        ],
+    )
+    def test_owner_rule_sections_reject_whitespace_tokens(
+        self, section: str, rule: dict
+    ) -> None:
+        spec = self._spec()
+        spec[section] = [rule]
+        with pytest.raises(SystemExit, match=f"{section} entry"):
+            compute_resolution(spec)
 
     def test_advisory_entries_use_the_same_owner_validation(self) -> None:
         spec = self._spec()
@@ -998,6 +1030,32 @@ class TestDiffAwareStrictGateE2E:
         assert _run_build(repo, areas, "--changed-only", "--base", base).returncode == 0
         # (c) full-tree strict still FAILS on that same inherited gap.
         assert _run_build(repo, areas).returncode == 1
+
+    def test_inherited_contract_only_blocks_full_tree(self, tmp_path) -> None:
+        areas = tmp_path / "areas.yaml"
+        areas.write_text(
+            'meta:\n  catch_all: "@root"\n'
+            'areas:\n  - label: runtime\n    github_team: "@runtime"\n'
+            '    path_globs: ["owned/"]\n'
+            '  - label: docs\n    github_team: "@docs"\n    path_globs: []\n'
+            'required_owners:\n  - glob: "owned/base.txt"\n    owners: [docs]\n'
+        )
+        repo = tmp_path / "r"
+        _init_repo(repo)
+        (repo / "owned").mkdir()
+        (repo / "owned" / "base.txt").write_text("x")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "base")
+        base = _head(repo)
+        (repo / "owned" / "new.txt").write_text("y")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "pr adds unrelated owned file")
+
+        diff_aware = _run_build(repo, areas, "--changed-only", "--base", base)
+        assert diff_aware.returncode == 0
+        full_tree = _run_build(repo, areas)
+        assert full_tree.returncode == 1
+        assert "lost declared owners" in full_tree.stdout
 
     def test_pr_introduced_gap_fails(self, tmp_path) -> None:
         areas = self._areas(tmp_path)

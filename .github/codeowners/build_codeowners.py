@@ -200,6 +200,23 @@ def is_policy_change(changed: list[str], areas: str, repo: str) -> bool:
     return False
 
 
+def validation_scope(
+    repo: Path, base: str, areas: str, changed_only: bool, tree: list[str]
+) -> tuple[list[str] | None, list[str]]:
+    """Return the coverage selector and matching ownership-contract tree."""
+    if not changed_only:
+        return None, tree
+    changed = changed_paths(repo, base)
+    if is_policy_change(changed, areas, str(repo)):
+        print(
+            "note: PR touches ownership policy (areas/scripts/CODEOWNERS); "
+            "evaluating full-tree coverage instead of the changed surface"
+        )
+        return None, tree
+    changed_set = set(changed)
+    return changed, [path for path in tree if path in changed_set]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument(
@@ -232,7 +249,19 @@ def main() -> int:
     model = compute_resolution(spec)
     tree = load_tree(Path(args.repo))
     unmatched = model.unmatched_paths(tree)
-    ownership_violations = ownership_contract_violations(model, tree)
+
+    # Diff-aware mode judges only the PR's own surface; full-tree mode (the
+    # default) judges every tracked file. A PR that edits ownership policy
+    # (areas/scripts/CODEOWNERS) can re-route any path, so it is always judged
+    # whole-tree -- otherwise a policy edit could orphan untouched paths.
+    changed, contract_tree = validation_scope(
+        Path(args.repo), args.base, args.areas, args.changed_only, tree
+    )
+
+    # Scope ownership contracts exactly like catch-all coverage. Otherwise a
+    # pre-existing owner loss on the base branch can fail an unrelated PR even
+    # though --changed-only promises that only the PR's own surface blocks.
+    ownership_violations = ownership_contract_violations(model, contract_tree)
     # Deletions never fail a gate (coverage counts files, and the drift check
     # forces the CODEOWNERS regeneration), so stale claims would otherwise
     # accumulate silently in areas.yaml. Surface them; never block on them.
@@ -262,19 +291,6 @@ def main() -> int:
     for lbl, c in counts.most_common():
         print(f"  {lbl:<22} {c}")
 
-    # Diff-aware mode judges only the PR's own surface; full-tree mode (the
-    # default) judges every tracked file. A PR that edits ownership policy
-    # (areas/scripts/CODEOWNERS) can re-route any path, so it is always judged
-    # whole-tree -- otherwise a policy edit could orphan untouched paths.
-    changed = None
-    if args.changed_only:
-        changed = changed_paths(Path(args.repo), args.base)
-        if is_policy_change(changed, args.areas, args.repo):
-            print(
-                "note: PR touches ownership policy (areas/scripts/CODEOWNERS); "
-                "evaluating full-tree coverage instead of the changed surface"
-            )
-            changed = None
     gate = split_coverage(unmatched, changed)
     if gate.warnings:
         print(
