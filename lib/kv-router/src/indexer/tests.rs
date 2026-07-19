@@ -1320,11 +1320,14 @@ mod interface_tests {
         index
             .apply_event(make_store_event_with_dp_rank(7, &[1, 2, 3], 0))
             .await;
+
+        index.reset_worker_dp_rank_and_wait(7, 0).await.unwrap();
+
+        // A rank reset does not fence sibling ranks, so order the sibling store explicitly.
         index
             .apply_event(make_store_event_with_dp_rank(7, &[1, 2, 3], 1))
             .await;
-
-        index.reset_worker_dp_rank_and_wait(7, 0).await.unwrap();
+        flush_and_settle(index.as_ref()).await;
 
         assert_query_scores_with_semantics(
             variant,
