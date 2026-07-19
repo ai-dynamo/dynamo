@@ -39,9 +39,8 @@ pub trait TieredMatchProvider: Send + Sync {
 
 /// Per-shard size snapshot returned by [`KvIndexerInterface::shard_sizes`].
 ///
-/// `worker_count` and `block_count` are always populated.
-/// `node_count` is populated only when the `shard-metrics` feature is enabled
-/// on the `dynamo-kv-router` crate; otherwise it is `0`.
+/// `worker_count` and `block_count` are always populated. `node_count` is
+/// reserved for backends that can expose a structural node count.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ShardSizeSnapshot {
     /// Zero-based shard index.
@@ -50,7 +49,7 @@ pub struct ShardSizeSnapshot {
     pub worker_count: usize,
     /// Total cached blocks across all workers in this shard.
     pub block_count: usize,
-    /// Radix-tree node count (only non-zero with `shard-metrics` feature).
+    /// Radix-tree node count, or zero when the backend does not expose one.
     pub node_count: usize,
 }
 
@@ -268,8 +267,7 @@ pub trait SyncIndexer: Send + Sync + 'static {
         String::new()
     }
 
-    /// Number of radix-tree nodes created since construction.
-    /// Only meaningful when the `shard-metrics` feature is enabled; returns 0 otherwise.
+    /// Number of radix-tree nodes created since construction, when available.
     fn node_count(&self) -> usize {
         0
     }
