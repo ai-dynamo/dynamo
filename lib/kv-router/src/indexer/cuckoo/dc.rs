@@ -12,6 +12,7 @@
 
 use derive_getters::Getters;
 use rustc_hash::{FxHashMap, FxHashSet};
+use serde::{Deserialize, Serialize};
 
 use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, RouterEvent, StorageTier,
@@ -20,6 +21,7 @@ use crate::protocols::{
 
 use super::addressing::CkfAddressing;
 use super::bucket::{CuckooBucketStore, OwnedPackedCkfLane, PackedBucket};
+use super::global::GlobalCkfBucketImage;
 use super::mutator::{CuckooInsertionScratch, CuckooMutator, lane_rng_seed};
 use super::{CkfBuildError, CkfConfig, bucket_count, validate_config};
 
@@ -27,7 +29,7 @@ const FORMAT_VERSION: u16 = 1;
 const FINGERPRINT_BITS: u8 = 16;
 const SLOTS_PER_BUCKET: u8 = 4;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Getters)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Getters, Serialize, Deserialize)]
 pub struct DcCkfFormatIdentity {
     #[getter(copy)]
     format_version: u16,
@@ -41,60 +43,35 @@ pub struct DcCkfFormatIdentity {
     slots_per_bucket: u8,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Getters)]
-pub struct DcCkfBucketImage {
-    #[getter(copy)]
-    bucket: usize,
-    #[getter(copy)]
-    value: u64,
+impl DcCkfFormatIdentity {
+    pub(super) const fn new(seed: u64, bucket_count: usize) -> Self {
+        Self {
+            format_version: FORMAT_VERSION,
+            seed,
+            bucket_count,
+            fingerprint_bits: FINGERPRINT_BITS,
+            slots_per_bucket: SLOTS_PER_BUCKET,
+        }
+    }
 }
 
-/// Complete physical CKF base for one producer sequence.
+/// Canonical absolute bucket images produced by the actor core before stream sequencing.
+///
+/// This is deliberately not a transport envelope. The logically serialized publisher owns the
+/// lease and sequence and consumes this batch after a complete actor command. Cadence may
+/// coalesce several commands, but a batch never splits one event, Clear, or relocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DcCkfSnapshot {
-    sequence: u64,
-    format: DcCkfFormatIdentity,
-    buckets: Box<[u64]>,
+pub struct DcCkfPublicationBatch {
+    images: Vec<GlobalCkfBucketImage>,
 }
 
-impl DcCkfSnapshot {
-    pub fn sequence(&self) -> u64 {
-        self.sequence
-    }
-
-    pub fn format(&self) -> DcCkfFormatIdentity {
-        self.format
-    }
-
-    pub fn buckets(&self) -> &[u64] {
-        &self.buckets
-    }
-}
-
-/// Ordered absolute-image update extending one [`DcCkfSnapshot`] layout.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DcCkfDelta {
-    base_sequence: u64,
-    sequence: u64,
-    reset: bool,
-    images: Vec<DcCkfBucketImage>,
-}
-
-impl DcCkfDelta {
-    pub fn base_sequence(&self) -> u64 {
-        self.base_sequence
-    }
-
-    pub fn sequence(&self) -> u64 {
-        self.sequence
-    }
-
-    pub fn reset(&self) -> bool {
-        self.reset
-    }
-
-    pub fn images(&self) -> &[DcCkfBucketImage] {
+impl DcCkfPublicationBatch {
+    pub fn images(&self) -> &[GlobalCkfBucketImage] {
         &self.images
+    }
+
+    pub(crate) fn into_images(self) -> Vec<GlobalCkfBucketImage> {
+        self.images
     }
 }
 
@@ -132,8 +109,6 @@ pub struct DcCkfAggregationStats {
 #[non_exhaustive]
 pub struct DcCkfPublicationStats {
     #[getter(copy)]
-    sequence: u64,
-    #[getter(copy)]
     pending_events: usize,
     #[getter(copy)]
     physical_touches: u64,
@@ -143,8 +118,6 @@ pub struct DcCkfPublicationStats {
     emitted_images: u64,
     #[getter(copy)]
     net_reverted_buckets: u64,
-    #[getter(copy)]
-    reset_count: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Getters)]
@@ -165,7 +138,7 @@ pub struct DcCkfMemoryStats {
 #[derive(Debug)]
 pub struct DcCkfEventOutcome {
     first_error: Option<KvCacheEventError>,
-    delta: Option<DcCkfDelta>,
+    publication: Option<DcCkfPublicationBatch>,
     unknown_removals: usize,
     publication_boundary: bool,
 }
@@ -175,12 +148,12 @@ impl DcCkfEventOutcome {
         self.first_error.as_ref()
     }
 
-    pub fn delta(&self) -> Option<&DcCkfDelta> {
-        self.delta.as_ref()
+    pub fn publication(&self) -> Option<&DcCkfPublicationBatch> {
+        self.publication.as_ref()
     }
 
-    pub fn into_delta(self) -> Option<DcCkfDelta> {
-        self.delta
+    pub fn into_publication(self) -> Option<DcCkfPublicationBatch> {
+        self.publication
     }
 
     pub fn unknown_removals(&self) -> usize {
@@ -217,10 +190,10 @@ impl DirtyWindow {
     fn try_reserve(&mut self, additional: usize) -> Result<(), KvCacheEventError> {
         self.buckets
             .try_reserve(additional)
-            .map_err(|_| KvCacheEventError::CapacityExhausted)?;
+            .map_err(|_| KvCacheEventError::AllocationFailed)?;
         self.originals
             .try_reserve(additional)
-            .map_err(|_| KvCacheEventError::CapacityExhausted)
+            .map_err(|_| KvCacheEventError::AllocationFailed)
     }
 
     fn mark(&mut self, bucket: usize, original: PackedBucket) {
@@ -266,10 +239,8 @@ impl DirtyWindow {
 #[derive(Debug)]
 struct PublicationWindow {
     dirty: DirtyWindow,
-    images: Vec<DcCkfBucketImage>,
-    sequence: u64,
+    images: Vec<GlobalCkfBucketImage>,
     pending_events: usize,
-    published_nonempty: bool,
 }
 
 impl PublicationWindow {
@@ -277,9 +248,7 @@ impl PublicationWindow {
         Ok(Self {
             dirty: DirtyWindow::new(bucket_count)?,
             images: Vec::new(),
-            sequence: 0,
             pending_events: 0,
-            published_nonempty: false,
         })
     }
 }
@@ -292,7 +261,6 @@ struct DcCkfTelemetry {
     distinct_touched_buckets: u64,
     emitted_images: u64,
     net_reverted_buckets: u64,
-    reset_count: u64,
     published_occupied_buckets: usize,
 }
 
@@ -322,13 +290,7 @@ impl DcCkfState {
             filter: OwnedPackedCkfLane::new(bucket_count)?,
             addressing: CkfAddressing::new(bucket_count, config.seed),
             config,
-            format: DcCkfFormatIdentity {
-                format_version: FORMAT_VERSION,
-                seed: config.seed,
-                bucket_count,
-                fingerprint_bits: FINGERPRINT_BITS,
-                slots_per_bucket: SLOTS_PER_BUCKET,
-            },
+            format: DcCkfFormatIdentity::new(config.seed, bucket_count),
             rng: lane_rng_seed(config.seed, 0),
             insertion_scratch: CuckooInsertionScratch::new(config.max_kicks)
                 .map_err(|_| CkfBuildError::AllocationFailed)?,
@@ -348,7 +310,7 @@ impl DcCkfState {
         {
             return DcCkfEventOutcome {
                 first_error: None,
-                delta: None,
+                publication: None,
                 unknown_removals: 0,
                 publication_boundary: false,
             };
@@ -388,13 +350,15 @@ impl DcCkfState {
             .telemetry
             .unknown_removals
             .saturating_add(unknown_removals as u64);
+        // Actor ownership makes this a producer cut after the complete command, including every
+        // successful sibling block and any rolled-back capacity omission.
         let publication_boundary = self.publication_due();
-        let delta = publication_boundary
+        let publication = publication_boundary
             .then(|| self.drain_publication())
             .flatten();
         DcCkfEventOutcome {
             first_error,
-            delta,
+            publication,
             unknown_removals,
             publication_boundary,
         }
@@ -403,7 +367,7 @@ impl DcCkfState {
     pub fn remove_rank(
         &mut self,
         worker: WorkerWithDpRank,
-    ) -> Result<Option<DcCkfDelta>, KvCacheEventError> {
+    ) -> Result<Option<DcCkfPublicationBatch>, KvCacheEventError> {
         self.remove_member(worker)?;
         Ok(self.drain_publication())
     }
@@ -411,7 +375,7 @@ impl DcCkfState {
     pub fn remove_worker(
         &mut self,
         worker_id: WorkerId,
-    ) -> Result<Option<DcCkfDelta>, KvCacheEventError> {
+    ) -> Result<Option<DcCkfPublicationBatch>, KvCacheEventError> {
         let members: Vec<_> = self
             .member_blocks
             .keys()
@@ -428,11 +392,11 @@ impl DcCkfState {
         &mut self,
         worker: WorkerWithDpRank,
         hashes: FxHashSet<ExternalSequenceBlockHash>,
-    ) -> Result<Option<DcCkfDelta>, KvCacheEventError> {
-        let mut replacement =
-            Self::new(self.config).map_err(|_| KvCacheEventError::CapacityExhausted)?;
-        replacement.publication.sequence = self.publication.sequence;
-        replacement.publication.published_nonempty = self.publication.published_nonempty;
+    ) -> Result<Option<DcCkfPublicationBatch>, KvCacheEventError> {
+        let mut replacement = Self::new(self.config).map_err(|error| match error {
+            CkfBuildError::AllocationFailed => KvCacheEventError::AllocationFailed,
+            _ => KvCacheEventError::IndexerInvariantViolation,
+        })?;
         for (&member, blocks) in &self.member_blocks {
             if member == worker {
                 continue;
@@ -454,7 +418,7 @@ impl DcCkfState {
             .publication
             .images
             .try_reserve(self.format.bucket_count)
-            .map_err(|_| KvCacheEventError::CapacityExhausted)?;
+            .map_err(|_| KvCacheEventError::AllocationFailed)?;
         for (bucket, published) in self.publication.dirty.touched_with_originals() {
             if replacement.filter.load_bucket(bucket) != published {
                 replacement.publication.dirty.mark(bucket, published);
@@ -480,34 +444,39 @@ impl DcCkfState {
         replacement.telemetry.distinct_touched_buckets = self.telemetry.distinct_touched_buckets;
         replacement.telemetry.emitted_images = self.telemetry.emitted_images;
         replacement.telemetry.net_reverted_buckets = self.telemetry.net_reverted_buckets;
-        replacement.telemetry.reset_count = self.telemetry.reset_count;
         replacement.telemetry.published_occupied_buckets =
             self.telemetry.published_occupied_buckets;
         *self = replacement;
         Ok(self.drain_publication())
     }
 
-    pub fn flush(&mut self) -> Option<DcCkfDelta> {
+    pub fn flush(&mut self) -> Option<DcCkfPublicationBatch> {
         self.drain_publication()
     }
 
-    pub fn snapshot(&mut self) -> Result<(Option<DcCkfDelta>, DcCkfSnapshot), CkfBuildError> {
+    pub fn has_pending_publication(&self) -> bool {
+        self.publication.pending_events != 0 || !self.publication.dirty.buckets.is_empty()
+    }
+
+    pub fn pending_event_count(&self) -> usize {
+        self.publication.pending_events
+    }
+
+    /// Drain the pending absolute-image tail, then copy one actor-serialized barrier snapshot.
+    ///
+    /// The core deliberately does not tag the snapshot with a lease or sequence. Its publisher
+    /// must first enqueue the returned tail, record its terminal sequence, then install the copy.
+    pub fn barrier_snapshot(
+        &mut self,
+    ) -> Result<(Option<DcCkfPublicationBatch>, Box<[u64]>), CkfBuildError> {
+        let publication = self.drain_publication();
         let mut buckets = Vec::new();
         buckets
             .try_reserve_exact(self.format.bucket_count)
             .map_err(|_| CkfBuildError::AllocationFailed)?;
         buckets
             .extend((0..self.format.bucket_count).map(|bucket| self.filter.load_bucket(bucket).0));
-        let buckets = buckets.into_boxed_slice();
-        let delta = self.drain_publication();
-        Ok((
-            delta,
-            DcCkfSnapshot {
-                sequence: self.publication.sequence,
-                format: self.format,
-                buckets,
-            },
-        ))
+        Ok((publication, buckets.into_boxed_slice()))
     }
 
     pub fn stats(&self) -> DcCkfStats {
@@ -522,13 +491,11 @@ impl DcCkfState {
                 occupied_slot_count: self.dc_refcounts.len(),
             },
             publication: DcCkfPublicationStats {
-                sequence: self.publication.sequence,
                 pending_events: self.publication.pending_events,
                 physical_touches: self.telemetry.physical_touches,
                 distinct_touched_buckets: self.telemetry.distinct_touched_buckets,
                 emitted_images: self.telemetry.emitted_images,
                 net_reverted_buckets: self.telemetry.net_reverted_buckets,
-                reset_count: self.telemetry.reset_count,
             },
             memory: DcCkfMemoryStats {
                 member_set_capacity: self.member_blocks.values().map(FxHashSet::capacity).sum(),
@@ -586,27 +553,27 @@ impl DcCkfState {
                 .get_mut(&worker)
                 .ok_or(KvCacheEventError::IndexerInvariantViolation)?
                 .try_reserve(1)
-                .map_err(|_| KvCacheEventError::CapacityExhausted)?;
+                .map_err(|_| KvCacheEventError::AllocationFailed)?;
             None
         } else {
             self.member_blocks
                 .try_reserve(1)
-                .map_err(|_| KvCacheEventError::CapacityExhausted)?;
+                .map_err(|_| KvCacheEventError::AllocationFailed)?;
             let mut member = FxHashSet::default();
             member
                 .try_reserve(1)
-                .map_err(|_| KvCacheEventError::CapacityExhausted)?;
+                .map_err(|_| KvCacheEventError::AllocationFailed)?;
             Some(member)
         };
 
         let current = self.dc_refcounts.get(&hash).copied().unwrap_or(0);
         if current == u32::MAX {
-            return Err(KvCacheEventError::IndexerInvariantViolation);
+            return Err(KvCacheEventError::OwnershipDegreeOverflow);
         }
         if current == 0 {
             self.dc_refcounts
                 .try_reserve(1)
-                .map_err(|_| KvCacheEventError::CapacityExhausted)?;
+                .map_err(|_| KvCacheEventError::AllocationFailed)?;
             self.reserve_publication_scratch(self.config.max_kicks.saturating_add(1))?;
             let dirty = &mut self.publication.dirty;
             let physical_touches = &mut self.telemetry.physical_touches;
@@ -620,6 +587,8 @@ impl DcCkfState {
                         dirty.mark(bucket, original);
                     },
                 )?;
+            // NOTE: Capacity failure returns above before any exact-state write. The omitted edge
+            // is intentionally untracked, so a later Remove is an idempotent unknown removal.
             self.dc_refcounts.insert(hash, 1);
         } else {
             *self
@@ -634,7 +603,7 @@ impl DcCkfState {
         } else {
             self.member_blocks
                 .get_mut(&worker)
-                .ok_or(KvCacheEventError::IndexerInvariantViolation)?
+                .expect("validated member must remain present through actor-owned commit")
                 .insert(hash)
         };
         debug_assert!(inserted);
@@ -670,7 +639,7 @@ impl DcCkfState {
         let member = self
             .member_blocks
             .get_mut(&worker)
-            .ok_or(KvCacheEventError::IndexerInvariantViolation)?;
+            .expect("validated member must remain present through actor-owned commit");
         let removed = member.remove(&hash);
         let member_is_empty = member.is_empty();
         debug_assert!(removed);
@@ -680,7 +649,8 @@ impl DcCkfState {
             *self
                 .dc_refcounts
                 .get_mut(&hash)
-                .ok_or(KvCacheEventError::IndexerInvariantViolation)? = current - 1;
+                .expect("validated refcount must remain present through actor-owned commit") =
+                current - 1;
         }
         if member_is_empty {
             self.member_blocks.remove(&worker);
@@ -695,7 +665,7 @@ impl DcCkfState {
         };
         self.remove_scratch
             .try_reserve(member.len())
-            .map_err(|_| KvCacheEventError::CapacityExhausted)?;
+            .map_err(|_| KvCacheEventError::AllocationFailed)?;
         self.remove_scratch.extend(member.iter().copied());
         for index in 0..self.remove_scratch.len() {
             let hash = self.remove_scratch[index];
@@ -706,22 +676,19 @@ impl DcCkfState {
         Ok(())
     }
 
-    fn drain_publication(&mut self) -> Option<DcCkfDelta> {
+    fn drain_publication(&mut self) -> Option<DcCkfPublicationBatch> {
         if self.publication.pending_events == 0 && self.publication.dirty.buckets.is_empty() {
             return None;
         }
-        let reset = self.dc_refcounts.is_empty() && self.publication.published_nonempty;
         let distinct_touched = self.publication.dirty.buckets.len() as u64;
         let occupied_bucket_count = self.current_occupied_bucket_count();
         self.publication.images.clear();
-        if !reset {
-            for (index, &bucket) in self.publication.dirty.buckets.iter().enumerate() {
-                let value = self.filter.load_bucket(bucket).0;
-                if value != self.publication.dirty.originals[index] {
-                    self.publication
-                        .images
-                        .push(DcCkfBucketImage { bucket, value });
-                }
+        for (index, &bucket) in self.publication.dirty.buckets.iter().enumerate() {
+            let value = self.filter.load_bucket(bucket).0;
+            if value != self.publication.dirty.originals[index] {
+                self.publication
+                    .images
+                    .push(GlobalCkfBucketImage::new(bucket, value));
             }
         }
         let images = std::mem::take(&mut self.publication.images);
@@ -734,28 +701,16 @@ impl DcCkfState {
             .telemetry
             .emitted_images
             .saturating_add(images.len() as u64);
-        if reset {
-            self.telemetry.reset_count = self.telemetry.reset_count.saturating_add(1);
-        } else {
-            self.telemetry.net_reverted_buckets = self
-                .telemetry
-                .net_reverted_buckets
-                .saturating_add(distinct_touched.saturating_sub(images.len() as u64));
-        }
+        self.telemetry.net_reverted_buckets = self
+            .telemetry
+            .net_reverted_buckets
+            .saturating_add(distinct_touched.saturating_sub(images.len() as u64));
         self.publication.pending_events = 0;
-        self.publication.published_nonempty = !self.dc_refcounts.is_empty();
-        self.telemetry.published_occupied_buckets = if reset { 0 } else { occupied_bucket_count };
-        if !reset && images.is_empty() {
+        self.telemetry.published_occupied_buckets = occupied_bucket_count;
+        if images.is_empty() {
             return None;
         }
-        let base_sequence = self.publication.sequence;
-        self.publication.sequence = self.publication.sequence.saturating_add(1);
-        Some(DcCkfDelta {
-            base_sequence,
-            sequence: self.publication.sequence,
-            reset,
-            images,
-        })
+        Some(DcCkfPublicationBatch { images })
     }
 
     fn reserve_publication_scratch(
@@ -772,7 +727,7 @@ impl DcCkfState {
         self.publication
             .images
             .try_reserve(maximum_images)
-            .map_err(|_| KvCacheEventError::CapacityExhausted)
+            .map_err(|_| KvCacheEventError::AllocationFailed)
     }
 
     fn current_occupied_bucket_count(&self) -> usize {
@@ -941,10 +896,9 @@ mod tests {
         let mut state = DcCkfState::new(config).unwrap();
 
         let first = state.apply_event(stored(worker, 1, &[7]));
-        assert!(first.delta().is_none());
+        assert!(first.publication().is_none());
         let second = state.apply_event(removed(worker, 2, &[7]));
-        assert!(second.delta().is_none());
-        assert_eq!(state.stats().publication().sequence(), 0);
+        assert!(second.publication().is_none());
         assert_eq!(state.stats().aggregation().unique_block_count(), 0);
     }
 
@@ -970,19 +924,20 @@ mod tests {
         let mut state = DcCkfState::new(CkfConfig::new(32)).unwrap();
         state.apply_event(stored(replaced, 1, &[shared.0]));
         state.apply_event(stored(survivor, 1, &[shared.0]));
-        let base_sequence = state.snapshot().unwrap().1.sequence();
+        let (_, before) = state.barrier_snapshot().unwrap();
 
-        let delta = state.replace_rank(replaced, FxHashSet::default()).unwrap();
+        let publication = state.replace_rank(replaced, FxHashSet::default()).unwrap();
 
         assert_eq!(state.member_block_count(replaced), 0);
         assert_eq!(state.member_block_count(survivor), 1);
         assert_eq!(state.stats().aggregation().unique_block_count(), 1);
         assert!(state.contains(shared));
         assert!(
-            delta.is_none(),
+            publication.is_none(),
             "shared ownership needs no physical CKF change"
         );
-        assert_eq!(state.stats().publication().sequence(), base_sequence);
+        let (_, after) = state.barrier_snapshot().unwrap();
+        assert_eq!(before.as_ref(), after.as_ref());
     }
 
     #[test]
@@ -992,25 +947,25 @@ mod tests {
         let mut config = CkfConfig::new(32);
         config.publish_every_n_events = 16;
         let mut state = DcCkfState::new(config).unwrap();
-        let (_, base) = state.snapshot().unwrap();
+        let (_, base) = state.barrier_snapshot().unwrap();
 
         assert!(
             state
                 .apply_event(stored(worker, 1, &[hash.0]))
-                .delta()
+                .publication()
                 .is_none()
         );
-        let delta = state
+        let publication = state
             .replace_rank(worker, [hash].into_iter().collect())
             .unwrap()
             .expect("replacement must publish the pending state");
-        let mut reconstructed = base.buckets().to_vec();
-        for image in delta.images() {
+        let mut reconstructed = base.to_vec();
+        for image in publication.images() {
             reconstructed[image.bucket()] = image.value();
         }
-        let (_, current) = state.snapshot().unwrap();
+        let (_, current) = state.barrier_snapshot().unwrap();
 
-        assert_eq!(reconstructed, current.buckets());
+        assert_eq!(reconstructed, current.as_ref());
         assert!(state.contains(hash));
     }
 
@@ -1021,38 +976,37 @@ mod tests {
         config.publish_every_n_events = 16;
         let mut state = DcCkfState::new(config).unwrap();
 
-        assert!(state.apply_event(stored(worker, 1, &[7])).delta().is_none());
+        assert!(
+            state
+                .apply_event(stored(worker, 1, &[7]))
+                .publication()
+                .is_none()
+        );
         assert!(
             state
                 .replace_rank(worker, FxHashSet::default())
                 .unwrap()
                 .is_none()
         );
-        assert_eq!(state.stats().publication().sequence(), 0);
         assert_eq!(state.stats().aggregation().unique_block_count(), 0);
     }
 
     #[test]
-    fn snapshot_and_absolute_deltas_reconstruct_producer_bytes() {
+    fn barrier_snapshot_and_absolute_batches_reconstruct_producer_bytes() {
         let worker = WorkerWithDpRank::new(1, 0);
         let mut state = DcCkfState::new(CkfConfig::new(32)).unwrap();
-        let (_, base) = state.snapshot().unwrap();
-        let delta = state
+        let (_, base) = state.barrier_snapshot().unwrap();
+        let publication = state
             .apply_event(stored(worker, 1, &[1, 2, 3]))
-            .into_delta()
+            .into_publication()
             .unwrap();
-        let mut reconstructed = base.buckets().to_vec();
-        if delta.reset() {
-            reconstructed.fill(0);
-        }
-        for image in delta.images() {
+        let mut reconstructed = base.to_vec();
+        for image in publication.images() {
             reconstructed[image.bucket()] = image.value();
         }
-        let (_, current) = state.snapshot().unwrap();
+        let (_, current) = state.barrier_snapshot().unwrap();
 
-        assert_eq!(delta.base_sequence(), base.sequence());
-        assert_eq!(delta.sequence(), current.sequence());
-        assert_eq!(reconstructed, current.buckets());
+        assert_eq!(reconstructed, current.as_ref());
     }
 
     #[test]

@@ -1,28 +1,45 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+mod adapter;
 mod addressing;
 mod bucket;
 mod dc;
-mod event_indexer;
+mod failure;
+mod global;
+mod ingestion_pool;
 mod mutator;
-mod relay;
+mod publication;
 mod search;
 
 #[cfg(test)]
 mod tests;
 
+pub use adapter::*;
 pub use dc::{
-    DcCkfAggregationStats, DcCkfBucketImage, DcCkfDelta, DcCkfEventOutcome, DcCkfFormatIdentity,
-    DcCkfMemoryStats, DcCkfPublicationStats, DcCkfSnapshot, DcCkfState, DcCkfStats,
+    DcCkfAggregationStats, DcCkfEventOutcome, DcCkfFormatIdentity, DcCkfMemoryStats,
+    DcCkfPublicationBatch, DcCkfPublicationStats, DcCkfState, DcCkfStats,
 };
-pub use event_indexer::EventTransposedCkfIndexer;
-pub use relay::{
-    CkfBucketImage, CkfDeltaBatch, CkfEventOutcome, CkfFormatIdentity, CkfMemorySnapshot,
-    CkfRelayAggregator, RelayLaneConfig, RelayManifest, RouterLocalCkfPipeline,
-    TransposedCkfReplica,
+pub use failure::{
+    CkfCommitState, CkfFailureAction, CkfFailureDisposition, CkfFailureDomain, CkfFailurePoint,
 };
-
+pub use global::{
+    CacheDomainId, CacheDomainIdentity, ConsumerDrainMarker, ConsumerInstanceId, DcCkfBucketImage,
+    DcCkfDelta, DcCkfSnapshot, DcId, EndpointId, GlobalCkfAssignmentError, GlobalCkfBucketImage,
+    GlobalCkfBuildError, GlobalCkfDelta, GlobalCkfIndexer, GlobalCkfIngestOutcome,
+    GlobalCkfLaneFault, GlobalCkfLaneIngestor, GlobalCkfLaneMatch, GlobalCkfLaneOwner,
+    GlobalCkfManifest, GlobalCkfQueryError, GlobalCkfQueryResult, GlobalCkfSnapshot, LaneLease,
+    ProducerIdentity,
+};
+pub use ingestion_pool::{
+    DEFAULT_GLOBAL_INGESTION_CONTROL_TIMEOUT, DEFAULT_GLOBAL_INGESTION_QUEUE_CAPACITY,
+    DEFAULT_GLOBAL_INGESTION_WORKERS, GlobalCkfIngestionError, GlobalCkfIngestionFault,
+    GlobalCkfIngestionPool, GlobalCkfIngestionPoolBuildError, GlobalCkfIngestionPoolConfig,
+};
+pub use publication::{
+    DcCkfDeltaSink, DcCkfPublishError, DcCkfPublisher, PublisherEmitOutcome, PublisherFenceReason,
+    PublisherSnapshotError,
+};
 /// Fixed number of DC lanes in the transposed CKF replica.
 pub const CKF_LANE_COUNT: usize = 16;
 
@@ -35,16 +52,6 @@ const DEFAULT_MAX_KICKS: usize = 500;
 const DEFAULT_EXPECTED_BLOCKS_PER_DC: usize = 1;
 const DEFAULT_VERIFICATION_WINDOW: usize = 2;
 const DEFAULT_PUBLISH_EVERY_N_EVENTS: usize = 1;
-
-/// Output shape for CKF prefix lookups through [`EventTransposedCkfIndexer`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum CkfMatchMode {
-    /// Return every positive DC-lane depth.
-    #[default]
-    FullMap,
-    /// Return every positive lane tied at the greatest verified depth.
-    MaxDepthMatches,
-}
 
 /// Search behavior for CKF prefix lookups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,15 +110,10 @@ impl Default for CkfConfig {
     }
 }
 
-/// Construction failures for [`EventTransposedCkfIndexer`].
+/// Construction failures for CKF storage and search components.
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum CkfBuildError {
-    #[error("duplicate CKF worker identity: {worker:?}")]
-    DuplicateWorker {
-        worker: crate::protocols::WorkerWithDpRank,
-    },
-
     #[error("expected_blocks_per_dc must be greater than zero")]
     ExpectedCapacityZero,
 
@@ -131,16 +133,6 @@ pub enum CkfBuildError {
 
     #[error("failed to allocate CKF storage")]
     AllocationFailed,
-
-    #[error("lane {lane} expected_contributions {value} is below the required minimum {minimum}")]
-    InvalidContributionCapacity {
-        lane: usize,
-        value: usize,
-        minimum: usize,
-    },
-
-    #[error("empty lane {lane} must have zero expected_contributions, got {value}")]
-    InvalidEmptyLaneContributionCapacity { lane: usize, value: usize },
 }
 
 pub(super) fn validate_config(config: CkfConfig) -> Result<(), CkfBuildError> {

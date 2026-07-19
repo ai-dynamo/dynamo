@@ -13,16 +13,39 @@ pub(crate) enum RecoveryResetReason {
     TargetFault,
 }
 
+/// Generation-scoped fence for commands targeting one `(worker, dp_rank)` source.
+///
+/// The membership coordinator owns this value. Recovery targets must carry it through
+/// admission so an accepted command or delayed fault from an old source cannot affect a
+/// replacement source for the same logical rank.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct SourceEpoch(u64);
+
+impl SourceEpoch {
+    pub(crate) const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub(crate) const fn get(self) -> u64 {
+        self.0
+    }
+}
+
 /// Destination semantics required by worker-local KV recovery.
 ///
 /// Ordinary events complete when the destination queue accepts them. Exact-rank
 /// reset and replacement are completion barriers. Targets never provide recovery
 /// state themselves; the source remains the worker's exact local indexer.
 pub(crate) trait RecoveryTarget: Send + Sync + 'static {
-    fn admit_event(&self, event: RouterEvent) -> impl Future<Output = anyhow::Result<()>> + Send;
+    fn admit_event(
+        &self,
+        source_epoch: SourceEpoch,
+        event: RouterEvent,
+    ) -> impl Future<Output = anyhow::Result<()>> + Send;
 
     fn replace_rank(
         &self,
+        source_epoch: SourceEpoch,
         worker_id: WorkerId,
         dp_rank: DpRank,
         events: Vec<RouterEvent>,
@@ -30,6 +53,7 @@ pub(crate) trait RecoveryTarget: Send + Sync + 'static {
 
     fn reset_rank(
         &self,
+        source_epoch: SourceEpoch,
         worker_id: WorkerId,
         dp_rank: DpRank,
         reason: RecoveryResetReason,
@@ -48,7 +72,11 @@ impl IndexerRecoveryTarget {
 }
 
 impl RecoveryTarget for IndexerRecoveryTarget {
-    async fn admit_event(&self, event: RouterEvent) -> anyhow::Result<()> {
+    async fn admit_event(
+        &self,
+        _source_epoch: SourceEpoch,
+        event: RouterEvent,
+    ) -> anyhow::Result<()> {
         self.indexer
             .try_apply_event(event)
             .await
@@ -57,20 +85,27 @@ impl RecoveryTarget for IndexerRecoveryTarget {
 
     async fn replace_rank(
         &self,
+        source_epoch: SourceEpoch,
         worker_id: WorkerId,
         dp_rank: DpRank,
         events: Vec<RouterEvent>,
     ) -> anyhow::Result<()> {
-        self.reset_rank(worker_id, dp_rank, RecoveryResetReason::Lifecycle)
-            .await?;
+        self.reset_rank(
+            source_epoch,
+            worker_id,
+            dp_rank,
+            RecoveryResetReason::Lifecycle,
+        )
+        .await?;
         for event in events {
-            self.admit_event(event).await?;
+            self.admit_event(source_epoch, event).await?;
         }
         Ok(())
     }
 
     async fn reset_rank(
         &self,
+        _source_epoch: SourceEpoch,
         worker_id: WorkerId,
         dp_rank: DpRank,
         _reason: RecoveryResetReason,

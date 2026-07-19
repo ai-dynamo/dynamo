@@ -16,24 +16,30 @@ pub struct KvDcRelay {
     dc_id: String,
     namespace_filter: Option<String>,
     endpoint_prefix: Option<String>,
+    publication_threshold: usize,
+    publication_delay_ms: u64,
     inner: Arc<OnceCell<Arc<llm_rs::kv_dc_relay::KvDcRelay>>>,
 }
 
 #[pymethods]
 impl KvDcRelay {
     #[new]
-    #[pyo3(signature = (endpoint, dc_id, namespace_filter=None, endpoint_prefix=None))]
+    #[pyo3(signature = (endpoint, dc_id, namespace_filter=None, endpoint_prefix=None, publication_threshold=16, publication_delay_ms=1))]
     fn new(
         endpoint: Endpoint,
         dc_id: String,
         namespace_filter: Option<String>,
         endpoint_prefix: Option<String>,
+        publication_threshold: usize,
+        publication_delay_ms: u64,
     ) -> Self {
         Self {
             endpoint: endpoint.inner,
             dc_id,
             namespace_filter,
             endpoint_prefix,
+            publication_threshold,
+            publication_delay_ms,
             inner: Arc::new(OnceCell::new()),
         }
     }
@@ -43,6 +49,8 @@ impl KvDcRelay {
         let dc_id = self.dc_id.clone();
         let namespace_filter = self.namespace_filter.clone();
         let endpoint_prefix = self.endpoint_prefix.clone();
+        let publication_threshold = self.publication_threshold;
+        let publication_delay_ms = self.publication_delay_ms;
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             inner
@@ -53,6 +61,8 @@ impl KvDcRelay {
                         llm_rs::kv_dc_relay::KvDcRelayConfig {
                             namespace_filter,
                             endpoint_prefix,
+                            publication_threshold,
+                            publication_delay_ms,
                         },
                     )
                     .await

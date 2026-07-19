@@ -35,7 +35,7 @@ use self::remote::RemoteIndexer;
 pub use self::remote::{ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use self::side::SideIndexer;
 pub(crate) use recovery::{
-    RecoveryResetReason, RecoverySupervisor, RecoveryTarget, TargetFaultDisposition,
+    RecoveryResetReason, RecoverySupervisor, RecoveryTarget, SourceEpoch, TargetFaultDisposition,
     WorkerQueryHealthSnapshot, start_target_subscriber,
 };
 pub(crate) use recovery::{start_subscriber, start_worker_kv_query_endpoint};

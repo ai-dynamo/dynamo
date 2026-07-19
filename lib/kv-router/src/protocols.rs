@@ -892,8 +892,17 @@ pub enum KvCacheEventError {
     #[error("Invalid block sequence")]
     InvalidBlockSequence,
 
+    /// A bounded, pre-commit index omission; this does not prove the backing table is full.
     #[error("Indexer capacity exhausted")]
     CapacityExhausted,
+
+    /// A pre-commit allocation or reservation failed; no lossy-capacity policy is implied.
+    #[error("Indexer allocation failed")]
+    AllocationFailed,
+
+    /// An exact ownership degree overflowed before mutation.
+    #[error("Indexer ownership degree overflow")]
+    OwnershipDegreeOverflow,
 
     #[error("Indexer invariant violated")]
     IndexerInvariantViolation,
