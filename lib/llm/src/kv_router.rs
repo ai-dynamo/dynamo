@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashSet, sync::Arc, time::Instant};
+use std::{collections::HashSet, marker::PhantomData, sync::Arc, time::Instant};
 
 use anyhow::Result;
 use dynamo_kv_router::{
@@ -21,7 +21,6 @@ use dynamo_kv_router::{
     },
 };
 use dynamo_runtime::{
-    CancellationToken,
     component::{Client, Endpoint},
     discovery::DiscoveryQuery,
     error::{DynamoError, ErrorType},
@@ -56,6 +55,7 @@ pub mod shared_cache;
 pub use dynamo_kv_router::scheduling::{
     OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlapScore,
 };
+use dynamo_kv_router::selector::{DefaultWorkerSelector, WorkerSelector};
 pub use encoder_router::EncoderRouter;
 pub use indexer::{Indexer, ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use prefill_router::PrefillRouter;
@@ -64,7 +64,7 @@ pub use push_router::{DirectRoutingRouter, KvPushRouter};
 use crate::{
     discovery::{KvSourceMembershipWatch, RuntimeConfigWatch},
     kv_router::{
-        scheduler::{DefaultWorkerSelector, KvScheduler, PotentialLoad},
+        scheduler::{KvScheduler, PotentialLoad},
         sequence::{SequenceError, SequenceRequest},
     },
     local_model::runtime_config::ModelRuntimeConfig,
@@ -201,15 +201,16 @@ pub fn router_discovery_query(namespace: String, component: String) -> Discovery
 /// TODO: Rename this to indicate it only selects a worker, it does not route.
 pub struct KvRouter<Sel = DefaultWorkerSelector>
 where
-    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>,
+    Sel: WorkerSelector<ModelRuntimeConfig>,
 {
+    // Keep first so router-owned tasks are cancelled before the remaining fields are dropped.
+    _cancellation_guard: tokio_util::sync::DropGuard,
     indexer: Indexer,
-    scheduler: KvScheduler<Sel, TieredOverlapRefresher<Indexer>>,
+    scheduler: KvScheduler,
     workers_with_configs: RuntimeConfigWatch,
     block_size: u32,
     kv_router_config: KvRouterConfig,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-    cancellation_token: CancellationToken,
     client: Client,
     is_eagle: bool,
     _served_indexer_handle: Option<ServedIndexerHandle>,
@@ -220,11 +221,12 @@ where
     /// narrowed to the LoRA's allocated/loaded replicas inside `find_best_match_details`,
     /// covering both the decode and prefill routers (both built via `kv_chooser_for`).
     lora_filter: Option<Arc<crate::lora::LoraFilter>>,
+    _marker: PhantomData<fn() -> Sel>,
 }
 
 impl<Sel> KvRouter<Sel>
 where
-    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + Sync + 'static,
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
@@ -296,7 +298,8 @@ where
             worker_type,
             cancellation_token.child_token(),
         )
-        .await?;
+        .await?
+        .into_erased();
 
         // Start KV event subscription if needed — skip when using a remote indexer.
         if kv_router_config.use_remote_indexer {
@@ -342,21 +345,54 @@ where
         };
 
         tracing::info!("KV Routing initialized");
-        let cancellation_token = cancellation_guard.disarm();
         Ok(Self {
+            _cancellation_guard: cancellation_guard,
             indexer,
             scheduler,
             workers_with_configs,
             block_size,
             kv_router_config,
             prefill_load_estimator,
-            cancellation_token,
             client,
             is_eagle,
             _served_indexer_handle: served_indexer_handle,
             shared_cache,
             lora_filter,
+            _marker: PhantomData,
         })
+    }
+
+    pub(crate) fn into_erased(self) -> KvRouter {
+        let Self {
+            _cancellation_guard,
+            indexer,
+            scheduler,
+            workers_with_configs,
+            block_size,
+            kv_router_config,
+            prefill_load_estimator,
+            client,
+            is_eagle,
+            _served_indexer_handle,
+            shared_cache,
+            lora_filter,
+            _marker: _,
+        } = self;
+        KvRouter {
+            _cancellation_guard,
+            indexer,
+            scheduler,
+            workers_with_configs,
+            block_size,
+            kv_router_config,
+            prefill_load_estimator,
+            client,
+            is_eagle,
+            _served_indexer_handle,
+            shared_cache,
+            lora_filter,
+            _marker: PhantomData,
+        }
     }
 
     /// Get a reference to the client used by this KvRouter
@@ -1162,7 +1198,7 @@ where
 impl<Sel> AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Error>
     for KvRouter<Sel>
 where
-    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + Sync + 'static,
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     async fn generate(
         &self,
@@ -1276,16 +1312,6 @@ where
         let response = Annotated::from_data(response);
         let stream = stream::iter(vec![response]);
         Ok(ResponseStream::new(Box::pin(stream), ctx.context()))
-    }
-}
-
-impl<Sel> Drop for KvRouter<Sel>
-where
-    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>,
-{
-    fn drop(&mut self) {
-        tracing::info!("Dropping KvRouter - cancelling background tasks");
-        self.cancellation_token.cancel();
     }
 }
 

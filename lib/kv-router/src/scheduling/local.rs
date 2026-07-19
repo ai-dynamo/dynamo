@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashMap, HashSet};
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -39,17 +40,18 @@ where
     RF: OverlapScoresRefresh,
 {
     slots: Arc<ActiveSequencesMultiWorker<P>>,
-    queue: Arc<SchedulerQueue<P, C, Sel, RF>>,
+    queue: Arc<SchedulerQueue<P, C>>,
     queue_updates: watch::Sender<()>,
     track_prefill_tokens_default: bool,
     worker_type: &'static str,
+    _marker: PhantomData<fn() -> (Sel, RF)>,
 }
 
 impl<P, C, Sel, RF> LocalScheduler<P, C, Sel, RF>
 where
     P: SequencePublisher + 'static,
     C: WorkerConfigLike + Clone + PartialEq + Send + Sync + 'static,
-    Sel: WorkerSelector<C> + Send + Sync + 'static,
+    Sel: WorkerSelector<C> + Send + 'static,
     RF: OverlapScoresRefresh + 'static,
 {
     fn worker_dp_ranges(workers: &HashMap<WorkerId, C>) -> Vec<WorkerDpRange> {
@@ -171,7 +173,7 @@ where
             .filter_map(|strategy| strategy.reconcile_interval())
             .fold(recheck_interval, Duration::min);
         let queue = Arc::new(
-            SchedulerQueue::new_with_policy_profile_and_admission_strategies(
+            SchedulerQueue::<P, C, Sel, RF>::new_with_policy_profile_and_admission_strategies(
                 Arc::clone(&slots),
                 workers_with_configs.clone(),
                 profile,
@@ -182,7 +184,8 @@ where
                 overloaded_worker_provider,
                 recheck_interval,
                 admission_strategies,
-            )?,
+            )?
+            .into_erased(),
         );
 
         if monitor_worker_configs {
@@ -273,7 +276,28 @@ where
             queue_updates,
             track_prefill_tokens_default,
             worker_type,
+            _marker: PhantomData,
         })
+    }
+
+    #[doc(hidden)]
+    pub fn into_erased(self) -> LocalScheduler<P, C> {
+        let Self {
+            slots,
+            queue,
+            queue_updates,
+            track_prefill_tokens_default,
+            worker_type,
+            _marker: _,
+        } = self;
+        LocalScheduler {
+            slots,
+            queue,
+            queue_updates,
+            track_prefill_tokens_default,
+            worker_type,
+            _marker: PhantomData,
+        }
     }
 
     pub async fn schedule_request(
@@ -620,7 +644,7 @@ impl<P, C, Sel> LocalScheduler<P, C, Sel, NoopOverlapScoresRefresh>
 where
     P: SequencePublisher + 'static,
     C: WorkerConfigLike + Clone + PartialEq + Send + Sync + 'static,
-    Sel: WorkerSelector<C> + Send + Sync + 'static,
+    Sel: WorkerSelector<C> + Send + 'static,
 {
     #[allow(clippy::too_many_arguments)]
     pub fn new_without_overlap_refresh_with_policy_profile(

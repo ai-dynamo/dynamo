@@ -14,6 +14,7 @@ use dynamo_kv_router::{
     PrefillLoadEstimator,
     config::KvRouterConfig,
     protocols::{KvTransferEnforcement, RoutingConstraints, WorkerId},
+    selector::{TargetWorkerSelector, ValidatedWorkerSelector, WorkerSelector},
 };
 use tokio::sync::oneshot;
 
@@ -1060,6 +1061,64 @@ impl ModelManager {
         model_name: Option<String>,
         is_eagle: bool,
     ) -> anyhow::Result<Arc<KvRouter>> {
+        let selector = DefaultWorkerSelector::new(kv_router_config.clone(), worker_type);
+        self.kv_chooser_for_scheduler_selector(
+            endpoint,
+            kv_cache_block_size,
+            kv_router_config,
+            prefill_load_estimator,
+            worker_type,
+            model_name,
+            is_eagle,
+            selector,
+        )
+        .await
+    }
+
+    /// Build a KV chooser with caller-provided worker selection logic.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn kv_chooser_for_with_selector<Sel>(
+        &self,
+        endpoint: &Endpoint,
+        kv_cache_block_size: u32,
+        kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        worker_type: &'static str,
+        model_name: Option<String>,
+        is_eagle: bool,
+        selector: Sel,
+    ) -> anyhow::Result<Arc<KvRouter>>
+    where
+        Sel: TargetWorkerSelector<ModelRuntimeConfig> + Send + 'static,
+    {
+        self.kv_chooser_for_scheduler_selector(
+            endpoint,
+            kv_cache_block_size,
+            kv_router_config,
+            prefill_load_estimator,
+            worker_type,
+            model_name,
+            is_eagle,
+            ValidatedWorkerSelector::new(selector),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn kv_chooser_for_scheduler_selector<Sel>(
+        &self,
+        endpoint: &Endpoint,
+        kv_cache_block_size: u32,
+        kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        worker_type: &'static str,
+        model_name: Option<String>,
+        is_eagle: bool,
+        selector: Sel,
+    ) -> anyhow::Result<Arc<KvRouter>>
+    where
+        Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+    {
         let client = endpoint.client().await?;
         let lora_domain = self.lora_domain(&endpoint.id());
 
@@ -1085,8 +1144,6 @@ impl ModelManager {
 
         // Get of create runtime config watcher for this endpoint
         let workers_with_configs = self.get_or_create_runtime_config_watcher(endpoint).await?;
-
-        let selector = DefaultWorkerSelector::new(kv_router_config.clone(), worker_type);
 
         // Build shared cache client based on shared_cache_type.
         let shared_cache: Option<Box<dyn dynamo_kv_router::SharedKvCache>> = match kv_router_config
@@ -1134,7 +1191,8 @@ impl ModelManager {
             shared_cache,
             self.lora_enabled.then(|| lora_domain.filter.clone()),
         )
-        .await?;
+        .await?
+        .into_erased();
 
         // F2: feed the LoRA LoadEstimator in KV mode. Start exactly one active-sequence
         // subscription per decode endpoint. WORKER_TYPE_DECODE is the routing path for BOTH

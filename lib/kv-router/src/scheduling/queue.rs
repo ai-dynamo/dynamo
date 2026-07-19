@@ -270,7 +270,7 @@ pub struct SchedulerQueue<
     queueing_enabled: bool,
     admission_enabled: bool,
     supports_overlap_refresh: bool,
-    _marker: PhantomData<(Sel, RF)>,
+    _marker: PhantomData<fn() -> (Sel, RF)>,
 }
 
 impl<
@@ -462,6 +462,37 @@ impl<
             supports_overlap_refresh: overlap_refresh_after.is_some(),
             _marker: PhantomData,
         })
+    }
+
+    pub(crate) fn into_erased(self) -> SchedulerQueue<P, C> {
+        let Self {
+            admission_tx,
+            cleanup,
+            next_lifecycle_generation,
+            pending_count,
+            pending_isl_tokens,
+            class_counters,
+            slots,
+            workers_with_configs,
+            queueing_enabled,
+            admission_enabled,
+            supports_overlap_refresh,
+            _marker: _,
+        } = self;
+        SchedulerQueue {
+            admission_tx,
+            cleanup,
+            next_lifecycle_generation,
+            pending_count,
+            pending_isl_tokens,
+            class_counters,
+            slots,
+            workers_with_configs,
+            queueing_enabled,
+            admission_enabled,
+            supports_overlap_refresh,
+            _marker: PhantomData,
+        }
     }
 }
 

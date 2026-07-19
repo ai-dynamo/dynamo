@@ -11,7 +11,7 @@ pub use dynamo_kv_router::scheduling::{
     SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
 };
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
-use dynamo_kv_router::selector::WorkerSelector as WorkerSelectorTrait;
+use dynamo_kv_router::selector::WorkerSelector;
 
 use super::metrics::{ROUTER_QUEUE_METRICS, RouterQueueMetricHandles};
 use super::sequence::{
@@ -29,23 +29,25 @@ use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_tokens::SequenceHash;
 use std::collections::{HashMap, HashSet};
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 pub struct KvScheduler<Sel = DefaultWorkerSelector, RF = NoopOverlapScoresRefresh>
 where
-    Sel: WorkerSelectorTrait<ModelRuntimeConfig>,
+    Sel: WorkerSelector<ModelRuntimeConfig>,
     RF: OverlapScoresRefresh,
 {
-    inner: Arc<LocalScheduler<RuntimeSequencePublisher, ModelRuntimeConfig, Sel, RF>>,
+    inner: Arc<LocalScheduler<RuntimeSequencePublisher, ModelRuntimeConfig>>,
     queue_metrics: Vec<RouterQueueMetricHandles>,
     queue_metric_indices: HashMap<String, usize>,
+    _marker: PhantomData<fn() -> (Sel, RF)>,
 }
 
 impl<Sel, RF> KvScheduler<Sel, RF>
 where
-    Sel: WorkerSelectorTrait<ModelRuntimeConfig> + Send + Sync + 'static,
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
     RF: OverlapScoresRefresh + Send + Sync + 'static,
 {
     /// Start the scheduler, optionally wiring an [`OverlapScoresRefresh`] into the queue so
@@ -134,7 +136,7 @@ where
             .collect();
 
         let inner = Arc::new(
-            LocalScheduler::new_with_policy_profile_and_admission_strategies(
+            LocalScheduler::<RuntimeSequencePublisher, ModelRuntimeConfig, Sel, RF>::new_with_policy_profile_and_admission_strategies(
                 slots,
                 workers_with_configs.clone(),
                 profile,
@@ -149,7 +151,8 @@ where
                 worker_type,
                 watch_worker_configs,
                 admission_strategies,
-            )?,
+            )?
+            .into_erased(),
         );
 
         let metrics_scheduler = Arc::clone(&inner);
@@ -186,7 +189,23 @@ where
             inner,
             queue_metrics,
             queue_metric_indices,
+            _marker: PhantomData,
         })
+    }
+
+    pub(crate) fn into_erased(self) -> KvScheduler {
+        let Self {
+            inner,
+            queue_metrics,
+            queue_metric_indices,
+            _marker: _,
+        } = self;
+        KvScheduler {
+            inner,
+            queue_metrics,
+            queue_metric_indices,
+            _marker: PhantomData,
+        }
     }
 
     pub async fn schedule_request(
