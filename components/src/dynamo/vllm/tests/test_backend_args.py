@@ -16,6 +16,7 @@ from dynamo.vllm.backend_args import (
     DisaggregationMode,
     DynamoVllmArgGroup,
     DynamoVllmConfig,
+    _reject_removed_multimodal_env_vars,
 )
 
 pytestmark = [
@@ -62,6 +63,32 @@ def test_removed_multimodal_role_flags_are_not_registered(flag):
 
     with pytest.raises(SystemExit):
         parser.parse_args([flag])
+
+
+@pytest.mark.parametrize(
+    "env_var",
+    [
+        "DYN_VLLM_MULTIMODAL_ENCODE_WORKER",
+        "DYN_VLLM_MULTIMODAL_WORKER",
+        "DYN_VLLM_MULTIMODAL_DECODE_WORKER",
+    ],
+)
+def test_removed_multimodal_env_vars_are_rejected(env_var, monkeypatch):
+    # The removed role flags fail at argparse, but a leftover env var would be
+    # silently ignored and start the worker in the wrong role — validate()
+    # rejects it with the migration path instead.
+    monkeypatch.setenv(env_var, "1")
+    config = create_config()
+
+    with pytest.raises(ValueError, match="no longer supported"):
+        config.validate()
+
+
+def test_removed_multimodal_env_var_falsy_value_is_ignored(monkeypatch):
+    # A falsy value was a no-op with the old flags too; keep it harmless.
+    monkeypatch.setenv("DYN_VLLM_MULTIMODAL_WORKER", "false")
+
+    _reject_removed_multimodal_env_vars()
 
 
 class TestResolveDisaggregationMode:

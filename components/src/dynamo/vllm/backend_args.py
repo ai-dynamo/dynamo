@@ -28,6 +28,28 @@ def _warn_deprecated(message: str) -> None:
     warnings.warn(message, DeprecationWarning, stacklevel=3)
 
 
+# Env vars of the removed multimodal role flags. The flags fail at argparse,
+# but a leftover env var would otherwise be silently ignored and start the
+# worker in the wrong role — reject it with the migration path instead.
+_REMOVED_MULTIMODAL_ENV_VARS = {
+    "DYN_VLLM_MULTIMODAL_ENCODE_WORKER": "--disaggregation-mode=encode",
+    "DYN_VLLM_MULTIMODAL_WORKER": (
+        "--disaggregation-mode=agg or --disaggregation-mode=prefill"
+    ),
+    "DYN_VLLM_MULTIMODAL_DECODE_WORKER": "--disaggregation-mode=decode",
+}
+
+
+def _reject_removed_multimodal_env_vars() -> None:
+    for env_var, replacement in _REMOVED_MULTIMODAL_ENV_VARS.items():
+        if os.environ.get(env_var, "").strip().lower() in ("true", "1", "yes", "on"):
+            raise ValueError(
+                f"{env_var} is no longer supported; use --enable-multimodal with "
+                f"{replacement} (env: DYN_VLLM_ENABLE_MULTIMODAL, "
+                "DYN_VLLM_DISAGGREGATION_MODE)."
+            )
+
+
 class _StoreExplicitBenchmarkOption(argparse.Action):
     """Store a value and remember that its new sampling option was explicit."""
 
@@ -444,6 +466,7 @@ class DynamoVllmConfig(ConfigBase):
 
     def validate(self) -> None:
         """Validate vLLM wrapper configuration."""
+        _reject_removed_multimodal_env_vars()
         self._resolve_disaggregation_mode()
         self._resolve_embedding_transfer_mode()
         self._validate_embedding_worker_exclusivity()

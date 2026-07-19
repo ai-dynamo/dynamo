@@ -4,6 +4,7 @@
 """Dynamo SGLang wrapper configuration ArgGroup."""
 
 import argparse
+import os
 from typing import List, Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
@@ -15,6 +16,28 @@ from dynamo.common.configuration.utils import add_argument, add_negatable_bool_a
 from dynamo.common.constants import EmbeddingTransferMode
 
 from . import __version__
+
+# Env vars of the removed multimodal role flags. The flags fail at argparse,
+# but a leftover env var would otherwise be silently ignored and start the
+# worker in the wrong role — reject it with the migration path instead.
+_REMOVED_MULTIMODAL_ENV_VARS = {
+    "DYN_SGL_MULTIMODAL_ENCODE_WORKER": (
+        "--enable-multimodal --disaggregation-mode=encode"
+    ),
+    "DYN_SGL_MULTIMODAL_WORKER": (
+        "--enable-multimodal --dedicated-mm-encoder with "
+        "--disaggregation-mode=pd, prefill, or decode"
+    ),
+}
+
+
+def _reject_removed_multimodal_env_vars() -> None:
+    for env_var, replacement in _REMOVED_MULTIMODAL_ENV_VARS.items():
+        if os.environ.get(env_var, "").strip().lower() in ("true", "1", "yes", "on"):
+            raise ValueError(
+                f"{env_var} is no longer supported; use {replacement} "
+                "(env: DYN_SGL_ENABLE_MULTIMODAL, DYN_SGL_DEDICATED_MM_ENCODER)."
+            )
 
 
 class DynamoSGLangArgGroup(ArgGroup):
@@ -164,6 +187,8 @@ class DynamoSGLangConfig(ConfigBase):
     served_model_aliases: Optional[List[str]] = None
 
     def validate(self) -> None:
+        _reject_removed_multimodal_env_vars()
+
         if not isinstance(self.embedding_transfer_mode, EmbeddingTransferMode):
             self.embedding_transfer_mode = EmbeddingTransferMode(
                 str(self.embedding_transfer_mode)
