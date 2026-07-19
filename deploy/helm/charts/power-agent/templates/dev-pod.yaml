@@ -46,7 +46,13 @@ spec:
   restartPolicy: Never                   # let it stay Failed if it crashes so we can read logs
   terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}  # graceful shutdown restores TGP
   runtimeClassName: {{ .Values.runtimeClassName | quote }}
+  {{- if .Values.dev.nodeName }}
   nodeName: {{ .Values.dev.nodeName | quote }}
+  {{- end }}
+  {{- with .Values.dev.affinity }}
+  affinity:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   {{- with .Values.tolerations }}
   tolerations:
     {{- toYaml . | nindent 4 }}

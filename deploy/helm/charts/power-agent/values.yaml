@@ -278,6 +278,8 @@ dev:
     limits:
       cpu: "500m"
       memory: "512Mi"
+  # Optional affinity rules for the dev pod. Only effective when nodeName is empty.
+  affinity: {}
   # Set to true ONLY if you genuinely need cluster-wide pod-listing RBAC
   # while iterating on power_agent.py (e.g., testing cross-namespace
   # multi-pod conflict resolution). Default: false — dev mode forces
