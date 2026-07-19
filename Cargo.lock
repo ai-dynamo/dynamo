@@ -2527,6 +2527,7 @@ dependencies = [
  "galil-seiferas",
  "hf-hub 0.4.3",
  "image",
+ "indexmap 2.14.0",
  "indicatif 0.18.4",
  "insta",
  "ipnet",

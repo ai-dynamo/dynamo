@@ -9,6 +9,7 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
     transports::event_plane::{EventPublisher, EventSubscriber},
 };
+use indexmap::IndexSet;
 use serde::{Deserialize, Serialize};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -18,7 +19,7 @@ use super::coordinator::{AffinityCoordinatorInner, AffinityTarget};
 pub(super) const SESSION_AFFINITY_SUBJECT: &str = "session_affinity_events";
 const OUTBOUND_CHANNEL_CAPACITY: usize = 4_096;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(super) struct SessionAffinityUpdate {
     pub session_id: String,
     pub worker_id: u64,
@@ -89,13 +90,13 @@ impl ReplicaSyncRuntime {
                 let Some(update) = update else {
                     return;
                 };
-                if let Err(error) = publisher.publish(&update).await {
-                    tracing::trace!(
-                        worker_id = update.worker_id,
-                        dp_rank = ?update.dp_rank,
-                        %error,
-                        "failed to publish best-effort session affinity update"
-                    );
+                if rx.is_empty() {
+                    publish_update(&publisher, &update).await;
+                    continue;
+                }
+                let updates = collect_unique_updates(update, &mut rx);
+                for update in updates {
+                    publish_update(&publisher, &update).await;
                 }
             }
         });
@@ -186,6 +187,29 @@ impl ReplicaSyncRuntime {
     }
 }
 
+async fn publish_update(publisher: &EventPublisher, update: &SessionAffinityUpdate) {
+    if let Err(error) = publisher.publish(update).await {
+        tracing::trace!(
+            worker_id = update.worker_id,
+            dp_rank = ?update.dp_rank,
+            %error,
+            "failed to publish best-effort session affinity update"
+        );
+    }
+}
+
+fn collect_unique_updates(
+    first: SessionAffinityUpdate,
+    rx: &mut mpsc::Receiver<SessionAffinityUpdate>,
+) -> IndexSet<SessionAffinityUpdate> {
+    let mut updates = IndexSet::with_capacity(rx.len() + 1);
+    updates.insert(first);
+    while let Ok(update) = rx.try_recv() {
+        updates.insert(update);
+    }
+    updates
+}
+
 impl Drop for ReplicaSyncRuntime {
     fn drop(&mut self) {
         self.shutdown_now();
@@ -247,6 +271,34 @@ mod tests {
 
         assert_eq!(rx.recv().await.unwrap().session_id, "first");
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn replica_update_batch_coalesces_identical_updates_in_order() {
+        let (runtime, mut rx) = ReplicaSyncRuntime::for_test(7, 4);
+        let first_target = AffinityTarget {
+            worker_id: 10,
+            dp_rank: Some(0),
+        };
+        let second_target = AffinityTarget {
+            worker_id: 11,
+            dp_rank: Some(1),
+        };
+        runtime.publish("session", first_target);
+        runtime.publish("session", first_target);
+        runtime.publish("session", second_target);
+        runtime.publish("session", first_target);
+
+        let first = rx.recv().await.unwrap();
+        let updates = collect_unique_updates(first, &mut rx)
+            .into_iter()
+            .collect::<Vec<_>>();
+
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[0].worker_id, first_target.worker_id);
+        assert_eq!(updates[0].dp_rank, first_target.dp_rank);
+        assert_eq!(updates[1].worker_id, second_target.worker_id);
+        assert_eq!(updates[1].dp_rank, second_target.dp_rank);
     }
 
     #[tokio::test]

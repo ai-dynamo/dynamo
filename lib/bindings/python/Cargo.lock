@@ -2216,6 +2216,7 @@ dependencies = [
  "galil-seiferas",
  "hf-hub 0.4.3",
  "image",
+ "indexmap 2.14.0",
  "ipnet",
  "json-five",
  "llm-multimodal",
