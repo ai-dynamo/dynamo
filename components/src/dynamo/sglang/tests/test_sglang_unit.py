@@ -674,15 +674,13 @@ def test_enable_multimodal_without_role_keeps_standalone_worker():
     assert config.multimodal_encode_worker is False
 
 
-def test_legacy_multimodal_worker_sets_enable_multimodal():
-    """Legacy multimodal role stays accepted while enabling the canonical flag."""
-    config = _make_sglang_config(multimodal_worker=True)
+@pytest.mark.parametrize("flag", ["--multimodal-encode-worker", "--multimodal-worker"])
+@pytest.mark.asyncio
+async def test_removed_multimodal_role_flags_are_rejected(flag, mock_sglang_cli):
+    mock_sglang_cli("--model", "Qwen/Qwen3-0.6B", flag)
 
-    with pytest.warns(DeprecationWarning, match="--multimodal-worker"):
-        config.validate()
-
-    assert config.enable_multimodal is True
-    assert config.multimodal_worker is True
+    with pytest.raises(SystemExit):
+        await parse_args(sys.argv[1:])
 
 
 def test_dedicated_mm_encoder_requires_enable_multimodal():

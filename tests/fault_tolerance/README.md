@@ -80,7 +80,7 @@ pytest tests/fault_tolerance/cancellation/test_vllm.py::test_request_cancellatio
 
 | Test | Mode | Cancellation Phase | Request Type | Setup |
 |------|------|--------------------|--------------|-------|
-| `test_request_cancellation_trtllm_aggregated` | Aggregated | During generation | 3 scenarios: completion, chat, streaming chat | 1 worker (prefill_and_decode) |
+| `test_request_cancellation_trtllm_aggregated` | Aggregated | During generation | 3 scenarios: completion, chat, streaming chat | 1 worker (agg) |
 | `test_request_cancellation_trtllm_disagg_decode_cancel` | Disaggregated | Remote decode | Streaming chat (5 responses read) | Prefill + Decode workers |
 | `test_request_cancellation_trtllm_disagg_prefill_cancel` | Disaggregated | Remote prefill | Completion (long prompt) | Prefill + Decode workers |
 

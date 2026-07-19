@@ -8,9 +8,15 @@ Unit tests for vLLM backend arguments.
 need to add more tests to cover different code paths of DynamoVllmConfig.
 """
 
+import argparse
+
 import pytest
 
-from dynamo.vllm.backend_args import DisaggregationMode, DynamoVllmConfig
+from dynamo.vllm.backend_args import (
+    DisaggregationMode,
+    DynamoVllmArgGroup,
+    DynamoVllmConfig,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -28,15 +34,12 @@ def create_config() -> DynamoVllmConfig:
     so we need to create a config with default values manually if not using
     from_cli_args() method.
 
-    All multimodal flags are False, disaggregation mode is None.
+    Multimodal is disabled and disaggregation mode is unset.
     Returns:
         DynamoVllmConfig: A config with default values.
     """
     config = DynamoVllmConfig()
     config.disaggregation_mode = None
-    config.multimodal_worker = False
-    config.multimodal_encode_worker = False
-    config.multimodal_decode_worker = False
     config.enable_multimodal = False
     config.embedding_worker = False
     config.benchmark_mode = None
@@ -45,11 +48,23 @@ def create_config() -> DynamoVllmConfig:
     return config
 
 
-class TestResolveDisaggregationModeFromLegacyMultimodalFlags:
-    """
-    Test suite for resolving disaggregation mode when legacy multimodal flags are set.
-    """
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "--multimodal-encode-worker",
+        "--multimodal-worker",
+        "--multimodal-decode-worker",
+    ],
+)
+def test_removed_multimodal_role_flags_are_not_registered(flag):
+    parser = argparse.ArgumentParser()
+    DynamoVllmArgGroup().add_arguments(parser)
 
+    with pytest.raises(SystemExit):
+        parser.parse_args([flag])
+
+
+class TestResolveDisaggregationMode:
     def test_pd_alias_resolves_to_aggregated(self):
         config = create_config()
         config.disaggregation_mode = "pd"
@@ -59,81 +74,6 @@ class TestResolveDisaggregationModeFromLegacyMultimodalFlags:
         config._resolve_disaggregation_mode()
 
         assert config.disaggregation_mode == DisaggregationMode.AGGREGATED
-
-    @pytest.mark.parametrize(
-        "mode",
-        [
-            None,  # Not specified
-            DisaggregationMode.AGGREGATED,
-            # DisaggregationMode.PREFILL, # test in 'test_prefill_worker' below
-            DisaggregationMode.DECODE,
-            DisaggregationMode.ENCODE,
-        ],
-    )
-    def test_agg_worker(self, mode):
-        config = create_config()
-        config.disaggregation_mode = mode
-        config.multimodal_worker = True
-        with pytest.warns(DeprecationWarning):
-            if mode is None or mode == DisaggregationMode.AGGREGATED:
-                config._resolve_disaggregation_model_from_legacy_multimodal_flags()
-                assert config.disaggregation_mode == DisaggregationMode.AGGREGATED
-            else:
-                with pytest.raises(ValueError):
-                    config._resolve_disaggregation_model_from_legacy_multimodal_flags()
-
-    # special case of 'test_agg_worker' above, test the prefill worker case
-    def test_prefill_worker(self):
-        config = create_config()
-        config.disaggregation_mode = DisaggregationMode.PREFILL
-        config.multimodal_worker = True
-        with pytest.warns(DeprecationWarning):
-            config._resolve_disaggregation_model_from_legacy_multimodal_flags()
-            assert config.disaggregation_mode == DisaggregationMode.PREFILL
-
-    @pytest.mark.parametrize(
-        "mode",
-        [
-            None,  # Not specified
-            DisaggregationMode.AGGREGATED,
-            DisaggregationMode.PREFILL,
-            DisaggregationMode.DECODE,
-            DisaggregationMode.ENCODE,
-        ],
-    )
-    def test_encode_worker(self, mode):
-        config = create_config()
-        config.disaggregation_mode = mode
-        config.multimodal_encode_worker = True
-        with pytest.warns(DeprecationWarning):
-            if mode is None or mode == DisaggregationMode.ENCODE:
-                config._resolve_disaggregation_model_from_legacy_multimodal_flags()
-                assert config.disaggregation_mode == DisaggregationMode.ENCODE
-            else:
-                with pytest.raises(ValueError):
-                    config._resolve_disaggregation_model_from_legacy_multimodal_flags()
-
-    @pytest.mark.parametrize(
-        "mode",
-        [
-            None,  # Not specified
-            DisaggregationMode.AGGREGATED,
-            DisaggregationMode.PREFILL,
-            DisaggregationMode.DECODE,
-            DisaggregationMode.ENCODE,
-        ],
-    )
-    def test_decode_worker(self, mode):
-        config = create_config()
-        config.disaggregation_mode = mode
-        config.multimodal_decode_worker = True
-        with pytest.warns(DeprecationWarning):
-            if mode is None or mode == DisaggregationMode.DECODE:
-                config._resolve_disaggregation_model_from_legacy_multimodal_flags()
-                assert config.disaggregation_mode == DisaggregationMode.DECODE
-            else:
-                with pytest.raises(ValueError):
-                    config._resolve_disaggregation_model_from_legacy_multimodal_flags()
 
 
 class TestEmbeddingWorkerExclusivity:
@@ -233,27 +173,6 @@ class TestValidateCustomEncoder:
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
         config.use_vllm_tokenizer = True
         with pytest.raises(ValueError, match="use-vllm-tokenizer"):
-            config._validate_custom_encoder()
-
-    @pytest.mark.parametrize(
-        "role_flag",
-        [
-            "multimodal_worker",
-            "multimodal_encode_worker",
-            "multimodal_decode_worker",
-        ],
-    )
-    def test_legacy_multimodal_role_rejected(self, role_flag):
-        # The custom encoder is its own aggregated multimodal path; combining it
-        # with a legacy multimodal role flag sets up two conflicting multimodal
-        # paths (and --multimodal-worker resolves to agg, slipping past the
-        # disaggregation-mode check), so reject the combination up front.
-        config = create_config()
-        config.custom_encoder_class = "my_pkg.MyEncoder"
-        config.enable_multimodal = True
-        config.disaggregation_mode = DisaggregationMode.AGGREGATED
-        setattr(config, role_flag, True)
-        with pytest.raises(ValueError, match="legacy multimodal role flags"):
             config._validate_custom_encoder()
 
     def test_frontend_decoding_rejected(self):

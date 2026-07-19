@@ -42,8 +42,6 @@ These arguments are added by Dynamo on top of SGLang's native arguments.
 | `--embedding-worker` | `DYN_SGL_EMBEDDING_WORKER` | `false` | Run as embedding worker (also sets SGLang's `--is-embedding`) |
 | `--enable-multimodal` | `DYN_SGL_ENABLE_MULTIMODAL` | `false` | Allow [multimodal](../../features/multimodal/multimodal-sglang.md) inputs on this worker |
 | `--dedicated-mm-encoder` | `DYN_SGL_DEDICATED_MM_ENCODER` | `false` | Select the internal encode-worker topology for multimodal PD/P/D workers |
-| `--multimodal-encode-worker` | `DYN_SGL_MULTIMODAL_ENCODE_WORKER` | `false` | **[Deprecated]** Use `--enable-multimodal --disaggregation-mode encode` |
-| `--multimodal-worker` | `DYN_SGL_MULTIMODAL_WORKER` | `false` | **[Deprecated]** Use `--enable-multimodal --dedicated-mm-encoder --disaggregation-mode pd/prefill/decode` for internal encode-worker topologies |
 | `--image-diffusion-worker` | `DYN_SGL_IMAGE_DIFFUSION_WORKER` | `false` | Run as [image diffusion](sglang-diffusion.md#image-diffusion) worker |
 | `--video-generation-worker` | `DYN_SGL_VIDEO_GENERATION_WORKER` | `false` | Run as [video generation](sglang-diffusion.md#video-generation) worker |
 | `--disagg-config` | `DYN_SGL_DISAGG_CONFIG` | `None` | Path to YAML disaggregation config file |
