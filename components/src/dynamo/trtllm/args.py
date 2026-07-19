@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import sys
+import warnings
 from typing import Any, Dict, Optional, Sequence
 
 from dynamo.common.config_dump import register_encoder
@@ -16,13 +17,15 @@ from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeConfig,
 )
 from dynamo.common.utils.runtime import parse_endpoint
-from dynamo.trtllm.backend_args import (
-    DynamoTrtllmArgGroup,
-    DynamoTrtllmConfig,
-    _warn_deprecated,
-)
+from dynamo.trtllm.backend_args import DynamoTrtllmArgGroup, DynamoTrtllmConfig
 from dynamo.trtllm.constants import DisaggregationMode, Modality
 from dynamo.trtllm.dynamic_flags import parse_dynamic_flags
+
+
+def _warn_deprecated(message: str) -> None:
+    logging.warning(message)
+    warnings.warn(message, DeprecationWarning, stacklevel=3)
+
 
 DEFAULT_ENDPOINT_COMPONENT = "backend"
 DEFAULT_PREFILL_COMPONENT = "prefill"
