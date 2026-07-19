@@ -9,10 +9,9 @@ use rustc_hash::FxHashMap;
 
 /// Update an `Arc` lookup map for keys that should point at `node`.
 ///
-/// Duplicate store/repair paths often revisit keys that already resolve to the
-/// same node. Skipping those replacements avoids unnecessary hash table writes
-/// and `Arc` refcount churn while still repairing stale entries. Returns the
-/// number of entries that were inserted or changed.
+/// Duplicate store paths often revisit keys that already resolve to the same
+/// node. Skipping those replacements avoids unnecessary hash table writes and
+/// `Arc` refcount churn. Returns the number of entries inserted or changed.
 pub(crate) fn update_arc_lookup_for_keys<K, T>(
     lookup: &mut FxHashMap<K, Arc<T>>,
     keys: impl IntoIterator<Item = K>,
@@ -34,6 +33,34 @@ where
                 entry.insert(Arc::clone(node));
                 changed += 1;
             }
+        }
+    }
+
+    changed
+}
+
+/// Update existing `Arc` lookup entries for keys that should point at `node`.
+///
+/// Unlike [`update_arc_lookup_for_keys`], this does not insert missing keys.
+/// Lookup repair uses absence as meaningful state: a remove can scrub an entry
+/// before another worker on the same event thread repairs a stale lookup.
+/// Returns the number of existing entries that changed.
+pub(crate) fn update_existing_arc_lookup_for_keys<K, T>(
+    lookup: &mut FxHashMap<K, Arc<T>>,
+    keys: impl IntoIterator<Item = K>,
+    node: &Arc<T>,
+) -> usize
+where
+    K: Eq + Hash,
+{
+    let mut changed = 0;
+
+    for key in keys {
+        if let Some(entry) = lookup.get_mut(&key)
+            && !Arc::ptr_eq(entry, node)
+        {
+            *entry = Arc::clone(node);
+            changed += 1;
         }
     }
 
