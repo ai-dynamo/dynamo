@@ -349,16 +349,16 @@ class AggPoolSelectionStrategy:
                 raise ValueError(
                     "isl_min, isl_max, and isl_resolution must be configured together"
                 )
-            mapping = cast(List[List[int]], self.agg_pool_mapping)
-            pool_idx = mapping[ttft_idx][itl_idx]
+            mapping_2d = cast(List[List[int]], self.agg_pool_mapping)
+            pool_idx = mapping_2d[ttft_idx][itl_idx]
         else:
             if isl is None:
                 isl = (isl_min + isl_max) // 2
             isl_idx = self._clamp_index(
                 (isl - isl_min) / ((isl_max - isl_min) / isl_resolution), isl_resolution
             )
-            mapping = cast(List[List[List[int]]], self.agg_pool_mapping)
-            pool_idx = mapping[isl_idx][ttft_idx][itl_idx]
+            mapping_3d = cast(List[List[List[int]]], self.agg_pool_mapping)
+            pool_idx = mapping_3d[isl_idx][ttft_idx][itl_idx]
         pool_idx = _apply_priority_overrides(
             pool_idx, priority, self.priority_overrides
         )
@@ -626,19 +626,19 @@ class GlobalRouterConfig:
                 raise ValueError(
                     "isl_min, isl_max, and isl_resolution must be configured together"
                 )
-            mapping = cast(List[List[int]], agg_strategy.agg_pool_mapping)
-            if len(mapping) != agg_strategy.ttft_resolution:
+            mapping_2d = cast(List[List[int]], agg_strategy.agg_pool_mapping)
+            if len(mapping_2d) != agg_strategy.ttft_resolution:
                 raise ValueError(
-                    f"agg_pool_mapping rows ({len(mapping)}) "
+                    f"agg_pool_mapping rows ({len(mapping_2d)}) "
                     f"does not match ttft_resolution ({agg_strategy.ttft_resolution})"
                 )
-            for i, row in enumerate(mapping):
-                if len(row) != agg_strategy.itl_resolution:
+            for i, itl_row in enumerate(mapping_2d):
+                if len(itl_row) != agg_strategy.itl_resolution:
                     raise ValueError(
-                        f"agg_pool_mapping row {i} length ({len(row)}) "
+                        f"agg_pool_mapping row {i} length ({len(itl_row)}) "
                         f"does not match itl_resolution ({agg_strategy.itl_resolution})"
                     )
-                for pool_idx in row:
+                for pool_idx in itl_row:
                     if pool_idx < 0 or pool_idx >= self.num_agg_pools:
                         raise ValueError(
                             f"Invalid agg pool index {pool_idx} in mapping "
@@ -654,27 +654,27 @@ class GlobalRouterConfig:
                     f"isl_min ({isl_min}) must be less than isl_max ({isl_max})"
                 )
 
-            mapping = cast(List[List[List[int]]], agg_strategy.agg_pool_mapping)
-            if len(mapping) != isl_resolution:
+            mapping_3d = cast(List[List[List[int]]], agg_strategy.agg_pool_mapping)
+            if len(mapping_3d) != isl_resolution:
                 raise ValueError(
-                    f"agg_pool_mapping ISL rows ({len(mapping)}) "
+                    f"agg_pool_mapping ISL rows ({len(mapping_3d)}) "
                     f"does not match isl_resolution ({isl_resolution})"
                 )
-            for isl_idx, isl_row in enumerate(mapping):
+            for isl_idx, isl_row in enumerate(mapping_3d):
                 if len(isl_row) != agg_strategy.ttft_resolution:
                     raise ValueError(
                         f"agg_pool_mapping ISL row {isl_idx} length "
                         f"({len(isl_row)}) does not match ttft_resolution "
                         f"({agg_strategy.ttft_resolution})"
                     )
-                for ttft_idx, row in enumerate(isl_row):
-                    if len(row) != agg_strategy.itl_resolution:
+                for ttft_idx, itl_row in enumerate(isl_row):
+                    if len(itl_row) != agg_strategy.itl_resolution:
                         raise ValueError(
                             f"agg_pool_mapping ISL row {isl_idx}, TTFT row "
-                            f"{ttft_idx} length ({len(row)}) does not match "
+                            f"{ttft_idx} length ({len(itl_row)}) does not match "
                             f"itl_resolution ({agg_strategy.itl_resolution})"
                         )
-                    for pool_idx in row:
+                    for pool_idx in itl_row:
                         if pool_idx < 0 or pool_idx >= self.num_agg_pools:
                             raise ValueError(
                                 f"Invalid agg pool index {pool_idx} in mapping "
