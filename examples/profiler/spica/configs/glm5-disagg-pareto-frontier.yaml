@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Experimental: this configuration uses kv_load_ratio and requires an AI Configurator release
+# that provides aiconfigurator.sdk.memory. It fails closed in the default Planner/Profiler image,
+# which currently retains AI Configurator 0.9.
+
+search_space:
+  deployment_mode: [disagg]
+  backend: [sglang]
+  parallel_configs: []
+
+  model_name: zai-org/GLM-5-FP8
+  hardware_sku: b200_sxm
+  gpu_budget: 72
+  context_length: 2048
+
+  router_mode: [round_robin]
+  planner_scaling_policy: [disabled]
+
+workload:
+  isl: 1024
+  osl: 1024
+  kv_load_ratio: [0.0, 1.0]
+  num_request_ratio: 10
+
+goal:
+  target: pareto
+  pareto_objectives: [throughput_per_gpu, throughput_per_user]
+
+sweep:
+  max_rounds: 80
+  parallel_evals: 8
+  candidates_per_round: 8
+  max_eval_seconds: 600

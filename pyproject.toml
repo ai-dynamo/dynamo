@@ -87,6 +87,20 @@ mocker = [
     "aiconfigurator>=0.9.0,<0.10.0",
 ]
 
+# Spica is experimental. Keep this dependency set in sync with
+# container/deps/requirements.planner.txt so the planner/profiler image can run it.
+spica = [
+    "aiconfigurator>=0.9.0,<0.10.0",
+    "google-vizier[jax]==0.1.21; python_version < '3.13'",
+    "jax==0.4.38; python_version < '3.13'",
+    "jaxlib==0.4.38; python_version < '3.13'",
+    "flax==0.10.0; python_version < '3.13'",
+    "optax==0.2.4; python_version < '3.13'",
+    "chex==0.1.87; python_version < '3.13'",
+    "tensorflow-probability[jax]==0.25.0; python_version < '3.13'",
+    "tfp-nightly==0.26.0.dev20260626; python_version < '3.13'",
+]
+
 [project.entry-points.pytest11]
 vllm_tests = "dynamo.vllm.tests.conftest"
 trtllm_tests = "dynamo.trtllm.tests.conftest"

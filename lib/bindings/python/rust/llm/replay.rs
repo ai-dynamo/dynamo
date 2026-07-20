@@ -1678,6 +1678,12 @@ fn load_optional_replay_mocker_args(
         .transpose()
 }
 
+fn is_aic_memory_estimator_unavailable(py: Python<'_>, error: &PyErr) -> bool {
+    py.import("dynamo._internal.aic")
+        .and_then(|module| module.getattr("AicMemoryEstimatorUnavailableError"))
+        .is_ok_and(|exception_type| error.is_instance(py, &exception_type))
+}
+
 fn materialize_replay_mocker_args(
     py: Python<'_>,
     extra_args: MockEngineArgs,
@@ -1713,7 +1719,7 @@ fn materialize_replay_mocker_args(
         // `dp_size` independent per-rank schedulers, each with a per-rank KV pool.
         // The topology applies whether KV capacity is explicit or estimated.
         if !num_gpu_blocks_explicit {
-            let per_rank_blocks = estimate_aic_num_gpu_blocks(
+            let capacity = estimate_aic_num_gpu_blocks(
                 py,
                 &backend,
                 &system,
@@ -1735,18 +1741,32 @@ fn materialize_replay_mocker_args(
                 fmha_dtype.as_deref(),
                 kv_cache_dtype.as_deref(),
                 comm_dtype.as_deref(),
-            )
-            .map_err(|e| {
-                PyException::new_err(format!(
-                    "Failed to estimate AIC KV cache capacity (--aic-perf-model was requested): {}",
-                    e
-                ))
-            })?;
-            // AIC returns a per-rank (per-GPU) block count. When replicating attention-DP
-            // into per-rank workers, each worker owns this per-rank pool (engine-wide
-            // capacity stays `per_rank * dp`, now partitioned per rank as on real hardware).
-            // With dp == 1 the per-rank pool is the engine-wide pool.
-            args.num_gpu_blocks = per_rank_blocks;
+            );
+            match capacity {
+                Ok(per_rank_blocks) => {
+                    // AIC returns a per-rank (per-GPU) block count. When replicating
+                    // attention-DP into per-rank workers, each worker owns this per-rank
+                    // pool (engine-wide capacity stays `per_rank * dp`, now partitioned
+                    // per rank as on real hardware). With dp == 1 the per-rank pool is
+                    // the engine-wide pool.
+                    args.num_gpu_blocks = per_rank_blocks;
+                }
+                Err(error) if is_aic_memory_estimator_unavailable(py, &error) => {
+                    tracing::warn!(
+                        %error,
+                        num_gpu_blocks = args.num_gpu_blocks,
+                        "AIC KV-cache capacity estimation is unavailable during replay; \
+                         using the default block count. Upgrade aiconfigurator or set \
+                         num_gpu_blocks explicitly"
+                    );
+                }
+                Err(error) => {
+                    return Err(PyException::new_err(format!(
+                        "Failed to estimate AIC KV cache capacity \
+                         (--aic-perf-model was requested): {error}"
+                    )));
+                }
+            }
         }
         let callback = create_aic_callback(
             py,

@@ -76,6 +76,24 @@ AI Configurator enables rapid offline profiling (~30 seconds) and supports all b
 | Online (AIPerf) | 2-4 hours | Highest | Yes | All |
 | Offline (AI Configurator) | 20-30 seconds | Estimated | No | All |
 
+## Experimental Configuration Search
+
+> [!WARNING]
+> **Experimental.** Spica is intended for evaluation and feedback, not production capacity
+> planning. Its API, configuration schema, search behavior, and output may change without a
+> standard deprecation period.
+
+[Spica](spica/README.md) searches engine, router, Planner, and KV Block Manager (KVBM) settings with
+a black-box optimizer. It evaluates each candidate with Dynamo Replay and supports scalar objectives
+and Pareto-front searches. Some workload modes need optional AI Configurator APIs that are not
+available in the default Planner/Profiler image; review the
+[current limitations](spica/README.md#current-limitations) before running a search.
+
+Use the existing `dynamo.profiler.utils.replay_optimize` API, documented as
+[DynoSim Sweeps](../../dynosim/sweeps.md), for the focused heuristic search over tensor-parallel
+shapes, worker counts, router settings, SLA constraints, and a GPU budget. Use Spica when you need
+the broader experimental search space, Planner policies, KVBM controls, or Pareto objectives.
+
 ## Output
 
 The profiler generates:
@@ -96,5 +114,6 @@ Suggested decode TP:4 (ITL 4.83 ms, throughput 51.22 tokens/s/GPU)
 |----------|-------------|
 | [Profiler Guide](profiler-guide.md) | Configuration, methods, and troubleshooting |
 | [Profiler Examples](profiler-examples.md) | Complete DGDR YAMLs and script examples |
+| [Spica (Experimental)](spica/README.md) | Replay-backed black-box configuration search |
 | [SLA Planner Guide](../planner/planner-guide.md) | End-to-end deployment workflow |
 | [SLA Planner Architecture](../planner/planner-guide.md) | How the Planner uses profiling data |

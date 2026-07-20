@@ -468,6 +468,25 @@ navigation:
                 path: components/profiler/profiler-guide.md
               - page: Profiler Examples
                 path: components/profiler/profiler-examples.md
+              - section: Spica (Experimental)
+                path: components/profiler/spica/README.md
+                contents:
+                  - page: Spica Overview
+                    path: components/profiler/spica/overview.md
+                  - page: Optimization Goals
+                    path: components/profiler/spica/optimization-goal.md
+                  - page: Traffic
+                    path: components/profiler/spica/traffic.md
+                  - page: Search Space
+                    path: components/profiler/spica/search-space.md
+                  - page: Unrolled Samples
+                    path: components/profiler/spica/sample.md
+                  - page: GLM-5-FP8 Pareto Sweep
+                    path: components/profiler/spica/examples/glm5-disagg-pareto-frontier-sweep.md
+                  - page: Planner Goodput-per-GPU Sweep
+                    path: components/profiler/spica/examples/planner-goodput-per-gpu-sweep.md
+                  - page: Router End-to-End Latency Sweep
+                    path: components/profiler/spica/examples/router-e2e-latency-sweep.md
           - page: KVBM
             path: components/kvbm/README.md
 

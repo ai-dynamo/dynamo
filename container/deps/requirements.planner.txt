@@ -9,12 +9,20 @@
 aiconfigurator>=0.9.0,<0.10.0
 aiofiles<=25.1.0
 aiohttp>=3.9.0,<4.0
+chex==0.1.87; python_version < '3.13'
 filterpy==1.4.5
+flax==0.10.0; python_version < '3.13'
+# Spica's Vizier search runs JAX on CPU. Keep these pins synchronized with the
+# ai-dynamo[spica] extra in pyproject.toml.
+google-vizier[jax]==0.1.21; python_version < '3.13'
 # gRPC + protobuf are runtime deps for the plugin-orchestrator transport.
 # Pin in sync with requirements.common.txt.
 grpcio>=1.63.0
+jax==0.4.38; python_version < '3.13'
+jaxlib==0.4.38; python_version < '3.13'
 kubernetes==32.0.1
 kubernetes_asyncio==32.0.0
+optax==0.2.4; python_version < '3.13'
 plotly>=6.0.1
 pmdarima==2.1.1
 prometheus-api-client==0.6.0
@@ -22,3 +30,7 @@ prophet==1.2.1
 protobuf>=5.29.5,<7.0.0
 scikit-learn==1.7.2
 scipy>=1.14.0,<2.0
+tensorflow-probability[jax]==0.25.0; python_version < '3.13'
+# Vizier's open-ended tfp-nightly dependency can select an incompatible future
+# build; pin the validated release used by experimental Spica.
+tfp-nightly==0.26.0.dev20260626; python_version < '3.13'
