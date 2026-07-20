@@ -212,15 +212,12 @@ def patch_kv_cache_pool_scope() -> None:
         return
 
     def patched_init_kv_cache(*args, **kwargs):
-        # Only the scratch path narrows the scope here; the sleep-mode path keeps
-        # its own gms_use_mem_pool wrap in worker.py.
-        if not is_scratch_kv_enabled():
-            return original_init_kv_cache(*args, **kwargs)
-        device = kwargs.get("device")
-        if device is None:
-            device = next((a for a in args if isinstance(a, torch.device)), None)
-        if device is None:
-            device = torch.device("cuda", torch.cuda.current_device())
+        # Installed only in shadow mode (apply_scratch_kv_patches runs only when
+        # is_scratch_kv_enabled), so always scope the KV allocation to the pool.
+        # init_kv_cache allocates on the worker's current CUDA device, which is
+        # exactly where the pool must apply.
+        assert torch.cuda.is_available(), "GMS scratch KV requires CUDA"
+        device = torch.device("cuda", torch.cuda.current_device())
         with gms_use_mem_pool("kv_cache", device):
             return original_init_kv_cache(*args, **kwargs)
 

@@ -37,14 +37,10 @@ from typing import Dict, List, Optional
 from gpu_memory_service.client.session import _GMSClientSession
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import GetAllocationResponse
-from gpu_memory_service.common.utils import align_to_granularity, is_truthy_env
+from gpu_memory_service.common.utils import align_to_granularity
 from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, get_vmm_device_type
 
 logger = logging.getLogger(__name__)
-
-# Opt-in (client-only debug knob): back every scratch mapping with ONE shared
-# physical granule instead of one per mapping. Off by default.
-ENV_SCRATCH_SINGLE_BLOCK = "DYN_GMS_SCRATCH_SINGLE_BLOCK"
 
 
 class StaleMemoryLayoutError(Exception):
@@ -177,8 +173,7 @@ class GMSClientMemoryManager:
         # Optional single-block scratch: alias ALL scratch mappings onto one
         # shared physical granule (N KV layers -> one scratch_size block instead
         # of N). Created lazily on the first scratch mapping, released once when
-        # the last one is torn down. Off by default (per-mapping granule).
-        self._single_block_scratch: bool = is_truthy_env(ENV_SCRATCH_SINGLE_BLOCK)
+        # the last one is torn down.
         self._shared_scratch_handle: int = 0
 
         self._unmapped = False
@@ -526,14 +521,12 @@ class GMSClientMemoryManager:
             if scratch.scratch_handle == 0:
                 continue
             self._vmm.unmap(base_va, scratch.va_reserved_size)
-            if not self._single_block_scratch:
-                self._vmm.release(scratch.scratch_handle)
             scratch.scratch_handle = 0
             unmapped_count += 1
             total_bytes += scratch.va_reserved_size
-        # Single-block: every mapping aliased one shared granule; release it once
-        # after all ranges are unmapped.
-        if self._single_block_scratch and self._shared_scratch_handle != 0:
+        # Every mapping aliased the one shared granule; release it once, after all
+        # ranges are unmapped.
+        if self._shared_scratch_handle != 0:
             self._vmm.release(self._shared_scratch_handle)
             self._shared_scratch_handle = 0
 
@@ -710,7 +703,7 @@ class GMSClientMemoryManager:
         aligned_size = align_to_granularity(size, self.granularity)
         va_reserved_size = align_to_granularity(size, self.scratch_size)
 
-        if self._single_block_scratch and self._shared_scratch_handle != 0:
+        if self._shared_scratch_handle != 0:
             # Reuse the one shared granule; every mapping aliases it.
             scratch_handle = self._shared_scratch_handle
         else:
@@ -723,8 +716,7 @@ class GMSClientMemoryManager:
                     f"({self.scratch_size // (1 << 20)} MiB) on "
                     f"{self.device_type.value} device {self.device}"
                 )
-            if self._single_block_scratch:
-                self._shared_scratch_handle = scratch_handle
+            self._shared_scratch_handle = scratch_handle
 
         va = self._vmm.address_reserve(va_reserved_size, self.scratch_size)
         for offset in range(0, va_reserved_size, self.scratch_size):
@@ -816,14 +808,11 @@ class GMSClientMemoryManager:
         self._vmm.synchronize()
         if scratch.scratch_handle:
             self._vmm.unmap(base_va, scratch.va_reserved_size)
-            if self._single_block_scratch:
-                # Shared granule: release only once the last mapping is gone
-                # (this entry was already popped above).
-                if self._shared_scratch_handle != 0 and not self._scratch_mappings:
-                    self._vmm.release(self._shared_scratch_handle)
-                    self._shared_scratch_handle = 0
-            else:
-                self._vmm.release(scratch.scratch_handle)
+            # Shared granule: release only once the last mapping is gone
+            # (this entry was already popped above).
+            if self._shared_scratch_handle != 0 and not self._scratch_mappings:
+                self._vmm.release(self._shared_scratch_handle)
+                self._shared_scratch_handle = 0
         self._vmm.address_free(base_va, scratch.va_reserved_size)
         return True
 
