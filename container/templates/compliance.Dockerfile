@@ -73,6 +73,20 @@ ENV PYTHONPATH=/opt
 # canonical SPDX text). Keyed "<name>-<version>". wheel_builder_base always
 # creates the dir, so this COPY never fails even for wheel-less targets.
 COPY --from=wheel_builder /opt/dynamo/rust-licenses /tmp/rust-licenses
+{% if target == "frontend" %}
+# EPP's Go compliance SBOM + harvested module LICENSE files, read from the build
+# CONTEXT (.epp-sbom/) rather than COPY --from the EPP image. The CI EPP-build
+# step exports them there via `make sbom-export` while the build cache is warm
+# (see deploy/inference-gateway/epp/Dockerfile sbom-export stage). This avoids
+# re-pulling the pushed EPP image — whose runtime layer could be served from a
+# stale cache and miss these files after the BuildKit builder is refreshed. The
+# SBOM is exported once on amd64; EPP's Go module set doesn't vary by GOARCH
+# (linux only), so the amd64 export is authoritative for all frontend arches.
+COPY .epp-sbom/sbom-go.cdx.json /tmp/sbom-go-epp.cdx.json
+# Real Go module LICENSE files so the go generator inlines upstream license text
+# instead of canonical SPDX fallback.
+COPY .epp-sbom/sbom-go-licenses /tmp/go-licenses
+{% endif %}
 
 # BASELINE_SBOM_FILE: the per-arch baseline SBOM *stem* (e.g.
 # "cuda@2ab6381d") under /opt/compliance/base_sboms/. We append
@@ -94,7 +108,9 @@ RUN {% if framework == "sglang" %}PKG_ARG="--site-packages $(python3 -c 'import 
     python3 -m compliance.generators \
     --ecosystem {{ compliance_ecosystems }} \
     ${PKG_ARG} \
-    --rust-licenses-dir /tmp/rust-licenses \
+{% if target == "frontend" %}    --go-sbom /tmp/sbom-go-epp.cdx.json \
+    --go-licenses-dir /tmp/go-licenses \
+{% endif %}    --rust-licenses-dir /tmp/rust-licenses \
     --output-dir /legal \
     --policy /opt/compliance/policy/licenses.toml \
     --native-yaml /opt/compliance/native_packages.yaml \

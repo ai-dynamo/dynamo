@@ -8,6 +8,7 @@ require live K8s deployments and are covered by the mocked end-to-end tests
 in test_profile_sla_dgdr.py.
 """
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pandas as pd
@@ -21,7 +22,10 @@ pytestmark = [
 ]
 
 try:
-    from dynamo.profiler.thorough import _pick_thorough_best_config
+    from dynamo.profiler.thorough import (
+        _enable_chunked_prefill_for_trtllm_candidates,
+        _pick_thorough_best_config,
+    )
     from dynamo.profiler.utils.aic_dataframe import build_decode_row, build_prefill_row
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         DynamoGraphDeploymentRequestSpec,
@@ -100,6 +104,43 @@ def _mock_result():
 # ---------------------------------------------------------------------------
 # _pick_thorough_best_config
 # ---------------------------------------------------------------------------
+
+
+def test_profile_candidates_enable_trtllm_chunked_prefill():
+    prefill = SimpleNamespace(
+        dgd_config={
+            "spec": {
+                "services": {
+                    "prefill": {
+                        "componentType": "worker",
+                        "subComponentType": "prefill",
+                        "extraPodSpec": {"mainContainer": {"args": []}},
+                    }
+                }
+            }
+        }
+    )
+    decode = SimpleNamespace(
+        dgd_config={
+            "spec": {
+                "services": {
+                    "decode": {
+                        "componentType": "worker",
+                        "subComponentType": "decode",
+                        "extraPodSpec": {"mainContainer": {"args": []}},
+                    }
+                }
+            }
+        }
+    )
+
+    _enable_chunked_prefill_for_trtllm_candidates([prefill], [decode])
+
+    for candidate in (prefill, decode):
+        worker = next(iter(candidate.dgd_config["spec"]["services"].values()))
+        args = worker["extraPodSpec"]["mainContainer"]["args"]
+        idx = args.index("--trtllm.enable_chunked_prefill")
+        assert args[idx + 1] == "true"
 
 
 class TestPickThoroughBestConfig:

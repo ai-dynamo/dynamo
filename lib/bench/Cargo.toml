@@ -13,6 +13,7 @@ description = "Lightweight HTTP benchmarks for Dynamo endpoints"
 
 [features]
 default = []
+dc-ckf-bench = []
 mocker-kvbm-offload = ["dynamo-mocker/kvbm-offload"]
 profile = ["dynamo-mocker/profile"]
 
@@ -39,10 +40,21 @@ name = "mooncake_bench"
 path = "kv_router/mooncake_bench.rs"
 harness = false
 
+[[bin]]
+name = "dc_ckf_consumer_bench"
+path = "kv_router/dc_ckf_consumer_bench.rs"
+required-features = ["dc-ckf-bench"]
+
 [[bench]]
 name = "active_sequences_bench"
 path = "kv_router/active_sequences_bench.rs"
 harness = false
+
+[[bench]]
+name = "dc_ckf_relay_bench"
+path = "kv_router/dc_ckf_relay_bench.rs"
+harness = false
+required-features = ["dc-ckf-bench"]
 
 [dependencies]
 anyhow = { workspace = true }

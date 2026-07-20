@@ -11,6 +11,7 @@ pub(crate) mod cleanup;
 pub mod conditional_disagg;
 mod lookup_update;
 
+pub mod identity;
 pub mod indexer;
 pub mod protocols;
 pub mod recovery;
@@ -48,6 +49,7 @@ pub use config::{
     ConditionalDisaggPolicyKind, KvRouterConfig, RouterConfigOverride, RouterPrefillLoadModel,
     RouterQueuePolicy, SharedCacheType,
 };
+pub use identity::DcId;
 #[allow(deprecated)]
 pub use indexer::{
     AnchorAwareBranchShardedIndexer, AnchorRef, AnchorTask, BranchShardedIndexer,
