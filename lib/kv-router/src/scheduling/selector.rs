@@ -1294,7 +1294,7 @@ mod tests {
             (cold_worker.worker_id, SimpleWorkerConfig::default()),
         ]);
 
-        let mut request = base_request(64);
+        let mut request = base_request(128);
         request
             .overlap
             .tier_overlap_blocks
@@ -1344,7 +1344,7 @@ mod tests {
     }
 
     #[test]
-    fn test_worker_logit_does_not_clamp_negative_prefill_cost() {
+    fn test_worker_logit_clamps_non_decode_overlap_credit() {
         let worker = WorkerWithDpRank::from_worker_id(0);
         let mut request = base_request(64);
         request.overlap.effective_cached_tokens.insert(worker, 96);
@@ -1373,7 +1373,7 @@ mod tests {
         request.track_prefill_tokens = false;
         assert_eq!(
             selector.worker_logit(&request, worker, 16, 0, weights, "test"),
-            -7.0
+            5.0
         );
     }
 
