@@ -39,7 +39,7 @@ window.__DEP_INDEX = [
     "slug": "0011-dep-process",
     "status": "Draft",
     "submitter": "dagil-nvidia",
-    "title": "DEP-0011: The Dynamo Enhancement Proposal (DEP) Process"
+    "title": "DEP-0011: The DEP Process and SIG Governance"
   },
   {
     "authors": [
