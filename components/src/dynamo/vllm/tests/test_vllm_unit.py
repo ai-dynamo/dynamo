@@ -842,6 +842,38 @@ class TestBenchmarkConfig:
             "prefix_max_batch_size_samples": 3,
         }
 
+    def test_benchmark_points_file_is_embedded_in_benchmark_config(
+        self, mock_vllm_cli, tmp_path
+    ):
+        points_path = tmp_path / "points.json"
+        points = {
+            "schema_version": 1,
+            "prefill": [
+                {
+                    "total_prefill_tokens": 8,
+                    "total_kv_read_tokens": 0,
+                    "batch_size": 1,
+                }
+            ],
+            "decode": [{"total_kv_read_tokens": 32, "batch_size": 2}],
+        }
+        points_path.write_text(json.dumps(points))
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--benchmark-mode",
+            "agg",
+            "--benchmark-points-file",
+            str(points_path),
+        )
+
+        config = parse_args()
+
+        bench = config._benchmark_additional_config
+        assert bench["points"] == points
+        assert "benchmark_points_file" not in bench
+        assert not any(key.endswith("_samples") for key in bench)
+
     def test_benchmark_sampling_controls_reach_scheduler_config(self, mock_vllm_cli):
         mock_vllm_cli(
             "--model",
@@ -1243,6 +1275,7 @@ def _make_dynamo_config(**overrides):
         "decode_max_kv_read_token_samples": 128,
         "decode_max_batch_size_samples": 128,
         "prefix_max_batch_size_samples": 3,
+        "_benchmark_points": None,
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)

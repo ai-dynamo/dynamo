@@ -110,6 +110,14 @@ class TestOverrideSamplingParams:
         assert result.temperature == original_temperature
         assert result.top_p == original_top_p
 
+    def test_disabled_top_k_sentinel_is_converted(self):
+        sampling_params = MockSamplingParams()
+        request = {"sampling_options": {"top_k": -1}}
+
+        result = HandlerBase._override_sampling_params(sampling_params, request)
+
+        assert result.top_k == 0
+
     def test_truthy_values_are_applied(self):
         """Test that normal truthy values are correctly set."""
         sampling_params = MockSamplingParams()
