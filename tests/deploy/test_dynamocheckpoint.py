@@ -64,8 +64,9 @@ GPU_TOLERATIONS = [
     {"key": "dedicated", "operator": "Exists", "effect": "NoSchedule"},
 ]
 
-TEST_PROMPT = "Reply with one short sentence confirming this restored worker can serve."
-DEFAULT_MAX_TOKENS = 24
+TEST_RESPONSE = "RESTORE_OK"
+TEST_PROMPT = f"Reply with exactly {TEST_RESPONSE} and nothing else. /no_think"
+DEFAULT_MAX_TOKENS = 16
 DEFAULT_TEMPERATURE = 0.0
 DEFAULT_REQUEST_TIMEOUT = 120
 CHECKPOINT_READY_TIMEOUT = 300
@@ -523,11 +524,14 @@ def _assert_chat_response(response: requests.Response, expected_model: str) -> N
             f"Expected assistant message, got response: {data}",
             pytrace=False,
         )
-    if not message.get("content"):
+    content = message.get("content", "").strip()
+    if TEST_RESPONSE not in content:
         pytest.fail(
-            f"Expected non-empty assistant content, got response: {data}",
+            f"Expected assistant content to contain {TEST_RESPONSE!r}, "
+            f"got response: {data}",
             pytrace=False,
         )
+    logger.info("Assistant content: %s", content)
 
 
 def _assert_inference(base_url: str, endpoint: str, model: str) -> None:

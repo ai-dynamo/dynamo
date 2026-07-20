@@ -2,11 +2,14 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
-	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
 	"github.com/go-logr/logr"
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/criu"
@@ -21,17 +24,17 @@ type RestoreOptions struct {
 	CUDADeviceMap  string
 	CgroupRoot     string
 	TargetPodIP    string
+	RootfsMountFD  int
+	WorkspaceFD    int
 }
 
 type RestoreInNamespaceResult struct {
-	RestoredPID            int           `json:"restoredPID"`
-	NSRestoreSetupDuration time.Duration `json:"nsrestoreSetupDuration"`
-	CRIURestoreDuration    time.Duration `json:"criuRestoreDuration"`
-	CUDADuration           time.Duration `json:"cudaDuration"`
+	RestoredPID int `json:"restoredPID"`
 }
 
 // RestoreInNamespace performs a full restore from inside the target container's namespaces.
 func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logger) (*RestoreInNamespaceResult, error) {
+	opts.CheckpointPath = canonicalizeCheckpointPath(opts.CheckpointPath)
 	restoreStart := time.Now()
 	log.Info("Starting nsrestore workflow",
 		"checkpoint_path", opts.CheckpointPath,
@@ -53,37 +56,42 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		"checkpoint_has_cuda", !m.CUDA.IsEmpty(),
 	)
 
-	// Phase 1: Configure — build CRIU opts from manifest
+	// Phase 1: Configure checkpoint metadata that does not depend on the staged root.
 	configureStart := time.Now()
 	if err := criu.ConfigureInetRemap(m, opts.TargetPodIP, log); err != nil {
-		return nil, err
-	}
-	criuOpts, err := criu.BuildRestoreOpts(m, opts.CheckpointPath, opts.CgroupRoot, log)
-	if err != nil {
 		return nil, err
 	}
 	configureDuration := time.Since(configureStart)
 
 	// Phase 2: Execute — rootfs, CRIU restore, CUDA restore
-	executeTimings, restoredPID, err := executeRestore(ctx, criuOpts, m, opts, log)
+	executeTimings, restoredPID, err := executeRestore(ctx, m, opts, log)
 	if err != nil {
 		return nil, err
 	}
 
 	result := &RestoreInNamespaceResult{
-		RestoredPID:            restoredPID,
-		NSRestoreSetupDuration: manifestReadDuration + configureDuration + executeTimings.nsrestoreSetupDuration,
-		CRIURestoreDuration:    executeTimings.criuRestoreDuration,
-		CUDADuration:           executeTimings.cudaDuration,
+		RestoredPID: restoredPID,
 	}
-	log.V(1).Info("nsrestore timing summary",
+	log.Info("nsrestore timing summary",
 		"restored_pid", restoredPID,
-		"nsrestore_setup_duration", result.NSRestoreSetupDuration,
-		"criu_restore_duration", result.CRIURestoreDuration,
-		"cuda_duration", result.CUDADuration,
+		"manifest_read_duration", manifestReadDuration,
+		"configure_duration", configureDuration,
+		"root_setup_duration", executeTimings.nsrestoreSetupDuration,
+		"criu_restore_duration", executeTimings.criuRestoreDuration,
+		"cuda_duration", executeTimings.cudaDuration,
 		"total_duration", time.Since(restoreStart),
 	)
 	return result, nil
+}
+
+func canonicalizeCheckpointPath(checkpointPath string) string {
+	const procSelfFDPrefix = "/proc/self/fd/"
+
+	fd, err := strconv.Atoi(strings.TrimPrefix(checkpointPath, procSelfFDPrefix))
+	if err != nil || fd < 0 || !strings.HasPrefix(checkpointPath, procSelfFDPrefix) {
+		return checkpointPath
+	}
+	return fmt.Sprintf("/proc/%d/fd/%d", os.Getpid(), fd)
 }
 
 type nsrestorePhaseTimings struct {
@@ -92,20 +100,38 @@ type nsrestorePhaseTimings struct {
 	cudaDuration           time.Duration
 }
 
-func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.CheckpointManifest, opts RestoreOptions, log logr.Logger) (*nsrestorePhaseTimings, int, error) {
-	timings := &nsrestorePhaseTimings{}
+func executeRestore(ctx context.Context, m *types.CheckpointManifest, opts RestoreOptions, log logr.Logger) (timings *nsrestorePhaseTimings, resultPID int, retErr error) {
+	timings = &nsrestorePhaseTimings{}
 
-	// Apply rootfs diff inside the namespace (target root is /)
 	nsrestoreSetupStart := time.Now()
-	if err := snapshotruntime.ApplyRootfsDiff(opts.CheckpointPath, "/", log); err != nil {
-		return nil, 0, fmt.Errorf("rootfs diff failed: %w", err)
+	deletedFile, err := snapshotruntime.OpenDeletedFiles(opts.CheckpointPath)
+	if err != nil {
+		return nil, 0, err
 	}
-
-	if err := snapshotruntime.ApplyDeletedFiles(opts.CheckpointPath, "/", log); err != nil {
-		log.Error(err, "Failed to apply deleted files")
+	deletedFD := -1
+	if deletedFile != nil {
+		deletedFD = int(deletedFile.Fd())
+		defer deletedFile.Close()
 	}
+	composition, err := snapshotruntime.ComposeRoot(
+		opts.RootfsMountFD,
+		opts.WorkspaceFD,
+		deletedFD,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("compose rootfs: %w", err)
+	}
+	defer func() {
+		retErr = errors.Join(retErr, composition.Close())
+	}()
+	log.V(1).Info(
+		"Root composition timing",
+		"root_path", composition.RootPath,
+		"mount_attach_duration", composition.MountAttachDuration,
+		"overlay_setup_duration", composition.OverlaySetupDuration,
+	)
 
-	// Unmount placeholder's /dev/shm so CRIU can recreate tmpfs with checkpointed content
+	// Unmount placeholder's /dev/shm so CRIU can recreate tmpfs with checkpointed content.
 	if err := syscall.Unmount("/dev/shm", 0); err != nil {
 		return nil, 0, fmt.Errorf("failed to unmount /dev/shm before restore: %w", err)
 	}
@@ -113,12 +139,22 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 	if err := snapshotruntime.RemountProcSys(true); err != nil {
 		return nil, 0, fmt.Errorf("failed to remount /proc/sys read-write for restore: %w", err)
 	}
-	timings.nsrestoreSetupDuration = time.Since(nsrestoreSetupStart)
 	defer func() {
 		if err := snapshotruntime.RemountProcSys(false); err != nil {
 			log.Error(err, "Failed to remount /proc/sys read-only after restore")
 		}
 	}()
+	criuOpts, err := criu.BuildRestoreOpts(
+		m,
+		opts.CheckpointPath,
+		composition.RootPath,
+		opts.CgroupRoot,
+		log,
+	)
+	if err != nil {
+		return nil, 0, err
+	}
+	timings.nsrestoreSetupDuration = time.Since(nsrestoreSetupStart)
 
 	// CRIU restore
 	criuRestoreStart := time.Now()

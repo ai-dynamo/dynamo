@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/go-logr/logr"
 
@@ -44,26 +45,26 @@ func LogProcessDiagnostics(procRoot string, pid int, restoreLogPath string, log 
 	logRestoreLog(restoreLogPath, entry)
 }
 
-// LogRestoreErrors finds the CRIU restore.log and logs key lines from it.
-func LogRestoreErrors(checkpointPath, workDir string, log logr.Logger) {
+// LogRestoreErrors logs the CRIU restore.log and returns a bounded failure summary.
+func LogRestoreErrors(checkpointPath, workDir string, log logr.Logger) string {
 	// Try workdir first, then checkpoint dir
 	for _, dir := range []string{workDir, checkpointPath} {
 		if dir == "" {
 			continue
 		}
 		logPath := filepath.Join(dir, "restore.log")
-		if _, err := os.Stat(logPath); err == nil {
-			logRestoreLog(logPath, log)
-			return
+		if summary := logRestoreLog(logPath, log); summary != "" {
+			return summary
 		}
 	}
+	return ""
 }
 
 // logRestoreLog extracts key lines and tail from a CRIU restore log file.
-func logRestoreLog(path string, log logr.Logger) {
+func logRestoreLog(path string, log logr.Logger) string {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return
+		return ""
 	}
 
 	lines := strings.Split(string(data), "\n")
@@ -102,4 +103,81 @@ func logRestoreLog(path string, log logr.Logger) {
 	if len(tail) > 0 {
 		log.Info("CRIU restore tail", "path", path, "lines", strings.Join(tail, " | "))
 	}
+
+	return restoreLogSummary(lines)
+}
+
+const (
+	restoreLogSummaryLimit = 320
+	restoreLogSummaryLines = 4
+	restoreLogSeparator    = " | "
+)
+
+func restoreLogSummary(lines []string) string {
+	end := len(lines)
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.Contains(strings.ToLower(lines[i]), "restoring failed") {
+			end = i
+			break
+		}
+	}
+
+	var selected []string
+	var fallback string
+	for _, rawLine := range lines[:end] {
+		line := normalizeRestoreLogLine(rawLine)
+		if line == "" {
+			continue
+		}
+		fallback = line
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "error") ||
+			strings.Contains(lower, "warn") ||
+			strings.Contains(lower, "fail") {
+			selected = append(selected, line)
+			if len(selected) > restoreLogSummaryLines {
+				selected = selected[1:]
+			}
+		}
+	}
+
+	if len(selected) == 0 && fallback != "" {
+		selected = append(selected, fallback)
+	}
+	if len(selected) == 0 {
+		return ""
+	}
+	return boundRestoreLogSummary(selected)
+}
+
+func normalizeRestoreLogLine(line string) string {
+	return strings.Join(strings.Fields(strings.ToValidUTF8(line, "�")), " ")
+}
+
+func boundRestoreLogSummary(lines []string) string {
+	remaining := restoreLogSummaryLimit - len(restoreLogSeparator)*(len(lines)-1)
+	for i := range lines {
+		lineLimit := remaining / (len(lines) - i)
+		lines[i] = truncateRestoreLogLine(lines[i], lineLimit)
+		remaining -= len(lines[i])
+	}
+	return strings.Join(lines, restoreLogSeparator)
+}
+
+func truncateRestoreLogLine(line string, limit int) string {
+	if len(line) <= limit {
+		return line
+	}
+
+	const omission = "..."
+	remaining := limit - len(omission)
+	headEnd := remaining / 2
+	for headEnd > 0 && !utf8.RuneStart(line[headEnd]) {
+		headEnd--
+	}
+	tailStart := len(line) - (remaining - remaining/2)
+	for tailStart < len(line) && !utf8.RuneStart(line[tailStart]) {
+		tailStart++
+	}
+	return line[:headEnd] + omission + line[tailStart:]
 }

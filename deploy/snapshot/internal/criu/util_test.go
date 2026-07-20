@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
+	"github.com/go-logr/logr"
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
@@ -186,6 +187,8 @@ func TestApplyCommonSettings(t *testing.T) {
 }
 
 func TestBuildRestoreExtMounts(t *testing.T) {
+	rootPath := "/.dynamo-snapshot-backing/root"
+
 	t.Run("normal manifest with ExtMnt", func(t *testing.T) {
 		m := &types.CheckpointManifest{
 			CRIUDump: types.CRIUDumpManifest{
@@ -195,19 +198,19 @@ func TestBuildRestoreExtMounts(t *testing.T) {
 				},
 			},
 		}
-		mounts, err := buildRestoreExtMounts(m)
+		mounts, err := buildRestoreExtMounts(m, rootPath)
 		if err != nil {
 			t.Fatalf("buildRestoreExtMounts: %v", err)
 		}
 
-		// Should contain value→value self-mappings plus "/" → "."
+		// Restore sources remain on the placeholder/control root.
 		mountMap := make(map[string]string, len(mounts))
 		for _, em := range mounts {
 			mountMap[em.GetKey()] = em.GetVal()
 		}
 
-		if mountMap["/"] != "." {
-			t.Errorf("root mapping: got %q, want %q", mountMap["/"], ".")
+		if mountMap["/"] != rootPath {
+			t.Errorf("root mapping: got %q, want %q", mountMap["/"], rootPath)
 		}
 		if mountMap["/etc/hostname"] != "/etc/hostname" {
 			t.Errorf("/etc/hostname mapping: got %q", mountMap["/etc/hostname"])
@@ -227,7 +230,7 @@ func TestBuildRestoreExtMounts(t *testing.T) {
 				},
 			},
 		}
-		mounts, err := buildRestoreExtMounts(m)
+		mounts, err := buildRestoreExtMounts(m, rootPath)
 		if err != nil {
 			t.Fatalf("buildRestoreExtMounts: %v", err)
 		}
@@ -237,9 +240,9 @@ func TestBuildRestoreExtMounts(t *testing.T) {
 			mountMap[em.GetKey()] = em.GetVal()
 		}
 
-		// "/" and "" values should be skipped from the value→value mapping
-		// but "/" → "." root mapping always exists
-		if mountMap["/"] != "." {
+		// "/" and "" values should be skipped from individual mappings,
+		// but the existing root identifier mapping always exists.
+		if mountMap["/"] != rootPath {
 			t.Errorf("root mapping missing")
 		}
 		if _, ok := mountMap[""]; ok {
@@ -254,9 +257,42 @@ func TestBuildRestoreExtMounts(t *testing.T) {
 		m := &types.CheckpointManifest{
 			CRIUDump: types.CRIUDumpManifest{},
 		}
-		_, err := buildRestoreExtMounts(m)
+		_, err := buildRestoreExtMounts(m, rootPath)
 		if err == nil {
 			t.Error("expected error for empty ExtMnt")
 		}
 	})
+}
+
+func TestBuildRestoreOptsUsesStagedRootAndControlMountSources(t *testing.T) {
+	rootPath := "/.dynamo-snapshot-backing/root"
+	m := &types.CheckpointManifest{
+		CRIUDump: types.CRIUDumpManifest{
+			ExtMnt: map[string]string{"/etc/hostname": "/etc/hostname"},
+		},
+	}
+
+	opts, err := BuildRestoreOpts(
+		m,
+		t.TempDir(),
+		rootPath,
+		"",
+		logr.Discard(),
+	)
+	if err != nil {
+		t.Fatalf("BuildRestoreOpts: %v", err)
+	}
+	if opts.GetRoot() != rootPath {
+		t.Fatalf("CRIU Root = %q, want %q", opts.GetRoot(), rootPath)
+	}
+	mountMap := make(map[string]string, len(opts.GetExtMnt()))
+	for _, mount := range opts.GetExtMnt() {
+		mountMap[mount.GetKey()] = mount.GetVal()
+	}
+	if mountMap["/"] != opts.GetRoot() {
+		t.Fatalf("CRIU ExtMnt[/] = %q, want Root %q", mountMap["/"], opts.GetRoot())
+	}
+	if mountMap["/etc/hostname"] != "/etc/hostname" {
+		t.Fatalf("CRIU ExtMnt = %v, want self-mapped /etc/hostname", opts.GetExtMnt())
+	}
 }

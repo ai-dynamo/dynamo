@@ -84,6 +84,9 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	if err != nil {
 		return err
 	}
+	if err := snapshotruntime.PreflightRootfsCapture(); err != nil {
+		return fmt.Errorf("rootfs capture preflight failed: %w", err)
+	}
 	phaseTimings.PrepareDuration = time.Since(prepareStart)
 
 	// Phase 3: Capture — CRIU dump, rootfs diff
@@ -243,10 +246,6 @@ func configureCheckpoint(
 		m.CUDA = types.NewCUDAManifest(state.CUDANSPIDs, state.GPUUUIDs)
 	}
 
-	if err := types.WriteManifest(checkpointDir, m); err != nil {
-		return nil, nil, fmt.Errorf("failed to write checkpoint manifest: %w", err)
-	}
-
 	return criuOpts, m, nil
 }
 
@@ -268,19 +267,22 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 	}
 	timings.CRIUDumpDuration = criuDumpDuration
 
-	// Overlay rootfs diff capture is best-effort. Failures are logged but not
-	// propagated — a checkpoint without overlay diffs is still valid for restore
-	// (the base container image provides the filesystem).
-	if state.UpperDir != "" {
-		overlayCaptureStart := time.Now()
-		if _, err := snapshotruntime.CaptureRootfsDiff(state.UpperDir, checkpointDir, data.Overlay.Exclusions, data.Overlay.BindMountDests); err != nil {
-			log.Error(err, "Failed to capture rootfs diff")
-		}
-		if _, err := snapshotruntime.CaptureDeletedFiles(state.UpperDir, checkpointDir); err != nil {
-			log.Error(err, "Failed to capture deleted files")
-		}
-		timings.OverlayCaptureDuration = time.Since(overlayCaptureStart)
+	overlayCaptureStart := time.Now()
+	digest, err := snapshotruntime.CaptureRootfsDiff(
+		ctx,
+		state.UpperDir,
+		checkpointDir,
+		data.Overlay.Exclusions,
+		data.Overlay.BindMountDests,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("rootfs diff capture failed: %w", err)
 	}
+	data.RootFSSHA256 = digest
+	if err := types.WriteManifest(checkpointDir, data); err != nil {
+		return nil, fmt.Errorf("failed to write checkpoint manifest: %w", err)
+	}
+	timings.OverlayCaptureDuration = time.Since(overlayCaptureStart)
 
 	return timings, nil
 }

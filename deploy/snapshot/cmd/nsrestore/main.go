@@ -20,10 +20,15 @@ func main() {
 	cudaDeviceMap := flag.String("cuda-device-map", "", "CUDA device map for cuda-checkpoint-helper restore")
 	cgroupRoot := flag.String("cgroup-root", "", "CRIU cgroup root remap path")
 	targetPodIP := flag.String("target-pod-ip", "", "Restore pod IP for CRIU TCP socket remapping")
+	rootfsMountFD := flag.Int("rootfs-mount-fd", -1, "Inherited detached SquashFS mount FD")
+	rootfsWorkspaceFD := flag.Int("rootfs-workspace-fd", -1, "Inherited rootfs backing mount FD")
 	flag.Parse()
 
 	if *checkpointPath == "" {
 		fatal(log, nil, "--checkpoint-path is required")
+	}
+	if *rootfsMountFD < 3 || *rootfsWorkspaceFD < 3 {
+		fatal(log, nil, "--rootfs-mount-fd and --rootfs-workspace-fd are required")
 	}
 
 	opts := executor.RestoreOptions{
@@ -31,6 +36,8 @@ func main() {
 		CUDADeviceMap:  *cudaDeviceMap,
 		CgroupRoot:     *cgroupRoot,
 		TargetPodIP:    *targetPodIP,
+		RootfsMountFD:  *rootfsMountFD,
+		WorkspaceFD:    *rootfsWorkspaceFD,
 	}
 
 	result, err := executor.RestoreInNamespace(context.Background(), opts, log)

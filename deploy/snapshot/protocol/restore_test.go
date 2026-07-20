@@ -97,11 +97,11 @@ func TestNewRestorePod(t *testing.T) {
 	if restorePod.Spec.SecurityContext == nil || restorePod.Spec.SecurityContext.SeccompProfile == nil {
 		t.Fatalf("expected seccomp profile to be injected: %#v", restorePod.Spec.SecurityContext)
 	}
-	if len(restorePod.Spec.Volumes) != 2 {
-		t.Fatalf("expected checkpoint and snapshot-control volumes, got %#v", restorePod.Spec.Volumes)
+	if len(restorePod.Spec.Volumes) != 3 {
+		t.Fatalf("expected checkpoint, control, and rootfs backing volumes, got %#v", restorePod.Spec.Volumes)
 	}
-	if len(main.VolumeMounts) != 2 {
-		t.Fatalf("expected checkpoint and snapshot-control mounts, got %#v", main.VolumeMounts)
+	if len(main.VolumeMounts) != 3 {
+		t.Fatalf("expected checkpoint, control, and rootfs backing mounts, got %#v", main.VolumeMounts)
 	}
 	foundMount := false
 	for _, m := range main.VolumeMounts {
@@ -205,8 +205,9 @@ func TestNewRestorePodShapesMultipleTargets(t *testing.T) {
 		t.Fatalf("sidecar command must not be rewritten, got %#v", sidecar.Command)
 	}
 	for _, m := range sidecar.VolumeMounts {
-		if m.Name == SnapshotControlVolumeName {
-			t.Fatalf("sidecar must not get a control mount: %#v", sidecar.VolumeMounts)
+		if m.Name == SnapshotControlVolumeName ||
+			m.MountPath == RootfsBackingWorkspaceMountPath {
+			t.Fatalf("sidecar must not get snapshot-private mounts: %#v", sidecar.VolumeMounts)
 		}
 	}
 	for _, e := range sidecar.Env {
@@ -285,12 +286,12 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 	if podSpec.SecurityContext == nil || podSpec.SecurityContext.SeccompProfile == nil {
 		t.Fatalf("expected seccomp profile to be injected: %#v", podSpec.SecurityContext)
 	}
-	if len(podSpec.Volumes) != 2 {
-		t.Fatalf("expected checkpoint and snapshot-control volumes, got %#v", podSpec.Volumes)
+	if len(podSpec.Volumes) != 3 {
+		t.Fatalf("expected checkpoint, control, and rootfs backing volumes, got %#v", podSpec.Volumes)
 	}
 	container := &podSpec.Containers[0]
-	if len(container.VolumeMounts) != 2 {
-		t.Fatalf("expected checkpoint and snapshot-control mounts, got %#v", container.VolumeMounts)
+	if len(container.VolumeMounts) != 3 {
+		t.Fatalf("expected checkpoint, control, and rootfs backing mounts, got %#v", container.VolumeMounts)
 	}
 	volCount := 0
 	for _, v := range podSpec.Volumes {
@@ -351,6 +352,34 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 		t.Fatalf("expected startup probe to gate restore completion")
 	}
 	assertRestoreStartupGate(t, container.StartupProbe)
+}
+
+func TestPrepareRestorePodSpecRejectsRootfsBackingSubPathExpr(t *testing.T) {
+	name := rootfsBackingVolumeName("main")
+	podSpec := corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name: "main",
+			VolumeMounts: []corev1.VolumeMount{{
+				Name:        name,
+				MountPath:   RootfsBackingWorkspaceMountPath,
+				SubPathExpr: "$(POD_NAME)",
+			}},
+		}},
+		Volumes: []corev1.Volume{{
+			Name:         name,
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		}},
+	}
+	err := PrepareRestorePodSpec(
+		&podSpec,
+		map[string]string{TargetContainersAnnotation: "main"},
+		Storage{},
+		"",
+		false,
+	)
+	if err == nil || !strings.Contains(err.Error(), "conflicting mount settings") {
+		t.Fatalf("expected rootfs backing subPathExpr rejection, got %v", err)
+	}
 }
 
 func TestPrepareRestorePodSpecSynthesizesStartupProbeFromLiveness(t *testing.T) {
@@ -488,13 +517,14 @@ func validRestoreSpecFixture(profile string, targets ...string) (*corev1.PodSpec
 			VolumeMounts: []corev1.VolumeMount{
 				{Name: CheckpointVolumeName, MountPath: "/checkpoints"},
 				{Name: SnapshotControlVolumeName, MountPath: SnapshotControlMountPath, SubPath: name},
+				{Name: rootfsBackingVolumeName(name), MountPath: RootfsBackingWorkspaceMountPath},
 			},
 			Env: []corev1.EnvVar{{Name: SnapshotControlDirEnv, Value: SnapshotControlMountPath}},
 		}
 		ensureRestoreStartupProbe(&container)
 		containers = append(containers, container)
 	}
-	return &corev1.PodSpec{
+	podSpec := &corev1.PodSpec{
 		SecurityContext: &corev1.PodSecurityContext{
 			SeccompProfile: &corev1.SeccompProfile{
 				Type:             corev1.SeccompProfileTypeLocalhost,
@@ -516,7 +546,14 @@ func validRestoreSpecFixture(profile string, targets ...string) (*corev1.PodSpec
 			},
 		},
 		Containers: containers,
-	}, map[string]string{TargetContainersAnnotation: FormatTargetContainers(targets)}
+	}
+	for _, name := range targets {
+		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
+			Name:         rootfsBackingVolumeName(name),
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		})
+	}
+	return podSpec, map[string]string{TargetContainersAnnotation: FormatTargetContainers(targets)}
 }
 
 func TestValidateRestorePodSpec(t *testing.T) {
@@ -584,6 +621,12 @@ func TestValidateRestorePodSpec(t *testing.T) {
 	}
 
 	badSpec = podSpec.DeepCopy()
+	badSpec.Containers[0].VolumeMounts[2].SubPathExpr = "$(POD_NAME)"
+	if err := ValidateRestorePodSpec(badSpec, annotations, storage, DefaultSeccompLocalhostProfile); err == nil || !strings.Contains(err.Error(), "subPathExpr") {
+		t.Fatalf("expected rootfs backing subPathExpr rejection, got %v", err)
+	}
+
+	badSpec = podSpec.DeepCopy()
 	badSpec.SecurityContext = nil
 	if err := ValidateRestorePodSpec(badSpec, annotations, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != "missing localhost seccomp profile" {
 		t.Fatalf("expected missing seccomp error, got %v", err)
@@ -603,6 +646,23 @@ func TestValidateRestorePodSpecMultipleTargets(t *testing.T) {
 	}
 	if err := ValidateRestorePodSpec(podSpec, annotations, storage, DefaultSeccompLocalhostProfile); err != nil {
 		t.Fatalf("expected multi-target validation to pass, got %v", err)
+	}
+
+	backingAlias := podSpec.DeepCopy()
+	backingAlias.Containers[0].VolumeMounts = append(
+		backingAlias.Containers[0].VolumeMounts,
+		corev1.VolumeMount{
+			Name:      rootfsBackingVolumeName("engine-0"),
+			MountPath: "/visible-backing",
+		},
+	)
+	if err := ValidateRestorePodSpec(
+		backingAlias,
+		annotations,
+		storage,
+		DefaultSeccompLocalhostProfile,
+	); err == nil || !strings.Contains(err.Error(), "rootfs backing") {
+		t.Fatalf("expected visible backing alias rejection, got %v", err)
 	}
 
 	// Drop the engine-1 control mount → validation should fail for that target specifically.

@@ -28,6 +28,10 @@ namespace-local workload PVCs, or it can require that they already exist.
 - **containerd** or **CRI-O** (chart defaults to containerd; see below for CRI-O / OpenShift)
 - Dynamo Platform already installed with `dynamo-operator.checkpoint.enabled=true`
 - a cluster where a privileged DaemonSet with `hostPID`, `hostIPC`, and `hostNetwork` is acceptable
+- host loop driver and `/dev/loop-control`, SquashFS with LZ4, and OverlayFS
+- Linux support for `open_tree`/`move_mount` (5.2), `openat2` (5.6), and
+  `LOOP_CONFIGURE` (5.8). Linux 5.8 is the first upstream release with the full
+  set, but enterprise backports make capability probing authoritative.
 
 In the default `agentMount` mode, the snapshot-agent DaemonSet mounts the
 checkpoint PVC directly. On a multi-node GPU cluster that means agent pods on
@@ -52,7 +56,8 @@ fail or defer that attempt until reconciliation sees a fresh container.
 For CRI-O nodes set `runtime.type=crio`. Only set `runtime.socketPath` if the CRI
 socket is not the default for that type (see `values.yaml`). On OpenShift, set
 `openshift.enabled=true` so the chart emits the extra RBAC and pod annotations
-the agent needs. Example:
+the agent needs. The privileged SCC grants permission; it does not load the host
+loop driver or provide `/dev/loop-control`. Example:
 
 ```bash
 helm upgrade --install snapshot ./deploy/helm/charts/snapshot \
