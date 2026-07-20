@@ -7,10 +7,10 @@ package webhook
 
 import (
 	"context"
-	"net/http"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	admissionv1 "k8s.io/api/admission/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -65,31 +65,42 @@ func TestLeaseAwareDefaulterWithoutChecker(t *testing.T) {
 }
 
 func TestWithGate(t *testing.T) {
-	webhook := WithGate(&admission.Webhook{Handler: admission.HandlerFunc(func(context.Context, admission.Request) admission.Response {
+	SetFeatureResolver(features.NewResolver(features.Gates{Grove: true}, func(namespace string) (string, bool) {
+		switch namespace {
+		case "claimed":
+			return `{"grove":false,"futureGate":true}`, true
+		case "invalid":
+			return `{"grove":"yes"}`, true
+		default:
+			return "", false
+		}
+	}))
+	t.Cleanup(func() { SetFeatureResolver(nil) })
+
+	webhook := WithGate(&admission.Webhook{Handler: admission.HandlerFunc(func(ctx context.Context, req admission.Request) admission.Response {
+		wantGrove := req.Namespace != "claimed"
+		if got := features.MustGateFrom(ctx).Enabled(features.Grove); got != wantGrove {
+			t.Fatalf("Grove gate = %v, want %v", got, wantGrove)
+		}
 		return admission.Allowed("handled")
 	})}, features.Gates{Grove: true})
-	ctx := webhook.WithContextFunc(context.Background(), &http.Request{})
-	if !features.MustGateFrom(ctx).Enabled(features.Grove) {
-		t.Fatal("Grove gate missing from webhook context")
-	}
-	if response := webhook.Handler.Handle(ctx, admission.Request{}); !response.Allowed {
-		t.Fatal("handler rejected request with gate context")
-	}
-}
 
-func TestWithGateRequiresGateContext(t *testing.T) {
-	webhook := WithGate(&admission.Webhook{Handler: admission.HandlerFunc(func(context.Context, admission.Request) admission.Response {
-		return admission.Allowed("handled")
-	})}, features.Defaults())
-	defer func() {
-		if recover() == nil {
-			t.Fatal("handler did not panic without gate context")
+	for namespace, wantWarnings := range map[string]int{"claimed": 1, "invalid": 1, "unclaimed": 0} {
+		response := webhook.Handler.Handle(context.Background(), admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+			Namespace: namespace,
+		}})
+		if !response.Allowed || len(response.Warnings) != wantWarnings {
+			t.Fatalf("response for %q = %#v", namespace, response)
 		}
-	}()
-	webhook.Handler.Handle(context.Background(), admission.Request{})
+	}
 }
 
 func TestCanModifyDGDReplicas(t *testing.T) {
+	SetNamespaceOperatorPrincipalResolver(func(namespace string) (string, bool) {
+		return "system:serviceaccount:tenant-a:dev-operator-controller-manager", namespace == "tenant-a"
+	})
+	t.Cleanup(func() { SetNamespaceOperatorPrincipalResolver(nil) })
+
 	tests := []struct {
 		name          string
 		principal     string
@@ -112,6 +123,12 @@ func TestCanModifyDGDReplicas(t *testing.T) {
 			name:          "operator SA auto-detected from downward API",
 			principal:     "system:serviceaccount:custom-ns:my-release-controller-manager",
 			username:      "system:serviceaccount:custom-ns:my-release-controller-manager",
+			expectAllowed: true,
+		},
+		{
+			name:          "active namespaced operator SA",
+			principal:     "system:serviceaccount:dynamo-system:dynamo-operator-controller-manager",
+			username:      "system:serviceaccount:tenant-a:dev-operator-controller-manager",
 			expectAllowed: true,
 		},
 		{

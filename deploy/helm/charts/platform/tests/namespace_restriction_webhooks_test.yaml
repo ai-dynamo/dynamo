@@ -40,63 +40,25 @@ tests:
           path: webhooks[3].namespaceSelector
         documentIndex: 1
 
-  - it: scopes namespace-restricted admission to the target namespace
+  - it: renders no admission configuration for a namespaced installation
     template: charts/dynamo-operator/templates/webhook-configuration.yaml
     set:
       dynamo-operator.namespaceRestriction.enabled: true
-      # Exercise a YAML boolean-like namespace to ensure the rendered selector stays a string.
-      dynamo-operator.namespaceRestriction.targetNamespace: "true"
       dynamo-operator.upgradeCRD: false
     asserts:
       - hasDocuments:
-          count: 2
-      - equal:
-          path: webhooks[0].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
-          value: "true"
-        documentIndex: 0
-      - equal:
-          path: webhooks[1].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
-          value: "true"
-        documentIndex: 0
-      - equal:
-          path: webhooks[2].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
-          value: "true"
-        documentIndex: 0
-      - equal:
-          path: webhooks[3].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
-          value: "true"
-        documentIndex: 0
-      - equal:
-          path: webhooks[4].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
-          value: "true"
-        documentIndex: 0
-      - equal:
-          path: webhooks[0].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
-          value: "true"
-        documentIndex: 1
-      - equal:
-          path: webhooks[1].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
-          value: "true"
-        documentIndex: 1
-      - equal:
-          path: webhooks[2].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
-          value: "true"
-        documentIndex: 1
-      - equal:
-          path: webhooks[3].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
-          value: "true"
-        documentIndex: 1
+          count: 0
 
-  - it: renders a webhook service for a namespace-restricted installation
+  - it: renders no webhook service for a namespaced installation
     template: charts/dynamo-operator/templates/webhook-service.yaml
     set:
       dynamo-operator.namespaceRestriction.enabled: true
       dynamo-operator.upgradeCRD: false
     asserts:
       - hasDocuments:
-          count: 1
+          count: 0
 
-  - it: renders webhook certificates for a namespace-restricted installation
+  - it: renders no webhook certificates for a namespaced installation
     template: charts/dynamo-operator/templates/webhook-certificates.yaml
     set:
       dynamo-operator.namespaceRestriction.enabled: true
@@ -104,4 +66,4 @@ tests:
       dynamo-operator.webhook.certManager.enabled: true
     asserts:
       - hasDocuments:
-          count: 4
+          count: 0

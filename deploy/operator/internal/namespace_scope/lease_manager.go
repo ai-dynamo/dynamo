@@ -21,10 +21,12 @@ package namespace_scope
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/go-logr/logr"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
@@ -37,6 +39,8 @@ import (
 const (
 	// LeaseName is the well-known name for namespace scope marker leases
 	LeaseName = "dynamo-operator-namespace-scope"
+	// OperatorPrincipalAnnotation stores the namespaced operator's Kubernetes username.
+	OperatorPrincipalAnnotation = "nvidia.com/dynamo-operator-principal"
 )
 
 // Deprecated: LeaseManager manages the namespace scope marker lease for the deprecated
@@ -54,10 +58,21 @@ type LeaseManager struct {
 	failureCount    int
 	maxFailures     int
 	logger          logr.Logger
+
+	admissionGatesJSON string
+	operatorPrincipal  string
 }
 
 // NewLeaseManager creates a new lease manager for namespace scope marking
-func NewLeaseManager(config *rest.Config, namespace string, operatorVersion string, leaseDuration time.Duration, renewInterval time.Duration) (*LeaseManager, error) {
+func NewLeaseManager(
+	config *rest.Config,
+	namespace string,
+	operatorVersion string,
+	leaseDuration time.Duration,
+	renewInterval time.Duration,
+	admissionGates features.Gates,
+	operatorPrincipal string,
+) (*LeaseManager, error) {
 	// Validate inputs
 	if leaseDuration <= 0 {
 		return nil, fmt.Errorf("lease duration must be greater than zero, got %v", leaseDuration)
@@ -92,6 +107,11 @@ func NewLeaseManager(config *rest.Config, namespace string, operatorVersion stri
 		maxFailures = 1 // Always allow at least 1 failure for transient issues
 	}
 
+	admissionGatesJSON, err := json.Marshal(admissionGates)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode admission feature gates: %w", err)
+	}
+
 	return &LeaseManager{
 		client:          client,
 		namespace:       namespace,
@@ -101,6 +121,9 @@ func NewLeaseManager(config *rest.Config, namespace string, operatorVersion stri
 		operatorVersion: operatorVersion,
 		stopCh:          make(chan struct{}),
 		maxFailures:     maxFailures,
+
+		admissionGatesJSON: string(admissionGatesJSON),
+		operatorPrincipal:  operatorPrincipal,
 	}, nil
 }
 
@@ -176,6 +199,10 @@ func (lm *LeaseManager) createOrUpdateLease(ctx context.Context) error {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      LeaseName,
 			Namespace: lm.namespace,
+			Annotations: map[string]string{
+				features.LeaseAnnotation:    lm.admissionGatesJSON,
+				OperatorPrincipalAnnotation: lm.operatorPrincipal,
+			},
 		},
 		Spec: coordinationv1.LeaseSpec{
 			HolderIdentity:       &lm.holderIdentity,
@@ -204,6 +231,11 @@ func (lm *LeaseManager) createOrUpdateLease(ctx context.Context) error {
 	existingLease.Spec.HolderIdentity = &lm.holderIdentity
 	existingLease.Spec.LeaseDurationSeconds = &leaseDurationSeconds
 	existingLease.Spec.RenewTime = &now
+	if existingLease.Annotations == nil {
+		existingLease.Annotations = make(map[string]string)
+	}
+	existingLease.Annotations[features.LeaseAnnotation] = lm.admissionGatesJSON
+	existingLease.Annotations[OperatorPrincipalAnnotation] = lm.operatorPrincipal
 
 	_, err = lm.client.CoordinationV1().Leases(lm.namespace).Update(ctx, existingLease, metav1.UpdateOptions{})
 	if err != nil {

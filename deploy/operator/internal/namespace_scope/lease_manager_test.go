@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -71,6 +72,9 @@ func TestLeaseManager_CreateOrUpdateLease(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			const admissionGatesJSON = `{"grove":false}`
+			const operatorPrincipal = "system:serviceaccount:test-ns:dynamo-operator"
+
 			// Create fake client with or without existing lease
 			var client *fake.Clientset
 			if tt.existingLease != nil {
@@ -88,6 +92,9 @@ func TestLeaseManager_CreateOrUpdateLease(t *testing.T) {
 				holderIdentity:  "namespace-restricted-operator-" + tt.operatorVersion,
 				operatorVersion: tt.operatorVersion,
 				stopCh:          make(chan struct{}),
+
+				admissionGatesJSON: admissionGatesJSON,
+				operatorPrincipal:  operatorPrincipal,
 			}
 
 			// Call createOrUpdateLease
@@ -128,6 +135,12 @@ func TestLeaseManager_CreateOrUpdateLease(t *testing.T) {
 			}
 			if *lease.Spec.LeaseDurationSeconds != 30 {
 				t.Errorf("lease duration = %v, want %v", *lease.Spec.LeaseDurationSeconds, 30)
+			}
+			if got := lease.Annotations[features.LeaseAnnotation]; got != admissionGatesJSON {
+				t.Errorf("admission gates = %q, want %q", got, admissionGatesJSON)
+			}
+			if got := lease.Annotations[OperatorPrincipalAnnotation]; got != operatorPrincipal {
+				t.Errorf("operator principal = %q, want %q", got, operatorPrincipal)
 			}
 
 			if lease.Spec.RenewTime == nil {

@@ -49,10 +49,9 @@ certificate authority (CA). Deploy exactly one cluster-wide operator per cluster
 > [!WARNING]
 > Namespace-restricted mode is only for development and testing. It is not supported for production.
 
-A namespace-restricted operator reconciles, validates, and mutates resources only in its target
-namespace. It creates a Lease that makes the cluster-wide operator skip reconciliation and
-admission in that namespace. The namespace-restricted operator serves its own admission webhooks
-using its local feature settings.
+A namespace-restricted operator reconciles only its target namespace and serves no webhooks. It
+creates a Lease that makes the cluster-wide operator skip reconciliation in that namespace and
+provides its feature gates to global admission.
 
 Use this mode to test controller changes or feature settings in one namespace on a development
 cluster. It is not a multi-tenancy boundary.
@@ -60,18 +59,10 @@ cluster. It is not a multi-tenancy boundary.
 **How It Works:**
 
 1. The namespace-restricted operator creates a Lease named `dynamo-operator-namespace-scope`.
-2. The cluster-wide operator watches these Leases and skips the claimed namespace.
-3. The namespace-restricted ValidatingWebhookConfiguration and MutatingWebhookConfiguration select
-   only the target namespace.
-4. The namespace-restricted operator manages the TLS certificate and CA bundles for its own
-   admission configurations.
-5. The cluster-wide operator remains the only owner of CRDs, conversion, and conversion CA bundles.
-
-If the namespace-restricted Pod becomes unavailable, Lease expiration lets the cluster-wide operator
-resume reconciliation, but does not remove the namespace-restricted webhook configurations. Admission
-continues to target the unavailable Service. Recover the Pod to restore namespace-restricted admission,
-or uninstall the release to remove its webhook configurations. Cluster-wide admission resumes after the
-Lease is deleted or expires.
+2. The cluster-wide operator watches these Leases and skips reconciliation in the claimed namespace.
+3. The cluster-wide operator remains the only owner of CRDs and all webhooks.
+4. Global admission uses the feature-gate snapshot from the Lease for the claimed namespace.
+5. If no successor renews the Lease, it expires and cluster-wide reconciliation resumes.
 
 > [!CAUTION]
 > Set `dynamo-operator.upgradeCRD=false`. Namespace-restricted operators use the CRDs installed and
@@ -98,10 +89,10 @@ release namespace.
 Install every operator Helm release in a separate namespace. Multiple Dynamo operator releases in
 the same Helm release namespace are not supported.
 
-Run the same operator version in parallel whenever possible. The cluster-wide operator should be
-the same version or newer and must provide the newest APIs in the cluster. A newer namespaced
-controller can be used for development when it does not require CRD fields absent from the
-cluster-wide installation.
+Run the same operator version in parallel whenever possible. The cluster-wide operator must be the
+same version or newer and provide the newest APIs in the cluster. A 1.3 namespaced operator is not
+supported with a 1.2 cluster-wide operator. Newer namespaced controller code can be used for
+development when it remains compatible with the cluster-wide CRDs and webhooks.
 
 **Observability:**
 

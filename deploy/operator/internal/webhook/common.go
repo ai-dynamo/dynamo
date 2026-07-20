@@ -19,7 +19,6 @@ package webhook
 
 import (
 	"context"
-	"net/http"
 	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -43,6 +42,8 @@ type ExcludedNamespacesChecker interface {
 // webhookExcludedNamespaces holds the excluded namespaces checker (usually leaseWatcher).
 // This is set by main.go and shared across admission handlers.
 var webhookExcludedNamespaces ExcludedNamespacesChecker
+var webhookFeatureResolver features.Resolver
+var namespaceOperatorPrincipal func(string) (string, bool)
 
 // SetExcludedNamespaces sets the excluded namespaces checker for all webhooks.
 // This should be called from main.go before starting the webhook server.
@@ -53,6 +54,16 @@ func SetExcludedNamespaces(checker ExcludedNamespacesChecker) {
 // GetExcludedNamespaces returns the current excluded namespaces checker.
 func GetExcludedNamespaces() ExcludedNamespacesChecker {
 	return webhookExcludedNamespaces
+}
+
+// SetFeatureResolver configures per-namespace feature gates for admission.
+func SetFeatureResolver(resolver features.Resolver) {
+	webhookFeatureResolver = resolver
+}
+
+// SetNamespaceOperatorPrincipalResolver configures namespaced operator authorization.
+func SetNamespaceOperatorPrincipalResolver(resolver func(string) (string, bool)) {
+	namespaceOperatorPrincipal = resolver
 }
 
 // LeaseAwareValidator wraps a CustomValidator and adds lease-based namespace exclusion logic.
@@ -76,12 +87,15 @@ type LeaseAwareDefaulter struct {
 func WithGate(webhook *admission.Webhook, gate features.Gate) *admission.Webhook {
 	handler := webhook.Handler
 	webhook.Handler = admission.HandlerFunc(func(ctx context.Context, req admission.Request) admission.Response {
-		features.MustGateFrom(ctx)
-		return handler.Handle(ctx, req)
+		effectiveGate := gate
+		var warnings admission.Warnings
+		if webhookFeatureResolver != nil {
+			effectiveGate, warnings = webhookFeatureResolver.ForNamespace(req.Namespace)
+		}
+		response := handler.Handle(features.WithGate(ctx, effectiveGate), req)
+		response.Warnings = append(warnings, response.Warnings...)
+		return response
 	})
-	webhook.WithContextFunc = func(ctx context.Context, _ *http.Request) context.Context {
-		return features.WithGate(ctx, gate)
-	}
 	return webhook
 }
 
@@ -190,6 +204,14 @@ func CanModifyDGDReplicas(operatorPrincipal string, userInfo authenticationv1.Us
 	}
 
 	parts := strings.Split(username, ":")
+	if len(parts) == 4 && namespaceOperatorPrincipal != nil {
+		if principal, found := namespaceOperatorPrincipal(parts[2]); found && principal == username {
+			webhookCommonLog.V(1).Info("allowing DGD replicas modification",
+				"username", username,
+				"matchType", "namespaceOperatorPrincipal")
+			return true
+		}
+	}
 	if len(parts) == 4 && parts[3] == consts.PlannerServiceAccountName {
 		webhookCommonLog.V(1).Info("allowing DGD replicas modification",
 			"username", username,

@@ -24,28 +24,14 @@ tests:
               - patch
         documentIndex: 2
 
-  - it: prevents a namespace-restricted operator from patching CRDs
+  - it: renders no webhook RBAC for a namespaced operator
     template: charts/dynamo-operator/templates/webhook-rbac.yaml
     set:
       dynamo-operator.namespaceRestriction.enabled: true
       dynamo-operator.upgradeCRD: false
     asserts:
       - hasDocuments:
-          count: 4
-      - notContains:
-          path: rules
-          content:
-            apiGroups:
-              - apiextensions.k8s.io
-            resources:
-              - customresourcedefinitions
-            verbs:
-              - get
-              - list
-              - watch
-              - update
-              - patch
-        documentIndex: 2
+          count: 0
 
   - it: omits cluster-scoped admission and CRD rules from the namespace-restricted manager Role
     template: charts/dynamo-operator/templates/manager-rbac.yaml

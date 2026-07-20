@@ -49,7 +49,7 @@ No action is required for most upgrades — the operator's built-in cert-control
 
 ---
 
-## ⚠️ Important: Cluster-Wide and Namespace-Restricted Deployment
+## ⚠️ DEVELOPMENT AND TESTING ONLY: Namespace-Restricted Deployment
 
 Deploy one cluster-wide operator per cluster. It owns the Custom Resource Definitions (CRDs),
 conversion webhook, and conversion certificate authority (CA).
@@ -57,9 +57,9 @@ conversion webhook, and conversion certificate authority (CA).
 > [!WARNING]
 > Namespace-restricted mode is only for development and testing. It is not supported for production.
 
-A namespace-restricted operator owns reconciliation, validation, and mutation only in its target
-namespace. Its Lease makes the cluster-wide operator skip that namespace. Install it alongside an
-existing cluster-wide operator with CRD management disabled:
+A namespace-restricted operator reconciles only its target namespace and serves no webhooks. Its
+Lease makes the cluster-wide reconcilers skip that namespace and provides feature gates to global
+admission. Install it alongside an existing cluster-wide operator with CRD management disabled:
 
 ```bash
 helm install dynamo-test dynamo-platform-${RELEASE_VERSION}.tgz \
@@ -105,7 +105,7 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.etcdAddr | string | `""` | etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: `http://hostname:2379` or `https://hostname:2379` |
 | dynamo-operator.modelExpressURL | string | `""` | URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true). |
 | dynamo-operator.namespaceRestriction | object | `{"enabled":false,"lease":{"duration":"30s","renewInterval":"10s"},"targetNamespace":null}` | DEVELOPMENT AND TESTING ONLY: Namespace-restricted mode is not supported for production. Use cluster-wide mode for production deployments. |
-| dynamo-operator.namespaceRestriction.enabled | bool | `false` | DEVELOPMENT AND TESTING ONLY: Enable namespace-restricted reconciliation and admission. Not supported for production. |
+| dynamo-operator.namespaceRestriction.enabled | bool | `false` | DEVELOPMENT AND TESTING ONLY: Enable namespace-restricted reconciliation. Not supported for production. |
 | dynamo-operator.namespaceRestriction.targetNamespace | string | `nil` | DEVELOPMENT AND TESTING ONLY: Target namespace. Defaults to the Helm release namespace. |
 | dynamo-operator.namespaceRestriction.lease | object | `{"duration":"30s","renewInterval":"10s"}` | DEVELOPMENT AND TESTING ONLY: Namespace ownership Lease settings. |
 | dynamo-operator.namespaceRestriction.lease.duration | string | `"30s"` | DEVELOPMENT AND TESTING ONLY: Namespace ownership Lease duration. |
@@ -152,7 +152,7 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.webhook.failurePolicy | string | `"Fail"` | Webhook failure policy controls how Kubernetes handles requests when the webhook is unavailable. 'Fail' (recommended for production) rejects requests if the webhook cannot be reached, ensuring strict validation. 'Ignore' allows requests through if the webhook is unavailable, providing availability over validation guarantees. |
 | dynamo-operator.webhook.podCheckpointRestoreFailurePolicy | string | `"Ignore"` | Failure policy for the Pod CREATE checkpoint-restore mutating webhook. Defaults to Ignore so a webhook outage falls back to cold-start instead of blocking workload Pods. |
 | dynamo-operator.webhook.timeoutSeconds | int | `10` | Timeout in seconds for webhook validation calls. If the webhook doesn't respond within this time, the request will be handled according to the failurePolicy. |
-| dynamo-operator.webhook.namespaceSelector | object | `{}` | Unsupported; must remain empty. Helm configures global admission for the cluster-wide operator and target-namespace admission for restricted operators. |
+| dynamo-operator.webhook.namespaceSelector | object | `{}` | Unsupported; must remain empty. Admission and conversion webhooks are always global and owned by the cluster-wide operator. Installation fails if set. |
 | dynamo-operator.webhook.certManager.enabled | bool | `false` | Whether to use cert-manager for automatic certificate management. Requires cert-manager to be installed in the cluster. When enabled, cert-manager will provision and rotate certificates instead of the operator's built-in cert-controller. |
 | dynamo-operator.webhook.certManager.certificate.duration | string | `"8760h"` | Certificate duration for webhook certificates managed by cert-manager (e.g., "8760h" for 1 year). cert-manager will automatically renew the certificate before it expires. |
 | dynamo-operator.webhook.certManager.certificate.renewBefore | string | `"360h"` | Time before certificate expiration to trigger renewal (e.g., "360h" for 15 days). cert-manager will attempt to renew the certificate when this threshold is reached. |

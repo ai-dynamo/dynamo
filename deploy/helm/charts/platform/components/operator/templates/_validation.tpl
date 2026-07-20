@@ -98,7 +98,7 @@ Validation for configuration consistency
   {{- fail "VALIDATION ERROR: namespaceRestriction.enabled=true is incompatible with upgradeCRD=true. Set upgradeCRD=false so the namespaced release does not install or update cluster-wide CRDs." -}}
 {{- end -}}
 {{- if not (empty .Values.webhook.namespaceSelector) -}}
-  {{- fail "VALIDATION ERROR: webhook.namespaceSelector must be empty. Helm manages admission scope: cluster-wide webhooks cover every namespace and namespace-restricted webhooks cover only their target namespace." -}}
+  {{- fail "VALIDATION ERROR: webhook.namespaceSelector must be empty. Admission and conversion webhooks are always global and owned by the cluster-wide operator." -}}
 {{- end -}}
 {{/* Validate leader election namespace setting */}}
 {{- if and (not .Values.namespaceRestriction.enabled) .Values.controllerManager.leaderElection.namespace -}}

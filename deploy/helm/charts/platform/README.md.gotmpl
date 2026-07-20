@@ -49,7 +49,7 @@ No action is required for most upgrades — the operator's built-in cert-control
 
 ---
 
-## ⚠️ Important: Cluster-Wide and Namespace-Restricted Deployment
+## ⚠️ DEVELOPMENT AND TESTING ONLY: Namespace-Restricted Deployment
 
 Deploy one cluster-wide operator per cluster. It owns the Custom Resource Definitions (CRDs),
 conversion webhook, and conversion certificate authority (CA).
@@ -57,9 +57,9 @@ conversion webhook, and conversion certificate authority (CA).
 > [!WARNING]
 > Namespace-restricted mode is only for development and testing. It is not supported for production.
 
-A namespace-restricted operator owns reconciliation, validation, and mutation only in its target
-namespace. Its Lease makes the cluster-wide operator skip that namespace. Install it alongside an
-existing cluster-wide operator with CRD management disabled:
+A namespace-restricted operator reconciles only its target namespace and serves no webhooks. Its
+Lease makes the cluster-wide reconcilers skip that namespace and provides feature gates to global
+admission. Install it alongside an existing cluster-wide operator with CRD management disabled:
 
 ```bash
 helm install dynamo-test dynamo-platform-${RELEASE_VERSION}.tgz \

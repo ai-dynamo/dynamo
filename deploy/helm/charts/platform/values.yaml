@@ -83,7 +83,7 @@ dynamo-operator:
   modelExpressURL: ""
   # -- DEVELOPMENT AND TESTING ONLY: Namespace-restricted mode is not supported for production. Use cluster-wide mode for production deployments.
   namespaceRestriction:
-    # -- DEVELOPMENT AND TESTING ONLY: Enable namespace-restricted reconciliation and admission. Not supported for production.
+    # -- DEVELOPMENT AND TESTING ONLY: Enable namespace-restricted reconciliation. Not supported for production.
     enabled: false
     # -- DEVELOPMENT AND TESTING ONLY: Target namespace. Defaults to the Helm release namespace.
     targetNamespace:
@@ -238,7 +238,7 @@ dynamo-operator:
     # -- Timeout in seconds for webhook validation calls. If the webhook doesn't respond within this time, the request will be handled according to the failurePolicy.
     timeoutSeconds: 10
 
-    # -- Unsupported; must remain empty. Helm configures global admission for the cluster-wide operator and target-namespace admission for restricted operators.
+    # -- Unsupported; must remain empty. Admission and conversion webhooks are always global and owned by the cluster-wide operator. Installation fails if set.
     namespaceSelector: {}
 
     # cert-manager integration for automated certificate lifecycle management
