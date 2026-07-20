@@ -65,6 +65,7 @@ def chat_payload_default(
     stream: bool = False,
     extra_body: Optional[Dict[str, Any]] = None,
     router_nvext_expectation: RouterNvextExpectation | None = None,
+    payload_cls: type[RouterNvextChatPayload] = RouterNvextChatPayload,
 ) -> ChatPayload:
     body = {
         "messages": [
@@ -89,7 +90,7 @@ def chat_payload_default(
         or ["AI", "knock", "joke", "think", "artificial", "intelligence"],
     }
     if router_nvext_expectation:
-        return RouterNvextChatPayload(
+        return payload_cls(
             **common_args,
             router_nvext_expectation=router_nvext_expectation,
         )
@@ -176,6 +177,7 @@ def router_selection_chat_payload_default(
     max_tokens: int = 1000,
     temperature: float = 0.0,
     stream: bool = False,
+    payload_cls: type[RouterNvextChatPayload] = RouterNvextChatPayload,
 ) -> ChatPayload:
     return chat_payload_default(
         repeat_count=repeat_count,
@@ -186,6 +188,7 @@ def router_selection_chat_payload_default(
         stream=stream,
         extra_body=router_nvext_extra_body(["worker_id"]),
         router_nvext_expectation=RouterNvextExpectation(worker_id=True),
+        payload_cls=payload_cls,
     )
 
 

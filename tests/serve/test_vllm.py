@@ -6,7 +6,6 @@ import logging
 import os
 import platform
 import random
-import types
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -44,52 +43,14 @@ from tests.utils.payload_builder import (
     router_selection_chat_payload_default,
 )
 from tests.utils.payloads import (
+    DistinctRouterWorkersPayload,
     EmbeddingMultiWorkerDispatchPayload,
     EmbeddingPayload,
     LoraTestChatPayload,
     ToolCallingChatPayload,
 )
-from tests.utils.router_nvext import require_router_worker_id
 
 logger = logging.getLogger(__name__)
-
-
-def _assert_distinct_router_workers(payload, min_distinct: int = 2):
-    """Require distinct router routes across repeated requests.
-
-    Binds validate/final_validation with ``types.MethodType`` so ``deepcopy`` in
-    ``run_serve_deployment`` rebinds them to the *copy* whose ``body`` is sent.
-    """
-    payload._min_distinct = min_distinct
-    payload._seen_routes = set()
-    payload._n = 0
-    base_validate = payload.__class__.validate
-
-    def validate(self, response, content):
-        base_validate(self, response, content)
-        worker_id = require_router_worker_id(response.json())
-        # One route identity per response (not independent prefill/decode IDs).
-        route = tuple(
-            worker_id[key]
-            for key in ("prefill_worker_id", "decode_worker_id")
-            if isinstance(worker_id.get(key), int)
-        )
-        if route:
-            self._seen_routes.add(route)
-        self._n += 1
-        # Diversify the prompt so KV affinity does not pin every request.
-        msg = self.body["messages"][0]
-        msg["content"] = msg["content"].split("\n[probe-", 1)[0] + f"\n[probe-{self._n}]"
-
-    def final_validation(self):
-        assert len(self._seen_routes) >= self._min_distinct, (
-            f"expected >= {self._min_distinct} distinct routes across {self._n} "
-            f"requests, got {sorted(self._seen_routes)}"
-        )
-
-    payload.validate = types.MethodType(validate, payload)
-    payload.final_validation = types.MethodType(final_validation, payload)
-    return payload
 
 
 def _is_cuda12() -> bool:
@@ -444,8 +405,11 @@ vllm_configs = {
         ],  # TODO: profile to get max_vram
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
-            _assert_distinct_router_workers(
-                router_selection_chat_payload_default(repeat_count=6)
+            # 10 requests keeps the random-tie-break flake probability of not
+            # hitting both replicas at ~2 * 0.5**10 (< 0.2%).
+            router_selection_chat_payload_default(
+                repeat_count=10,
+                payload_cls=DistinctRouterWorkersPayload,
             ),
             kv_events_metrics_payload(system_ports=[DefaultPort.SYSTEM2.value]),
         ],

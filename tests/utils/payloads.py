@@ -30,7 +30,11 @@ import requests
 from dynamo import prometheus_names  # type: ignore[attr-defined]
 from tests.utils.constants import DefaultPort
 from tests.utils.prometheus import sum_metric_samples
-from tests.utils.router_nvext import RouterNvextExpectation, validate_router_nvext
+from tests.utils.router_nvext import (
+    RouterNvextExpectation,
+    require_router_worker_id,
+    validate_router_nvext,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -215,6 +219,41 @@ class RouterNvextChatPayload(ChatPayload):
             response.json(),
             self.router_nvext_expectation,
             context=type(self).__name__,
+        )
+
+
+class DistinctRouterWorkersPayload(RouterNvextChatPayload):
+    """Assert repeated requests spread across >= ``min_distinct`` router workers.
+
+    A short prompt caches no full KV block, so every worker has zero prefix
+    overlap and the router breaks the resulting load tie at random. Over
+    ``repeat_count`` requests that random spread should exercise more than one
+    replica; this records each response's worker route and checks the count.
+    """
+
+    def __init__(self, *args, min_distinct: int = 2, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._min_distinct = min_distinct
+        self._seen_routes: set[tuple[int, ...]] = set()
+        self._request_count = 0
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        worker_id = require_router_worker_id(response.json())
+        # require_router_worker_id guarantees at least one int id, so the route
+        # tuple is never empty.
+        route = tuple(
+            worker_id[key]
+            for key in ("prefill_worker_id", "decode_worker_id")
+            if isinstance(worker_id.get(key), int)
+        )
+        self._seen_routes.add(route)
+        self._request_count += 1
+
+    def final_validation(self) -> None:
+        assert len(self._seen_routes) >= self._min_distinct, (
+            f"expected >= {self._min_distinct} distinct router workers across "
+            f"{self._request_count} requests, got {sorted(self._seen_routes)}"
         )
 
 
