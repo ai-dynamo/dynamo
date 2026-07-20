@@ -868,37 +868,29 @@ async fn run_actor(
 ) {
     let _stopped_guard = CancelOnDrop(stopped);
     let mut source_epochs = HashMap::<WorkerWithDpRank, SourceEpoch>::new();
+    let mut unknown_removal_events = 0u64;
     let mut capacity_omission_events = 0u64;
     let mut shutdown_response = None;
     let mut discard_tail = false;
-    let mut publication_deadline = None;
+    let publication_timer = tokio::time::sleep(Duration::ZERO);
+    tokio::pin!(publication_timer);
+    let mut publication_timer_armed = false;
     loop {
-        let command = if let Some(deadline) = publication_deadline {
-            tokio::select! {
-                biased;
-                _ = fence.cancelled() => {
-                    discard_tail = true;
-                    break;
-                }
-                command = receiver.recv() => command,
-                _ = tokio::time::sleep_until(deadline) => {
-                    publication_deadline = None;
-                    if state.has_pending_publication()
-                        && let Err(error) = publish_pending(&mut state, &mut publisher, &diagnostics)
-                    {
-                        diagnostics.record_error(&error);
-                    }
-                    continue;
-                }
+        let command = tokio::select! {
+            biased;
+            _ = fence.cancelled() => {
+                discard_tail = true;
+                break;
             }
-        } else {
-            tokio::select! {
-                biased;
-                _ = fence.cancelled() => {
-                    discard_tail = true;
-                    break;
+            command = receiver.recv() => command,
+            _ = &mut publication_timer, if publication_timer_armed => {
+                publication_timer_armed = false;
+                if state.has_pending_publication()
+                    && let Err(error) = publish_pending(&mut state, &mut publisher, &diagnostics)
+                {
+                    diagnostics.record_error(&error);
                 }
-                command = receiver.recv() => command,
+                continue;
             }
         };
         let Some(command) = command else {
@@ -957,17 +949,33 @@ async fn run_actor(
                     continue;
                 }
                 source_epochs.entry(key).or_insert(source_epoch);
+                // NOTE: Subscriber-free Relay operation is transitional or diagnostic, not an
+                // optimized steady-state mode. Keep one publication path until an unsubscribed
+                // deployment is measured; a useful Relay is expected to have a consumer.
                 let outcome = state.apply_event(event);
                 let first_error = outcome.first_error().copied();
                 let publication_boundary = outcome.publication_boundary();
                 if outcome.unknown_removals() != 0 {
-                    tracing::warn!(
-                        worker_id,
-                        dp_rank,
-                        event_id,
-                        unknown_removals = outcome.unknown_removals(),
-                        "Ignoring KV DC Relay removals not owned by this worker/rank"
-                    );
+                    unknown_removal_events = unknown_removal_events.saturating_add(1);
+                    if unknown_removal_events == 1 {
+                        tracing::warn!(
+                            worker_id,
+                            dp_rank,
+                            event_id,
+                            unknown_removals = outcome.unknown_removals(),
+                            unknown_removal_events,
+                            "Ignoring KV DC Relay removals not owned by this worker/rank"
+                        );
+                    } else if unknown_removal_events.is_power_of_two() {
+                        tracing::debug!(
+                            worker_id,
+                            dp_rank,
+                            event_id,
+                            unknown_removals = outcome.unknown_removals(),
+                            unknown_removal_events,
+                            "KV DC Relay continues after repeated unknown removals"
+                        );
+                    }
                 }
                 if let Some(batch) = outcome.into_publication() {
                     if let Err(error) = publish_batch(batch, &mut publisher, &diagnostics) {
@@ -977,9 +985,12 @@ async fn run_actor(
                     diagnostics.record_no_publication();
                 }
                 if publication_boundary {
-                    publication_deadline = None;
-                } else if state.pending_event_count() == 1 && publication_deadline.is_none() {
-                    publication_deadline = Some(tokio::time::Instant::now() + publication_delay);
+                    publication_timer_armed = false;
+                } else if state.pending_event_count() == 1 && !publication_timer_armed {
+                    publication_timer
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + publication_delay);
+                    publication_timer_armed = true;
                 }
                 if let Some(error) = first_error {
                     let disposition = event_failure_point(error).disposition();
@@ -1169,7 +1180,7 @@ async fn run_actor(
             }
         }
         if !state.has_pending_publication() {
-            publication_deadline = None;
+            publication_timer_armed = false;
         }
         diagnostics.finish_command();
     }

@@ -8,6 +8,7 @@
 //! placement preserves lane order only; query threads continue to read just the atomic ready mask
 //! and packed buckets owned by [`GlobalCkfIndexer`].
 
+use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -207,7 +208,7 @@ struct LaneAdmission {
     last_assignment_epoch: Option<u64>,
     next_delta_id: u64,
     outstanding_images: usize,
-    outstanding_deltas: Vec<OutstandingDelta>,
+    outstanding_deltas: VecDeque<OutstandingDelta>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -235,7 +236,7 @@ impl LaneControl {
         max_dirty_to_applied_age: Duration,
         queue_capacity: usize,
     ) -> Self {
-        let mut outstanding_deltas = Vec::new();
+        let mut outstanding_deltas = VecDeque::new();
         outstanding_deltas.reserve_exact(queue_capacity.saturating_add(1));
         Self {
             published_epoch: AtomicU64::new(0),
@@ -309,14 +310,31 @@ struct DeltaPermit {
 impl Drop for DeltaPermit {
     fn drop(&mut self) {
         let mut admission = self.control.admission.lock();
-        let Some(position) = admission
+        let outstanding = if admission
             .outstanding_deltas
-            .iter()
-            .position(|delta| delta.id == self.id)
-        else {
+            .front()
+            .is_some_and(|delta| delta.id == self.id)
+        {
+            admission.outstanding_deltas.pop_front()
+        } else if admission
+            .outstanding_deltas
+            .back()
+            .is_some_and(|delta| delta.id == self.id)
+        {
+            // A failed try_send drops the just-admitted delta before older queued work.
+            admission.outstanding_deltas.pop_back()
+        } else {
+            // Exceptional worker/channel teardown need not preserve permit-drop order. Keep that
+            // cold path correct without making ordinary FIFO completion scan the backlog.
+            admission
+                .outstanding_deltas
+                .iter()
+                .position(|delta| delta.id == self.id)
+                .and_then(|position| admission.outstanding_deltas.remove(position))
+        };
+        let Some(outstanding) = outstanding else {
             return;
         };
-        let outstanding = admission.outstanding_deltas.swap_remove(position);
         admission.outstanding_images = admission
             .outstanding_images
             .checked_sub(outstanding.images)
@@ -632,6 +650,9 @@ impl GlobalCkfIngestionPool {
             .saturating_mul(2)
             .saturating_add(config.worker_count);
         let (fault_tx, fault_rx) = flume::bounded(fault_capacity);
+        // NOTE: One fixed ingestion pool and watchdog per consumer is the deliberately simple
+        // initial topology. Revisit shared execution before supporting high consumer/domain
+        // cardinality; do not complicate lane ordering speculatively.
         let mut workers: Vec<IngestionWorkerHandle> = Vec::with_capacity(config.worker_count);
         for (worker_index, lanes) in worker_lanes.into_iter().enumerate() {
             let (sender, receiver) = flume::bounded(config.queue_capacity);
@@ -909,7 +930,8 @@ impl GlobalCkfIngestionPool {
         }
         let epoch = admission.epoch;
         let image_count = delta.images().len();
-        if oldest_outstanding_age(&admission, Instant::now())
+        let submitted_at = Instant::now();
+        if oldest_outstanding_age(&admission, submitted_at)
             .is_some_and(|age| age >= route.control.max_dirty_to_applied_age)
         {
             let lease = admission.lease;
@@ -945,10 +967,10 @@ impl GlobalCkfIngestionPool {
         };
         admission.next_delta_id = delta_id;
         admission.outstanding_images = requested;
-        admission.outstanding_deltas.push(OutstandingDelta {
+        admission.outstanding_deltas.push_back(OutstandingDelta {
             id: delta_id,
             images: image_count,
-            submitted_at: Instant::now(),
+            submitted_at,
         });
         let permit = DeltaPermit {
             control: Arc::clone(&route.control),
@@ -1306,9 +1328,8 @@ fn permanently_fence_admission_locked(
 fn oldest_outstanding_age(admission: &LaneAdmission, now: Instant) -> Option<Duration> {
     admission
         .outstanding_deltas
-        .iter()
+        .front()
         .map(|delta| now.saturating_duration_since(delta.submitted_at))
-        .max()
 }
 
 fn fence_expired_lanes(

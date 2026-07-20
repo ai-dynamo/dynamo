@@ -345,7 +345,6 @@ struct DcCkfTelemetry {
     distinct_touched_buckets: u64,
     emitted_images: u64,
     net_reverted_buckets: u64,
-    published_occupied_buckets: usize,
 }
 
 /// Exact and physical CKF state for one DC-local indexer pool.
@@ -544,8 +543,6 @@ impl DcCkfState {
         replacement.telemetry.distinct_touched_buckets = self.telemetry.distinct_touched_buckets;
         replacement.telemetry.emitted_images = self.telemetry.emitted_images;
         replacement.telemetry.net_reverted_buckets = self.telemetry.net_reverted_buckets;
-        replacement.telemetry.published_occupied_buckets =
-            self.telemetry.published_occupied_buckets;
         *self = replacement;
         Ok(self.drain_publication())
     }
@@ -793,7 +790,6 @@ impl DcCkfState {
             return None;
         }
         let distinct_touched = self.publication.dirty.buckets.len() as u64;
-        let occupied_bucket_count = self.current_occupied_bucket_count();
         self.publication.images.clear();
         for (index, &bucket) in self.publication.dirty.buckets.iter().enumerate() {
             let value = self.filter.load_bucket(bucket).0;
@@ -803,6 +799,9 @@ impl DcCkfState {
                     .push(GlobalCkfBucketImage::new(bucket, value));
             }
         }
+        // NOTE: Publication intentionally transfers ownership of this image buffer. Defer buffer
+        // pooling or shared payloads until the non-local transport and fanout shape are fixed and
+        // profiles show that allocation or copying is material.
         let images = std::mem::take(&mut self.publication.images);
         self.publication.dirty.clear();
         self.telemetry.distinct_touched_buckets = self
@@ -818,7 +817,6 @@ impl DcCkfState {
             .net_reverted_buckets
             .saturating_add(distinct_touched.saturating_sub(images.len() as u64));
         self.publication.pending_events = 0;
-        self.telemetry.published_occupied_buckets = occupied_bucket_count;
         if images.is_empty() {
             return None;
         }
@@ -843,12 +841,11 @@ impl DcCkfState {
     }
 
     fn current_occupied_bucket_count(&self) -> usize {
-        let mut count = self.telemetry.published_occupied_buckets as isize;
-        for (bucket, original) in self.publication.dirty.touched_with_originals() {
-            count += isize::from(self.filter.load_bucket(bucket) != PackedBucket::default())
-                - isize::from(original != PackedBucket::default());
-        }
-        usize::try_from(count).expect("occupied CKF bucket count cannot be negative")
+        // This full scan is diagnostic-only. Never cache it by adding work to mutation or
+        // publication; Relay calls stats only behind its diagnostics/test surface.
+        (0..self.format.bucket_count)
+            .filter(|&bucket| self.filter.load_bucket(bucket) != PackedBucket::default())
+            .count()
     }
 }
 
