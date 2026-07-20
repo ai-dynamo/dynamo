@@ -275,6 +275,19 @@ class TestValidateCustomEncoder:
         # Must not raise.
         config._validate_custom_encoder()
 
+    def test_queue_delay_requires_custom_encoder(self):
+        config = create_config()
+        config.custom_encoder_class = None
+        config.custom_encoder_max_queue_delay_us = 1000
+        with pytest.raises(ValueError, match="requires --custom-encoder-class"):
+            config._validate_custom_encoder()
+
+    def test_queue_delay_rejects_negative(self):
+        config = create_config()
+        config.custom_encoder_max_queue_delay_us = -1
+        with pytest.raises(ValueError, match="must be >= 0"):
+            config._validate_custom_encoder()
+
     def test_no_op_when_unset(self):
         # No custom encoder → validator must not touch unrelated configs.
         config = create_config()

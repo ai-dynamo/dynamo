@@ -169,6 +169,18 @@ class DynamoVllmArgGroup(ArgGroup):
                 "Example: 'my_package.encoders.MyEncoder'."
             ),
         )
+        add_argument(
+            g,
+            flag_name="--custom-encoder-max-queue-delay-us",
+            env_var="DYN_CUSTOM_ENCODER_MAX_QUEUE_DELAY_US",
+            default=0,
+            arg_type=int,
+            help=(
+                "Maximum microseconds to collect additional custom-encoder work "
+                "after the first item arrives. A full cost-bounded batch dispatches "
+                "immediately. Default 0 preserves eager drain without a timed hold."
+            ),
+        )
 
         add_argument(
             g,
@@ -437,6 +449,7 @@ class DynamoVllmConfig(ConfigBase):
 
     # CustomEncoder (image-only embeddings; worker assembles mixed prompt)
     custom_encoder_class: Optional[str] = None
+    custom_encoder_max_queue_delay_us: int = 0
 
     # Headless mode for multi-node TP/PP
     headless: bool = False
@@ -740,7 +753,14 @@ class DynamoVllmConfig(ConfigBase):
         never reaches the custom-encoder branch, or loading the encoder in
         --use-vllm-tokenizer text mode where it is never invoked.
         """
+        if self.custom_encoder_max_queue_delay_us < 0:
+            raise ValueError("--custom-encoder-max-queue-delay-us must be >= 0")
         if not self.custom_encoder_class:
+            if self.custom_encoder_max_queue_delay_us:
+                raise ValueError(
+                    "--custom-encoder-max-queue-delay-us requires "
+                    "--custom-encoder-class"
+                )
             return
         if (
             self.multimodal_worker

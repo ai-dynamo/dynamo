@@ -11,6 +11,7 @@ from tests.utils.multimodal import (
     MultimodalModelProfile,
     TopologyConfig,
     make_audio_payload,
+    make_custom_encoder_benchmark_payload,
     make_custom_encoder_payload,
     make_image_payload,
     make_image_payload_b64,
@@ -61,6 +62,7 @@ VLLM_TOPOLOGY_SCRIPTS: dict[str, str] = {
     # (no separate encode worker, no NIXL). Lives in examples/custom_encoder,
     # not examples/backends/vllm — the TopologyConfig sets `directory` to match.
     "agg_custom": "agg_custom.sh",
+    "agg_custom_qwen_benchmark": "agg_qwen2_5_vl_benchmark.sh",
 }
 
 VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
@@ -562,6 +564,20 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                     "PYTHONPATH": str(WORKSPACE_DIR),
                 },
                 tests=[MmCase(payload=make_custom_encoder_payload())],
+            ),
+            "agg_custom_qwen_benchmark": TopologyConfig(
+                marks=[pytest.mark.post_merge],
+                timeout_s=900,
+                directory=os.path.join(WORKSPACE_DIR, "examples/custom_encoder"),
+                env={
+                    "DYN_WORKER_GPU": "0",
+                    "DYN_CUSTOM_JINJA_TEMPLATE": os.path.join(
+                        WORKSPACE_DIR,
+                        "examples/custom_encoder/templates/qwen_vl.jinja",
+                    ),
+                    "PYTHONPATH": str(WORKSPACE_DIR),
+                },
+                tests=[MmCase(payload=make_custom_encoder_benchmark_payload())],
             ),
         },
     ),

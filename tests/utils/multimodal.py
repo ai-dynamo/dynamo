@@ -281,6 +281,28 @@ def make_custom_encoder_payload() -> ChatPayload:
     )
 
 
+def make_custom_encoder_benchmark_payload() -> ChatPayload:
+    """Mechanics-only check for the Qwen2.5-VL-to-text-LM benchmark path."""
+    return chat_payload(
+        [
+            {
+                "type": "text",
+                "text": "Describe the following image briefly.",
+            },
+            {"type": "image_url", "image_url": {"url": MULTIMODAL_IMG_URL}},
+        ],
+        repeat_count=1,
+        expected_response=[],
+        expected_log=[
+            "Qwen2_5VLBenchmarkEncoder",
+            "PERFORMANCE-ONLY",
+            "_LinearEmbedsAdapter",
+        ],
+        max_tokens=8,
+        temperature=0.0,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Config dataclasses
 # ---------------------------------------------------------------------------

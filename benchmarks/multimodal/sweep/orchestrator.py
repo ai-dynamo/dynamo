@@ -179,6 +179,7 @@ def _run_config(
                     input_file=input_file,
                     osl=config.osl,
                     artifact_dir=artifact_dir,
+                    extra_args=config.aiperf_extra_args,
                 )
             finally:
                 if config.restart_server_every_benchmark:
