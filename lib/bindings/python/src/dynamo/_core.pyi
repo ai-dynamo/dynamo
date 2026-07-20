@@ -2813,6 +2813,31 @@ class KvbmRequest:
     def __init__(self, request_id: int, tokens: List[int], block_size: int) -> None:
         ...
 
+class KvDcRelay:
+    def __init__(
+        self,
+        endpoint: Endpoint,
+        dc_id: str,
+        namespace_filter: Optional[str] = None,
+        endpoint_prefix: Optional[str] = None,
+        publication_threshold: int = 16,
+        publication_delay_ms: int = 1,
+        recovery_attempt_timeout_ms: int = 30_000,
+    ) -> None:
+        ...
+
+    async def start(self) -> None:
+        ...
+
+    async def health(self) -> Dict[str, Any]:
+        ...
+
+    async def flush(self) -> None:
+        ...
+
+    async def shutdown(self) -> None:
+        ...
+
 class KvRouter:
     """
     A KV-aware router that performs intelligent routing based on KV cache overlap.
