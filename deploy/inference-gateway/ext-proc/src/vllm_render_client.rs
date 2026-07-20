@@ -58,6 +58,17 @@ struct VllmRenderResponse {
     token_ids: Vec<u32>,
 }
 
+/// Parse and validate a vLLM renderer base URL.
+pub(crate) fn parse_vllm_render_base_url(base_url: &str) -> anyhow::Result<Url> {
+    let url = Url::parse(base_url)
+        .with_context(|| format!("invalid vLLM renderer base URL {base_url:?}"))?;
+    anyhow::ensure!(
+        matches!(url.scheme(), "http" | "https") && url.host_str().is_some(),
+        "vLLM renderer base URL must be an absolute HTTP(S) URL"
+    );
+    Ok(url)
+}
+
 impl VllmRenderClient {
     /// Build a pooled HTTP client from the vLLM renderer's base URL.
     ///
@@ -70,12 +81,7 @@ impl VllmRenderClient {
             "vLLM render timeout must be greater than zero"
         );
 
-        let mut endpoint = Url::parse(base_url)
-            .with_context(|| format!("invalid vLLM renderer base URL {base_url:?}"))?;
-        anyhow::ensure!(
-            matches!(endpoint.scheme(), "http" | "https") && endpoint.host_str().is_some(),
-            "vLLM renderer base URL must be an absolute HTTP(S) URL"
-        );
+        let mut endpoint = parse_vllm_render_base_url(base_url)?;
         {
             let mut path_segments = endpoint.path_segments_mut().map_err(|_| {
                 anyhow::anyhow!("vLLM renderer base URL cannot be used as a base URL")

@@ -13,6 +13,8 @@
 use validator::Validate;
 use validator::ValidationError;
 
+use crate::vllm_render_client::parse_vllm_render_base_url;
+
 const DEFAULT_KV_EVENT_PORT: u16 = 5557;
 const DEFAULT_SELECTOR_THREADS: usize = 4;
 const DEFAULT_TOKENIZATION_TIMEOUT_MS: u64 = 5_000;
@@ -137,16 +139,15 @@ impl EppStandaloneConfig {
 }
 
 fn validate_vllm_render_url(value: &str) -> Result<(), ValidationError> {
-    let valid_url = reqwest::Url::parse(value)
-        .map(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
-        .unwrap_or(false);
-    if valid_url {
-        Ok(())
-    } else {
+    if value.is_empty() {
+        return Ok(());
+    }
+
+    parse_vllm_render_base_url(value).map(|_| ()).map_err(|_| {
         let mut error = ValidationError::new("vllm_render_url_invalid");
         error.message = Some("DYN_EPP_VLLM_RENDER_URL must be an absolute HTTP(S) URL".into());
-        Err(error)
-    }
+        error
+    })
 }
 
 /// Trim a raw value and treat empty as absent.
