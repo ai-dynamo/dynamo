@@ -20,7 +20,6 @@ import argparse
 import asyncio
 import logging
 import os
-import resource
 import signal
 import sys
 from argparse import Namespace
@@ -60,17 +59,24 @@ FRONTEND_FD_LIMIT_TARGET = 8192
 
 
 def _raise_fd_limit(target: int = FRONTEND_FD_LIMIT_TARGET) -> None:
-    """Raise the process's soft RLIMIT_NOFILE toward `target`, bounded by the
-    hard limit. No-op if the soft limit is already >= target."""
-    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    new_soft = (
-        target if hard == resource.RLIM_INFINITY else min(target, hard)
-    )
-    if new_soft > soft:
-        resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))
-        logger.info(
-            f"Raised RLIMIT_NOFILE soft limit {soft} -> {new_soft} (hard={hard})"
-        )
+    """Best-effort: raise the process's soft RLIMIT_NOFILE toward `target`,
+    bounded by the hard limit. No-op if already sufficient, if the Unix-only
+    `resource` module is unavailable (e.g. Windows), or if the raise is denied."""
+    try:
+        import resource
+
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        new_soft = target if hard == resource.RLIM_INFINITY else min(target, hard)
+        if new_soft > soft:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))
+            logger.info(
+                f"Raised RLIMIT_NOFILE soft limit {soft} -> {new_soft} (hard={hard})"
+            )
+    except Exception:
+        # Best-effort hardening; ignore failures (Windows lacks `resource`, or
+        # setrlimit may be denied in a restricted environment).
+        # logger.debug("Could not raise RLIMIT_NOFILE; continuing")
+        pass
 
 
 def setup_engine_factory(
