@@ -44,6 +44,9 @@ import (
 type AdmissionWebhooks struct {
 	Mutating   bool
 	Validating bool
+	// BypassUsers excludes named API users from validating admission.
+	// It is intended for seeding legacy states that current admission rejects.
+	BypassUsers []string
 }
 
 // WebhookSetupOptions contains the effective operator settings passed to SetupWebhooks.
@@ -232,6 +235,7 @@ func webhookInstallOptions(opts Options) (envtest.WebhookInstallOptions, error) 
 		install.MutatingWebhooks = mutating
 	}
 	if opts.Admission.Validating {
+		addValidationBypassUsers(validating, opts.Admission.BypassUsers)
 		install.ValidatingWebhooks = validating
 	}
 	return install, nil
@@ -496,6 +500,8 @@ func crdDirectoryPaths(opts Options) []string {
 		filepath.Join(root, "internal", "controller", "testing", "volcano.sh"),
 		filepath.Join(root, "internal", "controller", "testing", "run.ai"),
 		filepath.Join(root, "internal", "controller", "testing", "nvidia"),
+		filepath.Join(root, "internal", "controller", "testing", "inference.networking.k8s.io"),
+		filepath.Join(root, "internal", "controller", "testing", "grove.io"),
 	}
 }
 

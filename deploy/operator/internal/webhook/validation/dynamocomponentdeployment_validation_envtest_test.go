@@ -15,10 +15,9 @@
  * limitations under the License.
  */
 
-package validation
+package validation_test
 
 import (
-	"slices"
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -39,8 +38,6 @@ const (
 )
 
 func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
-	requestValidators := requestValidatorsFromCRD(t, "nvidia.com_dynamocomponentdeployments.yaml")
-
 	var (
 		oneReplica       = int32(1)
 		validReplicas    = int32(3)
@@ -53,14 +50,15 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 	)
 
 	tests := []struct {
-		name            string
-		deployment      runtime.Object
-		oldDeployment   runtime.Object
-		checkpointOff   bool
-		wantSchemaErr   string
-		wantCELErr      string
-		wantWebhookErrs []string
-		wantWarnings    []string
+		name               string
+		deployment         runtime.Object
+		oldDeployment      runtime.Object
+		checkpointOff      bool
+		seedWithoutWebhook bool
+		wantSchemaErr      string
+		wantCELErr         string
+		wantWebhookErrs    []string
+		wantWarnings       []string
 	}{
 		// Baseline schema and webhook behavior.
 		{
@@ -175,7 +173,8 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			wantCELErr: "spec: Invalid value: minAvailable must be less than or equal to replicas unless replicas is 0",
 		},
 		{
-			name: "v1alpha1 minAvailable change is rejected by CEL",
+			name:               "v1alpha1 minAvailable change is rejected by CEL",
+			seedWithoutWebhook: true,
 			oldDeployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
 				dcd.Spec.Replicas = &validReplicas
 				dcd.Spec.MinAvailable = &oneReplica
@@ -187,7 +186,8 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			wantCELErr: "spec: Invalid value: minAvailable is immutable after creation",
 		},
 		{
-			name: "v1beta1 minAvailable change is rejected by CEL",
+			name:               "v1beta1 minAvailable change is rejected by CEL",
+			seedWithoutWebhook: true,
 			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.Replicas = &validReplicas
 				dcd.Spec.MinAvailable = &oneReplica
@@ -699,7 +699,12 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			name: "deprecated dynamo namespace warning shows calculated namespace",
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
 				dcd.Namespace = "hannahz"
-				dcd.OwnerReferences = []metav1.OwnerReference{{Kind: "DynamoGraphDeployment", Name: "trtllm-disagg"}}
+				dcd.OwnerReferences = []metav1.OwnerReference{{
+					APIVersion: nvidiacomv1alpha1.GroupVersion.String(),
+					Kind:       "DynamoGraphDeployment",
+					Name:       "trtllm-disagg",
+					UID:        "test-owner",
+				}}
 				dcd.Spec.DynamoNamespace = k8sptr.To("my-custom-namespace")
 			}),
 			wantWarnings: []string{`spec.dynamoNamespace is deprecated and ignored. Value "my-custom-namespace" will be replaced with "hannahz-trtllm-disagg". Remove this field from your configuration`},
@@ -953,7 +958,8 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{`spec.multinode: Invalid value: {"nodeCount":2}: cannot change node topology between single-node and multi-node after creation`},
 		},
 		{
-			name: "v1alpha1 update aggregates create and DCD-specific update errors",
+			name:               "v1alpha1 update aggregates create and DCD-specific update errors",
+			seedWithoutWebhook: true,
 			oldDeployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: consts.ComponentTypeWorker,
 				Replicas:      &oneReplica,
@@ -993,63 +999,24 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			request := admissionUnstructured(t, tt.deployment)
-			var oldRequest map[string]any
-			if tt.oldDeployment != nil {
-				oldRequest = admissionUnstructured(t, tt.oldDeployment)
+			gates := features.Gates{Checkpoint: !tt.checkpointOff}
+			test := admissionTestCase{
+				object:             tt.deployment,
+				oldObject:          tt.oldDeployment,
+				gates:              gates,
+				seedWithoutWebhook: tt.seedWithoutWebhook,
+				withoutTopology:    true,
+				wantSchemaError:    tt.wantSchemaErr,
+				wantCELError:       tt.wantCELErr,
+				wantWebhookErrors:  tt.wantWebhookErrs,
+				wantWarnings:       tt.wantWarnings,
 			}
-
-			version := admissionSourceVersion(t, tt.deployment)
-			if tt.oldDeployment != nil && admissionSourceVersion(t, tt.oldDeployment) != version {
-				t.Fatalf("old and current source versions differ")
+			if tt.checkpointOff && tt.oldDeployment != nil {
+				seedGates := gates
+				seedGates.Checkpoint = true
+				test.seedGates = &seedGates
 			}
-			requestValidator, ok := requestValidators[version]
-			if !ok {
-				t.Fatalf("no request validator for source version %q", version)
-			}
-
-			schemaErrs := requestValidator.validateSchema(request, oldRequest)
-			if tt.wantSchemaErr != "" {
-				if tt.wantCELErr != "" || len(tt.wantWebhookErrs) != 0 || len(tt.wantWarnings) != 0 {
-					t.Fatal("schema rejection cannot have downstream expectations")
-				}
-				assertRequestValidationError(t, schemaErrs, tt.wantSchemaErr)
-				return
-			}
-			if len(schemaErrs) != 0 {
-				t.Fatalf("schema errors = %v, want none", schemaErrs)
-			}
-
-			celErrs := requestValidator.celValidator(request, oldRequest)
-			if tt.wantCELErr != "" {
-				if len(tt.wantWebhookErrs) != 0 || len(tt.wantWarnings) != 0 {
-					t.Fatal("CEL rejection cannot have webhook expectations")
-				}
-				assertRequestValidationError(t, celErrs, tt.wantCELErr)
-				return
-			}
-			if len(celErrs) != 0 {
-				t.Fatalf("CEL errors = %v, want none", celErrs)
-			}
-
-			handler := NewDynamoComponentDeploymentHandler()
-			ctx := dgdAdmissionContext(dgdAdmissionOperation(tt.oldDeployment), nvidiacomv1beta1.DynamoComponentDeploymentGVK)
-			ctx = features.WithGate(ctx, features.Gates{Checkpoint: !tt.checkpointOff})
-			var warnings []string
-			var err error
-			if tt.oldDeployment == nil {
-				warnings, err = handler.ValidateCreate(ctx, dcdAdmissionBeta(t, tt.deployment))
-			} else {
-				warnings, err = handler.ValidateUpdate(
-					ctx,
-					dcdAdmissionBeta(t, tt.oldDeployment),
-					dcdAdmissionBeta(t, tt.deployment),
-				)
-			}
-			assertWebhookErrors(t, err, tt.wantWebhookErrs)
-			if !slices.Equal(warnings, tt.wantWarnings) {
-				t.Fatalf("webhook warnings = %v, want %v", warnings, tt.wantWarnings)
-			}
+			runAdmissionTest(t, test)
 		})
 	}
 }
@@ -1106,21 +1073,4 @@ func betaDCDForAdmission(
 		mutate(dcd)
 	}
 	return dcd
-}
-
-func dcdAdmissionBeta(t *testing.T, deployment runtime.Object) *nvidiacomv1beta1.DynamoComponentDeployment {
-	t.Helper()
-	switch deployment := deployment.(type) {
-	case *nvidiacomv1alpha1.DynamoComponentDeployment:
-		beta := &nvidiacomv1beta1.DynamoComponentDeployment{}
-		if err := deployment.ConvertTo(beta); err != nil {
-			t.Fatalf("convert v1alpha1 DCD to v1beta1: %v", err)
-		}
-		return beta
-	case *nvidiacomv1beta1.DynamoComponentDeployment:
-		return deployment.DeepCopy()
-	default:
-		t.Fatalf("unsupported DCD type %T", deployment)
-		return nil
-	}
 }

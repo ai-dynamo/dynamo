@@ -7,7 +7,6 @@
 package controller
 
 import (
-	"context"
 	"os"
 	"testing"
 
@@ -31,7 +30,6 @@ var (
 		SetupWebhooks:   setupProductionWebhooks,
 		OperatorVersion: "1.1.0",
 	})
-	ctx              = context.Background()
 	k8sClient        client.Client
 	envtestNamespace string
 )

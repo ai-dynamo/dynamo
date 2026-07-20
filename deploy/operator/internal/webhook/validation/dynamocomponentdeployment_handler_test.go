@@ -23,8 +23,10 @@ import (
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	admissionv1 "k8s.io/api/admission/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 )
@@ -34,7 +36,16 @@ func TestDynamoComponentDeploymentV1Alpha1HandlerConvertsRequest(t *testing.T) {
 		handler: NewDynamoComponentDeploymentHandler(),
 	}
 	ctx := dgdAdmissionContext(admissionv1.Create, nvidiacomv1alpha1.DynamoComponentDeploymentGVK)
-	dcd := alphaDCDForAdmission(nil)
+	dcd := &nvidiacomv1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "default"},
+		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+			BackendFramework: "vllm",
+			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ServiceName:   "worker",
+				ComponentType: consts.ComponentTypeWorker,
+			},
+		},
+	}
 
 	warnings, err := handler.ValidateCreate(ctx, dcd)
 	if err != nil {
@@ -46,13 +57,25 @@ func TestDynamoComponentDeploymentV1Alpha1HandlerConvertsRequest(t *testing.T) {
 }
 
 func TestCastToDynamoComponentDeployment(t *testing.T) {
-	beta := betaDCDForAdmission(nil)
+	beta := &nvidiacomv1beta1.DynamoComponentDeployment{
+		Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "worker",
+			},
+		},
+	}
 	got, err := castToDynamoComponentDeployment(beta)
 	if err != nil || got != beta {
 		t.Fatalf("castToDynamoComponentDeployment() = (%v, %v), want original DCD", got, err)
 	}
 
-	alpha := alphaDCDForAdmission(nil)
+	alpha := &nvidiacomv1alpha1.DynamoComponentDeployment{
+		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ServiceName: "worker",
+			},
+		},
+	}
 	got, err = castToDynamoComponentDeployment(alpha)
 	if err != nil {
 		t.Fatalf("castToDynamoComponentDeployment() error = %v", err)

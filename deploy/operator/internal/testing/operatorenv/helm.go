@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	helmchart "helm.sh/helm/v3/pkg/chart"
@@ -22,6 +23,20 @@ import (
 )
 
 const webhookConfigurationTemplate = "templates/webhook-configuration.yaml"
+
+func addValidationBypassUsers(configurations []*admissionregistrationv1.ValidatingWebhookConfiguration, usernames []string) {
+	for _, configuration := range configurations {
+		for i := range configuration.Webhooks {
+			for j, username := range usernames {
+				configuration.Webhooks[i].MatchConditions = append(configuration.Webhooks[i].MatchConditions,
+					admissionregistrationv1.MatchCondition{
+						Name:       fmt.Sprintf("operatorenv-bypass-%d", j),
+						Expression: "request.userInfo.username != " + strconv.Quote(username),
+					})
+			}
+		}
+	}
+}
 
 func helmWebhookConfigurations() ([]*admissionregistrationv1.MutatingWebhookConfiguration, []*admissionregistrationv1.ValidatingWebhookConfiguration, error) {
 	chart, err := loader.Load(operatorChartDirectory())
