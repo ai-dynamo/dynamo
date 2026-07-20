@@ -440,14 +440,8 @@ vllm_configs = {
             pytest.mark.gpu_2,
             pytest.mark.router,
             pytest.mark.pre_merge,
-            # Per-GPU peak matches other Qwen3-0.6B agg workers (~3.8 GiB);
-            # 2 replicas fit the existing 2x L4 (24 GiB) gpu_2 lane.
-            pytest.mark.profiled_vram_gib(3.8),
-            pytest.mark.requested_vllm_kv_cache_bytes(
-                1_119_388_000
-            ),  # KV cache cap (2x safety over min=559_693_824)
             pytest.mark.timeout(600),
-        ],
+        ],  # TODO: profile to get max_vram
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             _assert_distinct_router_workers(
