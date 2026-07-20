@@ -12,8 +12,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 from PIL import Image
+from vllm.config import DeviceConfig
 
 from dynamo.vllm.multimodal_utils.vision_encoder_backend import Preprocessed
+from examples.custom_encoder import qwen2_5_vl_benchmark_encoder
 from examples.custom_encoder.qwen2_5_vl_benchmark_encoder import (
     Qwen2_5VLBenchmarkEncoder,
     Qwen2VLImageInputs,
@@ -99,6 +101,16 @@ def _item(grid: tuple[int, int, int]) -> Qwen2VLImageInputs:
     )
 
 
+@pytest.fixture
+def cpu_vllm_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    vllm_config = qwen2_5_vl_benchmark_encoder.VllmConfig
+    monkeypatch.setattr(
+        qwen2_5_vl_benchmark_encoder,
+        "VllmConfig",
+        lambda: vllm_config(device_config=DeviceConfig(device="cpu")),
+    )
+
+
 def test_forward_batch_packs_and_splits_variable_resolution_inputs() -> None:
     encoder = Qwen2_5VLBenchmarkEncoder()
     encoder._device = torch.device("cpu")
@@ -150,7 +162,9 @@ def test_forward_batch_selects_smallest_compatible_graph(monkeypatch) -> None:
     assert torch.all(outputs[0] == 2)
 
 
-def test_installs_vllm_attention_without_replacing_hf_projections() -> None:
+def test_installs_vllm_attention_without_replacing_hf_projections(
+    cpu_vllm_config: None,
+) -> None:
     visual = _FakeAttentionVisual()
     original_qkv = [block.attn.qkv for block in visual.blocks]
     original_proj = [block.attn.proj for block in visual.blocks]
@@ -163,7 +177,9 @@ def test_installs_vllm_attention_without_replacing_hf_projections() -> None:
         assert block.attn.proj is original_proj[layer_index]
 
 
-def test_vllm_attention_receives_packed_sequence_boundaries() -> None:
+def test_vllm_attention_receives_packed_sequence_boundaries(
+    cpu_vllm_config: None,
+) -> None:
     attention = _VllmQwen2_5VisionAttention(
         _FakeHFVisionAttention(), prefix="test.attn"
     )
