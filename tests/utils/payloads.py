@@ -1512,6 +1512,11 @@ class MetricsPayload(BasePayload):
     port: int = DefaultPort.SYSTEM1.value
     min_num_requests: int = 1
     check_lifecycle_gauges: bool = False
+    # True only for a disaggregated prefill worker, which doesn't emit the
+    # decode-side KV gauges (absent from /metrics); aggregated scenarios keep
+    # requiring them. Remove once the prefill worker populates them
+    # (https://github.com/ai-dynamo/dynamo/issues/11919).
+    optional_kvstats: bool = False
 
     def with_model(self, model):
         # Metrics does not use model in request body
@@ -1580,8 +1585,7 @@ class MetricsPayload(BasePayload):
                 validator=lambda value: float(value) >= 0,
                 error_msg=lambda name, value: f"{name} should be >= 0, but got {value}",
                 success_msg=lambda name, value: f"SUCCESS: Found {name} = {value}",
-                # Decode-side KV stat; a prefill worker reports it as NaN/unset.
-                optional=True,
+                optional=self.optional_kvstats,
             ),
             MetricCheck(
                 name=f"{prefix}_{prometheus_names.kvstats.GPU_CACHE_USAGE_PERCENT}",
@@ -1591,7 +1595,7 @@ class MetricsPayload(BasePayload):
                     f"{name} should be between 0.0 and 1.0, but got {value}"
                 ),
                 success_msg=lambda name, value: f"SUCCESS: Found {name} = {value}",
-                optional=True,
+                optional=self.optional_kvstats,
             ),
             MetricCheck(
                 name=f"{prefix}_{prometheus_names.model_info.LOAD_TIME_SECONDS}",

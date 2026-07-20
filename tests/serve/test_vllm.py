@@ -461,11 +461,13 @@ vllm_configs = {
             chat_payload_default(),
             completion_payload_default(),
             metric_payload_default(min_num_requests=6, backend="vllm"),
-            # LMCache lives on the prefill worker (SYSTEM2), not decode (SYSTEM1).
+            # LMCache lives on the prefill worker, which doesn't emit the
+            # decode-side KV gauges, so relax those two here only.
             metric_payload_default(
                 min_num_requests=6,
                 backend="lmcache",
                 port=DefaultPort.SYSTEM2.value,
+                optional_kvstats=True,
             ),
         ],
     ),
