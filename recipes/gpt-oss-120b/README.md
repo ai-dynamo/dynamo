@@ -15,7 +15,7 @@ Dynamo + vLLM deployment profiles for the Mooncake agentic trace (64k/400/90%-KV
 |--------------------------|------------------------------------|------------------------------------|------------------------------------|------------------------------------|
 | **GPUs** (per node)      | 8x B200                            | 8x H200                            | 8x B200 (2 prefill + 6 decode)     | 8x H200 (4 prefill + 4 decode)     |
 | **Mode**                 | aggregated                         | aggregated                         | disaggregated                      | disaggregated                      |
-| **Framework**            | Dynamo 1.3.0-rc.12 / vLLM 0.23      | Dynamo 1.3.0-rc.12 / vLLM 0.23      | Dynamo 1.3.0-rc.12 / vLLM 0.23¹     | Dynamo 1.3.0-rc.12 / vLLM 0.23¹     |
+| **Framework**            | Dynamo 1.3.0 / vLLM 0.23           | Dynamo 1.3.0 / vLLM 0.23           | Dynamo 1.3.0 / vLLM 0.23¹          | Dynamo 1.3.0 / vLLM 0.23¹          |
 | **Deployment**           | DGD (8 pods, KV router)            | DGD (8 pods, KV router)            | single Pod, in-pod co-located¹     | single Pod, in-pod co-located¹     |
 | **Precision**            | MXFP4 + FP8 KV                     | MXFP4 + FP8 KV                     | MXFP4 + FP8 KV                     | MXFP4 + FP8 KV                     |
 | **Parallelism**          | 8x TP1 replicas                    | 8x TP1 replicas                    | 2x TP1 prefill + 6x TP1 decode³    | 4x TP1 prefill + 4x TP1 decode³    |
@@ -35,7 +35,7 @@ Dynamo + vLLM deployment profiles for the Mooncake agentic trace (64k/400/90%-KV
 ## Prerequisites
 
 1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../docs/kubernetes/README.md). The recipes pull
-   `nvcr.io/nvstaging/ai-dynamo/vllm-runtime` images via the `dynamo-ngc-token` image pull secret.
+   `nvcr.io/nvidia/ai-dynamo/vllm-runtime` images via the `dynamo-ngc-token` image pull secret.
 2. **HuggingFace token** with access to `openai/gpt-oss-120b` and `nvidia/gpt-oss-120b-Eagle3-v3`:
    ```bash
    export NAMESPACE=your-namespace
