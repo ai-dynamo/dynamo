@@ -843,18 +843,22 @@ def build_sampling_params(
         if isinstance(kv_transfer_params, dict):
             router_hint = kv_transfer_params.get(_ROUTER_HINT_EXTRA_ARGS_KEY)
             if isinstance(router_hint, dict):
-                if sampling_params.extra_args is None:
-                    sampling_params.extra_args = {}
-                existing_params = sampling_params.extra_args.get(
+                safe_extra_args = (
+                    dict(sampling_params.extra_args)
+                    if isinstance(sampling_params.extra_args, dict)
+                    else {}
+                )
+                existing_params = safe_extra_args.get(
                     _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY
                 )
                 safe_kv_transfer_params = (
                     dict(existing_params) if isinstance(existing_params, dict) else {}
                 )
                 safe_kv_transfer_params[_ROUTER_HINT_EXTRA_ARGS_KEY] = router_hint
-                sampling_params.extra_args[
+                safe_extra_args[
                     _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY
                 ] = safe_kv_transfer_params
+                sampling_params.extra_args = safe_extra_args
 
     # Dynamo's internal token path consumes disjoint token deltas. This mirrors
     # the SGLang integration and lets vLLM's stream_interval gate reduce backend

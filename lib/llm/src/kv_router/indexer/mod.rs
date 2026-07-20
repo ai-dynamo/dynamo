@@ -73,6 +73,13 @@ impl Indexer {
         matches!(self, Self::KvIndexer { .. } | Self::Concurrent { .. })
     }
 
+    pub(crate) fn supports_router_hint_chain_retention(&self) -> bool {
+        matches!(
+            self,
+            Self::KvIndexer { approx: None, .. } | Self::Concurrent { approx: None, .. }
+        )
+    }
+
     pub async fn new(
         component: &Component,
         kv_router_config: &KvRouterConfig,
@@ -90,7 +97,6 @@ impl Indexer {
                  do not combine a primary approximate indexer with a side approximate indexer"
             );
         }
-
         if kv_router_config.use_remote_indexer {
             let model_name = model_name
                 .ok_or_else(|| {

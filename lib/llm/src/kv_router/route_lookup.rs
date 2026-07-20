@@ -52,8 +52,15 @@ pub(super) async fn query_tiered_matches(
     block_hashes: Vec<LocalBlockHash>,
     options: TieredLookupOptions<'_>,
 ) -> Result<TieredLookupResult, KvRouterError> {
+    let retain_router_hint_chain =
+        options.retain_router_hint_chain && indexer.supports_router_hint_chain_retention();
+    if options.retain_router_hint_chain && !retain_router_hint_chain {
+        tracing::warn!(
+            "router_hint chain retention is not supported by this indexer configuration; router hints will not be attached"
+        );
+    }
     let lower_tier_options = LowerTierQueryOptions {
-        retain_router_hint_chain: options.retain_router_hint_chain,
+        retain_router_hint_chain,
     };
     if options.retain_block_hashes {
         let (tiered_matches, shared_cache_hits, indexer_duration, shared_cache_duration) =

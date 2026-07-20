@@ -50,6 +50,35 @@ def test_enable_router_hint_support_extracts_router_hint_endpoint():
     )
 
 
+def test_enable_router_hint_support_fails_with_multiple_router_hint_tiers():
+    runtime_config = MagicMock()
+    engine_args = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector_extra_config={
+                "secondary_tiers": [
+                    {
+                        "type": "custom-a",
+                        "router_capabilities": ["router_hint"],
+                        "control_advertise_host": "127.0.0.1",
+                        "control_port": "23280",
+                    },
+                    {
+                        "type": "custom-b",
+                        "router_capabilities": ["router_hint"],
+                        "control_advertise_host": "127.0.0.1",
+                        "control_port": "23281",
+                    },
+                ]
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="exactly one router-hint-capable"):
+        enable_router_hint_support(runtime_config, engine_args)
+
+    runtime_config.set_engine_specific.assert_not_called()
+
+
 def test_enable_router_hint_support_skips_without_router_hint_capability():
     runtime_config = MagicMock()
     engine_args = SimpleNamespace(

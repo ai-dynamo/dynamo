@@ -1120,16 +1120,21 @@ def test_build_sampling_params_allowlists_router_hint_extra_args():
         },
     }
 
-    sp = build_sampling_params(
-        request,
-        default_sampling_params={
-            "extra_args": {
-                "kv_transfer_params": {"internal": "kept"},
-                "other_internal": "kept",
-            }
-        },
-    )
+    default_sampling_params = {
+        "extra_args": {
+            "kv_transfer_params": {"internal": "kept"},
+            "other_internal": "kept",
+        }
+    }
 
+    sp = build_sampling_params(request, default_sampling_params=default_sampling_params)
+
+    assert default_sampling_params == {
+        "extra_args": {
+            "kv_transfer_params": {"internal": "kept"},
+            "other_internal": "kept",
+        }
+    }
     assert sp.extra_args == {
         "kv_transfer_params": {
             "internal": "kept",
