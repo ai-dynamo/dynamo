@@ -1476,7 +1476,7 @@ impl<
                 .and_then(|provider| provider());
             let eligibility = request.eligibility_with_overloaded(overloaded_worker_ids.as_ref());
             self.selector
-                .select_worker(&workers, &request, eligibility, self.block_size)
+                .select_worker(&workers, request, eligibility, self.block_size)
                 .map(|selection| {
                     let config = workers
                         .get(&selection.worker.worker_id)
