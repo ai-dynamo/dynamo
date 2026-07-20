@@ -61,6 +61,8 @@ import (
 	volcanoscheme "volcano.sh/apis/pkg/client/clientset/versioned/scheme"
 
 	semver "github.com/Masterminds/semver/v3"
+	dynamoapi "github.com/ai-dynamo/dynamo/deploy/operator/api"
+	configapi "github.com/ai-dynamo/dynamo/deploy/operator/api/config"
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	configvalidation "github.com/ai-dynamo/dynamo/deploy/operator/api/config/validation"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -143,9 +145,7 @@ func createScalesGetter(mgr ctrl.Manager) (scale.ScalesGetter, error) {
 func initCRDSchemes() {
 	utilruntime.Must(clientgoscheme.AddToScheme(crdScheme))
 
-	utilruntime.Must(nvidiacomv1alpha1.AddToScheme(crdScheme))
-
-	utilruntime.Must(nvidiacomv1beta1.AddToScheme(crdScheme))
+	utilruntime.Must(dynamoapi.Install(crdScheme))
 
 	utilruntime.Must(lwsscheme.AddToScheme(crdScheme))
 
@@ -164,7 +164,7 @@ func initCRDSchemes() {
 }
 
 func initConfigScheme() {
-	utilruntime.Must(configv1alpha1.AddToScheme(configScheme))
+	utilruntime.Must(configapi.Install(configScheme))
 }
 
 // +kubebuilder:rbac:groups=authentication.k8s.io,resources=tokenreviews,verbs=create
