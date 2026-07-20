@@ -142,6 +142,22 @@ impl KvPushRouter {
         }
     }
 
+    pub(crate) fn query_affinity_worker(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        phase: RequestPhase,
+    ) -> Result<Option<WorkerWithDpRank>, Error> {
+        let Some(affinity) = self.affinity.as_ref() else {
+            return Ok(None);
+        };
+        let Some(session_id) = affinity_id(request)? else {
+            return Ok(None);
+        };
+        let explicit = explicit_target(request, phase)?;
+        let target = affinity.query_target(&session_id, explicit)?;
+        Ok(target.and_then(affinity_worker))
+    }
+
     async fn select_request(
         &self,
         request: &SingleIn<PreprocessedRequest>,
@@ -235,22 +251,6 @@ impl KvPushRouter {
                 Err(error)
             }
         }
-    }
-
-    pub(crate) fn query_affinity_worker(
-        &self,
-        request: &SingleIn<PreprocessedRequest>,
-        phase: RequestPhase,
-    ) -> Result<Option<WorkerWithDpRank>, Error> {
-        let Some(affinity) = self.affinity.as_ref() else {
-            return Ok(None);
-        };
-        let Some(session_id) = affinity_id(request)? else {
-            return Ok(None);
-        };
-        let explicit = explicit_target(request, phase)?;
-        let target = affinity.query_target(&session_id, explicit)?;
-        Ok(target.and_then(affinity_worker))
     }
 
     async fn track_selection(
@@ -1155,6 +1155,49 @@ mod tests {
         };
         assert_eq!(target, original_target);
         drop(lease);
+
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn query_affinity_worker_returns_existing_binding_without_reserving() {
+        let (router, runtime) = router(Some(Duration::from_secs(10))).await;
+        let session_id = SessionAffinityId::new("query-existing-binding");
+        let target = AffinityTarget {
+            worker_id: 7,
+            dp_rank: Some(0),
+        };
+        let AffinityAcquire::Initialize(initializer) = router
+            .affinity
+            .as_ref()
+            .unwrap()
+            .acquire(&session_id, None)
+            .await
+            .unwrap()
+        else {
+            panic!("first request must initialize");
+        };
+        drop(initializer.commit(target).unwrap());
+
+        let mut request = Context::new(request());
+        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id.clone());
+
+        assert_eq!(
+            router
+                .query_affinity_worker(&request, RequestPhase::Prefill)
+                .unwrap(),
+            Some(WorkerWithDpRank::new(7, 0))
+        );
+        assert_eq!(
+            router
+                .affinity
+                .as_ref()
+                .unwrap()
+                .query_target(&session_id, None)
+                .unwrap(),
+            Some(target)
+        );
 
         drop(router);
         runtime.shutdown();

@@ -703,18 +703,6 @@ impl<
         Some(active_tokens.get(&worker).copied().unwrap_or(0) as f64 > threshold * capacity)
     }
 
-    pub(crate) fn worker_is_decode_busy(
-        &self,
-        worker: WorkerWithDpRank,
-        threshold: f64,
-    ) -> Option<bool> {
-        let active_blocks = self.slots.active_blocks();
-        let workers = self.workers_with_configs.borrow();
-        let config = workers.get(&worker.worker_id)?;
-        let capacity = config.total_kv_blocks()? as f64;
-        Some(active_blocks.get(&worker).copied().unwrap_or(0) as f64 > threshold * capacity)
-    }
-
     pub(crate) fn projected_decode_load_exceeds(
         &self,
         worker: WorkerWithDpRank,

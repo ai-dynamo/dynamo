@@ -222,6 +222,7 @@ impl
                 .select_decode_worker_for_conditional_disagg(
                     &req,
                     &request_id,
+                    session_affinity.as_deref(),
                     decode_affinity_target,
                 )
                 .await

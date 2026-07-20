@@ -950,14 +950,6 @@ where
             .worker_is_prefill_busy(worker, decay_now, threshold)
     }
 
-    pub(crate) fn worker_is_decode_busy(
-        &self,
-        worker: WorkerWithDpRank,
-        threshold: f64,
-    ) -> Option<bool> {
-        self.scheduler.worker_is_decode_busy(worker, threshold)
-    }
-
     pub(crate) fn projected_decode_load_exceeds(
         &self,
         worker: WorkerWithDpRank,
