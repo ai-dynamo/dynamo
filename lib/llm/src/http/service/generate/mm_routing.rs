@@ -3,6 +3,168 @@
 
 use super::GenerateRequest;
 use crate::protocols::common::preprocessor::MmRoutingInfo;
+pub(crate) use crate::protocols::multimodal::preprocessed_mm_cache_identifier;
+use crate::protocols::multimodal::{
+    MAX_PREPROCESSED_MM_BYTES, MAX_PREPROCESSED_MM_FEATURES, MAX_PREPROCESSED_MM_MODALITY_BYTES,
+    MAX_PREPROCESSED_MM_ROUTING_HASH_BYTES,
+};
+use base64::Engine as _;
+
+/// Validate the execution contract for renderer-produced multimodal features.
+/// Routing may remain conservative, but execution metadata must never reach a
+/// worker in a shape the sidecar would drop or reinterpret.
+pub(super) fn validate_generate_mm_features(request: &GenerateRequest) -> Result<(), String> {
+    let Some(features) = request.passthrough.get("features") else {
+        return Ok(());
+    };
+    if features.is_null() {
+        return Ok(());
+    }
+    let features = features
+        .as_object()
+        .ok_or_else(|| "features must be a JSON object".to_string())?;
+    if let Some(field) = features.keys().find(|field| {
+        !matches!(
+            field.as_str(),
+            "mm_hashes" | "mm_placeholders" | "kwargs_data"
+        )
+    }) {
+        return Err(format!("unsupported features field `{field}`"));
+    }
+    let hashes = features
+        .get("mm_hashes")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| "features.mm_hashes must be a JSON object".to_string())?;
+    let placeholders = features
+        .get("mm_placeholders")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| "features.mm_placeholders must be a JSON object".to_string())?;
+    let kwargs = features
+        .get("kwargs_data")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            "features.kwargs_data is required; unverified cache-hit nulls are unsupported"
+                .to_string()
+        })?;
+    let same_modalities = |other: &serde_json::Map<String, serde_json::Value>| {
+        hashes.len() == other.len() && hashes.keys().all(|modality| other.contains_key(modality))
+    };
+    if !same_modalities(placeholders) || !same_modalities(kwargs) {
+        return Err(
+            "features hashes, placeholders, and kwargs_data must have identical modality keys"
+                .to_string(),
+        );
+    }
+
+    let mut feature_count = 0usize;
+    let mut decoded_bytes = 0usize;
+    let mut ranges = Vec::new();
+    for (modality, hashes) in hashes {
+        if modality.is_empty() || modality.len() > MAX_PREPROCESSED_MM_MODALITY_BYTES {
+            return Err(format!(
+                "feature modality names must contain between 1 and {MAX_PREPROCESSED_MM_MODALITY_BYTES} bytes"
+            ));
+        }
+        let hashes = hashes
+            .as_array()
+            .ok_or_else(|| format!("features.mm_hashes.{modality} must be an array"))?;
+        let placeholders = placeholders[modality]
+            .as_array()
+            .ok_or_else(|| format!("features.mm_placeholders.{modality} must be an array"))?;
+        let kwargs = kwargs[modality]
+            .as_array()
+            .ok_or_else(|| format!("features.kwargs_data.{modality} must be an array"))?;
+        if hashes.len() != placeholders.len() || hashes.len() != kwargs.len() {
+            return Err(format!(
+                "feature lists for modality {modality:?} must have equal lengths"
+            ));
+        }
+        feature_count = feature_count
+            .checked_add(hashes.len())
+            .ok_or_else(|| "too many multimodal features".to_string())?;
+        for ((hash, placeholder), encoded) in hashes.iter().zip(placeholders).zip(kwargs) {
+            let hash = hash
+                .as_str()
+                .filter(|hash| {
+                    !hash.is_empty() && hash.len() <= MAX_PREPROCESSED_MM_ROUTING_HASH_BYTES
+                })
+                .ok_or_else(|| {
+                    "multimodal hashes must contain between 1 and 512 bytes".to_string()
+                })?;
+            let _ = hash;
+            let placeholder = placeholder
+                .as_object()
+                .ok_or_else(|| "multimodal placeholders must be JSON objects".to_string())?;
+            if let Some(field) = placeholder
+                .keys()
+                .find(|field| !matches!(field.as_str(), "offset" | "length" | "is_embed"))
+            {
+                return Err(format!(
+                    "unsupported multimodal placeholder field `{field}`"
+                ));
+            }
+            let offset = placeholder
+                .get("offset")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or_else(|| {
+                    "multimodal placeholder offsets must be non-negative integers".to_string()
+                })?;
+            let length = placeholder
+                .get("length")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .ok_or_else(|| {
+                    "multimodal placeholder lengths must be positive integers".to_string()
+                })?;
+            let end = offset
+                .checked_add(length)
+                .filter(|end| *end <= request.token_ids.len())
+                .ok_or_else(|| "multimodal placeholder range exceeds token_ids".to_string())?;
+            if let Some(mask) = placeholder.get("is_embed")
+                && !mask.is_null()
+            {
+                let mask = mask.as_array().ok_or_else(|| {
+                    "multimodal placeholder is_embed must be an array".to_string()
+                })?;
+                if mask.len() != length || mask.iter().any(|value| !value.is_boolean()) {
+                    return Err(
+                        "multimodal placeholder is_embed must contain one boolean per position"
+                            .to_string(),
+                    );
+                }
+            }
+            let encoded = encoded.as_str().ok_or_else(|| {
+                "each multimodal feature must carry base64 kwargs_data; cache-hit nulls are unsupported"
+                    .to_string()
+            })?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|error| format!("invalid multimodal kwargs_data base64: {error}"))?;
+            decoded_bytes = decoded_bytes
+                .checked_add(bytes.len())
+                .ok_or_else(|| "multimodal feature payload is too large".to_string())?;
+            ranges.push((offset, end));
+        }
+    }
+    if feature_count == 0 || feature_count > MAX_PREPROCESSED_MM_FEATURES {
+        return Err(format!(
+            "features must contain between 1 and {MAX_PREPROCESSED_MM_FEATURES} multimodal items"
+        ));
+    }
+    if decoded_bytes > MAX_PREPROCESSED_MM_BYTES {
+        return Err(format!(
+            "multimodal feature payload exceeds {} MiB",
+            MAX_PREPROCESSED_MM_BYTES / (1024 * 1024)
+        ));
+    }
+    ranges.sort_unstable_by_key(|range| range.0);
+    if ranges.windows(2).any(|pair| pair[0].1 > pair[1].0) {
+        return Err("multimodal feature ranges must not overlap".to_string());
+    }
+    Ok(())
+}
 
 /// Build the routing-only token sequence used by vLLM KV events for multimodal
 /// prompts. The caller-provided `features` object remains opaque to execution;
@@ -30,6 +192,10 @@ pub(super) fn generate_mm_routing_info(
         .get("mm_placeholders")
         .and_then(serde_json::Value::as_object)
         .ok_or("features.mm_placeholders must be a JSON object")?;
+    let kwargs_data = features
+        .get("kwargs_data")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("features.kwargs_data must be a JSON object")?;
 
     if mm_hashes
         .keys()
@@ -42,28 +208,42 @@ pub(super) fn generate_mm_routing_info(
         return Err("KV cache block size must be non-zero");
     }
 
-    let (hashes, placeholders) = match (mm_hashes.get("image"), mm_placeholders.get("image")) {
-        (None, None) => return Ok(None),
-        (Some(hashes), Some(placeholders)) => (
+    let (hashes, placeholders, kwargs) = match (
+        mm_hashes.get("image"),
+        mm_placeholders.get("image"),
+        kwargs_data.get("image"),
+    ) {
+        (None, None, None) => return Ok(None),
+        (Some(hashes), Some(placeholders), Some(kwargs)) => (
             hashes
                 .as_array()
                 .ok_or("features.mm_hashes.image must be an array")?,
             placeholders
                 .as_array()
                 .ok_or("features.mm_placeholders.image must be an array")?,
+            kwargs
+                .as_array()
+                .ok_or("features.kwargs_data.image must be an array")?,
         ),
-        _ => return Err("image hashes and placeholders must both be present"),
+        _ => return Err("image hashes, placeholders, and kwargs_data must all be present"),
     };
-    if hashes.len() != placeholders.len() {
-        return Err("image hashes and placeholders must have equal lengths");
+    if hashes.len() != placeholders.len() || hashes.len() != kwargs.len() {
+        return Err("image hashes, placeholders, and kwargs_data must have equal lengths");
     }
 
     let mut ranges = Vec::with_capacity(hashes.len());
-    for (hash, placeholder) in hashes.iter().zip(placeholders) {
-        let hash = hash
-            .as_str()
-            .and_then(dynamo_kv_router::zmq_wire::hash_mm_identifier)
+    for ((hash, placeholder), kwargs) in hashes.iter().zip(placeholders).zip(kwargs) {
+        hash.as_str()
             .ok_or("multimodal hashes must be non-empty strings")?;
+        let kwargs = kwargs
+            .as_str()
+            .ok_or("multimodal kwargs_data entries must be base64 strings")?;
+        let kwargs = base64::engine::general_purpose::STANDARD
+            .decode(kwargs)
+            .map_err(|_| "multimodal kwargs_data must be valid base64")?;
+        let identifier = preprocessed_mm_cache_identifier("image", &kwargs);
+        let hash = dynamo_kv_router::zmq_wire::hash_mm_identifier(&identifier)
+            .ok_or("canonical multimodal identifier must be non-empty")?;
         let placeholder = placeholder
             .as_object()
             .ok_or("multimodal placeholders must be JSON objects")?;

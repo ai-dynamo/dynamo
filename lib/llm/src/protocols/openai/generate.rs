@@ -115,6 +115,24 @@ impl GenerateRequest {
                 "sampling_params.min_tokens ({min_tokens}) exceeds max_tokens ({max_tokens})."
             ));
         }
+        if self
+            .sampling_params
+            .routed_experts_prompt_start()
+            .is_some_and(|start| start as usize >= self.token_ids.len())
+        {
+            return Err(
+                "sampling_params.routed_experts_prompt_start must be less than the prompt length."
+                    .to_string(),
+            );
+        }
+
+        if let Some(field) = self.passthrough.keys().find(|field| *field != "features") {
+            return Err(format!(
+                "unsupported /inference/v1/generate field `{field}`"
+            ));
+        }
+
+        self.sampling_params.validate_supported()?;
 
         Ok(())
     }
@@ -174,6 +192,16 @@ pub struct SamplingParams {
     structured_outputs: Option<Value>,
     skip_reading_prefix_cache: Option<bool>,
     vllm_xargs: Option<HashMap<String, Value>>,
+    stop: Option<Vec<String>>,
+    include_stop_str_in_output: Option<bool>,
+    skip_special_tokens: Option<bool>,
+    return_token_ids: Option<bool>,
+    cache_salt: Option<String>,
+    n: Option<u8>,
+    best_of: Option<u8>,
+    use_beam_search: Option<bool>,
+    length_penalty: Option<f32>,
+    routed_experts_prompt_start: Option<u32>,
 }
 
 impl SamplingParams {
@@ -183,6 +211,10 @@ impl SamplingParams {
 
     pub fn min_tokens(&self) -> Option<u32> {
         self.min_tokens
+    }
+
+    fn routed_experts_prompt_start(&self) -> Option<u32> {
+        self.routed_experts_prompt_start
     }
 
     pub fn ignore_eos(&self) -> bool {
@@ -200,6 +232,176 @@ impl SamplingParams {
     pub fn as_value(&self) -> &Value {
         &self.raw
     }
+
+    fn validate_supported(&self) -> Result<(), String> {
+        const SUPPORTED: &[&str] = &[
+            "allowed_token_ids",
+            "bad_words",
+            "best_of",
+            "cache_salt",
+            "frequency_penalty",
+            "ignore_eos",
+            "include_stop_str_in_output",
+            "length_penalty",
+            "logit_bias",
+            "logprob_token_ids",
+            "logprobs",
+            "max_tokens",
+            "min_p",
+            "min_tokens",
+            "n",
+            "presence_penalty",
+            "prompt_logprobs",
+            "repetition_penalty",
+            "return_token_ids",
+            "routed_experts_prompt_start",
+            "seed",
+            "skip_reading_prefix_cache",
+            "skip_special_tokens",
+            "stop",
+            "stop_token_ids",
+            "structured_outputs",
+            "temperature",
+            "thinking_token_budget",
+            "top_k",
+            "top_p",
+            "use_beam_search",
+            "vllm_xargs",
+        ];
+        let object = self
+            .raw
+            .as_object()
+            .expect("SamplingParams is constructed only from objects");
+        if let Some(field) = object
+            .keys()
+            .find(|field| SUPPORTED.binary_search(&field.as_str()).is_err())
+        {
+            return Err(format!(
+                "unsupported /inference/v1/generate sampling parameter `{field}`"
+            ));
+        }
+        if self.logprobs.is_some_and(|value| value < -1) {
+            return Err("sampling_params.logprobs must be non-negative or -1.".to_string());
+        }
+        if self
+            .top_k
+            .is_some_and(|value| value < -1 || i32::try_from(value).is_err())
+        {
+            return Err("sampling_params.top_k must fit i32 and be at least -1.".to_string());
+        }
+        if self.n.unwrap_or(1) != 1 || self.best_of.unwrap_or(1) != 1 {
+            return Err("sampling_params.n and best_of must both be 1.".to_string());
+        }
+        if self.use_beam_search.unwrap_or(false) {
+            return Err("sampling_params.use_beam_search is not supported.".to_string());
+        }
+        if self
+            .length_penalty
+            .is_some_and(|value| (value - 1.0).abs() > f32::EPSILON)
+        {
+            return Err("sampling_params.length_penalty must be 1.".to_string());
+        }
+        if let Some(token_ids) = self.logprob_token_ids.as_ref()
+            && self
+                .logprobs
+                .is_some_and(|count| count != token_ids.len() as i32)
+        {
+            return Err(
+                "sampling_params.logprobs must equal the logprob_token_ids count when both are set."
+                    .to_string(),
+            );
+        }
+        if self
+            .vllm_xargs
+            .as_ref()
+            .is_some_and(|args| args.contains_key("kv_transfer_params"))
+        {
+            return Err(
+                "sampling_params.vllm_xargs must not contain reserved key kv_transfer_params."
+                    .to_string(),
+            );
+        }
+        if self.allowed_token_ids.as_ref().is_some_and(Vec::is_empty) {
+            return Err("sampling_params.allowed_token_ids must not be empty.".to_string());
+        }
+        if let Some(structured) = self.structured_outputs.as_ref() {
+            validate_structured_outputs(structured)?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_structured_outputs(value: &Value) -> Result<(), String> {
+    const CONSTRAINTS: &[&str] = &[
+        "choice",
+        "grammar",
+        "json",
+        "json_object",
+        "regex",
+        "structural_tag",
+    ];
+    const OPTIONS: &[&str] = &[
+        "disable_additional_properties",
+        "disable_any_whitespace",
+        "whitespace_pattern",
+    ];
+    let object = value
+        .as_object()
+        .ok_or_else(|| "sampling_params.structured_outputs must be an object.".to_string())?;
+    if let Some(field) = object.keys().find(|field| {
+        CONSTRAINTS.binary_search(&field.as_str()).is_err()
+            && OPTIONS.binary_search(&field.as_str()).is_err()
+    }) {
+        return Err(format!(
+            "unsupported sampling_params.structured_outputs field `{field}`."
+        ));
+    }
+    let set_constraints = CONSTRAINTS
+        .iter()
+        .filter(|field| object.get(**field).is_some_and(|value| !value.is_null()))
+        .count();
+    if set_constraints != 1 {
+        return Err(
+            "sampling_params.structured_outputs must contain exactly one constraint.".to_string(),
+        );
+    }
+    if object.get("json_object") == Some(&Value::Bool(false)) {
+        return Err(
+            "sampling_params.structured_outputs.json_object must be true when set.".to_string(),
+        );
+    }
+    for field in ["disable_additional_properties", "disable_any_whitespace"] {
+        if object.get(field).is_some_and(|value| !value.is_boolean()) {
+            return Err(format!(
+                "sampling_params.structured_outputs.{field} must be a boolean."
+            ));
+        }
+    }
+    for field in ["grammar", "regex", "structural_tag", "whitespace_pattern"] {
+        if object.get(field).is_some_and(|value| !value.is_string()) {
+            return Err(format!(
+                "sampling_params.structured_outputs.{field} must be a string."
+            ));
+        }
+    }
+    if object.get("choice").is_some_and(|value| {
+        value
+            .as_array()
+            .is_none_or(|choices| choices.iter().any(|choice| !choice.is_string()))
+    }) {
+        return Err(
+            "sampling_params.structured_outputs.choice must be an array of strings.".to_string(),
+        );
+    }
+    if object
+        .get("json_object")
+        .is_some_and(|value| !value.is_boolean())
+    {
+        return Err(
+            "sampling_params.structured_outputs.json_object must be a boolean.".to_string(),
+        );
+    }
+    Ok(())
 }
 
 impl Serialize for SamplingParams {
@@ -256,6 +458,16 @@ impl<'de> Deserialize<'de> for SamplingParams {
             structured_outputs: field!(structured_outputs),
             skip_reading_prefix_cache: field!(skip_reading_prefix_cache),
             vllm_xargs: field!(vllm_xargs),
+            stop: field!(stop),
+            include_stop_str_in_output: field!(include_stop_str_in_output),
+            skip_special_tokens: field!(skip_special_tokens),
+            return_token_ids: field!(return_token_ids),
+            cache_salt: field!(cache_salt),
+            n: field!(n),
+            best_of: field!(best_of),
+            use_beam_search: field!(use_beam_search),
+            length_penalty: field!(length_penalty),
+            routed_experts_prompt_start: field!(routed_experts_prompt_start),
             raw,
         })
     }
@@ -285,6 +497,14 @@ where
         .map_err(|error| format!("sampling_params.{name}: {error}"))
 }
 
+/// Compact routed-expert tensor consumed by Prime's renderer client.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct GenerateRoutedExperts {
+    pub data: String,
+    pub shape: Vec<u64>,
+    pub start: u32,
+}
+
 /// A single choice in a `GenerateResponse`.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct GenerateResponseChoice {
@@ -296,7 +516,7 @@ pub struct GenerateResponseChoice {
 
     pub finish_reason: Option<String>,
 
-    pub routed_experts: Option<String>,
+    pub routed_experts: Option<GenerateRoutedExperts>,
 }
 
 /// Token-in/token-out generation response.
@@ -324,7 +544,7 @@ struct GenerateChoiceAcc {
     token_ids: Vec<crate::protocols::TokenIdType>,
     logprobs: Option<Vec<Value>>,
     finish_reason: Option<String>,
-    routed_experts: Option<String>,
+    routed_experts: Option<GenerateRoutedExperts>,
 }
 
 impl GenerateChoiceAcc {
@@ -723,6 +943,57 @@ mod tests {
     }
 
     #[test]
+    fn generate_request_rejects_unknown_fields_before_dispatch() {
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "token_ids": [1],
+            "sampling_params": {"future_sampling_field": true}
+        }))
+        .expect("capture unknown field for diagnostic");
+        assert!(
+            request
+                .validate()
+                .unwrap_err()
+                .contains("future_sampling_field")
+        );
+
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "token_ids": [1],
+            "sampling_params": {},
+            "future_top_level_field": true
+        }))
+        .expect("capture unknown field for diagnostic");
+        assert!(
+            request
+                .validate()
+                .unwrap_err()
+                .contains("future_top_level_field")
+        );
+    }
+
+    #[test]
+    fn generate_request_accepts_the_versioned_extended_sampling_contract() {
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "token_ids": [1],
+            "sampling_params": {
+                "thinking_token_budget": 64,
+                "logit_bias": {"7": -1.25},
+                "allowed_token_ids": [7, 8],
+                "bad_words": ["blocked"],
+                "logprobs": 2,
+                "logprob_token_ids": [7, 8],
+                "structured_outputs": {"regex": "[a-z]+"},
+                "skip_reading_prefix_cache": true,
+                "vllm_xargs": {"custom": true},
+                "skip_special_tokens": false,
+                "return_token_ids": true
+            }
+        }))
+        .expect("deserialize supported fields");
+
+        request.validate().expect("supported sampling contract");
+    }
+
+    #[test]
     fn generate_request_preserves_disabled_top_k_sentinel() {
         let raw_sampling = json!({"top_k": -1});
         let req: GenerateRequest = serde_json::from_value(json!({
@@ -789,6 +1060,20 @@ mod tests {
                     "sampling_params": {"min_tokens": 3, "max_tokens": 2}
                 }),
                 "min_tokens",
+            ),
+            (
+                json!({
+                    "token_ids": [1],
+                    "sampling_params": {"allowed_token_ids": []}
+                }),
+                "allowed_token_ids",
+            ),
+            (
+                json!({
+                    "token_ids": [1, 2],
+                    "sampling_params": {"routed_experts_prompt_start": 2}
+                }),
+                "routed_experts_prompt_start",
             ),
         ];
 
@@ -1030,7 +1315,11 @@ mod tests {
                 ]]),
                 finish_reason: Some(crate::protocols::common::FinishReason::Length),
                 engine_data: Some(json!({
-                    "routed_experts": "encoded-experts",
+                    "routed_experts": {
+                        "data": "AQIDBA==",
+                        "shape": [1, 2, 2],
+                        "start": 7
+                    },
                     "kv_transfer_params": {"connector": "x"}
                 })),
                 ..Default::default()
@@ -1053,8 +1342,12 @@ mod tests {
         assert_eq!(response.choices[0].token_ids, Some(vec![100, 101]));
         assert_eq!(response.choices[0].finish_reason.as_deref(), Some("length"));
         assert_eq!(
-            response.choices[0].routed_experts.as_deref(),
-            Some("encoded-experts")
+            response.choices[0].routed_experts,
+            Some(GenerateRoutedExperts {
+                data: "AQIDBA==".to_string(),
+                shape: vec![1, 2, 2],
+                start: 7,
+            })
         );
         let logprobs = response.choices[0]
             .logprobs
@@ -1100,14 +1393,18 @@ mod tests {
                 token_ids: vec![201],
                 index: Some(1),
                 finish_reason: Some(crate::protocols::common::FinishReason::Stop),
-                engine_data: Some(json!({"routed_experts": "experts-1"})),
+                engine_data: Some(json!({
+                    "routed_experts": {"data": "AQ==", "shape": [1, 1, 1], "start": 1}
+                })),
                 ..Default::default()
             }),
             Annotated::from_data(LLMEngineOutput {
                 token_ids: vec![100],
                 index: Some(0),
                 finish_reason: Some(crate::protocols::common::FinishReason::Stop),
-                engine_data: Some(json!({"routed_experts": "experts-0"})),
+                engine_data: Some(json!({
+                    "routed_experts": {"data": "Ag==", "shape": [1, 1, 1], "start": 2}
+                })),
                 ..Default::default()
             }),
         ]);
@@ -1118,13 +1415,21 @@ mod tests {
 
         assert_eq!(response.choices[0].index, 0);
         assert_eq!(
-            response.choices[0].routed_experts.as_deref(),
-            Some("experts-0")
+            response.choices[0].routed_experts.as_ref().unwrap().data,
+            "Ag=="
+        );
+        assert_eq!(
+            response.choices[0].routed_experts.as_ref().unwrap().start,
+            2
         );
         assert_eq!(response.choices[1].index, 1);
         assert_eq!(
-            response.choices[1].routed_experts.as_deref(),
-            Some("experts-1")
+            response.choices[1].routed_experts.as_ref().unwrap().data,
+            "AQ=="
+        );
+        assert_eq!(
+            response.choices[1].routed_experts.as_ref().unwrap().start,
+            1
         );
     }
 

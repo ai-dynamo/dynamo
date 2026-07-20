@@ -1,8 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use base64::Engine as _;
 use dynamo_backend_common::{
     BackendError, ErrorType, MultimodalData, MultimodalDataMap, PreprocessedRequest, RoutingHints,
+    preprocessed_mm_cache_identifier,
 };
 
 use super::request;
@@ -10,6 +12,7 @@ use crate::proto as pb;
 use crate::request::build_generate_request;
 use crate::wire::{
     GenerateEvent, json_to_prost_struct, prost_struct_to_json, validate_generate_response,
+    validate_generate_response_with_routed_start,
 };
 
 fn request_with_media(map: MultimodalDataMap) -> PreprocessedRequest {
@@ -33,6 +36,47 @@ fn decoded_media() -> MultimodalData {
         }
     }))
     .expect("synthesize MultimodalData::Decoded")
+}
+
+#[test]
+fn canonical_preprocessed_mm_identity_matches_native_grpc_vector() {
+    assert_eq!(
+        preprocessed_mm_cache_identifier("image", &[0x80]),
+        "grpc-mm:835d2213e413e78e540c88905d36dfa708aa0eb02e9d546026a832c6f5ac5825"
+    );
+}
+
+#[test]
+fn routed_experts_tensor_becomes_prime_compact_engine_data() {
+    let response = pb::GenerateResponse {
+        outputs: Some(pb::SequenceOutput {
+            token_ids: vec![10],
+            routed_experts: Some(pb::RoutedExpertsTensor {
+                // Python/NumPy's canonical dtype string for uint8. The sidecar also
+                // accepts the semantic alias `uint8` used by hand-authored clients.
+                dtype: "|u1".to_string(),
+                shape: vec![1, 2, 2],
+                data: vec![1, 2, 3, 4],
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let validated = validate_generate_response_with_routed_start(response, false, 7).unwrap();
+    let GenerateEvent::Token {
+        routed_experts: Some(encoded),
+        ..
+    } = &validated.events[0]
+    else {
+        panic!("expected routed-experts token event");
+    };
+    assert_eq!(encoded["shape"], serde_json::json!([1, 2, 2]));
+    assert_eq!(encoded["start"], 7);
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(encoded["data"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(data, [1, 2, 3, 4]);
 }
 
 #[test]
@@ -231,6 +275,7 @@ fn generate_response_reconstructs_positionally_aligned_top_logprobs() {
         token_ids,
         logprobs,
         top_logprobs,
+        ..
     } = &response.events[0]
     else {
         panic!("expected token event");
@@ -535,7 +580,7 @@ fn build_request_preserves_prime_tito_sampling_logprobs_and_cache_salt() {
                 "ignore_eos": true,
                 "logprobs": 1,
                 "skip_special_tokens": false,
-                "routed_experts_prompt_start": 11
+                "routed_experts_prompt_start": 1
             },
             "cache_salt": "rollout-7",
             "priority": -7
@@ -543,18 +588,19 @@ fn build_request_preserves_prime_tito_sampling_logprobs_and_cache_salt() {
     }));
 
     let wire = build_generate_request(&request, "req-tito", false).unwrap();
+    assert_eq!(wire.routed_experts_prompt_start, 1);
     let sampling = wire.sampling.unwrap();
     let decoding = wire.decoding.unwrap();
     let stopping = wire.stopping.unwrap();
     let response = wire.response.unwrap();
     assert_eq!(wire.temperature, Some(0.7));
-    assert_eq!(sampling.top_k, 23);
-    assert_eq!(sampling.top_p, 0.91);
-    assert_eq!(sampling.min_p, 0.05);
+    assert_eq!(sampling.top_k, Some(23));
+    assert_eq!(sampling.top_p, Some(0.91));
+    assert_eq!(sampling.min_p, Some(0.05));
     assert_eq!(sampling.seed, Some(42));
-    assert_eq!(decoding.presence_penalty, 0.2);
-    assert_eq!(decoding.frequency_penalty, 0.3);
-    assert_eq!(decoding.repetition_penalty, 1.1);
+    assert_eq!(decoding.presence_penalty, Some(0.2));
+    assert_eq!(decoding.frequency_penalty, Some(0.3));
+    assert_eq!(decoding.repetition_penalty, Some(1.1));
     assert_eq!(stopping.max_new_tokens, 17);
     assert_eq!(stopping.min_new_tokens, 2);
     assert_eq!(stopping.stop_strings, vec!["done"]);
@@ -564,6 +610,138 @@ fn build_request_preserves_prime_tito_sampling_logprobs_and_cache_salt() {
     assert!(response.output_candidates.is_some());
     assert_eq!(wire.kv.unwrap().cache_salt, "dynamo-cache-salt:rollout-7");
     assert_eq!(wire.priority, -7);
+}
+
+#[test]
+fn build_request_maps_extended_sampling_contract_losslessly() {
+    let mut request = request(Some(8));
+    request.extra_args = Some(serde_json::json!({
+        "vllm_tito": {
+            "sampling_params": {
+                "thinking_token_budget": 64,
+                "logit_bias": {"7": -1.25},
+                "allowed_token_ids": [7, 8],
+                "bad_words": ["blocked"],
+                "logprobs": 2,
+                "logprob_token_ids": [7, 8],
+                "structured_outputs": {
+                    "regex": "[a-z]+",
+                    "disable_any_whitespace": true,
+                    "disable_additional_properties": true,
+                    "whitespace_pattern": "\\s*"
+                },
+                "skip_reading_prefix_cache": true,
+                "vllm_xargs": {"exact_integer": 9007199254740993_u64}
+            }
+        }
+    }));
+
+    let wire = build_generate_request(&request, "req-extended", false).unwrap();
+    let decoding = wire.decoding.unwrap();
+    let stopping = wire.stopping.unwrap();
+    let response = wire.response.unwrap();
+    assert_eq!(decoding.logit_bias[&7], -1.25);
+    assert_eq!(decoding.allowed_token_ids, vec![7, 8]);
+    assert_eq!(decoding.bad_words, vec!["blocked"]);
+    assert!(decoding.structured_output_disable_any_whitespace);
+    assert!(decoding.structured_output_disable_additional_properties);
+    assert_eq!(
+        decoding.structured_output_whitespace_pattern.as_deref(),
+        Some("\\s*")
+    );
+    assert_eq!(stopping.thinking_token_budget, Some(64));
+    assert!(wire.kv.unwrap().bypass_prefix_cache);
+    assert_eq!(
+        response.output_candidates.and_then(|value| value.select),
+        Some(pb::candidate_tokens::Select::TokenIds(pb::TokenIds {
+            ids: vec![7, 8]
+        }))
+    );
+    let xargs: serde_json::Value =
+        serde_json::from_slice(wire.vllm_xargs_json.as_deref().unwrap()).unwrap();
+    assert_eq!(xargs["exact_integer"], 9_007_199_254_740_993_u64);
+}
+
+#[test]
+fn build_request_forwards_validated_preprocessed_multimodal_features() {
+    let mut request = request(Some(8));
+    request.token_ids = vec![10, 99, 99, 20];
+    let encoded = base64::engine::general_purpose::STANDARD.encode([0x81, 0xa1, b'x', 0x01]);
+    request.extra_args = Some(serde_json::json!({
+        "vllm_tito": {
+            "sampling_params": {},
+            "features": {
+                "mm_hashes": {"image": ["image-hash"]},
+                "mm_placeholders": {
+                    "image": [{"offset": 1, "length": 2, "is_embed": [true, false]}]
+                },
+                "kwargs_data": {"image": [encoded]}
+            }
+        }
+    }));
+
+    let wire = build_generate_request(&request, "req-mm", false).unwrap();
+    assert!(wire.media.is_empty());
+    assert_eq!(wire.mm_features.len(), 1);
+    let feature = &wire.mm_features[0];
+    assert_eq!(feature.modality, "image");
+    let identifier = preprocessed_mm_cache_identifier("image", &[0x81, 0xa1, b'x', 0x01]);
+    assert_eq!(feature.mm_hash, identifier);
+    assert_eq!(feature.cache_identifier, feature.mm_hash);
+    assert_eq!(
+        feature.kwargs_msgpack.as_deref(),
+        Some(&[0x81, 0xa1, b'x', 0x01][..])
+    );
+    assert_eq!(
+        feature.position.as_ref().unwrap().is_embed,
+        vec![true, false]
+    );
+}
+
+#[test]
+fn build_request_rejects_preprocessed_multimodal_lora_without_tower_contract() {
+    let mut request = request(Some(8));
+    request.token_ids = vec![10, 99, 20];
+    request.routing = Some(RoutingHints {
+        lora_name: Some("adapter-a".to_string()),
+        ..Default::default()
+    });
+    let encoded = base64::engine::general_purpose::STANDARD.encode([0x81, 0xa1, b'x', 0x01]);
+    request.extra_args = Some(serde_json::json!({
+        "vllm_tito": {
+            "sampling_params": {},
+            "features": {
+                "mm_hashes": {"image": ["routing-hash"]},
+                "mm_placeholders": {"image": [{"offset": 1, "length": 1}]},
+                "kwargs_data": {"image": [encoded]}
+            }
+        }
+    }));
+
+    let error = build_generate_request(&request, "req-mm-lora", false).unwrap_err();
+    assert!(error.message().contains("tower-LoRA"));
+}
+
+#[test]
+fn build_request_rejects_unverified_multimodal_cache_hit() {
+    let mut request = request(Some(8));
+    request.extra_args = Some(serde_json::json!({
+        "vllm_tito": {
+            "sampling_params": {},
+            "features": {
+                "mm_hashes": {"image": ["image-hash"]},
+                "mm_placeholders": {"image": [{"offset": 0, "length": 1}]},
+                "kwargs_data": null
+            }
+        }
+    }));
+
+    let error = build_generate_request(&request, "req-mm-cache", false).unwrap_err();
+    assert_eq!(
+        error.error_type(),
+        ErrorType::Backend(BackendError::InvalidArgument)
+    );
+    assert!(error.message().contains("cache hits"));
 }
 
 #[test]

@@ -86,6 +86,11 @@ pub(crate) fn nonempty(value: &str) -> Option<String> {
 }
 
 pub(crate) fn validate_discovery(discovery: &Discovery) -> Result<(), DynamoError> {
+    const REQUIRED_CAPABILITIES: &[&str] = &[
+        "generate.preprocessed_mm.v1",
+        "generate.routed_experts.v1",
+        "generate.sampling.v2",
+    ];
     if discovery.server.api_version != "vllm" {
         return Err(client::invalid_arg(format!(
             "vLLM gRPC API version `{}` is not supported",
@@ -103,6 +108,18 @@ pub(crate) fn validate_discovery(discovery: &Discovery) -> Result<(), DynamoErro
         return Err(client::invalid_arg(
             "engine must support token-ID input for Dynamo routing",
         ));
+    }
+    for capability in REQUIRED_CAPABILITIES {
+        if !discovery
+            .server
+            .capabilities
+            .iter()
+            .any(|reported| reported == capability)
+        {
+            return Err(client::invalid_arg(format!(
+                "vLLM gRPC server is missing required capability `{capability}`"
+            )));
+        }
     }
     if discovery.model.supports_lora && discovery.server.max_loras == 0 {
         return Err(client::invalid_arg(
@@ -200,6 +217,11 @@ mod tests {
         Discovery {
             server: pb::ServerInfo {
                 api_version: "vllm".to_string(),
+                capabilities: vec![
+                    "generate.preprocessed_mm.v1".to_string(),
+                    "generate.routed_experts.v1".to_string(),
+                    "generate.sampling.v2".to_string(),
+                ],
                 ..Default::default()
             },
             model: pb::ModelInfo {

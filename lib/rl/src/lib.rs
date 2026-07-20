@@ -236,8 +236,7 @@ async fn list_workers(state: &RlDiscoveryState) -> anyhow::Result<Vec<RlWorkerIn
         .list(DiscoveryQuery::NamespacedModels {
             namespace: config.namespace.clone(),
         })
-        .await
-        .unwrap_or_default();
+        .await?;
 
     let models = model_map(model_instances);
     let rl_endpoints = endpoint_instances

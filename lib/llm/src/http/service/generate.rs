@@ -41,7 +41,7 @@ use crate::protocols::openai::generate::{
     GenerateRequest, GenerateResponse, GenerateResponseOptions, SamplingParams, StreamOptions,
 };
 use crate::protocols::{Annotated, common::llm_backend::LLMEngineOutput};
-use mm_routing::generate_mm_routing_info;
+use mm_routing::{generate_mm_routing_info, validate_generate_mm_features};
 
 const X_REQUEST_ID_HEADER: &str = "x-request-id";
 const X_DATA_PARALLEL_RANK_HEADER: &str = "x-data-parallel-rank";
@@ -221,18 +221,25 @@ fn preprocessed_from_generate(
     kv_cache_block_size: u32,
     lora_name: Option<String>,
 ) -> anyhow::Result<PreprocessedRequest> {
+    if lora_name.as_deref().is_some_and(|name| !name.is_empty())
+        && request
+            .passthrough
+            .get("features")
+            .is_some_and(|features| !features.is_null())
+    {
+        anyhow::bail!(
+            "native gRPC does not yet advertise tower-LoRA multimodal cache semantics; multimodal requests with LoRA are unsupported"
+        );
+    }
     let sampling = &request.sampling_params;
     let max_tokens = sampling.max_tokens();
     let min_tokens = sampling.min_tokens();
     let ignore_eos = sampling.ignore_eos();
     let routing_priority = dynamo_routing_priority(request.priority);
     let input_tokens = request.token_ids.len();
-    // With vLLM's default `enable_tower_connector_lora=false`, the vision tower
-    // and connector stay on base weights, so MM identifiers are adapter-invariant.
-    // `lora_name` separately salts the LM KV hashes below, allowing exact MM+LoRA
-    // routing. If tower/connector LoRA is enabled, vLLM scopes MM identifiers by
-    // adapter; that worker capability is not advertised here, so this projection
-    // can miss the correct MM cache owner (suboptimal routing, not unsafe reuse).
+    // These renderer-provided hashes are routing hints only. The sidecar and
+    // vLLM derive the receiver-cache key from the verified payload bytes. Native
+    // gRPC rejects multimodal+LoRA until tower-LoRA cache semantics are advertised.
     let mm_routing_info = match generate_mm_routing_info(&request, kv_cache_block_size) {
         Ok(info) => info,
         Err(reason) => {
@@ -368,6 +375,9 @@ async fn handler_generate(
     }
 
     if let Err(message) = request.validate() {
+        return generate_error_response(StatusCode::BAD_REQUEST, "invalid_request_error", message);
+    }
+    if let Err(message) = validate_generate_mm_features(&request) {
         return generate_error_response(StatusCode::BAD_REQUEST, "invalid_request_error", message);
     }
 

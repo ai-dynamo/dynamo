@@ -26,6 +26,28 @@ mod tests {
     use tracing_subscriber::Layer;
     use tracing_subscriber::prelude::*;
 
+    #[test]
+    fn multimodal_lora_is_rejected_before_backend_dispatch() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1],
+            "sampling_params": {},
+            "features": {}
+        }))
+        .unwrap();
+
+        let error = preprocessed_from_generate(
+            request,
+            "adapter-a",
+            None,
+            "req-mm-lora",
+            16,
+            Some("adapter-a".to_string()),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("tower-LoRA"));
+    }
+
     #[derive(Clone, Copy)]
     enum PendingPhase {
         Generate,
@@ -447,8 +469,14 @@ mod tests {
 
     #[test]
     fn multimodal_features_build_exact_routing_tokens_without_changing_execution_payload() {
+        use base64::Engine as _;
+
         let hash_a = "a".repeat(64);
         let hash_b = "b".repeat(64);
+        let kwargs_a = vec![0x80];
+        let kwargs_b = vec![0x81];
+        let encoded_a = base64::engine::general_purpose::STANDARD.encode(&kwargs_a);
+        let encoded_b = base64::engine::general_purpose::STANDARD.encode(&kwargs_b);
         let raw = serde_json::json!({
             "token_ids": [10, 11, 12, 12, 12, 15, 16, 17, 17, 19],
             "sampling_params": {},
@@ -458,7 +486,7 @@ mod tests {
                     {"offset": 2, "length": 3},
                     {"offset": 7, "length": 2}
                 ]},
-                "kwargs_data": {"image": ["opaque-a", "opaque-b"]}
+                "kwargs_data": {"image": [encoded_a, encoded_b]}
             }
         });
         let request: GenerateRequest =
@@ -468,8 +496,16 @@ mod tests {
             preprocessed_from_generate(request, "test-model", None, "resolved-request", 4, None)
                 .expect("build request");
 
-        let pad_a = dynamo_kv_router::protocols::pad_value_for_mm_hash(0xaaaaaaaaaaaaaaaa);
-        let pad_b = dynamo_kv_router::protocols::pad_value_for_mm_hash(0xbbbbbbbbbbbbbbbb);
+        let canonical_a =
+            mm_routing::preprocessed_mm_cache_identifier("image", &kwargs_a);
+        let canonical_b =
+            mm_routing::preprocessed_mm_cache_identifier("image", &kwargs_b);
+        let pad_a = dynamo_kv_router::protocols::pad_value_for_mm_hash(
+            dynamo_kv_router::zmq_wire::hash_mm_identifier(&canonical_a).unwrap(),
+        );
+        let pad_b = dynamo_kv_router::protocols::pad_value_for_mm_hash(
+            dynamo_kv_router::zmq_wire::hash_mm_identifier(&canonical_b).unwrap(),
+        );
         let mm = preprocessed
             .mm_routing_info
             .as_ref()
@@ -495,19 +531,26 @@ mod tests {
 
     #[test]
     fn multimodal_projection_handles_many_blocks_and_sparse_placeholders() {
+        use base64::Engine as _;
+
         let token_count = 1024;
         let mut token_ids = vec![7_u32; token_count];
         let mut hashes = Vec::new();
         let mut placeholders = Vec::new();
+        let mut kwargs_data = Vec::new();
         let mut expected_pads = Vec::new();
 
         for index in 0..64 {
             let offset = index * 16 + 7;
             let identifier = format!("image-{index}");
-            let hash = dynamo_kv_router::zmq_wire::hash_mm_identifier(&identifier)
+            let kwargs = vec![index as u8];
+            let canonical =
+                mm_routing::preprocessed_mm_cache_identifier("image", &kwargs);
+            let hash = dynamo_kv_router::zmq_wire::hash_mm_identifier(&canonical)
                 .expect("non-empty identifier");
             hashes.push(identifier);
             placeholders.push(serde_json::json!({"offset": offset, "length": 1}));
+            kwargs_data.push(base64::engine::general_purpose::STANDARD.encode(kwargs));
             expected_pads.push((
                 offset,
                 dynamo_kv_router::protocols::pad_value_for_mm_hash(hash),
@@ -519,7 +562,8 @@ mod tests {
             "sampling_params": {},
             "features": {
                 "mm_hashes": {"image": hashes},
-                "mm_placeholders": {"image": placeholders}
+                "mm_placeholders": {"image": placeholders},
+                "kwargs_data": {"image": kwargs_data}
             }
         }))
         .expect("deserialize request");
@@ -537,13 +581,21 @@ mod tests {
 
     #[test]
     fn generate_mm_routing_hash_matches_normalized_vllm_worker_event() {
+        use base64::Engine as _;
+
         let mm_identifier = "1234567890abcdef".repeat(2);
+        let kwargs = vec![0x80];
+        let canonical_identifier =
+            mm_routing::preprocessed_mm_cache_identifier("image", &kwargs);
         let request: GenerateRequest = serde_json::from_value(serde_json::json!({
             "token_ids": [10, 99, 99, 20],
             "sampling_params": {},
             "features": {
                 "mm_hashes": {"image": [mm_identifier.clone()]},
-                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]}
+                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]},
+                "kwargs_data": {"image": [
+                    base64::engine::general_purpose::STANDARD.encode(kwargs)
+                ]}
             }
         }))
         .expect("deserialize request");
@@ -563,8 +615,10 @@ mod tests {
             dynamo_kv_router::zmq_wire::StoredBlockOptions {
                 mm_extra_info: Some(dynamo_kv_router::protocols::BlockExtraInfo {
                     mm_objects: vec![dynamo_kv_router::protocols::BlockMmObjectInfo {
-                        mm_hash: dynamo_kv_router::zmq_wire::hash_mm_identifier(&mm_identifier)
-                            .expect("non-empty identifier"),
+                        mm_hash: dynamo_kv_router::zmq_wire::hash_mm_identifier(
+                            &canonical_identifier,
+                        )
+                        .expect("non-empty identifier"),
                         offsets: vec![(1, 3)],
                     }],
                 }),
@@ -583,7 +637,8 @@ mod tests {
             "sampling_params": {},
             "features": {
                 "mm_hashes": {"image": ["image-0"]},
-                "mm_placeholders": {"image": [{"offset": 1, "length": 3}]}
+                "mm_placeholders": {"image": [{"offset": 1, "length": 3}]},
+                "kwargs_data": {"image": ["gA=="]}
             }
         }))
         .expect("deserialize request");
@@ -598,6 +653,9 @@ mod tests {
     #[test]
     fn sparse_mm_embed_mask_matches_normalized_vllm_worker_event() {
         let mm_identifier = "opaque-renderer-image-0";
+        let kwargs = [0x80];
+        let canonical_identifier =
+            mm_routing::preprocessed_mm_cache_identifier("image", &kwargs);
         let request: GenerateRequest = serde_json::from_value(serde_json::json!({
             "token_ids": [10, 99, 42, 99, 20],
             "sampling_params": {},
@@ -607,14 +665,15 @@ mod tests {
                     "offset": 1,
                     "length": 3,
                     "is_embed": [true, false, true]
-                }]}
+                }]},
+                "kwargs_data": {"image": ["gA=="]}
             }
         }))
         .expect("deserialize request");
         let routing = generate_mm_routing_info(&request, 5)
             .expect("valid sparse MM routing metadata")
             .expect("MM routing projection");
-        let mm_hash = dynamo_kv_router::zmq_wire::hash_mm_identifier(mm_identifier)
+        let mm_hash = dynamo_kv_router::zmq_wire::hash_mm_identifier(&canonical_identifier)
             .expect("non-empty identifier");
         let pad = dynamo_kv_router::protocols::pad_value_for_mm_hash(mm_hash);
         assert_eq!(routing.routing_token_ids, vec![10, pad, 42, pad, 20]);
@@ -657,7 +716,8 @@ mod tests {
                         "is_embed": [true, false, true]
                     },
                     {"offset": 5, "length": 1}
-                ]}
+                ]},
+                "kwargs_data": {"image": ["gA==", "gQ=="]}
             }
         }))
         .expect("deserialize request");
@@ -698,68 +758,80 @@ mod tests {
     }
 
     #[test]
-    fn default_lora_mode_composes_mm_identity_with_lora_hashing() {
-        let mm_identifier = "opaque-renderer-image-0";
-        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
-            "token_ids": [10, 99, 99, 20],
+    fn multimodal_execution_contract_requires_bounded_inline_data() {
+        use base64::Engine as _;
+
+        let encoded = base64::engine::general_purpose::STANDARD.encode([0x80]);
+        let valid: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2, 3],
             "sampling_params": {},
             "features": {
-                "mm_hashes": {"image": [mm_identifier]},
-                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]}
+                "mm_hashes": {"image": ["image-a"]},
+                "mm_placeholders": {"image": [{"offset": 1, "length": 1}]},
+                "kwargs_data": {"image": [encoded.clone()]}
             }
         }))
-        .expect("deserialize request");
+        .unwrap();
+        validate_generate_mm_features(&valid).expect("valid execution features");
 
-        let preprocessed = preprocessed_from_generate(
-            request,
-            "adapter-a",
-            None,
-            "resolved-request",
-            4,
-            Some("adapter-a".to_string()),
-        )
-        .expect("build request");
+        for features in [
+            serde_json::json!({
+                "mm_hashes": {"image": ["image-a"]},
+                "mm_placeholders": {"image": [{"offset": 1, "length": 1}]},
+                "kwargs_data": null
+            }),
+            serde_json::json!({
+                "mm_hashes": {"image": ["image-a"]},
+                "mm_placeholders": {"image": [{"offset": 1, "length": 1}]},
+                "kwargs_data": {"image": ["not-base64!"]}
+            }),
+            serde_json::json!({
+                "mm_hashes": {"image": ["image-a"]},
+                "mm_placeholders": {"image": [{"offset": 3, "length": 1}]},
+                "kwargs_data": {"image": [encoded.clone()]}
+            }),
+        ] {
+            let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+                "token_ids": [1, 2, 3],
+                "sampling_params": {},
+                "features": features
+            }))
+            .unwrap();
+            assert!(validate_generate_mm_features(&request).is_err());
+        }
+    }
 
-        let routing_tokens = &preprocessed
-            .mm_routing_info
-            .as_ref()
-            .expect("default language-only LoRA keeps MM identifiers stable")
-            .routing_token_ids;
+    #[test]
+    fn canonical_preprocessed_mm_identity_matches_native_grpc_vector() {
         assert_eq!(
-            preprocessed
-                .routing
-                .as_ref()
-                .and_then(|routing| routing.lora_name.as_deref()),
-            Some("adapter-a")
+            mm_routing::preprocessed_mm_cache_identifier("image", &[0x80]),
+            "grpc-mm:835d2213e413e78e540c88905d36dfa708aa0eb02e9d546026a832c6f5ac5825"
         );
+    }
 
-        let request_hash = dynamo_kv_router::protocols::compute_block_hash_for_seq(
-            routing_tokens,
-            4,
-            dynamo_kv_router::protocols::BlockHashOptions {
-                lora_name: Some("adapter-a"),
-                ..Default::default()
-            },
-        )[0];
-        let event_block = dynamo_kv_router::zmq_wire::create_stored_block_from_parts(
-            4,
-            7,
-            &[10, 99, 99, 20],
-            dynamo_kv_router::zmq_wire::StoredBlockOptions {
-                lora_name: Some("adapter-a"),
-                mm_extra_info: Some(dynamo_kv_router::protocols::BlockExtraInfo {
-                    mm_objects: vec![dynamo_kv_router::protocols::BlockMmObjectInfo {
-                        mm_hash: dynamo_kv_router::zmq_wire::hash_mm_identifier(mm_identifier)
-                            .expect("non-empty identifier"),
-                        offsets: vec![(1, 3)],
-                    }],
-                }),
-                image_token_id: Some(99),
-                ..Default::default()
-            },
-        );
+    #[test]
+    fn multimodal_execution_contract_compares_modality_keys_as_sets() {
+        use base64::Engine as _;
 
-        assert_eq!(request_hash, event_block.tokens_hash);
+        let encoded = base64::engine::general_purpose::STANDARD.encode([0x80]);
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2, 3],
+            "sampling_params": {},
+            "features": {
+                "mm_hashes": {"image": ["image-a"], "video": ["video-a"]},
+                "mm_placeholders": {
+                    "video": [{"offset": 2, "length": 1}],
+                    "image": [{"offset": 1, "length": 1}]
+                },
+                "kwargs_data": {
+                    "image": [encoded.clone()],
+                    "video": [encoded]
+                }
+            }
+        }))
+        .unwrap();
+
+        validate_generate_mm_features(&request).expect("modality key order is irrelevant");
     }
 
     #[test]
@@ -772,7 +844,8 @@ mod tests {
                 "mm_placeholders": {"image": [
                     {"offset": 0, "length": 2},
                     {"offset": 1, "length": 2}
-                ]}
+                ]},
+                "kwargs_data": {"image": ["gA==", "gQ=="]}
             }
         }))
         .expect("deserialize request");
@@ -790,7 +863,8 @@ mod tests {
             "sampling_params": {},
             "features": {
                 "mm_hashes": {"audio": ["audio-0"]},
-                "mm_placeholders": {"audio": [{"offset": 1, "length": 2}]}
+                "mm_placeholders": {"audio": [{"offset": 1, "length": 2}]},
+                "kwargs_data": {"audio": ["gA=="]}
             }
         }))
         .expect("deserialize request");
@@ -807,11 +881,13 @@ mod tests {
         for features in [
             serde_json::json!({
                 "mm_hashes": {"image": ["image-0"]},
-                "mm_placeholders": {}
+                "mm_placeholders": {},
+                "kwargs_data": {"image": ["gA=="]}
             }),
             serde_json::json!({
                 "mm_hashes": {},
-                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]}
+                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]},
+                "kwargs_data": {"image": ["gA=="]}
             }),
         ] {
             let request: GenerateRequest = serde_json::from_value(serde_json::json!({
@@ -824,7 +900,7 @@ mod tests {
             assert_eq!(
                 generate_mm_routing_info(&request, 4)
                     .expect_err("one-sided image metadata must disable exact routing"),
-                "image hashes and placeholders must both be present"
+                "image hashes, placeholders, and kwargs_data must all be present"
             );
         }
     }
@@ -836,7 +912,8 @@ mod tests {
             "sampling_params": {},
             "features": {
                 "mm_hashes": {"image": ["image-0", "image-1"]},
-                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]}
+                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]},
+                "kwargs_data": {"image": ["gA==", "gQ=="]}
             }
         }))
         .expect("deserialize request");
@@ -844,7 +921,7 @@ mod tests {
         assert_eq!(
             generate_mm_routing_info(&request, 4)
                 .expect_err("item count mismatch must disable exact routing"),
-            "image hashes and placeholders must have equal lengths"
+            "image hashes, placeholders, and kwargs_data must have equal lengths"
         );
     }
 

@@ -50,7 +50,7 @@ use crate::request::{
     attach_prompt_logprobs_to_handoff, build_generate_request, finish_output,
     handed_off_prompt_logprobs,
 };
-use crate::wire::{GenerateEvent, validate_generate_response};
+use crate::wire::{GenerateEvent, validate_generate_response_with_routed_start};
 
 /// A Dynamo backend that proxies inference to vLLM's gRPC server.
 pub struct VllmSidecarEngine {
@@ -355,6 +355,7 @@ impl LLMEngine for VllmSidecarEngine {
             .get()
             .ok_or_else(|| client::engine_shutdown("generate called before model discovery"))?
             .clone();
+        let routed_experts_start = grpc_req.routed_experts_prompt_start;
         let cancel = self.cancel.clone();
 
         Ok(Box::pin(async_stream::stream! {
@@ -416,7 +417,11 @@ impl LLMEngine for VllmSidecarEngine {
                     msg = stream.message() => {
                         match msg {
                             Ok(Some(resp)) => {
-                                let response = match validate_generate_response(resp, is_prefill) {
+                                let response = match validate_generate_response_with_routed_start(
+                                    resp,
+                                    is_prefill,
+                                    routed_experts_start,
+                                ) {
                                     Ok(response) => response,
                                     Err(error) => {
                                         yield Err(error);
@@ -447,12 +452,18 @@ impl LLMEngine for VllmSidecarEngine {
                                             token_ids,
                                             logprobs,
                                             top_logprobs,
+                                            routed_experts,
                                         } => {
                                             generated += token_ids.len() as u32;
                                             yield Ok(LLMEngineOutput {
                                                 token_ids,
                                                 log_probs: logprobs,
                                                 top_logprobs,
+                                                engine_data: routed_experts.map(|value| {
+                                                    serde_json::json!({
+                                                        "routed_experts": value,
+                                                    })
+                                                }),
                                                 ..Default::default()
                                             });
                                         }

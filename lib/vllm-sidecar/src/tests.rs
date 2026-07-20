@@ -257,6 +257,11 @@ impl Control for FakeEngine {
             max_running_requests: 256,
             max_batched_tokens: 8192,
             max_loras: self.cfg.max_loras,
+            capabilities: vec![
+                "generate.preprocessed_mm.v1".to_string(),
+                "generate.routed_experts.v1".to_string(),
+                "generate.sampling.v2".to_string(),
+            ],
         }))
     }
 

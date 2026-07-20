@@ -1,5 +1,5 @@
 # Provenance for the vendored vLLM native gRPC schema.
 source_repository = "https://github.com/biswapanda/vllm.git"
-source_revision = "e23da72a26787d794e4cd5f0d64d1ba09796f582"
+source_revision = "e56ee21b2cc8c318e93a69356d22734b382e86ef"
 source_path = "rust/proto/vllm_grpc.proto"
-sha256 = "ddc3b614dc2096e46f9a4381754312d4f84d8bb26d7420593ee69bafaada69ee"
+sha256 = "a7081009d47c9e08f9a8f643a53dfa76ce5580b3516283a87fe89ff736dc8f03"

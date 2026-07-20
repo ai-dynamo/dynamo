@@ -60,21 +60,27 @@ message GenerateRequest {
   repeated MediaItem media = 13;
   // Loaded LoRA name; empty selects the base model.
   string lora_name = 14;
+  // Lossless JSON object for engine-specific vLLM extensions.
+  optional bytes vllm_xargs_json = 15;
+  // Already-processed multimodal features from the token-in/token-out renderer.
+  repeated PreprocessedMultimodalFeature mm_features = 16;
+  // Skip this many prompt-token routing rows in the returned expert tensor.
+  uint32 routed_experts_prompt_start = 17;
 }
 
 message RandomSampling {
   uint32 num_sequences = 1;  // "n", default (0) means 1
-  uint32 top_k = 2;  // 0 means default
-  float top_p = 3;  // 0 means default
-  float min_p = 4;  // 0 means default
+  optional int32 top_k = 2;
+  optional float top_p = 3;
+  optional float min_p = 4;
   optional int64 seed = 5;
 }
 
 message DecodingParameters {
   // Penalties
-  float presence_penalty = 1;  // Default (0.0) means no penalty
-  float frequency_penalty = 2;  // Default (0.0) means no penalty
-  float repetition_penalty = 3;  // Default (0.0) means no penalty
+  optional float presence_penalty = 1;
+  optional float frequency_penalty = 2;
+  optional float repetition_penalty = 3;
   map<uint32, float> logit_bias = 4;
   repeated uint32 allowed_token_ids = 5;
 
@@ -91,6 +97,10 @@ message DecodingParameters {
     bool json_object = 10;
     string structural_tag = 11;
   }
+  bool structured_output_disable_any_whitespace = 12;
+  bool structured_output_disable_additional_properties = 13;
+  optional string structured_output_whitespace_pattern = 14;
+  repeated string bad_words = 15;
 }
 
 message StoppingCriteria {
@@ -104,6 +114,7 @@ message StoppingCriteria {
   bool include_stop_strings = 5;
 
   bool ignore_eos = 6;
+  optional int64 thinking_token_budget = 7;
 }
 
 message ResponseOptions {
@@ -159,6 +170,13 @@ message SequenceOutput {
 
   // Only present in final output for this sequence
   optional FinishInfo finish_info = 8;
+  optional RoutedExpertsTensor routed_experts = 9;
+}
+
+message RoutedExpertsTensor {
+  string dtype = 1;
+  repeated uint64 shape = 2;
+  bytes data = 3;
 }
 
 // Prompt info, returned in the first response
@@ -234,6 +252,25 @@ message MediaItem {
   string uuid = 6;
 }
 
+message MultimodalPlaceholder {
+  uint64 offset = 1;
+  uint64 length = 2;
+  // Empty means every position in the placeholder is an embedding position.
+  repeated bool is_embed = 3;
+}
+
+message PreprocessedMultimodalFeature {
+  string modality = 1;
+  // Canonical modality+kwargs identity. Kept equal to cache_identifier so
+  // Python vLLM cannot prefer an unverified renderer-provided cache key.
+  string mm_hash = 2;
+  MultimodalPlaceholder position = 3;
+  // Python vLLM's inline msgpack encoding. The current gRPC server requires it.
+  optional bytes kwargs_msgpack = 4;
+  // Canonical cache identity derived from modality and kwargs_msgpack.
+  string cache_identifier = 5;
+}
+
 // ======================================================================================
 // Discovery and lifecycle
 // ======================================================================================
@@ -251,6 +288,7 @@ message ServerInfo {
   uint64 max_running_requests = 8;
   uint64 max_batched_tokens = 9;
   uint32 max_loras = 10;
+  repeated string capabilities = 11;
 }
 
 message ParallelismInfo {

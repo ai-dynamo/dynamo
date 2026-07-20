@@ -21,6 +21,7 @@ dynamo-backend-common = { workspace = true }
 anyhow = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
+base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
 serde_json = { workspace = true }

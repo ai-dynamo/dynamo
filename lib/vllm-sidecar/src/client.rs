@@ -24,6 +24,8 @@ use crate::proto::control_client::ControlClient;
 use crate::proto::generate_client::GenerateClient;
 use tonic_health::pb::health_client::HealthClient;
 
+const MAX_GENERATE_MESSAGE_BYTES: usize = 20 * 1024 * 1024;
+
 pub type Generate = GenerateClient<Channel>;
 pub type Control = ControlClient<Channel>;
 pub type Health = HealthClient<Channel>;
@@ -137,6 +139,8 @@ impl Pool {
     pub fn stream_client(&self) -> Generate {
         let i = self.next.fetch_add(1, Ordering::Relaxed) % self.channels.len();
         GenerateClient::new(self.channels[i].clone())
+            .max_encoding_message_size(MAX_GENERATE_MESSAGE_BYTES)
+            .max_decoding_message_size(MAX_GENERATE_MESSAGE_BYTES)
     }
 
     /// A stable client (the first connection) for low-frequency control RPCs.

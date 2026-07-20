@@ -34,6 +34,10 @@ pub mod worker;
 pub use args::CommonArgs;
 pub use disagg::DisaggregationMode;
 pub use dynamo_llm::model_type::ModelInput;
+pub use dynamo_llm::protocols::multimodal::{
+    MAX_PREPROCESSED_MM_BYTES, MAX_PREPROCESSED_MM_FEATURES, MAX_PREPROCESSED_MM_MODALITY_BYTES,
+    MAX_PREPROCESSED_MM_ROUTING_HASH_BYTES, preprocessed_mm_cache_identifier,
+};
 pub use engine::{
     AsyncEngineContext, BootstrapInfo, CompletionUsage, ComponentSnapshot, EngineConfig,
     FinishReason, GenerateContext, GuidedDecodingOptions, HEALTH_CHECK_KEY, KvEventPublisher,

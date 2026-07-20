@@ -5,12 +5,14 @@
 
 use std::collections::HashSet;
 
+use base64::Engine as _;
 use dynamo_backend_common::{DynamoError, TopLogprob, TopLogprobs};
 
 use crate::client;
 use crate::proto as pb;
 
 const MIN_FINITE_LOGPROB: f64 = -1e30;
+const MAX_ROUTED_EXPERT_BYTES: usize = 16 * 1024 * 1024;
 
 fn finite_logprob(value: f32) -> Result<f64, DynamoError> {
     if value.is_finite() {
@@ -30,6 +32,7 @@ pub(crate) enum GenerateEvent {
         token_ids: Vec<u32>,
         logprobs: Option<Vec<f64>>,
         top_logprobs: Option<TopLogprobs>,
+        routed_experts: Option<serde_json::Value>,
     },
     Finished(pb::finish_info::FinishReason),
     PrefillReady(serde_json::Value),
@@ -41,9 +44,18 @@ pub(crate) struct ValidatedGenerateResponse {
 }
 
 /// Validate one streamed response before exposing it to Dynamo.
+#[cfg(test)]
 pub(crate) fn validate_generate_response(
     response: pb::GenerateResponse,
     is_prefill: bool,
+) -> Result<ValidatedGenerateResponse, DynamoError> {
+    validate_generate_response_with_routed_start(response, is_prefill, 0)
+}
+
+pub(crate) fn validate_generate_response_with_routed_start(
+    response: pb::GenerateResponse,
+    is_prefill: bool,
+    routed_experts_start: u32,
 ) -> Result<ValidatedGenerateResponse, DynamoError> {
     let mut events = Vec::new();
     let prompt_tokens = match response.prompt_info {
@@ -113,7 +125,12 @@ pub(crate) fn validate_generate_response(
         } else {
             None
         };
-        if !is_prefill && !output.token_ids.is_empty() {
+        let routed_experts = output
+            .routed_experts
+            .as_ref()
+            .map(|tensor| routed_experts_to_compact_json(tensor, routed_experts_start))
+            .transpose()?;
+        if !is_prefill && (!output.token_ids.is_empty() || routed_experts.is_some()) {
             let logprobs = (!output.logprobs.is_empty()).then(|| {
                 output
                     .logprobs
@@ -126,6 +143,7 @@ pub(crate) fn validate_generate_response(
                 token_ids: output.token_ids,
                 logprobs,
                 top_logprobs,
+                routed_experts,
             });
         }
         if let Some(finish) = output.finish_info {
@@ -164,6 +182,73 @@ pub(crate) fn validate_generate_response(
         prompt_tokens,
         events,
     })
+}
+
+fn routed_experts_to_compact_json(
+    tensor: &pb::RoutedExpertsTensor,
+    start: u32,
+) -> Result<serde_json::Value, DynamoError> {
+    if tensor.shape.len() != 3 {
+        return Err(client::protocol_error(
+            "routed_experts shape must have exactly 3 dimensions",
+        ));
+    }
+    let width = match tensor.dtype.as_str() {
+        "uint8" | "|u1" => 1usize,
+        "uint16" | "<u2" | ">u2" | "=u2" => 2usize,
+        dtype => {
+            return Err(client::protocol_error(format!(
+                "unsupported routed_experts dtype {dtype:?}"
+            )));
+        }
+    };
+    let elements = tensor.shape.iter().try_fold(1usize, |total, dimension| {
+        usize::try_from(*dimension)
+            .ok()
+            .and_then(|dimension| total.checked_mul(dimension))
+    });
+    let expected_bytes = elements
+        .and_then(|elements| elements.checked_mul(width))
+        .ok_or_else(|| client::protocol_error("routed_experts shape or byte length overflows"))?;
+    if expected_bytes != tensor.data.len() || expected_bytes > MAX_ROUTED_EXPERT_BYTES {
+        return Err(client::protocol_error(format!(
+            "routed_experts data has {} bytes; expected {expected_bytes} with a {} MiB limit",
+            tensor.data.len(),
+            MAX_ROUTED_EXPERT_BYTES / (1024 * 1024)
+        )));
+    }
+
+    let compact = if width == 1 {
+        tensor.data.clone()
+    } else {
+        let little_endian = match tensor.dtype.as_str() {
+            "<u2" => true,
+            ">u2" => false,
+            "uint16" | "=u2" => cfg!(target_endian = "little"),
+            _ => unreachable!("uint8 handled above"),
+        };
+        tensor
+            .data
+            .chunks_exact(2)
+            .map(|bytes| {
+                let value = if little_endian {
+                    u16::from_le_bytes([bytes[0], bytes[1]])
+                } else {
+                    u16::from_be_bytes([bytes[0], bytes[1]])
+                };
+                u8::try_from(value).map_err(|_| {
+                    client::protocol_error(
+                        "routed_experts contains an expert ID above Prime's uint8 limit",
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    Ok(serde_json::json!({
+        "data": base64::engine::general_purpose::STANDARD.encode(compact),
+        "shape": tensor.shape,
+        "start": start,
+    }))
 }
 
 fn prompt_logprobs_to_json(
