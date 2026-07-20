@@ -86,10 +86,10 @@ spec:
             value: "1"
           - name: NCCL_IB_DISABLE
             value: "0"
-          - name: VLLM_GPU_NIC_PCIE_MAPPING
-            value: 00000000:8D:00.0=0000:8c:00.0,00000000:91:00.0=0000:90:00.0,00000000:95:00.0=0000:94:00.0,00000000:99:00.0=0000:98:00.0,00000000:AB:00.0=0000:aa:00.0,00000000:AF:00.0=0000:ae:00.0,00000000:B3:00.0=0000:b2:00.0,00000000:B7:00.0=0000:b6:00.0
-          - name: VLLM_NIC_SELECTION_VARS
-            value: "UCX_NET_DEVICES:1"
+          # disagg GDR (per-rank NIC pinning): to enable GDR, set BOTH VLLM_GPU_NIC_PCIE_MAPPING and
+          # VLLM_NIC_SELECTION_VARS (a pair - vLLM #42083, setting only one fails EngineCore init);
+          # generate the node map per README "Per-rank NIC mapping". The recipe ships neither; without
+          # them, disagg KV transfer uses host-staging (slower) - see README "Per-rank NIC mapping".
           - name: UCX_IB_ADDR_TYPE
             value: ib_global
           - name: UCX_IB_REG_METHODS
@@ -223,10 +223,10 @@ spec:
             value: "1"
           - name: NCCL_IB_DISABLE
             value: "0"
-          - name: VLLM_GPU_NIC_PCIE_MAPPING
-            value: 00000000:8D:00.0=0000:8c:00.0,00000000:91:00.0=0000:90:00.0,00000000:95:00.0=0000:94:00.0,00000000:99:00.0=0000:98:00.0,00000000:AB:00.0=0000:aa:00.0,00000000:AF:00.0=0000:ae:00.0,00000000:B3:00.0=0000:b2:00.0,00000000:B7:00.0=0000:b6:00.0
-          - name: VLLM_NIC_SELECTION_VARS
-            value: "UCX_NET_DEVICES:1"
+          # disagg GDR (per-rank NIC pinning): to enable GDR, set BOTH VLLM_GPU_NIC_PCIE_MAPPING and
+          # VLLM_NIC_SELECTION_VARS (a pair - vLLM #42083, setting only one fails EngineCore init);
+          # generate the node map per README "Per-rank NIC mapping". The recipe ships neither; without
+          # them, disagg KV transfer uses host-staging (slower) - see README "Per-rank NIC mapping".
           - name: UCX_IB_ADDR_TYPE
             value: ib_global
           - name: UCX_IB_REG_METHODS

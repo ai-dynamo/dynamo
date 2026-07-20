@@ -58,6 +58,8 @@ All Day-0 variants use prebuilt NGC images ³. The GB200 disagg variant ships a 
 
 Floor-picks (max system tok/s/GPU at user_p50 ≥ 50), default temperature, **Agentic (MoonTrace) workload** — Pro was not benchmarked on the Custom/synthetic cell. Workload definition: [Optimization targets](../README.md#optimization-targets).
 
+> **Disaggregated floor-picks require the per-rank NIC mapping (GDR).** These disagg numbers were measured with GDR (per-rank affine NIC); to reproduce them, set **both** NIC env vars per [Per-rank NIC mapping](../README.md#per-rank-nic-mapping-b200--h200-disaggregated). Without them, KV transfer falls back to host-staging and won't reach these figures (see §Per-rank NIC mapping).
+
 | Variant | Concurrency | User tok/s | System tok/s/GPU |
 |---|---:|---:|---:|
 | [`agg-b200-agentic`](vllm/agg-b200-agentic/deploy.yaml) | 13 | 51.3 | 72.79 |

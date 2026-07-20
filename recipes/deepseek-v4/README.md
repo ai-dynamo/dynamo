@@ -51,9 +51,15 @@ requirement, not a DeepSeek-V4 property** — any TP>1 NIXL disaggregated worker
 the same way, and DSV4's "packed" KV layout (investigated at length) was ruled out as the cause.
 
 **Scope: disaggregated only.** Only recipes that ship **disaggregated** over GDR use this. Aggregated recipes
-have no cross-worker KV transfer and ignore `VLLM_GPU_NIC_PCIE_MAPPING` (empty ⇒ no-op). Among the recommended
+have no cross-worker KV transfer and set neither NIC env var (no GDR needed). Among the recommended
 picks that's **Pro B200 DisAgg (1P1D)**, **Flash B200 DisAgg (4P2D)**, and **Flash H200 DisAgg (4P3D)** —
 Pro H200 ships AGG, so it needs no NIC map.
+
+**The two NIC env vars are a pair.** `VLLM_GPU_NIC_PCIE_MAPPING` (the node's `GPU_BDF=NIC_BDF` map) and
+`VLLM_NIC_SELECTION_VARS` (a fixed selector, `UCX_NET_DEVICES:1`) must be set **together or not at all** —
+setting only one fails EngineCore init ([vLLM #42083](https://github.com/vllm-project/vllm/pull/42083)). **The
+recipe ships neither** (the map is node-specific and cannot be pre-baked); to enable GDR add **both** per the
+steps below. Without them, disagg falls back to single-NIC host-staging (silently under `shared_ib`; see the throughput figures above).
 
 **Providing the affine NIC per rank.** Set `VLLM_GPU_NIC_PCIE_MAPPING` to the node's `GPU_BDF=NIC_BDF` pairs
 so each rank uses its PCIe-affine NIC (regenerate per node type — below). This assumes the cluster exposes
@@ -100,9 +106,10 @@ Pair each GPU with the NIC sharing its PCIe switch (closest NIC), then join the 
 
 ```
 VLLM_GPU_NIC_PCIE_MAPPING="<gpu0_bdf>=<nic0_bdf>,<gpu1_bdf>=<nic1_bdf>,…"
+VLLM_NIC_SELECTION_VARS="UCX_NET_DEVICES:1"
 ```
 
-Set the same map on **both** the prefill and decode workers. After deploy, confirm the worker log shows
+Set **both** env vars — the generated `VLLM_GPU_NIC_PCIE_MAPPING` and the fixed `VLLM_NIC_SELECTION_VARS` (they are a pair, see above) — on **both** the prefill and decode workers. After deploy, confirm the worker log shows
 NIXL registering the CUDA/GDR path (~15–17 GB/s KV transfer). A wrong or missing map degrades to slow
 TCP transfer or fails NIXL setup.
 
