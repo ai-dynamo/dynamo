@@ -75,11 +75,26 @@ Select the architecture pattern as your template that best fits your use case.
 
 For example, when using the `vLLM` backend:
 
+<Tabs>
+<Tab title="CUDA">
+
 - **Development / Testing**: Use [`agg.yaml`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/agg.yaml) as the base configuration.
 
 - **Production with Load Balancing**: Use [`agg_router.yaml`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/agg_router.yaml) to enable scalable, load-balanced inference.
 
 - **High Performance / Disaggregated Deployment**: Use [`disagg_router.yaml`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/disagg_router.yaml) for maximum throughput and modular scalability.
+
+</Tab>
+<Tab title="XPU">
+
+- **Aggregated vLLM**: Use [`agg_xpu_dra.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_xpu_dra.yaml) when one vLLM worker handles prefill and decode on XPU.
+
+- **Disaggregated vLLM**: Use [`disagg_xpu_dra.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/disagg_xpu_dra.yaml) when separate prefill and decode workers share KV data on XPU.
+
+These templates require Kubernetes DRA and a `gpu.intel.com` `DeviceClass`.
+
+</Tab>
+</Tabs>
 
 
 ## Step 2: Customize the Template
@@ -162,6 +177,9 @@ Each worker will launch `python -m dynamo.YOUR_INFERENCE_BACKEND --model YOUR_MO
 
 ### Resource Allocation
 
+<Tabs>
+<Tab title="CUDA">
+
 ```yaml
    resources:
      requests:
@@ -169,6 +187,35 @@ Each worker will launch `python -m dynamo.YOUR_INFERENCE_BACKEND --model YOUR_MO
        memory: "NGi"
        gpu: "N"
 ```
+
+</Tab>
+<Tab title="XPU">
+
+Use Kubernetes DRA claims instead of `gpu: "N"` resource requests. The XPU templates include a `ResourceClaimTemplate` with `deviceClassName: gpu.intel.com` and reference it from each worker pod:
+
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: gpu-template
+spec:
+  spec:
+    devices:
+      requests:
+        - name: gpu
+          exactly:
+            deviceClassName: gpu.intel.com
+            count: 1
+```
+
+```yaml
+resourceClaims:
+  - name: gpu
+    resourceClaimTemplateName: gpu-template
+```
+
+</Tab>
+</Tabs>
 
 ### Scaling
 

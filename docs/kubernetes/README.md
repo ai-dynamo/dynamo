@@ -22,11 +22,25 @@ canonical path for shared GPU clusters and multi-node serving.
 
 ## Prerequisites
 
+- [Helm](https://helm.sh/docs/intro/install/) (v3.0+) installed
+
+<Tabs>
+<Tab title="CUDA">
+
 - Kubernetes cluster (v1.30+) with GPU nodes
 - [kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl) (v1.30+)
-- [Helm](https://helm.sh/docs/intro/install/) (v3.0+) installed
 - [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html) installed on the cluster
-- HuggingFace token secret on cluster
+
+</Tab>
+<Tab title="XPU">
+
+- Kubernetes cluster (v1.34+) with XPU nodes and Dynamic Resource Allocation (DRA) API v1 enabled
+- [kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl) matching your Kubernetes minor version (v1.34+ for these DRA API v1 templates)
+- [Intel resource drivers for Kubernetes](https://github.com/intel/intel-resource-drivers-for-kubernetes) installed with a `gpu.intel.com` `DeviceClass`
+- vLLM XPU runtime image built from this repository
+
+</Tab>
+</Tabs>
 
 ### HuggingFace token secret
 
@@ -40,6 +54,9 @@ kubectl create secret generic hf-token-secret \
 ```
 
 ### GPU Operator quick install
+
+<Tabs>
+<Tab title="CUDA">
 
 If you don't have the GPU Operator yet:
 
@@ -56,6 +73,23 @@ helm install gpu-operator nvidia/gpu-operator \
 > ```bash
 > --set driver.enabled=false --set toolkit.enabled=false
 > ```
+
+</Tab>
+<Tab title="XPU">
+
+Install the Intel resource drivers for Kubernetes by following the [Intel resource drivers for Kubernetes](https://github.com/intel/intel-resource-drivers-for-kubernetes) instructions.
+
+Verify that the cluster exposes the DRA resources used by the XPU templates:
+
+```bash
+kubectl get deviceclasses
+kubectl get resourceslices
+```
+
+The vLLM XPU templates expect a `gpu.intel.com` `DeviceClass`.
+
+</Tab>
+</Tabs>
 
 ### Detailed installation
 
@@ -126,6 +160,9 @@ For tuned production-style manifests, start from
 full deployment model, see the [Deployment Overview](model-deployment-guide.md).
 
 ## Deploy Your First Model
+
+<Tabs>
+<Tab title="CUDA">
 
 Save this DGDR to generate and deploy a DGD for `Qwen/Qwen3-0.6B`:
 
@@ -210,6 +247,44 @@ to `Deployed`:
 ```bash
 kubectl get dgdr qwen3-quickstart -n $NAMESPACE -w
 ```
+
+</Tab>
+<Tab title="XPU">
+
+Build and push a vLLM XPU runtime image:
+
+```bash
+container/render.py --framework=vllm --device=xpu --target=runtime --output-short-filename
+docker build -t <registry>/vllm-runtime-xpu:<tag> \
+  -f container/rendered.Dockerfile .
+docker push <registry>/vllm-runtime-xpu:<tag>
+```
+
+Use the DRA-based vLLM XPU templates from the repository:
+
+```bash
+cd <dynamo-source-root>/examples/backends/vllm/deploy
+```
+
+Update the template image fields to use `<registry>/vllm-runtime-xpu:<tag>`, then apply one template:
+
+```bash
+# Aggregated deployment
+kubectl apply -f agg_xpu_dra.yaml -n $NAMESPACE
+
+# Or disaggregated deployment
+kubectl apply -f disagg_xpu_dra.yaml -n $NAMESPACE
+```
+
+Verify DRA allocation:
+
+```bash
+kubectl get resourceclaim -n $NAMESPACE
+kubectl get resourceslices
+```
+
+</Tab>
+</Tabs>
 
 In both paths, the DGD is the live serving resource:
 

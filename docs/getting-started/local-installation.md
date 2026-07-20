@@ -12,16 +12,34 @@ For production multi-node clusters, see the [Kubernetes Deployment Guide](../kub
 
 ## System Requirements
 
-| Requirement | Supported |
-|---|---|
-| **GPU** | NVIDIA Ampere, Ada Lovelace, Hopper, Blackwell |
-| **OS** | Ubuntu 22.04, Ubuntu 24.04 |
-| **Architecture** | x86_64, ARM64 (ARM64 requires Ubuntu 24.04) |
-| **CUDA** | 12.9+ or 13.0+ (B300/GB300 require CUDA 13) |
-| **Python** | 3.10, 3.12 |
-| **Driver** | 575.51.03+ (CUDA 12) or 580.00.03+ (CUDA 13) |
+<Tabs>
+  <Tab title="CUDA">
 
-TensorRT-LLM does not support Python 3.11.
+    | Requirement | Supported |
+    |---|---|
+    | **GPU** | NVIDIA Ampere, Ada Lovelace, Hopper, Blackwell |
+    | **OS** | Ubuntu 22.04, Ubuntu 24.04 |
+    | **Architecture** | x86_64, ARM64 (ARM64 requires Ubuntu 24.04) |
+    | **CUDA** | 12.9+ or 13.0+ (B300/GB300 require CUDA 13) |
+    | **Python** | 3.10, 3.12 |
+    | **Driver** | 575.51.03+ (CUDA 12) or 580.00.03+ (CUDA 13) |
+
+    TensorRT-LLM does not support Python 3.11.
+
+  </Tab>
+  <Tab title="XPU">
+
+    | Requirement | Supported |
+    |---|---|
+    | **XPU** | Intel® Data Center GPU Max Series, Intel® Arc™ Pro B-Series Graphics Cards |
+    | **OS** | Ubuntu 24.04 |
+    | **Architecture** | x86_64 |
+    | **Python** | 3.12 |
+    | **oneAPI** | 2025.3 |
+    | **Driver** | 25.48.36300.8 |
+
+  </Tab>
+</Tabs>
 
 For the full compatibility matrix including backend framework versions, see the [Support Matrix](../reference/support-matrix.md).
 
@@ -29,18 +47,51 @@ For the full compatibility matrix including backend framework versions, see the 
 
 ### Option A: Containers (Recommended)
 
-Containers have all dependencies pre-installed. No setup required.
+<Tabs>
+  <Tab title="CUDA">
 
-```bash
-# SGLang
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
+    Containers have all dependencies pre-installed. No setup required.
 
-# TensorRT-LLM
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
+    ```bash
+    # SGLang
+    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
 
-# vLLM
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
-```
+    # TensorRT-LLM
+    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
+
+    # vLLM
+    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+    ```
+
+  </Tab>
+  <Tab title="XPU">
+
+    Build XPU runtime images from this repository. `container/render.py` supports `--device=xpu` for vLLM and SGLang runtime images. `container/run.sh --device=xpu` exposes `/dev/dri` and the host `render` group to the container.
+
+    **vLLM**
+
+    ```bash
+    git clone https://github.com/ai-dynamo/dynamo.git
+    cd dynamo
+    container/render.py --framework=vllm --device=xpu --target=runtime
+    docker build -t dynamo:latest-vllm-xpu-runtime \
+      -f container/vllm-runtime-xpu-amd64-rendered.Dockerfile .
+    container/run.sh --image dynamo:latest-vllm-xpu-runtime --device=xpu -it
+    ```
+
+    **SGLang**
+
+    ```bash
+    git clone https://github.com/ai-dynamo/dynamo.git
+    cd dynamo
+    container/render.py --framework=sglang --device=xpu --target=runtime
+    docker build -t dynamo:latest-sglang-xpu-runtime \
+      -f container/sglang-runtime-xpu-amd64-rendered.Dockerfile .
+    container/run.sh --image dynamo:latest-sglang-xpu-runtime --device=xpu -it
+    ```
+
+  </Tab>
+</Tabs>
 
 To run frontend and worker in the same container, either:
 
@@ -53,36 +104,44 @@ versions and backend guides for run instructions: [SGLang](../backends/sglang/RE
 
 ### Option B: Install from PyPI
 
-Supported for vLLM and SGLang only. Use Option A for TensorRT-LLM.
+<Tabs>
+  <Tab title="CUDA">
 
-```bash
-# Install uv (recommended Python package manager)
-curl -LsSf https://astral.sh/uv/install.sh | sh
+    Supported for vLLM and SGLang only. Use Option A for TensorRT-LLM.
 
-# Create virtual environment
-uv venv venv
-source venv/bin/activate
-uv pip install pip
-```
+    ```bash
+    # Install uv (recommended Python package manager)
+    curl -LsSf https://astral.sh/uv/install.sh | sh
 
-Install system dependencies and the Dynamo wheel for your chosen backend:
+    # Create virtual environment
+    uv venv venv
+    source venv/bin/activate
+    uv pip install pip
+    ```
 
-**SGLang**
+    Install system dependencies and the Dynamo wheel for your chosen backend:
 
-```bash
-sudo apt install python3-dev
-uv pip install --prerelease=allow "ai-dynamo[sglang]"
-```
+    **SGLang**
 
-For CUDA 13 (B300/GB300), the container is recommended. See
-[SGLang install docs](https://docs.sglang.io/get_started/install.html) for details.
+    ```bash
+    sudo apt install python3-dev
+    uv pip install --prerelease=allow "ai-dynamo[sglang]"
+    ```
 
-**vLLM**
+    **vLLM**
 
-```bash
-sudo apt install python3-dev libxcb1
-uv pip install --prerelease=allow "ai-dynamo[vllm]"
-```
+    ```bash
+    sudo apt install python3-dev libxcb1
+    uv pip install --prerelease=allow "ai-dynamo[vllm]"
+    ```
+
+  </Tab>
+  <Tab title="XPU">
+
+    The PyPI backend extras are CUDA-only. For XPU, use the source-built container path in [Option A: Containers](#option-a-containers-recommended).
+
+  </Tab>
+</Tabs>
 
 ## Run Dynamo
 
@@ -127,44 +186,55 @@ python3 -m dynamo.frontend --discovery-backend file > dynamo.frontend.log 2>&1 &
 
 ### Start a Worker
 
-In another terminal (or same terminal if using background mode), start a worker for your chosen backend:
+In another terminal (or same terminal if using background mode), start a worker for your chosen accelerator and backend:
 
-**SGLang**
+<Tabs>
+  <Tab title="CUDA">
 
-```bash
-python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --discovery-backend file
-```
+    **SGLang**
 
-**TensorRT-LLM**
+    ```bash
+    python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --discovery-backend file
+    ```
 
-```bash
-python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --discovery-backend file
-```
+    **TensorRT-LLM**
 
-The warning `Cannot connect to ModelExpress server/transport error. Using direct download.`
-is expected in this local single-machine setup (no ModelExpress server running) and can
-be safely ignored. In a Kubernetes deployment where `MODEL_EXPRESS_URL` is configured,
-this warning -- or the related `Failed to resolve local model path after server download`
--- indicates that ModelExpress is configured but is not actually serving cached models;
-see [Model Caching in Kubernetes](../kubernetes/model-caching.md#option-2-modelexpress-p2p-distribution)
-for the correct configuration.
+    ```bash
+    python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --discovery-backend file
+    ```
 
-**vLLM**
+    The warning `Cannot connect to ModelExpress server/transport error. Using direct download.`
+    is expected in this local single-machine setup (no ModelExpress server running) and can
+    be safely ignored. In a Kubernetes deployment where `MODEL_EXPRESS_URL` is configured,
+    this warning -- or the related `Failed to resolve local model path after server download`
+    -- indicates that ModelExpress is configured but is not actually serving cached models;
+    see [Model Caching in Kubernetes](../kubernetes/model-caching.md#option-2-modelexpress-p2p-distribution)
+    for the correct configuration.
 
-```bash
-python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file \
-  --kv-events-config '{"enable_kv_cache_events": false}'
-```
+    **vLLM**
 
-### KV Events Configuration
+    ```bash
+    python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file
+    ```
 
-For dependency-free local development, disable KV event publishing (avoids NATS):
+  </Tab>
+  <Tab title="XPU">
 
-- **vLLM:** Add `--kv-events-config '{"enable_kv_cache_events": false}'`
-- **SGLang:** No flag needed (KV events disabled by default)
-- **TensorRT-LLM:** No flag needed (KV events disabled by default)
+    **vLLM**
 
-KV events are disabled by default for all backends. For vLLM and SGLang, add backend-specific `--kv-events-config` only when you want KV event publishing enabled. For TensorRT-LLM, enable event publishing with `--publish-events-and-metrics`.
+    ```bash
+    VLLM_TARGET_DEVICE=xpu \
+      python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file
+    ```
+
+    **SGLang**
+
+    ```bash
+    python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --discovery-backend file
+    ```
+
+  </Tab>
+</Tabs>
 
 ## Test Your Deployment
 
@@ -178,56 +248,96 @@ curl localhost:8000/v1/chat/completions \
 
 ## Troubleshooting
 
-**CUDA/driver version mismatch**
+<Tabs>
+  <Tab title="CUDA">
 
-Run `nvidia-smi` to check your driver version. Dynamo requires driver 575.51.03+ for CUDA 12 or 580.00.03+ for CUDA 13. B300/GB300 GPUs require CUDA 13. See the [Support Matrix](../reference/support-matrix.md) for full requirements.
+    **CUDA/driver version mismatch**
 
-**Model doesn't fit on GPU (OOM)**
+    Run `nvidia-smi` to check your driver version. Dynamo requires driver 575.51.03+ for CUDA 12 or 580.00.03+ for CUDA 13. B300/GB300 GPUs require CUDA 13. See the [Support Matrix](../reference/support-matrix.md) for full requirements.
 
-The default model `Qwen/Qwen3-0.6B` requires ~2GB of GPU memory. Larger models need more VRAM:
+    **Model doesn't fit on GPU (OOM)**
 
-| Model Size | Approximate VRAM |
-|---|---|
-| 7B | 14-16 GB |
-| 13B | 26-28 GB |
-| 70B | 140+ GB (multi-GPU) |
+    The default model `Qwen/Qwen3-0.6B` requires ~2GB of GPU memory. Larger models need more VRAM:
 
-Start with a small model and scale up based on your hardware.
+    | Model Size | Approximate VRAM |
+    |---|---|
+    | 7B | 14-16 GB |
+    | 13B | 26-28 GB |
+    | 70B | 140+ GB (multi-GPU) |
 
-**TensorRT-LLM**
+    Start with a small model and scale up based on your hardware.
 
-TensorRT-LLM is not supported via a local PyPI install. Use the
-`tensorrtllm-runtime` container (Option A).
+    **TensorRT-LLM**
 
-**Container runs but GPU not detected**
+    TensorRT-LLM is not supported via a local PyPI install. Use the
+    `tensorrtllm-runtime` container (Option A).
 
-Ensure you passed `--gpus all` to `docker run`. Without this flag, the container won't have access to GPUs:
+    **Container runs but GPU not detected**
 
-```bash
-# Correct
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
+    Pass `--gpus all` to `docker run`. Without this flag, the container won't have access to NVIDIA GPUs:
 
-# Wrong -- no GPU access
-docker run --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
-```
+    ```bash
+    # Correct
+    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
 
-**vLLM worker fails to start: FlashInfer sampler JIT and CUDA 13 wheels**
+    # Wrong -- no GPU access
+    docker run --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
+    ```
 
-When you run a vLLM worker from a CUDA 13 install, the worker can abort during startup with a FlashInfer JIT error:
+    **vLLM worker fails to start: FlashInfer sampler JIT and CUDA 13 wheels**
 
-```text
-RuntimeError: Engine core initialization failed.
-...
-cuda/std/__cccl/cuda_toolkit.h:41: error: "CUDA compiler and CUDA toolkit headers are incompatible"
-```
+    When you run a vLLM worker from a CUDA 13 install, the worker can abort during startup with a FlashInfer JIT error:
 
-The CUDA wheels resolved for a CUDA 13 install can be version-skewed: `torch` pins the runtime headers to 13.0, while vLLM's `tilelang` dependency pulls `nvidia-cuda-nvcc` 13.2. FlashInfer compiles its sampler kernel with `nvcc` against those headers, and the version mismatch fails the build. This is tracked upstream at [flashinfer#3493](https://github.com/flashinfer-ai/flashinfer/issues/3493).
+    ```text
+    RuntimeError: Engine core initialization failed.
+    ...
+    cuda/std/__cccl/cuda_toolkit.h:41: error: "CUDA compiler and CUDA toolkit headers are incompatible"
+    ```
 
-Set `VLLM_USE_FLASHINFER_SAMPLER=0` so vLLM falls back to its native sampler:
+    The CUDA wheels resolved for a CUDA 13 install can be version-skewed: `torch` pins the runtime headers to 13.0, while vLLM's `tilelang` dependency pulls `nvidia-cuda-nvcc` 13.2. FlashInfer compiles its sampler kernel with `nvcc` against those headers, and the version mismatch fails the build. This is tracked upstream at [flashinfer#3493](https://github.com/flashinfer-ai/flashinfer/issues/3493).
 
-```bash
-export VLLM_USE_FLASHINFER_SAMPLER=0
-```
+    Set `VLLM_USE_FLASHINFER_SAMPLER=0` so vLLM falls back to its native sampler:
+
+    ```bash
+    export VLLM_USE_FLASHINFER_SAMPLER=0
+    ```
+
+  </Tab>
+  <Tab title="XPU">
+
+    **XPU/driver version mismatch**
+
+    Use the XPU Driver 25.48.36300.8 and oneAPI 2025.3 versions listed in [System Requirements](#system-requirements). Rebuild the XPU runtime image after changing the driver stack.
+
+    **Model doesn't fit on XPU memory (OOM)**
+
+    The default model `Qwen/Qwen3-0.6B` requires ~2GB of device memory. Larger models need more memory:
+
+    | Model Size | Approximate memory |
+    |---|---|
+    | 7B | 14-16 GB |
+    | 13B | 26-28 GB |
+    | 70B | 140+ GB |
+
+    Start with a small model and scale up based on your XPU capacity.
+
+    **Container runs but XPU is not detected**
+
+    Use `container/run.sh --device=xpu`. The wrapper adds `/dev/dri` and the host `render` group for XPU access.
+
+    ```bash
+    container/run.sh --image dynamo:latest-vllm-xpu-runtime --device=xpu -it
+    ```
+
+    Check that the host exposes `/dev/dri` and has a `render` group:
+
+    ```bash
+    ls -l /dev/dri
+    getent group render
+    ```
+
+  </Tab>
+</Tabs>
 
 ## Next Steps
 
