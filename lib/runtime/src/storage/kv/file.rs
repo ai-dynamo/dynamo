@@ -140,11 +140,22 @@ impl Store for FileStore {
                 ));
             }
         } else {
-            // Create
+            // Create. Idempotent, so concurrent callers racing past the fast path
+            // above are fine.
             fs::create_dir_all(&p).map_err(to_fs_err)?;
         }
-        let dir = Directory::new(self.root.clone(), p.clone(), ttl.unwrap_or(DEFAULT_TTL));
-        self.active_dirs.lock().insert(p, dir.clone());
+        // Lookup-or-insert under a single lock: concurrent callers must all get the
+        // SAME Directory. A duplicate Directory has its own owned_files set that the
+        // keep-alive thread never walks, so every file registered through it would
+        // silently expire after TTL.
+        let dir = self
+            .active_dirs
+            .lock()
+            .entry(p)
+            .or_insert_with_key(|p| {
+                Directory::new(self.root.clone(), p.clone(), ttl.unwrap_or(DEFAULT_TTL))
+            })
+            .clone();
         Ok(dir)
     }
 
@@ -163,9 +174,14 @@ impl Store for FileStore {
                 "Bucket name is not a directory".to_string(),
             ));
         }
-        // The filesystem itself doesn't store the TTL so for now default it
-        let dir = Directory::new(self.root.clone(), p.clone(), DEFAULT_TTL);
-        self.active_dirs.lock().insert(p, dir.clone());
+        // The filesystem itself doesn't store the TTL so for now default it.
+        // Single-lock entry op for the same reason as get_or_create_bucket.
+        let dir = self
+            .active_dirs
+            .lock()
+            .entry(p)
+            .or_insert_with_key(|p| Directory::new(self.root.clone(), p.clone(), DEFAULT_TTL))
+            .clone();
         Ok(Some(dir))
     }
 
@@ -396,6 +412,7 @@ impl Bucket for Directory {
         let safe_key = key.url_safe();
         let full_path = self.p.join(safe_key.as_ref());
         let str_path = full_path.display().to_string();
+
         if !full_path.exists() {
             return Err(StoreError::MissingKey(str_path));
         }
@@ -476,9 +493,12 @@ impl Bucket for Directory {
                     }
 
                     match event.kind {
-                        // Handle file creation, modification, and rename-to (from atomic writes)
+                        // Handle file creation, modification, and rename-to (from atomic
+                        // writes). Data modifications must match any DataChange: Linux
+                        // inotify reports plain writes as DataChange::Any, never Content.
+                        // Keep-alive touches are Modify(Metadata) and stay ignored.
                         EventKind::Create(event::CreateKind::File)
-                        | EventKind::Modify(event::ModifyKind::Data(event::DataChange::Content))
+                        | EventKind::Modify(event::ModifyKind::Data(_))
                         | EventKind::Modify(event::ModifyKind::Name(event::RenameMode::To)) => {
                             let data: bytes::Bytes = match fs::read(&item_path) {
                                 Ok(data) => data.into(),
@@ -719,5 +739,86 @@ mod tests {
             observed_values.into_iter().next().unwrap(),
             created_values.pop().unwrap()
         );
+    }
+
+    /// Concurrent get_or_create_bucket calls for the same brand-new bucket must all
+    /// return the same Directory. Duplicates each carry their own owned_files set,
+    /// the keep-alive thread only walks the one stored in active_dirs, and files
+    /// registered through a duplicate silently expire after TTL (observed in
+    /// production as a worker registering 3 endpoints within ~300us and losing a
+    /// random subset of them 10s later).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn test_concurrent_get_or_create_bucket_returns_one_directory() {
+        let t = tempfile::tempdir().unwrap();
+        let cancel_token = CancellationToken::new();
+        let store = FileStore::new(cancel_token.clone(), t.path());
+
+        for round in 0..50 {
+            let bucket_name = format!("v1/instances-{round}");
+            let mut tasks = Vec::new();
+            for i in 0..4 {
+                let store = store.clone();
+                let bucket_name = bucket_name.clone();
+                tasks.push(tokio::spawn(async move {
+                    let bucket = store
+                        .get_or_create_bucket(&bucket_name, None)
+                        .await
+                        .unwrap();
+                    bucket
+                        .insert(&Key::new(format!("endpoint-{i}")), "v".into(), 0)
+                        .await
+                        .unwrap();
+                    bucket
+                }));
+            }
+            let mut handles = Vec::new();
+            for task in tasks {
+                handles.push(task.await.unwrap());
+            }
+            for handle in &handles[1..] {
+                assert!(
+                    std::sync::Arc::ptr_eq(&handles[0].owned_files, &handle.owned_files),
+                    "round {round}: concurrent bucket handles must share one owned_files set"
+                );
+            }
+            assert_eq!(
+                handles[0].owned_files.lock().len(),
+                4,
+                "round {round}: every concurrently inserted file must be owned (kept alive)"
+            );
+        }
+        cancel_token.cancel();
+    }
+
+    /// A revision-0 insert that loses the create-if-absent race returns Exists and
+    /// must NOT take ownership of the file. Owners keep their files alive and delete
+    /// them on shutdown, so a loser owning the winner's file would keep alive (and
+    /// eventually delete) a registration it never held.
+    #[tokio::test]
+    async fn test_insert_existing_revision_zero_does_not_take_ownership() {
+        let t = tempfile::tempdir().unwrap();
+        let cancel_token = CancellationToken::new();
+        let key = Key::new("singleton".to_string());
+        let full_path = t.path().join("v1/claims").join(key.url_safe().as_ref());
+
+        let winner_store = FileStore::new(cancel_token.clone(), t.path());
+        let winner = winner_store
+            .get_or_create_bucket("v1/claims", None)
+            .await
+            .unwrap();
+        let loser_store = FileStore::new(cancel_token.clone(), t.path());
+        let loser = loser_store
+            .get_or_create_bucket("v1/claims", None)
+            .await
+            .unwrap();
+
+        let outcome = winner.insert(&key, "winner".into(), 0).await.unwrap();
+        assert_eq!(outcome, StoreOutcome::Created(0));
+        let outcome = loser.insert(&key, "loser".into(), 0).await.unwrap();
+        assert_eq!(outcome, StoreOutcome::Exists(0));
+
+        assert!(winner.owned_files.lock().contains(&full_path));
+        assert!(!loser.owned_files.lock().contains(&full_path));
+        cancel_token.cancel();
     }
 }
