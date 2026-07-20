@@ -169,6 +169,18 @@ def test_config_is_closed_loop_and_uses_requested_encoder_limits(
     assert [item.extra_args[-1] for item in config.configs] == ["0", "1000"]
     assert "--use-server-token-count" in config.aiperf_extra_args
 
+    smoke_config = build_config(
+        input_file,
+        (4,),
+        tmp_path / "smoke",
+        smoke=True,
+        image_size=(300, 300),
+    )
+    assert smoke_config.concurrencies == [4]
+    assert smoke_config.conversation_num == 1
+    assert smoke_config.warmup_count == 1
+    assert smoke_config.osl == 1
+
 
 def _latency(value: float) -> dict[str, float | str]:
     return {
