@@ -29,6 +29,7 @@ use super::types::{
     ReplayRequestHashes, RouterSequence, SequenceHashMode, SessionPartitionSpec, SessionTrace,
     SyntheticTraceSpec, Trace, TraceFileFormat, TurnTrace, effective_replay_key,
 };
+use super::{SYNTHETIC_OUTPUT_SEED, planned_output_token_ids};
 use crate::common::protocols::DirectRequest;
 
 #[derive(Debug, Deserialize)]
@@ -884,6 +885,7 @@ impl Trace {
 
     pub fn to_single_turn_requests(&self) -> Result<Vec<DirectRequest>> {
         let mut requests = Vec::with_capacity(self.sessions.len());
+        let mut output_rng = StdRng::seed_from_u64(SYNTHETIC_OUTPUT_SEED);
         for session in &self.sessions {
             if session.turns.len() != 1 {
                 bail!(
@@ -892,11 +894,17 @@ impl Trace {
                     session.turns.len()
                 );
             }
-            requests.push(session.turns[0].to_direct_request(
+            let mut request = session.turns[0].to_direct_request(
                 self.block_size,
                 Uuid::new_v4(),
                 session.first_arrival_timestamp_ms,
-            )?);
+            )?;
+            request.output_token_ids = Some(planned_output_token_ids(
+                request.output_token_ids,
+                request.max_output_tokens,
+                &mut output_rng,
+            ));
+            requests.push(request);
         }
         Ok(requests)
     }
