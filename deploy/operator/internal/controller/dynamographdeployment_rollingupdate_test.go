@@ -38,6 +38,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
@@ -3245,6 +3246,100 @@ func TestResolveRollingUpdateParams(t *testing.T) {
 	}
 }
 
+func TestOldWorkerDCDsAtZero(t *testing.T) {
+	newDCD := func(specReplicas int32, generation, observedGeneration int64, statusReplicas *int32) *nvidiacomv1beta1.DynamoComponentDeployment {
+		dcd := &nvidiacomv1beta1.DynamoComponentDeployment{
+			ObjectMeta: metav1.ObjectMeta{Generation: generation},
+			Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+					Replicas: ptr.To(specReplicas),
+				},
+			},
+			Status: nvidiacomv1beta1.DynamoComponentDeploymentStatus{
+				ObservedGeneration: observedGeneration,
+			},
+		}
+		if statusReplicas != nil {
+			dcd.Status.Component = &nvidiacomv1beta1.ComponentReplicaStatus{Replicas: *statusReplicas}
+		}
+		return dcd
+	}
+
+	tests := []struct {
+		name string
+		dcds []*nvidiacomv1beta1.DynamoComponentDeployment
+		want bool
+	}{
+		{
+			name: "no old generations",
+			want: true,
+		},
+		{
+			name: "old desired replicas have not been drained",
+			dcds: []*nvidiacomv1beta1.DynamoComponentDeployment{
+				newDCD(1, 1, 1, ptr.To(int32(1))),
+			},
+			want: false,
+		},
+		{
+			name: "default desired replica has not been drained",
+			dcds: []*nvidiacomv1beta1.DynamoComponentDeployment{
+				{
+					ObjectMeta: metav1.ObjectMeta{Generation: 1},
+					Status: nvidiacomv1beta1.DynamoComponentDeploymentStatus{
+						ObservedGeneration: 1,
+						Component:          &nvidiacomv1beta1.ComponentReplicaStatus{},
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "scale-down has not been observed",
+			dcds: []*nvidiacomv1beta1.DynamoComponentDeployment{
+				newDCD(0, 2, 1, ptr.To(int32(0))),
+			},
+			want: false,
+		},
+		{
+			name: "replica status has not been reported",
+			dcds: []*nvidiacomv1beta1.DynamoComponentDeployment{
+				newDCD(0, 2, 2, nil),
+			},
+			want: false,
+		},
+		{
+			name: "old non-terminated replicas remain",
+			dcds: []*nvidiacomv1beta1.DynamoComponentDeployment{
+				newDCD(0, 2, 2, ptr.To(int32(1))),
+			},
+			want: false,
+		},
+		{
+			name: "all old generations are observed at zero",
+			dcds: []*nvidiacomv1beta1.DynamoComponentDeployment{
+				newDCD(0, 2, 2, ptr.To(int32(0))),
+				newDCD(0, 4, 4, ptr.To(int32(0))),
+			},
+			want: true,
+		},
+		{
+			name: "one remaining old generation blocks cutover",
+			dcds: []*nvidiacomv1beta1.DynamoComponentDeployment{
+				newDCD(0, 2, 2, ptr.To(int32(0))),
+				newDCD(0, 4, 4, ptr.To(int32(1))),
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, oldWorkerDCDsAtZero(tt.dcds))
+		})
+	}
+}
+
 // --- reconcileRollingUpdate state machine tests ---
 
 func TestReconcileRollingUpdate_NoChange(t *testing.T) {
@@ -3789,6 +3884,77 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 			},
 			expectedOld: map[string]int32{"worker": 6}, // aggregated across both old gens
 			expectedNew: map[string]int32{"worker": 5},
+		},
+		{
+			name: "recreate drains old generation before starting new generation",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: consts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(3)),
+					Annotations: map[string]string{
+						KubeAnnotationDeploymentStrategy:                    string(common.DeploymentStrategyRecreate),
+						KubeAnnotationDeploymentRollingUpdateMaxSurge:       "100%",
+						KubeAnnotationDeploymentRollingUpdateMaxUnavailable: "0",
+					},
+				},
+			},
+			oldDCDs: func(_ string) []runtime.Object {
+				return []runtime.Object{
+					makeOldDCD("test-dgd", "worker", consts.ComponentTypeWorker, "", 3, 3, 3),
+				}
+			},
+			newDCDs: func(newHash string) []runtime.Object {
+				return []runtime.Object{
+					makeNewDCD("test-dgd", "worker", consts.ComponentTypeWorker, newHash, 2, 2, 2),
+				}
+			},
+			expectedOld: map[string]int32{"worker": 0},
+			expectedNew: map[string]int32{"worker": 0},
+		},
+		{
+			name: "recreate starts new generation after old generation reaches zero",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: consts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(3)),
+					Annotations: map[string]string{
+						KubeAnnotationDeploymentStrategy: string(common.DeploymentStrategyRecreate),
+					},
+				},
+			},
+			oldDCDs: func(_ string) []runtime.Object {
+				return []runtime.Object{
+					makeOldDCD("test-dgd", "worker", consts.ComponentTypeWorker, "", 0, 0, 0),
+				}
+			},
+			newDCDs:     func(_ string) []runtime.Object { return nil },
+			expectedOld: map[string]int32{"worker": 0},
+			expectedNew: map[string]int32{"worker": 3},
+		},
+		{
+			name: "recreate and rolling update components progress independently",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"prefill": {
+					ComponentType: consts.ComponentTypePrefill,
+					Replicas:      ptr.To(int32(2)),
+					Annotations: map[string]string{
+						KubeAnnotationDeploymentStrategy: string(common.DeploymentStrategyRecreate),
+					},
+				},
+				"decode": {
+					ComponentType: consts.ComponentTypeDecode,
+					Replicas:      ptr.To(int32(4)),
+				},
+			},
+			oldDCDs: func(_ string) []runtime.Object {
+				return []runtime.Object{
+					makeOldDCD("test-dgd", "prefill", consts.ComponentTypePrefill, "", 2, 2, 2),
+					makeOldDCD("test-dgd", "decode", consts.ComponentTypeDecode, "", 4, 4, 4),
+				}
+			},
+			newDCDs:     func(_ string) []runtime.Object { return nil },
+			expectedOld: map[string]int32{"prefill": 0, "decode": 3},
+			expectedNew: map[string]int32{"prefill": 0, "decode": 1},
 		},
 	}
 

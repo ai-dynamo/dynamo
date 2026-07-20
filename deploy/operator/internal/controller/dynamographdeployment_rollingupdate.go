@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 )
@@ -812,6 +813,26 @@ func (r *DynamoGraphDeploymentReconciler) getOldWorkerDCDsByComponent(
 	return dcdsByComponent, states, nil
 }
 
+// oldWorkerDCDsAtZero reports whether every old DCD has observed its desired
+// scale-to-zero state and no longer reports any non-terminated replicas. A
+// Recreate update must not start the replacement generation before this is
+// true. Requiring observedGeneration and replica status avoids treating an
+// unprocessed write or absent status as a completed drain.
+func oldWorkerDCDsAtZero(dcds []*nvidiacomv1beta1.DynamoComponentDeployment) bool {
+	for _, dcd := range dcds {
+		if dcd == nil || dcd.Spec.Replicas == nil || *dcd.Spec.Replicas != 0 {
+			return false
+		}
+		if dcd.Status.ObservedGeneration < dcd.Generation {
+			return false
+		}
+		if dcd.Status.Component == nil || dcd.Status.Component.Replicas != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // getDesiredWorkerReplicas returns the total desired replicas across all worker components.
 func (r *DynamoGraphDeploymentReconciler) getDesiredWorkerReplicas(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -1145,10 +1166,10 @@ func oldWorkerRuntimeNamespace(dcd nvidiacomv1beta1.DynamoComponentDeployment) s
 	return dynamo.GetDCDRuntimeNamespace(&dcd)
 }
 
-// resolveRollingUpdateParams reads the deployment strategy annotations from a component spec
-// and resolves maxSurge and maxUnavailable to concrete replica counts.
+// resolveRollingUpdateParams resolves maxSurge and maxUnavailable to concrete
+// replica counts for a RollingUpdate component. Recreate components bypass
+// this calculation.
 // Defaults: maxSurge=25%, maxUnavailable=25% (matches Kubernetes Deployment defaults).
-// TODO: support the recreate strategy
 func resolveRollingUpdateParams(annotations map[string]string, desiredReplicas int32) (maxSurge int32, maxUnavailable int32) {
 	surgeValue := intstr.FromString("25%")
 	unavailValue := intstr.FromString("25%")
@@ -1218,9 +1239,6 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 			desired = *spec.Replicas
 		}
 
-		maxSurge, maxUnavailable := resolveRollingUpdateParams(dynamo.GetPodTemplateAnnotations(spec), desired)
-		minAvailable := desired - maxUnavailable
-
 		var newState dcdComponentState
 		newDCDName := dynamo.GetDCDResourceName(dgd, componentName, newWorkerHash)
 		newDCD := &nvidiacomv1beta1.DynamoComponentDeployment{}
@@ -1231,18 +1249,35 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 		}
 
 		oldState := oldStates[componentName]
+		annotations := dynamo.GetPodTemplateAnnotations(spec)
+		strategy := deploymentStrategyFromAnnotations(annotations)
 
-		newUnavailable := max(int32(0), newState.Spec-newState.Available)
-		// maxScaledDown is the maximum number of old replicas that can be scaled down
-		maxScaledDown := max(int32(0), (oldState.Spec+newState.Spec)-minAvailable-newUnavailable)
-		oldUnhealthy := max(int32(0), oldState.Spec-oldState.Available)
-		// availableSurplus is how many extra available replicas we have above minAvailable (min 0)
-		availableSurplus := max(int32(0), (oldState.Available+newState.Available)-minAvailable)
-		oldTarget := max(int32(0), oldState.Spec-min(maxScaledDown, oldUnhealthy+availableSurplus))
+		var oldTarget, newTarget, maxSurge, maxUnavailable, minAvailable int32
+		switch strategy {
+		case common.DeploymentStrategyRecreate:
+			// Recreate deliberately permits the full component to be unavailable.
+			// Keep declaring every old generation at zero until their controllers
+			// have observed the drain; only then start the replacement generation.
+			maxUnavailable = desired
+			if oldWorkerDCDsAtZero(oldDCDsByComponent[componentName]) {
+				newTarget = desired
+			}
+		default:
+			maxSurge, maxUnavailable = resolveRollingUpdateParams(annotations, desired)
+			minAvailable = desired - maxUnavailable
 
-		// Surge budget uses Spec (declared intent) like K8s Deployment controller; scheduler enforces actual resource constraints.
-		scaleUpBudget := max(int32(0), desired+maxSurge-oldState.Spec-newState.Spec)
-		newTarget := min(desired, newState.Spec+scaleUpBudget)
+			newUnavailable := max(int32(0), newState.Spec-newState.Available)
+			// maxScaledDown is the maximum number of old replicas that can be scaled down
+			maxScaledDown := max(int32(0), (oldState.Spec+newState.Spec)-minAvailable-newUnavailable)
+			oldUnhealthy := max(int32(0), oldState.Spec-oldState.Available)
+			// availableSurplus is how many extra available replicas we have above minAvailable (min 0)
+			availableSurplus := max(int32(0), (oldState.Available+newState.Available)-minAvailable)
+			oldTarget = max(int32(0), oldState.Spec-min(maxScaledDown, oldUnhealthy+availableSurplus))
+
+			// Surge budget uses Spec (declared intent) like K8s Deployment controller; scheduler enforces actual resource constraints.
+			scaleUpBudget := max(int32(0), desired+maxSurge-oldState.Spec-newState.Spec)
+			newTarget = min(desired, newState.Spec+scaleUpBudget)
+		}
 
 		oldWorkerComponentReplicas[componentName] = oldTarget
 		newWorkerReplicas[componentName] = newTarget
@@ -1251,8 +1286,9 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 			oldWorkerDCDReplicas[dcdName] = target
 		}
 
-		logger.V(1).Info("Rolling update replica calculation",
+		logger.V(1).Info("Worker update replica calculation",
 			"component", componentName,
+			"strategy", strategy,
 			"desired", desired,
 			"maxSurge", maxSurge,
 			"maxUnavailable", maxUnavailable,
