@@ -338,16 +338,29 @@ def validate_result(
     }
 
 
+def _selected_concurrencies(root: Path) -> tuple[int, ...]:
+    metadata = json.loads(
+        (root / "benchmark_metadata.json").read_text(encoding="utf-8")
+    )
+    concurrencies = tuple(int(value) for value in metadata["concurrencies"])
+    if not concurrencies or any(value < 1 for value in concurrencies):
+        raise ValueError("benchmark concurrencies must be positive")
+    if len(set(concurrencies)) != len(concurrencies):
+        raise ValueError("benchmark concurrencies must be unique")
+    return concurrencies
+
+
 def validate_matrix(root: Path) -> list[dict[str, Any]]:
+    concurrencies = _selected_concurrencies(root)
     results = [
-        validate_result(path)
+        validate_result(path, expected_concurrencies=concurrencies)
         for path in sorted(root.rglob("profile_export_aiperf.json"))
         if path.parents[1].name in RUNTIME_DELAYS_US
     ]
     expected = {
         (runtime, concurrency)
         for runtime in RUNTIME_DELAYS_US
-        for concurrency in CONCURRENCIES
+        for concurrency in concurrencies
     }
     observed = {
         (str(result["runtime"]), int(result["concurrency"])) for result in results
@@ -411,10 +424,11 @@ def _dispatch_counts(root: Path) -> dict[CellKey, Counter[DispatchKey]]:
 
 def _dispatch_rows(root: Path) -> list[dict[str, Any]]:
     counts = _dispatch_counts(root)
+    concurrencies = _selected_concurrencies(root)
     expected_items = REQUESTS + WARMUP_REQUESTS
     rows: list[dict[str, Any]] = []
     for runtime, delay_us in RUNTIME_DELAYS_US.items():
-        for concurrency in CONCURRENCIES:
+        for concurrency in concurrencies:
             counter = counts.get((runtime, concurrency), Counter())
             total_calls = sum(counter.values())
             total_items = sum(
@@ -464,16 +478,17 @@ def _dispatch_rows(root: Path) -> list[dict[str, Any]]:
 
 def _comparison_rows(root: Path) -> list[dict[str, Any]]:
     validated = validate_matrix(root)
+    concurrencies = _selected_concurrencies(root)
     by_cell = {
         (str(result["runtime"]), int(result["concurrency"])): result
         for result in validated
     }
     runtimes = list(RUNTIME_DELAYS_US)
     rows: list[dict[str, Any]] = []
-    for concurrency in CONCURRENCIES:
+    for concurrency in concurrencies:
         no_wait = by_cell[(runtimes[0], concurrency)]
         wait = by_cell[(runtimes[1], concurrency)]
-        triton_req_s, triton_p95 = TRITON_BASELINE[concurrency]
+        triton_req_s, triton_p95 = TRITON_BASELINE.get(concurrency, (None, None))
         no_wait_req_s = float(no_wait["request_throughput"])
         wait_req_s = float(wait["request_throughput"])
         no_wait_ttft = float(no_wait["ttft_p95_ms"])

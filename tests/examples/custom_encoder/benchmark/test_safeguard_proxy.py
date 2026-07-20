@@ -171,11 +171,18 @@ def _write_result(root: Path, runtime: str, concurrency: int) -> None:
     (artifact / "command.txt").write_text(command + "\n", encoding="utf-8")
 
 
-def test_validation_and_report_cover_all_twenty_cells(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "concurrencies",
+    [CONCURRENCIES, (4, 8, 16, 24, 32)],
+)
+def test_validation_and_report_cover_selected_cells(
+    tmp_path: Path, concurrencies: tuple[int, ...]
+) -> None:
     for runtime in RUNTIME_DELAYS_US:
-        for concurrency in CONCURRENCIES:
+        for concurrency in concurrencies:
             _write_result(tmp_path, runtime, concurrency)
     metadata = {
+        "concurrencies": list(concurrencies),
         "dynamo_commit": "abc123",
         "container_image": "test-image",
         "gpu": "H100",
@@ -200,7 +207,7 @@ def test_validation_and_report_cover_all_twenty_cells(tmp_path: Path) -> None:
     )
     log_lines: list[str] = []
     for runtime in RUNTIME_DELAYS_US:
-        for concurrency in CONCURRENCIES:
+        for concurrency in concurrencies:
             log_lines.extend(
                 [
                     f"[input] Config: {runtime}  concurrency={concurrency}",
@@ -209,7 +216,7 @@ def test_validation_and_report_cover_all_twenty_cells(tmp_path: Path) -> None:
                 ]
             )
     (tmp_path / "sweep.log").write_text("\n".join(log_lines) + "\n", encoding="utf-8")
-    assert len(validate_matrix(tmp_path)) == 20
+    assert len(validate_matrix(tmp_path)) == 2 * len(concurrencies)
     markdown = tmp_path / "benchmark.md"
     csv_path = tmp_path / "benchmark.csv"
     summarize(tmp_path, markdown, csv_path)
@@ -218,8 +225,9 @@ def test_validation_and_report_cover_all_twenty_cells(tmp_path: Path) -> None:
     assert "all requests share one 300×300 JPEG" in report
     assert "Triton baseline used nine unique images" in report
     assert "queue delays: `[0, 1000]` microseconds" in report
-    assert "| 10 | 20.00 | 20.00 | +0.0% |" in report
-    assert "| 1000 us | 10 | 1020 | 1.00 | 100.0% |" in report
-    assert report.count("[AIPerf]") == 20
-    assert csv_path.read_text(encoding="utf-8").count("\n") == 11
+    last = concurrencies[-1]
+    assert f"| {last} | {last * 2:.2f} | {last * 2:.2f} | +0.0% |" in report
+    assert f"| 1000 us | {last} | 1020 | 1.00 | 100.0% |" in report
+    assert report.count("[AIPerf]") == 2 * len(concurrencies)
+    assert csv_path.read_text(encoding="utf-8").count("\n") == len(concurrencies) + 1
     assert (tmp_path / "dispatch_distribution.json").is_file()
