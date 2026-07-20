@@ -361,7 +361,7 @@ impl MatchDetails {
 
     pub fn retain_router_hint_root_candidates(
         &mut self,
-        block_hashes: Vec<ExternalSequenceBlockHash>,
+        mut block_hashes: Vec<ExternalSequenceBlockHash>,
     ) {
         let mut owner_prefix_blocks: Vec<_> = self
             .overlap_scores
@@ -375,6 +375,12 @@ impl MatchDetails {
         if block_hashes.is_empty() || owner_prefix_blocks.is_empty() {
             return;
         }
+        let max_owner_prefix_blocks = owner_prefix_blocks
+            .iter()
+            .map(|(_, blocks)| *blocks)
+            .max()
+            .unwrap_or(0);
+        block_hashes.truncate(max_owner_prefix_blocks);
         owner_prefix_blocks.sort_unstable_by_key(|(worker, _)| *worker);
         self.router_hint_root_candidates = Some(RouterHintRootCandidates {
             block_hashes,
