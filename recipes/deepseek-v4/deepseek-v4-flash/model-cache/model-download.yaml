@@ -33,9 +33,11 @@ spec:
             - |
               set -eux
               pip install --no-cache-dir huggingface_hub==1.11.0 click==8.1.8
-              # Remove the download that does not apply to your SKU:
-              hf download --max-workers 4 nvidia/DeepSeek-V4-Flash-NVFP4   # B200 recipes: NVFP4 experts + FP8
-              hf download --max-workers 4 deepseek-ai/DeepSeek-V4-Flash     # H200 recipes: public checkpoint
+              # Downloads ONE checkpoint per your SKU (the PVC in the README holds one, not both).
+              # B200 (NVFP4) is active by default; for H200, comment the NVFP4 line and uncomment
+              # the public checkpoint line instead.
+              hf download --max-workers 4 nvidia/DeepSeek-V4-Flash-NVFP4   # B200 recipes: NVFP4 experts + FP8 - default
+              # hf download --max-workers 4 deepseek-ai/DeepSeek-V4-Flash  # H200 recipes: public checkpoint
           resources:
             requests:
               cpu: "2"
