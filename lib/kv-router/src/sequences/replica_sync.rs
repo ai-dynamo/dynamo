@@ -6,17 +6,17 @@ use std::sync::Arc;
 use std::task::Poll;
 
 use rustc_hash::FxHashMap;
-use tokio::time::{Duration, Instant};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::multi_worker::{
     ActiveSequencesMultiWorker, ReplicaWorkerPolicy, SequencePublisher, SequenceSubscriber,
 };
 use super::prompt_registry::WorkerLoadSnapshot;
-use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData, WorkerWithDpRank};
-
-const MAX_REPLICA_BATCH_EVENTS: usize = 256;
-const MAX_REPLICA_BATCH_DURATION: Duration = Duration::from_millis(1);
+use crate::protocols::{
+    ActiveSequenceEvent, ActiveSequenceEventData, MAX_REPLICA_BATCH_DURATION,
+    MAX_REPLICA_BATCH_EVENTS, WorkerWithDpRank,
+};
 
 #[derive(Default)]
 struct ReplicaBatchEffects {

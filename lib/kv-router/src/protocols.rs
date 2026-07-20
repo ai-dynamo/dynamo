@@ -626,6 +626,16 @@ pub struct ActiveSequenceEvent {
     pub lora_name: Option<String>,
 }
 
+/// Ordered active-sequence lifecycle events carried by one replica-sync message.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ActiveSequenceEventBatch {
+    pub events: Vec<ActiveSequenceEvent>,
+}
+
+/// Shared cooperative batch limits for active-sequence replica sync.
+pub const MAX_REPLICA_BATCH_EVENTS: usize = 256;
+pub const MAX_REPLICA_BATCH_DURATION: Duration = Duration::from_millis(1);
+
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PrefillLoadHint {
     pub initial_effective_prefill_tokens: usize,
