@@ -606,7 +606,7 @@ jobs:
       gpu_parallel_max_vram_gib: '24'
     secrets: inherit
 
-  # TEMPORARY (OPS-7582): H100 lane on PR CI to validate agg_omni_image before
+  # TEMPORARY (#11854): H100 lane on PR CI to validate agg_omni_image before
   # flipping the scenario back to nightly-only. Remove once CI passes.
   vllm-h100-test:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI

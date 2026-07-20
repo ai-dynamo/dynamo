@@ -111,10 +111,10 @@ vllm_omni_configs = {
             pytest.mark.gpu_1,
             pytest.mark.h100,
             # Temporary: pre_merge so PR CI can validate on the H100 lane in
-            # pr.yaml. Flip back to nightly once CI passes (OPS-7582).
+            # pr.yaml. Flip back to nightly once CI passes (#11854).
             pytest.mark.pre_merge,
             pytest.mark.timeout(1800),
-            # Qwen-Image BF16 weights ~40–42 GiB; with VAE tiling/slicing + 2 GiB
+            # Qwen-Image BF16 weights ~40-42 GiB; with VAE tiling/slicing + 2 GiB
             # KV budget, derived peak ≈47 GiB.
             pytest.mark.profiled_vram_gib(47.0),
             # Modest KV pool for diffusion text-encoder/DiT; weights dominate.

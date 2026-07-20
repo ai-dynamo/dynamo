@@ -435,7 +435,8 @@ jobs:
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
-      gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1'
+      # Exclude h100: >24 GiB scenarios (e.g. agg_omni_image) run on dedicated H100 lanes.
+      gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1 and not h100'
       gpu_test_timeout_minutes: 120
       # Profiled tests (those carrying @pytest.mark.profiled_vram_gib(N)) run concurrently in
       # the parallel stage; the rest fall through to the sequential stage. 24 GiB admits all

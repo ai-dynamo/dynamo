@@ -341,7 +341,7 @@ jobs:
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
-      enable_coverage: true
+      enable_coverage: 'true'
       run_cpu_only_tests: true
       cpu_only_test_markers: vllm and gpu_0
       # Exclude h100 tests: they need >24 GiB and run on the vllm-h100-test lane below.
@@ -366,12 +366,12 @@ jobs:
       test_suite_name: vllm
       test_type: H100 Test
       # 80 GiB H100 (aws-dev-02): vLLM tests that exceed the 24 GiB gpu_1 lane
-      # (e.g. Qwen-Image / agg_omni_image ~40–45 GiB).
+      # (e.g. Qwen-Image / agg_omni_image ~40-45 GiB).
       amd_runner: aws-dev-02-tester-amd-gpu-v2
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
-      enable_coverage: true
+      enable_coverage: 'true'
       run_sanity_check: false
       gpu_test_markers: vllm and h100 and gpu_1
       gpu_test_timeout_minutes: 120

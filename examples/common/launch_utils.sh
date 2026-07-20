@@ -37,6 +37,11 @@ if [[ "${BASH_VERSINFO[0]}" -lt 4 || ( "${BASH_VERSINFO[0]}" -eq 4 && "${BASH_VE
     exit 1
 fi
 
+# GPU memory helpers (build_*_gpu_mem_args). Sourced here so launch scripts
+# only need to source launch_utils.sh.
+# shellcheck source=gpu_utils.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/gpu_utils.sh"
+
 EXAMPLE_PROMPT="Who is the tennis GOAT: Federer, Djokovic, or Nadal?"
 EXAMPLE_PROMPT_VISUAL="A golden retriever riding a skateboard through a neon-lit city"
 
