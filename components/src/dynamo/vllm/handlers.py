@@ -14,7 +14,7 @@ import time
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Mapping
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from typing import (
     Any,
     AsyncIterator,
@@ -98,6 +98,7 @@ from .multimodal_utils.request_processor import (
     VllmMultimodalRequestProcessor,
 )
 from .multimodal_utils.vision_encoder_backend import VisionEncoderBackend
+from .snapshot_backend import _worker_snapshot_profile
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -1036,6 +1037,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
         self.dp_range = get_dp_range_for_worker(self.engine_client.vllm_config)
         self._pause_controller = VllmEnginePauseController(self.engine_client)
+        self._snapshot_profile = (
+            _worker_snapshot_profile("worker-main")
+            if os.getenv("DYN_SNAPSHOT_CONTROL_DIR")
+            else None
+        )
         self._pause_lock = asyncio.Lock()
         # Maps request_id -> _DeferredAbort for in-flight decode-only requests so
         # admin abort_request can route through the deferred-abort path instead
@@ -1392,7 +1398,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
             try:
                 # Step 1: Wake engine first - must be ready before accepting requests
-                wake_complete = await self._pause_controller.resume(tags)
+                tag_value = ",".join(tags) if isinstance(tags, list) else "all"
+                wake_span = (
+                    self._snapshot_profile.phase("model_wake", tags=tag_value)
+                    if self._snapshot_profile is not None
+                    else nullcontext()
+                )
+                with wake_span:
+                    wake_complete = await self._pause_controller.resume(tags)
                 if not wake_complete:
                     return {
                         "status": "ok",
@@ -1400,7 +1413,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         "complete": False,
                     }
                 if self.generate_endpoint is not None:
-                    await self.generate_endpoint.register_endpoint_instance()
+                    registration_span = (
+                        self._snapshot_profile.phase("endpoint_registration")
+                        if self._snapshot_profile is not None
+                        else nullcontext()
+                    )
+                    with registration_span:
+                        await self.generate_endpoint.register_endpoint_instance()
                     logger.info(
                         "[Wake] Re-registered endpoint to discovery - worker added back to routing pool"
                     )

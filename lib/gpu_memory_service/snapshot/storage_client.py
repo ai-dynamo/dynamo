@@ -18,6 +18,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.protocol.messages import GetAllocationResponse
+from gpu_memory_service.common.snapshot_profile import SnapshotProfile
 from gpu_memory_service.snapshot.disk import (
     DeviceToFileWriter,
     load_manifest_and_metadata,
@@ -50,6 +51,7 @@ class GMSStorageClient:
         sharded_ssd_roots: Optional[Sequence[str]] = None,
         sharded_ssd_queues_per_root: int = 2,
         posix_backend_params: Optional[Mapping[str, str]] = None,
+        profile: SnapshotProfile | None = None,
     ) -> None:
         self.output_dir = output_dir
         self.device = device
@@ -62,6 +64,11 @@ class GMSStorageClient:
             else [
                 os.path.abspath(root) for root in sharded_ssd_roots if str(root).strip()
             ]
+        )
+        self._profile = profile or SnapshotProfile(
+            "loader",
+            enabled=False,
+            device=device,
         )
         self._sharded_ssd_queues_per_root = int(sharded_ssd_queues_per_root)
         if self._sharded_ssd_queues_per_root <= 0:
@@ -84,57 +91,103 @@ class GMSStorageClient:
             raise ValueError(
                 "output_dir must be set to call save(); pass it to GMSStorageClient()"
             )
-        output_dir, shard_dirs, use_absolute_shard_paths = self._prepare_output_dir()
+        with self._profile.phase("checkpoint_output_preparation"):
+            output_dir, shard_dirs, use_absolute_shard_paths = (
+                self._prepare_output_dir()
+            )
 
-        mm = GMSClientMemoryManager(self._socket_path, device=self.device)
+        with self._profile.phase("client_memory_manager_construction"):
+            mm = GMSClientMemoryManager(
+                self._socket_path,
+                device=self.device,
+                profile=self._profile,
+            )
         try:
             mm.connect(RequestedLockType.RO, timeout_ms=self._timeout_ms)
-            layout_hash = mm.get_memory_layout_hash()
-            if not layout_hash:
-                raise RuntimeError(
-                    "GMS server has no committed weights; nothing to dump"
-                )
-            allocations_info = mm.list_handles()
-            va_list = [
-                mm.create_mapping(allocation_id=alloc.allocation_id)
-                for alloc in allocations_info
-            ]
+            with self._profile.phase("allocation_enumeration"):
+                layout_hash = mm.get_memory_layout_hash()
+                if not layout_hash:
+                    raise RuntimeError(
+                        "GMS server has no committed weights; nothing to dump"
+                    )
+                allocations_info = mm.list_handles()
+            with self._profile.phase(
+                "source_mapping_preparation",
+                count=len(allocations_info),
+                byte_count=sum(
+                    int(allocation.aligned_size) for allocation in allocations_info
+                ),
+            ):
+                va_list = [
+                    mm.create_mapping(allocation_id=alloc.allocation_id)
+                    for alloc in allocations_info
+                ]
             logger.info("Imported %d source allocation VAs", len(va_list))
-            entries = self._write_shards(
-                shard_dirs,
-                allocations_info,
-                va_list,
-                max_workers=max_workers,
-                use_absolute_shard_paths=use_absolute_shard_paths,
-            )
-            metadata = self._save_metadata(mm)
-        except Exception:
-            mm.close()
-            raise
-
-        with open(
-            os.path.join(output_dir, "gms_metadata.json"),
-            "w",
-            encoding="utf-8",
-        ) as handle:
-            json.dump(metadata, handle, indent=2)
-        manifest = SaveManifest(
-            timestamp=time.time(),
-            layout_hash=layout_hash,
-            device=self.device,
-            allocations=entries,
-        )
-        with open(
-            os.path.join(output_dir, "manifest.json"),
-            "w",
-            encoding="utf-8",
-        ) as handle:
-            json.dump(asdict(manifest), handle, indent=2)
-        logger.info("Wrote manifest with %d allocations", len(entries))
-
-        mm.close()
-
-        return manifest
+            with self._profile.phase(
+                "gpu_host_file_transfer",
+                count=len(allocations_info),
+                byte_count=sum(
+                    int(allocation.aligned_size) for allocation in allocations_info
+                ),
+            ):
+                entries = self._write_shards(
+                    shard_dirs,
+                    allocations_info,
+                    va_list,
+                    max_workers=max_workers,
+                    use_absolute_shard_paths=use_absolute_shard_paths,
+                )
+            with self._profile.phase("metadata_enumeration"):
+                metadata = self._save_metadata(mm)
+            metadata_path = os.path.join(output_dir, "gms_metadata.json")
+            if self._profile.enabled:
+                with self._profile.phase(
+                    "metadata_serialization",
+                    count=len(metadata),
+                ):
+                    metadata_text = json.dumps(metadata, indent=2)
+                with self._profile.phase(
+                    "metadata_write",
+                    count=len(metadata),
+                    byte_count=len(metadata_text.encode()),
+                ):
+                    with open(metadata_path, "w", encoding="utf-8") as handle:
+                        handle.write(metadata_text)
+            else:
+                with open(metadata_path, "w", encoding="utf-8") as handle:
+                    json.dump(metadata, handle, indent=2)
+            with self._profile.phase("manifest_build", count=len(entries)):
+                manifest = SaveManifest(
+                    timestamp=time.time(),
+                    layout_hash=layout_hash,
+                    device=self.device,
+                    allocations=entries,
+                )
+            manifest_path = os.path.join(output_dir, "manifest.json")
+            if self._profile.enabled:
+                with self._profile.phase(
+                    "manifest_serialization",
+                    count=len(entries),
+                ):
+                    manifest_text = json.dumps(asdict(manifest), indent=2)
+                with self._profile.phase(
+                    "manifest_write",
+                    count=len(entries),
+                    byte_count=len(manifest_text.encode()),
+                ):
+                    with open(manifest_path, "w", encoding="utf-8") as handle:
+                        handle.write(manifest_text)
+            else:
+                with open(manifest_path, "w", encoding="utf-8") as handle:
+                    json.dump(asdict(manifest), handle, indent=2)
+            logger.info("Wrote manifest with %d allocations", len(entries))
+            return manifest
+        finally:
+            try:
+                with self._profile.phase("memory_manager_cleanup"):
+                    mm.close()
+            finally:
+                self._profile.emit_aggregates()
 
     def _prepare_output_dir(self) -> Tuple[str, list[str], bool]:
         assert self.output_dir is not None
@@ -157,10 +210,14 @@ class GMSStorageClient:
         max_workers: int,
         use_absolute_shard_paths: bool = False,
     ) -> list[AllocationEntry]:
-        layout = plan_shard_layout(allocations_info, self._shard_size)
-        shard_groups: Dict[int, list[Tuple[int, int]]] = defaultdict(list)
-        for index, (shard_idx, byte_offset) in enumerate(layout):
-            shard_groups[shard_idx].append((index, byte_offset))
+        with self._profile.phase(
+            "save_shard_layout_planning",
+            count=len(allocations_info),
+        ):
+            layout = plan_shard_layout(allocations_info, self._shard_size)
+            shard_groups: Dict[int, list[Tuple[int, int]]] = defaultdict(list)
+            for index, (shard_idx, byte_offset) in enumerate(layout):
+                shard_groups[shard_idx].append((index, byte_offset))
 
         entries: list[Optional[AllocationEntry]] = [None] * len(allocations_info)
 
@@ -172,7 +229,11 @@ class GMSStorageClient:
             abs_path = os.path.join(shards_dir, filename)
             rel_path = os.path.join("shards", filename)
             tensor_file = abs_path if use_absolute_shard_paths else rel_path
-            with DeviceToFileWriter(abs_path, device=self.device) as writer:
+            with DeviceToFileWriter(
+                abs_path,
+                device=self.device,
+                profile=self._profile,
+            ) as writer:
                 for index, byte_offset in alloc_pairs:
                     alloc = allocations_info[index]
                     writer.write_device(va_list[index], alloc.aligned_size)
@@ -185,13 +246,17 @@ class GMSStorageClient:
                         tensor_offset=byte_offset,
                     )
 
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = {
-                pool.submit(_write_one_shard, shard_idx, alloc_pairs): shard_idx
-                for shard_idx, alloc_pairs in shard_groups.items()
-            }
-            for future in as_completed(futures):
-                future.result()
+        with self._profile.phase(
+            "save_worker_barrier",
+            count=len(shard_groups),
+        ):
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = {
+                    pool.submit(_write_one_shard, shard_idx, alloc_pairs): shard_idx
+                    for shard_idx, alloc_pairs in shard_groups.items()
+                }
+                for future in as_completed(futures):
+                    future.result()
 
         missing = sum(1 for entry in entries if entry is None)
         if missing:
@@ -215,14 +280,18 @@ class GMSStorageClient:
         targets: Dict[str, GMSTransferTarget] = {}
         for entry in manifest.allocations:
             old_id = entry.allocation_id
-            va = mm.create_mapping(size=entry.size, tag=entry.tag)
-            id_map[old_id] = mm.mappings[va].allocation_id
-            targets[old_id] = GMSTransferTarget(
-                allocation_id=old_id,
-                va=va,
-                device=self.device,
+            with self._profile.aggregate(
+                "restore_target_mapping_total",
                 byte_count=entry.aligned_size,
-            )
+            ):
+                va = mm.create_mapping(size=entry.size, tag=entry.tag)
+                id_map[old_id] = mm.mappings[va].allocation_id
+                targets[old_id] = GMSTransferTarget(
+                    allocation_id=old_id,
+                    va=va,
+                    device=self.device,
+                    byte_count=entry.aligned_size,
+                )
         logger.info(
             "Allocated %d restore target GMS VAs in %.3fs",
             len(targets),
@@ -240,32 +309,66 @@ class GMSStorageClient:
     ) -> Dict[str, str]:
         backend_name = transfer_backend or self._transfer_backend
 
-        backend = create_transfer_backend(
-            backend_name,
-            GMSSnapshotConfig(
-                device=self.device,
-                max_workers=max_workers,
-                backend_config={
-                    "sharded_ssd_roots": self._sharded_ssd_roots,
-                    "sharded_ssd_queues_per_root": self._sharded_ssd_queues_per_root,
-                    "posix_backend_params": self._posix_backend_params,
-                },
-            ),
-        )
+        with self._profile.phase(
+            "transfer_backend_construction",
+            backend=backend_name,
+        ):
+            backend = create_transfer_backend(
+                backend_name,
+                GMSSnapshotConfig(
+                    device=self.device,
+                    max_workers=max_workers,
+                    backend_config={
+                        "sharded_ssd_roots": self._sharded_ssd_roots,
+                        "sharded_ssd_queues_per_root": (
+                            self._sharded_ssd_queues_per_root
+                        ),
+                        "posix_backend_params": self._posix_backend_params,
+                        "profile": self._profile,
+                    },
+                ),
+            )
         session = None
         id_map: Dict[str, str] = {}
 
         try:
-            manifest, saved_metadata = load_manifest_and_metadata(input_dir)
-            sources = build_file_transfer_sources(input_dir, manifest.allocations)
-            session = backend.start_restore(sources)
-            with GMSClientMemoryManager(self._socket_path, device=self.device) as mm:
+            manifest, saved_metadata = load_manifest_and_metadata(
+                input_dir,
+                profile=self._profile,
+            )
+            with self._profile.phase(
+                "restore_source_discovery",
+                count=len(manifest.allocations),
+            ):
+                sources = build_file_transfer_sources(
+                    input_dir,
+                    manifest.allocations,
+                )
+            with self._profile.phase(
+                "backend_restore_session_planning",
+                count=len(sources),
+                byte_count=sum(source.byte_count for source in sources),
+            ):
+                session = backend.start_restore(sources)
+            with self._profile.phase("client_memory_manager_construction"):
+                mm = GMSClientMemoryManager(
+                    self._socket_path,
+                    device=self.device,
+                    profile=self._profile,
+                )
+            with mm:
                 mm.connect(RequestedLockType.RW, timeout_ms=self._timeout_ms)
                 if clear_existing:
                     logger.info("RW connect cleared any previously committed GMS state")
 
                 id_map, targets = self._allocate_restore_targets(mm, manifest)
-                session.restore(targets)
+                with self._profile.phase(
+                    "payload_restore_total",
+                    backend=backend_name,
+                    count=len(sources),
+                    byte_count=sum(source.byte_count for source in sources),
+                ):
+                    session.restore(targets)
                 logger.info(
                     "%s restored %d allocation(s) to GMS memory",
                     backend_name,
@@ -273,12 +376,20 @@ class GMSStorageClient:
                 )
 
                 self._restore_metadata(mm, saved_metadata, id_map)
-                if not mm.commit():
-                    raise RuntimeError("GMS commit failed after restore")
+                with self._profile.phase("commit"):
+                    if not mm.commit():
+                        raise RuntimeError("GMS commit failed after restore")
         finally:
-            if session is not None:
-                session.close()
-            backend.close()
+            try:
+                if session is not None:
+                    with self._profile.phase("restore_session_cleanup"):
+                        session.close()
+            finally:
+                try:
+                    with self._profile.phase("transfer_backend_cleanup"):
+                        backend.close()
+                finally:
+                    self._profile.emit_aggregates()
 
         logger.info(
             "load_to_gms complete: %d allocations, %d metadata keys",
@@ -293,13 +404,31 @@ class GMSStorageClient:
         saved_metadata: Dict[str, Dict[str, Any]],
         id_map: Dict[str, str],
     ) -> None:
-        for key, meta in saved_metadata.items():
-            old_alloc_id = meta["allocation_id"]
-            new_alloc_id = id_map.get(old_alloc_id, old_alloc_id)
-            ok = mm.metadata_put(key, new_alloc_id, meta["offset_bytes"], meta["value"])
-            if not ok:
-                raise RuntimeError(f"Failed to write metadata key={key!r}")
-            logger.debug("Restored metadata key=%s -> alloc=%s", key, new_alloc_id)
+        metadata_bytes = sum(
+            len(key.encode()) + len(meta["value"])
+            for key, meta in saved_metadata.items()
+        )
+        with self._profile.phase(
+            "metadata_put_loop",
+            count=len(saved_metadata),
+            byte_count=metadata_bytes,
+        ):
+            for key, meta in saved_metadata.items():
+                old_alloc_id = meta["allocation_id"]
+                new_alloc_id = id_map.get(old_alloc_id, old_alloc_id)
+                ok = mm.metadata_put(
+                    key,
+                    new_alloc_id,
+                    meta["offset_bytes"],
+                    meta["value"],
+                )
+                if not ok:
+                    raise RuntimeError(f"Failed to write metadata key={key!r}")
+                logger.debug(
+                    "Restored metadata key=%s -> alloc=%s",
+                    key,
+                    new_alloc_id,
+                )
         logger.info("Restored %d metadata keys; committing", len(saved_metadata))
 
     def _save_metadata(self, mm: Any) -> Dict[str, Any]:

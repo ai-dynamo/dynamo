@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 from uuid import uuid4
 
+from gpu_memory_service.common.snapshot_profile import SnapshotProfile
 from gpu_memory_service.common.utils import align_to_granularity
 from gpu_memory_service.common.vmm import get_vmm
 
@@ -49,6 +50,7 @@ class GMSAllocationManager:
         *,
         allocation_retry_interval: float = 0.5,
         allocation_retry_timeout: Optional[float] = 60.0,
+        profile: SnapshotProfile | None = None,
     ):
         if allocation_retry_interval <= 0:
             raise ValueError(
@@ -61,10 +63,14 @@ class GMSAllocationManager:
 
         self._device = device
         self._vmm = get_vmm()
+        self._profile = profile or SnapshotProfile("server", enabled=False)
         self._allocations: dict[str, AllocationInfo] = {}
         self._next_layout_slot = 0
-        self._vmm.ensure_initialized()
-        self._granularity = self._vmm.get_allocation_granularity(device)
+        with self._profile.phase("allocation_manager_initialization"):
+            with self._profile.phase("server_cu_init"):
+                self._vmm.ensure_initialized()
+            with self._profile.phase("server_allocation_granularity"):
+                self._granularity = self._vmm.get_allocation_granularity(device)
         self._allocation_retry_interval = allocation_retry_interval
         self._allocation_retry_timeout = allocation_retry_timeout
         logger.info(
@@ -94,6 +100,7 @@ class GMSAllocationManager:
         tag: str = "default",
         is_connected: Optional[Callable[[], bool]] = None,
         on_oom: Optional[Callable[[], None]] = None,
+        session_id: str | None = None,
     ) -> AllocationInfo:
         if size <= 0:
             raise ValueError(f"size must be > 0, got {size}")
@@ -107,9 +114,21 @@ class GMSAllocationManager:
                     "RW client disconnected during allocation retry"
                 )
 
-            allocated, handle = self._vmm.create_tolerate_oom(
-                aligned_size, self._device
-            )
+            if not self._profile.enabled:
+                allocated, handle = self._vmm.create_tolerate_oom(
+                    aligned_size,
+                    self._device,
+                )
+            else:
+                with self._profile.aggregate(
+                    "server_cu_mem_create",
+                    byte_count=aligned_size,
+                    session=session_id or "-",
+                ):
+                    allocated, handle = self._vmm.create_tolerate_oom(
+                        aligned_size,
+                        self._device,
+                    )
             if allocated:
                 break
 
@@ -151,7 +170,15 @@ class GMSAllocationManager:
             )
             await asyncio.sleep(self._allocation_retry_interval)
 
-        export_fd = int(self._vmm.export_to_shareable_handle(int(handle)))
+        if not self._profile.enabled:
+            export_fd = int(self._vmm.export_to_shareable_handle(int(handle)))
+        else:
+            with self._profile.aggregate(
+                "server_initial_cuda_export",
+                byte_count=aligned_size,
+                session=session_id or "-",
+            ):
+                export_fd = int(self._vmm.export_to_shareable_handle(int(handle)))
         info = AllocationInfo(
             allocation_id=str(uuid4()),
             size=size,
@@ -174,9 +201,20 @@ class GMSAllocationManager:
         )
         return info
 
-    def export_allocation(self, allocation_id: str) -> int:
+    def export_allocation(
+        self,
+        allocation_id: str,
+        *,
+        session_id: str | None = None,
+    ) -> int:
         info = self.get_allocation(allocation_id)
-        return os.dup(info.export_fd)
+        if not self._profile.enabled:
+            return os.dup(info.export_fd)
+        with self._profile.aggregate(
+            "server_export_fd_dup",
+            session=session_id or "-",
+        ):
+            return os.dup(info.export_fd)
 
     def free_allocation(self, allocation_id: str) -> bool:
         info = self._allocations.get(allocation_id)

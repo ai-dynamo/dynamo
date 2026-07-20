@@ -151,6 +151,8 @@ RUN git clone https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint
 FROM ${AGENT_BASE_IMAGE} AS agent
 
 ARG TARGETARCH=amd64
+ARG GMS_SNAPSHOT_PROFILE=0
+ENV GMS_SNAPSHOT_PROFILE=${GMS_SNAPSHOT_PROFILE}
 
 RUN if [ "${TARGETARCH}" != "amd64" ]; then \
       echo "ERROR: Dynamo Snapshot requires x86_64 (cuda-checkpoint has no ${TARGETARCH} binary)" >&2; exit 1; \

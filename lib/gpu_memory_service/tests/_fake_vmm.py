@@ -99,6 +99,18 @@ class FakeVMM(VMMDevice):
     def stream_synchronize(self, stream):
         pass
 
+    def event_create(self):
+        return next(self._handles)
+
+    def event_record(self, event, stream):
+        pass
+
+    def event_elapsed_ns(self, start_event, end_event):
+        return 0
+
+    def event_destroy(self, event):
+        pass
+
     def memcpy_h2d_async(self, dst_ptr, src_ptr, size, stream):
         pass
 

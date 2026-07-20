@@ -16,6 +16,8 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"k8s.io/client-go/kubernetes"
 	podresourcesv1 "k8s.io/kubelet/pkg/apis/podresources/v1"
+
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/profile"
 )
 
 const (
@@ -83,6 +85,10 @@ func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName st
 // PodResources API does not report GPU devices (e.g. when GPUs are allocated
 // via DRA instead of the NVIDIA device plugin).
 func GetGPUUUIDsViaNvidiaSmi(ctx context.Context, hostProcPath string, pid int) ([]string, error) {
+	return getGPUUUIDsViaNvidiaSmi(ctx, hostProcPath, pid, logr.Discard(), profile.Operation{})
+}
+
+func getGPUUUIDsViaNvidiaSmi(ctx context.Context, hostProcPath string, pid int, log logr.Logger, operation profile.Operation) ([]string, error) {
 	mountPath := fmt.Sprintf("%s/%d/ns/mnt", strings.TrimRight(hostProcPath, "/"), pid)
 	cmd := exec.CommandContext(
 		ctx,
@@ -91,7 +97,9 @@ func GetGPUUUIDsViaNvidiaSmi(ctx context.Context, hostProcPath string, pid int) 
 		"--",
 		"nvidia-smi", "--query-gpu=gpu_uuid", "--format=csv,noheader",
 	)
+	span := operation.Start(log, "snapshot-agent", "nsenter_nvidia_smi", "pid", pid)
 	output, err := cmd.Output()
+	span.EndStatus(err)
 	if err != nil {
 		return nil, fmt.Errorf("nvidia-smi via nsenter (pid %d) failed: %w", pid, err)
 	}
@@ -108,7 +116,7 @@ func GetGPUUUIDsViaNvidiaSmi(ctx context.Context, hostProcPath string, pid int) 
 type visibleGPUDiscovery func(context.Context, string, int) ([]string, error)
 
 // DiscoverGPUUUIDs resolves GPU UUIDs in the container's runtime ordinal order.
-func DiscoverGPUUUIDs(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace, containerName, hostProcPath string, pid int, log logr.Logger) ([]string, error) {
+func DiscoverGPUUUIDs(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace, containerName, hostProcPath string, pid int, log logr.Logger, operation profile.Operation) ([]string, error) {
 	return discoverGPUUUIDs(
 		ctx,
 		clientset,
@@ -117,8 +125,11 @@ func DiscoverGPUUUIDs(ctx context.Context, clientset kubernetes.Interface, podNa
 		containerName,
 		hostProcPath,
 		pid,
-		GetGPUUUIDsViaNvidiaSmi,
+		func(ctx context.Context, hostProcPath string, pid int) ([]string, error) {
+			return getGPUUUIDsViaNvidiaSmi(ctx, hostProcPath, pid, log, operation)
+		},
 		log,
+		operation,
 	)
 }
 
@@ -132,8 +143,11 @@ func discoverGPUUUIDs(
 	pid int,
 	discoverVisibleGPUs visibleGPUDiscovery,
 	log logr.Logger,
+	operation profile.Operation,
 ) ([]string, error) {
+	draSpan := operation.Start(log, "snapshot-agent", "dra_api_lookup")
 	gpuUUIDs, hasNVIDIADRAAllocation, err := GetGPUUUIDsViaDRAAPI(ctx, clientset, podName, podNamespace, containerName, log)
+	draSpan.EndStatus(err)
 	if err != nil {
 		if hasNVIDIADRAAllocation {
 			return nil, fmt.Errorf("DRA GPU UUID lookup failed: %w", err)
@@ -152,7 +166,9 @@ func discoverGPUUUIDs(
 				"DRA GPU allocation has no resolvable UUIDs",
 			)
 		}
+		ordinalSpan := operation.Start(log, "snapshot-agent", "runtime_ordinal_discovery", "pid", pid)
 		visibleGPUUUIDs, err := discoverVisibleGPUs(ctx, hostProcPath, pid)
+		ordinalSpan.EndStatus(err)
 		if err != nil {
 			return nil, fmt.Errorf(
 				"discover DRA GPUs in container ordinal order: %w",
@@ -170,7 +186,9 @@ func discoverGPUUUIDs(
 		return orderedUUIDs, nil
 	}
 
+	podResourcesSpan := operation.Start(log, "snapshot-agent", "pod_resources_lookup")
 	gpuUUIDs, err = GetPodGPUUUIDs(ctx, podName, podNamespace, containerName)
+	podResourcesSpan.EndStatus(err)
 	if err != nil {
 		return nil, fmt.Errorf("PodResources GPU UUID lookup failed: %w", err)
 	}
@@ -179,7 +197,9 @@ func discoverGPUUUIDs(
 	}
 
 	log.Info("PodResources API returned no GPU UUIDs, falling back to nvidia-smi", "pid", pid)
+	ordinalSpan := operation.Start(log, "snapshot-agent", "runtime_ordinal_discovery", "pid", pid)
 	gpuUUIDs, err = discoverVisibleGPUs(ctx, hostProcPath, pid)
+	ordinalSpan.EndStatus(err)
 	if err != nil {
 		return nil, fmt.Errorf("nvidia-smi GPU UUID fallback failed: %w", err)
 	}

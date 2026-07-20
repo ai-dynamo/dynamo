@@ -14,6 +14,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/criu"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/cuda"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/profile"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
@@ -36,6 +37,12 @@ type RestoreInNamespaceResult struct {
 func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logger) (*RestoreInNamespaceResult, error) {
 	opts.CheckpointPath = canonicalizeCheckpointPath(opts.CheckpointPath)
 	restoreStart := time.Now()
+	operation := profile.NewOperation("nsrestore", "checkpoint_path", opts.CheckpointPath)
+	restoreSpan := operation.Start(log, "nsrestore", "nsrestore_total")
+	var retErr error
+	defer func() {
+		restoreSpan.EndStatus(retErr)
+	}()
 	log.Info("Starting nsrestore workflow",
 		"checkpoint_path", opts.CheckpointPath,
 		"has_cuda_map", opts.CUDADeviceMap != "",
@@ -44,9 +51,12 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 	)
 
 	manifestReadStart := time.Now()
+	manifestSpan := operation.Start(log, "nsrestore", "manifest_read")
 	m, err := types.ReadManifest(opts.CheckpointPath)
+	manifestSpan.EndStatus(err)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read manifest: %w", err)
+		retErr = fmt.Errorf("failed to read manifest: %w", err)
+		return nil, retErr
 	}
 	manifestReadDuration := time.Since(manifestReadStart)
 	log.V(1).Info("Loaded checkpoint manifest",
@@ -58,15 +68,20 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 
 	// Phase 1: Configure checkpoint metadata that does not depend on the staged root.
 	configureStart := time.Now()
+	configureSpan := operation.Start(log, "nsrestore", "configure", "checkpoint_id", m.CheckpointID)
 	if err := criu.ConfigureInetRemap(m, opts.TargetPodIP, log); err != nil {
-		return nil, err
+		configureSpan.EndStatus(err)
+		retErr = err
+		return nil, retErr
 	}
+	configureSpan.EndStatus(nil)
 	configureDuration := time.Since(configureStart)
 
 	// Phase 2: Execute — rootfs, CRIU restore, CUDA restore
-	executeTimings, restoredPID, err := executeRestore(ctx, m, opts, log)
+	executeTimings, restoredPID, err := executeRestore(ctx, m, opts, log, operation)
 	if err != nil {
-		return nil, err
+		retErr = err
+		return nil, retErr
 	}
 
 	result := &RestoreInNamespaceResult{
@@ -100,12 +115,14 @@ type nsrestorePhaseTimings struct {
 	cudaDuration           time.Duration
 }
 
-func executeRestore(ctx context.Context, m *types.CheckpointManifest, opts RestoreOptions, log logr.Logger) (timings *nsrestorePhaseTimings, resultPID int, retErr error) {
+func executeRestore(ctx context.Context, m *types.CheckpointManifest, opts RestoreOptions, log logr.Logger, operation profile.Operation) (timings *nsrestorePhaseTimings, resultPID int, retErr error) {
 	timings = &nsrestorePhaseTimings{}
 
 	nsrestoreSetupStart := time.Now()
+	setupSpan := operation.Start(log, "nsrestore", "root_setup", "checkpoint_id", m.CheckpointID)
 	deletedFile, err := snapshotruntime.OpenDeletedFiles(opts.CheckpointPath)
 	if err != nil {
+		setupSpan.EndStatus(err)
 		return nil, 0, err
 	}
 	deletedFD := -1
@@ -119,6 +136,7 @@ func executeRestore(ctx context.Context, m *types.CheckpointManifest, opts Resto
 		deletedFD,
 	)
 	if err != nil {
+		setupSpan.EndStatus(err)
 		return nil, 0, fmt.Errorf("compose rootfs: %w", err)
 	}
 	defer func() {
@@ -133,10 +151,12 @@ func executeRestore(ctx context.Context, m *types.CheckpointManifest, opts Resto
 
 	// Unmount placeholder's /dev/shm so CRIU can recreate tmpfs with checkpointed content.
 	if err := syscall.Unmount("/dev/shm", 0); err != nil {
+		setupSpan.EndStatus(err)
 		return nil, 0, fmt.Errorf("failed to unmount /dev/shm before restore: %w", err)
 	}
 
 	if err := snapshotruntime.RemountProcSys(true); err != nil {
+		setupSpan.EndStatus(err)
 		return nil, 0, fmt.Errorf("failed to remount /proc/sys read-write for restore: %w", err)
 	}
 	defer func() {
@@ -152,20 +172,26 @@ func executeRestore(ctx context.Context, m *types.CheckpointManifest, opts Resto
 		log,
 	)
 	if err != nil {
+		setupSpan.EndStatus(err)
 		return nil, 0, err
 	}
 	timings.nsrestoreSetupDuration = time.Since(nsrestoreSetupStart)
+	setupSpan.EndStatus(nil)
 
 	// CRIU restore
 	criuRestoreStart := time.Now()
+	criuSpan := operation.Start(log, "nsrestore", "criu_restore", "checkpoint_id", m.CheckpointID)
 	restoredPID, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, log)
+	criuSpan.EndStatus(err)
 	if err != nil {
 		return nil, 0, err
 	}
 	timings.criuRestoreDuration = time.Since(criuRestoreStart)
 
 	cudaStart := time.Now()
+	processTableSpan := operation.Start(log, "nsrestore", "process_table_read", "checkpoint_id", m.CheckpointID)
 	processes, err := snapshotruntime.ReadProcessTable("/proc")
+	processTableSpan.EndStatus(err)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to read restored process table: %w", err)
 	}
@@ -189,8 +215,10 @@ func executeRestore(ctx context.Context, m *types.CheckpointManifest, opts Resto
 	// CUDA restore — remap checkpoint-time innermost namespace PIDs onto the
 	// current visible restored PIDs before invoking cuda-checkpoint.
 	if !m.CUDA.IsEmpty() {
+		cudaSpan := operation.Start(log, "nsrestore", "cuda_restore", "checkpoint_id", m.CheckpointID)
 		restorePIDs, err := snapshotruntime.ResolveManifestPIDsToObservedPIDs(processes, int(restoredPID), m.CUDA.PIDs)
 		if err != nil {
+			cudaSpan.EndStatus(err)
 			return nil, 0, fmt.Errorf("failed to resolve restored CUDA PIDs: %w", err)
 		}
 		log.V(1).Info("Resolved manifest CUDA PIDs to current restore PIDs",
@@ -199,6 +227,7 @@ func executeRestore(ctx context.Context, m *types.CheckpointManifest, opts Resto
 			"criu_callback_pid", restoredPID,
 		)
 		_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, log)
+		cudaSpan.EndStatus(err)
 		if err != nil {
 			return nil, 0, fmt.Errorf("CUDA restore failed: %w", err)
 		}

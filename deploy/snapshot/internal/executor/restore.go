@@ -21,6 +21,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/criu"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/cuda"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/logging"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/profile"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
@@ -48,8 +49,23 @@ type RestoreRequest struct {
 // Returns the placeholder container's host PID so callers can reach into the
 // container's mount namespace (e.g. to write sentinels under /snapshot-control)
 // without re-resolving via the runtime.
-func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest) (int, error) {
+func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest) (placeholderHostPID int, retErr error) {
 	restoreStart := time.Now()
+	containerName := req.ContainerName
+	if containerName == "" {
+		containerName = "main"
+	}
+	operation := profile.NewOperation(
+		"restore",
+		"checkpoint_id", req.CheckpointID,
+		"pod", req.PodName,
+		"namespace", req.PodNamespace,
+		"container", containerName,
+	)
+	restoreSpan := operation.Start(log, "snapshot-agent", "restore_total")
+	defer func() {
+		restoreSpan.EndStatus(retErr)
+	}()
 	log.Info("=== Starting external restore ===",
 		"checkpoint_id", req.CheckpointID,
 		"pod", req.PodName,
@@ -59,7 +75,9 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 
 	// Phase 1: Host inspect — resolve placeholder, discover target GPUs, build device map
 	hostInspectStart := time.Now()
-	snap, err := inspectRestore(ctx, rt, log, req)
+	inspectSpan := operation.Start(log, "snapshot-agent", "host_inspect_total")
+	snap, err := inspectRestore(ctx, rt, log, req, operation)
+	inspectSpan.EndStatus(err)
 	if err != nil {
 		return 0, err
 	}
@@ -87,6 +105,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	defer checkpoint.Close()
 
 	// Phase 2: Execute — nsrestore handles rootfs, CRIU restore, and CUDA restore inside namespace
+	nsrestoreSpan := operation.Start(log, "snapshot-agent", "nsrestore_process_total")
 	result, err := execNSRestore(
 		ctx,
 		log,
@@ -96,6 +115,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		workspace,
 		checkpoint,
 	)
+	nsrestoreSpan.EndStatus(err)
 	if err != nil {
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
 	}
@@ -115,12 +135,15 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 
 	// Validate restored process from the host side
 	validationStart := time.Now()
+	validationSpan := operation.Start(log, "snapshot-agent", "post_restore_validation", "pid", result.RestoredPID)
 	procRoot := filepath.Join(snap.TargetRoot, "proc")
 	if err := snapshotruntime.ValidateProcessState(procRoot, result.RestoredPID); err != nil {
+		validationSpan.EndStatus(err)
 		restoreLogPath := filepath.Join(snap.TargetRoot, "var", "criu-work", criu.RestoreLogFilename)
 		logging.LogProcessDiagnostics(procRoot, result.RestoredPID, restoreLogPath, log)
 		return 0, fmt.Errorf("restored process failed post-restore validation: %w", err)
 	}
+	validationSpan.EndStatus(nil)
 
 	log.Info("=== External restore completed ===",
 		"restored_pid", result.RestoredPID,
@@ -132,7 +155,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	return snap.PlaceholderPID, nil
 }
 
-func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest) (*types.RestoreContainerSnapshot, error) {
+func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest, operation profile.Operation) (*types.RestoreContainerSnapshot, error) {
 	if req.CheckpointLocation == "" {
 		return nil, fmt.Errorf("checkpoint location is required")
 	}
@@ -150,7 +173,9 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 		return nil, fmt.Errorf("invalid checkpoint id %q", req.CheckpointID)
 	}
 
+	manifestSpan := operation.Start(log, "snapshot-agent", "manifest_read")
 	m, err := types.ReadManifest(checkpointPath)
+	manifestSpan.EndStatus(err)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read checkpoint manifest: %w", err)
 	}
@@ -161,17 +186,21 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 	}
 
 	var placeholderPID int
+	containerSpan := operation.Start(log, "snapshot-agent", "container_resolution")
 	if req.ContainerID != "" {
 		placeholderPID, _, err = rt.ResolveContainer(ctx, req.ContainerID)
 	} else {
 		placeholderPID, _, err = rt.ResolveContainerByPod(ctx, req.PodName, req.PodNamespace, containerName)
 	}
+	containerSpan.EndStatus(err)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve placeholder container: %w", err)
 	}
 	log.V(1).Info("Resolved placeholder container", "pid", placeholderPID)
 
+	cgroupSpan := operation.Start(log, "snapshot-agent", "cgroup_inspection", "pid", placeholderPID)
 	cgroupRoot, err := snapshotruntime.ResolveCgroupRootFromHostPID(placeholderPID)
+	cgroupSpan.EndStatus(err)
 	if err != nil {
 		log.Error(err, "Failed to resolve placeholder cgroup root; proceeding without explicit cgroup remap")
 		cgroupRoot = ""
@@ -182,6 +211,7 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 		if len(m.CUDA.SourceGPUUUIDs) == 0 {
 			return nil, fmt.Errorf("missing source GPU UUIDs in checkpoint manifest")
 		}
+		discoverySpan := operation.Start(log, "snapshot-agent", "gpu_discovery", "pid", placeholderPID)
 		targetGPUUUIDs, err := cuda.DiscoverGPUUUIDs(
 			ctx,
 			req.Clientset,
@@ -191,14 +221,18 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 			snapshotruntime.HostProcPath,
 			placeholderPID,
 			log,
+			operation,
 		)
+		discoverySpan.EndStatus(err)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get target GPU UUIDs: %w", err)
 		}
 		if len(targetGPUUUIDs) == 0 {
 			return nil, fmt.Errorf("missing target GPU UUIDs for %s/%s container %s", req.PodNamespace, req.PodName, containerName)
 		}
+		deviceMapSpan := operation.Start(log, "snapshot-agent", "device_map_build")
 		cudaDeviceMap, err = cuda.BuildDeviceMap(m.CUDA.SourceGPUUUIDs, targetGPUUUIDs, log)
+		deviceMapSpan.EndStatus(err)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build CUDA device map: %w", err)
 		}

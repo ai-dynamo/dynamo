@@ -17,6 +17,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/criu"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/cuda"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/profile"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
@@ -49,8 +50,19 @@ type checkpointPhaseTimings struct {
 // The checkpoint directory is staged under tmp/<uuid> during the operation.
 // On success, the previous checkpoint is removed and the staged directory is
 // renamed into place at the base path root.
-func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req CheckpointRequest, cfg *types.AgentConfig) error {
+func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req CheckpointRequest, cfg *types.AgentConfig) (retErr error) {
 	checkpointStart := time.Now()
+	operation := profile.NewOperation(
+		"checkpoint",
+		"checkpoint_id", req.CheckpointID,
+		"pod", req.PodName,
+		"namespace", req.PodNamespace,
+		"container", req.ContainerName,
+	)
+	checkpointSpan := operation.Start(log, "snapshot-agent", "checkpoint_total")
+	defer func() {
+		checkpointSpan.EndStatus(retErr)
+	}()
 	phaseTimings := checkpointPhaseTimings{}
 	prepareStart := time.Now()
 	log.Info("=== Starting checkpoint operation ===")
@@ -74,7 +86,9 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	defer os.RemoveAll(tmpDir)
 
 	// Phase 1: Inspect container state
-	state, err := inspectContainer(ctx, rt, log, req)
+	inspectSpan := operation.Start(log, "snapshot-agent", "host_inspect_total")
+	state, err := inspectContainer(ctx, rt, log, req, operation)
+	inspectSpan.EndStatus(err)
 	if err != nil {
 		return err
 	}
@@ -90,7 +104,7 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	phaseTimings.PrepareDuration = time.Since(prepareStart)
 
 	// Phase 3: Capture — CRIU dump, rootfs diff
-	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, log)
+	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, log, operation)
 	if err != nil {
 		return err
 	}
@@ -101,12 +115,16 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	// Remove any previous checkpoint with the same identity hash, then
 	// promote the staged checkpoint directory into place.
 	finalizeStart := time.Now()
+	finalizeSpan := operation.Start(log, "snapshot-agent", "checkpoint_finalize")
 	if err := os.RemoveAll(finalDir); err != nil {
+		finalizeSpan.EndStatus(err)
 		return fmt.Errorf("failed to remove previous checkpoint directory: %w", err)
 	}
 	if err := os.Rename(tmpDir, finalDir); err != nil {
+		finalizeSpan.EndStatus(err)
 		return fmt.Errorf("failed to finalize checkpoint directory: %w", err)
 	}
+	finalizeSpan.EndStatus(nil)
 	phaseTimings.FinalizeDuration = time.Since(finalizeStart)
 
 	totalDuration := time.Since(checkpointStart)
@@ -131,15 +149,20 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	return nil
 }
 
-func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req CheckpointRequest) (*types.CheckpointContainerSnapshot, error) {
+func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req CheckpointRequest, operation profile.Operation) (*types.CheckpointContainerSnapshot, error) {
 	containerID := req.ContainerID
+	containerSpan := operation.Start(log, "snapshot-agent", "container_resolution")
 	pid, ociSpec, err := rt.ResolveContainer(ctx, containerID)
+	containerSpan.EndStatus(err)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve container: %w", err)
 	}
 
 	var hostCgroupPath string
-	if cgPath, err := snapshotruntime.ResolveCgroupRootFromHostPID(pid); err == nil && cgPath != "" {
+	cgroupSpan := operation.Start(log, "snapshot-agent", "cgroup_inspection", "pid", pid)
+	cgPath, cgroupErr := snapshotruntime.ResolveCgroupRootFromHostPID(pid)
+	cgroupSpan.EndStatus(cgroupErr)
+	if cgroupErr == nil && cgPath != "" {
 		hostCgroupPath = filepath.Join(snapshotruntime.HostCgroupPath, cgPath)
 	}
 
@@ -194,6 +217,7 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 	}
 	var gpuUUIDs []string
 	if len(cudaHostPIDs) > 0 {
+		discoverySpan := operation.Start(log, "snapshot-agent", "gpu_discovery", "pid", pid)
 		gpuUUIDs, err = cuda.DiscoverGPUUUIDs(
 			ctx,
 			req.Clientset,
@@ -203,7 +227,9 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 			snapshotruntime.HostProcPath,
 			pid,
 			log,
+			operation,
 		)
+		discoverySpan.EndStatus(err)
 		if err != nil {
 			return nil, fmt.Errorf("failed to discover source GPU UUIDs: %w", err)
 		}
@@ -249,25 +275,30 @@ func configureCheckpoint(
 	return criuOpts, m, nil
 }
 
-func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir string, log logr.Logger) (*checkpointPhaseTimings, error) {
+func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir string, log logr.Logger, operation profile.Operation) (*checkpointPhaseTimings, error) {
 	timings := &checkpointPhaseTimings{}
 
 	// CUDA lock+checkpoint must happen before CRIU dump
 	if len(state.CUDAHostPIDs) > 0 {
+		cudaSpan := operation.Start(log, "snapshot-agent", "cuda_checkpoint", "process_count", len(state.CUDAHostPIDs))
 		cudaTimings, err := cuda.LockAndCheckpointProcessTree(ctx, state.CUDAHostPIDs, log)
+		cudaSpan.EndStatus(err)
 		if err != nil {
 			return nil, fmt.Errorf("CUDA checkpoint failed: %w", err)
 		}
 		timings.CUDADuration = cudaTimings.TotalDuration
 	}
 
+	criuSpan := operation.Start(log, "snapshot-agent", "criu_dump")
 	criuDumpDuration, err := criu.ExecuteDump(criuOpts, checkpointDir, criuSettings, log)
+	criuSpan.EndStatus(err)
 	if err != nil {
 		return nil, err
 	}
 	timings.CRIUDumpDuration = criuDumpDuration
 
 	overlayCaptureStart := time.Now()
+	overlaySpan := operation.Start(log, "snapshot-agent", "overlay_capture")
 	digest, err := snapshotruntime.CaptureRootfsDiff(
 		ctx,
 		state.UpperDir,
@@ -276,12 +307,15 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 		data.Overlay.BindMountDests,
 	)
 	if err != nil {
+		overlaySpan.EndStatus(err)
 		return nil, fmt.Errorf("rootfs diff capture failed: %w", err)
 	}
 	data.RootFSSHA256 = digest
 	if err := types.WriteManifest(checkpointDir, data); err != nil {
+		overlaySpan.EndStatus(err)
 		return nil, fmt.Errorf("failed to write checkpoint manifest: %w", err)
 	}
+	overlaySpan.EndStatus(nil)
 	timings.OverlayCaptureDuration = time.Since(overlayCaptureStart)
 
 	return timings, nil

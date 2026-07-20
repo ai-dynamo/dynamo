@@ -4,13 +4,16 @@
 """Unit tests for NIXL/POSIX staging restore planning."""
 
 import threading
+from types import SimpleNamespace
 
 import pytest
 
 try:
+    from gpu_memory_service.common.snapshot_profile import SnapshotProfile
     from gpu_memory_service.snapshot.backends.nixl_common import (
         NixlFileGroup,
         NixlWorkGroup,
+        release_transfer_resources,
         split_work_groups,
     )
     from gpu_memory_service.snapshot.backends.nixl_staging import (
@@ -115,7 +118,11 @@ def test_staging_prep_starts_before_restore(monkeypatch):
     fake_vmm = FakeVMM()
     monkeypatch.setattr(nixl_staging, "get_vmm", lambda: fake_vmm)
     monkeypatch.setattr(nixl_staging, "load_nixl_api", fake_load_nixl_api)
-    monkeypatch.setattr(nixl_staging, "make_pinned_copy_slots", lambda _vmm, _count: [])
+    monkeypatch.setattr(
+        nixl_staging,
+        "make_pinned_copy_slots",
+        lambda _vmm, _count, **_kwargs: [],
+    )
 
     session = _NixlPosixStagingTransferSession(
         backend_name="test-backend",
@@ -132,3 +139,55 @@ def test_staging_prep_starts_before_restore(monkeypatch):
     finally:
         allow_finish.set()
         session.close()
+
+
+@pytest.mark.parametrize("profile_enabled", [False, True])
+def test_release_transfer_resources_preserves_active_error_on_fd_close(
+    monkeypatch,
+    profile_enabled,
+):
+    def fail_close(_fd):
+        raise OSError("fd already closed")
+
+    monkeypatch.setattr(
+        "gpu_memory_service.snapshot.backends.nixl_common.os.close",
+        fail_close,
+    )
+    profile = SnapshotProfile("loader", enabled=profile_enabled)
+
+    with pytest.raises(ValueError, match="original transfer failure"):
+        try:
+            raise ValueError("original transfer failure")
+        finally:
+            release_transfer_resources(
+                SimpleNamespace(),
+                None,
+                None,
+                None,
+                fd=17,
+                profile=profile,
+            )
+
+
+def test_worker_cleanup_defers_profile_emission(monkeypatch, caplog):
+    from gpu_memory_service.snapshot.backends import nixl_staging
+
+    profile = SnapshotProfile(
+        "loader",
+        logger=nixl_staging.logger,
+        enabled=True,
+    )
+    with profile.aggregate("worker_transfer", worker=0):
+        pass
+    session = _NixlPosixStagingTransferSession.__new__(_NixlPosixStagingTransferSession)
+    session._profile = profile
+    prepared = SimpleNamespace(closed=False, slots=[], worker_index=0)
+    monkeypatch.setattr(nixl_staging, "close_pinned_copy_slots", lambda *_args: None)
+
+    with caplog.at_level("INFO"):
+        session._close_prepared_group(prepared)
+    assert "GMS_SNAPSHOT_PROFILE" not in caplog.text
+
+    with caplog.at_level("INFO"):
+        profile.emit_aggregates()
+    assert "GMS_SNAPSHOT_PROFILE" in caplog.text

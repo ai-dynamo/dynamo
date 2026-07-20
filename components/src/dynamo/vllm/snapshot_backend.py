@@ -3,6 +3,7 @@
 
 import gc
 import logging
+import os
 from collections.abc import Iterable
 from typing import Any
 
@@ -39,6 +40,7 @@ class DynamoGMSSnapshotBackend(SleepModeBackend):
 
     def __init__(self) -> None:
         super().__init__()
+        self._profile = _worker_snapshot_profile("worker-rank")
         self._restored_tags = set(_get_gms_tags())
         self._communicators_restored = True
         self._ro_connect_timeout_ms: int | None = None
@@ -57,7 +59,8 @@ class DynamoGMSSnapshotBackend(SleepModeBackend):
         checkpoint_prepare, _ = _checkpoint_hooks()
         self._communicators_restored = False
         try:
-            checkpoint_prepare()
+            with self._profile.phase("communicator_prepare"):
+                checkpoint_prepare()
         except Exception as exc:
             self._state = "SUSPENDED"
             self._fatal_error = SnapshotTerminalError(
@@ -66,7 +69,8 @@ class DynamoGMSSnapshotBackend(SleepModeBackend):
             raise self._fatal_error from exc
 
         try:
-            self._unmap_gms_tags()
+            with self._profile.phase("gms_memory_unmap"):
+                self._unmap_gms_tags()
         except Exception as exc:
             self._state = "SUSPENDED"
             self._fatal_error = SnapshotTerminalError(
@@ -75,8 +79,9 @@ class DynamoGMSSnapshotBackend(SleepModeBackend):
             raise self._fatal_error from exc
 
         self._restored_tags.clear()
-        gc.collect()
-        torch.cuda.empty_cache()
+        with self._profile.phase("device_cache_release"):
+            gc.collect()
+            torch.cuda.empty_cache()
         self._state = "SUSPENDED"
 
     def resume(self, tags: list[str] | None = None) -> None:
@@ -93,7 +98,8 @@ class DynamoGMSSnapshotBackend(SleepModeBackend):
             for tag in restore_tags:
                 if tag in self._restored_tags:
                     continue
-                self._resume_gms_tag(tag)
+                with self._profile.phase("gms_tag_restore", tag=tag):
+                    self._resume_gms_tag(tag)
                 self._restored_tags.add(tag)
 
             if (
@@ -102,7 +108,8 @@ class DynamoGMSSnapshotBackend(SleepModeBackend):
             ):
                 try:
                     _, checkpoint_restore = _checkpoint_hooks()
-                    checkpoint_restore()
+                    with self._profile.phase("communicator_restore"):
+                        checkpoint_restore()
                 except Exception as exc:
                     raise SnapshotTerminalError(
                         f"FlashInfer checkpoint restore failed: {exc}"
@@ -116,6 +123,8 @@ class DynamoGMSSnapshotBackend(SleepModeBackend):
 
         if self._restored_tags == set(_get_gms_tags()) and self._communicators_restored:
             self._state = "RUNNING"
+            with self._profile.phase("rank_wake_complete"):
+                pass
 
     def is_tag_restored(self, tag: str) -> bool:
         _validated_restore_tags((tag,))
@@ -248,6 +257,19 @@ def _checkpoint_hooks() -> tuple[Any, Any]:
     return (
         checkpoint_prepare_distributed_state,
         checkpoint_restore_distributed_state,
+    )
+
+
+def _worker_snapshot_profile(component: str) -> Any:
+    from gpu_memory_service.common.snapshot_profile import SnapshotProfile
+
+    return SnapshotProfile(
+        component,
+        logger=logger,
+        pid=os.getpid(),
+        rank=os.environ.get("RANK", "-"),
+        local_rank=os.environ.get("LOCAL_RANK", "-"),
+        service="weights",
     )
 
 

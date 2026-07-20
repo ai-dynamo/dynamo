@@ -76,9 +76,14 @@ class _GMSRPCTransport:
         self,
         lock_type: RequestedLockType,
         timeout_ms: Optional[int],
+        profile_session_id: Optional[str] = None,
     ) -> HandshakeResponse:
         response, _ = self.request_with_fd(
-            HandshakeRequest(lock_type=lock_type, timeout_ms=timeout_ms),
+            HandshakeRequest(
+                lock_type=lock_type,
+                timeout_ms=timeout_ms,
+                profile_session_id=profile_session_id,
+            ),
             HandshakeResponse,
             error_prefix="GMS handshake",
         )

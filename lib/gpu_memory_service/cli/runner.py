@@ -22,6 +22,7 @@ import logging
 from collections.abc import Sequence
 
 import uvloop
+from gpu_memory_service.common.snapshot_profile import SnapshotProfile
 from gpu_memory_service.common.vmm import init_vmm
 from gpu_memory_service.server.rpc import GMSRPCServer
 
@@ -76,6 +77,7 @@ async def serve_configs(configs: Sequence[Config]) -> None:
                 device=config.device,
                 allocation_retry_interval=config.alloc_retry_interval,
                 allocation_retry_timeout=config.alloc_retry_timeout,
+                service=config.tag,
             )
         )
 
@@ -84,8 +86,12 @@ async def serve_configs(configs: Sequence[Config]) -> None:
 
 def main() -> None:
     """Entry point for GPU Memory Service server."""
-    uvloop.install()
-    asyncio.run(serve_configs(parse_args()))
+    profile = SnapshotProfile("server", logger=logger, scope="process_cli")
+    with profile.phase("process_cli_entry_and_argument_parse"):
+        configs = parse_args()
+    with profile.phase("event_loop_installation"):
+        uvloop.install()
+    asyncio.run(serve_configs(configs))
 
 
 if __name__ == "__main__":

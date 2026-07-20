@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence, TypeVar
 
+from gpu_memory_service.common.snapshot_profile import SnapshotProfile
 from gpu_memory_service.snapshot.transfer import FileTransferSource
 
 NIXL_POSIX_BACKEND = "POSIX"
@@ -145,8 +146,29 @@ def open_direct_read_fd(
         raise
 
 
-def start_transfer(agent: Any, handle: Any, label: str, backend_name: str) -> None:
-    state = agent.transfer(handle)
+def start_transfer(
+    agent: Any,
+    handle: Any,
+    label: str,
+    backend_name: str,
+    *,
+    profile: SnapshotProfile | None = None,
+    profile_fields: Optional[Mapping[str, Any]] = None,
+) -> None:
+    if profile is None or not profile.enabled:
+        state = agent.transfer(handle)
+        if state == "ERR":
+            raise RuntimeError(f"{backend_name} transfer failed to start: {label}")
+        if state not in {"PROC", "DONE"}:
+            raise RuntimeError(
+                f"{backend_name} transfer returned unexpected state {state!r}"
+            )
+        return
+    with profile.aggregate(
+        "nixl_transfer_post",
+        **dict(profile_fields or {}),
+    ):
+        state = agent.transfer(handle)
     if state == "ERR":
         raise RuntimeError(f"{backend_name} transfer failed to start: {label}")
     if state not in {"PROC", "DONE"}:
@@ -155,9 +177,31 @@ def start_transfer(agent: Any, handle: Any, label: str, backend_name: str) -> No
         )
 
 
-def wait_for_transfer(agent: Any, handle: Any, label: str, backend_name: str) -> None:
-    start_transfer(agent, handle, label, backend_name)
-    wait_for_transfer_done(agent, handle, label, backend_name)
+def wait_for_transfer(
+    agent: Any,
+    handle: Any,
+    label: str,
+    backend_name: str,
+    *,
+    profile: SnapshotProfile | None = None,
+    profile_fields: Optional[Mapping[str, Any]] = None,
+) -> None:
+    start_transfer(
+        agent,
+        handle,
+        label,
+        backend_name,
+        profile=profile,
+        profile_fields=profile_fields,
+    )
+    wait_for_transfer_done(
+        agent,
+        handle,
+        label,
+        backend_name,
+        profile=profile,
+        profile_fields=profile_fields,
+    )
 
 
 def wait_for_transfer_done(
@@ -165,11 +209,30 @@ def wait_for_transfer_done(
     handle: Any,
     label: str,
     backend_name: str,
+    *,
+    profile: SnapshotProfile | None = None,
+    profile_fields: Optional[Mapping[str, Any]] = None,
 ) -> None:
-    state = agent.check_xfer_state(handle)
-    while state == "PROC":
-        time.sleep(0.001)
+    if profile is None or not profile.enabled:
         state = agent.check_xfer_state(handle)
+        while state == "PROC":
+            time.sleep(0.001)
+            state = agent.check_xfer_state(handle)
+        if state == "ERR":
+            raise RuntimeError(f"{backend_name} transfer failed: {label}")
+        if state != "DONE":
+            raise RuntimeError(
+                f"{backend_name} transfer ended in unexpected state {state!r}: {label}"
+            )
+        return
+    with profile.aggregate(
+        "nixl_transfer_poll_wait",
+        **dict(profile_fields or {}),
+    ):
+        state = agent.check_xfer_state(handle)
+        while state == "PROC":
+            time.sleep(0.001)
+            state = agent.check_xfer_state(handle)
     if state == "ERR":
         raise RuntimeError(f"{backend_name} transfer failed: {label}")
     if state != "DONE":
@@ -286,20 +349,49 @@ def release_transfer_resources(
     first_reg: Any,
     second_reg: Any,
     fd: Optional[int] = None,
+    *,
+    profile: SnapshotProfile | None = None,
+    profile_fields: Optional[Mapping[str, Any]] = None,
 ) -> None:
+    if profile is None or not profile.enabled:
+        if handle is not None:
+            try:
+                agent.release_xfer_handle(handle)
+            except Exception:
+                pass
+        if first_reg is not None:
+            try:
+                agent.deregister_memory(first_reg)
+            except Exception:
+                pass
+        if second_reg is not None:
+            try:
+                agent.deregister_memory(second_reg)
+            except Exception:
+                pass
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        return
+    fields = dict(profile_fields or {})
     if handle is not None:
         try:
-            agent.release_xfer_handle(handle)
+            with profile.aggregate("nixl_transfer_release", **fields):
+                agent.release_xfer_handle(handle)
         except Exception:
             pass
     if first_reg is not None:
         try:
-            agent.deregister_memory(first_reg)
+            with profile.aggregate("nixl_deregister_dram", **fields):
+                agent.deregister_memory(first_reg)
         except Exception:
             pass
     if second_reg is not None:
         try:
-            agent.deregister_memory(second_reg)
+            with profile.aggregate("nixl_deregister_file", **fields):
+                agent.deregister_memory(second_reg)
         except Exception:
             pass
     if fd is not None:

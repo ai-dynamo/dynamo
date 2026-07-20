@@ -43,6 +43,7 @@ from gpu_memory_service.common.protocol.messages import (
     MetadataPutRequest,
     MetadataPutResponse,
 )
+from gpu_memory_service.common.snapshot_profile import SnapshotProfile
 
 from .allocations import AllocationInfo, GMSAllocationManager
 from .fsm import Connection, ServerState, StateEvent
@@ -69,11 +70,14 @@ class GMS:
         *,
         allocation_retry_interval: float = 0.5,
         allocation_retry_timeout: Optional[float] = None,
+        profile: SnapshotProfile | None = None,
     ):
+        self._profile = profile or SnapshotProfile("server", enabled=False)
         self._allocations = GMSAllocationManager(
             device,
             allocation_retry_interval=allocation_retry_interval,
             allocation_retry_timeout=allocation_retry_timeout,
+            profile=self._profile,
         )
         self._sessions = GMSSessionManager()
         self._events: deque[GMSRuntimeEvent] = deque(maxlen=self._MAX_EVENTS)
@@ -198,8 +202,12 @@ class GMS:
 
     def on_connect(self, conn: Connection) -> None:
         if conn.mode == GrantedLockType.RW:
-            had_committed_layout = self._sessions.snapshot().committed
-            cleared = self._clear_layout_state()
+            with self._profile.phase(
+                "rw_state_clear",
+                session=conn.profile_session_id,
+            ):
+                had_committed_layout = self._sessions.snapshot().committed
+                cleared = self._clear_layout_state()
             if had_committed_layout:
                 self._events.append(
                     GMSRuntimeEvent(
@@ -239,34 +247,76 @@ class GMS:
             if self.state != ServerState.RW:
                 raise AssertionError("RW state is not active")
 
-            allocations = self._allocations.list_allocations()
-            allocations_by_id = {info.allocation_id: info for info in allocations}
-            self._validate_metadata_integrity(allocations_by_id)
-            self._memory_layout_hash = self._compute_memory_layout_hash(allocations)
+            with self._profile.phase(
+                "commit_validation",
+                session=conn.profile_session_id,
+                count=len(self._metadata),
+            ):
+                allocations = self._allocations.list_allocations()
+                allocations_by_id = {info.allocation_id: info for info in allocations}
+                self._validate_metadata_integrity(allocations_by_id)
+            with self._profile.phase(
+                "commit_layout_hash",
+                session=conn.profile_session_id,
+                count=len(allocations),
+            ):
+                self._memory_layout_hash = self._compute_memory_layout_hash(allocations)
 
             logger.info(
                 "Committed layout with state hash: %s...",
                 self._memory_layout_hash[:16],
             )
-            self._sessions.on_commit(conn)
-            self._events.append(GMSRuntimeEvent(kind="committed"))
+            with self._profile.phase(
+                "commit_publication",
+                session=conn.profile_session_id,
+            ):
+                self._sessions.on_commit(conn)
+                self._events.append(GMSRuntimeEvent(kind="committed"))
             return CommitResponse(success=True), -1, True
 
         if msg_type is AllocateRequest:
             if self.state != ServerState.RW:
                 raise AssertionError("RW state is not active")
 
-            info = await self._allocations.allocate(
-                size=msg.size,
-                tag=msg.tag,
-                is_connected=is_connected,
-                on_oom=lambda: self._events.append(
-                    GMSRuntimeEvent(
-                        kind="allocation_oom",
-                        allocation_count=self._allocations.allocation_count,
-                    )
-                ),
-            )
+            if not self._profile.enabled:
+                info = await self._allocations.allocate(
+                    size=msg.size,
+                    tag=msg.tag,
+                    is_connected=is_connected,
+                    on_oom=lambda: self._events.append(
+                        GMSRuntimeEvent(
+                            kind="allocation_oom",
+                            allocation_count=self._allocations.allocation_count,
+                        )
+                    ),
+                )
+                return (
+                    AllocateResponse(
+                        allocation_id=info.allocation_id,
+                        size=info.size,
+                        aligned_size=info.aligned_size,
+                        layout_slot=info.layout_slot,
+                    ),
+                    -1,
+                    False,
+                )
+            with self._profile.aggregate(
+                "server_allocation_request_total",
+                byte_count=msg.size,
+                session=conn.profile_session_id,
+            ):
+                info = await self._allocations.allocate(
+                    size=msg.size,
+                    tag=msg.tag,
+                    is_connected=is_connected,
+                    on_oom=lambda: self._events.append(
+                        GMSRuntimeEvent(
+                            kind="allocation_oom",
+                            allocation_count=self._allocations.allocation_count,
+                        )
+                    ),
+                    session_id=conn.profile_session_id,
+                )
             return (
                 AllocateResponse(
                     allocation_id=info.allocation_id,
@@ -304,7 +354,10 @@ class GMS:
 
         if msg_type is ExportAllocationRequest:
             info = self._allocations.get_allocation(msg.allocation_id)
-            fd = self._allocations.export_allocation(info.allocation_id)
+            fd = self._allocations.export_allocation(
+                info.allocation_id,
+                session_id=conn.profile_session_id,
+            )
             return (
                 ExportAllocationResponse(
                     allocation_id=info.allocation_id,
@@ -367,13 +420,27 @@ class GMS:
             )
 
         if msg_type is MetadataPutRequest:
-            allocation = self._allocations.get_allocation(msg.allocation_id)
-            self._validate_metadata_target(allocation, msg.offset_bytes)
-            self._metadata[msg.key] = MetadataEntry(
-                allocation_id=allocation.allocation_id,
-                offset_bytes=msg.offset_bytes,
-                value=msg.value,
-            )
+            if not self._profile.enabled:
+                allocation = self._allocations.get_allocation(msg.allocation_id)
+                self._validate_metadata_target(allocation, msg.offset_bytes)
+                self._metadata[msg.key] = MetadataEntry(
+                    allocation_id=allocation.allocation_id,
+                    offset_bytes=msg.offset_bytes,
+                    value=msg.value,
+                )
+                return MetadataPutResponse(success=True), -1, False
+            with self._profile.aggregate(
+                "server_metadata_put",
+                byte_count=len(msg.key.encode()) + len(msg.value),
+                session=conn.profile_session_id,
+            ):
+                allocation = self._allocations.get_allocation(msg.allocation_id)
+                self._validate_metadata_target(allocation, msg.offset_bytes)
+                self._metadata[msg.key] = MetadataEntry(
+                    allocation_id=allocation.allocation_id,
+                    offset_bytes=msg.offset_bytes,
+                    value=msg.value,
+                )
             return MetadataPutResponse(success=True), -1, False
 
         if msg_type is MetadataGetRequest:

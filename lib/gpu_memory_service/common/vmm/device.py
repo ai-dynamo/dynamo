@@ -144,6 +144,22 @@ class VMMDevice(ABC):
         """Block until all work on ``stream`` completes."""
 
     @abstractmethod
+    def event_create(self):
+        """Create a timing event. Returns an opaque handle."""
+
+    @abstractmethod
+    def event_record(self, event, stream) -> None:
+        """Record ``event`` on ``stream``."""
+
+    @abstractmethod
+    def event_elapsed_ns(self, start_event, end_event) -> int:
+        """Return elapsed device time between two recorded events."""
+
+    @abstractmethod
+    def event_destroy(self, event) -> None:
+        """Destroy a timing event."""
+
+    @abstractmethod
     def memcpy_h2d_async(
         self,
         dst_ptr: int,

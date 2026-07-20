@@ -29,6 +29,12 @@ WORKDIR /workspace
 
 ENV DYNAMO_HOME=/opt/dynamo
 ENV HOME=/home/dynamo
+{% if target == "runtime" and device == "cuda" %}
+# Opt-in snapshot timing is an image-level setting so the injected GMS native
+# sidecar (which uses this same image) observes it without operator mutation.
+ARG GMS_SNAPSHOT_PROFILE=0
+ENV GMS_SNAPSHOT_PROFILE=${GMS_SNAPSHOT_PROFILE}
+{% endif %}
 {% if device != "cuda" %}
 ENV PATH=/usr/local/ucx/bin:/usr/local/bin/etcd:${PATH}
 {% else %}

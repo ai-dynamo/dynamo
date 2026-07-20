@@ -8,6 +8,7 @@ import json
 import os
 from typing import Any, Dict, Optional, Sequence, Tuple
 
+from gpu_memory_service.common.snapshot_profile import SnapshotProfile
 from gpu_memory_service.common.protocol.messages import GetAllocationResponse
 from gpu_memory_service.common.vmm import get_vmm
 from gpu_memory_service.snapshot.backends.pinned_host import (
@@ -28,18 +29,40 @@ class _NullLogger:
 _NULL_LOGGER = _NullLogger()
 
 
-def _write_all_from_view(fd: int, view: memoryview, file_path: str) -> None:
+def _write_all_from_view(
+    fd: int,
+    view: memoryview,
+    file_path: str,
+    profile: SnapshotProfile | None = None,
+    **profile_fields: Any,
+) -> None:
     """Write a memoryview to a file descriptor, retrying partial writes."""
     total = len(view)
     done = 0
-    while done < total:
-        written = os.write(fd, view[done:])
-        if written == 0:
-            raise RuntimeError(
-                f"Short write to {file_path}: expected "
-                f"{total - done} more bytes, wrote 0"
-            )
-        done += written
+    if profile is None or not profile.enabled:
+        while done < total:
+            written = os.write(fd, view[done:])
+            if written == 0:
+                raise RuntimeError(
+                    f"Short write to {file_path}: expected "
+                    f"{total - done} more bytes, wrote 0"
+                )
+            done += written
+        return
+
+    with profile.aggregate(
+        "file_write_cpu",
+        byte_count=total,
+        **profile_fields,
+    ):
+        while done < total:
+            written = os.write(fd, view[done:])
+            if written == 0:
+                raise RuntimeError(
+                    f"Short write to {file_path}: expected "
+                    f"{total - done} more bytes, wrote 0"
+                )
+            done += written
 
 
 class DeviceToFileWriter:
@@ -57,8 +80,12 @@ class DeviceToFileWriter:
         device: Optional[int] = None,
         buffers: int = _SAVE_COPY_BUFFERS,
         chunk_size: int = PINNED_COPY_CHUNK_SIZE,
+        profile: SnapshotProfile | None = None,
+        **profile_fields: Any,
     ) -> None:
         self._file_path = file_path
+        self._profile = profile
+        self._profile_fields = profile_fields
         buffers = int(buffers)
         chunk_size = int(chunk_size)
         if buffers <= 0:
@@ -67,8 +94,20 @@ class DeviceToFileWriter:
             raise ValueError("chunk_size must be positive")
         self._vmm = get_vmm()
         if device is not None:
-            self._vmm.runtime_set_device(device)
-        self._slots = make_pinned_copy_slots(self._vmm, buffers)
+            if profile is None:
+                self._vmm.runtime_set_device(device)
+            else:
+                with profile.aggregate(
+                    "save_worker_cuda_set_device",
+                    **profile_fields,
+                ):
+                    self._vmm.runtime_set_device(device)
+        self._slots = make_pinned_copy_slots(
+            self._vmm,
+            buffers,
+            profile=profile,
+            **profile_fields,
+        )
         self._slot_index = 0
         self._closed = False
         try:
@@ -98,7 +137,13 @@ class DeviceToFileWriter:
             slot.wait()
             chunk_view = slot.view[:chunk_size]
             try:
-                _write_all_from_view(self._fd, chunk_view, self._file_path)
+                _write_all_from_view(
+                    self._fd,
+                    chunk_view,
+                    self._file_path,
+                    self._profile,
+                    **self._profile_fields,
+                )
             finally:
                 chunk_view.release()
             done += chunk_size
@@ -158,32 +203,48 @@ def plan_shard_layout(
 
 def load_manifest_and_metadata(
     input_dir: str,
+    *,
+    profile: SnapshotProfile | None = None,
 ) -> Tuple[SaveManifest, Dict[str, Dict[str, Any]]]:
     manifest_path = os.path.join(input_dir, "manifest.json")
-    with open(manifest_path, encoding="utf-8") as handle:
-        manifest_payload = json.load(handle)
-    manifest = SaveManifest(
-        timestamp=manifest_payload["timestamp"],
-        layout_hash=manifest_payload["layout_hash"],
-        device=manifest_payload["device"],
-        allocations=[
-            AllocationEntry(**allocation)
-            for allocation in manifest_payload.get("allocations", [])
-        ],
-    )
+    profile = profile or SnapshotProfile("loader", enabled=False)
+    with profile.phase(
+        "manifest_file_read",
+        byte_count=os.path.getsize(manifest_path),
+    ):
+        with open(manifest_path, encoding="utf-8") as handle:
+            manifest_text = handle.read()
+    with profile.phase("manifest_parse"):
+        manifest_payload = json.loads(manifest_text)
+        manifest = SaveManifest(
+            timestamp=manifest_payload["timestamp"],
+            layout_hash=manifest_payload["layout_hash"],
+            device=manifest_payload["device"],
+            allocations=[
+                AllocationEntry(**allocation)
+                for allocation in manifest_payload.get("allocations", [])
+            ],
+        )
 
     metadata_path = os.path.join(input_dir, "gms_metadata.json")
     raw_meta: Dict[str, Any] = {}
     if os.path.exists(metadata_path):
-        with open(metadata_path, encoding="utf-8") as handle:
-            raw_meta = json.load(handle)
+        with profile.phase(
+            "metadata_file_read",
+            byte_count=os.path.getsize(metadata_path),
+        ):
+            with open(metadata_path, encoding="utf-8") as handle:
+                metadata_text = handle.read()
+        with profile.phase("metadata_parse"):
+            raw_meta = json.loads(metadata_text)
 
-    metadata = {
-        key: {
-            "allocation_id": entry["allocation_id"],
-            "offset_bytes": int(entry["offset_bytes"]),
-            "value": base64.b64decode(entry["value"]),
+    with profile.phase("metadata_decode", count=len(raw_meta)):
+        metadata = {
+            key: {
+                "allocation_id": entry["allocation_id"],
+                "offset_bytes": int(entry["offset_bytes"]),
+                "value": base64.b64decode(entry["value"]),
+            }
+            for key, entry in raw_meta.items()
         }
-        for key, entry in raw_meta.items()
-    }
     return manifest, metadata
