@@ -3,7 +3,10 @@
 
 use std::{sync::Arc, time::Duration};
 
-use dynamo_kv_router::protocols::{TokensWithHashes, WorkerWithDpRank};
+use dynamo_kv_router::{
+    protocols::{TokensWithHashes, WorkerWithDpRank},
+    scheduling::AdmissionSession,
+};
 use dynamo_runtime::{
     error::{ErrorType, match_error_chain},
     metrics::frontend_perf::{STAGE_ROUTE, StageGuard},
@@ -151,14 +154,12 @@ impl KvPushRouter {
     ) -> Result<WorkerSelection, Error> {
         let context_id = request.context().id().to_string();
         let policy_class = request.metadata().get("policy-class").cloned();
-        let session_id = request
-            .agent_context
-            .as_ref()
-            .map(|context| context.session_id.clone());
-        let session_final = request
-            .agent_context
-            .as_ref()
-            .is_some_and(|context| context.session_final == Some(true));
+        let admission_session = request.agent_context.as_ref().map(|context| {
+            AdmissionSession::new(
+                context.session_id.clone(),
+                context.session_final == Some(true),
+            )
+        });
         let routing_parts = RoutingRequestParts::new(request);
         let request_context = request.context().clone();
         let selection_future = self
@@ -171,8 +172,7 @@ impl KvPushRouter {
                 SelectionOptions {
                     affinity_worker,
                     policy_class,
-                    session_id,
-                    session_final,
+                    admission_session,
                 },
             )
             .instrument(tracing::info_span!("kv_router.select_worker"));
@@ -723,7 +723,7 @@ mod tests {
     struct RecordingAdmissionPolicy(Arc<Mutex<Vec<AdmissionEvent>>>);
 
     impl PolicyClassAdmissionPolicy for RecordingAdmissionPolicy {
-        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
+        fn admit(&mut self, _request: AdmissionRequest) -> AdmissionDecision {
             AdmissionDecision::Ready(WorkerPlacement::Any)
         }
 
@@ -809,8 +809,7 @@ mod tests {
                     priority_jump: 0.0,
                     strict_priority: 0,
                     policy_class: None,
-                    session_id: None,
-                    session_final: false,
+                    admission_session: None,
                     overlap: OverlapSignals::default(),
                     shared_cache_hits: None,
                 })

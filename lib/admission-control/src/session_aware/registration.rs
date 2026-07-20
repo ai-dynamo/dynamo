@@ -130,7 +130,7 @@ mod tests {
     struct CustomPolicy;
 
     impl PolicyClassAdmissionPolicy for CustomPolicy {
-        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
+        fn admit(&mut self, _request: AdmissionRequest) -> AdmissionDecision {
             AdmissionDecision::Ready(WorkerPlacement::Any)
         }
     }

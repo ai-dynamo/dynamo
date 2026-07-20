@@ -268,8 +268,7 @@ where
             priority_jump,
             strict_priority,
             policy_class,
-            session_id,
-            session_final,
+            admission_session,
             overlap,
             shared_cache_hits,
         } = request;
@@ -287,8 +286,7 @@ where
             priority_jump,
             strict_priority,
             policy_class,
-            session_id,
-            session_final,
+            admission_session,
             overlap,
             shared_cache_hits,
             worker_loads: FxHashMap::default(),
@@ -445,8 +443,7 @@ where
             priority_jump,
             strict_priority,
             policy_class,
-            session_id: None,
-            session_final: false,
+            admission_session: None,
             expected_output_tokens,
             pinned_worker,
             allowed_worker_ids,
@@ -848,8 +845,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
-            session_id: None,
-            session_final: false,
+            admission_session: None,
             overlap: OverlapSignals::default(),
             shared_cache_hits: None,
         }
@@ -1401,7 +1397,7 @@ mod tests {
     struct AbortCountingPolicy(Arc<AtomicUsize>);
 
     impl PolicyClassAdmissionPolicy for AbortCountingPolicy {
-        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
+        fn admit(&mut self, _request: AdmissionRequest) -> AdmissionDecision {
             AdmissionDecision::Ready(WorkerPlacement::Any)
         }
 
@@ -1416,7 +1412,7 @@ mod tests {
     struct DeferredAbortCountingPolicy(Arc<AtomicUsize>);
 
     impl PolicyClassAdmissionPolicy for DeferredAbortCountingPolicy {
-        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
+        fn admit(&mut self, _request: AdmissionRequest) -> AdmissionDecision {
             AdmissionDecision::Defer
         }
 

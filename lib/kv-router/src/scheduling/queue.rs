@@ -20,6 +20,8 @@ use super::overlap_refresh::{
 use super::policy_config::{PolicyClassConfig, PolicyProfile};
 use super::policy_queue::{PolicyQueue, QueueSnapshot};
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
+#[cfg(test)]
+use super::queue_admission::AdmissionSession;
 use super::queue_admission::{
     AdmissionAction, AdmissionDecision, AdmissionTicket, ClassAdmissionAction,
     PolicyClassAdmissionPolicies, RequestProgressUpdater, WorkerEligibility,
@@ -848,8 +850,7 @@ impl<
             self.pending
                 .admit(
                     admission_class_index,
-                    request.session_id.as_deref(),
-                    request.session_final,
+                    request.admission_session.take(),
                     request.isl_tokens,
                     worker_eligibility,
                 )
@@ -2257,8 +2258,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
-            session_id: None,
-            session_final: false,
+            admission_session: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -2303,8 +2303,7 @@ mod tests {
     #[derive(Default)]
     struct GateState {
         deferred: Option<AdmissionId>,
-        session_id: Option<String>,
-        session_final: bool,
+        session: Option<AdmissionSession>,
         context_tokens: usize,
         progress: Option<RequestProgress>,
         dispatched: Vec<WorkerWithDpRank>,
@@ -2317,11 +2316,10 @@ mod tests {
     }
 
     impl PolicyClassAdmissionPolicy for ReconcileGate {
-        fn admit(&mut self, request: AdmissionRequest<'_>) -> AdmissionDecision {
+        fn admit(&mut self, request: AdmissionRequest) -> AdmissionDecision {
             let mut state = self.state.lock().unwrap();
             state.deferred = Some(request.id());
-            state.session_id = request.session_id().map(str::to_owned);
-            state.session_final = request.session_final();
+            state.session = request.session().cloned();
             state.context_tokens = request.context_tokens();
             state.progress = Some(request.progress().clone());
             AdmissionDecision::Defer
@@ -2455,15 +2453,15 @@ policy_classes:
         }));
         let (mut request, response) = make_admission_request("deferred", 64);
         request.policy_class = Some("agents".to_owned());
-        request.session_id = Some("session-a".to_owned());
-        request.session_final = true;
+        request.admission_session = Some(AdmissionSession::new("session-a", true));
 
         let mut lease = enqueue_with_lease(&queue, request).await;
         assert_eq!(queue.pending_count(), 1);
         {
             let state = state.lock().unwrap();
-            assert_eq!(state.session_id.as_deref(), Some("session-a"));
-            assert!(state.session_final);
+            let session = state.session.as_ref().unwrap();
+            assert_eq!(session.session_id(), "session-a");
+            assert!(session.is_final_request());
             assert_eq!(state.context_tokens, 64);
             assert!(state.dispatched.is_empty());
         }
@@ -2505,7 +2503,7 @@ policy_classes:
         }));
         let (mut request, response) = make_admission_request("cancelled", 64);
         request.policy_class = Some("agents".to_owned());
-        request.session_id = Some("session-a".to_owned());
+        request.admission_session = Some(AdmissionSession::new("session-a", false));
 
         let cancellation = enqueue_with_lease(&queue, request).await;
         drop(response);
@@ -2523,7 +2521,7 @@ policy_classes:
     }
 
     impl PolicyClassAdmissionPolicy for ReadyGate {
-        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
+        fn admit(&mut self, _request: AdmissionRequest) -> AdmissionDecision {
             AdmissionDecision::Ready(WorkerPlacement::Any)
         }
 
@@ -2544,7 +2542,7 @@ policy_classes:
     struct ExactReadyGate(WorkerWithDpRank);
 
     impl PolicyClassAdmissionPolicy for ExactReadyGate {
-        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
+        fn admit(&mut self, _request: AdmissionRequest) -> AdmissionDecision {
             AdmissionDecision::Ready(WorkerPlacement::Exact(self.0))
         }
     }
@@ -2552,7 +2550,7 @@ policy_classes:
     struct OrderedLifecycleGate(Arc<StdMutex<Vec<&'static str>>>);
 
     impl PolicyClassAdmissionPolicy for OrderedLifecycleGate {
-        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
+        fn admit(&mut self, _request: AdmissionRequest) -> AdmissionDecision {
             AdmissionDecision::Ready(WorkerPlacement::Any)
         }
 
@@ -2753,7 +2751,7 @@ policy_classes:
     }
 
     impl PolicyClassAdmissionPolicy for BypassGate {
-        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
+        fn admit(&mut self, _request: AdmissionRequest) -> AdmissionDecision {
             AdmissionDecision::Bypass
         }
 
@@ -2867,7 +2865,7 @@ policy_classes:
     }
 
     impl PolicyClassAdmissionPolicy for FinishReleaseGate {
-        fn admit(&mut self, request: AdmissionRequest<'_>) -> AdmissionDecision {
+        fn admit(&mut self, request: AdmissionRequest) -> AdmissionDecision {
             if self.first.is_none() {
                 self.first = Some(request.id());
                 AdmissionDecision::Ready(WorkerPlacement::Any)
@@ -2929,7 +2927,7 @@ policy_classes:
     }
 
     impl PolicyClassAdmissionPolicy for PreservePinGate {
-        fn admit(&mut self, request: AdmissionRequest<'_>) -> AdmissionDecision {
+        fn admit(&mut self, request: AdmissionRequest) -> AdmissionDecision {
             if self.deferred.is_none() {
                 self.deferred = Some(request.id());
                 AdmissionDecision::Defer

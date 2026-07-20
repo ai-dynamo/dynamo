@@ -18,7 +18,7 @@ use crate::protocols::{
     WorkerWithDpRank,
 };
 use crate::scheduling::policy_queue::QueueRejection;
-use crate::scheduling::queue_admission::RequestProgressUpdater;
+use crate::scheduling::queue_admission::{AdmissionSession, RequestProgressUpdater};
 use crate::sequences::WorkerLoadProjection;
 
 pub type OverloadedWorkerProvider =
@@ -160,8 +160,7 @@ pub struct ScheduleRequest {
     pub priority_jump: f64,
     pub strict_priority: u32,
     pub policy_class: Option<String>,
-    pub session_id: Option<String>,
-    pub session_final: bool,
+    pub admission_session: Option<AdmissionSession>,
     pub overlap: OverlapSignals,
     pub shared_cache_hits: Option<SharedCacheHits>,
 }
@@ -188,8 +187,7 @@ pub struct SchedulingRequest {
     pub priority_jump: f64,
     pub strict_priority: u32,
     pub policy_class: Option<String>,
-    pub session_id: Option<String>,
-    pub session_final: bool,
+    pub admission_session: Option<AdmissionSession>,
 
     // Overlap and cache signals.
     pub overlap: OverlapSignals,

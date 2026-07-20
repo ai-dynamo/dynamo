@@ -18,8 +18,8 @@ use crate::protocols::{
 use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::selector::DefaultWorkerSelector;
 use crate::scheduling::{
-    KvSchedulerError, LocalScheduler, OverlapAnalysis, OverlapSignals, PotentialLoad, ScheduleMode,
-    ScheduleRequest, TieredOverlapRefresher, effective_prefill_tokens,
+    AdmissionSession, KvSchedulerError, LocalScheduler, OverlapAnalysis, OverlapSignals,
+    PotentialLoad, ScheduleMode, ScheduleRequest, TieredOverlapRefresher, effective_prefill_tokens,
     prefill_load_hint_from_effective_tokens,
 };
 use crate::sequences::{
@@ -728,8 +728,7 @@ impl SelectionCore {
             priority_jump,
             strict_priority,
             policy_class,
-            session_id,
-            session_final: false,
+            admission_session: session_id.map(|id| AdmissionSession::new(id, false)),
             expected_output_tokens,
             pinned_worker,
             allowed_worker_ids,

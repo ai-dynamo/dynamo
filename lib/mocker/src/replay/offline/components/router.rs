@@ -14,8 +14,8 @@ use dynamo_kv_router::protocols::{
 };
 use dynamo_kv_router::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::scheduling::{
-    OverlapSignals, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueSnapshot, ScheduleMode,
-    WorkerPlacement,
+    AdmissionSession, OverlapSignals, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueSnapshot,
+    ScheduleMode, WorkerPlacement,
 };
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::{
@@ -178,8 +178,10 @@ impl PendingRequest {
             priority_jump: self.priority_jump,
             strict_priority: self.strict_priority,
             policy_class: self.policy_class.clone(),
-            session_id: self.session_id.clone(),
-            session_final: false,
+            admission_session: self
+                .session_id
+                .clone()
+                .map(|id| AdmissionSession::new(id, false)),
             expected_output_tokens: self.expected_output_tokens,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -704,12 +706,12 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use dynamo_kv_router::PrefillLoadEstimator;
     use dynamo_kv_router::config::{KvRouterConfig, RouterPrefillLoadModel, RouterQueuePolicy};
     use dynamo_kv_router::protocols::{
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
         KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier, WorkerId,
     };
+    use dynamo_kv_router::{PrefillLoadEstimator, scheduling::AdmissionSession};
     use rustc_hash::FxHashMap;
     use uuid::Uuid;
 
@@ -839,7 +841,13 @@ mod tests {
             .unwrap();
         let scheduling_request = pending.scheduling_request(64, FxHashMap::default());
 
-        assert_eq!(scheduling_request.session_id.as_deref(), Some("session-a"));
+        assert_eq!(
+            scheduling_request
+                .admission_session
+                .as_ref()
+                .map(AdmissionSession::session_id),
+            Some("session-a")
+        );
     }
 
     #[test]

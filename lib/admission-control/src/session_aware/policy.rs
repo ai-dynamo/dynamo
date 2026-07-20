@@ -200,22 +200,24 @@ impl<P: WorkerCapacityProvider> SessionAwareAdmissionControl<P> {
         })
     }
 
-    fn admit_request(&mut self, request: AdmissionRequest<'_>) -> AdmissionDecision {
-        let Some(session_id) = request.session_id() else {
+    fn admit_request(&mut self, mut request: AdmissionRequest) -> AdmissionDecision {
+        let Some(session) = request.take_session() else {
             return AdmissionDecision::Bypass;
         };
+        let session_final = session.is_final_request();
+        let session_id = session.into_session_id();
 
         let now = Instant::now();
         let id = request.id();
         let session_is_busy = self
             .sessions
-            .get(session_id)
+            .get(session_id.as_str())
             .is_some_and(|requests| requests.current.is_some());
         self.requests.insert(
             id,
             RequestState {
-                session_id: session_id.to_owned(),
-                session_final: request.session_final(),
+                session_id: session_id.clone(),
+                session_final,
                 progress: request.progress().clone(),
                 worker_eligibility: request.worker_eligibility().clone(),
                 prior: None,
@@ -223,14 +225,14 @@ impl<P: WorkerCapacityProvider> SessionAwareAdmissionControl<P> {
         );
         if session_is_busy {
             self.sessions
-                .get_mut(session_id)
+                .get_mut(session_id.as_str())
                 .expect("busy session must exist")
                 .waiting
                 .insert(id);
             return AdmissionDecision::Defer;
         }
 
-        self.begin_request(id, session_id, now)
+        self.begin_request(id, &session_id, now)
     }
 
     fn begin_request(
@@ -1157,7 +1159,7 @@ impl<P: WorkerCapacityProvider> SessionAwareAdmissionControl<P> {
 }
 
 impl<P: WorkerCapacityProvider> PolicyClassAdmissionPolicy for SessionAwareAdmissionControl<P> {
-    fn admit(&mut self, request: AdmissionRequest<'_>) -> AdmissionDecision {
+    fn admit(&mut self, request: AdmissionRequest) -> AdmissionDecision {
         self.admit_request(request)
     }
 
@@ -1224,30 +1226,25 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+    use dynamo_kv_router::scheduling::AdmissionSession;
 
     fn worker(id: u64) -> WorkerWithDpRank {
         WorkerWithDpRank::new(id, 0)
     }
 
-    fn request(id: u64, session_id: Option<&str>, context_tokens: usize) -> AdmissionRequest<'_> {
+    fn request(id: u64, session_id: Option<&str>, context_tokens: usize) -> AdmissionRequest {
         AdmissionRequest::new(
             AdmissionId::new(id),
-            session_id,
-            false,
+            session_id.map(|id| AdmissionSession::new(id, false)),
             context_tokens,
             WorkerEligibility::new(|| WorkerEligibilitySnapshot::new([worker(1), worker(2)])),
         )
     }
 
-    fn final_request(
-        id: u64,
-        session_id: Option<&str>,
-        context_tokens: usize,
-    ) -> AdmissionRequest<'_> {
+    fn final_request(id: u64, session_id: Option<&str>, context_tokens: usize) -> AdmissionRequest {
         AdmissionRequest::new(
             AdmissionId::new(id),
-            session_id,
-            true,
+            session_id.map(|id| AdmissionSession::new(id, true)),
             context_tokens,
             WorkerEligibility::new(|| WorkerEligibilitySnapshot::new([worker(1), worker(2)])),
         )
@@ -1258,11 +1255,10 @@ mod tests {
         session_id: Option<&str>,
         context_tokens: usize,
         eligible_workers: impl Fn() -> Vec<WorkerWithDpRank> + Send + Sync + 'static,
-    ) -> AdmissionRequest<'_> {
+    ) -> AdmissionRequest {
         AdmissionRequest::new(
             AdmissionId::new(id),
-            session_id,
-            false,
+            session_id.map(|id| AdmissionSession::new(id, false)),
             context_tokens,
             WorkerEligibility::new(move || WorkerEligibilitySnapshot::new(eligible_workers())),
         )
@@ -1273,11 +1269,10 @@ mod tests {
         session_id: Option<&str>,
         context_tokens: usize,
         workers: impl Fn() -> (Vec<WorkerWithDpRank>, Vec<WorkerWithDpRank>) + Send + Sync + 'static,
-    ) -> AdmissionRequest<'_> {
+    ) -> AdmissionRequest {
         AdmissionRequest::new(
             AdmissionId::new(id),
-            session_id,
-            false,
+            session_id.map(|id| AdmissionSession::new(id, false)),
             context_tokens,
             WorkerEligibility::new(move || {
                 let (structural, available) = workers();
