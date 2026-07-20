@@ -139,6 +139,7 @@ impl EndpointConfigBuilder {
         let metrics_labels: Option<Vec<(&str, &str)>> = metrics_labels
             .as_ref()
             .map(|v| v.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect());
+        handler.set_response_mux_client(endpoint.drt().response_mux_client())?;
         // Add metrics to the handler. The endpoint provides additional information to the handler.
         handler.add_metrics(&endpoint, metrics_labels.as_deref())?;
 

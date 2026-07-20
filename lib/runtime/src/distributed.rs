@@ -50,6 +50,7 @@ pub struct DistributedRuntime {
     nats_client: Option<transports::nats::Client>,
     network_manager: Arc<NetworkManager>,
     tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
+    response_mux_client: Arc<crate::pipeline::network::tcp::mux::client::ResponseMuxClientPool>,
     system_status_server: Arc<OnceLock<Arc<system_status_server::SystemStatusServerInfo>>>,
     request_plane: RequestPlaneMode,
 
@@ -193,11 +194,20 @@ impl DistributedRuntime {
             request_plane,
         );
 
+        let response_mux_config =
+            crate::pipeline::network::tcp::mux::initialize_response_mux_config()?;
+        let response_mux_client =
+            crate::pipeline::network::tcp::mux::client::ResponseMuxClientPool::new(
+                runtime.child_token(),
+                response_mux_config,
+            );
+
         let distributed_runtime = Self {
             runtime,
             network_manager: Arc::new(network_manager),
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
+            response_mux_client,
             system_status_server: Arc::new(OnceLock::new()),
             discovery_client,
             discovery_metadata,
@@ -212,6 +222,8 @@ impl DistributedRuntime {
             metadata_artifacts: crate::metadata_registry::MetadataArtifactRegistry::new(),
             event_transport_kind,
         };
+
+        crate::metrics::response_mux::ensure_registered(&distributed_runtime.metrics_registry);
 
         // Initialize the uptime gauge in SystemHealth
         distributed_runtime
@@ -398,6 +410,12 @@ impl DistributedRuntime {
             })
             .await?
             .clone())
+    }
+
+    pub fn response_mux_client(
+        &self,
+    ) -> Arc<crate::pipeline::network::tcp::mux::client::ResponseMuxClientPool> {
+        self.response_mux_client.clone()
     }
 
     /// Get the network manager

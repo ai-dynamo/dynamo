@@ -473,7 +473,7 @@ where
         // response-stream open subsequently fails, the forwarder task
         // spawned below exits cleanly when `frame_tx.send` observes the
         // dropped `frame_rx`.
-        let request_stream_recv = tcp::client::TcpClient::create_request_stream(
+        let mut request_stream_recv = tcp::client::TcpClient::create_request_stream(
             context_arc.clone(),
             req_stream_conn_info,
             None,
@@ -496,8 +496,7 @@ where
         let forwarder_ctx = context_arc.clone();
         let payload_adapter = self.payload_adapter.clone();
         tokio::spawn(async move {
-            let mut rx = request_stream_recv.rx;
-            while let Some(bytes) = rx.recv().await {
+            while let Some(bytes) = request_stream_recv.recv().await {
                 // Stop forwarding on either kill or soft-stop, matching the
                 // send-side `spawn_request_stream_forwarder`. Without the
                 // `stopped()` check, a `stop_generating()` would leave this
@@ -596,23 +595,35 @@ where
             WORK_HANDLER_NETWORK_TRANSIT_SECONDS.observe(transit_ns as f64 / 1_000_000_000.0);
         }
 
-        // todo - eventually have a handler class which will returned an abstracted object, but for now,
-        // we only support tcp here, so we can just unwrap the connection info
         tracing::trace!("creating tcp response stream");
-        let mut publisher = tcp::client::TcpClient::create_response_stream(
-            request.context(),
-            response_connection_info,
-            self.metrics().map(|m| m.cancellation_total.clone()),
-        )
-        .await
-        .map_err(|e| {
-            if let Some(m) = self.metrics() {
-                m.error_counter
-                    .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
-                    .inc();
+        let mut publisher =
+            if response_connection_info.transport == tcp::TCP_RESPONSE_MUX_TRANSPORT {
+                self.response_mux_client
+                    .get()
+                    .ok_or_else(|| {
+                        PipelineError::Generic(
+                            "response mux client was not initialized for endpoint ingress"
+                                .to_string(),
+                        )
+                    })?
+                    .create_response_stream(request.context(), response_connection_info)
+                    .await
+            } else {
+                tcp::client::TcpClient::create_response_stream(
+                    request.context(),
+                    response_connection_info,
+                    self.metrics().map(|m| m.cancellation_total.clone()),
+                )
+                .await
             }
-            PipelineError::Generic(format!("Failed to create response stream: {e}"))
-        })?;
+            .map_err(|e| {
+                if let Some(m) = self.metrics() {
+                    m.error_counter
+                        .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
+                        .inc();
+                }
+                PipelineError::Generic(format!("Failed to create response stream: {e}"))
+            })?;
 
         tracing::trace!("calling generate");
         let stream = self
@@ -662,6 +673,9 @@ where
 
         self.pump_response_stream(stream, &publisher, payload_codec)
             .await;
+        publisher.finish().await.map_err(|err| {
+            PipelineError::Generic(format!("Failed to finish response stream: {err}"))
+        })?;
 
         // Ensure the metrics guard is not dropped until the end of the function.
         // Drop fires "request completed" log via RAII.
@@ -694,6 +708,15 @@ where
         Ok(())
     }
 
+    fn set_response_mux_client(
+        &self,
+        client: Arc<tcp::mux::client::ResponseMuxClientPool>,
+    ) -> Result<()> {
+        self.response_mux_client
+            .set(client)
+            .map_err(|_| anyhow::anyhow!("Response mux client already set"))
+    }
+
     async fn handle_payload(
         &self,
         payload: Bytes,
@@ -724,6 +747,15 @@ where
             .set(notifier)
             .map_err(|_| anyhow::anyhow!("Endpoint health check notifier already set"))?;
         Ok(())
+    }
+
+    fn set_response_mux_client(
+        &self,
+        client: Arc<tcp::mux::client::ResponseMuxClientPool>,
+    ) -> Result<()> {
+        self.response_mux_client
+            .set(client)
+            .map_err(|_| anyhow::anyhow!("Response mux client already set"))
     }
 
     async fn handle_payload(
