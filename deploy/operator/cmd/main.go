@@ -145,7 +145,7 @@ func createScalesGetter(mgr ctrl.Manager) (scale.ScalesGetter, error) {
 func initCRDSchemes() {
 	utilruntime.Must(clientgoscheme.AddToScheme(crdScheme))
 
-	utilruntime.Must(dynamoapi.Install(crdScheme))
+	dynamoapi.Install(crdScheme)
 
 	utilruntime.Must(lwsscheme.AddToScheme(crdScheme))
 
@@ -164,7 +164,7 @@ func initCRDSchemes() {
 }
 
 func initConfigScheme() {
-	utilruntime.Must(configapi.Install(configScheme))
+	configapi.Install(configScheme)
 }
 
 // +kubebuilder:rbac:groups=authentication.k8s.io,resources=tokenreviews,verbs=create
