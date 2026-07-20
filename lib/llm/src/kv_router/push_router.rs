@@ -214,7 +214,6 @@ impl KvPushRouter {
             Ok(selection) => Ok((selection, Some(operation))),
             Err(error) if is_cancelled(&error) => Err(error),
             Err(_) if operation.target().is_some() && explicit.is_none() => {
-                operation.trace_bound_target_fallback_rebind();
                 operation.invalidate();
                 let retry = affinity
                     .acquire_with_context(&session_id, None, request_context.as_ref())
@@ -476,7 +475,7 @@ impl KvPushRouter {
         };
         Ok((
             metadata,
-            operation.into_stream(selected_target, phase, stream)?,
+            operation.into_stream(selected_target, stream)?,
         ))
     }
 }
@@ -587,7 +586,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             }
         };
         match operation {
-            Some(operation) => operation.into_stream(selected_target, phase, stream),
+            Some(operation) => operation.into_stream(selected_target, stream),
             None => Ok(stream),
         }
     }

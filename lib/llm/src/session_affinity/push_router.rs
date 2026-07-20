@@ -127,7 +127,6 @@ impl SessionAffinityPushRouter {
             return Ok(operation);
         }
 
-        operation.trace_bound_target_fallback_rebind();
         operation.invalidate();
         affinity
             .acquire_with_context(session_id, explicit, request_context)
@@ -239,7 +238,7 @@ impl SessionAffinityPushRouter {
                 return Err(error);
             }
         };
-        let stream = operation.into_stream(target, RequestPhase::Prefill, stream)?;
+        let stream = operation.into_stream(target, stream)?;
         Self::record_target(tracker.as_deref(), target);
         Ok((metadata, stream))
     }
@@ -359,7 +358,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LlmResponse>, Error>
                 return Err(error);
             }
         };
-        let stream = operation.into_stream(target, phase, stream)?;
+        let stream = operation.into_stream(target, stream)?;
         Self::record_target(tracker.as_deref(), target);
         Ok(stream)
     }
