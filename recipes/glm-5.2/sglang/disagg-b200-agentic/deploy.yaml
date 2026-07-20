@@ -76,6 +76,7 @@ data:
     speculative-num-draft-tokens: 4
     speculative-attention-mode: decode
     max-running-requests: 256
+    watchdog-timeout: 3600
     cuda-graph-max-bs: 256
     mem-fraction-static: 0.87
     enable-metrics: true
@@ -114,7 +115,7 @@ spec:
                       fieldPath: metadata.uid
                 - name: DYN_ROUTER_MODE
                   value: kv
-              image: nvcr.io/nvstaging/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1-rc.0
+              image: nvcr.io/nvstaging/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1
               imagePullPolicy: Always
               resources: {}
       replicas: 1
@@ -151,7 +152,8 @@ spec:
                   exec python3 -m dynamo.sglang \
                     --config /etc/sglang/prefill.yaml \
                     --dyn-tool-call-parser glm47 \
-                    --dyn-reasoning-parser glm45
+                    --dyn-reasoning-parser glm45 \
+                    --reasoning-parser glm45
               env:
                 - name: POD_UID
                   valueFrom:
@@ -159,6 +161,8 @@ spec:
                       fieldPath: metadata.uid
                 - name: HF_HOME
                   value: /model-cache
+                - name: DYN_SGL_ALLOW_TOP_LOGPROBS
+                  value: "1"
                 - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
                   value: UCX
                 - name: UCX_TLS
@@ -166,7 +170,7 @@ spec:
               envFrom:
                 - secretRef:
                     name: hf-token-secret
-              image: nvcr.io/nvstaging/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1-rc.0
+              image: nvcr.io/nvstaging/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1
               imagePullPolicy: Always
               resources:
                 requests:
@@ -244,7 +248,8 @@ spec:
                   exec python3 -m dynamo.sglang \
                     --config /etc/sglang/decode.yaml \
                     --dyn-tool-call-parser glm47 \
-                    --dyn-reasoning-parser glm45
+                    --dyn-reasoning-parser glm45 \
+                    --reasoning-parser glm45
               env:
                 - name: POD_UID
                   valueFrom:
@@ -252,6 +257,8 @@ spec:
                       fieldPath: metadata.uid
                 - name: HF_HOME
                   value: /model-cache
+                - name: DYN_SGL_ALLOW_TOP_LOGPROBS
+                  value: "1"
                 # Synthetic MTP acceptance length for performance benchmarking.
                 # - name: SGLANG_SIMULATE_ACC_LEN
                 #   value: "2.69"
@@ -268,7 +275,7 @@ spec:
               envFrom:
                 - secretRef:
                     name: hf-token-secret
-              image: nvcr.io/nvstaging/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1-rc.0
+              image: nvcr.io/nvstaging/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1
               imagePullPolicy: Always
               resources:
                 requests:

@@ -36,8 +36,9 @@ The benchmark replays a
 `--custom-dataset-type mooncake_trace`. Each JSONL line describes one request
 with `input_length`, `output_length`, and `hash_ids`.
 
-The recipe reuses the 15% agentic trace from the Kimi-K2.6 recipe via a
-symlink under [`traces`](traces):
+This recipe benchmarks the same 64K-ISL / 400-OSL / 90%-KV-reuse agentic trace
+shared across the agentic recipes, so rather than duplicate the Git-LFS blob it
+is referenced from the Kimi-K2.6 recipe via a symlink under [`traces`](traces):
 
 ```text
 traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl

@@ -111,5 +111,5 @@ Modified Mooncake traces are provided to showcase the value of KV-aware routing 
 
 - B200 recipes support up to 500K context lengths. The full 1M context length is not supported out of the box.
 - H200 recipes support up to 250K context lengths.
-- Structured decoding requires reasoning to be disabled (`"chat_template_kwargs": {"enable_thinking": false}`) for the output to be populated in the `content` field instead of the `reasoning_content` field.
+- Structured decoding works with reasoning enabled: the generated JSON is populated in the `content` field and the chain-of-thought in `reasoning_content`. This requires both `--dyn-reasoning-parser glm45` (frontend) and `--reasoning-parser glm45` (engine), which the recipes set.
 - `n>1` requests are not supported with the disaggregated recipe

@@ -123,7 +123,7 @@ spec:
                       fieldPath: metadata.uid
                 - name: DYN_ROUTER_MODE
                   value: kv
-              image: nvcr.io/nvstaging/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1-rc.0
+              image: nvcr.io/nvstaging/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1
               imagePullPolicy: Always
               resources: {}
       replicas: 1
@@ -160,7 +160,8 @@ spec:
                   exec python3 -m dynamo.sglang \
                     --config /etc/sglang/prefill.yaml \
                     --dyn-tool-call-parser glm47 \
-                    --dyn-reasoning-parser glm45
+                    --dyn-reasoning-parser glm45 \
+                    --reasoning-parser glm45
               env:
                 - name: POD_UID
                   valueFrom:
@@ -168,6 +169,8 @@ spec:
                       fieldPath: metadata.uid
                 - name: HF_HOME
                   value: /model-cache
+                - name: DYN_SGL_ALLOW_TOP_LOGPROBS
+                  value: "1"
                 - name: PYTHONUNBUFFERED
                   value: "1"
                 - name: DYN_FORWARDPASS_METRIC_PORT
@@ -179,7 +182,7 @@ spec:
               envFrom:
                 - secretRef:
                     name: hf-token-secret
-              image: nvcr.io/nvstaging/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1-rc.0
+              image: nvcr.io/nvstaging/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1
               imagePullPolicy: Always
               resources:
                 requests:
@@ -266,7 +269,8 @@ spec:
                   exec python3 -m dynamo.sglang \
                     --config /etc/sglang/decode.yaml \
                     --dyn-tool-call-parser glm47 \
-                    --dyn-reasoning-parser glm45
+                    --dyn-reasoning-parser glm45 \
+                    --reasoning-parser glm45
               env:
                 - name: POD_UID
                   valueFrom:
@@ -274,6 +278,8 @@ spec:
                       fieldPath: metadata.uid
                 - name: HF_HOME
                   value: /model-cache
+                - name: DYN_SGL_ALLOW_TOP_LOGPROBS
+                  value: "1"
                 - name: PYTHONUNBUFFERED
                   value: "1"
                 - name: DYN_FORWARDPASS_METRIC_PORT
@@ -294,7 +300,7 @@ spec:
               envFrom:
                 - secretRef:
                     name: hf-token-secret
-              image: nvcr.io/nvstaging/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1-rc.0
+              image: nvcr.io/nvstaging/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1
               imagePullPolicy: Always
               resources:
                 requests:
