@@ -430,6 +430,8 @@ navigation:
             contents:
               - page: Routing Concepts
                 path: components/router/router-concepts.md
+              - page: Multi-DC KV Routing and the DC Relay
+                path: components/router/multi-dc-kv-routing.md
               - page: Configuration and Tuning
                 path: components/router/router-configuration.md
               - page: Deficit Round Robin Queue Scheduling
