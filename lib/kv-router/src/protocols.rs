@@ -626,7 +626,7 @@ pub struct ActiveSequenceEvent {
     pub lora_name: Option<String>,
 }
 
-/// Ordered active-sequence lifecycle events carried by one replica-sync message.
+/// Active-sequence lifecycle events carried in publisher-queue arrival order.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ActiveSequenceEventBatch {
     pub events: Vec<ActiveSequenceEvent>,
