@@ -182,7 +182,6 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
                 busy_threshold=self.conditional_disagg_prefill_busy_threshold,
                 queue_threshold=self.router_queue_threshold,
             )
-        self.apply_admission_control()
         self.validate_rejection_thresholds()
         self.log_rejection_thresholds()
 
