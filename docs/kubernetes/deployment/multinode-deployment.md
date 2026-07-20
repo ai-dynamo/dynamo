@@ -264,7 +264,6 @@ For multi-node tensor/pipeline parallelism, **the `mp` (multiprocessing) backend
 **For Elastic EP (Data Parallel with Ray):**
 1. Ensure Ray is installed in your container: `pip install "ray>=2.55.0"`
 2. Add `--data-parallel-backend ray` to your vLLM launch command.
-3. See [`examples/backends/vllm/launch/elastic_ep.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/elastic_ep.sh) for a complete example.
 
 
 The `mp` backend is the official recommendation and should be used for all new deployments.
