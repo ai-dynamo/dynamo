@@ -19,7 +19,7 @@ Known limitations) are **shared** and linked from both.
 | Model | Size | Recommended picks | README |
 |---|---|---|---|
 | **DeepSeek-V4-Pro** | 1.6T / 49B active · 1M ctx | B200 → `disagg-b200-agentic` · H200 → `agg-h200-agentic` | [`deepseek-v4-pro/`](deepseek-v4-pro/) |
-| **DeepSeek-V4-Flash** | 284B / 13B active | B200 → `disagg-b200-agentic` (4P2D) · H200 → `disagg-h200-agentic` (4P3D) | [`deepseek-v4-flash/`](deepseek-v4-flash/) |
+| **DeepSeek-V4-Flash** | 284B / 13B active | B200 → `disagg-b200-agentic` (2P1D) · H200 → `disagg-h200-agentic` (4P3D) | [`deepseek-v4-flash/`](deepseek-v4-flash/) |
 
 B200 variants serve the NVFP4 checkpoints (`nvidia/DeepSeek-V4-*-NVFP4`); H200 variants serve the
 public checkpoints (`deepseek-ai/DeepSeek-V4-*`). H200 Pro is capped at `max_model_len=86,016` (HBM);
@@ -52,7 +52,7 @@ the same way, and DSV4's "packed" KV layout (investigated at length) was ruled o
 
 **Scope: disaggregated only.** Only recipes that ship **disaggregated** over GDR use this. Aggregated recipes
 have no cross-worker KV transfer and set neither NIC env var (no GDR needed). Among the recommended
-picks that's **Pro B200 DisAgg (1P1D)**, **Flash B200 DisAgg (4P2D)**, and **Flash H200 DisAgg (4P3D)** —
+picks that's **Pro B200 DisAgg (1P1D)**, **Flash B200 DisAgg (2P1D)**, and **Flash H200 DisAgg (4P3D)** —
 Pro H200 ships AGG, so it needs no NIC map.
 
 **The two NIC env vars are a pair.** `VLLM_GPU_NIC_PCIE_MAPPING` (the node's `GPU_BDF=NIC_BDF` map) and

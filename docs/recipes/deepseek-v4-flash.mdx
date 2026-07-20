@@ -36,7 +36,7 @@ Each target below is an agentic-workload vLLM deployment of DeepSeek-V4-Flash �
 </div>
 <div className="dynamo-target-picker-summary" data-sku="b200" data-variant="disagg" data-usecase="agentic">
 <span><b>Checkpoint</b> nvidia/DeepSeek-V4-Flash-NVFP4</span>
-<span><b>GPUs</b> 24x B200 — 4P2D (4 prefill + 2 decode, TP4 each)</span>
+<span><b>GPUs</b> 12x B200 — 2P1D (2 prefill + 1 decode, TP4 each)</span>
 <span><b>MoE / KV</b> FLASHINFER_TRTLLM, FP8 KV (block 256)</span>
 <span><b>Transfer</b> NIXL over RDMA/GDR</span>
 <span><b>Context</b> 1,048,576</span>
@@ -63,7 +63,7 @@ Each target below is an agentic-workload vLLM deployment of DeepSeek-V4-Flash �
 
 <div data-sku="b200">
 
-- **4x B200** (aggregated) or **24x B200** (disaggregated, 4P2D) available.
+- **4x B200** (aggregated) or **12x B200** (disaggregated, 2P1D) available.
 - A Hugging Face token with access to `nvidia/DeepSeek-V4-Flash-NVFP4`.
 
 </div>
@@ -144,12 +144,29 @@ First launch loads weights and warms CUDA graphs; the startup probes allow for i
 
 ## Smoke Test
 
+The `model` field must be the **served model name for your SKU** (the `--served-model-name` in the deploy): B200 serves `nvidia/DeepSeek-V4-Flash-NVFP4`, H200 serves `deepseek-ai/DeepSeek-V4-Flash`.
+
+<div data-sku="b200">
+
+```bash
+kubectl port-forward svc/${DGD}-frontend 8000:8000 -n ${NAMESPACE}
+
+curl http://localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"nvidia/DeepSeek-V4-Flash-NVFP4","messages":[{"role":"user","content":"Hello!"}],"max_tokens":512}'
+```
+
+</div>
+
+<div data-sku="h200">
+
 ```bash
 kubectl port-forward svc/${DGD}-frontend 8000:8000 -n ${NAMESPACE}
 
 curl http://localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"model":"deepseek-ai/DeepSeek-V4-Flash","messages":[{"role":"user","content":"Hello!"}],"max_tokens":512}'
 ```
+
+</div>
 
 Flash reasons by default: the chain-of-thought fills `message.reasoning_content` and the answer fills `message.content`. With too small a `max_tokens` the budget is spent on reasoning before any `content` (`content: null`, `finish_reason: "length"`) — expected; raise `max_tokens`.
 
@@ -166,7 +183,7 @@ kubectl apply -f recipes/deepseek-v4/perf/perf.yaml -n ${NAMESPACE}
 | Target | GPUs | Parallelism | MoE backend | Spec. decode | Transfer |
 |---|---|---|---|---|---|
 | agg-b200 | 4x B200 | TP4 + EP | FLASHINFER_TRTLLM | none | — |
-| disagg-b200 (4P2D) | 24x B200 | TP4 / TP4 | FLASHINFER_TRTLLM | none | NIXL GDR |
+| disagg-b200 (2P1D) | 12x B200 | TP4 / TP4 | FLASHINFER_TRTLLM | none | NIXL GDR |
 | agg-h200 | 4x H200 | DP4 + TP1 + EP | MARLIN (FLASHINFER_MLA attn) | MTP-1 | — |
 | disagg-h200 (4P3D) | 28x H200 | DP4+TP1+EP / DP4+TP1+EP | MARLIN | decode MTP-1 | NIXL GDR |
 

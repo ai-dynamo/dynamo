@@ -148,12 +148,29 @@ First launch loads weights across 8 TP ranks and warms CUDA graphs — up to ~90
 
 ## Smoke Test
 
+The `model` field must be the **served model name for your SKU** (the `--served-model-name` in the deploy): B200 serves `nvidia/DeepSeek-V4-Pro-NVFP4`, H200 serves `deepseek-ai/DeepSeek-V4-Pro`.
+
+<div data-sku="b200">
+
+```bash
+kubectl port-forward svc/${DGD}-frontend 8000:8000 -n ${NAMESPACE}
+
+curl http://localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"nvidia/DeepSeek-V4-Pro-NVFP4","messages":[{"role":"user","content":"Hello!"}],"max_tokens":512}'
+```
+
+</div>
+
+<div data-sku="h200">
+
 ```bash
 kubectl port-forward svc/${DGD}-frontend 8000:8000 -n ${NAMESPACE}
 
 curl http://localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"model":"deepseek-ai/DeepSeek-V4-Pro","messages":[{"role":"user","content":"Hello!"}],"max_tokens":512}'
 ```
+
+</div>
 
 Pro emits chain-of-thought into `message.reasoning_content` and the answer into `message.content`. Reasoning effort is selected via `chat_template_kwargs` (`{"thinking":true,"reasoning_effort":"high"|"max"}`; Think Max needs `--max-model-len >= 393216`).
 

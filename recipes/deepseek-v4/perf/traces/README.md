@@ -5,23 +5,21 @@ SPDX-License-Identifier: Apache-2.0
 
 # Trace Staging
 
-Trace JSONL files are intentionally not copied into this work-tracker staging
-tree yet.
-
-For local DGD benchmarking, stage Mooncake-format traces onto the model-cache
-PVC at:
+The three agentic Mooncake-format traces are vendored in this directory via Git
+LFS (see `.gitattributes`):
 
 ```text
-/model-cache/traces/
+64k_400_90kv_agent_new_noschedule.jsonl               # full
+64k_400_90kv_agent_new_noschedule_short_30perc.jsonl  # 30% subset
+64k_400_90kv_agent_new_noschedule_short_15perc.jsonl  # 15% subset
 ```
 
-Expected agentic filenames:
+A fresh clone contains only LFS pointer files. Fetch the real content before
+staging:
 
-```text
-64k_400_90kv_agent_new_noschedule.jsonl
-64k_400_90kv_agent_new_noschedule_short_30perc.jsonl
-64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
+```bash
+git lfs pull --include="recipes/deepseek-v4/perf/traces/*.jsonl"
 ```
 
-The final Dynamo PR can vendor trace files using Git LFS, matching the policy in
-`.gitattributes`, once the exact release trace set is selected.
+Then copy them onto the model-cache PVC at `/model-cache/traces/` — see
+[`../README.md`](../README.md) ("Stage Traces") for the `kubectl cp` step.

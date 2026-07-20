@@ -42,19 +42,27 @@ These agentic traces are vendored in [`traces/`](traces) via Git LFS (full +
 
 ## Workflow
 
+Run all commands below from the `recipes/deepseek-v4/` directory (paths are relative to it).
+
 ```bash
 export NAMESPACE=your-namespace
 ```
 
 ### 1. Stage Traces
 
+Trace JSONL files are vendored via Git LFS; fetch their content first (a fresh clone has only LFS pointer files), then copy them onto the PVC. `kubectl run` returns before the pod is Ready, so wait for it before `kubectl cp`:
+
 ```bash
+git lfs pull --include="recipes/deepseek-v4/perf/traces/*.jsonl"
+
 kubectl run pvc-helper -n ${NAMESPACE} \
   --image=busybox:1.36 --restart=Never \
   --overrides='{"spec":{"containers":[{"name":"helper","image":"busybox:1.36","command":["sleep","3600"],"volumeMounts":[{"name":"model-cache","mountPath":"/model-cache"}]}],"volumes":[{"name":"model-cache","persistentVolumeClaim":{"claimName":"model-cache"}}]}}' \
   --command -- sleep 3600
 
-kubectl cp ./traces ${NAMESPACE}/pvc-helper:/model-cache/
+kubectl wait --for=condition=Ready pod/pvc-helper -n ${NAMESPACE} --timeout=120s
+
+kubectl cp perf/traces ${NAMESPACE}/pvc-helper:/model-cache/
 ```
 
 ### 2. Run One Concurrency

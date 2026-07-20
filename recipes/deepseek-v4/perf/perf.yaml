@@ -32,14 +32,10 @@ spec:
               - key: nvidia.com/dynamo-graph-deployment-name
                 operator: In
                 values:
+                # Must match the DGD behind ENDPOINT below so the benchmark Job co-locates
+                # with the target frontend. Change this together with ENDPOINT when you switch
+                # variants (one of: dsv4-{pro,flash}-{agg,disagg}-{b200,h200}-agentic).
                 - dsv4-pro-agg-b200-agentic
-                - dsv4-pro-agg-h200-agentic
-                - dsv4-pro-disagg-b200-agentic
-                - dsv4-pro-disagg-h200-agentic
-                - dsv4-flash-agg-b200-agentic
-                - dsv4-flash-agg-h200-agentic
-                - dsv4-flash-disagg-b200-agentic
-                - dsv4-flash-disagg-h200-agentic
             topologyKey: kubernetes.io/hostname
       containers:
       - name: perf
@@ -108,8 +104,9 @@ spec:
             --export-http-trace
           echo "Done. Artifacts: ${RUN_DIR}"
         env:
-        # Default targets Pro AGG B200; edit ENDPOINT + TARGET_MODEL + TRACE_FILE
-        # per variant (see perf/README.md for the variant -> ENDPOINT -> TRACE table).
+        # Default targets Pro AGG B200; edit ENDPOINT + TARGET_MODEL + TRACE_FILE per
+        # variant AND update the podAffinity graph-deployment-name above to the same DGD
+        # (see perf/README.md for the variant -> ENDPOINT -> TRACE table).
         - name: ENDPOINT
           value: dsv4-pro-agg-b200-agentic-frontend:8000
         - name: TARGET_MODEL
