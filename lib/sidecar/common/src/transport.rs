@@ -5,32 +5,40 @@ use std::fmt::Write as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use dynamo_backend_common::{BackendError, DynamoError, ErrorType, GrpcTransportConfig};
+use dynamo_backend_common::DynamoError;
 use futures::future::try_join_all;
 use tokio::time::{Instant, sleep_until, timeout_at};
 use tonic::transport::{Channel, Endpoint};
 
-use crate::proto as pb;
+use crate::{GrpcEndpoint, GrpcTransportConfig, cannot_connect, invalid_argument};
 
-const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
+pub const DEFAULT_MAX_GRPC_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
-pub(crate) struct VllmClient {
+/// Connected channels distributed in round-robin order.
+pub struct GrpcChannelPool {
     channels: Vec<Channel>,
     next: AtomicUsize,
 }
 
-impl VllmClient {
-    pub(crate) async fn connect(
-        endpoint: &str,
+impl GrpcChannelPool {
+    pub async fn connect(
+        peer: &str,
+        endpoint: &GrpcEndpoint,
         transport: GrpcTransportConfig,
     ) -> Result<Self, DynamoError> {
         let endpoint_label = endpoint.to_string();
-        let endpoint = Endpoint::from_shared(endpoint.to_string())
-            .map_err(|error| invalid_argument(format!("invalid vLLM endpoint: {error}")))?;
-        let deadline = Instant::now() + transport.startup_deadline;
+        let tonic_endpoint = Endpoint::from_shared(endpoint_label.clone()).map_err(|error| {
+            invalid_argument(format!("invalid {peer} endpoint after validation: {error}"))
+        })?;
+        let deadline = checked_instant_add(
+            Instant::now(),
+            transport.startup_deadline,
+            "gRPC startup deadline",
+        )?;
         let first = connect_until_ready(
-            endpoint.clone(),
+            peer,
+            tonic_endpoint.clone(),
             endpoint_label.clone(),
             1,
             transport,
@@ -39,10 +47,18 @@ impl VllmClient {
         .await?;
         let mut channels = vec![first];
         let remaining = try_join_all((1..transport.connections.get()).map(|index| {
-            let endpoint = endpoint.clone();
+            let endpoint = tonic_endpoint.clone();
             let endpoint_label = endpoint_label.clone();
             async move {
-                connect_until_ready(endpoint, endpoint_label, index + 1, transport, deadline).await
+                connect_until_ready(
+                    peer,
+                    endpoint,
+                    endpoint_label,
+                    index + 1,
+                    transport,
+                    deadline,
+                )
+                .await
             }
         }))
         .await?;
@@ -53,27 +69,22 @@ impl VllmClient {
         })
     }
 
-    pub(crate) fn connection_count(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.channels.len()
     }
 
-    pub(crate) async fn generate_stream(
-        &self,
-        request: pb::GenerateRequest,
-    ) -> Result<tonic::Streaming<pb::GenerateResponse>, DynamoError> {
+    pub fn is_empty(&self) -> bool {
+        self.channels.is_empty()
+    }
+
+    pub fn next_channel(&self) -> Channel {
         let index = self.next.fetch_add(1, Ordering::Relaxed) % self.channels.len();
-        let mut client = pb::generate_client::GenerateClient::new(self.channels[index].clone())
-            .max_encoding_message_size(MAX_MESSAGE_SIZE)
-            .max_decoding_message_size(MAX_MESSAGE_SIZE);
-        client
-            .generate_stream(request)
-            .await
-            .map(tonic::Response::into_inner)
-            .map_err(|status| status_to_dynamo("GenerateStream", status))
+        self.channels[index].clone()
     }
 }
 
 async fn connect_until_ready(
+    peer: &str,
     endpoint: Endpoint,
     endpoint_label: String,
     pool_slot: usize,
@@ -90,6 +101,7 @@ async fn connect_until_ready(
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(startup_timeout(
+                peer,
                 &endpoint_label,
                 pool_slot,
                 attempt,
@@ -103,8 +115,7 @@ async fn connect_until_ready(
         let attempt_endpoint = endpoint
             .clone()
             .connect_timeout(transport.connect_attempt_timeout.min(remaining));
-        let connection_attempt = attempt_endpoint.connect();
-        match timeout_at(deadline, connection_attempt).await {
+        match timeout_at(deadline, attempt_endpoint.connect()).await {
             Ok(Ok(channel)) => return Ok(channel),
             Ok(Err(error)) => {
                 let detailed_error = format_error_chain(&error);
@@ -114,6 +125,7 @@ async fn connect_until_ready(
                     .is_none_or(|last| now.duration_since(last) >= RETRY_LOG_INTERVAL);
                 if error_changed || log_interval_elapsed {
                     tracing::debug!(
+                        peer,
                         endpoint = %endpoint_label,
                         pool_slot,
                         attempt,
@@ -122,7 +134,7 @@ async fn connect_until_ready(
                         retry_interval = ?transport.retry_interval,
                         suppressed_attempts,
                         error = ?error,
-                        "vLLM gRPC connection attempt failed"
+                        "sidecar gRPC connection attempt failed"
                     );
                     last_logged_at = Some(now);
                     last_logged_error = Some(detailed_error.clone());
@@ -134,6 +146,7 @@ async fn connect_until_ready(
             }
             Err(_) => {
                 return Err(startup_timeout(
+                    peer,
                     &endpoint_label,
                     pool_slot,
                     attempt,
@@ -146,6 +159,7 @@ async fn connect_until_ready(
 
         if Instant::now() >= deadline {
             return Err(startup_timeout(
+                peer,
                 &endpoint_label,
                 pool_slot,
                 attempt,
@@ -154,11 +168,29 @@ async fn connect_until_ready(
                 last_error.as_deref(),
             ));
         }
-        sleep_until((Instant::now() + transport.retry_interval).min(deadline)).await;
+        let retry_at = checked_instant_add(
+            Instant::now(),
+            transport.retry_interval,
+            "gRPC retry interval",
+        )?;
+        sleep_until(retry_at.min(deadline)).await;
     }
 }
 
+fn checked_instant_add(
+    instant: Instant,
+    duration: Duration,
+    setting: &str,
+) -> Result<Instant, DynamoError> {
+    instant.checked_add(duration).ok_or_else(|| {
+        invalid_argument(format!(
+            "{setting} {duration:?} exceeds the supported monotonic clock range"
+        ))
+    })
+}
+
 fn startup_timeout(
+    peer: &str,
     endpoint: &str,
     pool_slot: usize,
     attempts: u64,
@@ -168,7 +200,7 @@ fn startup_timeout(
 ) -> DynamoError {
     let cause = last_error.unwrap_or("the connection attempt exceeded the startup deadline");
     cannot_connect(format!(
-        "failed to establish the vLLM gRPC connection pool to {endpoint} for pool slot {pool_slot} within {:?} after {attempts} attempts over {elapsed:?}: {cause}",
+        "failed to establish the {peer} gRPC connection pool to {endpoint} for pool slot {pool_slot} within {:?} after {attempts} attempts over {elapsed:?}: {cause}",
         transport.startup_deadline,
     ))
 }
@@ -183,46 +215,43 @@ fn format_error_chain(error: &(dyn std::error::Error + 'static)) -> String {
     message
 }
 
-fn backend(kind: BackendError, message: impl Into<String>) -> DynamoError {
-    DynamoError::builder()
-        .error_type(ErrorType::Backend(kind))
-        .message(message)
-        .build()
-}
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroUsize;
+    use std::time::Duration;
 
-pub(crate) fn invalid_argument(message: impl Into<String>) -> DynamoError {
-    backend(BackendError::InvalidArgument, message)
-}
+    use tokio::net::TcpListener;
 
-pub(crate) fn protocol_error(message: impl Into<String>) -> DynamoError {
-    backend(
-        BackendError::Unknown,
-        format!("invalid vLLM gRPC response: {}", message.into()),
-    )
-}
+    use super::GrpcChannelPool;
+    use crate::{GrpcEndpoint, GrpcTransportConfig};
 
-pub(crate) fn engine_shutdown(message: impl Into<String>) -> DynamoError {
-    backend(BackendError::EngineShutdown, message)
-}
+    #[tokio::test]
+    async fn startup_deadline_caps_connection_retries() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        drop(listener);
 
-fn cannot_connect(message: impl Into<String>) -> DynamoError {
-    backend(BackendError::CannotConnect, message)
-}
+        let transport = GrpcTransportConfig {
+            connections: NonZeroUsize::new(2).unwrap(),
+            connect_attempt_timeout: Duration::from_millis(50),
+            retry_interval: Duration::from_millis(10),
+            startup_deadline: Duration::from_millis(100),
+        };
+        let endpoint = GrpcEndpoint::parse(&address.to_string(), "--test-endpoint").unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_millis(300),
+            GrpcChannelPool::connect("test", &endpoint, transport),
+        )
+        .await
+        .expect("connection retries must respect the startup deadline");
 
-pub(crate) fn status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
-    let kind = match status.code() {
-        tonic::Code::InvalidArgument
-        | tonic::Code::NotFound
-        | tonic::Code::OutOfRange
-        | tonic::Code::FailedPrecondition
-        | tonic::Code::AlreadyExists => BackendError::InvalidArgument,
-        tonic::Code::Unavailable => BackendError::CannotConnect,
-        tonic::Code::Cancelled => BackendError::Cancelled,
-        tonic::Code::DeadlineExceeded => BackendError::ConnectionTimeout,
-        _ => BackendError::Unknown,
-    };
-    backend(
-        kind,
-        format!("{rpc}: {} ({:?})", status.message(), status.code()),
-    )
+        let error = match result {
+            Ok(_) => panic!("the endpoint is closed"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("within 100ms"),
+            "unexpected error: {error}"
+        );
+    }
 }

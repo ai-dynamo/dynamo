@@ -135,9 +135,9 @@ trtllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: nvcr.io/nvidia/tensorrt-llm/release
     base_image_tag: 26.02-cuda13.1-devel-ubuntu24.04
-    runtime_image_tag: 1.3.0rc20
+    runtime_image_tag: 1.3.0rc21
     # Per-arch baseline stem (re-captured against tensorrt-llm/release, both arches).
-    baseline_sbom: release@1532b388
+    baseline_sbom: release@13fec2fe
   nixl_ref: v1.0.1
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"

@@ -9,7 +9,6 @@ from typing import Any
 
 from tensorrt_llm.inputs.multimodal import apply_mm_hashes
 from tensorrt_llm.inputs.utils import load_image
-from transformers import PretrainedConfig
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +66,6 @@ def process_multimodal(
     image_urls: list[str],
     tokenizer: Any,
     processor: Any,
-    model: str,
     model_type: str,
     request_token_ids: list[int] | None = None,
     request_multi_modal_data: dict | None = None,
@@ -104,7 +102,6 @@ def process_multimodal(
             effective_image_urls,
             tokenizer,
             processor,
-            model,
             model_type,
             pil_images=pil_images,
         )
@@ -184,7 +181,6 @@ def _get_expanded_tokens(
     image_urls: list[str],
     tokenizer: Any,
     processor: Any,
-    model_path: str,
     model_type: str,
     pil_images: list[Any] | None = None,
 ) -> tuple[list[int], list[tuple[int, int]] | None]:
@@ -206,13 +202,11 @@ def _get_expanded_tokens(
         if image_token_id is None:
             raise ValueError("processor.image_token_id not found")
 
-        # Get replacement_id: TRTLLM uses vocab_size + 1 in KV events
-        replacement_id = _get_replacement_id(model_path)
-
-        # Find contiguous image token ranges and replace them in one pass
-        contiguous_ranges = _find_and_replace_image_tokens(
-            tokens, image_token_id, replacement_id
-        )
+        # Locate each image's token range for the mm_hash side channel. TRT-LLM's
+        # KV-cache events keep the model's image_token_id at image positions, so
+        # the routing token stream must keep it too (no substitution); mm identity
+        # is carried by the mm_hash, not the token value.
+        contiguous_ranges = _find_image_token_ranges(tokens, image_token_id)
 
         # Compute tokens per image from processor output
         tokens_per_image = _compute_tokens_per_image(output, processor, model_type)
@@ -244,36 +238,11 @@ def _compute_tokens_per_image(
         raise NotImplementedError(f"Model type '{model_type}' is not supported yet")
 
 
-def _get_replacement_id(model_path: str) -> int:
-    """
-    Get the replacement token ID for image tokens to match TRTLLM's KV event format.
-
-    TRTLLM replaces image placeholder tokens with (vocab_size + 1) in KV events.
-    The vocab_size comes from the model config, not the tokenizer.
-    """
-
-    try:
-        config, _ = PretrainedConfig.get_config_dict(model_path)
-        # Some models (e.g. Qwen3-VL) store vocab_size in text_config, not top-level.
-        vocab_size = config.get("vocab_size")
-        if vocab_size is None:
-            vocab_size = config.get("text_config", {}).get("vocab_size")
-        if vocab_size is None:
-            raise AttributeError("vocab_size not found in config or config.text_config")
-        replacement_id = vocab_size + 1
-        logger.info(f"Got vocab_size={vocab_size} from config.json")
-        return replacement_id
-    except Exception as e:
-        raise RuntimeError(
-            f"Failed to get vocab_size from model config '{model_path}': {e}"
-        ) from e
-
-
-def _find_and_replace_image_tokens(
-    tokens: list[int], image_token_id: int, replacement_id: int
+def _find_image_token_ranges(
+    tokens: list[int], image_token_id: int
 ) -> list[tuple[int, int]]:
     """
-    Find all contiguous ranges of image tokens and replace them in place.
+    Find all contiguous ranges of image placeholder tokens.
 
     Returns: list of (start, end) ranges for contiguous image token regions.
     """
@@ -282,7 +251,6 @@ def _find_and_replace_image_tokens(
 
     for i, t in enumerate(tokens):
         if t == image_token_id:
-            tokens[i] = replacement_id
             if start is None:
                 start = i
         elif start is not None:
@@ -294,7 +262,8 @@ def _find_and_replace_image_tokens(
 
     if ranges:
         logger.info(
-            f"Replaced {sum(e - s for s, e in ranges)} image tokens: {image_token_id} -> {replacement_id}"
+            f"Found {sum(e - s for s, e in ranges)} image tokens "
+            f"(id={image_token_id}) in {len(ranges)} range(s)"
         )
 
     return ranges
