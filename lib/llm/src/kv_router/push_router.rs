@@ -1,7 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::hash_map::RandomState,
+    hash::{BuildHasher, Hash, Hasher},
+    sync::{Arc, LazyLock},
+    time::Duration,
+};
 
 use dynamo_kv_router::protocols::{TokensWithHashes, WorkerWithDpRank};
 use dynamo_runtime::{
@@ -16,6 +21,7 @@ use dynamo_runtime::{
 use futures::stream::{self, StreamExt};
 use tracing::Instrument;
 
+use crate::protocols::common::extensions::SessionAffinityId;
 use crate::{
     kv_router::{KvRouter, metrics::RouterRequestMetrics},
     preprocessor::PreprocessedRequest,
@@ -38,6 +44,7 @@ use selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 
 const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
 const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
+static SESSION_AFFINITY_LOG_HASHER: LazyLock<RandomState> = LazyLock::new(RandomState::new);
 
 fn is_cancelled(error: &Error) -> bool {
     match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[])
@@ -50,6 +57,39 @@ fn invalidate_on_non_cancellation(operation: &mut Option<AffinityAcquire>, error
     if let Some(operation) = operation.take() {
         operation.invalidate();
     }
+}
+
+fn session_affinity_fingerprint(session_id: &SessionAffinityId) -> String {
+    // Stable only within this process lifetime: useful for local log correlation,
+    // but intentionally not a durable or cross-replica session identifier.
+    let mut hasher = SESSION_AFFINITY_LOG_HASHER.build_hasher();
+    session_id.as_str().hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn log_session_affinity_decision(
+    request: &SingleIn<PreprocessedRequest>,
+    phase: RequestPhase,
+    session_id: &SessionAffinityId,
+    affinity_state: &'static str,
+    selection: &WorkerSelection,
+) {
+    if !tracing::enabled!(
+        target: "dynamo_llm::session_affinity::push_router",
+        tracing::Level::DEBUG
+    ) {
+        return;
+    }
+    tracing::debug!(
+        target: "dynamo_llm::session_affinity::push_router",
+        request_id = %request.context().id(),
+        ?phase,
+        session_fingerprint = %session_affinity_fingerprint(session_id),
+        affinity_state,
+        worker_id = selection.instance_id,
+        dp_rank = selection.dp_rank,
+        "Session affinity routing decision"
+    );
 }
 
 pub struct KvPushRouter {
@@ -168,9 +208,23 @@ impl KvPushRouter {
         let operation = affinity
             .acquire_with_context(&session_id, explicit, request_context.as_ref())
             .await?;
+        let affinity_state = if operation.target().is_some() {
+            "bound"
+        } else {
+            "initialize"
+        };
         let worker = operation.target().and_then(affinity_worker);
         match self.select_request(request, phase, false, worker).await {
-            Ok(selection) => Ok((selection, Some(operation))),
+            Ok(selection) => {
+                log_session_affinity_decision(
+                    request,
+                    phase,
+                    &session_id,
+                    affinity_state,
+                    &selection,
+                );
+                Ok((selection, Some(operation)))
+            }
             Err(error) if is_cancelled(&error) => Err(error),
             Err(_) if operation.target().is_some() && explicit.is_none() => {
                 operation.invalidate();
@@ -182,7 +236,16 @@ impl KvPushRouter {
                     .select_request(request, phase, false, retry_worker)
                     .await
                 {
-                    Ok(selection) => Ok((selection, Some(retry))),
+                    Ok(selection) => {
+                        log_session_affinity_decision(
+                            request,
+                            phase,
+                            &session_id,
+                            "reinitialize",
+                            &selection,
+                        );
+                        Ok((selection, Some(retry)))
+                    }
                     Err(retry_error) => {
                         retry.invalidate();
                         Err(retry_error)
@@ -642,6 +705,17 @@ mod tests {
         local_model::runtime_config::ModelRuntimeConfig,
         protocols::common::extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
     };
+
+    #[test]
+    fn session_affinity_fingerprint_is_stable_within_process_and_not_raw() {
+        let session_id = SessionAffinityId::new("prime-trace-id-123");
+        let first = session_affinity_fingerprint(&session_id);
+        let second = session_affinity_fingerprint(&session_id);
+
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 16);
+        assert_ne!(first, session_id.as_str());
+    }
 
     fn request() -> PreprocessedRequest {
         PreprocessedRequest::builder()
