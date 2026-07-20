@@ -101,6 +101,13 @@ class VizierBranchSampler:
         from vizier.service import clients
         from vizier.service import pyvizier as vz
 
+        # Vizier's embedded service defaults its SQLite database to the installed
+        # package directory, which is read-only in the planner image. Spica studies
+        # are process-local unless the caller explicitly configures Vizier storage,
+        # so use an in-memory database for the default embedded-service path.
+        if "database_url" not in clients.environment_variables.servicer_kwargs:
+            clients.environment_variables.servicer_use_sql_ram()
+
         self.branch = branch
         self._objectives = objectives or [(_METRIC, True)]
         self._decoders: dict[str, Callable[[Any], Any]] = {}
