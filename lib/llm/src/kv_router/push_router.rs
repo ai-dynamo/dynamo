@@ -796,6 +796,7 @@ mod tests {
                 .schedule_request(ScheduleRequest {
                     mode: ScheduleMode::TrackedWithLifecycle {
                         request_id: request_id.clone(),
+                        admission_session: None,
                     },
                     token_seq: Some(vec![1]),
                     block_hashes: None,
@@ -809,7 +810,6 @@ mod tests {
                     priority_jump: 0.0,
                     strict_priority: 0,
                     policy_class: None,
-                    admission_session: None,
                     overlap: OverlapSignals::default(),
                     shared_cache_hits: None,
                 })

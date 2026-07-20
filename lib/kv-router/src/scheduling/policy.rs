@@ -219,7 +219,6 @@ mod tests {
             priority_jump,
             strict_priority: 0,
             policy_class: None,
-            admission_session: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,

@@ -29,7 +29,7 @@ use super::queue_admission::{
 };
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
-    KvSchedulerError, OverloadedWorkerProvider, SchedulingContext, SchedulingRequest,
+    KvSchedulerError, OverloadedWorkerProvider, ScheduleMode, SchedulingContext, SchedulingRequest,
     SchedulingResponse,
 };
 use crate::protocols::{
@@ -847,10 +847,16 @@ impl<
                     .retain(|worker| !overloaded_worker_ids.contains(&worker.worker_id));
                 WorkerEligibilitySnapshot::with_availability(structural_workers, available_workers)
             });
+            let admission_session = match &mut request.mode {
+                ScheduleMode::TrackedWithLifecycle {
+                    admission_session, ..
+                } => admission_session.take(),
+                ScheduleMode::QueryOnly { .. } | ScheduleMode::Tracked { .. } => None,
+            };
             self.pending
                 .admit(
                     admission_class_index,
-                    request.admission_session.take(),
+                    admission_session,
                     request.isl_tokens,
                     worker_eligibility,
                 )
@@ -2258,7 +2264,6 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
-            admission_session: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -2281,6 +2286,7 @@ mod tests {
         let (mut request, response) = make_request(request_id, isl_tokens);
         request.mode = ScheduleMode::TrackedWithLifecycle {
             request_id: request_id.to_owned(),
+            admission_session: None,
         };
         (request, response)
     }
@@ -2453,7 +2459,10 @@ policy_classes:
         }));
         let (mut request, response) = make_admission_request("deferred", 64);
         request.policy_class = Some("agents".to_owned());
-        request.admission_session = Some(AdmissionSession::new("session-a", true));
+        request.mode = ScheduleMode::TrackedWithLifecycle {
+            request_id: "deferred".to_owned(),
+            admission_session: Some(AdmissionSession::new("session-a", true)),
+        };
 
         let mut lease = enqueue_with_lease(&queue, request).await;
         assert_eq!(queue.pending_count(), 1);
@@ -2503,7 +2512,10 @@ policy_classes:
         }));
         let (mut request, response) = make_admission_request("cancelled", 64);
         request.policy_class = Some("agents".to_owned());
-        request.admission_session = Some(AdmissionSession::new("session-a", false));
+        request.mode = ScheduleMode::TrackedWithLifecycle {
+            request_id: "cancelled".to_owned(),
+            admission_session: Some(AdmissionSession::new("session-a", false)),
+        };
 
         let cancellation = enqueue_with_lease(&queue, request).await;
         drop(response);

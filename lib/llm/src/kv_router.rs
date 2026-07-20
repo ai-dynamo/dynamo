@@ -583,6 +583,7 @@ where
         let mode = if update_states && track_lifecycle {
             ScheduleMode::TrackedWithLifecycle {
                 request_id: context_id.expect("validated above").to_string(),
+                admission_session,
             }
         } else if update_states {
             ScheduleMode::Tracked {
@@ -682,7 +683,6 @@ where
                 priority_jump,
                 strict_priority,
                 policy_class,
-                admission_session,
                 expected_output_tokens,
                 pinned_worker,
                 allowed_worker_ids,

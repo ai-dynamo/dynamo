@@ -390,7 +390,6 @@ impl AggRuntime {
         mut request: DirectRequest,
         arrival_time_ms: f64,
         replay_hashes: Option<ReplayRequestHashes>,
-        session_id: Option<String>,
     ) -> anyhow::Result<Uuid> {
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
         request.uuid = Some(uuid);
@@ -417,7 +416,7 @@ impl AggRuntime {
         let admissions = {
             let router = self.router.as_mut().expect("router presence checked above");
             router
-                .on_request_arrival_for_session(&request, replay_hashes, session_id, self.now_ms)?
+                .on_request_arrival(&request, replay_hashes, self.now_ms)?
                 .admissions
         };
         self.requests
@@ -667,7 +666,7 @@ impl AggRuntime {
                 turn_index,
             } = ready;
             let session_metadata = session_id.clone().zip(turn_index);
-            let uuid = self.assign_request(request, arrival_time_ms, replay_hashes, session_id)?;
+            let uuid = self.assign_request(request, arrival_time_ms, replay_hashes)?;
             if let Some((session_id, turn_index)) = session_metadata {
                 self.collector
                     .on_session_metadata(uuid, session_id, turn_index);
