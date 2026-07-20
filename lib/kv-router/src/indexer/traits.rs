@@ -111,6 +111,21 @@ pub trait KvIndexerInterface {
         self.remove_worker(worker).await;
     }
 
+    /// Remove one logical worker rank and return only after the reset is visible.
+    ///
+    /// This is a cold-path lifecycle barrier. Implementations must order the
+    /// reset after mutations already accepted for the worker and acknowledge it
+    /// only after those entries can no longer be returned by reads.
+    async fn reset_worker_dp_rank_and_wait(
+        &self,
+        _worker: WorkerId,
+        _dp_rank: DpRank,
+    ) -> Result<(), KvRouterError> {
+        Err(KvRouterError::Unsupported(
+            "acknowledged worker-rank reset is not supported".to_string(),
+        ))
+    }
+
     /// Shutdown the KV Indexer.
     fn shutdown(&self);
 

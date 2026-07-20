@@ -2,8 +2,7 @@
 
 This module turns engine KV-cache events into Dynamo router events. The ZMQ
 source is the common production path for vLLM and SGLang, while the event
-processor keeps the downstream publish path shared across Event Plane and
-JetStream.
+processor publishes normalized events through the configured event plane.
 
 ## Files
 

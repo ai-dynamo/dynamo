@@ -27,11 +27,11 @@ adding required approvals.
 |------|------------|
 | `areas.yaml` | The single source of truth: path globs to GitHub team, by subsystem. **Edit this.** |
 | `external_contributors.yaml` | External individuals granted area-scoped codeownership. Attaches a person to an area **label** (not a copy of its globs); drives the `@handle` co-owner lines and `CONTRIBUTORS.md`. **Edit this.** |
-| `codeowners_match.py` | Shared matcher + resolution pipeline. Build, emit, and who_owns all call into this -- one matcher, one resolver, no drift. |
-| `build_codeowners.py` | Resolves `areas.yaml` against the tree and validates 100% coverage (CI gate). |
-| `emit_codeowners.py` | Generates the root `CODEOWNERS` (a minimal, per-area-grouped last-match cover) and `CONTRIBUTORS.md`. |
+| `codeowners_match.py` | Shared matcher + policy resolver. Build, emit, and who_owns share its CODEOWNERS semantics. |
+| `build_codeowners.py` | Validates the resolved policy against the tracked tree for 100% explicit coverage (CI gate). |
+| `emit_codeowners.py` | Generates root `CODEOWNERS` directly from declared policy globs, plus `CONTRIBUTORS.md`; it never reads the git tree. |
 | `who_owns.py` | Answers "who reviews this?" for a path or a whole PR. |
-| `test_codeowners.py` | Unit tests for the canonical matcher, the min-cost cover, and external-contributor co-ownership. |
+| `test_codeowners.py` | Unit tests for matching, policy resolution, deterministic emission, precedence, and external-contributor co-ownership. |
 
 ## Change ownership
 
@@ -44,8 +44,7 @@ adding required approvals.
    python .github/codeowners/build_codeowners.py \
      --areas .github/codeowners/areas.yaml --repo . --strict
    python .github/codeowners/emit_codeowners.py \
-     --areas .github/codeowners/areas.yaml --repo . \
-     --out CODEOWNERS
+     --areas .github/codeowners/areas.yaml --out CODEOWNERS
    ```
 
 3. Commit `areas.yaml` and `CODEOWNERS` together.
@@ -90,6 +89,16 @@ generated outputs together.
 
 ## Notes
 
+- Emission is a pure function of `areas.yaml` and
+  `external_contributors.yaml`. Adding, deleting, or moving unrelated tracked
+  files cannot rewrite the generated rules.
+- Rule precedence follows CODEOWNERS last-match-wins semantics: catch-all and
+  base area rules, file-type defaults, nested path overrides, then explicit
+  `shared` rules. Overlapping file-type rules retain their YAML declaration
+  order, so later entries refine earlier ones.
+- Legacy `classify.keyword_rules` are rejected because auto-classification and
+  keyword co-ownership required a live tree. Declare ownership with explicit
+  area `path_globs` or `shared` entries.
 - Base area owners are GitHub **teams**. The one exception is
   `external_contributors.yaml`, which appends named individuals as area-scoped
   **co-owners** (never sole owners); team membership is otherwise managed

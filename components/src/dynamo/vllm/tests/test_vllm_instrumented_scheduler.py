@@ -1566,6 +1566,36 @@ def test_uniform_axis_limit_retains_endpoints_and_evenly_removes_middle():
         instrumented_scheduler_module._uniformly_limit_axis(values, 1)
 
 
+def test_cudagraph_axis_limit_preserves_eager_tail_below_twenty_percent():
+    capture_sizes = list(range(1, 41))
+    candidates = instrumented_scheduler_module._cudagraph_axis_points(capture_sizes, 80)
+
+    assert candidates == [*range(1, 42), 80]
+    assert instrumented_scheduler_module._limit_cudagraph_axis(
+        candidates, capture_sizes, 4
+    ) == [1, 40, 41, 80]
+
+
+def test_cudagraph_axis_limit_preserves_eager_tail_at_twenty_percent():
+    capture_sizes = list(range(1, 9))
+    candidates = instrumented_scheduler_module._cudagraph_axis_points(capture_sizes, 10)
+
+    assert candidates == list(range(1, 11))
+    assert instrumented_scheduler_module._limit_cudagraph_axis(
+        candidates, capture_sizes, 5
+    ) == [1, 5, 8, 9, 10]
+
+
+def test_cudagraph_axis_limit_uniformly_samples_tail_above_twenty_percent():
+    capture_sizes = [8]
+    candidates = instrumented_scheduler_module._cudagraph_axis_points(capture_sizes, 64)
+
+    assert candidates == [8, 9, 16, 32, 64]
+    assert instrumented_scheduler_module._limit_cudagraph_axis(
+        candidates, capture_sizes, 3
+    ) == [8, 16, 64]
+
+
 def test_cudagraph_axis_appends_exact_non_power_of_two_limit():
     assert instrumented_scheduler_module._cudagraph_axis_points([256], 1000) == [
         256,
@@ -1662,10 +1692,26 @@ def test_prefill_grid_uniformly_limits_new_tokens_batch_and_kv_axes():
             if point.total_prefill_tokens == total_tokens
         ]
         assert len(points) <= 3
-        assert points[0] == 0
-        assert points[-1] == InstrumentedScheduler._bench_max_prefill_kv_read_tokens(
+        assert points[0] == InstrumentedScheduler._bench_max_prefill_kv_read_tokens(
             stub, total_tokens, 1
         )
+        assert points[-1] == 0
+
+
+def test_prefill_grid_runs_larger_workload_coordinates_first():
+    stub = _prefill_grid_stub(num_gpu_blocks=512)
+
+    InstrumentedScheduler._bench_generate_prefill_grid(stub)
+
+    coordinates = [
+        (
+            point.total_prefill_tokens,
+            point.batch_size,
+            point.total_kv_read_tokens,
+        )
+        for point in stub._bench_grid
+    ]
+    assert coordinates == sorted(coordinates, reverse=True)
 
 
 def test_agg_grid_contains_piecewise_prefill_then_full_decode_points():

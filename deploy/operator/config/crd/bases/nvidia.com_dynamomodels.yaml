@@ -166,20 +166,32 @@ spec:
                       address:
                         description: Address is the full address of the endpoint (e.g., "http://10.0.1.5:9090")
                         type: string
+                      loraFallbackCovered:
+                        description: |-
+                          LoRAFallbackCovered indicates a legacy prefill endpoint that cannot manage
+                          LoRAs itself is covered by a capable prefill in the same topology during a
+                          rolling upgrade. It does not make this endpoint ready to serve the adapter.
+                        type: boolean
                       podName:
                         description: PodName is the name of the pod serving this endpoint
                         type: string
                       ready:
                         description: |-
-                          Ready indicates whether the endpoint is ready to serve traffic
-                          For LoRA models: true if the POST /loras request succeeded with a 2xx status code
-                          For base models: always false (no probing performed)
+                          Ready indicates whether this endpoint is ready to serve traffic.
+                          For LoRA models: true only if this endpoint's lifecycle request succeeded.
+                          For base models: always false (no probing performed).
                         type: boolean
                     required:
                       - address
                       - ready
                     type: object
                   type: array
+                loraFallbackCoveredEndpoints:
+                  description: |-
+                    LoRAFallbackCoveredEndpoints is the count of legacy prefill endpoints
+                    covered by a capable prefill during a rolling upgrade. These endpoints are
+                    excluded from ReadyEndpoints because they cannot serve the adapter directly.
+                  type: integer
                 readyEndpoints:
                   description: ReadyEndpoints is the count of endpoints that are ready
                   type: integer

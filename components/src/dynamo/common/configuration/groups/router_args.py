@@ -21,12 +21,7 @@ from typing import Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
-from dynamo.common.configuration.utils import (
-    add_argument,
-    add_negatable_bool_argument,
-    nullable_float,
-    nullable_int,
-)
+from dynamo.common.configuration.utils import add_argument, nullable_float, nullable_int
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +38,8 @@ _DEFAULT_SESSION_AFFINITY_HEADER_KEY = "x-dynamo-session-id"
 _HTTP_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 
 _ENFORCE_DISAGG_DEPRECATION = (
-    "--enforce-disagg and DYN_ENFORCE_DISAGG are deprecated and ignored; "
-    "routing topology and readiness are determined from registered worker types"
+    "%s is deprecated and ignored; disaggregated routing topology and readiness "
+    "are determined automatically from registered worker types"
 )
 
 _ADMISSION_CONTROL_REMOVAL_WARNING = (
@@ -74,6 +69,10 @@ def http_header_name(value: str) -> str:
             "--router-session-header-key must be a valid HTTP header name"
         )
     return value
+class _DeprecatedEnforceDisaggAction(argparse.BooleanOptionalAction):
+    def __call__(self, parser, namespace, values, option_string=None):
+        logger.warning(_ENFORCE_DISAGG_DEPRECATION, option_string)
+        super().__call__(parser, namespace, values, option_string)
 
 
 class RouterConfigBase(ConfigBase):
@@ -90,8 +89,6 @@ class RouterConfigBase(ConfigBase):
 
     def router_kwargs(self) -> dict:
         """Return a dict suitable for ``RouterConfig(mode, kv_config, **kwargs)``."""
-        if self.enforce_disagg:
-            logger.warning(_ENFORCE_DISAGG_DEPRECATION)
         return {f: getattr(self, f) for f in _ROUTER_FIELDS}
 
     def validate_rejection_thresholds(self) -> None:
@@ -153,6 +150,8 @@ class RouterArgGroup(ArgGroup):
     def add_arguments(self, parser) -> None:
         if "DYN_ADMISSION_CONTROL" in os.environ:
             logger.warning(_ADMISSION_CONTROL_REMOVAL_WARNING)
+        if "DYN_ENFORCE_DISAGG" in os.environ:
+            logger.warning(_ENFORCE_DISAGG_DEPRECATION, "DYN_ENFORCE_DISAGG")
 
         g = parser.add_argument_group("Router Options")
 
@@ -210,7 +209,8 @@ class RouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_SESSION_AFFINITY_TTL_SECS",
             default=None,
             help=(
-                "Enable router-local session affinity with this idle TTL in seconds. "
+                "Enable session affinity with this router-local idle TTL in seconds. "
+                "Bindings synchronize across router replicas on a best-effort basis. "
                 "Affinity is disabled when this option is omitted. "
                 "This is independent of KV prediction TTL settings."
             ),
@@ -239,6 +239,8 @@ class RouterArgGroup(ArgGroup):
                 "DEPRECATED: accepted for compatibility but ignored. Routing topology and "
                 "readiness are determined from registered worker types."
             ),
+            arg_type=None,
+            action=_DeprecatedEnforceDisaggAction,
         )
         add_argument(
             g,

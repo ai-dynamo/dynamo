@@ -2809,3 +2809,15 @@ name = "sudo"
 allow = ["GPL-2.0-or-later"]
 reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
 
+# --- native [[exceptions]] for snapshot-agent from-source binaries ----------
+# Built from source (native_packages.yaml, --native-image snapshot-agent) rather
+# than apt-installed, so they surface in the `native` ecosystem, not `dpkg`.
+# Same "mere aggregation" rationale as the dpkg copyleft exceptions above;
+# version-unpinned per user policy.
+
+[[exceptions]]
+type = "native"
+name = "CRIU"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation: standalone checkpoint/restore binary the snapshot-agent execs as a subprocess, not linked into Dynamo's Apache-2.0 code. COPYING ships at /legal/CRIU/COPYING; source available via the OSRB archive."
+

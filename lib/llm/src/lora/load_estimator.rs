@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use dynamo_kv_router::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
-use dynamo_runtime::component::Component;
+use dynamo_runtime::component::{Component, Endpoint};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventSubscriber;
 
@@ -466,16 +466,16 @@ impl LoadEstimator {
 
     pub fn start_event_subscription(
         self: Arc<Self>,
-        component: Component,
+        endpoint: Endpoint,
     ) -> tokio::task::JoinHandle<()> {
-        let cancel_token = component.drt().child_token();
+        let cancel_token = endpoint.drt().child_token();
         tokio::spawn(async move {
             // Durable feed: reconnect on transient errors / stream end with capped backoff,
             // stopping only on cancellation. A failed subscribe must not silently disable KV
             // load tracking for the lifetime of the process.
             let mut backoff = Duration::from_secs(1);
             while !cancel_token.is_cancelled() {
-                match self.subscribe_to_events(&component, &cancel_token).await {
+                match self.subscribe_to_events(&endpoint, &cancel_token).await {
                     Ok(()) => break, // cancelled cleanly
                     Err(e) => {
                         tracing::warn!(
@@ -495,10 +495,10 @@ impl LoadEstimator {
 
     async fn subscribe_to_events(
         &self,
-        component: &Component,
+        endpoint: &Endpoint,
         cancel_token: &tokio_util::sync::CancellationToken,
     ) -> anyhow::Result<()> {
-        let mut subscriber = EventSubscriber::for_component(component, ACTIVE_SEQUENCES_SUBJECT)
+        let mut subscriber = EventSubscriber::for_endpoint(endpoint, ACTIVE_SEQUENCES_SUBJECT)
             .await?
             .typed::<ActiveSequenceEvent>();
 

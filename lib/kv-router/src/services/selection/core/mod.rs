@@ -485,7 +485,8 @@ impl SelectionCore {
             self.cancel_token.child_token(),
             WORKER_TYPE,
             true,
-        );
+            Default::default(),
+        )?;
         let entry = Arc::new(SelectionEntry {
             key: key.clone(),
             block_size,

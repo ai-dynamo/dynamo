@@ -233,7 +233,6 @@ def test_load_aware_cli_applies_no_cache_load_balancing_preset() -> None:
 
     assert kwargs["overlap_score_credit"] == 0.0
     assert kwargs["use_kv_events"] is False
-    assert kwargs["durable_kv_events"] is False
     assert kwargs["router_track_active_blocks"] is True
     assert kwargs["router_assume_kv_reuse"] is False
     assert kwargs["router_track_prefill_tokens"] is True
@@ -513,28 +512,37 @@ def test_all_rejection_thresholds_and_queue_override_are_forwarded(
     assert config.kv_router_kwargs()["router_queue_threshold"] == 32.0
 
 
+@pytest.mark.parametrize(
+    ("flag", "expected_value"),
+    [("--enforce-disagg", True), ("--no-enforce-disagg", False)],
+)
 def test_enforce_disagg_cli_is_deprecated_and_not_forwarded(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    flag: str,
+    expected_value: bool,
 ) -> None:
     monkeypatch.delenv("DYN_ENFORCE_DISAGG", raising=False)
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
 
-    config = FrontendConfig.from_cli_args(parser.parse_args(["--enforce-disagg"]))
+    config = FrontendConfig.from_cli_args(parser.parse_args([flag]))
     config.validate()
     kwargs = config.router_kwargs()
 
-    assert config.enforce_disagg is True
+    assert config.enforce_disagg is expected_value
     assert "enforce_disagg" not in kwargs
-    assert "deprecated and ignored" in caplog.text
+    warning = f"{flag} is deprecated and ignored"
+    assert caplog.text.count(warning) == 1
 
 
+@pytest.mark.parametrize("value", ["true", "false"])
 def test_enforce_disagg_environment_is_deprecated_and_not_forwarded(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    value: str,
 ) -> None:
-    monkeypatch.setenv("DYN_ENFORCE_DISAGG", "true")
+    monkeypatch.setenv("DYN_ENFORCE_DISAGG", value)
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
 
@@ -542,9 +550,10 @@ def test_enforce_disagg_environment_is_deprecated_and_not_forwarded(
     config.validate()
     kwargs = config.router_kwargs()
 
-    assert config.enforce_disagg is True
+    assert config.enforce_disagg is (value == "true")
     assert "enforce_disagg" not in kwargs
-    assert "deprecated and ignored" in caplog.text
+    warning = "DYN_ENFORCE_DISAGG is deprecated and ignored"
+    assert caplog.text.count(warning) == 1
 
 
 def test_admission_control_cli_flag_warns_and_is_ignored(
