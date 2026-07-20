@@ -3,7 +3,7 @@
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 import pytest
 
@@ -19,6 +19,7 @@ from dynamo.vllm.handlers import (  # noqa: E402
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
@@ -99,16 +100,33 @@ async def test_pause_without_level_uses_vllm_default_sleep():
 
 
 @pytest.mark.asyncio
-async def test_wake_up_passes_explicit_tags_from_request():
+async def test_partial_wake_stays_paused_until_full_wake():
     handler = _make_handler()
     await handler._pause_controller.pause(1)
 
-    result = await handler.wake_up({"tags": ["weights"]})
+    partial_result = await handler.wake_up({"tags": ["weights"]})
 
-    assert result["status"] == "ok"
+    assert partial_result == {
+        "status": "ok",
+        "message": "Engine partially woke; full wake required",
+        "complete": False,
+    }
     handler.engine_client.wake_up.assert_awaited_once_with(["weights"])
-    handler.engine_client.resume_generation.assert_awaited_once()
-    handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
+    handler.engine_client.resume_generation.assert_not_awaited()
+    handler.generate_endpoint.register_endpoint_instance.assert_not_awaited()
+    assert handler._pause_controller.is_paused is True
+    assert handler._pause_controller.needs_resume_recovery is True
+
+    full_result = await handler.wake_up({})
+
+    assert full_result == {"status": "ok", "message": "Engine woke"}
+    assert handler.engine_client.wake_up.await_args_list == [
+        call(["weights"]),
+        call(),
+    ]
+    handler.engine_client.resume_generation.assert_awaited_once_with()
+    handler.generate_endpoint.register_endpoint_instance.assert_awaited_once_with()
+    assert handler._pause_controller.is_paused is False
 
 
 @pytest.mark.asyncio
