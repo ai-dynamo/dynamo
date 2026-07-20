@@ -6,6 +6,7 @@ import logging
 import os
 import platform
 import random
+import types
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -54,31 +55,40 @@ logger = logging.getLogger(__name__)
 
 
 def _assert_distinct_router_workers(payload, min_distinct: int = 2):
-    """Require distinct nvext worker IDs across repeated router requests."""
-    seen: set[int] = set()
-    n = 0
-    orig_validate = payload.validate
+    """Require distinct router routes across repeated requests.
 
-    def validate(response, content):
-        nonlocal n
-        orig_validate(response, content)
+    Binds validate/final_validation with ``types.MethodType`` so ``deepcopy`` in
+    ``run_serve_deployment`` rebinds them to the *copy* whose ``body`` is sent.
+    """
+    payload._min_distinct = min_distinct
+    payload._seen_routes = set()
+    payload._n = 0
+    base_validate = payload.__class__.validate
+
+    def validate(self, response, content):
+        base_validate(self, response, content)
         worker_id = require_router_worker_id(response.json())
-        for key in ("prefill_worker_id", "decode_worker_id"):
-            if isinstance(worker_id.get(key), int):
-                seen.add(worker_id[key])
-        n += 1
+        # One route identity per response (not independent prefill/decode IDs).
+        route = tuple(
+            worker_id[key]
+            for key in ("prefill_worker_id", "decode_worker_id")
+            if isinstance(worker_id.get(key), int)
+        )
+        if route:
+            self._seen_routes.add(route)
+        self._n += 1
         # Diversify the prompt so KV affinity does not pin every request.
-        msg = payload.body["messages"][0]
-        msg["content"] = msg["content"].split("\n[probe-", 1)[0] + f"\n[probe-{n}]"
+        msg = self.body["messages"][0]
+        msg["content"] = msg["content"].split("\n[probe-", 1)[0] + f"\n[probe-{self._n}]"
 
-    def final_validation():
-        assert len(seen) >= min_distinct, (
-            f"expected >= {min_distinct} distinct worker IDs across {n} requests, "
-            f"got {sorted(seen)}"
+    def final_validation(self):
+        assert len(self._seen_routes) >= self._min_distinct, (
+            f"expected >= {self._min_distinct} distinct routes across {self._n} "
+            f"requests, got {sorted(self._seen_routes)}"
         )
 
-    payload.validate = validate
-    payload.final_validation = final_validation
+    payload.validate = types.MethodType(validate, payload)
+    payload.final_validation = types.MethodType(final_validation, payload)
     return payload
 
 
