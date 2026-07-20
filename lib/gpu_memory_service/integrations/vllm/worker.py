@@ -92,6 +92,13 @@ if os.environ.get("MX_ENABLED", "0") == "1":
 # Import Worker after patches are applied
 from vllm.v1.worker.gpu_worker import Worker  # noqa: E402
 
+if os.getenv("DYN_SNAPSHOT_CONTROL_DIR"):
+    from dynamo.vllm.snapshot_backend import (  # noqa: E402
+        register_dynamo_gms_snapshot_backend,
+    )
+
+    register_dynamo_gms_snapshot_backend()
+
 
 def _get_dp_adjusted_local_rank(local_rank: int, parallel_config) -> int:
     """Return the CUDA device index vLLM will use for this worker.
@@ -336,7 +343,23 @@ class GMSWorker(Worker):
         _mappings and _scratch_mappings, releasing physical and preserving VA
         reservations. Wake reconnects and rebuilds via the standard
         prepare_scratch_for_reallocation → reallocate → remap pipeline.
+
+        Under Dynamo Snapshot the selected sleep-mode backend owns the GMS
+        unmap plus the FlashInfer checkpoint lifecycle.
         """
+        if os.getenv("DYN_SNAPSHOT_CONTROL_DIR"):
+            backend = self._get_sleep_mode_backend()
+            backend.set_ro_connect_timeout_ms(self.gms_ro_connect_timeout_ms)
+            try:
+                super().sleep(level)
+            except Exception:
+                logger.exception(
+                    "Fatal: GMS snapshot suspend failed; terminating worker "
+                    "instead of resuming an uncertain memory state"
+                )
+                sys.exit(1)
+            return
+
         free_bytes_before = torch_device().mem_get_info()[0]
 
         # Pause MX serving before GMS unmap
@@ -365,6 +388,49 @@ class GMSWorker(Worker):
 
     def wake_up(self, tags: Optional[List[str]] = None) -> None:
         """vLLM wake implementation with GMS integration."""
+        if os.getenv("DYN_SNAPSHOT_CONTROL_DIR"):
+            from dynamo.vllm.snapshot_backend import (
+                GMSWeightRestoreError,
+                SnapshotTerminalError,
+            )
+
+            restore_kv_cache = tags is None or "kv_cache" in tags
+            if (
+                getattr(self, "_snapshot_nixl_registration_pending", False)
+                and not restore_kv_cache
+            ):
+                raise RuntimeError(
+                    "GMS snapshot backend is unavailable until pending "
+                    "NIXL KV-cache registration succeeds"
+                )
+            kv_cache_manager = (
+                get_gms_client_memory_manager("kv_cache") if restore_kv_cache else None
+            )
+            was_scratch = kv_cache_manager is not None and is_scratch(kv_cache_manager)
+            if was_scratch:
+                self._snapshot_nixl_registration_pending = True
+            try:
+                super().wake_up(tags)
+            except GMSWeightRestoreError as exc:
+                self._fail_snapshot_weight_restore(exc)
+            except SnapshotTerminalError as exc:
+                logger.error(
+                    "Fatal: terminal snapshot lifecycle failure (%s): %s",
+                    type(exc).__name__,
+                    exc,
+                )
+                sys.exit(1)
+
+            backend = self._get_sleep_mode_backend()
+            if (
+                restore_kv_cache
+                and backend.is_tag_restored("kv_cache")
+                and getattr(self, "_snapshot_nixl_registration_pending", False)
+            ):
+                self._register_kv_caches_with_nixl()
+                self._snapshot_nixl_registration_pending = False
+            return
+
         if tags is None:
             tags = list(GMS_TAGS)
 
@@ -423,6 +489,36 @@ class GMSWorker(Worker):
             self.model_runner.post_kv_cache_wake_up()
             if was_scratch:
                 self._register_kv_caches_with_nixl()
+
+    def _fail_snapshot_weight_restore(self, exc: Exception) -> None:
+        """Clean a failed weight reconnect and terminate the worker."""
+        weights_manager = get_gms_client_memory_manager("weights")
+        if weights_manager is not None and weights_manager.is_connected:
+            try:
+                weights_manager.abort()
+            except Exception:
+                logger.exception(
+                    "Failed to clean partially connected GMS weights client"
+                )
+
+        cause = exc.__cause__
+        if isinstance(cause, TimeoutError):
+            logger.error(
+                "Fatal: timed out waiting for GMS RO lock during snapshot remap "
+                "(GMS may be down or RW lock held indefinitely)"
+            )
+        elif isinstance(cause, StaleMemoryLayoutError):
+            logger.error(
+                "Fatal: weight layout changed while snapshot was suspended, "
+                "cannot remap: %s",
+                cause,
+            )
+        else:
+            logger.error(
+                "Fatal: cannot connect to GMS during snapshot remap: %s",
+                cause or exc,
+            )
+        sys.exit(1)
 
     def _register_kv_caches_with_nixl(self) -> None:
         """Fire the NixlConnector KV-cache registration after deferred KV swap.
