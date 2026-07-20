@@ -192,12 +192,17 @@ def generate_workload(
     output_dir: Path,
     decoder_model: str = DECODER_MODEL,
     encoder_model: str = ENCODER_MODEL,
+    concurrencies: tuple[int, ...] = CONCURRENCIES,
     requests: int = REQUESTS,
     unique_images: int = UNIQUE_IMAGES,
     target_isl: int = TARGET_ISL,
     seed: int = SEED,
     image_size: int = DEFAULT_IMAGE_SIZE,
 ) -> Path:
+    if not concurrencies or any(value < 1 for value in concurrencies):
+        raise ValueError("concurrencies must be positive")
+    if len(set(concurrencies)) != len(concurrencies):
+        raise ValueError("concurrencies must be unique")
     if image_size < 1:
         raise ValueError("image_size must be positive")
     if unique_images < 1:
@@ -262,7 +267,7 @@ def generate_workload(
     occurrence_counts = Counter(schedule)
     manifest = {
         "axis": "concurrency",
-        "concurrencies": list(CONCURRENCIES),
+        "concurrencies": list(concurrencies),
         "decoder_model": decoder_model,
         "encoder_model": encoder_model,
         "requests_per_concurrency": requests,
@@ -418,6 +423,9 @@ def main() -> None:
     generate.add_argument("--output-dir", type=Path, required=True)
     generate.add_argument("--decoder-model", default=DECODER_MODEL)
     generate.add_argument("--encoder-model", default=ENCODER_MODEL)
+    generate.add_argument(
+        "--concurrencies", type=int, nargs="+", default=list(CONCURRENCIES)
+    )
     generate.add_argument("--image-size", type=int, default=DEFAULT_IMAGE_SIZE)
     generate.add_argument("--unique-images", type=int, default=UNIQUE_IMAGES)
     validate = subparsers.add_parser("validate")
@@ -430,6 +438,7 @@ def main() -> None:
             args.output_dir.resolve(),
             decoder_model=args.decoder_model,
             encoder_model=args.encoder_model,
+            concurrencies=tuple(args.concurrencies),
             image_size=args.image_size,
             unique_images=args.unique_images,
         )
