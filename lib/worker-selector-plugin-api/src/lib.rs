@@ -62,9 +62,9 @@ impl CandidateInputs {
     /// Dynamo's complete per-candidate cost before temperature sampling.
     pub const DEFAULT_COST: Self = Self(1 << 6);
     /// KV overlap credit used by Dynamo's default cost, measured in blocks.
-    pub const KV_OVERLAP: Self = Self(1 << 7);
+    pub const DEFAULT_KV_OVERLAP: Self = Self(1 << 7);
     /// Projected decode load used by Dynamo's default cost, measured in blocks.
-    pub const DECODE_LOAD: Self = Self(1 << 8);
+    pub const DEFAULT_DECODE_LOAD: Self = Self(1 << 8);
     pub const ALL: Self = Self((1 << 9) - 1);
 
     pub const fn bits(self) -> u64 {
@@ -229,8 +229,8 @@ pub struct WorkerSelectorCandidateColumnsV1 {
     pub capacities: *const WorkerSelectorCapacityV1,
     pub routing: *const WorkerSelectorRoutingV1,
     pub default_costs: *const f64,
-    pub kv_overlaps: *const f64,
-    pub decode_loads: *const u64,
+    pub default_kv_overlaps: *const f64,
+    pub default_decode_loads: *const u64,
 }
 
 #[repr(C)]
@@ -346,8 +346,8 @@ pub struct SelectionInput<'a> {
     capacities: Option<&'a [WorkerSelectorCapacityV1]>,
     routing: Option<&'a [WorkerSelectorRoutingV1]>,
     default_costs: Option<&'a [f64]>,
-    kv_overlaps: Option<&'a [f64]>,
-    decode_loads: Option<&'a [u64]>,
+    default_kv_overlaps: Option<&'a [f64]>,
+    default_decode_loads: Option<&'a [u64]>,
 }
 
 impl<'a> SelectionInput<'a> {
@@ -463,18 +463,18 @@ impl<'a> SelectionInput<'a> {
                     "default-cost column is null or invalid",
                 )
             }?,
-            kv_overlaps: unsafe {
+            default_kv_overlaps: unsafe {
                 optional_column(
-                    inputs.contains(CandidateInputs::KV_OVERLAP),
-                    columns.kv_overlaps,
+                    inputs.contains(CandidateInputs::DEFAULT_KV_OVERLAP),
+                    columns.default_kv_overlaps,
                     raw.candidate_count,
                     "KV-overlap column is null or invalid",
                 )
             }?,
-            decode_loads: unsafe {
+            default_decode_loads: unsafe {
                 optional_column(
-                    inputs.contains(CandidateInputs::DECODE_LOAD),
-                    columns.decode_loads,
+                    inputs.contains(CandidateInputs::DEFAULT_DECODE_LOAD),
+                    columns.default_decode_loads,
                     raw.candidate_count,
                     "decode-load column is null or invalid",
                 )
@@ -567,12 +567,12 @@ impl<'a> SelectionInput<'a> {
         self.default_costs
     }
 
-    pub fn kv_overlaps(&self) -> Option<&'a [f64]> {
-        self.kv_overlaps
+    pub fn default_kv_overlaps(&self) -> Option<&'a [f64]> {
+        self.default_kv_overlaps
     }
 
-    pub fn decode_loads(&self) -> Option<&'a [u64]> {
-        self.decode_loads
+    pub fn default_decode_loads(&self) -> Option<&'a [u64]> {
+        self.default_decode_loads
     }
 
     pub fn candidate_stable_routing_id(&self, index: usize) -> Option<&'a str> {
@@ -938,8 +938,8 @@ mod tests {
                 capacities,
                 routing,
                 default_costs,
-                kv_overlaps,
-                decode_loads,
+                default_kv_overlaps,
+                default_decode_loads,
             ),
             [0, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88]
         );
@@ -1007,8 +1007,8 @@ mod tests {
                 | CandidateInputs::CAPACITY
                 | CandidateInputs::ROUTING
                 | CandidateInputs::DEFAULT_COST
-                | CandidateInputs::KV_OVERLAP
-                | CandidateInputs::DECODE_LOAD
+                | CandidateInputs::DEFAULT_KV_OVERLAP
+                | CandidateInputs::DEFAULT_DECODE_LOAD
         }
 
         fn select(&mut self, input: SelectionInput<'_>) -> Result<Selection, String> {
@@ -1026,8 +1026,8 @@ mod tests {
             assert_eq!(input.loads(), None);
             assert_eq!(input.candidate_stable_routing_id(0), Some("worker-1"));
             assert_eq!(input.default_costs(), Some(&[3.5][..]));
-            assert_eq!(input.kv_overlaps(), Some(&[4.5][..]));
-            assert_eq!(input.decode_loads(), Some(&[5][..]));
+            assert_eq!(input.default_kv_overlaps(), Some(&[4.5][..]));
+            assert_eq!(input.default_decode_loads(), Some(&[5][..]));
             let capacity = &input.capacities().expect("capacity input")[0];
             assert_eq!(capacity.total_kv_blocks(), Some(8_192));
             assert_eq!(capacity.max_num_batched_tokens(), None);
@@ -1088,8 +1088,8 @@ mod tests {
                 | CandidateInputs::CAPACITY
                 | CandidateInputs::ROUTING
                 | CandidateInputs::DEFAULT_COST
-                | CandidateInputs::KV_OVERLAP
-                | CandidateInputs::DECODE_LOAD)
+                | CandidateInputs::DEFAULT_KV_OVERLAP
+                | CandidateInputs::DEFAULT_DECODE_LOAD)
                 .with_identity()
                 .bits()
         );
@@ -1107,8 +1107,8 @@ mod tests {
             preferred_taint_multiplier: 1.0,
         }];
         let default_costs = [3.5_f64];
-        let kv_overlaps = [4.5_f64];
-        let decode_loads = [5_u64];
+        let default_kv_overlaps = [4.5_f64];
+        let default_decode_loads = [5_u64];
         let columns = WorkerSelectorCandidateColumnsV1 {
             struct_size: size_of::<WorkerSelectorCandidateColumnsV1>() as u32,
             _reserved: 0,
@@ -1121,8 +1121,8 @@ mod tests {
             capacities: capacities.as_ptr(),
             routing: routing.as_ptr(),
             default_costs: default_costs.as_ptr(),
-            kv_overlaps: kv_overlaps.as_ptr(),
-            decode_loads: decode_loads.as_ptr(),
+            default_kv_overlaps: default_kv_overlaps.as_ptr(),
+            default_decode_loads: default_decode_loads.as_ptr(),
         };
         let input = WorkerSelectorInputV1 {
             struct_size: size_of::<WorkerSelectorInputV1>() as u32,
