@@ -237,6 +237,7 @@ type DynamoComponentDeploymentStatus struct {
 // +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:storageversion
 // +kubebuilder:resource:shortName=dcd
 // +kubebuilder:printcolumn:name="Available",type="string",JSONPath=".status.conditions[?(@.type=='Available')].status",description="Available"
 // +kubebuilder:printcolumn:name="Backend",type="string",JSONPath=`.spec.backendFramework`,description="Backend framework (sglang, vllm, trtllm)"
@@ -244,9 +245,8 @@ type DynamoComponentDeploymentStatus struct {
 
 // DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API.
 //
-// v1beta1 is a served version: the API server accepts reads and writes
-// against it, and transparently converts to/from v1alpha1 (still the
-// storage version until a later MR flips it). Conversion goes through the
+// v1beta1 is the storage version. The API server transparently converts
+// to and from the served v1alpha1 version through
 // operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 type DynamoComponentDeployment struct {
 	metav1.TypeMeta   `json:",inline"`

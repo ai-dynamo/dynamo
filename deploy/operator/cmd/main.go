@@ -45,6 +45,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
 
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
@@ -68,6 +69,7 @@ import (
 	internalcert "github.com/ai-dynamo/dynamo/deploy/operator/internal/cert"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/crdmigrator"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/namespace_scope"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
@@ -584,6 +586,34 @@ func registerControllers(
 	operatorImage string,
 	operatorPullPolicy corev1.PullPolicy,
 ) error {
+	if operatorCfg.Namespace.Restricted == "" {
+		migrator := &crdmigrator.CRDMigrator{
+			Client:    mgr.GetClient(),
+			APIReader: mgr.GetAPIReader(),
+			Config: map[client.Object]crdmigrator.ByObjectConfig{
+				&nvidiacomv1beta1.DynamoComponentDeployment{}: {
+					UseCache:                            false,
+					UseStatusForStorageVersionMigration: true,
+				},
+				&nvidiacomv1beta1.DynamoGraphDeployment{}: {
+					UseCache:                            false,
+					UseStatusForStorageVersionMigration: true,
+				},
+				&nvidiacomv1beta1.DynamoGraphDeploymentRequest{}: {
+					UseCache:                            false,
+					UseStatusForStorageVersionMigration: true,
+				},
+				&nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapter{}: {
+					UseCache:                            false,
+					UseStatusForStorageVersionMigration: true,
+				},
+			},
+		}
+		if err := migrator.SetupWithManager(mgr, ctrlcontroller.Options{MaxConcurrentReconciles: 1}); err != nil {
+			return fmt.Errorf("unable to create CRD migrator controller: %w", err)
+		}
+	}
+
 	setupOptions := controller.SetupOptions{
 		Config:        operatorCfg,
 		RuntimeConfig: runtimeConfig,

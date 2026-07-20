@@ -145,6 +145,37 @@ For user-focused workflows, see:
 - **[Managing Models with DynamoModel Guide](./deployment/dynamomodel-guide.md)**
 - **[Snapshotting GPU Workers](./snapshot.md)** for `DynamoCheckpoint`
 
+### CRD Storage Migration
+
+The cluster-wide Operator migrates existing `DynamoComponentDeployment`,
+`DynamoGraphDeployment`, `DynamoGraphDeploymentRequest`, and
+`DynamoGraphDeploymentScalingAdapter` objects to the current CRD storage version. The migration
+runs asynchronously after the conversion webhook starts. It writes through each resource's status
+subresource, so it does not intentionally change the spec or generation.
+
+The `v1alpha1` API remains served during the `v1beta1` storage migration. Existing alpha clients
+and manifests continue to work through the conversion webhook.
+
+Check migration progress for a CRD:
+
+```bash
+kubectl get crd dynamographdeployments.nvidia.com \
+  -o jsonpath='{.metadata.generation}{"\n"}{.metadata.annotations.crd-migration\.cluster\.x-k8s\.io/observed-generation}{"\n"}{.status.storedVersions}{"\n"}'
+```
+
+Migration is complete when the observed-generation annotation matches the CRD generation and
+`status.storedVersions` contains only `v1beta1`. A temporary conversion-webhook or API server error
+leaves these completion markers unchanged. The controller retries after the dependency recovers.
+
+> [!IMPORTANT]
+> Configure GitOps tools to preserve or ignore
+> `crd-migration.cluster.x-k8s.io/observed-generation`. Removing the annotation repeatedly causes
+> the Operator to scan the configured resources again.
+
+A cluster-wide Operator with `dynamo-operator.upgradeCRD=false` still runs migration, but it does
+not change the CRD spec. It waits until the external CRD owner declares the new storage version.
+Namespace-restricted Operators do not run storage migration.
+
 ## Webhooks
 
 The Dynamo Operator uses **Kubernetes admission webhooks** for real-time validation and mutation of custom resources before they are persisted to the cluster. Webhooks are a required component of the operator and ensure that invalid configurations are rejected immediately at the API server level.

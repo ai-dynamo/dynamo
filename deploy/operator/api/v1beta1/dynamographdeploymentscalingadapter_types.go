@@ -75,6 +75,7 @@ type DynamoGraphDeploymentScalingAdapterStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:storageversion
 // +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas,selectorpath=.status.selector
 // +kubebuilder:printcolumn:name="DGD",type="string",JSONPath=".spec.dgdRef.name",description="DynamoGraphDeployment name"
 // +kubebuilder:printcolumn:name="COMPONENT",type="string",JSONPath=".spec.dgdRef.componentName",description="Component name"
@@ -90,8 +91,8 @@ type DynamoGraphDeploymentScalingAdapterStatus struct {
 // ensuring that only the adapter controller modifies the DGD's component replicas.
 // This prevents conflicts when multiple autoscaling mechanisms are in play.
 //
-// v1alpha1 remains the storage version; conversion between served versions is
-// handled by the operator's conversion webhook
+// v1beta1 is the storage version; conversion to and from the served v1alpha1
+// version is handled by the operator's conversion webhook
 // (see api/v1alpha1/dynamographdeploymentscalingadapter_conversion.go).
 type DynamoGraphDeploymentScalingAdapter struct {
 	metav1.TypeMeta   `json:",inline"`
