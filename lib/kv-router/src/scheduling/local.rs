@@ -338,7 +338,7 @@ where
             .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
         match &mut response {
             Ok(response) if response.request_progress.is_some() => {
-                response.admission_lease = cancellation_guard.take().map(|lease| *lease);
+                response.admission_lease = cancellation_guard.take();
             }
             Ok(_) | Err(_) => {
                 if let Some(guard) = cancellation_guard.as_mut() {
