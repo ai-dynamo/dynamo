@@ -7,16 +7,20 @@ use anyhow::Result;
 use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, RouterEvent};
 use dynamo_runtime::{
     component::{Component, Endpoint},
+    config::environment_names::router::DYN_ROUTER_ZMQ_INGRESS_THREADS,
     discovery::EventTransportKind,
     protocols::EndpointId,
     traits::DistributedRuntimeProvider,
-    transports::event_plane::{EventSubscriber, TypedEventSubscriber},
+    transports::event_plane::{EventSubscriber, TypedEventSubscriber, uses_direct_zmq},
 };
 use tokio::sync::{Semaphore, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use super::{IndexerRecoveryTarget, RecoveryTarget, worker_query::WorkerQueryClient};
+use super::{
+    IndexerRecoveryTarget, RecoveryTarget, direct_zmq::run_direct_zmq_supervisor,
+    worker_query::WorkerQueryClient,
+};
 use crate::{
     discovery::{KvSourceMembershipView, KvSourceMembershipWatch, KvSourceStatus},
     kv_router::{Indexer, metrics::RouterWorkerStatusMetrics},
@@ -24,6 +28,8 @@ use crate::{
 
 const SUBSCRIPTION_INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 const SUBSCRIPTION_MAX_BACKOFF: Duration = Duration::from_secs(5);
+const DEFAULT_ZMQ_INGRESS_THREADS: usize = 2;
+const INGRESS_RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 enum ScopeExit {
     Rebind,
@@ -231,7 +237,7 @@ async fn wait_for_retry(
     }
 }
 
-fn update_mismatch_metric(
+pub(super) fn update_mismatch_metric(
     metrics: &RouterWorkerStatusMetrics,
     view: &KvSourceMembershipView,
     model: &str,
@@ -257,7 +263,7 @@ fn update_mismatch_metric(
     );
 }
 
-fn update_subscription_failure_metric(
+pub(super) fn update_subscription_failure_metric(
     metrics: &RouterWorkerStatusMetrics,
     view: &KvSourceMembershipView,
     model: &str,
@@ -274,6 +280,55 @@ fn update_subscription_failure_metric(
     );
 }
 
+pub(crate) struct KvEventSubscriptionHandle {
+    cancel: CancellationToken,
+    completion: Option<oneshot::Receiver<()>>,
+}
+
+impl KvEventSubscriptionHandle {
+    pub(crate) async fn shutdown(mut self) {
+        self.cancel.cancel();
+        if let Some(completion) = self.completion.take() {
+            let _ = completion.await;
+        }
+    }
+}
+
+impl Drop for KvEventSubscriptionHandle {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
+fn zmq_ingress_threads_from_lookup(get_env: impl FnOnce(&str) -> Option<String>) -> usize {
+    let Some(value) = get_env(DYN_ROUTER_ZMQ_INGRESS_THREADS) else {
+        return DEFAULT_ZMQ_INGRESS_THREADS;
+    };
+    match value.parse::<usize>() {
+        Ok(threads) => threads,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                value,
+                "Invalid {DYN_ROUTER_ZMQ_INGRESS_THREADS}; using {DEFAULT_ZMQ_INGRESS_THREADS}"
+            );
+            DEFAULT_ZMQ_INGRESS_THREADS
+        }
+    }
+}
+
+fn zmq_ingress_threads() -> usize {
+    zmq_ingress_threads_from_lookup(|key| std::env::var(key).ok())
+}
+
+fn use_direct_zmq_ingress(
+    transport_kind: EventTransportKind,
+    direct_zmq_configured: bool,
+    ingress_threads: usize,
+) -> bool {
+    ingress_threads > 0 && transport_kind == EventTransportKind::Zmq && direct_zmq_configured
+}
+
 pub async fn start_subscriber(
     endpoint: Endpoint,
     indexer: Indexer,
@@ -281,31 +336,107 @@ pub async fn start_subscriber(
     model: String,
     worker_type: &'static str,
     cancellation_token: CancellationToken,
-) -> Result<()> {
+) -> Result<KvEventSubscriptionHandle> {
     let transport_kind = endpoint.component().drt().default_event_transport_kind();
+    let ingress_threads = zmq_ingress_threads();
+    let direct_zmq = use_direct_zmq_ingress(
+        transport_kind,
+        uses_direct_zmq(transport_kind),
+        ingress_threads,
+    );
+    let cancel = cancellation_token.child_token();
     let client = WorkerQueryClient::spawn(
         endpoint.component().clone(),
         IndexerRecoveryTarget::new(indexer),
         membership_watch.clone(),
-        cancellation_token.child_token(),
+        cancel.child_token(),
     )
     .await?;
+
+    if !direct_zmq {
+        tracing::info!(
+            transport = ?transport_kind,
+            ingress_threads,
+            "Using aggregated KV event subscriber"
+        );
+        let (startup_tx, startup_rx) = oneshot::channel();
+        let (completion_tx, completion_rx) = oneshot::channel();
+        let task_cancel = cancel.clone();
+        tokio::spawn(async move {
+            run_subscription_supervisor(
+                endpoint.component().clone(),
+                endpoint.id(),
+                client,
+                transport_kind,
+                membership_watch,
+                model,
+                worker_type,
+                task_cancel,
+                Some(startup_tx),
+            )
+            .await;
+            let _ = completion_tx.send(());
+        });
+        startup_rx.await.map_err(|_| {
+            anyhow::anyhow!("KV event subscription supervisor exited before reporting readiness")
+        })?;
+        return Ok(KvEventSubscriptionHandle {
+            cancel,
+            completion: Some(completion_rx),
+        });
+    }
+
+    tracing::info!(
+        ingress_threads,
+        "Using dedicated direct-ZMQ KV event ingress runtime"
+    );
     let (startup_tx, startup_rx) = oneshot::channel();
-    tokio::spawn(run_subscription_supervisor(
-        endpoint.component().clone(),
-        endpoint.id(),
-        client,
-        transport_kind,
-        membership_watch,
-        model,
-        worker_type,
-        cancellation_token,
-        Some(startup_tx),
-    ));
-    startup_rx.await.map_err(|_| {
-        anyhow::anyhow!("KV event subscription supervisor exited before reporting readiness")
-    })?;
-    Ok(())
+    let (completion_tx, completion_rx) = oneshot::channel();
+    let owner_cancel = cancel.clone();
+    std::thread::Builder::new()
+        .name("dynamo-kv-zmq-owner".to_string())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(ingress_threads)
+                .thread_name("dynamo-kv-zmq-ingress")
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = startup_tx.send(Err(format!(
+                        "failed to build direct-ZMQ ingress runtime: {error}"
+                    )));
+                    let _ = completion_tx.send(());
+                    return;
+                }
+            };
+
+            runtime.block_on(run_direct_zmq_supervisor(
+                endpoint.component().clone(),
+                endpoint.id(),
+                client,
+                membership_watch,
+                model,
+                worker_type,
+                owner_cancel,
+                Some(startup_tx),
+            ));
+            runtime.shutdown_timeout(INGRESS_RUNTIME_SHUTDOWN_TIMEOUT);
+            let _ = completion_tx.send(());
+        })
+        .map_err(|error| anyhow::anyhow!("failed to start direct-ZMQ ingress owner: {error}"))?;
+
+    startup_rx
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!("Direct-ZMQ ingress supervisor exited before reporting readiness")
+        })?
+        .map_err(anyhow::Error::msg)?;
+    Ok(KvEventSubscriptionHandle {
+        cancel,
+        completion: Some(completion_rx),
+    })
 }
 
 pub(crate) struct RecoverySupervisor<T: RecoveryTarget> {
@@ -373,4 +504,67 @@ pub(crate) async fn start_target_subscriber<T: RecoveryTarget>(
         cancel,
         task,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ingress_thread_configuration_defaults_and_rolls_back() {
+        assert_eq!(zmq_ingress_threads_from_lookup(|_| None), 2);
+        assert_eq!(
+            zmq_ingress_threads_from_lookup(|key| {
+                assert_eq!(key, DYN_ROUTER_ZMQ_INGRESS_THREADS);
+                Some("0".to_string())
+            }),
+            0
+        );
+        assert_eq!(
+            zmq_ingress_threads_from_lookup(|_| Some("8".to_string())),
+            8
+        );
+        assert_eq!(
+            zmq_ingress_threads_from_lookup(|_| Some("invalid".to_string())),
+            2
+        );
+    }
+
+    #[test]
+    fn only_direct_zmq_with_positive_threads_selects_direct_ingress() {
+        let cases = [
+            (EventTransportKind::Zmq, true, 2, true),
+            (EventTransportKind::Zmq, true, 0, false),
+            (EventTransportKind::Zmq, false, 2, false),
+            (EventTransportKind::Zmq, false, 0, false),
+            (EventTransportKind::Nats, false, 2, false),
+            (EventTransportKind::Nats, false, 0, false),
+        ];
+
+        for (transport, direct_zmq_configured, threads, expected) in cases {
+            assert_eq!(
+                use_direct_zmq_ingress(transport, direct_zmq_configured, threads),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn subscription_handle_shutdown_waits_for_completion() {
+        let cancel = CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let (completion_tx, completion_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            task_cancel.cancelled().await;
+            let _ = completion_tx.send(());
+        });
+        let handle = KvEventSubscriptionHandle {
+            cancel,
+            completion: Some(completion_rx),
+        };
+
+        tokio::time::timeout(Duration::from_secs(1), handle.shutdown())
+            .await
+            .expect("subscription shutdown should complete");
+    }
 }

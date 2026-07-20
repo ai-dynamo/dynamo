@@ -607,6 +607,9 @@ pub mod router {
 
     /// Stale active-request cleanup guard in seconds; this is not a request timeout.
     pub const DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS: &str = "DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS";
+
+    /// Tokio worker threads dedicated to direct-ZMQ KV event ingress.
+    pub const DYN_ROUTER_ZMQ_INGRESS_THREADS: &str = "DYN_ROUTER_ZMQ_INGRESS_THREADS";
 }
 
 /// Request plane transport environment variables
@@ -868,6 +871,7 @@ mod tests {
             router::DYN_ROUTER_QUEUE_POLICY,
             router::DYN_ROUTER_POLICY_CONFIG,
             router::DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
+            router::DYN_ROUTER_ZMQ_INGRESS_THREADS,
             request_plane::DYN_REQUEST_PLANE_CODEC,
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
