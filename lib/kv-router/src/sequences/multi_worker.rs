@@ -95,6 +95,14 @@ pub trait SequencePublisher: Send + Sync {
         event: &ActiveSequenceEvent,
     ) -> impl Future<Output = anyhow::Result<()>> + Send;
 
+    /// Publish an owned replica-sync event, avoiding a clone when supported by the transport.
+    fn publish_event_owned(
+        &self,
+        event: ActiveSequenceEvent,
+    ) -> impl Future<Output = anyhow::Result<()>> + Send {
+        async move { self.publish_event(&event).await }
+    }
+
     /// Fire-and-forget publish of an [`ActiveLoad`] metric payload.
     fn publish_load(&self, load: ActiveLoad);
 
@@ -429,10 +437,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         // can mirror the same oldest-prefill anchor instead of approximating from receive time.
         let publisher = Arc::clone(&self.publisher);
         tokio::spawn(async move {
-            if let Err(e) = publisher.publish_event(&event).await {
+            let request_id = event.request_id.clone();
+            let worker = event.worker;
+            if let Err(e) = publisher.publish_event_owned(event).await {
                 tracing::error!(
-                    request_id = %event.request_id,
-                    worker = ?event.worker,
+                    request_id = %request_id,
+                    worker = ?worker,
                     "failed to publish active sequence event: {e}"
                 );
             }

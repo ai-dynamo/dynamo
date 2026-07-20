@@ -19,10 +19,9 @@ use dashmap::DashMap;
 use dynamo_kv_router::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
 use dynamo_runtime::component::{Component, Endpoint};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
-use dynamo_runtime::transports::event_plane::EventSubscriber;
 
-use crate::kv_router::ACTIVE_SEQUENCES_SUBJECT;
 use crate::kv_router::scheduler::KvScheduler;
+use crate::kv_router::sequence::{RuntimeSequenceSubscriber, SequenceSubscriber};
 use crate::lora::config::PredictorType;
 use crate::lora::predictor::{EmaPredictor, LoadPredictor};
 
@@ -498,18 +497,16 @@ impl LoadEstimator {
         endpoint: &Endpoint,
         cancel_token: &tokio_util::sync::CancellationToken,
     ) -> anyhow::Result<()> {
-        let mut subscriber = EventSubscriber::for_endpoint(endpoint, ACTIVE_SEQUENCES_SUBJECT)
-            .await?
-            .typed::<ActiveSequenceEvent>();
+        let mut subscriber = RuntimeSequenceSubscriber::for_endpoint(endpoint).await?;
 
         tracing::info!("Started LORA load event subscription");
 
         loop {
             tokio::select! {
                 _ = cancel_token.cancelled() => return Ok(()),
-                result = subscriber.next() => {
+                result = subscriber.next_event() => {
                     match result {
-                        Some(Ok((_envelope, event))) => {
+                        Some(Ok(event)) => {
                             self.handle_event(event);
                         }
                         Some(Err(e)) => {
@@ -745,6 +742,60 @@ impl Default for LoadEstimator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_kv_router::protocols::{ActiveSequenceEventBatch, WorkerWithDpRank};
+
+    fn lora_event(
+        request_id: &str,
+        lora_name: Option<&str>,
+        data: ActiveSequenceEventData,
+    ) -> ActiveSequenceEvent {
+        ActiveSequenceEvent {
+            request_id: request_id.to_string(),
+            worker: WorkerWithDpRank::new(1, 0),
+            data,
+            router_id: 7,
+            lora_name: lora_name.map(str::to_string),
+        }
+    }
+
+    fn add_request() -> ActiveSequenceEventData {
+        ActiveSequenceEventData::AddRequest {
+            token_sequence: None,
+            track_prefill_tokens: false,
+            expected_output_tokens: None,
+            prefill_load_hint: None,
+        }
+    }
+
+    #[test]
+    fn mixed_replica_batch_updates_lora_load_in_order() {
+        let estimator = LoadEstimator::new();
+        let batch = ActiveSequenceEventBatch {
+            events: vec![
+                lora_event("alpha", Some("lora-alpha"), add_request()),
+                lora_event(
+                    "alpha",
+                    Some("lora-alpha"),
+                    ActiveSequenceEventData::MarkPrefillCompleted,
+                ),
+                lora_event("beta", Some("lora-beta"), add_request()),
+                lora_event("alpha", Some("lora-alpha"), ActiveSequenceEventData::Free),
+                lora_event("no-lora", None, add_request()),
+            ],
+        };
+        for event in batch.events {
+            estimator.handle_event(event);
+        }
+
+        let inflight = estimator.get_inflight_counts();
+        assert!(!inflight.contains_key("lora-alpha"));
+        assert_eq!(inflight.get("lora-beta"), Some(&1));
+
+        let arrivals = estimator.get_raw_arrival_counts();
+        assert_eq!(arrivals.get("lora-alpha"), Some(&1));
+        assert_eq!(arrivals.get("lora-beta"), Some(&1));
+        assert_eq!(arrivals.len(), 2);
+    }
 
     #[test]
     fn set_config_rebuilds_existing_counter_geometry() {

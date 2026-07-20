@@ -5,7 +5,7 @@
 //!
 //! This module provides the concrete [`SequencePublisher`] and [`SequenceSubscriber`]
 //! implementations that wire the runtime-agnostic business logic (in `dynamo_kv_router`)
-//! to NATS event transport and Prometheus metrics.
+//! to the configured event transport and Prometheus metrics.
 
 pub use dynamo_kv_router::multi_worker_sequence::{
     ActiveSequencesMultiWorker, SequenceError, SequencePublisher, SequenceRequest,
@@ -18,12 +18,12 @@ use dynamo_kv_router::protocols::{
 pub use dynamo_kv_router::sequence::{ActiveSequences, RequestId};
 
 use anyhow::Result;
-use bytes::Bytes;
 use dynamo_runtime::component::Endpoint;
-use dynamo_runtime::transports::event_plane::{EventPublisher, EventSubscriber, MsgpackCodec};
-use serde::Serialize;
+use dynamo_runtime::traits::DistributedRuntimeProvider;
+use dynamo_runtime::transports::event_plane::{
+    EventPublisher, EventSubscriber, EventTransportKind, TypedEventSubscriber,
+};
 use std::collections::{HashMap, VecDeque};
-use std::ops::Range;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::sync::mpsc;
@@ -35,37 +35,62 @@ use crate::kv_router::{ACTIVE_SEQUENCES_SUBJECT, KV_METRICS_SUBJECT};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 #[cfg(test)]
 use dynamo_kv_router::protocols::PrefillLoadHint;
+#[cfg(test)]
+use dynamo_runtime::transports::event_plane::MsgpackCodec;
 
+// Match the existing standalone replica-sync queue. Senders wait asynchronously when it is full,
+// preserving the pre-existing fire-and-forget behavior rather than dropping lifecycle events.
 const REPLICA_EVENT_CHANNEL_CAPACITY: usize = 100_000;
-const MAX_REPLICA_BATCH_PAYLOAD_BYTES: usize = 1_000_000;
 
-#[derive(Serialize)]
-struct ActiveSequenceEventBatchRef<'a> {
-    events: &'a [ActiveSequenceEvent],
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActiveSequenceEventWireFormat {
+    Singleton,
+    Batch,
 }
 
-struct EncodedReplicaBatch {
-    event_range: Range<usize>,
-    payload: Bytes,
-    oversized: bool,
+fn active_sequence_event_wire_format(
+    transport_kind: EventTransportKind,
+) -> ActiveSequenceEventWireFormat {
+    match transport_kind {
+        EventTransportKind::Nats => ActiveSequenceEventWireFormat::Singleton,
+        EventTransportKind::Zmq => ActiveSequenceEventWireFormat::Batch,
+    }
 }
 
-/// Concrete [`SequencePublisher`] backed by NATS [`EventPublisher`] and Prometheus gauges.
+enum ActiveSequenceEventPublisher {
+    Nats(Box<EventPublisher>),
+    Zmq(mpsc::Sender<ActiveSequenceEvent>),
+}
+
+/// Concrete [`SequencePublisher`] backed by the runtime event plane and Prometheus gauges.
 pub struct RuntimeSequencePublisher {
-    event_tx: Option<mpsc::Sender<ActiveSequenceEvent>>,
+    event_publisher: Option<ActiveSequenceEventPublisher>,
     metrics_publisher: Arc<EventPublisher>,
     worker_status_metrics: Arc<RouterWorkerStatusMetrics>,
 }
 
-impl SequencePublisher for RuntimeSequencePublisher {
-    async fn publish_event(&self, event: &ActiveSequenceEvent) -> anyhow::Result<()> {
-        let Some(event_tx) = &self.event_tx else {
+impl RuntimeSequencePublisher {
+    async fn publish_owned_event(&self, event: ActiveSequenceEvent) -> anyhow::Result<()> {
+        let Some(event_publisher) = &self.event_publisher else {
             return Ok(());
         };
-        event_tx
-            .send(event.clone())
-            .await
-            .map_err(|_| anyhow::anyhow!("active-sequence replica publisher is closed"))
+        match event_publisher {
+            ActiveSequenceEventPublisher::Nats(publisher) => publisher.publish(&event).await,
+            ActiveSequenceEventPublisher::Zmq(event_tx) => event_tx
+                .send(event)
+                .await
+                .map_err(|_| anyhow::anyhow!("active-sequence replica publisher is closed")),
+        }
+    }
+}
+
+impl SequencePublisher for RuntimeSequencePublisher {
+    async fn publish_event(&self, event: &ActiveSequenceEvent) -> anyhow::Result<()> {
+        self.publish_owned_event(event.clone()).await
+    }
+
+    async fn publish_event_owned(&self, event: ActiveSequenceEvent) -> anyhow::Result<()> {
+        self.publish_owned_event(event).await
     }
 
     fn publish_load(&self, load: ActiveLoad) {
@@ -123,110 +148,27 @@ impl SequencePublisher for RuntimeSequencePublisher {
     }
 }
 
-fn encode_replica_batch(events: &[ActiveSequenceEvent]) -> Result<Bytes> {
-    MsgpackCodec.encode_payload(&ActiveSequenceEventBatchRef { events })
-}
+async fn publish_replica_batch(publisher: &EventPublisher, events: Vec<ActiveSequenceEvent>) {
+    let batch = ActiveSequenceEventBatch { events };
+    let first_request_id = &batch
+        .events
+        .first()
+        .expect("replica batch must contain an event")
+        .request_id;
+    let last_request_id = &batch
+        .events
+        .last()
+        .expect("replica batch must contain an event")
+        .request_id;
 
-fn encode_replica_batch_partitions(
-    events: &[ActiveSequenceEvent],
-) -> Result<Vec<EncodedReplicaBatch>> {
-    let mut batches = Vec::new();
-    let mut batch_start = 0;
-
-    while batch_start < events.len() {
-        let remaining = &events[batch_start..];
-        let remaining_payload = encode_replica_batch(remaining)?;
-        if remaining_payload.len() <= MAX_REPLICA_BATCH_PAYLOAD_BYTES {
-            batches.push(EncodedReplicaBatch {
-                event_range: batch_start..events.len(),
-                payload: remaining_payload,
-                oversized: false,
-            });
-            break;
-        }
-
-        let first_payload = encode_replica_batch(&remaining[..1])?;
-        if first_payload.len() > MAX_REPLICA_BATCH_PAYLOAD_BYTES {
-            batches.push(EncodedReplicaBatch {
-                event_range: batch_start..batch_start + 1,
-                payload: first_payload,
-                oversized: true,
-            });
-            batch_start += 1;
-            continue;
-        }
-
-        let mut best_len = 1;
-        let mut best_payload = first_payload;
-        let mut low = 2;
-        let mut high = remaining.len() - 1;
-        while low <= high {
-            let candidate_len = low + (high - low) / 2;
-            let candidate_payload = encode_replica_batch(&remaining[..candidate_len])?;
-            if candidate_payload.len() <= MAX_REPLICA_BATCH_PAYLOAD_BYTES {
-                best_len = candidate_len;
-                best_payload = candidate_payload;
-                low = candidate_len + 1;
-            } else {
-                high = candidate_len - 1;
-            }
-        }
-
-        batches.push(EncodedReplicaBatch {
-            event_range: batch_start..batch_start + best_len,
-            payload: best_payload,
-            oversized: false,
-        });
-        batch_start += best_len;
-    }
-
-    Ok(batches)
-}
-
-async fn publish_replica_batch(publisher: &EventPublisher, events: &[ActiveSequenceEvent]) {
-    let batches = match encode_replica_batch_partitions(events) {
-        Ok(batches) => batches,
-        Err(error) => {
-            tracing::error!(
-                event_count = events.len(),
-                error = %error,
-                "Failed to encode active-sequence replica batch"
-            );
-            return;
-        }
-    };
-
-    for batch in batches {
-        let batch_events = &events[batch.event_range.clone()];
-        let first_request_id = &batch_events
-            .first()
-            .expect("replica batch must contain an event")
-            .request_id;
-        let last_request_id = &batch_events
-            .last()
-            .expect("replica batch must contain an event")
-            .request_id;
-
-        if batch.oversized {
-            tracing::warn!(
-                request_id = %first_request_id,
-                payload_bytes = batch.payload.len(),
-                max_payload_bytes = MAX_REPLICA_BATCH_PAYLOAD_BYTES,
-                "Active-sequence replica event exceeds the batch payload limit; publishing intact"
-            );
-        }
-
-        if let Err(error) = publisher.publish_bytes_ref(batch.payload.as_ref()).await {
-            tracing::error!(
-                transport = ?publisher.transport_kind(),
-                event_count = batch_events.len(),
-                payload_bytes = batch.payload.len(),
-                first_request_id = %first_request_id,
-                last_request_id = %last_request_id,
-                error = %error,
-                "Failed to publish active-sequence replica batch"
-            );
-        }
+    if let Err(error) = publisher.publish(&batch).await {
+        tracing::error!(
+            event_count = batch.events.len(),
+            first_request_id = %first_request_id,
+            last_request_id = %last_request_id,
+            error = %error,
+            "Failed to publish active-sequence replica batch"
+        );
     }
 }
 
@@ -270,17 +212,46 @@ async fn run_replica_batch_publisher(
         };
         let (events, stop_after_flush) =
             collect_replica_batch(first_event, &mut event_rx, &cancellation_token).await;
-        publish_replica_batch(&publisher, &events).await;
+        publish_replica_batch(&publisher, events).await;
         if stop_after_flush {
             break;
         }
     }
 }
 
-/// Concrete [`SequenceSubscriber`] backed by NATS typed event stream.
+enum ActiveSequenceEventSubscriber {
+    Nats(TypedEventSubscriber<ActiveSequenceEvent>),
+    Zmq(TypedEventSubscriber<ActiveSequenceEventBatch>),
+}
+
+/// Concrete [`SequenceSubscriber`] backed by the configured runtime event transport.
 pub struct RuntimeSequenceSubscriber {
-    inner: dynamo_runtime::transports::event_plane::TypedEventSubscriber<ActiveSequenceEventBatch>,
+    inner: ActiveSequenceEventSubscriber,
     pending: VecDeque<ActiveSequenceEvent>,
+}
+
+impl RuntimeSequenceSubscriber {
+    pub(crate) async fn for_endpoint(endpoint: &Endpoint) -> Result<Self> {
+        let transport_kind = endpoint.drt().default_event_transport_kind();
+        let subscriber = EventSubscriber::for_endpoint_with_transport(
+            endpoint,
+            ACTIVE_SEQUENCES_SUBJECT,
+            transport_kind,
+        )
+        .await?;
+        let inner = match active_sequence_event_wire_format(transport_kind) {
+            ActiveSequenceEventWireFormat::Singleton => {
+                ActiveSequenceEventSubscriber::Nats(subscriber.typed::<ActiveSequenceEvent>())
+            }
+            ActiveSequenceEventWireFormat::Batch => {
+                ActiveSequenceEventSubscriber::Zmq(subscriber.typed::<ActiveSequenceEventBatch>())
+            }
+        };
+        Ok(Self {
+            inner,
+            pending: VecDeque::new(),
+        })
+    }
 }
 
 impl SequenceSubscriber for RuntimeSequenceSubscriber {
@@ -289,9 +260,17 @@ impl SequenceSubscriber for RuntimeSequenceSubscriber {
             if let Some(event) = self.pending.pop_front() {
                 return Some(Ok(event));
             }
-            match self.inner.next().await? {
-                Ok((_envelope, batch)) => self.pending.extend(batch.events),
-                Err(error) => return Some(Err(error)),
+            match &mut self.inner {
+                ActiveSequenceEventSubscriber::Nats(subscriber) => {
+                    return match subscriber.next().await? {
+                        Ok((_envelope, event)) => Some(Ok(event)),
+                        Err(error) => Some(Err(error)),
+                    };
+                }
+                ActiveSequenceEventSubscriber::Zmq(subscriber) => match subscriber.next().await? {
+                    Ok((_envelope, batch)) => self.pending.extend(batch.events),
+                    Err(error) => return Some(Err(error)),
+                },
             }
         }
     }
@@ -304,11 +283,21 @@ impl SequenceSubscriber for RuntimeSequenceSubscriber {
             if let Some(event) = self.pending.pop_front() {
                 return Poll::Ready(Some(Ok(event)));
             }
-            match self.inner.poll_next(cx) {
-                Poll::Ready(Some(Ok((_envelope, batch)))) => self.pending.extend(batch.events),
-                Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
-                Poll::Ready(None) => return Poll::Ready(None),
-                Poll::Pending => return Poll::Pending,
+            match &mut self.inner {
+                ActiveSequenceEventSubscriber::Nats(subscriber) => {
+                    return match subscriber.poll_next(cx) {
+                        Poll::Ready(Some(Ok((_envelope, event)))) => Poll::Ready(Some(Ok(event))),
+                        Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
+                        Poll::Ready(None) => Poll::Ready(None),
+                        Poll::Pending => Poll::Pending,
+                    };
+                }
+                ActiveSequenceEventSubscriber::Zmq(subscriber) => match subscriber.poll_next(cx) {
+                    Poll::Ready(Some(Ok((_envelope, batch)))) => self.pending.extend(batch.events),
+                    Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
+                    Poll::Ready(None) => return Poll::Ready(None),
+                    Poll::Pending => return Poll::Pending,
+                },
             }
         }
     }
@@ -317,7 +306,7 @@ impl SequenceSubscriber for RuntimeSequenceSubscriber {
 /// Type alias for the runtime-wired multi-worker sequence tracker.
 pub type ActiveSequencesMulti = ActiveSequencesMultiWorker<RuntimeSequencePublisher>;
 
-/// Convenience async constructor that creates the NATS publishers/subscribers
+/// Convenience async constructor that creates the event-plane publishers/subscribers
 /// and returns an `Arc<ActiveSequencesMulti>` with replica sync already running.
 pub async fn create_multi_worker_sequences(
     endpoint: Endpoint,
@@ -328,16 +317,28 @@ pub async fn create_multi_worker_sequences(
     worker_type: &'static str,
     cancellation_token: CancellationToken,
 ) -> Result<Arc<ActiveSequencesMulti>> {
-    let event_tx = if replica_sync {
-        let event_publisher =
-            EventPublisher::for_endpoint(&endpoint, ACTIVE_SEQUENCES_SUBJECT).await?;
-        let (event_tx, event_rx) = mpsc::channel(REPLICA_EVENT_CHANNEL_CAPACITY);
-        tokio::spawn(run_replica_batch_publisher(
-            event_publisher,
-            event_rx,
-            cancellation_token.child_token(),
-        ));
-        Some(event_tx)
+    let event_publisher = if replica_sync {
+        let transport_kind = endpoint.drt().default_event_transport_kind();
+        let event_publisher = EventPublisher::for_endpoint_with_transport(
+            &endpoint,
+            ACTIVE_SEQUENCES_SUBJECT,
+            transport_kind,
+        )
+        .await?;
+        match active_sequence_event_wire_format(transport_kind) {
+            ActiveSequenceEventWireFormat::Singleton => Some(ActiveSequenceEventPublisher::Nats(
+                Box::new(event_publisher),
+            )),
+            ActiveSequenceEventWireFormat::Batch => {
+                let (event_tx, event_rx) = mpsc::channel(REPLICA_EVENT_CHANNEL_CAPACITY);
+                tokio::spawn(run_replica_batch_publisher(
+                    event_publisher,
+                    event_rx,
+                    cancellation_token.child_token(),
+                ));
+                Some(ActiveSequenceEventPublisher::Zmq(event_tx))
+            }
+        }
     } else {
         None
     };
@@ -346,7 +347,7 @@ pub async fn create_multi_worker_sequences(
     let worker_status_metrics = RouterWorkerStatusMetrics::from_component(endpoint.component());
 
     let publisher = RuntimeSequencePublisher {
-        event_tx,
+        event_publisher,
         metrics_publisher,
         worker_status_metrics,
     };
@@ -373,13 +374,7 @@ pub async fn create_multi_worker_sequences(
     let arc = Arc::new(multi_worker);
 
     if replica_sync {
-        let subscriber = EventSubscriber::for_endpoint(&endpoint, ACTIVE_SEQUENCES_SUBJECT)
-            .await?
-            .typed::<ActiveSequenceEventBatch>();
-        let subscriber = RuntimeSequenceSubscriber {
-            inner: subscriber,
-            pending: VecDeque::new(),
-        };
+        let subscriber = RuntimeSequenceSubscriber::for_endpoint(&endpoint).await?;
         arc.start_replica_sync(subscriber, cancellation_token.child_token());
     }
 
@@ -412,21 +407,6 @@ mod tests {
         }
     }
 
-    fn large_add_event(request_id: impl Into<String>, hashes: usize) -> ActiveSequenceEvent {
-        ActiveSequenceEvent {
-            request_id: request_id.into(),
-            worker: WorkerWithDpRank::new(1, 0),
-            data: ActiveSequenceEventData::AddRequest {
-                token_sequence: Some(vec![u64::MAX; hashes]),
-                track_prefill_tokens: true,
-                expected_output_tokens: None,
-                prefill_load_hint: None,
-            },
-            router_id: 7,
-            lora_name: None,
-        }
-    }
-
     #[tokio::test(start_paused = true)]
     async fn active_sequence_batch_collection_uses_time_and_count_caps() {
         let (event_tx, mut event_rx) = mpsc::channel(MAX_REPLICA_BATCH_EVENTS + 1);
@@ -444,10 +424,10 @@ mod tests {
         assert!(!stop);
         assert_eq!(events.len(), 100);
         assert_eq!(Instant::now() - start, MAX_REPLICA_BATCH_DURATION);
-        let batches = encode_replica_batch_partitions(&events).unwrap();
-        assert_eq!(batches.len(), 1);
-        let decoded: ActiveSequenceEventBatch =
-            MsgpackCodec.decode_payload(&batches[0].payload).unwrap();
+        let payload = MsgpackCodec
+            .encode_payload(&ActiveSequenceEventBatch { events })
+            .unwrap();
+        let decoded: ActiveSequenceEventBatch = MsgpackCodec.decode_payload(&payload).unwrap();
         assert_eq!(decoded.events.len(), 100);
         for (request_id, event) in decoded.events.iter().enumerate() {
             assert_eq!(event.request_id, format!("free-{request_id}"));
@@ -469,67 +449,49 @@ mod tests {
         assert_eq!(event_rx.len(), 1);
 
         let last = event_rx.recv().await.unwrap();
+        let start = Instant::now();
         let (remaining, stop) =
             collect_replica_batch(last, &mut event_rx, &CancellationToken::new()).await;
         assert!(!stop);
         assert_eq!(remaining.len(), 1);
+        assert_eq!(Instant::now() - start, MAX_REPLICA_BATCH_DURATION);
     }
 
     #[test]
-    fn active_sequence_batches_split_at_payload_limit_and_roundtrip() {
-        const NATS_DEFAULT_MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
+    fn active_sequence_wire_format_uses_singletons_only_for_nats() {
+        assert_eq!(
+            active_sequence_event_wire_format(EventTransportKind::Nats),
+            ActiveSequenceEventWireFormat::Singleton
+        );
+        assert_eq!(
+            active_sequence_event_wire_format(EventTransportKind::Zmq),
+            ActiveSequenceEventWireFormat::Batch
+        );
 
-        let max_payload = vec![0; MAX_REPLICA_BATCH_PAYLOAD_BYTES];
-        let max_sized_envelope = MsgpackCodec
-            .encode_envelope_parts(
-                u64::MAX,
-                u64::MAX,
-                u64::MAX,
-                ACTIVE_SEQUENCES_SUBJECT,
-                &max_payload,
-            )
+        let event = free_event("request");
+        let singleton_payload = MsgpackCodec.encode_payload(&event).unwrap();
+        let decoded_singleton: ActiveSequenceEvent =
+            MsgpackCodec.decode_payload(&singleton_payload).unwrap();
+        assert_eq!(decoded_singleton.request_id, "request");
+        assert!(
+            MsgpackCodec
+                .decode_payload::<ActiveSequenceEventBatch>(&singleton_payload)
+                .is_err()
+        );
+
+        let batch_payload = MsgpackCodec
+            .encode_payload(&ActiveSequenceEventBatch {
+                events: vec![event],
+            })
             .unwrap();
-        assert!(max_sized_envelope.len() < NATS_DEFAULT_MAX_PAYLOAD_BYTES);
-
-        let events = vec![
-            large_add_event("large-0", 80_000),
-            large_add_event("large-1", 80_000),
-        ];
-        assert!(encode_replica_batch(&events).unwrap().len() > MAX_REPLICA_BATCH_PAYLOAD_BYTES);
-
-        let batches = encode_replica_batch_partitions(&events).unwrap();
-        assert_eq!(batches.len(), 2);
-        let mut decoded_request_ids = Vec::new();
-        for batch in &batches {
-            assert!(!batch.oversized);
-            assert!(batch.payload.len() <= MAX_REPLICA_BATCH_PAYLOAD_BYTES);
-            let envelope = MsgpackCodec
-                .encode_envelope_parts(
-                    u64::MAX,
-                    u64::MAX,
-                    u64::MAX,
-                    ACTIVE_SEQUENCES_SUBJECT,
-                    batch.payload.as_ref(),
-                )
-                .unwrap();
-            assert!(envelope.len() < NATS_DEFAULT_MAX_PAYLOAD_BYTES);
-
-            let decoded: ActiveSequenceEventBatch =
-                MsgpackCodec.decode_payload(&batch.payload).unwrap();
-            decoded_request_ids.extend(decoded.events.into_iter().map(|event| event.request_id));
-        }
-        assert_eq!(decoded_request_ids, ["large-0", "large-1"]);
-    }
-
-    #[test]
-    fn active_sequence_batch_preserves_single_oversized_event() {
-        let events = vec![large_add_event("oversized", 120_000)];
-        let batches = encode_replica_batch_partitions(&events).unwrap();
-
-        assert_eq!(batches.len(), 1);
-        assert!(batches[0].oversized);
-        assert!(batches[0].payload.len() > MAX_REPLICA_BATCH_PAYLOAD_BYTES);
-        assert_eq!(batches[0].event_range, 0..1);
+        let decoded_batch: ActiveSequenceEventBatch =
+            MsgpackCodec.decode_payload(&batch_payload).unwrap();
+        assert_eq!(decoded_batch.events[0].request_id, "request");
+        assert!(
+            MsgpackCodec
+                .decode_payload::<ActiveSequenceEvent>(&batch_payload)
+                .is_err()
+        );
     }
 
     #[tokio::test]
