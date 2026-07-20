@@ -118,18 +118,26 @@ impl KvPushRouter {
             .map(AffinityCoordinator::new)
             .transpose()?;
 
+        Ok(Self::new_with_coordinator(inner, chooser, affinity))
+    }
+
+    pub(crate) fn new_with_coordinator(
+        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        chooser: Arc<KvRouter>,
+        affinity: Option<AffinityCoordinator>,
+    ) -> Self {
         // Eagerly register router request metrics (as zeros) so they are
         // scrapeable before any requests arrive. Both the frontend pipeline
         // and the standalone router create KvPushRouter, so this covers both.
         let request_metrics =
             RouterRequestMetrics::from_component(chooser.client().endpoint.component());
 
-        Ok(KvPushRouter {
+        KvPushRouter {
             inner,
             chooser,
             request_metrics,
             affinity,
-        })
+        }
     }
 
     async fn select_request(
@@ -917,6 +925,7 @@ mod tests {
             endpoint,
             client.clone(),
             workers,
+            None,
             16,
             DefaultWorkerSelector::new(Some(config.clone()), "decode"),
             Some(config),

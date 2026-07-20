@@ -68,10 +68,16 @@ type EndpointInfo struct {
 	// +optional
 	PodName string `json:"podName,omitempty"`
 
-	// Ready indicates whether the endpoint is ready to serve traffic
-	// For LoRA models: true if the POST /loras request succeeded with a 2xx status code
-	// For base models: always false (no probing performed)
+	// Ready indicates whether this endpoint is ready to serve traffic.
+	// For LoRA models: true only if this endpoint's lifecycle request succeeded.
+	// For base models: always false (no probing performed).
 	Ready bool `json:"ready"`
+
+	// LoRAFallbackCovered indicates a legacy prefill endpoint that cannot manage
+	// LoRAs itself is covered by a capable prefill in the same topology during a
+	// rolling upgrade. It does not make this endpoint ready to serve the adapter.
+	// +optional
+	LoRAFallbackCovered bool `json:"loraFallbackCovered,omitempty"`
 }
 
 // DynamoModelStatus defines the observed state of DynamoModel
@@ -82,6 +88,12 @@ type DynamoModelStatus struct {
 
 	// ReadyEndpoints is the count of endpoints that are ready
 	ReadyEndpoints int `json:"readyEndpoints"`
+
+	// LoRAFallbackCoveredEndpoints is the count of legacy prefill endpoints
+	// covered by a capable prefill during a rolling upgrade. These endpoints are
+	// excluded from ReadyEndpoints because they cannot serve the adapter directly.
+	// +optional
+	LoRAFallbackCoveredEndpoints int `json:"loraFallbackCoveredEndpoints,omitempty"`
 
 	// TotalEndpoints is the total count of endpoints
 	TotalEndpoints int `json:"totalEndpoints"`
@@ -154,11 +166,12 @@ func (m *DynamoModel) IsReady() (bool, string) {
 	if m.Status.TotalEndpoints == 0 {
 		return false, "No endpoints configured"
 	}
-	if m.Status.ReadyEndpoints == 0 {
+	effectiveReadyEndpoints := m.Status.ReadyEndpoints + m.Status.LoRAFallbackCoveredEndpoints
+	if effectiveReadyEndpoints == 0 {
 		return false, "No endpoints ready"
 	}
-	if m.Status.ReadyEndpoints < m.Status.TotalEndpoints {
-		return false, fmt.Sprintf("Only %d/%d endpoints ready", m.Status.ReadyEndpoints, m.Status.TotalEndpoints)
+	if effectiveReadyEndpoints < m.Status.TotalEndpoints {
+		return false, fmt.Sprintf("Only %d/%d endpoints ready", effectiveReadyEndpoints, m.Status.TotalEndpoints)
 	}
 	return true, ""
 }

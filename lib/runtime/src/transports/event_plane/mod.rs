@@ -19,7 +19,7 @@ pub use transport::{EventTransportRx, EventTransportTx, WireStream};
 pub use zmq_transport::{ZmqPubTransport, ZmqSubTransport};
 
 // Re-export transport kind from discovery for convenience
-pub use crate::discovery::EventTransportKind;
+pub use crate::discovery::{EventScope, EventTransportKind};
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -37,55 +37,13 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use crate::DistributedRuntime;
-use crate::component::{Component, Namespace};
+use crate::component::{Component, Endpoint, Namespace};
 use crate::discovery::{
     Discovery, DiscoveryInstance, DiscoveryQuery, DiscoverySpec, EventChannelQuery, EventTransport,
 };
+use crate::protocols::EndpointId;
 use crate::traits::DistributedRuntimeProvider;
 use crate::utils::local_ip_for_advertise;
-
-/// Scope of the event plane - determines the subject prefix for pub/sub.
-#[derive(Debug, Clone)]
-pub enum EventScope {
-    /// Namespace-level scope: `namespace.{name}`
-    Namespace { name: String },
-    /// Component-level scope: `namespace.{namespace}.component.{component}`
-    Component {
-        namespace: String,
-        component: String,
-    },
-}
-
-impl EventScope {
-    /// Returns the subject prefix for this scope.
-    pub fn subject_prefix(&self) -> String {
-        match self {
-            EventScope::Namespace { name } => format!("namespace.{}", name),
-            EventScope::Component {
-                namespace,
-                component,
-            } => {
-                format!("namespace.{}.component.{}", namespace, component)
-            }
-        }
-    }
-
-    /// Get the namespace name
-    pub fn namespace(&self) -> &str {
-        match self {
-            EventScope::Namespace { name } => name,
-            EventScope::Component { namespace, .. } => namespace,
-        }
-    }
-
-    /// Get the component name (if component-scoped)
-    pub fn component(&self) -> Option<&str> {
-        match self {
-            EventScope::Namespace { .. } => None,
-            EventScope::Component { component, .. } => Some(component),
-        }
-    }
-}
 
 // ============================================================================
 // Broker Resolution Logic
@@ -291,6 +249,57 @@ pub struct EventPublisher {
 }
 
 impl EventPublisher {
+    /// Create a publisher for an endpoint-scoped topic.
+    pub async fn for_endpoint(endpoint: &Endpoint, topic: impl Into<String>) -> Result<Self> {
+        let transport_kind = endpoint.drt().default_event_transport_kind();
+        Self::for_endpoint_with_transport(endpoint, topic, transport_kind).await
+    }
+
+    /// Create an endpoint-scoped publisher with explicit transport.
+    pub async fn for_endpoint_with_transport(
+        endpoint: &Endpoint,
+        topic: impl Into<String>,
+        transport_kind: EventTransportKind,
+    ) -> Result<Self> {
+        Self::new_internal(
+            endpoint.drt(),
+            EventScope::Endpoint {
+                endpoint: endpoint.id(),
+            },
+            topic.into(),
+            transport_kind,
+        )
+        .await
+    }
+
+    /// Create a publisher for an endpoint identity without constructing a local endpoint handle.
+    pub async fn for_endpoint_id(
+        drt: &DistributedRuntime,
+        endpoint: &EndpointId,
+        topic: impl Into<String>,
+    ) -> Result<Self> {
+        let transport_kind = drt.default_event_transport_kind();
+        Self::for_endpoint_id_with_transport(drt, endpoint, topic, transport_kind).await
+    }
+
+    /// Create an endpoint-identity publisher with an explicit transport.
+    pub async fn for_endpoint_id_with_transport(
+        drt: &DistributedRuntime,
+        endpoint: &EndpointId,
+        topic: impl Into<String>,
+        transport_kind: EventTransportKind,
+    ) -> Result<Self> {
+        Self::new_internal(
+            drt,
+            EventScope::Endpoint {
+                endpoint: endpoint.clone(),
+            },
+            topic.into(),
+            transport_kind,
+        )
+        .await
+    }
+
     /// Create a publisher for a component-scoped topic.
     ///
     /// The event transport is chosen automatically: if `DYN_EVENT_PLANE` is set that
@@ -355,7 +364,7 @@ impl EventPublisher {
             .map_err(|error| anyhow::anyhow!("failed to generate publisher ID: {error}"))?;
         let discovery = Some(drt.discovery());
         let runtime_handle = drt.runtime().secondary();
-        let subject = format!("{}.{}", scope.subject_prefix(), topic);
+        let subject = scope.subject(&topic);
         let graceful_shutdown_tracker = drt.graceful_shutdown_tracker();
 
         // Use Msgpack codec for all transports
@@ -379,12 +388,12 @@ impl EventPublisher {
                 if let Some(broker) = resolve_zmq_broker(drt, &scope).await? {
                     // BROKER MODE: Connect to broker (single or multiple endpoints)
                     let pub_transport = if broker.xsub_endpoints.len() == 1 {
-                        zmq_transport::ZmqPubTransport::connect(&broker.xsub_endpoints[0], &topic)
+                        zmq_transport::ZmqPubTransport::connect(&broker.xsub_endpoints[0], &subject)
                             .await?
                     } else {
                         zmq_transport::ZmqPubTransport::connect_multiple(
                             &broker.xsub_endpoints,
-                            &topic,
+                            &subject,
                         )
                         .await?
                     };
@@ -438,8 +447,7 @@ impl EventPublisher {
             TransportSetup::Nats(tx, codec) => {
                 let transport_config = EventTransport::nats(scope.subject_prefix());
                 let spec = DiscoverySpec::EventChannel {
-                    namespace: scope.namespace().to_string(),
-                    component: scope.component().unwrap_or("").to_string(),
+                    scope: scope.clone(),
                     topic: topic.clone(),
                     publisher_id,
                     transport: transport_config,
@@ -457,8 +465,7 @@ impl EventPublisher {
             TransportSetup::ZmqDirect(tx, codec, public_endpoint) => {
                 let transport_config = EventTransport::zmq(public_endpoint);
                 let spec = DiscoverySpec::EventChannel {
-                    namespace: scope.namespace().to_string(),
-                    component: scope.component().unwrap_or("").to_string(),
+                    scope: scope.clone(),
                     topic: topic.clone(),
                     publisher_id,
                     transport: transport_config,
@@ -596,6 +603,51 @@ pub struct EventSubscriber {
 }
 
 impl EventSubscriber {
+    /// Create a subscriber for an endpoint-scoped topic.
+    pub async fn for_endpoint(endpoint: &Endpoint, topic: impl Into<String>) -> Result<Self> {
+        let transport_kind = endpoint.drt().default_event_transport_kind();
+        Self::for_endpoint_with_transport(endpoint, topic, transport_kind).await
+    }
+
+    /// Create an endpoint-scoped subscriber with explicit transport.
+    pub async fn for_endpoint_with_transport(
+        endpoint: &Endpoint,
+        topic: impl Into<String>,
+        transport_kind: EventTransportKind,
+    ) -> Result<Self> {
+        Self::for_endpoint_id_with_transport(endpoint.drt(), &endpoint.id(), topic, transport_kind)
+            .await
+    }
+
+    /// Create a subscriber for an endpoint identity without constructing a
+    /// local [`Endpoint`] handle.
+    pub async fn for_endpoint_id(
+        drt: &DistributedRuntime,
+        endpoint: &EndpointId,
+        topic: impl Into<String>,
+    ) -> Result<Self> {
+        let transport_kind = drt.default_event_transport_kind();
+        Self::for_endpoint_id_with_transport(drt, endpoint, topic, transport_kind).await
+    }
+
+    /// Create an endpoint-identity subscriber with explicit transport.
+    pub async fn for_endpoint_id_with_transport(
+        drt: &DistributedRuntime,
+        endpoint: &EndpointId,
+        topic: impl Into<String>,
+        transport_kind: EventTransportKind,
+    ) -> Result<Self> {
+        Self::new_internal(
+            drt,
+            EventScope::Endpoint {
+                endpoint: endpoint.clone(),
+            },
+            topic.into(),
+            transport_kind,
+        )
+        .await
+    }
+
     /// Create a subscriber for a component-scoped topic.
     ///
     /// The event transport is chosen automatically: if `DYN_EVENT_PLANE` is set that
@@ -652,13 +704,13 @@ impl EventSubscriber {
         transport_kind: EventTransportKind,
     ) -> Result<Self> {
         let discovery = drt.discovery();
+        let routing_key = scope.subject(&topic);
 
         // Use Msgpack codec for all transports
         let (wire_stream, codec): (WireStream, Arc<Codec>) = match transport_kind {
             EventTransportKind::Nats => {
                 let transport = nats_transport::NatsTransport::new(drt.clone());
-                let subject = format!("{}.{}", scope.subject_prefix(), topic);
-                let stream = transport.subscribe(&subject).await?;
+                let stream = transport.subscribe(&routing_key).await?;
                 let codec = Arc::new(Codec::Msgpack(MsgpackCodec));
                 (stream, codec)
             }
@@ -672,19 +724,19 @@ impl EventSubscriber {
                         // Single broker - no deduplication needed
                         let sub_transport = zmq_transport::ZmqSubTransport::connect_broker(
                             &broker.xpub_endpoints[0],
-                            &topic,
+                            &routing_key,
                         )
                         .await?;
-                        sub_transport.subscribe(&topic).await?
+                        sub_transport.subscribe(&routing_key).await?
                     } else {
                         // Multiple brokers - need deduplication
                         let sub_transport =
                             zmq_transport::ZmqSubTransport::connect_broker_multiple(
                                 &broker.xpub_endpoints,
-                                &topic,
+                                &routing_key,
                             )
                             .await?;
-                        let inner_stream = sub_transport.subscribe(&topic).await?;
+                        let inner_stream = sub_transport.subscribe(&routing_key).await?;
 
                         // Wrap with deduplication (default cache size: 100,000 entries)
                         Box::pin(DeduplicatingStream::new(
@@ -700,7 +752,10 @@ impl EventSubscriber {
                     let query = match &scope {
                         EventScope::Namespace { name } => {
                             crate::discovery::DiscoveryQuery::EventChannels(
-                                crate::discovery::EventChannelQuery::namespace(name.clone()),
+                                crate::discovery::EventChannelQuery::namespace_topic(
+                                    name.clone(),
+                                    topic.clone(),
+                                ),
                             )
                         }
                         EventScope::Component {
@@ -713,10 +768,22 @@ impl EventSubscriber {
                                 topic.clone(),
                             ),
                         ),
+                        EventScope::Endpoint { endpoint } => {
+                            crate::discovery::DiscoveryQuery::EventChannels(
+                                crate::discovery::EventChannelQuery::endpoint_topic(
+                                    endpoint.clone(),
+                                    topic.clone(),
+                                ),
+                            )
+                        }
                     };
 
-                    let subscriber =
-                        Arc::new(DynamicSubscriber::new(discovery, query, topic.clone()));
+                    let subscriber = Arc::new(DynamicSubscriber::with_cancel_token(
+                        discovery,
+                        query,
+                        topic.clone(),
+                        drt.primary_token().child_token(),
+                    ));
 
                     let stream = subscriber.start_zmq().await?;
                     let codec = Arc::new(Codec::Msgpack(MsgpackCodec));
@@ -819,6 +886,172 @@ fn current_timestamp_ms() -> u64 {
 mod tests {
     use super::*;
     use crate::config::environment_names::zmq_broker as broker_env;
+
+    #[tokio::test]
+    async fn direct_zmq_endpoint_scopes_are_isolated() {
+        temp_env::async_with_vars(
+            [
+                (broker_env::DYN_ZMQ_BROKER_URL, None::<&str>),
+                (broker_env::DYN_ZMQ_BROKER_ENABLED, None::<&str>),
+            ],
+            async {
+                let runtime = crate::Runtime::from_current().expect("create runtime handle");
+                let drt = DistributedRuntime::new(
+                    runtime,
+                    crate::distributed::DistributedConfig::process_local(),
+                )
+                .await
+                .expect("create distributed runtime");
+                let component = drt
+                    .namespace("endpoint-event-isolation-test")
+                    .expect("create namespace")
+                    .component("worker")
+                    .expect("create component");
+                let endpoint_a = component.endpoint("a");
+                let endpoint_b = component.endpoint("b");
+
+                let publisher_a = EventPublisher::for_endpoint_with_transport(
+                    &endpoint_a,
+                    "events",
+                    EventTransportKind::Zmq,
+                )
+                .await
+                .expect("create endpoint A publisher");
+                let publisher_b = EventPublisher::for_endpoint_with_transport(
+                    &endpoint_b,
+                    "events",
+                    EventTransportKind::Zmq,
+                )
+                .await
+                .expect("create endpoint B publisher");
+                let mut subscriber_a = EventSubscriber::for_endpoint_with_transport(
+                    &endpoint_a,
+                    "events",
+                    EventTransportKind::Zmq,
+                )
+                .await
+                .expect("create endpoint A subscriber");
+                let mut subscriber_b = EventSubscriber::for_endpoint_with_transport(
+                    &endpoint_b,
+                    "events",
+                    EventTransportKind::Zmq,
+                )
+                .await
+                .expect("create endpoint B subscriber");
+
+                let receive = async {
+                    loop {
+                        publisher_a
+                            .publish_bytes(vec![0xa1])
+                            .await
+                            .expect("publish endpoint A event");
+                        publisher_b
+                            .publish_bytes(vec![0xb2])
+                            .await
+                            .expect("publish endpoint B event");
+
+                        let a = tokio::time::timeout(
+                            std::time::Duration::from_millis(100),
+                            subscriber_a.next(),
+                        )
+                        .await;
+                        let b = tokio::time::timeout(
+                            std::time::Duration::from_millis(100),
+                            subscriber_b.next(),
+                        )
+                        .await;
+                        if let (Ok(Some(Ok(a))), Ok(Some(Ok(b)))) = (a, b) {
+                            assert_eq!(a.publisher_id, publisher_a.publisher_id());
+                            assert_eq!(a.payload.as_ref(), &[0xa1]);
+                            assert_eq!(b.publisher_id, publisher_b.publisher_id());
+                            assert_eq!(b.payload.as_ref(), &[0xb2]);
+                            break;
+                        }
+
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                };
+
+                tokio::time::timeout(std::time::Duration::from_secs(5), receive)
+                    .await
+                    .expect("each endpoint subscriber should receive only its own publisher");
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn direct_zmq_publishers_in_one_endpoint_fan_into_one_subscriber() {
+        temp_env::async_with_vars(
+            [
+                (broker_env::DYN_ZMQ_BROKER_URL, None::<&str>),
+                (broker_env::DYN_ZMQ_BROKER_ENABLED, None::<&str>),
+            ],
+            async {
+                let runtime = crate::Runtime::from_current().expect("create runtime handle");
+                let drt = DistributedRuntime::new(
+                    runtime,
+                    crate::distributed::DistributedConfig::process_local(),
+                )
+                .await
+                .expect("create distributed runtime");
+                let endpoint = drt
+                    .namespace("endpoint-event-fan-in-test")
+                    .expect("create namespace")
+                    .component("worker")
+                    .expect("create component")
+                    .endpoint("generate");
+                let publisher_a = EventPublisher::for_endpoint_with_transport(
+                    &endpoint,
+                    "events",
+                    EventTransportKind::Zmq,
+                )
+                .await
+                .expect("create first publisher");
+                let publisher_b = EventPublisher::for_endpoint_with_transport(
+                    &endpoint,
+                    "events",
+                    EventTransportKind::Zmq,
+                )
+                .await
+                .expect("create second publisher");
+                let mut subscriber = EventSubscriber::for_endpoint_with_transport(
+                    &endpoint,
+                    "events",
+                    EventTransportKind::Zmq,
+                )
+                .await
+                .expect("create subscriber");
+
+                let receive = async {
+                    let mut publisher_ids = std::collections::HashSet::new();
+                    while publisher_ids.len() < 2 {
+                        publisher_a.publish_bytes(vec![0xa1]).await.unwrap();
+                        publisher_b.publish_bytes(vec![0xb2]).await.unwrap();
+                        if let Ok(Some(Ok(envelope))) = tokio::time::timeout(
+                            std::time::Duration::from_millis(100),
+                            subscriber.next(),
+                        )
+                        .await
+                        {
+                            publisher_ids.insert(envelope.publisher_id);
+                        }
+                    }
+                    assert_eq!(
+                        publisher_ids,
+                        std::collections::HashSet::from([
+                            publisher_a.publisher_id(),
+                            publisher_b.publisher_id(),
+                        ])
+                    );
+                };
+                tokio::time::timeout(std::time::Duration::from_secs(5), receive)
+                    .await
+                    .expect("subscriber should receive both endpoint publishers");
+            },
+        )
+        .await;
+    }
 
     #[tokio::test]
     async fn same_topic_publishers_are_independent_across_recreation() {
@@ -1098,21 +1331,82 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn runtime_cancellation_stops_retained_direct_zmq_subscriber() {
+        temp_env::async_with_vars(
+            [
+                (broker_env::DYN_ZMQ_BROKER_URL, None::<&str>),
+                (broker_env::DYN_ZMQ_BROKER_ENABLED, None::<&str>),
+            ],
+            async {
+                let runtime = crate::Runtime::from_current().expect("create runtime handle");
+                let drt = DistributedRuntime::new(
+                    runtime,
+                    crate::distributed::DistributedConfig::process_local(),
+                )
+                .await
+                .expect("create distributed runtime");
+                let component = drt
+                    .namespace("event-subscriber-shutdown-test")
+                    .expect("create namespace")
+                    .component("worker")
+                    .expect("create component");
+
+                let mut subscriber = EventSubscriber::for_component_with_transport(
+                    &component,
+                    "events",
+                    EventTransportKind::Zmq,
+                )
+                .await
+                .expect("create subscriber");
+
+                drt.primary_token().cancel();
+
+                let next =
+                    tokio::time::timeout(std::time::Duration::from_secs(1), subscriber.next())
+                        .await
+                        .expect("runtime cancellation should stop the subscriber stream");
+                assert!(next.is_none());
+            },
+        )
+        .await;
+    }
+
     #[test]
     fn test_event_scope_subject_prefix() {
-        let ns_scope = EventScope::Namespace {
-            name: "test-ns".to_string(),
-        };
-        assert_eq!(ns_scope.subject_prefix(), "namespace.test-ns");
+        let scopes = [
+            (
+                EventScope::Namespace {
+                    name: "ns.one".to_string(),
+                },
+                "namespace.ns%2Eone",
+            ),
+            (
+                EventScope::Component {
+                    namespace: "ns.one".to_string(),
+                    component: "worker/*".to_string(),
+                },
+                "namespace.ns%2Eone.component.worker%2F%2A",
+            ),
+            (
+                EventScope::Endpoint {
+                    endpoint: EndpointId {
+                        namespace: "ns.one".to_string(),
+                        component: "worker/*".to_string(),
+                        name: "generate.>".to_string(),
+                    },
+                },
+                "namespace.ns%2Eone.component.worker%2F%2A.endpoint.generate%2E%3E",
+            ),
+        ];
 
-        let comp_scope = EventScope::Component {
-            namespace: "test-ns".to_string(),
-            component: "test-comp".to_string(),
-        };
-        assert_eq!(
-            comp_scope.subject_prefix(),
-            "namespace.test-ns.component.test-comp"
-        );
+        for (scope, expected_prefix) in scopes {
+            assert_eq!(scope.subject_prefix(), expected_prefix);
+            assert_eq!(
+                scope.subject("kv.events/*"),
+                format!("{expected_prefix}.kv%2Eevents%2F%2A")
+            );
+        }
     }
 
     #[test]
@@ -1129,15 +1423,6 @@ mod tests {
         };
         assert_eq!(comp_scope.namespace(), "my-ns");
         assert_eq!(comp_scope.component(), Some("my-comp"));
-    }
-
-    #[test]
-    fn test_timestamp_generation() {
-        let ts = current_timestamp_ms();
-
-        // Should be after Jan 1, 2020 (1577836800000) and before Jan 1, 2100 (4102444800000)
-        assert!(ts > 1577836800000, "Timestamp should be after 2020");
-        assert!(ts < 4102444800000, "Timestamp should be before 2100");
     }
 
     #[test]
