@@ -18,7 +18,7 @@ targets:
     count: 4
   runtime:
     framework: vllm
-    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
   topology: aggregated
   techniques:
   - tp4
@@ -40,7 +40,7 @@ targets:
     count: 8
   runtime:
     framework: vllm
-    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
   topology: disaggregated
   techniques:
   - disagg-pd
@@ -64,7 +64,7 @@ targets:
     count: 16
   runtime:
     framework: vllm
-    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
   topology: disaggregated
   techniques:
   - disagg-pd

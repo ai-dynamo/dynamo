@@ -26,7 +26,7 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.uid
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
           name: ""
           resources: {}
         nodeSelector:
@@ -96,7 +96,7 @@ spec:
               value: "0"
             - name: TLLM_LOG_LEVEL
               value: "INFO"
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
           name: ""
           resources: {}
           securityContext:
@@ -222,7 +222,7 @@ spec:
               value: "1"
             - name: TLLM_LOG_LEVEL
               value: "INFO"
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
           name: ""
           resources: {}
           securityContext:
