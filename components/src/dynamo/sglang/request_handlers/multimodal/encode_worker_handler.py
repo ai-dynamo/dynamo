@@ -379,7 +379,13 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                 else None
             )
             if hit is not None:
-                logger.info("Embedding cache hit for %s index %d", modality_name, i)
+                source_label = " URL" if isinstance(media_input, str) else ""
+                logger.info(
+                    "Embedding cache hit for %s%s index %d",
+                    modality_name,
+                    source_label,
+                    i,
+                )
                 cached[i] = hit
             else:
                 if media_input is None:
@@ -630,6 +636,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             image_cache_keys,
             image_prechecked_entries,
         ) = await self._prepare_image_inputs(image_items)
+        video_cache_keys: list[Optional[str]]
         if self._embedding_cache is None:
             video_cache_keys = [None] * len(video_urls)
         else:
