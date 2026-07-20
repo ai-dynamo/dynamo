@@ -96,6 +96,9 @@ python -m dynamo.vllm \
 
 > **Note:** Disaggregated FlexKV serving is experimental. The prefill worker must use `PdConnector` with two sub-connectors: `FlexKVConnectorV1` (KV cache offloading) and `NixlConnector` (P/D KV transfer). Using `FlexKVConnectorV1` alone as the top-level connector in disaggregated mode is **not supported** and will result in a `TypeError`.
 
+> [!IMPORTANT]
+> When using a hybrid model with `PdConnector`, pass `--disable-hybrid-kv-cache-manager` to every vLLM worker in the deployment, including both prefill and decode workers. `PdConnector` is not compatible with vLLM's hybrid KV cache manager.
+
 FlexKV can be used with disaggregated prefill/decode serving. The prefill worker uses FlexKV for KV cache offloading, while NIXL handles KV transfer between prefill and decode workers. The `PdConnector` wraps both connectors so they work together.
 
 ### Supported connector configuration

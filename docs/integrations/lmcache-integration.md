@@ -78,6 +78,9 @@ In aggregated mode, the system uses:
 
 Disaggregated serving separates prefill and decode operations into dedicated workers. This provides better resource utilization and scalability for production deployments.
 
+> [!IMPORTANT]
+> When using a hybrid model with `PdConnector`, pass `--disable-hybrid-kv-cache-manager` to every vLLM worker in the deployment, including both prefill and decode workers. `PdConnector` is not compatible with vLLM's hybrid KV cache manager.
+
 ### Deployment
 
 Use the provided disaggregated launch script (requires at least 2 GPUs):
