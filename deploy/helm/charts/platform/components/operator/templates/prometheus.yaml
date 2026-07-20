@@ -75,7 +75,7 @@ spec:
     - sourceLabels:
       - __meta_kubernetes_pod_label_app_kubernetes_io_name
       action: drop
-      regex: '.+-wkr$'
+      regex: '.+-wkr(-[0-9]+)?$'
     - action: replace
       sourceLabels:
       - __meta_kubernetes_pod_label_nvidia_com_dynamo_component_type
