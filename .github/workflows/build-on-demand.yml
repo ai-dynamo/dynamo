@@ -3,11 +3,27 @@
 
 name: Build On Demand
 
+permissions:
+  contents: read
+
 on:
   workflow_dispatch:
     inputs:
+      source_sha:
+        description: 'Exact Dynamo commit SHA; empty uses the dispatched workflow SHA'
+        type: string
+        required: false
+        default: ''
       build_vllm:
         description: 'Build and push vllm image, tagged with branch name'
+        type: boolean
+        default: false
+      build_vllm_placeholder:
+        description: 'Build and push the matching vLLM snapshot placeholder'
+        type: boolean
+        default: false
+      build_snapshot_agent:
+        description: 'Build and push the matching snapshot agent'
         type: boolean
         default: false
       build_sglang:
@@ -33,7 +49,20 @@ jobs:
     outputs:
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
       sanitized_ref_name: ${{ steps.sanitize-ref.outputs.sanitized_ref_name }}
+      source_sha: ${{ steps.validate-source.outputs.source_sha }}
     steps:
+      - name: Validate immutable source
+        id: validate-source
+        shell: bash
+        env:
+          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+          WORKFLOW_SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          source_sha="${REQUESTED_SOURCE_SHA:-${WORKFLOW_SOURCE_SHA}}"
+          [[ "${source_sha}" =~ ^[0-9a-f]{40}$ ]]
+          test "${source_sha}" = "${WORKFLOW_SOURCE_SHA}"
+          echo "source_sha=${source_sha}" >> "${GITHUB_OUTPUT}"
       - name: Export builder name
         id: export-builder-name
         run: |
@@ -52,16 +81,151 @@ jobs:
   vllm-build:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [init]
-    if: inputs.build_vllm
+    if: inputs.build_vllm || inputs.build_vllm_placeholder
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: vllm
       target: runtime
       cuda_version: '["13.0"]'
-      platform: 'linux/amd64,linux/arm64'
+      platform: ${{ inputs.build_vllm_placeholder && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
       builder_name: ${{ needs.init.outputs.builder_name }}
-      build_timeout_minutes: 60
+      build_timeout_minutes: ${{ inputs.build_vllm_placeholder && 120 || 60 }}
+      build_only: ${{ inputs.build_vllm_placeholder }}
+      source_ref: ${{ needs.init.outputs.source_sha }}
+      extra_build_args: |
+        ${{ inputs.build_vllm_placeholder && 'FLASHINFER_GIT_URL=https://github.com/galletas1712/flashinfer.git' || '' }}
+        ${{ inputs.build_vllm_placeholder && 'FLASHINFER_GIT_REF=refs/heads/experiment/flashinfer-v0.6.15-pr3950-provenance-20260720' || '' }}
+        ${{ inputs.build_vllm_placeholder && 'FLASHINFER_GIT_SHA=12a51a30ce011b08eb673cb4387db6d9f67945b1' || '' }}
+        ${{ inputs.build_vllm_placeholder && 'GMS_SNAPSHOT_PROFILE=1' || '' }}
+        ${{ inputs.build_vllm_placeholder && 'VLLM_GIT_URL=https://github.com/vllm-project/vllm.git' || '' }}
+        ${{ inputs.build_vllm_placeholder && 'VLLM_GIT_REF=refs/pull/46877/head' || '' }}
+        ${{ inputs.build_vllm_placeholder && 'VLLM_GIT_SHA=af259f998ff7301504829d2551c746502afe2f0a' || '' }}
+        ${{ inputs.build_vllm_placeholder && 'VLLM_INSTALL_MODE=python-overlay' || '' }}
+        ${{ inputs.build_vllm_placeholder && 'VLLM_RUNTIME_BASE_IMAGE=vllm/vllm-openai@sha256:7f2bc168366c77fbd8329368f00310d208531c14ece6c2de31a6611ef99f6ec8' || '' }}
     secrets: inherit
+
+  # ============================================================================
+  # SNAPSHOT (build-only)
+  # ============================================================================
+
+  snapshot-agent:
+    name: Snapshot Agent
+    needs: [init]
+    if: inputs.build_snapshot_agent || inputs.build_vllm_placeholder
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout immutable source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ needs.init.outputs.source_sha }}
+          persist-credentials: false
+      - name: Verify source checkout
+        shell: bash
+        env:
+          EXPECTED_SOURCE_SHA: ${{ needs.init.outputs.source_sha }}
+        run: test "$(git rev-parse HEAD)" = "${EXPECTED_SOURCE_SHA}"
+      - name: Build and push snapshot agent
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: snapshot
+          target: agent
+          image_tag: ${{ needs.init.outputs.source_sha }}-snapshot-agent
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.init.outputs.source_sha }}-snapshot-agent
+          extra_build_args: |
+            CRIU_REPO=https://github.com/galletas1712/criu.git
+            CRIU_REF=3dd2420c16e54fb7cd08b3e511d3a8bfb03cd001
+            CRIU_SHA=3dd2420c16e54fb7cd08b3e511d3a8bfb03cd001
+            CUDA_CHECKPOINT_REPO=https://github.com/NVIDIA/cuda-checkpoint.git
+            CUDA_CHECKPOINT_REF=00d5cce84c628088d6caa203fc4af40c1538b6f7
+            CUDA_CHECKPOINT_SHA=00d5cce84c628088d6caa203fc4af40c1538b6f7
+            DYNAMO_COMMIT_SHA=${{ needs.init.outputs.source_sha }}
+            GMS_SNAPSHOT_PROFILE=1
+
+  snapshot-placeholder-vllm:
+    name: vLLM Snapshot Placeholder
+    needs: [init, vllm-build]
+    if: inputs.build_vllm_placeholder
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout immutable source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ needs.init.outputs.source_sha }}
+          persist-credentials: false
+      - name: Verify source checkout
+        shell: bash
+        env:
+          EXPECTED_SOURCE_SHA: ${{ needs.init.outputs.source_sha }}
+        run: test "$(git rev-parse HEAD)" = "${EXPECTED_SOURCE_SHA}"
+      - name: Build and push vLLM snapshot placeholder
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: snapshot
+          target: placeholder
+          image_tag: ${{ needs.init.outputs.source_sha }}-vllm-placeholder
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.init.outputs.source_sha }}-vllm-placeholder
+          extra_build_args: |
+            BASE_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.init.outputs.source_sha }}-vllm-runtime
+            BASE_IMAGE_USER=dynamo
+            CRIU_REPO=https://github.com/galletas1712/criu.git
+            CRIU_REF=3dd2420c16e54fb7cd08b3e511d3a8bfb03cd001
+            CRIU_SHA=3dd2420c16e54fb7cd08b3e511d3a8bfb03cd001
+            CUDA_CHECKPOINT_REPO=https://github.com/NVIDIA/cuda-checkpoint.git
+            CUDA_CHECKPOINT_REF=00d5cce84c628088d6caa203fc4af40c1538b6f7
+            CUDA_CHECKPOINT_SHA=00d5cce84c628088d6caa203fc4af40c1538b6f7
+            DYNAMO_COMMIT_SHA=${{ needs.init.outputs.source_sha }}
+
+  image-digests:
+    name: Record immutable image digests
+    needs: [init, vllm-build, snapshot-agent, snapshot-placeholder-vllm]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        needs.init.result == 'success' &&
+        needs.vllm-build.result == 'success' &&
+        needs.snapshot-agent.result == 'success' &&
+        needs.snapshot-placeholder-vllm.result == 'success'
+      }}
+    runs-on: prod-default-small-v2
+    steps:
+      - name: Record ECR digests
+        shell: bash
+        env:
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+          SOURCE_SHA: ${{ needs.init.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          echo "### Immutable snapshot image digests" >> "${GITHUB_STEP_SUMMARY}"
+          echo "" >> "${GITHUB_STEP_SUMMARY}"
+          echo "| Image tag | Digest |" >> "${GITHUB_STEP_SUMMARY}"
+          echo "|---|---|" >> "${GITHUB_STEP_SUMMARY}"
+          for suffix in vllm-runtime vllm-placeholder snapshot-agent; do
+            tag="${SOURCE_SHA}-${suffix}"
+            digest="$(
+              aws ecr describe-images \
+                --repository-name ai-dynamo/dynamo \
+                --image-ids "imageTag=${tag}" \
+                --query 'imageDetails[0].imageDigest' \
+                --output text
+            )"
+            [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+            echo "| \`${tag}\` | \`${digest}\` |" >> "${GITHUB_STEP_SUMMARY}"
+          done
 
   sglang-build:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
@@ -94,6 +258,7 @@ jobs:
   vllm-copy-to-acr:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [vllm-build]
+    if: inputs.build_vllm && !inputs.build_vllm_placeholder
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
@@ -194,7 +359,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [init, vllm-build, sglang-build, trtllm-build, operator]
+    needs: [init, vllm-build, vllm-copy-to-acr, sglang-build, trtllm-build, operator, snapshot-agent, snapshot-placeholder-vllm, image-digests]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
