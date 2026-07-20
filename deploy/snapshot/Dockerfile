@@ -393,9 +393,20 @@ RUN chmod +x /usr/local/bin/nsrestore
 
 # Execute every restore-tool entry point in the final runtime so dynamic-loader
 # and architecture failures stop the build before image export.
+# The build-only CUDA stub loads successfully but reports "Insufficient driver"
+# after cuda-checkpoint enters main because no NVIDIA driver is injected yet.
 RUN criu --version \
-    && cuda-checkpoint --help >/dev/null \
-    && cuda-checkpoint-helper --help >/dev/null \
+    && test -f /usr/local/cuda-13.0/targets/x86_64-linux/lib/stubs/libcuda.so \
+    && cuda_stub_dir="$(mktemp -d)" \
+    && ln -s /usr/local/cuda-13.0/targets/x86_64-linux/lib/stubs/libcuda.so "${cuda_stub_dir}/libcuda.so.1" \
+    && if LD_LIBRARY_PATH="${cuda_stub_dir}" cuda-checkpoint --help >/dev/null 2>"${cuda_stub_dir}/cuda-checkpoint.stderr"; then \
+         :; \
+       else \
+         test "$?" -eq 255 \
+         && grep -Fxq "Insufficient driver" "${cuda_stub_dir}/cuda-checkpoint.stderr"; \
+       fi \
+    && LD_LIBRARY_PATH="${cuda_stub_dir}" cuda-checkpoint-helper --help >/dev/null \
+    && rm -rf "${cuda_stub_dir}" \
     && nsrestore -h >/dev/null 2>&1 \
     && echo "Snapshot restore tools installed successfully"
 
