@@ -13,8 +13,9 @@ a grid-based pool selection strategy. It supports two modes:
   requests based on (ISL, TTFT) and decode requests based on (context_length, ITL)
   to separate pool types.
 
-- "agg" mode: Registers as a single generate worker. Routes all requests based
-  on (ISL, ITL) to unified pools that handle both prefill and decode.
+- "agg" mode: Registers as a single generate worker. Routes all requests by
+  (TTFT, ITL), optionally extended with ISL, to unified pools that handle both
+  prefill and decode.
 
 Both modes support priority-based pool overrides from agent hints.
 """

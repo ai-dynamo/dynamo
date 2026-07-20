@@ -8,6 +8,41 @@ import os
 
 logger = logging.getLogger(__name__)
 
+# Optional override for the gpu_memory_service log level in the vLLM worker
+# (a logging level name, e.g. "DEBUG"); unset falls back to vLLM's own level.
+# vLLM-integration-scoped, so it lives here rather than in common (which is
+# reserved for operator/Go-lockstep env vars honored across every context).
+ENV_LOG_LEVEL = "DYN_GMS_VLLM_LOG_LEVEL"
+
+
+def configure_gms_worker_logging() -> None:
+    """Route gpu_memory_service logs through vLLM's handler in worker subprocesses.
+
+    vLLM configures only the "vllm" logger, so gpu_memory_service.* INFO is
+    silently dropped in EngineCore worker processes. Copy vLLM's handlers onto
+    the "gpu_memory_service" parent logger so every child inherits them via
+    propagation, at DYN_GMS_VLLM_LOG_LEVEL or vLLM's own level. Idempotent.
+    """
+    gms_root = logging.getLogger("gpu_memory_service")
+    if gms_root.handlers:
+        return
+    import vllm.logger  # noqa: F401 — ensure vLLM configured logging first
+
+    vllm_logger = logging.getLogger("vllm")
+    for handler in vllm_logger.handlers:
+        gms_root.addHandler(handler)
+    level_name = os.environ.get(ENV_LOG_LEVEL)
+    # getLevelName maps a valid level name to its int; anything unknown comes
+    # back as a "Level <x>" string, so only apply it when it resolved to an int.
+    level = logging.getLevelName(level_name) if level_name else None
+    if isinstance(level, int):
+        gms_root.setLevel(level)
+    elif vllm_logger.level != logging.NOTSET:
+        gms_root.setLevel(vllm_logger.level)
+    else:
+        gms_root.setLevel(logging.INFO)
+    gms_root.propagate = False
+
 
 def configure_gms_lock_mode(engine_args) -> None:
     """Set gms_read_only in model_loader_extra_config based on ENGINE_ID.

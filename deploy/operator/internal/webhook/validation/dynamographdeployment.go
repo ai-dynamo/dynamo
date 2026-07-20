@@ -134,7 +134,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 	return allErrs
 }
 
-// validateObjectMeta validates objectMeta. objectMeta and fldPath must not be nil.
+// validateObjectMeta validates DGD objectMeta. objectMeta and fldPath must not be nil.
 func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 	objectMeta *metav1.ObjectMeta,
 	fldPath *field.Path,

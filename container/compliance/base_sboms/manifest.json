@@ -50,23 +50,23 @@
       "platform": "linux/arm64"
     },
     {
-      "baseline_digest": "sha256:1532b38814b3faf2affdb5ef01ca91468685d314ffb7e8926a0567595355ed88",
+      "baseline_digest": "sha256:13fec2fefd5e10cad82ecdc0fe6fa142080941e4b89ac6b5f3e74895d8db1342",
       "baseline_image": "nvcr.io/nvidia/tensorrt-llm/release",
-      "baseline_sbom": "release@1532b388-amd64.cdx.json",
-      "baseline_tag": "1.3.0rc20",
-      "from_digest": "sha256:1532b38814b3faf2affdb5ef01ca91468685d314ffb7e8926a0567595355ed88",
+      "baseline_sbom": "release@13fec2fe-amd64.cdx.json",
+      "baseline_tag": "1.3.0rc21",
+      "from_digest": "sha256:13fec2fefd5e10cad82ecdc0fe6fa142080941e4b89ac6b5f3e74895d8db1342",
       "from_image": "nvcr.io/nvidia/tensorrt-llm/release",
-      "from_tag": "1.3.0rc20",
+      "from_tag": "1.3.0rc21",
       "platform": "linux/amd64"
     },
     {
-      "baseline_digest": "sha256:1532b38814b3faf2affdb5ef01ca91468685d314ffb7e8926a0567595355ed88",
+      "baseline_digest": "sha256:13fec2fefd5e10cad82ecdc0fe6fa142080941e4b89ac6b5f3e74895d8db1342",
       "baseline_image": "nvcr.io/nvidia/tensorrt-llm/release",
-      "baseline_sbom": "release@1532b388-arm64.cdx.json",
-      "baseline_tag": "1.3.0rc20",
-      "from_digest": "sha256:1532b38814b3faf2affdb5ef01ca91468685d314ffb7e8926a0567595355ed88",
+      "baseline_sbom": "release@13fec2fe-arm64.cdx.json",
+      "baseline_tag": "1.3.0rc21",
+      "from_digest": "sha256:13fec2fefd5e10cad82ecdc0fe6fa142080941e4b89ac6b5f3e74895d8db1342",
       "from_image": "nvcr.io/nvidia/tensorrt-llm/release",
-      "from_tag": "1.3.0rc20",
+      "from_tag": "1.3.0rc21",
       "platform": "linux/arm64"
     },
     {

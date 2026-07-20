@@ -864,6 +864,7 @@ class ModelRuntimeConfig:
     data_parallel_start_rank: int
     data_parallel_size: int
     enable_local_indexer: bool
+    kv_state_endpoint: str | None
     enable_eagle: bool
     taints: Set[str]
     stable_routing_id: str | None
@@ -1148,6 +1149,7 @@ class KvEventPublisher:
         zmq_topic: Optional[str] = None,
         batching_timeout_ms: Optional[int] = None,
         image_token_id: Optional[int] = None,
+        kv_state_endpoint: Optional[str] = None,
     ) -> None:
         """
         Create a `KvEventPublisher` object.
@@ -1165,6 +1167,7 @@ class KvEventPublisher:
             enable_local_indexer: Enable worker-local KV indexer
             zmq_endpoint: Optional ZMQ endpoint for relay mode (e.g. "tcp://127.0.0.1:5557")
             zmq_topic: ZMQ topic to subscribe to (defaults to "" when zmq_endpoint is set)
+            kv_state_endpoint: KV event ownership endpoint; defaults to endpoint.
         """
 
     def publish_stored(
@@ -2810,6 +2813,31 @@ class KvbmRequest:
     def __init__(self, request_id: int, tokens: List[int], block_size: int) -> None:
         ...
 
+class KvDcRelay:
+    def __init__(
+        self,
+        endpoint: Endpoint,
+        dc_id: str,
+        namespace_filter: Optional[str] = None,
+        endpoint_prefix: Optional[str] = None,
+        publication_threshold: int = 16,
+        publication_delay_ms: int = 1,
+        recovery_attempt_timeout_ms: int = 30_000,
+    ) -> None:
+        ...
+
+    async def start(self) -> None:
+        ...
+
+    async def health(self) -> Dict[str, Any]:
+        ...
+
+    async def flush(self) -> None:
+        ...
+
+    async def shutdown(self) -> None:
+        ...
+
 class KvRouter:
     """
     A KV-aware router that performs intelligent routing based on KV cache overlap.
@@ -3366,6 +3394,7 @@ class backend:
             route_to_encoder: bool = ...,
             media_decoder: Optional[MediaDecoder] = None,
             media_fetcher: Optional[MediaFetcher] = None,
+            kv_state_endpoint: Optional[str] = None,
         ) -> None: ...
 
     class Worker:

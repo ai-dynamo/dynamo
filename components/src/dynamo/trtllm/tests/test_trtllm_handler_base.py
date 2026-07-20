@@ -4,7 +4,7 @@
 import asyncio
 import re as re_mod
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import Any
 from unittest import mock
 from unittest.mock import MagicMock
 
@@ -23,7 +23,6 @@ from tensorrt_llm.llmapi import DisaggregatedParams
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
-from dynamo.trtllm.llm_engine import TrtllmLLMEngine
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.request_handlers.handler_base import HandlerBase
 
@@ -193,97 +192,6 @@ class TestOverrideSamplingParams:
             HandlerBase._override_sampling_params(sampling_params, request)
 
         mock_post_init.assert_called_once()
-
-
-class TestLLMEngineOverrideSamplingParams:
-    """Tests for the unified LLMEngine _override_sampling_params path."""
-
-    JSON_SCHEMA: ClassVar[dict[str, Any]] = {
-        "type": "object",
-        "properties": {"answer": {"type": "string"}},
-        "required": ["answer"],
-    }
-    JSON_SCHEMA_STRING: ClassVar[str] = (
-        '{"type":"object","properties":{"answer":{"type":"string"}},'
-        '"required":["answer"]}'
-    )
-
-    def test_n_is_passed_through(self):
-        sampling_params = MockSamplingParams()
-        request = {"sampling_options": {"n": 2}}
-
-        result = TrtllmLLMEngine._override_sampling_params(sampling_params, request)
-
-        assert result.n == 2
-        assert result.best_of == 2
-
-    def test_existing_best_of_greater_than_n_is_preserved(self):
-        sampling_params = MockSamplingParams(best_of=4)
-        request = {"sampling_options": {"n": 2}}
-
-        result = TrtllmLLMEngine._override_sampling_params(sampling_params, request)
-
-        assert result.n == 2
-        assert result.best_of == 4
-
-    @pytest.mark.parametrize(
-        ("guided_decoding", "expected_attribute", "expected_value"),
-        [
-            ({"json": JSON_SCHEMA}, "json", JSON_SCHEMA),
-            ({"json": JSON_SCHEMA_STRING}, "json", JSON_SCHEMA_STRING),
-            ({"regex": "[0-9]+"}, "regex", "[0-9]+"),
-            (
-                {"grammar": 'root ::= "yes" | "no"'},
-                "grammar",
-                'root ::= "yes" | "no"',
-            ),
-            ({"choice": ["yes", "no", "maybe"]}, "regex", "(yes|no|maybe)"),
-        ],
-        ids=["json-object", "json-string", "regex", "grammar", "choice"],
-    )
-    def test_guided_decoding_constraints_are_converted(
-        self, guided_decoding, expected_attribute, expected_value
-    ):
-        sampling_params = MockSamplingParams()
-        request = {"sampling_options": {"guided_decoding": guided_decoding}}
-
-        result = TrtllmLLMEngine._override_sampling_params(sampling_params, request)
-
-        assert not isinstance(result.guided_decoding, dict)
-        assert getattr(result.guided_decoding, expected_attribute) == expected_value
-
-    def test_guided_decoding_choice_escapes_regex_metacharacters(self):
-        sampling_params = MockSamplingParams()
-        choices = ["yes (confirmed)", "no [rejected]", "maybe?"]
-        request = {"sampling_options": {"guided_decoding": {"choice": choices}}}
-
-        result = TrtllmLLMEngine._override_sampling_params(sampling_params, request)
-
-        expected = "(" + "|".join(re_mod.escape(choice) for choice in choices) + ")"
-        assert result.guided_decoding.regex == expected
-
-
-@pytest.mark.parametrize(
-    ("override", "expected"),
-    [
-        (None, "xgrammar"),
-        ('{"guided_decoding_backend": "llguidance"}', "llguidance"),
-    ],
-    ids=["configured", "engine-override"],
-)
-def test_unified_guided_decoding_backend_matches_legacy(override, expected):
-    argv = [
-        "--model-path",
-        "Qwen/Qwen3-0.6B",
-        "--guided-decoding-backend",
-        "xgrammar",
-    ]
-    if override is not None:
-        argv.extend(["--override-engine-args", override])
-
-    engine, _ = asyncio.run(TrtllmLLMEngine.from_args(argv))
-
-    assert engine.engine_args["guided_decoding_backend"] == expected
 
 
 class TestGuidedDecodingFromToolChoice:

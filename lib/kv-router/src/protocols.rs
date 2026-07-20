@@ -689,6 +689,10 @@ pub struct KvCacheEvent {
 pub enum KvCacheEventData {
     Stored(KvCacheStoreData),
     Removed(KvCacheRemoveData),
+    /// Remove all KV ownership for the emitting `(worker_id, dp_rank)`.
+    ///
+    /// This is ordered only within that rank publisher's event sequence. Worker-wide removal is
+    /// a separate serving-membership lifecycle operation.
     Cleared,
 }
 
@@ -888,8 +892,17 @@ pub enum KvCacheEventError {
     #[error("Invalid block sequence")]
     InvalidBlockSequence,
 
+    /// A bounded, pre-commit index omission; this does not prove the backing table is full.
     #[error("Indexer capacity exhausted")]
     CapacityExhausted,
+
+    /// A pre-commit allocation or reservation failed; no lossy-capacity policy is implied.
+    #[error("Indexer allocation failed")]
+    AllocationFailed,
+
+    /// An exact ownership degree overflowed before mutation.
+    #[error("Indexer ownership degree overflow")]
+    OwnershipDegreeOverflow,
 
     #[error("Indexer invariant violated")]
     IndexerInvariantViolation,

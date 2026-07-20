@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import dataclasses
-import functools
 import logging
 import os
 from dataclasses import dataclass, field
@@ -14,7 +13,6 @@ from tests.serve.common import (
     SERVE_TEST_DIR,
     WORKSPACE_DIR,
     params_with_model_mark,
-    run_prefill_drain_deployment,
     run_serve_deployment,
 )
 from tests.serve.lora_utils import DEFAULT_LORA_REPO, MinioLoraConfig
@@ -25,7 +23,6 @@ from tests.serve.multimodal_profiles.sglang import (
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
 from tests.utils.multimodal import make_image_payload_b64, make_multimodal_configs
-from tests.utils.otel import wait_for_engine_generate_count
 from tests.utils.payload_builder import (
     anthropic_messages_payload_default,
     anthropic_messages_stream_payload_default,
@@ -129,29 +126,6 @@ sglang_configs = {
             responses_stream_payload_default(),
             guided_decoding_chat_payload_default(),
             metric_payload_default(min_num_requests=6, backend="sglang"),
-        ],
-    ),
-    "aggregated_unified": SGLangConfig(
-        name="aggregated_unified",
-        directory=sglang_dir,
-        script_name="agg.sh",
-        script_args=["--unified"],
-        marks=[
-            pytest.mark.core,
-            pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(3.7),
-            pytest.mark.requested_sglang_kv_tokens(2048),  # see "aggregated" above
-            pytest.mark.timeout(340),  # 3x ~111s (sglang gpu_1 log)
-            pytest.mark.pre_merge,
-            pytest.mark.unified,
-        ],
-        model="Qwen/Qwen3-0.6B",
-        env={},
-        frontend_port=DefaultPort.FRONTEND.value,
-        request_payloads=[
-            chat_payload_default(),
-            completion_payload_default(),
-            guided_decoding_chat_payload_default(),
         ],
     ),
     "disaggregated": SGLangConfig(
@@ -898,124 +872,6 @@ def test_sglang_deployment(
         sglang_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
-
-
-_AGGREGATED_OTEL_CONFIG = SGLangConfig(
-    name="aggregated_otel",
-    directory=sglang_dir,
-    script_name="agg.sh",
-    script_args=["--enable-otel", "--unified"],
-    marks=[],  # applied on the dedicated test below
-    model="Qwen/Qwen3-0.6B",
-    request_payloads=[chat_payload_default(repeat_count=1)],
-)
-
-
-def _assert_engine_generate_span_exported(collector) -> None:
-    count = wait_for_engine_generate_count(collector, min_count=1)
-    assert count >= 1, (
-        "OTLP collector received no `engine.generate` span from the "
-        "SGLang aggregated deployment"
-    )
-
-
-@pytest.mark.sglang
-@pytest.mark.core
-@pytest.mark.e2e
-@pytest.mark.gpu_1
-@pytest.mark.model("Qwen/Qwen3-0.6B")
-@pytest.mark.profiled_vram_gib(3.7)
-@pytest.mark.requested_sglang_kv_tokens(2048)
-@pytest.mark.timeout(360)
-@pytest.mark.nightly
-@pytest.mark.unified
-@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
-def test_aggregated_otel_exports_engine_generate_span(
-    request,
-    runtime_services_dynamic_ports,
-    dynamo_dynamic_ports,
-    num_system_ports,
-    predownload_models,
-    otlp_collector,
-):
-    """The aggregated launch flag must export worker spans over OTLP/gRPC."""
-    assert num_system_ports >= 2
-    collector, otlp_port = otlp_collector
-    config = dataclasses.replace(
-        _AGGREGATED_OTEL_CONFIG,
-        frontend_port=dynamo_dynamic_ports.frontend_port,
-    )
-    run_serve_deployment(
-        config,
-        request,
-        ports=dynamo_dynamic_ports,
-        extra_env={
-            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": (f"http://127.0.0.1:{otlp_port}"),
-        },
-        post_validation=functools.partial(
-            _assert_engine_generate_span_exported, collector
-        ),
-    )
-
-
-# ---------------------------------------------------------------------------
-# Prefill drain on graceful shutdown, unified entry point. A concurrent burst
-# gives the prefill worker in-flight work; it's then SIGTERMed mid-flight, and
-# the test asserts the Rust Worker drove a graceful shutdown (drain -> cleanup).
-# Also covers two SGLang specifics: the signal guard keeping SGLang's SIGTERM
-# handler from preempting the Worker, and is_quiescent() counting both the
-# bootstrap and completed prefill-stream paths.
-# ---------------------------------------------------------------------------
-_PREFILL_DRAIN_CONFIG = SGLangConfig(
-    name="prefill_drain_unified",
-    directory=sglang_dir,
-    script_name="disagg_same_gpu.sh",
-    script_args=["--unified"],
-    marks=[],  # applied on the test function below
-    model="Qwen/Qwen3-0.6B",
-    delayed_start=10,
-    health_check_workers=True,
-    env={
-        "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS": "0",
-        # Generous budget so the prefill queue can drain (is_quiescent -> True)
-        # within it rather than always timing out.
-        "DYN_PREFILL_DRAIN_TIMEOUT_S": "30",
-        "DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT": "60",
-        # Decode worker may disable its health canary; mark ready-on-liveness so
-        # the harness's worker health check passes (canary-having workers still
-        # gate on their canary).
-        "DYN_SYSTEM_STARTING_HEALTH_STATUS": "ready",
-        # torch-memory-saver links libcudart.so.12 (absent on the cu13 image);
-        # the 48 GiB GPU fits both workers unpacked, so disable it.
-        "DYN_SGLANG_DISABLE_MEMORY_SAVER": "1",
-    },
-    request_payloads=[chat_payload_default()],
-)
-
-
-@pytest.mark.sglang
-@pytest.mark.e2e
-@pytest.mark.gpu_1
-@pytest.mark.model("Qwen/Qwen3-0.6B")
-@pytest.mark.profiled_vram_gib(13.0)
-@pytest.mark.requested_sglang_kv_tokens(37472)
-@pytest.mark.timeout(470)
-@pytest.mark.post_merge
-@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
-def test_prefill_drain_unified(
-    request,
-    runtime_services_dynamic_ports,
-    dynamo_dynamic_ports,
-    num_system_ports,
-    predownload_models,
-):
-    """Burst + mid-flight prefill SIGTERM; assert the Rust Worker drove
-    graceful shutdown (drain -> cleanup) — proving the signal guard and the
-    is_quiescent() bootstrap-path fix both hold."""
-    config = dataclasses.replace(
-        _PREFILL_DRAIN_CONFIG, frontend_port=dynamo_dynamic_ports.frontend_port
-    )
-    run_prefill_drain_deployment(config, request, ports=dynamo_dynamic_ports)
 
 
 @pytest.mark.e2e

@@ -13,9 +13,12 @@ use dynamo_kv_router::protocols::*;
 pub use dynamo_kv_router::zmq_wire::create_stored_blocks;
 #[cfg(test)]
 use dynamo_kv_router::zmq_wire::*;
-use dynamo_runtime::component::Component;
+use dynamo_runtime::component::{Component, Endpoint};
+use dynamo_runtime::discovery::{DiscoverySpec, EventScope};
+use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 
+use crate::discovery::KvEventSource as DiscoveredKvEventSource;
 use crate::kv_router::{
     KV_EVENT_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE, indexer::start_worker_kv_query_endpoint,
     metrics::KvPublisherMetrics,
@@ -133,12 +136,12 @@ pub struct KvEventPublisher {
 
 impl KvEventPublisher {
     pub fn new(
-        component: Component,
+        endpoint: Endpoint,
         kv_block_size: u32,
         source_config: Option<KvEventSourceConfig>,
     ) -> Result<Self> {
         Self::new_with_local_indexer(
-            component,
+            endpoint,
             kv_block_size,
             source_config,
             false,
@@ -148,15 +151,37 @@ impl KvEventPublisher {
     }
 
     pub fn new_with_local_indexer(
-        component: Component,
+        endpoint: Endpoint,
         kv_block_size: u32,
         source_config: Option<KvEventSourceConfig>,
         enable_local_indexer: bool,
         dp_rank: DpRank,
         batching_timeout_ms: Option<u64>,
     ) -> Result<Self> {
-        Self::new_with_local_indexer_and_worker_id(
-            component,
+        let kv_state_endpoint = endpoint.id();
+        Self::new_with_local_indexer_at(
+            endpoint,
+            kv_state_endpoint,
+            kv_block_size,
+            source_config,
+            enable_local_indexer,
+            dp_rank,
+            batching_timeout_ms,
+        )
+    }
+
+    pub fn new_with_local_indexer_at(
+        endpoint: Endpoint,
+        kv_state_endpoint: EndpointId,
+        kv_block_size: u32,
+        source_config: Option<KvEventSourceConfig>,
+        enable_local_indexer: bool,
+        dp_rank: DpRank,
+        batching_timeout_ms: Option<u64>,
+    ) -> Result<Self> {
+        Self::new_with_local_indexer_and_worker_id_at(
+            endpoint,
+            kv_state_endpoint,
             None,
             kv_block_size,
             source_config,
@@ -167,7 +192,7 @@ impl KvEventPublisher {
     }
 
     pub fn new_with_local_indexer_and_worker_id(
-        component: Component,
+        endpoint: Endpoint,
         worker_id: Option<WorkerId>,
         kv_block_size: u32,
         source_config: Option<KvEventSourceConfig>,
@@ -175,6 +200,31 @@ impl KvEventPublisher {
         dp_rank: DpRank,
         batching_timeout_ms: Option<u64>,
     ) -> Result<Self> {
+        let kv_state_endpoint = endpoint.id();
+        Self::new_with_local_indexer_and_worker_id_at(
+            endpoint,
+            kv_state_endpoint,
+            worker_id,
+            kv_block_size,
+            source_config,
+            enable_local_indexer,
+            dp_rank,
+            batching_timeout_ms,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_local_indexer_and_worker_id_at(
+        endpoint: Endpoint,
+        kv_state_endpoint: EndpointId,
+        worker_id: Option<WorkerId>,
+        kv_block_size: u32,
+        source_config: Option<KvEventSourceConfig>,
+        enable_local_indexer: bool,
+        dp_rank: DpRank,
+        batching_timeout_ms: Option<u64>,
+    ) -> Result<Self> {
+        let component = endpoint.component().clone();
         let cancellation_token = CancellationToken::new();
         let batching_timeout_ms = batching_timeout_ms
             .filter(|&ms| {
@@ -194,14 +244,15 @@ impl KvEventPublisher {
 
         let _ = KvPublisherMetrics::from_component(&component);
 
-        let component_name = component.name();
+        let endpoint_id = endpoint.id();
         tracing::info!(
-            "Initializing KvEventPublisher for worker {worker_id} in component {component_name}"
+            %kv_state_endpoint,
+            "Initializing KvEventPublisher for worker {worker_id} on serving endpoint {endpoint_id}"
         );
 
         if enable_local_indexer {
             tracing::info!(
-                "LocalKvIndexer enabled for worker {worker_id} in component {component_name}"
+                "LocalKvIndexer enabled for worker {worker_id} on endpoint {endpoint_id}"
             );
         }
 
@@ -232,31 +283,16 @@ impl KvEventPublisher {
             None
         };
 
-        let _local_indexer_query_handle = local_indexer.as_ref().map(|local_indexer_ref| {
-            let component = component.clone();
-            let local_indexer = local_indexer_ref.clone();
-
-            component
-                .drt()
-                .runtime()
-                .secondary()
-                .spawn(start_worker_kv_query_endpoint(
-                    component,
-                    worker_id,
-                    dp_rank,
-                    local_indexer,
-                ))
-        });
-
         let cancellation_token_clone = cancellation_token.clone();
         let local_indexer_clone = local_indexer.clone();
 
         tracing::info!("Using event plane for KV event publishing");
-        let component_clone = component.clone();
+        let endpoint_clone = endpoint.clone();
         component.drt().runtime().secondary().spawn(async move {
             let event_publisher =
-                match dynamo_runtime::transports::event_plane::EventPublisher::for_component(
-                    &component_clone,
+                match dynamo_runtime::transports::event_plane::EventPublisher::for_endpoint_id(
+                    endpoint_clone.drt(),
+                    &kv_state_endpoint,
                     KV_EVENT_SUBJECT,
                 )
                 .await
@@ -267,6 +303,69 @@ impl KvEventPublisher {
                         return;
                     }
                 };
+            let publisher_id = event_publisher.publisher_id();
+
+            let recovery_endpoint = if let Some(local_indexer) = local_indexer_clone.as_ref() {
+                match start_worker_kv_query_endpoint(
+                    component.clone(),
+                    publisher_id,
+                    worker_id,
+                    dp_rank,
+                    local_indexer.clone(),
+                )
+                .await
+                {
+                    Ok(endpoint) => Some(endpoint),
+                    Err(error) => {
+                        tracing::error!(
+                            %error,
+                            worker_id,
+                            dp_rank,
+                            publisher_id,
+                            "KV recovery endpoint failed; advertising a live-only KV source"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            let source = DiscoveredKvEventSource {
+                kv_state_endpoint: kv_state_endpoint.clone(),
+                worker: WorkerWithDpRank::new(worker_id, dp_rank),
+                publisher_id,
+                recovery_target: recovery_endpoint
+                    .as_ref()
+                    .map(|endpoint| endpoint.instance().clone()),
+            };
+            let source_spec = DiscoverySpec::EventSource {
+                scope: EventScope::Endpoint {
+                    endpoint: kv_state_endpoint.clone(),
+                },
+                topic: KV_EVENT_SUBJECT.to_string(),
+                publisher_id,
+                metadata: match serde_json::to_value(&source) {
+                    Ok(metadata) => metadata,
+                    Err(error) => {
+                        tracing::error!(%error, "Failed to encode KV event source advertisement");
+                        if let Some(endpoint) = recovery_endpoint {
+                            let _ = endpoint.shutdown().await;
+                        }
+                        return;
+                    }
+                },
+            };
+            let source_instance = match component.drt().discovery().register(source_spec).await {
+                Ok(instance) => instance,
+                Err(error) => {
+                    tracing::error!(%error, "Failed to advertise KV event source");
+                    if let Some(endpoint) = recovery_endpoint {
+                        let _ = endpoint.shutdown().await;
+                    }
+                    return;
+                }
+            };
 
             start_event_processor(
                 EventPlanePublisher(event_publisher),
@@ -276,7 +375,21 @@ impl KvEventPublisher {
                 local_indexer_clone,
                 batching_timeout_ms,
             )
-            .await
+            .await;
+
+            if let Err(error) = component
+                .drt()
+                .discovery()
+                .unregister(source_instance)
+                .await
+            {
+                tracing::warn!(%error, publisher_id, "Failed to unregister KV event source");
+            }
+            if let Some(endpoint) = recovery_endpoint
+                && let Err(error) = endpoint.shutdown().await
+            {
+                tracing::warn!(%error, publisher_id, "Failed to stop KV recovery endpoint");
+            }
         });
 
         Ok(Self {
