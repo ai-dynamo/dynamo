@@ -251,6 +251,46 @@ def _uniformly_limit_axis(values: Sequence[int], max_samples: int) -> list[int]:
     ]
 
 
+def _limit_cudagraph_axis(
+    values: Sequence[int],
+    capture_sizes: Sequence[int],
+    max_samples: int,
+) -> list[int]:
+    """Limit a graph-aware axis while preserving a small eager tail.
+
+    Values above the largest configured CUDA Graph capture size run eagerly.
+    When those eager-tail values are at most 20% of all candidates, retain the
+    complete tail and spend the remaining sample budget on the graph-covered
+    prefix. If the tail is larger, use the existing uniform whole-axis limit.
+    """
+    if max_samples < 2:
+        raise ValueError("uniform axis sample limits must be at least 2")
+
+    candidates = list(values)
+    if len(candidates) <= max_samples:
+        return candidates
+
+    captures = [int(size) for size in capture_sizes if int(size) >= 1]
+    if not captures:
+        return _uniformly_limit_axis(candidates, max_samples)
+
+    max_capture_size = max(captures)
+    graph_points = [value for value in candidates if value <= max_capture_size]
+    eager_tail = [value for value in candidates if value > max_capture_size]
+
+    # Compare as integers so the inclusive 20% boundary is exact.
+    protect_eager_tail = bool(eager_tail) and len(eager_tail) * 5 <= len(candidates)
+    graph_budget = max_samples - len(eager_tail)
+    if not protect_eager_tail or not graph_points or graph_budget < 1:
+        return _uniformly_limit_axis(candidates, max_samples)
+
+    if graph_budget == 1:
+        limited_graph_points = [graph_points[0]]
+    else:
+        limited_graph_points = _uniformly_limit_axis(graph_points, graph_budget)
+    return limited_graph_points + eager_tail
+
+
 def _cudagraph_axis_points(
     capture_sizes: Sequence[int],
     limit: int,
@@ -1750,14 +1790,15 @@ class InstrumentedScheduler(AsyncScheduler):
             )
             return
 
-        total_prefill_tokens = _cudagraph_axis_points(
+        total_prefill_tokens = _limit_cudagraph_axis(
+            _cudagraph_axis_points(
+                self._bench_prefill_capture_sizes,
+                max_tokens,
+            ),
             self._bench_prefill_capture_sizes,
-            max_tokens,
-        )
-        total_prefill_tokens = _uniformly_limit_axis(
-            total_prefill_tokens,
             self._bench_config.prefill_max_new_token_samples,
         )
+        prefill_points: list[BenchmarkPoint] = []
         for total_tokens in total_prefill_tokens:
             for batch_size in self._bench_prefill_batch_sizes(total_tokens):
                 for total_kv_read_tokens in self._bench_prefill_kv_read_points(
@@ -1776,7 +1817,7 @@ class InstrumentedScheduler(AsyncScheduler):
                         self._bench_prefill_capture_sizes,
                         max_tokens,
                     )
-                    self._bench_grid.append(
+                    prefill_points.append(
                         BenchmarkPoint(
                             point_type="prefill",
                             total_prefill_tokens=total_tokens,
@@ -1792,6 +1833,11 @@ class InstrumentedScheduler(AsyncScheduler):
                             sample_reasons=sample_reasons,
                         )
                     )
+
+        # Generate axes in their natural ascending order, then reverse only the
+        # prefill phase so larger workload coordinates run first.  Keep
+        # decode ordering and the aggregate prefill-before-decode boundary intact.
+        self._bench_grid.extend(reversed(prefill_points))
 
     def _bench_prefill_batch_sizes(self, total_tokens: int) -> list[int]:
         """Return the smallest configured presets from the legal batch axis."""
@@ -2159,12 +2205,12 @@ class InstrumentedScheduler(AsyncScheduler):
             logger.warning("KV cache too small for decode grid, skipping")
             return
 
-        batch_sizes = _cudagraph_axis_points(
+        batch_sizes = _limit_cudagraph_axis(
+            _cudagraph_axis_points(
+                self._bench_decode_capture_sizes,
+                feasible_max_batch,
+            ),
             self._bench_decode_capture_sizes,
-            feasible_max_batch,
-        )
-        batch_sizes = _uniformly_limit_axis(
-            batch_sizes,
             self._bench_config.decode_max_batch_size_samples,
         )
         for batch_size in batch_sizes:
