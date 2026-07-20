@@ -5,12 +5,13 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
 use anyhow::{Context, Result, anyhow, bail};
+use rand::SeedableRng;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
 use super::types::{AgenticTrace, ReadyTurn, ReplayRequestHashes, Trace};
+use super::{SYNTHETIC_OUTPUT_SEED, planned_output_token_ids};
 use crate::common::protocols::DirectRequest;
 
 #[derive(Debug)]
@@ -38,20 +39,6 @@ struct AgenticState {
 enum PromptMode {
     Full,
     DeltaCumulative,
-}
-
-const SYNTHETIC_OUTPUT_SEED: u64 = 0xD37A_0A7E_5EED;
-
-fn planned_output_token_ids(
-    authored: Option<Vec<u32>>,
-    max_output_tokens: usize,
-    output_rng: &mut StdRng,
-) -> Vec<u32> {
-    authored.unwrap_or_else(|| {
-        (0..max_output_tokens)
-            .map(|_| output_rng.random::<u32>())
-            .collect()
-    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
