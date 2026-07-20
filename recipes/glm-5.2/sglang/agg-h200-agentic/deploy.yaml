@@ -160,4 +160,4 @@ spec:
               operator: Equal
               value: "true"
               effect: NoSchedule
-      replicas: 1
+      replicas: 3

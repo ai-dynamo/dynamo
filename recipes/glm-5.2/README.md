@@ -98,12 +98,12 @@ Modified Mooncake traces are provided to showcase the value of KV-aware routing 
 ## Performance results
 
 
-| Workload             | Recipe                 | SKU  | Concurrency | System output tok/s/gpu | User output tok/s (P50) | TTFT (P50) |
-| -------------------- | ---------------------- | ---- | ----------- | ----------------------- | ----------------------- | ---------- |
-| Agentic (15% subset) | Aggregated (4 workers) | B200 | 64          | 176.420                 | 57.493                  | 355.555    |
-| Agentic (15% subset) | Disaggregated (3P1D)   | B200 | 128         | 320.907                 | 65.105                  | 1938.059   |
-| Agentic (15% subset) | Aggregated (3 workers) | H200 | 32          | 54.550                  | 52.370                  | 1.790 s    |
-| Agentic (15% subset) | Disaggregated (1P1D)   | H200 | 24          | 68.860                  | 53.880                  | 1.874 s    |
+| Workload             | Recipe                 | SKU  | Concurrency | System output tok/s/gpu | User output tok/s (P50) | TTFT P50 (ms) |
+| -------------------- | ---------------------- | ---- | ----------- | ----------------------- | ----------------------- | ------------- |
+| Agentic (15% subset) | Aggregated (4 workers) | B200 | 64          | 176.420                 | 57.493                  | 355.555       |
+| Agentic (15% subset) | Disaggregated (3P1D)   | B200 | 128         | 320.907                 | 65.105                  | 1938.059      |
+| Agentic (15% subset) | Aggregated (3 workers) | H200 | 32          | 54.550                  | 52.370                  | 1790.000      |
+| Agentic (15% subset) | Disaggregated (1P1D)   | H200 | 24          | 68.860                  | 53.880                  | 1874.000      |
 
 
 
