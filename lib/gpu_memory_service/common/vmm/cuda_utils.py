@@ -6,8 +6,11 @@
 from __future__ import annotations
 
 import os
+import threading
+from typing import Any
 
 from gpu_memory_service.common.locks import GrantedLockType
+from gpu_memory_service.common.snapshot_profile import SnapshotProfile
 from gpu_memory_service.common.utils import fail
 from gpu_memory_service.common.vmm.device import VMMDevice
 
@@ -332,6 +335,8 @@ class CudaVMM(VMMDevice):
 
     """
 
+    api = "runtime"
+
     # ----- driver lifecycle -------------------------------------------------
 
     def ensure_initialized(self) -> None:
@@ -399,6 +404,9 @@ class CudaVMM(VMMDevice):
     def runtime_set_device(self, device: int) -> None:
         cuda_runtime_set_device(device)
 
+    def set_current_device(self, device: int) -> None:
+        self.runtime_set_device(device)
+
     def host_register(self, ptr: int, size: int) -> None:
         cuda_host_register(ptr, size)
 
@@ -443,3 +451,208 @@ class CudaVMM(VMMDevice):
         stream,
     ) -> None:
         cuda_memcpy_d2h_async(dst_ptr, src_ptr, size, stream)
+
+
+def cuda_driver_check_result(result: Any, name: str) -> None:
+    """Raise a recoverable error for a failed CUDA Driver operation."""
+    if result == cuda.CUresult.CUDA_SUCCESS:
+        return
+    err_result, err_str = cuda.cuGetErrorString(result)
+    if err_result == cuda.CUresult.CUDA_SUCCESS and err_str:
+        err_msg = err_str.decode() if isinstance(err_str, bytes) else str(err_str)
+    else:
+        err_msg = str(result)
+    raise RuntimeError(f"CUDA Driver error in {name}: {err_msg}")
+
+
+class DriverCudaProcess:
+    """Process-scoped Driver initialization and retained primary contexts."""
+
+    def __init__(self) -> None:
+        self._initialized = False
+        self._devices: dict[int, tuple[Any, Any]] = {}
+        self._lock = threading.Lock()
+
+    def initialize(self) -> None:
+        with self._lock:
+            if self._initialized:
+                return
+            (result,) = cuda.cuInit(0)
+            cuda_driver_check_result(result, "cuInit")
+            self._initialized = True
+
+    def device_get(self, ordinal: int):
+        if not self._initialized:
+            raise RuntimeError("CUDA Driver process is not initialized")
+        result, device = cuda.cuDeviceGet(ordinal)
+        cuda_driver_check_result(result, f"cuDeviceGet({ordinal})")
+        return device
+
+    def primary_context_retain(self, ordinal: int, device) -> Any:
+        with self._lock:
+            if ordinal in self._devices:
+                raise RuntimeError(
+                    f"CUDA primary context for device {ordinal} was already retained"
+                )
+        result, context = cuda.cuDevicePrimaryCtxRetain(device)
+        cuda_driver_check_result(result, f"cuDevicePrimaryCtxRetain({ordinal})")
+        with self._lock:
+            self._devices[ordinal] = (device, context)
+        return context
+
+    def set_current(self, ordinal: int) -> int:
+        with self._lock:
+            try:
+                _device, context = self._devices[ordinal]
+            except KeyError as exc:
+                raise RuntimeError(
+                    f"CUDA primary context for device {ordinal} is not retained"
+                ) from exc
+        (result,) = cuda.cuCtxSetCurrent(context)
+        cuda_driver_check_result(result, f"cuCtxSetCurrent(device={ordinal})")
+        return int(context)
+
+    def operations(
+        self,
+        ordinal: int,
+        profile: SnapshotProfile,
+    ) -> "DriverCudaTransferOperations":
+        return DriverCudaTransferOperations(self, ordinal, profile)
+
+    def close(self) -> None:
+        with self._lock:
+            retained = list(self._devices.items())
+            self._devices.clear()
+        first_error = None
+        for ordinal, (device, _context) in retained:
+            try:
+                (result,) = cuda.cuDevicePrimaryCtxRelease(device)
+                cuda_driver_check_result(
+                    result,
+                    f"cuDevicePrimaryCtxRelease({ordinal})",
+                )
+            except Exception as exc:  # noqa: BLE001
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
+
+
+class DriverCudaTransferOperations:
+    """CUDA Driver equivalents for pinned snapshot transfer operations."""
+
+    api = "driver"
+
+    def __init__(
+        self,
+        process: DriverCudaProcess,
+        device: int,
+        profile: SnapshotProfile,
+    ) -> None:
+        self._process = process
+        self._device = device
+        self._profile = profile
+        self._first_h2d_submitted = False
+        self._first_h2d_lock = threading.Lock()
+
+    def set_current_device(self, device: int) -> int:
+        if device != self._device:
+            raise RuntimeError(
+                f"Driver transfer operations for device {self._device} "
+                f"cannot select device {device}"
+            )
+        return self._process.set_current(device)
+
+    @staticmethod
+    def host_register(ptr: int, size: int) -> None:
+        (result,) = cuda.cuMemHostRegister(ptr, size, 0)
+        cuda_driver_check_result(result, "cuMemHostRegister")
+
+    @staticmethod
+    def host_unregister(ptr: int) -> None:
+        (result,) = cuda.cuMemHostUnregister(ptr)
+        cuda_driver_check_result(result, "cuMemHostUnregister")
+
+    @staticmethod
+    def stream_create_nonblocking():
+        result, stream = cuda.cuStreamCreate(cuda.CUstream_flags.CU_STREAM_NON_BLOCKING)
+        cuda_driver_check_result(result, "cuStreamCreate")
+        return stream
+
+    @staticmethod
+    def stream_destroy(stream) -> None:
+        (result,) = cuda.cuStreamDestroy(stream)
+        cuda_driver_check_result(result, "cuStreamDestroy")
+
+    @staticmethod
+    def stream_synchronize(stream) -> None:
+        (result,) = cuda.cuStreamSynchronize(stream)
+        cuda_driver_check_result(result, "cuStreamSynchronize")
+
+    @staticmethod
+    def event_create():
+        result, event = cuda.cuEventCreate(cuda.CUevent_flags.CU_EVENT_DEFAULT)
+        cuda_driver_check_result(result, "cuEventCreate")
+        return event
+
+    @staticmethod
+    def event_record(event, stream) -> None:
+        (result,) = cuda.cuEventRecord(event, stream)
+        cuda_driver_check_result(result, "cuEventRecord")
+
+    @staticmethod
+    def event_elapsed_ns(start_event, end_event) -> int:
+        result, milliseconds = cuda.cuEventElapsedTime(start_event, end_event)
+        cuda_driver_check_result(result, "cuEventElapsedTime")
+        return int(float(milliseconds) * 1_000_000)
+
+    @staticmethod
+    def event_destroy(event) -> None:
+        (result,) = cuda.cuEventDestroy(event)
+        cuda_driver_check_result(result, "cuEventDestroy")
+
+    def memcpy_h2d_async(
+        self,
+        dst_ptr: int,
+        src_ptr: int,
+        size: int,
+        stream,
+    ) -> None:
+        with self._first_h2d_lock:
+            first = not self._first_h2d_submitted
+            self._first_h2d_submitted = True
+        span = (
+            self._profile.phase(
+                "first_h2d_submission",
+                api="cuMemcpyHtoDAsync",
+                cuda_api=self.api,
+                byte_count=size,
+            )
+            if first
+            else None
+        )
+        if span is None:
+            self._memcpy_h2d_async(dst_ptr, src_ptr, size, stream)
+        else:
+            with span:
+                self._memcpy_h2d_async(dst_ptr, src_ptr, size, stream)
+
+    @staticmethod
+    def _memcpy_h2d_async(
+        dst_ptr: int,
+        src_ptr: int,
+        size: int,
+        stream,
+    ) -> None:
+        (result,) = cuda.cuMemcpyHtoDAsync(dst_ptr, src_ptr, size, stream)
+        cuda_driver_check_result(result, "cuMemcpyHtoDAsync")
+
+    @staticmethod
+    def memcpy_d2h_async(
+        dst_ptr: int,
+        src_ptr: int,
+        size: int,
+        stream,
+    ) -> None:
+        (result,) = cuda.cuMemcpyDtoHAsync(dst_ptr, src_ptr, size, stream)
+        cuda_driver_check_result(result, "cuMemcpyDtoHAsync")

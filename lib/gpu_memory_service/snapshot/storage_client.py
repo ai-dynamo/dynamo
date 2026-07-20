@@ -11,6 +11,7 @@ import logging
 import os
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
@@ -52,6 +53,11 @@ class GMSStorageClient:
         sharded_ssd_queues_per_root: int = 2,
         posix_backend_params: Optional[Mapping[str, str]] = None,
         profile: SnapshotProfile | None = None,
+        transfer_operations: Any = None,
+        mapping_starting: Callable[[], None] | None = None,
+        mapping_completion: Callable[[], None] | None = None,
+        mapping_gate: Any = None,
+        pinned_registration_groups: int = 0,
     ) -> None:
         self.output_dir = output_dir
         self.device = device
@@ -70,6 +76,11 @@ class GMSStorageClient:
             enabled=False,
             device=device,
         )
+        self._transfer_operations = transfer_operations
+        self._mapping_starting = mapping_starting
+        self._mapping_completion = mapping_completion
+        self._mapping_gate = mapping_gate
+        self._pinned_registration_groups = int(pinned_registration_groups)
         self._sharded_ssd_queues_per_root = int(sharded_ssd_queues_per_root)
         if self._sharded_ssd_queues_per_root <= 0:
             raise ValueError("sharded_ssd_queues_per_root must be positive")
@@ -325,6 +336,11 @@ class GMSStorageClient:
                         ),
                         "posix_backend_params": self._posix_backend_params,
                         "profile": self._profile,
+                        "transfer_operations": self._transfer_operations,
+                        "mapping_gate": self._mapping_gate,
+                        "pinned_registration_groups": (
+                            self._pinned_registration_groups
+                        ),
                     },
                 ),
             )
@@ -361,7 +377,19 @@ class GMSStorageClient:
                 if clear_existing:
                     logger.info("RW connect cleared any previously committed GMS state")
 
-                id_map, targets = self._allocate_restore_targets(mm, manifest)
+                with self._profile.phase(
+                    "restore_target_mapping_envelope",
+                    count=len(manifest.allocations),
+                    byte_count=sum(
+                        allocation.aligned_size for allocation in manifest.allocations
+                    ),
+                ):
+                    if self._mapping_starting is not None:
+                        self._mapping_starting()
+                    id_map, targets = self._allocate_restore_targets(mm, manifest)
+                with self._profile.phase("mapping_completion"):
+                    if self._mapping_completion is not None:
+                        self._mapping_completion()
                 with self._profile.phase(
                     "payload_restore_total",
                     backend=backend_name,

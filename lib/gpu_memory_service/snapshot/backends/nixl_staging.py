@@ -32,6 +32,7 @@ from gpu_memory_service.snapshot.backends.nixl_common import (
 from gpu_memory_service.snapshot.backends.pinned_host import (
     PINNED_COPY_CHUNK_SIZE,
     PinnedCopySlot,
+    PinnedCopyArena,
     close_pinned_copy_slots,
     make_pinned_copy_slots,
 )
@@ -103,6 +104,13 @@ class NixlPosixStagingTransferBackend:
             if isinstance(configured_profile, SnapshotProfile)
             else SnapshotProfile("loader", enabled=False)
         )
+        self._transfer_operations = (
+            config.backend_config.get("transfer_operations") or get_vmm()
+        )
+        self._mapping_gate = config.backend_config.get("mapping_gate")
+        self._pinned_registration_groups = int(
+            config.backend_config.get("pinned_registration_groups") or 0
+        )
         self._api_pool = ThreadPoolExecutor(max_workers=1)
         self._api_future = self._api_pool.submit(self._load_nixl_api)
         logger.info(
@@ -132,6 +140,9 @@ class NixlPosixStagingTransferBackend:
             sources=sources,
             api_future=self._api_future,
             profile=self._profile,
+            transfer_operations=self._transfer_operations,
+            mapping_gate=self._mapping_gate,
+            pinned_registration_groups=self._pinned_registration_groups,
         )
 
     def close(self) -> None:
@@ -152,6 +163,9 @@ class _NixlPosixStagingTransferSession:
         sources: Sequence[FileTransferSource],
         api_future: Optional[Future[object]] = None,
         profile: SnapshotProfile | None = None,
+        transfer_operations: object | None = None,
+        mapping_gate: object | None = None,
+        pinned_registration_groups: int = 0,
     ) -> None:
         self._backend_name = backend_name
         self._device = device
@@ -161,10 +175,19 @@ class _NixlPosixStagingTransferSession:
         self._sources = list(sources)
         self._api_future = api_future
         self._profile = profile or SnapshotProfile("loader", enabled=False)
+        self._transfer_operations = transfer_operations or get_vmm()
+        self._mapping_gate = mapping_gate
+        self._pinned_registration_groups = int(pinned_registration_groups)
+        if self._pinned_registration_groups < 0:
+            raise ValueError("pinned_registration_groups must not be negative")
         self._agent_name_base = (
             f"gms_{backend_name.replace('-', '_')}_{device}_{os.getpid()}_{id(self):x}"
         )
         self._cancel_event = threading.Event()
+        self._staging_started = False
+        self._staging_start_lock = threading.Lock()
+        self._arena: PinnedCopyArena | None = None
+        self._arena_lock = threading.Lock()
         self._prep_started_at = time.monotonic()
         with self._profile.phase(
             "restore_source_planning",
@@ -308,6 +331,49 @@ class _NixlPosixStagingTransferSession:
                 continue
             self._close_prepared_group(prepared)
         self._prep_futures.clear()
+        self._close_arena()
+
+    def _wait_for_mapping_gate(self) -> None:
+        if self._mapping_gate is not None:
+            with self._profile.aggregate("mapping_first_barrier_wait"):
+                self._mapping_gate.wait()
+        with self._staging_start_lock:
+            if self._staging_started:
+                return
+            self._staging_started = True
+        with self._profile.phase(
+            "staging_preparation_start",
+            registration_mode=(
+                "arena" if self._pinned_registration_groups else "independent"
+            ),
+        ):
+            pass
+
+    def _get_arena(self) -> PinnedCopyArena | None:
+        if not self._pinned_registration_groups:
+            return None
+        with self._arena_lock:
+            if self._arena is None:
+                slot_count = self._worker_count * _PINNED_COPY_BUFFERS_PER_WORKER
+                if self._pinned_registration_groups > slot_count:
+                    raise ValueError(
+                        "pinned_registration_groups exceeds logical slot count: "
+                        f"{self._pinned_registration_groups} > {slot_count}"
+                    )
+                self._arena = PinnedCopyArena(
+                    self._transfer_operations,
+                    slot_count,
+                    self._pinned_registration_groups,
+                    profile=self._profile,
+                )
+            return self._arena
+
+    def _close_arena(self) -> None:
+        with self._arena_lock:
+            arena = self._arena
+            self._arena = None
+        if arena is not None:
+            arena.close()
 
     def _prepare_group(
         self,
@@ -334,12 +400,11 @@ class _NixlPosixStagingTransferSession:
                 )
             if self._cancel_event.is_set():
                 raise CancelledError(f"{self._backend_name} cancelled")
-            vmm = get_vmm()
             with self._profile.aggregate(
                 "staging_worker_cuda_set_device",
                 worker=worker_index,
             ):
-                vmm.runtime_set_device(self._device)
+                self._transfer_operations.set_current_device(self._device)
             with self._profile.aggregate(
                 "nixl_worker_agent_backend_creation",
                 worker=worker_index,
@@ -352,10 +417,14 @@ class _NixlPosixStagingTransferSession:
                 )
             if self._cancel_event.is_set():
                 raise CancelledError(f"{self._backend_name} cancelled")
+            self._wait_for_mapping_gate()
+            arena = self._get_arena()
             slots = make_pinned_copy_slots(
-                vmm,
+                self._transfer_operations,
                 _PINNED_COPY_BUFFERS_PER_WORKER,
                 profile=self._profile,
+                arena=arena,
+                first_arena_slot=(worker_index * _PINNED_COPY_BUFFERS_PER_WORKER),
                 worker=worker_index,
             )
             prep_elapsed_s = time.monotonic() - prep_t0
@@ -395,7 +464,7 @@ class _NixlPosixStagingTransferSession:
             "transfer_worker_cuda_set_device",
             worker=prepared.worker_index,
         ):
-            get_vmm().runtime_set_device(self._device)
+            self._transfer_operations.set_current_device(self._device)
         group_t0 = time.monotonic()
         group_bytes = 0
         try:
@@ -409,6 +478,7 @@ class _NixlPosixStagingTransferSession:
                 slots=prepared.slots,
                 profile=self._profile,
                 profile_fields={"worker": prepared.worker_index},
+                transfer_operations=self._transfer_operations,
             )
         finally:
             elapsed = time.monotonic() - group_t0
@@ -450,9 +520,11 @@ def restore_file_groups_with_nixl_staging(
     slots: Optional[List[PinnedCopySlot]] = None,
     profile: SnapshotProfile | None = None,
     profile_fields: Optional[Mapping[str, object]] = None,
+    transfer_operations: object | None = None,
 ) -> int:
     profile = profile or SnapshotProfile("loader", enabled=False)
     fields = dict(profile_fields or {})
+    operations = transfer_operations or get_vmm()
     owned_slots = slots is None
     if slots is None:
         slots = []
@@ -461,7 +533,7 @@ def restore_file_groups_with_nixl_staging(
     try:
         if owned_slots:
             slots = make_pinned_copy_slots(
-                get_vmm(),
+                operations,
                 buffers_per_worker,
                 profile=profile,
                 **fields,
