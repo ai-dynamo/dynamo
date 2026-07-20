@@ -19,7 +19,7 @@ from gpu_memory_service.snapshot.transfer import (
 
 logger = logging.getLogger(__name__)
 
-_STRATEGY_CHAIN = "p2p->gds->posix"
+_STRATEGY_CHAIN = "rdma->gds->posix"
 _GMS_RESTORE_API_REQUIREMENT = (
     "The ModelExpress GMS snapshot backend requires a ModelExpress version "
     "newer than 0.4.0 that provides modelexpress.gds_loader read descriptors "

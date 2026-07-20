@@ -604,7 +604,7 @@ def test_mx_transfer_session_wraps_mx_failure_with_gms_context(
     ).start_restore([_source()])
 
     with pytest.raises(
-        RuntimeError, match="device=3.*p2p->gds->posix.*sources=1"
+        RuntimeError, match="device=3.*rdma->gds->posix.*sources=1"
     ) as exc:
         session.restore({"allocation-0": _target()})
 
@@ -630,7 +630,7 @@ def test_mx_transfer_session_wraps_from_env_failure_with_gms_context(
         RuntimeError,
         match=(
             "MX GMS restore failed: device=3.*"
-            "strategy_chain=p2p->gds->posix.*sources=1"
+            "strategy_chain=rdma->gds->posix.*sources=1"
         ),
     ) as exc:
         session.restore({"allocation-0": _target()})
