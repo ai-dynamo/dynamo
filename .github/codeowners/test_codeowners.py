@@ -8,7 +8,7 @@ policy-only emission:
   - `minimal_cover(file_team, catch_all)` -- the recursive min-cost cover that
     turns a per-file owner map into the smallest set of last-match base rules
     for legacy callers (the emitter no longer uses it).
-  - `compute_resolution(spec)` + `_render_codeowners(...)` -- pure policy
+  - `compute_resolution(spec)` + `render_codeowners(...)` -- pure policy
     resolution, explicit precedence, and byte-identical output across trees.
 
 If either drifts, the tests catch it before the generated CODEOWNERS goes wrong.
@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 # Allow `import codeowners_match` when pytest runs from the repo root.
 sys.path.insert(0, str(Path(__file__).parent))
@@ -28,7 +29,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 from build_codeowners import (  # noqa: E402
     CoverageGate,
     is_policy_change,
+    ownership_contract_violations,
     split_coverage,
+    strict_failure,
 )
 from codeowners_match import (  # noqa: E402
     Area,
@@ -45,9 +48,9 @@ from codeowners_match import (  # noqa: E402
 from emit_codeowners import (  # noqa: E402
     CONTRIBUTOR_LEVELS,
     _handle,
-    _render_codeowners,
     contributor_level,
     decorate_owners,
+    render_codeowners,
     render_contributors_md,
     team_externals_map,
 )
@@ -92,6 +95,13 @@ class TestMatchAnchoredFile:
         assert not match("/lib/*.rs", "lib/sub/foo.rs")
         assert match("/lib/**.rs", "lib/sub/foo.rs")
         assert match("/lib/**/foo.rs", "lib/a/b/foo.rs")
+
+    def test_double_star_slash_matches_zero_or_more_directories(self) -> None:
+        pattern = "/recipes/**/vllm/**"
+        assert match(pattern, "recipes/vllm/deploy.yaml")
+        assert match(pattern, "recipes/nested/vllm/deploy.yaml")
+        assert match(pattern, "recipes/a/b/vllm/deploy.yaml")
+        assert not match(pattern, "recipes/sglang/deploy.yaml")
 
     def test_question_mark_stays_in_segment(self) -> None:
         assert match("/lib/?.rs", "lib/a.rs")
@@ -399,15 +409,35 @@ class TestComputeResolution:
         [
             {"coowner": "docs", "advisory": False},
             {"pattern": "Dockerfile", "advisory": False},
+            {"pattern": "Dockerfile", "coowner": "typoed-owner"},
+            {"pattern": "Docker file", "coowner": "docs", "advisory": False},
+            {"pattern": "Dockerfile", "coowner": "@org/team extra"},
+            {"pattern": "Dockerfile", "coowner": "owner @example.com"},
+            {"pattern": "Dockerfile", "coowner": "docs", "advisory": "yes"},
+            ["not", "a", "mapping"],
         ],
     )
     def test_blocking_filetype_rule_requires_pattern_and_coowner(
-        self, rule: dict
+        self, rule: object
     ) -> None:
         spec = self._spec()
         spec["classify"]["filetype_rules"] = [rule]
-        with pytest.raises(SystemExit, match="missing 'pattern' or 'coowner'"):
+        with pytest.raises(SystemExit, match="filetype_rules entry"):
             compute_resolution(spec)
+
+    def test_filetype_rules_accept_explicit_raw_principals(self) -> None:
+        spec = self._spec()
+        spec["classify"]["filetype_rules"] = [
+            {"pattern": "*.owned", "coowner": "@org/team", "advisory": False},
+            {
+                "pattern": "*.reviewed",
+                "coowner": "owner@example.com",
+                "advisory": True,
+            },
+        ]
+        model = compute_resolution(spec)
+        assert model.filetype_shared[0].owners == ["@org/team"]
+        assert model.filetype_advisory[0]["coowner"] == "owner@example.com"
 
     def test_filetype_rule_covers_files_at_any_depth(self) -> None:
         # The strict coverage gate relies on ``unmatched_paths`` -- a
@@ -446,6 +476,85 @@ class TestComputeResolution:
         rows = [s for s in model.shared if s["glob"] == "lib/llm/metrics/"]
         assert len(rows) == 1
         assert rows[0]["owners"] == ["runtime", "docs"]
+
+    def test_shared_inherits_are_retained_and_stably_deduplicated(self) -> None:
+        spec = self._spec()
+        spec["shared"].append(
+            {
+                "glob": "lib/llm/metrics/",
+                "inherits": ["runtime", "docs"],
+                "owners": ["kvbm", "runtime"],
+            }
+        )
+        model = compute_resolution(spec)
+        row = next(s for s in model.shared if s["glob"] == "lib/llm/metrics/")
+        assert row == {
+            "glob": "lib/llm/metrics/",
+            "owners": ["runtime", "docs", "kvbm"],
+        }
+
+    @pytest.mark.parametrize(
+        "rule",
+        [
+            {"owners": ["runtime"]},
+            {"glob": "lib/llm/metrics/", "owners": "runtime"},
+            {"glob": "lib/llm/metrics/", "owners": [], "inherits": []},
+            {"glob": "lib/llm/metrics/", "owners": ["typoed-owner"]},
+            {"glob": "lib/llm/ metrics/", "owners": ["runtime"]},
+            {"glob": "lib/llm/metrics/", "owners": ["@org/team extra"]},
+            {"glob": "lib/llm/metrics/", "owners": ["owner @example.com"]},
+            {"glob": "lib/llm/metrics/", "inherits": ["runtime docs"]},
+            {"glob": "lib/llm/metrics/", "owners": [["not-hashable"]]},
+            ["not", "a", "mapping"],
+        ],
+    )
+    def test_shared_entries_require_a_glob_and_effective_owner_list(
+        self, rule: object
+    ) -> None:
+        spec = self._spec()
+        spec["shared"] = [rule]
+        with pytest.raises(SystemExit, match="shared entry"):
+            compute_resolution(spec)
+
+    def test_shared_entries_accept_explicit_raw_principals(self) -> None:
+        spec = self._spec()
+        spec["shared"] = [
+            {
+                "glob": "lib/llm/metrics/",
+                "inherits": ["runtime"],
+                "owners": ["@org/team", "owner@example.com"],
+            }
+        ]
+        model = compute_resolution(spec)
+        assert model.shared[0]["owners"] == [
+            "runtime",
+            "@org/team",
+            "owner@example.com",
+        ]
+
+    @pytest.mark.parametrize("section", ["shared", "required_owners", "advisory"])
+    @pytest.mark.parametrize(
+        "rule",
+        [
+            {"glob": "lib/llm/ metrics/", "owners": ["runtime"]},
+            {"glob": "lib/llm/metrics/", "owners": ["@org/team extra"]},
+            {"glob": "lib/llm/metrics/", "owners": ["owner @example.com"]},
+            {"glob": "lib/llm/metrics/", "inherits": ["runtime docs"]},
+        ],
+    )
+    def test_owner_rule_sections_reject_whitespace_tokens(
+        self, section: str, rule: dict
+    ) -> None:
+        spec = self._spec()
+        spec[section] = [rule]
+        with pytest.raises(SystemExit, match=f"{section} entry"):
+            compute_resolution(spec)
+
+    def test_advisory_entries_use_the_same_owner_validation(self) -> None:
+        spec = self._spec()
+        spec["advisory"] = [{"glob": "lib/llm/metrics/", "owners": ["typoed-owner"]}]
+        with pytest.raises(SystemExit, match="advisory entry"):
+            compute_resolution(spec)
 
 
 # ------------------------------------------------------------------
@@ -505,7 +614,7 @@ class TestEmissionIsTreeIndependent:
 
     def _render(self, spec: dict, tree: list[str] | None = None) -> str:
         model = compute_resolution(spec, tree)
-        lines, _ = _render_codeowners(model, group=True, external=[])
+        lines, _ = render_codeowners(model, group=True, external=[])
         return "\n".join(lines) + "\n"
 
     def test_add_file_under_owned_prefix_does_not_change_output(self) -> None:
@@ -593,10 +702,8 @@ class TestEmissionIsTreeIndependent:
         # the emitter's signature must not name a ``tree`` parameter.
         import inspect
 
-        sig = inspect.signature(_render_codeowners)
-        assert (
-            "tree" not in sig.parameters
-        ), "emit tree parameter reintroduced -- see TestEmissionIsTreeIndependent"
+        sig = inspect.signature(render_codeowners)
+        assert "tree" not in sig.parameters
         sig_base = inspect.signature(compute_resolution)
         # tree is still accepted (backward-compat) but must default to None
         # so callers that omit it get pure behavior for free.
@@ -617,11 +724,11 @@ class TestEmissionIsTreeIndependent:
             )
 
         monkeypatch.setattr(codeowners_match, "load_tree", _boom)
-        # compute_resolution + _render_codeowners together are the whole
+        # compute_resolution + render_codeowners together are the whole
         # emit path.
         spec = self._spec()
         model = compute_resolution(spec)
-        lines, _ = _render_codeowners(model, group=True, external=[])
+        lines, _ = render_codeowners(model, group=True, external=[])
         # sanity: we actually rendered something
         assert any(ln.startswith("/lib/") for ln in lines)
 
@@ -642,6 +749,23 @@ class TestEmissionIsTreeIndependent:
         assert resolve_owners(rules, "lib/llm/shared/Dockerfile") == [
             "@runtime",
             "@xpu",
+        ]
+
+    def test_shared_inherits_make_filetype_override_additive(self) -> None:
+        spec = self._spec()
+        spec["shared"].append(
+            {
+                "glob": "lib/llm/Dockerfile",
+                "inherits": ["runtime", "ops"],
+                "owners": ["docs"],
+            }
+        )
+
+        rules = parse_codeowners(self._render(spec))
+        assert resolve_owners(rules, "lib/llm/Dockerfile") == [
+            "@runtime",
+            "@ops",
+            "@docs",
         ]
 
     def test_overlapping_filetype_rules_preserve_declaration_order(self) -> None:
@@ -689,6 +813,93 @@ class TestSplitCoverage:
         )
         assert gate.blocking == ["newdir/z"]
         assert gate.warnings == ["base_only/x"]
+
+
+class TestOwnershipContracts:
+    def _spec(self) -> dict:
+        return {
+            "meta": {"catch_all": "@root"},
+            "areas": [
+                {
+                    "label": "runtime",
+                    "github_team": "@runtime",
+                    "path_globs": ["lib/"],
+                },
+                {
+                    "label": "docs",
+                    "github_team": "@docs",
+                    "path_globs": [],
+                },
+            ],
+            "shared": [
+                {"glob": "lib/", "owners": ["runtime", "docs"]},
+            ],
+        }
+
+    def test_no_violation_when_declared_owners_survive(self) -> None:
+        model = compute_resolution(self._spec())
+        assert ownership_contract_violations(model, ["lib/a.rs"]) == []
+
+    def test_required_owner_is_validation_only_and_fail_closed(self) -> None:
+        spec = self._spec()
+        spec["shared"] = []
+        spec["required_owners"] = [
+            {"glob": "lib/", "owners": ["docs"]},
+        ]
+        model = compute_resolution(spec)
+        lines, _ = render_codeowners(model, group=True, external=[])
+        rules = parse_codeowners("\n".join(lines))
+
+        assert resolve_owners(rules, "lib/a.rs") == ["@runtime"]
+        violations = ownership_contract_violations(model, ["lib/a.rs"])
+        assert len(violations) == 1
+        assert violations[0].glob == "lib/"
+        assert violations[0].missing == ("@docs",)
+
+    def test_later_shared_rule_cannot_silently_remove_declared_owner(self) -> None:
+        spec = self._spec()
+        spec["shared"].append({"glob": "lib/private/", "owners": ["runtime"]})
+        model = compute_resolution(spec)
+
+        violations = ownership_contract_violations(model, ["lib/private/a.rs"])
+
+        assert len(violations) == 1
+        assert violations[0].glob == "lib/"
+        assert violations[0].path == "lib/private/a.rs"
+        assert violations[0].missing == ("@docs",)
+        assert violations[0].actual == ("@runtime",)
+
+    def test_filetype_owner_cannot_be_silently_removed(self) -> None:
+        spec = self._spec()
+        spec["areas"].append({"label": "ops", "github_team": "@ops", "path_globs": []})
+        spec["classify"] = {
+            "filetype_rules": [
+                {"pattern": "*Dockerfile*", "coowner": "ops", "advisory": False}
+            ]
+        }
+        spec["shared"].append({"glob": "lib/private/", "owners": ["runtime", "docs"]})
+        model = compute_resolution(spec)
+
+        violations = ownership_contract_violations(model, ["lib/private/Dockerfile"])
+
+        assert len(violations) == 1
+        assert violations[0].glob == "*Dockerfile*"
+        assert violations[0].missing == ("@ops",)
+
+    def test_strict_gate_fails_on_ownership_loss(self) -> None:
+        model = compute_resolution(self._spec())
+        violations = ownership_contract_violations(model, ["lib/private/a.rs"])
+        message = strict_failure(
+            True, CoverageGate(blocking=[], warnings=[]), None, violations
+        )
+        assert message is None
+
+        model.shared.append({"glob": "lib/private/", "owners": ["runtime"]})
+        violations = ownership_contract_violations(model, ["lib/private/a.rs"])
+        message = strict_failure(
+            True, CoverageGate(blocking=[], warnings=[]), None, violations
+        )
+        assert message and "lost declared owners" in message
 
 
 # ------------------------------------------------------------------
@@ -820,6 +1031,32 @@ class TestDiffAwareStrictGateE2E:
         # (c) full-tree strict still FAILS on that same inherited gap.
         assert _run_build(repo, areas).returncode == 1
 
+    def test_inherited_contract_only_blocks_full_tree(self, tmp_path) -> None:
+        areas = tmp_path / "areas.yaml"
+        areas.write_text(
+            'meta:\n  catch_all: "@root"\n'
+            'areas:\n  - label: runtime\n    github_team: "@runtime"\n'
+            '    path_globs: ["owned/"]\n'
+            '  - label: docs\n    github_team: "@docs"\n    path_globs: []\n'
+            'required_owners:\n  - glob: "owned/base.txt"\n    owners: [docs]\n'
+        )
+        repo = tmp_path / "r"
+        _init_repo(repo)
+        (repo / "owned").mkdir()
+        (repo / "owned" / "base.txt").write_text("x")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "base")
+        base = _head(repo)
+        (repo / "owned" / "new.txt").write_text("y")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "pr adds unrelated owned file")
+
+        diff_aware = _run_build(repo, areas, "--changed-only", "--base", base)
+        assert diff_aware.returncode == 0
+        full_tree = _run_build(repo, areas)
+        assert full_tree.returncode == 1
+        assert "lost declared owners" in full_tree.stdout
+
     def test_pr_introduced_gap_fails(self, tmp_path) -> None:
         areas = self._areas(tmp_path)
         repo, base = self._repo_with_base(tmp_path)
@@ -886,8 +1123,67 @@ class TestTypedShapes:
         assert a["label"] == "x"
 
     def test_shared_spec_keys(self) -> None:
-        s: SharedSpec = {"glob": "x/", "owners": ["a", "b"]}
-        assert s["glob"] == "x/"
+        resolved: SharedSpec = {"glob": "x/", "owners": ["a", "b"]}
+        assert resolved["glob"] == "x/"
+
+
+@pytest.fixture(scope="module")
+def real_policy_rules() -> tuple[list[tuple[str, list[str]]], dict[str, str]]:
+    repo = Path(__file__).resolve().parents[2]
+    spec = yaml.safe_load((repo / ".github/codeowners/areas.yaml").read_text())
+    model = compute_resolution(spec)
+    lines, _ = render_codeowners(model, group=True, external=[])
+    return parse_codeowners("\n".join(lines)), model.label_to_team()
+
+
+class TestRealPolicyRoutingContracts:
+    @pytest.mark.parametrize(
+        ("path", "labels"),
+        [
+            (
+                "deploy/inference-gateway/epp/Makefile",
+                ("epp", "operator", "ops"),
+            ),
+            (
+                "deploy/operator/internal/checkpoint/resolve.go",
+                ("operator", "gms"),
+            ),
+            (
+                "container/templates/sglang_xpu_framework.Dockerfile",
+                ("ops", "backend-sglang", "xpu"),
+            ),
+            (
+                "tests/router/test_router_e2e_with_vllm_xpu.py",
+                ("router", "backend-vllm", "xpu"),
+            ),
+            (
+                "docs/backends/vllm/README.md",
+                ("docs", "backend-vllm"),
+            ),
+            (
+                "recipes/qwen3-32b/vllm/agg-round-robin/deploy.yaml",
+                ("performance", "backend-vllm"),
+            ),
+        ],
+    )
+    def test_required_teams_are_present(
+        self,
+        real_policy_rules: tuple[list[tuple[str, list[str]]], dict[str, str]],
+        path: str,
+        labels: tuple[str, ...],
+    ) -> None:
+        rules, teams = real_policy_rules
+        actual = set(resolve_owners(rules, path))
+        assert {teams[label] for label in labels} <= actual
+
+    def test_generic_vllm_handler_excludes_rl(
+        self,
+        real_policy_rules: tuple[list[tuple[str, list[str]]], dict[str, str]],
+    ) -> None:
+        rules, teams = real_policy_rules
+        assert resolve_owners(rules, "components/src/dynamo/vllm/handlers.py") == [
+            teams["backend-vllm"]
+        ]
 
 
 # ------------------------------------------------------------------
@@ -1063,14 +1359,14 @@ class TestRenderCodeownersWithExternals:
     def test_base_line_gets_handle(self) -> None:
         model = self._model()
         external = [{"name": "Jane", "github": "jane", "areas": ["runtime"]}]
-        lines, _ = _render_codeowners(model, group=True, external=external)
+        lines, _ = render_codeowners(model, group=True, external=external)
         body = "\n".join(lines)
         assert "@runtime @jane" in body
 
     def test_shared_line_gets_handle(self) -> None:
         model = self._model()
         external = [{"name": "Jane", "github": "jane", "areas": ["runtime"]}]
-        lines, _ = _render_codeowners(model, group=True, external=external)
+        lines, _ = render_codeowners(model, group=True, external=external)
         shared_line = next(ln for ln in lines if ln.startswith("/lib/llm/shared/"))
         assert "@runtime" in shared_line
         assert "@kvbm" in shared_line
@@ -1078,5 +1374,5 @@ class TestRenderCodeownersWithExternals:
 
     def test_no_externals_is_unchanged(self) -> None:
         model = self._model()
-        plain, _ = _render_codeowners(model, group=True, external=[])
+        plain, _ = render_codeowners(model, group=True, external=[])
         assert not any("@jane" in ln for ln in plain)
