@@ -59,6 +59,7 @@ class DynamoWorkerProcess(ManagedProcess):
         is_prefill: bool | None = None,
         timeout_s: int = 300,
     ):
+        # Allocate system port for this worker.
         self.system_port = allocate_port(DynamoPortRange.SERVE.value)
         # Register port cleanup early so partially constructed workers still release ports.
         request.addfinalizer(self._release_worker_ports)
@@ -84,7 +85,9 @@ class DynamoWorkerProcess(ManagedProcess):
             str(get_default_vllm_block_size()),
         ]
 
+        # Configure disaggregation mode, KV transfer, and health checks per worker type.
         if is_prefill is True:
+            # Prefill worker: disaggregated prefill mode; check own status endpoint only.
             command.extend(["--disaggregation-mode", "prefill"])
             command.extend(
                 [
@@ -96,6 +99,7 @@ class DynamoWorkerProcess(ManagedProcess):
                 (f"http://localhost:{self.system_port}/health", self.is_ready)
             ]
         elif is_prefill is False:
+            # Decode worker: disaggregated decode mode; also verify frontend sees the model.
             command.extend(["--disaggregation-mode", "decode"])
             command.extend(
                 [
@@ -115,6 +119,7 @@ class DynamoWorkerProcess(ManagedProcess):
                 (f"http://localhost:{frontend_port}/health", check_health_generate),
             ]
 
+        # Set environment variables.
         env = os.environ.copy()
         env["DYN_REQUEST_PLANE"] = request.getfixturevalue("request_plane")
         # Disable canary health check - these tests expect full control over requests
@@ -151,6 +156,7 @@ class DynamoWorkerProcess(ManagedProcess):
             )
             env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(self.nixl_side_channel_port)
 
+        # Set log directory based on worker type.
         if is_prefill is True:
             worker_type = "prefill_worker"
         elif is_prefill is False:
@@ -164,6 +170,7 @@ class DynamoWorkerProcess(ManagedProcess):
             shutil.rmtree(log_dir)
             logger.info(f"Cleaned up existing log directory: {log_dir}")
         except FileNotFoundError:
+            # Directory doesn't exist, which is fine.
             pass
 
         super().__init__(
@@ -186,6 +193,7 @@ class DynamoWorkerProcess(ManagedProcess):
         return self.proc.pid if self.proc else None
 
     def _release_worker_ports(self):
+        """Release all worker ports allocated by this test helper."""
         cleanup_errors = []
         for port_attr in (
             "system_port",

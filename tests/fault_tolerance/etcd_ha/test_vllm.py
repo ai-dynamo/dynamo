@@ -53,6 +53,7 @@ class DynamoWorkerProcess(ManagedProcess):
         etcd_endpoints: list,
         mode: WorkerMode = WorkerMode.AGGREGATED,
     ):
+        # Allocate system port for this worker.
         self.system_port = allocate_port(DynamoPortRange.SERVE.value)
         # Register port cleanup early so partially constructed workers still release ports.
         request.addfinalizer(self._release_worker_ports)
@@ -74,6 +75,7 @@ class DynamoWorkerProcess(ManagedProcess):
 
         port = str(self.system_port)
 
+        # Configure disaggregation mode, KV transfer, and health checks per worker type.
         if mode == WorkerMode.PREFILL:
             command.extend(["--disaggregation-mode", "prefill"])
             health_check_urls = [(f"http://localhost:{port}/health", self.is_ready)]
@@ -123,6 +125,7 @@ class DynamoWorkerProcess(ManagedProcess):
             )
             env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(self.nixl_side_channel_port)
 
+        # Set log directory based on worker type.
         worker_type = "prefill_worker" if mode == WorkerMode.PREFILL else "worker"
         log_dir = f"{request.node.name}_{worker_type}"
 
@@ -131,6 +134,7 @@ class DynamoWorkerProcess(ManagedProcess):
             shutil.rmtree(log_dir)
             logger.info(f"Cleaned up existing log directory: {log_dir}")
         except FileNotFoundError:
+            # Directory doesn't exist, which is fine.
             pass
 
         super().__init__(
@@ -149,6 +153,7 @@ class DynamoWorkerProcess(ManagedProcess):
         self.mode = mode
 
     def _release_worker_ports(self):
+        """Release all worker ports allocated by this test helper."""
         cleanup_errors = []
         for port_attr in (
             "system_port",
