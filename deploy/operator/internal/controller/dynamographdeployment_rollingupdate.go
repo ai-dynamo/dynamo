@@ -1249,7 +1249,7 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 		}
 
 		oldState := oldStates[componentName]
-		annotations := dynamo.GetPodTemplateAnnotations(spec)
+		annotations := dynamo.GetDGDComponentResourceAnnotations(dgd, componentName, spec)
 		strategy := deploymentStrategyFromAnnotations(annotations)
 
 		var oldTarget, newTarget, maxSurge, maxUnavailable, minAvailable int32

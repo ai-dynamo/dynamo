@@ -3664,12 +3664,14 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 	}
 
 	tests := []struct {
-		name        string
-		services    map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
-		oldDCDs     func(newHash string) []runtime.Object
-		newDCDs     func(newHash string) []runtime.Object
-		expectedOld map[string]int32
-		expectedNew map[string]int32
+		name                           string
+		services                       map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
+		dgdSpecAnnotations             map[string]string
+		preserveAlphaComponentMetadata bool
+		oldDCDs                        func(newHash string) []runtime.Object
+		newDCDs                        func(newHash string) []runtime.Object
+		expectedOld                    map[string]int32
+		expectedNew                    map[string]int32
 	}{
 		{
 			name: "normal rollout start - all old healthy, no new pods yet",
@@ -3932,6 +3934,47 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 			expectedNew: map[string]int32{"worker": 3},
 		},
 		{
+			name: "recreate inherited from DGD spec annotations drains old generation",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: consts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(3)),
+				},
+			},
+			dgdSpecAnnotations: map[string]string{
+				KubeAnnotationDeploymentStrategy: string(common.DeploymentStrategyRecreate),
+			},
+			oldDCDs: func(_ string) []runtime.Object {
+				return []runtime.Object{
+					makeOldDCD("test-dgd", "worker", consts.ComponentTypeWorker, "", 3, 3, 3),
+				}
+			},
+			newDCDs:     func(_ string) []runtime.Object { return nil },
+			expectedOld: map[string]int32{"worker": 0},
+			expectedNew: map[string]int32{"worker": 0},
+		},
+		{
+			name: "recreate preserved from v1alpha1 component annotations drains old generation",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: consts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(3)),
+					Annotations: map[string]string{
+						KubeAnnotationDeploymentStrategy: string(common.DeploymentStrategyRecreate),
+					},
+				},
+			},
+			preserveAlphaComponentMetadata: true,
+			oldDCDs: func(_ string) []runtime.Object {
+				return []runtime.Object{
+					makeOldDCD("test-dgd", "worker", consts.ComponentTypeWorker, "", 3, 3, 3),
+				}
+			},
+			newDCDs:     func(_ string) []runtime.Object { return nil },
+			expectedOld: map[string]int32{"worker": 0},
+			expectedNew: map[string]int32{"worker": 0},
+		},
+		{
 			name: "recreate and rolling update components progress independently",
 			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				"prefill": {
@@ -3960,10 +4003,28 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dgd := createTestDGD("test-dgd", tt.services)
-			dgd.Annotations = map[string]string{
-				consts.AnnotationCurrentWorkerHash: testOldWorkerHash,
+			var dgd *nvidiacomv1beta1.DynamoGraphDeployment
+			if tt.preserveAlphaComponentMetadata {
+				dgd = &nvidiacomv1beta1.DynamoGraphDeployment{}
+				err := (&nvidiacomv1alpha1.DynamoGraphDeployment{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+					Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+						Services: tt.services,
+					},
+				}).ConvertTo(dgd)
+				require.NoError(t, err)
+				require.Len(t, dgd.Spec.Components, 1)
+				require.Empty(t, dynamo.GetPodTemplateAnnotations(&dgd.Spec.Components[0])[KubeAnnotationDeploymentStrategy],
+					"test setup must keep the v1alpha1 annotation in compatibility metadata")
+			} else {
+				dgd = createTestDGD("test-dgd", tt.services)
 			}
+
+			dgd.Spec.Annotations = tt.dgdSpecAnnotations
+			if dgd.Annotations == nil {
+				dgd.Annotations = make(map[string]string)
+			}
+			dgd.Annotations[consts.AnnotationCurrentWorkerHash] = testOldWorkerHash
 
 			// Compute the actual new DCD label hash from the DGD spec.
 			newHash := betaDGDWorkersSpecHash(t, dgd)
