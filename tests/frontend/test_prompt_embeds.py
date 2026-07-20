@@ -35,6 +35,7 @@ from tests.utils.device import detect_target_device
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import ServicePorts
+from tests.frontend.conftest import wait_for_http_completions_ready
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +180,10 @@ def start_services(
             frontend_port=frontend_port,
             system_port=system_port,
         ):
+            wait_for_http_completions_ready(
+                frontend_port=frontend_port,
+                model=TEST_MODEL,
+            )
             logger.info("Vllm Worker with prompt embeds started for tests")
             yield dynamo_dynamic_ports
 
