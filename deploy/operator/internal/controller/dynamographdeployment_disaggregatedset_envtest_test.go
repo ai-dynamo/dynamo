@@ -12,6 +12,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -66,7 +67,7 @@ var _ = Describe("DisaggregatedSet", func() {
 		})
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}, dgd)).To(Succeed())
 
-		runtimeConfig := &commoncontroller.RuntimeConfig{LWSEnabled: true, DisaggregatedSetEnabled: true}
+		runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{LWS: true, DisaggregatedSet: true}}
 		operatorConfig := &configv1alpha1.OperatorConfiguration{
 			Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
 		}

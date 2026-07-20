@@ -43,6 +43,13 @@ The main multimodal vLLM launchers in this repo are:
 | E/PD (Encode + PD) | CUDA | `disagg_multimodal_e_pd.sh` | No | Separate encoder and embedding-cache workflows |
 | E/P/D (Full Disaggregation) | CUDA | `disagg_multimodal_epd.sh` | No | Separate encode, prefill, and decode workers |
 
+### Custom Vision Encoders
+
+The legacy aggregated vLLM worker can load an author-provided vision tower in
+process, batch images across concurrent requests, and splice the resulting
+embeddings into the language-model prompt. See [Custom Vision
+Encoders](custom-vision-encoder.md) for the backend contract, launch instructions,
+batch sizing guidance, and current limitations.
 
 ## Image/Video Serving
 

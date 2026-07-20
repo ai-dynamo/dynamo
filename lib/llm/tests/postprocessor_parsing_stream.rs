@@ -8,8 +8,11 @@ use std::sync::Arc;
 
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
+use dynamo_llm::protocols::openai::ParsingOptions;
+use dynamo_llm::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use dynamo_llm::protocols::openai::chat_completions::{
-    NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
+    NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
+    NvCreateChatCompletionStreamResponse,
 };
 use dynamo_protocols::types::{
     ChatCompletionMessageContent, ChatCompletionNamedToolChoice, ChatCompletionTool,
@@ -527,73 +530,102 @@ async fn postprocessor_parsing_stream_deepseek_v4_tool_continuation_keeps_inject
     );
 }
 
-/// Regression for Kimi K2.5 tool-continuation turns.
-///
-/// Kimi K2.5 direct answers after tool results should remain normal content.
-/// The `last_is_tool` guard from PR #8442 must still suppress forced
-/// prompt-injected reasoning for Kimi, even though DeepSeek V4 preserves it.
-#[tokio::test]
-async fn postprocessor_parsing_stream_kimi_k25_tool_continuation_suppresses_injected_reasoning() {
-    let preprocessor = build_preprocessor(Some("kimi_k25"), None);
-    let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+fn kimi_tool_continuation_request(
+    model: &str,
+    thinking: Option<bool>,
+) -> NvCreateChatCompletionRequest {
+    let mut request = serde_json::json!({
         "messages": [
-            {"role": "user", "content": "Create and run a hello-world script."},
+            {"role": "user", "content": "What is the weather in London?"},
             {
                 "role": "assistant",
                 "tool_calls": [{
                     "id": "call_1",
                     "type": "function",
                     "function": {
-                        "name": "run_python",
-                        "arguments": "{\"path\":\"/tmp/hello.py\"}"
+                        "name": "get_weather",
+                        "arguments": "{\"location\":\"London\"}"
                     }
                 }]
             },
             {
                 "role": "tool",
                 "tool_call_id": "call_1",
-                "content": "Hello, world!"
+                "content": "{\"temperature\":15,\"unit\":\"celsius\",\"condition\":\"cloudy\"}"
             }
         ],
-        "model": "moonshotai/Kimi-K2.5-Instruct",
+        "model": model,
         "stream": true
-    }))
-    .unwrap();
+    });
+    if let Some(thinking) = thinking {
+        request["chat_template_kwargs"] = serde_json::json!({"thinking": thinking});
+    }
+    serde_json::from_value(request).unwrap()
+}
 
-    let input_chunks = vec![
-        mock_content_chunk("Done. Output: `Hello, world!`"),
-        mock_final_chunk(),
-    ];
-
+async fn run_kimi_tool_continuation(
+    request: NvCreateChatCompletionRequest,
+    input_chunks: Vec<NvCreateChatCompletionStreamResponse>,
+) -> DrainOutput {
+    let preprocessor = build_preprocessor(Some("kimi_k25"), None);
     let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
     let output_stream = preprocessor
         .postprocessor_parsing_stream(input_stream, &request, true, false)
         .expect("postprocessor_parsing_stream should build");
+    drain_stream(output_stream).await
+}
 
-    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
-        output_stream.collect().await;
+/// K2.6 explicit thinking can emit implicit reasoning and a split close marker.
+#[tokio::test]
+async fn postprocessor_parsing_stream_kimi_k25_tool_continuation_with_thinking_parses_reasoning() {
+    let request = kimi_tool_continuation_request("moonshotai/Kimi-K2.6", Some(true));
+    let output = run_kimi_tool_continuation(
+        request,
+        vec![
+            mock_content_chunk("The tool returned 15°C and cloudy."),
+            mock_content_chunk("</thi"),
+            mock_content_chunk("nk>The current weather in London is 15°C and cloudy."),
+            mock_final_chunk(),
+        ],
+    )
+    .await;
 
-    let mut reasoning = String::new();
-    let mut content = String::new();
-    for output in &output_chunks {
-        let Some(data) = output.data.as_ref() else {
-            continue;
-        };
-        for choice in &data.inner.choices {
-            if let Some(r) = &choice.delta.reasoning_content {
-                reasoning.push_str(r);
-            }
-            if let Some(c) = &choice.delta.content {
-                content.push_str(get_text(c));
-            }
-        }
-    }
+    assert_eq!(output.reasoning, "The tool returned 15°C and cloudy.");
+    assert_eq!(
+        output.content,
+        "The current weather in London is 15°C and cloudy."
+    );
+    assert!(
+        !output.content.contains("</think>"),
+        "literal closing tag leaked into content: {:?}",
+        output.content
+    );
+}
+
+/// Kimi K2.6 enables thinking by default. An omitted `thinking` argument must
+/// therefore parse post-tool reasoning exactly like an explicit `true`.
+#[tokio::test]
+async fn postprocessor_parsing_stream_kimi_k26_omitted_thinking_parses_reasoning() {
+    let request = kimi_tool_continuation_request("moonshotai/Kimi-K2.6", None);
+
+    let output = run_kimi_tool_continuation(
+        request,
+        vec![
+            mock_content_chunk("The tool returned 15°C and cloudy."),
+            mock_content_chunk("</thi"),
+            mock_content_chunk("nk>The current weather in London is 15°C and cloudy."),
+            mock_final_chunk(),
+        ],
+    )
+    .await;
 
     assert_eq!(
-        reasoning, "",
-        "direct post-tool Kimi answer must not be mislabeled as reasoning_content",
+        (output.reasoning.as_str(), output.content.as_str()),
+        (
+            "The tool returned 15°C and cloudy.",
+            "The current weather in London is 15°C and cloudy."
+        )
     );
-    assert_eq!(content, "Done. Output: `Hello, world!`");
 }
 
 /// vLLM parity: `chat_template_kwargs={"enable_thinking": false}` disables
@@ -686,6 +718,105 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_strips_start_to
 
     assert_eq!(reasoning, "");
     assert_eq!(content, "This is plain content");
+}
+
+/// Non-streaming parity for the Nemotron `force_nonempty_content` flag.
+///
+/// A `stream=false` request is not a separate code path: the engine always runs
+/// internally in streaming mode, and the HTTP layer folds the resulting deltas
+/// into a single response. The leading-`<think>` strip that
+/// `postprocessor_parsing_stream` applies must therefore survive that fold.
+///
+/// This test exercises the full non-streaming path: `postprocessor_parsing_stream`
+/// (where the `force_nonempty_content` strip lives), then
+/// `NvCreateChatCompletionResponse::from_annotated_stream` (the entrypoint the
+/// non-streaming handler uses). It asserts the aggregated message has non-empty,
+/// `<think>`-stripped `content` and empty `reasoning_content` — the guarantee
+/// clients that require non-empty content depend on.
+#[tokio::test]
+async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_aggregated_strips_start_token() {
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args = Some(
+        serde_json::from_value(serde_json::json!({
+            "force_nonempty_content": true
+        }))
+        .unwrap(),
+    );
+
+    // Leading `<think>` arrives split across chunks (same input as the streaming
+    // test), then a terminal stop chunk closes the choice.
+    let input_chunks = vec![
+        mock_content_chunk("<thi"),
+        mock_content_chunk("nk>This is plain content"),
+        mock_final_chunk(),
+    ];
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+
+    // Step 1: the shared postprocessor stream (reasoning gate + `<think>` strip).
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+
+    // Step 2: the non-streaming fold, identical to the `stream=false` HTTP path.
+    let response = NvCreateChatCompletionResponse::from_annotated_stream(
+        output_stream,
+        ParsingOptions::default(),
+    )
+    .await
+    .expect("aggregation should succeed");
+
+    let choice = &response.inner.choices[0];
+    assert_eq!(
+        choice.message.content.as_ref().map(get_text),
+        Some("This is plain content"),
+        "aggregated content must be non-empty with the leading <think> stripped"
+    );
+    assert_eq!(
+        choice.message.reasoning_content, None,
+        "reasoning_content must stay empty when force_nonempty_content=true"
+    );
+}
+
+/// Non-streaming parity, EOF-flush case: when the stream ends after only a
+/// partial `<think>` prefix, those bytes are valid content that the strip
+/// flushes on the terminal chunk. This confirms the non-streaming fold keeps
+/// that flushed content instead of dropping it.
+#[tokio::test]
+async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_aggregated_flushes_partial_prefix()
+{
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args = Some(
+        serde_json::from_value(serde_json::json!({
+            "force_nonempty_content": true
+        }))
+        .unwrap(),
+    );
+
+    let input_chunks = vec![mock_content_chunk("<thi"), mock_final_chunk()];
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+
+    let response = NvCreateChatCompletionResponse::from_annotated_stream(
+        output_stream,
+        ParsingOptions::default(),
+    )
+    .await
+    .expect("aggregation should succeed");
+
+    let choice = &response.inner.choices[0];
+    assert_eq!(
+        choice.message.content.as_ref().map(get_text),
+        Some("<thi"),
+        "a partial <think> prefix is valid content and must survive aggregation"
+    );
+    assert_eq!(choice.message.reasoning_content, None);
 }
 
 /// Regression: if the stream ends after a partial `<think>` prefix, those bytes
@@ -2202,9 +2333,7 @@ async fn tool_calls_qwen3_coder_auto_routes_through_experimental_gate() {
         ..
     } = drain_stream(output_stream).await;
 
-    let path = if std::env::var("DYN_ENABLE_EXPERIMENTAL_PARSERS_V2")
-        .is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
-    {
+    let path = if dynamo_runtime::config::env_is_truthy("DYN_ENABLE_EXPERIMENTAL_PARSERS_V2") {
         "qwen3_coder auto -> dynamo-parsers-v2 (DYN_ENABLE_EXPERIMENTAL_PARSERS_V2 on)"
     } else {
         "qwen3_coder auto -> v1 jail (flag off)"

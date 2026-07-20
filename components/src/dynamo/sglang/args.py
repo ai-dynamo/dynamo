@@ -405,6 +405,10 @@ async def parse_args(
     # otherwise fall back to default endpoints
     namespace = dynamo_config.namespace
 
+    # Dynamo's parser consumes --enable-multimodal; forward it to SGLang.
+    if dynamo_config.enable_multimodal:
+        parsed_args.enable_multimodal = True
+
     # If --embedding-worker is set, also set SGLang's --is-embedding flag
     if dynamo_config.embedding_worker:
         parsed_args.is_embedding = True

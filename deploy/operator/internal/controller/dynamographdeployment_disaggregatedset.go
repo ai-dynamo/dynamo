@@ -48,6 +48,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 )
 
 var disaggregatedSetGVK = schema.GroupVersionKind{
@@ -92,7 +93,7 @@ func (r *DynamoGraphDeploymentReconciler) shouldUseDisaggregatedSet(dgd *nvidiac
 	if r.RuntimeConfig == nil {
 		return false, "runtime config is not initialized"
 	}
-	if !r.RuntimeConfig.DisaggregatedSetEnabled {
+	if !r.RuntimeConfig.Gate.Enabled(features.DisaggregatedSet) {
 		return false, "DisaggregatedSet API is not available"
 	}
 	selection, reason := selectDisaggregatedSetComponents(dgd)

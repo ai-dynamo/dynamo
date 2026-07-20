@@ -10,6 +10,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/onsi/gomega"
@@ -132,8 +133,7 @@ func TestInjectKaiSchedulerIfEnabled(t *testing.T) {
 		{
 			name: "grove disabled - no injection",
 			runtimeConfig: &controller_common.RuntimeConfig{
-				GroveEnabled:        false,
-				KaiSchedulerEnabled: true,
+				Gate: features.Gates{KaiScheduler: true},
 			},
 			validatedQueueName: "test-queue",
 			initialClique: &grovev1alpha1.PodCliqueTemplateSpec{
@@ -146,8 +146,7 @@ func TestInjectKaiSchedulerIfEnabled(t *testing.T) {
 		{
 			name: "kai-scheduler disabled - no injection",
 			runtimeConfig: &controller_common.RuntimeConfig{
-				GroveEnabled:        true,
-				KaiSchedulerEnabled: false,
+				Gate: features.Gates{Grove: true},
 			},
 			validatedQueueName: "test-queue",
 			initialClique: &grovev1alpha1.PodCliqueTemplateSpec{
@@ -160,8 +159,7 @@ func TestInjectKaiSchedulerIfEnabled(t *testing.T) {
 		{
 			name: "manual scheduler set - no injection",
 			runtimeConfig: &controller_common.RuntimeConfig{
-				GroveEnabled:        true,
-				KaiSchedulerEnabled: true,
+				Gate: features.Gates{Grove: true, KaiScheduler: true},
 			},
 			validatedQueueName: "test-queue",
 			initialClique: &grovev1alpha1.PodCliqueTemplateSpec{
@@ -176,8 +174,7 @@ func TestInjectKaiSchedulerIfEnabled(t *testing.T) {
 		{
 			name: "both enabled, no manual scheduler - inject",
 			runtimeConfig: &controller_common.RuntimeConfig{
-				GroveEnabled:        true,
-				KaiSchedulerEnabled: true,
+				Gate: features.Gates{Grove: true, KaiScheduler: true},
 			},
 			validatedQueueName: "test-queue",
 			initialClique: &grovev1alpha1.PodCliqueTemplateSpec{
@@ -192,8 +189,7 @@ func TestInjectKaiSchedulerIfEnabled(t *testing.T) {
 		{
 			name: "inject with existing labels",
 			runtimeConfig: &controller_common.RuntimeConfig{
-				GroveEnabled:        true,
-				KaiSchedulerEnabled: true,
+				Gate: features.Gates{Grove: true, KaiScheduler: true},
 			},
 			validatedQueueName: "custom-queue",
 			initialClique: &grovev1alpha1.PodCliqueTemplateSpec{
@@ -270,24 +266,21 @@ func TestInjectVolcanoSchedulerIfEnabled(t *testing.T) {
 		{
 			name: "grove disabled - no injection",
 			runtimeConfig: &controller_common.RuntimeConfig{
-				GroveEnabled:            false,
-				VolcanoSchedulerEnabled: true,
+				Gate: features.Gates{VolcanoScheduler: true},
 			},
 			expectedScheduler: "",
 		},
 		{
 			name: "volcano scheduler disabled - no injection",
 			runtimeConfig: &controller_common.RuntimeConfig{
-				GroveEnabled:            true,
-				VolcanoSchedulerEnabled: false,
+				Gate: features.Gates{Grove: true},
 			},
 			expectedScheduler: "",
 		},
 		{
 			name: "manual scheduler set - no injection",
 			runtimeConfig: &controller_common.RuntimeConfig{
-				GroveEnabled:            true,
-				VolcanoSchedulerEnabled: true,
+				Gate: features.Gates{Grove: true, VolcanoScheduler: true},
 			},
 			initialScheduler:  "manual-scheduler",
 			expectedScheduler: "manual-scheduler",
@@ -295,16 +288,14 @@ func TestInjectVolcanoSchedulerIfEnabled(t *testing.T) {
 		{
 			name: "both enabled, no manual scheduler - inject",
 			runtimeConfig: &controller_common.RuntimeConfig{
-				GroveEnabled:            true,
-				VolcanoSchedulerEnabled: true,
+				Gate: features.Gates{Grove: true, VolcanoScheduler: true},
 			},
 			expectedScheduler: commonconsts.VolcanoSchedulerName,
 		},
 		{
 			name: "volcano scheduler already set - preserve",
 			runtimeConfig: &controller_common.RuntimeConfig{
-				GroveEnabled:            true,
-				VolcanoSchedulerEnabled: true,
+				Gate: features.Gates{Grove: true, VolcanoScheduler: true},
 			},
 			initialScheduler:  commonconsts.VolcanoSchedulerName,
 			expectedScheduler: commonconsts.VolcanoSchedulerName,

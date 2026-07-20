@@ -118,8 +118,8 @@ helm install dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
 
 > [!WARNING]
 > **Namespace-restricted mode** (`namespaceRestriction.enabled=true`) is only for development and
-> testing. It is not supported for production. Install it with `--skip-crds` and
-> `dynamo-operator.upgradeCRD=false`; see [Dynamo Operator](dynamo-operator.md#namespace-restricted-mode).
+> testing. It is not supported for production. Set `dynamo-operator.upgradeCRD=false`; see
+> [Dynamo Operator](dynamo-operator.md#namespace-restricted-mode).
 
 Verify the Dynamo platform is running:
 
@@ -275,7 +275,8 @@ operator for production use.
 
 Cause: Installing CRDs on a cluster where they're already present (common on shared clusters).
 
-Solution: CRDs are installed automatically by the Helm chart. If you encounter conflicts, check existing CRDs with `kubectl get crd | grep dynamo`.
+Solution: The cluster-wide operator's `crd-apply` init container manages CRDs automatically. If you
+encounter conflicts, check existing CRDs with `kubectl get crd | grep dynamo`.
 
 **Pods not starting?**
 ```bash

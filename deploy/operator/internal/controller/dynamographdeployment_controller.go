@@ -64,6 +64,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -401,9 +402,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 	useDisaggregatedSet, disaggregatedSetFallbackReason := r.shouldUseDisaggregatedSet(dynamoDeployment)
 
 	// return error early if Grove, DS, and LWS are all unavailable for multinode
-	if !r.isGrovePathway(dynamoDeployment) && hasMultinode && !r.RuntimeConfig.LWSEnabled && !useDisaggregatedSet {
+	if !r.isGrovePathway(dynamoDeployment) && hasMultinode && !r.RuntimeConfig.Gate.Enabled(features.LWS) && !useDisaggregatedSet {
 		err := fmt.Errorf("no multinode orchestrator available")
-		logger.Error(err, err.Error(), "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.LWSEnabled, "disaggregatedSetEnabled", r.RuntimeConfig.DisaggregatedSetEnabled)
+		logger.Error(err, err.Error(), "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.Gate.Enabled(features.LWS), "disaggregatedSetEnabled", r.RuntimeConfig.Gate.Enabled(features.DisaggregatedSet))
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
 	}
 
@@ -495,14 +496,14 @@ func (r *DynamoGraphDeploymentReconciler) reconcileWorkloadResources(
 	logger := log.FromContext(ctx)
 
 	if r.isGrovePathway(dynamoDeployment) {
-		logger.Info("Reconciling Grove resources", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.LWSEnabled)
+		logger.Info("Reconciling Grove resources", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.Gate.Enabled(features.LWS))
 		return r.reconcileReplacementBeforeDisaggregatedSetCleanup(ctx, dynamoDeployment, func() (ReconcileResult, error) {
 			return r.reconcileGroveResources(ctx, dynamoDeployment, restartState, checkpointInfos)
 		})
 	}
 
 	if useDisaggregatedSet {
-		logger.Info("Reconciling DisaggregatedSet resources", "hasMultinode", hasMultinode, "disaggregatedSetEnabled", r.RuntimeConfig.DisaggregatedSetEnabled)
+		logger.Info("Reconciling DisaggregatedSet resources", "hasMultinode", hasMultinode, "disaggregatedSetEnabled", r.RuntimeConfig.Gate.Enabled(features.DisaggregatedSet))
 		return r.reconcileDisaggregatedSetResources(ctx, dynamoDeployment, restartState, checkpointInfos)
 	}
 
@@ -512,7 +513,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileWorkloadResources(
 			r.Recorder.Eventf(dynamoDeployment, corev1.EventTypeWarning, "DisaggregatedSetFallback", "DisaggregatedSet requested but falling back to DynamoComponentDeployments: %s", disaggregatedSetFallbackReason)
 		}
 	}
-	logger.Info("Reconciling Dynamo components deployments", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.LWSEnabled)
+	logger.Info("Reconciling Dynamo components deployments", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.Gate.Enabled(features.LWS))
 	return r.reconcileReplacementBeforeDisaggregatedSetCleanup(ctx, dynamoDeployment, func() (ReconcileResult, error) {
 		return r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment, restartState, checkpointInfos)
 	})
@@ -534,14 +535,14 @@ func (r *DynamoGraphDeploymentReconciler) reconcileReplacementBeforeDisaggregate
 }
 
 func (r *DynamoGraphDeploymentReconciler) deleteDisaggregatedSetOnLegacyPath(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) error {
-	if !r.RuntimeConfig.DisaggregatedSetEnabled {
+	if !r.RuntimeConfig.Gate.Enabled(features.DisaggregatedSet) {
 		return nil
 	}
 	return r.deleteDisaggregatedSetIfExists(ctx, dgd)
 }
 
 func (r *DynamoGraphDeploymentReconciler) isGrovePathway(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
-	return r.RuntimeConfig.GroveEnabled && (dgd.Annotations == nil ||
+	return r.RuntimeConfig.Gate.Enabled(features.Grove) && (dgd.Annotations == nil ||
 		strings.ToLower(dgd.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse)
 }
 
@@ -1121,7 +1122,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(
 func (r *DynamoGraphDeploymentReconciler) reconcileGMSResourceClaimTemplates(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment) error {
 	logger := log.FromContext(ctx)
 
-	if !r.RuntimeConfig.DRAEnabled {
+	if !r.RuntimeConfig.Gate.Enabled(features.DRA) {
 		for i := range dynamoDeployment.Spec.Components {
 			component := &dynamoDeployment.Spec.Components[i]
 			if dynamo.GetGPUMemoryService(component) != nil || component.IsInterPodFailoverEnabled() {
@@ -2045,6 +2046,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 		if checkpointConfig == nil {
 			continue
 		}
+		if !r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
+			return nil, nil, fmt.Errorf("component %s: checkpoint functionality is disabled in the operator configuration", componentName)
+		}
 
 		logger.Info("Reconciling checkpoint for component", "component", componentName)
 
@@ -2080,7 +2084,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 			checkpointName := fmt.Sprintf("checkpoint-%s", checkpointID)
 			refConfig := *alphaCheckpointConfig.DeepCopy()
 			refConfig.CheckpointRef = &checkpointName
-			info, err = checkpoint.ResolveCheckpointForService(ctx, r.Client, dynamoDeployment.Namespace, &refConfig)
+			info, err = checkpoint.ResolveCheckpointForService(ctx, r.Client, dynamoDeployment.Namespace, &refConfig, r.RuntimeConfig.Gate)
 			if errors.IsNotFound(err) {
 				info = nil
 				err = nil
@@ -2093,7 +2097,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 			}
 		} else {
 			// Resolve checkpoint for this component.
-			info, err = checkpoint.ResolveCheckpointForService(ctx, r.Client, dynamoDeployment.Namespace, alphaCheckpointConfig)
+			info, err = checkpoint.ResolveCheckpointForService(ctx, r.Client, dynamoDeployment.Namespace, alphaCheckpointConfig, r.RuntimeConfig.Gate)
 		}
 		if err != nil {
 			logger.Error(err, "Failed to resolve checkpoint for component", "component", componentName)
@@ -2230,7 +2234,7 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 	}
 	var checkpointGMSClaimTemplateName string
 	if gmsSpec != nil && gmsSpec.Enabled {
-		if err := checkpoint.ValidateGMSSnapshotGate("spec.gpuMemoryService", true, gmsSpec); err != nil {
+		if err := checkpoint.ValidateGMSSnapshotGate("spec.gpuMemoryService", true, gmsSpec, r.RuntimeConfig.Gate); err != nil {
 			return nil, err
 		}
 		checkpointGMSClaimTemplateName = checkpointGMSResourceClaimTemplateName(checkpointID)
@@ -2279,6 +2283,7 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 		deletionPolicy,
 		gmsSpec,
 		dynamoDeployment,
+		r.RuntimeConfig.Gate,
 	)
 	if err != nil {
 		return nil, err
@@ -2775,12 +2780,11 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 	// Only attempt DestinationRule reconciliation when the Istio CRDs are
 	// present on the cluster; otherwise the API call would fail on every
 	// reconcile for Istio-less clusters.
-	// IsEnabled controls service mesh creation/update. When disabled, still
-	// best-effort clean up previously owned DestinationRules if the API exists.
-	meshEnabled := r.Config.ServiceMesh.IsEnabled()
-	istioAvailable := r.RuntimeConfig.IstioEnabled
-	if !meshEnabled && !istioAvailable {
-		istioAvailable = commoncontroller.DetectIstioDestinationRuleAvailabilityFromConfig(ctx, r.RestConfig)
+	// When disabled, still best-effort clean up previously owned DestinationRules if the API exists.
+	meshEnabled := r.RuntimeConfig.Gate.Enabled(features.Istio)
+	istioAvailable := meshEnabled
+	if !meshEnabled {
+		istioAvailable = features.DetectIstioDestinationRuleAvailability(ctx, r.RestConfig)
 	}
 	if istioAvailable {
 		destinationRule := dynamo.GenerateEPPDestinationRule(eppServiceName, dgd.Namespace, r.Config.ServiceMesh)
@@ -2796,8 +2800,6 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 		} else {
 			logger.Info("Cleaned up EPP DestinationRule", "name", eppServiceName)
 		}
-	} else if r.Config.ServiceMesh.IsEnabled() {
-		logger.Error(nil, "Service mesh is enabled but networking.istio.io CRDs are not installed; skipping DestinationRule reconciliation")
 	}
 
 	logger.Info("Successfully reconciled EPP resources", "poolName", inferencePool.GetName())
@@ -2862,7 +2864,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
 		WithEventFilter(commoncontroller.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig))
-	if r.RuntimeConfig.IstioEnabled {
+	if r.RuntimeConfig.Gate.Enabled(features.Istio) {
 		ctrlBuilder = ctrlBuilder.Owns(&networkingv1beta1.DestinationRule{}, builder.WithPredicates(predicate.Funcs{
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
@@ -2870,7 +2872,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			GenericFunc: func(ge event.GenericEvent) bool { return false },
 		}))
 	}
-	if r.RuntimeConfig.DisaggregatedSetEnabled {
+	if r.RuntimeConfig.Gate.Enabled(features.DisaggregatedSet) {
 		ctrlBuilder = ctrlBuilder.Owns(newDisaggregatedSetObject(), builder.WithPredicates(predicate.Funcs{
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
@@ -2887,7 +2889,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			}),
 		)
 	}
-	if r.RuntimeConfig.GroveEnabled {
+	if r.RuntimeConfig.Gate.Enabled(features.Grove) {
 		ctrlBuilder = ctrlBuilder.Owns(&grovev1alpha1.PodCliqueSet{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the pod gang set
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },

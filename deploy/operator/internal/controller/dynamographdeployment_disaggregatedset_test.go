@@ -31,6 +31,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/stretchr/testify/require"
 )
 
@@ -635,5 +636,5 @@ func TestShouldUseDisaggregatedSet(t *testing.T) {
 }
 
 func newTestRuntimeConfig(enabled bool) *commoncontroller.RuntimeConfig {
-	return &commoncontroller.RuntimeConfig{DisaggregatedSetEnabled: enabled}
+	return &commoncontroller.RuntimeConfig{Gate: features.Gates{DisaggregatedSet: enabled}}
 }
