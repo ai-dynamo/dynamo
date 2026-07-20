@@ -37,7 +37,13 @@ page. The renderer normalizes direct review links to GitHub's `/files` view.
 The renderer derives each changed file's GitHub `diff-<sha256(path)>` anchor and
 the corresponding `L<line>` or `R<line>` target. The dashboard uses these for
 hover `+` buttons and direct links from findings, cases, annotations, and file
-headers. Other source providers retain the generic source link.
+headers.
+
+For a GitLab merge request, including a self-managed GitLab instance, set
+`source_url` to the MR, `/diffs`, or `/changes` page. The renderer normalizes it
+to `/diffs`, pins each changed file with the SHA-1 hash of its path, and derives
+exact `<sha1(path)>_<old-position>_<new-position>` line-code anchors. Other
+source providers retain the generic source link.
 
 List a changed path in `github_collapsed_files` when GitHub initially renders
 that file behind `Load diff` (including large or generated diffs). GitHub has

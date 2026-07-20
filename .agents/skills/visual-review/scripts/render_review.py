@@ -100,18 +100,73 @@ def github_diff_anchors(source_url: str, files: list[dict[str, Any]]) -> dict[st
     }
 
 
+def gitlab_mr_diffs_url(source_url: str) -> str:
+    """Normalize a GitLab merge-request URL to its current diffs view."""
+    parsed = urlsplit(source_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return ""
+    match = re.fullmatch(
+        r"/(.+)/-/merge_requests/(\d+)(?:/(?:diffs|changes))?/?", parsed.path
+    )
+    if not match:
+        return ""
+    diffs_path = f"/{match.group(1)}/-/merge_requests/{match.group(2)}/diffs"
+    return urlunsplit((parsed.scheme, parsed.netloc, diffs_path, "", ""))
+
+
+def gitlab_file_hash(path: str) -> str:
+    return hashlib.sha1(path.encode("utf-8")).hexdigest()
+
+
+def gitlab_diff_anchors(source_url: str, files: list[dict[str, Any]]) -> dict[str, str]:
+    """Return pinned GitLab merge-request file anchors keyed by changed path."""
+    diffs_url = gitlab_mr_diffs_url(source_url)
+    if not diffs_url:
+        return {}
+    anchors = {}
+    for item in files:
+        file_hash = gitlab_file_hash(item["path"])
+        anchors[item["path"]] = f"{diffs_url}?pin={file_hash}#{file_hash}"
+    return anchors
+
+
+def gitlab_line_anchors(
+    source_url: str, diff: dict[str, Any]
+) -> dict[str, dict[str, str]]:
+    """Return exact GitLab merge-request line anchors grouped by changed path."""
+    diffs_url = gitlab_mr_diffs_url(source_url)
+    if not diffs_url:
+        return {}
+    anchors: dict[str, dict[str, str]] = {}
+    for (path, side, line), (old_position, new_position) in diff[
+        "line_positions"
+    ].items():
+        file_hash = gitlab_file_hash(path)
+        line_code = f"{file_hash}_{old_position}_{new_position}"
+        anchors.setdefault(path, {})[
+            f"{side}:{line}"
+        ] = f"{diffs_url}?pin={file_hash}#{line_code}"
+    return anchors
+
+
 def parse_diff(raw: str) -> dict[str, Any]:
     files: list[dict[str, Any]] = []
     targets: set[str] = set()
     line_keys: set[tuple[str, str, int]] = set()
+    line_positions: dict[tuple[str, str, int], tuple[int, int]] = {}
     current: dict[str, Any] | None = None
     old_line = new_line = 0
+    old_remaining = new_remaining = 0
     skip_binary_payload = False
 
     for number, line in enumerate(
         raw.replace("\r\n", "\n").replace("\r", "\n").split("\n"), 1
     ):
         if line.startswith("diff --git "):
+            if old_remaining or new_remaining:
+                raise ReviewError(
+                    f"diff line {number}: previous hunk ended before its declared line counts"
+                )
             match = DIFF_RE.match(line)
             if not match:
                 raise ReviewError(f"diff line {number}: malformed file header")
@@ -119,9 +174,11 @@ def parse_diff(raw: str) -> dict[str, Any]:
                 "path": match.group(2),
                 "additions": 0,
                 "deletions": 0,
+                "rows": [],
             }
             files.append(current)
             targets.add(f"file-{slug(current['path'])}")
+            old_remaining = new_remaining = 0
             skip_binary_payload = False
             continue
 
@@ -136,45 +193,120 @@ def parse_diff(raw: str) -> dict[str, Any]:
             continue
 
         if line.startswith("@@"):
+            if old_remaining or new_remaining:
+                raise ReviewError(
+                    f"diff line {number}: previous hunk ended before its declared line counts"
+                )
             match = HUNK_RE.match(line)
             if not match:
                 raise ReviewError(f"diff line {number}: malformed hunk header")
             old_line = int(match.group(1))
             new_line = int(match.group(3))
+            old_remaining = int(match.group(2) or 1)
+            new_remaining = int(match.group(4) or 1)
+            current["rows"].append({"type": "hunk", "text": line})
             continue
 
-        if line.startswith(DIFF_BINARY_PREFIXES):
+        in_hunk = old_remaining > 0 or new_remaining > 0
+        if not in_hunk and line.startswith(DIFF_BINARY_PREFIXES):
+            current["rows"].append({"type": "meta", "text": line})
             skip_binary_payload = True
             continue
 
-        if line.startswith(DIFF_METADATA_PREFIXES):
+        if not in_hunk and line.startswith(DIFF_METADATA_PREFIXES):
+            current["rows"].append({"type": "meta", "text": line})
             continue
+
+        if line.startswith("\\"):
+            current["rows"].append({"type": "meta", "text": line})
+            continue
+
+        if not in_hunk:
+            if not line:
+                continue
+            raise ReviewError(
+                f"diff line {number}: content row outside a unified-diff hunk {line[:40]!r}"
+            )
 
         file_slug = slug(current["path"])
         if line.startswith("+"):
+            if new_remaining < 1:
+                raise ReviewError(
+                    f"diff line {number}: addition exceeds the hunk's new-line count"
+                )
             current["additions"] += 1
-            line_keys.add((current["path"], "new", new_line))
+            key = (current["path"], "new", new_line)
+            line_keys.add(key)
+            line_positions[key] = (old_line, new_line)
             targets.add(f"line-{file_slug}-new-{new_line}")
+            current["rows"].append(
+                {
+                    "type": "add",
+                    "text": line[1:],
+                    "oldLine": None,
+                    "newLine": new_line,
+                    "oldAnchor": old_line,
+                    "newAnchor": new_line,
+                }
+            )
             new_line += 1
+            new_remaining -= 1
         elif line.startswith("-"):
+            if old_remaining < 1:
+                raise ReviewError(
+                    f"diff line {number}: deletion exceeds the hunk's old-line count"
+                )
             current["deletions"] += 1
-            line_keys.add((current["path"], "old", old_line))
+            key = (current["path"], "old", old_line)
+            line_keys.add(key)
+            line_positions[key] = (old_line, new_line)
             targets.add(f"line-{file_slug}-old-{old_line}")
+            current["rows"].append(
+                {
+                    "type": "del",
+                    "text": line[1:],
+                    "oldLine": old_line,
+                    "newLine": None,
+                    "oldAnchor": old_line,
+                    "newAnchor": new_line,
+                }
+            )
             old_line += 1
+            old_remaining -= 1
         elif line.startswith(" "):
-            line_keys.add((current["path"], "old", old_line))
-            line_keys.add((current["path"], "new", new_line))
+            if old_remaining < 1 or new_remaining < 1:
+                raise ReviewError(
+                    f"diff line {number}: context exceeds the hunk's declared line counts"
+                )
+            old_key = (current["path"], "old", old_line)
+            new_key = (current["path"], "new", new_line)
+            line_keys.add(old_key)
+            line_keys.add(new_key)
+            line_positions[old_key] = (old_line, new_line)
+            line_positions[new_key] = (old_line, new_line)
             targets.add(f"line-{file_slug}-old-{old_line}")
             targets.add(f"line-{file_slug}-new-{new_line}")
+            current["rows"].append(
+                {
+                    "type": "context",
+                    "text": line[1:],
+                    "oldLine": old_line,
+                    "newLine": new_line,
+                    "oldAnchor": old_line,
+                    "newAnchor": new_line,
+                }
+            )
             old_line += 1
             new_line += 1
-        elif line.startswith("\\") or not line:
-            continue
+            old_remaining -= 1
+            new_remaining -= 1
         else:
             raise ReviewError(
                 f"diff line {number}: unsupported unified-diff row {line[:40]!r}"
             )
 
+    if old_remaining or new_remaining:
+        raise ReviewError("diff ended before its final hunk's declared line counts")
     if not files:
         raise ReviewError("diff contains no files")
 
@@ -185,6 +317,7 @@ def parse_diff(raw: str) -> dict[str, Any]:
         "deletions": sum(item["deletions"] for item in files),
         "targets": targets,
         "line_keys": line_keys,
+        "line_positions": line_positions,
     }
 
 
@@ -763,15 +896,29 @@ def validate_spec(spec: dict[str, Any], diff: dict[str, Any]) -> dict[str, Any]:
     normalized.setdefault("diagrams", [])
     normalized.setdefault("manifests", [])
     normalized.setdefault("github_collapsed_files", [])
+    github_files_url = github_pr_files_url(normalized["source_url"])
+    gitlab_files_url = gitlab_mr_diffs_url(normalized["source_url"])
+    github_anchors = github_diff_anchors(normalized["source_url"], diff["files"])
+    gitlab_anchors = gitlab_diff_anchors(normalized["source_url"], diff["files"])
+    source_provider = ""
+    source_diff_anchors: dict[str, str] = {}
+    if github_files_url:
+        source_provider = "github"
+        source_diff_anchors = github_anchors
+    elif gitlab_files_url:
+        source_provider = "gitlab"
+        source_diff_anchors = gitlab_anchors
     normalized["derived"] = {
         "changed_files": diff["changed_files"],
         "additions": diff["additions"],
         "deletions": diff["deletions"],
         "files": diff["files"],
-        "github_files_url": github_pr_files_url(normalized["source_url"]),
-        "github_diff_anchors": github_diff_anchors(
-            normalized["source_url"], diff["files"]
-        ),
+        "source_provider": source_provider,
+        "source_files_url": github_files_url or gitlab_files_url,
+        "source_diff_anchors": source_diff_anchors,
+        "source_line_anchors": gitlab_line_anchors(normalized["source_url"], diff),
+        "github_files_url": github_files_url,
+        "github_diff_anchors": github_anchors,
     }
     return normalized
 
@@ -813,12 +960,10 @@ def main() -> int:
         template = args.template or asset_root / "review-template.html"
         html = template.read_text(encoding="utf-8")
         payload = dict(normalized)
-        payload["diff"] = raw_diff
         encoded = json.dumps(
             payload, ensure_ascii=False, separators=(",", ":")
         ).replace("</", "<\\/")
         replacements = {
-            "__REVIEW_DATA_JSON__": encoded,
             "__CYTOSCAPE_JS__": (
                 "/*\n"
                 + (asset_root / "vendor" / "cytoscape.LICENSE").read_text(
@@ -847,6 +992,7 @@ def main() -> int:
                     encoding="utf-8"
                 )
             ).replace("</", "<\\/"),
+            "__REVIEW_DATA_JSON__": encoded,
         }
         rendered = html
         for placeholder, value in replacements.items():

@@ -2,7 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
+import hashlib
 import importlib.util
+import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -136,6 +139,91 @@ def test_parse_diff_handles_metadata_and_binary_payloads():
     assert ("example.py", "new", 1) in parsed["line_keys"]
 
 
+def test_parse_diff_treats_header_like_changed_lines_as_hunk_content():
+    parsed = renderer.parse_diff(
+        "diff --git a/example.py b/example.py\n"
+        "--- a/example.py\n"
+        "+++ b/example.py\n"
+        "@@ -10,2 +10,2 @@\n"
+        "--- removed marker\n"
+        "+++ added marker\n"
+        " unchanged\n"
+    )
+
+    rows = [row for row in parsed["files"][0]["rows"] if row["type"] != "meta"]
+    assert [row["type"] for row in rows] == ["hunk", "del", "add", "context"]
+    assert [row["text"] for row in rows[1:]] == [
+        "-- removed marker",
+        "++ added marker",
+        "unchanged",
+    ]
+    assert parsed["additions"] == 1
+    assert parsed["deletions"] == 1
+    assert parsed["line_positions"][("example.py", "old", 10)] == (10, 10)
+    assert parsed["line_positions"][("example.py", "new", 10)] == (11, 10)
+    assert ("example.py", "old", 11) in parsed["line_keys"]
+    assert ("example.py", "new", 11) in parsed["line_keys"]
+    file_hash = hashlib.sha1(b"example.py").hexdigest()
+    anchors = renderer.gitlab_line_anchors(
+        "https://gitlab.example.com/group/project/-/merge_requests/42", parsed
+    )["example.py"]
+    assert anchors["old:10"].endswith(f"#{file_hash}_10_10")
+    assert anchors["new:10"].endswith(f"#{file_hash}_11_10")
+
+
+def test_validate_spec_derives_gitlab_file_and_line_links():
+    spec = base_spec()
+    spec["source_url"] = "https://gitlab.example.com/group/project/-/merge_requests/42"
+
+    normalized = renderer.validate_spec(spec, text_diff())
+    file_hash = hashlib.sha1(b"example.py").hexdigest()
+    diffs_url = "https://gitlab.example.com/group/project/-/merge_requests/42/diffs"
+
+    assert normalized["derived"]["source_provider"] == "gitlab"
+    assert normalized["derived"]["source_files_url"] == diffs_url
+    assert normalized["derived"]["source_diff_anchors"]["example.py"] == (
+        f"{diffs_url}?pin={file_hash}#{file_hash}"
+    )
+    assert normalized["derived"]["source_line_anchors"]["example.py"]["new:1"] == (
+        f"{diffs_url}?pin={file_hash}#{file_hash}_0_1"
+    )
+
+
+def test_render_allows_placeholder_tokens_in_review_content(tmp_path, monkeypatch):
+    tokens = (
+        "__REVIEW_DATA_JSON__ __CYTOSCAPE_JS__ " "__DAGRE_JS__ __CYTOSCAPE_DAGRE_JS__"
+    )
+    spec_path = tmp_path / "review.json"
+    diff_path = tmp_path / "review.diff"
+    output_path = tmp_path / "review.html"
+    spec_path.write_text(json.dumps(base_spec()), encoding="utf-8")
+    diff_path.write_text(
+        "diff --git a/example.py b/example.py\n"
+        "--- a/example.py\n"
+        "+++ b/example.py\n"
+        "@@ -0,0 +1 @@\n"
+        f"+{tokens}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(RENDERER_PATH),
+            "--spec",
+            str(spec_path),
+            "--diff",
+            str(diff_path),
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    assert renderer.main() == 0
+    rendered = output_path.read_text(encoding="utf-8")
+    assert f'"text":"{tokens}"' in rendered
+
+
 def test_validate_spec_rejects_boolean_line_numbers():
     finding_spec = base_spec()
     finding_spec["findings"][0]["line"] = True
@@ -185,6 +273,8 @@ def test_validate_spec_rejects_boolean_line_numbers():
 def test_component_targets_have_keyboard_links():
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
 
+    assert "function parseDiff" not in template
+    assert "const files=arr(DATA.derived.files);" in template
     assert 'class="component-links"' in template
     assert '<a href="#${esc(link.target)}">' in template
     assert 'aria-describedby="${linksId}"' in template
