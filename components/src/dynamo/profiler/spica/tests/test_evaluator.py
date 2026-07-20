@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# ruff: noqa: E402
+
 """ReplayEvaluator dispatch across 3 load shapes x {static, planner} (dynamo stubbed)."""
 
 import dataclasses
@@ -13,7 +15,6 @@ pytest.importorskip("dynamo.mocker")
 
 import dynamo.mocker
 import dynamo.replay.api
-
 from dynamo.profiler.spica.config import (
     OptimizationGoal,
     OptimizationTarget,

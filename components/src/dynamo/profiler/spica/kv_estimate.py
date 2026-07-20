@@ -25,11 +25,11 @@ because it mis-models MoE expert sharding.
 from __future__ import annotations
 
 import importlib
-from collections.abc import Iterable
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from aiconfigurator.sdk.perf_database import get_latest_database_version
+
 from dynamo._internal.aic import AicMemoryEstimatorUnavailableError
 
 from .parallel_enum import ParallelShape

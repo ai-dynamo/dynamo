@@ -210,6 +210,7 @@ areas:
   - components/src/dynamo/profiler/tests/
   - components/src/dynamo/profiler/utils/
   - examples/global_planner/
+  - examples/profiler/
 - label: runtime
   github_team: '@ai-dynamo/dynamo-runtime-codeowners'
   path_globs:

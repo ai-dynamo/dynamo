@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# ruff: noqa: E402
+
 """End-to-end integration against the REAL dynamo replay (no stubs).
 
 Drives the full pipeline on a tiny mooncake trace: enumerate -> sample ->

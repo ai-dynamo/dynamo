@@ -50,7 +50,8 @@ from .search_space import BranchSpace, enumerate_branches
 class _Evaluator(Protocol):
     def evaluate(
         self, plan: Any, *, concurrency_override: int | None = None
-    ) -> dict[str, float]: ...
+    ) -> dict[str, float]:
+        ...
 
 
 # Result of evaluating one suggestion (no Vizier here): (candidate|None, observe_metrics|None,
@@ -98,7 +99,8 @@ def _evaluate_one(
     evaluator: _Evaluator,
 ) -> _EvalResult:
     """Pure unroll -> deploy -> replay -> score for one (already backend-supported)
-    suggestion. No Vizier, no shared mutable state -> safe to run in a worker process."""
+    suggestion. No Vizier, no shared mutable state -> safe to run in a worker process.
+    """
     try:
         sample = unroll_sample(
             search_space=config.search_space,
@@ -365,7 +367,8 @@ def run_smart_search(
         processes when a pool is set, else sequentially in-process. On the pool path it
         enforces the per-candidate ``max_eval_seconds`` cap: a replay that overruns is
         reported infeasible ("exceed runtime") and its worker is force-killed (a shared pool
-        can't cancel a running task), then a fresh pool is swapped in for the next rounds."""
+        can't cancel a running task), then a fresh pool is swapped in for the next rounds.
+        """
         pool = pool_box[0]
         if pool is None:
             for s in todo:

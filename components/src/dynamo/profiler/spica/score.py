@@ -53,7 +53,8 @@ def _avg_gpu(report: dict[str, float]) -> float:
     """Time-averaged provisioned GPU count = ``gpu_hours / e2e_hours`` (the integral of
     provisioned GPUs over the run, divided by its duration). For a static deployment this
     equals the fixed GPU count; for a planner-scaled run it averages over startup + serve +
-    drain. Returns 0.0 when gpu_hours / duration are unavailable (guards divide-by-zero)."""
+    drain. Returns 0.0 when gpu_hours / duration are unavailable (guards divide-by-zero).
+    """
     gpu_hours = float(report.get("gpu_hours", 0.0))
     duration_ms = float(report.get("duration_ms", 0.0))
     if gpu_hours <= 0.0 or duration_ms <= 0.0:
@@ -135,7 +136,8 @@ def pareto_front(
 ) -> list[Candidate]:
     """The non-dominated subset of ``candidates`` over ``objectives`` (each carrying an
     ``objectives`` vector), sorted by the **last** objective ascending — the x-axis — so the
-    returned list traces the frontier left-to-right (e.g. low->high per-user throughput)."""
+    returned list traces the frontier left-to-right (e.g. low->high per-user throughput).
+    """
     pool = [c for c in candidates if c.objectives is not None]
     front = [
         c

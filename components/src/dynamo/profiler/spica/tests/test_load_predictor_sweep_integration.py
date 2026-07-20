@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# ruff: noqa: E402
+
 """Integration tests that exercise the real dynamo planner predictors and the
 densify-fixed trace->window tool. Skipped unless the ``dynamo`` extra is
 installed (Rust runtime + prophet/pmdarima/filterpy)."""

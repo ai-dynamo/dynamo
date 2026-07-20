@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# ruff: noqa: E402
+
 """Per-branch candidate space. The branch enumeration calls the KV-feasibility
 path, so it needs aiconfigurator + a perf DB (skips otherwise)."""
 
@@ -8,12 +10,9 @@ import pytest
 
 pytest.importorskip("aiconfigurator")
 
-from dynamo.profiler.spica.config import SmartSearchConfig
 from dynamo._internal.aic import AicMemoryEstimatorUnavailableError
-from dynamo.profiler.spica.kv_estimate import (
-    NoPerfDatabase,
-    _load_memory_estimator,
-)
+from dynamo.profiler.spica.config import SmartSearchConfig
+from dynamo.profiler.spica.kv_estimate import NoPerfDatabase, _load_memory_estimator
 from dynamo.profiler.spica.model_hw import NoViableParallelConfig
 from dynamo.profiler.spica.parallel_enum import ParallelShape, ReplicaParallelConfig
 from dynamo.profiler.spica.search_space import branch_knob_choices, enumerate_branches

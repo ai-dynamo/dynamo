@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# ruff: noqa: E402
+
 """Model/hardware resolution + KV-cache parallel-config validity via AIConfigurator.
 
 Skipped unless ``aiconfigurator`` is importable. Uses models whose configs
@@ -10,12 +12,9 @@ import pytest
 
 pytest.importorskip("aiconfigurator")
 
-from dynamo._internal.aic import AicMemoryEstimatorUnavailableError
 import dynamo.profiler.spica.model_hw as mh_mod
-from dynamo.profiler.spica.kv_estimate import (
-    NoPerfDatabase,
-    _load_memory_estimator,
-)
+from dynamo._internal.aic import AicMemoryEstimatorUnavailableError
+from dynamo.profiler.spica.kv_estimate import NoPerfDatabase, _load_memory_estimator
 from dynamo.profiler.spica.model_hw import (
     NoViableParallelConfig,
     parallel_configs_for,

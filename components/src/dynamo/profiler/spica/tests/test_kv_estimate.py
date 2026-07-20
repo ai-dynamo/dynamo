@@ -7,8 +7,8 @@ import types
 
 import pytest
 
-from dynamo._internal.aic import AicMemoryEstimatorUnavailableError
 import dynamo.profiler.spica.kv_estimate as kv_estimate_mod
+from dynamo._internal.aic import AicMemoryEstimatorUnavailableError
 from dynamo.profiler.spica.kv_estimate import (
     NoPerfDatabase,
     estimate_kv_tokens,

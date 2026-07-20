@@ -18,8 +18,10 @@ use std::sync::{Mutex, OnceLock};
 #[cfg(feature = "aic-forward-pass")]
 use std::time::Duration;
 
+#[cfg(feature = "aic-forward-pass")]
+use pyo3::exceptions::PyModuleNotFoundError;
+use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use pyo3::{exceptions::PyModuleNotFoundError, prelude::*};
 
 #[cfg(feature = "aic-forward-pass")]
 use aiconfigurator_core::{AicEngine, build_aic_engine};
@@ -29,14 +31,18 @@ use dynamo_mocker::common::perf_model::AicCallback;
 /// GIL-bound compatibility callback for AIC 0.9 releases that predate the
 /// compiled-engine Python modules. The Python helper still uses AIC's real
 /// perf database and operation model; only the execution path is slower.
+#[cfg(feature = "aic-forward-pass")]
 pub(super) struct PyAicCallback {
     session: Py<PyAny>,
 }
 
 // PyAicCallback enters Python only through Python::with_gil.
+#[cfg(feature = "aic-forward-pass")]
 unsafe impl Send for PyAicCallback {}
+#[cfg(feature = "aic-forward-pass")]
 unsafe impl Sync for PyAicCallback {}
 
+#[cfg(feature = "aic-forward-pass")]
 impl PyAicCallback {
     fn predict_prefill_ms(
         &self,
@@ -52,6 +58,7 @@ impl PyAicCallback {
     }
 }
 
+#[cfg(feature = "aic-forward-pass")]
 impl AicCallback for PyAicCallback {
     fn predict_prefill(&self, batch_size: usize, effective_isl: usize, prefix: usize) -> f64 {
         self.predict_prefill_ms(batch_size, effective_isl, prefix)
@@ -68,6 +75,7 @@ impl AicCallback for PyAicCallback {
     }
 }
 
+#[cfg(feature = "aic-forward-pass")]
 impl PrefillLoadEstimator for PyAicCallback {
     fn predict_prefill_duration(
         &self,
@@ -80,6 +88,7 @@ impl PrefillLoadEstimator for PyAicCallback {
     }
 }
 
+#[cfg(feature = "aic-forward-pass")]
 fn compiled_engine_sdk_available(py: Python<'_>) -> PyResult<bool> {
     match py.import("aiconfigurator.sdk.engine") {
         Ok(_) => Ok(true),
@@ -98,6 +107,7 @@ fn compiled_engine_sdk_available(py: Python<'_>) -> PyResult<bool> {
     }
 }
 
+#[cfg(feature = "aic-forward-pass")]
 #[allow(clippy::too_many_arguments)]
 fn create_python_aic_callback(
     py: Python<'_>,

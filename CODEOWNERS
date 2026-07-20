@@ -158,6 +158,7 @@
 /examples/diffusers/                                                         @ai-dynamo/dynamo-diffusion-codeowners
 
 # === planner  (@ai-dynamo/dynamo-planner-codeowners) ===
+/examples/profiler/                                                          @ai-dynamo/dynamo-planner-codeowners
 /examples/global_planner/                                                    @ai-dynamo/dynamo-planner-codeowners
 /components/src/dynamo/planner/                                              @ai-dynamo/dynamo-planner-codeowners
 /components/src/dynamo/profiler/                                             @ai-dynamo/dynamo-planner-codeowners

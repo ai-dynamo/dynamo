@@ -124,7 +124,8 @@ class OptimizationGoal(BaseModel):
     def resolved_pareto_objectives(self) -> list[OptimizationTarget]:
         """The effective Pareto objective list: the configured one, or the default pair only
         when unset (``None``). An explicitly-supplied empty/short list is kept as-is so the
-        validator's ``len < 2`` guard rejects it (rather than silently using the default)."""
+        validator's ``len < 2`` guard rejects it (rather than silently using the default).
+        """
         return (
             list(_DEFAULT_PARETO_OBJECTIVES)
             if self.pareto_objectives is None
@@ -257,7 +258,8 @@ class Workload(BaseModel):
     def resolved_request_count(self, concurrency_override: int | None = None) -> int:
         """Synthetic request count = ``round(num_request_ratio * load)`` (>= 1), where
         ``load`` is the in-flight concurrency (closed-loop) or the request rate (open-loop).
-        ``concurrency_override`` is the candidate-specific concurrency in KV-load mode."""
+        ``concurrency_override`` is the candidate-specific concurrency in KV-load mode.
+        """
         if concurrency_override is not None:
             load: float = concurrency_override
         elif self.concurrency is not None:

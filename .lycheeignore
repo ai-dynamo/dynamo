@@ -28,3 +28,8 @@
 
 # NGC intermittently returns 503 for this version-filtered page from GitHub runners.
 ^https://catalog\.ngc\.nvidia\.com/orgs/nvidia/teams/ai-dynamo/containers/dynamo-frontend\?version=1\.2\.1$
+
+# Canonical main-branch links for Spica paths added by this PR return 404 until merge.
+^https://github\.com/ai-dynamo/dynamo/blob/main/examples/profiler/spica/configs/glm5-disagg-pareto-frontier\.yaml$
+^https://github\.com/ai-dynamo/dynamo/tree/main/examples/profiler/spica/?$
+^https://github\.com/ai-dynamo/dynamo/tree/main/docs/components/profiler/spica/?$
