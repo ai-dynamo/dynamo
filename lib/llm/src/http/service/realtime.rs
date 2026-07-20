@@ -232,7 +232,8 @@ async fn handle_socket(
             }
         };
         match msg {
-            Message::Text(text) => match parse_client_event(text.as_str()) {
+            Message::Text(text) => match serde_json::from_str::<RealtimeClientEvent>(text.as_str())
+            {
                 Ok(event) => {
                     if req_tx.send(event).await.is_err() {
                         tracing::debug!("/v1/realtime engine receiver dropped; ending inbound");
@@ -387,7 +388,7 @@ where
         };
         let event = match msg {
             Message::Text(text) => {
-                match parse_client_event(text.as_str()) {
+                match serde_json::from_str::<RealtimeClientEvent>(text.as_str()) {
                     Ok(e) => e,
                     Err(err) => {
                         // Client-driven and repeatable; debug! so a misbehaving
@@ -493,32 +494,6 @@ where
         }
     }
     None
-}
-
-/// Parse one client event while accepting `turn_detection: null`, as required
-/// for clients that use local VAD and explicitly commit each utterance.
-///
-/// `dynamo-protocols` currently re-exports async-openai 0.34, whose
-/// `AudioInput.turn_detection` field is non-nullable despite its own API docs.
-/// Newer async-openai releases corrected it to `Option<RealtimeTurnDetection>`.
-/// Keep this normalization at the transport boundary until Dynamo can update
-/// that dependency; the realtime transcription worker uses explicit commits
-/// and does not act on the placeholder VAD configuration.
-fn parse_client_event(text: &str) -> Result<RealtimeClientEvent, serde_json::Error> {
-    let mut value: serde_json::Value = serde_json::from_str(text)?;
-    if value.pointer("/session/type").and_then(|v| v.as_str()) == Some("transcription")
-        && value.pointer("/session/audio/input/turn_detection") == Some(&serde_json::Value::Null)
-    {
-        value["session"]["audio"]["input"]["turn_detection"] = serde_json::json!({
-            "type": "server_vad",
-            "create_response": false,
-            "interrupt_response": false,
-            "prefix_padding_ms": 0,
-            "silence_duration_ms": 0,
-            "threshold": 1.0
-        });
-    }
-    serde_json::from_value(value)
 }
 
 async fn send_error_event<S>(ws_tx: &mut S, code: &str, message: &str, param: Option<&str>)

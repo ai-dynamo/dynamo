@@ -167,18 +167,6 @@ def decode_pcm16(audio_b64: str) -> np.ndarray:
     return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
 
-def _is_local_vad_placeholder(turn_detection: Any) -> bool:
-    """Recognize the frontend's temporary representation of protocol null."""
-    return isinstance(turn_detection, dict) and turn_detection == {
-        "type": "server_vad",
-        "create_response": False,
-        "interrupt_response": False,
-        "prefix_padding_ms": 0,
-        "silence_duration_ms": 0,
-        "threshold": 1.0,
-    }
-
-
 class _Turn:
     def __init__(self, *, input_rate: int, model_sample_rate: int) -> None:
         self.item_id = f"item_{uuid.uuid4().hex}"
@@ -365,8 +353,7 @@ class RealtimeTranscriptionHandler:
             return "transcription prompts are not supported"
         if audio_input.get("noise_reduction") is not None:
             return "input audio noise reduction is not supported"
-        turn_detection = audio_input.get("turn_detection")
-        if turn_detection is not None and not _is_local_vad_placeholder(turn_detection):
+        if audio_input.get("turn_detection") is not None:
             return "server turn detection is not supported; use local VAD and explicit commits"
         return None
 

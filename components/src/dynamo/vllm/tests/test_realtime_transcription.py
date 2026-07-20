@@ -20,14 +20,6 @@ pytestmark = [
 ]
 
 MODEL = "test/realtime-asr"
-LOCAL_VAD_PLACEHOLDER = {
-    "type": "server_vad",
-    "create_response": False,
-    "interrupt_response": False,
-    "prefix_padding_ms": 0,
-    "silence_duration_ms": 0,
-    "threshold": 1.0,
-}
 
 
 class _Context:
@@ -74,7 +66,7 @@ def _handler(engine: _FakeEngine) -> RealtimeTranscriptionHandler:
     )
 
 
-def _session(*, turn_detection=LOCAL_VAD_PLACEHOLDER) -> dict:
+def _session(*, turn_detection=None) -> dict:
     return {
         "type": "transcription",
         "audio": {
