@@ -72,6 +72,8 @@ areas:
   - components/src/dynamo/vllm/
   - components/src/dynamo/vllm/tests/
   - examples/backends/vllm/
+  - lib/sidecar/vllm-grpc/
+  - lib/sidecar/vllm-mocker/
   - lib/sidecar/vllm/
 - label: backend-trtllm
   github_team: '@ai-dynamo/dynamo-backend-trtllm-codeowners'
