@@ -34,7 +34,10 @@ pub mod realtime;
 pub mod service_v2;
 
 pub use axum;
-pub use frontend_extension::{FrontendExtensionContext, FrontendRouteExtension, FrontendRouteSet};
+pub use frontend_extension::{
+    FrontendExtensionContext, FrontendRouteExtension, FrontendRouteSet,
+    validate_extension_route_path,
+};
 pub use metrics::Metrics;
 
 /// Documentation for a route

@@ -1,12 +1,12 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Python Route Extensions
 ---
 
 Python route extensions let an external package register additional HTTP routes on the Dynamo frontend, served on the same port as the OpenAI-compatible API — without a custom binary or a from-source build.
 
-Extensions are **opt-in**: the frontend only loads a provider you explicitly select on the command line. A selection is either a **name** registered under the `dynamo.frontend.routes` entry-point group (preferred for packaged plugins) or a direct **`module:function`** path (handy for quick/ad-hoc use). Extensions add routes; they cannot change or override the built-in inference routes (a duplicate path is rejected at startup).
+Extensions are **opt-in**: the frontend only loads a provider you explicitly select on the command line. A selection is either a **name** registered under the `dynamo.frontend.routes` entry-point group (preferred for packaged plugins) or a direct **`module:function`** path (handy for quick/ad-hoc use). Extensions add routes; they cannot override a built-in route (a duplicate method+path is rejected at startup).
 
 The initial contract is intentionally narrow: **static-path `GET` routes** with a synchronous handler. Path parameters (`/{id}`), wildcards, non-`GET` methods, and `async def` handlers are rejected at construction. This surface can grow later without breaking existing extensions.
 

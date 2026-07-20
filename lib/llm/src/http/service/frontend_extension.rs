@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Extension point for the HTTP frontend (currently: static GET routes).
@@ -77,25 +77,53 @@ impl FrontendRouteSet {
     }
 }
 
-/// Registers each route into both the router and its docs atomically.
+/// Reject paths that would panic axum's `Router::route` (params, wildcards,
+/// `:`/`*` segments, whitespace). Single source of truth, reused by Python.
+pub fn validate_extension_route_path(path: &str) -> anyhow::Result<()> {
+    if !path.starts_with('/') {
+        anyhow::bail!("frontend route path must start with '/': {path:?}");
+    }
+    // matchit (axum's router) reserves segments starting with ':' or '*'.
+    if path.split('/').any(|seg| seg.starts_with([':', '*'])) {
+        anyhow::bail!("frontend route path segment must not start with ':' or '*': {path:?}");
+    }
+    if path
+        .chars()
+        .any(|c| matches!(c, '{' | '}' | '*') || c.is_whitespace() || c.is_control())
+    {
+        anyhow::bail!(
+            "frontend route path must be static (no '{{...}}', '*', or whitespace): {path:?}"
+        );
+    }
+    Ok(())
+}
+
+/// Registers each route into both the router and its docs atomically; `get`
+/// validates the path and rejects duplicates instead of panicking axum.
 #[derive(Default)]
 pub struct FrontendRouteSetBuilder {
     route_docs: Vec<RouteDoc>,
     router: Router,
+    seen_paths: HashSet<String>,
 }
 
 impl FrontendRouteSetBuilder {
     /// Register a `GET` route, recording it in both the router and the docs.
-    pub fn get<H, T>(mut self, path: impl Into<String>, handler: H) -> Self
+    /// Errors on an invalid path or a duplicate path within this set.
+    pub fn get<H, T>(mut self, path: impl Into<String>, handler: H) -> anyhow::Result<Self>
     where
         H: Handler<T, ()>,
         T: 'static,
     {
         let path = path.into();
+        validate_extension_route_path(&path)?;
+        if !self.seen_paths.insert(path.clone()) {
+            anyhow::bail!("duplicate frontend route registered: GET {path}");
+        }
         self.route_docs
             .push(RouteDoc::new(Method::GET, path.clone()));
         self.router = self.router.route(&path, get(handler));
-        self
+        Ok(self)
     }
 
     pub fn build(self) -> FrontendRouteSet {
@@ -107,6 +135,48 @@ impl FrontendRouteSetBuilder {
 }
 
 /// Callback that attaches additional frontend routes during HTTP service build,
-/// given a read-only [`FrontendExtensionContext`].
-pub type FrontendRouteExtension =
-    Arc<dyn Fn(FrontendExtensionContext) -> FrontendRouteSet + Send + Sync + 'static>;
+/// given a read-only [`FrontendExtensionContext`]. Returns an error so invalid
+/// extension configuration becomes a clean startup failure.
+pub type FrontendRouteExtension = Arc<
+    dyn Fn(FrontendExtensionContext) -> anyhow::Result<FrontendRouteSet> + Send + Sync + 'static,
+>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::StatusCode;
+
+    #[test]
+    fn validate_route_path_rejects_non_static() {
+        assert!(validate_extension_route_path("/ok").is_ok());
+        assert!(validate_extension_route_path("/a/b_c").is_ok());
+        for bad in [
+            "no-slash",
+            "/:id",
+            "/{id}",
+            "/x/{*rest}",
+            "/*rest",
+            "/has space",
+        ] {
+            assert!(
+                validate_extension_route_path(bad).is_err(),
+                "expected {bad:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn builder_rejects_duplicate_path_within_set() {
+        let dup = FrontendRouteSet::builder()
+            .get("/a", || async { StatusCode::OK })
+            .unwrap()
+            .get("/a", || async { StatusCode::OK });
+        assert!(dup.is_err(), "duplicate GET path within a set must error");
+    }
+
+    #[test]
+    fn builder_rejects_colon_path() {
+        let bad = FrontendRouteSet::builder().get("/:id", || async { StatusCode::OK });
+        assert!(bad.is_err(), "colon-prefixed segment must error, not panic");
+    }
+}

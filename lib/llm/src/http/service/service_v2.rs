@@ -912,7 +912,7 @@ fn append_route_docs(
 impl HttpServiceConfigBuilder {
     pub fn add_frontend_route_extension<F>(mut self, extension: F) -> Self
     where
-        F: Fn(FrontendExtensionContext) -> FrontendRouteSet + Send + Sync + 'static,
+        F: Fn(FrontendExtensionContext) -> anyhow::Result<FrontendRouteSet> + Send + Sync + 'static,
     {
         self.frontend_route_extensions
             .get_or_insert_with(Vec::new)
@@ -1072,7 +1072,7 @@ impl HttpServiceConfigBuilder {
             );
         }
         for extension in &config.frontend_route_extensions {
-            let route_set = extension(FrontendExtensionContext::new(state.clone()));
+            let route_set = extension(FrontendExtensionContext::new(state.clone()))?;
             system_routes.push(route_set.into_parts());
         }
         let mut system_router = axum::Router::new();
@@ -1476,8 +1476,8 @@ mod tests {
 
     // Test extensions read live state via the narrowed context captured in the
     // handler closure (the Python bridge's shape), not Router::with_state.
-    fn readiness_extension(context: FrontendExtensionContext) -> FrontendRouteSet {
-        FrontendRouteSet::builder()
+    fn readiness_extension(context: FrontendExtensionContext) -> anyhow::Result<FrontendRouteSet> {
+        Ok(FrontendRouteSet::builder()
             .get("/test/frontend-route", move || {
                 let context = context.clone();
                 async move {
@@ -1487,28 +1487,34 @@ mod tests {
                         axum::http::StatusCode::SERVICE_UNAVAILABLE
                     }
                 }
-            })
-            .build()
+            })?
+            .build())
     }
 
-    fn first_test_extension(context: FrontendExtensionContext) -> FrontendRouteSet {
+    fn first_test_extension(context: FrontendExtensionContext) -> anyhow::Result<FrontendRouteSet> {
         test_status_extension(context, "/test/frontend-route/one")
     }
 
-    fn second_test_extension(context: FrontendExtensionContext) -> FrontendRouteSet {
+    fn second_test_extension(
+        context: FrontendExtensionContext,
+    ) -> anyhow::Result<FrontendRouteSet> {
         test_status_extension(context, "/test/frontend-route/two")
     }
 
-    fn duplicate_health_extension(context: FrontendExtensionContext) -> FrontendRouteSet {
+    fn duplicate_health_extension(
+        context: FrontendExtensionContext,
+    ) -> anyhow::Result<FrontendRouteSet> {
         test_status_extension(context, "/health")
     }
 
-    fn duplicate_test_extension(context: FrontendExtensionContext) -> FrontendRouteSet {
+    fn duplicate_test_extension(
+        context: FrontendExtensionContext,
+    ) -> anyhow::Result<FrontendRouteSet> {
         test_status_extension(context, "/test/frontend-route/duplicate")
     }
 
-    fn draining_extension(context: FrontendExtensionContext) -> FrontendRouteSet {
-        FrontendRouteSet::builder()
+    fn draining_extension(context: FrontendExtensionContext) -> anyhow::Result<FrontendRouteSet> {
+        Ok(FrontendRouteSet::builder()
             .get("/test/frontend-route/draining", move || {
                 let context = context.clone();
                 async move {
@@ -1518,16 +1524,19 @@ mod tests {
                         axum::http::StatusCode::ACCEPTED
                     }
                 }
-            })
-            .build()
+            })?
+            .build())
     }
 
-    fn test_status_extension(_context: FrontendExtensionContext, path: &str) -> FrontendRouteSet {
-        FrontendRouteSet::builder()
+    fn test_status_extension(
+        _context: FrontendExtensionContext,
+        path: &str,
+    ) -> anyhow::Result<FrontendRouteSet> {
+        Ok(FrontendRouteSet::builder()
             .get(path.to_string(), || async {
                 axum::http::StatusCode::NO_CONTENT
-            })
-            .build()
+            })?
+            .build())
     }
 
     async fn get_status(port: u16, path: &str) -> reqwest::StatusCode {

@@ -48,6 +48,8 @@ def test_rejects_non_get_methods(method):
         "/items/{id}",  # path parameter
         "/files/{*rest}",  # wildcard
         "/{}",  # malformed
+        "/:id",  # colon-prefixed segment (matchit-reserved)
+        "/*rest",  # wildcard-prefixed segment
         "/has space",  # whitespace
         "/tab\tchar",  # control char
     ],

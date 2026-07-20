@@ -55,7 +55,9 @@ impl PyFrontendRoute {
                 "unsupported FrontendRoute method '{method}'; only GET is supported"
             )));
         }
-        validate_static_path(&path)?;
+        // Reuse the core validator so Python and the Rust builder can't drift.
+        dynamo_llm::http::service::validate_extension_route_path(&path)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(Self { path, handler })
     }
 
@@ -171,9 +173,9 @@ fn frontend_route_extension_from_routes(routes: Vec<PyFrontendRoute>) -> Fronten
             let route_context = context.clone();
             builder = builder.get(path, move || {
                 call_python_frontend_route(handler.clone(), route_context.clone())
-            });
+            })?;
         }
-        builder.build()
+        Ok(builder.build())
     })
 }
 
@@ -227,6 +229,10 @@ async fn call_python_frontend_route(
 ) -> Response {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let job: ExtensionJob = Box::new(move || {
+        // Caller already gave up (timed out/disconnected): skip before the GIL.
+        if tx.is_closed() {
+            return;
+        }
         let result = Python::with_gil(|py| call_python_frontend_route_inner(py, &handler, context));
         let _ = tx.send(result);
     });
@@ -315,26 +321,6 @@ fn is_coroutine_function(py: Python<'_>, handler: &Bound<'_, PyAny>) -> PyResult
     py.import("inspect")?
         .call_method1("iscoroutinefunction", (handler,))?
         .extract()
-}
-
-/// Reject non-static paths (params `{...}`, wildcards `*`, whitespace) that would
-/// panic `Router::route` or create conflicts the path-string key can't detect.
-fn validate_static_path(path: &str) -> PyResult<()> {
-    if !path.starts_with('/') {
-        return Err(PyValueError::new_err(
-            "FrontendRoute path must start with '/'",
-        ));
-    }
-    if path
-        .chars()
-        .any(|c| matches!(c, '{' | '}' | '*') || c.is_whitespace() || c.is_control())
-    {
-        return Err(PyValueError::new_err(format!(
-            "FrontendRoute path '{path}' must be a static path \
-             (no path parameters '{{...}}', wildcards '*', or whitespace)"
-        )));
-    }
-    Ok(())
 }
 
 fn sorted_strings(values: impl Iterator<Item = String>) -> Vec<String> {
