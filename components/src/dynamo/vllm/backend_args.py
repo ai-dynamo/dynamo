@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# TODO(DIS-2240): Remove deprecated multimodal flags across engine
-
 """Dynamo vLLM wrapper configuration ArgGroup."""
 
 import argparse
@@ -28,6 +26,28 @@ PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
 def _warn_deprecated(message: str) -> None:
     logger.warning(message)
     warnings.warn(message, DeprecationWarning, stacklevel=3)
+
+
+# Env vars of the removed multimodal role flags. The flags fail at argparse,
+# but a leftover env var would otherwise be silently ignored and start the
+# worker in the wrong role — reject it with the migration path instead.
+_REMOVED_MULTIMODAL_ENV_VARS = {
+    "DYN_VLLM_MULTIMODAL_ENCODE_WORKER": "--disaggregation-mode=encode",
+    "DYN_VLLM_MULTIMODAL_WORKER": (
+        "--disaggregation-mode=agg or --disaggregation-mode=prefill"
+    ),
+    "DYN_VLLM_MULTIMODAL_DECODE_WORKER": "--disaggregation-mode=decode",
+}
+
+
+def _reject_removed_multimodal_env_vars() -> None:
+    for env_var, replacement in _REMOVED_MULTIMODAL_ENV_VARS.items():
+        if os.environ.get(env_var, "").strip().lower() in ("true", "1", "yes", "on"):
+            raise ValueError(
+                f"{env_var} is no longer supported; use --enable-multimodal with "
+                f"{replacement} (env: DYN_VLLM_ENABLE_MULTIMODAL, "
+                "DYN_VLLM_DISAGGREGATION_MODE)."
+            )
 
 
 class _StoreExplicitBenchmarkOption(argparse.Action):
@@ -97,27 +117,6 @@ class DynamoVllmArgGroup(ArgGroup):
             env_var="DYN_VLLM_ROUTE_TO_ENCODER",
             default=False,
             help="Enable routing to separate encoder workers for multimodal processing.",
-        )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--multimodal-encode-worker",
-            env_var="DYN_VLLM_MULTIMODAL_ENCODE_WORKER",
-            default=False,
-            help="Run as multimodal encode worker component for processing images/videos.",
-        )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--multimodal-worker",
-            env_var="DYN_VLLM_MULTIMODAL_WORKER",
-            default=False,
-            help="Run as multimodal worker component for LLM inference with multimodal data.",
-        )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--multimodal-decode-worker",
-            env_var="DYN_VLLM_MULTIMODAL_DECODE_WORKER",
-            default=False,
-            help="Run as multimodal decode worker in disaggregated mode.",
         )
         add_negatable_bool_argument(
             g,
@@ -422,9 +421,6 @@ class DynamoVllmConfig(ConfigBase):
 
     # Multimodal
     route_to_encoder: bool
-    multimodal_encode_worker: bool
-    multimodal_worker: bool
-    multimodal_decode_worker: bool
     enable_multimodal: bool
     # Enables RL-style token-in/token-out defaults.
     enable_rl: bool = False
@@ -470,10 +466,9 @@ class DynamoVllmConfig(ConfigBase):
 
     def validate(self) -> None:
         """Validate vLLM wrapper configuration."""
+        _reject_removed_multimodal_env_vars()
         self._resolve_disaggregation_mode()
         self._resolve_embedding_transfer_mode()
-        self._validate_multimodal_role_exclusivity()
-        self._validate_multimodal_requires_flag()
         self._validate_embedding_worker_exclusivity()
         self._validate_custom_encoder()
         self._resolve_legacy_benchmark_sampling()
@@ -581,9 +576,6 @@ class DynamoVllmConfig(ConfigBase):
            Raise if legacy booleans are also set.
         2. If legacy --is-prefill-worker or --is-decode-worker is set,
            emit DeprecationWarning and translate to enum.
-        3. If legacy multimodal flags are set, translate to enum,
-           emit DeprecationWarning and translate to enum, raise if conflicting
-           with --disaggregation-mode.
         3. Apply default (AGGREGATED) if nothing was provided.
         4. Sync boolean fields from the resolved enum value.
         """
@@ -624,14 +616,6 @@ class DynamoVllmConfig(ConfigBase):
                 )
                 self.disaggregation_mode = DisaggregationMode.DECODE
 
-        # Porting multimodal legacy flags
-        if (
-            self.multimodal_decode_worker
-            or self.multimodal_encode_worker
-            or self.multimodal_worker
-        ):
-            self._resolve_disaggregation_model_from_legacy_multimodal_flags()
-
         # Apply default if neither new flag nor legacy flags were provided
         if self.disaggregation_mode is None:
             self.disaggregation_mode = DisaggregationMode.AGGREGATED
@@ -639,95 +623,6 @@ class DynamoVllmConfig(ConfigBase):
         # Sync booleans from enum (canonical source of truth)
         self.is_prefill_worker = self.disaggregation_mode == DisaggregationMode.PREFILL
         self.is_decode_worker = self.disaggregation_mode == DisaggregationMode.DECODE
-
-    def _resolve_disaggregation_model_from_legacy_multimodal_flags(self) -> None:
-        """
-        Resolve disaggregation mode from legacy multimodal flags, emit DeprecationWarning
-        and raise ValueError if conflicting with --disaggregation-mode.
-
-        Transformation rules:
-        1. If --multimodal-decode-worker is set, use DisaggregationMode.DECODE.
-        2. If --multimodal-encode-worker is set, use DisaggregationMode.ENCODE.
-        3. If --multimodal-worker is set, default to DisaggregationMode.AGGREGATED unless
-           --disaggregation-mode is set.
-        """
-        if self.multimodal_decode_worker:
-            _warn_deprecated(
-                "--multimodal-decode-worker is deprecated; use "
-                "--enable-multimodal --disaggregation-mode=decode. "
-                "This release will map the legacy flag to the new arguments.",
-            )
-            if (
-                self.disaggregation_mode is not None
-                and self.disaggregation_mode != DisaggregationMode.DECODE
-            ):
-                raise ValueError(
-                    f"Cannot set --multimodal-decode-worker while --disaggregation-mode is not '{DisaggregationMode.DECODE.value}'"
-                )
-            self.disaggregation_mode = DisaggregationMode.DECODE
-            self.enable_multimodal = True
-        if self.multimodal_encode_worker:
-            _warn_deprecated(
-                "--multimodal-encode-worker is deprecated; use "
-                "--enable-multimodal --disaggregation-mode=encode. "
-                "This release will map the legacy flag to the new arguments.",
-            )
-            if (
-                self.disaggregation_mode is not None
-                and self.disaggregation_mode != DisaggregationMode.ENCODE
-            ):
-                raise ValueError(
-                    f"Cannot set --multimodal-encode-worker while --disaggregation-mode is not '{DisaggregationMode.ENCODE.value}'"
-                )
-            self.disaggregation_mode = DisaggregationMode.ENCODE
-            self.enable_multimodal = True
-        if self.multimodal_worker:
-            _warn_deprecated(
-                "--multimodal-worker is deprecated; use --enable-multimodal "
-                "with --disaggregation-mode=pd or --disaggregation-mode=prefill. "
-                "This release will map the legacy flag to the new arguments.",
-            )
-            if (
-                self.disaggregation_mode is not None
-                and self.disaggregation_mode != DisaggregationMode.AGGREGATED
-                and self.disaggregation_mode != DisaggregationMode.PREFILL
-            ):
-                raise ValueError(
-                    f"Cannot set --multimodal-worker while --disaggregation-mode is not '{DisaggregationMode.AGGREGATED.value}' or '{DisaggregationMode.PREFILL.value}'"
-                )
-            # only set 'self.disaggregation_mode' if it is not already set, '--multimodal-worker' may be specified with
-            # '--disaggregation-mode=prefill' as prefill workers in P/D disaggregation or without for aggregation.
-            if self.disaggregation_mode is None:
-                self.disaggregation_mode = DisaggregationMode.AGGREGATED
-            self.enable_multimodal = True
-
-    def _count_multimodal_roles(self) -> int:
-        """Return the number of multimodal worker roles set (0 or 1 allowed).
-
-        Note: --route-to-encoder is a modifier flag, not a worker type.
-        """
-        return sum(
-            [
-                bool(self.multimodal_encode_worker),
-                bool(self.multimodal_worker),
-                bool(self.multimodal_decode_worker),
-            ]
-        )
-
-    def _validate_multimodal_role_exclusivity(self) -> None:
-        """Ensure only one multimodal role is set at a time."""
-        if self._count_multimodal_roles() > 1:
-            raise ValueError(
-                "Use only one of --multimodal-encode-worker, --multimodal-worker, "
-                "--multimodal-decode-worker"
-            )
-
-    def _validate_multimodal_requires_flag(self) -> None:
-        """Require --enable-multimodal when any multimodal role is set."""
-        if self._count_multimodal_roles() == 1 and not self.enable_multimodal:
-            raise ValueError(
-                "Use --enable-multimodal when enabling any multimodal component"
-            )
 
     def _validate_custom_encoder(self) -> None:
         """Validate the aggregated CustomEncoder configuration.
@@ -742,18 +637,6 @@ class DynamoVllmConfig(ConfigBase):
         """
         if not self.custom_encoder_class:
             return
-        if (
-            self.multimodal_worker
-            or self.multimodal_encode_worker
-            or self.multimodal_decode_worker
-        ):
-            raise ValueError(
-                "--custom-encoder-class is incompatible with the legacy multimodal "
-                "role flags (--multimodal-worker / --multimodal-encode-worker / "
-                "--multimodal-decode-worker): the custom encoder is its own "
-                "aggregated multimodal path and bypasses vLLM's built-in "
-                "multimodal processing."
-            )
         if not self.enable_multimodal:
             raise ValueError(
                 "--custom-encoder-class requires --enable-multimodal "
@@ -794,7 +677,7 @@ class DynamoVllmConfig(ConfigBase):
                 f"(got {self.disaggregation_mode.value if isinstance(self.disaggregation_mode, DisaggregationMode) else self.disaggregation_mode}). "
                 "Pooling models do not have prefill/decode phases."
             )
-        if self._count_multimodal_roles() > 0 or self.enable_multimodal:
+        if self.enable_multimodal:
             raise ValueError(
                 "--embedding-worker cannot be combined with multimodal flags."
             )

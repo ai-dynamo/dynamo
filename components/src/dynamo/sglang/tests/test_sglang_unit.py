@@ -674,15 +674,35 @@ def test_enable_multimodal_without_role_keeps_standalone_worker():
     assert config.multimodal_encode_worker is False
 
 
-def test_legacy_multimodal_worker_sets_enable_multimodal():
-    """Legacy multimodal role stays accepted while enabling the canonical flag."""
-    config = _make_sglang_config(multimodal_worker=True)
+@pytest.mark.parametrize("flag", ["--multimodal-encode-worker", "--multimodal-worker"])
+@pytest.mark.asyncio
+async def test_removed_multimodal_role_flags_are_rejected(flag, mock_sglang_cli):
+    mock_sglang_cli("--model", "Qwen/Qwen3-0.6B", flag)
 
-    with pytest.warns(DeprecationWarning, match="--multimodal-worker"):
+    with pytest.raises(SystemExit):
+        await parse_args(sys.argv[1:])
+
+
+@pytest.mark.parametrize(
+    "env_var", ["DYN_SGL_MULTIMODAL_ENCODE_WORKER", "DYN_SGL_MULTIMODAL_WORKER"]
+)
+def test_removed_multimodal_env_vars_are_rejected(env_var, monkeypatch):
+    # The removed role flags fail at argparse, but a leftover env var would be
+    # silently ignored and start the worker in the wrong role — validate()
+    # rejects it with the migration path instead.
+    monkeypatch.setenv(env_var, "1")
+    config = _make_sglang_config()
+
+    with pytest.raises(ValueError, match="no longer supported"):
         config.validate()
 
-    assert config.enable_multimodal is True
-    assert config.multimodal_worker is True
+
+def test_removed_multimodal_env_var_falsy_value_is_ignored(monkeypatch):
+    # A falsy value was a no-op with the old flags too; keep it harmless.
+    monkeypatch.setenv("DYN_SGL_MULTIMODAL_WORKER", "false")
+    config = _make_sglang_config()
+
+    config.validate()
 
 
 def test_dedicated_mm_encoder_requires_enable_multimodal():

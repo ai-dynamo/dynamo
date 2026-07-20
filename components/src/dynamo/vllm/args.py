@@ -340,7 +340,7 @@ def update_engine_config_with_dynamo(
             )
 
     if dynamo_config.benchmark_mode is not None:
-        if dynamo_config.multimodal_worker or dynamo_config.multimodal_decode_worker:
+        if dynamo_config.enable_multimodal:
             logger.warning(
                 "--benchmark-mode is not supported for multimodal workers. "
                 "Benchmark data will be collected but not served via endpoint."
