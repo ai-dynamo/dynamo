@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -207,6 +208,41 @@ func TestLoadLoRA_ResponseHandling(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestLoadLoRARejectsRedirect(t *testing.T) {
+	var redirectedRequests atomic.Int32
+	redirectTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		redirectedRequests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer redirectTarget.Close()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, redirectTarget.URL+"/v1/loras", http.StatusFound)
+	}))
+	defer server.Close()
+
+	err := NewClient().loadLoRA(context.Background(), server.URL, "test-model", "s3://bucket/model")
+	if err == nil || !strings.Contains(err.Error(), "302") {
+		t.Fatalf("redirect must be rejected as a load failure, got %v", err)
+	}
+	if got := redirectedRequests.Load(); got != 0 {
+		t.Fatalf("LoRA redirect must not be followed, target received %d request(s)", got)
+	}
+}
+
+func TestLoadLoRABoundsErrorResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(strings.Repeat("x", maxLoRAErrorResponseBytes+1)))
+	}))
+	defer server.Close()
+
+	err := NewClient().loadLoRA(context.Background(), server.URL, "test-model", "s3://bucket/model")
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized error response must be bounded, got %v", err)
 	}
 }
 

@@ -6,6 +6,7 @@
 import asyncio
 import json
 import logging
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -652,17 +653,20 @@ class TestPrefillRegistrationContract:
             model="m",
             frontend_decoding=False,
             enable_multimodal=False,
+            enable_rl=False,
+            engine_args=SimpleNamespace(enable_lora=True),
         )
 
         runtime = Mock()
         runtime.endpoint.return_value = Mock(connection_id=Mock(return_value="cid"))
+        shutdown_endpoints: list = []
 
         with pytest.raises(RuntimeError, match="stop-after-register"):
             await factory._create_prefill_worker(
                 runtime,
                 config,
                 asyncio.Event(),
-                [],
+                shutdown_endpoints,
             )
 
         assert captured["model_input"] == ModelInput.Tokens
@@ -674,3 +678,101 @@ class TestPrefillRegistrationContract:
         if route_to_encoder:
             expected_needs_set.append(WorkerType.Encode)
         assert captured["needs"] == [expected_needs_set]
+        endpoint_names = [call.args[0] for call in runtime.endpoint.call_args_list]
+        assert "dyn.prefill.load_lora" in endpoint_names
+        assert "dyn.prefill.unload_lora" in endpoint_names
+        assert "dyn.prefill.list_loras" in endpoint_names
+        # generate, clear, perf, and all three LoRA lifecycle endpoints.
+        assert len(shutdown_endpoints) == 6
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lora_enabled", [True, False])
+async def test_prefill_serves_lora_lifecycle_endpoints_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    lora_enabled: bool,
+) -> None:
+    engine_client = Mock()
+    vllm_config = Mock(additional_config={})
+    engine_tuple: EngineSetupResult = (
+        engine_client,
+        vllm_config,
+        Mock(),
+        "/tmp/prom",
+        Mock(),
+    )
+    factory = WorkerFactory(
+        setup_vllm_engine_fn=Mock(return_value=engine_tuple),
+        setup_kv_event_publisher_fn=Mock(return_value=None),
+        register_vllm_model_fn=AsyncMock(),
+        setup_fpm_relay_fn=Mock(return_value=None),
+        setup_metrics_collection_fn=Mock(),
+    )
+    factory._maybe_get_encode_worker_client = AsyncMock(return_value=None)  # type: ignore[assignment]
+    factory._maybe_wait_for_failover_lock = AsyncMock()  # type: ignore[assignment]
+    factory.register_engine_routes = Mock()  # type: ignore[assignment]
+
+    handler = Mock(embedding_cache_manager=None)
+    handler.cleanup = Mock()
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.PrefillWorkerHandler",
+        Mock(return_value=handler),
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.VllmPrefillHealthCheckPayload",
+        Mock(return_value=Mock(to_dict=Mock(return_value={}))),
+    )
+
+    async def _noop(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.configure_kv_event_block_size", _noop
+    )
+
+    endpoints: dict[str, Mock] = {}
+
+    def _endpoint(name: str) -> Mock:
+        endpoint = Mock(connection_id=Mock(return_value="cid"))
+        endpoint.serve_endpoint = AsyncMock(return_value=None)
+        endpoints[name] = endpoint
+        return endpoint
+
+    runtime = Mock()
+    runtime.endpoint.side_effect = _endpoint
+    config = _make_config(
+        disaggregation_mode=DisaggregationMode.PREFILL,
+        route_to_encoder=False,
+        use_vllm_tokenizer=False,
+        namespace="dyn",
+        component="prefill",
+        endpoint="generate",
+        served_model_name="m",
+        model="m",
+        frontend_decoding=False,
+        enable_multimodal=False,
+        enable_rl=False,
+        engine_args=SimpleNamespace(enable_lora=lora_enabled),
+    )
+    shutdown_endpoints: list = []
+
+    await factory._create_prefill_worker(
+        runtime,
+        config,
+        asyncio.Event(),
+        shutdown_endpoints,
+    )
+
+    lifecycle_names = {
+        "dyn.prefill.load_lora",
+        "dyn.prefill.unload_lora",
+        "dyn.prefill.list_loras",
+    }
+    if lora_enabled:
+        assert lifecycle_names <= endpoints.keys()
+        for name in lifecycle_names:
+            endpoints[name].serve_endpoint.assert_awaited_once()
+        assert len(shutdown_endpoints) == 6
+    else:
+        assert lifecycle_names.isdisjoint(endpoints)
+        assert len(shutdown_endpoints) == 3

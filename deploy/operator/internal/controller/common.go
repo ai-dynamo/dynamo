@@ -50,10 +50,12 @@ func getPvcName(crd metav1.Object, defaultName *string) string {
 	return crd.GetName()
 }
 
-type dockerSecretRetriever interface {
+type DockerSecretRetriever interface {
 	// returns a list of secret names associated with the docker registry
 	GetSecrets(namespace, registry string) ([]string, error)
 }
+
+type dockerSecretRetriever = DockerSecretRetriever
 
 // getComponentNames returns the component names for logging purposes.
 func getComponentNames(components []v1beta1.DynamoComponentDeploymentSharedSpec) []string {

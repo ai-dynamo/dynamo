@@ -21,7 +21,6 @@ spec:
           args:
             - --router-mode
             - kv
-            - --router-reset-states
           command:
             - python
             - -m

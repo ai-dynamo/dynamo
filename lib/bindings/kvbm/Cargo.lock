@@ -1112,9 +1112,9 @@ dependencies = [
 
 [[package]]
 name = "cudarc"
-version = "0.19.3"
+version = "0.19.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6468cb7fa330840f3ebcd8df51edc0e7bf5c18df524792ce6004c6821851cdf3"
+checksum = "42310153e06cf4cd532901f7096beb27504d681736a29ee90728ae4e2d93b2a8"
 dependencies = [
  "libloading 0.9.0",
 ]
@@ -1549,12 +1549,12 @@ dependencies = [
  "dynamo-runtime",
  "dynamo-tokens",
  "dynamo-truthy",
+ "fastrand",
  "flume",
  "indexmap 2.14.0",
  "ordered-float 4.6.0",
  "parking_lot",
  "prometheus",
- "rand 0.9.4",
  "rmp-serde",
  "rustc-hash 2.1.2",
  "seqlock",
@@ -1566,7 +1566,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
- "validator",
  "xxhash-rust",
 ]
 

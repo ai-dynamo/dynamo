@@ -351,7 +351,7 @@ func TestExtractCandidates(t *testing.T) {
 			},
 		},
 		{
-			name: "endpoint with multiple addresses",
+			name: "endpoint with multiple addresses - physical pod included once",
 			endpointSlices: &discoveryv1.EndpointSliceList{
 				Items: []discoveryv1.EndpointSlice{
 					{
@@ -371,15 +371,56 @@ func TestExtractCandidates(t *testing.T) {
 				},
 			},
 			port:                 9090,
-			expectedCandidates:   2, // One candidate per address
+			expectedCandidates:   1,
 			expectedServiceNames: map[string]bool{},
 			validateCandidates: func(t *testing.T, candidates []Candidate) {
-				if len(candidates) != 2 {
-					t.Fatalf("expected 2 candidates, got %d", len(candidates))
+				if len(candidates) != 1 {
+					t.Fatalf("expected 1 candidate, got %d", len(candidates))
 				}
-				// Both should have the same pod name
-				if candidates[0].PodName != testPodWorker0 || candidates[1].PodName != testPodWorker0 {
-					t.Errorf("expected both candidates to have podName %s", testPodWorker0)
+				if candidates[0].PodName != testPodWorker0 {
+					t.Errorf("expected candidate to have podName %s", testPodWorker0)
+				}
+			},
+		},
+		{
+			name: "duplicate pod endpoint across services - included once",
+			endpointSlices: &discoveryv1.EndpointSliceList{
+				Items: []discoveryv1.EndpointSlice{
+					{
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+							discoveryv1.LabelServiceName: "component-service",
+						}},
+						Endpoints: []discoveryv1.Endpoint{{
+							Addresses:  []string{"10.0.1.5"},
+							Conditions: discoveryv1.EndpointConditions{Ready: &trueVal},
+							TargetRef:  &corev1.ObjectReference{Kind: "Pod", Name: testPodWorker0},
+						}},
+					},
+					{
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+							discoveryv1.LabelServiceName: "base-model-service",
+						}},
+						Endpoints: []discoveryv1.Endpoint{{
+							Addresses:  []string{"10.0.1.5"},
+							Conditions: discoveryv1.EndpointConditions{Ready: &trueVal},
+							TargetRef:  &corev1.ObjectReference{Kind: "Pod", Name: testPodWorker0},
+						}},
+					},
+				},
+			},
+			port:               9090,
+			expectedCandidates: 1,
+			expectedServiceNames: map[string]bool{
+				"component-service":  true,
+				"base-model-service": true,
+			},
+			validateCandidates: func(t *testing.T, candidates []Candidate) {
+				if len(candidates) != 1 {
+					t.Fatalf("expected one candidate, got %d", len(candidates))
+				}
+				candidate := candidates[0]
+				if !candidate.KubernetesReady {
+					t.Fatal("expected Kubernetes readiness to survive deduplication")
 				}
 			},
 		},

@@ -8,7 +8,7 @@
 # locally based on routing decisions with TTL-based expiration and pruning.
 #
 # Benefits:
-# - No NATS or JetStream required
+# - No NATS required
 # - Simpler deployment for lightweight scenarios
 # - Router makes local predictions based on its own routing decisions
 #
