@@ -130,8 +130,7 @@ kubectl wait --for=condition=Ready pod \
 
 ### Test the Deployment
 
-Port-forward the deployment's frontend (`<DGD>-frontend`), then send an OpenAI-compatible request
-(same model name / endpoints for vLLM and SGLang):
+Port-forward the deployment's frontend (`<DGD>-frontend`), then send an OpenAI-compatible request. The `model` field is the served name for your `RECIPE` — the examples below use the B200 default (`nvidia/DeepSeek-V4-Flash-NVFP4`); on H200 use `deepseek-ai/DeepSeek-V4-Flash`. Same endpoints for vLLM and SGLang:
 
 ```bash
 kubectl port-forward svc/${DGD}-frontend 8000:8000 -n ${NAMESPACE}
@@ -139,7 +138,7 @@ kubectl port-forward svc/${DGD}-frontend 8000:8000 -n ${NAMESPACE}
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-ai/DeepSeek-V4-Flash",
+    "model": "nvidia/DeepSeek-V4-Flash-NVFP4",
     "messages": [{"role": "user", "content": "Hello!"}],
     "max_tokens": 512
   }'
@@ -158,7 +157,7 @@ Same flow on both variants — same model, same `--dyn-reasoning-parser deepseek
 curl -s http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-ai/DeepSeek-V4-Flash",
+    "model": "nvidia/DeepSeek-V4-Flash-NVFP4",
     "messages": [{"role": "user", "content": "What is 2+2? Answer briefly."}],
     "max_tokens": 200
   }' | python3 -m json.tool
@@ -180,7 +179,7 @@ Same flow on both variants:
 curl -s http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-ai/DeepSeek-V4-Flash",
+    "model": "nvidia/DeepSeek-V4-Flash-NVFP4",
     "messages": [{"role": "user", "content": "What is the weather in San Francisco?"}],
     "tools": [{
       "type": "function",
