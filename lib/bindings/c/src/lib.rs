@@ -113,11 +113,12 @@ async fn wait_for_discovery_sync(drt: &DistributedRuntime) -> usize {
 }
 
 /// # Safety
-/// the namespace_c_str and component_c_str are passed as pointers to C strings
+/// the namespace_c_str, component_c_str, and endpoint_c_str are passed as pointers to C strings
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dynamo_llm_init(
     namespace_c_str: *const c_char,
     component_c_str: *const c_char,
+    endpoint_c_str: *const c_char,
     kv_block_size: u32,
 ) -> DynamoLlmResult {
     initialize_tracing();
@@ -165,9 +166,25 @@ pub unsafe extern "C" fn dynamo_llm_init(
     }
     let component: String = component_cow.into_owned();
 
+    if endpoint_c_str.is_null() {
+        tracing::error!("Serving endpoint name is required");
+        return DynamoLlmResult::ERR;
+    }
+    let endpoint = match unsafe { CStr::from_ptr(endpoint_c_str) }.to_str() {
+        Ok(value) if !value.trim().is_empty() => value.trim().to_string(),
+        Ok(_) => {
+            tracing::error!("Serving endpoint name must not be empty");
+            return DynamoLlmResult::ERR;
+        }
+        Err(error) => {
+            tracing::error!(?error, "Failed to convert serving endpoint name to UTF-8");
+            return DynamoLlmResult::ERR;
+        }
+    };
+
     match result {
         Ok(_) => match KV_PUB.get_or_try_init(move || {
-            dynamo_create_kv_publisher(namespace, component, kv_block_size)
+            dynamo_create_kv_publisher(namespace, component, endpoint, kv_block_size)
         }) {
             Ok(_) => DynamoLlmResult::OK,
             Err(e) => {
@@ -209,16 +226,17 @@ pub extern "C" fn dynamo_llm_load_publisher_create() -> DynamoLlmResult {
 fn dynamo_create_kv_publisher(
     namespace: String,
     component: String,
+    endpoint: String,
     kv_block_size: u32,
 ) -> Result<KvEventPublisher, anyhow::Error> {
-    tracing::info!("Creating KV Publisher for model: {}", component);
+    tracing::info!(%namespace, %component, %endpoint, "Creating endpoint-scoped KV publisher");
     match DRT
         .get()
         .ok_or(anyhow::Error::msg("Could not get Distributed Runtime"))
     {
         Ok(drt) => {
             let backend = drt.namespace(namespace)?.component(component)?;
-            KvEventPublisher::new(backend, kv_block_size, None)
+            KvEventPublisher::new(backend.endpoint(endpoint), kv_block_size, None)
         }
         Err(e) => Err(e),
     }

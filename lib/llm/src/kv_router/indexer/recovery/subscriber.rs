@@ -1,187 +1,311 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::worker_query::WorkerQueryClient;
-use crate::discovery::RuntimeConfigWatch;
-use crate::kv_router::Indexer;
+use std::{sync::Arc, time::Duration};
+
 use anyhow::Result;
-use dynamo_kv_router::{
-    config::KvRouterConfig,
-    protocols::{KV_EVENT_SUBJECT, RouterEvent},
-};
+use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, RouterEvent};
 use dynamo_runtime::{
-    component::Component, discovery::EventTransportKind, prelude::*,
-    transports::event_plane::EventSubscriber,
+    component::Endpoint,
+    discovery::EventTransportKind,
+    protocols::EndpointId,
+    traits::DistributedRuntimeProvider,
+    transports::event_plane::{EventSubscriber, TypedEventSubscriber},
 };
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-/// Start a simplified background task for event consumption using the event plane.
-///
-/// This is used when local indexer mode is enabled. Unlike `start_kv_router_background`,
-/// this function:
-/// - Uses the event plane (NATS Core or ZMQ) instead of JetStream
-/// - Does not support snapshots, purging, or durable consumers
-/// - On worker Added: dumps worker's local indexer into router
-/// - On worker Removed: removes worker from router indexer
-///
-/// This is appropriate when workers have local indexers enabled.
-async fn start_kv_router_background_event_plane(
-    component: Component,
-    indexer: Indexer,
-    transport_kind: EventTransportKind,
-    workers_with_configs: RuntimeConfigWatch,
-    model: String,
-    worker_type: &'static str,
-    cancellation_token: CancellationToken,
-) -> Result<()> {
-    // Subscribe to KV events BEFORE spawning the discovery/recovery loop.
-    // This ensures no events are lost between the initial dump fetch and the
-    // subscription becoming active — the tree state at fetch time is guaranteed
-    // to be a subset of what the subscription will deliver.
-    let mut subscriber =
-        EventSubscriber::for_component_with_transport(&component, KV_EVENT_SUBJECT, transport_kind)
-            .await?
-            .typed::<RouterEvent>();
+use super::worker_query::WorkerQueryClient;
+use crate::{
+    discovery::{KvSourceMembershipView, KvSourceMembershipWatch, KvSourceStatus},
+    kv_router::{Indexer, metrics::RouterWorkerStatusMetrics},
+};
 
-    // Brief delay to let the subscription fully establish with the NATS server
-    // before recovery fetches the initial dump from workers.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+const SUBSCRIPTION_INITIAL_BACKOFF: Duration = Duration::from_millis(100);
+const SUBSCRIPTION_MAX_BACKOFF: Duration = Duration::from_secs(5);
 
-    // WorkerQueryClient handles its own discovery loop for lifecycle + initial recovery.
-    // No blocking wait — recovery happens asynchronously as endpoints are discovered.
-    let worker_query_client = WorkerQueryClient::spawn(
-        component.clone(),
-        indexer,
-        workers_with_configs,
-        model,
-        worker_type,
-        cancellation_token.child_token(),
-    )
-    .await?;
-    let kv_event_subject = format!(
-        "namespace.{}.component.{}.{}",
-        component.namespace().name(),
-        component.name(),
-        KV_EVENT_SUBJECT
-    );
-
-    match transport_kind {
-        EventTransportKind::Nats => {
-            tracing::info!(
-                subject = %kv_event_subject,
-                "KV Router using NATS Core subscription (local_indexer mode)"
-            );
-        }
-        EventTransportKind::Zmq => {
-            tracing::info!(
-                subject = %kv_event_subject,
-                "KV Router using ZMQ event plane subscription (local_indexer mode)"
-            );
-        }
-    }
-
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                biased;
-
-                _ = cancellation_token.cancelled() => {
-                    tracing::debug!("KV Router event plane background task received cancellation signal");
-                    break;
-                }
-
-                // Handle event consumption from event plane subscription
-                Some(result) = subscriber.next() => {
-                    let (envelope, event) = match result {
-                        Ok((envelope, event)) => (envelope, event),
-                        Err(e) => {
-                            tracing::warn!("Failed to receive RouterEvent from event plane: {e:?}");
-                            continue;
-                        }
-                    };
-
-                    tracing::trace!(
-                        "Received event from publisher {} (seq {})",
-                        envelope.publisher_id,
-                        envelope.sequence
-                    );
-
-                    tracing::trace!(
-                        "Forwarding live event to recovery coordinator for worker {} dp_rank {} event_id {}",
-                        event.worker_id,
-                        event.event.dp_rank,
-                        event.event.event_id
-                    );
-                    worker_query_client.handle_live_event(event).await;
-                }
-            }
-        }
-
-        tracing::debug!("KV Router event plane background task exiting");
-    });
-
-    Ok(())
+enum ScopeExit {
+    Rebind,
+    Retry,
+    Stop,
 }
 
-/// Helper to decide which subscriber (JetStream or Event Plane) to start based on config
-pub async fn start_subscriber(
-    component: Component,
-    kv_router_config: &KvRouterConfig,
+#[allow(clippy::too_many_arguments)]
+async fn run_subscription_supervisor(
+    endpoint: Endpoint,
     indexer: Indexer,
-    workers_with_configs: RuntimeConfigWatch,
+    transport_kind: EventTransportKind,
+    mut membership_watch: KvSourceMembershipWatch,
+    model: String,
+    worker_type: &'static str,
+    cancellation_token: CancellationToken,
+    mut startup_ready: Option<oneshot::Sender<()>>,
+) {
+    let serving_endpoint = endpoint.id();
+    let component = endpoint.component().clone();
+    let metrics = RouterWorkerStatusMetrics::from_component(&component);
+    let client = match WorkerQueryClient::spawn(
+        component.clone(),
+        indexer,
+        membership_watch.clone(),
+        cancellation_token.child_token(),
+    )
+    .await
+    {
+        Ok(started) => started,
+        Err(error) => {
+            tracing::error!(%error, "Failed to start KV source recovery coordinator");
+            if let Some(ready) = startup_ready.take() {
+                let _ = ready.send(());
+            }
+            return;
+        }
+    };
+    let mut retry_delay = SUBSCRIPTION_INITIAL_BACKOFF;
+
+    loop {
+        membership_watch.borrow_and_update();
+        let view = client.sync_membership().await;
+        update_mismatch_metric(&metrics, &view, &model, worker_type, &serving_endpoint);
+
+        let subscriber = if let Some(kv_state_endpoint) = view.resolved_kv_state_endpoint() {
+            tracing::debug!(
+                serving_endpoint = %serving_endpoint,
+                %kv_state_endpoint,
+                "Resolved KV-state event source"
+            );
+            match EventSubscriber::for_endpoint_id_with_transport(
+                component.drt(),
+                kv_state_endpoint,
+                KV_EVENT_SUBJECT,
+                transport_kind,
+            )
+            .await
+            {
+                Ok(subscriber) => Some((
+                    kv_state_endpoint.clone(),
+                    subscriber.typed::<Vec<RouterEvent>>(),
+                )),
+                Err(error) => {
+                    tracing::error!(%error, %kv_state_endpoint, "Failed to subscribe to KV-state endpoint");
+                    update_subscription_failure_metric(
+                        &metrics,
+                        &view,
+                        &model,
+                        worker_type,
+                        &serving_endpoint,
+                    );
+                    if let Some(ready) = startup_ready.take() {
+                        let _ = ready.send(());
+                    }
+                    if !wait_for_retry(retry_delay, &mut membership_watch, &cancellation_token)
+                        .await
+                    {
+                        break;
+                    }
+                    retry_delay = (retry_delay * 2).min(SUBSCRIPTION_MAX_BACKOFF);
+                    continue;
+                }
+            }
+        } else {
+            tracing::error!(
+                serving_endpoint = %serving_endpoint,
+                resolution = ?view.endpoint_resolution,
+                "KV event handling disabled because active base cards disagree on their KV-state endpoint"
+            );
+            None
+        };
+
+        // Ordinary serving readiness is independent of recovery. In the healthy path this is
+        // sent only after the first exact transport subscription has been constructed.
+        if let Some(ready) = startup_ready.take() {
+            let _ = ready.send(());
+        }
+
+        let Some((kv_state_endpoint, subscriber)) = subscriber else {
+            tokio::select! {
+                _ = cancellation_token.cancelled() => break,
+                result = membership_watch.changed() => {
+                    if result.is_err() {
+                        break;
+                    }
+                }
+            }
+            continue;
+        };
+        match consume_scope(
+            subscriber,
+            &client,
+            &kv_state_endpoint,
+            &mut membership_watch,
+            &metrics,
+            &model,
+            worker_type,
+            &serving_endpoint,
+            &cancellation_token,
+            &mut retry_delay,
+        )
+        .await
+        {
+            ScopeExit::Rebind => {
+                retry_delay = SUBSCRIPTION_INITIAL_BACKOFF;
+                continue;
+            }
+            ScopeExit::Retry => {
+                let view = client.sync_membership().await;
+                update_subscription_failure_metric(
+                    &metrics,
+                    &view,
+                    &model,
+                    worker_type,
+                    &serving_endpoint,
+                );
+                if !wait_for_retry(retry_delay, &mut membership_watch, &cancellation_token).await {
+                    break;
+                }
+                retry_delay = (retry_delay * 2).min(SUBSCRIPTION_MAX_BACKOFF);
+            }
+            ScopeExit::Stop => break,
+        }
+    }
+
+    client.shutdown().await;
+    if cancellation_token.is_cancelled() {
+        metrics.set_kv_event_source_mismatch_workers(
+            &model,
+            worker_type,
+            &serving_endpoint.namespace,
+            &serving_endpoint.component,
+            &serving_endpoint.name,
+            0,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn consume_scope(
+    mut subscriber: TypedEventSubscriber<Vec<RouterEvent>>,
+    client: &Arc<WorkerQueryClient>,
+    kv_state_endpoint: &EndpointId,
+    membership_watch: &mut KvSourceMembershipWatch,
+    metrics: &RouterWorkerStatusMetrics,
+    model: &str,
+    worker_type: &str,
+    serving_endpoint: &EndpointId,
+    cancellation_token: &CancellationToken,
+    retry_delay: &mut Duration,
+) -> ScopeExit {
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancellation_token.cancelled() => return ScopeExit::Stop,
+            changed = membership_watch.changed() => {
+                if changed.is_err() {
+                    return ScopeExit::Stop;
+                }
+                membership_watch.borrow_and_update();
+                let view = client.sync_membership().await;
+                update_mismatch_metric(metrics, &view, model, worker_type, serving_endpoint);
+                if view.resolved_kv_state_endpoint() != Some(kv_state_endpoint) {
+                    return ScopeExit::Rebind;
+                }
+            }
+            result = subscriber.next() => {
+                let Some(result) = result else {
+                    tracing::error!(%kv_state_endpoint, "KV event-plane stream ended unexpectedly");
+                    return ScopeExit::Retry;
+                };
+                *retry_delay = SUBSCRIPTION_INITIAL_BACKOFF;
+                match result {
+                    Ok((envelope, events)) => {
+                        client.handle_live_batch(envelope.publisher_id, events).await;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, %kv_state_endpoint, "Failed to decode KV event batch");
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn wait_for_retry(
+    delay: Duration,
+    membership_watch: &mut KvSourceMembershipWatch,
+    cancellation_token: &CancellationToken,
+) -> bool {
+    tokio::select! {
+        _ = cancellation_token.cancelled() => false,
+        changed = membership_watch.changed() => changed.is_ok(),
+        _ = tokio::time::sleep(delay) => true,
+    }
+}
+
+fn update_mismatch_metric(
+    metrics: &RouterWorkerStatusMetrics,
+    view: &KvSourceMembershipView,
+    model: &str,
+    worker_type: &str,
+    serving_endpoint: &EndpointId,
+) {
+    let mismatch_count = view
+        .sources
+        .iter()
+        .filter(|(worker, status)| match status {
+            KvSourceStatus::Missing | KvSourceStatus::Ambiguous(_) => true,
+            KvSourceStatus::ActiveLiveOnly(_) => view.recovery_expected(worker).unwrap_or(false),
+            KvSourceStatus::ActiveRecoverable(_) => false,
+        })
+        .count();
+    metrics.set_kv_event_source_mismatch_workers(
+        model,
+        worker_type,
+        &serving_endpoint.namespace,
+        &serving_endpoint.component,
+        &serving_endpoint.name,
+        mismatch_count,
+    );
+}
+
+fn update_subscription_failure_metric(
+    metrics: &RouterWorkerStatusMetrics,
+    view: &KvSourceMembershipView,
+    model: &str,
+    worker_type: &str,
+    serving_endpoint: &EndpointId,
+) {
+    metrics.set_kv_event_source_mismatch_workers(
+        model,
+        worker_type,
+        &serving_endpoint.namespace,
+        &serving_endpoint.component,
+        &serving_endpoint.name,
+        view.sources.len(),
+    );
+}
+
+pub async fn start_subscriber(
+    endpoint: Endpoint,
+    indexer: Indexer,
+    membership_watch: KvSourceMembershipWatch,
     model: String,
     worker_type: &'static str,
     cancellation_token: CancellationToken,
 ) -> Result<()> {
-    let transport_kind = component.drt().default_event_transport_kind();
-
-    // Start subscriber - durable_kv_events flag determines the mode:
-    // - durable_kv_events=false (default): Use NATS Core / generic event plane (requires workers to have local_indexer enabled)
-    // - durable_kv_events=true: Use JetStream for durability and multi-replica consistency
-    if kv_router_config.durable_kv_events {
-        tracing::warn!(
-            "--durable-kv-events is deprecated and will be removed in a future release. \
-             The event-plane subscriber (local_indexer mode) is now the recommended path."
-        );
-        if transport_kind != EventTransportKind::Nats {
-            anyhow::bail!(
-                "--durable-kv-events requires NATS event plane, but runtime is configured for {transport_kind:?}"
-            );
-        }
-        tracing::info!("Using JetStream subscription (--durable-kv-events enabled)");
-
-        let consumer_id = component.drt().discovery().instance_id().to_string();
-        super::jetstream::start_kv_router_background(
-            component,
-            consumer_id,
-            indexer,
-            kv_router_config,
-            cancellation_token,
-        )
-        .await
-    } else {
-        if transport_kind == EventTransportKind::Zmq {
-            if kv_router_config.router_snapshot_threshold.is_some()
-                || kv_router_config.router_reset_states
-            {
-                tracing::warn!(
-                    "ZMQ event plane does not support KV snapshots or state reset; ignoring snapshot/reset settings"
-                );
-            }
-            tracing::info!("Using ZMQ event plane subscription (local_indexer mode)");
-        } else {
-            tracing::info!("Using NATS Core subscription (local_indexer mode)");
-        }
-
-        start_kv_router_background_event_plane(
-            component,
-            indexer,
-            transport_kind,
-            workers_with_configs,
-            model,
-            worker_type,
-            cancellation_token,
-        )
-        .await
-    }
+    let transport_kind = endpoint.component().drt().default_event_transport_kind();
+    let (startup_tx, startup_rx) = oneshot::channel();
+    tokio::spawn(run_subscription_supervisor(
+        endpoint,
+        indexer,
+        transport_kind,
+        membership_watch,
+        model,
+        worker_type,
+        cancellation_token,
+        Some(startup_tx),
+    ));
+    startup_rx.await.map_err(|_| {
+        anyhow::anyhow!("KV event subscription supervisor exited before reporting readiness")
+    })?;
+    Ok(())
 }

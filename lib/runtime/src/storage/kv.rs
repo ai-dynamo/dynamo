@@ -555,14 +555,15 @@ mod tests {
         let res = bucket.insert(&"test1".into(), "value1".into(), 0).await?;
         assert_eq!(res, StoreOutcome::Created(0));
 
-        let mut expected = Vec::with_capacity(3);
-        for i in 1..=3 {
-            let item = WatchEvent::Put(KeyValue::new(
-                Key::new(format!("test{i}")),
-                format!("value{i}").into(),
-            ));
-            expected.push(item);
-        }
+        let expected = [
+            WatchEvent::Put(KeyValue::new(Key::new("test1".into()), "value1".into())),
+            WatchEvent::Put(KeyValue::new(Key::new("test2".into()), "value2".into())),
+            WatchEvent::Put(KeyValue::new(
+                Key::new("test2".into()),
+                "value2-updated".into(),
+            )),
+            WatchEvent::Put(KeyValue::new(Key::new("test3".into()), "value3".into())),
+        ];
 
         let (got_first_tx, got_first_rx) = tokio::sync::oneshot::channel();
         let ingress = tokio::spawn(async move {
@@ -582,6 +583,9 @@ mod tests {
             let v = stream.next().await.unwrap();
             assert_eq!(v, expected[2]);
 
+            let v = stream.next().await.unwrap();
+            assert_eq!(v, expected[3]);
+
             Ok::<_, StoreError>(())
         });
 
@@ -598,7 +602,9 @@ mod tests {
         assert_eq!(res, StoreOutcome::Exists(0));
 
         // Increment revision
-        let res = bucket.insert(&"test2".into(), "value2".into(), 1).await?;
+        let res = bucket
+            .insert(&"test2".into(), "value2-updated".into(), 1)
+            .await?;
         assert_eq!(res, StoreOutcome::Created(1));
 
         let res = bucket.insert(&"test3".into(), "value3".into(), 0).await?;

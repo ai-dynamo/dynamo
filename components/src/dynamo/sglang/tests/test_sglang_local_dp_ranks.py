@@ -21,29 +21,6 @@ pytestmark = [
 ]
 
 
-def _slice(**overrides):
-    from dynamo.sglang.llm_engine import _local_dp_rank_range as helper
-
-    fields = {
-        "dp_size": 1,
-        "enable_dp_attention": False,
-        "nnodes": 1,
-        "node_rank": 0,
-        **overrides,
-    }
-    return helper(SimpleNamespace(**fields))
-
-
-def test_dp_attention_disabled_short_circuits_to_rank_zero():
-    assert _slice() == (0, 1)
-    assert _slice(dp_size=8) == (0, 1)
-
-
-def test_dp_attention_multi_node_slices_ranks_by_node_index():
-    assert _slice(dp_size=8, enable_dp_attention=True, nnodes=2, node_rank=0) == (0, 4)
-    assert _slice(dp_size=8, enable_dp_attention=True, nnodes=2, node_rank=1) == (4, 8)
-
-
 def test_model_card_registration_keeps_global_dp_range():
     from dynamo.sglang.capacity import model_card_dp_rank_bounds
 
@@ -55,9 +32,3 @@ def test_model_card_registration_keeps_global_dp_range():
     )
 
     assert model_card_dp_rank_bounds(server_args) == (0, 16)
-
-
-def test_missing_attributes_use_safe_defaults():
-    from dynamo.sglang.llm_engine import _local_dp_rank_range as helper
-
-    assert helper(SimpleNamespace()) == (0, 1)
