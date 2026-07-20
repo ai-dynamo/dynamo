@@ -83,7 +83,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /nsrestore ./cmd/nsrestore
 
 # =============================================================================
-# Stage: CUDA checkpoint helper builder
+# Stage: CUDA checkpoint helper builder - Noble snapshot-agent ABI
 # =============================================================================
 FROM ${AGENT_BASE_IMAGE} AS cuda-helper-builder
 
@@ -102,7 +102,7 @@ RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
     -lcuda
 
 # =============================================================================
-# Stage: CRIU Builder - Build CRIU with CUDA plugin
+# Stage: CRIU Builder - Build CRIU with CUDA plugin for the Noble snapshot-agent
 # =============================================================================
 FROM ubuntu:24.04 AS criu-builder
 
@@ -236,6 +236,105 @@ USER root
 ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 
 # =============================================================================
+# Stage: CUDA checkpoint helper builder - Jammy placeholder ABI
+# Build on the exact placeholder base so this native helper cannot require a
+# newer glibc than the runtime into which it is copied.
+# =============================================================================
+FROM ${BASE_IMAGE} AS cuda-helper-builder-jammy
+
+USER root
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+COPY cmd/cuda-checkpoint-helper/main.c ./cmd/cuda-checkpoint-helper/main.c
+
+RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
+    ./cmd/cuda-checkpoint-helper/main.c \
+    -I/usr/local/cuda/include \
+    -L/usr/local/cuda/lib64/stubs \
+    -lcuda
+
+# =============================================================================
+# Stage: CRIU Builder - Build CRIU with CUDA plugin for the Jammy placeholder
+# Keep this separate from the Noble snapshot-agent build: native CRIU binaries,
+# libraries, and plugins copied into a Jammy runtime must target glibc 2.35.
+# =============================================================================
+FROM ubuntu:22.04 AS criu-builder-jammy
+
+ARG CRIU_REPO
+ARG CRIU_REF
+ARG CRIU_SHA
+ARG CUDA_CHECKPOINT_REPO
+ARG CUDA_CHECKPOINT_REF
+ARG CUDA_CHECKPOINT_SHA
+ARG DYNAMO_COMMIT_SHA
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    ca-certificates \
+    build-essential \
+    pkg-config \
+    libbsd-dev \
+    libcap-dev \
+    libnet1-dev \
+    libnl-3-dev \
+    libnl-route-3-dev \
+    libprotobuf-dev \
+    libprotobuf-c-dev \
+    protobuf-c-compiler \
+    protobuf-compiler \
+    python3 \
+    python3-protobuf \
+    libgnutls28-dev \
+    libnftables-dev \
+    uuid-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git init /tmp/criu \
+    && cd /tmp/criu \
+    && git remote add origin "${CRIU_REPO}" \
+    && if [ "${CRIU_REF}" != "${CRIU_SHA}" ]; then \
+         test "$(git ls-remote --exit-code origin "${CRIU_REF}" | awk 'NR == 1 { print $1 } END { if (NR != 1) exit 1 }')" = "${CRIU_SHA}"; \
+       fi \
+    && git fetch --depth 1 origin "${CRIU_SHA}" \
+    && git checkout --detach "${CRIU_SHA}" \
+    && test "$(git rev-parse HEAD)" = "${CRIU_SHA}" \
+    && make -j$(nproc) \
+    && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin
+
+COPY plugins/inet-remap/snapshot_inet_remap.c /tmp/snapshot_inet_remap.c
+RUN mkdir -p /criu-install/usr/local/lib/snapshot/criu-plugins \
+    && gcc -O2 -Wall -Wextra -fPIC -shared \
+      -idirafter /tmp/criu/criu/include \
+      -o /criu-install/usr/local/lib/snapshot/criu-plugins/snapshot_inet_remap.so \
+      /tmp/snapshot_inet_remap.c
+
+RUN git init /tmp/cuda-checkpoint \
+    && cd /tmp/cuda-checkpoint \
+    && git remote add origin "${CUDA_CHECKPOINT_REPO}" \
+    && if [ "${CUDA_CHECKPOINT_REF}" != "${CUDA_CHECKPOINT_SHA}" ]; then \
+         test "$(git ls-remote --exit-code origin "${CUDA_CHECKPOINT_REF}" | awk 'NR == 1 { print $1 } END { if (NR != 1) exit 1 }')" = "${CUDA_CHECKPOINT_SHA}"; \
+       fi \
+    && git fetch --depth 1 origin "${CUDA_CHECKPOINT_SHA}" \
+    && git checkout --detach "${CUDA_CHECKPOINT_SHA}" \
+    && test "$(git rev-parse HEAD)" = "${CUDA_CHECKPOINT_SHA}"
+
+RUN printf '%s\n' "${DYNAMO_COMMIT_SHA}" | grep -Eq '^[0-9a-f]{40}$' \
+    && printf '%s\n' \
+      "dynamo_source_sha=${DYNAMO_COMMIT_SHA}" \
+      "criu_source_url=${CRIU_REPO}" \
+      "criu_source_ref=${CRIU_REF}" \
+      "criu_source_sha=${CRIU_SHA}" \
+      "cuda_checkpoint_source_url=${CUDA_CHECKPOINT_REPO}" \
+      "cuda_checkpoint_source_ref=${CUDA_CHECKPOINT_REF}" \
+      "cuda_checkpoint_source_sha=${CUDA_CHECKPOINT_SHA}" \
+      > /restore-tool-source-provenance.txt
+
+# =============================================================================
 # Stage: Placeholder - Runtime-compatible restore image (requires BASE_IMAGE arg)
 # This image is a superset of the runtime image: same default execution contract
 # (entrypoint/cmd/user), plus CRIU/cuda-checkpoint tooling for external restore.
@@ -276,20 +375,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy CRIU from builder (needed by nsrestore running inside these namespaces)
-COPY --from=criu-builder /criu-install/usr/local /usr/local
-COPY --from=criu-builder /tmp/criu/COPYING /legal/CRIU/COPYING
-COPY --from=criu-builder /restore-tool-source-provenance.txt /opt/dynamo/restore-tool-source-provenance.txt
-RUN criu --version && echo "CRIU installed successfully"
+COPY --from=criu-builder-jammy /criu-install/usr/local /usr/local
+COPY --from=criu-builder-jammy /tmp/criu/COPYING /legal/CRIU/COPYING
+COPY --from=criu-builder-jammy /restore-tool-source-provenance.txt /opt/dynamo/restore-tool-source-provenance.txt
 
 # Copy CUDA checkpoint binaries
-COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
-COPY --from=criu-builder /tmp/cuda-checkpoint/LICENSE /legal/cuda-checkpoint/LICENSE
-COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
+COPY --from=criu-builder-jammy /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
+COPY --from=criu-builder-jammy /tmp/cuda-checkpoint/LICENSE /legal/cuda-checkpoint/LICENSE
+COPY --from=cuda-helper-builder-jammy /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
 RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper
 
 # Copy nsrestore binary (invoked by DaemonSet via nsenter)
 COPY --from=builder /nsrestore /usr/local/bin/nsrestore
 RUN chmod +x /usr/local/bin/nsrestore
+
+# Execute every restore-tool entry point in the final runtime so dynamic-loader
+# and architecture failures stop the build before image export.
+RUN criu --version \
+    && cuda-checkpoint --help >/dev/null \
+    && cuda-checkpoint-helper --help >/dev/null \
+    && nsrestore -h >/dev/null 2>&1 \
+    && echo "Snapshot restore tools installed successfully"
 
 # The backing path is a pod-managed emptyDir in restore pods.
 RUN mkdir -p /checkpoints /var/run/criu /var/criu-work \
