@@ -51,17 +51,30 @@ logger = logging.getLogger(__name__)
 
 MIN_INITIAL_WORKERS_ENV = "DYN_ROUTER_MIN_INITIAL_WORKERS"
 
-# Default soft limit on most Linux distros is 1024, which can be exhausted by the
-# frontend's TCP listener under high concurrency (see the accept() loop in
+# The frontend's TCP listener can exhaust the default soft RLIMIT_NOFILE (1024 on
+# most distros) under high concurrency (see the accept() loop in
 # lib/runtime/src/pipeline/network/tcp/server.rs), causing accept() to fail with
-# EMFILE. Raise it at startup, bounded by whatever hard limit the environment allows.
+# EMFILE. At startup we raise the soft limit toward FRONTEND_FD_LIMIT_TARGET,
+# overridable per-deployment via DYN_FRONTEND_FD_LIMIT_TARGET. A non-positive or
+# non-integer value disables the raise, so operators can opt out.
+FRONTEND_FD_LIMIT_ENV = "DYN_FRONTEND_FD_LIMIT_TARGET"
 FRONTEND_FD_LIMIT_TARGET = 8192
 
 
-def _raise_fd_limit(target: int = FRONTEND_FD_LIMIT_TARGET) -> None:
-    """Best-effort: raise the process's soft RLIMIT_NOFILE toward `target`,
-    bounded by the hard limit. No-op if already sufficient, if the Unix-only
-    `resource` module is unavailable (e.g. Windows), or if the raise is denied."""
+def _raise_fd_limit(target: Optional[int] = None) -> None:
+    """Best-effort: raise the process's soft RLIMIT_NOFILE toward `target`
+    (default: the DYN_FRONTEND_FD_LIMIT_TARGET env var, else FRONTEND_FD_LIMIT_TARGET),
+    bounded by the hard limit. A target <= 0 (or a non-integer env value) disables
+    it; also a no-op if already sufficient, if the Unix-only `resource` module is
+    unavailable (e.g. Windows), or if the raise is denied."""
+    if target is None:
+        raw = os.getenv(FRONTEND_FD_LIMIT_ENV, str(FRONTEND_FD_LIMIT_TARGET))
+        try:
+            target = int(raw)
+        except ValueError:
+            target = 0
+    if target <= 0:
+        return
     try:
         import resource
 
