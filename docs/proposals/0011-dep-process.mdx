@@ -357,6 +357,18 @@ The recommended option is not free. It adds a rendering layer to maintain, a one
 
 ## Background
 
+### Historical Context
+
+Dynamo's design-proposal process has moved twice, and this DEP is the third step.
+
+**The dedicated repository came first.** `ai-dynamo/enhancements` was created as the home for Dynamo Enhancement Proposals, with a KEP-style layout and an approved process DEP (`deps/0000-dep-process.md`). Proposals were markdown files under `deps/`, added by pull request — the same shape this DEP recommends.
+
+**Cross-cutting DEPs then drifted to GitHub issues on `ai-dynamo/dynamo`.** An issue-per-DEP model was adopted inside the code repository because it was low-friction and because GitHub's native pull-request-to-issue linking (`Fixes #123`) and the linked-pull-requests panel came for free. Most of that convenience turned out to be a same-repository feature: across repositories a closing keyword only produces a cross-reference, and Dynamo's implementation PRs land across many repos, so the linking that motivated the move never held for cross-cutting work (see Native PR ↔ Issue Linking Is Preserved).
+
+**That move predated governance and SIGs** — arguably ahead of the structure that gives a DEP an owner and a review path. It left three gaps: no clean public link to share a proposal, no line-level design review on a rendered page, and no single place to read a DEP's current status. Design content, line-level review, and open-ended debate lived across a separate repository, pull-request threads, and meetings at the same time.
+
+**Now Dynamo is standing up SIG-based governance**, where a SIG owns a DEP rather than a code repo. That makes the dedicated `ai-dynamo/enhancements` repository the right home again, not a compromise, and it is why this DEP moves cross-cutting proposals back there and adds the rendering and comment-mirror layer that closes the visibility and design-review gaps the issue-based era exposed.
+
 ### Precedent
 
 The closest template is Kubernetes. Kubernetes organizes ownership into Special Interest Groups (SIGs), defined in the `kubernetes/community` repo, and each SIG owns its enhancement proposals (KEPs) in the dedicated `kubernetes/enhancements` repo while the implementation lands across many `kubernetes/*` code repos. A KEP lives under `keps/sig-<name>/NNNN-title/` with a `kep.yaml` that carries `owning-sig`, optional `participating-sigs`, and a `status`, and the owning SIG's approvers move it through the lifecycle. That is Dynamo's situation exactly: proposals owned at the group level, implemented across many repos.
