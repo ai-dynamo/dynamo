@@ -71,6 +71,11 @@ spec:
     path: /metrics
     port: system
     relabelings:
+    # Drop multi-node workers that don't listen for metrics
+    - sourceLabels:
+      - __meta_kubernetes_pod_label_app_kubernetes_io_name
+      action: drop
+      regex: '.+-wkr$'
     - action: replace
       sourceLabels:
       - __meta_kubernetes_pod_label_nvidia_com_dynamo_component_type
