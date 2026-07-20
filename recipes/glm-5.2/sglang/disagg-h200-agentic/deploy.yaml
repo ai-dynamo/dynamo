@@ -1,0 +1,341 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: glm52-disagg-h200-agentic-sglang-config
+  labels:
+    app.kubernetes.io/name: glm52-disagg-h200-agentic
+    app.kubernetes.io/part-of: dynamo
+data:
+  prefill.yaml: |-
+    model-path: zai-org/GLM-5.2-FP8
+    served-model-name: zai-org/GLM-5.2
+    # Decode connects to the pod IP advertised by Dynamo, so the SGLang
+    # bootstrap server must not use its loopback-only default.
+    host: 0.0.0.0
+    trust-remote-code: true
+    tensor-parallel-size: 8
+    data-parallel-size: 1
+    ep-size: 8
+    moe-a2a-backend: none
+    kv-cache-dtype: fp8_e4m3
+    fp8-gemm-backend: flashinfer_deepgemm
+    mem-fraction-static: 0.92
+    max-running-requests: 64
+    attention-backend: dsa
+    dsa-prefill-backend: flashmla_kv
+    enable-prefill-cp: true
+    cp-strategy: interleave
+    disable-overlap-schedule: true
+    cuda-graph-backend-prefill: disabled
+    cuda-graph-backend-decode: disabled
+    speculative-algorithm: EAGLE
+    speculative-num-steps: 3
+    speculative-eagle-topk: 1
+    speculative-num-draft-tokens: 4
+    context-length: 250000
+    watchdog-timeout: 3600
+    disaggregation-mode: prefill
+    disaggregation-transfer-backend: nixl
+    disaggregation-bootstrap-port: 12345
+    enable-metrics: true
+    kv-events-config:
+      publisher: zmq
+      topic: kv-events
+      endpoint: tcp://*:5557
+    model-loader-extra-config:
+      enable_multithread_load: true
+      num_threads: 32
+
+  decode.yaml: |-
+    model-path: zai-org/GLM-5.2-FP8
+    served-model-name: zai-org/GLM-5.2
+    host: 0.0.0.0
+    trust-remote-code: true
+    tensor-parallel-size: 8
+    data-parallel-size: 8
+    enable-dp-attention: true
+    ep-size: 1
+    moe-a2a-backend: none
+    fp8-gemm-backend: deep_gemm
+    enforce-shared-experts-fusion: true
+    kv-cache-dtype: fp8_e4m3
+    context-length: 250000
+    mem-fraction-static: 0.88
+    max-running-requests: 64
+    cuda-graph-max-bs: 64
+    cuda-graph-bs:
+      - 1
+      - 2
+      - 4
+      - 8
+      - 16
+      - 20
+      - 24
+      - 28
+      - 32
+      - 36
+      - 40
+      - 44
+      - 48
+      - 52
+      - 56
+      - 60
+      - 64
+    attention-backend: dsa
+    dsa-prefill-backend: flashmla_kv
+    dsa-decode-backend: flashmla_kv
+    speculative-algorithm: EAGLE
+    speculative-num-steps: 3
+    speculative-eagle-topk: 1
+    speculative-num-draft-tokens: 4
+    watchdog-timeout: 3600
+    disaggregation-mode: decode
+    disaggregation-transfer-backend: nixl
+    disaggregation-bootstrap-port: 12345
+    enable-metrics: true
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: glm52-disagg-h200-agentic
+spec:
+  backendFramework: sglang
+  components:
+    - name: Frontend
+      type: frontend
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              command:
+                - python3
+              args:
+                - -m
+                - dynamo.frontend
+                - --trust-remote-code
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: DYN_ROUTER_MODE
+                  value: kv
+              image: nvcr.io/nvstaging/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1-rc.0
+              imagePullPolicy: Always
+              resources: {}
+      replicas: 1
+
+    - name: prefill
+      type: prefill
+      sharedMemorySize: 64Gi
+      podTemplate:
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: nvidia.com/gpu.product
+                        operator: In
+                        values:
+                          - NVIDIA-H200
+          containers:
+            - name: main
+              command:
+                - /bin/bash
+                - -lc
+              args:
+                - |
+                  set -euo pipefail
+                  ulimit -l unlimited || true
+                  ulimit -n 1048576 || true
+                  UCX_NET_DEVICES="$(nvidia-smi topo -m | awk 'BEGIN{split("PIX PXB NODE PHB SYS", pri)} $1 ~ /^NIC[0-9]+:/ {gsub(":", "", $1); nic[$1]=$2; next} /CPU Affinity/ && /NIC/ {for (i=1; i<=NF; i++) if ($i ~ /^NIC[0-9]+$/) {idx=i+1; cols[++n]=idx; col[idx]=$i}; next} $1 ~ /^GPU[0-9]+$/ {g++; for (c=1; c<=n; c++) {idx=cols[c]; rel[g,c]=$idx}; next} END{for (r=1; r<=g; r++) for (p=1; p<=5; p++) {found=0; for (c=1; c<=n; c++) {dev=nic[col[cols[c]]]; if (rel[r,c] != pri[p] || dev == "" || dev ~ /bond/) continue; if (system("[ -d /sys/class/infiniband/" dev " ]") == 0) {found=1; if (!seen[dev]++) out=out (out ? "," : "") dev ":1"}} if (found) break} if (!out) exit 1; print out}')"
+                  : "${UCX_NET_DEVICES:?no GPU-local InfiniBand devices found from nvidia-smi topo -m}"
+                  export UCX_NET_DEVICES
+                  export SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS="{\"ucx_devices\":\"${UCX_NET_DEVICES}\",\"ucx_error_handling_mode\":\"peer\"}"
+                  echo "dynamic UCX_NET_DEVICES=${UCX_NET_DEVICES}"
+                  exec python3 -m dynamo.sglang \
+                    --config /etc/sglang/prefill.yaml \
+                    --dyn-tool-call-parser glm47 \
+                    --dyn-reasoning-parser glm45
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: HF_HOME
+                  value: /model-cache
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+                - name: DYN_FORWARDPASS_METRIC_PORT
+                  value: ""
+                - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
+                  value: UCX
+                - name: UCX_TLS
+                  value: cuda_ipc,cuda_copy,rc
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              image: nvcr.io/nvstaging/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1-rc.0
+              imagePullPolicy: Always
+              resources:
+                requests:
+                  nvidia.com/gpu: "8"
+                  rdma/ib: "8"
+                  memory: 1Ti
+                limits:
+                  nvidia.com/gpu: "8"
+                  rdma/ib: "8"
+                  memory: 1Ti
+              securityContext:
+                runAsUser: 0
+                capabilities:
+                  add:
+                    - IPC_LOCK
+                    - SYS_PTRACE
+                    - SYS_RESOURCE
+              startupProbe:
+                failureThreshold: 120
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 20
+              volumeMounts:
+                - mountPath: /etc/sglang
+                  name: sglang-config
+                  readOnly: true
+                - mountPath: /model-cache
+                  name: model-cache
+              workingDir: /workspace/
+          volumes:
+            - name: sglang-config
+              configMap:
+                name: glm52-disagg-h200-agentic-sglang-config
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+      replicas: 1
+
+    - name: decode
+      type: decode
+      sharedMemorySize: 64Gi
+      podTemplate:
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: nvidia.com/gpu.product
+                        operator: In
+                        values:
+                          - NVIDIA-H200
+            podAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+                - weight: 100
+                  podAffinityTerm:
+                    labelSelector:
+                      matchLabels:
+                        nvidia.com/dynamo-component-type: prefill
+                        nvidia.com/dynamo-graph-deployment-name: glm52-disagg-h200-agentic
+                    topologyKey: topology.kubernetes.io/zone
+          containers:
+            - name: main
+              command:
+                - /bin/bash
+                - -lc
+              args:
+                - |
+                  set -euo pipefail
+                  ulimit -l unlimited || true
+                  ulimit -n 1048576 || true
+                  UCX_NET_DEVICES="$(nvidia-smi topo -m | awk 'BEGIN{split("PIX PXB NODE PHB SYS", pri)} $1 ~ /^NIC[0-9]+:/ {gsub(":", "", $1); nic[$1]=$2; next} /CPU Affinity/ && /NIC/ {for (i=1; i<=NF; i++) if ($i ~ /^NIC[0-9]+$/) {idx=i+1; cols[++n]=idx; col[idx]=$i}; next} $1 ~ /^GPU[0-9]+$/ {g++; for (c=1; c<=n; c++) {idx=cols[c]; rel[g,c]=$idx}; next} END{for (r=1; r<=g; r++) for (p=1; p<=5; p++) {found=0; for (c=1; c<=n; c++) {dev=nic[col[cols[c]]]; if (rel[r,c] != pri[p] || dev == "" || dev ~ /bond/) continue; if (system("[ -d /sys/class/infiniband/" dev " ]") == 0) {found=1; if (!seen[dev]++) out=out (out ? "," : "") dev ":1"}} if (found) break} if (!out) exit 1; print out}')"
+                  : "${UCX_NET_DEVICES:?no GPU-local InfiniBand devices found from nvidia-smi topo -m}"
+                  export UCX_NET_DEVICES
+                  export SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS="{\"ucx_devices\":\"${UCX_NET_DEVICES}\",\"ucx_error_handling_mode\":\"peer\"}"
+                  echo "dynamic UCX_NET_DEVICES=${UCX_NET_DEVICES}"
+                  exec python3 -m dynamo.sglang \
+                    --config /etc/sglang/decode.yaml \
+                    --dyn-tool-call-parser glm47 \
+                    --dyn-reasoning-parser glm45
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: HF_HOME
+                  value: /model-cache
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+                - name: DYN_FORWARDPASS_METRIC_PORT
+                  value: ""
+                # Synthetic MTP acceptance length for performance benchmarking.
+                # - name: SGLANG_SIMULATE_ACC_LEN
+                #   value: "2.69"
+                # - name: SGLANG_SIMULATE_ACC_METHOD
+                #   value: match-expected
+                # - name: SGLANG_SIMULATE_ACC_TOKEN_ID
+                #   value: "32"
+                - name: SGLANG_DISAGGREGATION_WAITING_TIMEOUT
+                  value: "3600"
+                - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
+                  value: UCX
+                - name: UCX_TLS
+                  value: cuda_ipc,cuda_copy,rc
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              image: nvcr.io/nvstaging/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1-rc.0
+              imagePullPolicy: Always
+              resources:
+                requests:
+                  nvidia.com/gpu: "8"
+                  rdma/ib: "8"
+                  memory: 200Gi
+                limits:
+                  nvidia.com/gpu: "8"
+                  rdma/ib: "8"
+                  memory: 200Gi
+              securityContext:
+                runAsUser: 0
+                capabilities:
+                  add:
+                    - IPC_LOCK
+                    - SYS_PTRACE
+                    - SYS_RESOURCE
+              startupProbe:
+                failureThreshold: 120
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 20
+              volumeMounts:
+                - mountPath: /etc/sglang
+                  name: sglang-config
+                  readOnly: true
+                - mountPath: /model-cache
+                  name: model-cache
+              workingDir: /workspace/
+          volumes:
+            - name: sglang-config
+              configMap:
+                name: glm52-disagg-h200-agentic-sglang-config
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+      replicas: 1
