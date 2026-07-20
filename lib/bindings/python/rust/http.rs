@@ -106,7 +106,12 @@ impl HttpService {
                 )
             })?;
 
+        // Hold shutdown Phase 2 until the HTTP server finishes draining, so
+        // discovery/backend connections stay alive for in-flight requests.
+        let guard = runtime.inner().register_graceful_task();
+
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let _guard = guard;
             service.run(token).await.map_err(to_pyerr)?;
             Ok(())
         })
