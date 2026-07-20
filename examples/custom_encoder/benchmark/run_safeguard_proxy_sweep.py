@@ -202,7 +202,7 @@ def build_config(
     )
     return SweepConfig(
         model=DECODER_MODEL,
-        concurrencies=[1] if smoke else list(concurrencies),
+        concurrencies=list(concurrencies),
         osl=1 if smoke else TARGET_OSL,
         conversation_num=1 if smoke else REQUESTS,
         warmup_count=1 if smoke else WARMUP_REQUESTS,
