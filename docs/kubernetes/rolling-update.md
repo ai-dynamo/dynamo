@@ -350,7 +350,7 @@ spec:
         spec:
           containers:
             - name: main
-            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
 ```
 
 `Recreate` applies independently to each worker component. Other worker components without the
