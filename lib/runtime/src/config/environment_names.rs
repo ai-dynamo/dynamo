@@ -571,14 +571,23 @@ pub mod model {
         /// Hugging Face authentication token
         pub const HF_TOKEN: &str = "HF_TOKEN";
 
+        /// Deprecated alias for the Hugging Face authentication token
+        pub const HUGGING_FACE_HUB_TOKEN: &str = "HUGGING_FACE_HUB_TOKEN";
+
+        /// Path to the stored Hugging Face authentication token
+        pub const HF_TOKEN_PATH: &str = "HF_TOKEN_PATH";
+
         /// Hugging Face Hub cache directory
         pub const HF_HUB_CACHE: &str = "HF_HUB_CACHE";
 
         /// Hugging Face home directory
         pub const HF_HOME: &str = "HF_HOME";
 
+        /// Override the Hugging Face Hub API endpoint
+        pub const HF_ENDPOINT: &str = "HF_ENDPOINT";
+
         /// Offline mode - skip API calls when model is cached
-        /// Set to "1" or "true" to enable
+        /// Set to "1", "true", "on", or "yes" to enable
         pub const HF_HUB_OFFLINE: &str = "HF_HUB_OFFLINE";
     }
 }
@@ -595,6 +604,9 @@ pub mod router {
     /// Scheduling policy for the router queue ("fcfs" or "wspt").
     pub const DYN_ROUTER_QUEUE_POLICY: &str = "DYN_ROUTER_QUEUE_POLICY";
     pub const DYN_ROUTER_POLICY_CONFIG: &str = "DYN_ROUTER_POLICY_CONFIG";
+
+    /// Stale active-request cleanup guard in seconds; this is not a request timeout.
+    pub const DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS: &str = "DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS";
 }
 
 /// Request plane transport environment variables
@@ -844,14 +856,18 @@ mod tests {
             model::model_express::MODEL_EXPRESS_CACHE_PATH,
             model::model_express::MODEL_EXPRESS_NO_SHARED_STORAGE,
             model::huggingface::HF_TOKEN,
+            model::huggingface::HUGGING_FACE_HUB_TOKEN,
+            model::huggingface::HF_TOKEN_PATH,
             model::huggingface::HF_HUB_CACHE,
             model::huggingface::HF_HOME,
+            model::huggingface::HF_ENDPOINT,
             model::huggingface::HF_HUB_OFFLINE,
             // Router
             router::DYN_ROUTER_PREFILL_LOAD_SCALE,
             router::DYN_ROUTER_QUEUE_THRESHOLD,
             router::DYN_ROUTER_QUEUE_POLICY,
             router::DYN_ROUTER_POLICY_CONFIG,
+            router::DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
             request_plane::DYN_REQUEST_PLANE_CODEC,
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,

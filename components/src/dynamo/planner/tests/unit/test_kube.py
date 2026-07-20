@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from kubernetes import client
 
-from dynamo.planner.connectors.kubernetes_api import KubernetesAPI
+from dynamo.planner.connectors.clients.kubernetes_api import KubernetesAPI
 from dynamo.planner.errors import DynamoGraphDeploymentNotFoundError
 
 pytestmark = [
@@ -32,7 +32,7 @@ pytestmark = [
 
 @pytest.fixture
 def mock_config():
-    with patch("dynamo.planner.connectors.kubernetes_api.config") as mock:
+    with patch("dynamo.planner.connectors.clients.kubernetes_api.config") as mock:
         mock.load_incluster_config = MagicMock()
         yield mock
 
@@ -40,7 +40,7 @@ def mock_config():
 @pytest.fixture
 def mock_custom_api():
     with patch(
-        "dynamo.planner.connectors.kubernetes_api.client.CustomObjectsApi"
+        "dynamo.planner.connectors.clients.kubernetes_api.client.CustomObjectsApi"
     ) as mock:
         yield mock.return_value
 
@@ -48,7 +48,7 @@ def mock_custom_api():
 @pytest.fixture
 def mock_namespace():
     with patch(
-        "dynamo.planner.connectors.kubernetes_api.get_current_k8s_namespace",
+        "dynamo.planner.connectors.clients.kubernetes_api.get_current_k8s_namespace",
         return_value="default",
     ) as mock:
         yield mock
@@ -627,7 +627,7 @@ def test_list_pods_by_label_pagination_resource_version_only_on_first_page(
     """Continuation pages must not pass resource_version alongside _continue."""
     mock_core_api = MagicMock()
     with patch(
-        "dynamo.planner.connectors.kubernetes_api.client.CoreV1Api",
+        "dynamo.planner.connectors.clients.kubernetes_api.client.CoreV1Api",
         return_value=mock_core_api,
     ):
         api = KubernetesAPI()

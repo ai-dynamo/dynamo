@@ -1,25 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import json
+import asyncio
 import logging
 import os
-from typing import TYPE_CHECKING, Optional
+from typing import Any, Optional
 
 from dynamo._core import VirtualConnectorCoordinator
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
-from dynamo.planner.connectors.base import PlannerConnector
-from dynamo.planner.connectors.mdc import MdcEntry, select_entry, worker_info_from_mdc
+from dynamo.planner.connectors.base import PlannerConnector, WorkerInfoProvider
 from dynamo.planner.errors import EmptyTargetReplicasError
-from dynamo.planner.monitoring.worker_info import (
-    WorkerInfo,
-    build_worker_info_from_defaults,
-)
+from dynamo.planner.monitoring.worker_info import WorkerInfo
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
-
-if TYPE_CHECKING:
-    from dynamo.llm import FpmEventSubscriber
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -34,49 +27,39 @@ SCALING_MAX_WAIT_TIME = int(
 SCALING_MAX_RETRIES = SCALING_MAX_WAIT_TIME // SCALING_CHECK_INTERVAL  # 180 retries
 
 
-def _mdc_entries_from_subscriber(
-    subscriber: Optional["FpmEventSubscriber"],
-) -> list[MdcEntry]:
-    """Read the discovery-captured card JSON snapshot from an FPM subscriber.
-
-    Returns an empty list if tracking has not been started yet or no cards
-    have been observed.  Discovery-sourced entries have no wrapper
-    component/endpoint (those come from the CRD in K8s mode); worker_info_from_mdc
-    falls back to backend defaults for those fields.
-    """
-    if subscriber is None:
-        return []
-    try:
-        cards = subscriber.get_model_cards()
-    except RuntimeError:
-        # start_tracking() not called yet.
-        return []
-
-    entries: list[MdcEntry] = []
-    for worker_id, card_str in cards.items():
-        try:
-            card_json = json.loads(card_str)
-        except json.JSONDecodeError:
-            logger.warning(f"Skipping malformed MDC card JSON for worker {worker_id}")
-            continue
-        entries.append(MdcEntry(card_json=card_json, instance_id=worker_id))
-    return entries
-
-
 class VirtualConnector(PlannerConnector):
-    """
-    This is a virtual connector for planner to output scaling decisions to non-native environments
-    This virtual connector does not actually scale the deployment, instead, it communicates with the non-native environment through dynamo-runtime's VirtualConnectorCoordinator.
-    The deployment environment needs to use VirtualConnectorClient (in the Rust/Python bindings) to read from the scaling decisions and update report scaling status.
+    """Coordinate planner scaling decisions for non-native environments.
+
+    The connector does not scale a deployment directly. It publishes decisions
+    through the Dynamo runtime's ``VirtualConnectorCoordinator``; the deployment
+    environment consumes them with ``VirtualConnectorClient`` and reports scaling
+    status back to the coordinator.
+
+    Virtual deployments do not have a Kubernetes API from which to derive worker
+    component and endpoint metadata. They therefore require a
+    ``worker_info_provider`` that resolves ``WorkerInfo`` from runtime MDC. The
+    planner factory normally supplies its ``RuntimeFpmProvider``, sharing the same
+    runtime discovery source used for forward-pass metrics.
     """
 
     def __init__(
         self,
         runtime: DistributedRuntime,
         dynamo_namespace: str,
+        worker_info_provider: WorkerInfoProvider,
         model_name: Optional[str] = None,
     ):
-        self.connector = VirtualConnectorCoordinator(
+        """Initialize a virtual deployment connector.
+
+        Args:
+            runtime: Distributed runtime used for coordination and discovery.
+            dynamo_namespace: Namespace containing the virtual deployment.
+            worker_info_provider: Required source of runtime WorkerInfo/MDC used
+                to locate worker endpoints. ``construct_environment`` normally
+                provides a ``RuntimeFpmProvider``.
+            model_name: Model name reported by the deployment.
+        """
+        self.coord = VirtualConnectorCoordinator(
             runtime,
             dynamo_namespace,
             SCALING_CHECK_INTERVAL,
@@ -89,25 +72,11 @@ class VirtualConnector(PlannerConnector):
 
         self.model_name = model_name.lower()  # normalize model name to lowercase (MDC)
 
+        self.runtime = runtime
         self.dynamo_namespace = dynamo_namespace
-
-        # MDC sources injected by NativePlannerBase after FPM subscribers exist.
-        self._prefill_mdc_sub: Optional["FpmEventSubscriber"] = None
-        self._decode_mdc_sub: Optional["FpmEventSubscriber"] = None
-
-    def set_mdc_subscribers(
-        self,
-        prefill: Optional["FpmEventSubscriber"] = None,
-        decode: Optional["FpmEventSubscriber"] = None,
-    ) -> None:
-        """Inject FPM subscribers used as the MDC source for get_worker_info.
-
-        VirtualConnector has no K8s CRDs to read, so it reads model cards
-        from the discovery watch maintained by the FPM subscribers.  Until
-        this is called, get_worker_info returns backend defaults only.
-        """
-        self._prefill_mdc_sub = prefill
-        self._decode_mdc_sub = decode
+        self.worker_info_provider = worker_info_provider
+        self._worker_info: dict[SubComponentType, WorkerInfo] = {}
+        self._worker_clients: dict[SubComponentType, tuple[str, Any]] = {}
 
     def get_worker_info(
         self,
@@ -115,60 +84,42 @@ class VirtualConnector(PlannerConnector):
         backend: str = "vllm",
         component_name: "str | None" = None,
     ) -> WorkerInfo:
-        """Populate WorkerInfo from discovery-sourced MDCs, with defaults fallback.
-
-        Called by ``resolve_worker_info`` (once, at init) and by the tick-loop
-        refresh (once cards are available in discovery).
-        """
-        subscriber = (
-            self._prefill_mdc_sub
-            if sub_component_type == SubComponentType.PREFILL
-            else self._decode_mdc_sub
+        worker_info = self.worker_info_provider.get_worker_info(
+            sub_component_type, backend
         )
-        entries = _mdc_entries_from_subscriber(subscriber)
-        entry = select_entry(entries, sub_component_type)
-        if entry is not None:
-            info = worker_info_from_mdc(
-                entry,
-                sub_component_type,
-                backend=backend,
-            )
-            if not info.model_name:
-                info.model_name = self.model_name
-            return info
+        self._worker_info[sub_component_type] = worker_info
+        return worker_info
 
-        info = build_worker_info_from_defaults(
-            backend, sub_component_type, k8s_name_override=component_name
-        )
-        info.model_name = self.model_name
-        return info
-
-    async def _async_init(self):
+    async def async_init(self):
         """Async initialization that must be called after __init__"""
-        await self.connector.async_init()
+        await self.coord.async_init()
 
     async def _update_scaling_decision(
         self, num_prefill: Optional[int] = None, num_decode: Optional[int] = None
     ):
         """Update scaling decision"""
-        await self.connector.update_scaling_decision(num_prefill, num_decode)
+        await self.coord.update_scaling_decision(num_prefill, num_decode)
 
     async def _wait_for_scaling_completion(self):
         """Wait for the deployment environment to report that scaling is complete"""
-        await self.connector.wait_for_scaling_completion()
+        await self.coord.wait_for_scaling_completion()
 
     async def add_component(
         self, sub_component_type: SubComponentType, blocking: bool = True
     ):
         """Add a component by increasing its replica count by 1"""
-        state = self.connector.read_state()
+        state = self.coord.read_state()
 
         if sub_component_type == SubComponentType.PREFILL:
-            await self._update_scaling_decision(
-                num_prefill=state.num_prefill_workers + 1
-            )
+            current = state.num_prefill_workers
+            if current < 0:
+                current = await self._get_actual_worker_count(sub_component_type)
+            await self._update_scaling_decision(num_prefill=current + 1)
         elif sub_component_type == SubComponentType.DECODE:
-            await self._update_scaling_decision(num_decode=state.num_decode_workers + 1)
+            current = state.num_decode_workers
+            if current < 0:
+                current = await self._get_actual_worker_count(sub_component_type)
+            await self._update_scaling_decision(num_decode=current + 1)
 
         if blocking:
             await self._wait_for_scaling_completion()
@@ -177,13 +128,19 @@ class VirtualConnector(PlannerConnector):
         self, sub_component_type: SubComponentType, blocking: bool = True
     ):
         """Remove a component by decreasing its replica count by 1"""
-        state = self.connector.read_state()
+        state = self.coord.read_state()
 
         if sub_component_type == SubComponentType.PREFILL:
-            new_count = max(0, state.num_prefill_workers - 1)
+            current = state.num_prefill_workers
+            if current < 0:
+                current = await self._get_actual_worker_count(sub_component_type)
+            new_count = max(0, current - 1)
             await self._update_scaling_decision(num_prefill=new_count)
         elif sub_component_type == SubComponentType.DECODE:
-            new_count = max(0, state.num_decode_workers - 1)
+            current = state.num_decode_workers
+            if current < 0:
+                current = await self._get_actual_worker_count(sub_component_type)
+            new_count = max(0, current - 1)
             await self._update_scaling_decision(num_decode=new_count)
 
         if blocking:
@@ -228,8 +185,80 @@ class VirtualConnector(PlannerConnector):
 
     async def wait_for_deployment_ready(self, include_planner: bool = True):
         """Wait for the deployment to be ready"""
+        del include_planner
         await self._wait_for_scaling_completion()
 
-    async def get_model_name(self, **_kwargs) -> str:
+    def get_worker_runtime_namespace(self, base_dynamo_namespace: str) -> str:
+        return base_dynamo_namespace
+
+    async def get_actual_worker_counts(
+        self,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
+    ) -> tuple[int, int, bool]:
+        """Read active workers from discovery and scaling status from the client ack.
+
+        Coordinator worker counts are desired targets, not observations. Runtime
+        endpoint discovery is the source of truth for active workers, while the
+        coordinator's decision acknowledgement indicates whether scaling is still
+        in progress.
+        """
+        prefill_count = 0
+        decode_count = 0
+        if prefill_component_name is not None:
+            prefill_count = await self._get_actual_worker_count(
+                SubComponentType.PREFILL
+            )
+        if decode_component_name is not None:
+            decode_count = await self._get_actual_worker_count(SubComponentType.DECODE)
+        state = self.coord.read_state()
+        stable = await self.coord.is_scaling_ready()
+        if prefill_component_name is not None and state.num_prefill_workers >= 0:
+            stable = stable and prefill_count == state.num_prefill_workers
+        if decode_component_name is not None and state.num_decode_workers >= 0:
+            stable = stable and decode_count == state.num_decode_workers
+        return prefill_count, decode_count, stable
+
+    async def _get_actual_worker_count(
+        self, sub_component_type: SubComponentType
+    ) -> int:
+        worker_info = self._worker_info.get(sub_component_type)
+        if worker_info is None:
+            worker_info = self.get_worker_info(sub_component_type)
+        if not worker_info.component_name or not worker_info.endpoint:
+            logger.warning(
+                "WorkerInfo missing component or endpoint for %s; reporting zero workers",
+                sub_component_type.value,
+            )
+            return 0
+
+        endpoint_name = (
+            f"{self.dynamo_namespace}.{worker_info.component_name}."
+            f"{worker_info.endpoint}"
+        )
+        cached = self._worker_clients.get(sub_component_type)
+        if cached is None or cached[0] != endpoint_name:
+            client = await self.runtime.endpoint(endpoint_name).client()
+            self._worker_clients[sub_component_type] = (endpoint_name, client)
+            # Runtime discovery populates a new client's initial instance snapshot
+            # asynchronously. Preserve the pre-refactor settling window before the
+            # first read so existing workers are not transiently reported as zero.
+            await asyncio.sleep(0.1)
+        else:
+            client = cached[1]
+        return len(client.instance_ids())
+
+    def get_model_name(
+        self, require_prefill: bool = True, require_decode: bool = True
+    ) -> str:
         """Get the model name from the deployment"""
         return self.model_name
+
+    def get_gpu_counts(
+        self,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+    ) -> tuple[Optional[int], Optional[int]]:
+        """Virtual deployments do not expose GPU shape through the coordinator."""
+        del require_prefill, require_decode
+        return None, None

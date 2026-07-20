@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod args;
+#[cfg(feature = "dc-ckf-bench")]
+pub mod dc_ckf_shared;
+pub mod issuer;
 pub mod progress;
 pub mod replay;
 pub mod results;

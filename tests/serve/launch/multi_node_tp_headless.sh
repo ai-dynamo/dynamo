@@ -13,11 +13,8 @@ trap 'echo "Cleaning up..."; kill 0' EXIT
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 WORKER_MODULE="dynamo.vllm"
 
-# --unified switches both nodes to the unified backend entry point
-# (dynamo.vllm.unified_main), exercising the unified headless code path.
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --unified) WORKER_MODULE="dynamo.vllm.unified_main"; shift ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
 done

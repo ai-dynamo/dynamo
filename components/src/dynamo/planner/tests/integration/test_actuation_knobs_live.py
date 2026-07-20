@@ -71,7 +71,7 @@ if not (_IN_CLUSTER and _DGD_NAME and _K8S_NAMESPACE):
 # Imports that pull in the kubernetes runtime (deferred until after gating).
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica  # noqa: E402
 from dynamo.planner.connectors.kubernetes import KubernetesConnector  # noqa: E402
-from dynamo.planner.connectors.kubernetes_api import KubernetesAPI  # noqa: E402
+from dynamo.planner.connectors.clients.kubernetes_api import KubernetesAPI  # noqa: E402
 from dynamo.planner.core.budget import POWER_ANNOTATION_KEY  # noqa: E402
 from dynamo.planner.errors import PlannerError  # noqa: E402
 

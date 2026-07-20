@@ -86,7 +86,10 @@ def _mock_pod(name: str, annotation_value=None) -> Mock:
 def _bare_planner(connector, config, require_prefill=True, require_decode=True):
     """Return a NativePlannerBase instance without calling __init__."""
     planner = object.__new__(NativePlannerBase)
-    planner.connector = connector
+    environment = Mock()
+    environment.controller = connector
+    environment.apply_scaling = AsyncMock()
+    planner.environment = environment
     planner.config = config
     planner.require_prefill = require_prefill
     planner.require_decode = require_decode
@@ -127,7 +130,6 @@ class TestApplyScalingTargets:
         cfg = Mock()
         cfg.advisory = True
         planner = _bare_planner(connector, cfg)
-        connector.set_component_replicas = AsyncMock()
 
         targets = [
             TargetReplica(
@@ -138,14 +140,13 @@ class TestApplyScalingTargets:
         ]
         await planner._apply_scaling_targets(targets, blocking=False)
 
-        connector.set_component_replicas.assert_not_called()
+        planner.environment.apply_scaling.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_non_advisory_mode_calls_connector(self, connector):
         cfg = Mock()
         cfg.advisory = False
         planner = _bare_planner(connector, cfg)
-        connector.set_component_replicas = AsyncMock()
 
         targets = [
             TargetReplica(
@@ -156,7 +157,7 @@ class TestApplyScalingTargets:
         ]
         await planner._apply_scaling_targets(targets, blocking=False)
 
-        connector.set_component_replicas.assert_called_once_with(
+        planner.environment.apply_scaling.assert_awaited_once_with(
             targets, blocking=False
         )
 
@@ -165,11 +166,10 @@ class TestApplyScalingTargets:
         cfg = Mock()
         cfg.advisory = False
         planner = _bare_planner(connector, cfg)
-        connector.set_component_replicas = AsyncMock()
 
         await planner._apply_scaling_targets([], blocking=False)
 
-        connector.set_component_replicas.assert_not_called()
+        planner.environment.apply_scaling.assert_not_called()
 
 
 # ===========================================================================
@@ -186,7 +186,7 @@ class TestPatchPodAnnotation:
 
         # Call the real method body by directly invoking it on a bare API object.
         # core_api is already a Mock on mock_kube_api; just verify the call shape.
-        from dynamo.planner.connectors.kubernetes_api import KubernetesAPI
+        from dynamo.planner.connectors.clients.kubernetes_api import KubernetesAPI
 
         api = object.__new__(KubernetesAPI)
         api.core_api = Mock()
