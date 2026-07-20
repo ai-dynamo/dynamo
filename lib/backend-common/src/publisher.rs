@@ -20,7 +20,8 @@ use std::sync::Arc;
 use dynamo_llm::kv_router::publisher::{
     KvEventPublisher, KvEventSourceConfig, WorkerMetricsPublisher,
 };
-use dynamo_runtime::component::Component;
+use dynamo_runtime::component::Endpoint;
+use dynamo_runtime::protocols::EndpointId;
 
 use crate::engine::KvEventSource;
 use crate::error::{BackendError, DynamoError, ErrorType};
@@ -45,7 +46,8 @@ pub(crate) struct PublisherHandles {
 // snapshot router-publisher construction below is async because
 // `create_endpoint` does.
 fn setup_kv_publishers(
-    component: &Component,
+    endpoint: &Endpoint,
+    kv_state_endpoint: &EndpointId,
     sources: Vec<KvEventSource>,
     kv_cache_block_size: u32,
     enable_local_indexer: bool,
@@ -66,8 +68,9 @@ fn setup_kv_publishers(
             ),
             KvEventSource::Push { on_ready, .. } => (None, Some(on_ready)),
         };
-        let publisher = KvEventPublisher::new_with_local_indexer(
-            component.clone(),
+        let publisher = KvEventPublisher::new_with_local_indexer_at(
+            endpoint.clone(),
+            kv_state_endpoint.clone(),
             kv_cache_block_size,
             source_config,
             enable_local_indexer,
@@ -95,7 +98,7 @@ fn setup_kv_publishers(
 /// KV router. Constructed eagerly so the `SnapshotPublisher` can route
 /// per-rank writes inline.
 async fn build_router_publishers(
-    component: &Component,
+    endpoint: &Endpoint,
     dp_ranks: &[u32],
 ) -> Result<HashMap<u32, Arc<WorkerMetricsPublisher>>, DynamoError> {
     let mut out = HashMap::with_capacity(dp_ranks.len());
@@ -104,7 +107,7 @@ async fn build_router_publishers(
             publisher_err(format!("metrics publisher new (dp_rank={dp_rank}): {e}"))
         })?;
         publisher
-            .create_endpoint(component.clone())
+            .create_endpoint(endpoint.clone())
             .await
             .map_err(|e| {
                 publisher_err(format!(
@@ -124,8 +127,10 @@ fn publisher_err(message: String) -> DynamoError {
         .build()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn setup_publishers(
-    component: &Component,
+    endpoint: &Endpoint,
+    kv_state_endpoint: &EndpointId,
     engine_metrics: &EngineMetrics,
     kv_sources: Vec<KvEventSource>,
     dp_ranks: Vec<u32>,
@@ -137,7 +142,13 @@ pub(crate) async fn setup_publishers(
     // router can't translate token IDs into cache blocks. Snapshot publisher
     // is independent — load reporting works regardless of cache structure.
     let kv_publishers = if let Some(block_size) = kv_cache_block_size {
-        setup_kv_publishers(component, kv_sources, block_size, enable_local_indexer)?
+        setup_kv_publishers(
+            endpoint,
+            kv_state_endpoint,
+            kv_sources,
+            block_size,
+            enable_local_indexer,
+        )?
     } else {
         if !kv_sources.is_empty() {
             tracing::warn!(
@@ -151,7 +162,7 @@ pub(crate) async fn setup_publishers(
     let snapshot_publisher = if dp_ranks.is_empty() {
         None
     } else {
-        let router_publishers = build_router_publishers(component, &dp_ranks).await?;
+        let router_publishers = build_router_publishers(endpoint, &dp_ranks).await?;
         let gauges = Arc::new(ComponentGauges::new(engine_metrics, &dp_ranks)?);
         let publisher = Arc::new(SnapshotPublisher::new(gauges, router_publishers));
         if let Some(on_ready) = on_publisher_ready {

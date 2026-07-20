@@ -81,7 +81,7 @@ def _make_planner(prometheus_enabled: bool = True) -> NativePlannerBase:
             load_scaling_down_sensitivity=80,
             load_min_observations=5,
         )
-        planner = NativePlannerBase(None, config)
+        planner = NativePlannerBase(None, config, Mock())
     planner.prometheus_port = 1 if prometheus_enabled else 0
     return planner
 

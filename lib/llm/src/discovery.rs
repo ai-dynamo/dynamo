@@ -4,6 +4,18 @@
 mod model;
 pub use model::Model;
 
+pub mod kv_source_membership;
+pub use kv_source_membership::{
+    KvEventSource, KvSourceAdvertisement, KvSourceAmbiguity, KvSourceId, KvSourceKey,
+    KvSourceMembership, KvSourceMembershipError, KvSourceMembershipView, KvSourceStatus,
+    KvSourceTransition, KvStateEndpointResolution, PublisherId, resolve_kv_state_endpoint,
+};
+
+mod kv_source_watch;
+#[cfg(test)]
+pub(crate) use kv_source_watch::KvSourceMembershipCoordinator;
+pub use kv_source_watch::KvSourceMembershipWatch;
+
 mod model_manager;
 pub use model_manager::{ModelManager, ModelManagerError, UNKNOWN_METRIC_MODEL};
 

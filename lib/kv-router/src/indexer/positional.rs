@@ -270,7 +270,7 @@ impl SyncIndexer for PositionalIndexer {
                     }
                 }
                 WorkerTask::RemoveWorker { worker_id, .. } => {
-                    self.remove_or_clear_worker_blocks_impl(&mut worker_blocks, worker_id, false);
+                    self.remove_worker_blocks_impl(&mut worker_blocks, worker_id);
                 }
                 WorkerTask::RemoveWorkerDpRank {
                     worker_id, dp_rank, ..
@@ -350,7 +350,7 @@ impl PositionalIndexer {
                 Ok(())
             }
             KvCacheEventData::Cleared => {
-                self.clear_worker_blocks_impl(worker_blocks, worker_id);
+                self.remove_worker_dp_rank_impl(worker_blocks, worker_id, worker.dp_rank);
                 Ok(())
             }
         }
@@ -467,16 +467,6 @@ impl PositionalIndexer {
         Ok(())
     }
 
-    /// Clear all blocks for a specific worker_id (all dp_ranks), but keep worker tracked.
-    /// Static version for use in worker threads.
-    fn clear_worker_blocks_impl(
-        &self,
-        worker_blocks: &mut FxHashMap<WorkerWithDpRank, LevelIndex>,
-        worker_id: WorkerId,
-    ) {
-        self.remove_or_clear_worker_blocks_impl(worker_blocks, worker_id, true);
-    }
-
     fn remove_worker_dp_rank_impl(
         &self,
         worker_blocks: &mut FxHashMap<WorkerWithDpRank, LevelIndex>,
@@ -493,14 +483,10 @@ impl PositionalIndexer {
         }
     }
 
-    /// Helper function to remove or clear blocks for a worker.
-    /// If `keep_worker` is true, the worker remains tracked with empty blocks.
-    /// If `keep_worker` is false, the worker is completely removed.
-    fn remove_or_clear_worker_blocks_impl(
+    fn remove_worker_blocks_impl(
         &self,
         worker_blocks: &mut FxHashMap<WorkerWithDpRank, LevelIndex>,
         worker_id: WorkerId,
-        keep_worker: bool,
     ) {
         let workers: Vec<WorkerWithDpRank> = worker_blocks
             .iter()
@@ -515,11 +501,6 @@ impl PositionalIndexer {
                         let _ = entry.remove(*seq_hash, worker);
                     }
                 }
-            }
-
-            if keep_worker {
-                // Re-insert worker with empty map to keep it tracked
-                worker_blocks.insert(worker, FxHashMap::default());
             }
         }
     }

@@ -312,8 +312,7 @@ markers = [
     "framework_only: marks standard framework deployment tests (vllm, sglang, trtllm)",
     "framework_with_gaie: marks tests for GAIE (Gateway API Inference Extension) deployment",
     "dynamocheckpoint: marks tests for the DynamoCheckpoint controller deploy path",
-    "unified: marks unified-backend e2e tests (LLMEngine ABC + Worker, DEP #8251)",
-    "elastic_ep: marks vLLM elastic expert-parallelism (ePLB) scaling tests (scale_elastic_ep over the Ray DP backend)",
+    "unified: marks common backend-interface e2e tests (BaseEngine + Worker)",
     # Built-in markers
     "skip: skip this test",
     "skipif: skip if condition is true",

@@ -66,7 +66,6 @@ impl RelayLaneConfig {
 pub struct RelayManifest {
     lanes: [RelayLaneConfig; DC_COUNT],
     worker_to_lane: FxHashMap<WorkerWithDpRank, usize>,
-    worker_lane_masks: FxHashMap<WorkerId, u16>,
     active_lanes: u16,
 }
 
@@ -81,10 +80,6 @@ impl RelayManifest {
         worker_to_lane
             .try_reserve(member_count)
             .map_err(|_| CkfBuildError::AllocationFailed)?;
-        let mut worker_lane_masks = FxHashMap::default();
-        worker_lane_masks
-            .try_reserve(member_count)
-            .map_err(|_| CkfBuildError::AllocationFailed)?;
         let mut active_lanes = 0u16;
 
         for (lane, config) in lanes.iter().enumerate() {
@@ -95,14 +90,12 @@ impl RelayManifest {
                 if worker_to_lane.insert(worker, lane).is_some() {
                     return Err(CkfBuildError::DuplicateWorker { worker });
                 }
-                *worker_lane_masks.entry(worker.worker_id).or_insert(0) |= 1u16 << lane;
             }
         }
 
         Ok(Self {
             lanes,
             worker_to_lane,
-            worker_lane_masks,
             active_lanes,
         })
     }
@@ -135,10 +128,6 @@ impl RelayManifest {
 
     fn lane_for(&self, worker: WorkerWithDpRank) -> Option<usize> {
         self.worker_to_lane.get(&worker).copied()
-    }
-
-    fn lane_mask_for_worker(&self, worker_id: WorkerId) -> Option<u16> {
-        self.worker_lane_masks.get(&worker_id).copied()
     }
 }
 
@@ -988,44 +977,18 @@ impl RouterLocalCkfPipeline {
         }
 
         let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
-        let mask = match &event.event.data {
-            KvCacheEventData::Stored(_) | KvCacheEventData::Removed(_) => {
-                let Some(lane) = self.aggregator.manifest.lane_for(worker) else {
-                    tracing::warn!(
-                        worker_id = worker.worker_id,
-                        dp_rank = worker.dp_rank,
-                        event_id = event.event.event_id,
-                        "CKF event references an unknown worker/rank"
-                    );
-                    return CkfEventOutcome::failure(KvCacheEventError::InvalidBlockSequence);
-                };
-                1u16 << lane
-            }
-            KvCacheEventData::Cleared => {
-                let Some(mask) = self
-                    .aggregator
-                    .manifest
-                    .lane_mask_for_worker(event.worker_id)
-                else {
-                    tracing::warn!(
-                        worker_id = event.worker_id,
-                        event_id = event.event.event_id,
-                        "CKF clear references an unknown worker"
-                    );
-                    return CkfEventOutcome::failure(KvCacheEventError::InvalidBlockSequence);
-                };
-                mask
-            }
+        let Some(lane) = self.aggregator.manifest.lane_for(worker) else {
+            tracing::warn!(
+                worker_id = worker.worker_id,
+                dp_rank = worker.dp_rank,
+                event_id = event.event.event_id,
+                "CKF event references an unknown worker/rank"
+            );
+            return CkfEventOutcome::failure(KvCacheEventError::InvalidBlockSequence);
         };
+        let mask = 1u16 << lane;
 
-        let Some(capacity) = self
-            .aggregator
-            .bucket_count
-            .checked_mul(mask.count_ones() as usize)
-        else {
-            return CkfEventOutcome::failure(KvCacheEventError::CapacityExhausted);
-        };
-        if let Err(error) = batch.try_reserve(capacity) {
+        if let Err(error) = batch.try_reserve(self.aggregator.bucket_count) {
             return CkfEventOutcome::failure(error);
         }
 
@@ -1099,23 +1062,18 @@ impl RouterLocalCkfPipeline {
                     }
                 }
                 KvCacheEventData::Cleared => {
-                    for (lane, state) in guards.iter_mut().enumerate() {
-                        let Some(state) = state.as_mut() else {
-                            continue;
-                        };
-                        for member in self.aggregator.manifest.lanes[lane]
-                            .members
-                            .iter()
-                            .copied()
-                            .filter(|member| member.worker_id == event.worker_id)
-                        {
-                            state.remove_member(
-                                member,
-                                &self.aggregator.addressing,
-                                self.aggregator.config.max_kicks,
-                                &mut outcome.first_error,
-                            );
-                        }
+                    if let Some(state) = guards[lane].as_mut() {
+                        state.remove_member(
+                            worker,
+                            &self.aggregator.addressing,
+                            self.aggregator.config.max_kicks,
+                            &mut outcome.first_error,
+                        );
+                    } else {
+                        retain_first_error(
+                            &mut outcome.first_error,
+                            KvCacheEventError::IndexerInvariantViolation,
+                        );
                     }
                 }
             }
@@ -1165,10 +1123,17 @@ impl RouterLocalCkfPipeline {
         worker_id: WorkerId,
         batch: &mut CkfDeltaBatch,
     ) -> CkfEventOutcome {
-        let Some(mask) = self.aggregator.manifest.lane_mask_for_worker(worker_id) else {
+        let mask = self
+            .aggregator
+            .manifest
+            .worker_to_lane
+            .iter()
+            .filter(|(worker, _)| worker.worker_id == worker_id)
+            .fold(0u16, |mask, (_, lane)| mask | (1u16 << lane));
+        if mask == 0 {
             batch.reset(self.aggregator.format);
             return CkfEventOutcome::success(false);
-        };
+        }
         self.remove_members(mask, batch, |member| member.worker_id == worker_id)
     }
 

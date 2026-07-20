@@ -12,7 +12,8 @@ use dynamo_runtime::{
 use futures::{StreamExt, stream};
 
 use super::{
-    AffinityAcquire, AffinityCoordinator, AffinityTarget, LlmResponse, affinity_id, explicit_target,
+    AffinityAcquire, AffinityCoordinator, AffinityTarget, LlmResponse, affinity_id,
+    coordinator::ReplicaApplyOutcome, explicit_target,
 };
 use crate::{
     preprocessor::PreprocessedRequest,
@@ -495,4 +496,156 @@ async fn session_affinity_enforces_id_and_entry_limits() {
         coordinator.acquire(&second_id, None).await.unwrap(),
         AffinityAcquire::Initialize(_)
     ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_affinity_replica_applies_first_live_binding_wins() {
+    let coordinator = coordinator();
+    let local_target = target(7, Some(0));
+    let conflicting_target = target(8, Some(1));
+
+    assert_eq!(
+        coordinator.apply_replica_update_for_test("replicated", local_target),
+        ReplicaApplyOutcome::Inserted
+    );
+    assert_eq!(
+        coordinator
+            .query_target(&SessionAffinityId::new("replicated"), None)
+            .unwrap(),
+        Some(local_target)
+    );
+    assert_eq!(
+        coordinator.apply_replica_update_for_test("replicated", conflicting_target),
+        ReplicaApplyOutcome::IgnoredConflict
+    );
+
+    coordinator.expire_for_test(&SessionAffinityId::new("replicated"));
+    assert_eq!(
+        coordinator.apply_replica_update_for_test("replicated", conflicting_target),
+        ReplicaApplyOutcome::ReplacedExpired
+    );
+    assert_eq!(
+        coordinator
+            .query_target(&SessionAffinityId::new("replicated"), None)
+            .unwrap(),
+        Some(conflicting_target)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_affinity_replica_duplicate_refreshes_local_ttl() {
+    let coordinator = coordinator();
+    let replicated_id = SessionAffinityId::new("replicated");
+    let replicated_target = target(7, Some(0));
+
+    assert_eq!(
+        coordinator.apply_replica_update_for_test("replicated", replicated_target),
+        ReplicaApplyOutcome::Inserted
+    );
+    tokio::time::advance(Duration::from_secs(9)).await;
+    assert_eq!(
+        coordinator.apply_replica_update_for_test("replicated", replicated_target),
+        ReplicaApplyOutcome::Refreshed
+    );
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert_eq!(
+        coordinator.query_target(&replicated_id, None).unwrap(),
+        Some(replicated_target)
+    );
+    tokio::time::advance(Duration::from_secs(9)).await;
+    assert_eq!(
+        coordinator.query_target(&replicated_id, None).unwrap(),
+        None
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_affinity_replica_ignores_initializing_sessions() {
+    let coordinator = coordinator();
+    let initializing = coordinator.acquire(&session_id(), None).await.unwrap();
+
+    assert_eq!(
+        coordinator.apply_replica_update_for_test(session_id().as_str(), target(7, Some(0))),
+        ReplicaApplyOutcome::IgnoredInitializing
+    );
+    assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
+    drop(initializing);
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_affinity_replica_enforces_id_and_entry_limits() {
+    let coordinator = AffinityCoordinator::with_test_limits(1, 8);
+
+    assert_eq!(
+        coordinator.apply_replica_update_for_test("123456789", target(7, Some(0))),
+        ReplicaApplyOutcome::RejectedSessionId
+    );
+    assert_eq!(
+        coordinator.apply_replica_update_for_test("first", target(7, Some(0))),
+        ReplicaApplyOutcome::Inserted
+    );
+    assert_eq!(
+        coordinator.apply_replica_update_for_test("second", target(8, Some(0))),
+        ReplicaApplyOutcome::RejectedCapacity
+    );
+    assert_eq!(coordinator.entry_count(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_affinity_publishes_after_dispatch_and_lease_completion() {
+    let coordinator = coordinator();
+    let mut updates = coordinator.enable_test_replica(99, 4);
+    let selected_target = target(7, Some(0));
+    let operation = coordinator.acquire(&session_id(), None).await.unwrap();
+    let stream = operation
+        .into_stream(selected_target, response_stream(1))
+        .unwrap();
+
+    let after_dispatch = updates.recv().await.unwrap();
+    assert_eq!(after_dispatch.session_id, session_id().as_str());
+    assert_eq!(after_dispatch.worker_id, selected_target.worker_id);
+    assert_eq!(after_dispatch.dp_rank, selected_target.dp_rank);
+    assert_eq!(after_dispatch.router_id, 99);
+
+    drop(stream);
+    let after_completion = updates.recv().await.unwrap();
+    assert_eq!(after_completion, after_dispatch);
+    assert!(updates.try_recv().is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_affinity_completion_restores_expired_remote_binding() {
+    let origin = coordinator();
+    let mut updates = origin.enable_test_replica(99, 4);
+    let replica = coordinator();
+    let replicated_target = target(7, Some(0));
+    let operation = origin.acquire(&session_id(), None).await.unwrap();
+    let stream = operation
+        .into_stream(replicated_target, response_stream(1))
+        .unwrap();
+
+    let after_dispatch = updates.recv().await.unwrap();
+    assert_eq!(
+        replica.apply_replica_update_for_test(
+            after_dispatch.session_id,
+            target(after_dispatch.worker_id, after_dispatch.dp_rank),
+        ),
+        ReplicaApplyOutcome::Inserted
+    );
+    tokio::time::advance(Duration::from_secs(11)).await;
+    assert_eq!(replica.query_target(&session_id(), None).unwrap(), None);
+
+    drop(stream);
+    let after_completion = updates.recv().await.unwrap();
+    assert_eq!(
+        replica.apply_replica_update_for_test(
+            after_completion.session_id,
+            target(after_completion.worker_id, after_completion.dp_rank),
+        ),
+        ReplicaApplyOutcome::ReplacedExpired
+    );
+    assert_eq!(
+        replica.query_target(&session_id(), None).unwrap(),
+        Some(replicated_target)
+    );
 }

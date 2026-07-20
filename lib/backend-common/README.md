@@ -415,8 +415,8 @@ lib/backend-common/
         mocker/          # CPU-only reference backend + docker-compose stack
 ```
 
-The Python `Worker` shim that drives this crate from `dynamo.*.unified_main`
-entry points lives at
+The Python `Worker` shim that drives this crate from a backend's entry point
+(e.g. `dynamo.common.backend.sample_main`) lives at
 [`components/src/dynamo/common/backend/worker.py`](../../components/src/dynamo/common/backend/worker.py).
 
 ## See Also
