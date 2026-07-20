@@ -177,7 +177,7 @@ def test_config_is_closed_loop_and_uses_requested_encoder_limits(
         image_size=(300, 300),
     )
     assert smoke_config.concurrencies == [4]
-    assert smoke_config.conversation_num == 1
+    assert smoke_config.conversation_num == 4
     assert smoke_config.warmup_count == 1
     assert smoke_config.osl == 1
 
