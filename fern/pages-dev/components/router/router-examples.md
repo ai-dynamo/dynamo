@@ -33,7 +33,9 @@ The `KvRouter` provides the following methods:
   - With `request_id`: Updates router lifecycle state to track the request. **Note**: If used with `request_id`, you must call `mark_prefill_complete()` and `free()` at the appropriate lifecycle points to maintain accurate load tracking
   - With `update_indexer=True`: Records the selected worker in the approximate indexer for future overlap predictions. This is only meaningful when `use_kv_events=False`
 
-- **`get_potential_loads(token_ids)`**: Get detailed load information for all workers, including potential prefill tokens and active decode blocks. Returns a list of load dictionaries.
+- **`get_potential_loads(token_ids)`**: Get detailed load information for all workers, including potential prefill tokens, potential decode blocks, and active requests. Returns a list of load dictionaries.
+
+- **`get_overlap_scores(token_ids, ...)`**: Get per-worker KV overlap by storage tier, including shared-cache overlap when configured.
 
 - **`mark_prefill_complete(request_id)`**: Signal that a request has completed its prefill phase. Only used for [manual lifecycle management](#2-manual-state-management-advanced) when using `best_worker()` for manual routing instead of `generate()`.
 
