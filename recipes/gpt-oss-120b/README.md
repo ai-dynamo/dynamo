@@ -1,6 +1,11 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # GPT-OSS-120B Recipes
 
-Production-ready deployment for **GPT-OSS-120B** using TensorRT-LLM on Blackwell (GB200) hardware.
+Deploy `openai/gpt-oss-120b` on Blackwell GPUs with Dynamo.
 
 ## Available Configurations
 
@@ -8,12 +13,16 @@ Production-ready deployment for **GPT-OSS-120B** using TensorRT-LLM on Blackwell
 |--------------|------|------|-------------|
 | [**trtllm/agg**](trtllm/agg/) | 4x GB200 | Aggregated | WideEP, ARM64 |
 | [**trtllm/disagg**](trtllm/disagg/) | 5x Blackwell (GB200/B200) | Disaggregated | Prefill/Decode split |
+| [**vllm/agg-snapshot-gms**](vllm/agg-snapshot-gms/) | 1x B200 | Aggregated | Experimental Snapshot and GMS restore |
 
 ## Prerequisites
 
 1. **Dynamo Platform installed** — See [Kubernetes Deployment Guide](../../docs/kubernetes/README.md)
 2. **GPU cluster** with GB200 (Blackwell) GPUs
 3. **HuggingFace token** with access to the model
+
+The experimental vLLM configuration has additional Snapshot, GMS, driver, DRA,
+storage, and image-build prerequisites in its leaf README.
 
 ## Quick Start
 
@@ -54,5 +63,7 @@ curl http://localhost:8000/v1/chat/completions \
 ## Notes
 
 - Update `storageClassName` in `model-cache/model-cache.yaml` before deploying
-- This recipe requires ARM64 (GB200) nodes — it will not run on x86 Hopper/Ampere hardware
-- Update the container image tag in `deploy.yaml` to match your Dynamo release version
+- The TensorRT-LLM recipe requires ARM64 GB200 nodes; the vLLM Snapshot recipe
+  requires an x86_64 B200 node.
+- Update container image tags in `deploy.yaml` to match your Dynamo release
+  version.
