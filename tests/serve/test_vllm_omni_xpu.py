@@ -20,7 +20,6 @@ from tests.serve.common import (
 )
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payloads import (
-    AudioSpeechPayload,
     I2VPayload,
     ImageGenerationPayload,
     VideoGenerationPayload,
