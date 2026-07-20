@@ -273,6 +273,7 @@ ARG CUDA_CHECKPOINT_REF
 ARG CUDA_CHECKPOINT_SHA
 ARG DYNAMO_COMMIT_SHA
 
+# Jammy's Python is not PEP 668 managed, so CRIU's install-lib target invokes pip.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     ca-certificates \
@@ -288,6 +289,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-c-compiler \
     protobuf-compiler \
     python3 \
+    python3-pip \
     python3-protobuf \
     libgnutls28-dev \
     libnftables-dev \
