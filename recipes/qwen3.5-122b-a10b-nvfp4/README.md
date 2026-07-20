@@ -132,6 +132,12 @@ is system output tok/s per GPU at the best SLA-passing concurrency.
   quality regression: a spec-decode conv-state metadata mismatch between the prefill
   and decode workers causes the NIXL transfer to misplace the Mamba conv state,
   producing garbage output.
-- **MTP on aggregation** is likewise not shipped: it requires DS unset and, on this
-  workload, MTP-heavy decode starves prefill on the shared GPU (TTFT regressions)
-  for no throughput win.
+- **MTP on aggregation** is likewise not shipped. Output is *correct* in isolation
+  (agg + MTP stays coherent even on a forced Mamba prefix-cache hit — the P↔D
+  transfer garbage above cannot occur without disaggregation), but MTP + prefix
+  caching forces `mamba_cache_mode='align'`, whose conv-state copy path crashes
+  under real concurrent long-context traffic — the same align-mode defect as above
+  (vLLM [#38898](https://github.com/vllm-project/vllm/issues/38898) / PR
+  [#40454](https://github.com/vllm-project/vllm/pull/40454); NVBug 6442165). Even
+  with DS unset to sidestep that, MTP-heavy decode starves prefill on the shared
+  GPU (TTFT regressions) for no throughput win.
