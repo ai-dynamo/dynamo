@@ -3,7 +3,7 @@
 
 #[cfg(feature = "claude-trace-export")]
 pub mod coding;
-#[cfg(feature = "multiturn")]
+#[cfg(feature = "kv-router-stress-support")]
 pub mod common;
 
 #[cfg(any(

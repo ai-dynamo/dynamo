@@ -42,6 +42,7 @@ dc-ckf-relay = [
   "dep:rustc-hash",
   "dep:sha2",
 ]
+kv-router-stress-support = ["dep:reqwest"]
 mooncake = [
   "router-bench",
   "dep:dynamo-mocker",
@@ -50,11 +51,11 @@ mooncake = [
   "dep:tokio-util",
 ]
 multiturn = [
+  "kv-router-stress-support",
   "dep:dynamo-mocker",
   "dep:futures-util",
   "dep:indicatif",
   "dep:rand",
-  "dep:reqwest",
 ]
 offline-replay = ["dep:dynamo-mocker"]
 router-bench = ["dynamo-kv-router/bench"]

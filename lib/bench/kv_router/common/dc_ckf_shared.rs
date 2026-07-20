@@ -495,7 +495,7 @@ impl PoolCapacityTracker {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-support"))]
 mod tests {
     use std::io::Write;
     use std::path::PathBuf;
