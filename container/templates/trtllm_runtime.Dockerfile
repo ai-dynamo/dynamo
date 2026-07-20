@@ -161,6 +161,20 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
     ldconfig
 ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
 
+# Positive codec guard: the shipped ffmpeg MUST expose the VP9 encoder and MUST
+# NOT expose any H.264/H.265/AAC/NVENC encoder. A missing/broken copy (no VP9)
+# or a codec regression fails the build here rather than at runtime — closing the
+# gap where an image with no working encoder passed every PR gate.
+RUN set -eu; \
+    ff="${IMAGEIO_FFMPEG_EXE:-ffmpeg}"; \
+    "$ff" -hide_banner -encoders 2>/dev/null | grep -qiE 'libvpx[-_]vp9' \
+      || { echo "ERROR: shipped ffmpeg ($ff) has no VP9 encoder" >&2; exit 1; }; \
+    if "$ff" -hide_banner -encoders 2>/dev/null \
+         | grep -iE 'h\.?264|h\.?265|hevc|(^| )aac|nvenc|cuvid|nvdec'; then \
+        echo "ERROR: shipped ffmpeg ($ff) exposes an H.264/H.265/AAC/NVENC encoder" >&2; \
+        exit 1; \
+    fi
+
 # Drop upstream's preinstalled opencv-python-headless (and the libav*/ffmpeg
 # copies its wheel vendors under opencv_python_headless.libs/). TRT-LLM made
 # cv2 an optional video extra (NVIDIA/TensorRT-LLM#16206) and its imports are
