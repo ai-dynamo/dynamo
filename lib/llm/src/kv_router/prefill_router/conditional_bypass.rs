@@ -4,9 +4,15 @@
 use anyhow::Result;
 use dynamo_kv_router::conditional_disagg::ConditionalDisaggDecisionInput;
 use dynamo_kv_router::protocols::WorkerWithDpRank;
+use dynamo_runtime::pipeline::{Context, SingleIn};
 
 use super::{InnerPrefillRouter, PrefillRouter};
-use crate::protocols::common::llm_backend::PreprocessedRequest;
+use crate::protocols::common::{
+    extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+    llm_backend::PreprocessedRequest,
+    preprocessor::RoutingHints,
+    timing::RequestPhase,
+};
 use crate::session_affinity::AffinityTarget;
 
 /// Conditional-disagg decision: which decode worker to pin the request to,
@@ -17,8 +23,38 @@ pub(super) struct ConditionalDisaggDecodeDecision {
     pub net_new_tokens: usize,
 }
 
-fn decode_gate_allows_bypass(policy_says_bypass: bool, decode_busy: Option<bool>) -> bool {
-    policy_says_bypass && decode_busy != Some(true)
+#[derive(Debug, PartialEq, Eq)]
+enum DecodePinResolution {
+    None,
+    Resolved(WorkerWithDpRank),
+    Unresolved { worker_id: u64 },
+}
+
+fn resolve_request_decode_pin(
+    routing: Option<&RoutingHints>,
+    unique_dp_rank_for_worker: impl Fn(u64) -> Option<u32>,
+) -> DecodePinResolution {
+    let Some(routing) = routing else {
+        return DecodePinResolution::None;
+    };
+    let Some(worker_id) = routing.decode_worker_id.or(routing.backend_instance_id) else {
+        return DecodePinResolution::None;
+    };
+    let Some(dp_rank) = routing
+        .dp_rank
+        .or_else(|| unique_dp_rank_for_worker(worker_id))
+    else {
+        return DecodePinResolution::Unresolved { worker_id };
+    };
+    DecodePinResolution::Resolved(WorkerWithDpRank::new(worker_id, dp_rank))
+}
+
+fn decode_gate_allows_bypass(
+    policy_says_bypass: bool,
+    decode_gate_configured: bool,
+    decode_busy: Option<bool>,
+) -> bool {
+    policy_says_bypass && (!decode_gate_configured || matches!(decode_busy, Some(false)))
 }
 
 impl PrefillRouter {
@@ -28,6 +64,7 @@ impl PrefillRouter {
         &self,
         req: &PreprocessedRequest,
         request_id: &str,
+        session_affinity: Option<&SessionAffinityId>,
         decode_affinity_target: Option<AffinityTarget>,
     ) -> Result<Option<ConditionalDisaggDecodeDecision>> {
         if !self.router_mode.is_kv_routing() {
@@ -102,13 +139,20 @@ impl PrefillRouter {
             }
             None => None,
         };
-        let request_pinned_worker = req.routing.as_ref().and_then(|routing| {
-            let worker_id = routing.decode_worker_id.or(routing.backend_instance_id)?;
-            let dp_rank = routing
-                .dp_rank
-                .or_else(|| decode_router.unique_dp_rank_for_worker(worker_id))?;
-            Some(WorkerWithDpRank::new(worker_id, dp_rank))
-        });
+        let request_pinned_worker = match resolve_request_decode_pin(req.routing.as_ref(), |id| {
+            decode_router.unique_dp_rank_for_worker(id)
+        }) {
+            DecodePinResolution::None => None,
+            DecodePinResolution::Resolved(worker) => Some(worker),
+            DecodePinResolution::Unresolved { worker_id } => {
+                tracing::debug!(
+                    request_id,
+                    worker_id,
+                    "Skipping conditional disagg because request has an explicit decode worker with no resolved DP rank"
+                );
+                return Ok(None);
+            }
+        };
         let pinned_worker = request_pinned_worker.or(affinity_pinned_worker);
         let routing_constraints = req
             .routing
@@ -158,7 +202,9 @@ impl PrefillRouter {
 
         let mut input = ConditionalDisaggDecisionInput::new(prompt_tokens, cached_tokens);
         if self.conditional_disagg_policy.needs_prefill_worker_busy() {
-            let busy = self.peek_prefill_chosen_worker_busy(req).await;
+            let busy = self
+                .peek_prefill_chosen_worker_busy(req, session_affinity)
+                .await;
             tracing::debug!(
                 request_id,
                 prefill_chosen_worker_busy = ?busy,
@@ -181,6 +227,7 @@ impl PrefillRouter {
         // reservation handoff to the downstream decode router. Use the selected
         // worker's projected decode load, including this request, but allow for
         // concurrent bypass decisions to race the same threshold.
+        let decode_gate_configured = self.conditional_disagg_decode_busy_threshold.is_some();
         let decode_busy = if policy_says_bypass {
             self.conditional_disagg_decode_busy_threshold
                 .and_then(|threshold| {
@@ -195,13 +242,14 @@ impl PrefillRouter {
         };
         input = input.with_decode_chosen_worker_busy(decode_busy);
 
-        let bypass = decode_gate_allows_bypass(policy_says_bypass, decode_busy);
+        let bypass =
+            decode_gate_allows_bypass(policy_says_bypass, decode_gate_configured, decode_busy);
         let decode_gate_decision = if !policy_says_bypass {
             "bypass_declined_by_policy"
-        } else if self.conditional_disagg_decode_busy_threshold.is_none() {
+        } else if !decode_gate_configured {
             "bypass_allowed_decode_gate_disabled"
         } else if decode_busy.is_none() {
-            "bypass_allowed_decode_busy_unknown"
+            "bypass_denied_decode_busy_unknown"
         } else if decode_busy == Some(true) {
             "bypass_denied_decode_busy"
         } else {
@@ -236,7 +284,11 @@ impl PrefillRouter {
         Ok(None)
     }
 
-    async fn peek_prefill_chosen_worker_busy(&self, req: &PreprocessedRequest) -> Option<bool> {
+    async fn peek_prefill_chosen_worker_busy(
+        &self,
+        req: &PreprocessedRequest,
+        session_affinity: Option<&SessionAffinityId>,
+    ) -> Option<bool> {
         let threshold = self.conditional_disagg_prefill_busy_threshold?;
         let prefill_router = self.prefill_router.get()?;
         let router = match prefill_router {
@@ -276,6 +328,14 @@ impl PrefillRouter {
             .and_then(|routing| routing.routing_constraints.clone())
             .unwrap_or_default();
         let (routing_token_ids, block_mm_infos) = req.block_mm_routing_info();
+        let mut probe_context: SingleIn<PreprocessedRequest> = Context::new(req.clone());
+        if let Some(session_affinity) = session_affinity {
+            probe_context.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity.clone());
+        }
+        let pinned_worker = router
+            .query_affinity_worker(&probe_context, RequestPhase::Prefill)
+            .ok()
+            .flatten();
 
         let outcome = router
             .chooser
@@ -292,7 +352,7 @@ impl PrefillRouter {
                 None,
                 None,
                 expected_output_tokens,
-                None,
+                pinned_worker,
                 allowed_worker_ids,
                 routing_constraints,
             )
@@ -312,27 +372,86 @@ impl PrefillRouter {
 
 #[cfg(test)]
 mod tests {
-    use super::decode_gate_allows_bypass;
+    use super::{DecodePinResolution, decode_gate_allows_bypass, resolve_request_decode_pin};
+    use crate::protocols::common::preprocessor::RoutingHints;
+    use dynamo_kv_router::protocols::WorkerWithDpRank;
+
+    #[test]
+    fn request_decode_pin_resolves_explicit_rank() {
+        let routing = RoutingHints {
+            decode_worker_id: Some(7),
+            dp_rank: Some(2),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            resolve_request_decode_pin(Some(&routing), |_| Some(0)),
+            DecodePinResolution::Resolved(WorkerWithDpRank::new(7, 2))
+        );
+    }
+
+    #[test]
+    fn request_decode_pin_resolves_unique_worker_rank() {
+        let routing = RoutingHints {
+            backend_instance_id: Some(7),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            resolve_request_decode_pin(Some(&routing), |worker_id| {
+                assert_eq!(worker_id, 7);
+                Some(3)
+            }),
+            DecodePinResolution::Resolved(WorkerWithDpRank::new(7, 3))
+        );
+    }
+
+    #[test]
+    fn request_decode_pin_keeps_unresolved_explicit_pin_distinct() {
+        let routing = RoutingHints {
+            decode_worker_id: Some(7),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            resolve_request_decode_pin(Some(&routing), |_| None),
+            DecodePinResolution::Unresolved { worker_id: 7 }
+        );
+    }
+
+    #[test]
+    fn request_decode_pin_is_none_without_decode_target() {
+        assert_eq!(
+            resolve_request_decode_pin(Some(&RoutingHints::default()), |_| Some(0)),
+            DecodePinResolution::None
+        );
+    }
 
     #[test]
     fn decode_gate_calm_and_policy_bypass_allows_bypass() {
-        assert!(decode_gate_allows_bypass(true, Some(false)));
+        assert!(decode_gate_allows_bypass(true, true, Some(false)));
     }
 
     #[test]
     fn decode_gate_busy_vetoes_policy_bypass() {
-        assert!(!decode_gate_allows_bypass(true, Some(true)));
+        assert!(!decode_gate_allows_bypass(true, true, Some(true)));
     }
 
     #[test]
     fn decode_gate_does_not_bypass_when_policy_declines() {
-        assert!(!decode_gate_allows_bypass(false, Some(false)));
-        assert!(!decode_gate_allows_bypass(false, Some(true)));
-        assert!(!decode_gate_allows_bypass(false, None));
+        assert!(!decode_gate_allows_bypass(false, true, Some(false)));
+        assert!(!decode_gate_allows_bypass(false, true, Some(true)));
+        assert!(!decode_gate_allows_bypass(false, true, None));
     }
 
     #[test]
-    fn decode_gate_signal_unavailable_does_not_block_bypass() {
-        assert!(decode_gate_allows_bypass(true, None));
+    fn disabled_decode_gate_does_not_block_bypass() {
+        assert!(decode_gate_allows_bypass(true, false, None));
+        assert!(decode_gate_allows_bypass(true, false, Some(true)));
+    }
+
+    #[test]
+    fn configured_decode_gate_signal_unavailable_vetoes_bypass() {
+        assert!(!decode_gate_allows_bypass(true, true, None));
     }
 }

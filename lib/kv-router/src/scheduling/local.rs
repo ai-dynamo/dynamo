@@ -538,10 +538,6 @@ where
             .worker_is_prefill_busy(worker, decay_now, threshold)
     }
 
-    pub fn worker_is_decode_busy(&self, worker: WorkerWithDpRank, threshold: f64) -> Option<bool> {
-        self.queue.worker_is_decode_busy(worker, threshold)
-    }
-
     pub fn projected_decode_load_exceeds(
         &self,
         worker: WorkerWithDpRank,
