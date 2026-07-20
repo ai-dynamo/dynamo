@@ -22,6 +22,7 @@ from examples.custom_encoder.benchmark.safeguard_proxy_workload import (
     _calibrate_prompt,
     _generate_jpeg,
     _request_schedule,
+    generate_workload,
     validate_workload,
 )
 
@@ -80,6 +81,40 @@ def test_workload_validation_rejects_requested_image_count_mismatch(
     )
     with pytest.raises(AssertionError, match="has 9 unique images; requested 1"):
         validate_workload(tmp_path, expected_unique_images=1)
+
+
+def test_workload_generation_records_selected_concurrencies(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        "examples.custom_encoder.benchmark.safeguard_proxy_workload."
+        "AutoTokenizer.from_pretrained",
+        lambda _model: object(),
+    )
+    monkeypatch.setattr(
+        "examples.custom_encoder.benchmark.safeguard_proxy_workload."
+        "AutoProcessor.from_pretrained",
+        lambda _model: SimpleNamespace(image_processor=object()),
+    )
+    monkeypatch.setattr(
+        "examples.custom_encoder.benchmark.safeguard_proxy_workload."
+        "_calculate_custom_isl_components",
+        lambda *_args: 644,
+    )
+    monkeypatch.setattr(
+        "examples.custom_encoder.benchmark.safeguard_proxy_workload."
+        "_calibrate_prompt",
+        lambda target, _calculate: ("prompt", target),
+    )
+    manifest_path = generate_workload(
+        tmp_path,
+        concurrencies=(4, 8, 16, 24, 32),
+        requests=1,
+        unique_images=1,
+        image_size=300,
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["concurrencies"] == [4, 8, 16, 24, 32]
 
 
 def test_custom_isl_replaces_one_placeholder_with_image_tokens() -> None:
