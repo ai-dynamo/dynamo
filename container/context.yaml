@@ -107,8 +107,9 @@ sglang:
     # attributes everything sglang adds over the clean NVIDIA CUDA+cuDNN floor
     # (framework, python stack, system libs) rather than hiding it. Per-arch stem;
     # the licenses stage appends -${TARGETARCH}.cdx.json. SGLang's codec-bearing
-    # Python wheels are purged in sglang_runtime.Dockerfile; FFmpeg is not copied
-    # into the image and the Dynamo Rust wheel is built without media-ffmpeg.
+    # Python wheels are purged in sglang_runtime.Dockerfile; only the in-tree VP9
+    # ffmpeg is copied in (CUDA, for the video-generation encode path) and the
+    # Dynamo Rust wheel is built without media-ffmpeg.
     baseline_sbom: cuda@8b2705ea
   xpu:
     base_image: intel/deep-learning-essentials

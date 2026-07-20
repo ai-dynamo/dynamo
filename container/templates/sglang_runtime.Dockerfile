@@ -143,27 +143,28 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
     pip install --break-system-packages --no-deps $(grep -E '^nvtx==' /tmp/requirements.common.txt)
 
 # Install SGLang-specific runtime dependencies without changing the upstream
-# dependency solution. imageio-ffmpeg is intentionally absent.
+# dependency solution. imageio-ffmpeg is installed from source (no bundled
+# binary) for the VP9 video-encode path; see requirements.sglang.txt.
 RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tmp/requirements.sglang.txt \
     --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages --force-reinstall --no-deps \
         --requirement /tmp/requirements.sglang.txt
 
-# Remove every codec-bearing component found in the upstream SGLang image and
-# fail the build if an executable or shared library for FFmpeg, H.264, H.265, or
-# AAC remains in the merged runtime filesystem.
+# Remove the codec-bearing video-DECODE components from the upstream SGLang image
+# (PyAV, decord, OpenCV, torchcodec + any base ffmpeg/libav*), then copy the
+# VP9-only in-tree ffmpeg from wheel_builder below for the video-generation
+# encode path. H.264/H.265/AAC encoders must never appear (guarded at the end).
 #
 # Inkling image preprocessing uses Pillow. Its audio feature extractor imports
 # soundfile and uses torchaudio only for resampling, so those paths remain
 # available for formats supported by libsndfile (for example WAV and FLAC).
-# AAC-backed M4A and all video encode/decode support are intentionally removed.
+# AAC-backed M4A stays removed; video encode is VP9 only.
 RUN set -eux; \
     python3 -m pip uninstall --yes \
         av \
         decord \
         decord2 \
-        imageio-ffmpeg \
         opencv-python \
         opencv-python-headless \
         torchcodec; \
@@ -179,8 +180,6 @@ RUN set -eux; \
         "${SITE_PACKAGES}"/decord2 \
         "${SITE_PACKAGES}"/decord2-*.dist-info \
         "${SITE_PACKAGES}"/decord2.libs \
-        "${SITE_PACKAGES}"/imageio_ffmpeg \
-        "${SITE_PACKAGES}"/imageio_ffmpeg-*.dist-info \
         "${SITE_PACKAGES}"/opencv_python*.dist-info \
         "${SITE_PACKAGES}"/opencv_python*.libs \
         "${SITE_PACKAGES}"/torchcodec \
@@ -198,7 +197,41 @@ RUN set -eux; \
         /usr/local/src/ffmpeg \
         /root/.cache/pip; \
     ldconfig
+
+{% if device == "cuda" %}
+# Copy the in-tree VP9 ffmpeg from wheel_builder: versioned shared libs
+# (libav*.so*, libsw*.so*) + libvpx + the in-tree CLI binary that imageio targets
+# via IMAGEIO_FFMPEG_EXE. The upstream ffmpeg was purged above, so this
+# VP9-only build is the only ffmpeg present; the video-generation
+# handler (CUDA DiffGenerator) encodes libvpx-vp9 with it. Same pattern as
+# vllm_runtime.Dockerfile.
+RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
+    mkdir -p /usr/local/lib/pkgconfig && \
+    cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
+    cp -nL /tmp/usr/local/lib/libav*.so* /tmp/usr/local/lib/libsw*.so* /usr/local/lib/ && \
+    cp -nL /tmp/usr/local/lib/lib*vpx*.so* /usr/local/lib/ 2>/dev/null || true && \
+    cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/local/lib/pkgconfig/ && \
+    cp -nL /tmp/usr/local/bin/ffmpeg /usr/local/bin/ffmpeg && \
+    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/ && \
+    ldconfig
+ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
+
+# Positive codec guard: the shipped ffmpeg MUST expose the VP9 encoder and MUST
+# NOT expose any H.264/H.265/AAC/NVENC encoder. A missing/broken copy (no VP9)
+# or a codec regression fails the build here rather than at runtime — closing the
+# gap where SGLang shipping no encoder passed every PR gate.
+RUN set -eu; \
+    ff="${IMAGEIO_FFMPEG_EXE:-ffmpeg}"; \
+    "$ff" -hide_banner -encoders 2>/dev/null | grep -qiE 'libvpx[-_]vp9' \
+      || { echo "ERROR: shipped ffmpeg ($ff) has no VP9 encoder" >&2; exit 1; }; \
+    if "$ff" -hide_banner -encoders 2>/dev/null \
+         | grep -iE 'h\.?264|h\.?265|hevc|(^| )aac|nvenc|cuvid|nvdec'; then \
+        echo "ERROR: shipped ffmpeg ($ff) exposes an H.264/H.265/AAC/NVENC encoder" >&2; \
+        exit 1; \
+    fi
+{% else %}
 ENV IMAGEIO_FFMPEG_EXE=
+{% endif %}
 
 # Copy tests, deploy and components for CI with correct ownership
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
@@ -245,24 +278,23 @@ RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')
     (python3 -m compileall -q -j0 /sgl-workspace/sglang/python || true)
 {%- endif %}
 
-# Keep this guard at the end of the populated runtime stage so later COPY/RUN
-# steps cannot silently reintroduce a codec. The extra AAC library names cover
-# common non-FFmpeg implementations even though the current Syft baseline did
-# not find them.
+# Belt-and-suspenders guard at the end of the populated runtime stage: fail the
+# build if an H.264/H.265/AAC codec *implementation* library appears. The VP9
+# ffmpeg (ffmpeg + libav*/libsw* + libvpx) copied above is intentionally
+# shipped for the video-encode path, so it is NOT flagged here — the in-tree
+# build is VP9-only by construction (wheel_builder's post-build codec-surface
+# guard) and the media-codec scan below re-permits it only under /usr/local while
+# still catching any stray third-party libav*/ffmpeg. This adds the extra
+# non-FFmpeg AAC/H.264 implementation names the scan's deny_globs don't list.
 RUN set -eux; \
     remaining="$(find /usr /opt /workspace /sgl-workspace -xdev \
         \( -type f -o -type l \) \
-        \( -name ffmpeg -o -name ffprobe \
-        -o -name 'libavcodec*.so*' -o -name 'libavdevice*.so*' \
-        -o -name 'libavfilter*.so*' -o -name 'libavformat*.so*' \
-        -o -name 'libavutil*.so*' -o -name 'libpostproc*.so*' \
-        -o -name 'libswresample*.so*' -o -name 'libswscale*.so*' \
-        -o -name 'libx264*.so*' -o -name 'libx265*.so*' \
+        \( -name 'libx264*.so*' -o -name 'libx265*.so*' \
         -o -name 'libopenh264*.so*' -o -name 'libfdk-aac*.so*' \
         -o -name 'libfaac*.so*' -o -name 'libvo-aacenc*.so*' \
         -o -name 'libaacplus*.so*' \) -print)"; \
     if [ -n "${remaining}" ]; then \
-        echo "ERROR: codec-bearing files remain in the SGLang image:" >&2; \
+        echo "ERROR: H.264/H.265/AAC codec libraries remain in the SGLang image:" >&2; \
         echo "${remaining}" >&2; \
         exit 1; \
     fi; \

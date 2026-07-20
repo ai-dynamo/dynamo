@@ -3,8 +3,17 @@
 #
 # Third-party Python dependencies for the SGLang runtime image. Installed with
 # --force-reinstall --no-deps so the upstream SGLang dependency stack remains
-# otherwise unchanged. FFmpeg and codec-bearing wheels are removed separately
-# in sglang_runtime.Dockerfile.
+# otherwise unchanged. Codec-bearing video-DECODE wheels (av, decord, opencv,
+# torchcodec) are removed separately in sglang_runtime.Dockerfile; the in-tree
+# VP9 ffmpeg + imageio-ffmpeg below are kept for the video-generation encode
+# path.
+
+# Install imageio-ffmpeg from source so no prebuilt ffmpeg binary lands in
+# <site-packages>/imageio_ffmpeg/binaries/. IMAGEIO_FFMPEG_EXE (set in
+# sglang_runtime.Dockerfile) points imageio at the in-tree VP9 CLI copied from
+# wheel_builder. The video-generation handler encodes with libvpx-vp9.
+--no-binary imageio-ffmpeg
 
 blake3>=1.0.0,<2.0.0  # Dynamo SGLang multimodal request handlers import blake3 at startup
+imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive above
 zstandard==0.23.0

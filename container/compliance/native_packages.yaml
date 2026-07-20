@@ -78,8 +78,8 @@ packages:
   # generator), so it is intentionally NOT duplicated here.
 
   # LGPL media stack — built --disable-gpl in wheel_builder with libvpx (VP9) and
-  # no H.264 capability, then copied into the vLLM and TensorRT-LLM runtimes.
-  # SGLang contains no FFmpeg.
+  # no H.264 capability, then copied into the vLLM, SGLang, and TensorRT-LLM
+  # runtimes for the VP9 video-encode path.
   - name: ffmpeg
     version: "8.1.2"
     license: LGPL-2.1-or-later
@@ -87,6 +87,8 @@ packages:
     images:
       - vllm-runtime
       - vllm-runtime-efa
+      - sglang-runtime
+      - sglang-runtime-efa
       - trtllm-runtime
       - trtllm-runtime-efa
 
@@ -99,6 +101,8 @@ packages:
     images:
       - vllm-runtime
       - vllm-runtime-efa
+      - sglang-runtime
+      - sglang-runtime-efa
       - trtllm-runtime
       - trtllm-runtime-efa
 

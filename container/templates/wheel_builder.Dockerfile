@@ -288,11 +288,10 @@ RUN mkdir -p /tmp/native-sources
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}}
 
-# Build FFmpeg for frameworks that retain media encode/decode support. SGLang
-# deliberately omits it: its Inkling image/audio path uses Pillow and
-# soundfile/torchaudio, and the SGLang runtime must not contain H.264, H.265, or
-# AAC implementations.
-{% if framework != "sglang" %}
+# Build FFmpeg for every framework's video-encode path, SGLang included. The
+# build is VP9-only (libvpx) — it contains no H.264, H.265, or AAC encoder in
+# any form — so SGLang's video-generation handler gets a VP9 encoder to write
+# with, matching vLLM/TRT-LLM.
 # Build FFmpeg so libs are available for Rust checks in CI.
 # We build the ffmpeg CLI with the libvpx_vp9 encoder so Python code can encode
 # video without the GPL-licensed binary shipped by imageio-ffmpeg.
@@ -400,7 +399,6 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     mkdir -p /usr/local/src/ffmpeg && \
     find /tmp/ffmpeg-${FFMPEG_VERSION} \( -name config.log -o -name config.status \) -delete && \
     mv /tmp/ffmpeg-${FFMPEG_VERSION}* /usr/local/src/ffmpeg/
-{% endif %}
 
 # Build and install UCX
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
