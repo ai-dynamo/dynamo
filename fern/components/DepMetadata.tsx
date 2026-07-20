@@ -37,7 +37,7 @@ interface DepMetadataProps {
   category?: string;
   /**
    * Owning SIG (Special Interest Group). Mirrors the Kubernetes KEP
-   * `owning-sig` metadata. Per DEP-0001, a SIG owns a DEP, not a code repo.
+   * `owning-sig` metadata. Per DEP-0011, a SIG owns a DEP, not a code repo.
    */
   owningSig?: string;
   /** Other SIGs involved or impacted. Mirrors Kubernetes KEP `participating-sigs`. */

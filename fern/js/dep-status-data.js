@@ -16,6 +16,6 @@
  */
 window.__DEP_STATUS = {
   "0000-example-dep": "Draft",
-  "0001-dep-process": "Draft",
+  "0011-dep-process": "Draft",
   "dep-nova-synced": "Draft"
 };

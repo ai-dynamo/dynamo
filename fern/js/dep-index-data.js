@@ -35,11 +35,11 @@ window.__DEP_INDEX = [
       }
     ],
     "category": "Process",
-    "dep": "0001",
-    "slug": "0001-dep-process",
+    "dep": "0011",
+    "slug": "0011-dep-process",
     "status": "Draft",
     "submitter": "dagil-nvidia",
-    "title": "DEP-0001: The Dynamo Enhancement Proposal (DEP) Process"
+    "title": "DEP-0011: The Dynamo Enhancement Proposal (DEP) Process"
   },
   {
     "authors": [

@@ -7,10 +7,10 @@ subtitle: "SIG-owned DEPs live in ai-dynamo/enhancements; the Dynamo docs site r
 
 A Dynamo Enhancement Proposal (DEP) captures an architecture, design, or process decision along with the motivation behind it. This Proposals tab is the **rendering and discussion layer** for those DEPs — the DEPs themselves are authored and owned by a [Special Interest Group (SIG)](https://github.com/kubernetes/community/blob/master/governance.md) and live in the dedicated `ai-dynamo/enhancements` repository. The docs site publishes each DEP as a page here and mirrors its GitHub review (line comments, PR conversation, and tracking-issue thread) read-only, so the proposal, its status, and its debate share one shareable public link.
 
-The full process, roles, and lifecycle are specified in **DEP-0001** (the meta-DEP that ratifies this model). This overview describes just the model and where each artifact lives.
+The full process, roles, and lifecycle are specified in **DEP-0011** (the meta-DEP that ratifies this model). This overview describes just the model and where each artifact lives.
 
 > [!NOTE]
-> **Current State.** What renders today is a DEP page on this tab plus a read-only, cross-repo mirror of its GitHub review and discussion (the Nova demo mirrors `ai-dynamo/enhancements` PR #61). A build-time content sync (`fern/scripts/sync_deps.py`) is prototyped: it fetches the DEP body from `ai-dynamo/enhancements` on every Fern build and renders the synced version at `dep-nova-synced`. The prototype has one known caveat — the sync manifest pins a source branch rather than per-DEP SHAs. Hardening (SHA pinning, promotion into the production nav) is tracked alongside DEP-0001 acceptance.
+> **Current State.** What renders today is a DEP page on this tab plus a read-only, cross-repo mirror of its GitHub review and discussion (the Nova demo mirrors `ai-dynamo/enhancements` PR #61). A build-time content sync (`fern/scripts/sync_deps.py`) is prototyped: it fetches the DEP body from `ai-dynamo/enhancements` on every Fern build and renders the synced version at `dep-nova-synced`. The prototype has one known caveat — the sync manifest pins a source branch rather than per-DEP SHAs. Hardening (SHA pinning, promotion into the production nav) is tracked alongside DEP-0011 acceptance.
 
 ## Why the Enhancements Repository, Not This One
 
@@ -20,7 +20,7 @@ Dynamo is adopting **SIG-based governance** — the Kubernetes model, where a Sp
 
 SIGs formalize the ownership taxonomy the `ai-dynamo/dynamo` repository already enforces. Its CODEOWNERS Infrastructure-as-Code (`.github/codeowners/areas.yaml`) partitions the repository into first-class areas — for example `frontend`, `router`, `kv-memory`, `planner`, `operator`, `backend-vllm`, `backend-trtllm`, `backend-sglang`, `observability`, `fault-tolerance`, `runtime`, `ops`, `docs`, `process` — each backed by an `@ai-dynamo/dynamo-<area>-codeowners` team. SIGs are expected to map onto those existing area boundaries as they stand up, so this is formalizing what the repository already enforces, not net-new bureaucracy.
 
-**One honest note on history.** An earlier iteration of the DEP process tracked proposals as GitHub issues inside the code repository. That predated Dynamo's move to SIG-based governance, and with SIGs now being adopted the process moves to the dedicated repository they naturally live in. DEP-0001 carries the full narrative.
+**One honest note on history.** An earlier iteration of the DEP process tracked proposals as GitHub issues inside the code repository. That predated Dynamo's move to SIG-based governance, and with SIGs now being adopted the process moves to the dedicated repository they naturally live in. DEP-0011 carries the full narrative.
 
 **Precedent for the dedicated-repo choice.** Other multi-repo projects made the same call:
 
@@ -30,7 +30,7 @@ SIGs formalize the ownership taxonomy the `ai-dynamo/dynamo` repository already 
 | Rust | [`rust-lang/rfcs`](https://github.com/rust-lang/rfcs) | Language and tooling RFCs, implemented across many `rust-lang/*` repositories. |
 | React | [`reactjs/rfcs`](https://github.com/reactjs/rfcs) | Cross-package RFCs owned by the React team. |
 | Swift | [`swiftlang/swift-evolution`](https://github.com/swiftlang/swift-evolution) | Language evolution proposals separate from the compiler and standard-library repos. |
-| Python | [`python/peps`](https://github.com/python/peps) | Python Enhancement Proposals, the model DEP-0001 explicitly builds on. |
+| Python | [`python/peps`](https://github.com/python/peps) | Python Enhancement Proposals, the model DEP-0011 explicitly builds on. |
 
 ## The Model
 
@@ -55,7 +55,7 @@ Each card deep-links back to GitHub to reply. The docs page never posts; GitHub 
 1. **Open a tracking issue** in `ai-dynamo/enhancements`. This is the DEP's anchor and its durable design-discussion thread, owned by the SIG.
 2. **Open a DEP PR** in `ai-dynamo/enhancements` adding `deps/NNNN-slug.md`, following the KEP-style layout the repository uses. The SIG's approvers (chairs or technical leads) review the DEP; reviewers use PR line comments for precise, line-level review.
 3. **Render on the docs site.** The DEP page is published under this Proposals tab and mirrors the PR and tracking-issue comments read-only.
-4. **Advance the status via follow-up PRs.** As the proposal moves through the lifecycle (Draft → Under Review → Accepted, or to Rejected, Deferred, Implemented, or Replaced), update the status banner and header in a short follow-up PR. The banner tracks status on every rendered page. See DEP-0001 for the full lifecycle specification.
+4. **Advance the status via follow-up PRs.** As the proposal moves through the lifecycle (Draft → Under Review → Accepted, or to Rejected, Deferred, Implemented, or Replaced), update the status banner and header in a short follow-up PR. The banner tracks status on every rendered page. See DEP-0011 for the full lifecycle specification.
 
 ## Status Banner Convention
 
@@ -101,12 +101,12 @@ Because DEPs live in `ai-dynamo/enhancements`, the **cross-repo case is the defa
 />
 ```
 
-The fetch is unauthenticated, so it is subject to GitHub's 60-requests/hour/IP limit; on a 403 the affected section degrades to a notice plus a link to the thread. For high-traffic production pages, bake the comments in at build time to remove that limit — this is called out as deferred work in DEP-0001.
+The fetch is unauthenticated, so it is subject to GitHub's 60-requests/hour/IP limit; on a 403 the affected section degrades to a notice plus a link to the thread. For high-traffic production pages, bake the comments in at build time to remove that limit — this is called out as deferred work in DEP-0011.
 
 ## What's Rendered Here vs. What's in `ai-dynamo/enhancements`
 
 - **Source of truth: `ai-dynamo/enhancements`.** DEP markdown, review, and status advancement all happen there.
-- **This directory on the Dynamo docs site.** Today it holds the Fern-rendering scaffolding — a template, a worked example that shows the rendered format, and a build-time-synced Nova demo — plus this overview page. The render + comment-mirror capability is proven end-to-end on the Nova demo (`ai-dynamo/enhancements#61`, PR by [@ryanolson](https://github.com/ryanolson)) in both light and dark mode. Automated content sync from the enhancements repository is now **prototyped**: `fern/scripts/sync_deps.py` (invoked by the Fern preview job and the pre-merge `fern check` / broken-links jobs) fetches the DEP markdown from `ai-dynamo/enhancements` at build time and emits generated `.mdx` under `docs/proposals/_generated/`, which is gitignored so no DEP body copy is committed here. The prototype's honest caveats: the synced Nova page (`dep-nova-synced`) is rendered from a sync manifest (`fern/scripts/deps.json`) that pins a source branch rather than per-DEP SHAs, and moving synced DEPs into the production nav is deferred to DEP-0001 acceptance.
+- **This directory on the Dynamo docs site.** Today it holds the Fern-rendering scaffolding — a template, a worked example that shows the rendered format, and a build-time-synced Nova demo — plus this overview page. The render + comment-mirror capability is proven end-to-end on the Nova demo (`ai-dynamo/enhancements#61`, PR by [@ryanolson](https://github.com/ryanolson)) in both light and dark mode. Automated content sync from the enhancements repository is now **prototyped**: `fern/scripts/sync_deps.py` (invoked by the Fern preview job and the pre-merge `fern check` / broken-links jobs) fetches the DEP markdown from `ai-dynamo/enhancements` at build time and emits generated `.mdx` under `docs/proposals/_generated/`, which is gitignored so no DEP body copy is committed here. The prototype's honest caveats: the synced Nova page (`dep-nova-synced`) is rendered from a sync manifest (`fern/scripts/deps.json`) that pins a source branch rather than per-DEP SHAs, and moving synced DEPs into the production nav is deferred to DEP-0011 acceptance.
 
 The files in this directory:
 
