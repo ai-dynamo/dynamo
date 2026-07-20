@@ -38,6 +38,9 @@ static ACTUAL_TCP_RPC_PORT: OnceLock<u16> = OnceLock::new();
 static GLOBAL_TCP_SERVER: tokio::sync::OnceCell<Arc<SharedTcpServer>> =
     tokio::sync::OnceCell::const_new();
 
+/// First valid process-wide engine capacity reported for automatic TCP sizing.
+static GLOBAL_ENGINE_CAPACITY_HINT: OnceLock<usize> = OnceLock::new();
+
 /// Process-wide cancellation token for the global TCP server.
 ///
 /// This token is independent of any individual runtime's cancellation token so that
@@ -197,6 +200,28 @@ impl NetworkManager {
         }
     }
 
+    /// Record the first engine capacity without starting the request-plane server.
+    pub async fn set_engine_capacity_hint(&self, engine_capacity: usize) -> Result<()> {
+        if !matches!(self.mode, RequestPlaneMode::Tcp) || engine_capacity == 0 {
+            return Ok(());
+        }
+
+        GLOBAL_ENGINE_CAPACITY_HINT.get_or_init(|| engine_capacity);
+        self.apply_engine_capacity_hint().await
+    }
+
+    async fn apply_engine_capacity_hint(&self) -> Result<()> {
+        if matches!(self.mode, RequestPlaneMode::Tcp)
+            && let Some(engine_capacity) = GLOBAL_ENGINE_CAPACITY_HINT.get().copied()
+            && let Some(server) = GLOBAL_TCP_SERVER.get()
+        {
+            server
+                .update_worker_pool_from_engine_capacity(engine_capacity)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Get or create the request plane server
     ///
     /// The server is created lazily on first access and cached for subsequent calls.
@@ -217,6 +242,7 @@ impl NetworkManager {
             .server
             .get_or_try_init(async { self.create_server().await })
             .await?;
+        self.apply_engine_capacity_hint().await?;
 
         Ok(server.clone())
     }
@@ -277,7 +303,11 @@ impl NetworkManager {
                     "Creating TCP request plane server"
                 );
 
-                let server = SharedTcpServer::new(bind_addr, GLOBAL_TCP_SERVER_TOKEN.clone());
+                let server = SharedTcpServer::new(
+                    bind_addr,
+                    GLOBAL_TCP_SERVER_TOKEN.clone(),
+                    GLOBAL_ENGINE_CAPACITY_HINT.get().copied(),
+                )?;
 
                 // Bind and start server, getting the actual bound address
                 let actual_addr = server.clone().bind_and_start().await?;
@@ -346,6 +376,11 @@ impl NetworkManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metrics::work_handler_pool::WORK_HANDLER_POOL_CAPACITY;
+    use std::process::Command;
+
+    const SERVER_FIRST_CHILD_ENV: &str = "DYN_TEST_SERVER_FIRST_ENGINE_CAPACITY_HINT";
+    const SERVER_FIRST_TEST_NAME: &str = "pipeline::network::manager::tests::server_first_engine_capacity_hint_updates_global_server";
 
     fn manager_for(mode: RequestPlaneMode) -> NetworkManager {
         NetworkManager::new(
@@ -371,5 +406,49 @@ mod tests {
             ),
             Err(err) => assert!(err.to_string().contains("NATS client required")),
         }
+    }
+
+    #[test]
+    fn server_first_engine_capacity_hint_updates_global_server() {
+        if std::env::var_os(SERVER_FIRST_CHILD_ENV).is_none() {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["--exact", SERVER_FIRST_TEST_NAME, "--nocapture"])
+                .env(SERVER_FIRST_CHILD_ENV, "1")
+                .env("DYN_TCP_RPC_HOST", "127.0.0.1");
+            for name in [
+                "DYN_ENGINE_REQUEST_LIMIT",
+                "DYN_TCP_WORKER_POOL_SIZE",
+                "DYN_TCP_WORK_QUEUE_SIZE",
+                "DYN_DYNAMO_REQUEST_QUEUE_LIMIT",
+                "DYN_TCP_RPC_PORT",
+            ] {
+                command.env_remove(name);
+            }
+
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "child test failed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let server_manager = manager_for(RequestPlaneMode::Tcp);
+                server_manager.server().await.unwrap();
+                assert_eq!(WORK_HANDLER_POOL_CAPACITY.get(), 10_000);
+
+                let hint_manager = manager_for(RequestPlaneMode::Tcp);
+                hint_manager.set_engine_capacity_hint(8_000).await.unwrap();
+                assert_eq!(WORK_HANDLER_POOL_CAPACITY.get(), 12_000);
+                GLOBAL_TCP_SERVER_TOKEN.cancel();
+            });
     }
 }
