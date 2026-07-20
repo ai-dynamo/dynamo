@@ -60,7 +60,7 @@ class DynamoWorkerProcess(ManagedProcess):
         timeout_s: int = 300,
     ):
         self.system_port = allocate_port(DynamoPortRange.SERVE.value)
-        self._ports_cleanup_done = False
+        # Register port cleanup early so partially constructed workers still release ports.
         request.addfinalizer(self._release_worker_ports)
         self.frontend_port = frontend_port
 
@@ -117,6 +117,10 @@ class DynamoWorkerProcess(ManagedProcess):
 
         env = os.environ.copy()
         env["DYN_REQUEST_PLANE"] = request.getfixturevalue("request_plane")
+        # Disable canary health check - these tests expect full control over requests
+        # sent to the workers where canary health check intermittently sends dummy
+        # requests to workers interfering with the test process which may cause
+        # intermittent failures
         env["DYN_LOG"] = "debug"
         env["DYN_HEALTH_CHECK_ENABLED"] = "false"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
@@ -127,6 +131,8 @@ class DynamoWorkerProcess(ManagedProcess):
             self.fpm_port = allocate_port(DynamoPortRange.FPM.value)
             env["DYN_FORWARDPASS_METRIC_PORT"] = str(self.fpm_port)
 
+        # Set KV events config and NIXL side channel port only for prefill worker
+        # to avoid conflicts with decode worker
         if is_prefill is True:
             self.kv_event_port = allocate_port(DynamoPortRange.SERVE.value)
             self.nixl_side_channel_port = allocate_port(DynamoPortRange.NIXL.value)
@@ -153,6 +159,7 @@ class DynamoWorkerProcess(ManagedProcess):
             worker_type = "worker"
         log_dir = f"{request.node.name}_{worker_type}"
 
+        # Clean up any existing log directory from previous runs
         try:
             shutil.rmtree(log_dir)
             logger.info(f"Cleaned up existing log directory: {log_dir}")
@@ -166,6 +173,7 @@ class DynamoWorkerProcess(ManagedProcess):
             timeout=timeout_s,
             display_output=True,
             terminate_all_matching_process_names=False,
+            # Ensure any orphaned vLLM engine cores or child helpers are cleaned up
             stragglers=["VLLM::EngineCore"],
             straggler_commands=["-m dynamo.vllm"],
             log_dir=log_dir,
@@ -177,31 +185,7 @@ class DynamoWorkerProcess(ManagedProcess):
         """Get the PID of the worker process"""
         return self.proc.pid if self.proc else None
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Release allocated port when worker exits."""
-        super_error = None
-        try:
-            result = super().__exit__(exc_type, exc_val, exc_tb)
-        except Exception as exc:
-            super_error = exc
-            result = None
-
-        try:
-            self._release_worker_ports()
-        except Exception as exc:
-            if super_error is not None:
-                raise exc from super_error
-            raise
-
-        if super_error is not None:
-            raise super_error
-
-        return result
-
     def _release_worker_ports(self):
-        if self._ports_cleanup_done:
-            return
-
         cleanup_errors = []
         for port_attr in (
             "system_port",
@@ -223,8 +207,6 @@ class DynamoWorkerProcess(ManagedProcess):
 
         if cleanup_errors:
             raise cleanup_errors[0]
-
-        self._ports_cleanup_done = True
 
     def is_ready(self, response) -> bool:
         """Check the health of the worker process"""
