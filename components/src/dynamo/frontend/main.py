@@ -79,6 +79,8 @@ def _raise_fd_limit(target: Optional[int] = None) -> None:
         import resource
 
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft == resource.RLIM_INFINITY:
+            return  # already unlimited; a finite target would only reduce it
         new_soft = target if hard == resource.RLIM_INFINITY else min(target, hard)
         if new_soft > soft:
             resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))
