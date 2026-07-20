@@ -64,6 +64,12 @@ BENCHMARK_DURATION="${BENCHMARK_DURATION:-}"  # aiperf --benchmark-duration (sec
 REQUEST_RATE="${REQUEST_RATE:-}"              # aiperf --request-rate (requests/sec)
 WARMUP_DURATION="${WARMUP_DURATION:-}"        # aiperf --warmup-duration (seconds)
 WARMUP_COUNT="${WARMUP_COUNT:-}"              # aiperf --warmup-request-count
+FRONTEND_CORES="${FRONTEND_CORES:-}"          # Optional taskset for frontend only
+OTHER_CORES="${OTHER_CORES:-}"                # Optional shorthand for mockers + aiperf
+WORKER_CORES="${WORKER_CORES:-}"              # Optional taskset for mockers
+CLIENT_CORES="${CLIENT_CORES:-}"              # Optional taskset for aiperf
+AIPERF_WORKERS_MAX="${AIPERF_WORKERS_MAX:-}"  # Optional client worker cap; aiperf auto-sizes by default
+AIPERF_RECORD_PROCESSORS="${AIPERF_RECORD_PROCESSORS:-}"  # Optional metrics process count; aiperf auto-sizes by default
 
 # Opt-out flags
 SKIP_BPF=false
@@ -104,6 +110,12 @@ while [[ $# -gt 0 ]]; do
         --request-rate)         REQUEST_RATE="$2"; shift 2 ;;
         --warmup-duration)      WARMUP_DURATION="$2"; shift 2 ;;
         --warmup-count)         WARMUP_COUNT="$2"; shift 2 ;;
+        --frontend-cores)       FRONTEND_CORES="$2"; shift 2 ;;
+        --other-cores)          OTHER_CORES="$2"; shift 2 ;;
+        --worker-cores)         WORKER_CORES="$2"; shift 2 ;;
+        --client-cores)         CLIENT_CORES="$2"; shift 2 ;;
+        --aiperf-workers-max)   AIPERF_WORKERS_MAX="$2"; shift 2 ;;
+        --aiperf-record-processors) AIPERF_RECORD_PROCESSORS="$2"; shift 2 ;;
         --skip-bpf)             SKIP_BPF=true; shift ;;
         --skip-nsys)            SKIP_NSYS=true; shift ;;
         --skip-flamegraph)      SKIP_FLAMEGRAPH=true; shift ;;
@@ -137,6 +149,13 @@ Service Options:
   --request-rate N          Target requests per second (aiperf --request-rate)
   --warmup-duration N       aiperf warmup phase duration in seconds
   --warmup-count N          aiperf warmup request count (default: concurrency)
+  --frontend-cores LIST     Pin frontend to this taskset CPU list (for example 0-3)
+  --other-cores LIST        Pin mockers and aiperf to this taskset CPU list (for example 4-23)
+  --worker-cores LIST       Pin mockers to this taskset CPU list (overrides --other-cores)
+  --client-cores LIST       Pin aiperf to this taskset CPU list (overrides --other-cores)
+  --aiperf-workers-max N    Override aiperf's auto-sized client worker pool
+  --aiperf-record-processors N
+                            Override aiperf's auto-sized metrics process pool
 
 Load Options:
   --concurrency N           aiperf concurrency (default: 64)
@@ -160,6 +179,20 @@ USAGE
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
+
+[[ -z "$WORKER_CORES" ]] && WORKER_CORES="$OTHER_CORES"
+[[ -z "$CLIENT_CORES" ]] && CLIENT_CORES="$OTHER_CORES"
+FRONTEND_CPU_CMD=()
+WORKER_CPU_CMD=()
+CLIENT_CPU_CMD=()
+if [[ -n "$FRONTEND_CORES" || -n "$WORKER_CORES" || -n "$CLIENT_CORES" ]]; then
+    command -v taskset >/dev/null 2>&1 || {
+        echo "ERROR: taskset is required when CPU lists are configured"; exit 1;
+    }
+fi
+[[ -n "$FRONTEND_CORES" ]] && FRONTEND_CPU_CMD=(taskset -c "$FRONTEND_CORES")
+[[ -n "$WORKER_CORES" ]] && WORKER_CPU_CMD=(taskset -c "$WORKER_CORES")
+[[ -n "$CLIENT_CORES" ]] && CLIENT_CPU_CMD=(taskset -c "$CLIENT_CORES")
 
 # Default model-name to model if not set
 [[ -z "$MODEL_NAME" ]] && MODEL_NAME="$MODEL"
@@ -213,6 +246,8 @@ echo "╚═══════════════════════�
 echo ""
 echo "Output:    $OUTPUT_DIR"
 echo "Tokenizer: ${TOKENIZER_BACKEND:-hf (default)}"
+echo "CPU sets:  frontend=${FRONTEND_CORES:-unrestricted} workers=${WORKER_CORES:-unrestricted} client=${CLIENT_CORES:-unrestricted}"
+echo "Response:  mux=${DYN_TCP_RESPONSE_MUX:-0} batch=${DYN_TCP_RESPONSE_BATCH_INTERVAL_MS:-5}ms window=${DYN_TCP_RESPONSE_CONNECTION_WINDOW_BYTES:-262144}B packet_metrics=${DYN_TCP_RESPONSE_PACKET_METRICS:-0}"
 echo ""
 
 # ─── Pre-flight: detect available tools ──────────────────────────────────────
@@ -409,7 +444,8 @@ for MN in "${MODEL_NAMES[@]}"; do
         fi
 
         MN_SAFE="${MN//\//_}"
-        HF_HUB_OFFLINE=1 DYN_SYSTEM_PORT=$WORKER_PORT DYN_EVENT_PLANE="$EVENT_PLANE" python -m dynamo.mocker "${MOCKER_ARGS[@]}" \
+        HF_HUB_OFFLINE=1 DYN_SYSTEM_PORT=$WORKER_PORT DYN_EVENT_PLANE="$EVENT_PLANE" \
+            "${WORKER_CPU_CMD[@]}" python -m dynamo.mocker "${MOCKER_ARGS[@]}" \
             > "$OUTPUT_DIR/logs/mocker_${MN_SAFE}_${i}.log" 2>&1 &
         ALL_PIDS+=($!)
         echo "  Worker $WORKER_IDX ($MN #$i): PID ${ALL_PIDS[-1]}, port $WORKER_PORT"
@@ -455,7 +491,7 @@ fi
 
 if [[ "$HAS_NSYS" == true ]]; then
     echo "  (under nsys profiling)"
-    env "${FRONTEND_ENV[@]}" \
+    env "${FRONTEND_ENV[@]}" "${FRONTEND_CPU_CMD[@]}" \
         "$NSYS_CMD" profile \
         --trace=osrt,nvtx \
         --sample=cpu \
@@ -485,7 +521,7 @@ if [[ "$HAS_NSYS" == true ]]; then
     echo "  nsys wrapper PID: $NSYS_WRAPPER_PID"
     echo "  Frontend PID: $FRONTEND_PID"
 else
-    env "${FRONTEND_ENV[@]}" python -m dynamo.frontend \
+    env "${FRONTEND_ENV[@]}" "${FRONTEND_CPU_CMD[@]}" python -m dynamo.frontend \
         > "$OUTPUT_DIR/logs/frontend.log" 2>&1 &
     FRONTEND_PID=$!
     ALL_PIDS+=($FRONTEND_PID)
@@ -725,6 +761,14 @@ else
     _WARMUP_ARGS+=(--warmup-request-count "$CONCURRENCY")
 fi
 
+_AIPERF_WORKER_ARGS=()
+if [[ -n "$AIPERF_WORKERS_MAX" ]]; then
+    _AIPERF_WORKER_ARGS+=(--workers-max "$AIPERF_WORKERS_MAX")
+fi
+if [[ -n "$AIPERF_RECORD_PROCESSORS" ]]; then
+    _AIPERF_WORKER_ARGS+=(--record-processors "$AIPERF_RECORD_PROCESSORS")
+fi
+
 # Build the list of models to target
 _AIPERF_MODELS=()
 if [[ "$AIPERF_TARGETS" == "all" && ${#MODEL_NAMES[@]} -gt 1 ]]; then
@@ -751,7 +795,7 @@ for _AIPERF_MODEL in "${_AIPERF_MODELS[@]}"; do
         _AIPERF_TOK_ARGS=(--tokenizer "$MODEL")
     fi
 
-    HF_HUB_OFFLINE=1 aiperf profile --artifact-dir "$AIPERF_ARTIFACT_DIR" \
+    HF_HUB_OFFLINE=1 "${CLIENT_CPU_CMD[@]}" aiperf profile --artifact-dir "$AIPERF_ARTIFACT_DIR" \
         --model "$_AIPERF_MODEL" \
         "${_AIPERF_TOK_ARGS[@]}" \
         --endpoint-type chat \
@@ -772,8 +816,7 @@ for _AIPERF_MODEL in "${_AIPERF_MODELS[@]}"; do
         "${_WARMUP_ARGS[@]}" \
         --num-dataset-entries 12800 \
         --random-seed 100 \
-        --workers-max "$CONCURRENCY" \
-        --record-processors 32 \
+        "${_AIPERF_WORKER_ARGS[@]}" \
         --ui simple || echo "WARNING: aiperf failed for model ${_AIPERF_MODEL}"
 done
 
@@ -913,6 +956,18 @@ cat > "$OUTPUT_DIR/config.json" <<EOF
   "isl": $ISL,
   "osl": $OSL,
   "capture_duration": $CAPTURE_DURATION,
+  "frontend_cores": "${FRONTEND_CORES:-}",
+  "worker_cores": "${WORKER_CORES:-}",
+  "client_cores": "${CLIENT_CORES:-}",
+  "aiperf_workers_max": ${AIPERF_WORKERS_MAX:-null},
+  "aiperf_record_processors": ${AIPERF_RECORD_PROCESSORS:-null},
+  "tcp_response_mux": "${DYN_TCP_RESPONSE_MUX:-0}",
+  "tcp_response_batch_interval_ms": "${DYN_TCP_RESPONSE_BATCH_INTERVAL_MS:-5}",
+  "tcp_response_batch_max_bytes": "${DYN_TCP_RESPONSE_BATCH_MAX_BYTES:-65536}",
+  "tcp_response_batch_max_frames": "${DYN_TCP_RESPONSE_BATCH_MAX_FRAMES:-64}",
+  "tcp_response_stream_window_bytes": "${DYN_TCP_RESPONSE_STREAM_WINDOW_BYTES:-262144}",
+  "tcp_response_connection_window_bytes": "${DYN_TCP_RESPONSE_CONNECTION_WINDOW_BYTES:-262144}",
+  "tcp_response_packet_metrics": "${DYN_TCP_RESPONSE_PACKET_METRICS:-0}",
   "frontend_pid": $FRONTEND_PID,
   "has_nsys": $HAS_NSYS,
   "has_perf": $HAS_PERF,

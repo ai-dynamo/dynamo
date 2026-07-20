@@ -115,6 +115,7 @@
 //! - Downstream writes: nothing. Its TCP write half is closed right after the CallHome handshake.
 
 pub mod client;
+pub mod mux;
 pub mod server;
 
 pub mod test_utils;
@@ -129,6 +130,59 @@ use super::{
 };
 
 const TCP_TRANSPORT: &str = "tcp_server";
+pub const TCP_RESPONSE_MUX_TRANSPORT: &str = "tcp_response_mux_v1";
+
+/// Read Linux's kernel-maintained count of data-bearing TCP segments for one
+/// socket. This is used only by opt-in benchmark diagnostics; keeping the
+/// query here avoids coupling the transport to packet-capture privileges.
+#[cfg(target_os = "linux")]
+pub(crate) fn tcp_data_segments_out(stream: &tokio::net::TcpStream) -> Option<u64> {
+    use std::os::fd::AsRawFd;
+
+    tcp_data_segments_out_fd(stream.as_raw_fd())
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn tcp_data_segments_out_fd(fd: std::os::fd::RawFd) -> Option<u64> {
+    #[repr(C)]
+    struct LinuxTcpInfoThroughDataSegments {
+        _header: [u8; 8],
+        _metrics: [u32; 24],
+        _rates_and_bytes: [u64; 4],
+        _segments_out: u32,
+        _segments_in: u32,
+        _notsent_bytes: u32,
+        _min_rtt: u32,
+        _data_segments_in: u32,
+        data_segments_out: u32,
+    }
+
+    let mut info = std::mem::MaybeUninit::<LinuxTcpInfoThroughDataSegments>::zeroed();
+    let mut len = std::mem::size_of::<LinuxTcpInfoThroughDataSegments>() as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_INFO,
+            info.as_mut_ptr().cast(),
+            &mut len,
+        )
+    };
+    if result != 0 || len < std::mem::size_of::<LinuxTcpInfoThroughDataSegments>() as _ {
+        return None;
+    }
+    Some(unsafe { info.assume_init() }.data_segments_out as u64)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn tcp_data_segments_out(_stream: &tokio::net::TcpStream) -> Option<u64> {
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn tcp_data_segments_out_fd(_fd: std::os::fd::RawFd) -> Option<u64> {
+    None
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TcpStreamConnectionInfo {
@@ -166,6 +220,42 @@ impl TryFrom<ConnectionInfo> for TcpStreamConnectionInfo {
 
         serde_json::from_str(&info.info)
             .map_err(|e| anyhow::anyhow!("Failed parse ConnectionInfo: {:?}", e))
+    }
+}
+
+/// Connection information for one logical response stream carried by the
+/// frontend's persistent response-mux listener.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResponseMuxConnectionInfo {
+    pub address: String,
+    pub frontend_server_id: uuid::Uuid,
+    pub stream_id: uuid::Uuid,
+    pub context: String,
+    pub version: u8,
+}
+
+impl From<ResponseMuxConnectionInfo> for ConnectionInfo {
+    fn from(info: ResponseMuxConnectionInfo) -> Self {
+        Self {
+            transport: TCP_RESPONSE_MUX_TRANSPORT.to_string(),
+            info: serde_json::to_string(&info)
+                .expect("Failed to serialize ResponseMuxConnectionInfo"),
+        }
+    }
+}
+
+impl TryFrom<ConnectionInfo> for ResponseMuxConnectionInfo {
+    type Error = anyhow::Error;
+
+    fn try_from(info: ConnectionInfo) -> Result<Self, Self::Error> {
+        if info.transport != TCP_RESPONSE_MUX_TRANSPORT {
+            return Err(anyhow::anyhow!(
+                "Invalid transport; response mux requires `{TCP_RESPONSE_MUX_TRANSPORT}`; got {}",
+                info.transport
+            ));
+        }
+        serde_json::from_str(&info.info)
+            .map_err(|e| anyhow::anyhow!("Failed to parse response mux connection info: {e}"))
     }
 }
 
@@ -247,14 +337,14 @@ mod tests {
         send_stream.send(payload.into()).await.unwrap();
 
         // [client] The client can now receive the response from the server
-        let data = recv_stream.rx.recv().await.unwrap();
+        let data = recv_stream.recv().await.unwrap();
         let recv_msg = serde_json::from_slice::<TestMessage>(&data).unwrap();
         assert_eq!(msg.foo, recv_msg.foo);
 
         // Dropping the upstream `StreamSender` should cleanly close the request
         // stream — the downstream receiver should observe `None`.
         drop(send_stream);
-        assert!(recv_stream.rx.recv().await.is_none());
+        assert!(recv_stream.recv().await.is_none());
     }
 
     #[tokio::test]
@@ -306,7 +396,7 @@ mod tests {
 
         // [server] After client sends the prologue, the server can pick up its `StreamReceiver` half.
         let (_conn_info, stream_provider) = pending_connection.recv_stream.unwrap().into_parts();
-        let recv_stream = stream_provider.await.unwrap();
+        let mut recv_stream = stream_provider.await.unwrap();
 
         // [client] The client can now send the response message to the server
         let msg = TestMessage {
@@ -319,7 +409,7 @@ mod tests {
 
         // [server] The server can now receive the response message from the client
 
-        let data = recv_stream.unwrap().rx.recv().await.unwrap();
+        let data = recv_stream.as_mut().unwrap().recv().await.unwrap();
 
         let recv_msg = serde_json::from_slice::<TestMessage>(&data).unwrap();
 

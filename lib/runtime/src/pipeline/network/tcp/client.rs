@@ -17,7 +17,7 @@ use prometheus::IntCounter;
 use super::{CallHomeHandshake, ControlMessage, TcpStreamConnectionInfo};
 use crate::engine::AsyncEngineContext;
 use crate::pipeline::network::{
-    ConnectionInfo, ResponseStreamPrologue, StreamReceiver, StreamSender,
+    ConnectionInfo, ResponseStreamPrologue, StreamReceiver, StreamRxItem, StreamSender,
     codec::{TwoPartCodec, TwoPartMessage, TwoPartMessageType},
     tcp::StreamType,
 };
@@ -87,6 +87,9 @@ impl TcpClient {
         }
 
         let stream = TcpClient::connect(&info.address).await?;
+        let packet_baseline = super::mux::response_packet_metrics_enabled()
+            .then(|| super::tcp_data_segments_out(&stream))
+            .flatten();
         let peer_port = stream.peer_addr().ok().map(|addr| addr.port());
         let (read_half, write_half) = tokio::io::split(stream);
 
@@ -152,6 +155,7 @@ impl TcpClient {
                 monitor_context,
                 peer_port,
                 subject,
+                packet_baseline,
             )
             .await;
         });
@@ -161,10 +165,7 @@ impl TcpClient {
         let prologue = Some(ResponseStreamPrologue { error: None });
 
         // create the stream sender
-        let stream_sender = StreamSender {
-            tx: bytes_tx,
-            prologue,
-        };
+        let stream_sender = StreamSender::dedicated(bytes_tx, prologue);
 
         Ok(stream_sender)
     }
@@ -230,7 +231,7 @@ impl TcpClient {
         // never writes again, so close the write half immediately.
         drop(framed_writer);
 
-        let (bytes_tx, bytes_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(64);
+        let (bytes_tx, bytes_rx) = tokio::sync::mpsc::channel::<StreamRxItem>(64);
 
         tokio::spawn(handle_request_reader(
             framed_reader,
@@ -239,13 +240,13 @@ impl TcpClient {
             cancellation_counter,
         ));
 
-        Ok(StreamReceiver { rx: bytes_rx })
+        Ok(StreamReceiver::dedicated(bytes_rx))
     }
 }
 
 async fn handle_request_reader(
     mut framed_reader: FramedRead<tokio::io::ReadHalf<tokio::net::TcpStream>, TwoPartCodec>,
-    bytes_tx: tokio::sync::mpsc::Sender<bytes::Bytes>,
+    bytes_tx: tokio::sync::mpsc::Sender<StreamRxItem>,
     context: Arc<dyn AsyncEngineContext>,
     cancellation_counter: Option<IntCounter>,
 ) {
@@ -319,7 +320,7 @@ async fn handle_request_reader(
                                 }
                             }
                             TwoPartMessageType::DataOnly(data) => {
-                                if bytes_tx.send(data).await.is_err() {
+                                if bytes_tx.send(StreamRxItem::dedicated(data)).await.is_err() {
                                     tracing::debug!("downstream consumer dropped; exiting request-stream reader");
                                     break;
                                 }
@@ -372,6 +373,7 @@ async fn wait_for_connection_tasks(
     context: Arc<dyn AsyncEngineContext>,
     peer_port: Option<u16>,
     subject: String,
+    packet_baseline: Option<u64>,
 ) -> Result<()> {
     // Await the reader first and abort the writer on reader Err — the
     // writer parks on `bytes_rx.recv()` and won't wake on its own.
@@ -418,6 +420,13 @@ async fn wait_for_connection_tasks(
     };
 
     let stream = reader.unsplit(writer);
+    if let Some(baseline) = packet_baseline
+        && let Some(current) = super::tcp_data_segments_out(&stream)
+    {
+        crate::metrics::response_mux::DATA_SEGMENTS_TOTAL
+            .with_label_values(&["dedicated", "worker"])
+            .inc_by(current.saturating_sub(baseline));
+    }
     wait_for_server_shutdown(stream, context).await
 }
 
@@ -1061,6 +1070,7 @@ mod tests {
                 monitor_context,
                 None,
                 "test-subject".to_string(),
+                None,
             ),
         )
         .await;
@@ -1120,6 +1130,7 @@ mod tests {
                 context,
                 None,
                 "test-reader-panic".to_string(),
+                None,
             ),
         )
         .await;
@@ -1500,8 +1511,8 @@ mod tests {
     struct RequestReaderHarness {
         framed_server: FramedWrite<tokio::io::WriteHalf<tokio::net::TcpStream>, TwoPartCodec>,
         framed_reader: FramedRead<tokio::io::ReadHalf<tokio::net::TcpStream>, TwoPartCodec>,
-        bytes_tx: mpsc::Sender<Bytes>,
-        bytes_rx: mpsc::Receiver<Bytes>,
+        bytes_tx: mpsc::Sender<StreamRxItem>,
+        bytes_rx: mpsc::Receiver<StreamRxItem>,
         controller: Arc<Controller>,
     }
 
@@ -1512,7 +1523,7 @@ mod tests {
 
         let framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
         let framed_server = FramedWrite::new(server_write, TwoPartCodec::default());
-        let (bytes_tx, bytes_rx) = mpsc::channel::<Bytes>(64);
+        let (bytes_tx, bytes_rx) = mpsc::channel::<StreamRxItem>(64);
         let controller = Arc::new(Controller::default());
 
         RequestReaderHarness {
