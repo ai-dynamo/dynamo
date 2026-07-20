@@ -971,7 +971,7 @@ mod tests {
     }
 
     #[test]
-    fn session_affinity_requires_explicit_dynamo_header() {
+    fn session_affinity_prefers_dynamo_header_over_agent_mappings() {
         let mut headers = HeaderMap::new();
         headers.insert(
             HEADER_CLAUDE_CODE_SESSION_ID,
@@ -982,20 +982,30 @@ mod tests {
             HEADER_OPENCODE_SESSION_ID,
             "opencode-session".parse().unwrap(),
         );
-        assert!(session_affinity_from_headers(&headers).is_none());
+        // Without a canonical header, affinity falls back to the first matching
+        // agent mapping. Claude precedes Codex and OpenCode in AGENT_HEADER_MAPPINGS.
+        assert_eq!(
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "claude-session"
+        );
 
+        // The explicit Dynamo session header always wins over agent mappings.
         headers.insert(HEADER_DYNAMO_SESSION_ID, "canonical".parse().unwrap());
         assert_eq!(
             session_affinity_from_headers(&headers).unwrap().as_str(),
             "canonical"
         );
 
+        // A blank Dynamo header is ignored and affinity falls back to the mapping.
         headers.insert(HEADER_DYNAMO_SESSION_ID, "   ".parse().unwrap());
-        assert!(session_affinity_from_headers(&headers).is_none());
+        assert_eq!(
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "claude-session"
+        );
     }
 
     #[test]
-    fn native_agent_session_does_not_enable_affinity() {
+    fn session_affinity_uses_agent_child_session_when_present() {
         let mut headers = HeaderMap::new();
         headers.insert(
             HEADER_CLAUDE_CODE_SESSION_ID,
@@ -1005,8 +1015,12 @@ mod tests {
 
         let agent_context = agent_context_from_headers(&headers).unwrap();
         assert_eq!(agent_context.session_id, "claude-agent");
-        assert!(session_affinity_from_headers(&headers).is_none());
+        assert_eq!(
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "claude-agent"
+        );
 
+        // The explicit Dynamo session header still takes precedence.
         headers.insert(
             HEADER_DYNAMO_SESSION_ID,
             "affinity-session".parse().unwrap(),
@@ -1017,6 +1031,31 @@ mod tests {
             session_affinity_from_headers(&headers).unwrap().as_str(),
             "affinity-session"
         );
+    }
+
+    #[test]
+    fn session_affinity_accepts_prime_trace_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HEADER_OPENCODE_SESSION_ID,
+            "prime-trace-id".parse().unwrap(),
+        );
+
+        let agent_context = agent_context_from_headers(&headers).unwrap();
+        assert_eq!(agent_context.session_id, "prime-trace-id");
+        assert_eq!(
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "prime-trace-id"
+        );
+    }
+
+    #[test]
+    fn session_affinity_absent_without_any_session_header() {
+        let mut headers = HeaderMap::new();
+        assert!(session_affinity_from_headers(&headers).is_none());
+
+        headers.insert(HEADER_DYNAMO_SESSION_ID, "   ".parse().unwrap());
+        assert!(session_affinity_from_headers(&headers).is_none());
     }
 
     #[test]
