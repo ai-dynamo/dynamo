@@ -3,14 +3,11 @@
 
 """Common base classes and utilities for engine tests (vLLM, TRT-LLM, etc.)"""
 
-import collections
-import concurrent.futures
 import dataclasses
 import logging
 import os
-import signal
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from typing import Any, Dict, Optional
 
@@ -19,10 +16,9 @@ import pytest
 from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.conftest import ServicePorts
 from tests.utils.client import send_request
-from tests.utils.constants import DefaultPort
+from tests.utils.constants import DefaultPort, DynamoPortRange
 from tests.utils.engine_process import (
     EngineConfig,
-    EngineLogError,
     EngineProcess,
     ResponseValidationError,
 )
@@ -37,6 +33,7 @@ from tests.utils.port_utils import allocate_port, deallocate_port
 DEFAULT_TIMEOUT = 10
 
 SERVE_TEST_DIR = os.path.join(WORKSPACE_DIR, "tests/serve")
+logger = logging.getLogger(__name__)
 
 
 def _tail_logs(content: str, *, lines: int = 80) -> str:
@@ -96,47 +93,6 @@ def _with_endpoint_readiness_checks(
     )
 
 
-# Stable lifecycle tokens emitted by the Rust backend-common Worker
-# (dynamo_backend_common::worker). We key off these rather than full
-# human-readable sentences so a log reword doesn't break the test.
-_RUST_WORKER_CLEANUP_TOKEN = "Engine cleanup complete"
-_RUST_WORKER_DRAIN_TOKEN = "drain: waiting for prefill to quiesce"
-
-
-def assert_rust_worker_drained(
-    server_process: EngineProcess,
-    logger: logging.Logger,
-    *,
-    deadline_s: float = 90.0,
-) -> bool:
-    """Assert the Rust Worker reached ``Engine cleanup complete`` within
-    ``deadline_s`` of the prefill SIGTERM (proving drain -> cleanup ran), and
-    return whether the drain loop observably engaged.
-
-    Keyed off worker-log tokens, not metrics: the drain runs at shutdown and the
-    process exits right after, so ``/metrics`` is already gone. The log-format
-    coupling is isolated here per ``tests/CLAUDE.md``. The returned
-    ``drain: waiting for prefill to quiesce`` flag is a diagnostic only (always
-    present for engines that return None); the loop logic is unit-tested in Rust.
-    """
-    end = time.time() + deadline_s
-    while True:
-        log = server_process.read_logs() or ""
-        if _RUST_WORKER_CLEANUP_TOKEN in log:
-            drain_engaged = _RUST_WORKER_DRAIN_TOKEN in log
-            logger.info(
-                "Rust Worker shutdown observed (drain loop engaged=%s)", drain_engaged
-            )
-            return drain_engaged
-        if time.time() >= end:
-            raise EngineLogError(
-                f"Rust Worker '{_RUST_WORKER_CLEANUP_TOKEN}' not observed within "
-                f"{deadline_s:.0f}s of prefill SIGTERM.\n\nLog tail:\n"
-                f"{_tail_logs(log, lines=60)}"
-            )
-        time.sleep(0.5)
-
-
 def _format_request_failure(
     *,
     config: EngineConfig,
@@ -167,6 +123,7 @@ class _PreparedDeployment:
     frontend_port: int
     system_ports: list
     disagg_bootstrap_port: Optional[int]
+    extra_allocated_ports: list[int]
 
 
 def _prepare_deployment(
@@ -217,6 +174,19 @@ def _prepare_deployment(
                 str(gib_to_bytes),
             )
 
+    # Stagger engine startup under xdist to avoid vLLM profiling race
+    # (vLLM bug #10643: concurrent profilers miscount each other's memory).
+    worker_id = os.environ.get("PYTEST_XDIST_WORKER", "")
+    if worker_id.startswith("gw"):
+        worker_num = int(worker_id.removeprefix("gw"))
+        if worker_num > 0:
+            stagger_s = worker_num * 15
+            logger.info("Staggering startup by %ds (xdist %s)", stagger_s, worker_id)
+            time.sleep(stagger_s)
+
+    # Track additional ports allocated for multi-GPU tests (for cleanup in finally)
+    extra_allocated_ports: list[int] = []
+
     if ports is not None:
         dynamic_frontend_port = int(ports.frontend_port)
         dynamic_system_ports = [int(p) for p in ports.system_ports]
@@ -251,8 +221,16 @@ def _prepare_deployment(
         # Unique ZMQ port for vLLM KV event publishing (avoids xdist collisions).
         if ports.kv_event_port:
             merged_env["DYN_VLLM_KV_EVENT_PORT"] = str(ports.kv_event_port)
+            # For multi-worker scripts (xpu_2 router tests), allocate separate
+            # KV event ports for each worker to avoid ZMQ bind collisions.
+            if len(dynamic_system_ports) >= 2:
+                kv_port1 = ports.kv_event_port
+                kv_port2 = allocate_port(ports.kv_event_port + 1)
+                extra_allocated_ports.append(kv_port2)
+                merged_env["DYN_VLLM_KV_EVENT_PORT1"] = str(kv_port1)
+                merged_env["DYN_VLLM_KV_EVENT_PORT2"] = str(kv_port2)
 
-        # Per-worker NIXL side-channel ports, indexed to match DYN_SYSTEM_PORT{idx}.
+        # Per-worker NIXL side-channel ports (avoids xdist collisions on 20097).
         for idx, port in enumerate(ports.nixl_side_channel_ports, start=1):
             merged_env[f"DYN_VLLM_NIXL_SIDE_CHANNEL_PORT{idx}"] = str(port)
 
@@ -279,7 +257,7 @@ def _prepare_deployment(
     # Disagg scripts need a unique bootstrap port so parallel runs don't collide.
     disagg_bootstrap_port: int | None = None
     if config.script_name and "disagg" in config.script_name:
-        disagg_bootstrap_port = allocate_port(12000)
+        disagg_bootstrap_port = allocate_port(DynamoPortRange.BOOTSTRAP.value)
         merged_env["DYN_DISAGG_BOOTSTRAP_PORT"] = str(disagg_bootstrap_port)
 
     return _PreparedDeployment(
@@ -288,150 +266,8 @@ def _prepare_deployment(
         frontend_port=dynamic_frontend_port,
         system_ports=dynamic_system_ports,
         disagg_bootstrap_port=disagg_bootstrap_port,
+        extra_allocated_ports=extra_allocated_ports,
     )
-
-
-def _sigterm_prefill_worker(
-    server_process: EngineProcess, logger: logging.Logger
-) -> bool:
-    """SIGTERM the prefill worker's launcher process, found under the script's
-    process tree by its cmdline. Returns False if not found."""
-    import psutil
-
-    try:
-        root = psutil.Process(server_process.get_pid())
-    except psutil.NoSuchProcess:
-        return False
-    for proc in [root, *root.children(recursive=True)]:
-        try:
-            cmdline = proc.cmdline()
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
-        joined = " ".join(cmdline)
-        # Require the `unified_main` token, not just the disagg arg, so we don't
-        # signal an engine-spawned child/MPI rank that inherited the same args.
-        if "unified_main" in joined and "--disaggregation-mode prefill" in joined:
-            logger.info("Sending SIGTERM to prefill worker pid=%d", proc.pid)
-            proc.send_signal(signal.SIGTERM)
-            return True
-    return False
-
-
-def run_prefill_drain_deployment(
-    config: EngineConfig,
-    request: Any,
-    *,
-    ports: ServicePorts | None,
-    burst_size: int = 96,
-    burst_max_tokens: int = 256,
-    burst_prompt: str = "The quick brown fox jumps over the lazy dog. " * 160,
-) -> None:
-    """Prefill-drain e2e: launch a disaggregated deployment, fire a concurrent
-    burst, SIGTERM only the prefill worker while requests are in flight, and
-    assert the Rust Worker drove graceful shutdown via
-    :func:`assert_rust_worker_drained`.
-
-    Backend-agnostic — the same burst exercises all three engines. Signaling the
-    worker directly (not via harness teardown) avoids the harness's ~8s SIGKILL
-    so the drain can run to completion.
-    """
-    logger = logging.getLogger(request.node.name)
-    logger.info("Starting %s prefill-drain test", config.name)
-
-    prep = _prepare_deployment(config, request, ports=ports, extra_env=None)
-    chat_url = f"http://localhost:{prep.frontend_port}/v1/chat/completions"
-    chat_body = {
-        "model": config.model,
-        "messages": [{"role": "user", "content": burst_prompt}],
-        "max_tokens": burst_max_tokens,
-        "temperature": 0.0,
-        "stream": False,
-    }
-
-    try:
-        with EngineProcess.from_script(
-            prep.config, request, extra_env=prep.merged_env
-        ) as server:
-            # Warm-up: confirm the pipeline serves before stressing it. Retry
-            # because disagg readiness can briefly 5xx just after registration.
-            warm = None
-            for attempt in range(5):
-                warm = send_request(
-                    url=chat_url, payload=chat_body, timeout=120, method="POST"
-                )
-                if warm.status_code == 200:
-                    break
-                logger.warning(
-                    "warm-up attempt %d got %d; retrying", attempt + 1, warm.status_code
-                )
-                time.sleep(2.0)
-            assert (
-                warm is not None and warm.status_code == 200
-            ), f"warm-up request failed after retries: {warm.status_code} {warm.text[:300]}"
-
-            # Fire a concurrent burst and do NOT wait for it.
-            pool = concurrent.futures.ThreadPoolExecutor(max_workers=burst_size)
-            futures = [
-                pool.submit(
-                    send_request,
-                    url=chat_url,
-                    payload=chat_body,
-                    timeout=180,
-                    method="POST",
-                )
-                for _ in range(burst_size)
-            ]
-            logger.info("Fired burst of %d concurrent requests", burst_size)
-
-            # Gate on the burst being observably in flight (not a fixed sleep)
-            # so the SIGTERM lands while transfers are pending, regardless of
-            # GPU speed.
-            want_in_flight = max(burst_size // 2, 8)
-            gate_deadline = time.time() + 15.0
-            in_flight = 0
-            while time.time() < gate_deadline:
-                in_flight = sum(1 for f in futures if not f.done())
-                if in_flight >= want_in_flight:
-                    break
-                time.sleep(0.1)
-            logger.info("burst in-flight=%d; signaling prefill worker", in_flight)
-
-            assert _sigterm_prefill_worker(
-                server, logger
-            ), "could not locate the prefill worker process to signal"
-
-            drain_engaged = assert_rust_worker_drained(server, logger)
-
-            # Functional floor: some burst requests served. Requests routed
-            # after the prefill unregister legitimately fail, so this is a
-            # floor, not "all succeed". Tally outcomes by status code (or
-            # exception type) so a 0-OK failure shows how the burst died.
-            outcomes: collections.Counter = collections.Counter()
-            try:
-                for fut in concurrent.futures.as_completed(futures, timeout=200):
-                    try:
-                        outcomes[fut.result().status_code] += 1
-                    except Exception as e:
-                        outcomes[type(e).__name__] += 1
-            except concurrent.futures.TimeoutError:
-                logger.warning("burst tally timed out waiting for stragglers")
-            ok = outcomes[200]
-            logger.info(
-                "burst: %d/%d returned 200 across prefill drain "
-                "(drain loop engaged=%s, outcomes=%s)",
-                ok,
-                burst_size,
-                drain_engaged,
-                dict(outcomes),
-            )
-            assert ok >= 1, (
-                "no burst request completed across the prefill drain "
-                f"(outcomes: {dict(outcomes)})"
-            )
-            pool.shutdown(wait=False)
-    finally:
-        if prep.disagg_bootstrap_port is not None:
-            deallocate_port(prep.disagg_bootstrap_port)
 
 
 def run_serve_deployment(
@@ -440,12 +276,14 @@ def run_serve_deployment(
     *,
     ports: ServicePorts | None = None,  # pass `dynamo_dynamic_ports` here
     extra_env: Optional[Dict[str, str]] = None,
+    post_validation: Optional[Callable[[], None]] = None,
 ) -> None:
     """Run a standard serve deployment test for any EngineConfig.
 
     - Launches the engine via EngineProcess.from_script
     - Builds a payload (with optional override/mutator)
     - Iterates configured endpoints and validates responses and logs
+    - Optionally runs a final assertion while the deployment is still alive
     """
 
     logger = logging.getLogger(request.node.name)
@@ -464,6 +302,7 @@ def run_serve_deployment(
     dynamic_frontend_port = prep.frontend_port
     dynamic_system_ports = prep.system_ports
     disagg_bootstrap_port = prep.disagg_bootstrap_port
+    extra_allocated_ports = prep.extra_allocated_ports
 
     try:
         with EngineProcess.from_script(
@@ -577,9 +416,14 @@ def run_serve_deployment(
                 # Call final_validation if the payload has one (e.g., CachedTokensChatPayload)
                 if hasattr(payload, "final_validation"):
                     payload.final_validation()
+
+            if post_validation is not None:
+                post_validation()
     finally:
         if disagg_bootstrap_port is not None:
             deallocate_port(disagg_bootstrap_port)
+        for p in extra_allocated_ports:
+            deallocate_port(p)
 
 
 def params_with_model_mark(configs: Mapping[str, EngineConfig]):

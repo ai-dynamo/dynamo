@@ -50,43 +50,103 @@
       "platform": "linux/arm64"
     },
     {
-      "baseline_digest": "sha256:1532b38814b3faf2affdb5ef01ca91468685d314ffb7e8926a0567595355ed88",
+      "baseline_digest": "sha256:13fec2fefd5e10cad82ecdc0fe6fa142080941e4b89ac6b5f3e74895d8db1342",
       "baseline_image": "nvcr.io/nvidia/tensorrt-llm/release",
-      "baseline_sbom": "release@1532b388-amd64.cdx.json",
-      "baseline_tag": "1.3.0rc20",
-      "from_digest": "sha256:1532b38814b3faf2affdb5ef01ca91468685d314ffb7e8926a0567595355ed88",
+      "baseline_sbom": "release@13fec2fe-amd64.cdx.json",
+      "baseline_tag": "1.3.0rc21",
+      "from_digest": "sha256:13fec2fefd5e10cad82ecdc0fe6fa142080941e4b89ac6b5f3e74895d8db1342",
       "from_image": "nvcr.io/nvidia/tensorrt-llm/release",
-      "from_tag": "1.3.0rc20",
+      "from_tag": "1.3.0rc21",
       "platform": "linux/amd64"
     },
     {
-      "baseline_digest": "sha256:1532b38814b3faf2affdb5ef01ca91468685d314ffb7e8926a0567595355ed88",
+      "baseline_digest": "sha256:13fec2fefd5e10cad82ecdc0fe6fa142080941e4b89ac6b5f3e74895d8db1342",
       "baseline_image": "nvcr.io/nvidia/tensorrt-llm/release",
-      "baseline_sbom": "release@1532b388-arm64.cdx.json",
-      "baseline_tag": "1.3.0rc20",
-      "from_digest": "sha256:1532b38814b3faf2affdb5ef01ca91468685d314ffb7e8926a0567595355ed88",
+      "baseline_sbom": "release@13fec2fe-arm64.cdx.json",
+      "baseline_tag": "1.3.0rc21",
+      "from_digest": "sha256:13fec2fefd5e10cad82ecdc0fe6fa142080941e4b89ac6b5f3e74895d8db1342",
       "from_image": "nvcr.io/nvidia/tensorrt-llm/release",
-      "from_tag": "1.3.0rc20",
+      "from_tag": "1.3.0rc21",
       "platform": "linux/arm64"
     },
     {
-      "baseline_digest": "sha256:efec382c17b5090114ea8b2b7c8fc6678c5d1a74ce5be6676bf31082e0e44f36",
+      "baseline_digest": "sha256:22b2291f0d515dbffde9d9f2333d82051b72781149fb5c2664076224dd8c53de",
       "baseline_image": "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo",
-      "baseline_sbom": "vllm-ci-test-repo@efec382c-amd64.cdx.json",
-      "baseline_tag": "ad7125a431e176d4161099480a66f0169609a690-xpu",
-      "from_digest": "sha256:efec382c17b5090114ea8b2b7c8fc6678c5d1a74ce5be6676bf31082e0e44f36",
+      "baseline_sbom": "vllm-ci-test-repo@22b2291f-amd64.cdx.json",
+      "baseline_tag": "ee0da84ab9e04ac7610e28580af62c365e898389-xpu",
+      "from_digest": "sha256:22b2291f0d515dbffde9d9f2333d82051b72781149fb5c2664076224dd8c53de",
       "from_image": "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo",
-      "from_tag": "ad7125a431e176d4161099480a66f0169609a690-xpu",
+      "from_tag": "ee0da84ab9e04ac7610e28580af62c365e898389-xpu",
       "platform": "linux/amd64"
     },
     {
-      "baseline_digest": "sha256:b15b9f691838b46723fcb0a51a01a015576cac8e5c52f174eba7cab0d1c893c7",
-      "baseline_image": "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo",
-      "baseline_sbom": "vllm-ci-test-repo@b15b9f69-amd64.cdx.json",
-      "baseline_tag": "ee0da84ab9e04ac7610e28580af62c365e898389-xpu",
-      "from_digest": "sha256:b15b9f691838b46723fcb0a51a01a015576cac8e5c52f174eba7cab0d1c893c7",
-      "from_image": "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo",
-      "from_tag": "ee0da84ab9e04ac7610e28580af62c365e898389-xpu",
+      "baseline_digest": "sha256:043085f9298b5da0d79bfd91e162b04c0661f3cb2f03202c5b912037cf6c1ba6",
+      "baseline_image": "nvcr.io/nvidia/distroless/python",
+      "baseline_sbom": "python@043085f9-amd64.cdx.json",
+      "baseline_tag": "3.12-v4.0.3",
+      "from_digest": "sha256:043085f9298b5da0d79bfd91e162b04c0661f3cb2f03202c5b912037cf6c1ba6",
+      "from_image": "nvcr.io/nvidia/distroless/python",
+      "from_tag": "3.12-v4.0.3",
+      "platform": "linux/amd64"
+    },
+    {
+      "baseline_digest": "sha256:043085f9298b5da0d79bfd91e162b04c0661f3cb2f03202c5b912037cf6c1ba6",
+      "baseline_image": "nvcr.io/nvidia/distroless/python",
+      "baseline_sbom": "python@043085f9-arm64.cdx.json",
+      "baseline_tag": "3.12-v4.0.3",
+      "from_digest": "sha256:043085f9298b5da0d79bfd91e162b04c0661f3cb2f03202c5b912037cf6c1ba6",
+      "from_image": "nvcr.io/nvidia/distroless/python",
+      "from_tag": "3.12-v4.0.3",
+      "platform": "linux/arm64"
+    },
+    {
+      "baseline_digest": "sha256:e86c88d0910e71728d4e2b6def5230890009344eef1946c09b5519628c084968",
+      "baseline_image": "nvcr.io/nvidia/distroless/go",
+      "baseline_sbom": "go@e86c88d0-amd64.cdx.json",
+      "baseline_tag": "v4.0.3",
+      "from_digest": "sha256:e86c88d0910e71728d4e2b6def5230890009344eef1946c09b5519628c084968",
+      "from_image": "nvcr.io/nvidia/distroless/go",
+      "from_tag": "v4.0.3",
+      "platform": "linux/amd64"
+    },
+    {
+      "baseline_digest": "sha256:e86c88d0910e71728d4e2b6def5230890009344eef1946c09b5519628c084968",
+      "baseline_image": "nvcr.io/nvidia/distroless/go",
+      "baseline_sbom": "go@e86c88d0-arm64.cdx.json",
+      "baseline_tag": "v4.0.3",
+      "from_digest": "sha256:e86c88d0910e71728d4e2b6def5230890009344eef1946c09b5519628c084968",
+      "from_image": "nvcr.io/nvidia/distroless/go",
+      "from_tag": "v4.0.3",
+      "platform": "linux/arm64"
+    },
+    {
+      "baseline_digest": "sha256:7291df3657ecfcf05332af183b373994eb2cf328c7914944b09e6c437bf2edf8",
+      "baseline_image": "nvcr.io/nvidia/base/ubuntu",
+      "baseline_sbom": "ubuntu@7291df36-amd64.cdx.json",
+      "baseline_tag": "noble-20250619",
+      "from_digest": "sha256:7291df3657ecfcf05332af183b373994eb2cf328c7914944b09e6c437bf2edf8",
+      "from_image": "nvcr.io/nvidia/base/ubuntu",
+      "from_tag": "noble-20250619",
+      "platform": "linux/amd64"
+    },
+    {
+      "baseline_digest": "sha256:7291df3657ecfcf05332af183b373994eb2cf328c7914944b09e6c437bf2edf8",
+      "baseline_image": "nvcr.io/nvidia/base/ubuntu",
+      "baseline_sbom": "ubuntu@7291df36-arm64.cdx.json",
+      "baseline_tag": "noble-20250619",
+      "from_digest": "sha256:7291df3657ecfcf05332af183b373994eb2cf328c7914944b09e6c437bf2edf8",
+      "from_image": "nvcr.io/nvidia/base/ubuntu",
+      "from_tag": "noble-20250619",
+      "platform": "linux/arm64"
+    },
+    {
+      "baseline_digest": "sha256:8315e2455736c4f9b597f15c5fb4d31f834e798e0c6b66bbdbdbac491ce26bd1",
+      "baseline_image": "nvcr.io/nvidia/cuda-dl-base",
+      "baseline_sbom": "cuda-dl-base@8315e245-amd64.cdx.json",
+      "baseline_tag": "25.11-cuda13.0-devel-ubuntu24.04",
+      "from_digest": "sha256:8315e2455736c4f9b597f15c5fb4d31f834e798e0c6b66bbdbdbac491ce26bd1",
+      "from_image": "nvcr.io/nvidia/cuda-dl-base",
+      "from_tag": "25.11-cuda13.0-devel-ubuntu24.04",
       "platform": "linux/amd64"
     }
   ],
@@ -102,6 +162,6 @@
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
   "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB per file.",
-  "generated_at": "2026-07-03T06:54:02+00:00",
+  "generated_at": "2026-07-10T14:53:03+00:00",
   "schema_version": 2
 }

@@ -20,6 +20,8 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
+#[cfg(feature = "bench")]
+use super::WorkerObservationState;
 use super::{EventKind, KvIndexerMetrics, SyncIndexer, WorkerLookupStats, WorkerTask};
 use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
@@ -196,7 +198,7 @@ impl LowerTierIndexer {
                 self.remove_blocks_impl(worker_blocks, worker, &remove_data.block_hashes)
             }
             KvCacheEventData::Cleared => {
-                self.clear_worker_impl(worker_blocks, event.worker_id);
+                self.remove_worker_dp_rank_impl(worker_blocks, worker);
                 Ok(())
             }
         }
@@ -503,6 +505,8 @@ impl SyncIndexer for LowerTierIndexer {
     ) -> anyhow::Result<()> {
         let mut worker_blocks = WorkerBlockIndex::default();
         let counters = metrics.as_ref().map(|m| m.prebind());
+        #[cfg(feature = "bench")]
+        let mut observation = WorkerObservationState::default();
 
         while let Ok(task) = event_receiver.recv() {
             match task {
@@ -528,13 +532,39 @@ impl SyncIndexer for LowerTierIndexer {
                     }
                     let _ = resp.send(applied);
                 }
+                #[cfg(feature = "bench")]
+                WorkerTask::InstallObservation { writer, resp } => {
+                    observation.install(writer, resp);
+                }
+                #[cfg(feature = "bench")]
+                WorkerTask::ObservedEvent {
+                    event,
+                    correlation_id,
+                } => {
+                    let kind = EventKind::of(&event.event.data);
+                    let result = self.apply_event(&mut worker_blocks, event);
+                    observation.record(correlation_id, result.is_ok());
+                    if let Err(ref error) = result {
+                        tracing::warn!(%error, "Failed to apply lower-tier event");
+                    }
+                    if let Some(ref c) = counters {
+                        c.inc(kind, result);
+                    }
+                }
+                #[cfg(feature = "bench")]
+                WorkerTask::SealObservation(resp) => observation.seal(resp),
+                #[cfg(feature = "bench")]
+                WorkerTask::HarvestObservation(resp) => observation.harvest(resp),
                 WorkerTask::Anchor { worker, anchor } => {
                     if let Err(error) = self.apply_anchor(worker, anchor) {
                         tracing::warn!(?error, "Failed to apply anchor");
                     }
                 }
-                WorkerTask::RemoveWorker { worker_id, .. } => {
+                WorkerTask::RemoveWorker {
+                    worker_id, resp, ..
+                } => {
                     self.remove_worker(&mut worker_blocks, worker_id);
+                    let _ = resp.send(());
                 }
                 WorkerTask::RemoveWorkerDpRank {
                     worker_id, dp_rank, ..
@@ -1291,7 +1321,7 @@ mod tests {
     }
 
     #[test]
-    fn cleared_event_is_worker_wide_across_dp_ranks() {
+    fn cleared_event_only_removes_target_dp_rank() {
         let mut index = TestLowerTierIndex::new();
         index
             .apply_event(store_event(29, 0, 0, Some(1200), &[101], &[1001]))
@@ -1313,9 +1343,10 @@ mod tests {
             LowerTierContinuation::new(0, ExternalSequenceBlockHash(2200)),
         );
 
-        let hits = index.query_contiguous_hits(&local_hashes(&[101]), &continuations);
-        assert_eq!(hits.get(&WorkerWithDpRank::new(29, 0)), Some(&0));
-        assert_eq!(hits.get(&WorkerWithDpRank::new(29, 1)), Some(&0));
+        let cleared_hits = index.query_contiguous_hits(&local_hashes(&[101]), &continuations);
+        assert_eq!(cleared_hits.get(&WorkerWithDpRank::new(29, 0)), Some(&0));
+        let sibling_hits = index.query_contiguous_hits(&local_hashes(&[201]), &continuations);
+        assert_eq!(sibling_hits.get(&WorkerWithDpRank::new(29, 1)), Some(&1));
     }
 
     #[test]

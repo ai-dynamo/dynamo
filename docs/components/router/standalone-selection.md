@@ -66,6 +66,9 @@ APIs. Those bindings should wrap `SelectionService` rather than construct
 | `--indexer-peers` | none | Comma-separated HTTP URLs used for startup KV recovery through `/dump`. |
 | `--replica-sync-port` | none | Local ZMQ PUB port for active-load lifecycle events. The selector binds `tcp://*:<port>` internally. |
 | `--replica-sync-peers` | none | Comma-separated ZMQ PUB endpoints for selector peers. Requires `--replica-sync-port`. |
+| `--selection-cache-ttl-secs` | `120` | Seconds an unclaimed pending selection lives before eviction. |
+| `--selection-cache-max-entries` | `4096` | Maximum resident pending selections, evicting oldest first. |
+| `--selection-cache-max-bytes` | `268435456` | Approximate byte budget across resident pending selections. |
 
 Router scheduling behavior continues to use the standard Dynamo router
 environment configuration.
@@ -82,7 +85,7 @@ Content-Type: application/json
 {
   "worker_id": 1,
   "model_name": "model",
-  "tenant_id": "default",
+  "routing_group": "default",
   "endpoint": "http://worker:8000",
   "block_size": 16,
   "data_parallel_start_rank": 0,
@@ -97,7 +100,7 @@ Content-Type: application/json
 
 `POST /workers` returns `201`. `PATCH /workers/{worker_id}` updates supplied
 fields, `DELETE /workers/{worker_id}` removes the worker, and `GET /workers`
-lists catalog state. `model_name` and `tenant_id` scope all selection, indexer,
+lists catalog state. `model_name` and `routing_group` scope all selection, indexer,
 and load state; both default to `"default"` when omitted.
 
 `GET /health` is process liveness. `GET /ready` returns `200` only after at
@@ -113,7 +116,7 @@ Select a worker without booking active load:
 {
   "selection_id": "select-123",
   "model_name": "model",
-  "tenant_id": "default",
+  "routing_group": "default",
   "block_hashes": [11, 12, 13, 14, 15, 16, 17, 18],
   "sequence_hashes": [21, 22, 23, 24, 25, 26, 27, 28],
   "isl_tokens": 512
@@ -123,14 +126,13 @@ Select a worker without booking active load:
 ### `POST /select_and_reserve`
 
 Select and atomically book load in the receiving selector process. Supply a
-globally unique `reservation_id`, or allow the service to generate one:
+globally unique `selection_id`, or allow the service to generate one:
 
 ```json
 {
   "selection_id": "select-123",
-  "reservation_id": "request-123",
   "model_name": "model",
-  "tenant_id": "default",
+  "routing_group": "default",
   "block_hashes": [11, 12, 13, 14, 15, 16, 17, 18],
   "sequence_hashes": [21, 22, 23, 24, 25, 26, 27, 28],
   "isl_tokens": 512
@@ -142,9 +144,8 @@ Both endpoints return the same selection shape:
 ```json
 {
   "selection_id": "select-123",
-  "reservation_id": "request-123",
   "model_name": "model",
-  "tenant_id": "default",
+  "routing_group": "default",
   "worker_id": 1,
   "dp_rank": 0,
   "endpoint": "http://worker:8000",
@@ -160,7 +161,7 @@ Both endpoints return the same selection shape:
 }
 ```
 
-`selection_id` and `reservation_id` are omitted when absent. All `overlap`
+`selection_id` is omitted when absent. All `overlap`
 values are matched token counts. `gpu`, `cpu`, and `disk` use the cumulative
 Mooncake tier semantics documented in the standalone indexer's
 [per-instance tier breakdown](standalone-indexer.md#per-instance-tier-breakdown).
@@ -180,21 +181,72 @@ been removed. Their values remain internal scheduler inputs.
 
 Ray can keep model invocation separate from selector admission:
 
-1. Call `POST /select`.
+1. Call `POST /select` with a `selection_id`.
 2. Send the request to the returned `endpoint` and `dp_rank`.
-3. Call `POST /reservations` with a globally unique reservation ID, selected
-   worker identity, the same prompt representation, and the returned
-   `effective_prefill_tokens`.
+3. Call `POST /reservations` using the cached selection replay form, or the
+   explicit form with the full worker identity and prompt.
 4. Report prefill completion and request completion through the lifecycle API.
+
+### Cached selection replay form
+
+A `/select` that carries a `selection_id` caches its booking inputs (the
+chosen worker, the normalized prompt, `effective_prefill_tokens`,
+`expected_output_tokens`, and the prefill-tracking decision) on the selector
+that served it. A reservation that passes the same `selection_id`,
+`model_name`, and `routing_group` replays the cached selection, booked under
+that `selection_id`, without re-sending the prompt:
 
 ```http
 POST /reservations
 Content-Type: application/json
 
 {
-  "reservation_id": "request-123",
+  "selection_id": "select-123",
   "model_name": "model",
-  "tenant_id": "default",
+  "routing_group": "default"
+}
+```
+
+- **Id namespace**: `selection_id` is client-chosen and scoped per
+  `(model_name, routing_group)`; use a distinct id per in-flight select. A new
+  `select` reusing a pending id replaces it (latest wins), and an explicit
+  booking discards the cached selection for its `selection_id`.
+- **Required id**: `selection_id` is always required (the replay key and the
+  booking id); a request without it is rejected.
+- **Single-use**: The first successful booking consumes the entry; a repeat
+  replay returns `404` (`no pending selection`). Concurrent replays of the same
+  id collide at the scheduler, so only one books.
+- **Retryable on failure**: A booking that fails before landing (worker no
+  longer schedulable, service not ready) leaves the entry in place, so the same
+  call can be retried once the condition clears.
+- **Bounded window**: By default, entries expire after 120 seconds and each
+  selector retains at most 4096 pending selections within a 256 MiB budget,
+  evicting oldest first. All three limits are configurable.
+- **Replica-local**: The cache lives in the selector process that served the
+  `/select`. With multiple selector replicas, route the reservation to the
+  same replica or use the explicit form.
+- **Pure replay**: The booking uses exactly what `select` captured; other
+  request fields are ignored. Supplying `worker_id` switches to the explicit
+  form.
+
+On any miss (expired, already consumed, wrong model or routing group, or a
+different replica) the call returns `404`; fall back to the explicit form.
+
+### Explicit form
+
+The self-contained form carries the worker identity and prompt and needs no
+cached selection; it wins whenever `worker_id` is present. It discards the
+cached selection for its `selection_id`, so a later replay of the same id
+cannot book stale state:
+
+```http
+POST /reservations
+Content-Type: application/json
+
+{
+  "selection_id": "request-123",
+  "model_name": "model",
+  "routing_group": "default",
   "worker_id": 1,
   "dp_rank": 0,
   "sequence_hashes": [21, 22, 23, 24, 25, 26, 27, 28],
@@ -211,9 +263,9 @@ reservation API does not accept or derive accounting from overlap fields.
 ## Reservation Lifecycle
 
 ```http
-POST /reservations/{reservation_id}/prefill_complete
-POST /reservations/{reservation_id}/output_block
-DELETE /reservations/{reservation_id}
+POST /reservations/{selection_id}/prefill_complete
+POST /reservations/{selection_id}/output_block
+DELETE /reservations/{selection_id}
 ```
 
 `prefill_complete` clears active prefill load. `output_block` updates only the
@@ -231,7 +283,7 @@ The selector has two independent peer configurations:
 | Plane | Transport | Flags | Purpose |
 |-------|-----------|-------|---------|
 | Indexer recovery | HTTP | `--indexer-peers` | Fetch a compatible `/dump` during startup and replay KV events into the local indexer. |
-| Replica synchronization | ZMQ | `--replica-sync-port`, `--replica-sync-peers` | Share admission, prefill-complete, and free events by model and tenant. |
+| Replica synchronization | ZMQ | `--replica-sync-port`, `--replica-sync-peers` | Share admission, prefill-complete, and free events by model and routing group. |
 
 Example:
 
@@ -268,22 +320,29 @@ replica-sync peers. They do not alter the HTTP indexer-recovery peers.
   dropped events, and temporary active-load divergence are accepted.
 - There is no sequencing, acknowledgement, replay, backpressure, or
   resynchronization for replica lifecycle events.
-- Unknown worker, model, tenant, DP-rank, and block-size events are dropped.
+- Unknown worker, model, routing-group, DP-rank, and block-size events are dropped.
   Register the same worker catalog on every selector before routing traffic.
+- The v1 replica envelope uses `routing_group` and is incompatible with binaries that
+  send `tenant_id`. Drain active reservations and lifecycle traffic, upgrade all connected
+  selectors together, re-register worker catalogs, and then resume traffic. Active advisory
+  state is not migrated.
 - Admission, prefill-complete, and free are synchronized. Output-block growth
   remains local to avoid excessive network bandwidth.
 - Startup recovery waits for recovered events to be submitted to the indexer,
   not for complete processing. Early selections may temporarily miss recovered
   KV state.
 - `/select` followed by `/reservations` provides eventual, not atomic,
-  cross-replica admission. Use `/select_and_reserve` for atomic local booking.
-- Reservation IDs must be globally unique. Existing conflict and retry
-  semantics are unchanged; no idempotency ledger is added.
+  cross-replica admission, and the pending-selection cache behind the minimal
+  reservation form is local to the selector that served the `/select`. Use
+  `/select_and_reserve` for atomic local booking.
+- Reservation IDs must be globally unique. Duplicate bookings for the same ID
+  conflict (`409`); no idempotency ledger is added. An explicit booking that
+  carries a `selection_id` also discards that cached selection.
 
 ## Inspection APIs
 
 - `GET /loads` returns active-load snapshots, optionally filtered by
-  `model_name` and `tenant_id`.
+  `model_name` and `routing_group`.
 - `POST /potential_loads` estimates worker load for a prompt without selection.
 - `POST /overlap_scores` returns per-worker/per-rank tiered overlap rows.
 - `GET /dump` returns the compatible indexer recovery snapshot.

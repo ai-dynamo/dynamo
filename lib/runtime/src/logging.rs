@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 use tracing::level_filters::LevelFilter;
 use tracing::{Event, Subscriber};
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::Targets;
 use tracing_subscriber::fmt::time::FormatTime;
 use tracing_subscriber::fmt::time::LocalTime;
 use tracing_subscriber::fmt::time::SystemTime;
@@ -68,6 +69,7 @@ use tracing_subscriber::Registry;
 use tracing_subscriber::field::Visit;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::layer::Context;
+use tracing_subscriber::layer::Filter;
 use tracing_subscriber::registry::SpanData;
 use uuid::Uuid;
 
@@ -895,6 +897,21 @@ pub fn inject_trace_headers_into_map(headers: &mut std::collections::HashMap<Str
     }
 }
 
+pub fn otel_parent_context_from_distributed(
+    ctx: &DistributedTraceContext,
+) -> Option<opentelemetry::Context> {
+    let mut headers = async_nats::HeaderMap::new();
+    headers.insert("traceparent", ctx.create_traceparent());
+
+    if let Some(ref tracestate) = ctx.tracestate {
+        headers.insert("tracestate", tracestate.as_str());
+    }
+
+    let (otel_context, _trace_id, _parent_span_id) =
+        extract_otel_context_from_nats_headers(&headers);
+    otel_context
+}
+
 /// Create a client_request span linked to the parent trace context
 pub fn make_client_request_span(
     operation: &str,
@@ -903,15 +920,7 @@ pub fn make_client_request_span(
     instance_id: Option<&str>,
 ) -> Span {
     if let Some(ctx) = trace_context {
-        let mut headers = async_nats::HeaderMap::new();
-        headers.insert("traceparent", ctx.create_traceparent());
-
-        if let Some(ref tracestate) = ctx.tracestate {
-            headers.insert("tracestate", tracestate.as_str());
-        }
-
-        let (otel_context, _extracted_trace_id, _extracted_parent_span_id) =
-            extract_otel_context_from_nats_headers(&headers);
+        let otel_context = otel_parent_context_from_distributed(ctx);
 
         let span = if let Some(inst_id) = instance_id {
             tracing::info_span!(
@@ -1414,13 +1423,165 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn filters(config: LoggingConfig) -> EnvFilter {
+#[allow(clippy::large_enum_variant)] // Constructed once during logging initialization.
+enum LoggingFilter {
+    Targets(Targets),
+    Env(EnvFilter),
+}
+
+impl<S> Filter<S> for LoggingFilter {
+    #[inline]
+    fn enabled(&self, meta: &tracing::Metadata<'_>, cx: &Context<'_, S>) -> bool {
+        match self {
+            Self::Targets(filter) => <Targets as Filter<S>>::enabled(filter, meta, cx),
+            Self::Env(filter) => <EnvFilter as Filter<S>>::enabled(filter, meta, cx),
+        }
+    }
+
+    #[inline]
+    fn callsite_enabled(
+        &self,
+        meta: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        match self {
+            Self::Targets(filter) => <Targets as Filter<S>>::callsite_enabled(filter, meta),
+            Self::Env(filter) => <EnvFilter as Filter<S>>::callsite_enabled(filter, meta),
+        }
+    }
+
+    #[inline]
+    fn event_enabled(&self, event: &Event<'_>, cx: &Context<'_, S>) -> bool {
+        match self {
+            Self::Targets(filter) => <Targets as Filter<S>>::event_enabled(filter, event, cx),
+            Self::Env(filter) => <EnvFilter as Filter<S>>::event_enabled(filter, event, cx),
+        }
+    }
+
+    #[inline]
+    fn max_level_hint(&self) -> Option<LevelFilter> {
+        match self {
+            Self::Targets(filter) => <Targets as Filter<S>>::max_level_hint(filter),
+            Self::Env(filter) => <EnvFilter as Filter<S>>::max_level_hint(filter),
+        }
+    }
+
+    #[inline]
+    fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &Id, cx: Context<'_, S>) {
+        if let Self::Env(filter) = self {
+            <EnvFilter as Filter<S>>::on_new_span(filter, attrs, id, cx);
+        }
+    }
+
+    #[inline]
+    fn on_record(&self, id: &Id, values: &span::Record<'_>, cx: Context<'_, S>) {
+        if let Self::Env(filter) = self {
+            <EnvFilter as Filter<S>>::on_record(filter, id, values, cx);
+        }
+    }
+
+    #[inline]
+    fn on_enter(&self, id: &Id, cx: Context<'_, S>) {
+        if let Self::Env(filter) = self {
+            <EnvFilter as Filter<S>>::on_enter(filter, id, cx);
+        }
+    }
+
+    #[inline]
+    fn on_exit(&self, id: &Id, cx: Context<'_, S>) {
+        if let Self::Env(filter) = self {
+            <EnvFilter as Filter<S>>::on_exit(filter, id, cx);
+        }
+    }
+
+    #[inline]
+    fn on_close(&self, id: Id, cx: Context<'_, S>) {
+        if let Self::Env(filter) = self {
+            <EnvFilter as Filter<S>>::on_close(filter, id, cx);
+        }
+    }
+}
+
+fn filters(config: LoggingConfig) -> LoggingFilter {
+    let targets = match std::env::var(env_logging::DYN_LOG) {
+        Ok(value) => targets_filter(&config, Some(&value)),
+        Err(std::env::VarError::NotPresent) => targets_filter(&config, None),
+        Err(std::env::VarError::NotUnicode(_)) => None,
+    };
+
+    if let Some(filter) = targets {
+        return LoggingFilter::Targets(filter);
+    }
+
+    LoggingFilter::Env(env_filter(&config))
+}
+
+/// Use the lock-free target/level filter when `DYN_LOG` contains no dynamic
+/// span or field directives. `EnvFilter` tracks dynamic span matches behind an
+/// `RwLock`, and its span lifecycle callbacks acquire that lock even when the
+/// configured directives are all static.
+fn targets_filter(config: &LoggingConfig, dyn_log: Option<&str>) -> Option<Targets> {
+    // `EnvFilter::parse_lossy` ignores zero-length comma-separated segments,
+    // but leaves all other text untouched. In particular, do not trim here:
+    // whitespace may make the directive dynamic or invalid.
+    let dyn_directives = dyn_log
+        .into_iter()
+        .flat_map(|value| value.split(',').filter(|directive| !directive.is_empty()));
+
+    let mut directives = Vec::new();
+    for directive in dyn_directives {
+        // Parsing as `Targets` is also the feature test for whether the
+        // configured directive requires EnvFilter's dynamic span matching.
+        targets_compatible(directive)?;
+        directives.push(directive.to_string());
+    }
+
+    // EnvFilter uses the configured default only when DYN_LOG is absent or
+    // contains no directives. A target-only DYN_LOG must leave other targets
+    // disabled rather than inheriting the configured default level.
+    if directives.is_empty() {
+        directives.push(config.log_level.clone());
+    }
+
+    for (module, level) in &config.log_filters {
+        let directive = format!("{module}={level}");
+        match targets_compatible(&directive) {
+            Some(()) => directives.push(directive),
+            None => match directive.parse::<Directive>() {
+                // Valid span or field directives require EnvFilter's dynamic
+                // matching, so do not silently drop a configured filter.
+                Ok(_) => return None,
+                // Preserve the pre-fast-path warn-and-ignore behavior for
+                // directives that neither parser accepts.
+                Err(e) => {
+                    eprintln!("Failed parsing filter '{level}' for module '{module}': {e}");
+                }
+            },
+        }
+    }
+
+    if span_events_enabled() {
+        directives.push("span_event=trace".to_string());
+    }
+
+    directives.push("request_span=trace".to_string());
+    directives.join(",").parse::<Targets>().ok()
+}
+
+/// An opening `[` begins EnvFilter's span or field selector grammar. Targets
+/// accepts some bracketed forms as literal targets or static field filters, but
+/// routing every bracketed directive through EnvFilter keeps the configuration
+/// language consistent. Curly braces alone remain ordinary target characters.
+fn targets_compatible(directive: &str) -> Option<()> {
+    (!directive.contains('[') && directive.parse::<Targets>().is_ok()).then_some(())
+}
+
+fn env_filter(config: &LoggingConfig) -> EnvFilter {
     let mut filter_layer = EnvFilter::builder()
         .with_default_directive(config.log_level.parse().unwrap())
         .with_env_var(env_logging::DYN_LOG)
         .from_env_lossy();
 
-    for (module, level) in config.log_filters {
+    for (module, level) in &config.log_filters {
         match format!("{module}={level}").parse::<Directive>() {
             Ok(d) => {
                 filter_layer = filter_layer.add_directive(d);
@@ -1784,6 +1945,129 @@ pub mod tests {
     use std::io::{BufRead, BufReader};
     use stdio_override::*;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn unset_dyn_log_uses_configured_default() {
+        let filter = targets_filter(&LoggingConfig::default(), None)
+            .expect("an unset DYN_LOG should use Targets");
+
+        assert!(filter.would_enable("request_span", &tracing::Level::TRACE));
+        assert!(filter.would_enable("unlisted_target", &tracing::Level::INFO));
+        assert!(!filter.would_enable("unlisted_target", &tracing::Level::DEBUG));
+        assert!(!filter.would_enable("tower", &tracing::Level::WARN));
+    }
+
+    #[test]
+    fn empty_dyn_log_uses_configured_default() {
+        for dyn_log in ["", ",,"] {
+            let filter = targets_filter(&LoggingConfig::default(), Some(dyn_log))
+                .expect("an empty DYN_LOG should use Targets");
+
+            assert!(filter.would_enable("request_span", &tracing::Level::TRACE));
+            assert!(filter.would_enable("unlisted_target", &tracing::Level::INFO));
+            assert!(!filter.would_enable("unlisted_target", &tracing::Level::DEBUG));
+            assert!(!filter.would_enable("tower", &tracing::Level::WARN));
+        }
+    }
+
+    #[test]
+    fn target_only_dyn_log_does_not_use_configured_default() {
+        let filter = targets_filter(
+            &LoggingConfig::default(),
+            Some("dynamo_runtime::logging=debug"),
+        )
+        .expect("target/level directives should use Targets");
+
+        assert!(filter.would_enable("request_span", &tracing::Level::TRACE));
+        assert!(!filter.would_enable("unlisted_target", &tracing::Level::INFO));
+        assert!(!filter.would_enable("unlisted_target", &tracing::Level::DEBUG));
+        assert!(filter.would_enable("dynamo_runtime::logging::child", &tracing::Level::DEBUG));
+        assert!(!filter.would_enable("tower", &tracing::Level::WARN));
+    }
+
+    #[test]
+    fn trailing_empty_dyn_log_segments_do_not_enable_trace() {
+        let filter = targets_filter(
+            &LoggingConfig::default(),
+            Some("dynamo_runtime::logging=debug,"),
+        )
+        .expect("target/level directives should use Targets");
+
+        assert!(filter.would_enable("dynamo_runtime::logging", &tracing::Level::DEBUG));
+        assert!(!filter.would_enable("unlisted_target", &tracing::Level::TRACE));
+    }
+
+    #[test]
+    fn dynamic_span_directives_fall_back_to_env_filter() {
+        assert!(
+            targets_filter(
+                &LoggingConfig::default(),
+                Some("dynamo_runtime[request{model=foo}]=debug"),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn span_selector_dyn_log_falls_back_to_env_filter() {
+        assert!(
+            targets_filter(
+                &LoggingConfig::default(),
+                Some("dynamo_runtime[request]=debug"),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn field_presence_dyn_log_falls_back_to_env_filter() {
+        assert!(
+            targets_filter(
+                &LoggingConfig::default(),
+                Some("dynamo_runtime[{request_id}]=debug"),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn dynamic_log_filters_fall_back_to_env_filter() {
+        let config = LoggingConfig {
+            log_level: DEFAULT_FILTER_LEVEL.to_string(),
+            log_filters: HashMap::from([(
+                "dynamo_runtime[request{model=foo}]".to_string(),
+                "debug".to_string(),
+            )]),
+        };
+
+        assert!(targets_filter(&config, None).is_none());
+    }
+
+    #[test]
+    fn span_selector_log_filters_fall_back_to_env_filter() {
+        let config = LoggingConfig {
+            log_level: DEFAULT_FILTER_LEVEL.to_string(),
+            log_filters: HashMap::from([(
+                "dynamo_runtime[request]".to_string(),
+                "debug".to_string(),
+            )]),
+        };
+
+        assert!(targets_filter(&config, None).is_none());
+    }
+
+    #[test]
+    fn field_presence_log_filters_fall_back_to_env_filter() {
+        let config = LoggingConfig {
+            log_level: DEFAULT_FILTER_LEVEL.to_string(),
+            log_filters: HashMap::from([(
+                "dynamo_runtime[{request_id}]".to_string(),
+                "debug".to_string(),
+            )]),
+        };
+
+        assert!(targets_filter(&config, None).is_none());
+    }
 
     #[test]
     fn otlp_protocol_defaults_to_grpc() {

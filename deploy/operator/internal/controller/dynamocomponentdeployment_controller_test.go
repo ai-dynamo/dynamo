@@ -32,6 +32,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"github.com/google/go-cmp/cmp"
@@ -685,6 +686,7 @@ func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentS
 		Config: &configv1alpha1.OperatorConfiguration{
 			Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
 		},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return nil, nil
@@ -764,6 +766,7 @@ func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentType(t 
 		Config: &configv1alpha1.OperatorConfiguration{
 			Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
 		},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return nil, nil
@@ -886,7 +889,7 @@ func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentTypeFro
 			WithScheme(s).
 			WithObjects(dcd, existingLeaderWorkerSet).
 			Build(),
-		RuntimeConfig: &controller_common.RuntimeConfig{LWSEnabled: true},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{LWS: true}},
 	}
 
 	componentType, err := r.getDCDWorkloadComponentType(context.Background(), dcd)
@@ -938,6 +941,7 @@ func TestDynamoComponentDeploymentReconciler_BetaPrefillWorkloadComponentType(t 
 		Config: &configv1alpha1.OperatorConfiguration{
 			Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
 		},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return nil, nil
@@ -1737,6 +1741,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 					Enabled: true,
 				},
 			},
+			RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
 		}
 	}
 
@@ -1786,7 +1791,6 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 	})
 
 	t.Run("ready gms checkpoint injects restore clients", func(t *testing.T) {
-		t.Setenv(commonconsts.DynamoOperatorAllowGMSSnapshotEnvVar, "1")
 		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
 		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
 		if err != nil {
@@ -1819,6 +1823,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 
 		r := makeReconciler(dcd, ckpt)
+		r.RuntimeConfig = &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, GMSSnapshot: true}}
 		podTemplateSpec, err := r.generatePodTemplateSpec(
 			context.Background(),
 			generateResourceOption{dynamoComponentDeployment: dcd},
@@ -1908,7 +1913,6 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 	})
 
 	t.Run("ready gms checkpoint wires user-declared loader", func(t *testing.T) {
-		t.Setenv(commonconsts.DynamoOperatorAllowGMSSnapshotEnvVar, "1")
 		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
 		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
 		if err != nil {
@@ -1940,6 +1944,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 
 		r := makeReconciler(dcd, ckpt)
+		r.RuntimeConfig = &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, GMSSnapshot: true}}
 		podTemplateSpec, err := r.generatePodTemplateSpec(
 			context.Background(),
 			generateResourceOption{dynamoComponentDeployment: dcd},
@@ -2194,6 +2199,7 @@ func TestDynamoComponentDeploymentReconciler_generateDeployment_RestoreStrategy(
 					Enabled: true,
 				},
 			},
+			RuntimeConfig: &controller_common.RuntimeConfig{},
 		}
 	}
 
@@ -2578,6 +2584,8 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 			result, err := reconciler.reconcileLeaderWorkerSetResources(ctx, dcd)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
+			tt.wantComponentReconcileResult.serviceReplicaStatus.RuntimeNamespace = dynamo.GetDCDRuntimeNamespace(dcd)
+
 			// Assert the ComponentReconcileResult
 			g.Expect(result).To(gomega.Equal(tt.wantComponentReconcileResult))
 		})
@@ -2887,6 +2895,8 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			// Assert the ComponentReconcileResult
+			tt.wantComponentReconcileResult.serviceReplicaStatus.RuntimeNamespace = dynamo.GetDCDRuntimeNamespace(dcd)
+
 			g.Expect(result).To(gomega.Equal(tt.wantComponentReconcileResult))
 		})
 	}
@@ -2976,6 +2986,7 @@ func Test_reconcileDeploymentResources_DoesNotRecycleFailedRestorePods(t *testin
 		serviceReplicaStatus: &v1beta1.ComponentReplicaStatus{
 			ComponentKind:     v1beta1.ComponentKindDeployment,
 			ComponentNames:    []string{"test-component"},
+			RuntimeNamespace:  "default",
 			Replicas:          1,
 			UpdatedReplicas:   1,
 			ReadyReplicas:     ptr.To(int32(0)),
@@ -3449,6 +3460,7 @@ func TestGenerateWorkerPodTemplateSpecDoesNotRequireGPUResource(t *testing.T) {
 		Config: &configv1alpha1.OperatorConfiguration{
 			Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
 		},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return nil, nil

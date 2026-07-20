@@ -4,8 +4,10 @@
 """Worker initialization factory for vLLM workers."""
 
 import asyncio
+import copy
 import json
 import logging
+import math
 import os
 import time as _time
 from collections.abc import Awaitable, Callable
@@ -47,6 +49,12 @@ from .publisher import StatLoggerFactory
 
 logger = logging.getLogger(__name__)
 
+# The active point has an 8s FPM deadline. ADP schedule/result, decision/commit,
+# boundary, and final cleanup phases each have a 10s bound. Their worst-case
+# healthy stop path is about 70s, with the remainder reserved for JSON writing
+# and scheduler-loop slack before failing closed.
+BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS = 90
+
 # (engine_client, vllm_config, default_sampling_params, prometheus_temp_dir, component_gauges)
 # component_gauges is None on the embedding-worker path: pooling engines
 # have no KV cache / scheduler gauges, so setup_vllm_engine() skips the
@@ -54,29 +62,413 @@ logger = logging.getLogger(__name__)
 EngineSetupResult = tuple[AsyncLLM, VllmConfig, Any, Any, Optional[LLMBackendMetrics]]
 
 
+def _benchmark_rank_path(base_path: Path, dp_rank: int) -> Path:
+    if dp_rank == 0:
+        return base_path
+    stem, ext = os.path.splitext(str(base_path))
+    return Path(f"{stem}_dp{dp_rank}{ext}")
+
+
+def _benchmark_merged_path(base_path: Path, dp_start: int) -> Path:
+    stem, ext = os.path.splitext(str(base_path))
+    rank_suffix = "" if dp_start == 0 else f"_dp{dp_start}"
+    return Path(f"{stem}{rank_suffix}_merged{ext}")
+
+
+def _validate_benchmark_rank_payload(data: dict, path: Path) -> str:
+    """Validate status/coverage invariants before accepting a rank artifact."""
+    status = data.get("status", "complete" if data.get("valid") is True else "failed")
+
+    def invalid(reason: str) -> RuntimeError:
+        return RuntimeError(
+            f"Self-benchmark produced incomplete results at {path}: {reason}; "
+            f"coverage={data.get('coverage')} "
+            f"skipped_points={data.get('skipped_points')} "
+            f"missing_phases={data.get('missing_phases')}"
+        )
+
+    if status not in {"complete", "partial"}:
+        raise invalid(f"status={status!r}")
+
+    coverage = data.get("coverage")
+    if not isinstance(coverage, dict):
+        raise invalid("missing coverage")
+    expected = coverage.get("expected_points")
+    completed = coverage.get("completed_points")
+    skipped = coverage.get("skipped_points")
+    if (
+        not isinstance(expected, int)
+        or not isinstance(completed, int)
+        or not isinstance(skipped, int)
+        or min(expected, completed, skipped) < 0
+        or completed + skipped > expected
+    ):
+        raise invalid("invalid coverage arithmetic")
+
+    skipped_points = data.get("skipped_points", [])
+    missing_phases = data.get("missing_phases", [])
+    results = data.get("results")
+    iteration_groups = data.get("iteration_groups")
+    if not isinstance(skipped_points, list) or len(skipped_points) != skipped:
+        raise invalid("skipped point count mismatch")
+    if not isinstance(missing_phases, list):
+        raise invalid("invalid missing phases")
+    if not isinstance(results, list) or len(results) != completed:
+        raise invalid("result count does not match completed coverage")
+    if not isinstance(iteration_groups, list) or len(iteration_groups) != completed:
+        raise invalid("iteration group count does not match completed coverage")
+
+    if status == "complete":
+        if (
+            data.get("valid") is not True
+            or ("usable" in data and data.get("usable") is not True)
+            or data.get("stop_reason") is not None
+            or completed != expected
+            or skipped != 0
+            or missing_phases
+            or data.get("error") is not None
+        ):
+            raise invalid("inconsistent complete status")
+    elif (
+        data.get("valid") is not False
+        or data.get("usable") is not True
+        or data.get("stop_reason") != "timeout"
+        or completed >= expected
+        or skipped != 0
+        or missing_phases
+        or data.get("error") is not None
+    ):
+        raise invalid("inconsistent partial status")
+    return status
+
+
+def _merge_benchmark_rank_results(
+    rank_data: list[tuple[int, Path, dict]],
+    merged_path: Path,
+) -> dict:
+    """Validate and flatten globally synchronized benchmark iterations."""
+    if not rank_data:
+        raise RuntimeError("No self-benchmark rank results were loaded")
+
+    source_ranks = [rank for rank, _, _ in rank_data]
+    reference_rank, reference_path, reference = rank_data[0]
+    run_id = reference.get("run_id")
+    grid_digest = reference.get("grid_digest")
+    if not isinstance(run_id, str) or not run_id:
+        raise RuntimeError("Self-benchmark rank results are missing run_id")
+    if not isinstance(grid_digest, str) or not grid_digest:
+        raise RuntimeError("Self-benchmark rank results are missing grid_digest")
+
+    reference_status = _validate_benchmark_rank_payload(reference, reference_path)
+
+    reference_coverage = reference.get("coverage")
+    if not isinstance(reference_coverage, dict):
+        raise RuntimeError("Self-benchmark rank results are missing coverage")
+    expected_points_per_rank = reference_coverage.get("expected_points")
+    completed_points_per_rank = reference_coverage.get("completed_points")
+    skipped_points_per_rank = reference_coverage.get("skipped_points")
+    if (
+        not isinstance(expected_points_per_rank, int)
+        or not isinstance(completed_points_per_rank, int)
+        or not isinstance(skipped_points_per_rank, int)
+        or expected_points_per_rank < completed_points_per_rank
+        or min(completed_points_per_rank, skipped_points_per_rank) < 0
+    ):
+        raise RuntimeError("Self-benchmark rank results have invalid coverage")
+
+    global_size = reference.get("dp", {}).get("size")
+    if not isinstance(global_size, int) or global_size < 1:
+        raise RuntimeError("Self-benchmark results have invalid global DP size")
+    global_ranks = list(range(global_size))
+
+    reference_groups = reference.get("iteration_groups")
+    if not isinstance(reference_groups, list) or not reference_groups:
+        raise RuntimeError(
+            "Self-benchmark rank results are missing synchronized iteration groups"
+        )
+
+    groups_by_id: dict[int, dict] = {}
+    for group in reference_groups:
+        benchmark_id = group.get("benchmark_id")
+        if not isinstance(benchmark_id, int) or benchmark_id < 1:
+            raise RuntimeError(
+                f"Self-benchmark rank {reference_rank} has invalid benchmark_id "
+                f"{benchmark_id}"
+            )
+        if benchmark_id in groups_by_id:
+            raise RuntimeError(
+                f"Self-benchmark rank {reference_rank} has duplicate "
+                f"benchmark_id={benchmark_id}"
+            )
+        if group.get("point", {}).get("benchmark_id") != benchmark_id:
+            raise RuntimeError(
+                "Self-benchmark iteration group point id mismatch for "
+                f"benchmark_id={benchmark_id}"
+            )
+        if group.get("expected_dp_ranks") != global_ranks or not group.get("complete"):
+            raise RuntimeError(
+                "Self-benchmark iteration group is incomplete for "
+                f"benchmark_id={benchmark_id}: "
+                f"expected={global_ranks} "
+                f"actual={group.get('expected_dp_ranks')}"
+            )
+
+        rank_results = group.get("rank_results")
+        if not isinstance(rank_results, list):
+            raise RuntimeError(
+                f"Self-benchmark iteration group {benchmark_id} has no rank results"
+            )
+        actual_ranks = [result.get("dp_rank") for result in rank_results]
+        if actual_ranks != global_ranks:
+            raise RuntimeError(
+                "Self-benchmark iteration group rank mismatch for "
+                f"benchmark_id={benchmark_id}: "
+                f"expected={global_ranks} actual={actual_ranks}"
+            )
+
+        wall_times: list[float] = []
+        for rank_result in rank_results:
+            dp_rank = rank_result["dp_rank"]
+            fpms = rank_result.get("fpms")
+            if not isinstance(fpms, list) or len(fpms) != 1:
+                raise RuntimeError(
+                    "Each self-benchmark rank-point must contain exactly one FPM: "
+                    f"rank={dp_rank} benchmark_id={benchmark_id}"
+                )
+            fpm = fpms[0]
+            if fpm.get("counter_id") != benchmark_id:
+                raise RuntimeError(
+                    "Self-benchmark FPM counter mismatch: "
+                    f"rank={dp_rank} benchmark_id={benchmark_id} "
+                    f"counter_id={fpm.get('counter_id')}"
+                )
+            if fpm.get("dp_rank") != dp_rank:
+                raise RuntimeError(
+                    "Self-benchmark FPM rank mismatch: "
+                    f"result_rank={dp_rank} fpm_rank={fpm.get('dp_rank')}"
+                )
+            wall_times.append(float(fpm.get("wall_time", 0.0)))
+        expected_wall_time = max(wall_times, default=0.0)
+        if group.get("wall_time") != expected_wall_time:
+            raise RuntimeError(
+                "Self-benchmark iteration wall time mismatch for "
+                f"benchmark_id={benchmark_id}: "
+                f"expected={expected_wall_time} actual={group.get('wall_time')}"
+            )
+        groups_by_id[benchmark_id] = group
+
+    expected_ids = sorted(groups_by_id)
+    if expected_ids != list(range(1, len(expected_ids) + 1)):
+        raise RuntimeError(
+            f"Self-benchmark ids are not a contiguous 1-based sequence: {expected_ids}"
+        )
+    if completed_points_per_rank != len(expected_ids):
+        raise RuntimeError(
+            "Self-benchmark completed coverage does not match iteration groups: "
+            f"coverage={completed_points_per_rank} groups={len(expected_ids)}"
+        )
+
+    measured_iteration_seconds = sum(
+        float(group.get("wall_time", 0.0)) for group in reference_groups
+    )
+    rank_timings: list[tuple[int, dict]] = []
+
+    for dp_rank, path, data in rank_data:
+        data_status = _validate_benchmark_rank_payload(data, path)
+        if data_status != reference_status:
+            raise RuntimeError(
+                f"Self-benchmark status mismatch at {path}: "
+                f"expected={reference_status} actual={data_status}"
+            )
+        if data.get("coverage") != reference_coverage:
+            raise RuntimeError(
+                f"Self-benchmark coverage mismatch at {path}: "
+                f"expected={reference_coverage} actual={data.get('coverage')}"
+            )
+        if data.get("stop_reason") != reference.get("stop_reason"):
+            raise RuntimeError(f"Self-benchmark stop reason mismatch at {path}")
+        if data.get("run_id") != run_id:
+            raise RuntimeError(
+                f"Self-benchmark run_id mismatch at {path}: "
+                f"expected={run_id} actual={data.get('run_id')}"
+            )
+        if data.get("grid_digest") != grid_digest:
+            raise RuntimeError(
+                f"Self-benchmark grid mismatch at {path}: "
+                f"expected={grid_digest} actual={data.get('grid_digest')}"
+            )
+        recorded_rank = data.get("dp", {}).get("rank")
+        if recorded_rank != dp_rank:
+            raise RuntimeError(
+                f"Self-benchmark rank metadata mismatch at {path}: "
+                f"expected={dp_rank} actual={recorded_rank}"
+            )
+        if data.get("dp", {}).get("size") != global_size:
+            raise RuntimeError(
+                f"Self-benchmark global DP size mismatch at {path}: "
+                f"expected={global_size} actual={data.get('dp', {}).get('size')}"
+            )
+        if data.get("iteration_groups") != reference_groups:
+            raise RuntimeError(
+                f"Self-benchmark synchronized iteration groups differ at {path}"
+            )
+
+        timing = data.get("timing")
+        if not isinstance(timing, dict):
+            raise RuntimeError(f"Self-benchmark rank {dp_rank} is missing timing")
+        started_at = timing.get("started_at")
+        completed_at = timing.get("completed_at")
+        elapsed_seconds = timing.get("benchmark_elapsed_seconds")
+        measured_seconds = timing.get("measured_iteration_seconds")
+        if not isinstance(started_at, str) or not isinstance(completed_at, str):
+            raise RuntimeError(
+                f"Self-benchmark rank {dp_rank} has invalid timing timestamps"
+            )
+        if (
+            not isinstance(elapsed_seconds, (int, float))
+            or not math.isfinite(elapsed_seconds)
+            or elapsed_seconds < 0
+        ):
+            raise RuntimeError(
+                f"Self-benchmark rank {dp_rank} has invalid elapsed timing"
+            )
+        if (
+            not isinstance(measured_seconds, (int, float))
+            or not math.isfinite(measured_seconds)
+            or not math.isclose(
+                measured_seconds,
+                measured_iteration_seconds,
+                rel_tol=1e-9,
+                abs_tol=1e-12,
+            )
+        ):
+            raise RuntimeError(
+                f"Self-benchmark rank {dp_rank} measured timing does not match "
+                "the synchronized iteration groups"
+            )
+        if measured_seconds > elapsed_seconds + 1e-12:
+            raise RuntimeError(
+                f"Self-benchmark rank {dp_rank} measured timing exceeds elapsed timing"
+            )
+        rank_timings.append((dp_rank, timing))
+
+        results_by_id: dict[int, dict] = {}
+        for result in data.get("results", []):
+            point = result.get("point", {})
+            benchmark_id = point.get("benchmark_id")
+            if benchmark_id in results_by_id:
+                raise RuntimeError(
+                    f"Self-benchmark rank {dp_rank} has duplicate "
+                    f"benchmark_id={benchmark_id}"
+                )
+            results_by_id[benchmark_id] = result
+        if sorted(results_by_id) != expected_ids:
+            raise RuntimeError(
+                f"Self-benchmark rank {dp_rank} has a different id set: "
+                f"expected={expected_ids} actual={sorted(results_by_id)}"
+            )
+
+        for benchmark_id in expected_ids:
+            result = results_by_id[benchmark_id]
+            group = groups_by_id[benchmark_id]
+            if result.get("point") != group.get("point"):
+                raise RuntimeError(
+                    "Self-benchmark point mismatch for "
+                    f"benchmark_id={benchmark_id} on rank {dp_rank}"
+                )
+            fpms = result.get("fpms") or []
+            if len(fpms) != 1:
+                raise RuntimeError(
+                    f"Self-benchmark rank {dp_rank} must have exactly one FPM for "
+                    f"benchmark_id={benchmark_id}"
+                )
+            fpm = fpms[0]
+            if fpm.get("counter_id") != benchmark_id:
+                raise RuntimeError(
+                    "Self-benchmark FPM counter mismatch: "
+                    f"rank={dp_rank} benchmark_id={benchmark_id} "
+                    f"counter_id={fpm.get('counter_id')}"
+                )
+            if fpm.get("dp_rank") != dp_rank:
+                raise RuntimeError(
+                    "Self-benchmark FPM rank mismatch: "
+                    f"file_rank={dp_rank} fpm_rank={fpm.get('dp_rank')}"
+                )
+            group_fpms = group["rank_results"][dp_rank]["fpms"]
+            if fpms != group_fpms:
+                raise RuntimeError(
+                    "Self-benchmark local result differs from synchronized group: "
+                    f"rank={dp_rank} benchmark_id={benchmark_id}"
+                )
+
+    flattened_results: list[dict] = []
+    for benchmark_id in expected_ids:
+        group = groups_by_id[benchmark_id]
+        canonical_point = group["point"]
+        for rank_result in group["rank_results"]:
+            dp_rank = rank_result["dp_rank"]
+            fpms = copy.deepcopy(rank_result["fpms"])
+            point = copy.deepcopy(canonical_point)
+            point["dp_rank"] = dp_rank
+            flattened_results.append({"point": point, "fpms": fpms})
+
+    merged = copy.deepcopy(reference)
+    merged["artifact_type"] = "merged"
+    merged["dp"] = {
+        "ranks": global_ranks,
+        "source_ranks": source_ranks,
+        "managed_size": len(source_ranks),
+        "global_size": global_size,
+    }
+    merged["rank_files"] = [str(path) for _, path, _ in rank_data]
+    merged["merged_output_path"] = str(merged_path)
+    merged["results"] = flattened_results
+    merged["iteration_groups"] = copy.deepcopy(reference_groups)
+    _, slowest_timing = max(
+        rank_timings,
+        key=lambda item: float(item[1]["benchmark_elapsed_seconds"]),
+    )
+    merged["timing"] = copy.deepcopy(slowest_timing)
+    merged["timing"]["benchmark_elapsed_seconds"] = max(
+        float(timing["benchmark_elapsed_seconds"]) for _, timing in rank_timings
+    )
+    merged["timing"]["measured_iteration_seconds"] = measured_iteration_seconds
+    merged["timing"]["rank_benchmark_elapsed_seconds"] = {
+        str(rank): float(timing["benchmark_elapsed_seconds"])
+        for rank, timing in rank_timings
+    }
+    merged["coverage"] = {
+        "expected_points": expected_points_per_rank * global_size,
+        "completed_points": completed_points_per_rank * global_size,
+        "skipped_points": skipped_points_per_rank * global_size,
+    }
+    merged["skipped_points"] = copy.deepcopy(reference.get("skipped_points", []))
+    return merged
+
+
+def _write_json_atomic(path: Path, data: dict) -> None:
+    tmp_path = Path(f"{path}.tmp")
+    with open(tmp_path, "w") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp_path, path)
+
+
 async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> dict:
     """Wait for benchmark result files and aggregate across DP ranks."""
     base_path = Path(
         os.environ.get(ENV_FPM_BENCHMARK_OUTPUT_PATH, bench_cfg["output_path"])
     )
-    timeout = int(bench_cfg.get("timeout", 300))
+    timeout = int(bench_cfg.get("timeout", 900))
 
+    dp_start, dp_size = get_dp_range_for_worker(vllm_config)
+
+    dp_ranks = list(range(dp_start, dp_start + dp_size))
+    rank_paths = [_benchmark_rank_path(base_path, dp_rank) for dp_rank in dp_ranks]
+    merged_path = _benchmark_merged_path(base_path, dp_start)
     try:
-        dp_start, dp_size = get_dp_range_for_worker(vllm_config)
-    except Exception:
-        logger.warning(
-            "Could not determine DP range, assuming single rank",
-            exc_info=True,
-        )
-        dp_start, dp_size = 0, 1
-
-    rank_paths = []
-    for dp_rank in range(dp_start, dp_start + dp_size):
-        if dp_rank == 0:
-            rank_paths.append(base_path)
-        else:
-            stem, ext = os.path.splitext(str(base_path))
-            rank_paths.append(Path(f"{stem}_dp{dp_rank}{ext}"))
+        merged_path.unlink()
+    except FileNotFoundError:
+        pass
 
     logger.info(
         "Waiting for benchmark to complete (files: %s, timeout: %ds)...",
@@ -85,32 +477,54 @@ async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> 
     )
 
     deadline = _time.monotonic() + timeout
-    for p in rank_paths:
-        while not p.exists():
-            if _time.monotonic() > deadline:
-                raise TimeoutError(
-                    f"Benchmark did not complete within {timeout}s. Missing: {p}"
+    hard_deadline = deadline + BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS
+    timeout_warning_emitted = False
+    while True:
+        missing_paths = [path for path in rank_paths if not path.exists()]
+        if not missing_paths:
+            break
+        now = _time.monotonic()
+        if now > deadline:
+            if not timeout_warning_emitted:
+                logger.warning(
+                    "Self-benchmark exceeded the %ds soft timeout; waiting up to "
+                    "%ds for the current profiling iteration, rank cleanup, and "
+                    "partial result write. Missing: %s",
+                    timeout,
+                    BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS,
+                    missing_paths,
                 )
-            await asyncio.sleep(0.1)
+                timeout_warning_emitted = True
+            if now > hard_deadline:
+                raise TimeoutError(
+                    "Self-benchmark did not publish results within the soft "
+                    f"timeout plus {BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS}s cleanup "
+                    f"grace. Missing: {missing_paths}"
+                )
+        await asyncio.sleep(0.1)
 
-    merged: dict = {}
-    for i, p in enumerate(rank_paths):
+    rank_data: list[tuple[int, Path, dict]] = []
+    for dp_rank, p in zip(dp_ranks, rank_paths):
         with open(p) as f:
             data = json.load(f)
-        if i == 0:
-            merged = data
-            for r in merged.get("results", []):
-                r["point"]["dp_rank"] = dp_start
-        else:
-            dp_rank = dp_start + i
-            for r in data.get("results", []):
-                r["point"]["dp_rank"] = dp_rank
-            merged.setdefault("results", []).extend(data.get("results", []))
+        _validate_benchmark_rank_payload(data, p)
+        rank_data.append((dp_rank, p, data))
+
+    merged = _merge_benchmark_rank_results(rank_data, merged_path)
+    _write_json_atomic(merged_path, merged)
+
+    if merged.get("status") == "partial":
+        logger.warning(
+            "Self-benchmark soft timeout returned partial results: coverage=%s. "
+            "Engine startup will continue.",
+            merged.get("coverage"),
+        )
 
     logger.info(
-        "Benchmark complete, %d points across %d rank(s)",
+        "Benchmark complete, %d rank-points across %d rank(s); merged results: %s",
         len(merged.get("results", [])),
         len(rank_paths),
+        merged_path,
     )
     return merged
 
@@ -682,6 +1096,17 @@ class WorkerFactory:
             if config.enable_rl
             else None
         )
+        lora_enabled = config.engine_args.enable_lora
+        if lora_enabled:
+            load_lora_endpoint = runtime.endpoint(
+                f"{config.namespace}.{config.component}.load_lora"
+            )
+            unload_lora_endpoint = runtime.endpoint(
+                f"{config.namespace}.{config.component}.unload_lora"
+            )
+            list_loras_endpoint = runtime.endpoint(
+                f"{config.namespace}.{config.component}.list_loras"
+            )
 
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
         fpm_worker_id = str(generate_endpoint.connection_id())
@@ -790,6 +1215,10 @@ class WorkerFactory:
         shutdown_endpoints[:] = [generate_endpoint, clear_endpoint, perf_endpoint]
         if rl_endpoint is not None:
             shutdown_endpoints.append(rl_endpoint)
+        if lora_enabled:
+            shutdown_endpoints.extend(
+                [load_lora_endpoint, unload_lora_endpoint, list_loras_endpoint]
+            )
 
         # Prefill workers expose no OpenAI surface — the role is carried by
         # `worker_type=Prefill`. We register the legacy `ModelType.Prefill`
@@ -856,6 +1285,23 @@ class WorkerFactory:
                         handler.rl_dispatch,
                         metrics_labels=prefill_metrics_labels,
                     )
+                )
+            if lora_enabled:
+                serve_tasks.extend(
+                    [
+                        load_lora_endpoint.serve_endpoint(
+                            handler.load_lora,
+                            metrics_labels=prefill_metrics_labels,
+                        ),
+                        unload_lora_endpoint.serve_endpoint(
+                            handler.unload_lora,
+                            metrics_labels=prefill_metrics_labels,
+                        ),
+                        list_loras_endpoint.serve_endpoint(
+                            handler.list_loras,
+                            metrics_labels=prefill_metrics_labels,
+                        ),
+                    ]
                 )
             await asyncio.gather(*serve_tasks)
             logger.debug("serve_endpoint completed for prefill worker")

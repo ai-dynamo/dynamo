@@ -63,7 +63,6 @@ if [[ "$POLICY" == "ta" ]]; then
         --dyn-tool-call-parser minimax_m2 \
         --dyn-reasoning-parser minimax_append_think \
         --router-block-size "$BLOCK_SIZE" \
-        --router-reset-states \
         --shared-cache-type none &
     ROUTER_MODE=round-robin
 else
@@ -74,9 +73,7 @@ DYN_SYSTEM_PORT=8184 python -m dynamo.frontend \
     --http-host 0.0.0.0 \
     --http-port "$HTTP_PORT" \
     --router-mode "$ROUTER_MODE" \
-    --router-reset-states \
-    --shared-cache-type none \
-    --admission-control none &
+    --shared-cache-type none &
 
 until curl -fsS "http://127.0.0.1:${HTTP_PORT}/v1/models/${WORKER_MODEL}/ready" 2>/dev/null \
     | jq -e '([.namespaces[].worker_types.aggregated.workers // 0] | add) == 2' >/dev/null; do

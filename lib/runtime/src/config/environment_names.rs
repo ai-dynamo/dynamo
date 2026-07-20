@@ -297,6 +297,13 @@ pub mod llm {
     pub const DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: &str =
         "DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS";
 
+    /// HTTP status code returned when the frontend rejects a request because
+    /// all workers are overloaded. Defaults to 529 ("Site is overloaded"); set
+    /// to 503 for Service Unavailable retry semantics. Any valid HTTP status
+    /// code (100–999) is accepted; an unparseable or out-of-range value falls
+    /// back to 529.
+    pub const DYN_HTTP_OVERLOAD_STATUS_CODE: &str = "DYN_HTTP_OVERLOAD_STATUS_CODE";
+
     /// Enable LoRA adapter support (set to "true" to enable)
     pub const DYN_LORA_ENABLED: &str = "DYN_LORA_ENABLED";
 
@@ -532,6 +539,12 @@ pub mod llm {
         /// First-frame ZMQ topic filter override for harness tool events.
         pub const DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC: &str =
             "DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC";
+
+        /// Comma/whitespace-separated allowlist of HTTP request header names to
+        /// record in request payload records. Unset/empty captures none. Values
+        /// are recorded unredacted; avoid credential-bearing headers.
+        pub const DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST: &str =
+            "DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST";
     }
 }
 
@@ -558,14 +571,23 @@ pub mod model {
         /// Hugging Face authentication token
         pub const HF_TOKEN: &str = "HF_TOKEN";
 
+        /// Deprecated alias for the Hugging Face authentication token
+        pub const HUGGING_FACE_HUB_TOKEN: &str = "HUGGING_FACE_HUB_TOKEN";
+
+        /// Path to the stored Hugging Face authentication token
+        pub const HF_TOKEN_PATH: &str = "HF_TOKEN_PATH";
+
         /// Hugging Face Hub cache directory
         pub const HF_HUB_CACHE: &str = "HF_HUB_CACHE";
 
         /// Hugging Face home directory
         pub const HF_HOME: &str = "HF_HOME";
 
+        /// Override the Hugging Face Hub API endpoint
+        pub const HF_ENDPOINT: &str = "HF_ENDPOINT";
+
         /// Offline mode - skip API calls when model is cached
-        /// Set to "1" or "true" to enable
+        /// Set to "1", "true", "on", or "yes" to enable
         pub const HF_HUB_OFFLINE: &str = "HF_HUB_OFFLINE";
     }
 }
@@ -582,6 +604,9 @@ pub mod router {
     /// Scheduling policy for the router queue ("fcfs" or "wspt").
     pub const DYN_ROUTER_QUEUE_POLICY: &str = "DYN_ROUTER_QUEUE_POLICY";
     pub const DYN_ROUTER_POLICY_CONFIG: &str = "DYN_ROUTER_POLICY_CONFIG";
+
+    /// Stale active-request cleanup guard in seconds; this is not a request timeout.
+    pub const DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS: &str = "DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS";
 }
 
 /// Request plane transport environment variables
@@ -774,6 +799,7 @@ mod tests {
             // LLM
             llm::DYN_HTTP_BODY_LIMIT_MB,
             llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+            llm::DYN_HTTP_OVERLOAD_STATUS_CODE,
             llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS,
             llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_PATH,
@@ -823,20 +849,25 @@ mod tests {
             llm::request_trace::DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES,
             llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
             llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
+            llm::request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST,
             llm::audit::DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES,
             // Model
             model::model_express::MODEL_EXPRESS_URL,
             model::model_express::MODEL_EXPRESS_CACHE_PATH,
             model::model_express::MODEL_EXPRESS_NO_SHARED_STORAGE,
             model::huggingface::HF_TOKEN,
+            model::huggingface::HUGGING_FACE_HUB_TOKEN,
+            model::huggingface::HF_TOKEN_PATH,
             model::huggingface::HF_HUB_CACHE,
             model::huggingface::HF_HOME,
+            model::huggingface::HF_ENDPOINT,
             model::huggingface::HF_HUB_OFFLINE,
             // Router
             router::DYN_ROUTER_PREFILL_LOAD_SCALE,
             router::DYN_ROUTER_QUEUE_THRESHOLD,
             router::DYN_ROUTER_QUEUE_POLICY,
             router::DYN_ROUTER_POLICY_CONFIG,
+            router::DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
             request_plane::DYN_REQUEST_PLANE_CODEC,
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,

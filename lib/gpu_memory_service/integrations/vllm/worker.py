@@ -38,6 +38,7 @@ from gpu_memory_service.integrations.common import patch_empty_cache
 from gpu_memory_service.integrations.common.utils import (
     get_gms_lock_mode,
     get_gms_ro_connect_timeout_ms,
+    torch_device,
 )
 from gpu_memory_service.integrations.vllm.model_loader import (
     abort_pending_gms_write,
@@ -51,8 +52,13 @@ from gpu_memory_service.integrations.vllm.patches import (
     apply_scratch_kv_patches,
     patch_memory_snapshot,
 )
+from gpu_memory_service.integrations.vllm.utils import configure_gms_worker_logging
 
 logger = logging.getLogger(__name__)
+
+# Make gpu_memory_service INFO/DEBUG visible in the vLLM worker subprocess, where
+# vLLM's logging config would otherwise drop them.
+configure_gms_worker_logging()
 
 # Trigger model loader registration and utility patches on import
 register_gms_loader()
@@ -197,10 +203,10 @@ class GMSWorker(Worker):
         # adding below.
         has_pending_write = has_pending_gms_write()
 
-        torch.cuda.reset_peak_memory_stats()
+        torch_device().reset_peak_memory_stats()
         self.model_runner.profile_run()
-        torch.cuda.synchronize()
-        torch_peak = torch.cuda.max_memory_allocated()
+        torch_device().synchronize()
+        torch_peak = torch_device().max_memory_allocated()
 
         cudagraph_memory_estimate = 0
         if (
@@ -227,23 +233,19 @@ class GMSWorker(Worker):
         )
         self.available_kv_cache_memory_bytes = int(projected_available)
 
-        msg = (
+        logger.info(
             "[GMS] projected available memory "
             "%.2f GiB (requested=%.2f GiB, non_kv=%.2f GiB, "
             "torch_peak=%.2f GiB, invisible_weights=%.2f GiB, "
-            "cudagraph_estimate=%.2f GiB, cudagraph_applied=%.2f GiB)"
-            % (
-                projected_available / (1 << 30),
-                self.requested_memory / (1 << 30),
-                non_kv_cache_memory / (1 << 30),
-                torch_peak / (1 << 30),
-                invisible_weights_memory / (1 << 30),
-                cudagraph_memory_estimate / (1 << 30),
-                cudagraph_memory_estimate_applied / (1 << 30),
-            )
+            "cudagraph_estimate=%.2f GiB, cudagraph_applied=%.2f GiB)",
+            projected_available / (1 << 30),
+            self.requested_memory / (1 << 30),
+            non_kv_cache_memory / (1 << 30),
+            torch_peak / (1 << 30),
+            invisible_weights_memory / (1 << 30),
+            cudagraph_memory_estimate / (1 << 30),
+            cudagraph_memory_estimate_applied / (1 << 30),
         )
-        logger.info(msg)
-        print(msg, flush=True)
 
         return int(projected_available)
 
@@ -335,7 +337,7 @@ class GMSWorker(Worker):
         reservations. Wake reconnects and rebuilds via the standard
         prepare_scratch_for_reallocation → reallocate → remap pipeline.
         """
-        free_bytes_before = torch.cuda.mem_get_info()[0]
+        free_bytes_before = torch_device().mem_get_info()[0]
 
         # Pause MX serving before GMS unmap
         mx_ctx = get_mx_load_context()
@@ -350,9 +352,9 @@ class GMSWorker(Worker):
             manager.abort()
 
         gc.collect()
-        torch.cuda.empty_cache()
+        torch_device().empty_cache()
 
-        free_bytes_after, total = torch.cuda.mem_get_info()
+        free_bytes_after, total = torch_device().mem_get_info()
         freed_bytes = free_bytes_after - free_bytes_before
         used_bytes = total - free_bytes_after
         logger.info(

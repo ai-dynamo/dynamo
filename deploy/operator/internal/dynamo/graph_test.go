@@ -33,6 +33,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	gmsruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -5081,7 +5082,7 @@ func TestDetectBackendFrameworkFromArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := detectBackendFrameworkFromArgs(tt.command, tt.args)
+			result, err := DetectBackendFrameworkFromArgs(tt.command, tt.args)
 
 			if tt.expectError {
 				if err == nil {
@@ -8226,7 +8227,7 @@ func TestGenerateGrovePodCliqueSet_GMSPodsDoNotCarryDiscoveryLabels(t *testing.T
 		},
 	}
 
-	got, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), controllerConfig, &controller_common.RuntimeConfig{DRAEnabled: true}, nil, nil, nil, nil, nil)
+	got, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), controllerConfig, &controller_common.RuntimeConfig{Gate: features.Gates{DRA: true}}, nil, nil, nil, nil, nil)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 
@@ -8337,7 +8338,7 @@ func TestGenerateGrovePodCliqueSet_GMSPodsAreNotCheckpointTargets(t *testing.T) 
 		},
 	}
 
-	got, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), controllerConfig, &controller_common.RuntimeConfig{DRAEnabled: true}, kubeClient, nil, nil, nil, infoByService)
+	got, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), controllerConfig, &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, DRA: true}}, kubeClient, nil, nil, nil, infoByService)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 
@@ -8464,7 +8465,7 @@ func TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets(t *testing.
 		},
 	}
 
-	got, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), controllerConfig, &controller_common.RuntimeConfig{DRAEnabled: true}, kubeClient, nil, nil, nil, infoByService)
+	got, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), controllerConfig, &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, DRA: true}}, kubeClient, nil, nil, nil, infoByService)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 
@@ -8521,7 +8522,7 @@ func TestGenerateGrovePodCliqueSet_WaitForCheckpointGatesPodCliqueScalingGroup(t
 		context.Background(),
 		betaDGD(t, dgd),
 		&configv1alpha1.OperatorConfiguration{Checkpoint: configv1alpha1.CheckpointConfiguration{Enabled: true}},
-		&controller_common.RuntimeConfig{DRAEnabled: true},
+		&controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, DRA: true}},
 		nil,
 		nil,
 		nil,
@@ -8688,7 +8689,7 @@ func TestGenerateGrovePodCliqueSet_MinAvailable_FailoverShadowsAreRedundant(t *t
 			Discovery:      configv1alpha1.DiscoveryConfiguration{Backend: "kubernetes"},
 			Infrastructure: configv1alpha1.InfrastructureConfiguration{ETCDAddress: "etcd-address", NATSAddress: "nats-address"},
 		},
-		&controller_common.RuntimeConfig{DRAEnabled: true},
+		&controller_common.RuntimeConfig{Gate: features.Gates{DRA: true}},
 		nil, nil, nil, nil, nil,
 	)
 	require.NoError(t, err)
@@ -9020,6 +9021,14 @@ func TestGenerateComponentContext_WorkerHashSuffix(t *testing.T) {
 	}
 	compCtx2 := generateComponentContext(betaComponent(t, component2), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod})
 	assert.Empty(t, compCtx2.WorkerHashSuffix)
+
+	// Legacy is the active suffix for DCD generations created before managed rolling updates.
+	componentLegacy := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: commonconsts.ComponentTypeWorker,
+		Labels:        map[string]string{commonconsts.KubeLabelDynamoWorkerHash: commonconsts.LegacyWorkerHash},
+	}
+	compCtxLegacy := generateComponentContext(betaComponent(t, componentLegacy), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod})
+	assert.Equal(t, commonconsts.LegacyWorkerHash, compCtxLegacy.WorkerHashSuffix)
 
 	// Frontend never gets WorkerHashSuffix, even with the label
 	component3 := &v1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -9637,8 +9646,7 @@ func TestGenerateGrovePodCliqueSet_MetadataVolcanoQueuePropagation(t *testing.T)
 				commonconsts.KubeAnnotationVolcanoQueue: "qa-volcano-e2e",
 			},
 			runtimeConfig: &controller_common.RuntimeConfig{
-				GroveEnabled:            true,
-				VolcanoSchedulerEnabled: true,
+				Gate: features.Gates{Grove: true, VolcanoScheduler: true},
 			},
 			expectedQueue: "qa-volcano-e2e",
 			expectQueue:   true,
@@ -9652,8 +9660,7 @@ func TestGenerateGrovePodCliqueSet_MetadataVolcanoQueuePropagation(t *testing.T)
 				commonconsts.GroveAnnotationVolcanoQueue: "spec-queue",
 			},
 			runtimeConfig: &controller_common.RuntimeConfig{
-				GroveEnabled:            true,
-				VolcanoSchedulerEnabled: true,
+				Gate: features.Gates{Grove: true, VolcanoScheduler: true},
 			},
 			expectedQueue: "metadata-queue",
 			expectQueue:   true,
@@ -9667,8 +9674,7 @@ func TestGenerateGrovePodCliqueSet_MetadataVolcanoQueuePropagation(t *testing.T)
 				commonconsts.GroveAnnotationVolcanoQueue: "spec-queue",
 			},
 			runtimeConfig: &controller_common.RuntimeConfig{
-				GroveEnabled:            true,
-				VolcanoSchedulerEnabled: true,
+				Gate: features.Gates{Grove: true, VolcanoScheduler: true},
 			},
 			expectedQueue: "spec-queue",
 			expectQueue:   true,
@@ -9679,8 +9685,7 @@ func TestGenerateGrovePodCliqueSet_MetadataVolcanoQueuePropagation(t *testing.T)
 				commonconsts.KubeAnnotationVolcanoQueue: " \t ",
 			},
 			runtimeConfig: &controller_common.RuntimeConfig{
-				GroveEnabled:            true,
-				VolcanoSchedulerEnabled: true,
+				Gate: features.Gates{Grove: true, VolcanoScheduler: true},
 			},
 			expectQueue: false,
 		},
@@ -9690,8 +9695,7 @@ func TestGenerateGrovePodCliqueSet_MetadataVolcanoQueuePropagation(t *testing.T)
 				commonconsts.GroveAnnotationVolcanoQueue: "spec-queue",
 			},
 			runtimeConfig: &controller_common.RuntimeConfig{
-				GroveEnabled:            true,
-				VolcanoSchedulerEnabled: true,
+				Gate: features.Gates{Grove: true, VolcanoScheduler: true},
 			},
 			expectedQueue: "spec-queue",
 			expectQueue:   true,
@@ -9702,8 +9706,7 @@ func TestGenerateGrovePodCliqueSet_MetadataVolcanoQueuePropagation(t *testing.T)
 				commonconsts.KubeAnnotationVolcanoQueue: "qa-volcano-e2e",
 			},
 			runtimeConfig: &controller_common.RuntimeConfig{
-				GroveEnabled:            true,
-				VolcanoSchedulerEnabled: false,
+				Gate: features.Gates{Grove: true},
 			},
 			expectQueue: false,
 		},
@@ -9764,7 +9767,7 @@ func TestGenerateGrovePodCliqueSet_VolcanoSchedulerInjection(t *testing.T) {
 		context.Background(),
 		betaDGD(t, dgd),
 		&configv1alpha1.OperatorConfiguration{},
-		&controller_common.RuntimeConfig{GroveEnabled: true, VolcanoSchedulerEnabled: true},
+		&controller_common.RuntimeConfig{Gate: features.Gates{Grove: true, VolcanoScheduler: true}},
 		nil,
 		nil,
 		nil,
@@ -9797,7 +9800,7 @@ func TestGenerateGrovePodCliqueSet_SchedulerIntegrationMutualExclusion(t *testin
 		context.Background(),
 		betaDGD(t, dgd),
 		&configv1alpha1.OperatorConfiguration{},
-		&controller_common.RuntimeConfig{GroveEnabled: true, KaiSchedulerEnabled: true, VolcanoSchedulerEnabled: true},
+		&controller_common.RuntimeConfig{Gate: features.Gates{Grove: true, KaiScheduler: true, VolcanoScheduler: true}},
 		nil,
 		nil,
 		nil,
@@ -10015,10 +10018,50 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 				},
 			},
 			wantPCSTemplateTC: &grovev1alpha1.TopologyConstraint{
-				PackDomain: grovev1alpha1.TopologyDomain("zone"),
+				TopologyName: "test-topology",
+				Pack: &grovev1alpha1.TopologyPackConstraint{
+					RequiredDomain: grovev1alpha1.TopologyDomain("zone"),
+				},
 			},
 			wantCliqueTC: map[string]*grovev1alpha1.TopologyConstraint{
-				"worker": {PackDomain: grovev1alpha1.TopologyDomain("rack")},
+				"worker": {
+					Pack: &grovev1alpha1.TopologyPackConstraint{
+						RequiredDomain: grovev1alpha1.TopologyDomain("rack"),
+					},
+				},
+			},
+			wantPCSGCount: 0,
+		},
+		{
+			name: "service-only topology constraint - topology name is explicit on clique",
+			deployment: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-deploy",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{
+						TopologyProfile: "test-topology",
+					},
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							ComponentType: commonconsts.ComponentTypeWorker,
+							Replicas:      ptr.To(int32(2)),
+							TopologyConstraint: &v1alpha1.TopologyConstraint{
+								PackDomain: v1alpha1.TopologyDomain("rack"),
+							},
+						},
+					},
+				},
+			},
+			wantPCSTemplateTC: nil,
+			wantCliqueTC: map[string]*grovev1alpha1.TopologyConstraint{
+				"worker": {
+					TopologyName: "test-topology",
+					Pack: &grovev1alpha1.TopologyPackConstraint{
+						RequiredDomain: grovev1alpha1.TopologyDomain("rack"),
+					},
+				},
 			},
 			wantPCSGCount: 0,
 		},
@@ -10049,14 +10092,61 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 				},
 			},
 			wantPCSTemplateTC: &grovev1alpha1.TopologyConstraint{
-				PackDomain: grovev1alpha1.TopologyDomain("zone"),
+				TopologyName: "test-topology",
+				Pack: &grovev1alpha1.TopologyPackConstraint{
+					RequiredDomain: grovev1alpha1.TopologyDomain("zone"),
+				},
 			},
 			wantCliqueTC: map[string]*grovev1alpha1.TopologyConstraint{
 				"worker-ldr": nil,
 				"worker-wkr": nil,
 			},
 			wantPCSGTC: map[string]*grovev1alpha1.TopologyConstraint{
-				"worker": {PackDomain: grovev1alpha1.TopologyDomain("block")},
+				"worker": {
+					Pack: &grovev1alpha1.TopologyPackConstraint{
+						RequiredDomain: grovev1alpha1.TopologyDomain("block"),
+					},
+				},
+			},
+			wantPCSGCount: 1,
+		},
+		{
+			name: "service-only multinode constraint - topology name is explicit on scaling group",
+			deployment: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-deploy",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{
+						TopologyProfile: "test-topology",
+					},
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							ComponentType: commonconsts.ComponentTypeWorker,
+							Replicas:      ptr.To(int32(2)),
+							Multinode: &v1alpha1.MultinodeSpec{
+								NodeCount: 4,
+							},
+							TopologyConstraint: &v1alpha1.TopologyConstraint{
+								PackDomain: v1alpha1.TopologyDomain("block"),
+							},
+						},
+					},
+				},
+			},
+			wantPCSTemplateTC: nil,
+			wantCliqueTC: map[string]*grovev1alpha1.TopologyConstraint{
+				"worker-ldr": nil,
+				"worker-wkr": nil,
+			},
+			wantPCSGTC: map[string]*grovev1alpha1.TopologyConstraint{
+				"worker": {
+					TopologyName: "test-topology",
+					Pack: &grovev1alpha1.TopologyPackConstraint{
+						RequiredDomain: grovev1alpha1.TopologyDomain("block"),
+					},
+				},
 			},
 			wantPCSGCount: 1,
 		},
@@ -10082,8 +10172,7 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 			if tt.wantPCSTemplateTC == nil {
 				assert.Nil(t, pcs.Spec.Template.TopologyConstraint, "expected PCS template TopologyConstraint to be nil")
 			} else {
-				assert.NotNil(t, pcs.Spec.Template.TopologyConstraint, "expected PCS template TopologyConstraint to be set")
-				assert.Equal(t, tt.wantPCSTemplateTC.PackDomain, pcs.Spec.Template.TopologyConstraint.PackDomain)
+				assert.Equal(t, tt.wantPCSTemplateTC, pcs.Spec.Template.TopologyConstraint)
 			}
 
 			// Verify clique-level TopologyConstraints (exhaustive)
@@ -10099,8 +10188,7 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 				if expectedTC == nil {
 					assert.Nil(t, clique.TopologyConstraint, "clique %q: expected nil TopologyConstraint", clique.Name)
 				} else {
-					assert.NotNil(t, clique.TopologyConstraint, "clique %q: expected non-nil TopologyConstraint", clique.Name)
-					assert.Equal(t, expectedTC.PackDomain, clique.TopologyConstraint.PackDomain, "clique %q: packDomain mismatch", clique.Name)
+					assert.Equal(t, expectedTC, clique.TopologyConstraint, "clique %q: topologyConstraint mismatch", clique.Name)
 				}
 			}
 			for expectedName := range tt.wantCliqueTC {
@@ -10123,8 +10211,7 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 					if expectedTC == nil {
 						assert.Nil(t, pcsg.TopologyConstraint, "PCSG %q: expected nil TopologyConstraint", pcsg.Name)
 					} else {
-						assert.NotNil(t, pcsg.TopologyConstraint, "PCSG %q: expected non-nil TopologyConstraint", pcsg.Name)
-						assert.Equal(t, expectedTC.PackDomain, pcsg.TopologyConstraint.PackDomain, "PCSG %q: packDomain mismatch", pcsg.Name)
+						assert.Equal(t, expectedTC, pcsg.TopologyConstraint, "PCSG %q: topologyConstraint mismatch", pcsg.Name)
 					}
 				}
 			}

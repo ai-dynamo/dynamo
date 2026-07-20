@@ -26,6 +26,8 @@ default = []
 media-ffmpeg = ["dynamo-llm/media-ffmpeg"]
 kv-indexer = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalone-indexer"]
 kv-indexer-metrics = ["kv-indexer", "dynamo-kv-router/metrics"]
+# Exposes the optional Relay stats/snapshot methods to Python diagnostic builds.
+ckf-diagnostics = ["dynamo-llm/ckf-diagnostics"]
 slot-tracker = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalone-slot-tracker"]
 select-service = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalone-selection"]
 mocker-kvbm-offload = ["dynamo-mocker/kvbm-offload"]
@@ -49,8 +51,9 @@ mm-routing = ["dynamo-llm/mm-routing"]
 aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git", rev = "ffbab15797d3a3f14c382e937c0ab0c1c5cbc530", package = "aiconfigurator-core", optional = true }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
-dynamo-parsers = { version = "3.0.0" }
+dynamo-parsers = { version = "5.0.0" }
 dynamo-backend-common = { path = "../../backend-common" }
+dynamo-sglang-sidecar = { path = "../../sidecar/sglang" }
 
 anyhow = { version = "1" }
 async-stream = { version = "0.3" }
@@ -110,6 +113,8 @@ dynamo-llm = { path = "../../llm" }
 dynamo-llm = { path = "../../llm", default-features = false }
 
 [dev-dependencies]
+opentelemetry_sdk = { version = "0.31.0", features = ["trace"] }
+tracing-subscriber = { version = "0.3", features = ["registry"] }
 
 [profile.profiling]
 inherits = "release"

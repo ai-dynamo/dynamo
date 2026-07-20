@@ -5,6 +5,11 @@ from collections.abc import Mapping
 from typing import Any, Optional
 
 
+def normalize_top_k_for_trtllm(top_k: int) -> int:
+    """Translate Dynamo's disabled top-k sentinel to TRT-LLM's sentinel."""
+    return 0 if top_k == -1 else top_k
+
+
 def request_cache_salt(request: Mapping[str, Any]) -> Optional[str]:
     """Return the first non-empty cache_salt, preferring routing hints."""
     routing = request.get("routing") or {}
@@ -48,3 +53,34 @@ def stored_event_cache_salt(data: Mapping[str, Any]) -> Optional[str]:
         raise ValueError("stored KV event contains conflicting cache_salt values")
 
     return next(iter(cache_salts), None)
+
+
+def apply_stop_conditions_to_sampling_params(
+    sampling_params: Any, stop_conditions: Mapping[str, Any]
+) -> None:
+    """Apply Dynamo stop conditions using TRT-LLM stopping semantics.
+
+    TRT-LLM cannot return a token that it consumes as an engine-side stop. If
+    Dynamo marks a stop token as visible, disable TRT-LLM stopping and let the
+    Dynamo decoder return the token and terminate the request. TRT-LLM maps
+    ``ignore_eos=True`` to both ``end_id=-1`` and an empty stop-word list when
+    it builds the executor request.
+    """
+    visible_stop_token_ids = set(stop_conditions.get("stop_token_ids_visible") or [])
+    if stop_conditions.get("ignore_eos") or visible_stop_token_ids:
+        sampling_params.ignore_eos = True
+
+    min_tokens = stop_conditions.get("min_tokens")
+    if min_tokens:
+        sampling_params.min_tokens = min_tokens
+
+    hidden_stop_token_ids = stop_conditions.get("stop_token_ids_hidden")
+    if hidden_stop_token_ids:
+        engine_stop_token_ids = set(sampling_params.stop_token_ids or [])
+        engine_stop_token_ids.update(hidden_stop_token_ids)
+        engine_stop_token_ids.difference_update(visible_stop_token_ids)
+        sampling_params.stop_token_ids = list(engine_stop_token_ids)
+    elif visible_stop_token_ids and sampling_params.stop_token_ids:
+        sampling_params.stop_token_ids = list(
+            set(sampling_params.stop_token_ids) - visible_stop_token_ids
+        )

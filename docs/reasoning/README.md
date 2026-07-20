@@ -20,6 +20,11 @@ To enable reasoning parsing, launch the backend worker with:
 
 - `--dyn-reasoning-parser`: select the reasoning parser from the supported list below
 
+For vLLM structured output, or SGLang required/named tool choice, also configure
+the engine's native `--reasoning-parser`. It controls when the grammar starts;
+Dynamo's parser populates `reasoning_content`. Parser names can differ between
+registries.
+
 ```bash
 # <backend> can be sglang, trtllm, vllm, etc. based on your installation
 python -m dynamo.<backend> --help
@@ -32,8 +37,8 @@ python -m dynamo.<backend> --help
 
 The table below lists the currently supported reasoning parsers in Dynamo's registry. The
 **Upstream name** column shows where the vLLM or SGLang parser name differs
-from Dynamo's -- relevant when using `--dyn-chat-processor vllm` or `sglang`
-(see [Parser Engine Fallback](../tool-calling/engine-fallback.md)). A blank upstream
+from Dynamo's. This is relevant for engine fallback and when configuring the
+native structured-output reasoning gate. A blank upstream
 column means the same name works everywhere. `Dynamo-only` means no upstream
 parser exists for this format.
 
@@ -45,7 +50,9 @@ require the opening tag to be present in the model output.
 |---|---|---|---|---|
 | `kimi_k25` | Kimi K2.5 / Kimi K2.6 format-compatible thinking models | Dynamo-only | Yes | `<think>...</think>` with force-reasoning |
 | `kimi` | Kimi K2 Instruct / Thinking with Unicode delimiters | Dynamo-only | No | `◁think▷...◁/think▷` |
-| `minimax_append_think` | MiniMax M2 / M2.1 | Dynamo-only | No | Implicit opening `<think>` prepended |
+| `minimax_m2` | MiniMax M2 / M2.5 / M2.7 | vLLM: `minimax_m2` | Yes | `<think>...</think>` with force-reasoning |
+| `minimax_m3` | MiniMax M3 | vLLM: `minimax_m3` | No | `<mm:think>...</mm:think>`; recovers a prompt-prefilled opener |
+| `minimax_append_think` | MiniMax M2 / M2.1 | Dynamo-only | No | Deprecated. Legacy pass-through with an implicit `<think>` opener; use `minimax_m2` for MiniMax M2 tool-calling deployments |
 | `deepseek_v4` | DeepSeek V4 Pro / Flash | vLLM: `deepseek_v4`; SGLang: `deepseek-v4` | No | `<think>...</think>`. Aliases: `deepseek-v4`, `deepseekv4` |
 | `deepseek_r1` | DeepSeek R1, DeepSeek V3.1, DeepSeek V3.2 | | Yes | Pass explicitly for V3.1/V3.2 (no alias) |
 | `qwen3` | Qwen3.5, QwQ-32B, Qwen3-Think, Qwen3-Coder | | No | `<think>...</think>` |
@@ -60,6 +67,14 @@ require the opening tag to be present in the model output.
 | `step3` | Step-3 / Step-3-Reasoning | Dynamo-only | Yes | `<think>...</think>` |
 | `basic` | Generic CoT models | Dynamo-only | No | Plain `<think>...</think>` |
 
+## Model-Specific Limitations
+
+> [!WARNING]
+> Kimi K2.7 may ignore `chat_template_kwargs.thinking=false` and continue to
+> generate reasoning. Dynamo can separate emitted reasoning when a compatible
+> parser is configured, but it cannot force the model to disable reasoning.
+> Treat the request flag as best-effort for Kimi K2.7.
+
 ## Common Parser Pairings
 
 Some models need both parsers configured together. Common pairings include:
@@ -70,7 +85,14 @@ Some models need both parsers configured together. Common pairings include:
 - `moonshotai/Kimi-K2.5*` / Kimi K2.6 format-compatible outputs: `--dyn-tool-call-parser kimi_k2 --dyn-reasoning-parser kimi_k25`
 - `google/gemma-4-*` thinking models: `--dyn-tool-call-parser gemma4 --dyn-reasoning-parser gemma4 --custom-jinja-template examples/chat_templates/gemma4_tool.jinja`
 - `Qwen/Qwen3.5*`: `--dyn-tool-call-parser qwen3_coder --dyn-reasoning-parser qwen3`
-- MiniMax M2.1 style outputs: `--dyn-tool-call-parser minimax_m2 --dyn-reasoning-parser minimax_append_think`
+- MiniMax M2 style outputs: `--dyn-tool-call-parser minimax_m2 --dyn-reasoning-parser minimax_m2`
+- MiniMax M3 style outputs: `--dyn-tool-call-parser minimax_m3 --dyn-reasoning-parser minimax_m3`
+
+> [!WARNING]
+> `minimax_append_think` is deprecated for MiniMax M2 tool-calling deployments.
+> Use `--dyn-reasoning-parser minimax_m2` with `--dyn-tool-call-parser minimax_m2`
+> so Dynamo can separate reasoning and pass MiniMax XML tool calls to the tool
+> parser.
 
 ## Tool Calling Interplay
 
@@ -82,7 +104,7 @@ Reasoning parsing happens before tool call parsing. If a model emits both reason
 
 ```bash
 # launch backend worker (or dynamo.vllm)
-python -m dynamo.sglang --model Qwen/Qwen3.5-4B --dyn-tool-call-parser qwen3_coder --dyn-reasoning-parser qwen3
+python -m dynamo.sglang --model Qwen/Qwen3.5-4B --dyn-tool-call-parser qwen3_coder --reasoning-parser qwen3 --dyn-reasoning-parser qwen3
 
 # launch frontend worker
 python -m dynamo.frontend

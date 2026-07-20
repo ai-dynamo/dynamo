@@ -45,7 +45,6 @@ def make_args(**overrides):
         "decode_speedup_ratio": 1.0,
         "dp_size": 1,
         "startup_time": None,
-        "durable_kv_events": False,
         "kv_transfer_bandwidth": 64.0,
         "kv_transfer_timing_mode": "full_prompt",
         "reasoning": None,
@@ -225,9 +224,7 @@ def test_g4_args_allow_kv_bytes_per_token_worker_override():
 
 
 def test_runtime_config_disables_local_indexer_for_decode_worker():
-    engine_args = CONFIG.build_mocker_engine_args(
-        make_args(is_decode_worker=True, durable_kv_events=False)
-    )
+    engine_args = CONFIG.build_mocker_engine_args(make_args(is_decode_worker=True))
 
     _, runtime_config = CONFIG.build_runtime_config(engine_args)
 
@@ -274,7 +271,6 @@ def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
         planner_profile_data=planner_profile_data,
         is_prefill_worker=True,
         is_decode_worker=False,
-        durable_kv_events=False,
         kv_bytes_per_token=131072,
         kv_transfer_bandwidth=123.0,
         kv_transfer_timing_mode="destination_missing",
@@ -465,6 +461,52 @@ def test_replay_engine_args_preserves_explicit_max_model_len():
     assert engine_args.max_model_len == 32768
 
 
+def test_replay_attention_dp_sets_rank_topology_with_explicit_kv_capacity():
+    import dynamo.replay.main as replay_main
+
+    engine_args = replay_main._load_engine_args(
+        json.dumps(
+            {
+                "num_gpu_blocks": 4096,
+                "aic_attention_dp_size": 4,
+            }
+        )
+    )
+
+    assert engine_args.num_gpu_blocks == 4096
+    assert engine_args.dp_size == 4
+
+
+def test_replay_rejects_mismatched_dp_topology():
+    import dynamo.replay.main as replay_main
+
+    with pytest.raises(ValueError, match="dp_size must match"):
+        replay_main._load_engine_args(
+            json.dumps(
+                {
+                    "num_gpu_blocks": 4096,
+                    "dp_size": 2,
+                    "aic_attention_dp_size": 4,
+                }
+            )
+        )
+
+
+def test_replay_rejects_dp_topology_without_aic_attention_dp():
+    import dynamo.replay.main as replay_main
+
+    with pytest.raises(ValueError, match="dp_size must match"):
+        replay_main._load_engine_args(
+            json.dumps(
+                {
+                    "num_gpu_blocks": 4096,
+                    "dp_size": 2,
+                    "aic_backend": "vllm",
+                }
+            )
+        )
+
+
 def test_replay_engine_args_compute_kv_bytes_for_g3_before_validation(monkeypatch):
     import dynamo.replay.main as replay_main
 
@@ -608,6 +650,23 @@ def test_build_mocker_engine_args_estimates_aic_blocks(monkeypatch):
             "attention_dp_size": None,
         }
     ]
+
+
+def test_build_mocker_engine_args_falls_back_when_aic_estimator_missing(
+    monkeypatch, caplog
+):
+    def missing_memory(module_name):
+        raise ModuleNotFoundError(name=module_name)
+
+    monkeypatch.setattr("dynamo._internal.aic.importlib.import_module", missing_memory)
+
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(aic_perf_model=True, model_path="/models/mock")
+    )
+
+    assert engine_args.num_gpu_blocks == 16384
+    assert "Falling back to default num_gpu_blocks=16384" in caplog.text
+    assert "--num-gpu-blocks-override" in caplog.text
 
 
 def test_aic_capacity_estimation_preserves_explicit_zero_inputs(monkeypatch):

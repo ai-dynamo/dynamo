@@ -30,6 +30,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	admissionv1 "k8s.io/api/admission/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
@@ -72,7 +73,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		mutateRequest func(*testing.T, map[string]any) // mutates the source-version request map
 		manager       ctrl.Manager                     // supplies webhook dependencies
 		groveDisabled bool                             // disables the configured Grove pathway
-		environment   map[string]string                // sets process environment for the case
+		checkpointOff bool                             // disables checkpoint creation and restore
 		userInfo      *authenticationv1.UserInfo       // supplies the admission request identity
 		operator      string                           // sets the configured operator principal
 
@@ -435,6 +436,24 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				}
 			}),
 		},
+		{
+			name:          "checkpoint configuration requires operator feature gate",
+			checkpointOff: true,
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{
+						Enabled: true,
+						Job: &nvidiacomv1beta1.ComponentCheckpointJobConfig{
+							GMSClientContainers: []string{"main"},
+						},
+					},
+				}
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[1].experimental.checkpoint: Forbidden: checkpoint functionality is disabled in the operator configuration",
+				"spec.components[1].experimental.checkpoint.job.gmsClientContainers: Forbidden: requires gpuMemoryService to be set",
+			},
+		},
 
 		// KV-transfer CEL rules.
 		{
@@ -720,8 +739,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name:        "GMS snapshot combination requires env gate",
-			environment: map[string]string{consts.DynamoOperatorAllowGMSSnapshotEnvVar: ""},
+			name: "GMS snapshot combination requires gate",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
 				enableBetaIntraPodGMS(worker)
@@ -776,7 +794,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					},
 				}
 			}),
-			wantWebhookErrs: []string{"spec.services[worker].eppConfig: Invalid value: null: exactly one of configMapRef or config is required"},
+			wantWebhookErrs: []string{"spec.services[worker].eppConfig: Forbidden: exactly one of configMapRef or config is required"},
 		},
 		{
 			name: "alpha intra-pod failover shadow maximum is preserved structurally",
@@ -926,7 +944,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.ComponentType = consts.ComponentTypeEPP
 				worker.EPPConfig = &nvidiacomv1alpha1.EPPConfig{}
 			}),
-			wantWebhookErrs: []string{"spec.services[worker].eppConfig: Invalid value: null: exactly one of configMapRef or config is required"},
+			wantWebhookErrs: []string{"spec.services[worker].eppConfig: Forbidden: exactly one of configMapRef or config is required"},
 		},
 		{
 			name: "v1beta1 EPP config without a source is rejected by CEL",
@@ -1650,9 +1668,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			for name, value := range tt.environment {
-				t.Setenv(name, value)
-			}
 			current := admissionUnstructured(t, tt.deployment)
 			if tt.mutateRequest != nil {
 				tt.mutateRequest(t, current)
@@ -1691,12 +1706,13 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			if manager == nil {
 				manager = defaultManager
 			}
-			handler := NewDynamoGraphDeploymentHandler(manager, tt.operator, !tt.groveDisabled)
+			handler := NewDynamoGraphDeploymentHandler(manager, tt.operator)
 			ctx := dgdAdmissionContextWithUserInfo(
 				dgdAdmissionOperation(tt.oldDeployment),
 				nvidiacomv1beta1.DynamoGraphDeploymentGVK,
 				tt.userInfo,
 			)
+			ctx = features.WithGate(ctx, features.Gates{Checkpoint: !tt.checkpointOff, Grove: !tt.groveDisabled})
 
 			var (
 				warnings []string
@@ -1722,8 +1738,9 @@ func TestDynamoGraphDeploymentConversionFailureIsFatal(t *testing.T) {
 	dgd := newBetaDGDForValidation()
 	dgd.Spec.Components = append(dgd.Spec.Components, dgd.Spec.Components[0])
 
-	validator := newDynamoGraphDeploymentTestValidator(t, true)
-	_, err := validator.Validate(context.Background(), dgd)
+	validator := newDynamoGraphDeploymentTestValidator(t)
+	ctx := features.WithGate(context.Background(), features.Gates{Grove: true})
+	_, err := validator.Validate(ctx, dgd)
 	if err == nil || !strings.Contains(err.Error(), "failed to reconstruct compatibility view") {
 		t.Fatalf("Validate() error = %v, want fatal conversion error", err)
 	}
@@ -2043,9 +2060,9 @@ func (m *fakeManager) GetConfig() *rest.Config              { return m.config }
 func (m *fakeManager) GetScheme() *runtime.Scheme           { return m.scheme }
 func (m *fakeManager) GetWebhookServer() ctrlwebhook.Server { return m.webhookServer }
 
-func newDynamoGraphDeploymentTestValidator(t *testing.T, groveEnabled bool) *DynamoGraphDeploymentValidator {
+func newDynamoGraphDeploymentTestValidator(t *testing.T) *DynamoGraphDeploymentValidator {
 	t.Helper()
-	return NewDynamoGraphDeploymentValidator(newGroveTopologyTestManager(t), groveEnabled)
+	return NewDynamoGraphDeploymentValidator(newGroveTopologyTestManager(t))
 }
 
 func newGroveTopologyTestManager(t *testing.T, objects ...runtime.Object) ctrl.Manager {

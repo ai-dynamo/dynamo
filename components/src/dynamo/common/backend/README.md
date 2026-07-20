@@ -65,22 +65,6 @@ This starts a backend that generates rotating token IDs. Point a frontend at
 `dynamo.sample.generate` to test the full request flow without any ML
 dependencies.
 
-### Running a real engine
-
-```bash
-# vLLM
-python -m dynamo.vllm.unified_main --model Qwen/Qwen3-0.6B ...
-
-# SGLang
-python -m dynamo.sglang.unified_main --model-path Qwen/Qwen3-0.6B ...
-
-# TensorRT-LLM
-python -m dynamo.trtllm.unified_main --model Qwen/Qwen3-0.6B ...
-```
-
-Each `unified_main.py` calls `run(MyLLMEngine)` from the common
-`run.py` module.
-
 ## Implementing a New Engine
 
 Subclass `LLMEngine` and implement the required methods:
@@ -137,9 +121,9 @@ class MyEngine(LLMEngine):
 Then create an entry point:
 
 ```python
-# my_backend/unified_main.py
+# my_backend/my_backend_main.py
 from dynamo.common.backend.run import run
-from my_backend.llm_engine import MyEngine
+from my_backend.my_backend_engine import MyEngine
 
 def main():
     run(MyEngine)
@@ -285,19 +269,6 @@ examples/backends/sample/launch/disagg.sh
 Spawns the frontend plus a sample prefill worker and a sample decode
 worker; the frontend's `PrefillRouter` forwards the synthetic
 `disaggregated_params` from prefill to decode.
-
-### Switching production backends to the unified path
-
-Each backend's `disagg.sh` accepts `--unified` to swap in the unified
-entry point. With it, the launch script exercises the same disagg flow
-through `dynamo.<backend>.unified_main` instead of the legacy
-`dynamo.<backend>` dispatch:
-
-```bash
-examples/backends/vllm/launch/disagg.sh --unified
-examples/backends/sglang/launch/disagg.sh --unified
-examples/backends/trtllm/launch/disagg.sh --unified
-```
 
 ### Helpers
 
@@ -480,15 +451,6 @@ common/backend/
     tests/               # test_backend_bindings, test_disagg_helpers,
                          #   test_logprobs, test_sample_engine
     CLAUDE.md            # Design notes (rationale, invariants)
-
-vllm/llm_engine.py       # VllmLLMEngine (agg + disagg)
-vllm/unified_main.py     # Entry point -> run(VllmLLMEngine)
-
-sglang/llm_engine.py     # SglangLLMEngine (agg + disagg, bootstrap handshake)
-sglang/unified_main.py   # Entry point -> run(SglangLLMEngine)
-
-trtllm/llm_engine.py     # TrtllmLLMEngine (agg + disagg)
-trtllm/unified_main.py   # Entry point -> run(TrtllmLLMEngine)
 ```
 
 ## Feature Gaps
@@ -535,6 +497,14 @@ Lifecycle and runtime:
 - **Sleep/wake (vLLM)** — `sleep` / `wake_up` controls via
   `VllmEnginePauseController` (discovery unregister before sleep,
   re-register after wake; `worker.rs` `engine_control_policy`)
+- **KV block clearing (vLLM)** — `POST /engine/control/clear_kv_blocks`
+  on the unified worker's system port,
+  with an empty JSON object (`{}`). The control resets both the prefix
+  cache and connector cache in aggregated, prefill, and decode modes. It
+  returns `{"status":"success","message":"KV cache cleared"}` on
+  success and HTTP 200 with `status:"error"` on semantic failure. The
+  control runs directly without pausing generation or draining requests;
+  if blocks are still in use, retry after the active requests finish.
 - **Elastic EP scaling (vLLM)** — `scale_elastic_ep` control at parity
   with `new_data_parallel_size` validation, a
   single-flight lock (concurrent scales rejected, not queued), and the
@@ -555,7 +525,7 @@ Lifecycle and runtime:
   least 80 GiB per GPU for weights and runtime headroom.
 - **Headless multi-node (vLLM)** — `--headless` secondary nodes run
   vLLM workers only (multi-node TP/PP with `--data-parallel-backend mp`),
-  bypassing DistributedRuntime; `unified_main` routes them to
+  bypassing DistributedRuntime; `dynamo.vllm.main` routes them to
   `run_dynamo_headless` before the Worker/engine path. Distinct from
   elastic EP, which uses the Ray backend above.
 - **Disaggregated serving** (`agg`/`prefill`/`decode`) — KV transfer
@@ -598,14 +568,13 @@ Observability:
 
 Request handling:
 - **Guided decoding / structured outputs** — wired per-engine on the
-  request side, with engine-specific coverage:
+  request side with JSON schema, regex, grammar, and choice coverage:
   - vLLM (`build_sampling_params` → `StructuredOutputsParams`):
     JSON schema, regex, grammar, choice.
   - TRT-LLM (`GuidedDecodingParams`): JSON schema, regex, grammar,
     choice, `json_object`.
-  - SGLang (`_get_guided_decoding_params`): JSON schema only;
-    regex / grammar / choice are silently dropped (see SGLang gaps
-    below).
+  - SGLang (`_get_guided_decoding_params`): JSON schema, regex,
+    grammar through `ebnf`, and choice through an escaped regex.
 - **Structural tag generation** — `WorkerConfig.structural_tag_{mode,
   scope, schema}` + `serialize_structural_tag` helper
 - **Custom Jinja chat templates** — `WorkerConfig.custom_jinja_template`
@@ -630,7 +599,6 @@ Request handling:
 |---------|-------------|
 | GMS shadow mode | GPU Memory Service integration with failover lock (`--gms-shadow-mode`, `configure_gms_lock_mode`) |
 | ModelExpress P2P | Distributed model loading via P2P (`--model-express-url`, `register_modelexpress_loaders`, `mx-source` / `mx-target` load formats) |
-| KV block clearing | Prefix cache reset endpoint |
 | `VllmEngineMonitor` | Background `EngineDeadError` detection task |
 | Instrumented scheduler + FPM relay | Per-forward-pass `ForwardPassMetrics` ZMQ telemetry |
 | `KvConnectorProtocol` abstraction | Legacy abstracts NIXL pull / Mooncake push; unified uses vLLM's internal connector only |
@@ -656,7 +624,6 @@ Request handling:
 | `protocol.py` Pydantic models | `EmbeddingRequest`, `DisaggPreprocessedRequest`, multimodal content types |
 | `--disagg-config` YAML override | `--disagg-config` / `--disagg-config-key` for YAML-based disagg config |
 | `--enable-rl` | RL support via `call_tokenizer_manager` route |
-| Guided-decoding constraint coverage | `_get_guided_decoding_params` forwards only `json` (and `structural_tag`); `regex` / `grammar` / `choice` are silently dropped on the unified path even though SGLang's engine accepts them |
 
 ### TRT-LLM-specific gaps
 
@@ -686,10 +653,9 @@ For users picking what to land next on the unified path:
    (engine updates `/engine/update/load_lora|unload_lora|list_loras` + a
    `/v1/loras` compatibility alias; see [What works today](#what-works-today)).
    Remaining: SGLang and TRT-LLM, which advertise no LoRA updates yet.
-3. **Engine routes / lifecycle endpoints** — weight updates, KV block
-   clearing, prefix cache reset. (Profiling, sleep/wake, elastic-EP
-   scaling, and headless multi-node already landed.) Visible in operator
-   workflows.
+3. **Engine routes / lifecycle endpoints** — weight updates. (Profiling,
+   sleep/wake, KV block clearing, elastic-EP scaling, and headless
+   multi-node already landed.) Visible in operator workflows.
 4. **Snapshot / CRIU** — production checkpoint support.
 5. **Multimodal / diffusion / video / DLLM** — biggest functional
    gap, but largest scope. Best parallelized across modality leads.

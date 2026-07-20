@@ -44,6 +44,23 @@ pub trait KvCacheEventSink: Send + Sync {
     ) -> anyhow::Result<()> {
         self.publish(event)
     }
+
+    /// Publishes events that share one source visibility boundary.
+    ///
+    /// Implementations that do not have a native batch representation retain
+    /// singleton delivery semantics by default.
+    fn publish_batch_with_storage_tiers(
+        &self,
+        events: Vec<(KvCacheEvent, StorageTier)>,
+    ) -> anyhow::Result<()> {
+        let mut first_error = None;
+        for (event, storage_tier) in events {
+            if let Err(error) = self.publish_with_storage_tier(event, storage_tier) {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
 }
 
 /// Raw KV event payload used by transport-specific publishers such as the
@@ -58,6 +75,20 @@ pub struct RawKvEvent {
 /// Trait for publishing transport-specific raw KV event payloads.
 pub trait RawKvEventSink: Send + Sync {
     fn publish(&self, event: RawKvEvent) -> anyhow::Result<()>;
+
+    /// Publishes raw events that share one source visibility boundary.
+    ///
+    /// Implementations that do not have a native batch representation retain
+    /// singleton delivery semantics by default.
+    fn publish_batch(&self, events: Vec<RawKvEvent>) -> anyhow::Result<()> {
+        let mut first_error = None;
+        for event in events {
+            if let Err(error) = self.publish(event) {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
 }
 
 /// Shared KV event publisher bundle used by schedulers and KV managers.
@@ -112,6 +143,28 @@ impl KvEventPublishers {
             })?;
         }
 
+        Ok(())
+    }
+
+    /// Publishes normal KV events without also forwarding them to a raw sink.
+    ///
+    /// Deferred live-scheduler forwarding uses this to preserve its source
+    /// visibility boundary for normal and raw sinks independently.
+    pub(crate) fn publish_event_sink_batch_only(
+        &self,
+        events: Vec<(KvCacheEvent, StorageTier)>,
+    ) -> anyhow::Result<()> {
+        if let Some(sink) = self.event_sink.as_ref() {
+            sink.publish_batch_with_storage_tiers(events)?;
+        }
+        Ok(())
+    }
+
+    /// Publishes raw events as one source visibility boundary.
+    pub(crate) fn publish_raw_batch(&self, events: Vec<RawKvEvent>) -> anyhow::Result<()> {
+        if let Some(sink) = self.raw_sink.as_ref() {
+            sink.publish_batch(events)?;
+        }
         Ok(())
     }
 }
@@ -1277,14 +1330,13 @@ impl MockEngineArgs {
         MockEngineArgsBuilder::default()
     }
 
-    /// GPUs occupied by one worker (engine), derived from the AIC parallelism:
-    /// `aic_tp_size × aic_attention_dp_size` (the attention width, which by the
-    /// MoE constraint equals `aic_moe_tp_size × aic_moe_ep_size`). Falls back to
-    /// 1 when AIC parallelism is not configured (non-AIC / polynomial perf
-    /// model, where a worker is a single logical engine). Used to turn
+    /// GPUs occupied by one worker (engine), derived from tensor parallelism
+    /// and the materialized DP topology. AIC-backed replay uses
+    /// `aic_tp_size × aic_attention_dp_size`; non-AIC replay still counts one
+    /// GPU for every independently modeled `dp_size` rank. Used to turn
     /// provisioned worker-seconds into GPU-hours.
     pub fn aic_gpus_per_worker(&self) -> usize {
-        self.aic_tp_size.unwrap_or(1) * self.aic_attention_dp_size.unwrap_or(1)
+        self.aic_tp_size.unwrap_or(1) * self.dp_size.max(1) as usize
     }
 
     /// Finite ownership bound for live handoff queues and sessions.
@@ -1397,8 +1449,48 @@ impl MockEngineArgs {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
     use serde_json::json;
+
+    #[derive(Default)]
+    struct FailingRawSink {
+        attempts: Mutex<Vec<u64>>,
+    }
+
+    impl RawKvEventSink for FailingRawSink {
+        fn publish(&self, event: RawKvEvent) -> anyhow::Result<()> {
+            self.attempts.lock().unwrap().push(event.event.event_id);
+            if event.event.event_id == 2 {
+                anyhow::bail!("injected raw sink failure");
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn raw_sink_batch_fallback_attempts_later_events_after_failure() {
+        let sink = FailingRawSink::default();
+        let error = sink
+            .publish_batch(
+                (1..=3)
+                    .map(|event_id| RawKvEvent {
+                        event: KvCacheEvent {
+                            event_id,
+                            data: dynamo_kv_router::protocols::KvCacheEventData::Cleared,
+                            dp_rank: 0,
+                        },
+                        block_token_ids: None,
+                        storage_tier: StorageTier::Device,
+                    })
+                    .collect(),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "injected raw sink failure");
+        assert_eq!(*sink.attempts.lock().unwrap(), vec![1, 2, 3]);
+    }
 
     #[test]
     fn direct_request_priorities_are_backward_compatible() {

@@ -111,6 +111,21 @@ pub trait KvIndexerInterface {
         self.remove_worker(worker).await;
     }
 
+    /// Remove one logical worker rank and return only after the reset is visible.
+    ///
+    /// This is a cold-path lifecycle barrier. Implementations must order the
+    /// reset after mutations already accepted for the worker and acknowledge it
+    /// only after those entries can no longer be returned by reads.
+    async fn reset_worker_dp_rank_and_wait(
+        &self,
+        _worker: WorkerId,
+        _dp_rank: DpRank,
+    ) -> Result<(), KvRouterError> {
+        Err(KvRouterError::Unsupported(
+            "acknowledged worker-rank reset is not supported".to_string(),
+        ))
+    }
+
     /// Shutdown the KV Indexer.
     fn shutdown(&self);
 
@@ -183,6 +198,9 @@ pub trait KvIndexerInterface {
 /// - Sticky event routing to N worker threads
 /// - Inline reads on the caller's thread (no channel dispatch for find_matches)
 pub trait SyncIndexer: Send + Sync + 'static {
+    /// Bind optional shared metrics before the backend is published to worker threads.
+    fn configure_metrics(&mut self, _metrics: Option<&KvIndexerMetrics>) {}
+
     fn worker(
         &self,
         event_receiver: flume::Receiver<WorkerTask>,
@@ -191,6 +209,16 @@ pub trait SyncIndexer: Send + Sync + 'static {
 
     /// Find matches for a sequence of block hashes.
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores;
+
+    /// Whether this backend can reconstruct its complete state as router events.
+    fn supports_event_dump(&self) -> bool {
+        true
+    }
+
+    /// Whether Boolean event acknowledgements are sufficient for pruning bookkeeping.
+    fn supports_routing_decision_pruning(&self) -> bool {
+        true
+    }
 
     /// Install a shared structural anchor for branch-sharded suffix routing.
     ///

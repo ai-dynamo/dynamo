@@ -16,11 +16,11 @@ use super::*;
 use crate::indexer::pruning::PruneConfig;
 use crate::protocols::*;
 use crate::test_utils::{
-    assert_exact_scores, assert_no_scores, assert_overlap_scores_eq, assert_score,
-    flush_and_settle, make_clear_event, make_clear_event_with_dp_rank, make_remove_event,
-    make_remove_event_with_parent, make_store_event, make_store_event_with_dp_rank,
-    make_store_event_with_parent, make_store_event_with_start_position, query_scores, remove_event,
-    router_event, snapshot_events, snapshot_tree, stored_blocks_with_sequence_hashes,
+    assert_overlap_scores_eq, assert_score, flush_and_settle, make_clear_event,
+    make_clear_event_with_dp_rank, make_remove_event, make_remove_event_with_parent,
+    make_store_event, make_store_event_with_dp_rank, make_store_event_with_parent,
+    make_store_event_with_start_position, query_scores, remove_event, router_event,
+    snapshot_events, snapshot_tree, stored_blocks_with_sequence_hashes,
 };
 
 // ============================================================================
@@ -29,6 +29,8 @@ use crate::test_utils::{
 
 #[template]
 #[rstest]
+// CKF is added selectively through `matching_indexer_template`; this template also drives
+// dump/restore, parent-structure, and implementation-specific tests that CKF does not support.
 fn indexer_template(
     #[values("single", "flat", "flat_binary", "concurrent", "concurrent_compressed")] variant: &str,
 ) {
@@ -36,6 +38,14 @@ fn indexer_template(
 
 #[template]
 #[rstest]
+fn matching_indexer_template(
+    #[values("single", "flat", "flat_binary", "concurrent", "concurrent_compressed")] variant: &str,
+) {
+}
+
+#[template]
+#[rstest]
+// CKF exposes logical resident counts through Stats, not tree node shape.
 fn tree_size_indexer_template(
     #[values("single", "concurrent", "concurrent_compressed")] variant: &str,
 ) {
@@ -43,6 +53,7 @@ fn tree_size_indexer_template(
 
 #[template]
 #[rstest]
+// CKF has no compressed-tree node representation.
 fn compressed_tree_size_indexer_template(
     #[values("single", "concurrent_compressed")] variant: &str,
 ) {
@@ -50,12 +61,71 @@ fn compressed_tree_size_indexer_template(
 
 #[template]
 #[rstest]
+// CKF intentionally rejects approximate routing and pruning construction.
 fn approx_indexer_template(
     #[values("single", "flat", "flat_binary", "concurrent", "concurrent_compressed")] variant: &str,
 ) {
 }
 
-fn make_indexer(variant: &str) -> Box<dyn KvIndexerInterface> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MatchSemantics {
+    Exact,
+    ProbabilisticNoUnderreport,
+}
+
+fn make_matching_indexer(
+    variant: &str,
+    workers: &[WorkerWithDpRank],
+) -> Box<dyn KvIndexerInterface + Sync> {
+    let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+    make_matching_indexer_with_metrics(variant, workers, metrics).0
+}
+
+fn make_matching_indexer_with_metrics(
+    variant: &str,
+    workers: &[WorkerWithDpRank],
+    metrics: Arc<KvIndexerMetrics>,
+) -> (Box<dyn KvIndexerInterface + Sync>, Arc<KvIndexerMetrics>) {
+    let _ = workers;
+    make_indexer_with_metrics(variant, metrics)
+}
+
+fn assert_scores_with_semantics(
+    variant: &str,
+    actual: &OverlapScores,
+    query_len: usize,
+    configured_workers: &[WorkerWithDpRank],
+    expected_scores: &[(WorkerWithDpRank, u32)],
+    _ckf_semantics: MatchSemantics,
+) {
+    let expected: std::collections::HashMap<_, _> = expected_scores.iter().copied().collect();
+    let _ = (variant, query_len, configured_workers);
+    assert_eq!(actual.scores.len(), expected.len());
+    for (&worker, &expected_depth) in &expected {
+        assert_eq!(actual.scores.get(&worker), Some(&expected_depth));
+    }
+}
+
+async fn assert_query_scores_with_semantics(
+    variant: &str,
+    index: &dyn KvIndexerInterface,
+    query: &[u64],
+    configured_workers: &[WorkerWithDpRank],
+    expected_scores: &[(WorkerWithDpRank, u32)],
+    ckf_semantics: MatchSemantics,
+) {
+    let scores = query_scores(index, query).await;
+    assert_scores_with_semantics(
+        variant,
+        &scores,
+        query.len(),
+        configured_workers,
+        expected_scores,
+        ckf_semantics,
+    );
+}
+
+fn make_indexer(variant: &str) -> Box<dyn KvIndexerInterface + Sync> {
     let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
     make_indexer_with_metrics(variant, metrics).0
 }
@@ -63,11 +133,11 @@ fn make_indexer(variant: &str) -> Box<dyn KvIndexerInterface> {
 fn make_indexer_with_metrics(
     variant: &str,
     metrics: Arc<KvIndexerMetrics>,
-) -> (Box<dyn KvIndexerInterface>, Arc<KvIndexerMetrics>) {
+) -> (Box<dyn KvIndexerInterface + Sync>, Arc<KvIndexerMetrics>) {
     let token = CancellationToken::new();
     let kv_block_size = 32;
 
-    let indexer: Box<dyn KvIndexerInterface> = match variant {
+    let indexer: Box<dyn KvIndexerInterface + Sync> = match variant {
         "single" => Box::new(KvIndexer::new(token, kv_block_size, metrics.clone())),
         // Pin the mode explicitly (not via `new`, which reads DYN_ROUTER_POSITIONAL_SEARCH_MODE)
         // so the matrix always exercises both strided and binary regardless of the ambient env.
@@ -384,11 +454,12 @@ mod interface_tests {
 
     #[cfg(feature = "metrics")]
     #[tokio::test]
-    #[apply(indexer_template)]
+    #[apply(matching_indexer_template)]
     async fn test_continuation_store_does_not_warn(variant: &str) {
         let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
-        let (index, metrics) = make_indexer_with_metrics(variant, metrics);
         let worker = WorkerWithDpRank::new(0, 0);
+        let workers = [worker];
+        let (index, metrics) = make_matching_indexer_with_metrics(variant, &workers, metrics);
 
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
         flush_and_settle(index.as_ref()).await;
@@ -398,22 +469,40 @@ mod interface_tests {
             .await;
         flush_and_settle(index.as_ref()).await;
 
-        assert_score(index.as_ref(), &[1, 2, 3, 4, 5], worker, 5).await;
+        assert_query_scores_with_semantics(
+            variant,
+            index.as_ref(),
+            &[1, 2, 3, 4, 5],
+            &workers,
+            &[(worker, 5)],
+            MatchSemantics::Exact,
+        )
+        .await;
         assert_no_event_errors(metrics.as_ref());
         assert_no_event_warnings(metrics.as_ref());
     }
 
     #[tokio::test]
-    #[apply(indexer_template)]
+    #[apply(matching_indexer_template)]
     async fn test_store_and_find(variant: &str) {
-        let index = make_indexer(variant);
+        let worker = WorkerWithDpRank::new(0, 0);
+        let workers = [worker];
+        let index = make_matching_indexer(variant, &workers);
 
         // Store a sequence for worker 0
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
 
         flush_and_settle(index.as_ref()).await;
 
-        assert_score(index.as_ref(), &[1, 2, 3], WorkerWithDpRank::new(0, 0), 3).await;
+        assert_query_scores_with_semantics(
+            variant,
+            index.as_ref(),
+            &[1, 2, 3],
+            &workers,
+            &[(worker, 3)],
+            MatchSemantics::Exact,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -651,22 +740,34 @@ mod interface_tests {
     }
 
     #[tokio::test]
-    #[apply(indexer_template)]
+    #[apply(matching_indexer_template)]
     async fn test_partial_match(variant: &str) {
-        let index = make_indexer(variant);
+        let worker = WorkerWithDpRank::new(0, 0);
+        let workers = [worker];
+        let index = make_matching_indexer(variant, &workers);
 
         // Store [1, 2, 3] for worker 0
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
 
         flush_and_settle(index.as_ref()).await;
 
-        assert_score(index.as_ref(), &[1, 2, 999], WorkerWithDpRank::new(0, 0), 2).await;
+        assert_query_scores_with_semantics(
+            variant,
+            index.as_ref(),
+            &[1, 2, 999],
+            &workers,
+            &[(worker, 2)],
+            MatchSemantics::ProbabilisticNoUnderreport,
+        )
+        .await;
     }
 
     #[tokio::test]
-    #[apply(indexer_template)]
+    #[apply(matching_indexer_template)]
     async fn test_remove(variant: &str) {
-        let index = make_indexer(variant);
+        let worker = WorkerWithDpRank::new(0, 0);
+        let workers = [worker];
+        let index = make_matching_indexer(variant, &workers);
 
         // Store sequence for worker 0
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
@@ -676,13 +777,24 @@ mod interface_tests {
 
         flush_and_settle(index.as_ref()).await;
 
-        assert_no_scores(index.as_ref(), &[1, 2, 3]).await;
+        assert_query_scores_with_semantics(
+            variant,
+            index.as_ref(),
+            &[1, 2, 3],
+            &workers,
+            &[],
+            MatchSemantics::Exact,
+        )
+        .await;
     }
 
     #[tokio::test]
-    #[apply(indexer_template)]
+    #[apply(matching_indexer_template)]
     async fn test_multiple_workers_shared_prefix(variant: &str) {
-        let index = make_indexer(variant);
+        let worker0 = WorkerWithDpRank::new(0, 0);
+        let worker1 = WorkerWithDpRank::new(1, 0);
+        let workers = [worker0, worker1];
+        let index = make_matching_indexer(variant, &workers);
 
         // Worker 0 has [1, 2], Worker 1 has [1, 3]
         // Since sequence hashes are cumulative, [1] has same hash for both,
@@ -692,31 +804,34 @@ mod interface_tests {
 
         flush_and_settle(index.as_ref()).await;
 
-        assert_exact_scores(
+        assert_query_scores_with_semantics(
+            variant,
             index.as_ref(),
             &[1],
-            &[
-                (WorkerWithDpRank::new(0, 0), 1),
-                (WorkerWithDpRank::new(1, 0), 1),
-            ],
+            &workers,
+            &[(worker0, 1), (worker1, 1)],
+            MatchSemantics::Exact,
         )
         .await;
 
-        assert_exact_scores(
+        assert_query_scores_with_semantics(
+            variant,
             index.as_ref(),
             &[1, 2],
-            &[
-                (WorkerWithDpRank::new(0, 0), 2),
-                (WorkerWithDpRank::new(1, 0), 1),
-            ],
+            &workers,
+            &[(worker0, 2), (worker1, 1)],
+            MatchSemantics::ProbabilisticNoUnderreport,
         )
         .await;
     }
 
     #[tokio::test]
-    #[apply(indexer_template)]
+    #[apply(matching_indexer_template)]
     async fn test_remove_worker(variant: &str) {
-        let index = make_indexer(variant);
+        let worker0 = WorkerWithDpRank::new(0, 0);
+        let worker1 = WorkerWithDpRank::new(1, 0);
+        let workers = [worker0, worker1];
+        let index = make_matching_indexer(variant, &workers);
 
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
         index.apply_event(make_store_event(1, &[1, 2, 3])).await;
@@ -729,10 +844,13 @@ mod interface_tests {
         // Allow time for async remove_worker processing
         flush_and_settle(index.as_ref()).await;
 
-        assert_exact_scores(
+        assert_query_scores_with_semantics(
+            variant,
             index.as_ref(),
             &[1, 2, 3],
-            &[(WorkerWithDpRank::new(1, 0), 3)],
+            &workers,
+            &[(worker1, 3)],
+            MatchSemantics::Exact,
         )
         .await;
     }
@@ -767,9 +885,12 @@ mod interface_tests {
     }
 
     #[tokio::test]
-    #[apply(indexer_template)]
+    #[apply(matching_indexer_template)]
     async fn test_clear_all_blocks(variant: &str) {
-        let index = make_indexer(variant);
+        let worker0 = WorkerWithDpRank::new(0, 0);
+        let worker1 = WorkerWithDpRank::new(1, 0);
+        let workers = [worker0, worker1];
+        let index = make_matching_indexer(variant, &workers);
 
         // Store some data for two workers
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
@@ -781,46 +902,66 @@ mod interface_tests {
         flush_and_settle(index.as_ref()).await;
 
         // Worker 0's blocks should be gone, worker 1's remain
-        let scores = index
-            .find_matches(vec![
-                LocalBlockHash(1),
-                LocalBlockHash(2),
-                LocalBlockHash(3),
-            ])
-            .await
-            .unwrap();
-        assert_eq!(scores.scores.len(), 1);
-        assert!(scores.scores.contains_key(&WorkerWithDpRank::new(1, 0)));
+        assert_query_scores_with_semantics(
+            variant,
+            index.as_ref(),
+            &[1, 2, 3],
+            &workers,
+            &[(worker1, 3)],
+            MatchSemantics::Exact,
+        )
+        .await;
     }
 
     #[tokio::test]
-    #[apply(indexer_template)]
+    #[apply(matching_indexer_template)]
     async fn test_empty_query(variant: &str) {
-        let index = make_indexer(variant);
+        let worker = WorkerWithDpRank::new(0, 0);
+        let workers = [worker];
+        let index = make_matching_indexer(variant, &workers);
 
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
 
         flush_and_settle(index.as_ref()).await;
 
-        assert_no_scores(index.as_ref(), &[]).await;
+        assert_query_scores_with_semantics(
+            variant,
+            index.as_ref(),
+            &[],
+            &workers,
+            &[],
+            MatchSemantics::Exact,
+        )
+        .await;
     }
 
     #[tokio::test]
-    #[apply(indexer_template)]
+    #[apply(matching_indexer_template)]
     async fn test_miss_query(variant: &str) {
-        let index = make_indexer(variant);
+        let worker = WorkerWithDpRank::new(0, 0);
+        let workers = [worker];
+        let index = make_matching_indexer(variant, &workers);
 
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
 
         flush_and_settle(index.as_ref()).await;
 
-        assert_no_scores(index.as_ref(), &[999, 998]).await;
+        assert_query_scores_with_semantics(
+            variant,
+            index.as_ref(),
+            &[999, 998],
+            &workers,
+            &[],
+            MatchSemantics::ProbabilisticNoUnderreport,
+        )
+        .await;
     }
 
     #[tokio::test]
-    #[apply(indexer_template)]
+    #[apply(matching_indexer_template)]
     async fn test_shutdown_idempotent(variant: &str) {
-        let index = make_indexer(variant);
+        let worker = WorkerWithDpRank::new(0, 0);
+        let index = make_matching_indexer(variant, &[worker]);
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
         flush_and_settle(index.as_ref()).await;
         index.shutdown();
@@ -828,16 +969,18 @@ mod interface_tests {
     }
 
     #[tokio::test]
-    #[apply(indexer_template)]
+    #[apply(matching_indexer_template)]
     async fn test_find_matches_for_request(variant: &str) {
-        let index = make_indexer(variant);
+        let worker = WorkerWithDpRank::new(0, 0);
+        let workers = [worker];
+        let index = make_matching_indexer(variant, &workers);
 
         let tokens: Vec<u32> = (1..=96).collect();
         let scores = index
             .find_matches_for_request(&tokens, None, None, None)
             .await
             .unwrap();
-        assert!(scores.scores.is_empty());
+        assert_scores_with_semantics(variant, &scores, 3, &workers, &[], MatchSemantics::Exact);
 
         let block_hashes = compute_block_hash_for_seq(&tokens, 32, BlockHashOptions::default());
         let sequence_hashes = compute_seq_hash_for_block(&block_hashes);
@@ -859,7 +1002,14 @@ mod interface_tests {
             .find_matches_for_request(&tokens, None, None, None)
             .await
             .unwrap();
-        assert_eq!(scores.scores.get(&WorkerWithDpRank::new(0, 0)), Some(&3));
+        assert_scores_with_semantics(
+            variant,
+            &scores,
+            3,
+            &workers,
+            &[(worker, 3)],
+            MatchSemantics::Exact,
+        );
     }
 
     #[tokio::test]
@@ -1021,9 +1171,11 @@ mod interface_tests {
     }
 
     #[tokio::test]
-    #[apply(indexer_template)]
+    #[apply(matching_indexer_template)]
     async fn test_parent_hash_chains(variant: &str) {
-        let index = make_indexer(variant);
+        let worker = WorkerWithDpRank::new(0, 0);
+        let workers = [worker];
+        let index = make_matching_indexer(variant, &workers);
 
         // Store initial sequence [1, 2, 3]
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
@@ -1036,16 +1188,26 @@ mod interface_tests {
         flush_and_settle(index.as_ref()).await;
 
         // Query for full sequence [1, 2, 3, 4, 5] should match all 5 blocks
-        assert_score(
+        assert_query_scores_with_semantics(
+            variant,
             index.as_ref(),
             &[1, 2, 3, 4, 5],
-            WorkerWithDpRank::new(0, 0),
-            5,
+            &workers,
+            &[(worker, 5)],
+            MatchSemantics::Exact,
         )
         .await;
 
         // Query for just [1, 2, 3] should match 3 blocks
-        assert_score(index.as_ref(), &[1, 2, 3], WorkerWithDpRank::new(0, 0), 3).await;
+        assert_query_scores_with_semantics(
+            variant,
+            index.as_ref(),
+            &[1, 2, 3],
+            &workers,
+            &[(worker, 3)],
+            MatchSemantics::Exact,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1089,9 +1251,14 @@ mod interface_tests {
     }
 
     #[tokio::test]
-    #[apply(indexer_template)]
+    #[apply(matching_indexer_template)]
     async fn test_multiple_dp_ranks(variant: &str) {
-        let index = make_indexer(variant);
+        let workers = [
+            WorkerWithDpRank::new(0, 0),
+            WorkerWithDpRank::new(0, 1),
+            WorkerWithDpRank::new(0, 2),
+        ];
+        let index = make_matching_indexer(variant, &workers);
 
         // Same worker_id but different dp_ranks should be tracked separately
         index
@@ -1107,19 +1274,78 @@ mod interface_tests {
         flush_and_settle(index.as_ref()).await;
 
         // Query should return all 3 dp_ranks as separate entries
-        let seq: Vec<LocalBlockHash> = (1..=3).map(LocalBlockHash).collect();
-        let scores = index.find_matches(seq).await.unwrap();
+        assert_query_scores_with_semantics(
+            variant,
+            index.as_ref(),
+            &[1, 2, 3],
+            &workers,
+            &[(workers[0], 3), (workers[1], 3), (workers[2], 3)],
+            MatchSemantics::Exact,
+        )
+        .await;
+    }
 
-        assert_eq!(scores.scores.len(), 3);
-        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 3);
-        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 1)).unwrap(), 3);
-        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 2)).unwrap(), 3);
+    #[tokio::test]
+    #[apply(matching_indexer_template)]
+    async fn test_remove_worker_dp_rank_only_clears_target_rank(variant: &str) {
+        let workers = [WorkerWithDpRank::new(7, 0), WorkerWithDpRank::new(7, 1)];
+        let index = make_matching_indexer(variant, &workers);
+        index
+            .apply_event(make_store_event_with_dp_rank(7, &[1, 2, 3], 0))
+            .await;
+        index
+            .apply_event(make_store_event_with_dp_rank(7, &[1, 2, 3], 1))
+            .await;
+        flush_and_settle(index.as_ref()).await;
+
+        index.remove_worker_dp_rank(7, 0).await;
+        flush_and_settle(index.as_ref()).await;
+
+        assert_query_scores_with_semantics(
+            variant,
+            index.as_ref(),
+            &[1, 2, 3],
+            &workers,
+            &[(workers[1], 3)],
+            MatchSemantics::Exact,
+        )
+        .await;
     }
 
     #[tokio::test]
     #[apply(indexer_template)]
-    async fn test_partial_block_removal(variant: &str) {
+    async fn test_acknowledged_rank_reset_orders_after_accepted_events(variant: &str) {
+        let workers = [WorkerWithDpRank::new(7, 0), WorkerWithDpRank::new(7, 1)];
         let index = make_indexer(variant);
+        index
+            .apply_event(make_store_event_with_dp_rank(7, &[1, 2, 3], 0))
+            .await;
+
+        index.reset_worker_dp_rank_and_wait(7, 0).await.unwrap();
+
+        // A rank reset does not fence sibling ranks, so order the sibling store explicitly.
+        index
+            .apply_event(make_store_event_with_dp_rank(7, &[1, 2, 3], 1))
+            .await;
+        flush_and_settle(index.as_ref()).await;
+
+        assert_query_scores_with_semantics(
+            variant,
+            index.as_ref(),
+            &[1, 2, 3],
+            &workers,
+            &[(workers[1], 3)],
+            MatchSemantics::Exact,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[apply(matching_indexer_template)]
+    async fn test_partial_block_removal(variant: &str) {
+        let worker = WorkerWithDpRank::new(0, 0);
+        let workers = [worker];
+        let index = make_matching_indexer(variant, &workers);
 
         // Store [1, 2, 3]
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
@@ -1129,7 +1355,14 @@ mod interface_tests {
         // Verify all 3 blocks match
         let seq: Vec<LocalBlockHash> = (1..=3).map(LocalBlockHash).collect();
         let scores = index.find_matches(seq.clone()).await.unwrap();
-        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 3);
+        assert_scores_with_semantics(
+            variant,
+            &scores,
+            seq.len(),
+            &workers,
+            &[(worker, 3)],
+            MatchSemantics::Exact,
+        );
 
         // Remove only the last block (block 3)
         // To do this correctly, we need to compute the seq_hash for block 3 specifically,
@@ -1145,12 +1378,26 @@ mod interface_tests {
 
         // Query [1, 2, 3] - should only match 2 blocks now (block 3 is removed)
         let scores = index.find_matches(seq).await.unwrap();
-        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 2);
+        assert_scores_with_semantics(
+            variant,
+            &scores,
+            3,
+            &workers,
+            &[(worker, 2)],
+            MatchSemantics::ProbabilisticNoUnderreport,
+        );
 
         // Query [1, 2] - should still match 2 blocks
         let partial_seq: Vec<LocalBlockHash> = (1..=2).map(LocalBlockHash).collect();
         let scores = index.find_matches(partial_seq).await.unwrap();
-        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 2);
+        assert_scores_with_semantics(
+            variant,
+            &scores,
+            2,
+            &workers,
+            &[(worker, 2)],
+            MatchSemantics::Exact,
+        );
     }
 
     #[tokio::test]
@@ -1209,9 +1456,11 @@ mod interface_tests {
     }
 
     #[tokio::test]
-    #[apply(indexer_template)]
+    #[apply(matching_indexer_template)]
     async fn test_remove_nonexistent_worker(variant: &str) {
-        let index = make_indexer(variant);
+        let worker = WorkerWithDpRank::new(0, 0);
+        let workers = [worker];
+        let index = make_matching_indexer(variant, &workers);
 
         // Store data for worker 0
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
@@ -1225,16 +1474,23 @@ mod interface_tests {
         flush_and_settle(index.as_ref()).await;
 
         // Worker 0's data should still be there
-        let seq: Vec<LocalBlockHash> = (1..=3).map(LocalBlockHash).collect();
-        let scores = index.find_matches(seq).await.unwrap();
-        assert_eq!(scores.scores.len(), 1);
-        assert!(scores.scores.contains_key(&WorkerWithDpRank::new(0, 0)));
+        assert_query_scores_with_semantics(
+            variant,
+            index.as_ref(),
+            &[1, 2, 3],
+            &workers,
+            &[(worker, 3)],
+            MatchSemantics::Exact,
+        )
+        .await;
     }
 
     #[tokio::test]
-    #[apply(indexer_template)]
+    #[apply(matching_indexer_template)]
     async fn test_remove_nonexistent_blocks(variant: &str) {
-        let index = make_indexer(variant);
+        let worker = WorkerWithDpRank::new(0, 0);
+        let workers = [worker];
+        let index = make_matching_indexer(variant, &workers);
 
         // Store [1, 2, 3]
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
@@ -1245,15 +1501,23 @@ mod interface_tests {
         flush_and_settle(index.as_ref()).await;
 
         // Original data should still be there
-        let seq: Vec<LocalBlockHash> = (1..=3).map(LocalBlockHash).collect();
-        let scores = index.find_matches(seq).await.unwrap();
-        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 3);
+        assert_query_scores_with_semantics(
+            variant,
+            index.as_ref(),
+            &[1, 2, 3],
+            &workers,
+            &[(worker, 3)],
+            MatchSemantics::Exact,
+        )
+        .await;
     }
 
     #[tokio::test]
-    #[apply(indexer_template)]
+    #[apply(matching_indexer_template)]
     async fn test_clear_then_reuse(variant: &str) {
-        let index = make_indexer(variant);
+        let worker = WorkerWithDpRank::new(0, 0);
+        let workers = [worker];
+        let index = make_matching_indexer(variant, &workers);
 
         // Store initial data
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
@@ -1266,7 +1530,14 @@ mod interface_tests {
         // Verify data is gone
         let seq: Vec<LocalBlockHash> = (1..=3).map(LocalBlockHash).collect();
         let scores = index.find_matches(seq.clone()).await.unwrap();
-        assert!(scores.scores.is_empty());
+        assert_scores_with_semantics(
+            variant,
+            &scores,
+            seq.len(),
+            &workers,
+            &[],
+            MatchSemantics::Exact,
+        );
 
         // Store new data for the same worker
         index.apply_event(make_store_event(0, &[1, 2, 3])).await;
@@ -1275,14 +1546,22 @@ mod interface_tests {
 
         // Verify new data is accessible
         let scores = index.find_matches(seq).await.unwrap();
-        assert_eq!(scores.scores.len(), 1);
-        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 3);
+        assert_scores_with_semantics(
+            variant,
+            &scores,
+            3,
+            &workers,
+            &[(worker, 3)],
+            MatchSemantics::Exact,
+        );
     }
 
     #[tokio::test]
-    #[apply(indexer_template)]
+    #[apply(matching_indexer_template)]
     async fn test_multiple_sequences_per_worker(variant: &str) {
-        let index = make_indexer(variant);
+        let worker = WorkerWithDpRank::new(0, 0);
+        let workers = [worker];
+        let index = make_matching_indexer(variant, &workers);
 
         // Store two disjoint sequences for the same worker
         // Sequence 1: [1, 2, 3]
@@ -1297,24 +1576,46 @@ mod interface_tests {
         // Query first sequence
         let seq1: Vec<LocalBlockHash> = (1..=3).map(LocalBlockHash).collect();
         let scores = index.find_matches(seq1).await.unwrap();
-        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 3);
+        assert_scores_with_semantics(
+            variant,
+            &scores,
+            3,
+            &workers,
+            &[(worker, 3)],
+            MatchSemantics::Exact,
+        );
 
         // Query second sequence
         let seq2: Vec<LocalBlockHash> = (100..=102).map(LocalBlockHash).collect();
         let scores = index.find_matches(seq2).await.unwrap();
-        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 3);
+        assert_scores_with_semantics(
+            variant,
+            &scores,
+            3,
+            &workers,
+            &[(worker, 3)],
+            MatchSemantics::Exact,
+        );
 
         // Query a mix that doesn't exist as a sequence - should only match first block
         let mixed: Vec<LocalBlockHash> = vec![LocalBlockHash(1), LocalBlockHash(100)];
         let scores = index.find_matches(mixed).await.unwrap();
-        // Only block 1 matches because [1, 100] is not a valid prefix
-        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 1);
+        // Only block 1 is an exact match; CKF may over-report on the absent suffix.
+        assert_scores_with_semantics(
+            variant,
+            &scores,
+            2,
+            &workers,
+            &[(worker, 1)],
+            MatchSemantics::ProbabilisticNoUnderreport,
+        );
     }
 
     #[tokio::test]
-    #[apply(indexer_template)]
-    async fn test_clear_clears_all_dp_ranks(variant: &str) {
-        let index = make_indexer(variant);
+    #[apply(matching_indexer_template)]
+    async fn test_clear_only_removes_target_dp_rank(variant: &str) {
+        let workers = [WorkerWithDpRank::new(0, 0), WorkerWithDpRank::new(0, 1)];
+        let index = make_matching_indexer(variant, &workers);
 
         // Store same sequence for different dp_ranks
         index
@@ -1329,18 +1630,29 @@ mod interface_tests {
         // Verify both dp_ranks are present
         let seq: Vec<LocalBlockHash> = (1..=3).map(LocalBlockHash).collect();
         let scores = index.find_matches(seq.clone()).await.unwrap();
-        assert_eq!(scores.scores.len(), 2);
+        assert_scores_with_semantics(
+            variant,
+            &scores,
+            3,
+            &workers,
+            &[(workers[0], 3), (workers[1], 3)],
+            MatchSemantics::Exact,
+        );
 
-        // Clear event clears ALL blocks for the worker_id, regardless of dp_rank
+        // A clear is ordered within and applies only to its emitting rank.
         index.apply_event(make_clear_event_with_dp_rank(0, 0)).await;
 
         flush_and_settle(index.as_ref()).await;
 
-        // Both dp_ranks should be cleared
+        // Rank 0 is cleared while rank 1 retains the same sequence.
         let scores = index.find_matches(seq).await.unwrap();
-        assert!(
-            scores.scores.is_empty(),
-            "Cleared event should clear all dp_ranks for a worker"
+        assert_scores_with_semantics(
+            variant,
+            &scores,
+            3,
+            &workers,
+            &[(workers[1], 3)],
+            MatchSemantics::Exact,
         );
     }
 }
@@ -2479,15 +2791,40 @@ mod local_indexer_tests {
         assert_eq!(local_indexer.buffer_len(), 0);
 
         match local_indexer.get_events_in_id_range(None, None).await {
-            WorkerKvQueryResponse::TreeDump {
-                events,
+            WorkerKvQueryResponse::TreeDumpFailed {
                 last_event_id,
+                message,
             } => {
-                assert!(events.is_empty());
                 assert_eq!(last_event_id, 0);
+                assert_eq!(message, "Indexer is offline");
             }
-            other => panic!("Expected TreeDump, got: {other:?}"),
+            other => panic!("Expected TreeDumpFailed, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn legacy_named_messagepack_query_defaults_explicit_dump_failure_capability_off() {
+        #[derive(serde::Serialize)]
+        struct LegacyWorkerKvQueryRequest {
+            worker_id: WorkerId,
+            dp_rank: DpRank,
+            start_event_id: Option<u64>,
+            end_event_id: Option<u64>,
+        }
+
+        let encoded = rmp_serde::to_vec_named(&LegacyWorkerKvQueryRequest {
+            worker_id: 7,
+            dp_rank: 3,
+            start_event_id: None,
+            end_event_id: Some(9),
+        })
+        .unwrap();
+        let decoded: WorkerKvQueryRequest = rmp_serde::from_slice(&encoded).unwrap();
+
+        assert_eq!(decoded.worker_id, 7);
+        assert_eq!(decoded.dp_rank, 3);
+        assert_eq!(decoded.end_event_id, Some(9));
+        assert!(!decoded.supports_tree_dump_failed);
     }
 
     #[tokio::test]
@@ -2759,10 +3096,24 @@ mod local_indexer_tests {
         indexer.shutdown();
         dump_tx.closed().await;
 
-        let _ = indexer.get_events_in_id_range(None, None).await;
-        let _ = indexer.get_events_in_id_range(None, None).await;
+        let first = indexer.get_events_in_id_range(None, None).await;
+        let second = indexer.get_events_in_id_range(None, None).await;
 
         assert_eq!(indexer.dump_build_count(), 2);
+        assert!(matches!(
+            first,
+            WorkerKvQueryResponse::TreeDumpFailed {
+                last_event_id: 0,
+                ..
+            }
+        ));
+        assert!(matches!(
+            second,
+            WorkerKvQueryResponse::TreeDumpFailed {
+                last_event_id: 0,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -2835,8 +3186,6 @@ mod local_indexer_tests {
 /// known positional-indexer limitation skipped by `test_remove_mid_chain_block`).
 #[tokio::test]
 async fn positional_binary_matches_strided_differential() {
-    use rand::{Rng, SeedableRng, rngs::StdRng};
-
     // Pin both modes explicitly (not via make_indexer, whose "flat" arm reads the env var) so the
     // comparison is genuinely strided-vs-binary regardless of any ambient DYN_ROUTER_* setting.
     let strided: Box<dyn KvIndexerInterface> = Box::new(ThreadPoolIndexer::new_with_metrics(
@@ -2852,10 +3201,10 @@ async fn positional_binary_matches_strided_differential() {
         None,
     ));
 
-    let mut rng = StdRng::seed_from_u64(0xC0FF_EED1_FF5E_ED42);
+    let mut rng = fastrand::Rng::with_seed(0xC0FF_EED1_FF5E_ED42);
 
     const BASE_LEN: usize = 1300;
-    let base: Vec<u64> = (0..BASE_LEN).map(|_| rng.random::<u64>()).collect();
+    let base: Vec<u64> = (0..BASE_LEN).map(|_| rng.u64(..)).collect();
 
     // Build the shared event stream once, then apply identical clones to both indexers.
     let mut events: Vec<RouterEvent> = Vec::new();
@@ -2870,9 +3219,9 @@ async fn positional_binary_matches_strided_differential() {
     ];
     for (i, &d) in divergence_points.iter().enumerate() {
         let worker_id = (i + 1) as u64;
-        let tail_len = 1 + rng.random_range(0..40usize);
+        let tail_len = 1 + rng.usize(0..40);
         let mut seq = base[..d].to_vec();
-        seq.extend((0..tail_len).map(|_| rng.random::<u64>()));
+        seq.extend((0..tail_len).map(|_| rng.u64(..)));
         events.push(make_store_event(worker_id, &seq));
     }
 
@@ -2892,10 +3241,10 @@ async fn positional_binary_matches_strided_differential() {
 
     // Build the query set, starting with edge cases.
     let mut queries: Vec<Vec<u64>> = vec![
-        vec![],                                         // empty
-        vec![base[0]],                                  // single element (hit)
-        vec![rng.random::<u64>()],                      // single element (miss)
-        (0..50).map(|_| rng.random::<u64>()).collect(), // pure miss
+        vec![],                                 // empty
+        vec![base[0]],                          // single element (hit)
+        vec![rng.u64(..)],                      // single element (miss)
+        (0..50).map(|_| rng.u64(..)).collect(), // pure miss
     ];
 
     // Base prefixes of many lengths, including jump_size boundaries.
@@ -2913,17 +3262,17 @@ async fn positional_binary_matches_strided_differential() {
 
     // Random divergent queries: a base prefix of random length plus a random tail.
     for _ in 0..600 {
-        let p = rng.random_range(0..BASE_LEN);
-        let tail_len = rng.random_range(0..30usize);
+        let p = rng.usize(0..BASE_LEN);
+        let tail_len = rng.usize(0..30);
         let mut q = base[..p].to_vec();
-        q.extend((0..tail_len).map(|_| rng.random::<u64>()));
+        q.extend((0..tail_len).map(|_| rng.u64(..)));
         queries.push(q);
     }
 
     // Fully random queries.
     for _ in 0..600 {
-        let len = rng.random_range(0..(BASE_LEN + 10));
-        queries.push((0..len).map(|_| rng.random::<u64>()).collect());
+        let len = rng.usize(0..(BASE_LEN + 10));
+        queries.push((0..len).map(|_| rng.u64(..)).collect());
     }
 
     for q in &queries {

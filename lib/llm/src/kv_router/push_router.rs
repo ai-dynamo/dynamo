@@ -8,8 +8,8 @@ use dynamo_runtime::{
     error::{ErrorType, match_error_chain},
     metrics::frontend_perf::{STAGE_ROUTE, StageGuard},
     pipeline::{
-        AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
-        SingleIn, async_trait,
+        AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Error, ManyOut, PushRouter,
+        ResponseStream, SingleIn, async_trait,
     },
     protocols::annotated::Annotated,
 };
@@ -20,6 +20,7 @@ use crate::{
     kv_router::{KvRouter, metrics::RouterRequestMetrics},
     preprocessor::PreprocessedRequest,
     protocols::common::{
+        FinishReason,
         llm_backend::LLMEngineOutput,
         timing::{RequestPhase, RoutingData},
     },
@@ -32,7 +33,7 @@ mod cancellation;
 mod request_guard;
 mod selection;
 
-use cancellation::{cancel_on_stop, cancelled_error};
+use cancellation::cancel_on_stop;
 use request_guard::RequestGuard;
 use selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 
@@ -52,9 +53,60 @@ fn invalidate_on_non_cancellation(operation: &mut Option<AffinityAcquire>, error
     }
 }
 
+fn monitor_response_stream(
+    mut response_stream: ManyOut<Annotated<LLMEngineOutput>>,
+    context: Arc<dyn AsyncEngineContext>,
+    mut guard: RequestGuard,
+) -> impl futures::Stream<Item = Annotated<LLMEngineOutput>> + Send {
+    async_stream::stream! {
+        // Keep one cancellation future alive for the whole response stream. Calling
+        // `stopped()` for every item repeatedly clones and polls a watch receiver.
+        let stopped = context.stopped();
+        tokio::pin!(stopped);
+
+        let mut failed = false;
+        let completed = loop {
+            tokio::select! {
+                biased;
+
+                _ = &mut stopped => {
+                    tracing::debug!(request_id = context.id(), "Request cancelled, ending stream");
+                    break false;
+                }
+
+                item = response_stream.next() => {
+                    let Some(item) = item else {
+                        break true;
+                    };
+                    failed |= response_item_failed(&item);
+                    guard.on_item(&item).await;
+                    let completed_terminal = !failed
+                        && item
+                            .data
+                            .as_ref()
+                            .is_some_and(|data| data.finish_reason.is_some());
+                    if completed_terminal {
+                        guard.mark_completed_terminal();
+                    }
+                    // Mark before yielding so a client drop completes admission, then keep
+                    // polling for the request-plane EOF after the application terminal item.
+                    yield item;
+                }
+            }
+        };
+
+        if completed && !failed {
+            guard.finish().await;
+        } else {
+            guard.abort().await;
+        }
+    }
+}
+
 pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     pub chooser: Arc<KvRouter>,
+    request_metrics: Arc<RouterRequestMetrics>,
     affinity: Option<AffinityCoordinator>,
 }
 
@@ -68,16 +120,26 @@ impl KvPushRouter {
             .map(AffinityCoordinator::new)
             .transpose()?;
 
+        Ok(Self::new_with_coordinator(inner, chooser, affinity))
+    }
+
+    pub(crate) fn new_with_coordinator(
+        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        chooser: Arc<KvRouter>,
+        affinity: Option<AffinityCoordinator>,
+    ) -> Self {
         // Eagerly register router request metrics (as zeros) so they are
         // scrapeable before any requests arrive. Both the frontend pipeline
         // and the standalone router create KvPushRouter, so this covers both.
-        RouterRequestMetrics::from_component(chooser.client().endpoint.component());
+        let request_metrics =
+            RouterRequestMetrics::from_component(chooser.client().endpoint.component());
 
-        Ok(KvPushRouter {
+        KvPushRouter {
             inner,
             chooser,
+            request_metrics,
             affinity,
-        })
+        }
     }
 
     async fn select_request(
@@ -95,8 +157,8 @@ impl KvPushRouter {
             .map(|context| context.session_id.clone());
         let routing_parts = RoutingRequestParts::new(request);
         let request_context = request.context().clone();
-        let mut selection_future = Box::pin(async {
-            self.select_worker(
+        let selection_future = self
+            .select_worker(
                 &context_id,
                 request,
                 routing_parts,
@@ -108,30 +170,9 @@ impl KvPushRouter {
                     session_id,
                 },
             )
-            .instrument(tracing::info_span!("kv_router.select_worker"))
-            .await
-        });
-        let selection_result = tokio::select! {
-            biased;
+            .instrument(tracing::info_span!("kv_router.select_worker"));
 
-            _ = request_context.stopped() => None,
-            result = &mut selection_future => Some(result),
-        };
-        drop(selection_future);
-
-        match selection_result {
-            Some(result) => result,
-            None => {
-                if !is_query_only && let Err(error) = self.chooser.free(&context_id).await {
-                    tracing::warn!(
-                        request_id = %context_id,
-                        %error,
-                        "Failed to free scheduler state after cancellation during worker selection"
-                    );
-                }
-                Err(cancelled_error(&context_id))
-            }
-        }
+        cancel_on_stop(request_context.as_ref(), selection_future).await?
     }
 
     async fn select_with_affinity(
@@ -208,9 +249,11 @@ impl KvPushRouter {
         let block_size = self.chooser.block_size() as usize;
         let mut guard = RequestGuard::new(
             self.chooser.clone(),
+            self.request_metrics.clone(),
             context_id.clone(),
             request,
-            selection.scheduler_tracked,
+            !is_query_only,
+            selection.lifecycle.take(),
         );
 
         let record_result: Result<(), Error> = async {
@@ -219,7 +262,6 @@ impl KvPushRouter {
                 let record_result = if let Some(hashes) = selection.routing_hashes.take() {
                     cancel_on_stop(
                         request_context.as_ref(),
-                        &context_id,
                         self.chooser.record_routing_decision_hashes(hashes, worker),
                     )
                     .await?
@@ -238,7 +280,6 @@ impl KvPushRouter {
                     }
                     cancel_on_stop(
                         request_context.as_ref(),
-                        &context_id,
                         self.chooser
                             .record_routing_decision(tokens_with_hashes, worker),
                     )
@@ -320,7 +361,6 @@ impl KvPushRouter {
         };
         let dispatch_result = cancel_on_stop(
             request_context.as_ref(),
-            &context_id,
             dispatch.instrument(tracing::info_span!(
                 "kv_router.route_request",
                 request_id = %context_id,
@@ -332,7 +372,7 @@ impl KvPushRouter {
         )
         .await
         .and_then(|result| result);
-        let mut response_stream = match dispatch_result {
+        let response_stream = match dispatch_result {
             Ok(stream) => stream,
             Err(error) => {
                 guard.abort().await;
@@ -340,37 +380,13 @@ impl KvPushRouter {
             }
         };
 
-        guard.mark_dispatched();
+        guard.mark_dispatched().await;
         let stream_context = response_stream.context();
-        let context_for_monitoring = stream_context.clone();
-        let wrapped_stream = Box::pin(async_stream::stream! {
-            let mut guard = guard;
-            // Keep one cancellation future alive for the whole response stream. Calling
-            // `stopped()` for every item repeatedly clones and polls a watch receiver.
-            let stopped = context_for_monitoring.stopped();
-            tokio::pin!(stopped);
-
-            loop {
-                tokio::select! {
-                    biased;
-
-                    _ = &mut stopped => {
-                        tracing::debug!("Request {context_id} cancelled, ending stream");
-                        break;
-                    }
-
-                    item = response_stream.next() => {
-                        let Some(item) = item else {
-                            break;
-                        };
-                        guard.on_item(&item).await;
-                        yield item;
-                    }
-                }
-            }
-
-            guard.finish().await;
-        });
+        let wrapped_stream = Box::pin(monitor_response_stream(
+            response_stream,
+            stream_context.clone(),
+            guard,
+        ));
         Ok(ResponseStream::new(wrapped_stream, stream_context))
     }
 
@@ -515,7 +531,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 );
                 tracker.record_router_queue_depth(self.chooser.pending_count());
             }
-            RouterRequestMetrics::from_component(self.chooser.client().endpoint.component())
+            self.request_metrics
                 .input_sequence_tokens
                 .observe(request.token_ids.len() as f64);
             let stream_context = request.context().clone();
@@ -608,6 +624,18 @@ impl DirectRoutingRouter {
     }
 }
 
+fn response_item_failed(item: &Annotated<LLMEngineOutput>) -> bool {
+    item.error.is_some()
+        || item.event.as_deref() == Some("error")
+        || item
+            .data
+            .as_ref()
+            .and_then(|data| data.finish_reason.as_ref())
+            .is_some_and(|reason| {
+                matches!(reason, FinishReason::Error(_) | FinishReason::Cancelled)
+            })
+}
+
 #[async_trait]
 impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
     for DirectRoutingRouter
@@ -626,11 +654,29 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Arc, time::Duration};
+    use std::{
+        collections::HashMap,
+        future,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::Duration,
+    };
 
-    use dynamo_kv_router::{DefaultWorkerSelector, config::KvRouterConfig};
+    use dynamo_kv_router::{
+        ActiveSequencesMultiWorker, DefaultWorkerSelector, SequencePublisher,
+        config::{KvRouterConfig, RouterQueuePolicy},
+        protocols::{ActiveLoad, ActiveSequenceEvent, RoutingConstraints},
+        scheduling::{
+            AdmissionAction, AdmissionDecision, AdmissionEvent, AdmissionId, AdmissionRequest,
+            LocalScheduler, NoopOverlapScoresRefresh, OverlapSignals, PolicyClassAdmissionPolicies,
+            PolicyClassAdmissionPolicy, PolicyProfile, ScheduleMode, ScheduleRequest,
+            WorkerPlacement,
+        },
+    };
     use dynamo_runtime::{
-        DistributedRuntime, Runtime,
+        CancellationToken, DistributedRuntime, Runtime,
         distributed::DistributedConfig,
         error::{ErrorType, match_error_chain},
         pipeline::{AsyncEngineContext, Context, PushRouter, RouterMode, context::Controller},
@@ -652,6 +698,218 @@ mod tests {
             .output_options(Default::default())
             .build()
             .unwrap()
+    }
+
+    struct NoopSequencePublisher;
+
+    impl SequencePublisher for NoopSequencePublisher {
+        fn publish_event(
+            &self,
+            _event: &ActiveSequenceEvent,
+        ) -> impl future::Future<Output = anyhow::Result<()>> + Send {
+            future::ready(Ok(()))
+        }
+
+        fn publish_load(&self, _load: ActiveLoad) {}
+
+        fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize) {}
+    }
+
+    struct RecordingAdmissionPolicy(Arc<Mutex<Vec<AdmissionEvent>>>);
+
+    impl PolicyClassAdmissionPolicy for RecordingAdmissionPolicy {
+        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
+            AdmissionDecision::Ready(WorkerPlacement::Any)
+        }
+
+        fn on_event(&mut self, event: AdmissionEvent) -> Vec<AdmissionAction> {
+            self.0.lock().unwrap().push(event);
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn response_item_failed_includes_typed_terminal_failures() {
+        let mut output = LLMEngineOutput::default();
+        assert!(!response_item_failed(&Annotated::from_data(output.clone())));
+
+        output.finish_reason = Some(FinishReason::Error("decode failed".to_string()));
+        assert!(response_item_failed(&Annotated::from_data(output.clone())));
+
+        output.finish_reason = Some(FinishReason::Cancelled);
+        assert!(response_item_failed(&Annotated::from_data(output.clone())));
+
+        output.finish_reason = Some(FinishReason::Length);
+        assert!(!response_item_failed(&Annotated::from_data(output)));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn dropping_stream_after_terminal_item_reports_admission_completed() {
+        let (router, runtime) = router(None).await;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let slots = Arc::new(ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            16,
+            HashMap::from([(7, (0, 1))]),
+            false,
+            0,
+            "decode",
+        ));
+        let (_config_tx, config_rx) =
+            watch::channel(HashMap::from([(7, ModelRuntimeConfig::default())]));
+        let mut policies = PolicyClassAdmissionPolicies::new();
+        policies.insert(
+            "default".to_owned(),
+            Box::new(RecordingAdmissionPolicy(Arc::clone(&events))),
+        );
+        let cancel = CancellationToken::new();
+        let scheduler = LocalScheduler::new_with_policy_profile(
+            Arc::clone(&slots),
+            config_rx,
+            PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs),
+            16,
+            DefaultWorkerSelector::new(None, "decode"),
+            None,
+            None::<Arc<NoopOverlapScoresRefresh>>,
+            None,
+            Duration::from_secs(60),
+            true,
+            cancel.clone(),
+            "decode",
+            false,
+            policies,
+        )
+        .unwrap();
+
+        for (index, finish_reason) in [FinishReason::Stop, FinishReason::EoS, FinishReason::Length]
+            .into_iter()
+            .enumerate()
+        {
+            let request_id = format!("terminal-drop-{index}");
+            let mut response = scheduler
+                .schedule_request(ScheduleRequest {
+                    mode: ScheduleMode::TrackedWithLifecycle {
+                        request_id: request_id.clone(),
+                    },
+                    token_seq: Some(vec![1]),
+                    block_hashes: None,
+                    isl_tokens: 1,
+                    lora_name: None,
+                    expected_output_tokens: None,
+                    pinned_worker: None,
+                    allowed_worker_ids: None,
+                    routing_constraints: RoutingConstraints::default(),
+                    router_config_override: None,
+                    priority_jump: 0.0,
+                    strict_priority: 0,
+                    policy_class: None,
+                    session_id: None,
+                    overlap: OverlapSignals::default(),
+                    shared_cache_hits: None,
+                })
+                .await
+                .unwrap();
+            let worker = response.best_worker;
+            let mut guard = RequestGuard::new(
+                Arc::clone(&router.chooser),
+                Arc::clone(&router.request_metrics),
+                request_id.clone(),
+                &request(),
+                true,
+                response
+                    .request_progress
+                    .take()
+                    .zip(response.lifecycle_lease.take()),
+            );
+            guard.mark_dispatched().await;
+
+            let context = Context::new(()).context();
+            let source = ResponseStream::new(
+                Box::pin(stream::iter([Annotated::from_data(LLMEngineOutput {
+                    finish_reason: Some(finish_reason.clone()),
+                    ..Default::default()
+                })])),
+                Arc::clone(&context),
+            );
+            {
+                let monitored = monitor_response_stream(source, context, guard);
+                tokio::pin!(monitored);
+                let item = monitored.next().await.unwrap();
+                assert_eq!(
+                    item.data.and_then(|output| output.finish_reason),
+                    Some(finish_reason)
+                );
+            }
+
+            let expected_len = (index + 1) * 2;
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while events.lock().unwrap().len() < expected_len {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("terminal stream drop did not report admission completion");
+            assert_eq!(
+                &events.lock().unwrap()[index * 2..expected_len],
+                [
+                    AdmissionEvent::Dispatched {
+                        id: AdmissionId::new(index as u64),
+                        worker,
+                    },
+                    AdmissionEvent::Completed {
+                        id: AdmissionId::new(index as u64),
+                        context_tokens: 1,
+                    },
+                ]
+            );
+        }
+
+        assert!(
+            slots
+                .active_request_counts()
+                .values()
+                .all(|count| *count == 0)
+        );
+        cancel.cancel();
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn terminal_item_does_not_skip_transport_eof() {
+        let (router, runtime) = router(None).await;
+        let context = Context::new(()).context();
+        let drained = Arc::new(AtomicBool::new(false));
+        let source_drained = Arc::clone(&drained);
+        let source = ResponseStream::new(
+            Box::pin(async_stream::stream! {
+                yield Annotated::from_data(LLMEngineOutput {
+                    finish_reason: Some(FinishReason::Stop),
+                    ..Default::default()
+                });
+                source_drained.store(true, Ordering::Release);
+            }),
+            Arc::clone(&context),
+        );
+        let guard = RequestGuard::new(
+            Arc::clone(&router.chooser),
+            Arc::clone(&router.request_metrics),
+            "terminal-drain".to_string(),
+            &request(),
+            false,
+            None,
+        );
+        let monitored = monitor_response_stream(source, context, guard);
+        tokio::pin!(monitored);
+
+        assert!(monitored.next().await.is_some());
+        assert!(monitored.next().await.is_none());
+        assert!(drained.load(Ordering::Acquire));
+
+        drop(router);
+        runtime.shutdown();
     }
 
     async fn router(session_affinity_ttl: Option<Duration>) -> (KvPushRouter, Runtime) {
@@ -679,6 +937,7 @@ mod tests {
             endpoint,
             client.clone(),
             workers,
+            None,
             16,
             DefaultWorkerSelector::new(Some(config.clone()), "decode"),
             Some(config),
@@ -698,10 +957,89 @@ mod tests {
         (router, runtime)
     }
 
+    async fn track_request(
+        router: &KvPushRouter,
+        is_query_only: bool,
+    ) -> (SingleIn<PreprocessedRequest>, WorkerSelection, RequestGuard) {
+        let request = Context::new(request());
+        let (mut selection, _) = router
+            .select_with_affinity(&request, RequestPhase::Aggregated, is_query_only)
+            .await
+            .unwrap();
+        let guard = router
+            .track_selection(&request, &mut selection, is_query_only)
+            .await
+            .unwrap();
+        (request, selection, guard)
+    }
+
     #[tokio::test]
     async fn session_affinity_disabled_does_not_create_coordinator() {
         let (router, runtime) = router(None).await;
         assert!(router.affinity.is_none());
+
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn router_request_counters_follow_admission_and_completion_lifecycle() {
+        let (router, runtime) = router(None).await;
+        let metrics = router.request_metrics.clone();
+        let started_before = metrics.requests_started_total().get();
+        let completed_before = metrics.requests_total.get();
+
+        let controller = Controller::new("pre-admission-cancellation".to_string());
+        controller.stop();
+        let cancelled_request = Context::with_controller(request(), controller);
+        assert!(
+            router
+                .select_with_affinity(&cancelled_request, RequestPhase::Aggregated, false)
+                .await
+                .is_err()
+        );
+        assert_eq!(metrics.requests_started_total().get(), started_before);
+
+        let (_, _, mut query_guard) = track_request(&router, true).await;
+        query_guard.abort().await;
+        drop(query_guard);
+        assert_eq!(metrics.requests_started_total().get(), started_before);
+
+        let (_, _, mut cancelled_guard) = track_request(&router, false).await;
+
+        assert_eq!(metrics.requests_started_total().get(), started_before + 1);
+        assert_eq!(metrics.requests_total.get(), completed_before);
+
+        // Admission remains counted even when the request aborts before dispatch.
+        cancelled_guard.abort().await;
+        drop(cancelled_guard);
+        assert_eq!(metrics.requests_started_total().get(), started_before + 1);
+        assert_eq!(metrics.requests_total.get(), completed_before);
+
+        let (failed_request, failed_selection, failed_dispatch_guard) =
+            track_request(&router, false).await;
+        assert!(
+            router
+                .dispatch_selection(
+                    failed_request,
+                    failed_selection,
+                    failed_dispatch_guard,
+                    true,
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(metrics.requests_started_total().get(), started_before + 2);
+        assert_eq!(metrics.requests_total.get(), completed_before);
+
+        let (_, _, mut completed_guard) = track_request(&router, false).await;
+        completed_guard.start_dispatch("aggregated");
+        completed_guard.mark_dispatched().await;
+        completed_guard.finish().await;
+        drop(completed_guard);
+        assert_eq!(metrics.requests_started_total().get(), started_before + 3);
+        assert_eq!(metrics.requests_total.get(), completed_before + 1);
 
         drop(router);
         runtime.shutdown();
@@ -724,7 +1062,7 @@ mod tests {
         drop(initializer.commit(original_target).unwrap());
 
         let mut operation = Some(affinity.acquire(&session_id, None).await.unwrap());
-        let cancellation = cancelled_error("cancelled-after-selection-request");
+        let cancellation = cancellation::cancelled_error("cancelled-after-selection-request");
         invalidate_on_non_cancellation(&mut operation, &cancellation);
         assert!(operation.is_some());
         drop(operation);

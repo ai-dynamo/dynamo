@@ -195,9 +195,12 @@ def _render_context(args, context=None):
     # Compliance Jinja vars consumed by templates/compliance.Dockerfile.
     # Computed here (not in the template) so the per-target lookup
     # against context.yaml stays in Python and the template stays declarative.
-    compliance_base_stage, compliance_baseline_sbom = _resolve_compliance_inputs(
-        args.framework, args.target, device_key, context
-    )
+    (
+        compliance_base_stage,
+        compliance_baseline_sbom,
+        compliance_ecosystems,
+        compliance_source_ecosystem_flags,
+    ) = _resolve_compliance_inputs(args.framework, args.target, device_key, context)
     return dict(
         framework=args.framework,
         device=args.device,
@@ -208,23 +211,55 @@ def _render_context(args, context=None):
         make_efa=args.make_efa,
         compliance_base_stage=compliance_base_stage,
         compliance_baseline_sbom=compliance_baseline_sbom,
+        compliance_ecosystems=compliance_ecosystems,
+        compliance_source_ecosystem_flags=compliance_source_ecosystem_flags,
     )
 
 
 def _resolve_compliance_inputs(framework, target, device_key, context):
-    """Return (base_stage, baseline_sbom_filename) for templates/compliance.Dockerfile.
+    """Return (base_stage, baseline_sbom, ecosystems, source_ecosystem_flags).
 
     The shared compliance template needs to know:
-      - which earlier stage to FROM (pre_runtime)
+      - which earlier stage to FROM (pre_runtime / planner_builder)
       - which baseline SBOM file to subtract (may be empty if not captured)
-    Both depend on `framework` + `device_key`, so the lookup lives here
-    rather than being repeated as Jinja expressions per template.
+      - which ecosystems to scan. planner is distroless-python: it ships the
+        venv (python), the runtime wheel's crates (rust) and a few native
+        binaries, but none of planner_builder's Debian packages — so it drops
+        dpkg to avoid attributing builder-only packages. dash is carried via
+        native and libgomp via the base SBOM instead.
+    All depend on `target` + `framework` + `device_key`, so the lookup lives
+    here rather than being repeated as Jinja expressions per template.
     """
+    full_ecosystems = "python,rust,dpkg,native"
+    full_source_flags = "--ecosystem dpkg --ecosystem rust --ecosystem native"
     if context is None:
-        return "pre_runtime", ""
+        return "pre_runtime", "", full_ecosystems, full_source_flags
+    if target == "planner":
+        # planner is framework=dynamo, but its distroless-python base differs
+        # from dynamo-runtime's, so it carries its own baseline stem.
+        return (
+            "planner_builder",
+            context.get("dynamo", {}).get("planner_baseline_sbom", ""),
+            "python,rust,native",
+            "--ecosystem rust --ecosystem native",
+        )
+    if target == "frontend":
+        # frontend is framework-agnostic (its ubuntu base is shared across
+        # frameworks), so it carries its own baseline stem under `dynamo`.
+        # It additionally attributes EPP's Go modules (`go`): compliance.Dockerfile
+        # feeds the EPP-emitted CycloneDX SBOM in via --go-sbom for this target.
+        return (
+            "pre_frontend",
+            context.get("dynamo", {}).get("frontend_baseline_sbom", ""),
+            "python,rust,dpkg,go,native",
+            "--ecosystem dpkg --ecosystem rust --ecosystem native --ecosystem go",
+        )
     # runtime / dev / local-dev / wheel_builder / base / framework
-    return "pre_runtime", (
-        context.get(framework, {}).get(device_key, {}).get("baseline_sbom", "")
+    return (
+        "pre_runtime",
+        context.get(framework, {}).get(device_key, {}).get("baseline_sbom", ""),
+        full_ecosystems,
+        full_source_flags,
     )
 
 

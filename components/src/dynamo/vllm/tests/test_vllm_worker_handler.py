@@ -651,6 +651,9 @@ def _make_decode_handler(
         use_unified_vision_chunk=False,
     )
     handler._deferred_aborts = {}
+    # Real BaseWorkerHandler.__init__ (patched out above) sets this; the
+    # aggregated branch in _generate_token_mode reads it, so mirror the default.
+    handler._custom_encoder = None
     return handler
 
 
@@ -744,7 +747,7 @@ class TestDecodeWorkerMultimodalBranching:
             disaggregation_mode="DECODE",
         )
         handler._build_prompt_from_request = MagicMock(
-            return_value=(None, None, {"status": "error", "message": "test stop"})
+            return_value=(None, {"status": "error", "message": "test stop"})
         )
         request = {
             "token_ids": [1, 2, 3],
@@ -777,7 +780,7 @@ class TestDecodeWorkerMultimodalBranching:
         # Return an error from _build_prompt_from_request so _generate_token_mode
         # yields it and returns early — no need to mock the engine.
         handler._build_prompt_from_request = MagicMock(
-            return_value=(None, None, {"status": "error", "message": "test stop"})
+            return_value=(None, {"status": "error", "message": "test stop"})
         )
 
         request = {
@@ -806,7 +809,7 @@ class TestDecodeWorkerMultimodalBranching:
     ):
         handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
 
-        prompt, _, error = handler._build_prompt_from_request(
+        prompt, error = handler._build_prompt_from_request(
             {"token_ids": [1, 2, 3]},
             "request-prompt",
             multi_modal_data=None,
@@ -837,7 +840,7 @@ async def test_prefill_delegates_mode_policy_to_shared_processor():
     )
     handler._multimodal_request_processor = processor
     handler._build_prompt_from_request = MagicMock(
-        return_value=(None, None, {"status": "error", "message": "stop"})
+        return_value=(None, {"status": "error", "message": "stop"})
     )
     context = MagicMock()
 
@@ -1130,9 +1133,7 @@ class TestDeferredAbort:
         handler.input_param_manager = MagicMock()
         handler.input_param_manager.get_input_param.return_value = [1, 2, 3]
         handler._resolve_lora_request = MagicMock(return_value=None)
-        handler._build_prompt_from_request = MagicMock(
-            return_value=(MagicMock(), None, None)
-        )
+        handler._build_prompt_from_request = MagicMock(return_value=(MagicMock(), None))
 
         # Capture the guard created inside the handler and wrap close() so
         # the test can assert that the handler awaited it.
@@ -1657,6 +1658,140 @@ class TestRLAdminRouteHardening:
             "finish_weight_update", kwargs={}
         )
         handler.engine_client.reset_prefix_cache.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    async def test_init_weights_update_group_succeeds_within_timeout(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+
+        resp = await handler.init_weights_update_group(
+            {
+                "engine_rpc": "init_weight_transfer_engine",
+                "init_info": {"master_address": "trainer", "master_port": 29500},
+            }
+        )
+
+        assert resp == {
+            "status": "ok",
+            "message": "Weight update group initialized",
+        }
+        handler.engine_client.collective_rpc.assert_awaited_once_with(
+            "init_weight_transfer_engine",
+            kwargs={
+                "init_info": {
+                    "master_address": "trainer",
+                    "master_port": 29500,
+                }
+            },
+        )
+        assert not handler._pause_lock.locked()
+
+    def test_init_weights_update_group_timeout_defaults_to_30_seconds(
+        self, monkeypatch
+    ):
+        monkeypatch.delenv("DYN_RL_INIT_WEIGHTS_TIMEOUT_S", raising=False)
+
+        assert mod._rl_init_weights_timeout_s() == 30.0
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_init_weights_update_group_timeout_exits_worker(self, monkeypatch):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.runtime = MagicMock()
+        handler.engine_client = MagicMock()
+
+        rpc_cancelled = asyncio.Event()
+
+        async def blocked_rpc(*_args, **_kwargs):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                rpc_cancelled.set()
+                raise
+
+        handler.engine_client.collective_rpc = AsyncMock(side_effect=blocked_rpc)
+        monkeypatch.setenv("DYN_RL_INIT_WEIGHTS_TIMEOUT_S", "0.01")
+        exit_mock = MagicMock(side_effect=SystemExit(1))
+        monkeypatch.setattr(mod.os, "_exit", exit_mock)
+
+        with pytest.raises(SystemExit) as exc_info:
+            await handler.init_weights_update_group(
+                {"engine_rpc": "init_weight_transfer_engine"}
+            )
+
+        assert exc_info.value.code == 1
+        assert rpc_cancelled.is_set()
+        handler.runtime.shutdown.assert_called_once_with()
+        exit_mock.assert_called_once_with(1)
+
+    @pytest.mark.asyncio
+    async def test_init_weights_update_group_returns_inner_timeout_error(
+        self, monkeypatch
+    ):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.runtime = MagicMock()
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock(
+            side_effect=TimeoutError("transport timed out")
+        )
+        exit_mock = MagicMock(side_effect=SystemExit(1))
+        monkeypatch.setattr(mod.os, "_exit", exit_mock)
+
+        resp = await handler.init_weights_update_group(
+            {"engine_rpc": "init_weight_transfer_engine"}
+        )
+
+        assert resp == {"status": "error", "message": "transport timed out"}
+        handler.runtime.shutdown.assert_not_called()
+        exit_mock.assert_not_called()
+        assert not handler._pause_lock.locked()
+
+    @pytest.mark.asyncio
+    async def test_init_weights_update_group_engine_dead_exits_worker(
+        self, monkeypatch
+    ):
+        from vllm.v1.engine.exceptions import EngineDeadError
+
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.runtime = MagicMock()
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock(
+            side_effect=EngineDeadError("engine dead")
+        )
+        exit_mock = MagicMock(side_effect=SystemExit(1))
+        monkeypatch.setattr(mod.os, "_exit", exit_mock)
+
+        with pytest.raises(SystemExit) as exc_info:
+            await handler.init_weights_update_group(
+                {"engine_rpc": "init_weight_transfer_engine"}
+            )
+
+        assert exc_info.value.code == 1
+        handler.runtime.shutdown.assert_called_once_with()
+        exit_mock.assert_called_once_with(1)
+
+    @pytest.mark.asyncio
+    async def test_init_weights_update_group_returns_ordinary_errors(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.runtime = MagicMock()
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock(
+            side_effect=RuntimeError("init failed")
+        )
+
+        resp = await handler.init_weights_update_group(
+            {"engine_rpc": "init_weight_transfer_engine"}
+        )
+
+        assert resp == {"status": "error", "message": "init failed"}
+        handler.runtime.shutdown.assert_not_called()
+        assert not handler._pause_lock.locked()
 
     @pytest.mark.asyncio
     async def test_abort_request_surfaces_deferred_abort_failure(self):

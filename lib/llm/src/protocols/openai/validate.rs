@@ -235,8 +235,8 @@ pub fn validate_top_p(top_p: Option<f32>) -> Result<(), anyhow::Error> {
 pub fn validate_top_k(top_k: Option<i32>) -> Result<(), anyhow::Error> {
     match top_k {
         None => Ok(()),
-        Some(k) if k == -1 || k >= 1 => Ok(()),
-        _ => anyhow::bail!("Top_k must be null, -1, or greater than or equal to 1"),
+        Some(k) if k >= -1 => Ok(()),
+        _ => anyhow::bail!("Top_k must be null or greater than or equal to -1"),
     }
 }
 
@@ -804,6 +804,19 @@ where
     Ok(Some(value))
 }
 
+/// A nested `chat_template` bypasses Dynamo's top-level rejection and is
+/// promoted into the rendered template, so block it for every chat processor.
+pub fn validate_chat_template_args(
+    chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
+) -> Result<(), anyhow::Error> {
+    if let Some(args) = chat_template_args
+        && args.contains_key("chat_template")
+    {
+        anyhow::bail!("`chat_template` is not supported inside `chat_template_args`");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -814,6 +827,23 @@ mod tests {
 
     fn unknown_fields() -> HashMap<String, serde_json::Value> {
         HashMap::from([("experimental_field".to_string(), json!("value"))])
+    }
+
+    #[test]
+    fn validate_chat_template_args_rejects_nested_chat_template() {
+        let args = HashMap::from([(
+            "chat_template".to_string(),
+            json!("{% for _ in range(10**9) %}x{% endfor %}"),
+        )]);
+        let err = validate_chat_template_args(Some(&args)).unwrap_err();
+        assert!(err.to_string().contains("chat_template"));
+    }
+
+    #[test]
+    fn validate_chat_template_args_accepts_other_keys() {
+        let args = HashMap::from([("enable_thinking".to_string(), json!(false))]);
+        validate_chat_template_args(Some(&args)).unwrap();
+        validate_chat_template_args(None).unwrap();
     }
 
     #[test]

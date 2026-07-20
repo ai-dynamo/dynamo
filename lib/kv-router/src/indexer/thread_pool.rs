@@ -15,6 +15,11 @@ use dashmap::DashMap;
 use rustc_hash::FxBuildHasher;
 use tokio::sync::oneshot;
 
+#[cfg(feature = "bench")]
+use super::{
+    EventCompletionBuffer, EventCompletionWriter, ObservationError, ObservationSeal,
+    ObservedEnqueueReceipt, ThreadPoolObservationPlan, ThreadPoolObservationSnapshot,
+};
 use super::{
     KvIndexerInterface, KvIndexerMetrics, KvRouterError, ShardSizeSnapshot, SyncIndexer,
     WorkerLookupStats, WorkerTask, panic_payload_message,
@@ -22,10 +27,12 @@ use super::{
 use crate::indexer::pruning::{BlockEntry, PruneConfig, WorkerPruneManager};
 use crate::protocols::*;
 use dynamo_tokens::SequenceHash;
+#[cfg(feature = "bench")]
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 /// Generic wrapper that provides [`KvIndexerInterface`] for any [`SyncIndexer`] backend.
 ///
-/// Spawns N OS threads for processing write events (sticky-routed by WorkerId).
+/// Spawns N OS threads for processing write events (sticky-routed by `(WorkerId, dp_rank)`).
 /// Read operations (find_matches) are executed inline on the caller's thread,
 /// avoiding channel overhead and allowing reads to scale with callers.
 ///
@@ -47,17 +54,17 @@ pub struct ThreadPoolIndexer<T: SyncIndexer> {
     /// Shared backend - thread-safe via internal locking.
     backend: Arc<T>,
 
-    /// Maps WorkerId to worker thread index for indexer-lifetime sticky routing.
+    /// Maps `(WorkerId, dp_rank)` to a worker thread for indexer-lifetime sticky routing.
     ///
     /// This is not a live-worker registry: entries intentionally remain for the
     /// indexer's lifetime. Producers read this assignment before enqueueing, so
     /// removing an entry without a generation-aware handoff could let later work
     /// overtake tasks already queued on the old thread.
-    worker_assignments: Arc<DashMap<WorkerId, usize, FxBuildHasher>>,
-    /// Monotonic round-robin reservation sequence for new WorkerIds.
+    worker_assignments: Arc<DashMap<WorkerWithDpRank, usize, FxBuildHasher>>,
+    /// Monotonic round-robin reservation sequence for new rank streams.
     ///
-    /// This is not an active-worker count: cold removals also reserve a slot so
-    /// the removal sweep and any subsequent restore share one FIFO.
+    /// This is not an active-worker count: cold rank removals also reserve a slot
+    /// so the removal and any subsequent rank restore share one FIFO.
     worker_assignment_count: Arc<AtomicUsize>,
 
     /// Channels to send tasks to worker threads (one per thread).
@@ -80,6 +87,54 @@ pub struct ThreadPoolIndexer<T: SyncIndexer> {
 
     /// Synthetic event IDs for approximate store/remove events.
     synthetic_event_id: Arc<AtomicU64>,
+
+    #[cfg(feature = "bench")]
+    observation_active: AtomicBool,
+}
+
+#[cfg(feature = "bench")]
+struct ObservationLease<'a> {
+    active: &'a AtomicBool,
+}
+
+#[cfg(feature = "bench")]
+impl Drop for ObservationLease<'_> {
+    fn drop(&mut self) {
+        self.active.store(false, AtomicOrdering::Release);
+    }
+}
+
+#[cfg(feature = "bench")]
+pub struct ThreadPoolObservationSession<'a, T: SyncIndexer> {
+    indexer: &'a ThreadPoolIndexer<T>,
+    epoch: std::time::Instant,
+    seal_tasks: Vec<Option<WorkerTask>>,
+    seal_receivers: Vec<oneshot::Receiver<Option<ObservationSeal>>>,
+    harvest_tasks: Vec<Option<WorkerTask>>,
+    harvest_receivers: Vec<oneshot::Receiver<EventCompletionBuffer>>,
+    queue_depth_at_stop: Vec<usize>,
+    lease: ObservationLease<'a>,
+}
+
+#[cfg(feature = "bench")]
+pub struct ThreadPoolObservationDrain<'a, T: SyncIndexer> {
+    indexer: &'a ThreadPoolIndexer<T>,
+    seal_tasks: Vec<Option<WorkerTask>>,
+    seal_receivers: Vec<oneshot::Receiver<Option<ObservationSeal>>>,
+    harvest_tasks: Vec<Option<WorkerTask>>,
+    harvest_receivers: Vec<oneshot::Receiver<EventCompletionBuffer>>,
+    queue_depth_at_stop: Vec<usize>,
+    lease: ObservationLease<'a>,
+}
+
+#[cfg(feature = "bench")]
+pub struct ThreadPoolSealedObservation<'a, T: SyncIndexer> {
+    indexer: &'a ThreadPoolIndexer<T>,
+    seals: Vec<ObservationSeal>,
+    harvest_tasks: Vec<Option<WorkerTask>>,
+    harvest_receivers: Vec<oneshot::Receiver<EventCompletionBuffer>>,
+    queue_depth_at_stop: Vec<usize>,
+    lease: ObservationLease<'a>,
 }
 
 impl<T: SyncIndexer> ThreadPoolIndexer<T> {
@@ -142,14 +197,19 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
     }
 
     pub fn new_with_metrics_and_pruning(
-        backend: T,
+        mut backend: T,
         num_workers: usize,
         kv_block_size: u32,
         metrics: Option<Arc<KvIndexerMetrics>>,
         prune_config: Option<PruneConfig>,
     ) -> Self {
         assert!(num_workers > 0, "Number of workers must be greater than 0");
+        assert!(
+            prune_config.is_none() || backend.supports_routing_decision_pruning(),
+            "backend does not support routing-decision pruning"
+        );
         super::warn_on_unit_block_size("thread_pool", kv_block_size);
+        backend.configure_metrics(metrics.as_deref());
 
         let backend = Arc::new(backend);
         let mut worker_event_senders = Vec::new();
@@ -217,6 +277,8 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             prune_manager,
             prune_pump_cancel,
             synthetic_event_id,
+            #[cfg(feature = "bench")]
+            observation_active: AtomicBool::new(false),
         }
     }
 
@@ -232,6 +294,131 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
     /// itself.
     pub fn backend_arc(&self) -> Arc<T> {
         Arc::clone(&self.backend)
+    }
+
+    #[cfg(feature = "bench")]
+    pub async fn begin_observation(
+        &self,
+        plan: ThreadPoolObservationPlan,
+    ) -> Result<ThreadPoolObservationSession<'_, T>, ObservationError> {
+        if plan.expected_events_by_worker.is_empty() {
+            return Err(ObservationError::EmptyPlan);
+        }
+        if self
+            .observation_active
+            .compare_exchange(false, true, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
+            .is_err()
+        {
+            return Err(ObservationError::AlreadyActive);
+        }
+        let lease = ObservationLease {
+            active: &self.observation_active,
+        };
+
+        let mut seen = BTreeSet::new();
+        let mut expected_events_per_queue = vec![0usize; self.num_workers];
+        for &(worker_id, expected_events) in &plan.expected_events_by_worker {
+            if !seen.insert(worker_id) {
+                return Err(ObservationError::DuplicateWorker(worker_id));
+            }
+            // The current observation corpus models one rank-zero stream per worker.
+            // Production routing below uses the event's actual rank.
+            let worker = WorkerWithDpRank::from_worker_id(worker_id);
+            let worker_idx = Self::get_or_assign_thread_idx(
+                &self.worker_assignments,
+                &self.worker_assignment_count,
+                worker,
+                self.num_workers,
+            );
+            expected_events_per_queue[worker_idx] = expected_events_per_queue[worker_idx]
+                .checked_add(expected_events)
+                .ok_or(ObservationError::CapacityOverflow(worker_idx))?;
+        }
+
+        let mut install_receivers = Vec::with_capacity(self.num_workers);
+        let mut seal_tasks = Vec::with_capacity(self.num_workers);
+        let mut seal_receivers = Vec::with_capacity(self.num_workers);
+        let mut harvest_tasks = Vec::with_capacity(self.num_workers);
+        let mut harvest_receivers = Vec::with_capacity(self.num_workers);
+
+        for (worker_idx, &capacity) in expected_events_per_queue.iter().enumerate() {
+            let (install_tx, install_rx) = oneshot::channel();
+            self.worker_event_channels[worker_idx]
+                .send(WorkerTask::InstallObservation {
+                    writer: EventCompletionWriter::new(plan.epoch, capacity),
+                    resp: install_tx,
+                })
+                .map_err(|_| ObservationError::WorkerOffline(worker_idx))?;
+            install_receivers.push(install_rx);
+
+            let (seal_tx, seal_rx) = oneshot::channel();
+            seal_tasks.push(Some(WorkerTask::SealObservation(seal_tx)));
+            seal_receivers.push(seal_rx);
+
+            let (harvest_tx, harvest_rx) = oneshot::channel();
+            harvest_tasks.push(Some(WorkerTask::HarvestObservation(harvest_tx)));
+            harvest_receivers.push(harvest_rx);
+        }
+
+        for (worker_idx, receiver) in install_receivers.into_iter().enumerate() {
+            let accepted = receiver
+                .await
+                .map_err(|_| ObservationError::InstallCanceled(worker_idx))?;
+            if !accepted {
+                return Err(ObservationError::InstallRejected(worker_idx));
+            }
+        }
+
+        Ok(ThreadPoolObservationSession {
+            indexer: self,
+            epoch: plan.epoch,
+            seal_tasks,
+            seal_receivers,
+            harvest_tasks,
+            harvest_receivers,
+            queue_depth_at_stop: vec![0; self.num_workers],
+            lease,
+        })
+    }
+
+    #[cfg(feature = "bench")]
+    #[doc(hidden)]
+    pub fn enqueue_active_observation_owned(
+        &self,
+        event: RouterEvent,
+        correlation_id: u32,
+        epoch: std::time::Instant,
+    ) -> Result<ObservedEnqueueReceipt, ObservationError> {
+        if !self.observation_active.load(AtomicOrdering::Acquire) {
+            return Err(ObservationError::ProducerClosed);
+        }
+        let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
+        let worker_idx = self
+            .worker_assignments
+            .get(&worker)
+            .map(|entry| *entry)
+            .ok_or(ObservationError::UnknownWorker(worker.worker_id))?;
+
+        self.worker_event_channels[worker_idx]
+            .send(WorkerTask::ObservedEvent {
+                event,
+                correlation_id,
+            })
+            .map_err(|_| ObservationError::WorkerOffline(worker_idx))?;
+        let accepted_ns = epoch.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        self.maybe_enqueue_cleanup(worker_idx);
+
+        Ok(ObservedEnqueueReceipt {
+            accepted_ns,
+            event_worker: worker_idx,
+        })
+    }
+
+    #[cfg(feature = "bench")]
+    fn capture_queue_depths(&self, depths: &mut [usize]) {
+        for (depth, channel) in depths.iter_mut().zip(&self.worker_event_channels) {
+            *depth = channel.len();
+        }
     }
 
     pub(crate) async fn worker_lookup_stats(&self) -> WorkerLookupStats {
@@ -266,8 +453,8 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             .collect()
     }
 
-    /// Enqueue a structural anchor on the same worker queue used by normal
-    /// events for this worker. Branch-sharded routing uses this to preserve
+    /// Enqueue a structural anchor on the same rank queue used by normal
+    /// events for this source. Branch-sharded routing uses this to preserve
     /// Anchor-before-Stored ordering for the dependent suffix on that queue.
     pub(crate) fn enqueue_anchor(
         &self,
@@ -277,7 +464,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         let thread_idx = Self::get_or_assign_thread_idx(
             &self.worker_assignments,
             &self.worker_assignment_count,
-            worker.worker_id,
+            worker,
             self.num_workers,
         );
         self.worker_event_channels[thread_idx]
@@ -287,56 +474,156 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         Ok(())
     }
 
-    /// Wait until all previously queued worker tasks have completed.
+    /// Enqueue an event and report whether the worker queue accepted it.
+    pub fn enqueue_event(&self, event: RouterEvent) -> Result<(), KvRouterError> {
+        let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
+        let thread_idx = Self::get_or_assign_thread_idx(
+            &self.worker_assignments,
+            &self.worker_assignment_count,
+            worker,
+            self.num_workers,
+        );
+        self.worker_event_channels[thread_idx]
+            .send(WorkerTask::Event(event))
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+        self.maybe_enqueue_cleanup(thread_idx);
+        Ok(())
+    }
+
+    /// Wait until every worker queue has completed tasks accepted before this call.
     ///
-    /// Used primarily for testing and benchmarking to ensure writes are visible
-    /// before checking results.
-    pub async fn flush(&self) {
-        let mut receivers = Vec::new();
+    /// This is a FIFO progress barrier, not an event-result acknowledgement. Ordinary
+    /// `WorkerTask::Event` application errors are logged by the worker and are not returned here.
+    pub async fn flush_and_wait(&self) -> Result<(), KvRouterError> {
+        let mut receivers = Vec::with_capacity(self.worker_event_channels.len());
         for channel in &self.worker_event_channels {
             let (resp_tx, resp_rx) = oneshot::channel();
-            if channel.send(WorkerTask::Flush(resp_tx)).is_ok() {
-                receivers.push(resp_rx);
-            }
+            channel
+                .send(WorkerTask::Flush(resp_tx))
+                .map_err(|_| KvRouterError::IndexerOffline)?;
+            receivers.push(resp_rx);
         }
         for receiver in receivers {
-            let _ = receiver.await;
+            receiver
+                .await
+                .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+        }
+        Ok(())
+    }
+
+    /// Wait until the FIFO lane for `worker` has completed tasks accepted before this call.
+    ///
+    /// NOTE: Rank-to-queue assignment is stable for the indexer's lifetime. Replacement reset
+    /// depends on removal and acknowledgement using that same FIFO lane before activation. This
+    /// proves queue progress only; ordinary event errors are logged by the worker.
+    async fn flush_worker_lane_and_wait(
+        &self,
+        worker: WorkerWithDpRank,
+    ) -> Result<(), KvRouterError> {
+        let thread_idx = Self::get_or_assign_thread_idx(
+            &self.worker_assignments,
+            &self.worker_assignment_count,
+            worker,
+            self.num_workers,
+        );
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.worker_event_channels[thread_idx]
+            .send(WorkerTask::Flush(resp_tx))
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+        resp_rx
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)
+    }
+
+    /// Wait until all previously queued worker tasks have completed.
+    ///
+    /// Used primarily for testing and benchmarking to stop at a stable queue boundary before
+    /// checking results. Individual event-application errors are observable only through logs and
+    /// metrics, not this barrier.
+    pub async fn flush(&self) {
+        if let Err(error) = self.flush_and_wait().await {
+            tracing::error!(%error, "Failed to flush thread-pool indexer");
         }
     }
 
     fn get_or_assign_thread_idx(
-        worker_assignments: &DashMap<WorkerId, usize, FxBuildHasher>,
+        worker_assignments: &DashMap<WorkerWithDpRank, usize, FxBuildHasher>,
         worker_assignment_count: &AtomicUsize,
-        worker_id: WorkerId,
+        worker: WorkerWithDpRank,
         num_workers: usize,
     ) -> usize {
-        *worker_assignments.entry(worker_id).or_insert_with(|| {
+        if let Some(thread_idx) = worker_assignments.get(&worker).map(|entry| *entry) {
+            return thread_idx;
+        }
+
+        *worker_assignments.entry(worker).or_insert_with(|| {
             let idx = worker_assignment_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             idx % num_workers
         })
     }
 
-    fn enqueue_worker_removal(&self, worker_id: WorkerId, task: WorkerTask) {
-        // All mutations for one WorkerId use this indexer-lifetime assignment,
-        // so the removal and any subsequent restore share one FIFO.
+    fn enqueue_rank_removal(&self, worker: WorkerWithDpRank, task: WorkerTask) {
+        // All mutations for one rank stream use this indexer-lifetime assignment,
+        // so the removal and any subsequent rank restore share one FIFO.
         let thread_idx = Self::get_or_assign_thread_idx(
             &self.worker_assignments,
             &self.worker_assignment_count,
-            worker_id,
+            worker,
             self.num_workers,
         );
 
         if let Err(error) = self.worker_event_channels[thread_idx].send(task) {
             tracing::error!(
-                worker_id,
+                worker_id = worker.worker_id,
+                dp_rank = worker.dp_rank,
                 worker_thread_index = thread_idx,
                 ?error,
-                "Failed to send worker removal task"
+                "Failed to send rank removal task"
             );
             return;
         }
 
         self.maybe_enqueue_cleanup(thread_idx);
+    }
+
+    async fn remove_worker_across_lanes_and_wait(
+        &self,
+        worker_id: WorkerId,
+    ) -> Result<(), KvRouterError> {
+        let mut lane_receivers = Vec::with_capacity(self.worker_event_channels.len());
+        for channel in &self.worker_event_channels {
+            let (resp_tx, resp_rx) = oneshot::channel();
+            channel
+                .send(WorkerTask::RemoveWorker {
+                    worker_id,
+                    sweep_tree: false,
+                    resp: resp_tx,
+                })
+                .map_err(|_| KvRouterError::IndexerOffline)?;
+            lane_receivers.push(resp_rx);
+        }
+        for receiver in lane_receivers {
+            receiver
+                .await
+                .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+        }
+
+        // NOTE: The lifecycle caller stops this worker's source before removal. Broadcasting
+        // keeps all admission bookkeeping off the event hot path; events concurrently admitted
+        // before this barrier completes belong to the retiring source and may be removed.
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.worker_event_channels[0]
+            .send(WorkerTask::RemoveWorker {
+                worker_id,
+                sweep_tree: true,
+                resp: resp_tx,
+            })
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+        resp_rx
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+        self.maybe_enqueue_cleanup(0);
+        Ok(())
     }
 
     fn next_synthetic_event_id(synthetic_event_id: &AtomicU64) -> u64 {
@@ -390,7 +677,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
 
     fn enqueue_prune_removes(
         worker_event_channels: &[flume::Sender<WorkerTask>],
-        worker_assignments: &DashMap<WorkerId, usize, FxBuildHasher>,
+        worker_assignments: &DashMap<WorkerWithDpRank, usize, FxBuildHasher>,
         worker_assignment_count: &AtomicUsize,
         num_workers: usize,
         synthetic_event_id: &AtomicU64,
@@ -417,7 +704,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             let thread_idx = Self::get_or_assign_thread_idx(
                 worker_assignments,
                 worker_assignment_count,
-                worker.worker_id,
+                worker,
                 num_workers,
             );
             if let Err(error) = worker_event_channels[thread_idx].send(WorkerTask::Event(event)) {
@@ -433,7 +720,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
     fn spawn_prune_pump(
         prune_manager: WorkerPruneManager,
         worker_event_channels: Vec<flume::Sender<WorkerTask>>,
-        worker_assignments: Arc<DashMap<WorkerId, usize, FxBuildHasher>>,
+        worker_assignments: Arc<DashMap<WorkerWithDpRank, usize, FxBuildHasher>>,
         worker_assignment_count: Arc<AtomicUsize>,
         num_workers: usize,
         synthetic_event_id: Arc<AtomicU64>,
@@ -513,7 +800,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         let thread_idx = Self::get_or_assign_thread_idx(
             &self.worker_assignments,
             &self.worker_assignment_count,
-            worker.worker_id,
+            worker,
             self.num_workers,
         );
 
@@ -553,6 +840,104 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
     ) -> Result<(), KvRouterError> {
         self.record_routing_decision_hashes(worker, local_hashes, sequence_hashes)
             .await
+    }
+}
+
+#[cfg(feature = "bench")]
+impl<'a, T: SyncIndexer> ThreadPoolObservationSession<'a, T> {
+    pub fn enqueue_observed_owned(
+        &mut self,
+        event: RouterEvent,
+        correlation_id: u32,
+    ) -> Result<ObservedEnqueueReceipt, ObservationError> {
+        self.indexer
+            .enqueue_active_observation_owned(event, correlation_id, self.epoch)
+    }
+
+    pub fn close_observed_producers(mut self) -> ThreadPoolObservationDrain<'a, T> {
+        self.indexer
+            .capture_queue_depths(&mut self.queue_depth_at_stop);
+
+        ThreadPoolObservationDrain {
+            indexer: self.indexer,
+            seal_tasks: self.seal_tasks,
+            seal_receivers: self.seal_receivers,
+            harvest_tasks: self.harvest_tasks,
+            harvest_receivers: self.harvest_receivers,
+            queue_depth_at_stop: self.queue_depth_at_stop,
+            lease: self.lease,
+        }
+    }
+}
+
+#[cfg(feature = "bench")]
+impl<'a, T: SyncIndexer> ThreadPoolObservationDrain<'a, T> {
+    pub async fn seal(mut self) -> Result<ThreadPoolSealedObservation<'a, T>, ObservationError> {
+        for worker_idx in 0..self.indexer.num_workers {
+            let Some(task) = self.seal_tasks[worker_idx].take() else {
+                return Err(ObservationError::SealTaskConsumed(worker_idx));
+            };
+            self.indexer.worker_event_channels[worker_idx]
+                .send(task)
+                .map_err(|_| ObservationError::WorkerOffline(worker_idx))?;
+        }
+
+        let mut seals = Vec::with_capacity(self.indexer.num_workers);
+        for (worker_idx, receiver) in self.seal_receivers.into_iter().enumerate() {
+            let seal = receiver
+                .await
+                .map_err(|_| ObservationError::SealCanceled(worker_idx))?
+                .ok_or(ObservationError::SealRejected(worker_idx))?;
+            seals.push(seal);
+        }
+
+        Ok(ThreadPoolSealedObservation {
+            indexer: self.indexer,
+            seals,
+            harvest_tasks: self.harvest_tasks,
+            harvest_receivers: self.harvest_receivers,
+            queue_depth_at_stop: self.queue_depth_at_stop,
+            lease: self.lease,
+        })
+    }
+}
+
+#[cfg(feature = "bench")]
+impl<T: SyncIndexer> ThreadPoolSealedObservation<'_, T> {
+    pub fn latest_seal_ns(&self) -> u64 {
+        self.seals
+            .iter()
+            .map(|seal| seal.sealed_ns)
+            .max()
+            .unwrap_or_default()
+    }
+
+    pub async fn harvest(mut self) -> Result<ThreadPoolObservationSnapshot, ObservationError> {
+        for worker_idx in 0..self.indexer.num_workers {
+            let Some(task) = self.harvest_tasks[worker_idx].take() else {
+                return Err(ObservationError::HarvestTaskConsumed(worker_idx));
+            };
+            self.indexer.worker_event_channels[worker_idx]
+                .send(task)
+                .map_err(|_| ObservationError::WorkerOffline(worker_idx))?;
+        }
+
+        let mut buffers = Vec::with_capacity(self.indexer.num_workers);
+        for (worker_idx, receiver) in self.harvest_receivers.into_iter().enumerate() {
+            buffers.push(
+                receiver
+                    .await
+                    .map_err(|_| ObservationError::HarvestCanceled(worker_idx))?,
+            );
+        }
+
+        let snapshot = ThreadPoolObservationSnapshot {
+            seals: self.seals,
+            buffers,
+            queue_depth_at_stop: self.queue_depth_at_stop,
+        };
+        drop(self.lease);
+        Ok(snapshot)
     }
 }
 
@@ -616,27 +1001,9 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
     }
 
     async fn apply_event(&self, event: RouterEvent) {
-        let worker_id = event.worker_id;
-
-        // Get or assign worker thread index using sticky round-robin
-        let thread_idx = Self::get_or_assign_thread_idx(
-            &self.worker_assignments,
-            &self.worker_assignment_count,
-            worker_id,
-            self.num_workers,
-        );
-
-        // Send event to the assigned worker thread
-        if let Err(e) = self.worker_event_channels[thread_idx].send(WorkerTask::Event(event)) {
-            tracing::error!(
-                "Failed to send event to worker thread {}: {:?}",
-                thread_idx,
-                e
-            );
-            return;
+        if let Err(error) = self.enqueue_event(event) {
+            tracing::error!(%error, "Failed to enqueue event to thread-pool indexer");
         }
-
-        self.maybe_enqueue_cleanup(thread_idx);
     }
 
     async fn remove_worker(&self, worker_id: WorkerId) {
@@ -644,13 +1011,9 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
             prune_manager.remove_worker(worker_id);
         }
 
-        self.enqueue_worker_removal(
-            worker_id,
-            WorkerTask::RemoveWorker {
-                worker_id,
-                sweep_tree: true,
-            },
-        );
+        if let Err(error) = self.remove_worker_across_lanes_and_wait(worker_id).await {
+            tracing::error!(worker_id, %error, "Failed to remove worker across mutation lanes");
+        }
     }
 
     async fn remove_worker_dp_rank(&self, worker_id: WorkerId, dp_rank: DpRank) {
@@ -658,14 +1021,42 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
             prune_manager.remove_worker_dp_rank(WorkerWithDpRank::new(worker_id, dp_rank));
         }
 
-        self.enqueue_worker_removal(
-            worker_id,
+        let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+        self.enqueue_rank_removal(
+            worker,
             WorkerTask::RemoveWorkerDpRank {
                 worker_id,
                 dp_rank,
                 sweep_tree: true,
             },
         );
+    }
+
+    async fn reset_worker_dp_rank_and_wait(
+        &self,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+    ) -> Result<(), KvRouterError> {
+        if let Some(prune_manager) = &self.prune_manager {
+            prune_manager.remove_worker_dp_rank(WorkerWithDpRank::new(worker_id, dp_rank));
+        }
+
+        let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+        let thread_idx = Self::get_or_assign_thread_idx(
+            &self.worker_assignments,
+            &self.worker_assignment_count,
+            worker,
+            self.num_workers,
+        );
+        self.worker_event_channels[thread_idx]
+            .send(WorkerTask::RemoveWorkerDpRank {
+                worker_id,
+                dp_rank,
+                sweep_tree: true,
+            })
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+
+        self.flush_worker_lane_and_wait(worker).await
     }
 
     fn shutdown(&self) {
@@ -696,6 +1087,12 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
     }
 
     async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
+        if !self.backend.supports_event_dump() {
+            return Err(KvRouterError::Unsupported(
+                "backend cannot reconstruct router events".to_string(),
+            ));
+        }
+
         // Send DumpEvents to every worker as a FIFO barrier: each worker must
         // finish processing all previously queued Events before it handles
         // DumpEvents, so by the time all workers respond we know the shared
@@ -812,48 +1209,133 @@ mod tests {
     use super::*;
     use crate::{
         ConcurrentRadixTreeCompressed,
-        test_utils::{assert_score, make_store_event},
+        test_utils::{
+            assert_no_scores, assert_score, make_store_event, make_store_event_with_dp_rank,
+        },
     };
 
     fn assigned_thread(
         indexer: &ThreadPoolIndexer<ConcurrentRadixTreeCompressed>,
-        worker_id: WorkerId,
+        worker: WorkerWithDpRank,
     ) -> Option<usize> {
-        indexer
-            .worker_assignments
-            .get(&worker_id)
-            .map(|entry| *entry)
+        indexer.worker_assignments.get(&worker).map(|entry| *entry)
     }
 
+    #[derive(Clone, Copy)]
     enum ColdRemoval {
         Worker,
         DpRank,
     }
 
-    async fn assert_cold_remove_reserves_sticky_queue(removal: ColdRemoval) {
+    async fn assert_cold_removal_assignment(removal: ColdRemoval) {
         let indexer = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 2, 16);
         indexer.apply_event(make_store_event(1, &[1])).await;
-        assert_eq!(assigned_thread(&indexer, 1), Some(0));
+        let first = WorkerWithDpRank::new(1, 0);
+        let removed = WorkerWithDpRank::new(2, 0);
+        assert_eq!(assigned_thread(&indexer, first), Some(0));
 
         match removal {
             ColdRemoval::Worker => indexer.remove_worker(2).await,
             ColdRemoval::DpRank => indexer.remove_worker_dp_rank(2, 0).await,
         }
 
-        assert_eq!(assigned_thread(&indexer, 2), Some(1));
+        let expected_before_store = match removal {
+            ColdRemoval::Worker => None,
+            ColdRemoval::DpRank => Some(1),
+        };
+        assert_eq!(assigned_thread(&indexer, removed), expected_before_store);
         indexer.apply_event(make_store_event(2, &[2])).await;
         indexer.flush().await;
-        assert_eq!(assigned_thread(&indexer, 2), Some(1));
-        assert_score(&indexer, &[2], WorkerWithDpRank::new(2, 0), 1).await;
+        assert_eq!(assigned_thread(&indexer, removed), Some(1));
+        assert_score(&indexer, &[2], removed, 1).await;
     }
 
     #[tokio::test]
-    async fn cold_worker_remove_reserves_sticky_queue() {
-        assert_cold_remove_reserves_sticky_queue(ColdRemoval::Worker).await;
+    async fn cold_worker_remove_does_not_reserve_rank_queue() {
+        assert_cold_removal_assignment(ColdRemoval::Worker).await;
     }
 
     #[tokio::test]
     async fn cold_rank_remove_reserves_sticky_queue() {
-        assert_cold_remove_reserves_sticky_queue(ColdRemoval::DpRank).await;
+        assert_cold_removal_assignment(ColdRemoval::DpRank).await;
+    }
+
+    #[tokio::test]
+    async fn sibling_ranks_use_independent_sticky_queues() {
+        let indexer = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 2, 16);
+        let rank0 = WorkerWithDpRank::new(7, 0);
+        let rank1 = WorkerWithDpRank::new(7, 1);
+
+        indexer
+            .apply_event(make_store_event_with_dp_rank(7, &[10], 0))
+            .await;
+        indexer
+            .apply_event(make_store_event_with_dp_rank(7, &[20], 1))
+            .await;
+
+        assert_eq!(assigned_thread(&indexer, rank0), Some(0));
+        assert_eq!(assigned_thread(&indexer, rank1), Some(1));
+        indexer.flush().await;
+        assert_score(&indexer, &[10], rank0, 1).await;
+        assert_score(&indexer, &[20], rank1, 1).await;
+    }
+
+    #[tokio::test]
+    async fn whole_worker_remove_barriers_every_rank_lane_before_returning() {
+        let indexer = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 2, 16);
+        let rank1 = WorkerWithDpRank::new(7, 1);
+
+        indexer
+            .apply_event(make_store_event_with_dp_rank(7, &[10], 0))
+            .await;
+        indexer
+            .apply_event(make_store_event_with_dp_rank(7, &[20], 1))
+            .await;
+        indexer.remove_worker(7).await;
+
+        assert_no_scores(&indexer, &[10]).await;
+        assert_no_scores(&indexer, &[20]).await;
+
+        indexer
+            .apply_event(make_store_event_with_dp_rank(7, &[30], 1))
+            .await;
+        indexer.flush().await;
+        assert_score(&indexer, &[30], rank1, 1).await;
+    }
+
+    #[cfg(feature = "bench")]
+    #[tokio::test]
+    async fn observed_events_use_fixed_worker_buffers_and_fifo_seals() {
+        let indexer = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 2, 16);
+        let epoch = std::time::Instant::now();
+        let mut observation = indexer
+            .begin_observation(ThreadPoolObservationPlan {
+                epoch,
+                expected_events_by_worker: vec![(1, 1), (2, 1)],
+            })
+            .await
+            .unwrap();
+
+        let first = observation
+            .enqueue_observed_owned(make_store_event(1, &[11]), 10)
+            .unwrap();
+        let second = observation
+            .enqueue_observed_owned(make_store_event(2, &[22]), 20)
+            .unwrap();
+        assert_ne!(first.event_worker, second.event_worker);
+
+        let sealed = observation.close_observed_producers().seal().await.unwrap();
+        assert!(sealed.latest_seal_ns() >= first.accepted_ns);
+        let snapshot = sealed.harvest().await.unwrap();
+        assert_eq!(snapshot.buffers.len(), 2);
+        assert!(snapshot.buffers.iter().all(|buffer| !buffer.overflowed()));
+        let mut ids = snapshot
+            .buffers
+            .iter()
+            .flat_map(|buffer| buffer.records().iter())
+            .map(|record| record.correlation_id)
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        assert_eq!(ids, [10, 20]);
     }
 }

@@ -31,14 +31,7 @@ const QUERY_REQUEST_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 const DYN_KV_INDEXER_TEST_ENDPOINTS: &str = "DYN_KV_INDEXER_TEST_ENDPOINTS";
 
 fn test_endpoints_enabled() -> bool {
-    matches!(
-        std::env::var(DYN_KV_INDEXER_TEST_ENDPOINTS)
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str(),
-        "1" | "true" | "yes" | "on"
-    )
+    dynamo_truthy::env_is_truthy(DYN_KV_INDEXER_TEST_ENDPOINTS)
 }
 
 use super::logging::{AccessLogModel, AccessLogSink};
@@ -64,7 +57,7 @@ impl AppState {
             let prom_registry = prometheus::Registry::new();
             super::metrics::register(&prom_registry)?;
             let indexer_metrics = KvIndexerMetrics::new_registered(&prom_registry)?;
-            return Ok(Self {
+            Ok(Self {
                 registry: Arc::new(WorkerRegistry::new_with_indexer_metrics_and_cancel_token(
                     indexer_threads,
                     indexer_metrics,
@@ -72,7 +65,7 @@ impl AppState {
                 )),
                 access_log_sink: None,
                 prom_registry,
-            });
+            })
         }
 
         #[cfg(not(feature = "metrics"))]
@@ -86,62 +79,70 @@ impl AppState {
     }
 }
 
-fn default_tenant() -> String {
+fn default_routing_group() -> String {
     "default".to_string()
 }
 
 #[derive(Deserialize)]
-pub struct RegisterRequest {
-    pub instance_id: WorkerId,
-    pub endpoint: String,
-    pub model_name: String,
-    #[serde(default = "default_tenant")]
-    pub tenant_id: String,
-    pub block_size: u32,
+struct RegisterRequest {
+    instance_id: WorkerId,
+    endpoint: String,
+    model_name: String,
+    #[serde(default = "default_routing_group")]
+    routing_group: String,
+    #[serde(default = "default_routing_group", rename = "tenant_id")]
+    _tenant_id: String,
+    block_size: u32,
     #[serde(default)]
-    pub dp_rank: Option<u32>,
+    dp_rank: Option<u32>,
     #[serde(default)]
-    pub replay_endpoint: Option<String>,
+    replay_endpoint: Option<String>,
     /// Optional per-tenant salt (Mooncake RFC #1403 `additionalsalt`).
     /// Currently accepted but not yet mixed into hashes — engines apply
     /// their own salt internally. Plumbed for forward compatibility.
-    #[serde(default, alias = "additionalsalt")]
-    pub additional_salt: Option<String>,
+    #[serde(default, alias = "additionalsalt", rename = "additional_salt")]
+    _additional_salt: Option<String>,
 }
 
 #[derive(Deserialize)]
-pub struct UnregisterRequest {
-    pub instance_id: WorkerId,
-    pub model_name: String,
+struct UnregisterRequest {
+    instance_id: WorkerId,
+    model_name: String,
     #[serde(default)]
-    pub tenant_id: Option<String>,
+    routing_group: Option<String>,
+    #[serde(default, rename = "tenant_id")]
+    _tenant_id: Option<String>,
     #[serde(default)]
-    pub dp_rank: Option<u32>,
+    dp_rank: Option<u32>,
 }
 
 #[derive(Deserialize)]
-pub struct QueryRequest {
-    pub token_ids: Vec<u32>,
-    pub model_name: String,
-    #[serde(default = "default_tenant")]
-    pub tenant_id: String,
+struct QueryRequest {
+    token_ids: Vec<u32>,
+    model_name: String,
+    #[serde(default = "default_routing_group")]
+    routing_group: String,
+    #[serde(default = "default_routing_group", rename = "tenant_id")]
+    _tenant_id: String,
     #[serde(default)]
-    pub lora_name: Option<String>,
+    lora_name: Option<String>,
     /// Optional per-request cache salt (Mooncake RFC #1403), mixed into `/query` hashes.
     #[serde(default)]
-    pub cache_salt: Option<String>,
+    cache_salt: Option<String>,
 }
 
 #[derive(Deserialize)]
-pub struct QueryByHashRequest {
-    pub block_hashes: Vec<i64>,
-    pub model_name: String,
-    #[serde(default = "default_tenant")]
-    pub tenant_id: String,
+struct QueryByHashRequest {
+    block_hashes: Vec<i64>,
+    model_name: String,
+    #[serde(default = "default_routing_group")]
+    routing_group: String,
+    #[serde(default = "default_routing_group", rename = "tenant_id")]
+    _tenant_id: String,
     /// Invalid for `/query_by_hash`. Callers must precompute `block_hashes` with the intended
     /// cache salt and omit this field; a non-null value is rejected.
     #[serde(default)]
-    pub cache_salt: Option<String>,
+    cache_salt: Option<String>,
 }
 
 /// Response shape for `/query` and `/query_by_hash`.
@@ -183,7 +184,7 @@ async fn register(
             req.endpoint,
             req.dp_rank.unwrap_or(0),
             req.model_name,
-            req.tenant_id,
+            req.routing_group,
             req.block_size,
             req.replay_endpoint,
         )
@@ -210,25 +211,25 @@ async fn unregister(
     Json(req): Json<UnregisterRequest>,
 ) -> Response {
     let model = req.model_name.clone();
-    let result = match req.tenant_id {
-        Some(tenant_id) => match req.dp_rank {
+    let result = match req.routing_group {
+        Some(routing_group) => match req.dp_rank {
             Some(dp_rank) => {
                 state
                     .registry
-                    .deregister_dp_rank(req.instance_id, dp_rank, &req.model_name, &tenant_id)
+                    .deregister_dp_rank(req.instance_id, dp_rank, &req.model_name, &routing_group)
                     .await
             }
             None => {
                 state
                     .registry
-                    .deregister(req.instance_id, &req.model_name, &tenant_id)
+                    .deregister(req.instance_id, &req.model_name, &routing_group)
                     .await
             }
         },
         None => {
             state
                 .registry
-                .deregister_all_tenants(req.instance_id, &req.model_name)
+                .deregister_all_routing_groups(req.instance_id, &req.model_name)
                 .await
         }
     };
@@ -247,22 +248,23 @@ async fn unregister(
 /// Optional query parameters for `GET /workers`.
 ///
 /// Both fields are independent filters; omitting one skips that dimension.
-/// Example: `GET /workers?model_name=llama3&tenant_id=acme`
+/// Example: `GET /workers?model_name=llama3&routing_group=acme`
 #[derive(Deserialize)]
 struct WorkersQuery {
     model_name: Option<String>,
-    tenant_id: Option<String>,
+    routing_group: Option<String>,
+    #[serde(default, rename = "tenant_id")]
+    _tenant_id: Option<String>,
 }
 
 async fn list_workers(
     State(state): State<Arc<AppState>>,
     Query(params): Query<WorkersQuery>,
 ) -> impl IntoResponse {
-    Json(
-        state
-            .registry
-            .list_filtered(params.model_name.as_deref(), params.tenant_id.as_deref()),
-    )
+    Json(state.registry.list_filtered(
+        params.model_name.as_deref(),
+        params.routing_group.as_deref(),
+    ))
 }
 
 /// Build the [`ScoreResponse`] in both the flat (legacy) and per-instance
@@ -316,13 +318,16 @@ async fn query(State(state): State<Arc<AppState>>, Json(req): Json<QueryRequest>
     let model = req.model_name.clone();
     let key = IndexerKey {
         model_name: req.model_name,
-        tenant_id: req.tenant_id,
+        routing_group: req.routing_group,
     };
     let Some(ie) = state.registry.get_indexer(&key) else {
         let mut resp = (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
-                "error": format!("no indexer for model={} tenant={}", key.model_name, key.tenant_id)
+                "error": format!(
+                    "no indexer for model={} routing_group={}",
+                    key.model_name, key.routing_group
+                )
             })),
         )
             .into_response();
@@ -367,13 +372,16 @@ async fn query_by_hash(
 
     let key = IndexerKey {
         model_name: req.model_name,
-        tenant_id: req.tenant_id,
+        routing_group: req.routing_group,
     };
     let Some(ie) = state.registry.get_indexer(&key) else {
         let mut resp = (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
-                "error": format!("no indexer for model={} tenant={}", key.model_name, key.tenant_id)
+                "error": format!(
+                    "no indexer for model={} routing_group={}",
+                    key.model_name, key.routing_group
+                )
             })),
         )
             .into_response();
@@ -497,7 +505,7 @@ pub(crate) async fn dump_registry(registry: &WorkerRegistry) -> serde_json::Valu
     for handle in handles {
         match handle.await {
             Ok((key, Ok(events), block_size)) => {
-                let map_key = format!("{}:{}", key.model_name, key.tenant_id);
+                let map_key = format!("{}:{}", key.model_name, key.routing_group);
                 result.insert(
                     map_key,
                     serde_json::json!({
@@ -507,7 +515,7 @@ pub(crate) async fn dump_registry(registry: &WorkerRegistry) -> serde_json::Valu
                 );
             }
             Ok((key, Err(e), _)) => {
-                let map_key = format!("{}:{}", key.model_name, key.tenant_id);
+                let map_key = format!("{}:{}", key.model_name, key.routing_group);
                 result.insert(map_key, serde_json::json!({"error": e.to_string()}));
             }
             Err(e) => {
@@ -741,14 +749,14 @@ mod tests {
             .await
             .unwrap();
 
-        // Worker 21: mistral / acme, block_size=8
+        // Worker 21: mistral / other, block_size=8
         registry
             .register(
                 21,
                 "tcp://127.0.0.1:15591".to_string(),
                 0,
                 "mistral".to_string(),
-                "acme".to_string(),
+                "other".to_string(),
                 8,
                 None,
             )
@@ -794,7 +802,43 @@ mod tests {
             .find(|w| w["model_name"] == "llama3")
             .unwrap();
         assert_eq!(llama["block_size"], 4);
-        assert_eq!(llama["tenant_id"], "acme");
+        assert_eq!(llama["routing_group"], "acme");
+        assert!(llama.get("tenant_id").is_none());
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/workers?tenant_id=acme")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let legacy_filtered: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(legacy_filtered.len(), 2);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/workers?routing_group=acme")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let filtered_by_group: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(filtered_by_group.len(), 1);
+        assert_eq!(filtered_by_group[0]["routing_group"], "acme");
 
         // Filtered by model_name=llama3: only one result
         let response = app
