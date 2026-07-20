@@ -14,6 +14,7 @@ from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.multimodal import EMBEDDING_RECEIVER_FACTORIES, TransferRequest
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.engine_response import normalize_finish_reason
+from dynamo.sglang._compat import filter_supported_async_generate_kwargs
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
     DisaggSglangMultimodalRequest,
@@ -42,6 +43,14 @@ class MultimodalConfig:
 
     EMBEDDINGS_DTYPE = torch.float16
     EMBEDDINGS_DEVICE = "cpu"
+
+
+def _mm_hashes_kwargs(engine: Any, request: SglangMultimodalRequest) -> dict[str, Any]:
+    if not request.mm_hashes:
+        return {}
+    return filter_supported_async_generate_kwargs(
+        engine, {"mm_hashes": request.mm_hashes}
+    )
 
 
 class EmbeddingsProcessorLike(Protocol):
@@ -594,6 +603,7 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
                 gen_params["image_data"] = image_mm_items
             if video_data:
                 gen_params["video_data"] = video_data
+            gen_params.update(_mm_hashes_kwargs(self.engine, request))
 
             agg_stream = await self.engine.async_generate(**gen_params)
 
@@ -804,6 +814,7 @@ class MultimodalPrefillWorkerHandler(
                 gen_params["image_data"] = image_mm_items
             if video_data:
                 gen_params["video_data"] = video_data
+            gen_params.update(_mm_hashes_kwargs(self.engine, request))
 
             results = await self.engine.async_generate(**gen_params)
 

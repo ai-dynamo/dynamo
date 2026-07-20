@@ -31,6 +31,7 @@ from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang._compat import (
     enable_disjoint_streaming_output,
+    ensure_sglang_external_mm_hash_updates_pad_value,
     ensure_sglang_tensor_image_size,
 )
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
@@ -552,6 +553,7 @@ async def parse_args(
         server_args = ServerArgs.from_cli_args(parsed_args)
         if server_args.get_model_config().is_multimodal:
             ensure_sglang_tensor_image_size()
+            ensure_sglang_external_mm_hash_updates_pad_value()
 
     if getattr(server_args, "schedule_low_priority_values_first", False):
         raise ValueError(

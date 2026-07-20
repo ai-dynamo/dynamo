@@ -137,6 +137,8 @@ class SglangMultimodalRequest(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     request: PreprocessedRequest
     multimodal_inputs: List[MultiModalGroup] = Field(default_factory=list)
+    # Canonical per-item hashes in SGLang's image/video/audio grouping order.
+    mm_hashes: Optional[List[str]] = None
     # Shared embedding transfer metadata for the entire multimodal request.
     embeddings_shape: Optional[
         Union[Tuple[int, int], Tuple[int, int, int], Tuple[int, int, int, int]]

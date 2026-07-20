@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 import yaml
@@ -21,6 +22,8 @@ import dynamo.sglang.llm_engine as sglang_llm_engine
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
 from dynamo.sglang._compat import (
+    ensure_sglang_external_mm_hash_updates_pad_value,
+    ensure_sglang_frontend_decoded_video_support,
     ensure_sglang_tensor_image_size,
     ensure_sglang_top_level_exports,
     filter_supported_async_generate_kwargs,
@@ -244,6 +247,85 @@ def test_compat_supports_tensor_image_sizes_and_is_idempotent(caplog, monkeypatc
         )
     finally:
         BaseMultimodalProcessor.resolve_image_token_counts = original
+
+
+def test_compat_refreshes_stale_pad_value_after_external_hash():
+    from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
+
+    from dynamo.common.multimodal.routing_utils import pad_value_for_mm_hash
+
+    original = MultimodalDataItem.set_pad_value
+    try:
+        item = MultimodalDataItem(
+            modality=Modality.VIDEO,
+            precomputed_embeddings=torch.arange(4, dtype=torch.float32),
+        )
+        item.set_pad_value()
+        stale_pad_value = item.pad_value
+
+        external_hash = 0x0123_4567_89AB_CDEF
+        item.hash = external_hash
+        ensure_sglang_external_mm_hash_updates_pad_value()
+        installed = MultimodalDataItem.set_pad_value
+        ensure_sglang_external_mm_hash_updates_pad_value()
+        item.set_pad_value()
+
+        assert installed is MultimodalDataItem.set_pad_value
+        assert item.pad_value == pad_value_for_mm_hash(external_hash)
+        assert item.pad_value != stale_pad_value
+    finally:
+        MultimodalDataItem.set_pad_value = original
+
+
+@pytest.mark.asyncio
+async def test_compat_preserves_frontend_sampled_video_frames_and_timestamps():
+    from sglang.srt.disaggregation import encode_server
+    from sglang.srt.multimodal.processors import qwen_vl
+
+    from dynamo.sglang.request_handlers.multimodal.video_input import (
+        FrontendDecodedVideo,
+    )
+
+    original_encode_server = encode_server.preprocess_video
+    original_qwen = qwen_vl.preprocess_video
+    try:
+        ensure_sglang_frontend_decoded_video_support()
+        installed = encode_server.preprocess_video
+        ensure_sglang_frontend_decoded_video_support()
+
+        assert installed is qwen_vl.preprocess_video
+
+        frames = np.arange(4 * 3 * 5 * 3, dtype=np.uint8).reshape(4, 3, 5, 3)
+        video = FrontendDecodedVideo(
+            frames,
+            {
+                "fps": 24.0,
+                "duration": 10.0,
+                "total_num_frames": 240,
+                "frames_indices": [0, 80, 160, 239],
+            },
+        )
+
+        processor_frames, metadata = await encode_server.preprocess_video(
+            video,
+            video_config={"max_pixels": 1},
+        )
+
+        assert installed is encode_server.preprocess_video
+        torch.testing.assert_close(
+            processor_frames,
+            torch.from_numpy(frames).permute(0, 3, 1, 2),
+        )
+        assert metadata == {
+            "fps": 24.0,
+            "duration": 10.0,
+            "total_num_frames": 240,
+            "frames_indices": [0, 80, 160, 239],
+            "video_backend": "dynamo_frontend",
+        }
+    finally:
+        encode_server.preprocess_video = original_encode_server
+        qwen_vl.preprocess_video = original_qwen
 
 
 @pytest.mark.asyncio

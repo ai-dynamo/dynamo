@@ -48,9 +48,9 @@ pub struct RdmaMediaDataDescriptor {
     #[serde(flatten)]
     pub(crate) tensor_info: MediaTensorInfo,
 
-    /// Canonical xxh3-64 key for `(shape, dtype, decoded image byte payload)`.
-    /// Serialized once so routing and backend embedding caches consume the
-    /// exact same hash without reimplementing the payload contract.
+    /// Canonical xxh3-64 key for the decoded media payload. Video keys also
+    /// include modality and model-visible temporal metadata. Serialized once
+    /// so routing and backend embedding caches consume the same identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) content_hash: Option<String>,
 
@@ -89,6 +89,9 @@ impl RdmaMediaDataDescriptor {
     /// model-visible fields automatically participate in the identity.
     #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
     pub(crate) fn video_content_hash(&self) -> Result<u64> {
+        if let Some(hash) = self.content_hash() {
+            return Ok(hash);
+        }
         let bytes = self
             .local_payload()
             .ok_or_else(|| anyhow::anyhow!("decoded video has no local payload"))?;
@@ -115,7 +118,7 @@ impl RdmaMediaDataDescriptor {
     }
 }
 
-#[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+#[cfg(feature = "media-ffmpeg")]
 fn hash_video_content(tensor_info: &MediaTensorInfo, bytes: &[u8]) -> Result<u64> {
     use xxhash_rust::xxh3::Xxh3;
 
@@ -186,7 +189,7 @@ fn video_dimensions_from_parts(
     Ok((*frames, width, height))
 }
 
-#[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+#[cfg(feature = "media-ffmpeg")]
 fn update_len_prefixed(hasher: &mut xxhash_rust::xxh3::Xxh3, bytes: &[u8]) {
     hasher.update(&(bytes.len() as u64).to_le_bytes());
     hasher.update(bytes);
@@ -214,29 +217,28 @@ fn canonical_content_hash(shape: &[usize], dtype: DataType, bytes: &[u8]) -> u64
 fn content_hash_for_storage(tensor_info: &MediaTensorInfo, storage: &SystemStorage) -> Option<u64> {
     use dynamo_memory::{MemoryDescriptor, actions::Slice};
 
-    // The current consumers cache and route images only. Avoid an otherwise
-    // unused full-buffer pass over decoded videos.
-    if !matches!(
-        tensor_info.metadata.as_ref(),
-        Some(DecodedMediaMetadata::Image(_))
-    ) || storage.size() == 0
-    {
+    if storage.size() == 0 {
         return None;
     }
 
     // SAFETY: storage owns this stable buffer and is only read while the
     // descriptor is being built, before NIXL can access it concurrently.
     let bytes = unsafe { storage.as_slice().ok()? };
-    Some(canonical_content_hash(
-        &tensor_info.shape,
-        tensor_info.dtype,
-        bytes,
-    ))
+    match tensor_info.metadata.as_ref() {
+        Some(DecodedMediaMetadata::Image(_)) => Some(canonical_content_hash(
+            &tensor_info.shape,
+            tensor_info.dtype,
+            bytes,
+        )),
+        #[cfg(feature = "media-ffmpeg")]
+        Some(DecodedMediaMetadata::Video(_)) => hash_video_content(tensor_info, bytes).ok(),
+        None => None,
+    }
 }
 
 impl DecodedMediaData {
-    /// Precompute the canonical image hash while still running on the decode
-    /// thread. Videos and empty buffers intentionally remain unkeyed.
+    /// Precompute the canonical media hash while still running on the decode
+    /// thread, before NIXL registration returns to the async runtime.
     pub(crate) fn compute_content_hash(&mut self) {
         self.content_hash = content_hash_for_storage(&self.tensor_info, &self.data);
     }
@@ -317,7 +319,7 @@ pub fn get_nixl_agent() -> Result<NixlAgent> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+    #[cfg(feature = "media-ffmpeg")]
     use crate::preprocessor::media::decoders::VideoMetadata;
 
     #[test]
@@ -329,7 +331,7 @@ mod tests {
         assert_eq!(format!("{hash:016x}"), "7a9bbcb11a898630");
     }
 
-    #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+    #[cfg(feature = "media-ffmpeg")]
     fn video_info(sampled_timestamps: Vec<f64>) -> MediaTensorInfo {
         MediaTensorInfo {
             shape: vec![2, 1, 2, 3],
@@ -340,6 +342,20 @@ mod tests {
                 sampled_timestamps,
             })),
         }
+    }
+
+    #[cfg(feature = "media-ffmpeg")]
+    #[test]
+    fn video_content_hash_is_precomputed_for_wire_reuse() {
+        let bytes = vec![0_u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+        let array = ndarray::Array4::from_shape_vec((2, 1, 2, 3), bytes.clone()).unwrap();
+        let mut decoded = DecodedMediaData::try_from(array).unwrap();
+        decoded.tensor_info.metadata = video_info(vec![0.0, 5.0]).metadata;
+        let expected = hash_video_content(&decoded.tensor_info, &bytes).unwrap();
+
+        decoded.compute_content_hash();
+
+        assert_eq!(decoded.content_hash, Some(expected));
     }
 
     #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]

@@ -17,6 +17,9 @@ VIDEO_URL_KEY = "video_url"
 _SUPPORTED_MULTIMODAL_CONTENT_TYPES = frozenset(
     {IMAGE_URL_KEY, AUDIO_URL_KEY, VIDEO_URL_KEY}
 )
+# BaseMultiModalProcessorOutput.organize_results() builds SGLang's mm_items in
+# this order, independent of their order in the original prompt.
+_SGLANG_MM_ITEM_MODALITY_ORDER = ("image", "video", "audio")
 
 
 def _multi_modal_data(request: Dict[str, Any]) -> Dict[str, Any]:
@@ -26,7 +29,7 @@ def _multi_modal_data(request: Dict[str, Any]) -> Dict[str, Any]:
     mm_data = request["multi_modal_data"]
     if not isinstance(mm_data, dict):
         raise ValueError(
-            "multi_modal_data must be an object, " f"got {type(mm_data).__name__}"
+            f"multi_modal_data must be an object, got {type(mm_data).__name__}"
         )
     return mm_data
 
@@ -116,6 +119,64 @@ def extract_media_urls(
         raise ValueError(f"Unsupported {media_key} item: {item!r}")
 
     return urls or None
+
+
+def extract_mm_hashes(request: Dict[str, Any]) -> list[str] | None:
+    """Return frontend MM hashes in SGLang's modality-grouped item order."""
+    extra_args = request.get("extra_args")
+    if not isinstance(extra_args, dict):
+        return None
+
+    grouped = extra_args.get("mm_hashes_by_modality")
+    if grouped is not None:
+        if not isinstance(grouped, dict):
+            logger.warning(
+                "extra_args.mm_hashes_by_modality is not an object; "
+                "ignoring routing-side hashes and letting SGLang recompute"
+            )
+            return None
+
+        unknown_modalities = {
+            str(modality)
+            for modality, hashes in grouped.items()
+            if modality not in _SGLANG_MM_ITEM_MODALITY_ORDER and hashes
+        }
+        if unknown_modalities:
+            logger.warning(
+                "extra_args.mm_hashes_by_modality contains unsupported "
+                "modalities %s; ignoring routing-side hashes and letting "
+                "SGLang recompute",
+                sorted(unknown_modalities),
+            )
+            return None
+
+        flattened: list[str] = []
+        for modality in _SGLANG_MM_ITEM_MODALITY_ORDER:
+            hashes = grouped.get(modality)
+            if hashes is None:
+                continue
+            if not isinstance(hashes, list) or not all(
+                isinstance(value, str) for value in hashes
+            ):
+                logger.warning(
+                    "extra_args.mm_hashes_by_modality[%s] is not a string "
+                    "list; ignoring routing-side hashes and letting SGLang recompute",
+                    modality,
+                )
+                return None
+            flattened.extend(hashes)
+        return flattened or None
+
+    mm_hashes = extra_args.get("mm_hashes")
+    if not mm_hashes or not isinstance(mm_hashes, list):
+        return None
+    if not all(isinstance(value, str) for value in mm_hashes):
+        logger.warning(
+            "extra_args.mm_hashes contained non-str entries; ignoring "
+            "routing-side hashes and letting SGLang recompute"
+        )
+        return None
+    return mm_hashes
 
 
 def build_disagg_mm_kwargs(request: Dict[str, Any]) -> Dict[str, Any]:

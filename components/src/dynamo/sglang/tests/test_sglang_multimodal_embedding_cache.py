@@ -59,6 +59,7 @@ def cache_handler() -> MultimodalEncodeWorkerHandler:
     handler._missing_video_cache_key_config_warned = False
     handler._decoded_content_hash_warning_emitted = False
     handler._image_loader = None
+    handler._video_loader = None
     handler._embedding_cache = MultimodalEmbeddingCacheManager(
         capacity_bytes=32 * 1024 * 1024
     )

@@ -106,6 +106,70 @@ def ensure_sglang_tensor_image_size() -> None:
     BaseMultimodalProcessor.resolve_image_token_counts = resolve_image_token_counts
 
 
+def ensure_sglang_external_mm_hash_updates_pad_value() -> None:
+    """Keep caller-supplied MM hashes authoritative for processor outputs.
+
+    SGLang 0.5.15 may compute ``pad_value`` from a precomputed embedding before
+    its tokenizer manager applies ``mm_hashes``. Later ``set_pad_value`` calls
+    then return early with the stale value. Refresh that value from the current
+    hash so E/PD processor-output requests use the same prefix-cache identity as
+    Dynamo's frontend router. Remove this shim once SGLang clears/recomputes the
+    pad value when it accepts a caller hash.
+    """
+    from sglang.srt.managers.schedule_batch import MultimodalDataItem
+
+    from dynamo.common.multimodal.routing_utils import pad_value_for_mm_hash
+
+    original = MultimodalDataItem.set_pad_value
+    if getattr(original, "_dynamo_external_mm_hash_refresh", False):
+        return
+
+    @wraps(original)
+    def set_pad_value(self: Any) -> None:
+        if self.hash is not None and self.pad_value is not None:
+            expected = pad_value_for_mm_hash(self.hash)
+            if self.pad_value != expected:
+                self.pad_value = expected
+                return
+        original(self)
+
+    set_pad_value._dynamo_external_mm_hash_refresh = True  # type: ignore[attr-defined]
+    MultimodalDataItem.set_pad_value = set_pad_value
+
+
+def ensure_sglang_frontend_decoded_video_support() -> None:
+    """Keep frontend-sampled videos unchanged in SGLang's encode server.
+
+    SGLang 0.5.15 treats every ``VideoDecoderWrapper`` as an unsampled source:
+    it samples and resizes the frames before invoking the model's HF video
+    processor. Dynamo has already selected the model-visible frames, so that
+    path can change both timestamps and the vision token grid. Preserve the
+    transferred RGB frames and their source indices until SGLang exposes a
+    native pre-sampled-video contract.
+    """
+    from sglang.srt.disaggregation import encode_server
+    from sglang.srt.multimodal.processors import qwen_vl
+
+    from dynamo.sglang.request_handlers.multimodal.video_input import (
+        FrontendDecodedVideo,
+    )
+
+    original = qwen_vl.preprocess_video
+    if getattr(original, "_dynamo_frontend_decoded_video_support", False):
+        encode_server.preprocess_video = original
+        return
+
+    @wraps(original)
+    async def preprocess_video(video: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(video, FrontendDecodedVideo):
+            return video.as_processor_input()
+        return await original(video, *args, **kwargs)
+
+    preprocess_video._dynamo_frontend_decoded_video_support = True  # type: ignore[attr-defined]
+    qwen_vl.preprocess_video = preprocess_video
+    encode_server.preprocess_video = preprocess_video
+
+
 @lru_cache(maxsize=32)
 def _get_async_generate_supported_kwarg_names(
     async_generate: Any,
@@ -228,6 +292,8 @@ def enable_disjoint_streaming_output(server_args: Any) -> None:
 
 __all__ = [
     "enable_disjoint_streaming_output",
+    "ensure_sglang_external_mm_hash_updates_pad_value",
+    "ensure_sglang_frontend_decoded_video_support",
     "ensure_sglang_tensor_image_size",
     "ensure_sglang_top_level_exports",
     "filter_supported_async_generate_kwargs",

@@ -67,7 +67,7 @@ while [[ $# -gt 0 ]]; do
             echo "                       Enable encode-worker CPU embedding cache with this capacity"
             echo "  --disaggregation-transfer-backend <backend>"
             echo "                       SGLang disaggregation transfer backend (default: $TRANSFER_BACKEND)"
-            echo "  --frontend-decoding  Decode images in the Rust frontend and transfer pixels to the encode worker"
+            echo "  --frontend-decoding  Decode images and videos in the Rust frontend and transfer pixels to the encode worker"
             echo "  -h, --help           Show this help message"
             exit 0
             ;;

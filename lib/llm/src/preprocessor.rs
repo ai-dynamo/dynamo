@@ -206,6 +206,64 @@ impl MmRoutingEntry {
 }
 
 #[cfg(feature = "mm-routing")]
+fn insert_mm_routing_worker_args(extra_args: &mut serde_json::Value, entries: &[MmRoutingEntry]) {
+    let hex =
+        |entry: &MmRoutingEntry| serde_json::Value::String(format!("{:016x}", entry.mm_hash()));
+    if entries
+        .iter()
+        .all(|entry| matches!(entry, MmRoutingEntry::Image { .. }))
+    {
+        // Preserve the legacy image-only worker protocol.
+        extra_args["mm_hashes"] = serde_json::Value::Array(entries.iter().map(hex).collect());
+        return;
+    }
+
+    let mut grouped = serde_json::Map::new();
+    let image_hashes: Vec<_> = entries
+        .iter()
+        .filter(|entry| matches!(entry, MmRoutingEntry::Image { .. }))
+        .map(hex)
+        .collect();
+    let video_hashes: Vec<_> = entries
+        .iter()
+        .filter(|entry| matches!(entry, MmRoutingEntry::Video { .. }))
+        .map(hex)
+        .collect();
+    if !image_hashes.is_empty() {
+        grouped.insert("image".to_string(), serde_json::Value::Array(image_hashes));
+    }
+    if !video_hashes.is_empty() {
+        grouped.insert("video".to_string(), serde_json::Value::Array(video_hashes));
+    }
+    extra_args["mm_hashes_by_modality"] = serde_json::Value::Object(grouped);
+
+    // The SGLang E/PD encode worker receives the original worker token ids,
+    // so carry the exact replacements instead of duplicating model-specific
+    // timestamp/token layout logic in Python.
+    let video_replacements: Vec<_> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            MmRoutingEntry::Video {
+                placeholder_token_id,
+                target_tokens,
+                replacement_tokens,
+                ..
+            } => Some(serde_json::json!({
+                "placeholder_token_id": placeholder_token_id,
+                "target_tokens": target_tokens,
+                "replacement_tokens": replacement_tokens,
+            })),
+            MmRoutingEntry::Image { .. } => None,
+        })
+        .collect();
+    if !video_replacements.is_empty() {
+        extra_args["mm_replacements_by_modality"] = serde_json::json!({
+            "video": video_replacements,
+        });
+    }
+}
+
+#[cfg(feature = "mm-routing")]
 fn placeholder_sequence_matches(
     entries: &[MmRoutingEntry],
     token_ids: &[TokenIdType],
@@ -1707,36 +1765,7 @@ impl OpenAIPreprocessor {
                     == total_image_count
                 && self.routing_placeholder_sequence_matches(&mm_routing_entries, token_ids)
             {
-                let hex = |entry: &MmRoutingEntry| {
-                    serde_json::Value::String(format!("{:016x}", entry.mm_hash()))
-                };
-                if mm_routing_entries
-                    .iter()
-                    .all(|entry| matches!(entry, MmRoutingEntry::Image { .. }))
-                {
-                    // Preserve the legacy image-only worker protocol.
-                    extra_args["mm_hashes"] =
-                        serde_json::Value::Array(mm_routing_entries.iter().map(hex).collect());
-                } else {
-                    let mut grouped = serde_json::Map::new();
-                    let image_hashes: Vec<_> = mm_routing_entries
-                        .iter()
-                        .filter(|entry| matches!(entry, MmRoutingEntry::Image { .. }))
-                        .map(hex)
-                        .collect();
-                    let video_hashes: Vec<_> = mm_routing_entries
-                        .iter()
-                        .filter(|entry| matches!(entry, MmRoutingEntry::Video { .. }))
-                        .map(hex)
-                        .collect();
-                    if !image_hashes.is_empty() {
-                        grouped.insert("image".to_string(), serde_json::Value::Array(image_hashes));
-                    }
-                    if !video_hashes.is_empty() {
-                        grouped.insert("video".to_string(), serde_json::Value::Array(video_hashes));
-                    }
-                    extra_args["mm_hashes_by_modality"] = serde_json::Value::Object(grouped);
-                }
+                insert_mm_routing_worker_args(&mut extra_args, &mm_routing_entries);
             } else if !mm_routing_entries.is_empty() {
                 tracing::warn!(
                     target: "mm_routing",
@@ -5305,6 +5334,51 @@ mod tests {
             s3a, s3b,
             "s3:// query params identify objects and must not collide"
         );
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn mixed_mm_worker_args_group_hashes_and_preserve_exact_video_replacement() {
+        let entries = vec![
+            MmRoutingEntry::Image {
+                mm_hash: 1,
+                width: 16,
+                height: 16,
+            },
+            MmRoutingEntry::Video {
+                mm_hash: 2,
+                placeholder_token_id: 20,
+                target_tokens: vec![30, 20, 31],
+                replacement_tokens: vec![30, 40, 20, 20, 41, 31],
+            },
+            MmRoutingEntry::Image {
+                mm_hash: 3,
+                width: 16,
+                height: 16,
+            },
+        ];
+        let mut extra_args = serde_json::json!({});
+
+        insert_mm_routing_worker_args(&mut extra_args, &entries);
+
+        assert_eq!(
+            extra_args["mm_hashes_by_modality"],
+            serde_json::json!({
+                "image": ["0000000000000001", "0000000000000003"],
+                "video": ["0000000000000002"],
+            })
+        );
+        assert_eq!(
+            extra_args["mm_replacements_by_modality"],
+            serde_json::json!({
+                "video": [{
+                    "placeholder_token_id": 20,
+                    "target_tokens": [30, 20, 31],
+                    "replacement_tokens": [30, 40, 20, 20, 41, 31],
+                }],
+            })
+        );
+        assert!(extra_args.get("mm_hashes").is_none());
     }
 
     #[cfg(feature = "mm-routing")]

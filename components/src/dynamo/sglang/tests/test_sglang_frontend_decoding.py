@@ -139,6 +139,7 @@ async def test_encode_worker_rejects_decoded_images_without_frontend_decoding():
     handler._embedding_cache = None
     handler._decoded_content_hash_warning_emitted = False
     handler._image_loader = None
+    handler._video_loader = None
 
     with pytest.raises(ValueError, match="--frontend-decoding is not enabled"):
         await handler._prepare_image_inputs(
@@ -290,6 +291,7 @@ async def test_encode_worker_skips_image_cache_keys_when_cache_is_disabled():
     handler._embedding_cache = None
     handler._decoded_content_hash_warning_emitted = False
     handler._image_loader = None
+    handler._video_loader = None
     handler._url_hash = Mock(side_effect=AssertionError("URL hash must not run"))
 
     image_inputs, cache_keys, prechecked_entries = await handler._prepare_image_inputs(
@@ -309,6 +311,7 @@ async def test_encode_worker_rejects_ambiguous_media_variant(media_key):
     handler._embedding_cache = None
     handler._decoded_content_hash_warning_emitted = False
     handler._image_loader = None
+    handler._video_loader = None
     request = {
         "multi_modal_data": {
             media_key: [
@@ -321,13 +324,13 @@ async def test_encode_worker_rejects_ambiguous_media_variant(media_key):
     }
 
     message = f"Unsupported {media_key[:-4]} data variant"
+    image_items, video_items = handler._extract_media_inputs(request)
     if media_key == "image_url":
-        image_items, _ = handler._extract_media_inputs(request)
         with pytest.raises(ValueError, match=message):
             await handler._prepare_image_inputs(image_items)
     else:
-        with pytest.raises(ValueError, match="Unsupported video_url item"):
-            handler._extract_media_inputs(request)
+        with pytest.raises(ValueError, match=message):
+            await handler._prepare_video_inputs(video_items)
 
 
 @pytest.mark.asyncio
@@ -340,6 +343,7 @@ async def test_encode_worker_releases_decoded_image_before_streaming():
     handler._embedding_cache = None
     handler.image_token_id = 42
     handler.video_token_id = None
+    handler._video_loader = None
 
     class _ImageLoader:
         image_ref = None
@@ -411,6 +415,47 @@ async def test_encode_worker_releases_decoded_image_before_streaming():
 
     outputs = [output async for output in handler.generate(raw_request, context=None)]
     assert outputs == [{"token_ids": [7]}]
+
+
+def test_extract_mm_hashes_flattens_sglang_item_order():
+    request = {
+        "extra_args": {
+            "mm_hashes_by_modality": {
+                # SGLang groups multimodal items by modality even when their
+                # prompt offsets are interleaved I-V-I.
+                "image": ["image-1", "image-2"],
+                "video": ["video-1"],
+            }
+        }
+    }
+
+    assert DecodeWorkerHandler._extract_mm_hashes(request) == [
+        "image-1",
+        "image-2",
+        "video-1",
+    ]
+
+
+def test_extract_mm_hashes_preserves_legacy_image_only_protocol():
+    request = {"extra_args": {"mm_hashes": ["image-1", "image-2"]}}
+
+    assert DecodeWorkerHandler._extract_mm_hashes(request) == [
+        "image-1",
+        "image-2",
+    ]
+
+
+def test_extract_mm_hashes_rejects_malformed_group():
+    request = {
+        "extra_args": {
+            "mm_hashes_by_modality": {
+                "image": ["image-1"],
+                "video": [123],
+            }
+        }
+    }
+
+    assert DecodeWorkerHandler._extract_mm_hashes(request) is None
 
 
 class _Context:
@@ -544,6 +589,7 @@ async def test_aggregated_fd_on_loads_decoded_variants_to_pil():
 @pytest.mark.asyncio
 async def test_aggregated_fd_on_loads_decoded_video_frames():
     handler = _new_decode_handler(enable_frontend_decoding=True)
+    handler._mm_hashes_supported = True
     frames = np.zeros((4, 4, 4, 3), dtype=np.uint8)
     metadata = {
         "fps": 24.0,
@@ -564,10 +610,11 @@ async def test_aggregated_fd_on_loads_decoded_video_frames():
         return _empty_stream()
 
     handler.engine = SimpleNamespace(async_generate=fake_async_generate)
-    decoded_metadata = {"shape": [2, 4, 4, 3], "dtype": "uint8"}
+    decoded_metadata = {"shape": [4, 4, 4, 3], "dtype": "uint8"}
     request = {
         "token_ids": [1, 2, 3],
         "multi_modal_data": {"video_url": [{"Decoded": decoded_metadata}]},
+        "extra_args": {"mm_hashes_by_modality": {"video": ["video-hash"]}},
     }
 
     async for _ in handler.generate(request, _Context()):
@@ -581,6 +628,7 @@ async def test_aggregated_fd_on_loads_decoded_video_frames():
     assert isinstance(video, np.ndarray)
     assert video.avg_fps == pytest.approx(72 / 239)
     np.testing.assert_array_equal(video.get_frames_at([0, 1]), frames[[0, 1]])
+    assert captured["mm_hashes"] == ["video-hash"]
 
 
 @pytest.mark.asyncio

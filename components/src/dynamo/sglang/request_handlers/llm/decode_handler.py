@@ -6,11 +6,8 @@ import logging
 import time
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
-import numpy as np
 import sglang as sgl
-import torch
 from PIL.Image import Image as PILImage
-from sglang.srt.utils.video_decoder import VideoDecoderWrapper
 
 from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
@@ -20,6 +17,7 @@ from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.sglang._compat import (
+    ensure_sglang_frontend_decoded_video_support,
     filter_supported_async_generate_kwargs,
     require_reasoning_kwargs,
 )
@@ -32,7 +30,12 @@ from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     VIDEO_URL_KEY,
     build_disagg_mm_kwargs,
     extract_media_urls,
+    extract_mm_hashes,
     raise_if_unextracted_multimodal,
+)
+from dynamo.sglang.request_handlers.multimodal.video_input import (
+    FrontendDecodedVideo,
+    as_sglang_video,
 )
 
 _SAMPLING_OPTION_FIELDS = (
@@ -44,59 +47,6 @@ _SAMPLING_OPTION_FIELDS = (
     "top_k",
     "min_p",
 )
-
-
-class FrontendDecodedVideo(np.ndarray, VideoDecoderWrapper):
-    def __new__(
-        cls, video_frames: Any, video_metadata: Dict[str, Any]
-    ) -> "FrontendDecodedVideo":
-        video = np.ascontiguousarray(video_frames).view(cls)
-        duration = float(video_metadata.get("duration") or 0)
-        source_fps = float(video_metadata.get("fps") or 0)
-        # TODO: SGLang does not yet provide a model-independent contract for
-        # pre-sampled video inputs with source frame indices and timestamps. Use the
-        # effective FPS as a best-effort workaround until SGLang video processors can
-        # preserve the supplied sampling metadata and skip redundant temporal sampling.
-        effective_fps = len(video_frames) / duration if duration > 0 else source_fps
-        frame_indices = video_metadata.get("frames_indices")
-        if (
-            source_fps > 0
-            and frame_indices is not None
-            and len(frame_indices) == len(video_frames)
-            and len(frame_indices) > 1
-        ):
-            span_frames = float(frame_indices[-1]) - float(frame_indices[0])
-            if span_frames > 0:
-                effective_fps = (len(video_frames) - 1) * source_fps / span_frames
-        video._avg_fps = effective_fps
-        if video._avg_fps <= 0:
-            raise ValueError("Frontend-decoded video metadata must contain a valid fps")
-        return video
-
-    def __init__(self, video_frames: Any, video_metadata: Dict[str, Any]):
-        pass
-
-    def __array_finalize__(self, source: Any) -> None:
-        if source is not None:
-            self._avg_fps = getattr(source, "_avg_fps", 0.0)
-
-    @property
-    def avg_fps(self) -> float:
-        return self._avg_fps
-
-    def get_frames_as_tensor(self, indices: list[int]):
-        return torch.from_numpy(np.asarray(self)[indices])
-
-    def get_frames_at(self, indices: list[int]):
-        return np.asarray(self)[indices]
-
-    def close(self) -> None:
-        pass
-
-
-def _as_sglang_video(frames: Any, metadata: Dict[str, Any]) -> FrontendDecodedVideo:
-    """Expose transferred frames through SGLang's predecoded video contract."""
-    return FrontendDecodedVideo(frames, metadata)
 
 
 def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
@@ -242,6 +192,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # Lazy-inits a NIXL connector internally for Decoded variants.
             self._image_loader = ImageLoader(enable_frontend_decoding=True)
             self._video_loader = VideoLoader(enable_frontend_decoding=True)
+            ensure_sglang_frontend_decoded_video_support()
         self._mm_hashes_supported: bool = self._resolve_mm_hashes_supported(self.engine)
         if self.serving_mode == DisaggregationMode.DECODE:
             logging.info(
@@ -283,29 +234,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     @staticmethod
     def _extract_mm_hashes(request: Dict[str, Any]) -> Optional[List[str]]:
-        """Pull the per-image hashes the Rust frontend forwards via extra_args.
-
-        Returns ``None`` when the field is absent or malformed; SGLang then
-        recomputes the hash internally via ``hash_feature()``.
-        """
-        extra_args = request.get("extra_args")
-        if not isinstance(extra_args, dict):
-            return None
-        mm_hashes = extra_args.get("mm_hashes")
-        if not mm_hashes:
-            return None
-        if not isinstance(mm_hashes, list):
-            return None
-        # Fail closed if a non-string slipped into the list — downstream
-        # SGLang treats mm_hashes as List[str] and a bad element would
-        # crash the worker mid-request. Routing falls back to text-prefix.
-        if not all(isinstance(h, str) for h in mm_hashes):
-            logging.warning(
-                "extra_args.mm_hashes contained non-str entries; "
-                "ignoring routing-side hashes and letting SGLang recompute"
-            )
-            return None
-        return mm_hashes
+        return extract_mm_hashes(request)
 
     def _metadata_uploader_from_request(
         self, request: Dict[str, Any]
@@ -508,7 +437,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         video_items
                     )
                     video_data = [
-                        _as_sglang_video(frames, metadata)
+                        as_sglang_video(frames, metadata)
                         for frames, metadata in decoded_videos
                     ]
                 else:
