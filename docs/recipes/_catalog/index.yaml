@@ -10,6 +10,7 @@
 # active ones in recipes/<id>.yaml.
 schema_version: 1
 recipes:
+- glm-5-2
 - inkling
 - kimi-k2-6
 - nemotron-3-ultra

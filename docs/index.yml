@@ -635,6 +635,9 @@ navigation:
       - page: Browse All Recipes
         path: recipes/README.mdx
         slug: browse
+      - page: GLM-5.2
+        path: recipes/glm-5-2.mdx
+        slug: glm-5-2
       - page: Inkling NVFP4
         path: recipes/inkling.mdx
         slug: inkling
