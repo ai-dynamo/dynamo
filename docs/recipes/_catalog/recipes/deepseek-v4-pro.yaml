@@ -38,7 +38,7 @@ targets:
     tool: aiperf
     asset: recipes/deepseek-v4/perf/perf.yaml
   expected_performance:
-    available: false
+    available: true
     summary: Floor-pick c28 = 77.31 system tok/s/GPU @ user 51.3 (1P1D, +6% over AGG).
 - id: agg-b200-agentic
   recommended: false
@@ -65,7 +65,7 @@ targets:
     tool: aiperf
     asset: recipes/deepseek-v4/perf/perf.yaml
   expected_performance:
-    available: false
+    available: true
     summary: Floor-pick c13 = 72.79 system tok/s/GPU @ user 51.3.
 - id: agg-h200-agentic
   recommended: false
@@ -91,8 +91,8 @@ targets:
     tool: aiperf
     asset: recipes/deepseek-v4/perf/perf.yaml
   expected_performance:
-    available: false
-    summary: Secondary/best-effort on the public FP8 checkpoint; floor-pick c8 = 45.9 system tok/s/GPU @ user 53.2, max_model_len 86016 (H200 HBM cap). Pending GA-image confirmation.
+    available: true
+    summary: Secondary/best-effort on the public FP8 checkpoint; floor-pick c8 = 45.9 system tok/s/GPU @ user 53.2, max_model_len 86016 (H200 HBM cap).
 - id: disagg-h200-agentic
   recommended: false
   hardware:
@@ -119,12 +119,11 @@ targets:
     tool: aiperf
     asset: recipes/deepseek-v4/perf/perf.yaml
   expected_performance:
-    available: false
-    summary: Secondary/best-effort; floor-pick c32 = 43.86 system tok/s/GPU @ user 50.5 (1P3D). Pro ships AGG on H200 (AGG > 1P3D). Pending GA-image confirmation.
+    available: true
+    summary: Secondary/best-effort; floor-pick c32 = 43.86 system tok/s/GPU @ user 50.5 (1P3D). Pro ships AGG on H200 (AGG > 1P3D).
 related_benchmarks: []
 maintainer: null
 gaps:
-- Expected Performance floor-picks were measured on a pre-GA build, not the shipped RC/GA image; omitted (available:false) until confirmed on the GA image.
 - 'H200 targets are secondary/best-effort on the public FP8 checkpoint, capped at max_model_len 86016 (HBM); cannot serve the full 1M context the B200 recipes handle.'
 - maintainer unknown
 - Day-0 / GB200 (vLLM + SGLang) variants (experimental, dev images, ComputeDomain/MNNVL) are intentionally excluded from this customer page.

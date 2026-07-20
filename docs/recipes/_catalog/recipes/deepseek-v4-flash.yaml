@@ -35,7 +35,7 @@ targets:
     tool: aiperf
     asset: recipes/deepseek-v4/perf/perf.yaml
   expected_performance:
-    available: false
+    available: true
     summary: Floor-pick c38 = 362.1 system tok/s/GPU @ user 50.6.
 - id: disagg-b200-agentic
   recommended: true
@@ -63,7 +63,7 @@ targets:
     tool: aiperf
     asset: recipes/deepseek-v4/perf/perf.yaml
   expected_performance:
-    available: false
+    available: true
     summary: Floor-pick c128 = 409.9 system tok/s/GPU @ user 50.35 (2P1D, 12 GPU).
 - id: agg-h200-agentic
   recommended: false
@@ -91,8 +91,8 @@ targets:
     tool: aiperf
     asset: recipes/deepseek-v4/perf/perf.yaml
   expected_performance:
-    available: false
-    summary: Floor-pick c16 = 145.4 system tok/s/GPU @ user 50.7; H200 serves the public checkpoint. Pending GA-image confirmation.
+    available: true
+    summary: Floor-pick c16 = 145.4 system tok/s/GPU @ user 50.7; H200 serves the public checkpoint.
 - id: disagg-h200-agentic
   recommended: false
   hardware:
@@ -121,11 +121,10 @@ targets:
     tool: aiperf
     asset: recipes/deepseek-v4/perf/perf.yaml
   expected_performance:
-    available: false
-    summary: Floor-pick c128 = 201.9 system tok/s/GPU @ user 51.8 (4P3D); decode-ITL bound. Pending GA-image confirmation.
+    available: true
+    summary: Floor-pick c128 = 201.9 system tok/s/GPU @ user 51.8 (4P3D); decode-ITL bound.
 related_benchmarks: []
 maintainer: null
 gaps:
-- Expected Performance floor-picks were measured on a pre-GA build, not the shipped RC/GA image; omitted (available:false) until confirmed on the GA image.
 - maintainer unknown
 - Day-0 / GB200 SGLang variants (experimental, dev images) are intentionally excluded from this customer page.
