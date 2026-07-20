@@ -1723,6 +1723,24 @@ class TestEmbeddingWorkerFlag:
             parse_args()
 
 
+class TestRealtimeWorkerFlag:
+    """Parsing for the generic --realtime worker mode."""
+
+    def test_default_false(self, mock_vllm_cli):
+        mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
+
+        config = parse_args()
+
+        assert config.realtime is False
+
+    def test_flag_sets_true(self, mock_vllm_cli):
+        mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--realtime")
+
+        config = parse_args()
+
+        assert config.realtime is True
+
+
 def test_build_sampling_params_openai_maps_max_thinking_tokens():
     from dynamo.vllm.handlers import build_sampling_params_openai
 

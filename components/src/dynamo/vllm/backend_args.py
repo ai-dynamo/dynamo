@@ -192,11 +192,12 @@ class DynamoVllmArgGroup(ArgGroup):
 
         add_negatable_bool_argument(
             g,
-            flag_name="--realtime-transcription-worker",
-            env_var="DYN_VLLM_REALTIME_TRANSCRIPTION_WORKER",
+            flag_name="--realtime",
+            env_var="DYN_VLLM_REALTIME",
             default=False,
-            help="Serve a streaming ASR model through the OpenAI /v1/realtime "
-            "transcription session protocol. Aggregated workers only.",
+            help="Serve a ModelType.Realtime bidirectional endpoint through "
+            "the OpenAI /v1/realtime protocol. Standard vLLM currently "
+            "supports transcription sessions only. Aggregated workers only.",
         )
 
         # Headless mode for multi-node TP/PP
@@ -443,7 +444,7 @@ class DynamoVllmConfig(ConfigBase):
         str, EmbeddingTransferMode
     ]  # resolved to enum in validate()
     embedding_worker: bool = False
-    realtime_transcription_worker: bool = False
+    realtime: bool = False
 
     # CustomEncoder (image-only embeddings; worker assembles mixed prompt)
     custom_encoder_class: Optional[str] = None
@@ -485,7 +486,7 @@ class DynamoVllmConfig(ConfigBase):
         self._validate_multimodal_role_exclusivity()
         self._validate_multimodal_requires_flag()
         self._validate_embedding_worker_exclusivity()
-        self._validate_realtime_transcription_worker_exclusivity()
+        self._validate_realtime_worker_exclusivity()
         self._validate_custom_encoder()
         self._resolve_legacy_benchmark_sampling()
         self._validate_benchmark_sampling()
@@ -818,9 +819,9 @@ class DynamoVllmConfig(ConfigBase):
                 "benchmark sweeps are not meaningful."
             )
 
-    def _validate_realtime_transcription_worker_exclusivity(self) -> None:
-        """Realtime ASR is a dedicated aggregated bidirectional worker."""
-        if not self.realtime_transcription_worker:
+    def _validate_realtime_worker_exclusivity(self) -> None:
+        """Realtime serving uses a dedicated aggregated bidirectional worker."""
+        if not self.realtime:
             return
         if self.disaggregation_mode != DisaggregationMode.AGGREGATED:
             mode = (
@@ -829,25 +830,15 @@ class DynamoVllmConfig(ConfigBase):
                 else self.disaggregation_mode
             )
             raise ValueError(
-                "--realtime-transcription-worker is only valid with "
-                f"--disaggregation-mode=agg (got {mode})."
+                f"--realtime is only valid with --disaggregation-mode=agg (got {mode})."
             )
         if self.embedding_worker:
-            raise ValueError(
-                "--realtime-transcription-worker cannot be combined with "
-                "--embedding-worker."
-            )
+            raise ValueError("--realtime cannot be combined with --embedding-worker.")
         if self._count_multimodal_roles() > 0 or self.enable_multimodal:
             raise ValueError(
-                "--realtime-transcription-worker cannot be combined with "
-                "multimodal worker flags."
+                "--realtime cannot be combined with multimodal worker flags."
             )
         if self.benchmark_mode is not None:
-            raise ValueError(
-                "--realtime-transcription-worker cannot be combined with "
-                "--benchmark-mode."
-            )
+            raise ValueError("--realtime cannot be combined with --benchmark-mode.")
         if getattr(getattr(self, "engine_args", None), "enable_lora", False):
-            raise ValueError(
-                "--realtime-transcription-worker cannot be combined with --enable-lora."
-            )
+            raise ValueError("--realtime cannot be combined with --enable-lora.")

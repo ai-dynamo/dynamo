@@ -15,6 +15,7 @@ from dynamo.vllm.realtime_transcription import RealtimeTranscriptionHandler
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
 ]

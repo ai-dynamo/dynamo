@@ -46,6 +46,7 @@ from .health_check import (
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
 from .multimodal_handlers import EncodeWorkerHandler
 from .publisher import StatLoggerFactory
+from .realtime import RealtimeHandler
 from .realtime_transcription import RealtimeTranscriptionHandler
 
 logger = logging.getLogger(__name__)
@@ -564,8 +565,8 @@ class WorkerFactory:
     ) -> None:
         """Create the appropriate multimodal worker based on config flags."""
 
-        if config.realtime_transcription_worker:
-            await self._create_realtime_transcription_worker(
+        if config.realtime:
+            await self._create_realtime_worker(
                 runtime,
                 config,
                 shutdown_event,
@@ -610,7 +611,7 @@ class WorkerFactory:
             )
         return
 
-    async def _create_realtime_transcription_worker(
+    async def _create_realtime_worker(
         self,
         runtime: DistributedRuntime,
         config: Config,
@@ -618,7 +619,7 @@ class WorkerFactory:
         shutdown_endpoints: list,
         snapshot_engine: Optional[EngineSetupResult] = None,
     ) -> None:
-        """Initialize an aggregated vLLM realtime transcription worker."""
+        """Initialize an aggregated vLLM realtime worker."""
         del shutdown_event  # Connection cancellation is carried by Dynamo Context.
 
         generate_endpoint = runtime.endpoint(
@@ -663,10 +664,14 @@ class WorkerFactory:
         factory.init_publish()
 
         model_name = config.served_model_name or config.model
-        handler = RealtimeTranscriptionHandler.from_engine(
-            engine_client=engine_client,
-            model_name=model_name,
-            model_path=config.model,
+        handler = RealtimeHandler(
+            {
+                "transcription": RealtimeTranscriptionHandler.from_engine(
+                    engine_client=engine_client,
+                    model_name=model_name,
+                    model_path=config.model,
+                )
+            }
         )
         self.setup_metrics_collection(config, generate_endpoint, logger)
 
@@ -686,7 +691,7 @@ class WorkerFactory:
             (prometheus_names.labels.MODEL_NAME, model_name),
         ]
         logger.info(
-            "Starting realtime transcription worker endpoint for model: %s",
+            "Starting realtime worker endpoint for model: %s",
             model_name,
         )
         try:
@@ -696,7 +701,7 @@ class WorkerFactory:
                 metrics_labels=metrics_labels,
             )
         except Exception as exc:
-            logger.error("Realtime transcription worker failed: %s", exc)
+            logger.error("Realtime worker failed: %s", exc)
             raise
         finally:
             if prometheus_temp_dir is not None:

@@ -193,12 +193,12 @@ class TestEmbeddingWorkerExclusivity:
         config._validate_embedding_worker_exclusivity()
 
 
-class TestRealtimeTranscriptionWorkerExclusivity:
+class TestRealtimeWorkerExclusivity:
     def test_baseline_aggregated_is_accepted(self):
         config = create_config()
-        config.realtime_transcription_worker = True
+        config.realtime = True
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
-        config._validate_realtime_transcription_worker_exclusivity()
+        config._validate_realtime_worker_exclusivity()
 
     @pytest.mark.parametrize(
         "mode",
@@ -210,42 +210,42 @@ class TestRealtimeTranscriptionWorkerExclusivity:
     )
     def test_non_aggregated_disagg_rejected(self, mode):
         config = create_config()
-        config.realtime_transcription_worker = True
+        config.realtime = True
         config.disaggregation_mode = mode
         with pytest.raises(ValueError, match="disaggregation-mode=agg"):
-            config._validate_realtime_transcription_worker_exclusivity()
+            config._validate_realtime_worker_exclusivity()
 
     def test_embedding_combination_rejected(self):
         config = create_config()
-        config.realtime_transcription_worker = True
+        config.realtime = True
         config.embedding_worker = True
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
         with pytest.raises(ValueError, match="embedding-worker"):
-            config._validate_realtime_transcription_worker_exclusivity()
+            config._validate_realtime_worker_exclusivity()
 
     def test_multimodal_combination_rejected(self):
         config = create_config()
-        config.realtime_transcription_worker = True
+        config.realtime = True
         config.enable_multimodal = True
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
         with pytest.raises(ValueError, match="multimodal"):
-            config._validate_realtime_transcription_worker_exclusivity()
+            config._validate_realtime_worker_exclusivity()
 
     def test_benchmark_mode_rejected(self):
         config = create_config()
-        config.realtime_transcription_worker = True
+        config.realtime = True
         config.benchmark_mode = "agg"
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
         with pytest.raises(ValueError, match="benchmark-mode"):
-            config._validate_realtime_transcription_worker_exclusivity()
+            config._validate_realtime_worker_exclusivity()
 
     def test_lora_rejected(self):
         config = create_config()
-        config.realtime_transcription_worker = True
+        config.realtime = True
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
         config.engine_args = SimpleNamespace(enable_lora=True)
         with pytest.raises(ValueError, match="enable-lora"):
-            config._validate_realtime_transcription_worker_exclusivity()
+            config._validate_realtime_worker_exclusivity()
 
 
 class TestValidateCustomEncoder:
