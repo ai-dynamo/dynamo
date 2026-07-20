@@ -275,18 +275,17 @@ class GMSWorker(Worker):
             # The scratch pool is scoped to the KV tensors by
             # patch_kv_cache_pool_scope(), not the whole initialize_kv_cache.
             self.model_runner.initialize_kv_cache(kv_cache_config)
-            # Visible summary of scratch engagement; per-mapping GMS INFO is
-            # suppressed in the vLLM worker subprocess, so print() for now (a
-            # worker-logging fix is a follow-up).
+            # Visible summary of scratch engagement (GMS worker logs are routed
+            # through vLLM's handler by configure_gms_worker_logging()).
             n_scratch, virtual_bytes, physical_bytes = scratch_mgr.scratch_summary()
-            msg = (
-                f"[GMS] Scratch-KV engaged: {n_scratch} allocations, "
-                f"{virtual_bytes / (1 << 30):.2f} GiB virtual reserved, "
-                f"{physical_bytes / (1 << 30):.2f} GiB physical backing "
-                f"on device {device}"
+            logger.info(
+                "[GMS] Scratch-KV engaged: %d allocations, %.2f GiB virtual "
+                "reserved, %.2f GiB physical backing on device %d",
+                n_scratch,
+                virtual_bytes / (1 << 30),
+                physical_bytes / (1 << 30),
+                device,
             )
-            logger.info(msg)
-            print(msg, flush=True)
             # Fail closed: KV tensors expected but none scratch-aliased means the
             # shadow fully backed its KV (defeats colocation, risks ~2x KV OOM).
             # kv_cache_tensors is the list _allocate_kv_cache iterates to emit the
