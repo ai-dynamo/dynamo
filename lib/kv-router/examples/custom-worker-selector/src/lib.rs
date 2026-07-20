@@ -4,7 +4,7 @@
 //! Minimal runtime-loaded worker-selector plugin.
 
 use dynamo_worker_selector_plugin_api::{
-    CandidateSignalGroups, RouterRole, Selection, SelectionInput, WorkerSelectorPlugin,
+    CandidateInputs, RouterRole, Selection, SelectionInput, WorkerSelectorPlugin,
     export_worker_selector_plugin,
 };
 
@@ -22,10 +22,10 @@ impl WorkerSelectorPlugin for Strategy {
         }
     }
 
-    fn required_candidate_groups(&self) -> CandidateSignalGroups {
+    fn required_candidate_inputs(&self) -> CandidateInputs {
         match self {
-            Self::MostCached => CandidateSignalGroups::CACHED_TOKENS,
-            Self::UseDefault => CandidateSignalGroups::NONE,
+            Self::MostCached => CandidateInputs::CACHED_TOKENS,
+            Self::UseDefault => CandidateInputs::NONE,
         }
     }
 
@@ -35,15 +35,15 @@ impl WorkerSelectorPlugin for Strategy {
             Self::MostCached => {
                 let cached_tokens = input
                     .cached_tokens()
-                    .ok_or_else(|| "cached-token group is unavailable".to_string())?;
+                    .ok_or_else(|| "cached-token input is unavailable".to_string())?;
                 (0..input.candidate_count())
                     .max_by_key(|&index| {
-                    (
+                        (
                             cached_tokens[index],
                             input.worker_ids()[index],
                             input.dp_ranks()[index],
-                    )
-                })
+                        )
+                    })
                     .map(Selection::Candidate)
                     .ok_or_else(|| "no eligible candidates".to_string())
             }

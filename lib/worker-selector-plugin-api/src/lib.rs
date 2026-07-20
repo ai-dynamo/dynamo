@@ -43,15 +43,15 @@ pub const SELECTION_MODE_TRACKED_WITH_ADMISSION: u32 = 2;
 /// Candidate storage format used by [`WorkerSelectorInputV1`].
 pub const CANDIDATE_FORMAT_COLUMNAR_V1: u32 = 1;
 
-/// Candidate signal groups a plugin needs for selection.
+/// Candidate inputs a plugin needs for selection.
 ///
-/// Dynamo materializes only the requested groups. Any non-empty requirement includes
+/// Dynamo materializes only the requested inputs. Any non-empty requirement includes
 /// [`Self::IDENTITY`] so a returned index always maps to a worker and data-parallel rank.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct CandidateSignalGroups(u64);
+pub struct CandidateInputs(u64);
 
-impl CandidateSignalGroups {
+impl CandidateInputs {
     pub const NONE: Self = Self(0);
     pub const IDENTITY: Self = Self(1 << 0);
     pub const CACHED_TOKENS: Self = Self(1 << 1);
@@ -59,7 +59,13 @@ impl CandidateSignalGroups {
     pub const LOAD: Self = Self(1 << 3);
     pub const CAPACITY: Self = Self(1 << 4);
     pub const ROUTING: Self = Self(1 << 5);
-    pub const ALL: Self = Self((1 << 6) - 1);
+    /// Dynamo's complete per-candidate cost before temperature sampling.
+    pub const DEFAULT_COST: Self = Self(1 << 6);
+    /// KV overlap credit used by Dynamo's default cost, measured in blocks.
+    pub const KV_OVERLAP: Self = Self(1 << 7);
+    /// Projected decode load used by Dynamo's default cost, measured in blocks.
+    pub const DECODE_LOAD: Self = Self(1 << 8);
+    pub const ALL: Self = Self((1 << 9) - 1);
 
     pub const fn bits(self) -> u64 {
         self.0
@@ -86,7 +92,7 @@ impl CandidateSignalGroups {
     }
 }
 
-impl BitOr for CandidateSignalGroups {
+impl BitOr for CandidateInputs {
     type Output = Self;
 
     fn bitor(self, rhs: Self) -> Self::Output {
@@ -94,7 +100,7 @@ impl BitOr for CandidateSignalGroups {
     }
 }
 
-impl BitOrAssign for CandidateSignalGroups {
+impl BitOrAssign for CandidateInputs {
     fn bitor_assign(&mut self, rhs: Self) {
         self.0 |= rhs.0;
     }
@@ -214,7 +220,7 @@ impl WorkerSelectorCapacityV1 {
 pub struct WorkerSelectorCandidateColumnsV1 {
     pub struct_size: u32,
     pub _reserved: u32,
-    pub provided_groups: u64,
+    pub provided_inputs: u64,
     pub worker_ids: *const u64,
     pub dp_ranks: *const u32,
     pub cached_tokens: *const u64,
@@ -222,6 +228,9 @@ pub struct WorkerSelectorCandidateColumnsV1 {
     pub loads: *const WorkerSelectorLoadV1,
     pub capacities: *const WorkerSelectorCapacityV1,
     pub routing: *const WorkerSelectorRoutingV1,
+    pub default_costs: *const f64,
+    pub kv_overlaps: *const f64,
+    pub decode_loads: *const u64,
 }
 
 #[repr(C)]
@@ -286,13 +295,13 @@ pub type WorkerSelectorSelectV1 = unsafe extern "C" fn(
 
 pub type WorkerSelectorDestroyV1 = unsafe extern "C" fn(state: *mut c_void);
 
-/// Return the optional candidate signal groups required by this configured plugin state.
+/// Return the optional candidate inputs required by this configured plugin state.
 ///
 /// The host calls this once after successful creation and caches the result. On [`STATUS_OK`], the
-/// callback must initialize `candidate_groups_out` with a valid [`CandidateSignalGroups`] bitset.
-pub type WorkerSelectorRequiredCandidateGroupsV1 = unsafe extern "C" fn(
+/// callback must initialize `candidate_inputs_out` with a valid [`CandidateInputs`] bitset.
+pub type WorkerSelectorRequiredCandidateInputsV1 = unsafe extern "C" fn(
     state: *mut c_void,
-    candidate_groups_out: *mut u64,
+    candidate_inputs_out: *mut u64,
     error_out: *mut WorkerSelectorErrorBufferV1,
 ) -> i32;
 
@@ -312,7 +321,7 @@ pub struct WorkerSelectorPluginV1 {
     pub create: Option<WorkerSelectorCreateV1>,
     pub select: Option<WorkerSelectorSelectV1>,
     pub destroy: Option<WorkerSelectorDestroyV1>,
-    pub required_candidate_groups: Option<WorkerSelectorRequiredCandidateGroupsV1>,
+    pub required_candidate_inputs: Option<WorkerSelectorRequiredCandidateInputsV1>,
 }
 
 #[repr(C)]
@@ -328,7 +337,7 @@ pub type WorkerSelectorEntrypointV1 = unsafe extern "C" fn() -> *const WorkerSel
 #[derive(Clone, Copy)]
 pub struct SelectionInput<'a> {
     raw: &'a WorkerSelectorInputV1,
-    groups: CandidateSignalGroups,
+    inputs: CandidateInputs,
     worker_ids: &'a [u64],
     dp_ranks: &'a [u32],
     cached_tokens: Option<&'a [u64]>,
@@ -336,12 +345,15 @@ pub struct SelectionInput<'a> {
     loads: Option<&'a [WorkerSelectorLoadV1]>,
     capacities: Option<&'a [WorkerSelectorCapacityV1]>,
     routing: Option<&'a [WorkerSelectorRoutingV1]>,
+    default_costs: Option<&'a [f64]>,
+    kv_overlaps: Option<&'a [f64]>,
+    decode_loads: Option<&'a [u64]>,
 }
 
 impl<'a> SelectionInput<'a> {
     unsafe fn from_abi(
         raw: *const WorkerSelectorInputV1,
-        required_groups: CandidateSignalGroups,
+        required_inputs: CandidateInputs,
     ) -> Result<Self, &'static str> {
         if raw.is_null() {
             return Err("selection input is null");
@@ -370,15 +382,15 @@ impl<'a> SelectionInput<'a> {
             return Err("candidate columns are smaller than ABI v1");
         }
         let columns = unsafe { &*columns_ptr };
-        let groups = CandidateSignalGroups::from_bits(columns.provided_groups)
-            .ok_or("selection input contains unknown candidate signal groups")?;
-        if groups != groups.with_identity() {
-            return Err("candidate signal groups require the identity group");
+        let inputs = CandidateInputs::from_bits(columns.provided_inputs)
+            .ok_or("selection input contains unknown candidate inputs")?;
+        if inputs != inputs.with_identity() {
+            return Err("candidate inputs require identity");
         }
-        if !groups.contains(required_groups) {
-            return Err("selection input is missing a required candidate signal group");
+        if !inputs.contains(required_inputs) {
+            return Err("selection input is missing a required candidate input");
         }
-        let (worker_ids, dp_ranks) = if groups.contains(CandidateSignalGroups::IDENTITY) {
+        let (worker_ids, dp_ranks) = if inputs.contains(CandidateInputs::IDENTITY) {
             (
                 unsafe {
                     required_column(
@@ -400,12 +412,12 @@ impl<'a> SelectionInput<'a> {
         };
         Ok(Self {
             raw,
-            groups,
+            inputs,
             worker_ids,
             dp_ranks,
             cached_tokens: unsafe {
                 optional_column(
-                    groups.contains(CandidateSignalGroups::CACHED_TOKENS),
+                    inputs.contains(CandidateInputs::CACHED_TOKENS),
                     columns.cached_tokens,
                     raw.candidate_count,
                     "cached-token column is null or invalid",
@@ -413,7 +425,7 @@ impl<'a> SelectionInput<'a> {
             }?,
             cache_tiers: unsafe {
                 optional_column(
-                    groups.contains(CandidateSignalGroups::CACHE_TIERS),
+                    inputs.contains(CandidateInputs::CACHE_TIERS),
                     columns.cache_tiers,
                     raw.candidate_count,
                     "cache-tier column is null or invalid",
@@ -421,7 +433,7 @@ impl<'a> SelectionInput<'a> {
             }?,
             loads: unsafe {
                 optional_column(
-                    groups.contains(CandidateSignalGroups::LOAD),
+                    inputs.contains(CandidateInputs::LOAD),
                     columns.loads,
                     raw.candidate_count,
                     "load column is null or invalid",
@@ -429,7 +441,7 @@ impl<'a> SelectionInput<'a> {
             }?,
             capacities: unsafe {
                 optional_column(
-                    groups.contains(CandidateSignalGroups::CAPACITY),
+                    inputs.contains(CandidateInputs::CAPACITY),
                     columns.capacities,
                     raw.candidate_count,
                     "capacity column is null or invalid",
@@ -437,10 +449,34 @@ impl<'a> SelectionInput<'a> {
             }?,
             routing: unsafe {
                 optional_column(
-                    groups.contains(CandidateSignalGroups::ROUTING),
+                    inputs.contains(CandidateInputs::ROUTING),
                     columns.routing,
                     raw.candidate_count,
                     "routing column is null or invalid",
+                )
+            }?,
+            default_costs: unsafe {
+                optional_column(
+                    inputs.contains(CandidateInputs::DEFAULT_COST),
+                    columns.default_costs,
+                    raw.candidate_count,
+                    "default-cost column is null or invalid",
+                )
+            }?,
+            kv_overlaps: unsafe {
+                optional_column(
+                    inputs.contains(CandidateInputs::KV_OVERLAP),
+                    columns.kv_overlaps,
+                    raw.candidate_count,
+                    "KV-overlap column is null or invalid",
+                )
+            }?,
+            decode_loads: unsafe {
+                optional_column(
+                    inputs.contains(CandidateInputs::DECODE_LOAD),
+                    columns.decode_loads,
+                    raw.candidate_count,
+                    "decode-load column is null or invalid",
                 )
             }?,
         })
@@ -467,8 +503,8 @@ impl<'a> SelectionInput<'a> {
         self.raw.flags & INPUT_HAS_SHARED_CACHE_HITS != 0
     }
 
-    pub fn candidate_groups(&self) -> CandidateSignalGroups {
-        self.groups
+    pub fn candidate_inputs(&self) -> CandidateInputs {
+        self.inputs
     }
 
     pub fn selection_mode(&self) -> SelectionMode {
@@ -525,6 +561,18 @@ impl<'a> SelectionInput<'a> {
 
     pub fn routing(&self) -> Option<&'a [WorkerSelectorRoutingV1]> {
         self.routing
+    }
+
+    pub fn default_costs(&self) -> Option<&'a [f64]> {
+        self.default_costs
+    }
+
+    pub fn kv_overlaps(&self) -> Option<&'a [f64]> {
+        self.kv_overlaps
+    }
+
+    pub fn decode_loads(&self) -> Option<&'a [u64]> {
+        self.decode_loads
     }
 
     pub fn candidate_stable_routing_id(&self, index: usize) -> Option<&'a str> {
@@ -585,12 +633,12 @@ pub trait WorkerSelectorPlugin: Send + Sized + 'static {
     /// Create independent state for one router role.
     fn from_config(config: &[u8], router_role: RouterRole) -> Result<Self, String>;
 
-    /// Candidate signal groups required by this configured strategy.
+    /// Candidate inputs required by this configured strategy.
     ///
     /// Dynamo evaluates this once at creation and materializes only these columns. Return
-    /// [`CandidateSignalGroups::IDENTITY`] for a strategy that only needs worker identity, or
-    /// [`CandidateSignalGroups::NONE`] for a strategy that always delegates to the default.
-    fn required_candidate_groups(&self) -> CandidateSignalGroups;
+    /// [`CandidateInputs::IDENTITY`] for a strategy that only needs worker identity, or
+    /// [`CandidateInputs::NONE`] for a strategy that always delegates to the default.
+    fn required_candidate_inputs(&self) -> CandidateInputs;
 
     /// Select a candidate or delegate this request to Dynamo's default selector.
     /// Calls for one instance are serialized, so stateful strategies can mutate directly.
@@ -615,7 +663,7 @@ pub mod __private {
 
     struct PluginState<T> {
         plugin: T,
-        required_groups: CandidateSignalGroups,
+        required_inputs: CandidateInputs,
     }
 
     pub unsafe extern "C" fn create<T: WorkerSelectorPlugin>(
@@ -638,13 +686,13 @@ pub mod __private {
         };
         match catch_unwind(AssertUnwindSafe(|| {
             let plugin = T::from_config(config, RouterRole::from_abi(router_role))?;
-            let required_groups = plugin.required_candidate_groups().with_identity();
-            Ok::<_, String>((plugin, required_groups))
+            let required_inputs = plugin.required_candidate_inputs().with_identity();
+            Ok::<_, String>((plugin, required_inputs))
         })) {
-            Ok(Ok((plugin, required_groups))) => {
+            Ok(Ok((plugin, required_inputs))) => {
                 let state = PluginState {
                     plugin,
-                    required_groups,
+                    required_inputs,
                 };
                 unsafe { state_out.write(Box::into_raw(Box::new(state)).cast()) };
                 STATUS_OK
@@ -660,17 +708,17 @@ pub mod __private {
         }
     }
 
-    pub unsafe extern "C" fn required_candidate_groups<T: WorkerSelectorPlugin>(
+    pub unsafe extern "C" fn required_candidate_inputs<T: WorkerSelectorPlugin>(
         state: *mut c_void,
-        candidate_groups_out: *mut u64,
+        candidate_inputs_out: *mut u64,
         error_out: *mut WorkerSelectorErrorBufferV1,
     ) -> i32 {
-        if state.is_null() || candidate_groups_out.is_null() {
-            unsafe { write_error(error_out, "state or candidate-groups output is null") };
+        if state.is_null() || candidate_inputs_out.is_null() {
+            unsafe { write_error(error_out, "state or candidate-inputs output is null") };
             return STATUS_INVALID_INPUT;
         }
         let state = unsafe { &*state.cast::<PluginState<T>>() };
-        unsafe { candidate_groups_out.write(state.required_groups.bits()) };
+        unsafe { candidate_inputs_out.write(state.required_inputs.bits()) };
         STATUS_OK
     }
 
@@ -685,7 +733,7 @@ pub mod __private {
             return STATUS_INVALID_INPUT;
         }
         let state = unsafe { &mut *state.cast::<PluginState<T>>() };
-        let input = match unsafe { SelectionInput::from_abi(input, state.required_groups) } {
+        let input = match unsafe { SelectionInput::from_abi(input, state.required_inputs) } {
             Ok(input) => input,
             Err(error) => {
                 unsafe { write_error(error_out, error) };
@@ -756,8 +804,8 @@ macro_rules! export_worker_selector_plugin {
                 create: Some($crate::__private::create::<$plugin>),
                 select: Some($crate::__private::select::<$plugin>),
                 destroy: Some($crate::__private::destroy::<$plugin>),
-                required_candidate_groups: Some(
-                    $crate::__private::required_candidate_groups::<$plugin>,
+                required_candidate_inputs: Some(
+                    $crate::__private::required_candidate_inputs::<$plugin>,
                 ),
             };
 
@@ -784,10 +832,7 @@ mod tests {
     fn abi_v1_layout_is_stable_on_64_bit_targets() {
         assert_eq!(
             [
-                (
-                    size_of::<CandidateSignalGroups>(),
-                    align_of::<CandidateSignalGroups>(),
-                ),
+                (size_of::<CandidateInputs>(), align_of::<CandidateInputs>(),),
                 (size_of::<ByteSliceV1>(), align_of::<ByteSliceV1>()),
                 (
                     size_of::<WorkerSelectorCacheTiersV1>(),
@@ -841,7 +886,7 @@ mod tests {
                 (24, 8),
                 (16, 8),
                 (24, 8),
-                (72, 8),
+                (96, 8),
                 (88, 8),
                 (8, 4),
                 (4, 4),
@@ -884,7 +929,7 @@ mod tests {
             offsets!(WorkerSelectorCandidateColumnsV1;
                 struct_size,
                 _reserved,
-                provided_groups,
+                provided_inputs,
                 worker_ids,
                 dp_ranks,
                 cached_tokens,
@@ -892,8 +937,11 @@ mod tests {
                 loads,
                 capacities,
                 routing,
+                default_costs,
+                kv_overlaps,
+                decode_loads,
             ),
-            [0, 4, 8, 16, 24, 32, 40, 48, 56, 64]
+            [0, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88]
         );
         assert_eq!(
             offsets!(WorkerSelectorInputV1;
@@ -930,7 +978,7 @@ mod tests {
                 create,
                 select,
                 destroy,
-                required_candidate_groups,
+                required_candidate_inputs,
             ),
             [0, 4, 8, 16, 24, 32]
         );
@@ -954,10 +1002,13 @@ mod tests {
             })
         }
 
-        fn required_candidate_groups(&self) -> CandidateSignalGroups {
-            CandidateSignalGroups::CACHED_TOKENS
-                | CandidateSignalGroups::CAPACITY
-                | CandidateSignalGroups::ROUTING
+        fn required_candidate_inputs(&self) -> CandidateInputs {
+            CandidateInputs::CACHED_TOKENS
+                | CandidateInputs::CAPACITY
+                | CandidateInputs::ROUTING
+                | CandidateInputs::DEFAULT_COST
+                | CandidateInputs::KV_OVERLAP
+                | CandidateInputs::DECODE_LOAD
         }
 
         fn select(&mut self, input: SelectionInput<'_>) -> Result<Selection, String> {
@@ -965,8 +1016,8 @@ mod tests {
                 return Ok(Selection::Candidate(input.candidate_count()));
             }
             assert_eq!(
-                input.candidate_groups(),
-                self.required_candidate_groups().with_identity()
+                input.candidate_inputs(),
+                self.required_candidate_inputs().with_identity()
             );
             assert_eq!(input.worker_ids(), [1]);
             assert_eq!(input.dp_ranks(), [2]);
@@ -974,7 +1025,10 @@ mod tests {
             assert_eq!(input.cache_tiers(), None);
             assert_eq!(input.loads(), None);
             assert_eq!(input.candidate_stable_routing_id(0), Some("worker-1"));
-            let capacity = &input.capacities().expect("capacity group")[0];
+            assert_eq!(input.default_costs(), Some(&[3.5][..]));
+            assert_eq!(input.kv_overlaps(), Some(&[4.5][..]));
+            assert_eq!(input.decode_loads(), Some(&[5][..]));
+            let capacity = &input.capacities().expect("capacity input")[0];
             assert_eq!(capacity.total_kv_blocks(), Some(8_192));
             assert_eq!(capacity.max_num_batched_tokens(), None);
             if std::mem::replace(&mut self.called, true) {
@@ -991,7 +1045,7 @@ mod tests {
             Ok(Self)
         }
 
-        fn required_candidate_groups(&self) -> CandidateSignalGroups {
+        fn required_candidate_inputs(&self) -> CandidateInputs {
             panic!("boom")
         }
 
@@ -1019,20 +1073,23 @@ mod tests {
         };
         assert_eq!(status, STATUS_OK);
 
-        let mut required_groups = u64::MAX;
+        let mut required_inputs = u64::MAX;
         let status = unsafe {
-            __private::required_candidate_groups::<ShimPlugin>(
+            __private::required_candidate_inputs::<ShimPlugin>(
                 state,
-                &mut required_groups,
+                &mut required_inputs,
                 &mut error,
             )
         };
         assert_eq!(status, STATUS_OK);
         assert_eq!(
-            required_groups,
-            (CandidateSignalGroups::CACHED_TOKENS
-                | CandidateSignalGroups::CAPACITY
-                | CandidateSignalGroups::ROUTING)
+            required_inputs,
+            (CandidateInputs::CACHED_TOKENS
+                | CandidateInputs::CAPACITY
+                | CandidateInputs::ROUTING
+                | CandidateInputs::DEFAULT_COST
+                | CandidateInputs::KV_OVERLAP
+                | CandidateInputs::DECODE_LOAD)
                 .with_identity()
                 .bits()
         );
@@ -1049,10 +1106,13 @@ mod tests {
             stable_routing_id: ByteSliceV1::from_slice(stable_routing_id),
             preferred_taint_multiplier: 1.0,
         }];
+        let default_costs = [3.5_f64];
+        let kv_overlaps = [4.5_f64];
+        let decode_loads = [5_u64];
         let columns = WorkerSelectorCandidateColumnsV1 {
             struct_size: size_of::<WorkerSelectorCandidateColumnsV1>() as u32,
             _reserved: 0,
-            provided_groups: required_groups,
+            provided_inputs: required_inputs,
             worker_ids: worker_ids.as_ptr(),
             dp_ranks: dp_ranks.as_ptr(),
             cached_tokens: cached_tokens.as_ptr(),
@@ -1060,6 +1120,9 @@ mod tests {
             loads: std::ptr::null(),
             capacities: capacities.as_ptr(),
             routing: routing.as_ptr(),
+            default_costs: default_costs.as_ptr(),
+            kv_overlaps: kv_overlaps.as_ptr(),
+            decode_loads: decode_loads.as_ptr(),
         };
         let input = WorkerSelectorInputV1 {
             struct_size: size_of::<WorkerSelectorInputV1>() as u32,
