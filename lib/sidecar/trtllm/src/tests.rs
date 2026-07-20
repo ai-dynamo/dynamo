@@ -234,7 +234,6 @@ fn request() -> PreprocessedRequest {
             presence_penalty: Some(0.3),
             frequency_penalty: Some(0.4),
             repetition_penalty: Some(1.1),
-            include_stop_str_in_output: Some(true),
             guided_decoding: Some(dynamo_backend_common::GuidedDecodingOptions {
                 json: Some(json!({"type": "object"})),
                 ..Default::default()
@@ -281,6 +280,18 @@ async fn collect(
         .await
 }
 
+/// Applies `mutate` to a baseline request and asserts `build_generate_request`
+/// rejects it with a message mentioning `expect`.
+fn assert_rejected(mutate: impl FnOnce(&mut PreprocessedRequest), expect: &str) {
+    let mut req = request();
+    mutate(&mut req);
+    let error = build_generate_request(&req, "req", None).expect_err("request must be rejected");
+    assert!(
+        error.to_string().contains(expect),
+        "error {error:?} should mention {expect:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Request-building unit tests
 // ---------------------------------------------------------------------------
@@ -296,7 +307,9 @@ fn request_maps_sampling_stop_and_output_fields() {
     assert_eq!(proto.max_tokens, 16);
     assert!(proto.streaming);
     assert!(proto.ignore_eos);
-    assert!(proto.include_stop_token_in_output);
+    // Stop-token inclusion is never enabled from `include_stop_str_in_output`
+    // (different axis; would leak hidden stop tokens).
+    assert!(!proto.include_stop_token_in_output);
     assert_eq!(proto.stop, ["done"]);
     assert_eq!(proto.stop_token_ids, [2]);
 
@@ -363,6 +376,78 @@ fn oversized_logprob_count_is_rejected() {
     let error =
         build_generate_request(&req, "req", None).expect_err("oversized logprobs must fail");
     assert!(error.to_string().contains("must fit in i32"));
+}
+
+#[test]
+fn unsupported_request_controls_are_rejected() {
+    // Controls the native gRPC contract can neither forward nor faithfully honor:
+    // reject rather than fail open.
+    assert_rejected(
+        |r| r.sampling_options.include_stop_str_in_output = Some(true),
+        "include_stop_str_in_output",
+    );
+    assert_rejected(
+        |r| r.stop_conditions.max_thinking_tokens = Some(32),
+        "max_thinking_tokens",
+    );
+    assert_rejected(
+        |r| {
+            r.routing = Some(dynamo_backend_common::engine::RoutingHints {
+                cache_namespace: Some("tenant-a".to_string()),
+                ..Default::default()
+            })
+        },
+        "cache namespace",
+    );
+    assert_rejected(
+        |r| {
+            r.routing = Some(dynamo_backend_common::engine::RoutingHints {
+                priority: Some(5),
+                ..Default::default()
+            })
+        },
+        "priority",
+    );
+    // A negative top_k other than -1/0 (the "all tokens" sentinels) is invalid,
+    // not a silent widening to "all tokens".
+    assert_rejected(|r| r.sampling_options.top_k = Some(-5), "top_k must be");
+    assert_rejected(
+        |r| r.sampling_options.seed = Some(-1),
+        "seed must be non-negative",
+    );
+}
+
+#[test]
+fn logprobs_zero_keeps_selected_without_alternatives() {
+    let mut req = request();
+    req.output_options.logprobs = Some(0);
+    // The wire request must still ask TRT-LLM for one logprob so the selected
+    // token's value is computed.
+    let proto = build_generate_request(&req, "req", None).expect("build");
+    assert_eq!(proto.output_config.unwrap().logprobs, Some(1));
+
+    let mut state = ResponseState::new(&req);
+    let chunk = pb::GenerateResponse {
+        request_id: "r".to_string(),
+        response: Some(pb::generate_response::Response::Chunk(
+            pb::GenerateStreamChunk {
+                token_ids: vec![7],
+                sequence_index: 0,
+                prompt_tokens: 3,
+                completion_tokens: 1,
+                cached_tokens: 0,
+                logprobs: vec![pb::TokenLogprob {
+                    token_id: 7,
+                    logprob: -0.1,
+                    top_logprobs: vec![],
+                }],
+            },
+        )),
+    };
+    let delta = state.convert(chunk).expect("convert").expect("delta");
+    assert_eq!(delta.log_probs.as_deref(), Some(&[f64::from(-0.1_f32)][..]));
+    // logprobs=0 surfaces the selected-token logprob but no top alternatives.
+    assert!(delta.top_logprobs.is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -445,6 +530,71 @@ fn unsupported_sequence_index_is_rejected() {
         )),
     };
     assert!(state.convert(chunk).is_err());
+}
+
+#[test]
+fn missing_response_payload_is_rejected() {
+    let req = request();
+    let mut state = ResponseState::new(&req);
+    let empty = pb::GenerateResponse {
+        request_id: "r".to_string(),
+        response: None,
+    };
+    assert!(state.convert(empty).is_err());
+}
+
+#[test]
+fn unknown_finish_reason_is_rejected() {
+    let req = request();
+    let mut state = ResponseState::new(&req);
+    let complete = pb::GenerateResponse {
+        request_id: "r".to_string(),
+        response: Some(pb::generate_response::Response::Complete(
+            pb::GenerateComplete {
+                finish_reason: "teleported".to_string(),
+                sequence_index: 0,
+                ..Default::default()
+            },
+        )),
+    };
+    assert!(state.convert(complete).is_err());
+}
+
+#[test]
+fn terminal_token_count_mismatch_is_rejected() {
+    let mut req = request();
+    req.output_options.logprobs = None;
+    let mut state = ResponseState::new(&req);
+    // Stream a single delta token...
+    let chunk = pb::GenerateResponse {
+        request_id: "r".to_string(),
+        response: Some(pb::generate_response::Response::Chunk(
+            pb::GenerateStreamChunk {
+                token_ids: vec![7],
+                sequence_index: 0,
+                prompt_tokens: 3,
+                completion_tokens: 1,
+                cached_tokens: 0,
+                logprobs: vec![],
+            },
+        )),
+    };
+    state.convert(chunk).expect("convert chunk");
+    // ...but the terminal claims two cumulative output tokens.
+    let complete = pb::GenerateResponse {
+        request_id: "r".to_string(),
+        response: Some(pb::generate_response::Response::Complete(
+            pb::GenerateComplete {
+                output_token_ids: vec![7, 8],
+                sequence_index: 0,
+                finish_reason: "stop".to_string(),
+                prompt_tokens: 3,
+                completion_tokens: 2,
+                ..Default::default()
+            },
+        )),
+    };
+    assert!(state.convert(complete).is_err());
 }
 
 // ---------------------------------------------------------------------------

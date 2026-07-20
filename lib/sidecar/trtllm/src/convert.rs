@@ -42,11 +42,11 @@ pub(crate) fn build_generate_request(
         sampling_config: Some(pb::SamplingConfig {
             beam_width: 1,
             num_return_sequences: 1,
-            top_k: normalize_top_k(sampling.top_k),
+            top_k: normalize_top_k(sampling.top_k)?,
             top_p: sampling.top_p,
             temperature: sampling.temperature,
             min_p: sampling.min_p,
-            seed: normalize_seed(sampling.seed),
+            seed: normalize_seed(sampling.seed)?,
             min_tokens: stop.min_tokens,
             repetition_penalty: sampling.repetition_penalty,
             presence_penalty: sampling.presence_penalty,
@@ -54,7 +54,7 @@ pub(crate) fn build_generate_request(
             ..Default::default()
         }),
         output_config: Some(pb::OutputConfig {
-            logprobs: output.logprobs.map(logprob_count).transpose()?,
+            logprobs: output.logprobs.map(request_logprob_count).transpose()?,
             // prompt_logprobs is intentionally not requested: it is rejected in
             // `validate_request` (no `LLMEngineOutput` field to surface it).
             // TRT-LLM streams delta tokens; input tokens must not be echoed.
@@ -67,7 +67,11 @@ pub(crate) fn build_generate_request(
         stop: stop.stop.clone().unwrap_or_default(),
         stop_token_ids: stop_token_ids(request),
         ignore_eos: stop.ignore_eos.unwrap_or(false),
-        include_stop_token_in_output: sampling.include_stop_str_in_output.unwrap_or(false),
+        // `include_stop_token_in_output` retains matched stop *token IDs*, a
+        // different axis from Dynamo's `include_stop_str_in_output` (stop
+        // *strings*). Mapping one to the other would leak hidden stop/EOS tokens,
+        // so leave it at the default (strip) and reject the request-level flag in
+        // `validate_request` instead.
         ..Default::default()
     })
 }
@@ -102,21 +106,35 @@ fn max_tokens(
     Ok(context_length.saturating_sub(prompt_len).max(1))
 }
 
-fn normalize_top_k(top_k: Option<i32>) -> Option<i32> {
-    // Dynamo uses -1 (or absence) for "consider all tokens"; TRT-LLM treats an
-    // unset/0 top_k the same way. Only forward a positive cap.
+fn normalize_top_k(top_k: Option<i32>) -> Result<Option<i32>, DynamoError> {
+    // Dynamo uses -1/0 (or absence) for "consider all tokens"; TRT-LLM treats an
+    // unset top_k the same way. Forward only a positive cap; reject other
+    // negatives rather than silently widening them to "all tokens".
     match top_k {
-        Some(value) if value > 0 => Some(value),
-        _ => None,
+        None | Some(-1) | Some(0) => Ok(None),
+        Some(value) if value > 0 => Ok(Some(value)),
+        Some(value) => Err(client::invalid_argument(format!(
+            "top_k must be -1, 0, or positive; got {value}"
+        ))),
     }
 }
 
-fn normalize_seed(seed: Option<i64>) -> Option<u64> {
-    seed.and_then(|seed| u64::try_from(seed).ok())
+fn normalize_seed(seed: Option<i64>) -> Result<Option<u64>, DynamoError> {
+    // TRT-LLM's seed is `uint64`; reject a negative seed rather than silently
+    // dropping it and losing reproducibility.
+    seed.map(|seed| {
+        u64::try_from(seed)
+            .map_err(|_| client::invalid_argument(format!("seed must be non-negative; got {seed}")))
+    })
+    .transpose()
 }
 
-fn logprob_count(count: u32) -> Result<i32, DynamoError> {
-    i32::try_from(count).map_err(|_| {
+fn request_logprob_count(count: u32) -> Result<i32, DynamoError> {
+    // TRT-LLM computes the selected-token logprob only when at least one logprob
+    // is requested, so floor the wire value at 1: `logprobs=0` (selected token,
+    // no alternatives) still yields the chosen-token logprob. The original count
+    // is preserved in `ResponseState` to decide whether to surface alternatives.
+    i32::try_from(count.max(1)).map_err(|_| {
         client::invalid_argument(format!("logprobs request must fit in i32; got {count}"))
     })
 }
@@ -251,7 +269,50 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
             "KV-aware data-parallel routing is not supported by the TensorRT-LLM sidecar",
         ));
     }
+    if request
+        .routing
+        .as_ref()
+        .and_then(|routing| routing.cache_namespace.as_deref())
+        .is_some_and(|namespace| !namespace.is_empty())
+    {
+        // `cache_namespace` is the request-scoped KV-cache isolation contract. The
+        // proto carries `cache_salt_id`, but TRT-LLM 1.3.0rc21 does not plumb it
+        // through the gRPC servicer, so honoring it would let requests from
+        // different namespaces share prefix-cache entries. Reject until supported.
+        return Err(client::invalid_argument(
+            "cache namespace isolation is not supported by the TensorRT-LLM sidecar",
+        ));
+    }
+    if request
+        .routing
+        .as_ref()
+        .and_then(|routing| routing.priority)
+        .is_some_and(|priority| priority != 0)
+    {
+        // The shared contract forwards a nonzero priority to the engine, but the
+        // TRT-LLM gRPC request has no priority field, so it would be silently
+        // dropped and change queue ordering. Reject until the wire protocol
+        // carries it.
+        return Err(client::invalid_argument(
+            "request priority is not supported by the TensorRT-LLM sidecar",
+        ));
+    }
+    if request.stop_conditions.max_thinking_tokens.is_some() {
+        // A reasoning-token budget the sidecar can neither forward nor enforce.
+        return Err(client::invalid_argument(
+            "max_thinking_tokens is not supported by the TensorRT-LLM sidecar",
+        ));
+    }
     let sampling = &request.sampling_options;
+    if sampling.include_stop_str_in_output == Some(true) {
+        // Retaining stop *strings* has no faithful mapping in the TRT-LLM gRPC
+        // request (its only control, `include_stop_token_in_output`, governs stop
+        // *token IDs* and would leak hidden stop/EOS tokens). Reject rather than
+        // mis-map — consistent with rejecting visible stop token IDs above.
+        return Err(client::invalid_argument(
+            "include_stop_str_in_output is not supported by the TensorRT-LLM sidecar",
+        ));
+    }
     if sampling.n.unwrap_or(1) != 1 {
         return Err(client::invalid_argument("n must be 1"));
     }
@@ -269,7 +330,8 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
 pub(crate) struct ResponseState {
     prompt_tokens: u32,
     completion_tokens: u32,
-    expect_output_logprobs: bool,
+    streamed_tokens: u32,
+    output_logprobs: Option<u32>,
 }
 
 impl ResponseState {
@@ -277,7 +339,8 @@ impl ResponseState {
         Self {
             prompt_tokens: request.token_ids.len() as u32,
             completion_tokens: 0,
-            expect_output_logprobs: request.output_options.logprobs.is_some(),
+            streamed_tokens: 0,
+            output_logprobs: request.output_options.logprobs,
         }
     }
 
@@ -298,7 +361,11 @@ impl ResponseState {
             Some(pb::generate_response::Response::Complete(complete)) => {
                 self.convert_complete(complete).map(Some)
             }
-            None => Ok(None),
+            // A response with neither payload is protocol drift, not an
+            // empty delta — fail rather than silently discard it.
+            None => Err(client::protocol_error(
+                "response carried neither a chunk nor a complete payload",
+            )),
         }
     }
 
@@ -334,6 +401,9 @@ impl ResponseState {
             chunk.prompt_tokens,
             chunk.completion_tokens,
         )?;
+        self.streamed_tokens = self
+            .streamed_tokens
+            .saturating_add(chunk.token_ids.len() as u32);
         if chunk.token_ids.is_empty() {
             return Ok(None);
         }
@@ -357,11 +427,25 @@ impl ResponseState {
             complete.completion_tokens,
         )?;
 
+        // The terminal echoes the cumulative output token IDs (proto: "cumulative,
+        // not delta"). When present they must match what we streamed; a mismatch
+        // is protocol drift. Tolerate an omitted echo (empty) rather than
+        // false-erroring a server that only carries finish state in the terminal.
+        if !complete.output_token_ids.is_empty()
+            && complete.output_token_ids.len() as u32 != self.streamed_tokens
+        {
+            return Err(client::protocol_error(format!(
+                "terminal output_token_ids ({}) do not match {} streamed delta tokens",
+                complete.output_token_ids.len(),
+                self.streamed_tokens
+            )));
+        }
+
         // The delta tokens were already streamed via chunks; the terminal
         // response only carries finish state and usage.
         let mut terminal = LLMEngineOutput {
             index: Some(0),
-            finish_reason: Some(finish_reason(&complete.finish_reason)),
+            finish_reason: Some(finish_reason(&complete.finish_reason)?),
             completion_usage: Some(usage(self.prompt_tokens, self.completion_tokens)),
             ..Default::default()
         };
@@ -379,9 +463,9 @@ impl ResponseState {
         token_ids: &[u32],
         logprobs: &[pb::TokenLogprob],
     ) -> Result<MappedLogprobs, DynamoError> {
-        if !self.expect_output_logprobs {
+        let Some(count) = self.output_logprobs else {
             return Ok((None, None));
-        }
+        };
         // Logprobs were requested, so every delta token must carry one; an empty
         // or short slice is a protocol violation, not a silent no-op.
         if logprobs.len() != token_ids.len() {
@@ -392,6 +476,11 @@ impl ResponseState {
             )));
         }
         let log_probs = logprobs.iter().map(|lp| f64::from(lp.logprob)).collect();
+        if count == 0 {
+            // `logprobs=0` keeps the selected-token logprob but omits the top
+            // alternatives, matching the vLLM sidecar contract.
+            return Ok((Some(log_probs), None));
+        }
         let top_logprobs = logprobs
             .iter()
             .map(|lp| {
@@ -422,12 +511,20 @@ impl ResponseState {
     }
 }
 
-fn finish_reason(reason: &str) -> FinishReason {
-    match reason.trim().to_ascii_lowercase().as_str() {
+fn finish_reason(reason: &str) -> Result<FinishReason, DynamoError> {
+    Ok(match reason.trim().to_ascii_lowercase().as_str() {
         "length" => FinishReason::Length,
         "cancelled" | "canceled" | "aborted" | "timeout" => FinishReason::Cancelled,
         "error" => FinishReason::Error("TensorRT-LLM reported an error finish".to_string()),
-        // "stop", "stop_word", "eos", or an empty string (finished implies stop).
-        _ => FinishReason::Stop,
-    }
+        // Proto-documented stop reasons ("stop", "stop_word"); an empty string is
+        // a bare terminal (finished implies stop).
+        "stop" | "stop_word" | "eos" | "" => FinishReason::Stop,
+        // Fail closed on an unrecognized reason rather than reporting a clean stop
+        // for a version-skewed or malformed terminal.
+        other => {
+            return Err(client::protocol_error(format!(
+                "unknown finish reason {other:?}"
+            )));
+        }
+    })
 }
