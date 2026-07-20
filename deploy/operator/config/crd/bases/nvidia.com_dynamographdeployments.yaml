@@ -12098,7 +12098,7 @@ spec:
               type: object
           type: object
       served: true
-      storage: true
+      storage: false
       subresources:
         status: {}
     - additionalPrinterColumns:
@@ -12119,9 +12119,8 @@ spec:
           description: |-
             DynamoGraphDeployment is the Schema for the dynamographdeployments API.
 
-            v1beta1 is a served version: the API server accepts reads and writes
-            against it, and transparently converts to/from v1alpha1 (still the
-            storage version until a later MR flips it). Conversion goes through the
+            v1beta1 is the storage version. The API server transparently converts
+            to and from the served v1alpha1 version through
             operator's conversion webhook; see api/v1alpha1/*_conversion.go.
           properties:
             apiVersion:
@@ -21429,7 +21428,7 @@ spec:
               type: object
           type: object
       served: true
-      storage: false
+      storage: true
       subresources:
         status: {}
   conversion:

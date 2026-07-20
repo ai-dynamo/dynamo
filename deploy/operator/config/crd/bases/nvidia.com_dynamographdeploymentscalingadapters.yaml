@@ -117,7 +117,7 @@ spec:
               type: object
           type: object
       served: true
-      storage: true
+      storage: false
       subresources:
         scale:
           labelSelectorPath: .status.selector
@@ -152,8 +152,8 @@ spec:
             ensuring that only the adapter controller modifies the DGD's component replicas.
             This prevents conflicts when multiple autoscaling mechanisms are in play.
 
-            v1alpha1 remains the storage version; conversion between served versions is
-            handled by the operator's conversion webhook
+            v1beta1 is the storage version; conversion to and from the served v1alpha1
+            version is handled by the operator's conversion webhook
             (see api/v1alpha1/dynamographdeploymentscalingadapter_conversion.go).
           properties:
             apiVersion:
@@ -233,7 +233,7 @@ spec:
               type: object
           type: object
       served: true
-      storage: false
+      storage: true
       subresources:
         scale:
           labelSelectorPath: .status.selector
