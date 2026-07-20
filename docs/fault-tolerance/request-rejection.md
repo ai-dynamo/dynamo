@@ -409,9 +409,7 @@ If `active_decode_blocks_threshold` is configured but you suspect `router_track_
 ## Worker-Side Request Admission
 
 In addition to the frontend's metric-driven busy detection above, a worker can
-enforce a hard concurrency cap directly at its request-plane ingress. This is
-disabled by default — when neither knob is set, the worker behaves exactly as
-before (a large pool plus a large overflow queue, no rejection).
+enforce a hard concurrency cap directly at its request-plane ingress.
 
 ### Knobs
 
@@ -419,6 +417,7 @@ before (a large pool plus a large overflow queue, no rejection).
 | --- | --- | --- |
 | `--engine-request-limit N` | `DYN_ENGINE_REQUEST_LIMIT` | Max requests handled **concurrently by the engine** (the worker-pool semaphore size). Setting this enables worker-side rejection. |
 | _(env-only)_ | `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` | Max requests **waiting in Dynamo** (not yet in the engine) — the overflow queue size. Not a CLI knob; a small fixed burst defaulting to **16** (hard cap `N + 16`). Only takes effect when the engine limit is set. Advanced override only; must be **≥ 2**. |
+| _(automatic)_ | _(none)_ | When `DYN_ENGINE_REQUEST_LIMIT` is unset and the backend reports capacity, the worker pool is sized to `ceil(1.5 × max_num_seqs × data_parallel_size)`. This may not take effect if `DYN_TCP_WORKER_POOL_SIZE` is set. |
 
 When `--engine-request-limit` is set, the worker accepts a request directly into
 the engine while a slot is free; once all `N` engine slots are busy, further

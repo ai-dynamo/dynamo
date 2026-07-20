@@ -639,6 +639,16 @@ impl LocalModel {
             &self.card,
             model_suffix,
         )?;
+
+        if lora_info.is_none()
+            && let Some(engine_capacity) = self.runtime_config.tcp_worker_pool_capacity_hint()
+        {
+            endpoint
+                .drt()
+                .network_manager()
+                .set_engine_capacity_hint(engine_capacity)
+                .await?;
+        }
         let _instance = discovery.register(spec).await?;
 
         Ok(())

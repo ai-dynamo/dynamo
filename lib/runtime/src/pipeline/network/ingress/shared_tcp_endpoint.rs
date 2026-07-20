@@ -14,7 +14,7 @@ use crate::metrics::work_handler_pool::{
     WORK_HANDLER_QUEUE_DEPTH,
 };
 use crate::pipeline::network::PushWorkHandler;
-use anyhow::Result;
+use anyhow::{Result, anyhow, bail};
 use bytes::Bytes;
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Notify, OnceCell, OwnedSemaphorePermit, Semaphore};
 use tokio_util::bytes::BytesMut;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -33,23 +33,31 @@ use tracing::Instrument;
 const DEFAULT_WORKER_POOL_SIZE: usize = 10000;
 
 /// Default work queue size for TCP request handling
-/// this is 4X the worker pool size to handle burst traffic
-const DEFAULT_WORK_QUEUE_SIZE: usize = 40000;
+/// this is a small overflow queue to handle burst traffic
+const DEFAULT_WORK_QUEUE_SIZE: usize = 16;
 
-/// Get worker pool size from environment or use default
-fn get_worker_pool_size() -> usize {
-    std::env::var("DYN_TCP_WORKER_POOL_SIZE")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_WORKER_POOL_SIZE)
+fn parse_env_usize_value(name: &str, raw_value: &str) -> Result<usize> {
+    raw_value
+        .parse::<usize>()
+        .map_err(|_| anyhow!("{name} must be a positive integer, got {raw_value:?}"))
 }
 
-/// Get work queue size from environment or use default
-fn get_work_queue_size() -> usize {
-    std::env::var("DYN_TCP_WORK_QUEUE_SIZE")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_WORK_QUEUE_SIZE)
+fn parse_env_usize(name: &str) -> Result<Option<usize>> {
+    match std::env::var(name) {
+        Ok(raw_value) => parse_env_usize_value(name, &raw_value).map(Some),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(anyhow!("failed to read {name}: {error}")),
+    }
+}
+
+fn validate_tokio_capacity(name: &str, value: usize, minimum: usize) -> Result<usize> {
+    if value < minimum || value > Semaphore::MAX_PERMITS {
+        bail!(
+            "{name} must be between {minimum} and {}, got {value}",
+            Semaphore::MAX_PERMITS
+        );
+    }
+    Ok(value)
 }
 
 /// Default small overflow queue when the engine-request limit is set but the
@@ -64,37 +72,64 @@ const DEFAULT_DYNAMO_REQUEST_QUEUE_LIMIT: usize = 16;
 ///
 /// * `DYN_ENGINE_REQUEST_LIMIT` set → pool = engine limit (N), queue = Q
 ///   (default 16). Hard cap N+Q.
-/// * unset → large defaults (10000 / 40000), so rejection only triggers under
-///   extreme saturation.
+/// * otherwise `DYN_TCP_WORKER_POOL_SIZE` set → explicit pool and TCP queue.
+/// * otherwise a retained engine-capacity hint sets the initial pool size; without
+///   one, the pool starts at 10000 and may be updated once. The TCP queue defaults
+///   to 16.
+#[derive(Debug)]
 struct SizingConfig {
     pool_size: usize,
     queue_size: usize,
+    accepts_engine_capacity_hint: bool,
 }
 
-fn resolve_sizing() -> SizingConfig {
-    match std::env::var("DYN_ENGINE_REQUEST_LIMIT")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-    {
+fn worker_pool_size_for_engine_capacity(engine_capacity: usize) -> usize {
+    engine_capacity
+        .saturating_add(engine_capacity.div_ceil(2))
+        .min(Semaphore::MAX_PERMITS)
+}
+
+fn resolve_sizing(
+    env: impl Fn(&str) -> Result<Option<usize>>,
+    engine_capacity_hint: Option<usize>,
+) -> Result<SizingConfig> {
+    let read_capacity = |name: &str, minimum: usize| {
+        env(name)?
+            .map(|value| validate_tokio_capacity(name, value, minimum))
+            .transpose()
+    };
+
+    let sizing = match read_capacity("DYN_ENGINE_REQUEST_LIMIT", 1)? {
         Some(engine_limit) => {
-            let queue_limit = std::env::var("DYN_DYNAMO_REQUEST_QUEUE_LIMIT")
-                .ok()
-                .and_then(|s| s.parse::<usize>().ok())
+            let queue_limit = read_capacity("DYN_DYNAMO_REQUEST_QUEUE_LIMIT", 2)?
                 .unwrap_or(DEFAULT_DYNAMO_REQUEST_QUEUE_LIMIT);
             // The single dispatcher holds one request between `recv()` and
             // acquiring an engine permit, so size the channel to limit-1:
             // channel + the dispatcher-held request cap "queued, not in engine"
             // at exactly `limit`.
             SizingConfig {
-                pool_size: engine_limit.max(1),
-                queue_size: queue_limit.saturating_sub(1).max(1),
+                pool_size: engine_limit,
+                queue_size: queue_limit - 1,
+                accepts_engine_capacity_hint: false,
             }
         }
-        None => SizingConfig {
-            pool_size: get_worker_pool_size(),
-            queue_size: get_work_queue_size(),
-        },
-    }
+        None => {
+            let explicit_pool_size = read_capacity("DYN_TCP_WORKER_POOL_SIZE", 1)?;
+            let automatic_pool_size = engine_capacity_hint
+                .filter(|capacity| *capacity > 0)
+                .map(worker_pool_size_for_engine_capacity);
+            SizingConfig {
+                pool_size: explicit_pool_size
+                    .or(automatic_pool_size)
+                    .unwrap_or(DEFAULT_WORKER_POOL_SIZE),
+                queue_size: read_capacity("DYN_TCP_WORK_QUEUE_SIZE", 1)?
+                    .unwrap_or(DEFAULT_WORK_QUEUE_SIZE),
+                accepts_engine_capacity_hint: explicit_pool_size.is_none()
+                    && automatic_pool_size.is_none(),
+            }
+        }
+    };
+    Ok(sizing)
 }
 
 /// RAII guard for `WORK_HANDLER_POOL_ACTIVE_TASKS`. `new()` increments and
@@ -147,6 +182,12 @@ pub struct SharedTcpServer {
     /// Worker-pool semaphore bounding concurrent in-engine requests. Shared with
     /// `read_loop` so it can front-acquire a permit and dispatch directly.
     engine_sem: Arc<Semaphore>,
+    /// Pool size selected when this server was constructed.
+    initial_worker_pool_size: usize,
+    /// Explicit environment overrides disable automatic sizing.
+    accepts_engine_capacity_hint: bool,
+    /// Serializes the single allowed fallback-to-engine-capacity update.
+    engine_capacity_update: OnceCell<()>,
     /// Overflow-queue capacity; `read_loop` compares against it to tell whether
     /// the queue is empty for the FIFO direct-dispatch rule.
     queue_capacity: usize,
@@ -164,11 +205,25 @@ struct EndpointHandler {
 }
 
 impl SharedTcpServer {
-    pub fn new(bind_addr: SocketAddr, cancellation_token: CancellationToken) -> Arc<Self> {
+    pub fn new(
+        bind_addr: SocketAddr,
+        cancellation_token: CancellationToken,
+        engine_capacity_hint: Option<usize>,
+    ) -> Result<Arc<Self>> {
+        let sizing = resolve_sizing(parse_env_usize, engine_capacity_hint)?;
+        Ok(Self::new_with_sizing(bind_addr, cancellation_token, sizing))
+    }
+
+    fn new_with_sizing(
+        bind_addr: SocketAddr,
+        cancellation_token: CancellationToken,
+        sizing: SizingConfig,
+    ) -> Arc<Self> {
         let SizingConfig {
             pool_size: worker_pool_size,
             queue_size: work_queue_size,
-        } = resolve_sizing();
+            accepts_engine_capacity_hint,
+        } = sizing;
 
         tracing::info!(
             "Initializing TCP server with dispatcher (concurrency={}, queue={})",
@@ -204,8 +259,56 @@ impl SharedTcpServer {
             cancellation_token,
             work_tx,
             engine_sem,
+            initial_worker_pool_size: worker_pool_size,
+            accepts_engine_capacity_hint,
+            engine_capacity_update: OnceCell::new(),
             queue_capacity: work_queue_size,
         })
+    }
+
+    /// Apply the first engine-capacity hint when no explicit pool override was set.
+    pub async fn update_worker_pool_from_engine_capacity(
+        &self,
+        engine_capacity: usize,
+    ) -> Result<()> {
+        if !self.accepts_engine_capacity_hint || engine_capacity == 0 {
+            return Ok(());
+        }
+
+        self.engine_capacity_update
+            .get_or_try_init(|| async {
+                let worker_pool_size = worker_pool_size_for_engine_capacity(engine_capacity);
+
+                if worker_pool_size < self.initial_worker_pool_size {
+                    let permits_to_remove =
+                        u32::try_from(self.initial_worker_pool_size - worker_pool_size)
+                            .map_err(|_| anyhow!("TCP worker-pool shrink exceeds u32"))?;
+                    let permit = self
+                        .engine_sem
+                        .clone()
+                        .acquire_many_owned(permits_to_remove)
+                        .await
+                        .map_err(|_| anyhow!("TCP worker-pool semaphore closed during sizing"))?;
+                    permit.forget();
+                } else if worker_pool_size > self.initial_worker_pool_size {
+                    self.engine_sem
+                        .add_permits(worker_pool_size - self.initial_worker_pool_size);
+                }
+
+                WORK_HANDLER_POOL_CAPACITY.set(crate::metrics::prometheus_names::clamp_u64_to_i64(
+                    worker_pool_size as u64,
+                ));
+                tracing::info!(
+                    engine_capacity,
+                    previous_concurrency = self.initial_worker_pool_size,
+                    concurrency = worker_pool_size,
+                    "Updated TCP worker dispatcher concurrency from engine capacity"
+                );
+                Ok::<(), anyhow::Error>(())
+            })
+            .await?;
+
+        Ok(())
     }
 
     /// Start the worker pool dispatcher that processes requests with bounded concurrency
@@ -770,6 +873,218 @@ mod tests {
     use std::time::Duration;
     use tokio::time::Instant;
 
+    fn sizing_env<const N: usize>(
+        values: [(&'static str, usize); N],
+    ) -> impl Fn(&str) -> Result<Option<usize>> {
+        move |name| {
+            Ok(values
+                .iter()
+                .find_map(|(key, value)| (*key == name).then_some(*value)))
+        }
+    }
+
+    fn assert_sizing_error<const N: usize>(
+        values: [(&'static str, usize); N],
+        expected_name: &str,
+    ) {
+        let error = resolve_sizing(sizing_env(values), None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(expected_name),
+            "error did not name {expected_name}: {error}"
+        );
+    }
+
+    fn test_server(pool_size: usize, accepts_engine_capacity_hint: bool) -> Arc<SharedTcpServer> {
+        SharedTcpServer::new_with_sizing(
+            "127.0.0.1:0".parse().unwrap(),
+            CancellationToken::new(),
+            SizingConfig {
+                pool_size,
+                queue_size: DEFAULT_WORK_QUEUE_SIZE,
+                accepts_engine_capacity_hint,
+            },
+        )
+    }
+
+    #[test]
+    fn worker_pool_size_precedence() {
+        // Each case supplies an immutable environment view, so this test is
+        // independent from process-global state and other parallel tests.
+        let sizing = resolve_sizing(
+            sizing_env([
+                ("DYN_ENGINE_REQUEST_LIMIT", 7),
+                ("DYN_DYNAMO_REQUEST_QUEUE_LIMIT", 5),
+                ("DYN_TCP_WORKER_POOL_SIZE", 99),
+                ("DYN_TCP_WORK_QUEUE_SIZE", 123),
+            ]),
+            Some(6),
+        )
+        .unwrap();
+        assert_eq!(sizing.pool_size, 7);
+        assert_eq!(sizing.queue_size, 4);
+        assert!(!sizing.accepts_engine_capacity_hint);
+
+        let sizing = resolve_sizing(
+            sizing_env([
+                ("DYN_TCP_WORKER_POOL_SIZE", 99),
+                ("DYN_TCP_WORK_QUEUE_SIZE", 123),
+            ]),
+            Some(6),
+        )
+        .unwrap();
+        assert_eq!(sizing.pool_size, 99);
+        assert_eq!(sizing.queue_size, 123);
+
+        assert!(!sizing.accepts_engine_capacity_hint);
+        let sizing =
+            resolve_sizing(sizing_env([("DYN_ENGINE_REQUEST_LIMIT", 7)]), Some(6)).unwrap();
+        assert_eq!(sizing.pool_size, 7);
+        // The logical default is 16 queued requests: 15 in the
+        // channel plus one held by the dispatcher.
+        assert_eq!(sizing.queue_size, 15);
+        assert_eq!(sizing.queue_size + 1, 16);
+
+        assert_eq!(worker_pool_size_for_engine_capacity(3), 5);
+        assert_eq!(worker_pool_size_for_engine_capacity(8), 12);
+        let fallback = resolve_sizing(|_| Ok(None), None).unwrap();
+        assert_eq!(fallback.pool_size, 10_000);
+        assert_eq!(fallback.queue_size, 16);
+        assert!(fallback.accepts_engine_capacity_hint);
+    }
+
+    #[tokio::test]
+    async fn engine_capacity_hint_before_server_creation_sets_initial_pool_size() {
+        let cancellation_token = CancellationToken::new();
+        let bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let sizing = resolve_sizing(|_| Ok(None), Some(6)).unwrap();
+        let server =
+            SharedTcpServer::new_with_sizing(bind_addr, cancellation_token.clone(), sizing);
+
+        assert_eq!(server.initial_worker_pool_size, 9);
+        assert_eq!(server.engine_sem.available_permits(), 9);
+        assert!(!server.accepts_engine_capacity_hint);
+
+        cancellation_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn late_engine_capacity_updates_only_the_fallback_pool() {
+        let server = test_server(DEFAULT_WORKER_POOL_SIZE, true);
+
+        assert_eq!(server.engine_sem.available_permits(), 10_000);
+        server
+            .update_worker_pool_from_engine_capacity(6)
+            .await
+            .unwrap();
+        assert_eq!(server.engine_sem.available_permits(), 9);
+
+        // A later registration cannot resize the process-global pool again.
+        server
+            .update_worker_pool_from_engine_capacity(20)
+            .await
+            .unwrap();
+        assert_eq!(server.engine_sem.available_permits(), 9);
+
+        let overridden = test_server(13, false);
+        overridden
+            .update_worker_pool_from_engine_capacity(6)
+            .await
+            .unwrap();
+        assert_eq!(overridden.engine_sem.available_permits(), 13);
+
+        server.cancellation_token.cancel();
+        overridden.cancellation_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn late_engine_capacity_shrink_waits_for_active_permits() {
+        let server = test_server(10, true);
+        let last_needed = server.engine_sem.clone().acquire_owned().await.unwrap();
+        let active = server
+            .engine_sem
+            .clone()
+            .acquire_many_owned(3)
+            .await
+            .unwrap();
+
+        let update = server.update_worker_pool_from_engine_capacity(2);
+        tokio::pin!(update);
+
+        // Target 3 needs seven free permits; four active permits leave only six.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut update)
+                .await
+                .is_err()
+        );
+        drop(last_needed);
+        tokio::time::timeout(Duration::from_secs(1), &mut update)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(server.engine_sem.available_permits(), 0);
+
+        drop(active);
+        assert_eq!(server.engine_sem.available_permits(), 3);
+        server.cancellation_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn late_engine_capacity_grows_the_fallback_pool() {
+        let server = test_server(DEFAULT_WORKER_POOL_SIZE, true);
+        server
+            .update_worker_pool_from_engine_capacity(8_000)
+            .await
+            .unwrap();
+        assert_eq!(server.engine_sem.available_permits(), 12_000);
+        server.cancellation_token.cancel();
+    }
+
+    #[test]
+    fn worker_pool_sizing_rejects_invalid_capacities() {
+        let too_large = Semaphore::MAX_PERMITS + 1;
+
+        for value in [0, too_large] {
+            assert_sizing_error(
+                [("DYN_ENGINE_REQUEST_LIMIT", value)],
+                "DYN_ENGINE_REQUEST_LIMIT",
+            );
+            assert_sizing_error(
+                [
+                    ("DYN_ENGINE_REQUEST_LIMIT", 1),
+                    ("DYN_DYNAMO_REQUEST_QUEUE_LIMIT", value),
+                ],
+                "DYN_DYNAMO_REQUEST_QUEUE_LIMIT",
+            );
+            assert_sizing_error(
+                [("DYN_TCP_WORKER_POOL_SIZE", value)],
+                "DYN_TCP_WORKER_POOL_SIZE",
+            );
+            assert_sizing_error(
+                [("DYN_TCP_WORK_QUEUE_SIZE", value)],
+                "DYN_TCP_WORK_QUEUE_SIZE",
+            );
+        }
+
+        assert_sizing_error(
+            [
+                ("DYN_ENGINE_REQUEST_LIMIT", 1),
+                ("DYN_DYNAMO_REQUEST_QUEUE_LIMIT", 1),
+            ],
+            "DYN_DYNAMO_REQUEST_QUEUE_LIMIT",
+        );
+    }
+
+    #[test]
+    fn worker_pool_sizing_rejects_malformed_capacity() {
+        let error = parse_env_usize_value("DYN_TCP_WORKER_POOL_SIZE", "not-a-number")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("DYN_TCP_WORKER_POOL_SIZE"));
+        assert!(error.contains("not-a-number"));
+    }
+
     /// Mock handler that simulates slow request processing for testing
     struct SlowMockHandler {
         /// Tracks if a request is currently being processed
@@ -836,7 +1151,15 @@ mod tests {
         let bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
         // Create SharedTcpServer
-        let server = SharedTcpServer::new(bind_addr, cancellation_token.clone());
+        let server = SharedTcpServer::new_with_sizing(
+            bind_addr,
+            cancellation_token.clone(),
+            SizingConfig {
+                pool_size: 10_000,
+                queue_size: 16,
+                accepts_engine_capacity_hint: false,
+            },
+        );
 
         // Create a handler that takes 1s to process requests
         let handler = Arc::new(SlowMockHandler::new(Duration::from_secs(1)));
@@ -1183,20 +1506,16 @@ mod tests {
     async fn test_capacities_published_on_server_init() {
         crate::logging::init();
 
-        // SharedTcpServer::new publishes static capacities. Any test that instantiates
-        // a SharedTcpServer will have populated the gauges; we just assert they're > 0.
+        // Server construction publishes static capacities. Process-global
+        // gauges may also be written by parallel tests, so keep this oracle
+        // intentionally minimal; the process-isolated Mocker E2E checks values.
         let cancellation_token = CancellationToken::new();
         let bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let _server = SharedTcpServer::new(bind_addr, cancellation_token.clone());
-
-        assert!(
-            WORK_HANDLER_POOL_CAPACITY.get() > 0,
-            "pool_capacity should be set to DEFAULT_WORKER_POOL_SIZE"
-        );
-        assert!(
-            WORK_HANDLER_QUEUE_CAPACITY.get() > 0,
-            "queue_capacity should be set to DEFAULT_WORK_QUEUE_SIZE"
-        );
+        let sizing = resolve_sizing(|_| Ok(None), None).unwrap();
+        let _server =
+            SharedTcpServer::new_with_sizing(bind_addr, cancellation_token.clone(), sizing);
+        assert!(WORK_HANDLER_POOL_CAPACITY.get() > 0);
+        assert!(WORK_HANDLER_QUEUE_CAPACITY.get() > 0);
         cancellation_token.cancel();
     }
 }
