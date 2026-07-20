@@ -27,7 +27,7 @@ type Options struct {
 	Gate              features.Gate
 }
 
-func SetupAll(mgr ctrl.Manager, opts Options) error {
+func Setup(mgr ctrl.Manager, opts Options) error {
 	if opts.Config == nil {
 		return fmt.Errorf("operator configuration is required")
 	}

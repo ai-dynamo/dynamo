@@ -668,7 +668,7 @@ func registerWebhookHandlers(
 		)
 	}
 
-	if err := webhooksetup.SetupAll(mgr, webhooksetup.Options{
+	if err := webhooksetup.Setup(mgr, webhooksetup.Options{
 		Config:            operatorCfg,
 		RuntimeConfig:     runtimeConfig,
 		OperatorVersion:   operatorVersion,

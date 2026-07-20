@@ -11,17 +11,17 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 )
 
-func TestSetupAllRequiresOperatorConfiguration(t *testing.T) {
+func TestSetupRequiresOperatorConfiguration(t *testing.T) {
 	wantErr := "operator configuration is required"
-	if err := SetupAll(nil, Options{}); err == nil || err.Error() != wantErr {
-		t.Fatalf("SetupAll() error = %v, want %q", err, wantErr)
+	if err := Setup(nil, Options{}); err == nil || err.Error() != wantErr {
+		t.Fatalf("Setup() error = %v, want %q", err, wantErr)
 	}
 }
 
-func TestSetupAllRequiresRuntimeConfiguration(t *testing.T) {
+func TestSetupRequiresRuntimeConfiguration(t *testing.T) {
 	wantErr := "runtime configuration is required"
 	opts := Options{Config: &configv1alpha1.OperatorConfiguration{}}
-	if err := SetupAll(nil, opts); err == nil || err.Error() != wantErr {
-		t.Fatalf("SetupAll() error = %v, want %q", err, wantErr)
+	if err := Setup(nil, opts); err == nil || err.Error() != wantErr {
+		t.Fatalf("Setup() error = %v, want %q", err, wantErr)
 	}
 }
