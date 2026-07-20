@@ -170,10 +170,8 @@ class GMSClientMemoryManager:
         self._mappings: Dict[int, LocalMapping] = {}
         self._inverse_mapping: Dict[str, int] = {}
         self._scratch_mappings: Dict[int, _ScratchMapping] = {}
-        # Optional single-block scratch: alias ALL scratch mappings onto one
-        # shared physical granule (N KV layers -> one scratch_size block instead
-        # of N). Created lazily on the first scratch mapping, released once when
-        # the last one is torn down.
+        # All scratch mappings alias ONE shared physical granule (N KV layers ->
+        # one scratch_size block, not N). Created lazily, released once.
         self._shared_scratch_handle: int = 0
 
         self._unmapped = False

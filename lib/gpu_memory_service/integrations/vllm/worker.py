@@ -272,12 +272,8 @@ class GMSWorker(Worker):
             # Client-local scratch only — no GMS server session at init.
             # wake_up will connect RW and allocate fresh server backing.
             get_or_create_scratch_manager(socket, device, tag="kv_cache")
-            # NOTE: the scratch mem-pool is scoped to init_kv_cache (the raw KV
-            # tensors) by patch_kv_cache_pool_scope(), NOT the whole
-            # initialize_kv_cache. BlockTables / FlashInfer workspace / pointer
-            # tensors must get real memory: under single-block scratch they would
-            # otherwise alias the one KV granule and a KV write would clobber the
-            # block-table pointers -> illegal memory access in the gather kernel.
+            # The scratch pool is scoped to the KV tensors by
+            # patch_kv_cache_pool_scope(), not the whole initialize_kv_cache.
             self.model_runner.initialize_kv_cache(kv_cache_config)
         elif self.vllm_config.model_config.enable_sleep_mode:
             get_or_create_gms_client_memory_manager(

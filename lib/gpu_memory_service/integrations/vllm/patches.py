@@ -181,20 +181,12 @@ def patch_register_kv_caches() -> None:
 
 
 def patch_kv_cache_pool_scope() -> None:
-    """Scope the GMS scratch mem-pool to the raw KV cache tensors only.
+    """Scope the scratch mem-pool to init_kv_cache (the raw KV tensors) only.
 
-    GMSWorker.initialize_from_config no longer wraps the whole
-    initialize_kv_cache() in gms_use_mem_pool; it lets this patch wrap ONLY
-    init_kv_cache (the raw KV tensor allocation). Everything else
-    initialize_kv_cache touches -- BlockTables, the FlashInfer workspace,
-    block-table pointer tensors -- then uses normal CUDA memory.
-
-    This matters for single-block scratch: if those metadata buffers share the
-    one aliased scratch granule with the KV cache, a KV write clobbers the
-    block-table pointer tensor and the block-table gather kernel dereferences a
-    garbage pointer -> illegal memory access. (Per-mapping scratch happened to
-    keep them correct only because each metadata buffer was < one granule, so it
-    never self-aliased; single-block collapses everything onto one granule.)
+    Keeps BlockTables / workspace / the block-table pointer tensor on real memory.
+    Single-block scratch aliases everything in the pool onto one granule, so a KV
+    write over that pointer tensor would corrupt the block-table gather kernel
+    (-> illegal memory access).
     """
     global _kv_cache_pool_scope_patched
 
@@ -212,10 +204,8 @@ def patch_kv_cache_pool_scope() -> None:
         return
 
     def patched_init_kv_cache(*args, **kwargs):
-        # Installed only in shadow mode (apply_scratch_kv_patches runs only when
-        # is_scratch_kv_enabled), so always scope the KV allocation to the pool.
-        # init_kv_cache allocates on the worker's current CUDA device, which is
-        # exactly where the pool must apply.
+        # Installed only in shadow mode, so always scope to the pool. init_kv_cache
+        # allocates on the worker's current device.
         assert torch.cuda.is_available(), "GMS scratch KV requires CUDA"
         device = torch.device("cuda", torch.cuda.current_device())
         with gms_use_mem_pool("kv_cache", device):
