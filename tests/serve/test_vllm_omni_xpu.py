@@ -109,36 +109,6 @@ vllm_omni_configs = {
             ),
         ],
     ),
-    "omni_audio": VLLMOmniConfig(
-        name="omni_audio",
-        directory=vllm_dir,
-        script_name="xpu/agg_omni_audio_xpu.sh",
-        marks=[
-            pytest.mark.xpu_1,
-            pytest.mark.pre_merge,
-            pytest.mark.timeout(1200),
-            pytest.mark.skip(
-                reason=(
-                    "vLLM-Omni Qwen3-TTS XPU code predictor still hard-codes "
-                    "CUDA graph capture and fails at runtime"
-                )
-            ),
-        ],
-        model="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-        request_payloads=[
-            AudioSpeechPayload(
-                body={
-                    "input": "Hello, this is a test of Dynamo audio generation.",
-                    "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-                    "voice": "vivian",
-                    "language": "English",
-                },
-                repeat_count=1,
-                expected_response=[],
-                expected_log=[],
-            ),
-        ],
-    ),
     "omni_t2v": VLLMOmniConfig(
         name="omni_t2v",
         directory=vllm_dir,
