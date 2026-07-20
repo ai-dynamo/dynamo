@@ -36,11 +36,11 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
   <div className="dynamo-recipe-browser-header">
     <div>
       <p className="dynamo-recipe-eyebrow">Recipe catalog</p>
-      <h3>13 model families</h3>
+      <h3>14 model families</h3>
       <p>Filter by provider, runtime, and hardware. Each card notes its serving technique and workload shape.</p>
     </div>
     <div className="dynamo-catalog-facts">
-      <strong>30</strong>
+      <strong>34</strong>
       <span>Deployable configurations</span>
       <button className="dynamo-filter-reset" type="reset">Reset filters</button>
     </div>
@@ -67,6 +67,15 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
 </div>
 
 <div className="dynamo-model-grid" data-recipe-card-grid>
+  <div className="dynamo-model-card" data-recipe-card data-provider="zai" data-runtime="sglang" data-hardware="b200 h200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/zai-org.svg" alt="" />
+      <div><h3>GLM-5.2</h3><p>Z.AI / NVIDIA</p></div>
+    </div>
+    <p className="dynamo-model-summary">SGLang recipes for long-context agentic traffic on B200 (NVFP4) or H200 (FP8), aggregated or disaggregated, with KV-aware routing, EAGLE MTP speculation, and HiCache CPU offload.</p>
+    <div className="dynamo-model-tags"><span>SGLang</span><span>4x/12x B200 · 8x/16x H200</span><span>Agentic · up to 500K context</span></div>
+  <a className="dynamo-card-link" href="./glm-5-2.mdx" aria-label="Open the GLM-5.2 recipe">Open recipe</a>
+  </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="thinkingmachines" data-runtime="sglang" data-hardware="b200" data-technique="aggregated spec-decoding" data-workload="multimodal-reuse">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../assets/img/recipes/providers/thinkingmachines.png" alt="" />

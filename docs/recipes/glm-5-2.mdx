@@ -1,0 +1,255 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "GLM-5.2"
+subtitle: "Serve GLM-5.2 with Dynamo and SGLang on B200 or H200 for long-context agentic workloads."
+---
+
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
+Each target below is a Dynamo + SGLang deployment of Z.AI's GLM-5.2 tuned for an agentic workload (64K median ISL / 400 median OSL, 90% KV cache hit rate) with KV-aware routing and EAGLE-style MTP speculative decoding. B200 serves the NVFP4 checkpoint at up to 500K context with HiCache CPU offload; H200 serves the FP8 checkpoint at up to 250K context. Both run aggregated or with prefill/decode disaggregation. Pick your GPU architecture and serving topology; every command on this page updates to match.
+
+<div className="dynamo-target-picker">
+<p className="dynamo-target-picker-title">Choose your deployment target</p>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">GPU</span>
+<input type="radio" id="recipe-sku-b200" name="recipe-sku" value="b200" defaultChecked />
+<label htmlFor="recipe-sku-b200">B200 (NVFP4)</label>
+<input type="radio" id="recipe-sku-h200" name="recipe-sku" value="h200" />
+<label htmlFor="recipe-sku-h200">H200 (FP8)</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Topology</span>
+<input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" defaultChecked />
+<label htmlFor="recipe-variant-agg">Aggregated</label>
+<input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" />
+<label htmlFor="recipe-variant-disagg">Disaggregated</label>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="b200" data-variant="agg">
+<span><b>Checkpoint</b> nvidia/GLM-5.2-NVFP4</span>
+<span><b>Precision</b> NVFP4 + FP8 KV cache</span>
+<span><b>GPUs</b> 4x B200, one worker</span>
+<span><b>Parallelism</b> DTP4</span>
+<span><b>Routing</b> KV-aware</span>
+<span><b>Context</b> Up to 500K, HiCache CPU offload</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="b200" data-variant="disagg">
+<span><b>Checkpoint</b> nvidia/GLM-5.2-NVFP4</span>
+<span><b>Precision</b> NVFP4 + FP8 KV cache</span>
+<span><b>GPUs</b> 4x B200 prefill + 8x B200 decode</span>
+<span><b>Parallelism</b> DEP4 prefill / DTP8 decode</span>
+<span><b>Routing</b> KV-aware, NIXL/UCX over IB</span>
+<span><b>Context</b> Up to 500K, HiCache CPU offload</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="h200" data-variant="agg">
+<span><b>Checkpoint</b> zai-org/GLM-5.2-FP8</span>
+<span><b>Precision</b> FP8 + FP8 KV cache</span>
+<span><b>GPUs</b> 8x H200, one worker</span>
+<span><b>Parallelism</b> TP8/EP8</span>
+<span><b>Routing</b> KV-aware</span>
+<span><b>Context</b> Up to 250K</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="h200" data-variant="disagg">
+<span><b>Checkpoint</b> zai-org/GLM-5.2-FP8</span>
+<span><b>Precision</b> FP8 + FP8 KV cache</span>
+<span><b>GPUs</b> 8x H200 prefill + 8x H200 decode</span>
+<span><b>Parallelism</b> TP8/EP8 prefill / TP8/DP8/EP1 decode</span>
+<span><b>Routing</b> KV-aware, NIXL/UCX over IB</span>
+<span><b>Context</b> Up to 250K</span>
+</div>
+</div>
+
+## Prerequisites
+
+<div data-sku="b200">
+
+- A Kubernetes cluster with the Dynamo platform installed and B200 GPUs available — 4x for aggregated, 12x for disaggregated. See the [Kubernetes Deployment Guide](../kubernetes/README.md).
+- A Hugging Face token with access to `nvidia/GLM-5.2-NVFP4`.
+
+</div>
+
+<div data-sku="h200">
+
+- A Kubernetes cluster with the Dynamo platform installed and H200 GPUs available — 8x for aggregated, 16x for disaggregated. See the [Kubernetes Deployment Guide](../kubernetes/README.md).
+- A Hugging Face token with access to `zai-org/GLM-5.2-FP8`.
+
+</div>
+
+Create the namespace and token secret:
+
+```bash
+export NAMESPACE=your-namespace
+kubectl create namespace ${NAMESPACE}
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="your-token" \
+  -n ${NAMESPACE}
+```
+
+<Warning>
+Edit `storageClassName` in `model-cache/model-cache.yaml` to a ReadWriteMany storage class on your cluster (`kubectl get storageclass`) before applying it. Review namespace, image tags, node selectors, and resource claims in the manifests as well.
+</Warning>
+
+## Deploy
+
+Create the shared model cache, then download the checkpoint for your target SKU. Edit `model-cache/model-download.yaml` and remove the `hf download` line for the checkpoint you are not serving:
+
+```bash
+# Edit storageClassName in model-cache/model-cache.yaml first.
+kubectl apply -f recipes/glm-5.2/model-cache/model-cache.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/glm-5.2/model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=7200s
+```
+
+Then deploy the target DGD:
+
+<div data-sku="b200" data-variant="agg">
+
+```bash
+kubectl apply -f recipes/glm-5.2/sglang/agg-b200-agentic/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="b200" data-variant="disagg">
+
+```bash
+kubectl apply -f recipes/glm-5.2/sglang/disagg-b200-agentic/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="h200" data-variant="agg">
+
+```bash
+kubectl apply -f recipes/glm-5.2/sglang/agg-h200-agentic/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="h200" data-variant="disagg">
+
+```bash
+kubectl apply -f recipes/glm-5.2/sglang/disagg-h200-agentic/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+## Smoke Test
+
+Send a test request to verify the deployment serves traffic. First forward the frontend port for your target:
+
+<div data-sku="b200" data-variant="agg">
+
+```bash
+kubectl port-forward svc/glm52-agg-b200-agentic-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="b200" data-variant="disagg">
+
+```bash
+kubectl port-forward svc/glm52-disagg-b200-agentic-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="h200" data-variant="agg">
+
+```bash
+kubectl port-forward svc/glm52-agg-h200-agentic-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="h200" data-variant="disagg">
+
+```bash
+kubectl port-forward svc/glm52-disagg-h200-agentic-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+All four targets serve under the same model name, `zai-org/GLM-5.2`:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"zai-org/GLM-5.2","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
+```
+
+GLM-5.2 reasons before answering. To get the answer in the `content` field instead of `reasoning_content`, disable thinking:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"zai-org/GLM-5.2","messages":[{"role":"user","content":"What is 17 times 24?"}],"chat_template_kwargs":{"enable_thinking":false},"max_tokens":64}'
+```
+
+## Benchmark
+
+A single AIPerf trace-replay Job — `perf/perf.yaml` — covers all four DGDs. It replays a Mooncake-format agentic trace (64K ISL / 400 OSL, 90% KV cache hit rate) at one concurrency value and writes artifacts to the shared `model-cache` PVC. The benchmark pod is co-located with a DGD frontend through `podAffinity`.
+
+Edit the `env` block in `perf/perf.yaml` to target your deployed DGD — set `ENDPOINT` to the matching frontend service and `SYNTHESIS_MAX_ISL` to its context limit:
+
+| Target | `ENDPOINT` | `SYNTHESIS_MAX_ISL` |
+| --- | --- | --- |
+| B200 aggregated | `glm52-agg-b200-agentic-frontend:8000` | `500000` |
+| B200 disaggregated | `glm52-disagg-b200-agentic-frontend:8000` | `500000` |
+| H200 aggregated | `glm52-agg-h200-agentic-frontend:8000` | `250000` |
+| H200 disaggregated | `glm52-disagg-h200-agentic-frontend:8000` | `250000` |
+
+Then run the Job:
+
+```bash
+kubectl apply -f recipes/glm-5.2/perf/perf.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/glm52-bench -n ${NAMESPACE} --timeout=7200s
+```
+
+For trace staging, concurrency sweeps, and fetching artifacts, see the [benchmark README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/perf/README.md).
+
+## Expected Performance
+
+Measured on the 15% agentic trace subset. System throughput is per-GPU output tokens per second; user throughput is the P50 per-request output rate.
+
+| | Concurrency | System output tok/s/GPU | User output tok/s (P50) | TTFT P50 (ms) |
+|---|---|---|---|---|
+| <span data-sku="b200" data-variant="agg">**B200 aggregated** (4 workers)</span><span data-sku="b200" data-variant="disagg">**B200 disaggregated** (3P1D)</span><span data-sku="h200" data-variant="agg">**H200 aggregated** (3 workers)</span><span data-sku="h200" data-variant="disagg">**H200 disaggregated** (1P1D)</span> | <span data-sku="b200" data-variant="agg">64</span><span data-sku="b200" data-variant="disagg">128</span><span data-sku="h200" data-variant="agg">32</span><span data-sku="h200" data-variant="disagg">24</span> | <span data-sku="b200" data-variant="agg">176.420</span><span data-sku="b200" data-variant="disagg">320.907</span><span data-sku="h200" data-variant="agg">54.550</span><span data-sku="h200" data-variant="disagg">68.860</span> | <span data-sku="b200" data-variant="agg">57.493</span><span data-sku="b200" data-variant="disagg">65.105</span><span data-sku="h200" data-variant="agg">52.370</span><span data-sku="h200" data-variant="disagg">53.880</span> | <span data-sku="b200" data-variant="agg">355.555</span><span data-sku="b200" data-variant="disagg">1938.059</span><span data-sku="h200" data-variant="agg">1790.000</span><span data-sku="h200" data-variant="disagg">1874.000</span> |
+
+## Compare All Targets
+
+All four targets serve GLM-5.2 on SGLang with KV-aware routing and EAGLE-style MTP speculative decoding (draft length 3, SpeedBench acceptance length 2.69), benchmarked on the same agentic trace:
+
+| | B200 aggregated | B200 disaggregated | H200 aggregated | H200 disaggregated |
+|---|---|---|---|---|
+| **Checkpoint** | nvidia/GLM-5.2-NVFP4 | nvidia/GLM-5.2-NVFP4 | zai-org/GLM-5.2-FP8 | zai-org/GLM-5.2-FP8 |
+| **Precision** | NVFP4 + FP8 KV | NVFP4 + FP8 KV | FP8 + FP8 KV | FP8 + FP8 KV |
+| **GPUs** | 4x B200 | 4x B200 prefill + 8x B200 decode | 8x H200 | 8x H200 prefill + 8x H200 decode |
+| **Parallelism** | DTP4 | DEP4 / DTP8 | TP8/EP8 | TP8/EP8 prefill / TP8/DP8/EP1 decode |
+| **KV offload** | HiCache CPU | HiCache CPU | None | None |
+| **Max context** | 500K | 500K | 250K | 250K |
+
+## Notes
+
+- Speculative decoding uses EAGLE-style MTP with draft length 3, measured at a SpeedBench acceptance length of 2.69.
+- All four targets use KV-aware routing at the frontend. The B200 targets add HiCache CPU offload; the agentic traces are shaped to show the value of KV-aware routing and offloading.
+- The disaggregated targets transfer KV over NIXL/UCX on InfiniBand.
+
+## Limitations
+
+- B200 targets support up to 500K context; the full 1M context length is not supported out of the box. H200 targets support up to 250K context.
+- Structured decoding requires reasoning to be disabled (`"chat_template_kwargs": {"enable_thinking": false}`) so the output lands in the `content` field instead of `reasoning_content`.
+- `n>1` requests are not supported with the disaggregated targets.
+
+## Source
+
+- Source README: [recipes/glm-5.2/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/README.md)
+- Benchmark README: [recipes/glm-5.2/perf/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/perf/README.md)
+- Aggregated B200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/sglang/agg-b200-agentic/deploy.yaml)
+- Disaggregated B200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/sglang/disagg-b200-agentic/deploy.yaml)
+- Aggregated H200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/sglang/agg-h200-agentic/deploy.yaml)
+- Disaggregated H200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/sglang/disagg-h200-agentic/deploy.yaml)
+- Setup assets: [model-cache.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/model-cache/model-cache.yaml) and [model-download.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/model-cache/model-download.yaml)
+- Benchmark manifest: [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/perf/perf.yaml)
