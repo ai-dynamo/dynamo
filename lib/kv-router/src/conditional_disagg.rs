@@ -291,7 +291,7 @@ impl ConditionalDisaggPolicy for RandomBypassConditionalDisaggPolicy {
         if !self.enabled {
             return false;
         }
-        rand::random::<f64>() < self.bypass_probability
+        fastrand::f64() < self.bypass_probability
     }
 }
 
