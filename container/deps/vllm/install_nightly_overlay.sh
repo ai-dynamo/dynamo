@@ -7,6 +7,8 @@ set -euo pipefail
 readonly EXPECTED_BASE_COMMIT=dcfebf93f4eccf30f71872283331eee757915daf
 readonly EXPECTED_BASE_DIGEST=sha256:7f2bc168366c77fbd8329368f00310d208531c14ece6c2de31a6611ef99f6ec8
 readonly EXPECTED_AMD64_DIGEST=sha256:99e7dd3cf74c489af0615671f3fdbde182de2930f1195a0ee39e914e38033a88
+readonly EXPECTED_BASE_DIGEST_HEX=${EXPECTED_BASE_DIGEST#sha256:}
+readonly EXPECTED_BASELINE_SBOM="vllm-openai@${EXPECTED_BASE_DIGEST_HEX:0:8}"
 readonly EXPECTED_VLLM_URL=https://github.com/vllm-project/vllm.git
 readonly EXPECTED_VLLM_REF=refs/pull/46877/head
 readonly EXPECTED_VLLM_HEAD=af259f998ff7301504829d2551c746502afe2f0a
@@ -172,6 +174,8 @@ validate_flashinfer_source() {
 [[ "$(uname -m)" == "x86_64" ]] || die "nightly overlay is x86_64-only"
 require_exact VLLM_RUNTIME_BASE_IMAGE "${VLLM_RUNTIME_BASE_IMAGE:-}" \
     "vllm/vllm-openai@${EXPECTED_BASE_DIGEST}"
+require_exact BASELINE_SBOM_FILE "${BASELINE_SBOM_FILE:-}" \
+    "${EXPECTED_BASELINE_SBOM}"
 require_exact VLLM_GIT_URL "${VLLM_GIT_URL:-}" "${EXPECTED_VLLM_URL}"
 require_exact VLLM_GIT_REF "${VLLM_GIT_REF:-}" "${EXPECTED_VLLM_REF}"
 require_exact VLLM_GIT_SHA "${VLLM_GIT_SHA:-}" "${EXPECTED_VLLM_HEAD}"
@@ -253,6 +257,7 @@ install_mode=python-overlay
 vllm_runtime_base_image=${VLLM_RUNTIME_BASE_IMAGE}
 vllm_runtime_index_digest=${EXPECTED_BASE_DIGEST}
 vllm_runtime_amd64_digest=${EXPECTED_AMD64_DIGEST}
+vllm_runtime_baseline_sbom=${BASELINE_SBOM_FILE}
 vllm_base_commit=${EXPECTED_BASE_COMMIT}
 vllm_source_url=${EXPECTED_VLLM_URL}
 vllm_source_ref=${EXPECTED_VLLM_REF}

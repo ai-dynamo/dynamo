@@ -123,6 +123,28 @@ def resolve_index_digest(ref: str) -> str:
     return "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
+def resolve_platform_digest(ref: str, platform: str) -> str:
+    """Return the immutable manifest digest selected for ``platform``."""
+    raw = _imagetools_raw(ref)
+    parsed = json.loads(raw)
+
+    if "manifests" not in parsed:
+        return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+    os_part, arch_part = platform.split("/", 1)
+    for entry in parsed["manifests"]:
+        p = entry.get("platform", {}) or {}
+        if p.get("os") == os_part and p.get("architecture") == arch_part:
+            return entry["digest"]
+    raise ValueError(
+        f"no platform {platform} in {ref}; available: "
+        + ", ".join(
+            f"{e.get('platform', {}).get('os')}/{e.get('platform', {}).get('architecture')}"
+            for e in parsed["manifests"]
+        )
+    )
+
+
 def resolve_platform_layers(ref: str, platform: str) -> list[str]:
     """Return the ordered layer digest list for `ref` on `platform`.
 
@@ -570,11 +592,13 @@ def capture(
     try:
         from_digest = resolve_index_digest(from_ref)
         baseline_digest = resolve_index_digest(baseline_ref)
+        baseline_platform_digest = resolve_platform_digest(baseline_ref, platform)
     except subprocess.CalledProcessError as exc:
         logger.error("Registry inspect failed: %s", (exc.stderr or b"").decode())
         return 2
     logger.info("  from_image     %s @ %s", from_ref, from_digest)
     logger.info("  baseline_image %s @ %s", baseline_ref, baseline_digest)
+    logger.info("  baseline %s @ %s", platform, baseline_platform_digest)
 
     # Cache-key paths. Both keys include the manifest digest, so a rebuilt
     # vendor tag (different digest) naturally invalidates the cache — no
@@ -761,6 +785,7 @@ def capture(
         "baseline_image": baseline_image,
         "baseline_tag": baseline_tag,
         "baseline_digest": baseline_digest,
+        "baseline_platform_digest": baseline_platform_digest,
         "baseline_sbom": sbom_filename,
         "platform": platform,
     }

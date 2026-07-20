@@ -46,6 +46,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from capture_baseline_sbom import (  # noqa: E402
     resolve_index_digest,
+    resolve_platform_digest,
     resolve_platform_layers,
 )
 
@@ -109,6 +110,24 @@ def check_entry(entry: dict) -> list[str]:
             f"      action  : rerun capture_baseline_sbom.py "
             f"--from {from_ref} --baseline {baseline_ref}"
         )
+
+    # Check the platform manifest when capture recorded it. The index digest
+    # already binds every child manifest cryptographically; recording the child
+    # as well proves which platform image the committed SBOM actually scanned.
+    if entry.get("baseline_platform_digest"):
+        try:
+            platform_current = resolve_platform_digest(baseline_ref, platform)
+        except (subprocess.CalledProcessError, ValueError) as exc:
+            problems.append(f"{baseline_ref}: platform-manifest lookup failed ({exc})")
+        else:
+            if platform_current != entry["baseline_platform_digest"]:
+                problems.append(
+                    f"{baseline_ref}: PLATFORM-MANIFEST DRIFT ({platform})\n"
+                    f"      recorded: {entry['baseline_platform_digest']}\n"
+                    f"      current : {platform_current}\n"
+                    f"      action  : rerun capture_baseline_sbom.py "
+                    f"--from {from_ref} --baseline {baseline_ref}"
+                )
 
     # Check 3: layer-prefix invariant. Skipped only if explicitly opted out
     # at capture time (recorded on the entry).

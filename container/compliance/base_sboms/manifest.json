@@ -80,6 +80,17 @@
       "platform": "linux/amd64"
     },
     {
+      "baseline_digest": "sha256:7f2bc168366c77fbd8329368f00310d208531c14ece6c2de31a6611ef99f6ec8",
+      "baseline_image": "vllm/vllm-openai",
+      "baseline_platform_digest": "sha256:99e7dd3cf74c489af0615671f3fdbde182de2930f1195a0ee39e914e38033a88",
+      "baseline_sbom": "vllm-openai@7f2bc168-amd64.cdx.json",
+      "baseline_tag": "nightly-dcfebf93f4eccf30f71872283331eee757915daf",
+      "from_digest": "sha256:7f2bc168366c77fbd8329368f00310d208531c14ece6c2de31a6611ef99f6ec8",
+      "from_image": "vllm/vllm-openai",
+      "from_tag": "nightly-dcfebf93f4eccf30f71872283331eee757915daf",
+      "platform": "linux/amd64"
+    },
+    {
       "baseline_digest": "sha256:043085f9298b5da0d79bfd91e162b04c0661f3cb2f03202c5b912037cf6c1ba6",
       "baseline_image": "nvcr.io/nvidia/distroless/python",
       "baseline_sbom": "python@043085f9-amd64.cdx.json",
@@ -123,6 +134,7 @@
   "entry_schema": {
     "baseline_digest": "manifest-list digest of baseline_image at capture time",
     "baseline_image": "engineer-specified compliance floor (upstream owns below; we own above)",
+    "baseline_platform_digest": "(optional) immutable child manifest selected for platform when captured",
     "baseline_sbom": "filename of the slim CycloneDX SBOM of the baseline in this directory",
     "baseline_tag": "registry tag of baseline_image",
     "from_digest": "manifest-list digest of from_image at capture time",
@@ -132,6 +144,6 @@
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
   "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB per file.",
-  "generated_at": "2026-07-09T16:26:09+00:00",
+  "generated_at": "2026-07-20T12:12:32+00:00",
   "schema_version": 2
 }

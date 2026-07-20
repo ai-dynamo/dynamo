@@ -102,6 +102,7 @@ jobs:
         ${{ inputs.build_vllm_placeholder && 'VLLM_GIT_REF=refs/pull/46877/head' || '' }}
         ${{ inputs.build_vllm_placeholder && 'VLLM_GIT_SHA=af259f998ff7301504829d2551c746502afe2f0a' || '' }}
         ${{ inputs.build_vllm_placeholder && 'VLLM_INSTALL_MODE=python-overlay' || '' }}
+        ${{ inputs.build_vllm_placeholder && 'BASELINE_SBOM_FILE=vllm-openai@7f2bc168' || '' }}
         ${{ inputs.build_vllm_placeholder && 'VLLM_RUNTIME_BASE_IMAGE=vllm/vllm-openai@sha256:7f2bc168366c77fbd8329368f00310d208531c14ece6c2de31a6611ef99f6ec8' || '' }}
     secrets: inherit
 
