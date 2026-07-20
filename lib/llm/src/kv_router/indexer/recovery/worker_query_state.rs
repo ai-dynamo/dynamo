@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 
 use dynamo_kv_router::{
     protocols::{DpRank, KvCacheEventData, RouterEvent, WorkerId},
@@ -10,87 +10,142 @@ use dynamo_kv_router::{
 
 pub(super) type RecoveryKey = (WorkerId, DpRank);
 
-pub(super) const RECOVERY_PENDING_LIVE_EVENT_LIMIT: usize = 1024;
-pub(super) const RECOVERY_PENDING_FAST_PRUNE_MARGIN: usize = 10;
+const RECOVERY_PENDING_LIVE_EVENT_LIMIT: usize = 1024;
+const RECOVERY_PENDING_FAST_PRUNE_MARGIN: usize = 10;
 
 pub(super) enum LiveEventAction {
     Ignore,
-    ApplyDirect(RouterEvent),
-    ApplyClear(RouterEvent),
-    SpawnFullRestore { epoch: u64 },
-    SpawnIncremental { epoch: u64, start_event_id: u64 },
+    Apply {
+        event_id: u64,
+        event: RouterEvent,
+    },
+    Clear {
+        event_id: u64,
+        event: RouterEvent,
+    },
+    Recover {
+        start_event_id: Option<u64>,
+        end_event_id: Option<u64>,
+        reset: bool,
+    },
+    ResetDegraded {
+        event: RouterEvent,
+    },
 }
 
-pub(super) struct DiscoveredRankAction {
-    pub(super) reset_rank: bool,
-    pub(super) restore_epoch: Option<u64>,
-}
-
-pub(super) enum PendingDrainAction {
-    Apply(RouterEvent),
-    RecoverFrom(u64),
-    Complete,
-}
-
-#[derive(Debug, Default)]
-pub(super) struct RankState {
+pub(super) struct PendingDrainPlan {
+    pub(super) events: Vec<RouterEvent>,
     pub(super) cursor: CursorState,
-    pub(super) max_seen_live_id: Option<u64>,
+    pub(super) next_recovery_start: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct RankState {
+    /// NOTE: This coordinator tracks the last event successfully admitted to the indexer's
+    /// per-worker FIFO, not confirmed backend application. A trailing `Flush` proves queue
+    /// progress, not event success. Stronger applied-state semantics require an explicit
+    /// batch-result acknowledgement. Plan without mutating this cursor, advance only after every
+    /// event in the commit group is admitted, and fence/reset on partial admission failure.
+    pub(super) cursor: CursorState,
     pub(super) recovery_inflight: bool,
-    pub(super) pending_live_events: VecDeque<RouterEvent>,
+    pending_live_events: VecDeque<RouterEvent>,
+    max_seen_live_id: Option<u64>,
 }
 
 impl RankState {
-    pub(super) fn last_applied_id(&self) -> Option<u64> {
+    pub(super) fn activate(&mut self, recoverable: bool) {
+        *self = Self {
+            recovery_inflight: recoverable,
+            ..Self::default()
+        };
+    }
+
+    pub(super) fn last_admitted_id(&self) -> Option<u64> {
         self.cursor.last_applied_id()
     }
 
-    pub(super) fn observe_live_id(&mut self, event_id: u64) {
-        self.max_seen_live_id = Some(self.max_seen_live_id.unwrap_or(0).max(event_id));
-    }
+    pub(super) fn observe_live_event(
+        &mut self,
+        event: RouterEvent,
+        recoverable: bool,
+    ) -> LiveEventAction {
+        let event_id = event.event.event_id;
 
-    fn clear_max_seen_if_caught_up(&mut self, last_applied_id: u64) {
-        if self
-            .max_seen_live_id
-            .is_some_and(|max_seen| max_seen <= last_applied_id)
-        {
-            self.max_seen_live_id = None;
+        if matches!(&event.event.data, KvCacheEventData::Cleared) {
+            if self
+                .last_admitted_id()
+                .is_some_and(|last_admitted_id| event_id <= last_admitted_id)
+            {
+                return LiveEventAction::Ignore;
+            }
+            return LiveEventAction::Clear { event_id, event };
+        }
+
+        match self.cursor.observe(event_id) {
+            CursorObservation::Stale { .. } => LiveEventAction::Ignore,
+            observation if self.recovery_inflight => {
+                if matches!(
+                    observation,
+                    CursorObservation::Initial { .. }
+                        | CursorObservation::Contiguous { .. }
+                        | CursorObservation::Gap { .. }
+                ) {
+                    self.observe_and_buffer(event);
+                }
+                LiveEventAction::Ignore
+            }
+            CursorObservation::Initial { .. } if recoverable => {
+                self.observe_and_buffer(event.clone());
+                self.recovery_inflight = true;
+                LiveEventAction::Recover {
+                    start_event_id: None,
+                    end_event_id: None,
+                    reset: false,
+                }
+            }
+            CursorObservation::Gap { .. } if recoverable => {
+                self.observe_and_buffer(event);
+                self.recovery_inflight = true;
+                LiveEventAction::Recover {
+                    start_event_id: None,
+                    end_event_id: None,
+                    reset: true,
+                }
+            }
+            CursorObservation::Gap { .. } => LiveEventAction::ResetDegraded { event },
+            CursorObservation::Initial { got } | CursorObservation::Contiguous { got } => {
+                LiveEventAction::Apply {
+                    event_id: got,
+                    event,
+                }
+            }
         }
     }
 
-    fn observe_and_buffer_live_event(&mut self, event: RouterEvent) {
-        self.observe_live_id(event.event.event_id);
-        self.push_pending_live_event(event);
+    pub(super) fn commit_live_admission(&mut self, event_id: u64) {
+        self.cursor = self.cursor.advance_to(event_id);
+        self.clear_max_seen_if_caught_up(event_id);
     }
 
-    fn push_pending_live_event(&mut self, event: RouterEvent) {
-        self.pending_live_events.push_back(event);
-        while self.pending_live_events.len() > RECOVERY_PENDING_LIVE_EVENT_LIMIT {
-            self.pending_live_events.pop_front();
-        }
+    pub(super) fn begin_successful_recovery_drain(&mut self, cursor: CursorState) {
+        self.cursor = cursor;
+        self.recovery_inflight = true;
     }
 
-    fn clear_pending_live_events(&mut self) {
+    pub(super) fn discard_recovery_before_clear(&mut self) {
+        self.recovery_inflight = false;
         self.pending_live_events.clear();
+        self.max_seen_live_id = None;
     }
 
-    fn fast_prune_stale_pending_prefix(&mut self, last_applied_id: u64) {
-        if self.pending_live_events.len() <= RECOVERY_PENDING_FAST_PRUNE_MARGIN {
-            return;
-        }
-
-        let split_at = self.pending_live_events.len() - RECOVERY_PENDING_FAST_PRUNE_MARGIN;
-        let Some(boundary_event) = self.pending_live_events.get(split_at) else {
-            return;
-        };
-        if boundary_event.event.event_id <= last_applied_id {
-            self.pending_live_events.drain(..split_at);
-        }
-    }
-
-    fn next_pending_drain_action(&mut self) -> PendingDrainAction {
-        let mut last_applied_id = self.last_applied_id().unwrap_or(0);
-        self.fast_prune_stale_pending_prefix(last_applied_id);
+    pub(super) fn plan_pending_drain(&mut self) -> PendingDrainPlan {
+        let mut last_admitted_id = self.last_admitted_id().unwrap_or(0);
+        let mut cursor = self.cursor;
+        self.pending_live_events
+            .make_contiguous()
+            .sort_unstable_by_key(|event| event.event.event_id);
+        self.fast_prune_stale_pending_prefix(last_admitted_id);
+        let mut events = Vec::new();
 
         loop {
             let Some(front_event_id) = self
@@ -98,179 +153,111 @@ impl RankState {
                 .front()
                 .map(|event| event.event.event_id)
             else {
-                self.clear_max_seen_if_caught_up(last_applied_id);
+                self.clear_max_seen_if_caught_up(last_admitted_id);
                 if self
                     .max_seen_live_id
-                    .is_some_and(|max_seen| max_seen > last_applied_id)
+                    .is_some_and(|max_seen| max_seen > last_admitted_id)
                 {
-                    return PendingDrainAction::RecoverFrom(last_applied_id.saturating_add(1));
+                    return PendingDrainPlan {
+                        events,
+                        cursor,
+                        next_recovery_start: Some(last_admitted_id.saturating_add(1)),
+                    };
                 }
-                self.recovery_inflight = false;
-                return PendingDrainAction::Complete;
+                return PendingDrainPlan {
+                    events,
+                    cursor,
+                    next_recovery_start: None,
+                };
             };
 
-            if front_event_id <= last_applied_id {
+            if front_event_id <= last_admitted_id {
                 self.pending_live_events.pop_front();
                 continue;
             }
 
-            let expected = last_applied_id.saturating_add(1);
+            let expected = last_admitted_id.saturating_add(1);
             if front_event_id != expected {
-                return PendingDrainAction::RecoverFrom(expected);
+                return PendingDrainPlan {
+                    events,
+                    cursor,
+                    next_recovery_start: Some(expected),
+                };
             }
 
             let event = self
                 .pending_live_events
                 .pop_front()
                 .expect("front event exists while draining pending live events");
-            self.cursor = self.cursor.advance_to(front_event_id);
-            last_applied_id = front_event_id;
-            self.clear_max_seen_if_caught_up(last_applied_id);
-            return PendingDrainAction::Apply(event);
+            last_admitted_id = front_event_id;
+            cursor = cursor.advance_to(front_event_id);
+            events.push(event);
         }
     }
-}
 
-#[derive(Debug, Default)]
-pub(super) struct WorkerState {
-    pub(super) epoch: u64,
-    pub(super) ranks: HashMap<DpRank, RankState>,
-}
-
-impl WorkerState {
-    pub(super) fn handle_discovered_rank(
+    pub(super) fn commit_pending_drain(
         &mut self,
-        dp_rank: DpRank,
-        reset_rank: bool,
-    ) -> DiscoveredRankAction {
-        if reset_rank {
-            self.epoch += 1;
-            self.ranks.insert(dp_rank, RankState::default());
-        }
-
-        let rank_state = self.ranks.entry(dp_rank).or_default();
-        let restore_epoch =
-            if matches!(rank_state.cursor, CursorState::Initial) && !rank_state.recovery_inflight {
-                rank_state.recovery_inflight = true;
-                Some(self.epoch)
-            } else {
-                None
-            };
-
-        DiscoveredRankAction {
-            reset_rank,
-            restore_epoch,
-        }
-    }
-
-    pub(super) fn remove_rank(&mut self, dp_rank: DpRank) -> bool {
-        self.ranks.remove(&dp_rank).is_some()
-    }
-
-    pub(super) fn is_empty(&self) -> bool {
-        self.ranks.is_empty()
-    }
-
-    pub(super) fn observe_live_event(&mut self, event: RouterEvent) -> LiveEventAction {
-        let dp_rank = event.event.dp_rank;
-        let event_id = event.event.event_id;
-
-        if matches!(&event.event.data, KvCacheEventData::Cleared) {
-            let rank_state = self.ranks.entry(dp_rank).or_default();
-            if rank_state
-                .last_applied_id()
-                .is_some_and(|last_applied_id| event_id <= last_applied_id)
-            {
-                return LiveEventAction::Ignore;
-            }
-
-            self.apply_worker_clear_barrier(dp_rank, event_id);
-            return LiveEventAction::ApplyClear(event);
-        }
-
-        let rank_state = self.ranks.entry(dp_rank).or_default();
-        match rank_state.cursor.observe(event_id) {
-            CursorObservation::Stale { .. } => LiveEventAction::Ignore,
-            observation if rank_state.recovery_inflight => {
-                match observation {
-                    CursorObservation::Initial { .. }
-                    | CursorObservation::Contiguous { .. }
-                    | CursorObservation::Gap { .. }
-                    | CursorObservation::FreshAfterBarrier { .. } => {
-                        rank_state.observe_and_buffer_live_event(event);
-                    }
-                    CursorObservation::Stale { .. } => {}
-                }
-                LiveEventAction::Ignore
-            }
-            CursorObservation::Initial { .. } => {
-                rank_state.observe_and_buffer_live_event(event);
-                rank_state.recovery_inflight = true;
-                LiveEventAction::SpawnFullRestore { epoch: self.epoch }
-            }
-            CursorObservation::Gap { expected, .. } => {
-                rank_state.observe_and_buffer_live_event(event);
-                rank_state.recovery_inflight = true;
-                LiveEventAction::SpawnIncremental {
-                    epoch: self.epoch,
-                    start_event_id: expected,
-                }
-            }
-            CursorObservation::Contiguous { got }
-            | CursorObservation::FreshAfterBarrier { got, .. } => {
-                rank_state.cursor = rank_state.cursor.advance_to(got);
-                rank_state.clear_max_seen_if_caught_up(got);
-                LiveEventAction::ApplyDirect(event)
-            }
-        }
-    }
-
-    pub(super) fn apply_worker_clear_barrier(
-        &mut self,
-        clear_dp_rank: DpRank,
-        clear_event_id: u64,
+        cursor: CursorState,
+        next_recovery_start: Option<u64>,
     ) {
-        self.epoch += 1;
-        for rank_state in self.ranks.values_mut() {
-            let post_clear_max_seen = rank_state
-                .max_seen_live_id
-                .filter(|max_seen| *max_seen > clear_event_id);
-            rank_state.cursor = rank_state.cursor.invalidate_by_barrier();
-            rank_state.max_seen_live_id = post_clear_max_seen;
-            rank_state.recovery_inflight = false;
-            rank_state.clear_pending_live_events();
+        self.cursor = cursor;
+        self.clear_max_seen_if_caught_up(self.last_admitted_id().unwrap_or(0));
+        self.recovery_inflight = next_recovery_start.is_some();
+    }
+
+    pub(super) fn finish_failed_recovery(&mut self) {
+        self.recovery_inflight = false;
+        self.pending_live_events.clear();
+        self.max_seen_live_id = None;
+    }
+
+    pub(super) fn take_failed_recovery_degraded(&mut self) -> Vec<RouterEvent> {
+        let last_admitted_id = self.last_admitted_id().unwrap_or(0);
+        let mut events: Vec<_> = self.pending_live_events.drain(..).collect();
+        events.sort_unstable_by_key(|event| event.event.event_id);
+        events.dedup_by_key(|event| event.event.event_id);
+        events.retain(|event| event.event.event_id > last_admitted_id);
+        events
+    }
+
+    pub(super) fn commit_failed_recovery_degraded(&mut self, last_event_id: Option<u64>) {
+        if let Some(last_event_id) = last_event_id {
+            self.cursor = self.cursor.advance_to(last_event_id);
         }
-
-        let rank_state = self.ranks.entry(clear_dp_rank).or_default();
-        rank_state.cursor = rank_state.cursor.apply_barrier(clear_event_id);
+        self.recovery_inflight = false;
+        self.max_seen_live_id = None;
     }
 
-    pub(super) fn rank_cursor(&self, dp_rank: DpRank) -> Option<CursorState> {
-        self.ranks.get(&dp_rank).map(|rank_state| rank_state.cursor)
+    fn observe_and_buffer(&mut self, event: RouterEvent) {
+        let event_id = event.event.event_id;
+        self.max_seen_live_id = Some(self.max_seen_live_id.unwrap_or(0).max(event_id));
+        self.pending_live_events.push_back(event);
+        while self.pending_live_events.len() > RECOVERY_PENDING_LIVE_EVENT_LIMIT {
+            self.pending_live_events.pop_front();
+        }
     }
 
-    pub(super) fn begin_successful_recovery_drain(&mut self, dp_rank: DpRank, cursor: CursorState) {
-        let rank_state = self
-            .ranks
-            .get_mut(&dp_rank)
-            .expect("rank state should exist while finishing recovery");
-        rank_state.cursor = cursor;
-        rank_state.recovery_inflight = true;
+    fn clear_max_seen_if_caught_up(&mut self, last_admitted_id: u64) {
+        if self
+            .max_seen_live_id
+            .is_some_and(|max_seen| max_seen <= last_admitted_id)
+        {
+            self.max_seen_live_id = None;
+        }
     }
 
-    pub(super) fn next_pending_drain_action(&mut self, dp_rank: DpRank) -> PendingDrainAction {
-        let Some(rank_state) = self.ranks.get_mut(&dp_rank) else {
-            return PendingDrainAction::Complete;
-        };
-        rank_state.next_pending_drain_action()
-    }
-
-    pub(super) fn finish_failed_recovery(&mut self, dp_rank: DpRank) {
-        let Some(rank_state) = self.ranks.get_mut(&dp_rank) else {
+    fn fast_prune_stale_pending_prefix(&mut self, last_admitted_id: u64) {
+        if self.pending_live_events.len() <= RECOVERY_PENDING_FAST_PRUNE_MARGIN {
             return;
-        };
-        rank_state.recovery_inflight = false;
-        rank_state.clear_pending_live_events();
+        }
+        let split_at = self.pending_live_events.len() - RECOVERY_PENDING_FAST_PRUNE_MARGIN;
+        if self
+            .pending_live_events
+            .get(split_at)
+            .is_some_and(|event| event.event.event_id <= last_admitted_id)
+        {
+            self.pending_live_events.drain(..split_at);
+        }
     }
 }
 
@@ -282,7 +269,7 @@ mod tests {
         LocalBlockHash,
     };
 
-    fn make_store_event(event_id: u64) -> RouterEvent {
+    fn store(event_id: u64) -> RouterEvent {
         RouterEvent::new(
             1,
             KvCacheEvent {
@@ -301,48 +288,96 @@ mod tests {
         )
     }
 
-    fn pending_ids(rank_state: &RankState) -> Vec<u64> {
-        rank_state
-            .pending_live_events
-            .iter()
-            .map(|event| event.event.event_id)
-            .collect()
+    #[test]
+    fn live_only_source_accepts_first_event_without_recovery() {
+        let mut state = RankState::default();
+        let action = state.observe_live_event(store(9), false);
+        assert!(matches!(action, LiveEventAction::Apply { event_id: 9, .. }));
+        assert_eq!(state.last_admitted_id(), None);
+        state.commit_live_admission(9);
+        assert_eq!(state.last_admitted_id(), Some(9));
     }
 
     #[test]
-    fn test_pending_fast_prune_keeps_margin_before_normal_drain() {
-        let mut rank_state = RankState {
-            cursor: CursorState::Live(35),
-            recovery_inflight: true,
-            ..Default::default()
-        };
-        for event_id in 1..=40 {
-            rank_state.push_pending_live_event(make_store_event(event_id));
-        }
-
-        match rank_state.next_pending_drain_action() {
-            PendingDrainAction::Apply(event) => assert_eq!(event.event.event_id, 36),
-            _ => panic!("expected first non-stale contiguous pending event to apply"),
-        }
-        assert_eq!(pending_ids(&rank_state), vec![37, 38, 39, 40]);
+    fn recoverable_source_buffers_until_restore() {
+        let mut state = RankState::default();
+        assert!(matches!(
+            state.observe_live_event(store(9), true),
+            LiveEventAction::Recover {
+                start_event_id: None,
+                end_event_id: None,
+                reset: false,
+            }
+        ));
+        assert!(state.recovery_inflight);
     }
 
     #[test]
-    fn test_pending_stale_gappy_queue_after_recovery_completes_without_follow_up() {
-        let mut rank_state = RankState {
-            cursor: CursorState::Live(20),
-            recovery_inflight: true,
-            ..Default::default()
-        };
-        for event_id in [13, 14, 18, 19] {
-            rank_state.push_pending_live_event(make_store_event(event_id));
-        }
+    fn gap_recovery_buffers_and_drains_live_events_in_event_id_order() {
+        let mut state = RankState::default();
+        assert!(matches!(
+            state.observe_live_event(store(1), false),
+            LiveEventAction::Apply { event_id: 1, .. }
+        ));
+        state.commit_live_admission(1);
 
-        match rank_state.next_pending_drain_action() {
-            PendingDrainAction::Complete => {}
-            _ => panic!("expected stale pending queue to complete without follow-up"),
-        }
-        assert!(rank_state.pending_live_events.is_empty());
-        assert!(!rank_state.recovery_inflight);
+        assert!(matches!(
+            state.observe_live_event(store(4), true),
+            LiveEventAction::Recover {
+                start_event_id: None,
+                end_event_id: None,
+                reset: true,
+            }
+        ));
+        assert!(matches!(
+            state.observe_live_event(store(3), true),
+            LiveEventAction::Ignore
+        ));
+        assert_eq!(state.last_admitted_id(), Some(1));
+
+        state.begin_successful_recovery_drain(CursorState::Initial.advance_to(2));
+        let plan = state.plan_pending_drain();
+        assert_eq!(
+            plan.events
+                .iter()
+                .map(|event| event.event.event_id)
+                .collect::<Vec<_>>(),
+            vec![3, 4]
+        );
+        assert_eq!(plan.cursor.last_applied_id(), Some(4));
+        assert_eq!(plan.next_recovery_start, None);
+        assert_eq!(state.last_admitted_id(), Some(2));
+        state.commit_pending_drain(plan.cursor, plan.next_recovery_start);
+        assert_eq!(state.last_admitted_id(), Some(4));
+        assert!(!state.recovery_inflight);
+    }
+
+    #[test]
+    fn clear_supersedes_same_rank_gap_recovery() {
+        let mut state = RankState::default();
+        assert!(matches!(
+            state.observe_live_event(store(1), false),
+            LiveEventAction::Apply { event_id: 1, .. }
+        ));
+        state.commit_live_admission(1);
+        assert!(matches!(
+            state.observe_live_event(store(4), true),
+            LiveEventAction::Recover { reset: true, .. }
+        ));
+
+        let mut clear = store(5);
+        clear.event.data = KvCacheEventData::Cleared;
+        assert!(matches!(
+            state.observe_live_event(clear, true),
+            LiveEventAction::Clear { event_id: 5, .. }
+        ));
+        state.discard_recovery_before_clear();
+        state.commit_live_admission(5);
+
+        assert!(!state.recovery_inflight);
+        assert!(matches!(
+            state.observe_live_event(store(6), true),
+            LiveEventAction::Apply { event_id: 6, .. }
+        ));
     }
 }

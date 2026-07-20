@@ -11,7 +11,6 @@ use dynamo_kv_router::{
 };
 use dynamo_runtime::{
     component::{Component, Instance},
-    discovery::EndpointInstanceId,
     pipeline::{AddressedPushRouter, AddressedRequest, AsyncEngine, ManyOut, SingleIn},
     protocols::maybe_error::MaybeError,
 };
@@ -27,12 +26,6 @@ pub(super) trait WorkerQueryTransport: Send + Sync {
         start_event_id: Option<u64>,
         end_event_id: Option<u64>,
     ) -> Result<WorkerKvQueryResponse>;
-
-    async fn cancel_instance_streams(&self, _endpoint_id: &EndpointInstanceId) -> usize {
-        0
-    }
-
-    async fn clear_instance_tombstone(&self, _endpoint_id: &EndpointInstanceId) {}
 }
 
 pub(super) struct RuntimeWorkerQueryTransport {
@@ -89,13 +82,5 @@ impl WorkerQueryTransport for RuntimeWorkerQueryTransport {
         }
 
         Ok(response)
-    }
-
-    async fn cancel_instance_streams(&self, endpoint_id: &EndpointInstanceId) -> usize {
-        self.addressed.cancel_instance_streams(endpoint_id).await
-    }
-
-    async fn clear_instance_tombstone(&self, endpoint_id: &EndpointInstanceId) {
-        self.addressed.clear_instance_tombstone(endpoint_id).await;
     }
 }

@@ -1418,6 +1418,31 @@ mod interface_tests {
     }
 
     #[tokio::test]
+    #[apply(indexer_template)]
+    async fn test_acknowledged_rank_reset_orders_after_accepted_events(variant: &str) {
+        let workers = [WorkerWithDpRank::new(7, 0), WorkerWithDpRank::new(7, 1)];
+        let index = make_indexer(variant);
+        index
+            .apply_event(make_store_event_with_dp_rank(7, &[1, 2, 3], 0))
+            .await;
+        index
+            .apply_event(make_store_event_with_dp_rank(7, &[1, 2, 3], 1))
+            .await;
+
+        index.reset_worker_dp_rank_and_wait(7, 0).await.unwrap();
+
+        assert_query_scores_with_semantics(
+            variant,
+            index.as_ref(),
+            &[1, 2, 3],
+            &workers,
+            &[(workers[1], 3)],
+            MatchSemantics::Exact,
+        )
+        .await;
+    }
+
+    #[tokio::test]
     #[apply(matching_indexer_template)]
     async fn test_partial_block_removal(variant: &str) {
         let worker = WorkerWithDpRank::new(0, 0);
@@ -1690,7 +1715,7 @@ mod interface_tests {
 
     #[tokio::test]
     #[apply(matching_indexer_template)]
-    async fn test_clear_clears_all_dp_ranks(variant: &str) {
+    async fn test_clear_only_removes_target_dp_rank(variant: &str) {
         let workers = [WorkerWithDpRank::new(0, 0), WorkerWithDpRank::new(0, 1)];
         let index = make_matching_indexer(variant, &workers);
 
@@ -1716,14 +1741,21 @@ mod interface_tests {
             MatchSemantics::Exact,
         );
 
-        // Clear event clears ALL blocks for the worker_id, regardless of dp_rank
+        // A clear is ordered within and applies only to its emitting rank.
         index.apply_event(make_clear_event_with_dp_rank(0, 0)).await;
 
         flush_and_settle(index.as_ref()).await;
 
-        // Both dp_ranks should be cleared
+        // Rank 0 is cleared while rank 1 retains the same sequence.
         let scores = index.find_matches(seq).await.unwrap();
-        assert_scores_with_semantics(variant, &scores, 3, &workers, &[], MatchSemantics::Exact);
+        assert_scores_with_semantics(
+            variant,
+            &scores,
+            3,
+            &workers,
+            &[(workers[1], 3)],
+            MatchSemantics::Exact,
+        );
     }
 }
 
@@ -3217,8 +3249,6 @@ mod local_indexer_tests {
 /// known positional-indexer limitation skipped by `test_remove_mid_chain_block`).
 #[tokio::test]
 async fn positional_binary_matches_strided_differential() {
-    use rand::{Rng, SeedableRng, rngs::StdRng};
-
     // Pin both modes explicitly (not via make_indexer, whose "flat" arm reads the env var) so the
     // comparison is genuinely strided-vs-binary regardless of any ambient DYN_ROUTER_* setting.
     let strided: Box<dyn KvIndexerInterface> = Box::new(ThreadPoolIndexer::new_with_metrics(
@@ -3234,10 +3264,10 @@ async fn positional_binary_matches_strided_differential() {
         None,
     ));
 
-    let mut rng = StdRng::seed_from_u64(0xC0FF_EED1_FF5E_ED42);
+    let mut rng = fastrand::Rng::with_seed(0xC0FF_EED1_FF5E_ED42);
 
     const BASE_LEN: usize = 1300;
-    let base: Vec<u64> = (0..BASE_LEN).map(|_| rng.random::<u64>()).collect();
+    let base: Vec<u64> = (0..BASE_LEN).map(|_| rng.u64(..)).collect();
 
     // Build the shared event stream once, then apply identical clones to both indexers.
     let mut events: Vec<RouterEvent> = Vec::new();
@@ -3252,9 +3282,9 @@ async fn positional_binary_matches_strided_differential() {
     ];
     for (i, &d) in divergence_points.iter().enumerate() {
         let worker_id = (i + 1) as u64;
-        let tail_len = 1 + rng.random_range(0..40usize);
+        let tail_len = 1 + rng.usize(0..40);
         let mut seq = base[..d].to_vec();
-        seq.extend((0..tail_len).map(|_| rng.random::<u64>()));
+        seq.extend((0..tail_len).map(|_| rng.u64(..)));
         events.push(make_store_event(worker_id, &seq));
     }
 
@@ -3274,10 +3304,10 @@ async fn positional_binary_matches_strided_differential() {
 
     // Build the query set, starting with edge cases.
     let mut queries: Vec<Vec<u64>> = vec![
-        vec![],                                         // empty
-        vec![base[0]],                                  // single element (hit)
-        vec![rng.random::<u64>()],                      // single element (miss)
-        (0..50).map(|_| rng.random::<u64>()).collect(), // pure miss
+        vec![],                                 // empty
+        vec![base[0]],                          // single element (hit)
+        vec![rng.u64(..)],                      // single element (miss)
+        (0..50).map(|_| rng.u64(..)).collect(), // pure miss
     ];
 
     // Base prefixes of many lengths, including jump_size boundaries.
@@ -3295,17 +3325,17 @@ async fn positional_binary_matches_strided_differential() {
 
     // Random divergent queries: a base prefix of random length plus a random tail.
     for _ in 0..600 {
-        let p = rng.random_range(0..BASE_LEN);
-        let tail_len = rng.random_range(0..30usize);
+        let p = rng.usize(0..BASE_LEN);
+        let tail_len = rng.usize(0..30);
         let mut q = base[..p].to_vec();
-        q.extend((0..tail_len).map(|_| rng.random::<u64>()));
+        q.extend((0..tail_len).map(|_| rng.u64(..)));
         queries.push(q);
     }
 
     // Fully random queries.
     for _ in 0..600 {
-        let len = rng.random_range(0..(BASE_LEN + 10));
-        queries.push((0..len).map(|_| rng.random::<u64>()).collect());
+        let len = rng.usize(0..(BASE_LEN + 10));
+        queries.push((0..len).map(|_| rng.u64(..)).collect());
     }
 
     for q in &queries {

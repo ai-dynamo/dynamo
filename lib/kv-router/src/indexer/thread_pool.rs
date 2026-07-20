@@ -471,20 +471,72 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         Ok(())
     }
 
-    /// Wait until all previously queued worker tasks have completed.
+    /// Enqueue an event and report whether the worker queue accepted it.
+    pub fn enqueue_event(&self, event: RouterEvent) -> Result<(), KvRouterError> {
+        let worker_id = event.worker_id;
+        let thread_idx = Self::get_or_assign_thread_idx(
+            &self.worker_assignments,
+            &self.worker_assignment_count,
+            worker_id,
+            self.num_workers,
+        );
+        self.worker_event_channels[thread_idx]
+            .send(WorkerTask::Event(event))
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+        self.maybe_enqueue_cleanup(thread_idx);
+        Ok(())
+    }
+
+    /// Wait until every worker queue has completed tasks accepted before this call.
     ///
-    /// Used primarily for testing and benchmarking to ensure writes are visible
-    /// before checking results.
-    pub async fn flush(&self) {
-        let mut receivers = Vec::new();
+    /// This is a FIFO progress barrier, not an event-result acknowledgement. Ordinary
+    /// `WorkerTask::Event` application errors are logged by the worker and are not returned here.
+    pub async fn flush_and_wait(&self) -> Result<(), KvRouterError> {
+        let mut receivers = Vec::with_capacity(self.worker_event_channels.len());
         for channel in &self.worker_event_channels {
             let (resp_tx, resp_rx) = oneshot::channel();
-            if channel.send(WorkerTask::Flush(resp_tx)).is_ok() {
-                receivers.push(resp_rx);
-            }
+            channel
+                .send(WorkerTask::Flush(resp_tx))
+                .map_err(|_| KvRouterError::IndexerOffline)?;
+            receivers.push(resp_rx);
         }
         for receiver in receivers {
-            let _ = receiver.await;
+            receiver
+                .await
+                .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+        }
+        Ok(())
+    }
+
+    /// Wait until the FIFO lane for `worker_id` has completed tasks accepted before this call.
+    ///
+    /// NOTE: Worker-to-queue assignment is stable for the indexer's lifetime. Replacement reset
+    /// depends on removal and acknowledgement using that same FIFO lane before activation. This
+    /// proves queue progress only; ordinary event errors are logged by the worker.
+    async fn flush_worker_lane_and_wait(&self, worker_id: WorkerId) -> Result<(), KvRouterError> {
+        let thread_idx = Self::get_or_assign_thread_idx(
+            &self.worker_assignments,
+            &self.worker_assignment_count,
+            worker_id,
+            self.num_workers,
+        );
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.worker_event_channels[thread_idx]
+            .send(WorkerTask::Flush(resp_tx))
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+        resp_rx
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)
+    }
+
+    /// Wait until all previously queued worker tasks have completed.
+    ///
+    /// Used primarily for testing and benchmarking to stop at a stable queue boundary before
+    /// checking results. Individual event-application errors are observable only through logs and
+    /// metrics, not this barrier.
+    pub async fn flush(&self) {
+        if let Err(error) = self.flush_and_wait().await {
+            tracing::error!(%error, "Failed to flush thread-pool indexer");
         }
     }
 
@@ -898,27 +950,9 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
     }
 
     async fn apply_event(&self, event: RouterEvent) {
-        let worker_id = event.worker_id;
-
-        // Get or assign worker thread index using sticky round-robin
-        let thread_idx = Self::get_or_assign_thread_idx(
-            &self.worker_assignments,
-            &self.worker_assignment_count,
-            worker_id,
-            self.num_workers,
-        );
-
-        // Send event to the assigned worker thread
-        if let Err(e) = self.worker_event_channels[thread_idx].send(WorkerTask::Event(event)) {
-            tracing::error!(
-                "Failed to send event to worker thread {}: {:?}",
-                thread_idx,
-                e
-            );
-            return;
+        if let Err(error) = self.enqueue_event(event) {
+            tracing::error!(%error, "Failed to enqueue event to thread-pool indexer");
         }
-
-        self.maybe_enqueue_cleanup(thread_idx);
     }
 
     async fn remove_worker(&self, worker_id: WorkerId) {
@@ -948,6 +982,32 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
                 sweep_tree: true,
             },
         );
+    }
+
+    async fn reset_worker_dp_rank_and_wait(
+        &self,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+    ) -> Result<(), KvRouterError> {
+        if let Some(prune_manager) = &self.prune_manager {
+            prune_manager.remove_worker_dp_rank(WorkerWithDpRank::new(worker_id, dp_rank));
+        }
+
+        let thread_idx = Self::get_or_assign_thread_idx(
+            &self.worker_assignments,
+            &self.worker_assignment_count,
+            worker_id,
+            self.num_workers,
+        );
+        self.worker_event_channels[thread_idx]
+            .send(WorkerTask::RemoveWorkerDpRank {
+                worker_id,
+                dp_rank,
+                sweep_tree: true,
+            })
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+
+        self.flush_worker_lane_and_wait(worker_id).await
     }
 
     fn shutdown(&self) {

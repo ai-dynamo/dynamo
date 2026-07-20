@@ -65,5 +65,7 @@ rustc-hash = "2"
 tokio-timerfd = "0.2"
 
 [dev-dependencies]
+dynamo-kv-router = { workspace = true, features = ["metrics"] }
 rstest = "0.18.2"
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

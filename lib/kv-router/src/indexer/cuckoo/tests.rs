@@ -559,7 +559,7 @@ fn clear_one_owner_preserves_another_owner_in_the_same_dc() {
 
     let _ = pipeline.apply_event(store_event(first, &[10], 1), &mut batch);
     let _ = pipeline.apply_event(store_event(second, &[10], 2), &mut batch);
-    let outcome = pipeline.apply_event(clear_event(first.worker_id), &mut batch);
+    let outcome = pipeline.apply_event(clear_event(first), &mut batch);
 
     assert!(outcome.first_error().is_none());
     assert!(!pipeline.member_contains(first, ExternalSequenceBlockHash(10)));
@@ -576,7 +576,7 @@ fn clear_one_owner_preserves_another_owner_in_the_same_dc() {
 }
 
 #[test]
-fn worker_wide_clear_spans_lanes_and_preserves_unrelated_members() {
+fn clear_removes_only_the_exact_rank_member() {
     let rank_zero = WorkerWithDpRank::new(100, 0);
     let rank_one = WorkerWithDpRank::new(100, 1);
     let other = WorkerWithDpRank::new(200, 0);
@@ -591,16 +591,14 @@ fn worker_wide_clear_spans_lanes_and_preserves_unrelated_members() {
     let _ = pipeline.apply_event(store_event(rank_zero, &[10], 1), &mut batch);
     let _ = pipeline.apply_event(store_event(other, &[10], 2), &mut batch);
     let _ = pipeline.apply_event(store_event(rank_one, &[20], 3), &mut batch);
-    let mut clear = clear_event(rank_zero.worker_id);
-    clear.event.dp_rank = 999;
-    let outcome = pipeline.apply_event(clear, &mut batch);
+    let outcome = pipeline.apply_event(clear_event(rank_zero), &mut batch);
 
     assert!(outcome.first_error().is_none());
     assert!(pipeline.member_contains(other, ExternalSequenceBlockHash(10)));
     assert!(!pipeline.member_contains(rank_zero, ExternalSequenceBlockHash(10)));
-    assert!(!pipeline.member_contains(rank_one, ExternalSequenceBlockHash(20)));
+    assert!(pipeline.member_contains(rank_one, ExternalSequenceBlockHash(20)));
     assert_eq!(batch.reset_lanes() & 1, 0);
-    assert_ne!(batch.reset_lanes() & (1 << 1), 0);
+    assert_eq!(batch.reset_lanes() & (1 << 1), 0);
 }
 
 #[test]
@@ -617,7 +615,7 @@ fn non_device_events_are_ignored_and_unknown_clear_is_rejected() {
     assert!(!host_outcome.batch_applied());
     assert!(!pipeline.member_contains(worker, ExternalSequenceBlockHash(10)));
 
-    let unknown = pipeline.apply_event(clear_event(999), &mut batch);
+    let unknown = pipeline.apply_event(clear_event(WorkerWithDpRank::new(999, 0)), &mut batch);
     assert!(matches!(
         unknown.first_error(),
         Some(crate::protocols::KvCacheEventError::InvalidBlockSequence)
@@ -1115,7 +1113,7 @@ fn max_depth_matches_full_projection_for_every_small_stable_mask() {
 }
 
 #[tokio::test]
-async fn thread_pool_uses_external_hashes_returns_full_map_and_clears_all_ranks() {
+async fn thread_pool_uses_external_hashes_and_clears_only_target_rank() {
     let workers = workers_with_shared_worker();
     let index = ThreadPoolIndexer::new(
         EventTransposedCkfIndexer::new(workers, CkfConfig::new(32)).unwrap(),
@@ -1152,16 +1150,16 @@ async fn thread_pool_uses_external_hashes_returns_full_map_and_clears_all_ranks(
         .await;
     KvIndexerInterface::flush(&index).await;
 
-    KvIndexerInterface::apply_event(&index, clear_event(workers[0].worker_id)).await;
+    KvIndexerInterface::apply_event(&index, clear_event(workers[0])).await;
     KvIndexerInterface::flush(&index).await;
     let scores = KvIndexerInterface::find_matches(&index, local_hashes)
         .await
         .unwrap();
     assert!(!scores.scores.contains_key(&workers[0]));
-    assert!(!scores.scores.contains_key(&workers[1]));
+    assert_eq!(scores.scores.get(&workers[1]), Some(&2));
     let stats = index.worker_lookup_stats().await;
     assert_eq!(stats.block_count_for_worker(workers[0]), None);
-    assert_eq!(stats.block_count_for_worker(workers[1]), None);
+    assert_eq!(stats.block_count_for_worker(workers[1]), Some(2));
     index.shutdown();
 }
 
@@ -1729,7 +1727,7 @@ async fn concurrent_queries_and_mutations_stay_bounded_and_drain_consistently() 
         remove_event(workers[0], &sequence_hashes[..16]),
     )
     .await;
-    KvIndexerInterface::apply_event(index.as_ref(), clear_event(workers[0].worker_id)).await;
+    KvIndexerInterface::apply_event(index.as_ref(), clear_event(workers[0])).await;
     KvIndexerInterface::apply_event(
         index.as_ref(),
         store_event(workers[0], &sequence_hashes, 20_000),
@@ -2518,14 +2516,14 @@ fn remove_event(worker: WorkerWithDpRank, hashes: &[u64]) -> RouterEvent {
     }
 }
 
-fn clear_event(worker_id: u64) -> RouterEvent {
+fn clear_event(worker: WorkerWithDpRank) -> RouterEvent {
     RouterEvent {
-        worker_id,
+        worker_id: worker.worker_id,
         storage_tier: StorageTier::Device,
         event: KvCacheEvent {
             event_id: 3,
             data: KvCacheEventData::Cleared,
-            dp_rank: 0,
+            dp_rank: worker.dp_rank,
         },
     }
 }

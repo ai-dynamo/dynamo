@@ -25,7 +25,7 @@ use dynamo_kv_router::{
     config::{KvRouterConfig, RouterConfigOverride},
     protocols::{RoutingConstraints, WorkerId, WorkerWithDpRank},
 };
-use dynamo_runtime::component::Component;
+use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_tokens::SequenceHash;
 use std::collections::{HashMap, HashSet};
@@ -52,7 +52,7 @@ where
     /// long-waiting requests can be re-scored at dequeue time.
     #[expect(clippy::too_many_arguments)]
     pub async fn start(
-        component: Component,
+        endpoint: Endpoint,
         block_size: u32,
         workers_with_configs: RuntimeConfigWatch,
         selector: Sel,
@@ -65,7 +65,7 @@ where
         cancellation_token: CancellationToken,
     ) -> Result<Self, KvSchedulerError> {
         Self::start_with_admission_strategies(
-            component,
+            endpoint,
             block_size,
             workers_with_configs,
             selector,
@@ -83,7 +83,7 @@ where
 
     #[expect(clippy::too_many_arguments)]
     pub async fn start_with_admission_strategies(
-        component: Component,
+        endpoint: Endpoint,
         block_size: u32,
         workers_with_configs: RuntimeConfigWatch,
         selector: Sel,
@@ -99,9 +99,9 @@ where
         let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> =
             workers_with_configs.borrow().clone();
 
-        let router_id = component.drt().discovery().instance_id();
+        let router_id = endpoint.drt().discovery().instance_id();
         let slots = create_multi_worker_sequences(
-            component.clone(),
+            endpoint,
             block_size as usize,
             initial_workers,
             kv_router_config.router_replica_sync,
@@ -457,6 +457,7 @@ fn update_queue_metrics(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_runtime::component::Component;
     use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
     use tokio::sync::watch;
 
@@ -518,7 +519,7 @@ mod tests {
         let cancellation_token = CancellationToken::new();
 
         let scheduler = KvScheduler::start(
-            component.clone(),
+            component.endpoint("generate"),
             64,
             cfg_rx,
             DefaultWorkerSelector::new(Some(config.clone()), "decode"),
