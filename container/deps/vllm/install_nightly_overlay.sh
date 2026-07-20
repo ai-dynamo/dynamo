@@ -95,10 +95,16 @@ validate_and_compose_vllm() {
             "${EXPECTED_MERGE_BASE}..${EXPECTED_VLLM_HEAD}")" \
         5
 
-    actual_tree="$(
-        git -C "${source}" merge-tree --write-tree \
-            "${EXPECTED_BASE_COMMIT}" "${EXPECTED_VLLM_HEAD}"
-    )" || die "vLLM nightly and PR #46877 do not merge cleanly"
+    git -C "${source}" checkout --quiet --detach "${EXPECTED_BASE_COMMIT}"
+    if ! git -C "${source}" \
+        -c user.name=Dynamo \
+        -c user.email=dynamo@nvidia.com \
+        merge --quiet --no-commit --no-ff "${EXPECTED_VLLM_HEAD}"; then
+        git -C "${source}" merge --abort || true
+        die "vLLM nightly and PR #46877 do not merge cleanly"
+    fi
+    actual_tree="$(git -C "${source}" write-tree)"
+    git -C "${source}" merge --abort
     require_exact "composed vLLM tree" "${actual_tree}" "${EXPECTED_COMPOSED_TREE}"
 
     mapfile -t actual_diff < <(
