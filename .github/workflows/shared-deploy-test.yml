@@ -85,6 +85,6 @@ jobs:
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.image_suffix }}
           platform_arch: amd64
           extra_pytest_args: -m framework_only
-          # Mount the shared model cache when the repo provides its endpoint;
-          # empty var -> workers download from HuggingFace as before.
-          model_cache_pvc: ${{ vars.AZURE_MODEL_CACHE_SERVER != '' && 'model-cache' || '' }}
+          # Mount the shared model cache only when both endpoint vars are set
+          # (matches the PV/PVC creation gate); otherwise workers download from HF.
+          model_cache_pvc: ${{ vars.AZURE_MODEL_CACHE_SERVER != '' && vars.AZURE_MODEL_CACHE_PATH != '' && 'model-cache' || '' }}

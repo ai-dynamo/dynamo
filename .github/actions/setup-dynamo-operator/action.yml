@@ -220,6 +220,7 @@ runs:
         VCLUSTER_HOST_PRIORITY_CLASS: ${{ steps.resolve-vcluster-priority.outputs.priority_class }}
         CHECKPOINT_ENABLED: ${{ inputs.checkpoint_enabled }}
         MODEL_CACHE_SERVER: ${{ inputs.model_cache_server }}
+        MODEL_CACHE_PATH: ${{ inputs.model_cache_path }}
       run: |
         echo "::group::Create vCluster ${VCLUSTER_NAME} in ${NAMESPACE}"
         set -euo pipefail
@@ -229,7 +230,7 @@ runs:
           VCLUSTER_HELM_ARGS+=(--set "sync.toHost.pods.priorityClassName=${VCLUSTER_HOST_PRIORITY_CLASS}")
         fi
         # Sync the model-cache PV to the host so its mount options are honored.
-        if [ -n "${MODEL_CACHE_SERVER}" ]; then
+        if [ -n "${MODEL_CACHE_SERVER}" ] && [ -n "${MODEL_CACHE_PATH}" ]; then
           VCLUSTER_HELM_ARGS+=(--set "sync.toHost.persistentVolumes.enabled=true")
         fi
         if [[ "${CHECKPOINT_ENABLED}" == "true" ]]; then
