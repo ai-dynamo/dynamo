@@ -2,12 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Third-party Python dependencies for the vllm runtime image. Installed
-# with --reinstall-package imageio-ffmpeg --no-deps to replace the upstream
-# vllm/vllm-openai base image's imageio-ffmpeg wheel (which ships a
-# GPL-encumbered prebuilt ffmpeg binary) with a source build that leaves
-# no binary on disk. vLLM-Omni uses diffusers.export_to_video and doesn't
-# invoke imageio-ffmpeg, so no IMAGEIO_FFMPEG_EXE is needed — this is
-# purely to clear the GPL binary.
+# with --no-binary imageio-ffmpeg so pip does not pull the upstream wheel's
+# GPL-encumbered prebuilt ffmpeg binary. vLLM-Omni encodes video via imageio
+# (VP9/webm), which resolves ffmpeg through IMAGEIO_FFMPEG_EXE pointed at the
+# source-built binary (see container/templates/wheel_builder.Dockerfile).
 
 --no-binary imageio-ffmpeg
 
