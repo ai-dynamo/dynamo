@@ -260,7 +260,7 @@ jobs:
   vllm-copy-to-acr:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [vllm-build]
-    if: inputs.build_vllm && !inputs.build_vllm_placeholder
+    if: inputs.build_vllm
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
