@@ -430,7 +430,7 @@ backend explicitly in these cases:
 
 Each backend handles multinode inference differently:
 
-- **vLLM**: Uses Ray for multi-node TP/PP. Ray head runs on the leader, agents on workers.
+- **vLLM**: Uses PyTorch multiprocessing (mp) backend with distributed initialization flags for multi-node TP/PP. Each node runs its own vLLM process with synchronized training initialization.
 - **SGLang**: Uses `--dist-init-addr`, `--nnodes`, `--node-rank` flags for distributed setup.
 - **TRT-LLM**: MPI-based. The operator auto-generates SSH keypairs; the leader runs `mpirun`.
 
