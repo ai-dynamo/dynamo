@@ -498,6 +498,13 @@ jobs:
             done
           fi
 
+      - name: Freeze the install selector in the versioned Quickstart
+        # Dev keeps the interactive selector; a release snapshot is static and pinned.
+        run: |
+          python3 source-checkout/.github/scripts/freeze_install_selector.py \
+            "docs-checkout/fern/pages-${{ steps.version.outputs.tag }}/getting-started/quickstart.mdx" \
+            "${{ steps.version.outputs.version }}"
+
       - name: Update GitHub links to version tag
         run: |
           TAG="${{ steps.version.outputs.tag }}"
