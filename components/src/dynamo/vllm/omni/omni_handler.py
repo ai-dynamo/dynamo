@@ -409,7 +409,13 @@ class OmniHandler(BaseOmniHandler):
             nonlocal previous_text
 
             per_request_kwargs = dict(generate_kwargs)
-            if admitted_lora_request is not None:
+            # Preserve the contract above: diffusion paths carrying per-stage
+            # sampling params should source LoRA from stage params, not the
+            # top-level generate() argument.
+            if (
+                admitted_lora_request is not None
+                and inputs.sampling_params_list is None
+            ):
                 per_request_kwargs["lora_request"] = admitted_lora_request
 
             async for stage_output in self.engine_client.generate(**per_request_kwargs):
