@@ -118,6 +118,11 @@ function buildHtml(data: Data): string {
     radio("is-form", `is-form-${f}`, i === 0) + chip(`is-form-${f}`, lbl),
   ).join("");
 
+  // Per-framework version row heading ("vLLM version" …); only the selected one shows.
+  const verLabel = fws
+    .map((fw) => `<span class="is-rl" data-fwlabel="${fw}">${esc(data[fw].label)} version</span>`)
+    .join("");
+
   let blocks = "";
   for (const fw of fws)
     for (const [ch] of CHANNELS)
@@ -129,7 +134,7 @@ function buildHtml(data: Data): string {
     `<div class="is-head"><h3>Choose your build</h3><p>Every command is complete and copy-pastable — no placeholders.</p></div>` +
     `<div class="is-row"><span class="is-rl">Backend</span><div class="is-chips">${fwRow}</div></div>` +
     `<div class="is-row"><span class="is-rl">Dynamo build</span><div class="is-chips">${chRow}</div></div>` +
-    `<div class="is-row"><span class="is-rl">Version</span><div class="is-chips">${verRow}</div></div>` +
+    `<div class="is-row">${verLabel}<div class="is-chips">${verRow}</div></div>` +
     `<div class="is-row"><span class="is-rl">Install form</span><div class="is-chips">${formRow}</div></div>` +
     `<div class="is-out">${blocks}</div>`
   );
@@ -155,6 +160,7 @@ function buildCss(data: Data): string {
       vg.push(`.is-sel:not(:has(#is-fw-${fw}:checked)) [data-vg="${fw}-${ch}"]`);
       vg.push(`.is-sel:not(:has(#is-ch-${ch}:checked)) [data-vg="${fw}-${ch}"]`);
     }
+  for (const fw of fws) vg.push(`.is-sel:not(:has(#is-fw-${fw}:checked)) [data-fwlabel="${fw}"]`);
 
   return `${STATIC_CSS}\n${hide.join(",\n")}{display:none}\n${vg.join(",\n")}{display:none}`;
 }

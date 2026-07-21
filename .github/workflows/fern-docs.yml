@@ -45,6 +45,11 @@ on:
     tags:
       # Match only clean semver tags: vX.Y.Z
       - 'v[0-9]+.[0-9]+.[0-9]+'
+  schedule:
+    # Daily refresh so the Get Dynamo selector's rolling 30-day nightly window and
+    # the Support Matrix ToT row stay current. Regenerates and republishes only when
+    # the generated data actually changed; commits nothing to main.
+    - cron: '0 9 * * *'
   workflow_dispatch:
     inputs:
       tag:
@@ -65,8 +70,9 @@ jobs:
   # Detect changed files for conditional job execution
   changed-files:
     runs-on: ubuntu-latest
-    # Skip for tag pushes - version release doesn't need changed-files check
-    if: github.ref_type != 'tag'
+    # Skip for tag pushes (version release doesn't need it) and scheduled runs
+    # (no diff base; the scheduled refresh regenerates unconditionally).
+    if: github.ref_type != 'tag' && github.event_name != 'schedule'
     outputs:
       docs: ${{ steps.changes.outputs.docs }}
     steps:
@@ -88,9 +94,14 @@ jobs:
   preview-or-publish-docs:
     name: Preview or publish docs
     needs: changed-files
+    # always() so the job still evaluates on scheduled runs, where changed-files is
+    # skipped. It runs when docs changed, on manual dispatch, or on the daily schedule.
     if: |
+      always() &&
       github.ref_type != 'tag' &&
-      (needs.changed-files.outputs.docs == 'true' || github.event_name == 'workflow_dispatch') &&
+      needs.changed-files.result != 'failure' &&
+      needs.changed-files.result != 'cancelled' &&
+      (needs.changed-files.outputs.docs == 'true' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') &&
       (github.event.inputs.tag == '' || github.event.inputs.tag == null)
     runs-on: ubuntu-latest
     steps:
@@ -126,7 +137,7 @@ jobs:
         run: |
           git -C source-checkout fetch --unshallow --tags 2>/dev/null || git -C source-checkout fetch --tags
           python3 -m pip install --quiet pyyaml
-          python3 source-checkout/.github/scripts/build_install_selector.py
+          python3 source-checkout/.github/scripts/build_install_selector.py --refresh-support-matrix
 
       - name: Sync dev content from main
         run: |

@@ -1,46 +1,50 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Generate the data file for the "Get Dynamo" install-command selector.
+"""Generate the data for the "Get Dynamo" install-command selector.
 
-Produces ``docs/data/install-selector.json``: for each backend framework, the
-stable and nightly Dynamo builds that ship each backend version, with the
-complete, copy-pastable install command per (channel, version, install form).
+Produces ``docs/data/install-selector.json`` (+ a TS module the Fern component
+imports): for each backend framework, the stable and nightly Dynamo builds that
+ship each backend version, with the complete, copy-pastable install command per
+(channel, version, install form). With ``--refresh-support-matrix`` it also
+rewrites the ``main (ToT)`` row of the Support Matrix from ``container/context.yaml``.
 
 Data sources (all authoritative, no credentials required):
   * stable release -> backend version -- the "Backend Dependencies" table in
     ``docs/reference/support-matrix.md``.
-  * backend version -> nightly window -- git history of ``container/context.yaml``
-    (reused from ``sync_nightly_backend_versions``).
-  * per-window latest PUBLISHED nightly -- the live NGC tag list
-    (``nvcr.io`` anonymous pull token) gives the exact ``YYYYMMDD-<sha>`` tag; the
-    wheel version derives from ``pyproject.toml`` at that ``<sha>``. GC'd or
-    skipped nights simply never appear, so a dead command is never emitted.
+  * backend version -> nightly window -- git history of ``container/context.yaml``.
+  * per-window latest PUBLISHED nightly -- the live NGC tag list (``nvcr.io``
+    anonymous pull token) gives the exact ``YYYYMMDD-<sha>`` tag; the wheel version
+    derives from ``pyproject.toml`` at that ``<sha>``. GC'd or skipped nights never
+    appear, so a dead command is never emitted.
 
 Scope: the ``STABLE_RELEASES_BACK`` most recent stable releases and nightly builds
 pinned within ``NIGHTLY_DAYS_BACK`` days of the latest published nightly.
 
 Usage:
-    build_install_selector.py                 # write docs/data/install-selector.json
-    build_install_selector.py --stdout        # print JSON to stdout
-    build_install_selector.py --check         # exit 1 if the on-disk file is stale
+    build_install_selector.py                        # write JSON + TS module
+    build_install_selector.py --refresh-support-matrix   # also refresh the ToT row
+    build_install_selector.py --stdout               # print JSON to stdout
+    build_install_selector.py --check                # exit 1 if the on-disk JSON is stale
 """
 from __future__ import annotations
 
 import argparse
 import json
 import re
+import subprocess
 import sys
 import urllib.request
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import sync_nightly_backend_versions as sync  # noqa: E402  (reuse history helpers)
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 OUT = "docs/data/install-selector.json"
 TS_OUT = "fern/components/install-selector-data.ts"
+CONTEXT = "container/context.yaml"
 SUPPORT_MATRIX = "docs/reference/support-matrix.md"
 REGISTRY = "nvcr.io/nvidia/ai-dynamo"
 PYPI = "https://pypi.nvidia.com"
@@ -48,7 +52,7 @@ PYPI = "https://pypi.nvidia.com"
 STABLE_RELEASES_BACK = 3  # show only the N most recent stable releases
 NIGHTLY_DAYS_BACK = 30    # show nightly builds pinned within N days of the latest
 
-# label (as used by sync.FRAMEWORKS) -> (image stem, wheel extra, has PyPI wheel)
+# label -> (image stem, wheel extra, has PyPI wheel)
 META = {
     "vLLM": ("vllm", "vllm", True),
     "SGLang": ("sglang", "sglang", True),
@@ -57,10 +61,106 @@ META = {
 
 
 # --------------------------------------------------------------------------- #
+# container/context.yaml — current + historical backend versions (from git)
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class Framework:
+    label: str  # display name
+    key: str  # top-level context.yaml key
+    device: str  # sub-key holding runtime_image_tag
+    version_re: "re.Pattern[str]"  # accepts only real backend tags
+
+
+# Device keys track the CUDA targets nightly builds. version_re drops pre-layout
+# base-image tags (e.g. vLLM 13.0.2) so the history walk keeps only real versions.
+FRAMEWORKS = [
+    Framework("vLLM", "vllm", "cuda13.0", re.compile(r"^v\d+\.\d+\.\d+")),
+    Framework("SGLang", "sglang", "cuda13.0", re.compile(r"^v\d+\.\d+")),
+    Framework("TensorRT-LLM", "trtllm", "cuda13.1", re.compile(r"^\d+\.\d+\.\d+rc\d+")),
+]
+
+
+def parse_version(tag: str) -> str:
+    """``v0.24.0-ubuntu2404`` -> ``v0.24.0``; ``1.3.0rc20`` -> ``1.3.0rc20``."""
+    return tag.split("-")[0]
+
+
+def tag_from_context(doc: dict, fw: Framework) -> str | None:
+    node = doc.get(fw.key)
+    if not isinstance(node, dict):
+        return None
+    dev = node.get(fw.device)
+    if not isinstance(dev, dict):
+        return None
+    return dev.get("runtime_image_tag")
+
+
+def git(args: list[str], repo_root: Path) -> str:
+    return subprocess.check_output(["git", *args], cwd=repo_root, text=True)
+
+
+def read_current(repo_root: Path) -> dict[str, tuple[str, str]]:
+    """{label: (version, raw_runtime_image_tag)} from context.yaml at HEAD."""
+    doc = yaml.safe_load((repo_root / CONTEXT).read_text())
+    out: dict[str, tuple[str, str]] = {}
+    for fw in FRAMEWORKS:
+        tag = tag_from_context(doc, fw)
+        if tag is None:
+            raise SystemExit(f"{CONTEXT}: no runtime_image_tag for {fw.key}.{fw.device}")
+        out[fw.label] = (parse_version(tag), tag)
+    return out
+
+
+def read_history(repo_root: Path) -> dict[str, list[tuple[str, str]]]:
+    """{label: [(version, start_date), ...]} oldest-first, from git history."""
+    lines = git(["log", "--reverse", "--format=%H|%cs", "--", CONTEXT], repo_root).strip().splitlines()
+    changes: dict[str, list[tuple[str, str]]] = {fw.label: [] for fw in FRAMEWORKS}
+    for line in lines:
+        sha, date = line.split("|", 1)
+        try:
+            doc = yaml.safe_load(git(["show", f"{sha}:{CONTEXT}"], repo_root))
+        except (subprocess.CalledProcessError, yaml.YAMLError):
+            continue  # file absent or unparsable at this commit
+        if not isinstance(doc, dict):
+            continue
+        for fw in FRAMEWORKS:
+            tag = tag_from_context(doc, fw)
+            if not tag:
+                continue
+            v = parse_version(tag)
+            if not fw.version_re.match(v):
+                continue
+            pts = changes[fw.label]
+            if not pts or pts[-1][0] != v:
+                pts.append((v, date))
+    return changes
+
+
+# --------------------------------------------------------------------------- #
+# Support Matrix — main (ToT) row (Dynamo | SGLang | TensorRT-LLM | vLLM | NIXL);
+# we rewrite the three framework cells and leave the trailing NIXL cell alone.
+# --------------------------------------------------------------------------- #
+TOT_RE = re.compile(r"(?m)^\| \*\*main \(ToT\)\*\* \| `[^`]+` \| `[^`]+` \| `[^`]+` \|")
+
+
+def update_tot(text: str, current: dict[str, tuple[str, str]]) -> str:
+    def bare(version: str) -> str:
+        return version[1:] if version.startswith("v") else version
+
+    repl = (
+        f"| **main (ToT)** | `{bare(current['SGLang'][0])}` "
+        f"| `{bare(current['TensorRT-LLM'][0])}` | `{bare(current['vLLM'][0])}` |"
+    )
+    new, n = TOT_RE.subn(repl, text)
+    if n != 1:
+        raise SystemExit(f"{SUPPORT_MATRIX}: expected exactly 1 main (ToT) row, found {n}")
+    return new
+
+
+# --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #
 def norm(label: str, version: str) -> str:
-    """Display form: vLLM/SGLang carry a leading ``v``; TensorRT-LLM does not."""
     if label in ("vLLM", "SGLang") and not version.startswith("v"):
         return "v" + version
     return version
@@ -83,7 +183,6 @@ def _ngc_token(repo: str) -> str:
 
 
 def ngc_tag_list(repo: str) -> list[str]:
-    """All tags for a public nvcr.io repo (anonymous pull token)."""
     req = urllib.request.Request(
         f"https://nvcr.io/v2/{repo}/tags/list",
         headers={"Authorization": f"Bearer {_ngc_token(repo)}"},
@@ -118,11 +217,6 @@ _ROW = re.compile(
 
 
 def stable_by_framework(live: dict[str, set[str]]) -> dict[str, list[dict]]:
-    """{label: [{backend_version, releases:[newest..]}]} for the newest releases.
-
-    Limited to the ``STABLE_RELEASES_BACK`` newest releases, and only releases whose
-    ``{image}-runtime:{release}`` tag is actually published.
-    """
     text = (REPO_ROOT / SUPPORT_MATRIX).read_text()
     releases: dict[str, dict[str, str]] = {}
     for line in text.splitlines():
@@ -142,7 +236,7 @@ def stable_by_framework(live: dict[str, set[str]]) -> dict[str, list[dict]]:
         for label in META:
             img = META[label][0]
             if relnum not in live.get(img, set()):
-                continue  # no published image for this framework at this release
+                continue
             bver = norm(label, releases[release][label])
             existing = next((e for e in out[label] if e["backend_version"] == bver), None)
             if existing:
@@ -153,10 +247,9 @@ def stable_by_framework(live: dict[str, set[str]]) -> dict[str, list[dict]]:
 
 
 # --------------------------------------------------------------------------- #
-# nightly windows (git) + wheel version (git)
+# nightly windows + wheel version (git)
 # --------------------------------------------------------------------------- #
 def windows(label: str, changes: dict[str, list[tuple[str, str]]]):
-    """[(version, start_iso, end_iso|None)] oldest-first; last is the current build."""
     pts = changes[label]
     return [
         (v, start, pts[i + 1][1] if i + 1 < len(pts) else None)
@@ -173,7 +266,7 @@ def latest_in_window(dated: dict[int, tuple[str, str]], start_iso: str, end_iso:
 
 def base_version_at(sha: str) -> str | None:
     try:
-        blob = sync.git(["show", f"{sha}:pyproject.toml"], REPO_ROOT)
+        blob = git(["show", f"{sha}:pyproject.toml"], REPO_ROOT)
     except Exception:
         return None
     m = re.search(r'(?m)^version\s*=\s*"(\d+\.\d+\.\d+)"', blob)
@@ -218,7 +311,7 @@ def nightly_pinned_commands(label: str, date: str, sha: str, wheel_version: str 
 # assembly
 # --------------------------------------------------------------------------- #
 def build() -> dict:
-    changes = sync.read_history(REPO_ROOT)
+    changes = read_history(REPO_ROOT)
 
     dated_by_img: dict[str, dict] = {}
     reltags_by_img: dict[str, set] = {}
@@ -238,7 +331,7 @@ def build() -> dict:
     stable = stable_by_framework(reltags_by_img)
     data: dict[str, dict] = {}
 
-    for fw in sync.FRAMEWORKS:
+    for fw in FRAMEWORKS:
         label = fw.label
         img, extra, has_wheel = META[label]
         entry: dict = {"label": label, "image": img, "extra": extra, "wheel": has_wheel,
@@ -271,10 +364,10 @@ def build() -> dict:
                 continue
             hit = latest_in_window(dated, start, end)
             if not hit:
-                continue  # no published (or GC'd) nightly in range -> omit
+                continue
             date, sha = hit
             if cutoff is not None and int(date) < cutoff:
-                continue  # older than the nightly window we surface
+                continue
             base = base_version_at(sha)
             wheel_version = f"{base}.dev{date}" if base else None
             entry["nightly"].append({
@@ -310,6 +403,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--stdout", action="store_true", help="print JSON instead of writing")
     ap.add_argument("--check", action="store_true", help="exit 1 if the on-disk JSON is stale")
+    ap.add_argument("--refresh-support-matrix", action="store_true",
+                    help="also rewrite the main (ToT) row in support-matrix.md (docs-build time)")
     ap.add_argument("--out", default=OUT, help="JSON data path")
     ap.add_argument("--ts-out", default=TS_OUT, help="TypeScript module path for the component")
     args = ap.parse_args()
@@ -333,6 +428,11 @@ def main() -> int:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text)
         print(f"wrote {rel}")
+
+    if args.refresh_support_matrix:
+        sm = REPO_ROOT / SUPPORT_MATRIX
+        sm.write_text(update_tot(sm.read_text(), read_current(REPO_ROOT)))
+        print(f"refreshed {SUPPORT_MATRIX} main (ToT) row")
     return 0
 
 
