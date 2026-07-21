@@ -42,9 +42,9 @@
     {
       "id": "neg-deploy-recipe",
       "question": "Deploy the Qwen vLLM recipe for me.",
-      "expected_skill": "dynamo-recipe-runner",
-      "ground_truth": "Normal bring-up of an existing recipe belongs to dynamo-recipe-runner.",
-      "expected_behavior": ["dynamo-troubleshoot stays silent; dynamo-recipe-runner handles it"]
+      "expected_skill": "dynamo-recipe-deployer",
+      "ground_truth": "Normal bring-up of an existing recipe belongs to dynamo-recipe-deployer.",
+      "expected_behavior": ["dynamo-troubleshoot stays silent; dynamo-recipe-deployer handles it"]
     },
     {
       "id": "neg-enable-kv-routing",
