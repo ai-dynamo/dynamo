@@ -73,6 +73,12 @@ async def init_omni(
 
     engine_lora_enabled = bool(getattr(config.engine_args, "enable_lora", False))
     lora_enabled = engine_lora_enabled and (get_lora_manager() is not None)
+    if engine_lora_enabled and not lora_enabled:
+        logger.warning(
+            "LoRA is enabled in engine args, but LoRA endpoints are disabled "
+            "because LoRAManager is unavailable. Ensure DYN_LORA_ENABLED=true "
+            "and LoRAManager initialization succeeds."
+        )
     load_lora_endpoint = None
     unload_lora_endpoint = None
     list_loras_endpoint = None
