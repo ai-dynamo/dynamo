@@ -2897,6 +2897,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-trtllm-sidecar"
+version = "1.3.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "clap",
+ "dynamo-backend-common",
+ "dynamo-sidecar-common",
+ "futures",
+ "prost 0.13.5",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic 0.13.1",
+ "tonic-build 0.13.1",
+ "tracing",
+]
+
+[[package]]
 name = "dynamo-truthy"
 version = "1.3.0"
 dependencies = [

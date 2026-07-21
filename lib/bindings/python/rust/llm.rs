@@ -28,6 +28,7 @@ pub mod aic_callback;
 pub mod engine_perf;
 pub mod entrypoint;
 pub mod fpm;
+pub mod frontend_routes;
 pub mod kv;
 pub mod kv_dc_relay;
 pub mod local_model;
