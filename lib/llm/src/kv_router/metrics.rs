@@ -1011,7 +1011,7 @@ mod tests {
         .unwrap()
     }
 
-    fn test_router_request_metrics(
+    struct TestRouterMetricVecs {
         decisions_total: IntCounterVec,
         selected_worker_total: IntCounterVec,
         candidate_workers: HistogramVec,
@@ -1020,7 +1020,20 @@ mod tests {
         final_score: HistogramVec,
         tie_breaks_total: IntCounterVec,
         no_candidates_total: IntCounterVec,
-    ) -> RouterRequestMetrics {
+    }
+
+    fn test_router_request_metrics(metric_vecs: TestRouterMetricVecs) -> RouterRequestMetrics {
+        let TestRouterMetricVecs {
+            decisions_total,
+            selected_worker_total,
+            candidate_workers,
+            kv_overlap_score,
+            worker_load_score,
+            final_score,
+            tie_breaks_total,
+            no_candidates_total,
+        } = metric_vecs;
+
         RouterRequestMetrics {
             requests_total: prometheus::IntCounter::new("test_router_requests_total", "test")
                 .unwrap(),
@@ -1434,7 +1447,7 @@ dynamo_frontend_router_queue_pending_requests{model=\"model\",policy_class=\"def
             .register(Box::new(no_candidates_total.clone()))
             .unwrap();
 
-        let metrics = test_router_request_metrics(
+        let metrics = test_router_request_metrics(TestRouterMetricVecs {
             decisions_total,
             selected_worker_total,
             candidate_workers,
@@ -1443,7 +1456,7 @@ dynamo_frontend_router_queue_pending_requests{model=\"model\",policy_class=\"def
             final_score,
             tie_breaks_total,
             no_candidates_total,
-        );
+        });
 
         metrics.observe_selection_decision(
             "model-a",
