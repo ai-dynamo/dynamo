@@ -6,7 +6,7 @@ intent: >-
   Turn a selected Dynamo deploy.yaml/DGD into a live endpoint and test it with one OpenAI-compatible smoke request.
   Recipe selection, benchmarking, and optimization are owned by other agents.
 skills:
-  - dynamo-recipe-deployer
+  - deploy-dynamo-recipe
 docs:
   - docs/kubernetes/kubernetes-recipe-workflow.md
   - docs/reference/target-workload.md
@@ -37,7 +37,7 @@ Input ownership:
 ## Do
 
 - Treat the assigned `deploy.yaml`, DGD manifest, or recipe variant directory as the only deployment candidate.
-- Use the `dynamo-recipe-deployer` skill for validation, apply, readiness, and smoke-test workflow.
+- Use the `deploy-dynamo-recipe` skill for validation, apply, readiness, and smoke-test workflow.
 - Create one deployment directory for the assigned iteration under the experiment root.
 - Copy every manifest used into `${DEPLOY_ROOT}/applied_manifests/`; never modify the tracked recipe source.
 - Make only required cluster-compatibility patches in those run-scoped copies and record each reason.
