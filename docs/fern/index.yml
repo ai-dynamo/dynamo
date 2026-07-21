@@ -24,13 +24,9 @@ tabs:
     icon: house
     skip-slug: true
   user-guide:
-    display-name: Kubernetes Guide
-    icon: fa-brands fa-kubernetes
+    display-name: User Guide
+    icon: book-open
     skip-slug: true
-  cli-guide:
-    display-name: CLI Guide
-    icon: rectangle-terminal
-    slug: cli
   use-cases:
     display-name: Features
     icon: puzzle-piece
@@ -66,194 +62,205 @@ navigation:
         path: ./welcome.mdx
 
   - tab: user-guide
-    layout:
-      # ==================== Getting Started ====================
-      - section: Getting Started
-        icon: rocket
-        contents:
-          - page: Introduction
-            path: getting-started/introduction.mdx
-          - page: Quickstart
-            path: kubernetes/README.md
-          - page: Compatibility
-            path: reference/compatibility.mdx
-          # - page: Local Quickstart
-          #   path: getting-started/quickstart.mdx
+    variants:
+      # ==================== Kubernetes Deployment variant ====================
+      # skip-slug preserves the existing K8s page URLs (previously the
+      # Kubernetes Guide tab used skip-slug: true).
+      - title: Kubernetes
+        icon: fa-brands fa-kubernetes
+        skip-slug: true
+        layout:
+          # ==================== Getting Started ====================
+          - section: Getting Started
+            icon: rocket
+            collapsed: open-by-default
+            contents:
+              - page: Introduction
+                path: getting-started/introduction.mdx
+              - page: Quickstart
+                path: kubernetes/README.md
+              - page: Compatibility
+                path: reference/compatibility.mdx
+              # - page: Local Quickstart
+              #   path: getting-started/quickstart.mdx
 
-      - section: Installation
-        icon: download
-        contents:
-        - page: Install Dynamo
-          path: kubernetes/installation-guide.md
-        - page: Multinode Orchestration
-          path: kubernetes/multinode-installation.md
-        - section: RDMA Setup
-          contents:
-            - page: Overview
-              path: kubernetes/cloud-providers/rdma-setup.md
-            - page: Infiniband on Azure
-              path: kubernetes/cloud-providers/aks/rdma-infiniband.md
-            - page: EFA on AWS
-              path: kubernetes/cloud-providers/eks/efa.md
-        - section: Model Storage
-          contents:
-            - page: Overview
-              path: kubernetes/cloud-providers/model-storage-overview.md
-            - page: AKS Storage
-              path: kubernetes/cloud-providers/aks/storage.md
-            - page: Azure Lustre CSI Driver
-              path: kubernetes/cloud-providers/aks/azure-lustre-csi.md
-            - page: EFS
-              path: kubernetes/cloud-providers/eks/efs.md
-        - page: Observability
-          path: observability/README.md
-        - section: Managed Kubernetes
-          collapsed: true
-          contents:
-            - section: EKS
-              collapsed: true
+          - section: Installation
+            icon: download
+            collapsed: open-by-default
+            contents:
+            - page: Install Dynamo
+              path: kubernetes/installation-guide.md
+            - page: Multinode Orchestration
+              path: kubernetes/multinode-installation.md
+            - section: RDMA Setup
               contents:
-                - page: EKS Setup
-                  path: kubernetes/cloud-providers/eks/eks.md
-                - page: ECS
-                  path: kubernetes/cloud-providers/ecs/ecs.md
-            - section: Azure
-              collapsed: true
+                - page: Overview
+                  path: kubernetes/cloud-providers/rdma-setup.md
+                - page: Infiniband on Azure
+                  path: kubernetes/cloud-providers/aks/rdma-infiniband.md
+                - page: EFA on AWS
+                  path: kubernetes/cloud-providers/eks/efa.md
+            - section: Model Storage
               contents:
-                - page: AKS Setup
-                  path: kubernetes/cloud-providers/aks/aks.md
-                - page: Spot VMs
-                  path: kubernetes/cloud-providers/aks/spot-vms.md
-            - section: GCP
-              collapsed: true
+                - page: Overview
+                  path: kubernetes/cloud-providers/model-storage-overview.md
+                - page: AKS Storage
+                  path: kubernetes/cloud-providers/aks/storage.md
+                - page: Azure Lustre CSI Driver
+                  path: kubernetes/cloud-providers/aks/azure-lustre-csi.md
+                - page: EFS
+                  path: kubernetes/cloud-providers/eks/efs.md
+            - page: Observability
+              path: observability/README.md
+            - section: Managed Kubernetes
               contents:
-                - page: GKE Setup
-                  path: kubernetes/cloud-providers/gke/gke.md
+                - section: EKS
+                  contents:
+                    - page: EKS Setup
+                      path: kubernetes/cloud-providers/eks/eks.md
+                    - page: ECS
+                      path: kubernetes/cloud-providers/ecs/ecs.md
+                - section: Azure
+                  contents:
+                    - page: AKS Setup
+                      path: kubernetes/cloud-providers/aks/aks.md
+                    - page: Spot VMs
+                      path: kubernetes/cloud-providers/aks/spot-vms.md
+                - section: GCP
+                  contents:
+                    - page: GKE Setup
+                      path: kubernetes/cloud-providers/gke/gke.md
 
-      # ==================== Usage ====================
-      - section: Model Deployment # TODO: could be renamed to Deployment or Model Deployment bc this part is more about installation and how to get running with a model as opposed to observability, tuning, or other features.
-        icon: microchip
-        contents:
-          - page: Introduction
-            path: getting-started/kubernetes-deployment.md
-          - page: Deploy with DGD
-            path: kubernetes/dgd-guide.md
-          - page: KV Aware Routing
-            path: kubernetes/dgd-kv-routing.md
-          - page: Disaggregated Serving
-            path: features/disaggregated-serving/README.md
-          - page: Size with AIConfigurator
-            path: kubernetes/dgd-aiconfigurator.md
-          - page: Multinode Deployments
-            path: kubernetes/deployment/multinode-deployment.md
-          - page: Model Caching
-            path: kubernetes/model-caching.md
-          - page: KV Cache Offloading
-            path: kubernetes/dgd-kv-offloading.md
-          - section: Auto Deploy with DGDR
+          # ==================== Usage ====================
+          - section: Model Deployment # TODO: could be renamed to Deployment or Model Deployment bc this part is more about installation and how to get running with a model as opposed to observability, tuning, or other features.
+            icon: microchip
+            collapsed: open-by-default
             contents:
-            - page: DGDR Walkthrough
-              path: kubernetes/dgdr-guide.md
-            - page: Dynamo Profiler
-              path: kubernetes/dgdr-profiler.md
-            - page: Dynamo Planner
-              path: kubernetes/dgdr-planner.md
+              - page: Introduction
+                path: getting-started/kubernetes-deployment.md
+              - page: Deploy with DGD
+                path: kubernetes/dgd-guide.md
+              - page: KV Aware Routing
+                path: kubernetes/dgd-kv-routing.md
+              - page: Disaggregated Serving
+                path: features/disaggregated-serving/README.md
+              - page: Size with AIConfigurator
+                path: kubernetes/dgd-aiconfigurator.md
+              - page: Multinode Deployments
+                path: kubernetes/deployment/multinode-deployment.md
+              - page: Model Caching
+                path: kubernetes/model-caching.md
+              - page: KV Cache Offloading
+                path: kubernetes/dgd-kv-offloading.md
+              - section: Auto Deploy with DGDR
+                contents:
+                - page: DGDR Walkthrough
+                  path: kubernetes/dgdr-guide.md
+                - page: Dynamo Profiler
+                  path: kubernetes/dgdr-profiler.md
+                - page: Dynamo Planner
+                  path: kubernetes/dgdr-planner.md
 
-      - section: Operations
-        icon: screwdriver-wrench
-        contents:
-          - page: Observability
-            path: kubernetes/observability/metrics.md
-          - section: CLI Tools
-            collapsed: true
+          - section: Operations
+            icon: screwdriver-wrench
+            collapsed: open-by-default
             contents:
-              - page: Sizing with AIConfigurator
-                path: tools/aic.md
-              - page: Benchmarking with AIPerf
-                path: tools/aiperf.md
-          - section: Inference Simulation (DynoSim)
-            slug: dynosim
-            collapsed: true
-            contents:
-              - page: Overview
-                path: dynosim/README.md
-              - page: Live Simulation with Mocker
-                path: dynosim/mocker.md
-              - page: Simulation Runs
-                path: dynosim/runs.md
-              - page: Simulation Sweeps
-                path: dynosim/sweeps.md
-              - page: Planner Simulation Benchmarking
-                path: dynosim/planner-benchmarking.md
+              - page: Observability
+                path: kubernetes/observability/metrics.md
+              - section: CLI Tools
+                contents:
+                  - page: Sizing with AIConfigurator
+                    path: tools/aic.md
+                  - page: Benchmarking with AIPerf
+                    path: tools/aiperf.md
+              - section: Inference Simulation (DynoSim)
+                slug: dynosim
+                contents:
+                  - page: Overview
+                    path: dynosim/README.md
+                  - page: Live Simulation with Mocker
+                    path: dynosim/mocker.md
+                  - page: Simulation Runs
+                    path: dynosim/runs.md
+                  - page: Simulation Sweeps
+                    path: dynosim/sweeps.md
+                  - page: Planner Simulation Benchmarking
+                    path: dynosim/planner-benchmarking.md
 
-  - tab: cli-guide
-    layout:
-      - section: Getting Started
-        icon: rocket
-        contents:
-          - page: Introduction
-            path: cli/introduction.md
-          - page: Quickstart
-            path: getting-started/quickstart.mdx
-
-      - section: Installation
-        icon: download
-        contents:
-          - page: Install Dynamo
-            path: getting-started/local-installation.mdx
-          - page: Building from Source
-            path: cli/building-from-source.md
-          - page: Minikube Setup
-            path: kubernetes/deployment/minikube.md
-          - section: Observability Setup
-            collapsed: true
+      # ==================== Local Deployment variant ====================
+      # slug: cli preserves the existing CLI page URLs (previously the
+      # CLI Guide tab used slug: cli).
+      - title: Local (CLI)
+        icon: rectangle-terminal
+        slug: cli
+        layout:
+          - section: Getting Started
+            icon: rocket
+            collapsed: open-by-default
             contents:
-              - page: Overview
-                path: cli/observability.md
-              - page: Prometheus + Grafana
-                path: observability/prometheus-grafana.md
+              - page: Introduction
+                path: cli/introduction.md
+              - page: Quickstart
+                path: getting-started/quickstart.mdx
 
-      - section: Model Deployment
-        icon: microchip
-        contents:
-          - page: Introduction
-            path: cli/overview.mdx
-          - page: KV-Aware Routing
-            path: cli/kv-routing.mdx
-          - page: Disaggregated Serving
-            path: cli/disaggregated-serving.mdx
-          - page: Multi-Node Deployment
-            path: cli/multinode-deployment.mdx
-          - section: Backends
-            collapsed: true
+          - section: Installation
+            icon: download
+            collapsed: open-by-default
             contents:
-            - page: vLLM Deployments
-              path: backends/vllm/vllm-examples.md
-            - page: SGLang Deployments
-              path: backends/sglang/sglang-examples.md
-            - page: TRT-LLM Deployments
-              path: backends/trtllm/trtllm-examples.md
-          - section: KV Cache Offloading
-            collapsed: true
-            contents:
-              - page: LMCache Integration
-                path: integrations/lmcache-integration.md
-              - page: Hicache Integration
-                path: cli/sglang-hicache.md
-              - page: FlexKV Integration
-                path: integrations/flexkv-integration.md
-              - page: Custom KV Events
-                path: integrations/kv-events-custom-engines.md
+              - page: Install Dynamo
+                path: getting-started/local-installation.mdx
+              - page: Building from Source
+                path: cli/building-from-source.md
+              - page: Minikube Setup
+                path: kubernetes/deployment/minikube.md
+              - section: Observability Setup
+                contents:
+                  - page: Overview
+                    path: cli/observability.md
+                  - page: Prometheus + Grafana
+                    path: observability/prometheus-grafana.md
 
-      - section: Operations
-        icon: screwdriver-wrench
-        contents:
-          - page: Health Checks
-            path: observability/health-checks.md
-          - page: Tracing
-            path: observability/tracing.md
-          - page: Logging
-            path: observability/logging.md
+          - section: Model Deployment
+            icon: microchip
+            collapsed: open-by-default
+            contents:
+              - page: Introduction
+                path: cli/overview.mdx
+              - page: KV-Aware Routing
+                path: cli/kv-routing.mdx
+              - page: Disaggregated Serving
+                path: cli/disaggregated-serving.mdx
+              - page: Multi-Node Deployment
+                path: cli/multinode-deployment.mdx
+              - section: Backends
+                contents:
+                - page: vLLM Deployments
+                  path: backends/vllm/vllm-examples.md
+                - page: SGLang Deployments
+                  path: backends/sglang/sglang-examples.md
+                - page: TRT-LLM Deployments
+                  path: backends/trtllm/trtllm-examples.md
+              - section: KV Cache Offloading
+                contents:
+                  - page: LMCache Integration
+                    path: integrations/lmcache-integration.md
+                  - page: Hicache Integration
+                    path: cli/sglang-hicache.md
+                  - page: FlexKV Integration
+                    path: integrations/flexkv-integration.md
+                  - page: Custom KV Events
+                    path: integrations/kv-events-custom-engines.md
+
+          - section: Operations
+            icon: screwdriver-wrench
+            collapsed: open-by-default
+            contents:
+              - page: Health Checks
+                path: observability/health-checks.md
+              - page: Tracing
+                path: observability/tracing.md
+              - page: Logging
+                path: observability/logging.md
 
   - tab: use-cases
     layout:
