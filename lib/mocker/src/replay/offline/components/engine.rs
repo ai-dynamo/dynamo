@@ -549,11 +549,10 @@ where
         payload
             .lifecycle_events
             .extend(worker.retry_pending_destinations());
-        let had_raw_observations = worker.has_engine_events();
-        let engine_events = Observation::drain_worker_events(worker);
-        payload.progress.had_raw_observations |= had_raw_observations;
-        payload.progress.made_progress |= had_raw_observations;
-        payload.engine_events.append(engine_events);
+        let observed = Observation::drain_worker_events(worker);
+        payload.progress.had_raw_observations |= observed.had_raw_observations;
+        payload.progress.made_progress |= observed.had_raw_observations;
+        payload.engine_events.append(observed.events);
         Ok(payload)
     }
 

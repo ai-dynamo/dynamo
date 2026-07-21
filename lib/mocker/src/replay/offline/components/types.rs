@@ -13,6 +13,21 @@ use crate::scheduler::{
     SchedulerLifecycleEvent,
 };
 
+pub(in crate::replay) struct ObservedWorkerEvents<Events: EngineEventBatch> {
+    pub(in crate::replay::offline) events: Events,
+    pub(in crate::replay::offline) had_raw_observations: bool,
+}
+
+impl<Events: EngineEventBatch> ObservedWorkerEvents<Events> {
+    pub(in crate::replay) fn from_events(events: Events) -> Self {
+        let had_raw_observations = !events.is_empty();
+        Self {
+            events,
+            had_raw_observations,
+        }
+    }
+}
+
 impl RequestIdentity for DirectRequest {
     fn request_id(&self) -> Option<Uuid> {
         self.uuid
@@ -38,7 +53,7 @@ pub(in crate::replay) trait ReplayEngineObservation {
 
     fn take_pass_events(pass: &mut EnginePassResult) -> Self::Batch;
     fn take_command_events(effects: &mut SchedulerCommandEffects) -> Self::Batch;
-    fn drain_worker_events(worker: &OfflineWorkerState) -> Self::Batch;
+    fn drain_worker_events(worker: &OfflineWorkerState) -> ObservedWorkerEvents<Self::Batch>;
 
     #[cfg(feature = "kvbm-offload")]
     fn take_offload_events(effects: &mut crate::scheduler::OffloadTickEffects) -> Self::Batch;
@@ -64,8 +79,8 @@ impl ReplayEngineObservation for NoEngineEvents {
     }
 
     #[inline]
-    fn drain_worker_events(worker: &OfflineWorkerState) -> Self::Batch {
-        worker.discard_engine_events();
+    fn drain_worker_events(_worker: &OfflineWorkerState) -> ObservedWorkerEvents<Self::Batch> {
+        ObservedWorkerEvents::from_events(())
     }
 
     #[cfg(feature = "kvbm-offload")]

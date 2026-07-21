@@ -280,13 +280,6 @@ impl EngineCore {
         }
     }
 
-    pub(crate) fn has_kv_events(&self) -> bool {
-        match self {
-            Self::Vllm(core) => core.has_kv_events(),
-            Self::Sglang(core) => core.has_kv_events(),
-        }
-    }
-
     pub(crate) fn num_requests(&self) -> usize {
         match self {
             Self::Vllm(core) => core.num_requests(),

@@ -8,7 +8,8 @@ use dynamo_kv_router::protocols::RouterEvent;
 pub(in crate::replay) use dynamo_kv_router::protocols::StorageTier;
 
 use super::super::components::{
-    AdmissionQueue, NoReplayMetadata, ReplayEngineObservation, ReplayMode, ReplayWorkerCore,
+    AdmissionQueue, NoReplayMetadata, ObservedWorkerEvents, ReplayEngineObservation, ReplayMode,
+    ReplayWorkerCore,
 };
 use super::super::core::EngineEventBatch;
 use super::super::core::round_robin::PoolRoundRobinPlacement;
@@ -56,9 +57,11 @@ impl ReplayEngineObservation for RouterEventObservation {
     }
 
     #[inline]
-    fn drain_worker_events(worker: &super::super::state::OfflineWorkerState) -> Self::Batch {
+    fn drain_worker_events(
+        worker: &super::super::state::OfflineWorkerState,
+    ) -> ObservedWorkerEvents<Self::Batch> {
         let mut events = worker.engine_core().drain_kv_events();
-        Self::take(&mut events)
+        ObservedWorkerEvents::from_events(Self::take(&mut events))
     }
 
     #[cfg(feature = "kvbm-offload")]

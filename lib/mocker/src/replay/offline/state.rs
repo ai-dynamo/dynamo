@@ -379,14 +379,6 @@ impl OfflineWorkerState {
         &self.core
     }
 
-    pub(crate) fn has_engine_events(&self) -> bool {
-        self.core.has_kv_events()
-    }
-
-    pub(crate) fn discard_engine_events(&self) {
-        self.core.drain_kv_events();
-    }
-
     fn increment_in_flight(&mut self) {
         self.in_flight = self
             .in_flight

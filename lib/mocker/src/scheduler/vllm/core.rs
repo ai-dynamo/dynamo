@@ -999,12 +999,6 @@ impl VllmCore {
             .unwrap_or_default()
     }
 
-    pub(crate) fn has_kv_events(&self) -> bool {
-        self.kv_event_buffer
-            .as_ref()
-            .is_some_and(|buffer| !buffer.is_empty())
-    }
-
     pub(crate) fn num_requests(&self) -> usize {
         self.state.requests.len()
     }

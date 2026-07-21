@@ -17,7 +17,7 @@ pub(in crate::replay::offline) use types::ObservedOffloadEffects;
 pub(in crate::replay) use types::ReplayMode;
 pub use types::TrafficStats;
 pub(in crate::replay::offline) use types::{
-    EngineEffects, EnginePassMode, ObservedCommandEffects, ReplayEngineObservation,
-    ScheduledWorkerCompletion, TrafficAccumulator,
+    EngineEffects, EnginePassMode, ObservedCommandEffects, ObservedWorkerEvents,
+    ReplayEngineObservation, ScheduledWorkerCompletion, TrafficAccumulator,
 };
 pub(crate) use worker_core::ReplayWorkerCore;
