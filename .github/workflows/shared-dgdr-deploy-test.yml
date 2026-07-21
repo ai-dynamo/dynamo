@@ -127,41 +127,6 @@ jobs:
           extra_pytest_args: -m gpu_0 -k=dgdr_${{ matrix.suite }} --dgdr-name-prefix=ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.suite }} --dgdr-hf-token-secret=hf-token-secret
           cleanup_deployment: 'false'
 
-      - name: Collect failure diagnostics
-        if: failure() && steps.kubeconfig.outcome == 'success'
-        shell: bash
-        run: |
-          set +e
-          mkdir -p test-results
-          {
-            echo '=== DGDRs ==='
-            kubectl get dynamographdeploymentrequests -n "${DGDR_NAMESPACE}" -o wide
-            echo '=== DGDs ==='
-            kubectl get dynamographdeployments -n "${DGDR_NAMESPACE}" -o wide
-            echo '=== Jobs and pods ==='
-            kubectl get jobs,pods -n "${DGDR_NAMESPACE}" -o wide
-            echo '=== Recent events ==='
-            kubectl get events -n "${DGDR_NAMESPACE}" --sort-by='.lastTimestamp'
-            echo '=== Test pod descriptions and logs ==='
-            kubectl get pods -n "${DGDR_NAMESPACE}" -o name | while read -r pod; do
-              kubectl describe -n "${DGDR_NAMESPACE}" "${pod}"
-              kubectl logs -n "${DGDR_NAMESPACE}" "${pod}" \
-                --all-containers --prefix --tail=300
-            done
-            echo '=== Operator logs ==='
-            kubectl logs -n default -l control-plane=controller-manager \
-              --all-containers --tail=300
-          } 2>&1 | tee "${GITHUB_WORKSPACE}/test-results/dgdr-cpu-diagnostics.log"
-
-      - name: Upload DGDR test diagnostics
-        if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
-        with:
-          name: dgdr-cpu-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
-          path: test-results/dgdr-cpu-diagnostics.log
-          retention-days: 7
-          if-no-files-found: ignore
-
       - name: Clean up DGDR test namespace
         if: always() && steps.kubeconfig.outcome == 'success'
         shell: bash
