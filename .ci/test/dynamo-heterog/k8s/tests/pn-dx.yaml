@@ -30,7 +30,7 @@ spec:
           kueue.x-k8s.io/pod-group-total-count: "3"
       extraPodSpec:
         nodeSelector:
-          dynamo.intel.com/node: ${NVIDIA_NODE}
+          dynamo.intel.com/node: ${XPU_NODE}
         imagePullSecrets:
           - name: amr-caas-registry
         volumes:
@@ -43,7 +43,7 @@ spec:
               path: /mnt/weka
               type: Directory
         mainContainer:
-          image: ${DOCKER_IMAGE_GPU}
+          image: ${DOCKER_IMAGE_XPU}
           env:
             - name: DYN_STORE_KV
               value: "mem"
