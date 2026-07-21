@@ -25,6 +25,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
@@ -37,6 +38,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 		oldRequest         runtime.Object
 		gpuDiscovery       bool
 		seedWithoutWebhook bool
+		wantImage          string
 		wantSchemaErr      string
 		wantCELErr         string
 		wantWebhook        []string
@@ -44,9 +46,12 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 	}{
 		// Source-version schema, CEL, and conversion boundaries.
 		{
-			name:         "valid v1beta1 request",
-			request:      betaDGDRForAdmission(nil),
+			name: "valid v1beta1 request is defaulted",
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.Image = ""
+			}),
 			gpuDiscovery: true,
+			wantImage:    "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.0",
 		},
 		{
 			name:         "valid v1alpha1 request converts through the production path",
@@ -250,7 +255,16 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				seedGates.GPUDiscovery = true
 				test.seedGates = &seedGates
 			}
-			runAdmissionTest(t, test)
+			actual := runAdmissionTest(t, test)
+			if tt.wantImage != "" {
+				image, found, err := unstructured.NestedString(actual.Object, "spec", "image")
+				if err != nil || !found {
+					t.Fatalf("read defaulted spec.image: found=%v, err=%v", found, err)
+				}
+				if image != tt.wantImage {
+					t.Fatalf("defaulted spec.image = %q, want %q", image, tt.wantImage)
+				}
+			}
 		})
 	}
 }

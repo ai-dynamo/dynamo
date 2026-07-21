@@ -20,18 +20,22 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
+const admissionBypassUsername = "operatorenv-controller-admission-bypass"
+
 var (
 	sharedEnv = operatorenv.New(operatorenv.Options{
 		Admission: operatorenv.AdmissionWebhooks{
-			Mutating:   true,
-			Validating: true,
+			Mutating:    true,
+			Validating:  true,
+			BypassUsers: []string{admissionBypassUsername},
 		},
 		Conversion:      true,
 		SetupWebhooks:   setupProductionWebhooks,
 		OperatorVersion: "1.1.0",
 	})
-	k8sClient        client.Client
-	envtestNamespace string
+	k8sClient             client.Client
+	admissionBypassClient client.Client
+	envtestNamespace      string
 )
 
 func setupProductionWebhooks(mgr ctrl.Manager, opts operatorenv.WebhookSetupOptions) error {
@@ -57,4 +61,11 @@ var _ = BeforeEach(func() {
 	env := sharedEnv.ForTest(GinkgoTB())
 	k8sClient = env.Client()
 	envtestNamespace = env.Namespace()
+
+	config := env.RESTConfig()
+	config.Impersonate.UserName = admissionBypassUsername
+	config.Impersonate.Groups = []string{"system:masters"}
+	var err error
+	admissionBypassClient, err = client.New(config, client.Options{Scheme: k8sClient.Scheme()})
+	Expect(err).NotTo(HaveOccurred())
 })

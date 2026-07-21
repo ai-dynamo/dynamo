@@ -38,6 +38,7 @@ var (
 	admissionGate = &mutableFeatureGate{}
 	admissionEnv  = operatorenv.New(operatorenv.Options{
 		Admission: operatorenv.AdmissionWebhooks{
+			Mutating:    true,
 			Validating:  true,
 			BypassUsers: []string{legacySeedUsername},
 		},
@@ -92,12 +93,13 @@ type admissionTestCase struct {
 
 	wantSchemaError   string
 	wantCELError      string
+	wantAdmissionErrs []string
 	wantWebhookErrors []string
 	wantWarnings      []string
 	notWantError      string
 }
 
-func runAdmissionTest(t *testing.T, test admissionTestCase) {
+func runAdmissionTest(t *testing.T, test admissionTestCase) *unstructured.Unstructured {
 	t.Helper()
 
 	t.Log("Create an isolated namespace in the shared operator environment")
@@ -113,10 +115,13 @@ func runAdmissionTest(t *testing.T, test admissionTestCase) {
 	admissionGate.set(test.gates)
 	current, originalNamespace := admissionObject(t, test.object, env.Namespace(), test.mutateObject)
 
-	var err error
+	var (
+		result *unstructured.Unstructured
+		err    error
+	)
 	if test.oldObject == nil {
 		t.Log("Submit the create request through the Kubernetes API server")
-		_, err = resourceClient.Create(t.Context(), current, metav1.CreateOptions{})
+		result, err = resourceClient.Create(t.Context(), current, metav1.CreateOptions{})
 	} else {
 		t.Log("Create the old resource state through the Kubernetes API server")
 		seedGates := test.gates
@@ -134,7 +139,7 @@ func runAdmissionTest(t *testing.T, test admissionTestCase) {
 		admissionGate.set(test.gates)
 		warnings.clear()
 		current.SetResourceVersion(old.GetResourceVersion())
-		_, err = resourceClient.Update(t.Context(), current, metav1.UpdateOptions{})
+		result, err = resourceClient.Update(t.Context(), current, metav1.UpdateOptions{})
 	}
 
 	t.Log("Compare the API server admission result with the table expectations")
@@ -145,6 +150,7 @@ func runAdmissionTest(t *testing.T, test admissionTestCase) {
 	if got := warnings.list(); !slices.Equal(got, wantWarnings) {
 		t.Fatalf("warnings = %v, want %v", got, wantWarnings)
 	}
+	return result
 }
 
 func newAdmissionResourceClient(
@@ -370,6 +376,9 @@ func expectedAdmissionErrors(t *testing.T, test admissionTestCase) []string {
 	if test.wantCELError != "" {
 		categories++
 	}
+	if len(test.wantAdmissionErrs) != 0 {
+		categories++
+	}
 	if len(test.wantWebhookErrors) != 0 {
 		categories++
 	}
@@ -381,6 +390,9 @@ func expectedAdmissionErrors(t *testing.T, test admissionTestCase) []string {
 	}
 	if test.wantCELError != "" {
 		return []string{test.wantCELError}
+	}
+	if len(test.wantAdmissionErrs) != 0 {
+		return test.wantAdmissionErrs
 	}
 	return test.wantWebhookErrors
 }

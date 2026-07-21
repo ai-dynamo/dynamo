@@ -91,13 +91,6 @@ func TestDGDRDefaulter_Default(t *testing.T) {
 		expectedImage string
 	}{
 		{
-			name:          "CREATE with empty image defaults to operator version",
-			version:       "1.1.0",
-			operation:     admissionv1.Create,
-			initialImage:  "",
-			expectedImage: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.0",
-		},
-		{
 			name:          "CREATE with preset image is not overwritten",
 			version:       "1.1.0",
 			operation:     admissionv1.Create,

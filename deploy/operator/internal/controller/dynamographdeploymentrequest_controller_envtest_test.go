@@ -21,7 +21,6 @@ import (
 	"context"
 	"errors"
 	"strings"
-	"testing"
 	"time"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -44,7 +43,6 @@ import (
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -78,103 +76,6 @@ func (c *writeFaultClient) Apply(ctx context.Context, obj runtime.ApplyConfigura
 		}, "injected", errors.New("injected apply conflict"))
 	}
 	return c.Client.Apply(ctx, obj, opts...)
-}
-
-func TestDynamoGraphDeploymentRequestReconcilerRejectsImmutableSpecChange(t *testing.T) {
-	ctx := t.Context()
-	scheme := runtime.NewScheme()
-	if err := nvidiacomv1beta1.AddToScheme(scheme); err != nil {
-		t.Fatalf("add DynamoGraphDeploymentRequest scheme: %v", err)
-	}
-
-	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:       "immutable-spec-change",
-			Namespace:  "default",
-			Generation: 2,
-			Finalizers: []string{"nvidia.com/finalizer"},
-		},
-		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-			Model:   "modified-model",
-			Backend: "vllm",
-			Image:   "test-profiler:latest",
-		},
-		Status: nvidiacomv1beta1.DynamoGraphDeploymentRequestStatus{
-			ObservedGeneration: 1,
-			Phase:              nvidiacomv1beta1.DGDRPhaseProfiling,
-		},
-	}
-	recorder := record.NewFakeRecorder(1)
-	reconciler := &DynamoGraphDeploymentRequestReconciler{
-		Client:   fake.NewClientBuilder().WithScheme(scheme).WithObjects(dgdr).Build(),
-		Recorder: recorder,
-	}
-
-	_, err := reconciler.Reconcile(ctx, reconcile.Request{
-		NamespacedName: types.NamespacedName{Name: dgdr.Name, Namespace: dgdr.Namespace},
-	})
-	if err != nil {
-		t.Fatalf("reconcile immutable spec change: %v", err)
-	}
-
-	var got nvidiacomv1beta1.DynamoGraphDeploymentRequest
-	if err := reconciler.Get(ctx, types.NamespacedName{Name: dgdr.Name, Namespace: dgdr.Namespace}, &got); err != nil {
-		t.Fatalf("get reconciled DGDR: %v", err)
-	}
-	if got.Status.ObservedGeneration != 1 {
-		t.Fatalf("observed generation = %d, want 1", got.Status.ObservedGeneration)
-	}
-	if got.Status.Phase != nvidiacomv1beta1.DGDRPhaseProfiling {
-		t.Fatalf("phase = %q, want %q", got.Status.Phase, nvidiacomv1beta1.DGDRPhaseProfiling)
-	}
-
-	eventCtx, cancel := context.WithTimeout(t.Context(), time.Second)
-	defer cancel()
-	var event string
-	select {
-	case event = <-recorder.Events:
-	case <-eventCtx.Done():
-		t.Fatalf("wait for immutable-spec event: %v", eventCtx.Err())
-	}
-	wantEventFragment := "DynamoGraphDeploymentRequest is immutable once profiling starts"
-	if !strings.Contains(event, wantEventFragment) {
-		t.Fatalf("event = %q, want it to contain %q", event, wantEventFragment)
-	}
-}
-
-func TestDGDRAdmissionDefaultsPlannerImage(t *testing.T) {
-	ctx := t.Context()
-	env := sharedEnv.ForTest(t)
-
-	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "default-image",
-			Namespace: env.Namespace(),
-		},
-		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-			Model:   "Qwen/Qwen3-0.6B",
-			Backend: nvidiacomv1beta1.BackendTypeVllm,
-			Hardware: &nvidiacomv1beta1.HardwareSpec{
-				GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
-				VRAMMB:         ptr.To(81920.0),
-				NumGPUsPerNode: ptr.To[int32](8),
-				TotalGPUs:      ptr.To[int32](8),
-			},
-		},
-	}
-	if err := env.Client().Create(ctx, dgdr); err != nil {
-		t.Fatalf("create DGDR: %v", err)
-	}
-
-	var got nvidiacomv1beta1.DynamoGraphDeploymentRequest
-	key := types.NamespacedName{Name: dgdr.Name, Namespace: env.Namespace()}
-	if err := env.Client().Get(ctx, key, &got); err != nil {
-		t.Fatalf("get DGDR: %v", err)
-	}
-	want := "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.0"
-	if got.Spec.Image != want {
-		t.Fatalf("defaulted image = %q, want %q", got.Spec.Image, want)
-	}
 }
 
 var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
@@ -1415,6 +1316,7 @@ spec:
 
 	Context("When enforcing spec immutability", func() {
 		It("Should reject spec changes after profiling starts", func() {
+			t := GinkgoT()
 			ctx := context.Background()
 			dgdrName := "test-dgdr-immutable"
 			namespace := envtestNamespace
@@ -1441,29 +1343,48 @@ spec:
 				},
 			}
 
+			t.Log("Create and reconcile the initial request")
 			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
-
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
 			})
 			Expect(err).NotTo(HaveOccurred())
-
 			var current nvidiacomv1beta1.DynamoGraphDeploymentRequest
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
 			initialGeneration := current.Generation
+			observedGeneration := current.Status.ObservedGeneration
 
+			t.Log("Move the request into the profiling phase")
 			current.Status.Phase = nvidiacomv1beta1.DGDRPhaseProfiling
 			Expect(k8sClient.Status().Update(ctx, &current)).Should(Succeed())
 
+			t.Log("Seed a spec change that validating admission normally rejects")
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
 			current.Spec.Model = "modified-model"
-			Expect(k8sClient.Update(ctx, &current)).Should(MatchError(ContainSubstring("spec: Forbidden: updates are forbidden while the resource is in phase")))
+			Expect(admissionBypassClient.Update(ctx, &current)).Should(Succeed())
 
+			t.Log("Reconcile the legacy invalid state")
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			t.Log("Verify that reconciliation preserves the previously observed state")
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
-			Expect(current.Generation).Should(Equal(initialGeneration))
-			Expect(current.Spec.Model).Should(Equal("test-model"))
+			Expect(current.Generation).Should(BeNumerically(">", initialGeneration))
+			Expect(current.Status.ObservedGeneration).Should(Equal(observedGeneration))
 			Expect(current.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseProfiling))
+
+			t.Log("Verify that reconciliation reports the rejected change")
+			Eventually(func() bool {
+				select {
+				case event := <-recorder.Events:
+					return strings.Contains(event, "DynamoGraphDeploymentRequest is immutable once profiling starts")
+				default:
+					return false
+				}
+			}, timeout, interval).Should(BeTrue())
 		})
 	})
 

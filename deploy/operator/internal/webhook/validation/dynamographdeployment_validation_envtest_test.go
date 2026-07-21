@@ -56,11 +56,12 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		checkpointOff   bool                             // disables checkpoint creation and restore
 		username        string                           // supplies the admission request identity
 
-		wantSchemaErr   string
-		wantCELErr      string
-		wantWebhookErrs []string
-		wantWarnings    []string
-		notWantErr      string
+		wantSchemaErr     string
+		wantCELErr        string
+		wantAdmissionErrs []string
+		wantWebhookErrs   []string
+		wantWarnings      []string
+		notWantErr        string
 	}{
 		// Baseline create-path rules.
 		{
@@ -79,7 +80,10 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).Replicas = k8sptr.To(int32(-1))
 			}),
-			wantSchemaErr: "spec.components[1].replicas: Invalid value: -1: spec.components[1].replicas in body should be greater than or equal to 0",
+			wantAdmissionErrs: []string{
+				"spec.components[1].replicas: Invalid value: -1: spec.components[1].replicas in body should be greater than or equal to 0",
+				"spec.components[1]: Invalid value: minAvailable must be less than or equal to replicas unless replicas is 0",
+			},
 		},
 		{
 			name:          "component minAvailable requires Grove",
@@ -225,13 +229,14 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantSchemaErr: `spec.components[1].compilationCache.pvcName: Invalid value: "": spec.components[1].compilationCache.pvcName in body should be at least 1 chars long`,
 		},
 		{
-			name: "v1alpha1 converted compilation cache mount with an empty PVC name reaches the webhook",
+			name: "v1alpha1 converted compilation cache mount with an empty PVC name is rejected",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["worker"].VolumeMounts = []nvidiacomv1alpha1.VolumeMount{{
 					UseAsCompilationCache: true,
 				}}
 			}),
 			mutateRequest: setAlphaCompilationCacheVolumeNameEmpty,
+			wantSchemaErr: `spec.services.worker.volumeMounts[0].name: Required value`,
 		},
 		{
 			name: "v1beta1 sidecars must provide an image in CEL",
@@ -395,12 +400,11 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantCELErr: "spec.components[1]: Invalid value: minAvailable is immutable after creation",
 		},
 		{
-			name: "v1beta1 removed minAvailable update is rejected by CEL",
+			name: "v1beta1 removed minAvailable update is restored by defaulting",
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).MinAvailable = k8sptr.To(int32(1))
 			}),
 			deployment: betaDGDForAdmission(nil),
-			wantCELErr: "spec.components[1]: Invalid value: minAvailable is immutable after creation",
 		},
 
 		// Checkpoint rules.
@@ -1640,6 +1644,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				username:          tt.username,
 				wantSchemaError:   tt.wantSchemaErr,
 				wantCELError:      tt.wantCELErr,
+				wantAdmissionErrs: tt.wantAdmissionErrs,
 				wantWebhookErrors: tt.wantWebhookErrs,
 				wantWarnings:      tt.wantWarnings,
 				notWantError:      tt.notWantErr,
