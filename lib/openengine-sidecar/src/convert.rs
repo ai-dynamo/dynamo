@@ -8,15 +8,54 @@ use dynamo_backend_common::{
     DynamoError, GuidedDecodingOptions, LLMEngineOutput, PreprocessedRequest, TopLogprob,
 };
 use dynamo_llm::protocols::common::preprocessor::MultimodalData;
+use tonic::metadata::{Ascii, MetadataKey, MetadataMap, MetadataValue};
 
 use crate::client;
 use crate::proto as pb;
 
-pub fn merge_context_metadata(
-    request: &mut pb::GenerateRequest,
-    metadata: &BTreeMap<String, String>,
-) {
-    request.metadata.extend(metadata.clone());
+pub fn generate_metadata(
+    request: &PreprocessedRequest,
+    context: &BTreeMap<String, String>,
+    is_prefill: bool,
+) -> Result<MetadataMap, DynamoError> {
+    let mut metadata = MetadataMap::new();
+    for (key, value) in context {
+        insert_metadata(&mut metadata, key, value)?;
+    }
+    for annotation in &request.annotations {
+        if let Some((key, value)) = annotation.split_once(':') {
+            insert_metadata(&mut metadata, key, value)?;
+        }
+    }
+    if let Some(routing) = request.routing.as_ref() {
+        if let Some(priority) = routing.priority {
+            insert_metadata(&mut metadata, "openengine-priority", &priority.to_string())?;
+        }
+        let rank = if is_prefill {
+            routing.prefill_dp_rank
+        } else {
+            routing.dp_rank
+        };
+        if let Some(rank) = rank {
+            insert_metadata(
+                &mut metadata,
+                "openengine-target-dp-rank",
+                &rank.to_string(),
+            )?;
+        }
+    }
+    Ok(metadata)
+}
+
+fn insert_metadata(metadata: &mut MetadataMap, key: &str, value: &str) -> Result<(), DynamoError> {
+    let key = MetadataKey::<Ascii>::from_bytes(key.as_bytes()).map_err(|error| {
+        client::invalid_arg(format!("invalid OpenEngine metadata key `{key}`: {error}"))
+    })?;
+    let value = MetadataValue::<Ascii>::try_from(value).map_err(|error| {
+        client::invalid_arg(format!("invalid OpenEngine metadata value: {error}"))
+    })?;
+    metadata.insert(key, value);
+    Ok(())
 }
 
 pub fn build_generate_request(
@@ -130,13 +169,6 @@ pub fn build_generate_request(
         }),
         kv: Some(pb::KvOptions {
             session: kv_session,
-            data_parallel_rank: routing.and_then(|value| {
-                if is_prefill {
-                    value.prefill_dp_rank
-                } else {
-                    value.dp_rank
-                }
-            }),
             bypass_prefix_cache: prefix_cache_bypass(request),
             cache_salt: routing.and_then(|value| value.cache_namespace.clone()),
         }),
@@ -149,13 +181,7 @@ pub fn build_generate_request(
         lora_name: routing
             .and_then(|value| value.lora_name.clone())
             .unwrap_or_default(),
-        priority: routing.and_then(|value| value.priority),
-        metadata: request
-            .annotations
-            .iter()
-            .filter_map(|annotation| annotation.split_once(':'))
-            .map(|(key, value)| (key.to_string(), value.to_string()))
-            .collect(),
+        extra: None,
         media_options,
     })
 }

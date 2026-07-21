@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-const OPENENGINE_COMMIT: &str = "cea19cb06acf03c911b84d5c147e519b60dd92a6";
+const OPENENGINE_COMMIT: &str = "7d6ac3848bba9c9a2b1aabcd4fab5f1a4ea04558";
 
 fn main() {
     let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());

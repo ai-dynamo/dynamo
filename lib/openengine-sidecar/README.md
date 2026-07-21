@@ -11,7 +11,7 @@ sidecar/
 ```
 
 `build.rs` verifies that the sibling OpenEngine worktree is exactly commit
-`cea19cb06acf03c911b84d5c147e519b60dd92a6`; a different HEAD fails the build.
+`7d6ac3848bba9c9a2b1aabcd4fab5f1a4ea04558`; a different HEAD fails the build.
 The Cargo dependency also requires package version 0.2.0. Keep the path
 dependency until that exact OpenEngine commit is published at an immutable Git
 or registry location, then replace it with the corresponding immutable pin.

@@ -17,12 +17,12 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 
-use crate::client::{self, Client};
+use crate::client::{self, Control};
 use crate::proto as pb;
 
 pub async fn discover_sources(
     channel: Channel,
-    mut client: Client,
+    mut client: Control,
     expected_ranks: HashSet<u32>,
     cancel: CancellationToken,
     tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
@@ -97,7 +97,7 @@ async fn subscribe_loop(
     cancel: CancellationToken,
     fatal: watch::Sender<Option<String>>,
 ) {
-    let mut client = pb::open_engine_client::OpenEngineClient::new(channel);
+    let mut client = pb::control_client::ControlClient::new(channel);
     let response = client.subscribe_kv_events(subscription_request(rank)).await;
     let mut stream = match response {
         Ok(response) => response.into_inner(),

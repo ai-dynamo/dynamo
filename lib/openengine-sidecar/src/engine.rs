@@ -161,7 +161,7 @@ impl OpenEngineSidecar {
         ))
     }
 
-    async fn await_ready(&self, client: &mut client::Client) -> Result<(), DynamoError> {
+    async fn await_ready(&self, client: &mut client::Control) -> Result<(), DynamoError> {
         let deadline = Instant::now() + self.transport.deadline;
         loop {
             match tokio::time::timeout(
@@ -317,15 +317,17 @@ impl LLMEngine for OpenEngineSidecar {
         } else {
             discovery.model.served_model_name.as_str()
         };
-        let mut grpc_request = convert::build_generate_request(
+        let grpc_message = convert::build_generate_request(
             &request,
             &request_id,
             remote_model,
             is_prefill,
             discovery.model.supports_text_input == Some(true),
         )?;
-        validate_decode_handoff(discovery, &grpc_request, self.disaggregation_mode)?;
-        convert::merge_context_metadata(&mut grpc_request, ctx.metadata());
+        validate_decode_handoff(discovery, &grpc_message, self.disaggregation_mode)?;
+        let metadata = convert::generate_metadata(&request, ctx.metadata(), is_prefill)?;
+        let mut grpc_request = tonic::Request::new(grpc_message);
+        *grpc_request.metadata_mut() = metadata;
         let mut grpc_client = pool.stream_client();
         let abort_client = pool.control_client();
         let cancel = self.cancel.clone();
@@ -881,7 +883,7 @@ async fn load_loop(
     interval: std::time::Duration,
     cancel: CancellationToken,
 ) {
-    let mut grpc_client = pb::open_engine_client::OpenEngineClient::new(channel);
+    let mut grpc_client = pb::control_client::ControlClient::new(channel);
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
@@ -937,11 +939,11 @@ fn publish_load(publisher: &SnapshotPublisher, rank: u32, used: Option<u64>, tot
 
 struct AbortOnDrop {
     request_id: Option<String>,
-    client: Option<client::Client>,
+    client: Option<client::Control>,
 }
 
 impl AbortOnDrop {
-    fn new(request_id: String, client: client::Client) -> Self {
+    fn new(request_id: String, client: client::Control) -> Self {
         Self {
             request_id: Some(request_id),
             client: Some(client),
@@ -965,7 +967,7 @@ impl Drop for AbortOnDrop {
     }
 }
 
-async fn abort_request(mut client: client::Client, request_id: String) {
+async fn abort_request(mut client: client::Control, request_id: String) {
     if let Err(error) = client
         .abort(pb::AbortRequest {
             target: Some(pb::abort_request::Target::RequestId(request_id.clone())),
@@ -993,13 +995,13 @@ fn bootstrap_discover(
 }
 
 fn engine_role(discovery: &Discovery) -> Result<pb::EngineRole, DynamoError> {
-    match pb::EngineRole::try_from(discovery.engine.role) {
+    match pb::EngineRole::try_from(discovery.engine.engine_role) {
         Ok(
             role @ (pb::EngineRole::Aggregated | pb::EngineRole::Prefill | pb::EngineRole::Decode),
         ) => Ok(role),
         Ok(pb::EngineRole::Unspecified) | Err(_) => Err(client::invalid_arg(format!(
             "OpenEngine advertised unsupported role value {}",
-            discovery.engine.role
+            discovery.engine.engine_role
         ))),
     }
 }
@@ -1466,6 +1468,7 @@ fn validate_guided_capability(
 fn build_engine_config(discovery: &Discovery) -> EngineConfig {
     let model = &discovery.model;
     let parallelism = discovery.engine.parallelism.unwrap_or_default();
+    let capacity = discovery.engine.capacity.as_ref();
     EngineConfig {
         model: model.model_id.clone(),
         served_model_name: nonempty(&model.served_model_name),
@@ -1483,10 +1486,10 @@ fn build_engine_config(discovery: &Discovery) -> EngineConfig {
         .collect(),
         llm: Some(LlmRegistration {
             context_length: model.max_context_length,
-            kv_cache_block_size: model.kv_block_size,
-            total_kv_blocks: model.total_kv_blocks,
-            max_num_seqs: model.max_running_requests,
-            max_num_batched_tokens: model.max_batched_tokens,
+            kv_cache_block_size: capacity.and_then(|value| value.kv_block_size),
+            total_kv_blocks: capacity.and_then(|value| value.total_kv_blocks),
+            max_num_seqs: capacity.and_then(|value| value.max_running_requests),
+            max_num_batched_tokens: capacity.and_then(|value| value.max_batched_tokens),
             data_parallel_size: parallelism.data_parallel_size,
             data_parallel_start_rank: parallelism.data_parallel_start_rank,
             bootstrap_host: None,

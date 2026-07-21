@@ -74,13 +74,28 @@ fn request_conversion_forwards_sampling_routing_and_stopping() {
     });
     let converted =
         convert::build_generate_request(&request, "r1", "served", false, false).unwrap();
+    let metadata = convert::generate_metadata(&request, &BTreeMap::new(), false).unwrap();
     assert_eq!(converted.model, "served");
-    assert_eq!(converted.priority, Some(9));
+    assert_eq!(
+        metadata
+            .get("openengine-priority")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "9"
+    );
+    assert_eq!(
+        metadata
+            .get("openengine-target-dp-rank")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "3"
+    );
     assert_eq!(converted.lora_name, "adapter");
     assert_eq!(converted.sampling.unwrap().num_sequences, Some(2));
     assert_eq!(converted.stopping.unwrap().max_tokens, Some(16));
     let kv = converted.kv.unwrap();
-    assert_eq!(kv.data_parallel_rank, Some(3));
     assert_eq!(kv.cache_salt.as_deref(), Some("tenant"));
 }
 
@@ -287,17 +302,23 @@ fn token_delta_preserves_text_logprobs_and_output_index() {
 
 #[test]
 fn runtime_trace_metadata_is_merged_into_generate_request() {
-    let mut converted =
-        convert::build_generate_request(&request(), "r1", "served", false, false).unwrap();
-    convert::merge_context_metadata(
-        &mut converted,
+    let metadata = convert::generate_metadata(
+        &request(),
         &BTreeMap::from([
             ("traceparent".to_string(), "00-abcd-1234-01".to_string()),
             ("tracestate".to_string(), "vendor=value".to_string()),
         ]),
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        metadata.get("traceparent").unwrap().to_str().unwrap(),
+        "00-abcd-1234-01"
     );
-    assert_eq!(converted.metadata["traceparent"], "00-abcd-1234-01");
-    assert_eq!(converted.metadata["tracestate"], "vendor=value");
+    assert_eq!(
+        metadata.get("tracestate").unwrap().to_str().unwrap(),
+        "vendor=value"
+    );
 }
 
 const AGGREGATE: u8 = 0;
@@ -309,7 +330,7 @@ const PREFILL_NO_USAGE: u8 = 5;
 const PREFILL_BAD_HANDOFF: u8 = 6;
 
 struct FakeState {
-    engine: Mutex<pb::EngineInfo>,
+    engine: Mutex<pb::ServerInfo>,
     model: Mutex<pb::ModelInfo>,
     health: AtomicI32,
     behavior: AtomicU8,
@@ -324,9 +345,9 @@ struct FakeState {
 impl Default for FakeState {
     fn default() -> Self {
         Self {
-            engine: Mutex::new(pb::EngineInfo {
+            engine: Mutex::new(pb::ServerInfo {
                 engine_name: "tensorrt_llm".into(),
-                role: pb::EngineRole::Aggregated as i32,
+                engine_role: pb::EngineRole::Aggregated as i32,
                 supported_models: vec!["model".into()],
                 schema_revision: openengine_proto::SCHEMA_REVISION,
                 minimum_client_revision: 1,
@@ -347,6 +368,13 @@ impl Default for FakeState {
                     schema_version: Some(1),
                     ..Default::default()
                 }),
+                capacity: Some(pb::DeploymentCapacity {
+                    kv_block_size: Some(16),
+                    total_kv_blocks: Some(10),
+                    max_running_requests: Some(4),
+                    max_batched_tokens: Some(128),
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
             model: Mutex::new(pb::ModelInfo {
@@ -355,7 +383,6 @@ impl Default for FakeState {
                 supports_token_ids_input: Some(true),
                 supports_text_input: Some(true),
                 supports_lora: Some(true),
-                kv_block_size: Some(16),
                 generation: Some(pb::GenerationCapabilities {
                     prompt_logprobs: Some(pb::LogprobCapabilities {
                         supported: Some(true),
@@ -399,7 +426,7 @@ impl Default for FakeState {
 struct FakeOpenEngine(Arc<FakeState>);
 
 #[tonic::async_trait]
-impl pb::open_engine_server::OpenEngine for FakeOpenEngine {
+impl pb::inference_server::Inference for FakeOpenEngine {
     type GenerateStream = GrpcStream<pb::GenerateResponse>;
 
     async fn generate(
@@ -596,11 +623,14 @@ impl pb::open_engine_server::OpenEngine for FakeOpenEngine {
     ) -> Result<tonic::Response<pb::ScoreResponse>, tonic::Status> {
         Err(tonic::Status::unimplemented("score"))
     }
+}
 
-    async fn get_engine_info(
+#[tonic::async_trait]
+impl pb::control_server::Control for FakeOpenEngine {
+    async fn get_server_info(
         &self,
-        _: tonic::Request<pb::GetEngineInfoRequest>,
-    ) -> Result<tonic::Response<pb::EngineInfo>, tonic::Status> {
+        _: tonic::Request<pb::GetServerInfoRequest>,
+    ) -> Result<tonic::Response<pb::ServerInfo>, tonic::Status> {
         let delay_ms = self.0.discovery_delay_ms.load(Ordering::SeqCst);
         if delay_ms > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
@@ -805,10 +835,11 @@ impl FakeServer {
         let address = listener.local_addr().unwrap();
         let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
+            let inference = FakeOpenEngine(state.clone());
+            let control = FakeOpenEngine(state);
             tonic::transport::Server::builder()
-                .add_service(pb::open_engine_server::OpenEngineServer::new(
-                    FakeOpenEngine(state),
-                ))
+                .add_service(pb::inference_server::InferenceServer::new(inference))
+                .add_service(pb::control_server::ControlServer::new(control))
                 .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
                     let _ = shutdown_rx.await;
                 })
@@ -938,7 +969,7 @@ async fn fake_tonic_health_probe_bypasses_decode_handoff() {
     use futures::StreamExt;
 
     let state = Arc::new(FakeState::default());
-    state.engine.lock().role = pb::EngineRole::Decode as i32;
+    state.engine.lock().engine_role = pb::EngineRole::Decode as i32;
     let server = FakeServer::start(state.clone()).await;
     let (engine, _) = build_sidecar(server.address, "tensorrt_llm").await.unwrap();
     engine.start(1).await.unwrap();
@@ -1070,11 +1101,11 @@ async fn fake_tonic_rejects_schema_engine_and_role_mismatches() {
     state.engine.lock().schema_release = "main".into();
     assert!(build_sidecar(server.address, "tensorrt_llm").await.is_err());
     state.engine.lock().schema_release = crate::OPENENGINE_PROTO_COMMIT.into();
-    state.engine.lock().role = pb::EngineRole::Unspecified as i32;
+    state.engine.lock().engine_role = pb::EngineRole::Unspecified as i32;
     assert!(build_sidecar(server.address, "tensorrt_llm").await.is_err());
-    state.engine.lock().role = pb::EngineRole::Aggregated as i32;
+    state.engine.lock().engine_role = pb::EngineRole::Aggregated as i32;
     let (engine, _) = build_sidecar(server.address, "tensorrt_llm").await.unwrap();
-    state.engine.lock().role = pb::EngineRole::Decode as i32;
+    state.engine.lock().engine_role = pb::EngineRole::Decode as i32;
     assert!(engine.start(1).await.is_err());
     engine.cleanup().await.unwrap();
     server.stop().await;
@@ -1085,7 +1116,7 @@ async fn fake_tonic_prefill_decode_preserves_media_options_and_handoff() {
     use futures::StreamExt;
 
     let state = Arc::new(FakeState::default());
-    state.engine.lock().role = pb::EngineRole::Prefill as i32;
+    state.engine.lock().engine_role = pb::EngineRole::Prefill as i32;
     state.behavior.store(PREFILL, Ordering::SeqCst);
     let server = FakeServer::start(state.clone()).await;
     let mut media_request = request();
@@ -1108,7 +1139,7 @@ async fn fake_tonic_prefill_decode_preserves_media_options_and_handoff() {
     let handoff = output.remove(0).unwrap().disaggregated_params.unwrap();
     prefill.cleanup().await.unwrap();
 
-    state.engine.lock().role = pb::EngineRole::Decode as i32;
+    state.engine.lock().engine_role = pb::EngineRole::Decode as i32;
     state.behavior.store(AGGREGATE, Ordering::SeqCst);
     state.requests.lock().clear();
     media_request.prefill_result = Some(dynamo_backend_common::PrefillResult {
@@ -1140,7 +1171,7 @@ async fn fake_tonic_prefill_rejects_missing_usage_and_malformed_server_handoff()
 
     for behavior in [PREFILL_NO_USAGE, PREFILL_BAD_HANDOFF] {
         let state = Arc::new(FakeState::default());
-        state.engine.lock().role = pb::EngineRole::Prefill as i32;
+        state.engine.lock().engine_role = pb::EngineRole::Prefill as i32;
         state.behavior.store(behavior, Ordering::SeqCst);
         let server = FakeServer::start(state).await;
         let (engine, _) = build_sidecar(server.address, "tensorrt_llm").await.unwrap();
@@ -1250,7 +1281,7 @@ async fn bootstrap_discovery_rpc_timeout_is_typed_and_bounded() {
             dynamo_backend_common::BackendError::CannotConnect
         )
     );
-    assert!(error.to_string().contains("GetEngineInfo"));
+    assert!(error.to_string().contains("GetServerInfo"));
     server.stop().await;
 }
 

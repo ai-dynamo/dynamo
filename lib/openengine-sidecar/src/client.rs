@@ -10,13 +10,15 @@ use tonic::transport::{Channel, Endpoint};
 
 use crate::args::TransportConfig;
 use crate::proto as pb;
-use crate::proto::open_engine_client::OpenEngineClient;
+use crate::proto::control_client::ControlClient;
+use crate::proto::inference_client::InferenceClient;
 
-pub type Client = OpenEngineClient<Channel>;
+pub type Control = ControlClient<Channel>;
+pub type Inference = InferenceClient<Channel>;
 
 #[derive(Clone, Debug)]
 pub struct Discovery {
-    pub engine: pb::EngineInfo,
+    pub engine: pb::ServerInfo,
     pub model: pb::ModelInfo,
     pub selected_model: String,
 }
@@ -46,13 +48,13 @@ impl Pool {
         self.channels.len()
     }
 
-    pub fn stream_client(&self) -> Client {
+    pub fn stream_client(&self) -> Inference {
         let index = self.next.fetch_add(1, Ordering::Relaxed) % self.channels.len();
-        OpenEngineClient::new(self.channels[index].clone())
+        InferenceClient::new(self.channels[index].clone())
     }
 
-    pub fn control_client(&self) -> Client {
-        OpenEngineClient::new(self.channels[0].clone())
+    pub fn control_client(&self) -> Control {
+        ControlClient::new(self.channels[0].clone())
     }
 
     pub fn channel(&self) -> Channel {
@@ -60,8 +62,8 @@ impl Pool {
     }
 }
 
-pub async fn connect(uri: &str, config: &TransportConfig) -> Result<Client, DynamoError> {
-    Ok(OpenEngineClient::new(connect_channel(uri, config).await?))
+pub async fn connect(uri: &str, config: &TransportConfig) -> Result<Control, DynamoError> {
+    Ok(ControlClient::new(connect_channel(uri, config).await?))
 }
 
 async fn connect_channel(uri: &str, config: &TransportConfig) -> Result<Channel, DynamoError> {
@@ -93,19 +95,19 @@ async fn connect_channel(uri: &str, config: &TransportConfig) -> Result<Channel,
 }
 
 pub async fn discover(
-    client: &mut Client,
+    client: &mut Control,
     requested_model: Option<&str>,
     expected_engine: Option<&str>,
     deadline: Duration,
 ) -> Result<Discovery, DynamoError> {
     let deadline_at = Instant::now() + deadline;
     let mut engine = timeout_discovery_rpc(
-        "GetEngineInfo",
+        "GetServerInfo",
         deadline_at,
-        client.get_engine_info(pb::GetEngineInfoRequest {}),
+        client.get_server_info(pb::GetServerInfoRequest {}),
     )
     .await?
-    .map_err(|status| status_to_dynamo("GetEngineInfo", status))?
+    .map_err(|status| status_to_dynamo("GetServerInfo", status))?
     .into_inner();
 
     validate_schema(&engine)?;
@@ -119,8 +121,8 @@ pub async fn discover(
     }
 
     let selected_model = select_model(&engine.supported_models, requested_model)?;
-    // Model enumeration is part of GetEngineInfo in revision 2; there is no
-    // separate ListModels RPC. Selection therefore shares GetEngineInfo's
+    // Model enumeration is part of GetServerInfo in revision 2; there is no
+    // separate ListModels RPC. Selection therefore shares GetServerInfo's
     // bounded deadline above.
     let model = timeout_discovery_rpc(
         "GetModelInfo",
@@ -192,7 +194,7 @@ fn select_model(models: &[String], requested: Option<&str>) -> Result<String, Dy
     }
 }
 
-fn validate_schema(engine: &pb::EngineInfo) -> Result<(), DynamoError> {
+fn validate_schema(engine: &pb::ServerInfo) -> Result<(), DynamoError> {
     let client_revision = openengine_proto::SCHEMA_REVISION;
     if engine.schema_revision == 0 {
         return Err(invalid_arg("OpenEngine reported invalid schema revision 0"));
@@ -290,7 +292,7 @@ mod tests {
 
     #[test]
     fn rejects_nonimmutable_schema_release() {
-        let mut engine = pb::EngineInfo {
+        let mut engine = pb::ServerInfo {
             schema_revision: openengine_proto::SCHEMA_REVISION,
             minimum_client_revision: 1,
             schema_release: "unreleased".to_string(),
@@ -301,7 +303,7 @@ mod tests {
         assert!(validate_schema(&engine).is_err());
         engine.schema_release = "main".to_string();
         assert!(validate_schema(&engine).is_err());
-        engine.schema_release = "cea19cb".to_string();
+        engine.schema_release = "7d6ac38".to_string();
         assert!(validate_schema(&engine).is_err());
         engine.schema_release = env!("OPENENGINE_PROTO_COMMIT").to_string();
         assert!(validate_schema(&engine).is_ok());
