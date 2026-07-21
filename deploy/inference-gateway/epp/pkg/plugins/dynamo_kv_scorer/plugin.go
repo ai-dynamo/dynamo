@@ -101,6 +101,7 @@ import "C"
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"strings"
 	"sync"
@@ -283,11 +284,46 @@ func SerializeEndpointsToJSON(endpoints []schedtypes.Endpoint) (string, error) {
 }
 
 func BuildOpenAIRequest(req *schedtypes.InferenceRequest) (map[string]any, error) {
-	requestBody := make(map[string]any)
-
 	if req == nil || req.Body == nil {
 		return nil, fmt.Errorf("missing request body")
 	}
+
+	// Prefer the full, original request body. The Rust router parses this JSON
+	// and re-renders the model's chat template to tokenize for KV-aware routing,
+	// so it needs the complete message structure — tool_calls, tool_call_id,
+	// tools, reasoning/thinking content, multimodal parts, etc. The typed
+	// ChatCompletions view only models role+content; reconstructing from it
+	// drops those fields, which breaks routing in two ways:
+	//  1. On tool-calling turns the router's strict parse fails (a role:"tool"
+	//     message is missing the required tool_call_id), route_decode_request
+	//     returns an error, no worker is selected, and the request is dropped
+	//     as 503 "no healthy upstream" — multi-turn tool calling is unroutable.
+	//  2. Even when parsing succeeds, the chat template renders an incomplete
+	//     prompt, so reasoning/tool parsing is lost (e.g. on non-streaming
+	//     requests) and tokenization no longer matches what the worker sees.
+	if pm, ok := req.Body.Payload.(fwkrh.PayloadMap); ok && len(pm) > 0 {
+		requestBody := make(map[string]any, len(pm))
+		maps.Copy(requestBody, pm)
+		// Route on the resolved target model, not whatever alias the caller sent.
+		if strings.TrimSpace(req.TargetModel) != "" {
+			requestBody["model"] = req.TargetModel
+		}
+		return requestBody, nil
+	}
+
+	// Fallback: the raw payload is unavailable (not unmarshaled). Reconstruct a
+	// minimal request from the framework's typed view. Tool-calling turns cannot
+	// be represented here, but plain chat/completion routing still works.
+	return buildOpenAIRequestFromTyped(req)
+}
+
+// buildOpenAIRequestFromTyped reconstructs a minimal request from the
+// framework's typed request view. The typed Message only models role+content,
+// so this cannot preserve tool-calling fields (tool_calls / tool_call_id / name)
+// or other structure the raw payload carries; it is only used when the raw
+// payload is unavailable.
+func buildOpenAIRequestFromTyped(req *schedtypes.InferenceRequest) (map[string]any, error) {
+	requestBody := make(map[string]any)
 
 	if req.Body.ChatCompletions != nil && len(req.Body.ChatCompletions.Messages) > 0 {
 		messages := make([]map[string]any, 0, len(req.Body.ChatCompletions.Messages))

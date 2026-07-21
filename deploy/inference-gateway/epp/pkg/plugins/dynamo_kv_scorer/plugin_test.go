@@ -169,3 +169,80 @@ func TestBuildOpenAIRequest_CompletionsStringArrayPromptKeepsLegacyMessageShape(
 		t.Fatalf("expected single user message with content='hello world', got %#v", messages)
 	}
 }
+
+// TestBuildOpenAIRequest_PreservesToolCallFields pins the contract that a
+// multi-turn tool conversation survives intact in the JSON sent across FFI to
+// the Rust router. The router parses this body and re-renders the model's chat
+// template to tokenize, so it needs the full message structure. If tool_calls /
+// tool_call_id are dropped, the router's strict parse fails with
+// "missing field tool_call_id" and the request is unroutable (503 no healthy
+// upstream); reasoning/tool parsing is also lost when the template renders an
+// incomplete prompt.
+func TestBuildOpenAIRequest_PreservesToolCallFields(t *testing.T) {
+	toolCall := map[string]any{
+		"id":   "call-abc",
+		"type": "function",
+		"function": map[string]any{
+			"name":      "get_current_weather",
+			"arguments": `{"location":"Tokyo"}`,
+		},
+	}
+	req := &schedtypes.InferenceRequest{
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			// The typed view only carries role+content; the raw payload below is
+			// the source of truth and must be forwarded verbatim.
+			ChatCompletions: &fwkrh.ChatCompletionsRequest{
+				Messages: []fwkrh.Message{
+					{Role: "user", Content: fwkrh.Content{Raw: "weather in Tokyo?"}},
+					{Role: "assistant", Content: fwkrh.Content{Raw: ""}},
+					{Role: "tool", Content: fwkrh.Content{Raw: "18C rain"}},
+				},
+			},
+			Payload: fwkrh.PayloadMap{
+				"model": "alias-model",
+				"messages": []any{
+					map[string]any{"role": "user", "content": "weather in Tokyo?"},
+					map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{toolCall}},
+					map[string]any{"role": "tool", "tool_call_id": "call-abc", "content": "18C rain"},
+				},
+			},
+		},
+	}
+
+	body, err := BuildOpenAIRequest(req)
+	if err != nil {
+		t.Fatalf("BuildOpenAIRequest returned error: %v", err)
+	}
+
+	// Target model must override the caller's alias.
+	if got := body["model"]; got != "test-model" {
+		t.Fatalf("expected model=test-model, got %v", got)
+	}
+
+	msgs, ok := body["messages"].([]any)
+	if !ok {
+		t.Fatalf("expected messages []any from raw payload, got %T", body["messages"])
+	}
+	if len(msgs) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(msgs))
+	}
+
+	// Assistant turn must retain tool_calls.
+	assistant, ok := msgs[1].(map[string]any)
+	if !ok {
+		t.Fatalf("expected assistant message map, got %T", msgs[1])
+	}
+	if _, ok := assistant["tool_calls"].([]any); !ok {
+		t.Fatalf("assistant message lost tool_calls: %#v", assistant)
+	}
+
+	// Tool turn must retain tool_call_id (the field whose loss caused the 503).
+	tool, ok := msgs[2].(map[string]any)
+	if !ok {
+		t.Fatalf("expected tool message map, got %T", msgs[2])
+	}
+	if got := tool["tool_call_id"]; got != "call-abc" {
+		t.Fatalf("tool message lost tool_call_id: got %v in %#v", got, tool)
+	}
+}
