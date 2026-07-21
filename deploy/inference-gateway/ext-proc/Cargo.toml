@@ -20,6 +20,7 @@ dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols
 dynamo-runtime = { workspace = true }
 
 anyhow = { workspace = true }
+bytes = { workspace = true }
 futures = { workspace = true }
 hyper-util = { workspace = true, features = ["tokio", "http2", "server-auto"] }
 k8s-openapi = { workspace = true }
