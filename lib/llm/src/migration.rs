@@ -61,7 +61,7 @@ fn is_migratable(err: &(dyn StdError + 'static)) -> bool {
         ErrorType::CannotConnect,
         ErrorType::Disconnected,
         ErrorType::ConnectionTimeout,
-        // DIS-2405: a stalled/frozen worker's stream-inactivity timeout surfaces
+        // a stalled/frozen worker's stream-inactivity timeout surfaces
         // as ResponseTimeout (push_router fault detection quarantines the worker
         // via the same signal); migrate instead of hanging to the stream timeout.
         ErrorType::ResponseTimeout,
@@ -411,7 +411,7 @@ mod tests {
 
     const TEST_MODEL: &str = "test-model";
 
-    // DIS-2405: a stalled/frozen worker's stream-inactivity timeout surfaces as
+    // a stalled/frozen worker's stream-inactivity timeout surfaces as
     // ErrorType::ResponseTimeout (push_router fault detection). It must be
     // migratable so the request fails over instead of hanging to the stream
     // timeout. A StreamIncomplete backend error (a truncated stream from a
