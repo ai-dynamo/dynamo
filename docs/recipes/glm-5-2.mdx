@@ -192,14 +192,14 @@ curl http://localhost:8000/v1/chat/completions \
 
 A single AIPerf trace-replay Job — `perf/perf.yaml` — covers all four DGDs. It replays a Mooncake-format agentic trace (64K ISL / 400 OSL, 90% KV cache hit rate) at one concurrency value and writes artifacts to the shared `model-cache` PVC. The benchmark pod is co-located with a DGD frontend through `podAffinity`.
 
-Edit the `env` block in `perf/perf.yaml` to target your deployed DGD — set `ENDPOINT` to the matching frontend service and `SYNTHESIS_MAX_ISL` to its context limit:
+Edit the `env` block in `perf/perf.yaml` to target your deployed DGD — set `ENDPOINT` to the matching frontend service, `SYNTHESIS_MAX_ISL` to its context limit, and `CONCURRENCY` to the value for that target. The `CONCURRENCY` values below reproduce the [Expected Performance](#expected-performance) numbers:
 
-| Target | `ENDPOINT` | `SYNTHESIS_MAX_ISL` |
-| --- | --- | --- |
-| B200 aggregated | `glm52-agg-b200-agentic-frontend:8000` | `500000` |
-| B200 disaggregated | `glm52-disagg-b200-agentic-frontend:8000` | `500000` |
-| H200 aggregated | `glm52-agg-h200-agentic-frontend:8000` | `250000` |
-| H200 disaggregated | `glm52-disagg-h200-agentic-frontend:8000` | `250000` |
+| Target | `ENDPOINT` | `SYNTHESIS_MAX_ISL` | `CONCURRENCY` |
+| --- | --- | --- | --- |
+| B200 aggregated | `glm52-agg-b200-agentic-frontend:8000` | `500000` | `64` |
+| B200 disaggregated | `glm52-disagg-b200-agentic-frontend:8000` | `500000` | `128` |
+| H200 aggregated | `glm52-agg-h200-agentic-frontend:8000` | `250000` | `32` |
+| H200 disaggregated | `glm52-disagg-h200-agentic-frontend:8000` | `250000` | `24` |
 
 Then run the Job:
 
