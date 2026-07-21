@@ -73,8 +73,6 @@ ARG NIXL_REF={{ context[framework].nixl_ref }}
 {% endif -%}
 {% if device == "cuda" %}
 ARG NIXL_GDRCOPY_REF={{ context.dynamo.nixl_gdrcopy_ref }}
-ARG NIXL_LIBFABRIC_REPO={{ context.dynamo.nixl_libfabric_repo }}
-ARG NIXL_LIBFABRIC_REF={{ context.dynamo.nixl_libfabric_ref }}
 ARG HWLOC_VERSION={{ context.dynamo.hwloc_version }}
 {% endif %}
 
@@ -125,12 +123,8 @@ ARG SGLANG_KERNEL_REF={{ context.sglang.xpu.sglang_kernel_ref }}
 {%- endif -%}
 
 {% if make_efa == true %}
-{% if framework == "sglang" and device == "cuda" and target == "runtime" -%}
-ARG EFA_VERSION={{ context.sglang[device_key].efa_version }}
-ARG EFA_INSTALLER_SHA256={{ context.sglang[device_key].efa_installer_sha256 }}
-ARG EFA_INSTALLER_SIZE={{ context.sglang[device_key].efa_installer_size }}
-{% else -%}
 ARG EFA_VERSION={{ context.dynamo.efa_version }}
-{% endif -%}
+ARG EFA_INSTALLER_SHA256={{ context.dynamo.efa_installer_sha256 }}
+ARG EFA_INSTALLER_SIZE={{ context.dynamo.efa_installer_size }}
 ARG EFA_BASE_IMAGE={{ "runtime" if target=="runtime" else "dev" }}
 {%- endif -%}

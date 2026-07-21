@@ -1,11 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Hand-curated overlay for from-source components we build inside our
-# Dockerfiles. These don't show up via dpkg-query (apt didn't install
-# them), aren't Python wheels / Rust crates / Go modules, so the per-
-# ecosystem generators miss them. This file makes them visible in
-# /legal/native/NOTICES-Native.txt.
+# Hand-curated overlay for native components added by our Dockerfiles.
+# These either do not show up via dpkg-query or are installed after the
+# licenses stage, so the per-ecosystem generators miss them. This file makes
+# them visible in /legal/native/NOTICES-Native.txt.
 #
 # Consumed by container/compliance/generators/native.py:
 #   python3 -m compliance.generators \
@@ -38,46 +37,30 @@ packages:
   # installers. The licenses stage precedes the final AWS stage, so its dpkg
   # scan cannot see those later additions; this YAML overlay attributes them.
   #
-  # Image filter:
-  #   - vllm-runtime-efa: baseline (nvcr.io/nvidia/cuda:X.Y-runtime) has
-  #     no libfabric, so EFA legitimately adds both libs.
-  #   - trtllm-runtime-efa: baseline (cuda-dl-base) already ships
-  #     libfabric-aws@2.1.0amzn5.0, but the EFA installer may install a
-  #     different version; explicit attribution closes the version-skew
-  #     gap defensively.
-  #   - sglang-runtime-efa has a separate EFA 1.49 entry below because
-  #     release/1.3 intentionally retains the installer's newer native stack.
-  - name: libfabric
-    # AWS fork: shipped by EFA installer 1.47.0 as libfabric1-aws_2.4.0amzn1.0
-    # (Ubuntu 24.04 DEB). The `amzn1.0` suffix indicates an AWS patch set on
-    # top of upstream libfabric 2.4.0; preserved here for OSRB traceability.
-    version: 2.4.0amzn1.0
-    license: BSD-2-Clause
-    source: https://github.com/ofiwg/libfabric
-    images:
-      - vllm-runtime-efa
-      - trtllm-runtime-efa
-
-  - &sglang_efa_libfabric
+  # Every CUDA EFA framework image uses the same EFA Installer 1.49.0
+  # userspace stack. The installer replaces any framework-base copy, and no
+  # source-built OFIWG libfabric overlay is added afterward.
+  - &efa149_libfabric
     name: libfabric1-aws
-    # DYN-3429 release/1.3 SGLang EFA stack. EFA Installer 1.49.0 ships
-    # the AWS patch set on top of upstream libfabric 2.4.0.
+    # EFA Installer 1.49.0 ships the AWS patch set on top of libfabric 2.4.0.
     version: 2.4.0amzn5.0
     license: BSD-2-Clause
     source: https://github.com/aws/libfabric/tree/v2.4.0amzn5.0
     images:
+      - vllm-runtime-efa
       - sglang-runtime-efa
+      - trtllm-runtime-efa
 
-  - <<: *sglang_efa_libfabric
+  - <<: *efa149_libfabric
     name: libfabric-aws-bin
 
-  - <<: *sglang_efa_libfabric
+  - <<: *efa149_libfabric
     name: libfabric-aws-dev
 
   # EFA Installer 1.49.0's --build-ngc path installs the complete matching
   # rdma-core package set. Keep the dpkg names exact so the final-image Syft
   # audit can match components generated after the earlier licenses stage.
-  - &sglang_efa_rdma_core
+  - &efa149_rdma_core
     name: rdma-core
     version: "63.0-1"
     # The binary payload chooses the permissive alternatives documented by
@@ -88,51 +71,53 @@ packages:
     source: https://github.com/linux-rdma/rdma-core/tree/v63.0
     license_text_path: /opt/compliance/native_licenses/rdma-core-v63.0-debian-copyright
     images:
+      - vllm-runtime-efa
       - sglang-runtime-efa
+      - trtllm-runtime-efa
 
-  - <<: *sglang_efa_rdma_core
+  - <<: *efa149_rdma_core
     name: ibacm
 
-  - <<: *sglang_efa_rdma_core
+  - <<: *efa149_rdma_core
     name: ibverbs-providers
 
-  - <<: *sglang_efa_rdma_core
+  - <<: *efa149_rdma_core
     name: ibverbs-utils
 
-  - <<: *sglang_efa_rdma_core
+  - <<: *efa149_rdma_core
     name: infiniband-diags
 
-  - <<: *sglang_efa_rdma_core
+  - <<: *efa149_rdma_core
     name: libibmad-dev
 
-  - <<: *sglang_efa_rdma_core
+  - <<: *efa149_rdma_core
     name: libibmad5
 
-  - <<: *sglang_efa_rdma_core
+  - <<: *efa149_rdma_core
     name: libibnetdisc-dev
 
-  - <<: *sglang_efa_rdma_core
+  - <<: *efa149_rdma_core
     name: libibnetdisc5
 
-  - <<: *sglang_efa_rdma_core
+  - <<: *efa149_rdma_core
     name: libibumad-dev
 
-  - <<: *sglang_efa_rdma_core
+  - <<: *efa149_rdma_core
     name: libibumad3
 
-  - <<: *sglang_efa_rdma_core
+  - <<: *efa149_rdma_core
     name: libibverbs-dev
 
-  - <<: *sglang_efa_rdma_core
+  - <<: *efa149_rdma_core
     name: libibverbs1
 
-  - <<: *sglang_efa_rdma_core
+  - <<: *efa149_rdma_core
     name: librdmacm-dev
 
-  - <<: *sglang_efa_rdma_core
+  - <<: *efa149_rdma_core
     name: librdmacm1
 
-  - <<: *sglang_efa_rdma_core
+  - <<: *efa149_rdma_core
     name: rdmacm-utils
 
   - name: NIXL LIBFABRIC plugin
@@ -145,13 +130,15 @@ packages:
     images:
       - sglang-runtime-efa
 
-  - name: aws-ofi-nccl
-    # Shipped by EFA installer 1.47.0 as libnccl-ofi_1.18.0-1 (Ubuntu 24.04 DEB).
-    version: 1.18.0
+  - name: libnccl-ofi-ngc-v3
+    # Exact Debian package shipped by EFA Installer 1.49.0 for CUDA 13 NGC
+    # images. Its upstream project is aws-ofi-nccl.
+    version: 1.20.0-1
     license: Apache-2.0
     source: https://github.com/aws/aws-ofi-nccl
     images:
       - vllm-runtime-efa
+      - sglang-runtime-efa
       - trtllm-runtime-efa
 
   # --- From-source binaries built in wheel_builder / dynamo_base and copied

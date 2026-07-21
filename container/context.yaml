@@ -36,8 +36,6 @@ dynamo:
   nixl_ucx_ref: v1.20.x
   nixl_gdrcopy_ref: v2.5.2
   nixl_ucx_efa_ref: 9d2b88a1f67faf9876f267658bd077b379b8bb76
-  nixl_libfabric_repo: https://github.com/ofiwg/libfabric.git
-  nixl_libfabric_ref: v2.5.1
   # Keep in sync with upstream NIXL's contrib/Dockerfile.manylinux.
   hwloc_version: 2.12.2
   enable_kvbm: "true"
@@ -48,7 +46,21 @@ dynamo:
   nv_codec_headers_ref: "n13.0.19.0"
   libvpx_ref: "v1.14.1"
   sccache_version: "v0.14.0"
-  efa_version: 1.47.0
+  # All release/1.3 EFA images use one content-addressed AWS userspace stack.
+  # NIXL is built against these installer headers; no upstream libfabric
+  # overlay is compiled or copied into the final image.
+  efa_version: 1.49.0
+  efa_installer_sha256: cf2e9281a2328a243c76f911a490faed43ca0fecfe4733c25e34b2e92a32c309
+  efa_installer_size: "702811844"
+  efa_runtime_sha256:
+    amd64:
+      libfabric: 5d5f48961cf9b30def1c8cdb0961b0683f0102ca9898641ef90f2d205379a5fd
+      libefa: 4fd773bd4943441011f6c671696f76a941381d2177deda9211ba378647787eef
+      libibverbs: 4a75b36b5462876f8a78c14e07cedef9d481ef436f22d81f9d8de9178745bbbd
+    arm64:
+      libfabric: 24291af4829bcdddc2d47d7eb35366c19246170091202b93814fda9b67f32248
+      libefa: 2c3bc675f5c19238dfd86d8e912a08a70eb89fdab32b5600a2d4595390691abb
+      libibverbs: 1b2f194c7b95a503eeb2f3f8e9977c067bc0e04ff2b168fcf9e5799a2c725ba4
 
 vllm:
   cuda13.0:
@@ -104,20 +116,6 @@ sglang:
     # GPL ffmpeg/codec dpkgs; the GPL imageio-ffmpeg pip binary is replaced by an
     # in-tree LGPL ffmpeg in sglang_runtime.Dockerfile — no dpkg purge needed.)
     baseline_sbom: cuda@8b2705ea
-    # DYN-3429: the release/1.3 SGLang EFA image uses the native EFA 1.49
-    # userspace closure instead of the generic upstream libfabric overlay.
-    efa_version: 1.49.0
-    efa_installer_sha256: cf2e9281a2328a243c76f911a490faed43ca0fecfe4733c25e34b2e92a32c309
-    efa_installer_size: "702811844"
-    efa_runtime_sha256:
-      amd64:
-        libfabric: 5d5f48961cf9b30def1c8cdb0961b0683f0102ca9898641ef90f2d205379a5fd
-        libefa: 4fd773bd4943441011f6c671696f76a941381d2177deda9211ba378647787eef
-        libibverbs: 4a75b36b5462876f8a78c14e07cedef9d481ef436f22d81f9d8de9178745bbbd
-      arm64:
-        libfabric: 24291af4829bcdddc2d47d7eb35366c19246170091202b93814fda9b67f32248
-        libefa: 2c3bc675f5c19238dfd86d8e912a08a70eb89fdab32b5600a2d4595390691abb
-        libibverbs: 1b2f194c7b95a503eeb2f3f8e9977c067bc0e04ff2b168fcf9e5799a2c725ba4
   xpu:
     base_image: intel/deep-learning-essentials
     base_image_tag: 2025.3.2-0-devel-ubuntu24.04

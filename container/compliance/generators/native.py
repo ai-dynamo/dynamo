@@ -2,13 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """NOTICES-Native.txt generator.
 
-Reads container/compliance/native_packages.yaml — the hand-curated
-overlay for from-source components we build inside our Dockerfiles
-(CRIU, cuda-checkpoint, ucx, libfabric, gdrcopy, ffmpeg, ...). These
-don't show up via dpkg-query (we build them from upstream source, not
-apt-installed packages) and they're not Python wheels / Rust crates /
-Go modules, so the per-ecosystem generators miss them. This file makes
-them visible in /legal/native/NOTICES-Native.txt.
+Reads container/compliance/native_packages.yaml — the hand-curated overlay for
+native components the licenses stage cannot observe. This includes binaries we
+build from source (CRIU, cuda-checkpoint, UCX, gdrcopy, ffmpeg, ...) and packages
+installed only in a later image stage (such as EFA). They are not visible to the
+normal dpkg/Python/Rust/Go scans, so this generator makes them visible in
+/legal/native/NOTICES-Native.txt.
 
 YAML schema:
 
@@ -26,10 +25,9 @@ YAML schema:
                                        # runtime only sees its own
                                        # native deps.
 
-The `subtract` parameter from the orchestrator API is accepted but
-ignored — native components by definition come from our build process,
-not from any upstream baseline image, so they can never overlap with
-a baseline_sbom by (name, version).
+The `subtract` parameter from the orchestrator API is accepted but ignored —
+these native entries describe components added after the upstream baseline, so
+they cannot overlap with a baseline_sbom by (name, version).
 """
 
 from __future__ import annotations
@@ -118,7 +116,7 @@ def collect_components(
         )
 
     logger.info(
-        "Native generator: %d components match image_filter=%r " "(out of %d in YAML)",
+        "Native generator: %d components match image_filter=%r (out of %d in YAML)",
         len(out),
         image_filter,
         len(packages),

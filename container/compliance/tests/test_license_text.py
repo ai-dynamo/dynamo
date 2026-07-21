@@ -107,8 +107,8 @@ def test_efa149_rdma_core_uses_exact_deb_copyright():
     )
 
     native_yaml = _NATIVE_PACKAGES.read_text()
-    anchor_start = native_yaml.index("  - &sglang_efa_rdma_core")
-    anchor_end = native_yaml.index("\n  - <<: *sglang_efa_rdma_core", anchor_start)
+    anchor_start = native_yaml.index("  - &efa149_rdma_core")
+    anchor_end = native_yaml.index("\n  - <<: *efa149_rdma_core", anchor_start)
     anchor = native_yaml[anchor_start:anchor_end]
     assert 'version: "63.0-1"' in anchor
     assert (
@@ -119,7 +119,42 @@ def test_efa149_rdma_core_uses_exact_deb_copyright():
         "license_text_path: "
         "/opt/compliance/native_licenses/rdma-core-v63.0-debian-copyright"
     ) in anchor
-    assert native_yaml.count("<<: *sglang_efa_rdma_core") == 15
+    assert native_yaml.count("<<: *efa149_rdma_core") == 15
+
+    for image in (
+        "vllm-runtime-efa",
+        "sglang-runtime-efa",
+        "trtllm-runtime-efa",
+    ):
+        assert f"      - {image}" in anchor
+
+
+def test_efa149_native_metadata_is_common_to_all_frameworks():
+    native_yaml = _NATIVE_PACKAGES.read_text()
+    efa_images = (
+        "vllm-runtime-efa",
+        "sglang-runtime-efa",
+        "trtllm-runtime-efa",
+    )
+    anchor_start = native_yaml.index("  - &efa149_libfabric")
+    anchor_end = native_yaml.index("\n  - <<: *efa149_libfabric", anchor_start)
+    anchor = native_yaml[anchor_start:anchor_end]
+
+    assert "version: 2.4.0amzn5.0" in anchor
+    assert "https://github.com/aws/libfabric/tree/v2.4.0amzn5.0" in anchor
+    for image in efa_images:
+        assert f"      - {image}" in anchor
+
+    nccl_start = native_yaml.index("  - name: libnccl-ofi-ngc-v3")
+    nccl_end = native_yaml.index("\n\n  # --- From-source", nccl_start)
+    nccl = native_yaml[nccl_start:nccl_end]
+    assert "version: 1.20.0-1" in nccl
+    for image in efa_images:
+        assert f"      - {image}" in nccl
+
+    assert "https://github.com/ofiwg/libfabric" not in native_yaml
+    assert "2.4.0amzn1.0" not in native_yaml
+    assert "version: 1.18.0" not in native_yaml
 
 
 def test_nixl_backport_osrb_disclosure_matches_build_input():
