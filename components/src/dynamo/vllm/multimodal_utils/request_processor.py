@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import pickle
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -49,7 +50,9 @@ AUDIO_URL_KEY = "audio_url"
 URL_VARIANT_KEY = "Url"
 
 
-def pad_mm_hashes_to_64(mm_hashes: list[str]) -> list[str]:
+def pad_mm_hashes_to_64(
+    mm_hashes: Sequence[str | None],
+) -> list[str | None]:
     """Pad frontend hashes to vLLM's 64-character UUID representation."""
     return [
         value.ljust(64, "0") if isinstance(value, str) and len(value) < 64 else value
@@ -70,11 +73,11 @@ def _normalize_forwarded_mm_modality(
 def _build_forwarded_mm_uuids(
     extra_args: dict[str, Any],
     use_unified_vision_chunk: bool,
-) -> Optional[dict[str, Any]]:
+) -> Optional[dict[str, list[str | None]]]:
     """Preserve frontend cache identities, including mixed modalities."""
     grouped_hashes = extra_args.get("mm_hashes_by_modality")
     if isinstance(grouped_hashes, dict):
-        mm_uuids: dict[str, Any] = {}
+        mm_uuids: dict[str, list[str | None]] = {}
         for modality, hashes in grouped_hashes.items():
             if not hashes:
                 continue
@@ -94,9 +97,53 @@ def _build_forwarded_mm_uuids(
             "image",
             use_unified_vision_chunk,
         )
-        return {modality_key: pad_mm_hashes_to_64(list(forwarded_hashes))}
+        padded_hashes = pad_mm_hashes_to_64(list(forwarded_hashes))
+        return {modality_key: padded_hashes}
 
     return None
+
+
+def _build_user_mm_uuids(
+    raw_uuids: Any,
+    use_unified_vision_chunk: bool,
+) -> Optional[dict[str, list[str | None]]]:
+    """Normalize vLLM image cache identities without changing opaque values."""
+    if raw_uuids is None:
+        return None
+    if not isinstance(raw_uuids, dict):
+        raise ValueError("multi_modal_uuids must be an object")
+
+    for modality, values in raw_uuids.items():
+        if modality == IMAGE_URL_KEY:
+            continue
+        has_uuid = (
+            any(value is not None for value in values)
+            if isinstance(values, list)
+            else values is not None
+        )
+        if has_uuid:
+            raise ValueError(
+                "multimodal cache UUIDs must use the 'image_url' modality key"
+            )
+
+    if IMAGE_URL_KEY not in raw_uuids:
+        return None
+    image_uuids = raw_uuids[IMAGE_URL_KEY]
+    if not isinstance(image_uuids, list):
+        raise ValueError("multi_modal_uuids['image_url'] must be a list")
+    for index, value in enumerate(image_uuids):
+        if value is not None and (not isinstance(value, str) or not value):
+            raise ValueError(
+                "multi_modal_uuids['image_url'] entries must be non-empty "
+                f"strings or null; got invalid entry at index {index}"
+            )
+    if not any(value is not None for value in image_uuids):
+        return None
+    backend_modality = _normalize_forwarded_mm_modality(
+        "image",
+        use_unified_vision_chunk,
+    )
+    return {backend_modality: list(image_uuids)}
 
 
 def _get_modality_extra_values(
@@ -142,7 +189,7 @@ def _placeholder_range_from_extra_arg(value: Any) -> PlaceholderRange:
 
 def compute_mm_uuids(
     multi_modal_data: Optional[dict[str, Any]],
-) -> Optional[dict[str, list[str]]]:
+) -> Optional[dict[str, list[str | None]]]:
     """Compute image UUIDs when the frontend did not provide canonical hashes."""
     if not multi_modal_data:
         return None
@@ -154,11 +201,9 @@ def compute_mm_uuids(
         chunks = multi_modal_data[modality]
         if not isinstance(chunks, list):
             chunks = [chunks]
-        images = [
-            chunk.get("image")
-            for chunk in chunks
-            if isinstance(chunk, dict) and chunk.get("image") is not None
-        ]
+        if not all(isinstance(chunk, dict) for chunk in chunks):
+            raise ValueError("vision_chunk entries must be objects")
+        images = [chunk.get("image") for chunk in chunks]
     elif isinstance(images, dict):
         # Pre-computed embedding dictionaries do not have a stable raw-image
         # preimage here. Their identity is carried by the upstream encoder/cache.
@@ -170,7 +215,13 @@ def compute_mm_uuids(
         images = [images]
     if not images:
         return None
-    return {modality: compute_mm_uuids_from_images(images)}
+    if any(image is None for image in images):
+        raise ValueError(
+            "UUID-only image slots require aligned multi_modal_uuids; "
+            "no cache UUID was provided"
+        )
+    uuids: list[str | None] = list(compute_mm_uuids_from_images(images))
+    return {modality: uuids}
 
 
 def get_mm_processor_kwargs(request: dict[str, Any]) -> Optional[dict[str, Any]]:
@@ -270,7 +321,9 @@ class VllmMultimodalRequestProcessor:
             for key in ("mm_kwargs_shm", "mm_kwargs_nixl")
         )
         if (
-            request.get("multi_modal_data") is not None or has_transfer
+            request.get("multi_modal_data") is not None
+            or request.get("multi_modal_uuids") is not None
+            or has_transfer
         ) and not self.enable_multimodal:
             raise self._multimodal_disabled_error()
 
@@ -331,7 +384,7 @@ class VllmMultimodalRequestProcessor:
                 for item in mm_map.get(IMAGE_URL_KEY, []):
                     if isinstance(item, dict) and URL_VARIANT_KEY in item:
                         image_urls.append(item[URL_VARIANT_KEY])
-                    elif isinstance(item, dict) and "Decoded" in item:
+                    else:
                         supported = False
                 if supported:
                     vllm_mm_data = (
@@ -350,6 +403,8 @@ class VllmMultimodalRequestProcessor:
                     images = await self.image_loader.load_image_batch(image_items)
                 if images:
                     if self.use_unified_vision_chunk:
+                        # vLLM reads cache identities from the prompt-level
+                        # multi_modal_uuids map, not this chunk metadata field.
                         chunks = [
                             {"type": "image", "image": image, "uuid": None}
                             for image in images
@@ -359,7 +414,9 @@ class VllmMultimodalRequestProcessor:
                         )
                     else:
                         vllm_mm_data[image_key] = (
-                            images[0] if len(images) == 1 else images
+                            images[0]
+                            if len(images) == 1 and images[0] is not None
+                            else images
                         )
 
             video_items = mm_map.get(VIDEO_URL_KEY, [])
@@ -509,8 +566,12 @@ class VllmMultimodalRequestProcessor:
                 )
                 return None
 
-            padded_hashes = pad_mm_hashes_to_64(list(mm_hashes))
-            mm_hashes_dict = {backend_modality: padded_hashes}
+            # These are vLLM's final feature hashes. When the request supplies
+            # an opaque UUID, vLLM derives this identity from the UUID together
+            # with mm_processor_kwargs. Any rewriting (including zero-padding)
+            # would create a different worker-cache key.
+            feature_hashes = list(mm_hashes)
+            mm_hashes_dict = {backend_modality: feature_hashes}
             mm_kwargs_dict = {backend_modality: kwargs_items}
             engine_input = {
                 "type": "multimodal",
@@ -549,10 +610,15 @@ class VllmMultimodalRequestProcessor:
     ) -> TokensPrompt:
         """Create a TokensPrompt with stable multimodal UUIDs."""
         extra_args = request.get("extra_args") or {}
-        mm_uuids = _build_forwarded_mm_uuids(
-            extra_args,
+        mm_uuids = _build_user_mm_uuids(
+            request.get("multi_modal_uuids"),
             self.use_unified_vision_chunk,
         )
+        if mm_uuids is None:
+            mm_uuids = _build_forwarded_mm_uuids(
+                extra_args,
+                self.use_unified_vision_chunk,
+            )
         if mm_uuids is None and self.embedding_loader is None:
             mm_uuids = compute_mm_uuids(multi_modal_data)
             if mm_uuids is not None:
