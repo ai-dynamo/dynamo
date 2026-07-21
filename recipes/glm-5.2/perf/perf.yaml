@@ -53,10 +53,7 @@ spec:
               - key: nvidia.com/dynamo-graph-deployment-name
                 operator: In
                 values:
-                - glm52-agg-b200-agentic
-                - glm52-disagg-b200-agentic
-                - glm52-agg-h200-agentic
-                - glm52-disagg-h200-agentic
+                - glm52-agg-b200-agentic  # Update to match your ENDPOINT target DGD
             topologyKey: kubernetes.io/hostname
       # tolerations: # Uncomment and populate for tainted frontend nodes.
       containers:
