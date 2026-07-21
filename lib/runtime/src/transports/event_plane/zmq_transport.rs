@@ -211,13 +211,27 @@ pub struct ZmqSubTransport {
     socket_pump_handle: Arc<AbortOnDropHandle<()>>,
 }
 
+/// One validated multipart message from a direct ZMQ publisher.
+pub struct ZmqWireMessage {
+    pub publisher_id: u64,
+    pub sequence: u64,
+    pub payload: Bytes,
+}
+
+pub type ZmqWireStream =
+    std::pin::Pin<Box<dyn futures::Stream<Item = Result<ZmqWireMessage>> + Send>>;
+
 impl ZmqSubTransport {
+    fn connect_socket(endpoint: &str, topic: &str) -> Result<Subscribe> {
+        let ctx = shared_zmq_context();
+        Ok(configure_subscribe_builder(subscribe(&ctx))
+            .connect(endpoint)?
+            .subscribe(topic.as_bytes())?)
+    }
+
     /// Create a new ZMQ subscriber by connecting to a single endpoint.
     pub async fn connect(endpoint: &str, topic: &str) -> Result<Self> {
-        let ctx = shared_zmq_context();
-        let socket = configure_subscribe_builder(subscribe(&ctx))
-            .connect(endpoint)?
-            .subscribe(topic.as_bytes())?;
+        let socket = Self::connect_socket(endpoint, topic)?;
 
         tracing::info!(
             endpoint = %endpoint,
@@ -233,6 +247,48 @@ impl ZmqSubTransport {
             broadcast_tx,
             socket_pump_handle: Arc::new(AbortOnDropHandle::new(pump_handle)),
         })
+    }
+
+    /// Connect one consumer directly to one ZMQ publisher.
+    ///
+    /// Unlike [`Self::connect`], this stream owns and polls the socket directly. It
+    /// therefore has no background pump or lossy broadcast hop and naturally
+    /// applies backpressure at the configured ZMQ receive HWM.
+    pub async fn connect_single_consumer(endpoint: &str, topic: &str) -> Result<ZmqWireStream> {
+        let mut socket = Self::connect_socket(endpoint, topic)?;
+        let expected_topic = topic.as_bytes().to_vec();
+
+        tracing::info!(
+            endpoint,
+            topic,
+            rcvhwm = ZMQ_RCVHWM,
+            "Direct ZMQ single-consumer stream connected"
+        );
+
+        let stream = stream! {
+            while let Some(result) = socket.next().await {
+                let frames = match result {
+                    Ok(frames) => frames,
+                    Err(error) => {
+                        yield Err(error.into());
+                        break;
+                    }
+                };
+
+                match decode_multipart(frames, &expected_topic) {
+                    Ok(message) => yield Ok(ZmqWireMessage {
+                        publisher_id: message.publisher_id,
+                        sequence: message.sequence,
+                        payload: message.payload,
+                    }),
+                    Err(error) => {
+                        tracing::warn!(%error, "Dropping malformed direct-ZMQ message");
+                    }
+                }
+            }
+        };
+
+        Ok(Box::pin(stream))
     }
 
     /// Connect to broker's XPUB endpoint (broker mode)
@@ -289,7 +345,7 @@ impl ZmqSubTransport {
                     break;
                 };
 
-                let mut frames = match result {
+                let frames = match result {
                     Ok(frames) => frames,
                     Err(error) => {
                         tracing::error!(error = %error, "ZMQ receive error in socket pump");
@@ -297,47 +353,14 @@ impl ZmqSubTransport {
                     }
                 };
 
-                if frames.len() != 4 {
-                    tracing::warn!(
-                        frame_count = frames.len(),
-                        "Unexpected multipart frame count in socket pump"
-                    );
-                    continue;
-                }
-
-                let publisher_id_bytes = &frames[1];
-                if publisher_id_bytes.len() != 8 {
-                    tracing::warn!(
-                        actual = publisher_id_bytes.len(),
-                        "Invalid publisher_id frame in socket pump"
-                    );
-                    continue;
-                }
-                let publisher_id = u64::from_be_bytes(publisher_id_bytes[..].try_into().unwrap());
-
-                let sequence_bytes = &frames[2];
-                if sequence_bytes.len() != 8 {
-                    tracing::warn!(
-                        actual = sequence_bytes.len(),
-                        "Invalid sequence frame in socket pump"
-                    );
-                    continue;
-                }
-                let sequence = u64::from_be_bytes(sequence_bytes[..].try_into().unwrap());
-
-                tracing::trace!(
-                    publisher_id = publisher_id,
-                    sequence = sequence,
-                    "Socket pump received ZMQ message"
-                );
-
-                let Some(frame_message) = frames.pop_back() else {
-                    continue;
-                };
-                let frame_bytes = Bytes::from_owner(ZmqMessageOwner(frame_message));
-                match Frame::decode(frame_bytes) {
-                    Ok(frame) => {
-                        let _ = broadcast_tx.send(frame.payload);
+                match decode_multipart(frames, &[]) {
+                    Ok(message) => {
+                        tracing::trace!(
+                            publisher_id = message.publisher_id,
+                            sequence = message.sequence,
+                            "Socket pump received ZMQ message"
+                        );
+                        let _ = broadcast_tx.send(message.payload);
                     }
                     Err(error) => {
                         tracing::warn!(error = %error, "Failed to decode ZMQ frame in socket pump");
@@ -348,6 +371,52 @@ impl ZmqSubTransport {
             tracing::info!("ZMQ socket pump task terminated");
         })
     }
+}
+
+struct DecodedZmqMessage {
+    publisher_id: u64,
+    sequence: u64,
+    payload: Bytes,
+}
+
+fn decode_multipart(mut frames: Multipart, expected_topic: &[u8]) -> Result<DecodedZmqMessage> {
+    if frames.len() != 4 {
+        anyhow::bail!("unexpected ZMQ multipart frame count: {}", frames.len());
+    }
+
+    if !expected_topic.is_empty() && &frames[0][..] != expected_topic {
+        anyhow::bail!("ZMQ message topic disagrees with the exact subscription topic");
+    }
+
+    let publisher_id_bytes = &frames[1];
+    if publisher_id_bytes.len() != 8 {
+        anyhow::bail!(
+            "invalid ZMQ publisher ID frame length: {}",
+            publisher_id_bytes.len()
+        );
+    }
+    let publisher_id = u64::from_be_bytes(publisher_id_bytes[..].try_into().unwrap());
+
+    let sequence_bytes = &frames[2];
+    if sequence_bytes.len() != 8 {
+        anyhow::bail!(
+            "invalid ZMQ sequence frame length: {}",
+            sequence_bytes.len()
+        );
+    }
+    let sequence = u64::from_be_bytes(sequence_bytes[..].try_into().unwrap());
+
+    let frame_message = frames
+        .pop_back()
+        .ok_or_else(|| anyhow!("ZMQ multipart message has no payload frame"))?;
+    let frame_bytes = Bytes::from_owner(ZmqMessageOwner(frame_message));
+    let frame = Frame::decode(frame_bytes)?;
+
+    Ok(DecodedZmqMessage {
+        publisher_id,
+        sequence,
+        payload: frame.payload,
+    })
 }
 
 #[async_trait]
@@ -478,6 +547,80 @@ mod tests {
         assert_eq!(decoded.publisher_id, 12345);
         assert_eq!(decoded.sequence, 1);
         assert_eq!(decoded.topic, topic);
+    }
+
+    #[tokio::test]
+    async fn single_consumer_preserves_wire_identity_and_exact_topic() {
+        let endpoint = format!("inproc://dynamo-zmq-single-consumer-{}", std::process::id());
+        let topic = "single-consumer";
+        let (publisher, _) = ZmqPubTransport::bind(&endpoint, topic).await.unwrap();
+        let mut stream = ZmqSubTransport::connect_single_consumer(&endpoint, topic)
+            .await
+            .unwrap();
+        let codec = MsgpackCodec;
+        let anchor = EventEnvelope {
+            publisher_id: 41,
+            sequence: 1,
+            published_at: 1,
+            topic: topic.to_string(),
+            payload: Bytes::from_static(b"anchor"),
+        };
+        let anchor_bytes = codec.encode_envelope(&anchor).unwrap();
+
+        let wire = timeout(Duration::from_secs(2), async {
+            loop {
+                publisher
+                    .publish(topic, anchor_bytes.clone())
+                    .await
+                    .unwrap();
+                if let Ok(Some(Ok(message))) =
+                    timeout(Duration::from_millis(25), stream.next()).await
+                {
+                    break message;
+                }
+            }
+        })
+        .await
+        .expect("single-consumer socket should become ready");
+        assert_eq!(wire.publisher_id, anchor.publisher_id);
+        assert_eq!(wire.sequence, anchor.sequence);
+        assert_eq!(
+            codec.decode_envelope(&wire.payload).unwrap().payload,
+            anchor.payload
+        );
+
+        let sentinel = EventEnvelope {
+            publisher_id: 41,
+            sequence: 2,
+            published_at: 2,
+            topic: topic.to_string(),
+            payload: Bytes::from_static(b"sentinel"),
+        };
+        let sentinel_bytes = codec.encode_envelope(&sentinel).unwrap();
+        let framed = Frame::new(sentinel_bytes.clone()).encode().to_vec();
+        send_raw(
+            &publisher,
+            vec![
+                format!("{topic}-prefix-collision").into_bytes(),
+                sentinel.publisher_id.to_be_bytes().to_vec(),
+                sentinel.sequence.to_be_bytes().to_vec(),
+                framed,
+            ],
+        )
+        .await;
+        publisher.publish(topic, sentinel_bytes).await.unwrap();
+
+        let wire = timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("valid event should follow an exact-topic rejection")
+            .expect("single-consumer stream should remain open")
+            .expect("valid event should decode");
+        assert_eq!(wire.publisher_id, sentinel.publisher_id);
+        assert_eq!(wire.sequence, sentinel.sequence);
+        assert_eq!(
+            codec.decode_envelope(&wire.payload).unwrap().payload,
+            sentinel.payload
+        );
     }
 
     #[tokio::test]

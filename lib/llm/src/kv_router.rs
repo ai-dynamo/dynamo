@@ -210,6 +210,7 @@ where
     cancellation_token: CancellationToken,
     client: Client,
     is_eagle: bool,
+    kv_event_subscription: Option<indexer::KvEventSubscriptionHandle>,
     _served_indexer_handle: Option<ServedIndexerHandle>,
     /// Optional external shared KV cache pool. When present, `find_best_match`
     /// queries it in parallel with the indexer and factors shared hits into scoring.
@@ -298,30 +299,34 @@ where
         .await?;
 
         // Start KV event subscription if needed — skip when using a remote indexer.
-        if kv_router_config.use_remote_indexer {
+        let kv_event_subscription = if kv_router_config.use_remote_indexer {
             tracing::info!("Skipping KV event subscription (using remote indexer)");
+            None
         } else if kv_router_config.should_subscribe_to_kv_events() {
             let membership_watch = kv_source_membership.ok_or_else(|| {
                 anyhow::anyhow!(
                     "KV source membership watch is required when local KV event subscription is enabled"
                 )
             })?;
-            indexer::start_subscriber(
-                endpoint.clone(),
-                indexer.clone(),
-                membership_watch,
-                model_name.clone().unwrap_or_else(|| "unknown".to_string()),
-                worker_type,
-                cancellation_token.child_token(),
+            Some(
+                indexer::start_subscriber(
+                    endpoint.clone(),
+                    indexer.clone(),
+                    membership_watch,
+                    model_name.clone().unwrap_or_else(|| "unknown".to_string()),
+                    worker_type,
+                    cancellation_token.child_token(),
+                )
+                .await?,
             )
-            .await?;
         } else {
             tracing::info!(
                 "Skipping KV event subscription (use_kv_events={}, overlap_score_credit={})",
                 kv_router_config.use_kv_events,
                 kv_router_config.overlap_score_credit,
             );
-        }
+            None
+        };
 
         let served_indexer_handle = if kv_router_config.serve_indexer {
             let model_name = model_name.clone().ok_or_else(|| {
@@ -352,6 +357,7 @@ where
             cancellation_token,
             client,
             is_eagle,
+            kv_event_subscription,
             _served_indexer_handle: served_indexer_handle,
             shared_cache,
             lora_filter,
@@ -369,6 +375,14 @@ where
 
     pub fn kv_router_config(&self) -> &KvRouterConfig {
         &self.kv_router_config
+    }
+
+    /// Cancel background work and wait for KV event ingestion to stop.
+    pub async fn shutdown(mut self) {
+        self.cancellation_token.cancel();
+        if let Some(subscription) = self.kv_event_subscription.take() {
+            subscription.shutdown().await;
+        }
     }
 
     pub fn is_eagle(&self) -> bool {

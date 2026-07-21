@@ -10,13 +10,16 @@ use dynamo_runtime::{
     discovery::EventTransportKind,
     protocols::EndpointId,
     traits::DistributedRuntimeProvider,
-    transports::event_plane::{EventSubscriber, TypedEventSubscriber},
+    transports::event_plane::{EventSubscriber, TypedEventSubscriber, uses_direct_zmq},
 };
 use tokio::sync::{Semaphore, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use super::{IndexerRecoveryTarget, RecoveryTarget, worker_query::WorkerQueryClient};
+use super::{
+    IndexerRecoveryTarget, RecoveryTarget, direct_zmq::run_direct_zmq_supervisor,
+    worker_query::WorkerQueryClient,
+};
 use crate::{
     discovery::{KvSourceMembershipView, KvSourceMembershipWatch, KvSourceStatus},
     kv_router::{Indexer, metrics::RouterWorkerStatusMetrics},
@@ -160,16 +163,13 @@ async fn run_subscription_supervisor<T: RecoveryTarget>(
     }
 
     client.shutdown().await;
-    if cancellation_token.is_cancelled() {
-        metrics.set_kv_event_source_mismatch_workers(
-            &model,
-            worker_type,
-            &serving_endpoint.namespace,
-            &serving_endpoint.component,
-            &serving_endpoint.name,
-            0,
-        );
-    }
+    clear_mismatch_metric_on_cancellation(
+        &metrics,
+        &cancellation_token,
+        &model,
+        worker_type,
+        &serving_endpoint,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -231,7 +231,7 @@ async fn wait_for_retry(
     }
 }
 
-fn update_mismatch_metric(
+pub(super) fn update_mismatch_metric(
     metrics: &RouterWorkerStatusMetrics,
     view: &KvSourceMembershipView,
     model: &str,
@@ -257,7 +257,7 @@ fn update_mismatch_metric(
     );
 }
 
-fn update_subscription_failure_metric(
+pub(super) fn update_subscription_failure_metric(
     metrics: &RouterWorkerStatusMetrics,
     view: &KvSourceMembershipView,
     model: &str,
@@ -274,6 +274,46 @@ fn update_subscription_failure_metric(
     );
 }
 
+pub(super) fn clear_mismatch_metric_on_cancellation(
+    metrics: &RouterWorkerStatusMetrics,
+    cancellation_token: &CancellationToken,
+    model: &str,
+    worker_type: &str,
+    serving_endpoint: &EndpointId,
+) {
+    if !cancellation_token.is_cancelled() {
+        return;
+    }
+    metrics.set_kv_event_source_mismatch_workers(
+        model,
+        worker_type,
+        &serving_endpoint.namespace,
+        &serving_endpoint.component,
+        &serving_endpoint.name,
+        0,
+    );
+}
+
+pub(crate) struct KvEventSubscriptionHandle {
+    cancel: CancellationToken,
+    completion: Option<oneshot::Receiver<()>>,
+}
+
+impl KvEventSubscriptionHandle {
+    pub(crate) async fn shutdown(mut self) {
+        self.cancel.cancel();
+        if let Some(completion) = self.completion.take() {
+            let _ = completion.await;
+        }
+    }
+}
+
+impl Drop for KvEventSubscriptionHandle {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
 pub async fn start_subscriber(
     endpoint: Endpoint,
     indexer: Indexer,
@@ -281,31 +321,79 @@ pub async fn start_subscriber(
     model: String,
     worker_type: &'static str,
     cancellation_token: CancellationToken,
-) -> Result<()> {
+) -> Result<KvEventSubscriptionHandle> {
     let transport_kind = endpoint.component().drt().default_event_transport_kind();
+    let direct_zmq = uses_direct_zmq(transport_kind);
+    let cancel = cancellation_token.child_token();
     let client = WorkerQueryClient::spawn(
         endpoint.component().clone(),
         IndexerRecoveryTarget::new(indexer),
         membership_watch.clone(),
-        cancellation_token.child_token(),
+        cancel.child_token(),
     )
     .await?;
+
+    if !direct_zmq {
+        tracing::info!(
+            transport = ?transport_kind,
+            "Using aggregated KV event subscriber"
+        );
+        let (startup_tx, startup_rx) = oneshot::channel();
+        let (completion_tx, completion_rx) = oneshot::channel();
+        let task_cancel = cancel.clone();
+        tokio::spawn(async move {
+            run_subscription_supervisor(
+                endpoint.component().clone(),
+                endpoint.id(),
+                client,
+                transport_kind,
+                membership_watch,
+                model,
+                worker_type,
+                task_cancel,
+                Some(startup_tx),
+            )
+            .await;
+            let _ = completion_tx.send(());
+        });
+        startup_rx.await.map_err(|_| {
+            anyhow::anyhow!("KV event subscription supervisor exited before reporting readiness")
+        })?;
+        return Ok(KvEventSubscriptionHandle {
+            cancel,
+            completion: Some(completion_rx),
+        });
+    }
+
+    tracing::info!("Using direct-ZMQ KV event ingress on the application runtime");
     let (startup_tx, startup_rx) = oneshot::channel();
-    tokio::spawn(run_subscription_supervisor(
-        endpoint.component().clone(),
-        endpoint.id(),
-        client,
-        transport_kind,
-        membership_watch,
-        model,
-        worker_type,
-        cancellation_token,
-        Some(startup_tx),
-    ));
-    startup_rx.await.map_err(|_| {
-        anyhow::anyhow!("KV event subscription supervisor exited before reporting readiness")
-    })?;
-    Ok(())
+    let (completion_tx, completion_rx) = oneshot::channel();
+    let task_cancel = cancel.clone();
+    tokio::spawn(async move {
+        run_direct_zmq_supervisor(
+            endpoint.component().clone(),
+            endpoint.id(),
+            client,
+            membership_watch,
+            model,
+            worker_type,
+            task_cancel,
+            Some(startup_tx),
+        )
+        .await;
+        let _ = completion_tx.send(());
+    });
+
+    startup_rx
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!("Direct-ZMQ ingress supervisor exited before reporting readiness")
+        })?
+        .map_err(anyhow::Error::msg)?;
+    Ok(KvEventSubscriptionHandle {
+        cancel,
+        completion: Some(completion_rx),
+    })
 }
 
 pub(crate) struct RecoverySupervisor<T: RecoveryTarget> {
@@ -373,4 +461,28 @@ pub(crate) async fn start_target_subscriber<T: RecoveryTarget>(
         cancel,
         task,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn subscription_handle_shutdown_waits_for_completion() {
+        let cancel = CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let (completion_tx, completion_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            task_cancel.cancelled().await;
+            let _ = completion_tx.send(());
+        });
+        let handle = KvEventSubscriptionHandle {
+            cancel,
+            completion: Some(completion_rx),
+        };
+
+        tokio::time::timeout(Duration::from_secs(1), handle.shutdown())
+            .await
+            .expect("subscription shutdown should complete");
+    }
 }
