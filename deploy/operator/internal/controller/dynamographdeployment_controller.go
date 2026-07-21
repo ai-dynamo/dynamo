@@ -2763,6 +2763,11 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 				GenericFunc: func(ge event.GenericEvent) bool { return true },
 			}),
 		).
+		Watches(
+			&corev1.Pod{},
+			handler.EnqueueRequestsFromMapFunc(mapDGDWorkerPodToRequests),
+			builder.WithPredicates(dgdWorkerPodEventPredicate()),
+		).
 		Owns(&nvidiacomv1beta1.DynamoComponentDeployment{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the deployment
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
@@ -2851,6 +2856,62 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 
 func (r *DynamoGraphDeploymentReconciler) GetRecorder() record.EventRecorder {
 	return r.Recorder
+}
+
+func isDGDManagedWorkerPod(obj client.Object) bool {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok || pod == nil {
+		return false
+	}
+	labels := pod.GetLabels()
+	return labels[consts.KubeLabelDynamoGraphDeploymentName] != "" &&
+		labels[consts.KubeLabelDynamoComponent] != "" &&
+		labels[consts.KubeLabelDynamoSelector] != "" &&
+		dynamo.IsWorkerComponent(labels[consts.KubeLabelDynamoComponentType])
+}
+
+// dgdWorkerPodEventPredicate admits only events that can change whether a
+// Recreate rollout is blocked by an old pod. Creation and deletion change pod
+// membership; updates matter only when membership or terminality changes. A
+// deletion timestamp alone leaves the pod non-terminal and does not enqueue.
+func dgdWorkerPodEventPredicate() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool {
+			return isDGDManagedWorkerPod(e.Object)
+		},
+		DeleteFunc: func(e event.DeleteEvent) bool {
+			return isDGDManagedWorkerPod(e.Object)
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldManaged := isDGDManagedWorkerPod(e.ObjectOld)
+			newManaged := isDGDManagedWorkerPod(e.ObjectNew)
+			if oldManaged != newManaged {
+				return true
+			}
+			if !newManaged {
+				return false
+			}
+			oldPod := e.ObjectOld.(*corev1.Pod)
+			newPod := e.ObjectNew.(*corev1.Pod)
+			if oldPod.Labels[consts.KubeLabelDynamoGraphDeploymentName] != newPod.Labels[consts.KubeLabelDynamoGraphDeploymentName] ||
+				oldPod.Labels[consts.KubeLabelDynamoComponent] != newPod.Labels[consts.KubeLabelDynamoComponent] ||
+				oldPod.Labels[consts.KubeLabelDynamoSelector] != newPod.Labels[consts.KubeLabelDynamoSelector] {
+				return true
+			}
+			return isTerminalPhase(oldPod.Status.Phase) != isTerminalPhase(newPod.Status.Phase)
+		},
+		GenericFunc: func(event.GenericEvent) bool {
+			return false
+		},
+	}
+}
+
+func mapDGDWorkerPodToRequests(_ context.Context, obj client.Object) []ctrl.Request {
+	if !isDGDManagedWorkerPod(obj) {
+		return nil
+	}
+	dgdName := obj.GetLabels()[consts.KubeLabelDynamoGraphDeploymentName]
+	return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: dgdName}}}
 }
 
 func (r *DynamoGraphDeploymentReconciler) mapAutoCheckpointToDGDRequests(ctx context.Context, obj client.Object) []ctrl.Request {

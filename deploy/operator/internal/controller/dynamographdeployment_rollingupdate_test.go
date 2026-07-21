@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -3340,6 +3341,153 @@ func TestOldWorkerDCDsAtZero(t *testing.T) {
 	}
 }
 
+func TestOldWorkerPodsTerminated(t *testing.T) {
+	oldDCDs := []*nvidiacomv1beta1.DynamoComponentDeployment{
+		{ObjectMeta: metav1.ObjectMeta{Name: "old-worker-a"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "old-worker-b"}},
+	}
+	newPod := func(name, selector string, phase corev1.PodPhase) corev1.Pod {
+		return corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name,
+				Labels: map[string]string{
+					consts.KubeLabelDynamoSelector: selector,
+				},
+			},
+			Status: corev1.PodStatus{Phase: phase},
+		}
+	}
+
+	terminating := newPod("terminating", "old-worker-a", corev1.PodRunning)
+	terminating.DeletionTimestamp = ptr.To(metav1.Now())
+
+	tests := []struct {
+		name string
+		pods []corev1.Pod
+		want bool
+	}{
+		{
+			name: "no pods",
+			want: true,
+		},
+		{
+			name: "running old pod blocks",
+			pods: []corev1.Pod{newPod("running", "old-worker-a", corev1.PodRunning)},
+			want: false,
+		},
+		{
+			name: "terminating running old pod blocks",
+			pods: []corev1.Pod{terminating},
+			want: false,
+		},
+		{
+			name: "pending old pod blocks",
+			pods: []corev1.Pod{newPod("pending", "old-worker-a", corev1.PodPending)},
+			want: false,
+		},
+		{
+			name: "unknown old pod blocks",
+			pods: []corev1.Pod{newPod("unknown", "old-worker-a", corev1.PodUnknown)},
+			want: false,
+		},
+		{
+			name: "terminal old pods do not block",
+			pods: []corev1.Pod{
+				newPod("failed", "old-worker-a", corev1.PodFailed),
+				newPod("succeeded", "old-worker-b", corev1.PodSucceeded),
+			},
+			want: true,
+		},
+		{
+			name: "non-terminal new generation pod does not block",
+			pods: []corev1.Pod{newPod("new", "new-worker", corev1.PodRunning)},
+			want: true,
+		},
+		{
+			name: "pod without a workload selector does not block",
+			pods: []corev1.Pod{newPod("checkpoint", "", corev1.PodRunning)},
+			want: true,
+		},
+		{
+			name: "one non-terminal old generation blocks",
+			pods: []corev1.Pod{
+				newPod("failed", "old-worker-a", corev1.PodFailed),
+				newPod("running", "old-worker-b", corev1.PodRunning),
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, oldWorkerPodsTerminated(oldDCDs, tt.pods))
+		})
+	}
+}
+
+func TestDGDWorkerPodEventPredicate(t *testing.T) {
+	newPod := func(phase corev1.PodPhase) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "worker",
+				Namespace: "default",
+				Labels: map[string]string{
+					consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+					consts.KubeLabelDynamoComponent:           "worker",
+					consts.KubeLabelDynamoComponentType:       consts.ComponentTypeWorker,
+					consts.KubeLabelDynamoSelector:            "old-worker",
+				},
+			},
+			Status: corev1.PodStatus{Phase: phase},
+		}
+	}
+
+	pred := dgdWorkerPodEventPredicate()
+	running := newPod(corev1.PodRunning)
+	failed := newPod(corev1.PodFailed)
+	succeeded := newPod(corev1.PodSucceeded)
+	deleting := running.DeepCopy()
+	deleting.DeletionTimestamp = ptr.To(metav1.Now())
+	unrelated := running.DeepCopy()
+	delete(unrelated.Labels, consts.KubeLabelDynamoSelector)
+	frontend := running.DeepCopy()
+	frontend.Labels[consts.KubeLabelDynamoComponentType] = consts.ComponentTypeFrontend
+	moved := running.DeepCopy()
+	moved.Labels[consts.KubeLabelDynamoSelector] = "another-old-worker"
+
+	assert.True(t, pred.Create(event.CreateEvent{Object: running}), "pod creation changes drain membership")
+	assert.False(t, pred.Create(event.CreateEvent{Object: frontend}), "non-worker pods must be ignored")
+	assert.True(t, pred.Delete(event.DeleteEvent{Object: running}), "pod deletion can unblock a drain")
+	assert.False(t, pred.Delete(event.DeleteEvent{Object: unrelated}), "unmanaged pods must be ignored")
+	assert.True(t, pred.Update(event.UpdateEvent{ObjectOld: running, ObjectNew: failed}), "transition to Failed can unblock a drain")
+	assert.True(t, pred.Update(event.UpdateEvent{ObjectOld: running, ObjectNew: succeeded}), "transition to Succeeded can unblock a drain")
+	assert.False(t, pred.Update(event.UpdateEvent{ObjectOld: running, ObjectNew: deleting}), "deletion timestamp alone does not make a pod terminal")
+	assert.False(t, pred.Update(event.UpdateEvent{ObjectOld: failed, ObjectNew: succeeded}), "terminal-to-terminal transitions are irrelevant")
+	assert.True(t, pred.Update(event.UpdateEvent{ObjectOld: running, ObjectNew: moved}), "selector changes move the pod between drain memberships")
+	assert.True(t, pred.Update(event.UpdateEvent{ObjectOld: unrelated, ObjectNew: running}), "becoming a managed worker pod changes drain membership")
+	assert.False(t, pred.Generic(event.GenericEvent{Object: running}))
+}
+
+func TestMapDGDWorkerPodToRequests(t *testing.T) {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:      "worker",
+		Namespace: "default",
+		Labels: map[string]string{
+			consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+			consts.KubeLabelDynamoComponent:           "worker",
+			consts.KubeLabelDynamoComponentType:       consts.ComponentTypeWorker,
+			consts.KubeLabelDynamoSelector:            "old-worker",
+		},
+	}}
+
+	requests := mapDGDWorkerPodToRequests(context.Background(), pod)
+	require.Len(t, requests, 1)
+	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "test-dgd"}, requests[0].NamespacedName)
+
+	delete(pod.Labels, consts.KubeLabelDynamoGraphDeploymentName)
+	assert.Empty(t, mapDGDWorkerPodToRequests(context.Background(), pod))
+}
+
 // --- reconcileRollingUpdate state machine tests ---
 
 func TestReconcileRollingUpdate_NoChange(t *testing.T) {
@@ -3657,6 +3805,22 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 			},
 		})
 	}
+	makeWorkerPod := func(name, dgdName, componentName, componentType, workerHash, selector string, phase corev1.PodPhase) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: "default",
+				Labels: map[string]string{
+					consts.KubeLabelDynamoGraphDeploymentName: dgdName,
+					consts.KubeLabelDynamoComponent:           componentName,
+					consts.KubeLabelDynamoComponentType:       componentType,
+					consts.KubeLabelDynamoWorkerHash:          workerHash,
+					consts.KubeLabelDynamoSelector:            selector,
+				},
+			},
+			Status: corev1.PodStatus{Phase: phase},
+		}
+	}
 	makeDefaultReplicaOldDCD := func(dgdName, serviceName, componentType, workerHash string, statusReplicas, availableReplicas int32) *nvidiacomv1beta1.DynamoComponentDeployment {
 		dcd := makeOldDCD(dgdName, serviceName, componentType, workerHash, 1, statusReplicas, availableReplicas)
 		dcd.Spec.Replicas = nil
@@ -3670,6 +3834,7 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 		preserveAlphaComponentMetadata bool
 		oldDCDs                        func(newHash string) []runtime.Object
 		newDCDs                        func(newHash string) []runtime.Object
+		pods                           func(newHash string) []runtime.Object
 		expectedOld                    map[string]int32
 		expectedNew                    map[string]int32
 	}{
@@ -3934,6 +4099,40 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 			expectedNew: map[string]int32{"worker": 3},
 		},
 		{
+			name: "recreate waits for terminating old pod after DCD reaches zero",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: consts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(3)),
+					Annotations: map[string]string{
+						KubeAnnotationDeploymentStrategy: string(common.DeploymentStrategyRecreate),
+					},
+				},
+			},
+			oldDCDs: func(_ string) []runtime.Object {
+				return []runtime.Object{
+					makeOldDCD("test-dgd", "worker", consts.ComponentTypeWorker, "", 0, 0, 0),
+				}
+			},
+			pods: func(_ string) []runtime.Object {
+				pod := makeWorkerPod(
+					"terminating-old-worker",
+					"test-dgd",
+					"worker",
+					consts.ComponentTypeWorker,
+					testOldWorkerHash,
+					"test-dgd-worker-"+testOldWorkerHash[:8],
+					corev1.PodRunning,
+				)
+				pod.DeletionTimestamp = ptr.To(metav1.Now())
+				pod.Finalizers = []string{"test.example/finalizer"}
+				return []runtime.Object{pod}
+			},
+			newDCDs:     func(_ string) []runtime.Object { return nil },
+			expectedOld: map[string]int32{"worker": 0},
+			expectedNew: map[string]int32{"worker": 0},
+		},
+		{
 			name: "recreate inherited from DGD spec annotations drains old generation",
 			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				"worker": {
@@ -4038,6 +4237,9 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 			if tt.newDCDs != nil {
 				objs = append(objs, tt.newDCDs(newHash)...)
 			}
+			if tt.pods != nil {
+				objs = append(objs, tt.pods(newHash)...)
+			}
 
 			r := createTestReconcilerWithStatus(dgd, withObjects(objs...))
 			ctx := context.Background()
@@ -4137,6 +4339,58 @@ func TestBuildRollingUpdateContext_ListOldDCDsError(t *testing.T) {
 	assert.ErrorIs(t, err, injectedErr, "List error must be wrapped and propagated, not swallowed")
 	assert.Contains(t, err.Error(), "failed to get old worker component states",
 		"error must originate from the old-DCD List path, not some other call")
+}
+
+func TestBuildRollingUpdateContext_ListPodsError(t *testing.T) {
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: consts.ComponentTypeWorker,
+			Replicas:      ptr.To(int32(3)),
+			Annotations: map[string]string{
+				KubeAnnotationDeploymentStrategy: string(common.DeploymentStrategyRecreate),
+			},
+		},
+	})
+	dgd.Annotations = map[string]string{
+		consts.AnnotationCurrentWorkerHash: testOldWorkerHash,
+	}
+	oldDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd-worker-" + testOldWorkerHash[:8],
+			Namespace: "default",
+			Labels: map[string]string{
+				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+				consts.KubeLabelDynamoWorkerHash:          testOldWorkerHash,
+			},
+		},
+		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				ServiceName:   "worker",
+				Replicas:      ptr.To(int32(0)),
+			},
+		},
+		Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
+			Service: &nvidiacomv1alpha1.ServiceReplicaStatus{Replicas: 0},
+		},
+	})
+
+	injectedErr := errors.New("simulated pod list failure")
+	funcs := interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, ok := list.(*corev1.PodList); ok {
+				return injectedErr
+			}
+			return c.List(ctx, list, opts...)
+		},
+	}
+	r := createTestReconcilerWithStatus(dgd, withObjects(oldDCD), withInterceptor(funcs))
+
+	_, err := r.buildRollingUpdateContext(context.Background(), dgd)
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, injectedErr)
+	assert.Contains(t, err.Error(), "failed to list pods for DGD test-dgd component worker")
 }
 
 func TestBuildRollingUpdateContext_GetNewDCDError(t *testing.T) {

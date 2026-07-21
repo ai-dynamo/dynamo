@@ -814,10 +814,9 @@ func (r *DynamoGraphDeploymentReconciler) getOldWorkerDCDsByComponent(
 }
 
 // oldWorkerDCDsAtZero reports whether every old DCD has observed its desired
-// scale-to-zero state and no longer reports any non-terminated replicas. A
-// Recreate update must not start the replacement generation before this is
-// true. Requiring observedGeneration and replica status avoids treating an
-// unprocessed write or absent status as a completed drain.
+// scale-to-zero state and reports no non-terminated replicas. This is the
+// controller-status half of the Recreate barrier. Callers must also inspect
+// the old workload pods because Deployment status excludes terminating pods.
 func oldWorkerDCDsAtZero(dcds []*nvidiacomv1beta1.DynamoComponentDeployment) bool {
 	for _, dcd := range dcds {
 		if dcd == nil || dcd.Spec.Replicas == nil || *dcd.Spec.Replicas != 0 {
@@ -831,6 +830,50 @@ func oldWorkerDCDsAtZero(dcds []*nvidiacomv1beta1.DynamoComponentDeployment) boo
 		}
 	}
 	return true
+}
+
+// oldWorkerPodsTerminated reports whether every pod belonging to an old DCD
+// is in a terminal phase. A deletion timestamp does not make a pod terminal:
+// Pending, Running, and Unknown pods continue to block Recreate until they
+// reach Failed or Succeeded, or disappear from the informer cache.
+func oldWorkerPodsTerminated(dcds []*nvidiacomv1beta1.DynamoComponentDeployment, pods []corev1.Pod) bool {
+	oldDCDNames := make(map[string]struct{}, len(dcds))
+	for _, dcd := range dcds {
+		if dcd != nil && dcd.Name != "" {
+			oldDCDNames[dcd.Name] = struct{}{}
+		}
+	}
+
+	for i := range pods {
+		pod := &pods[i]
+		if _, old := oldDCDNames[pod.Labels[consts.KubeLabelDynamoSelector]]; !old {
+			continue
+		}
+		if !isTerminalPhase(pod.Status.Phase) {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *DynamoGraphDeploymentReconciler) listDGDComponentPods(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	componentName string,
+) ([]corev1.Pod, error) {
+	podList := &corev1.PodList{}
+	if err := r.List(
+		ctx,
+		podList,
+		client.InNamespace(dgd.Namespace),
+		client.MatchingLabels{
+			consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+			consts.KubeLabelDynamoComponent:           componentName,
+		},
+	); err != nil {
+		return nil, fmt.Errorf("failed to list pods for DGD %s component %s: %w", dgd.Name, componentName, err)
+	}
+	return podList.Items, nil
 }
 
 // getDesiredWorkerReplicas returns the total desired replicas across all worker components.
@@ -1257,10 +1300,18 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 		case common.DeploymentStrategyRecreate:
 			// Recreate deliberately permits the full component to be unavailable.
 			// Keep declaring every old generation at zero until their controllers
-			// have observed the drain; only then start the replacement generation.
+			// have observed the drain and every old workload pod is terminal; only
+			// then start the replacement generation.
 			maxUnavailable = desired
-			if oldWorkerDCDsAtZero(oldDCDsByComponent[componentName]) {
-				newTarget = desired
+			oldDCDs := oldDCDsByComponent[componentName]
+			if oldWorkerDCDsAtZero(oldDCDs) {
+				pods, err := r.listDGDComponentPods(ctx, dgd, componentName)
+				if err != nil {
+					return dynamo.RollingUpdateContext{}, err
+				}
+				if oldWorkerPodsTerminated(oldDCDs, pods) {
+					newTarget = desired
+				}
 			}
 		default:
 			maxSurge, maxUnavailable = resolveRollingUpdateParams(annotations, desired)

@@ -330,8 +330,9 @@ This avoids creating extra pods but allows up to 2 decode replicas to be unavail
 
 For a Deployment-backed worker component that cannot use temporary surge capacity, set
 `nvidia.com/deployment-strategy: Recreate` on its pod template. The operator scales every old DCD
-for that component to zero, waits for the DCDs to report zero non-terminated replicas, and then
-scales the new DCD to the requested replica count.
+for that component to zero, waits for the DCDs to observe the scale-down and for every old worker
+pod to reach a terminal phase or be deleted, and then scales the new DCD to the requested replica
+count.
 
 ```yaml
 apiVersion: nvidia.com/v1beta1
