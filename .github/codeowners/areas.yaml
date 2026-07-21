@@ -370,8 +370,11 @@ areas:
   - CONTRIBUTING.md
   - CONTRIBUTORS.md
   - DCO.md
+  - GOVERNANCE.md
   - LICENSE
+  - MAINTAINERS.md
   - SECURITY.md
+  - SIGS.md
   - skills
 - label: operator
   github_team: '@ai-dynamo/dynamo-operator-codeowners'

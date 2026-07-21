@@ -25,8 +25,11 @@ For the full contribution guide — including how to get started, build from sou
 
 Or view the source: [`docs/contribution-guide.md`](docs/contribution-guide.md)
 
+How the project is governed is defined in [GOVERNANCE.md](GOVERNANCE.md): the contributor ladder, decision-making, SIGs, and conflict resolution.
+
 ## Quick Links
 
+- [Project Governance](GOVERNANCE.md)
 - [Good first issues](https://github.com/ai-dynamo/dynamo/labels/good-first-issue)
 - [Help wanted](https://github.com/ai-dynamo/dynamo/labels/help-wanted)
 - [Open a bug report](https://github.com/ai-dynamo/dynamo/issues/new?template=bug_report.yml)
