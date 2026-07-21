@@ -10,12 +10,12 @@ readonly EXPECTED_AMD64_DIGEST=sha256:99e7dd3cf74c489af0615671f3fdbde182de2930f1
 readonly EXPECTED_BASELINE_SBOM=vllm-openai@7f2bc168
 readonly EXPECTED_VLLM_URL=https://github.com/galletas1712/vllm.git
 readonly EXPECTED_VLLM_REF=schwinns/gms-sparse-indexer-sync-diagnostic-20260721
-readonly EXPECTED_VLLM_HEAD=29056d699f5af192278b68b9235582763f220f9d
-readonly EXPECTED_VLLM_HEAD_TREE=f35a4968649513d0ac1e27fb26e217897ccb86de
+readonly EXPECTED_VLLM_HEAD=9ddf85272a3bb86890dc4c0520eb9afef1d58882
+readonly EXPECTED_VLLM_HEAD_TREE=12e780c91b80de8678c91c5f688dfc803ec1e0f7
 readonly EXPECTED_MERGE_BASE=c4f5cd60dae386d106c9b8a12dbab24e2e9dda0b
-readonly EXPECTED_COMPOSED_TREE=e1c9b55d3926e7297572f23950adc878450983c6
+readonly EXPECTED_COMPOSED_TREE=adb768862d2f9caafa5f1130c3ff656249fe382f
 readonly EXPECTED_PARALLEL_STATE_BLOB=5d3587fa48d7e4b659f3ae68cc174d5d3335a9a6
-readonly EXPECTED_SPARSE_INDEXER_BLOB=90581b105fd1d3d1ccaff52273be56e3ec7eaf5e
+readonly EXPECTED_SPARSE_INDEXER_BLOB=af51ec92e414ac4ebcaa85d667654e395593cc38
 readonly SPARSE_INDEXER_PATH=vllm/model_executor/layers/sparse_attn_indexer.py
 readonly EXPECTED_FLASHINFER_URL=https://github.com/flashinfer-ai/flashinfer.git
 readonly EXPECTED_FLASHINFER_REF=8eccd0c1352165302840c0e19066bc42d36dbd7a
@@ -103,7 +103,7 @@ validate_and_compose_vllm() {
     require_exact "vLLM PR commit count" \
         "$(git -C "${source}" rev-list --count \
             "${EXPECTED_MERGE_BASE}..${EXPECTED_VLLM_HEAD}")" \
-        8
+        9
 
     git -C "${source}" checkout --quiet --detach "${EXPECTED_BASE_COMMIT}"
     if ! git -C "${source}" \
@@ -273,7 +273,7 @@ vllm_source_sha=${EXPECTED_VLLM_HEAD}
 vllm_source_tree=${EXPECTED_VLLM_HEAD_TREE}
 vllm_merge_base=${EXPECTED_MERGE_BASE}
 vllm_composed_tree=${EXPECTED_COMPOSED_TREE}
-vllm_pr_commits=8
+vllm_pr_commits=9
 vllm_overlay_files=${#OVERLAY_PATHS[@]}
 vllm_parallel_state_blob=${EXPECTED_PARALLEL_STATE_BLOB}
 vllm_sparse_indexer_blob=${EXPECTED_SPARSE_INDEXER_BLOB}
