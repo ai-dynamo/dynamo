@@ -77,7 +77,7 @@ RUN set -eux; \
     grep -aFq efa_data_path_direct_post_read "$REAL"; \
     grep -aFq efa_data_path_direct_post_write "$REAL"; \
     ldd "$REAL" | tee /tmp/efa-libfabric.ldd; \
-    ! grep -Fq "not found" /tmp/efa-libfabric.ldd; \
+    if grep -Fq "not found" /tmp/efa-libfabric.ldd; then exit 1; fi; \
     LIBEFA_LOADED=$(awk '$1 == "libefa.so.1" {print $3}' /tmp/efa-libfabric.ldd); \
     LIBIBVERBS_LOADED=$(awk '$1 == "libibverbs.so.1" {print $3}' /tmp/efa-libfabric.ldd); \
     test "$(readlink -f "$LIBEFA_LOADED")" = \
@@ -85,7 +85,7 @@ RUN set -eux; \
     test "$(readlink -f "$LIBIBVERBS_LOADED")" = \
         "$(readlink -f "${RUNTIME_LIB}/libibverbs.so.1.16.63.0")"; \
     ldd "$PROVIDER" | tee /tmp/efa-provider.ldd; \
-    ! grep -Fq "not found" /tmp/efa-provider.ldd; \
+    if grep -Fq "not found" /tmp/efa-provider.ldd; then exit 1; fi; \
     /opt/amazon/efa/bin/fi_info --version | tee /tmp/efa-fi-info.version; \
     grep -F "libfabric: 2.4.0amzn5.0" /tmp/efa-fi-info.version; \
     printf '%s\n' /opt/amazon/efa/lib > /etc/ld.so.conf.d/000_efa.conf; \
@@ -244,8 +244,8 @@ RUN set -eux; \
     mkdir -p /tmp/cuda-stubs; \
     ln -sf /usr/local/cuda/lib64/stubs/libcuda.so /tmp/cuda-stubs/libcuda.so.1; \
     for plugin in "$ACTIVE" "$COMPAT"; do \
-        ! readelf --wide -S "$plugin" | grep -F .nv_fatbin >/dev/null; \
-        ! readelf --version-info "$plugin" | grep -F FABRIC_1.9 >/dev/null; \
+        if readelf --wide -S "$plugin" | grep -Fq .nv_fatbin; then exit 1; fi; \
+        if readelf --version-info "$plugin" | grep -Fq FABRIC_1.9; then exit 1; fi; \
         for symbol in fi_getinfo fi_freeinfo fi_dupinfo; do \
             readelf --wide -Ws "$plugin" | \
                 grep -E "[[:space:]]${symbol}@FABRIC_1[.]8([[:space:]]|$)"; \
@@ -253,7 +253,7 @@ RUN set -eux; \
         env -u LD_PRELOAD \
             LD_LIBRARY_PATH="/tmp/cuda-stubs:/opt/amazon/efa/lib:${CORE}:${VENDOR}" \
             ldd -v "$plugin" | tee /tmp/nixl-plugin.ldd; \
-        ! grep -Fq "not found" /tmp/nixl-plugin.ldd; \
+        if grep -Fq "not found" /tmp/nixl-plugin.ldd; then exit 1; fi; \
         grep -F "libfabric.so.1 => /opt/amazon/efa/lib/libfabric.so.1" \
             /tmp/nixl-plugin.ldd; \
         env -u LD_PRELOAD \
@@ -293,8 +293,8 @@ RUN set -eux; \
     env -u LD_PRELOAD \
         LD_LIBRARY_PATH="/tmp/cuda-stubs:/opt/amazon/efa/lib:${NIXL_LIB}:${LD_LIBRARY_PATH:-}" \
         ldd -v "$PLUGIN" 2>&1 | tee /tmp/nixl-libfabric.ldd; \
-    ! grep -Fq "not found" /tmp/nixl-libfabric.ldd; \
-    ! grep -Fq "FABRIC_1.9" /tmp/nixl-libfabric.ldd; \
+    if grep -Fq "not found" /tmp/nixl-libfabric.ldd; then exit 1; fi; \
+    if grep -Fq "FABRIC_1.9" /tmp/nixl-libfabric.ldd; then exit 1; fi; \
     grep -F "libfabric.so.1 => /opt/amazon/efa/lib/libfabric.so.1" \
         /tmp/nixl-libfabric.ldd; \
     env -u LD_PRELOAD \

@@ -169,11 +169,17 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
 # were dead weight that only dragged in a GPL-2.0+ codec cluster (sox, libsox*,
 # libao*, libmad0, libid3tag0, libltdl7) we'd then be redistributing. SoX is
 # inherently GPL (no LGPL replacement), so the compliant fix is to not ship it.
+#
+# CUDA vLLM obtains NIXL from the upstream nixl-cu wheel. Its LIBFABRIC plugin
+# links libhwloc.so.15, but the upstream vLLM runtime does not provide that
+# library on every architecture. Install the Ubuntu runtime package explicitly
+# so the plugin can be loaded eagerly instead of failing only when EFA is used.
 # (sglang_runtime.Dockerfile is the reference codec-compliance pattern.)
 RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        jq; \
+        jq{% if device == "cuda" and make_efa %} \
+        libhwloc15{% endif %}; \
     rm -rf /var/lib/apt/lists/*
 
 # Layer the released vLLM-Omni package matching the pinned upstream ref while

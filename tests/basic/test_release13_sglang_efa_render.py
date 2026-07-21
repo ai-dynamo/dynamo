@@ -209,9 +209,24 @@ def test_vllm_and_trtllm_gate_the_final_nixl_plugin(
 
     assert f"PLUGIN={plugin}" in rendered
     assert 'ldd -v "$PLUGIN"' in rendered
-    assert '! grep -Fq "FABRIC_1.9"' in rendered
+    assert (
+        'if grep -Fq "not found" /tmp/nixl-libfabric.ldd; then exit 1; fi' in rendered
+    )
+    assert (
+        'if grep -Fq "FABRIC_1.9" /tmp/nixl-libfabric.ldd; then exit 1; fi' in rendered
+    )
     assert "libfabric.so.1 => /opt/amazon/efa/lib/libfabric.so.1" in rendered
     assert (
         'ctypes.CDLL(os.environ["PLUGIN"], mode=os.RTLD_NOW | os.RTLD_LOCAL)'
         in rendered
     )
+
+
+def test_vllm_cuda_runtime_installs_nixl_plugin_runtime_dependency():
+    rendered = _render("vllm", make_efa=True)
+
+    assert "libhwloc15" in rendered
+    assert rendered.index("libhwloc15") < rendered.index("FROM pre_runtime AS licenses")
+
+    non_efa = _render("vllm", make_efa=False)
+    assert "libhwloc15" not in non_efa

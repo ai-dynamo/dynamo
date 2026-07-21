@@ -107,7 +107,10 @@ grep -aFq efa_data_path_direct_post_write "${libfabric}"
 /opt/amazon/efa/bin/fi_info --version | grep -F "libfabric: 2.4.0amzn5.0"
 
 if [[ "${skip_nccl}" == "--skip-nccl" ]]; then
-    ! dpkg-query -W 'libnccl-ofi*' >/dev/null 2>&1
+    if dpkg-query -W 'libnccl-ofi*' >/dev/null 2>&1; then
+        echo "NCCL OFI package remains after --skip-nccl installation" >&2
+        exit 1
+    fi
     [[ ! -e /opt/amazon/ofi-nccl ]]
 else
     [[ "$(dpkg-query -W -f='${Version}' libnccl-ofi-ngc-v3)" == "1.20.0-1" ]]
