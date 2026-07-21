@@ -168,3 +168,7 @@ package-lock.json
 
 # HuggingFace hub cache downloaded by tests (never commit; committed fixtures use plain dir names)
 lib/llm/tests/data/sample-models/models--*/
+
+# Install selector: generated at docs-build time from live registries (build_install_selector.py)
+docs/data/install-selector.json
+fern/components/install-selector-data.ts

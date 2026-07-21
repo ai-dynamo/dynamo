@@ -1,0 +1,19 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Get Dynamo
+subtitle: Pick your backend and the version you need — get the exact Dynamo container or wheel to install.
+---
+
+import { InstallSelector } from "@/components/InstallSelector";
+
+Choose your inference backend, a stable or nightly Dynamo build, and the backend version you need. The selector gives you the complete, copy-pastable install command — the image tag and wheel version are real, with no placeholders to fill in.
+
+<InstallSelector />
+
+## Notes
+
+- **Stable** builds are QA-validated releases. **Nightly** builds track `main` and are experimental — see [Nightly Release Info](../reference/nightly-release-info.md).
+- The selector covers the three most recent stable releases and the last 30 days of nightlies.
+- TensorRT-LLM ships as a container only; there is no PyPI wheel.
+- For the full artifact inventory (Helm charts, Rust crates, CUDA and EFA image variants), see [Release Artifacts](../reference/release-artifacts.md). For hardware, platform, and CUDA support, see the [Support Matrix](../reference/support-matrix.md).

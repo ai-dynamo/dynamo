@@ -116,6 +116,18 @@ jobs:
           path: docs-checkout
           fetch-depth: 1
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate Get Dynamo selector data
+        # Option B: the install-selector data is generated at docs-build time from
+        # live NGC tags + git and is never committed to main (see .gitignore). The
+        # generated TS module is written into fern/components/ and picked up by the
+        # component sync below. Needs full history + tags for container/context.yaml
+        # history, release tags, and nightly commit lookups.
+        run: |
+          git -C source-checkout fetch --unshallow --tags 2>/dev/null || git -C source-checkout fetch --tags
+          python3 -m pip install --quiet pyyaml
+          python3 source-checkout/.github/scripts/build_install_selector.py
+
       - name: Sync dev content from main
         run: |
           # Sync content directories from docs/ to fern/pages-dev/ on docs-website
@@ -126,6 +138,7 @@ jobs:
           rsync -a \
             --exclude='digest' \
             --exclude='index.yml' \
+            --exclude='data' \
             source-checkout/docs/ docs-checkout/fern/pages-dev/
 
           # Sync Fern's native-localization mirror as-is:
