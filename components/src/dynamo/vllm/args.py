@@ -359,27 +359,36 @@ def update_engine_config_with_dynamo(
                 f"--scheduler-cls is set to '{existing_cls}'. Either remove "
                 f"--scheduler-cls or use a subclass of InstrumentedScheduler."
             )
-        dynamo_config._benchmark_additional_config = {  # type: ignore[attr-defined]
+        benchmark_config: Dict[str, Any] = {
             "mode": dynamo_config.benchmark_mode,
             "warmup_iterations": dynamo_config.benchmark_warmup_iterations,
             "output_path": dynamo_config.benchmark_output_path,
             "timeout": dynamo_config.benchmark_timeout,
-            "prefill_max_new_token_samples": (
-                dynamo_config.prefill_max_new_token_samples
-            ),
-            "prefill_max_kv_read_token_samples": (
-                dynamo_config.prefill_max_kv_read_token_samples
-            ),
-            "decode_max_kv_read_token_samples": (
-                dynamo_config.decode_max_kv_read_token_samples
-            ),
-            "decode_max_batch_size_samples": (
-                dynamo_config.decode_max_batch_size_samples
-            ),
-            "prefix_max_batch_size_samples": (
-                dynamo_config.prefix_max_batch_size_samples
-            ),
         }
+        explicit_points = dynamo_config._benchmark_points
+        if explicit_points is not None:
+            benchmark_config["points"] = explicit_points.model_dump(mode="json")
+        else:
+            benchmark_config.update(
+                {
+                    "prefill_max_new_token_samples": (
+                        dynamo_config.prefill_max_new_token_samples
+                    ),
+                    "prefill_max_kv_read_token_samples": (
+                        dynamo_config.prefill_max_kv_read_token_samples
+                    ),
+                    "decode_max_kv_read_token_samples": (
+                        dynamo_config.decode_max_kv_read_token_samples
+                    ),
+                    "decode_max_batch_size_samples": (
+                        dynamo_config.decode_max_batch_size_samples
+                    ),
+                    "prefix_max_batch_size_samples": (
+                        dynamo_config.prefix_max_batch_size_samples
+                    ),
+                }
+            )
+        dynamo_config._benchmark_additional_config = benchmark_config  # type: ignore[attr-defined]
         logger.info(
             "Benchmark mode=%s configured (output=%s)",
             dynamo_config.benchmark_mode,

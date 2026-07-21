@@ -120,6 +120,8 @@ normalized_load = total_inflight(group) / (instance_count(group) x throughput_we
 
 The throughput weight is `1` for CPU workers and `DYN_ENCODER_CUDA_TO_CPU_RATIO` for non-CPU workers. The next request is routed to the group with the lower normalized load, then to the least-loaded worker inside that group.
 
+For multimodal requests, a full embedding-cache hit on one or more workers bypasses the CPU-to-non-CPU ratio. The router selects the least-loaded worker among those that hold every distinct embedding-cache key in the request. Partial hits continue through the normal weighted group selection. See [Embedding Cache](../../features/multimodal/embedding-cache.md#cache-aware-routing).
+
 Use `DYN_ENCODER_CUDA_TO_CPU_RATIO` to approximate the throughput ratio of a non-CPU worker relative to one CPU worker. The default is `8`.
 
 When only one device class is present, the policy degenerates to standard least-loaded routing.

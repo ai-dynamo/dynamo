@@ -6,16 +6,17 @@ use std::{sync::Arc, time::Duration};
 use anyhow::Result;
 use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, RouterEvent};
 use dynamo_runtime::{
-    component::Endpoint,
+    component::{Component, Endpoint},
     discovery::EventTransportKind,
     protocols::EndpointId,
     traits::DistributedRuntimeProvider,
     transports::event_plane::{EventSubscriber, TypedEventSubscriber},
 };
-use tokio::sync::oneshot;
+use tokio::sync::{Semaphore, oneshot};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use super::worker_query::WorkerQueryClient;
+use super::{IndexerRecoveryTarget, RecoveryTarget, worker_query::WorkerQueryClient};
 use crate::{
     discovery::{KvSourceMembershipView, KvSourceMembershipWatch, KvSourceStatus},
     kv_router::{Indexer, metrics::RouterWorkerStatusMetrics},
@@ -31,9 +32,10 @@ enum ScopeExit {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_subscription_supervisor(
-    endpoint: Endpoint,
-    indexer: Indexer,
+async fn run_subscription_supervisor<T: RecoveryTarget>(
+    component: Component,
+    serving_endpoint: EndpointId,
+    client: Arc<WorkerQueryClient<T>>,
     transport_kind: EventTransportKind,
     mut membership_watch: KvSourceMembershipWatch,
     model: String,
@@ -41,31 +43,11 @@ async fn run_subscription_supervisor(
     cancellation_token: CancellationToken,
     mut startup_ready: Option<oneshot::Sender<()>>,
 ) {
-    let serving_endpoint = endpoint.id();
-    let component = endpoint.component().clone();
     let metrics = RouterWorkerStatusMetrics::from_component(&component);
-    let client = match WorkerQueryClient::spawn(
-        component.clone(),
-        indexer,
-        membership_watch.clone(),
-        cancellation_token.child_token(),
-    )
-    .await
-    {
-        Ok(started) => started,
-        Err(error) => {
-            tracing::error!(%error, "Failed to start KV source recovery coordinator");
-            if let Some(ready) = startup_ready.take() {
-                let _ = ready.send(());
-            }
-            return;
-        }
-    };
     let mut retry_delay = SUBSCRIPTION_INITIAL_BACKOFF;
 
     loop {
-        membership_watch.borrow_and_update();
-        let view = client.sync_membership().await;
+        let view = membership_watch.borrow_and_update().clone();
         update_mismatch_metric(&metrics, &view, &model, worker_type, &serving_endpoint);
 
         let subscriber = if let Some(kv_state_endpoint) = view.resolved_kv_state_endpoint() {
@@ -116,8 +98,16 @@ async fn run_subscription_supervisor(
             None
         };
 
-        // Ordinary serving readiness is independent of recovery. In the healthy path this is
-        // sent only after the first exact transport subscription has been constructed.
+        let current_view = membership_watch.borrow().clone();
+        if current_view.resolved_kv_state_endpoint()
+            != subscriber.as_ref().map(|(endpoint, _)| endpoint)
+        {
+            continue;
+        }
+        client.sync_membership().await;
+
+        // Subscriber construction establishes buffering before membership activation starts
+        // initial recovery. Re-reading the watch above rejects a stale endpoint binding.
         if let Some(ready) = startup_ready.take() {
             let _ = ready.send(());
         }
@@ -183,9 +173,9 @@ async fn run_subscription_supervisor(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn consume_scope(
+async fn consume_scope<T: RecoveryTarget>(
     mut subscriber: TypedEventSubscriber<Vec<RouterEvent>>,
-    client: &Arc<WorkerQueryClient>,
+    client: &Arc<WorkerQueryClient<T>>,
     kv_state_endpoint: &EndpointId,
     membership_watch: &mut KvSourceMembershipWatch,
     metrics: &RouterWorkerStatusMetrics,
@@ -293,10 +283,18 @@ pub async fn start_subscriber(
     cancellation_token: CancellationToken,
 ) -> Result<()> {
     let transport_kind = endpoint.component().drt().default_event_transport_kind();
+    let client = WorkerQueryClient::spawn(
+        endpoint.component().clone(),
+        IndexerRecoveryTarget::new(indexer),
+        membership_watch.clone(),
+        cancellation_token.child_token(),
+    )
+    .await?;
     let (startup_tx, startup_rx) = oneshot::channel();
     tokio::spawn(run_subscription_supervisor(
-        endpoint,
-        indexer,
+        endpoint.component().clone(),
+        endpoint.id(),
+        client,
         transport_kind,
         membership_watch,
         model,
@@ -308,4 +306,71 @@ pub async fn start_subscriber(
         anyhow::anyhow!("KV event subscription supervisor exited before reporting readiness")
     })?;
     Ok(())
+}
+
+pub(crate) struct RecoverySupervisor<T: RecoveryTarget> {
+    client: Arc<WorkerQueryClient<T>>,
+    cancel: CancellationToken,
+    task: JoinHandle<()>,
+}
+
+impl<T: RecoveryTarget> RecoverySupervisor<T> {
+    pub(crate) fn client(&self) -> &Arc<WorkerQueryClient<T>> {
+        &self.client
+    }
+
+    pub(crate) async fn shutdown(self) {
+        self.cancel.cancel();
+        self.client.shutdown().await;
+        if let Err(error) = self.task.await
+            && !error.is_cancelled()
+        {
+            tracing::warn!(%error, "KV source subscription supervisor failed during shutdown");
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn start_target_subscriber<T: RecoveryTarget>(
+    component: Component,
+    serving_endpoint: EndpointId,
+    target: T,
+    membership_watch: KvSourceMembershipWatch,
+    model: String,
+    worker_type: &'static str,
+    recovery_semaphore: Arc<Semaphore>,
+    recovery_attempt_timeout: Duration,
+    cancellation_token: CancellationToken,
+) -> Result<RecoverySupervisor<T>> {
+    let transport_kind = component.drt().default_event_transport_kind();
+    let cancel = cancellation_token.child_token();
+    let client = WorkerQueryClient::spawn_with_recovery_limit(
+        component.clone(),
+        target,
+        membership_watch.clone(),
+        recovery_semaphore,
+        recovery_attempt_timeout,
+        cancel.child_token(),
+    )
+    .await?;
+    let (startup_tx, startup_rx) = oneshot::channel();
+    let task = tokio::spawn(run_subscription_supervisor(
+        component,
+        serving_endpoint,
+        client.clone(),
+        transport_kind,
+        membership_watch,
+        model,
+        worker_type,
+        cancel.clone(),
+        Some(startup_tx),
+    ));
+    startup_rx.await.map_err(|_| {
+        anyhow::anyhow!("KV event subscription supervisor exited before reporting readiness")
+    })?;
+    Ok(RecoverySupervisor {
+        client,
+        cancel,
+        task,
+    })
 }

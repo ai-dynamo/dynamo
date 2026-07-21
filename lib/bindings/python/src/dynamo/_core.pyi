@@ -652,10 +652,10 @@ class WorkerMetricsPublisher:
 
     async def create_endpoint(self, endpoint: Endpoint) -> None:
         """
-        Initialize the NATS endpoint for publishing worker metrics. Must be awaited.
+        Initialize event-plane publishing for worker metrics. Must be awaited.
 
         Extracts component information from the endpoint to set up metrics publishing
-        on the correct NATS subject for routing decisions.
+        on the endpoint-scoped event subject used for routing decisions.
 
         Args:
             endpoint: The endpoint to extract component information from for metrics publishing
@@ -691,7 +691,7 @@ class MultimodalEmbeddingCachePublisher:
 
     async def create_endpoint(self, endpoint: Endpoint) -> None:
         """
-        Initialize the NATS endpoint for publishing multimodal cache state.
+        Initialize event-plane publishing for multimodal cache state.
 
         Args:
             endpoint: The endpoint to extract component information from.
@@ -2811,6 +2811,31 @@ class KvbmRequest:
     """
 
     def __init__(self, request_id: int, tokens: List[int], block_size: int) -> None:
+        ...
+
+class KvDcRelay:
+    def __init__(
+        self,
+        endpoint: Endpoint,
+        dc_id: str,
+        namespace_filter: Optional[str] = None,
+        endpoint_prefix: Optional[str] = None,
+        publication_threshold: int = 16,
+        publication_delay_ms: int = 1,
+        recovery_attempt_timeout_ms: int = 30_000,
+    ) -> None:
+        ...
+
+    async def start(self) -> None:
+        ...
+
+    async def health(self) -> Dict[str, Any]:
+        ...
+
+    async def flush(self) -> None:
+        ...
+
+    async def shutdown(self) -> None:
         ...
 
 class KvRouter:

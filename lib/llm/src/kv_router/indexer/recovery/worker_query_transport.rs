@@ -55,6 +55,7 @@ impl WorkerQueryTransport for RuntimeWorkerQueryTransport {
             dp_rank,
             start_event_id,
             end_event_id,
+            supports_tree_dump_failed: true,
         };
         let instance = target;
         let instance_id = instance.instance_id;

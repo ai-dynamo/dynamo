@@ -23,8 +23,9 @@ members = [
     "lib/bench",
     "lib/backend-common",
     "lib/backend-common/examples/mocker",
-    "lib/backend/vllm-sidecar",
-    "lib/backend/sglang-sidecar",
+    "lib/sidecar/common",
+    "lib/sidecar/vllm",
+    "lib/sidecar/sglang",
     "lib/bindings/c",
     "lib/bindings/python/codegen",
     "deploy/inference-gateway/ext-proc",
@@ -62,6 +63,7 @@ dynamo-parsers = { version = "5.0.0" }
 #   sparse index: curl https://index.crates.io/dy/na/dynamo-parsers-v2   (one JSON line per release; read the "vers" field)
 dynamo-parsers-v2 = { version = "0.1.19" }
 dynamo-backend-common = { path = "lib/backend-common", version = "1.3.0" }
+dynamo-sidecar-common = { path = "lib/sidecar/common", version = "1.3.0" }
 fastokens = { version = "0.2.0" }
 
 

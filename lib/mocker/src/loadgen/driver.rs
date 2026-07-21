@@ -5,12 +5,13 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
 use anyhow::{Context, Result, anyhow, bail};
+use rand::SeedableRng;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
 use super::types::{AgenticTrace, ReadyTurn, ReplayRequestHashes, Trace};
+use super::{SYNTHETIC_OUTPUT_SEED, planned_output_token_ids};
 use crate::common::protocols::DirectRequest;
 
 #[derive(Debug)]
@@ -39,8 +40,6 @@ enum PromptMode {
     Full,
     DeltaCumulative,
 }
-
-const SYNTHETIC_DELTA_OUTPUT_SEED: u64 = 0xD37A_0A7E_5EED;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TurnOutcome {
@@ -312,6 +311,7 @@ impl WorkloadDriver {
         let mut remaining_dependencies = Vec::with_capacity(trace.turns.len());
         let mut ready_after_ms = Vec::with_capacity(trace.turns.len());
         let mut sessions = Vec::with_capacity(trace.turns.len());
+        let mut output_rng = StdRng::seed_from_u64(SYNTHETIC_OUTPUT_SEED);
 
         for (session_index, turn) in trace.turns.into_iter().enumerate() {
             for dependency in &turn.wait_for {
@@ -325,6 +325,11 @@ impl WorkloadDriver {
 
             let replay_hashes = Some(turn.to_replay_hashes(trace_block_size, engine_block_size)?);
             let tokens = turn.synthesize_tokens(trace_block_size)?;
+            let output_token_ids = Some(planned_output_token_ids(
+                turn.output_token_ids,
+                turn.max_output_tokens,
+                &mut output_rng,
+            ));
             let next_ready_at_ms = if turn.wait_for.is_empty() {
                 Some(turn.first_ready_timestamp_ms.unwrap_or(0.0))
             } else {
@@ -337,7 +342,7 @@ impl WorkloadDriver {
                     replay_key: turn.replay_key,
                     tokens,
                     max_output_tokens: turn.max_output_tokens,
-                    output_token_ids: turn.output_token_ids,
+                    output_token_ids,
                     delay_after_previous_ms: turn.delay_after_dependencies_ms,
                     priority: turn.priority,
                     strict_priority: turn.strict_priority,
@@ -390,7 +395,7 @@ impl WorkloadDriver {
             u32::try_from(engine_block_size).context("engine_block_size does not fit in u32")?;
         let trace_block_size = trace.block_size;
         let is_concurrency = matches!(&policy, SchedulingPolicy::Concurrency(_));
-        let mut output_rng = StdRng::seed_from_u64(SYNTHETIC_DELTA_OUTPUT_SEED);
+        let mut output_rng = StdRng::seed_from_u64(SYNTHETIC_OUTPUT_SEED);
         let sessions: Vec<SessionRuntime> = trace
             .sessions
             .into_iter()
@@ -410,15 +415,11 @@ impl WorkloadDriver {
                             None
                         };
                         let tokens = turn.synthesize_tokens(trace_block_size)?;
-                        let output_token_ids = match turn.output_token_ids {
-                            Some(output_token_ids) => Some(output_token_ids),
-                            None if prompt_mode == PromptMode::DeltaCumulative => Some(
-                                (0..turn.max_output_tokens)
-                                    .map(|_| output_rng.random::<u32>())
-                                    .collect(),
-                            ),
-                            None => None,
-                        };
+                        let output_token_ids = Some(planned_output_token_ids(
+                            turn.output_token_ids,
+                            turn.max_output_tokens,
+                            &mut output_rng,
+                        ));
                         Ok(TurnRuntime {
                             request_id: None,
                             tokens,
@@ -798,6 +799,26 @@ mod tests {
     use super::*;
     use crate::loadgen::{AgenticTrace, AgenticTurnTrace, SessionTrace, Trace, TurnTrace};
 
+    fn assert_deterministic_output_plan(
+        mut first_driver: WorkloadDriver,
+        mut second_driver: WorkloadDriver,
+        expected_len: usize,
+    ) {
+        let first = first_driver.pop_ready(0.0, usize::MAX);
+        let second = second_driver.pop_ready(0.0, usize::MAX);
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_eq!(
+            first[0].request.output_token_ids,
+            second[0].request.output_token_ids
+        );
+        assert_eq!(
+            first[0].request.output_token_ids.as_ref().map(Vec::len),
+            Some(expected_len)
+        );
+    }
+
     fn two_session_trace() -> Trace {
         Trace {
             block_size: 1,
@@ -1151,6 +1172,47 @@ mod tests {
         assert!(
             driver.is_drained(),
             "is_drained must become true so run_workload can exit"
+        );
+    }
+
+    #[test]
+    fn full_prompt_modes_plan_missing_output_token_ids_deterministically() {
+        let trace = Trace {
+            block_size: 1,
+            sessions: vec![SessionTrace {
+                session_id: "a".into(),
+                first_arrival_timestamp_ms: Some(0.0),
+                turns: vec![TurnTrace {
+                    input_length: 2,
+                    max_output_tokens: 3,
+                    hash_ids: vec![10, 11],
+                    ..Default::default()
+                }],
+            }],
+        };
+        assert_deterministic_output_plan(
+            WorkloadDriver::new_trace(trace.clone(), 1).unwrap(),
+            WorkloadDriver::new_trace(trace, 1).unwrap(),
+            3,
+        );
+
+        let trace = AgenticTrace {
+            block_size: 1,
+            turns: vec![AgenticTurnTrace {
+                request_id: "r1".into(),
+                session_id: "a".into(),
+                input_length: 2,
+                max_output_tokens: 3,
+                hash_ids: vec![10, 11],
+                first_ready_timestamp_ms: Some(0.0),
+                prefix_reset: true,
+                ..Default::default()
+            }],
+        };
+        assert_deterministic_output_plan(
+            WorkloadDriver::new_agentic_trace(trace.clone(), 1).unwrap(),
+            WorkloadDriver::new_agentic_trace(trace, 1).unwrap(),
+            3,
         );
     }
 

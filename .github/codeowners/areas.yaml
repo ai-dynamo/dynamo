@@ -71,7 +71,7 @@ areas:
   - components/src/dynamo/vllm/
   - components/src/dynamo/vllm/tests/
   - examples/backends/vllm/
-  - lib/backend/vllm-sidecar/
+  - lib/sidecar/vllm/
 - label: backend-trtllm
   github_team: '@ai-dynamo/dynamo-backend-trtllm-codeowners'
   path_globs:
@@ -91,7 +91,7 @@ areas:
   - components/src/dynamo/sglang/request_handlers/
   - components/src/dynamo/sglang/tests/
   - examples/backends/sglang/
-  - lib/backend/sglang-sidecar/
+  - lib/sidecar/sglang/
 - label: kv-memory
   github_team: '@ai-dynamo/dynamo-kv-memory-codeowners'
   path_globs:
@@ -227,6 +227,8 @@ areas:
   - examples/custom_backend/
   - lib/backend-common/
   - lib/backend-common/examples/
+  - lib/sidecar/README.md
+  - lib/sidecar/common/
   - lib/bindings/
   - lib/bindings/c/
   - lib/bindings/python/

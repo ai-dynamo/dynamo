@@ -34,6 +34,12 @@ pub use self::embedding_cache::{EmbeddingCacheIndexer, try_build_cache_indexer};
 use self::remote::RemoteIndexer;
 pub use self::remote::{ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use self::side::SideIndexer;
+#[cfg(feature = "ckf-diagnostics")]
+pub(crate) use recovery::WorkerQueryHealthSnapshot;
+pub(crate) use recovery::{
+    DEFAULT_RECOVERY_ATTEMPT_TIMEOUT, RecoveryResetReason, RecoverySupervisor, RecoveryTarget,
+    SourceEpoch, TargetFaultDisposition, start_target_subscriber,
+};
 pub(crate) use recovery::{start_subscriber, start_worker_kv_query_endpoint};
 
 /// `approx` is the optional predict-on-route side indexer. It is always local
