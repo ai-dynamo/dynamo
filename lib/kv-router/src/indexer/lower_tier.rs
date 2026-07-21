@@ -22,22 +22,58 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 #[cfg(feature = "bench")]
 use super::WorkerObservationState;
-use super::{EventKind, KvIndexerMetrics, SyncIndexer, WorkerLookupStats, WorkerTask};
+use super::{
+    EventKind, KvIndexerMetrics, PreBoundEventCounters, SyncIndexer, WorkerLookupStats, WorkerTask,
+};
 use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
-    KvCacheStoredBlockData, LocalBlockHash, OverlapScores, RouterEvent, WorkerWithDpRank,
+    KvCacheStoredBlockData, LocalBlockHash, OverlapScores, RouterEvent, StorageTier,
+    WorkerWithDpRank,
 };
 
 type WorkerSet = FxHashSet<WorkerWithDpRank>;
 type FrontierBuckets = FxHashMap<Option<ExternalSequenceBlockHash>, WorkerSet>;
 type FinalStates = FxHashMap<WorkerWithDpRank, (usize, Option<ExternalSequenceBlockHash>)>;
-type WorkerBlockIndex =
-    FxHashMap<WorkerWithDpRank, FxHashMap<ExternalSequenceBlockHash, TransitionKey>>;
+type WorkerBlockIndex = FxHashMap<WorkerWithDpRank, WorkerBlockState>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct TransitionKey {
     parent_hash: Option<ExternalSequenceBlockHash>,
     local_hash: LocalBlockHash,
+}
+
+/// Identity of one chunk within a lower-tier index partition.
+///
+/// Lower-tier indexers are already allocated per storage tier, but retaining
+/// the tier in the key keeps chunk ownership explicitly medium-scoped and
+/// prevents accidental cross-tier aliasing in direct/replay call sites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ChunkKey {
+    storage_tier: StorageTier,
+    tail_hash: ExternalSequenceBlockHash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkerBlockEntry {
+    transition_key: TransitionKey,
+    storage_tier: StorageTier,
+    owners: FxHashSet<ChunkKey>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct WorkerBlockState {
+    entries: FxHashMap<ExternalSequenceBlockHash, WorkerBlockEntry>,
+    chunks: FxHashMap<ChunkKey, Vec<ExternalSequenceBlockHash>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct LowerTierRemovalStats {
+    removals_fanout_chunks: u64,
+    removal_hashes_member_covered: u64,
+    removal_hashes_legacy_deleted: u64,
+    removal_hashes_owner_protected: u64,
+    removal_hashes_unknown: u64,
+    entries_kept_shared_owner: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -186,16 +222,34 @@ impl LowerTierIndexer {
         &self,
         worker_blocks: &mut WorkerBlockIndex,
         event: RouterEvent,
+        counters: Option<&PreBoundEventCounters>,
     ) -> Result<(), KvCacheEventError> {
         let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
+        let storage_tier = event.storage_tier;
 
         match event.event.data {
             KvCacheEventData::Stored(store_data) => {
-                self.store_blocks_impl(worker_blocks, worker, store_data);
+                self.store_blocks_impl(worker_blocks, worker, storage_tier, store_data);
                 Ok(())
             }
             KvCacheEventData::Removed(remove_data) => {
-                self.remove_blocks_impl(worker_blocks, worker, &remove_data.block_hashes)
+                let stats = self.remove_blocks_impl(
+                    worker_blocks,
+                    worker,
+                    storage_tier,
+                    &remove_data.block_hashes,
+                );
+                if let Some(counters) = counters {
+                    counters.inc_lower_tier_removal(
+                        stats.removals_fanout_chunks,
+                        stats.removal_hashes_member_covered,
+                        stats.removal_hashes_legacy_deleted,
+                        stats.removal_hashes_owner_protected,
+                        stats.removal_hashes_unknown,
+                        stats.entries_kept_shared_owner,
+                    );
+                }
+                Ok(())
             }
             KvCacheEventData::Cleared => {
                 self.remove_worker_dp_rank_impl(worker_blocks, worker);
@@ -208,10 +262,23 @@ impl LowerTierIndexer {
         &self,
         worker_blocks: &mut WorkerBlockIndex,
         worker: WorkerWithDpRank,
+        storage_tier: StorageTier,
         store_data: KvCacheStoreData,
     ) {
+        let Some(tail_hash) = store_data.blocks.last().map(|block| block.block_hash) else {
+            // Placeholder stores normalize to an empty block list. Keep the
+            // existing behavior: they do not create lower-tier index state.
+            return;
+        };
+
+        let chunk_key = ChunkKey {
+            storage_tier,
+            tail_hash,
+        };
+        let block_count = store_data.blocks.len();
         let mut parent_hash = store_data.parent_hash;
-        let worker_map = worker_blocks.entry(worker).or_default();
+        let worker_state = worker_blocks.entry(worker).or_default();
+        let mut members = Vec::with_capacity(block_count);
 
         for block in store_data.blocks {
             let key = TransitionKey {
@@ -223,9 +290,10 @@ impl LowerTierIndexer {
             // block_hash, or if the shared edge is owned by a conflicting
             // child_hash, stop the walk: any further blocks in this chain would
             // hang off an edge this index never accepted for the worker.
-            if worker_map
+            if worker_state
+                .entries
                 .get(&block.block_hash)
-                .is_some_and(|existing_key| *existing_key != key)
+                .is_some_and(|entry| entry.transition_key != key)
             {
                 break;
             }
@@ -244,38 +312,141 @@ impl LowerTierIndexer {
                 break;
             }
 
-            worker_map.insert(block.block_hash, key);
+            worker_state
+                .entries
+                .entry(block.block_hash)
+                .or_insert_with(|| WorkerBlockEntry {
+                    transition_key: key,
+                    storage_tier,
+                    owners: FxHashSet::default(),
+                });
+            members.push(block.block_hash);
             parent_hash = Some(block.block_hash);
         }
+
+        // Preserve the existing conflict behavior: a partially accepted chain
+        // remains legacy/ownerless state. Installing a record for only part of
+        // the announced chunk would make a later key-only removal incomplete.
+        if members.len() != block_count {
+            return;
+        }
+
+        for member in &members {
+            if let Some(entry) = worker_state.entries.get_mut(member) {
+                entry.owners.insert(chunk_key);
+            }
+        }
+        // The tail sequence hash deterministically identifies the members, so
+        // duplicate/retried stores safely converge on the same record.
+        worker_state.chunks.insert(chunk_key, members);
     }
 
     fn remove_blocks_impl(
         &self,
         worker_blocks: &mut WorkerBlockIndex,
         worker: WorkerWithDpRank,
+        storage_tier: StorageTier,
         block_hashes: &[ExternalSequenceBlockHash],
-    ) -> Result<(), KvCacheEventError> {
+    ) -> LowerTierRemovalStats {
+        let mut stats = LowerTierRemovalStats::default();
         let remove_worker_entry = {
-            let Some(worker_map) = worker_blocks.get_mut(&worker) else {
-                return Err(KvCacheEventError::BlockNotFound);
+            let Some(worker_state) = worker_blocks.get_mut(&worker) else {
+                stats.removal_hashes_unknown = block_hashes.len() as u64;
+                return stats;
             };
 
-            for block_hash in block_hashes {
-                let Some(key) = worker_map.remove(block_hash) else {
-                    return Err(KvCacheEventError::BlockNotFound);
-                };
+            let mut tail_keys = Vec::new();
+            let mut tail_hashes = FxHashSet::default();
+            let mut covered = FxHashSet::default();
 
-                self.remove_worker_from_edge(key, worker);
+            for &tail_hash in block_hashes {
+                let chunk_key = ChunkKey {
+                    storage_tier,
+                    tail_hash,
+                };
+                if worker_state.chunks.contains_key(&chunk_key) && tail_hashes.insert(tail_hash) {
+                    tail_keys.push(chunk_key);
+                    if let Some(members) = worker_state.chunks.get(&chunk_key) {
+                        covered.extend(members.iter().copied());
+                    }
+                }
             }
 
-            worker_map.is_empty()
+            stats.removal_hashes_member_covered = block_hashes
+                .iter()
+                .filter(|hash| covered.contains(hash) && !tail_hashes.contains(hash))
+                .count() as u64;
+
+            // Fan out every recognized chunk tail before processing legacy
+            // leftovers. Missing member entries are tolerated for idempotence
+            // and recovery from partial state.
+            for chunk_key in tail_keys {
+                let Some(members) = worker_state.chunks.remove(&chunk_key) else {
+                    continue;
+                };
+                stats.removals_fanout_chunks += 1;
+
+                for member in members {
+                    let Some((transition_key, remove_entry)) =
+                        worker_state.entries.get_mut(&member).map(|entry| {
+                            entry.owners.remove(&chunk_key);
+                            (entry.transition_key, entry.owners.is_empty())
+                        })
+                    else {
+                        continue;
+                    };
+
+                    if remove_entry {
+                        worker_state.entries.remove(&member);
+                        self.remove_worker_from_edge(transition_key, worker);
+                    } else {
+                        stats.entries_kept_shared_owner += 1;
+                    }
+                }
+            }
+
+            // A fat removal can mix known chunks with legacy entries. Entries
+            // protected by any live chunk record must survive; ownerless
+            // entries retain the pre-upgrade direct-removal behavior.
+            for block_hash in block_hashes {
+                if covered.contains(block_hash) {
+                    continue;
+                }
+
+                let Some((transition_key, owner_protected)) = worker_state
+                    .entries
+                    .get(block_hash)
+                    .map(|entry| (entry.transition_key, !entry.owners.is_empty()))
+                else {
+                    stats.removal_hashes_unknown += 1;
+                    continue;
+                };
+
+                if owner_protected {
+                    stats.removal_hashes_owner_protected += 1;
+                    continue;
+                }
+
+                worker_state.entries.remove(block_hash);
+                self.remove_worker_from_edge(transition_key, worker);
+                stats.removal_hashes_legacy_deleted += 1;
+            }
+
+            // Accepted upgrade corner: a post-upgrade chunk can adopt an
+            // ownerless legacy prefix, but the old chunk's co-residency is not
+            // reconstructible. Removing the new chunk may therefore delete
+            // that shared prefix while the legacy chunk still exists. This is
+            // a bounded false negative during rollout, never a false positive;
+            // the legacy removal or a partition reset self-heals the residue.
+
+            worker_state.entries.is_empty() && worker_state.chunks.is_empty()
         };
 
         if remove_worker_entry {
             worker_blocks.remove(&worker);
         }
 
-        Ok(())
+        stats
     }
 
     fn clear_worker_impl(&self, worker_blocks: &mut WorkerBlockIndex, worker_id: u64) {
@@ -295,12 +466,12 @@ impl LowerTierIndexer {
         worker_blocks: &mut WorkerBlockIndex,
         worker: WorkerWithDpRank,
     ) {
-        let Some(worker_map) = worker_blocks.remove(&worker) else {
+        let Some(worker_state) = worker_blocks.remove(&worker) else {
             return;
         };
 
-        for (_, key) in worker_map {
-            self.remove_worker_from_edge(key, worker);
+        for (_, entry) in worker_state.entries {
+            self.remove_worker_from_edge(entry.transition_key, worker);
         }
     }
 
@@ -335,30 +506,82 @@ impl LowerTierIndexer {
             .unwrap_or_default()
     }
 
-    /// Reconstruct store events from the per-worker block index. Each block
-    /// becomes a single-block `Stored` event with the correct parent hash,
-    /// suitable for replaying into a fresh indexer to recreate the same state.
+    /// Reconstruct store events from the per-worker block index.
+    ///
+    /// Chunk-owned entries are dumped in their original chunk groups so replay
+    /// restores key-only removal fan-out. Ownerless legacy entries are emitted
+    /// as single-block stores, which preserves their indexed edges while safely
+    /// upgrading them to one-block chunk records on replay.
     fn dump_events(worker_blocks: &WorkerBlockIndex) -> Vec<RouterEvent> {
         let mut events = Vec::new();
         let mut event_id = 0u64;
 
-        for (worker, block_map) in worker_blocks {
-            for (block_hash, key) in block_map {
-                events.push(RouterEvent::new(
+        for (worker, worker_state) in worker_blocks {
+            let mut covered = FxHashSet::default();
+
+            for (chunk_key, members) in &worker_state.chunks {
+                let Some(first_entry) = members
+                    .first()
+                    .and_then(|hash| worker_state.entries.get(hash))
+                else {
+                    continue;
+                };
+
+                let blocks: Vec<_> = members
+                    .iter()
+                    .filter_map(|block_hash| {
+                        worker_state
+                            .entries
+                            .get(block_hash)
+                            .map(|entry| KvCacheStoredBlockData {
+                                block_hash: *block_hash,
+                                tokens_hash: entry.transition_key.local_hash,
+                                mm_extra_info: None,
+                            })
+                    })
+                    .collect();
+                if blocks.len() != members.len() {
+                    continue;
+                }
+
+                events.push(RouterEvent::with_storage_tier(
                     worker.worker_id,
                     KvCacheEvent {
                         event_id,
                         data: KvCacheEventData::Stored(KvCacheStoreData {
-                            parent_hash: key.parent_hash,
+                            parent_hash: first_entry.transition_key.parent_hash,
+                            start_position: None,
+                            blocks,
+                        }),
+                        dp_rank: worker.dp_rank,
+                    },
+                    chunk_key.storage_tier,
+                ));
+                event_id += 1;
+                covered.extend(members.iter().copied());
+            }
+
+            for (block_hash, entry) in &worker_state.entries {
+                if covered.contains(block_hash) {
+                    continue;
+                }
+
+                events.push(RouterEvent::with_storage_tier(
+                    worker.worker_id,
+                    KvCacheEvent {
+                        event_id,
+                        data: KvCacheEventData::Stored(KvCacheStoreData {
+                            parent_hash: entry.transition_key.parent_hash,
                             start_position: None,
                             blocks: vec![KvCacheStoredBlockData {
                                 block_hash: *block_hash,
-                                tokens_hash: key.local_hash,
+                                tokens_hash: entry.transition_key.local_hash,
                                 mm_extra_info: None,
                             }],
                         }),
                         dp_rank: worker.dp_rank,
                     },
+                    entry.storage_tier,
                 ));
                 event_id += 1;
             }
@@ -512,7 +735,7 @@ impl SyncIndexer for LowerTierIndexer {
             match task {
                 WorkerTask::Event(event) => {
                     let kind = EventKind::of(&event.event.data);
-                    let result = self.apply_event(&mut worker_blocks, event);
+                    let result = self.apply_event(&mut worker_blocks, event, counters.as_ref());
                     if let Err(ref error) = result {
                         tracing::warn!(%error, "Failed to apply lower-tier event");
                     }
@@ -522,7 +745,7 @@ impl SyncIndexer for LowerTierIndexer {
                 }
                 WorkerTask::EventWithAck { event, resp } => {
                     let kind = EventKind::of(&event.event.data);
-                    let result = self.apply_event(&mut worker_blocks, event);
+                    let result = self.apply_event(&mut worker_blocks, event, counters.as_ref());
                     let applied = result.is_ok();
                     if let Err(ref error) = result {
                         tracing::warn!(%error, "Failed to apply lower-tier event");
@@ -542,7 +765,7 @@ impl SyncIndexer for LowerTierIndexer {
                     correlation_id,
                 } => {
                     let kind = EventKind::of(&event.event.data);
-                    let result = self.apply_event(&mut worker_blocks, event);
+                    let result = self.apply_event(&mut worker_blocks, event, counters.as_ref());
                     observation.record(correlation_id, result.is_ok());
                     if let Err(ref error) = result {
                         tracing::warn!(%error, "Failed to apply lower-tier event");
@@ -578,7 +801,7 @@ impl SyncIndexer for LowerTierIndexer {
                     let stats = WorkerLookupStats::from_worker_block_counts(
                         worker_blocks
                             .iter()
-                            .map(|(worker, worker_map)| (*worker, worker_map.len())),
+                            .map(|(worker, worker_state)| (*worker, worker_state.entries.len())),
                     );
                     let _ = sender.send(stats);
                 }
@@ -806,13 +1029,13 @@ fn finalize_workers(
 
 #[cfg(test)]
 mod tests {
-    use super::{LowerTierContinuation, LowerTierIndexer, WorkerBlockIndex};
+    use super::{LowerTierContinuation, LowerTierIndexer, LowerTierRemovalStats, WorkerBlockIndex};
     use rustc_hash::FxHashMap;
 
     use crate::indexer::{KvIndexerInterface, ThreadPoolIndexer};
     use crate::protocols::{
-        ExternalSequenceBlockHash, KvCacheEventData, KvCacheStoreData, LocalBlockHash,
-        WorkerWithDpRank,
+        ExternalSequenceBlockHash, KvCacheEventData, KvCacheStoreData, LocalBlockHash, RouterEvent,
+        StorageTier, WorkerWithDpRank,
     };
     use crate::test_utils::{remove_event, router_event, stored_blocks_with_sequence_hashes};
 
@@ -843,6 +1066,11 @@ mod tests {
         )
     }
 
+    fn in_tier(mut event: RouterEvent, storage_tier: StorageTier) -> RouterEvent {
+        event.storage_tier = storage_tier;
+        event
+    }
+
     struct TestLowerTierIndex {
         index: LowerTierIndexer,
         worker_blocks: WorkerBlockIndex,
@@ -860,7 +1088,7 @@ mod tests {
             &mut self,
             event: crate::protocols::RouterEvent,
         ) -> Result<(), crate::protocols::KvCacheEventError> {
-            self.index.apply_event(&mut self.worker_blocks, event)
+            self.index.apply_event(&mut self.worker_blocks, event, None)
         }
 
         fn remove_worker(&mut self, worker_id: u64) {
@@ -901,6 +1129,74 @@ mod tests {
 
         fn dump_events(&self) -> Vec<crate::protocols::RouterEvent> {
             LowerTierIndexer::dump_events(&self.worker_blocks)
+        }
+
+        fn removal_stats(
+            &mut self,
+            worker_id: u64,
+            dp_rank: u32,
+            storage_tier: StorageTier,
+            hashes: &[u64],
+        ) -> LowerTierRemovalStats {
+            self.index.remove_blocks_impl(
+                &mut self.worker_blocks,
+                WorkerWithDpRank::new(worker_id, dp_rank),
+                storage_tier,
+                &hashes
+                    .iter()
+                    .copied()
+                    .map(ExternalSequenceBlockHash)
+                    .collect::<Vec<_>>(),
+            )
+        }
+
+        fn mark_legacy(&mut self, worker_id: u64, dp_rank: u32) {
+            let state = self
+                .worker_blocks
+                .get_mut(&WorkerWithDpRank::new(worker_id, dp_rank))
+                .expect("worker state");
+            state.chunks.clear();
+            for entry in state.entries.values_mut() {
+                entry.owners.clear();
+            }
+        }
+
+        fn drop_entry_but_keep_chunk_record(&mut self, worker_id: u64, dp_rank: u32, hash: u64) {
+            let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+            let entry = self
+                .worker_blocks
+                .get_mut(&worker)
+                .expect("worker state")
+                .entries
+                .remove(&ExternalSequenceBlockHash(hash))
+                .expect("entry");
+            self.index
+                .remove_worker_from_edge(entry.transition_key, worker);
+        }
+
+        fn has_entry(&self, worker_id: u64, dp_rank: u32, hash: u64) -> bool {
+            self.worker_blocks
+                .get(&WorkerWithDpRank::new(worker_id, dp_rank))
+                .is_some_and(|state| state.entries.contains_key(&ExternalSequenceBlockHash(hash)))
+        }
+
+        fn owner_count(&self, worker_id: u64, dp_rank: u32, hash: u64) -> usize {
+            self.worker_blocks
+                .get(&WorkerWithDpRank::new(worker_id, dp_rank))
+                .and_then(|state| state.entries.get(&ExternalSequenceBlockHash(hash)))
+                .map(|entry| entry.owners.len())
+                .unwrap_or(0)
+        }
+
+        fn chunk_count(&self, worker_id: u64, dp_rank: u32) -> usize {
+            self.worker_blocks
+                .get(&WorkerWithDpRank::new(worker_id, dp_rank))
+                .map(|state| state.chunks.len())
+                .unwrap_or(0)
+        }
+
+        fn is_clean(&self) -> bool {
+            self.worker_blocks.is_empty() && self.index.edges.is_empty()
         }
     }
 
@@ -1228,7 +1524,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_stops_contiguous_walk_at_missing_edge() {
+    fn owned_non_tail_removal_is_protected() {
         let mut index = TestLowerTierIndex::new();
         index
             .apply_event(store_event(
@@ -1241,9 +1537,8 @@ mod tests {
             ))
             .unwrap();
 
-        index
-            .apply_event(remove_event(17, 1, 0, vec![ExternalSequenceBlockHash(702)]))
-            .unwrap();
+        let stats = index.removal_stats(17, 0, StorageTier::Device, &[702]);
+        assert_eq!(stats.removal_hashes_owner_protected, 1);
 
         let query = local_hashes(&[71, 72, 73]);
         let mut continuations = FxHashMap::default();
@@ -1253,7 +1548,7 @@ mod tests {
         );
 
         let hits = index.query_contiguous_hits(&query, &continuations);
-        assert_eq!(hits.get(&WorkerWithDpRank::new(17, 0)), Some(&1));
+        assert_eq!(hits.get(&WorkerWithDpRank::new(17, 0)), Some(&3));
     }
 
     #[test]
@@ -1398,6 +1693,7 @@ mod tests {
         let hits = index.query_contiguous_hits(&local_hashes(&[1]), &continuations);
         assert_eq!(hits.get(&WorkerWithDpRank::new(41, 0)), Some(&0));
         assert_eq!(hits.get(&WorkerWithDpRank::new(41, 1)), Some(&0));
+        assert!(index.is_clean());
     }
 
     #[test]
@@ -1427,7 +1723,7 @@ mod tests {
     }
 
     #[test]
-    fn removing_parent_block_keeps_child_continuation_edge() {
+    fn owned_non_tail_removal_keeps_entire_chunk() {
         let mut index = TestLowerTierIndex::new();
         index
             .apply_event(store_event(
@@ -1440,14 +1736,8 @@ mod tests {
             ))
             .unwrap();
 
-        index
-            .apply_event(remove_event(
-                31,
-                1,
-                0,
-                vec![ExternalSequenceBlockHash(1101)],
-            ))
-            .unwrap();
+        let stats = index.removal_stats(31, 0, StorageTier::Device, &[1101]);
+        assert_eq!(stats.removal_hashes_owner_protected, 1);
 
         let root_query = local_hashes(&[111, 112]);
         let mut root_continuations = FxHashMap::default();
@@ -1456,7 +1746,7 @@ mod tests {
             LowerTierContinuation::new(0, ExternalSequenceBlockHash(1300)),
         );
         let root_hits = index.query_contiguous_hits(&root_query, &root_continuations);
-        assert_eq!(root_hits.get(&WorkerWithDpRank::new(31, 0)), Some(&0));
+        assert_eq!(root_hits.get(&WorkerWithDpRank::new(31, 0)), Some(&2));
 
         let child_query = local_hashes(&[111, 112]);
         let mut child_continuations = FxHashMap::default();
@@ -1824,6 +2114,404 @@ mod tests {
         assert_eq!(details.hits.get(&WorkerWithDpRank::new(111, 0)), Some(&0));
     }
 
+    // --- Chunk-keyed lower-tier removal tests ---
+
+    #[test]
+    fn key_only_removal_fans_out_entire_chunk() {
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(in_tier(
+                store_event(200, 0, 0, None, &[1, 2, 3, 4], &[101, 102, 103, 104]),
+                StorageTier::HostPinned,
+            ))
+            .unwrap();
+
+        let stats = index.removal_stats(200, 0, StorageTier::HostPinned, &[104]);
+
+        assert_eq!(stats.removals_fanout_chunks, 1);
+        assert_eq!(stats.removal_hashes_member_covered, 0);
+        assert!(index.is_clean());
+
+        let duplicate = index.removal_stats(200, 0, StorageTier::HostPinned, &[104]);
+        assert_eq!(duplicate.removal_hashes_unknown, 1);
+        assert!(index.is_clean());
+    }
+
+    #[test]
+    fn shared_prefix_survives_until_last_chunk_owner_is_removed() {
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(in_tier(
+                store_event(201, 0, 0, None, &[5, 6, 7, 8], &[105, 106, 107, 108]),
+                StorageTier::HostPinned,
+            ))
+            .unwrap();
+        index
+            .apply_event(in_tier(
+                store_event(201, 0, 1, None, &[5, 6, 17, 18], &[105, 106, 117, 118]),
+                StorageTier::HostPinned,
+            ))
+            .unwrap();
+        assert_eq!(index.owner_count(201, 0, 105), 2);
+        assert_eq!(index.owner_count(201, 0, 106), 2);
+
+        let first = index.removal_stats(201, 0, StorageTier::HostPinned, &[108]);
+        assert_eq!(first.removals_fanout_chunks, 1);
+        assert_eq!(first.entries_kept_shared_owner, 2);
+        assert!(index.has_entry(201, 0, 105));
+        assert!(index.has_entry(201, 0, 106));
+        assert!(!index.has_entry(201, 0, 107));
+        assert!(!index.has_entry(201, 0, 108));
+
+        let worker = WorkerWithDpRank::new(201, 0);
+        let mut continuations = FxHashMap::default();
+        continuations.insert(worker, LowerTierContinuation::from_root(0));
+        assert_eq!(
+            index
+                .query_contiguous_hits(&local_hashes(&[5, 6, 17, 18]), &continuations)
+                .get(&worker),
+            Some(&4)
+        );
+
+        index.removal_stats(201, 0, StorageTier::HostPinned, &[118]);
+        assert!(index.is_clean());
+    }
+
+    #[test]
+    fn fat_and_key_only_removals_are_equivalent_without_sharing() {
+        let mut key_only = TestLowerTierIndex::new();
+        let mut fat = TestLowerTierIndex::new();
+        let store = in_tier(
+            store_event(202, 0, 0, None, &[1, 2, 3, 4], &[101, 102, 103, 104]),
+            StorageTier::Disk,
+        );
+        key_only.apply_event(store.clone()).unwrap();
+        fat.apply_event(store).unwrap();
+
+        key_only.removal_stats(202, 0, StorageTier::Disk, &[104]);
+        let fat_stats = fat.removal_stats(202, 0, StorageTier::Disk, &[101, 102, 103, 104]);
+
+        assert_eq!(fat_stats.removals_fanout_chunks, 1);
+        assert_eq!(fat_stats.removal_hashes_member_covered, 3);
+        assert_eq!(key_only.worker_blocks, fat.worker_blocks);
+        assert!(key_only.is_clean());
+        assert!(fat.is_clean());
+    }
+
+    #[test]
+    fn fat_and_key_only_removals_are_equivalent_with_shared_prefix() {
+        let mut key_only = TestLowerTierIndex::new();
+        let mut fat = TestLowerTierIndex::new();
+        for index in [&mut key_only, &mut fat] {
+            index
+                .apply_event(in_tier(
+                    store_event(203, 0, 0, None, &[5, 6, 7, 8], &[105, 106, 107, 108]),
+                    StorageTier::HostPinned,
+                ))
+                .unwrap();
+            index
+                .apply_event(in_tier(
+                    store_event(203, 0, 1, None, &[5, 6, 17, 18], &[105, 106, 117, 118]),
+                    StorageTier::HostPinned,
+                ))
+                .unwrap();
+        }
+
+        key_only.removal_stats(203, 0, StorageTier::HostPinned, &[108]);
+        fat.removal_stats(203, 0, StorageTier::HostPinned, &[105, 106, 107, 108]);
+
+        assert_eq!(key_only.worker_blocks, fat.worker_blocks);
+        for hash in [105, 106, 117, 118] {
+            assert!(fat.has_entry(203, 0, hash));
+        }
+        for hash in [107, 108] {
+            assert!(!fat.has_entry(203, 0, hash));
+        }
+    }
+
+    #[test]
+    fn legacy_fat_removal_deletes_ownerless_entries() {
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(in_tier(
+                store_event(204, 0, 0, None, &[1, 2, 3, 4], &[101, 102, 103, 104]),
+                StorageTier::HostPinned,
+            ))
+            .unwrap();
+        index.mark_legacy(204, 0);
+
+        let stats = index.removal_stats(204, 0, StorageTier::HostPinned, &[101, 102, 103, 104]);
+
+        assert_eq!(stats.removals_fanout_chunks, 0);
+        assert_eq!(stats.removal_hashes_legacy_deleted, 4);
+        assert!(index.is_clean());
+    }
+
+    #[test]
+    fn legacy_fat_removal_cannot_delete_post_upgrade_shared_prefix() {
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(in_tier(
+                store_event(205, 0, 0, None, &[5, 6, 27, 28], &[105, 106, 127, 128]),
+                StorageTier::HostPinned,
+            ))
+            .unwrap();
+        index.mark_legacy(205, 0);
+        index
+            .apply_event(in_tier(
+                store_event(205, 0, 1, None, &[5, 6, 7, 8], &[105, 106, 107, 108]),
+                StorageTier::HostPinned,
+            ))
+            .unwrap();
+
+        let stats = index.removal_stats(205, 0, StorageTier::HostPinned, &[105, 106, 127, 128]);
+
+        assert_eq!(stats.removal_hashes_legacy_deleted, 2);
+        assert_eq!(stats.removal_hashes_owner_protected, 2);
+        for hash in [105, 106, 107, 108] {
+            assert!(index.has_entry(205, 0, hash));
+        }
+        assert!(!index.has_entry(205, 0, 127));
+        assert!(!index.has_entry(205, 0, 128));
+    }
+
+    #[test]
+    fn batched_key_only_removal_fans_out_multiple_chunks() {
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(in_tier(
+                store_event(206, 0, 0, None, &[1, 2], &[101, 102]),
+                StorageTier::Disk,
+            ))
+            .unwrap();
+        index
+            .apply_event(in_tier(
+                store_event(206, 0, 1, Some(102), &[3, 4], &[103, 104]),
+                StorageTier::Disk,
+            ))
+            .unwrap();
+
+        let stats = index.removal_stats(206, 0, StorageTier::Disk, &[102, 104]);
+
+        assert_eq!(stats.removals_fanout_chunks, 2);
+        assert!(index.is_clean());
+    }
+
+    #[test]
+    fn mixed_generation_fat_batch_cleans_known_and_legacy_chunks() {
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(in_tier(
+                store_event(207, 0, 0, None, &[5, 6, 27, 28], &[105, 106, 127, 128]),
+                StorageTier::HostPinned,
+            ))
+            .unwrap();
+        index.mark_legacy(207, 0);
+        index
+            .apply_event(in_tier(
+                store_event(207, 0, 1, None, &[5, 6, 7, 8], &[105, 106, 107, 108]),
+                StorageTier::HostPinned,
+            ))
+            .unwrap();
+        index
+            .apply_event(in_tier(
+                store_event(207, 0, 2, Some(500), &[31, 32], &[131, 132]),
+                StorageTier::HostPinned,
+            ))
+            .unwrap();
+
+        let stats = index.removal_stats(
+            207,
+            0,
+            StorageTier::HostPinned,
+            &[131, 132, 105, 106, 127, 128],
+        );
+
+        assert_eq!(stats.removals_fanout_chunks, 1);
+        assert_eq!(stats.removal_hashes_member_covered, 1);
+        assert_eq!(stats.removal_hashes_legacy_deleted, 2);
+        assert_eq!(stats.removal_hashes_owner_protected, 2);
+        for hash in [105, 106, 107, 108] {
+            assert!(index.has_entry(207, 0, hash));
+        }
+        for hash in [127, 128, 131, 132] {
+            assert!(!index.has_entry(207, 0, hash));
+        }
+    }
+
+    #[test]
+    fn completely_unknown_removal_is_idempotent_noop() {
+        let mut index = TestLowerTierIndex::new();
+
+        let first = index.removal_stats(208, 0, StorageTier::External, &[999]);
+        let second = index.removal_stats(208, 0, StorageTier::External, &[999]);
+
+        assert_eq!(first.removal_hashes_unknown, 1);
+        assert_eq!(first, second);
+        assert!(index.is_clean());
+    }
+
+    #[test]
+    fn duplicate_chunk_store_converges_to_one_owner() {
+        let mut index = TestLowerTierIndex::new();
+        let store = in_tier(
+            store_event(209, 0, 0, None, &[1, 2, 3, 4], &[101, 102, 103, 104]),
+            StorageTier::HostPinned,
+        );
+        index.apply_event(store.clone()).unwrap();
+        index.apply_event(store).unwrap();
+
+        assert_eq!(index.chunk_count(209, 0), 1);
+        for hash in [101, 102, 103, 104] {
+            assert_eq!(index.owner_count(209, 0, hash), 1);
+        }
+
+        index.removal_stats(209, 0, StorageTier::HostPinned, &[104]);
+        assert!(index.is_clean());
+    }
+
+    #[test]
+    fn single_block_chunk_key_removes_exactly_one_entry() {
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(in_tier(
+                store_event(210, 0, 0, Some(100), &[1], &[101]),
+                StorageTier::External,
+            ))
+            .unwrap();
+
+        let stats = index.removal_stats(210, 0, StorageTier::External, &[101]);
+
+        assert_eq!(stats.removals_fanout_chunks, 1);
+        assert!(index.is_clean());
+    }
+
+    #[test]
+    fn chunk_owners_are_scoped_by_storage_tier() {
+        let mut index = TestLowerTierIndex::new();
+        for storage_tier in [StorageTier::HostPinned, StorageTier::Disk] {
+            index
+                .apply_event(in_tier(
+                    store_event(211, 0, 0, None, &[1, 2], &[101, 102]),
+                    storage_tier,
+                ))
+                .unwrap();
+        }
+
+        assert_eq!(index.owner_count(211, 0, 101), 2);
+        index.removal_stats(211, 0, StorageTier::HostPinned, &[102]);
+        assert_eq!(index.chunk_count(211, 0), 1);
+        assert_eq!(index.owner_count(211, 0, 101), 1);
+        assert!(index.has_entry(211, 0, 102));
+
+        index.removal_stats(211, 0, StorageTier::Disk, &[102]);
+        assert!(index.is_clean());
+    }
+
+    #[test]
+    fn key_only_removal_tolerates_missing_members() {
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(in_tier(
+                store_event(212, 0, 0, None, &[1, 2, 3], &[101, 102, 103]),
+                StorageTier::Disk,
+            ))
+            .unwrap();
+        index.drop_entry_but_keep_chunk_record(212, 0, 102);
+
+        let stats = index.removal_stats(212, 0, StorageTier::Disk, &[103]);
+
+        assert_eq!(stats.removals_fanout_chunks, 1);
+        assert!(index.is_clean());
+    }
+
+    #[test]
+    fn store_remove_restore_cycle_leaves_no_residue() {
+        let mut index = TestLowerTierIndex::new();
+        let store = in_tier(
+            store_event(213, 0, 0, None, &[1, 2], &[101, 102]),
+            StorageTier::HostPinned,
+        );
+
+        for _ in 0..2 {
+            index.apply_event(store.clone()).unwrap();
+            assert_eq!(index.chunk_count(213, 0), 1);
+            index.removal_stats(213, 0, StorageTier::HostPinned, &[102]);
+            assert!(index.is_clean());
+        }
+    }
+
+    #[test]
+    fn known_tail_and_unknown_hash_share_one_removal_event() {
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(in_tier(
+                store_event(214, 0, 0, None, &[1, 2], &[101, 102]),
+                StorageTier::HostPinned,
+            ))
+            .unwrap();
+
+        let stats = index.removal_stats(214, 0, StorageTier::HostPinned, &[102, 999]);
+
+        assert_eq!(stats.removals_fanout_chunks, 1);
+        assert_eq!(stats.removal_hashes_unknown, 1);
+        assert!(index.is_clean());
+    }
+
+    #[test]
+    fn adoption_corner_is_bounded_to_a_false_negative() {
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(in_tier(
+                store_event(215, 0, 0, None, &[5, 6, 27, 28], &[105, 106, 127, 128]),
+                StorageTier::HostPinned,
+            ))
+            .unwrap();
+        index.mark_legacy(215, 0);
+        index
+            .apply_event(in_tier(
+                store_event(215, 0, 1, None, &[5, 6, 7, 8], &[105, 106, 107, 108]),
+                StorageTier::HostPinned,
+            ))
+            .unwrap();
+
+        // The post-upgrade chunk adopts h5/h6 with only its own visible owner.
+        // Removing it therefore removes h5/h6 even though legacy P still exists:
+        // a temporary missed hit, never stale positive routing.
+        index.removal_stats(215, 0, StorageTier::HostPinned, &[108]);
+        for hash in [105, 106, 107, 108] {
+            assert!(!index.has_entry(215, 0, hash));
+        }
+        assert!(index.has_entry(215, 0, 127));
+        assert!(index.has_entry(215, 0, 128));
+
+        let stats = index.removal_stats(215, 0, StorageTier::HostPinned, &[105, 106, 127, 128]);
+        assert_eq!(stats.removal_hashes_unknown, 2);
+        assert_eq!(stats.removal_hashes_legacy_deleted, 2);
+        assert!(index.is_clean());
+    }
+
+    #[test]
+    fn clear_drops_entries_owners_and_chunk_records() {
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(in_tier(
+                store_event(216, 0, 0, None, &[1, 2, 3], &[101, 102, 103]),
+                StorageTier::HostPinned,
+            ))
+            .unwrap();
+        assert_eq!(index.chunk_count(216, 0), 1);
+
+        index
+            .apply_event(in_tier(
+                router_event(216, 1, 0, KvCacheEventData::Cleared),
+                StorageTier::HostPinned,
+            ))
+            .unwrap();
+
+        assert!(index.is_clean());
+    }
+
     // --- dump_events tests ---
 
     /// Helper: replay dumped events into a fresh indexer and return it.
@@ -1846,7 +2534,7 @@ mod tests {
             .unwrap();
 
         let events = index.dump_events();
-        assert_eq!(events.len(), 4);
+        assert_eq!(events.len(), 2);
 
         let restored = replay_dump(events);
 
@@ -1885,9 +2573,8 @@ mod tests {
             .unwrap();
 
         let events = index.dump_events();
-        // 2 blocks * 2 workers = 4 events (each worker's blocks are dumped
-        // independently even if they share the same underlying edges).
-        assert_eq!(events.len(), 4);
+        // One chunk event per worker, even when the underlying edges are shared.
+        assert_eq!(events.len(), 2);
 
         let restored = replay_dump(events);
 
@@ -1911,19 +2598,18 @@ mod tests {
     fn dump_after_removal_excludes_removed_blocks() {
         let mut index = TestLowerTierIndex::new();
         index
-            .apply_event(store_event(
-                5,
-                0,
-                0,
-                Some(800),
-                &[31, 32, 33],
-                &[301, 302, 303],
-            ))
+            .apply_event(store_event(5, 0, 0, Some(800), &[31], &[301]))
+            .unwrap();
+        index
+            .apply_event(store_event(5, 0, 1, Some(301), &[32], &[302]))
+            .unwrap();
+        index
+            .apply_event(store_event(5, 0, 2, Some(302), &[33], &[303]))
             .unwrap();
 
         // Remove the middle block.
         index
-            .apply_event(remove_event(5, 1, 0, vec![ExternalSequenceBlockHash(302)]))
+            .apply_event(remove_event(5, 3, 0, vec![ExternalSequenceBlockHash(302)]))
             .unwrap();
 
         let events = index.dump_events();
@@ -1957,7 +2643,7 @@ mod tests {
             .unwrap();
 
         let events = index.dump_events();
-        assert_eq!(events.len(), 4);
+        assert_eq!(events.len(), 2);
 
         let restored = replay_dump(events);
 
@@ -1984,6 +2670,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dump_round_trip_preserves_chunk_key_fanout() {
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(in_tier(
+                store_event(12, 0, 0, Some(800), &[31, 32, 33], &[301, 302, 303]),
+                StorageTier::Disk,
+            ))
+            .unwrap();
+
+        let events = index.dump_events();
+        assert_eq!(events.len(), 1);
+        let mut restored = replay_dump(events);
+
+        restored.removal_stats(12, 0, StorageTier::Disk, &[303]);
+        assert!(restored.is_clean());
+    }
+
     #[tokio::test]
     async fn thread_pool_dump_events_round_trip() {
         let index = ThreadPoolIndexer::new(LowerTierIndexer::new(), 2, 1);
@@ -1994,7 +2698,7 @@ mod tests {
             .await;
 
         let events = index.dump_events().await.unwrap();
-        assert_eq!(events.len(), 3);
+        assert_eq!(events.len(), 1);
 
         // Replay into a fresh ThreadPoolIndexer.
         let restored = ThreadPoolIndexer::new(LowerTierIndexer::new(), 2, 1);
@@ -2014,5 +2718,96 @@ mod tests {
             .query_contiguous_hits(&local_hashes(&[11, 12, 13]), &continuations);
         assert_eq!(original, replayed);
         assert_eq!(replayed.get(&worker), Some(&3));
+    }
+
+    #[cfg(feature = "metrics")]
+    #[tokio::test]
+    async fn lower_tier_removal_metrics_match_mutation_outcomes() {
+        use std::sync::Arc;
+
+        use crate::indexer::{
+            KvIndexerMetrics, METRIC_LOWER_TIER_ENTRIES_KEPT_SHARED_OWNER,
+            METRIC_LOWER_TIER_REMOVAL_HASHES_LEGACY_DELETED,
+            METRIC_LOWER_TIER_REMOVAL_HASHES_MEMBER_COVERED,
+            METRIC_LOWER_TIER_REMOVAL_HASHES_OWNER_PROTECTED,
+            METRIC_LOWER_TIER_REMOVAL_HASHES_UNKNOWN, METRIC_LOWER_TIER_REMOVALS_FANOUT_CHUNKS,
+        };
+
+        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+        let index = ThreadPoolIndexer::new_with_metrics(
+            LowerTierIndexer::new(),
+            1,
+            1,
+            Some(metrics.clone()),
+        );
+
+        index
+            .apply_event(store_event(
+                300,
+                0,
+                0,
+                None,
+                &[5, 6, 7, 8],
+                &[105, 106, 107, 108],
+            ))
+            .await;
+        index
+            .apply_event(store_event(
+                300,
+                0,
+                1,
+                None,
+                &[5, 6, 17, 18],
+                &[105, 106, 117, 118],
+            ))
+            .await;
+        index
+            .apply_event(remove_event(
+                300,
+                2,
+                0,
+                vec![ExternalSequenceBlockHash(105)],
+            ))
+            .await;
+        index
+            .apply_event(remove_event(
+                300,
+                3,
+                0,
+                vec![
+                    ExternalSequenceBlockHash(105),
+                    ExternalSequenceBlockHash(106),
+                    ExternalSequenceBlockHash(107),
+                    ExternalSequenceBlockHash(108),
+                    ExternalSequenceBlockHash(999),
+                ],
+            ))
+            .await;
+
+        // A conflicting two-block store accepts the first edge before the
+        // second conflicts, leaving one ownerless legacy entry by design.
+        index
+            .apply_event(store_event(300, 0, 4, None, &[9], &[900]))
+            .await;
+        index
+            .apply_event(store_event(300, 0, 5, None, &[1, 2], &[901, 900]))
+            .await;
+        index
+            .apply_event(remove_event(
+                300,
+                6,
+                0,
+                vec![ExternalSequenceBlockHash(901)],
+            ))
+            .await;
+        let _ = index.dump_events().await.unwrap();
+
+        let value = |label| metrics.lower_tier_removal.with_label_values(&[label]).get();
+        assert_eq!(value(METRIC_LOWER_TIER_REMOVALS_FANOUT_CHUNKS), 1);
+        assert_eq!(value(METRIC_LOWER_TIER_REMOVAL_HASHES_MEMBER_COVERED), 3);
+        assert_eq!(value(METRIC_LOWER_TIER_REMOVAL_HASHES_LEGACY_DELETED), 1);
+        assert_eq!(value(METRIC_LOWER_TIER_REMOVAL_HASHES_OWNER_PROTECTED), 1);
+        assert_eq!(value(METRIC_LOWER_TIER_REMOVAL_HASHES_UNKNOWN), 1);
+        assert_eq!(value(METRIC_LOWER_TIER_ENTRIES_KEPT_SHARED_OWNER), 2);
     }
 }

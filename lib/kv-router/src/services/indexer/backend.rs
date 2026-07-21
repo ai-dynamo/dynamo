@@ -499,19 +499,19 @@ pub fn create_indexer_with_metrics(
                 ConcurrentRadixTreeCompressed::new(),
                 num_threads,
                 block_size,
-                Some(metrics),
+                Some(metrics.clone()),
             )),
-            lower_tier: LowerTierIndexers::new(num_threads, block_size),
+            lower_tier: LowerTierIndexers::new_with_metrics(num_threads, block_size, Some(metrics)),
         }
     } else {
         Indexer::Single {
             primary: KvIndexer::new_with_pruning(
                 CancellationToken::new(),
                 block_size,
-                metrics,
+                metrics.clone(),
                 None,
             ),
-            lower_tier: LowerTierIndexers::new(1, block_size),
+            lower_tier: LowerTierIndexers::new_with_metrics(1, block_size, Some(metrics)),
         }
     }
 }

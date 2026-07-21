@@ -151,6 +151,9 @@ pub struct KvIndexerMetrics {
     /// Counters for CKF mutation outcomes that are finer-grained than event status.
     #[cfg(feature = "metrics")]
     pub ckf_mutation: IntCounterVec,
+    /// Counters for lower-tier chunk-removal outcomes.
+    #[cfg(feature = "metrics")]
+    pub lower_tier_removal: IntCounterVec,
 }
 
 /// Metric status labels.
@@ -174,6 +177,14 @@ pub const METRIC_WARNING_DUPLICATE_STORE: &str = "duplicate_store";
 /// CKF mutation metric labels.
 pub const METRIC_CKF_MUTATION_UNKNOWN_REMOVE: &str = "unknown_remove";
 pub const METRIC_CKF_MUTATION_CAPACITY_EXHAUSTED: &str = "capacity_exhausted";
+
+/// Lower-tier removal metric labels.
+pub const METRIC_LOWER_TIER_REMOVALS_FANOUT_CHUNKS: &str = "removals_fanout_chunks";
+pub const METRIC_LOWER_TIER_REMOVAL_HASHES_MEMBER_COVERED: &str = "removal_hashes_member_covered";
+pub const METRIC_LOWER_TIER_REMOVAL_HASHES_LEGACY_DELETED: &str = "removal_hashes_legacy_deleted";
+pub const METRIC_LOWER_TIER_REMOVAL_HASHES_OWNER_PROTECTED: &str = "removal_hashes_owner_protected";
+pub const METRIC_LOWER_TIER_REMOVAL_HASHES_UNKNOWN: &str = "removal_hashes_unknown";
+pub const METRIC_LOWER_TIER_ENTRIES_KEPT_SHARED_OWNER: &str = "entries_kept_shared_owner";
 
 /// Metric name for KV cache events applied counter.
 #[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
@@ -201,6 +212,14 @@ const CKF_MUTATION_NAME: &str = "dynamo_kvrouter_ckf_mutation_total";
 const CKF_MUTATION_HELP: &str = "Total number of CKF block-level mutation outcomes";
 #[cfg(feature = "metrics")]
 const CKF_MUTATION_LABELS: &[&str] = &["outcome"];
+#[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
+const LOWER_TIER_REMOVAL_SUFFIX: &str = "lower_tier_removal_total";
+#[cfg(feature = "metrics")]
+const LOWER_TIER_REMOVAL_NAME: &str = "dynamo_kvrouter_lower_tier_removal_total";
+#[cfg(feature = "metrics")]
+const LOWER_TIER_REMOVAL_HELP: &str = "Total number of lower-tier chunk-removal outcomes";
+#[cfg(feature = "metrics")]
+const LOWER_TIER_REMOVAL_LABELS: &[&str] = &["outcome"];
 
 #[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
 static KV_INDEXER_METRICS: OnceLock<Arc<KvIndexerMetrics>> = OnceLock::new();
@@ -211,11 +230,13 @@ impl KvIndexerMetrics {
         kv_cache_events_applied: IntCounterVec,
         kv_cache_event_warnings: IntCounterVec,
         ckf_mutation: IntCounterVec,
+        lower_tier_removal: IntCounterVec,
     ) -> Self {
         Self {
             kv_cache_events_applied,
             kv_cache_event_warnings,
             ckf_mutation,
+            lower_tier_removal,
         }
     }
 
@@ -234,6 +255,10 @@ impl KvIndexerMetrics {
                 Opts::new(CKF_MUTATION_NAME, CKF_MUTATION_HELP),
                 CKF_MUTATION_LABELS,
             )?,
+            IntCounterVec::new(
+                Opts::new(LOWER_TIER_REMOVAL_NAME, LOWER_TIER_REMOVAL_HELP),
+                LOWER_TIER_REMOVAL_LABELS,
+            )?,
         ))
     }
 
@@ -244,6 +269,7 @@ impl KvIndexerMetrics {
         registry.register(Box::new(metrics.kv_cache_events_applied.clone()))?;
         registry.register(Box::new(metrics.kv_cache_event_warnings.clone()))?;
         registry.register(Box::new(metrics.ckf_mutation.clone()))?;
+        registry.register(Box::new(metrics.lower_tier_removal.clone()))?;
         Ok(metrics)
     }
 
@@ -274,17 +300,28 @@ impl KvIndexerMetrics {
                             CKF_MUTATION_LABELS,
                             &[],
                         ),
+                        component.metrics().create_intcountervec(
+                            LOWER_TIER_REMOVAL_SUFFIX,
+                            LOWER_TIER_REMOVAL_HELP,
+                            LOWER_TIER_REMOVAL_LABELS,
+                            &[],
+                        ),
                     ) {
                         (
                             Ok(kv_cache_events_applied),
                             Ok(kv_cache_event_warnings),
                             Ok(ckf_mutation),
+                            Ok(lower_tier_removal),
                         ) => Arc::new(Self::new(
                             kv_cache_events_applied,
                             kv_cache_event_warnings,
                             ckf_mutation,
+                            lower_tier_removal,
                         )),
-                        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
+                        (Err(e), _, _, _)
+                        | (_, Err(e), _, _)
+                        | (_, _, Err(e), _)
+                        | (_, _, _, Err(e)) => {
                             tracing::warn!("Failed to create kv indexer metrics from component: {}. Using unregistered metrics as fallback.", e);
                             Arc::new(Self::new_unregistered())
                         }
@@ -387,12 +424,23 @@ struct PreBoundMetricCounters {
     cleared: ResultCounters,
     duplicate_store_warning: IntCounter,
     ckf_mutation: CkfMutationCounters,
+    lower_tier_removal: LowerTierRemovalCounters,
 }
 
 #[cfg(feature = "metrics")]
 struct CkfMutationCounters {
     unknown_remove: IntCounter,
     capacity_exhausted: IntCounter,
+}
+
+#[cfg(feature = "metrics")]
+struct LowerTierRemovalCounters {
+    removals_fanout_chunks: IntCounter,
+    removal_hashes_member_covered: IntCounter,
+    removal_hashes_legacy_deleted: IntCounter,
+    removal_hashes_owner_protected: IntCounter,
+    removal_hashes_unknown: IntCounter,
+    entries_kept_shared_owner: IntCounter,
 }
 
 #[cfg(feature = "metrics")]
@@ -463,6 +511,26 @@ impl PreBoundEventCounters {
                             .ckf_mutation
                             .with_label_values(&[METRIC_CKF_MUTATION_CAPACITY_EXHAUSTED]),
                     },
+                    lower_tier_removal: LowerTierRemovalCounters {
+                        removals_fanout_chunks: metrics
+                            .lower_tier_removal
+                            .with_label_values(&[METRIC_LOWER_TIER_REMOVALS_FANOUT_CHUNKS]),
+                        removal_hashes_member_covered: metrics
+                            .lower_tier_removal
+                            .with_label_values(&[METRIC_LOWER_TIER_REMOVAL_HASHES_MEMBER_COVERED]),
+                        removal_hashes_legacy_deleted: metrics
+                            .lower_tier_removal
+                            .with_label_values(&[METRIC_LOWER_TIER_REMOVAL_HASHES_LEGACY_DELETED]),
+                        removal_hashes_owner_protected: metrics
+                            .lower_tier_removal
+                            .with_label_values(&[METRIC_LOWER_TIER_REMOVAL_HASHES_OWNER_PROTECTED]),
+                        removal_hashes_unknown: metrics
+                            .lower_tier_removal
+                            .with_label_values(&[METRIC_LOWER_TIER_REMOVAL_HASHES_UNKNOWN]),
+                        entries_kept_shared_owner: metrics
+                            .lower_tier_removal
+                            .with_label_values(&[METRIC_LOWER_TIER_ENTRIES_KEPT_SHARED_OWNER]),
+                    },
                 },
             }
         }
@@ -518,5 +586,54 @@ impl PreBoundEventCounters {
         }
         #[cfg(not(feature = "metrics"))]
         let _ = (self, kind, count);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn inc_lower_tier_removal(
+        &self,
+        removals_fanout_chunks: u64,
+        removal_hashes_member_covered: u64,
+        removal_hashes_legacy_deleted: u64,
+        removal_hashes_owner_protected: u64,
+        removal_hashes_unknown: u64,
+        entries_kept_shared_owner: u64,
+    ) {
+        #[cfg(feature = "metrics")]
+        {
+            self.inner
+                .lower_tier_removal
+                .removals_fanout_chunks
+                .inc_by(removals_fanout_chunks);
+            self.inner
+                .lower_tier_removal
+                .removal_hashes_member_covered
+                .inc_by(removal_hashes_member_covered);
+            self.inner
+                .lower_tier_removal
+                .removal_hashes_legacy_deleted
+                .inc_by(removal_hashes_legacy_deleted);
+            self.inner
+                .lower_tier_removal
+                .removal_hashes_owner_protected
+                .inc_by(removal_hashes_owner_protected);
+            self.inner
+                .lower_tier_removal
+                .removal_hashes_unknown
+                .inc_by(removal_hashes_unknown);
+            self.inner
+                .lower_tier_removal
+                .entries_kept_shared_owner
+                .inc_by(entries_kept_shared_owner);
+        }
+        #[cfg(not(feature = "metrics"))]
+        let _ = (
+            self,
+            removals_fanout_chunks,
+            removal_hashes_member_covered,
+            removal_hashes_legacy_deleted,
+            removal_hashes_owner_protected,
+            removal_hashes_unknown,
+            entries_kept_shared_owner,
+        );
     }
 }
