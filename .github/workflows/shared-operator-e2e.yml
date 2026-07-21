@@ -30,7 +30,6 @@ on:
 
 jobs:
   deploy-test-operator-e2e:
-    # TODO(sttts): Rework the GPU operator tests to run in CI too; today this lane only covers GPU-free specs.
     name: gpu_0
     runs-on: prod-deploy-tester-v1
     timeout-minutes: 120
@@ -118,6 +117,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p test-results
+          # TODO(sttts): Rework the GPU operator tests to run in CI too; today this filter only selects GPU-free specs.
           make -C deploy/operator test-e2e-dgdr \
             DGDR_NAMESPACE="${E2E_NAMESPACE}" \
             DGDR_IMAGE="${DGDR_IMAGE}" \
