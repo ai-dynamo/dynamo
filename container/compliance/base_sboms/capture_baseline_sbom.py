@@ -139,7 +139,7 @@ def resolve_platform_layers(ref: str, platform: str) -> list[str]:
             p = entry.get("platform", {}) or {}
             if p.get("os") == os_part and p.get("architecture") == arch_part:
                 # Fetch this platform's specific manifest.
-                repo = ref.rsplit(":", 1)[0]
+                repo = ref.split("@", 1)[0] if "@" in ref else ref.rsplit(":", 1)[0]
                 platform_ref = f"{repo}@{entry['digest']}"
                 manifest_raw = _imagetools_raw(platform_ref)
                 manifest = json.loads(manifest_raw)
@@ -541,6 +541,11 @@ def upsert_entry(manifest: dict, entry: dict) -> None:
 
 
 def split_ref(ref: str) -> tuple[str, str]:
+    if "@" in ref:
+        image, digest = ref.rsplit("@", 1)
+        if not image or ":" not in digest:
+            raise ValueError(f"expected image@digest, got {ref!r}")
+        return image, digest
     if ":" not in ref:
         raise ValueError(f"expected image:tag, got {ref!r}")
     image, tag = ref.rsplit(":", 1)
