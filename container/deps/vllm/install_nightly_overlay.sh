@@ -9,11 +9,14 @@ readonly EXPECTED_BASE_DIGEST=sha256:7f2bc168366c77fbd8329368f00310d208531c14ece
 readonly EXPECTED_AMD64_DIGEST=sha256:99e7dd3cf74c489af0615671f3fdbde182de2930f1195a0ee39e914e38033a88
 readonly EXPECTED_BASELINE_SBOM=vllm-openai@7f2bc168
 readonly EXPECTED_VLLM_URL=https://github.com/galletas1712/vllm.git
-readonly EXPECTED_VLLM_REF=schwinns/gms-revert-mnnvl-quant-fusion-20260721
-readonly EXPECTED_VLLM_HEAD=4579c44ed46af70ac1a235f4115aa32207a87fcf
-readonly EXPECTED_VLLM_HEAD_TREE=da10364c047bbd48b8740cb6de6aaf74d0e5bbe6
+readonly EXPECTED_VLLM_REF=schwinns/gms-sparse-indexer-sync-diagnostic-20260721
+readonly EXPECTED_VLLM_HEAD=29056d699f5af192278b68b9235582763f220f9d
+readonly EXPECTED_VLLM_HEAD_TREE=f35a4968649513d0ac1e27fb26e217897ccb86de
 readonly EXPECTED_MERGE_BASE=c4f5cd60dae386d106c9b8a12dbab24e2e9dda0b
-readonly EXPECTED_COMPOSED_TREE=b1df8583880f8a42c590c73ad2859fc52c552f9d
+readonly EXPECTED_COMPOSED_TREE=e1c9b55d3926e7297572f23950adc878450983c6
+readonly EXPECTED_PARALLEL_STATE_BLOB=5d3587fa48d7e4b659f3ae68cc174d5d3335a9a6
+readonly EXPECTED_SPARSE_INDEXER_BLOB=90581b105fd1d3d1ccaff52273be56e3ec7eaf5e
+readonly SPARSE_INDEXER_PATH=vllm/model_executor/layers/sparse_attn_indexer.py
 readonly EXPECTED_FLASHINFER_URL=https://github.com/flashinfer-ai/flashinfer.git
 readonly EXPECTED_FLASHINFER_REF=8eccd0c1352165302840c0e19066bc42d36dbd7a
 readonly EXPECTED_FLASHINFER_SHA=8eccd0c1352165302840c0e19066bc42d36dbd7a
@@ -29,6 +32,7 @@ readonly -a OVERLAY_PATHS=(
     vllm/distributed/device_communicators/cuda_communicator.py
     vllm/distributed/device_communicators/flashinfer_all_reduce.py
     vllm/distributed/parallel_state.py
+    vllm/model_executor/layers/sparse_attn_indexer.py
     vllm/model_executor/utils.py
     vllm/v1/worker/gpu_worker.py
 )
@@ -41,6 +45,7 @@ readonly -a EXPECTED_DIFF=(
     "M	vllm/distributed/device_communicators/cuda_communicator.py"
     "M	vllm/distributed/device_communicators/flashinfer_all_reduce.py"
     "M	vllm/distributed/parallel_state.py"
+    "M	vllm/model_executor/layers/sparse_attn_indexer.py"
     "M	vllm/model_executor/utils.py"
     "M	vllm/v1/worker/gpu_worker.py"
 )
@@ -98,7 +103,7 @@ validate_and_compose_vllm() {
     require_exact "vLLM PR commit count" \
         "$(git -C "${source}" rev-list --count \
             "${EXPECTED_MERGE_BASE}..${EXPECTED_VLLM_HEAD}")" \
-        7
+        8
 
     git -C "${source}" checkout --quiet --detach "${EXPECTED_BASE_COMMIT}"
     if ! git -C "${source}" \
@@ -111,6 +116,14 @@ validate_and_compose_vllm() {
     actual_tree="$(git -C "${source}" write-tree)"
     git -C "${source}" merge --abort
     require_exact "composed vLLM tree" "${actual_tree}" "${EXPECTED_COMPOSED_TREE}"
+    require_exact "composed parallel_state.py blob" \
+        "$(git -C "${source}" rev-parse \
+            "${EXPECTED_COMPOSED_TREE}:vllm/distributed/parallel_state.py")" \
+        "${EXPECTED_PARALLEL_STATE_BLOB}"
+    require_exact "composed sparse_attn_indexer.py blob" \
+        "$(git -C "${source}" rev-parse \
+            "${EXPECTED_COMPOSED_TREE}:${SPARSE_INDEXER_PATH}")" \
+        "${EXPECTED_SPARSE_INDEXER_BLOB}"
 
     mapfile -t actual_diff < <(
         git -C "${source}" diff --no-renames --name-status \
@@ -260,8 +273,10 @@ vllm_source_sha=${EXPECTED_VLLM_HEAD}
 vllm_source_tree=${EXPECTED_VLLM_HEAD_TREE}
 vllm_merge_base=${EXPECTED_MERGE_BASE}
 vllm_composed_tree=${EXPECTED_COMPOSED_TREE}
-vllm_pr_commits=7
+vllm_pr_commits=8
 vllm_overlay_files=${#OVERLAY_PATHS[@]}
+vllm_parallel_state_blob=${EXPECTED_PARALLEL_STATE_BLOB}
+vllm_sparse_indexer_blob=${EXPECTED_SPARSE_INDEXER_BLOB}
 flashinfer_source_url=${EXPECTED_FLASHINFER_URL}
 flashinfer_source_ref=${EXPECTED_FLASHINFER_REF}
 flashinfer_source_sha=${EXPECTED_FLASHINFER_SHA}

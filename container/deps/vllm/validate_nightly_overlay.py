@@ -19,11 +19,13 @@ EXPECTED_BASE_DIGEST = (
     "sha256:7f2bc168366c77fbd8329368f00310d208531c14ece6c2de31a6611ef99f6ec8"
 )
 EXPECTED_VLLM_URL = "https://github.com/galletas1712/vllm.git"
-EXPECTED_VLLM_REF = "schwinns/gms-revert-mnnvl-quant-fusion-20260721"
-EXPECTED_VLLM_HEAD = "4579c44ed46af70ac1a235f4115aa32207a87fcf"
-EXPECTED_VLLM_HEAD_TREE = "da10364c047bbd48b8740cb6de6aaf74d0e5bbe6"
+EXPECTED_VLLM_REF = "schwinns/gms-sparse-indexer-sync-diagnostic-20260721"
+EXPECTED_VLLM_HEAD = "29056d699f5af192278b68b9235582763f220f9d"
+EXPECTED_VLLM_HEAD_TREE = "f35a4968649513d0ac1e27fb26e217897ccb86de"
 EXPECTED_MERGE_BASE = "c4f5cd60dae386d106c9b8a12dbab24e2e9dda0b"
-EXPECTED_COMPOSED_TREE = "b1df8583880f8a42c590c73ad2859fc52c552f9d"
+EXPECTED_COMPOSED_TREE = "e1c9b55d3926e7297572f23950adc878450983c6"
+EXPECTED_PARALLEL_STATE_BLOB = "5d3587fa48d7e4b659f3ae68cc174d5d3335a9a6"
+EXPECTED_SPARSE_INDEXER_BLOB = "90581b105fd1d3d1ccaff52273be56e3ec7eaf5e"
 EXPECTED_FLASHINFER_URL = "https://github.com/flashinfer-ai/flashinfer.git"
 EXPECTED_FLASHINFER_REF = "8eccd0c1352165302840c0e19066bc42d36dbd7a"
 EXPECTED_FLASHINFER_SHA = "8eccd0c1352165302840c0e19066bc42d36dbd7a"
@@ -43,6 +45,7 @@ OVERLAY_PATHS = (
     "vllm/distributed/device_communicators/cuda_communicator.py",
     "vllm/distributed/device_communicators/flashinfer_all_reduce.py",
     "vllm/distributed/parallel_state.py",
+    "vllm/model_executor/layers/sparse_attn_indexer.py",
     "vllm/model_executor/utils.py",
     "vllm/v1/worker/gpu_worker.py",
 )
@@ -267,8 +270,10 @@ def validate() -> None:
         "vllm_source_tree": EXPECTED_VLLM_HEAD_TREE,
         "vllm_merge_base": EXPECTED_MERGE_BASE,
         "vllm_composed_tree": EXPECTED_COMPOSED_TREE,
-        "vllm_pr_commits": "7",
+        "vllm_pr_commits": "8",
         "vllm_overlay_files": str(len(OVERLAY_PATHS)),
+        "vllm_parallel_state_blob": EXPECTED_PARALLEL_STATE_BLOB,
+        "vllm_sparse_indexer_blob": EXPECTED_SPARSE_INDEXER_BLOB,
         "flashinfer_source_url": EXPECTED_FLASHINFER_URL,
         "flashinfer_source_ref": EXPECTED_FLASHINFER_REF,
         "flashinfer_source_sha": EXPECTED_FLASHINFER_SHA,
