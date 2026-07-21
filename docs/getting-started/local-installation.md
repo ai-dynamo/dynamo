@@ -21,9 +21,9 @@ For production multi-node clusters, see the [Kubernetes Deployment Guide](../kub
 | **GPU** | NVIDIA Ampere, Ada Lovelace, Hopper, Blackwell |
 | **OS** | Ubuntu 22.04, Ubuntu 24.04 |
 | **Architecture** | x86_64, ARM64 (ARM64 requires Ubuntu 24.04) |
-| **CUDA** | 12.9+ or 13.0+ (B300/GB300 require CUDA 13) |
+| **CUDA** | 13.0+ |
 | **Python** | 3.10, 3.12 |
-| **Driver** | 575.51.03+ (CUDA 12) or 580.00.03+ (CUDA 13) |
+| **Driver** | 580.00.03+ |
 
 TensorRT-LLM does not support Python 3.11.
 

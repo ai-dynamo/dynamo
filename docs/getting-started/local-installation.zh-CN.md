@@ -22,9 +22,9 @@ description: 使用容器或 PyPI 在本地机器或 VM 上安装并运行 Dynam
 | **GPU** | NVIDIA Ampere、Ada Lovelace、Hopper、Blackwell |
 | **OS** | Ubuntu 22.04、Ubuntu 24.04 |
 | **架构** | x86_64、ARM64（ARM64 需要 Ubuntu 24.04） |
-| **CUDA** | 12.9+ 或 13.0+（B300/GB300 需要 CUDA 13） |
+| **CUDA** | 13.0+ |
 | **Python** | 3.10、3.12 |
-| **驱动** | 575.51.03+（CUDA 12）或 580.00.03+（CUDA 13） |
+| **驱动** | 580.00.03+ |
 
 TensorRT-LLM 不支持 Python 3.11。
 
