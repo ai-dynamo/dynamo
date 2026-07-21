@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Deployment tests
 
-This directory contains live-cluster pytest suites. `test_deploy.py` validates
+This directory contains live-cluster pytest suites. `test_dgd.py` validates
 example `DynamoGraphDeployment` manifests. `test_dgdr.py` validates the operator's
 `DynamoGraphDeploymentRequest` API, and `test_dgdr_h100.py` contains its real-GPU
 H100 support matrix.

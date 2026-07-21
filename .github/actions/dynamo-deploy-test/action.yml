@@ -52,7 +52,7 @@ inputs:
   test_file:
     description: 'Pytest file to run.'
     required: false
-    default: 'tests/deploy/test_deploy.py'
+    default: 'tests/deploy/test_dgd.py'
   model_cache_pvc:
     description: 'Name of a pre-existing PVC to mount as a shared model cache on worker pods (sets HF_HOME). Empty downloads from HuggingFace.'
     required: false
@@ -61,6 +61,10 @@ inputs:
     description: 'Additional pytest arguments (e.g., --frontend-image=...)'
     required: false
     default: ''
+  cleanup_deployment:
+    description: 'Clean up the single DGD named by the standard deployment fixture.'
+    required: false
+    default: 'true'
 
 runs:
   using: "composite"
@@ -159,7 +163,7 @@ runs:
           --output-directory="${DYN_TEST_OUTPUT_PATH}/cluster-info" || true
 
     - name: Cleanup Deployment
-      if: always()
+      if: always() && inputs.cleanup_deployment == 'true'
       shell: bash
       env:
         NAMESPACE: ${{ inputs.namespace }}
