@@ -329,6 +329,7 @@ mod tests {
                 ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
                 ("POD_NAMESPACE", "inference"),
                 ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+                ("DYN_EPP_VLLM_RENDER_URL", "http://vllm-render:8000"),
                 ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
                 ("DYN_EPP_KV_EVENT_REPLAY_PORT", "0"),
             ])
