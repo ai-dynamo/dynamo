@@ -26,7 +26,9 @@ A 10-second cooldown between launches avoids the vLLM profiling race
 from __future__ import annotations
 
 import argparse
+import atexit
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -118,6 +120,10 @@ class _RunningTest:
     start_time: float
     captured: list[str] = field(default_factory=list)
     reader_thread: threading.Thread | None = None
+    # Process-group id of the child pytest. With start_new_session=True the
+    # child is a group leader, so pgid == pid; used to killpg the whole tree
+    # on orchestrator exit.
+    pgid: int | None = None
 
 
 def _print(msg: str = "") -> None:
@@ -445,6 +451,52 @@ def _select_launches(
     return to_launch
 
 
+def _reap_running(running: dict[int, _RunningTest], reason: str) -> None:
+    """Force-kill every still-running child pytest and its engine tree.
+
+    The orchestrator can exit while children are mid-run — GitHub
+    ``timeout-minutes`` firing (SIGTERM), a Ctrl-C (SIGINT), or an unhandled
+    exception. Each child pytest spawns an engine tree (vLLM EngineCore,
+    SGLang / TRT-LLM workers) that pins GPU memory on its assigned GPU. Without
+    this sweep those trees are orphaned and VRAM stays reserved until the
+    runner is recycled — the "GPU tests hang / hold memory long after the run"
+    failure mode.
+
+    Idempotent: clears ``running`` on completion, so a second call (e.g. signal
+    handler then atexit) is a no-op.
+    """
+    if not running:
+        return
+    # Lazy import: only needed on the abnormal-exit path, and keeps module
+    # import cheap for the common case.
+    from tests.utils.managed_process import terminate_process_tree
+
+    _print(f"[cleanup] terminating {len(running)} running test(s) — {reason}")
+    for w_id, run_info in list(running.items()):
+        # Snapshot + kill the whole descendant tree. terminate_process_tree
+        # enumerates recursive children BEFORE killing the child pytest, so it
+        # still catches ManagedProcess workers that setsid into their own
+        # session — a process-group kill alone would miss them once the child
+        # pytest dies and they reparent to init.
+        try:
+            terminate_process_tree(run_info.proc.pid, immediate_kill=True, timeout=5)
+        except Exception as exc:  # never let one test's cleanup abort the rest
+            _print(f"[cleanup] w{w_id} tree kill error: {exc}")
+        # Belt-and-suspenders: SIGKILL anything left in the child's group.
+        if run_info.pgid is not None:
+            try:
+                os.killpg(run_info.pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        try:
+            run_info.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _print(f"[cleanup] w{w_id} still alive after SIGKILL")
+        if run_info.reader_thread is not None:
+            run_info.reader_thread.join(timeout=2)
+    running.clear()
+
+
 def run_parallel(
     test_ids: list[str],
     meta: dict[str, dict],
@@ -745,8 +797,15 @@ def run_parallel(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            # Isolate each child pytest (and the engine tree it spawns) in its
+            # own session/process group. This lets the orchestrator killpg the
+            # whole tree on early exit, and means a terminal Ctrl-C hits only
+            # the orchestrator, which then tears children down in order.
+            start_new_session=True,
         )
         run_info = _RunningTest(proc=proc, test=test, start_time=time.monotonic())
+        # start_new_session=True makes the child a group leader, so pgid == pid.
+        run_info.pgid = proc.pid
         w_id = test.w_id
         stream_prefix = f"[w{w_id}]" if stream else None
         t = threading.Thread(
@@ -759,6 +818,28 @@ def run_parallel(
         return run_info
 
     env_base = os.environ.copy()
+
+    # --- Orchestrator-exit GPU cleanup ---------------------------------------
+    # If the orchestrator exits early, kill every running child's engine tree
+    # so it doesn't orphan and pin VRAM. Signal handlers cover the timeout
+    # (SIGTERM) and Ctrl-C (SIGINT) paths; atexit is the backstop for a normal
+    # or exception-driven interpreter exit. (SIGKILL to the orchestrator itself
+    # is unpreventable and would still orphan children — nothing can catch it.)
+    def _signal_reap(signum, _frame):
+        _reap_running(running, f"signal {signum}")
+        # Restore default disposition and re-raise so exit status reflects the
+        # signal (GitHub/pytest see the expected termination).
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+    _prev_handlers: dict[int, object] = {}
+    if threading.current_thread() is threading.main_thread():
+        for _sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                _prev_handlers[_sig] = signal.signal(_sig, _signal_reap)
+            except (ValueError, OSError):
+                pass
+    atexit.register(_reap_running, running, "interpreter exit")
 
     while pending or running:
         now = time.monotonic()
@@ -946,6 +1027,15 @@ def run_parallel(
 
         if running or pending:
             time.sleep(1.0)
+
+    # Loop drained normally: all children reaped, restore signal dispositions
+    # and drop the atexit backstop so pytest's own shutdown is unaffected.
+    for _sig, _handler in _prev_handlers.items():
+        try:
+            signal.signal(_sig, _handler)
+        except (ValueError, OSError):
+            pass
+    atexit.unregister(_reap_running)
 
     # Summary
     wall_time = time.monotonic() - t0
