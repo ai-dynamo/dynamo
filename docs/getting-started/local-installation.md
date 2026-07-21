@@ -21,9 +21,9 @@ For production multi-node clusters, see the [Kubernetes Deployment Guide](../kub
 | **GPU** | NVIDIA Ampere, Ada Lovelace, Hopper, Blackwell |
 | **OS** | Ubuntu 22.04, Ubuntu 24.04 |
 | **Architecture** | x86_64, ARM64 (ARM64 requires Ubuntu 24.04) |
-| **CUDA** | 12.9+ or 13.0+ (B300/GB300 require CUDA 13) |
+| **CUDA** | 13.0+ |
 | **Python** | 3.10, 3.12 |
-| **Driver** | 575.51.03+ (CUDA 12) or 580.00.03+ (CUDA 13) |
+| **Driver** | 580.00.03+ |
 
 TensorRT-LLM does not support Python 3.11.
 
@@ -37,13 +37,13 @@ Containers have all dependencies pre-installed. No setup required.
 
 ```bash
 # SGLang
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0
 
 # TensorRT-LLM
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
 
 # vLLM
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
 ```
 
 To run frontend and worker in the same container, either:
@@ -219,10 +219,10 @@ Ensure you passed `--gpus all` to `docker run`. Without this flag, the container
 
 ```bash
 # Correct
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0
 
 # Wrong -- no GPU access
-docker run --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
+docker run --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0
 ```
 
 ## Next Steps

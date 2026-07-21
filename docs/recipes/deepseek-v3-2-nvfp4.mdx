@@ -26,7 +26,7 @@ This recipe deploys DeepSeek V3.2 NVFP4 disaggregated across 32 GB200 GPUs — 2
 
 - A Kubernetes cluster with the Dynamo platform (operator) installed and **32x GB200 across 8 nodes (NVL72, MNNVL-connected)** available.
 - A Hugging Face token with access to `nvidia/DeepSeek-V3.2-NVFP4`.
-- The `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1` image (already pinned in `deploy.yaml`).
+- The `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0` image (already pinned in `deploy.yaml`).
 
 Create the namespace and token secret:
 

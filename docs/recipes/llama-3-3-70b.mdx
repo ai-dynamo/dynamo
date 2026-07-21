@@ -223,7 +223,7 @@ kubectl logs -f job/llama3-70b-disagg-mn-perf -n ${NAMESPACE}
 
 ## Compare All Targets
 
-All three targets serve `RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic` on the vLLM runtime (`nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1`) and are benchmarked at 16 concurrency per GPU with 8K ISL / 1K OSL traffic:
+All three targets serve `RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic` on the vLLM runtime (`nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0`) and are benchmarked at 16 concurrency per GPU with 8K ISL / 1K OSL traffic:
 
 | | Aggregated | Disagg single-node | Disagg multi-node |
 |---|---|---|---|

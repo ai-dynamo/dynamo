@@ -143,7 +143,7 @@ spec:
           value: "16"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
 ```
 
 ### Alternative: Using Command Args in K8s
@@ -153,7 +153,7 @@ You can also pass CLI arguments directly in the container command:
 ```yaml
 extraPodSpec:
   mainContainer:
-    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
     command:
       - /bin/sh
       - -c

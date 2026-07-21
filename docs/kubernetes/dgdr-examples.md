@@ -26,7 +26,7 @@ metadata:
 spec:
   model: Qwen/Qwen3-32B
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.3.0"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 Deploy:
@@ -48,7 +48,7 @@ metadata:
 spec:
   model: meta-llama/Llama-3.3-70B-Instruct
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.3.0"  # dynamo-frontend for Dynamo < 1.1.0
   searchStrategy: thorough
 ```
 
@@ -75,7 +75,7 @@ metadata:
 spec:
   model: Qwen/Qwen3-0.6B
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.3.0"  # dynamo-frontend for Dynamo < 1.1.0
   features:
     planner:
       mode: disagg
@@ -99,7 +99,7 @@ metadata:
 spec:
   model: deepseek-ai/DeepSeek-R1
   backend: sglang
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.3.0"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 Deploy:
@@ -121,7 +121,7 @@ metadata:
 spec:
   model: deepseek-ai/DeepSeek-R1
   backend: sglang
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.3.0"  # dynamo-frontend for Dynamo < 1.1.0
   overrides:
     dgd:
       apiVersion: nvidia.com/v1alpha1
@@ -171,7 +171,7 @@ spec:
     mocker:
       enabled: true  # Deploy mocker instead of real backend
 
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.3.0"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 Profiling runs against the real backend (via GPUs or AIC). The mocker deployment then uses profiling data to simulate realistic timing.

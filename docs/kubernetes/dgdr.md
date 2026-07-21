@@ -43,7 +43,7 @@ metadata:
   name: my-model
 spec:
   model: Qwen/Qwen3-0.6B
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.3.0"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 ### Field Reference
@@ -101,7 +101,7 @@ metadata:
 spec:
   model: Qwen/Qwen3-0.6B
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.3.0"  # dynamo-frontend for Dynamo < 1.1.0
   features:
     planner:
       mode: disagg
@@ -153,7 +153,7 @@ metadata:
 spec:
   model: Qwen/Qwen3-30B-A3B
   backend: sglang
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.3.0"  # dynamo-frontend for Dynamo < 1.1.0
   overrides:
     dgd:
       apiVersion: nvidia.com/v1alpha1
