@@ -1285,6 +1285,8 @@ def dynamo_dynamic_ports(num_system_ports) -> Generator[ServicePorts, None, None
         all_ports.extend(system_port_list)
         kv_event_port = allocate_port(DynamoPortRange.SERVE.value)
         all_ports.append(kv_event_port)
+        fpm_port = allocate_port(DynamoPortRange.FPM.value)
+        all_ports.append(fpm_port)
         # One NIXL side-channel port per worker (avoids xdist collisions on shared hosts).
         nixl_side_channel_ports = allocate_ports(
             num_system_ports, DynamoPortRange.NIXL.value
@@ -1294,6 +1296,7 @@ def dynamo_dynamic_ports(num_system_ports) -> Generator[ServicePorts, None, None
             frontend_port=frontend_port,
             system_ports=system_port_list,
             kv_event_port=kv_event_port,
+            fpm_port=fpm_port,
             nixl_side_channel_ports=nixl_side_channel_ports,
         )
     finally:
