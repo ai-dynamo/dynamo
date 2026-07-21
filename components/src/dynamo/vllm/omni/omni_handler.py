@@ -6,7 +6,16 @@ import os
 import random
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any, AsyncGenerator, Dict, Optional, Union, cast
+from typing import (
+    Any,
+    AsyncGenerator,
+    AsyncIterator,
+    Callable,
+    Dict,
+    Optional,
+    Union,
+    cast,
+)
 
 import PIL.Image
 from fsspec.implementations.dirfs import DirFileSystem
@@ -383,13 +392,45 @@ class OmniHandler(BaseOmniHandler):
         if inputs.lora_request is not None and inputs.sampling_params_list is None:
             generate_kwargs["lora_request"] = inputs.lora_request
 
+        previous_text = ""
+
+        def update_previous_text(stage_output: Any, current: str) -> str:
+            if getattr(stage_output, "final_output_type", None) == "text" and getattr(
+                stage_output, "request_output", None
+            ):
+                outputs = stage_output.request_output.outputs
+                if outputs:
+                    return outputs[0].text
+            return current
+
+        async def create_generator(
+            admitted_lora_request: LoRARequest | None,
+        ) -> AsyncIterator[Dict[str, Any]]:
+            nonlocal previous_text
+
+            per_request_kwargs = dict(generate_kwargs)
+            if admitted_lora_request is not None:
+                per_request_kwargs["lora_request"] = admitted_lora_request
+
+            async for stage_output in self.engine_client.generate(**per_request_kwargs):
+                chunk = await self.output_formatter.format(
+                    stage_output,
+                    request_id,
+                    request_type=inputs.request_type,
+                    fps=inputs.fps,
+                    response_format=inputs.response_format,
+                    output_format=inputs.output_format,
+                    previous_text=previous_text,
+                    speed=inputs.speed,
+                )
+                previous_text = update_previous_text(stage_output, previous_text)
+                yield {"stage_output": stage_output, "formatted_chunk": chunk}
+
         async with self._abort_monitor(context, request_id):
             try:
                 async for chunk in self._generate_with_lora_admission_lock(
                     inputs.lora_request,
-                    generate_kwargs,
-                    inputs,
-                    request_id,
+                    create_generator,
                 ):
                     if chunk:
                         yield chunk["formatted_chunk"]
@@ -404,10 +445,8 @@ class OmniHandler(BaseOmniHandler):
     async def _generate_with_lora_admission_lock(
         self,
         lora_request: LoRARequest | None,
-        generate_kwargs: Dict[str, Any],
-        inputs: EngineInputs,
-        request_id: str,
-    ) -> AsyncGenerator[Dict[str, Any], None]:
+        create_generator: Callable[[LoRARequest | None], AsyncIterator[Any]],
+    ) -> AsyncIterator[Any]:
         """Yield engine outputs after atomically admitting a LoRA request.
 
         For preloaded adapters, AsyncOmni does not lazily activate like vLLM.
@@ -422,39 +461,13 @@ class OmniHandler(BaseOmniHandler):
 
         Args:
             lora_request: Original LoRA request, or None for base model.
-            generate_kwargs: Arguments to pass to engine_client.generate().
-            inputs: Parsed engine inputs (needed for output formatting).
-            request_id: Request ID for logging.
-
-        Yields:
-            Dicts with 'stage_output' and 'formatted_chunk' for output formatting.
+            create_generator: Factory that creates an async result iterator for
+                the admitted adapter.
         """
-        previous_text = ""
-
-        def update_previous_text(stage_output: Any, current: str) -> str:
-            if getattr(stage_output, "final_output_type", None) == "text" and getattr(
-                stage_output, "request_output", None
-            ):
-                outputs = stage_output.request_output.outputs
-                if outputs:
-                    return outputs[0].text
-            return current
-
         if lora_request is None or self._preload_lora_into_engine():
             # Base model or preloaded adapters: no lock needed
-            async for stage_output in self.engine_client.generate(**generate_kwargs):
-                chunk = await self.output_formatter.format(
-                    stage_output,
-                    request_id,
-                    request_type=inputs.request_type,
-                    fps=inputs.fps,
-                    response_format=inputs.response_format,
-                    output_format=inputs.output_format,
-                    previous_text=previous_text,
-                    speed=inputs.speed,
-                )
-                previous_text = update_previous_text(stage_output, previous_text)
-                yield {"stage_output": stage_output, "formatted_chunk": chunk}
+            async for result in create_generator(lora_request):
+                yield result
             return
 
         # Hold lock through first result to prevent concurrent unload
@@ -472,42 +485,17 @@ class OmniHandler(BaseOmniHandler):
                     f"unknown model or LoRA adapter: '{lora_request.lora_name}'"
                 )
 
-            # Update generate_kwargs with re-resolved adapter
-            generate_kwargs["lora_request"] = admitted_lora_request
-            generator = self.engine_client.generate(**generate_kwargs)
+            generator = create_generator(admitted_lora_request)
             try:
                 first_output = await anext(generator)
             except StopAsyncIteration:
                 return
 
-            # Format first result while lock is held
-            first_chunk = await self.output_formatter.format(
-                first_output,
-                request_id,
-                request_type=inputs.request_type,
-                fps=inputs.fps,
-                response_format=inputs.response_format,
-                output_format=inputs.output_format,
-                previous_text=previous_text,
-                speed=inputs.speed,
-            )
-            previous_text = update_previous_text(first_output, previous_text)
-            yield {"stage_output": first_output, "formatted_chunk": first_chunk}
+            yield first_output
 
         # Release lock; stream remaining results
-        async for stage_output in generator:
-            chunk = await self.output_formatter.format(
-                stage_output,
-                request_id,
-                request_type=inputs.request_type,
-                fps=inputs.fps,
-                response_format=inputs.response_format,
-                output_format=inputs.output_format,
-                previous_text=previous_text,
-                speed=inputs.speed,
-            )
-            previous_text = update_previous_text(stage_output, previous_text)
-            yield {"stage_output": stage_output, "formatted_chunk": chunk}
+        async for result in generator:
+            yield result
 
     async def build_engine_inputs(
         self,

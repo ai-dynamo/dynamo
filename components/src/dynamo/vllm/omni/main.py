@@ -171,6 +171,9 @@ async def init_omni(
             )
         ]
         if lora_enabled:
+            assert load_lora_endpoint is not None
+            assert unload_lora_endpoint is not None
+            assert list_loras_endpoint is not None
             serve_tasks.extend(
                 [
                     load_lora_endpoint.serve_endpoint(

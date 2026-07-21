@@ -75,7 +75,7 @@ echo "  curl -s -X DELETE http://localhost:${SYSTEM_PORT}/v1/loras/my-lora | jq 
 
 echo ""
 echo "Starting frontend..."
-python -m dynamo.frontend &
+python -m dynamo.frontend --http-port "$HTTP_PORT" &
 FRONTEND_PID=$!
 
 if ! wait_for_ready "http://localhost:${HTTP_PORT}/health" 60; then
