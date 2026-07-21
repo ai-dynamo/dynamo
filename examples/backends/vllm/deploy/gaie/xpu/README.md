@@ -18,7 +18,12 @@ GAIE deployment templates for Intel XPU using Kubernetes Dynamic Resource Alloca
 
 1. **Kubernetes v1.34+** with DRA API v1 enabled.
 2. **[Intel resource drivers for Kubernetes](https://github.com/intel/intel-resource-drivers-for-kubernetes)** installed with DeviceClass `gpu.intel.com`.
-3. **XPU runtime image** (`vllm-runtime-xpu`) built via `python container/render.py --framework=vllm --device=xpu --target=runtime`.
+3. **XPU runtime image** (`vllm-runtime-xpu`) built and tagged for the manifests:
+   ```bash
+   python container/render.py --framework=vllm --device=xpu --target=runtime
+   docker build -t nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag \
+     -f container/vllm-runtime-xpu-amd64-rendered.Dockerfile .
+   ```
 4. **GAIE** installed in-cluster -- see [Gateway API docs](../../../../../../docs/kubernetes/gateway-api/README.mdx).
 5. **HuggingFace token secret** (`hf-token-secret`).
 
