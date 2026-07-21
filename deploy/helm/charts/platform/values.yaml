@@ -73,7 +73,7 @@ dynamo-operator:
   # Environment variables to pass to operator Deployment.
   env: []
 
-  # -- NATS server address for operator communication (leave empty to use the bundled NATS chart). Format: `nats://hostname:4222`
+  # -- NATS server address for operator communication. When empty, the operator uses bundled NATS only if global.nats.install=true; otherwise NATS is not configured. Format: `nats://hostname:4222`
   natsAddr: ""
 
   # -- etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: `http://hostname:2379` or `https://hostname:2379`
