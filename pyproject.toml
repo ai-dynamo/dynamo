@@ -21,6 +21,7 @@ dependencies = [
     "msgspec>=0.19.0",
     "zstandard>=0.23.0,<1.0",
     "pyzmq>=26.0.0",
+    "msgpack==1.2.1",
     # typing.Self is 3.11+; declared minimum is 3.10 (see requires-python),
     # so back-port Self via typing_extensions in dynamo.common.configuration.
     "typing_extensions>=4.10.0",
@@ -59,7 +60,7 @@ trtllm =[
 vllm = [
     "uvloop",
     "nixl[cu13]==1.1.0",
-    "vllm[flashinfer,runai,otel]==0.23.0",
+    "vllm[flashinfer,runai,otel]==0.24.0",
     # vllm-omni is not part of ai-dynamo[vllm]: container builds inherit the
     # framework stack from vllm/vllm-openai, and pip/uv dependency resolution
     # for omni can override the vLLM torch stack.
