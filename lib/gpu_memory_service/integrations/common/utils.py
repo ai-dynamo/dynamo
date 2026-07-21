@@ -15,6 +15,7 @@ from gpu_memory_service.client.torch.module import (
     rebind_nonparameter_tensors,
     register_module_tensors,
 )
+from gpu_memory_service.client.torch.tensor import ModuleTensorBinding
 from gpu_memory_service.common.locks import RequestedLockType
 
 if TYPE_CHECKING:
@@ -93,6 +94,8 @@ def setup_meta_tensor_workaround() -> None:
 def prepare_gms_write(
     allocator: "GMSClientMemoryManager",
     model: torch.nn.Module,
+    *,
+    runtime_private_bindings: set[ModuleTensorBinding] | None = None,
 ) -> GMSCommittedMemoryStats:
     """Register model tensors and prune unreferenced allocations.
 
@@ -107,7 +110,11 @@ def prepare_gms_write(
     Returns:
         Committed/pruned byte stats for the write awaiting publication.
     """
-    referenced_allocation_ids = register_module_tensors(allocator, model)
+    referenced_allocation_ids = register_module_tensors(
+        allocator,
+        model,
+        runtime_private_bindings=runtime_private_bindings,
+    )
     before_prune_bytes = allocator.total_bytes
     before_prune_count = len(allocator.mappings)
 

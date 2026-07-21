@@ -6,11 +6,11 @@
 Write:
   module -> discover -> match/select -> validate -> build manifests -> metadata
 Read:
-  metadata -> validate/resolve -> GMS map -> parameter-containing storage
-                              `-> clone ---> all other storage
+  metadata -> validate/resolve -> GMS map -> shared storage
+                              `-> clone ---> runtime-private storage
 Writer rebind:
-  discover -> match/select -> validate -> clone/swap non-parameter-only storage
-                                      `-> retain source owners
+  discover -> match/select -> validate -> clone/swap runtime-private storage
+                                      `-> retain displaced source owners
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from gpu_memory_service.client.torch.tensor import (
     ModuleTensorBinding,
     ModuleTensorKind,
     StorageManifest,
+    StorageOwnership,
     TensorObject,
     _dtype_from_name,
     _storage_from_pointer,
@@ -216,6 +217,44 @@ def _discover_module_storages(model: torch.nn.Module) -> list[_DiscoveredStorage
     return list(storages.values())
 
 
+def snapshot_module_tensor_bindings(
+    model: torch.nn.Module,
+) -> dict[ModuleTensorBinding, torch.Tensor]:
+    """Capture canonical module tensor bindings and their exact objects."""
+    snapshot: dict[ModuleTensorBinding, torch.Tensor] = {}
+    for tensor, binding in _iter_module_tensor_bindings(model):
+        previous = snapshot.setdefault(binding, tensor)
+        if previous is not tensor:
+            raise RuntimeError(
+                f"Module tensor binding {binding.path!r} resolves to multiple objects"
+            )
+    return snapshot
+
+
+def runtime_private_bindings_after(
+    before: dict[ModuleTensorBinding, torch.Tensor],
+    model: torch.nn.Module,
+) -> set[ModuleTensorBinding]:
+    """Find module bindings introduced or replaced after a runtime transform."""
+    return {
+        binding
+        for binding, tensor in snapshot_module_tensor_bindings(model).items()
+        if before.get(binding) is not tensor
+    }
+
+
+def _is_runtime_private_storage(
+    discovered_storage: _DiscoveredStorage,
+    runtime_private_bindings: set[ModuleTensorBinding],
+) -> bool:
+    """Expand private binding ownership to its complete StorageImpl component."""
+    return not discovered_storage.has_parameter or any(
+        binding in runtime_private_bindings
+        for tensor_object in discovered_storage.objects
+        for binding in tensor_object.bindings
+    )
+
+
 def _validate_discovered_storage(
     discovered_storage: _DiscoveredStorage,
 ) -> None:
@@ -345,6 +384,7 @@ def _match_storages_to_gms_mappings(
 
 def _build_storage_manifest(
     discovered_storage: _DiscoveredStorage,
+    ownership: StorageOwnership,
 ) -> StorageManifest:
     """Build one manifest for a discovered StorageImpl and all of its tensors."""
     return StorageManifest(
@@ -363,6 +403,7 @@ def _build_storage_manifest(
             )
             for tensor_object in discovered_storage.objects
         ),
+        ownership=ownership,
     )
 
 
@@ -432,8 +473,12 @@ def _validate_storage_manifest(
 def register_module_tensors(
     gms_client_memory_manager: "GMSClientMemoryManager",
     model: torch.nn.Module,
+    *,
+    runtime_private_bindings: set[ModuleTensorBinding] | None = None,
 ) -> set[str]:
     """Publish one typed storage manifest for each GMS-backed StorageImpl."""
+    if runtime_private_bindings is None:
+        runtime_private_bindings = set()
     storages = _match_storages_to_gms_mappings(
         _discover_module_storages(model),
         gms_client_memory_manager.mappings,
@@ -450,7 +495,12 @@ def register_module_tensors(
         storage_base_offset,
     ) in enumerate(storages):
         key = f"{STORAGE_MANIFEST_PREFIX}{ordinal}"
-        manifest = _build_storage_manifest(discovered_storage)
+        ownership = (
+            StorageOwnership.RUNTIME_PRIVATE
+            if _is_runtime_private_storage(discovered_storage, runtime_private_bindings)
+            else StorageOwnership.SHARED
+        )
+        manifest = _build_storage_manifest(discovered_storage, ownership)
         _validate_storage_manifest(
             manifest,
             key=key,
@@ -678,7 +728,7 @@ def materialize_module_from_gms(
     *,
     device_index: int,
 ) -> None:
-    """Map parameter-containing storages read-only and clone all other storages."""
+    """Map shared storages read-only and clone runtime-private storages."""
     if int(gms_client_memory_manager.device) != device_index:
         raise RuntimeError(
             "GMS manager device does not match materialization device: "
@@ -689,6 +739,7 @@ def materialize_module_from_gms(
         list[tuple[TensorObject, tuple[_ResolvedTensorDestination, ...]]]
     ] = []
     destinations: dict[tuple[int, str, int | None], tuple[int, int]] = {}
+    existing_objects: dict[int, list[tuple[int, int]]] = {}
     for manifest_index, stored in enumerate(stored_manifests):
         manifest_destinations: list[
             tuple[TensorObject, tuple[_ResolvedTensorDestination, ...]]
@@ -718,8 +769,37 @@ def materialize_module_from_gms(
                     )
                 unique_destinations[destination.destination] = destination
             object_destinations = tuple(unique_destinations.values())
+            for existing in {
+                id(destination.existing): destination.existing
+                for destination in object_destinations
+                if destination.existing is not None
+            }.values():
+                existing_objects.setdefault(id(existing), []).append(object_id)
             manifest_destinations.append((tensor_object, object_destinations))
         resolved.append(manifest_destinations)
+
+    preservable: dict[tuple[int, int], torch.Tensor] = {}
+    for manifest_index, manifest_destinations in enumerate(resolved):
+        for object_index, (tensor_object, object_destinations) in enumerate(
+            manifest_destinations
+        ):
+            object_id = (manifest_index, object_index)
+            existing = {
+                id(destination.existing): destination.existing
+                for destination in object_destinations
+                if destination.existing is not None
+            }
+            has_parameter = any(
+                destination.binding.kind is ModuleTensorKind.PARAMETER
+                for destination in object_destinations
+            )
+            if (
+                len(existing) == 1
+                and len(existing_objects[next(iter(existing))]) == 1
+                and isinstance(next(iter(existing.values())), torch.nn.Parameter)
+                is has_parameter
+            ):
+                preservable[object_id] = next(iter(existing.values()))
 
     allocation_ids = list(
         dict.fromkeys(stored.allocation_id for stored in stored_manifests)
@@ -744,8 +824,10 @@ def materialize_module_from_gms(
         materialized: list[
             tuple[torch.Tensor, tuple[_ResolvedTensorDestination, ...]]
         ] = []
-        for stored, manifest_destinations in zip(
-            stored_manifests, resolved, strict=True
+        identity_swaps: list[_DiscoveredTensor] = []
+        identity_replacements: dict[int, torch.Tensor] = {}
+        for manifest_index, (stored, manifest_destinations) in enumerate(
+            zip(stored_manifests, resolved, strict=True)
         ):
             mapping = gms_client_memory_manager.mappings[mapped[stored.allocation_id]]
             if (
@@ -761,18 +843,16 @@ def materialize_module_from_gms(
                 stored.manifest.nbytes,
                 device_index,
             )
-            has_parameter = any(
-                binding.kind is ModuleTensorKind.PARAMETER
-                for tensor_object in stored.manifest.objects
-                for binding in tensor_object.bindings
-            )
-            if has_parameter:
-                target_storage = source_storage
-            else:
+            if stored.manifest.ownership is StorageOwnership.RUNTIME_PRIVATE:
                 clone_started = True
                 target_storage = source_storage.clone()
+            else:
+                target_storage = source_storage
 
-            for tensor_object, object_destinations in manifest_destinations:
+            for object_index, (
+                tensor_object,
+                object_destinations,
+            ) in enumerate(manifest_destinations):
                 dtype = _dtype_from_name(tensor_object.dtype)
                 tensor = _tensor_from_storage(
                     target_storage,
@@ -799,7 +879,23 @@ def materialize_module_from_gms(
                         tensor,
                         requires_grad=tensor_object.requires_grad,
                     )
-                materialized.append((tensor, object_destinations))
+                existing = preservable.get((manifest_index, object_index))
+                if existing is None:
+                    materialized.append((tensor, object_destinations))
+                else:
+                    identity_swaps.append(
+                        _DiscoveredTensor(
+                            existing,
+                            [
+                                destination.binding
+                                for destination in object_destinations
+                            ],
+                        )
+                    )
+                    identity_replacements[id(existing)] = tensor
+                    materialized.append((existing, object_destinations))
+
+        _swap_discovered_tensors(identity_swaps, identity_replacements)
 
         installation_started = True
         for tensor, object_destinations in materialized:
@@ -827,6 +923,8 @@ def _swap_discovered_tensors(
     replacements: dict[int, torch.Tensor],
 ) -> None:
     """Preflight and swap a group of identity-preserving tensor replacements."""
+    if not objects:
+        return
     if not hasattr(torch.utils, "swap_tensors"):
         raise RuntimeError("GMS publisher rebinding requires torch.utils.swap_tensors")
 
@@ -836,6 +934,7 @@ def _swap_discovered_tensors(
         base = tensor_object.tensor._base
         if base is not None and id(base) in object_ids:
             group_base_uses[id(base)] = group_base_uses.get(id(base), 0) + 1
+    del base
 
     def base_depth(tensor_object: _DiscoveredTensor) -> int:
         depth = 0
@@ -897,8 +996,12 @@ def _swap_discovered_tensors(
 def rebind_nonparameter_tensors(
     gms_client_memory_manager: "GMSClientMemoryManager",
     model: torch.nn.Module,
+    *,
+    runtime_private_bindings: set[ModuleTensorBinding] | None = None,
 ) -> int:
-    """Clone each non-parameter-only GMS storage once."""
+    """Clone each selected runtime-private GMS storage component once."""
+    if runtime_private_bindings is None:
+        runtime_private_bindings = set()
     displaced_source_tensors = _get_displaced_source_tensors(model)
     storages = _match_storages_to_gms_mappings(
         _discover_module_storages(model),
@@ -908,7 +1011,7 @@ def rebind_nonparameter_tensors(
     candidates = [
         discovered_storage
         for discovered_storage, _, _ in storages
-        if not discovered_storage.has_parameter
+        if _is_runtime_private_storage(discovered_storage, runtime_private_bindings)
     ]
     for discovered_storage in candidates:
         _validate_discovered_storage(discovered_storage)
@@ -933,13 +1036,21 @@ def rebind_nonparameter_tensors(
         source_owners.append(source_owner)
         for tensor_object in discovered_storage.objects:
             tensor = tensor_object.tensor
-            replacements[id(tensor)] = _tensor_from_storage(
+            replacement = _tensor_from_storage(
                 target_storage,
                 list(tensor.shape),
                 list(tensor.stride()),
                 tensor.dtype,
                 int(tensor.storage_offset()),
             )
+            if isinstance(tensor, torch.nn.Parameter):
+                replacement = _make_parameter_from_template(
+                    tensor,
+                    replacement,
+                    requires_grad=tensor.requires_grad,
+                )
+            replacements[id(tensor)] = replacement
+            del replacement
             objects.append(tensor_object)
 
     _swap_discovered_tensors(objects, replacements)
@@ -950,4 +1061,12 @@ def rebind_nonparameter_tensors(
         )
     else:
         displaced_source_tensors.extend(source_owners)
-    return sum(discovered_storage.storage.nbytes() for discovered_storage in candidates)
+    rebound_bytes = sum(
+        discovered_storage.storage.nbytes() for discovered_storage in candidates
+    )
+    logger.info(
+        "[GMS] Cloned %d runtime-private storage components / %.2f MiB",
+        len(candidates),
+        rebound_bytes / (1 << 20),
+    )
+    return rebound_bytes

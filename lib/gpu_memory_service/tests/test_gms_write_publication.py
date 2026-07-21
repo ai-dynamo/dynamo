@@ -30,12 +30,15 @@ from gpu_memory_service.client.torch.module import (
     materialize_module_from_gms,
     rebind_nonparameter_tensors,
     register_module_tensors,
+    runtime_private_bindings_after,
+    snapshot_module_tensor_bindings,
 )
 from gpu_memory_service.client.torch.tensor import (
     STORAGE_MANIFEST_PREFIX,
     ModuleTensorBinding,
     ModuleTensorKind,
     StorageManifest,
+    StorageOwnership,
 )
 from gpu_memory_service.integrations.common import utils as common_utils
 from gpu_memory_service.integrations.trtllm import model_loader as trtllm_model_loader
@@ -147,7 +150,8 @@ def gms_allocator(monkeypatch):
     events = []
     allocator = _FakeAllocator(events)
 
-    def register(_allocator, _model):
+    def register(_allocator, _model, *, runtime_private_bindings=None):
+        assert runtime_private_bindings is None
         events.append("register")
         return {"weight"}
 
@@ -239,8 +243,9 @@ def test_manifest_groups_exact_alias_bindings_and_shared_storage_objects():
     manifest = msgspec.msgpack.decode(payload)
     assert allocation_id == "allocation"
     assert storage_base_offset == 0
-    assert set(manifest) == {"nbytes", "objects"}
+    assert set(manifest) == {"nbytes", "objects", "ownership"}
     assert manifest["nbytes"] == backing.untyped_storage().nbytes()
+    assert manifest["ownership"] == "runtime_private"
     assert len(manifest["objects"]) == 2
     first_object = manifest["objects"][0]
     assert first_object["dtype"] == "float32"
@@ -258,6 +263,159 @@ def test_manifest_groups_exact_alias_bindings_and_shared_storage_objects():
     ]
     typed = msgspec.msgpack.decode(payload, type=StorageManifest)
     assert typed.objects[0].bindings[0].kind is ModuleTensorKind.ATTRIBUTE
+    assert typed.ownership is StorageOwnership.RUNTIME_PRIVATE
+
+
+def test_manifest_ownership_missing_defaults_to_shared():
+    payload = msgspec.msgpack.encode({"nbytes": 4, "objects": []})
+
+    manifest = msgspec.msgpack.decode(payload, type=StorageManifest)
+
+    assert manifest.ownership is StorageOwnership.SHARED
+
+
+def test_post_load_binding_classification_tracks_new_and_replaced_objects():
+    model = torch.nn.Module()
+    original = torch.nn.Parameter(torch.arange(8, dtype=torch.float32))
+    model.register_parameter("weight", original)
+    unchanged = torch.arange(2, dtype=torch.float32)
+    model.unchanged = unchanged
+    before = snapshot_module_tensor_bindings(model)
+
+    replacement = torch.nn.Parameter(original.detach()[1:7], requires_grad=False)
+    model.register_parameter("weight", replacement)
+    model.runtime = replacement.detach()[::2]
+
+    private = runtime_private_bindings_after(before, model)
+
+    assert private == {
+        ModuleTensorBinding("weight", ModuleTensorKind.PARAMETER),
+        ModuleTensorBinding("runtime", ModuleTensorKind.ATTRIBUTE),
+    }
+
+
+def test_runtime_private_parameter_component_clones_once_and_round_trips(
+    monkeypatch,
+    cpu_storage_pointer,
+):
+    backing = torch.arange(16, dtype=torch.float32)
+    parameter = torch.nn.Parameter(backing[1:13:2], requires_grad=True)
+    overlap = backing[3:15:2]
+    disjoint = backing[0:1]
+    model = torch.nn.Module()
+    model.register_parameter("weight", parameter)
+    model.weight_alias = parameter
+    model.overlap = overlap
+    model.disjoint = disjoint
+    before = {}
+    private = runtime_private_bindings_after(before, model)
+    store, writer = _writer_for_tensor(backing)
+
+    register_module_tensors(
+        writer,
+        model,
+        runtime_private_bindings=private,
+    )
+    manifest = msgspec.msgpack.decode(next(iter(store.entries.values()))[2])
+    assert manifest["ownership"] == "runtime_private"
+
+    old_objects = (parameter, overlap, disjoint)
+    old_storage = backing.untyped_storage()._cdata
+    clone_calls = 0
+    original_clone = torch.UntypedStorage.clone
+
+    def count_clone(storage):
+        nonlocal clone_calls
+        clone_calls += 1
+        return original_clone(storage)
+
+    monkeypatch.setattr(torch.UntypedStorage, "clone", count_clone)
+    rebound_bytes = rebind_nonparameter_tensors(
+        writer,
+        model,
+        runtime_private_bindings=private,
+    )
+
+    assert rebound_bytes == backing.untyped_storage().nbytes()
+    assert clone_calls == 1
+    assert (model.weight, model.overlap, model.disjoint) == old_objects
+    assert model.weight is model.weight_alias is parameter
+    assert model.overlap is overlap
+    assert model.disjoint is disjoint
+    assert type(model.weight) is torch.nn.Parameter
+    assert model.weight.requires_grad
+    storage_ids = {
+        tensor.untyped_storage()._cdata
+        for tensor in (model.weight, model.overlap, model.disjoint)
+    }
+    assert len(storage_ids) == 1
+    assert old_storage not in storage_ids
+    assert (model.weight.storage_offset(), model.weight.stride()) == (1, (2,))
+    assert (model.overlap.storage_offset(), model.overlap.stride()) == (3, (2,))
+    assert (model.disjoint.storage_offset(), model.disjoint.stride()) == (0, (1,))
+    model.weight[1].detach().fill_(99)
+    assert model.overlap[0].item() == 99
+
+    reader_model = torch.nn.Module()
+    reader_parameter = torch.nn.Parameter(
+        torch.empty_strided((6,), (2,), device="meta"), requires_grad=False
+    )
+    reader_overlap = torch.empty_strided((6,), (2,), device="meta")
+    reader_disjoint = torch.empty(1, device="meta")
+    reader_model.register_parameter("weight", reader_parameter)
+    reader_model.weight_alias = reader_parameter
+    reader_model.overlap = reader_overlap
+    reader_model.disjoint = reader_disjoint
+    reader = _Manager(store, writer.allocations, mapped=False)
+    clone_calls = 0
+    materialize_module_from_gms(reader, reader_model, device_index=0)
+
+    assert clone_calls == 1
+    assert reader_model.weight is reader_model.weight_alias is reader_parameter
+    assert reader_model.overlap is reader_overlap
+    assert reader_model.disjoint is reader_disjoint
+    assert reader_model.weight.requires_grad
+    assert reader_model.weight.untyped_storage()._cdata == (
+        reader_model.overlap.untyped_storage()._cdata
+    )
+    assert reader_model.weight.untyped_storage()._cdata == (
+        reader_model.disjoint.untyped_storage()._cdata
+    )
+    assert (reader_model.weight.storage_offset(), reader_model.weight.stride()) == (
+        1,
+        (2,),
+    )
+    assert (reader_model.overlap.storage_offset(), reader_model.overlap.stride()) == (
+        3,
+        (2,),
+    )
+    assert (
+        reader_model.disjoint.storage_offset(),
+        reader_model.disjoint.stride(),
+    ) == (0, (1,))
+
+
+def test_normal_parameter_component_remains_shared(cpu_storage_pointer):
+    parameter = torch.nn.Parameter(torch.arange(4, dtype=torch.float32))
+    writer_model = torch.nn.Module()
+    writer_model.register_parameter("weight", parameter)
+    store, writer = _writer_for_tensor(parameter)
+    register_module_tensors(writer, writer_model)
+    manifest = msgspec.msgpack.decode(next(iter(store.entries.values()))[2])
+    assert manifest["ownership"] == "shared"
+
+    reader_model = torch.nn.Module()
+    reader_model.register_parameter(
+        "weight",
+        torch.nn.Parameter(torch.empty(4, device="meta")),
+    )
+    reader = _Manager(store, writer.allocations, mapped=False)
+    materialize_module_from_gms(reader, reader_model, device_index=0)
+
+    assert (
+        reader_model.weight.untyped_storage().data_ptr()
+        == parameter.untyped_storage().data_ptr()
+    )
 
 
 def test_reader_uses_source_topology_and_binding_forms(cpu_storage_pointer):
@@ -1194,6 +1352,107 @@ def test_write_load_failure_uses_best_effort_close_and_preserves_error(monkeypat
 
     assert events == ["close_best_effort"]
     assert not model_loader.has_pending_gms_write()
+
+
+def test_write_mode_classifies_bindings_around_post_load(monkeypatch):
+    events = []
+    model = torch.nn.Module()
+    original = torch.nn.Parameter(torch.arange(8, dtype=torch.float32))
+    model.register_parameter("weight", original)
+    loader_utils = ModuleType("vllm.model_executor.model_loader.utils")
+    loader_utils.initialize_model = lambda **_kwargs: (
+        events.append("initialize") or model
+    )
+
+    def post_load(loaded_model, *_args):
+        events.append("post-load")
+        replacement = torch.nn.Parameter(
+            loaded_model.weight.detach()[1:7],
+            requires_grad=False,
+        )
+        loaded_model.register_parameter("weight", replacement)
+        loaded_model.runtime = replacement.detach()[::2]
+
+    loader_utils.process_weights_after_loading = post_load
+    torch_utils = ModuleType("vllm.utils.torch_utils")
+    torch_utils.set_default_torch_dtype = lambda _dtype: nullcontext()
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm.model_executor.model_loader.utils",
+        loader_utils,
+    )
+    monkeypatch.setitem(sys.modules, "vllm.utils.torch_utils", torch_utils)
+    monkeypatch.setattr(
+        model_loader,
+        "gms_use_mem_pool",
+        lambda *_args: nullcontext(),
+    )
+    monkeypatch.setattr(model_loader, "get_mx_load_context", lambda *_args: None)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: events.append("empty-cache"))
+    default_loader = SimpleNamespace(
+        load_weights=lambda *_args: events.append("load-weights")
+    )
+    observed = []
+
+    def prepare(_client, _model, *, runtime_private_bindings):
+        events.append("prepare")
+        observed.append(runtime_private_bindings)
+        return common_utils.GMSCommittedMemoryStats(16, 0)
+
+    def rebind(_client, _model, *, runtime_private_bindings):
+        events.append("rebind")
+        assert runtime_private_bindings is observed[0]
+        return 8
+
+    monkeypatch.setattr(model_loader, "prepare_gms_write", prepare)
+    monkeypatch.setattr(model_loader, "rebind_nonparameter_tensors", rebind)
+    monkeypatch.setattr(
+        model_loader,
+        "_store_pending_gms_write",
+        lambda *_args: events.append("store-pending"),
+    )
+
+    result = model_loader._load_write_mode_impl(
+        object(),
+        object(),
+        SimpleNamespace(dtype=torch.float32),
+        default_loader,
+        torch.device("cpu"),
+    )
+
+    assert result is model
+    assert events == [
+        "initialize",
+        "load-weights",
+        "post-load",
+        "empty-cache",
+        "prepare",
+        "rebind",
+        "store-pending",
+    ]
+    assert observed == [
+        {
+            ModuleTensorBinding("weight", ModuleTensorKind.PARAMETER),
+            ModuleTensorBinding("runtime", ModuleTensorKind.ATTRIBUTE),
+        }
+    ]
+
+
+def test_write_mode_fails_closed_when_mx_owns_post_load(monkeypatch):
+    monkeypatch.setattr(
+        model_loader,
+        "get_mx_load_context",
+        lambda *_args: object(),
+    )
+
+    with pytest.raises(RuntimeError, match="ModelExpress owns post-load"):
+        model_loader._load_write_mode_impl(
+            object(),
+            object(),
+            SimpleNamespace(dtype=torch.float32),
+            object(),
+            torch.device("cpu"),
+        )
 
 
 def test_read_mode_runs_meta_post_load_once_before_materialization(

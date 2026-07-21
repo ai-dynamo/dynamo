@@ -22,6 +22,13 @@ class ModuleTensorKind(str, Enum):
     ATTRIBUTE = "attribute"
 
 
+class StorageOwnership(str, Enum):
+    """Classify the runtime owner of a published storage component."""
+
+    SHARED = "shared"
+    RUNTIME_PRIVATE = "runtime_private"
+
+
 class ModuleTensorBinding(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     """Name one module binding for a tensor object."""
 
@@ -45,6 +52,7 @@ class StorageManifest(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
 
     nbytes: int
     objects: tuple[TensorObject, ...]
+    ownership: StorageOwnership = StorageOwnership.SHARED
 
 
 def _dtype_from_name(name: str) -> torch.dtype:

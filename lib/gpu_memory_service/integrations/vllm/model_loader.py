@@ -22,6 +22,8 @@ from gpu_memory_service.client.torch.allocator import (
 from gpu_memory_service.client.torch.module import (
     materialize_module_from_gms,
     rebind_nonparameter_tensors,
+    runtime_private_bindings_after,
+    snapshot_module_tensor_bindings,
 )
 from gpu_memory_service.common.locks import GrantedLockType
 from gpu_memory_service.common.utils import get_socket_path
@@ -38,7 +40,6 @@ if os.environ.get("MX_ENABLED", "0") == "1":
     try:
         from modelexpress.engines.vllm.adapter import build_vllm_load_context
         from modelexpress.load_strategy import (
-            LoadStrategyChain,
             publish_metadata,
             register_tensors,
         )
@@ -142,9 +143,8 @@ def abort_pending_gms_write() -> bool:
 # =============================================================================
 # MX (ModelExpress) Integration — Optional P2P weight transfer
 #
-# Write mode: delegates to LoadStrategyChain which handles weight loading
-#   (RDMA P2P -> ModelStreamer -> GDS -> disk), post-processing, NIXL
-#   registration, and metadata publishing.
+# Write mode: currently rejected because the strategy chain owns post-processing,
+#   hiding the boundary needed to classify runtime-private storage.
 # Read mode: uses register_tensors + publish_metadata directly to make
 #   GMS-imported tensors available as a P2P source.
 # =============================================================================
@@ -318,20 +318,24 @@ def _load_write_mode_impl(
     Deferring the commit keeps waiting RO consumers (snapshot saver, peer
     engines) off the device while vLLM profiles memory.
 
-    When MX is active, uses LoadStrategyChain for automatic weight source
-    detection (RDMA P2P -> ModelStreamer -> GDS -> disk) with fallback.
-    The chain also handles NIXL registration and metadata publishing.
+    ModelExpress write mode fails closed because its strategy chain owns
+    post-load processing and does not expose the classification boundary.
     """
     if _pending_gms_client is not None:
         raise RuntimeError("A GMS write is already awaiting publication")
+
+    mx_ctx = get_mx_load_context(vllm_config, model_config)
+    if mx_ctx is not None:
+        raise RuntimeError(
+            "GMS write mode cannot classify runtime-private storage when "
+            "ModelExpress owns post-load processing"
+        )
 
     from vllm.model_executor.model_loader.utils import (
         initialize_model,
         process_weights_after_loading,
     )
     from vllm.utils.torch_utils import set_default_torch_dtype
-
-    mx_ctx = get_mx_load_context(vllm_config, model_config)
 
     # Allocate model tensors using GMS memory pool
     with set_default_torch_dtype(model_config.dtype):
@@ -341,19 +345,27 @@ def _load_write_mode_impl(
                     vllm_config=vllm_config, model_config=model_config
                 )
 
-            if mx_ctx is not None:
-                # Full MX load strategy chain: RDMA -> ModelStreamer -> GDS -> Default
-                LoadStrategyChain.run(model, mx_ctx)
-            else:
-                default_loader.load_weights(model, model_config)
-                process_weights_after_loading(model, model_config, target_device)
+            default_loader.load_weights(model, model_config)
+            bindings_before_post_load = snapshot_module_tensor_bindings(model)
+            process_weights_after_loading(model, model_config, target_device)
+            runtime_private_bindings = runtime_private_bindings_after(
+                bindings_before_post_load, model
+            )
 
             torch.cuda.empty_cache()
 
-    stats = prepare_gms_write(gms_client, model)
+    stats = prepare_gms_write(
+        gms_client,
+        model,
+        runtime_private_bindings=runtime_private_bindings,
+    )
     # The private clones must exist before vLLM profiles memory so the
     # profiled peak covers them.
-    rebound_bytes = rebind_nonparameter_tensors(gms_client, model)
+    rebound_bytes = rebind_nonparameter_tensors(
+        gms_client,
+        model,
+        runtime_private_bindings=runtime_private_bindings,
+    )
     _store_pending_gms_write(gms_client, stats, rebound_bytes)
 
     logger.info(
