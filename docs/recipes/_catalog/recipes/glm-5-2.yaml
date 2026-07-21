@@ -1,0 +1,121 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: glm-5-2
+title: GLM-5.2
+page: recipes/glm-5-2.mdx
+provider: zai
+model:
+  name: GLM-5.2
+  hf_id: nvidia/GLM-5.2-NVFP4 (B200) / zai-org/GLM-5.2-FP8 (H200)
+  precision: NVFP4 + FP8 KV (B200) / FP8 + FP8 KV (H200)
+status: validated
+targets:
+- id: sglang-agg-b200
+  recommended: false
+  hardware:
+    gpu: B200
+    count: 4
+  runtime:
+    framework: sglang
+  topology: aggregated
+  techniques:
+  - nvfp4
+  - fp8-kv-cache
+  - eagle-mtp-spec-dec
+  - kv-aware-routing
+  - hicache-cpu-offload
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 64
+  deploy:
+    asset: recipes/glm-5.2/sglang/agg-b200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/glm-5.2/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 176.42 output tok/s/GPU, 57.49 user tok/s P50, TTFT P50 355.6 ms at concurrency 64 (15% agentic trace subset)
+- id: sglang-disagg-b200
+  recommended: false
+  hardware:
+    gpu: B200
+    count: 12
+  runtime:
+    framework: sglang
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - nvfp4
+  - fp8-kv-cache
+  - eagle-mtp-spec-dec
+  - kv-aware-routing
+  - hicache-cpu-offload
+  - nixl-ucx
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 128
+  deploy:
+    asset: recipes/glm-5.2/sglang/disagg-b200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/glm-5.2/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 320.91 output tok/s/GPU, 65.11 user tok/s P50, TTFT P50 1938.1 ms at concurrency 128 (3P1D, 15% agentic trace subset)
+- id: sglang-agg-h200
+  recommended: false
+  hardware:
+    gpu: H200
+    count: 8
+  runtime:
+    framework: sglang
+  topology: aggregated
+  techniques:
+  - fp8
+  - fp8-kv-cache
+  - eagle-mtp-spec-dec
+  - kv-aware-routing
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 32
+  deploy:
+    asset: recipes/glm-5.2/sglang/agg-h200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/glm-5.2/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 54.55 output tok/s/GPU, 52.37 user tok/s P50, TTFT P50 1790 ms at concurrency 32 (3 workers, 15% agentic trace subset)
+- id: sglang-disagg-h200
+  recommended: false
+  hardware:
+    gpu: H200
+    count: 16
+  runtime:
+    framework: sglang
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - fp8
+  - fp8-kv-cache
+  - eagle-mtp-spec-dec
+  - kv-aware-routing
+  - nixl-ucx
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 24
+  deploy:
+    asset: recipes/glm-5.2/sglang/disagg-h200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/glm-5.2/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 68.86 output tok/s/GPU, 53.88 user tok/s P50, TTFT P50 1874 ms at concurrency 24 (1P1D, 15% agentic trace subset)
+related_benchmarks: []
+maintainer: milesial
+gaps:
+- Source recipe tree (recipes/glm-5.2/) lands in PR #11448; source links and asset-path validation resolve once that PR merges to main
+- Full 1M context not supported out of the box (B200 capped at 500K, H200 at 250K)
+- n>1 requests unsupported on the disaggregated targets
