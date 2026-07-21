@@ -29,6 +29,7 @@ ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG VLLM_OMNI_REF
 ARG NIXL_REF
+ARG DYNAMO_COMMIT_SHA
 {% if device == "cuda" %}
 ARG CUDA_MAJOR
 ARG FLASHINFER_GIT_URL
@@ -38,6 +39,7 @@ ARG VLLM_GIT_URL
 ARG VLLM_GIT_REF
 ARG VLLM_GIT_SHA
 ARG VLLM_INSTALL_MODE=auto
+ARG BASELINE_SBOM_FILE
 ARG VLLM_RUNTIME_BASE_IMAGE
 {% endif %}
 ARG MODELEXPRESS_VERSION
@@ -337,8 +339,12 @@ RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/
 
 USER dynamo
 
-ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
+LABEL org.opencontainers.image.revision=${DYNAMO_COMMIT_SHA} \
+    ai.dynamo.vllm.base-image=${VLLM_RUNTIME_BASE_IMAGE} \
+    ai.dynamo.vllm.install-mode=${VLLM_INSTALL_MODE} \
+    ai.dynamo.vllm.source-sha=${VLLM_GIT_SHA} \
+    ai.dynamo.flashinfer.source-sha=${FLASHINFER_GIT_SHA}
 
 # Reset the upstream "vllm serve" entrypoint so the derived runtime behaves
 # like other Dynamo images and can execute arbitrary commands directly.

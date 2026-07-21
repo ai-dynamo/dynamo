@@ -14,15 +14,22 @@ import sys
 from pathlib import Path
 from typing import Any
 
-EXPECTED_BASE_COMMIT = "8e981630c9336233ca9de91452f68918bddbc4e2"
+EXPECTED_BASE_COMMIT = "dcfebf93f4eccf30f71872283331eee757915daf"
 EXPECTED_BASE_DIGEST = (
-    "sha256:f2ac337893360e23462249c3897e1c92dc8ba8a1ebbc3dd15c4ac931e957438e"
+    "sha256:7f2bc168366c77fbd8329368f00310d208531c14ece6c2de31a6611ef99f6ec8"
 )
-EXPECTED_VLLM_HEAD = "c764a139c99a1c1e9ba18f2f210054017aab1a33"
-EXPECTED_FLASHINFER_SHA = "c64cc4a8c44a5bfb494a40ae2f1ba210080a9d6b"
+EXPECTED_VLLM_URL = "https://github.com/vllm-project/vllm.git"
+EXPECTED_VLLM_REF = "af259f998ff7301504829d2551c746502afe2f0a"
+EXPECTED_VLLM_HEAD = "af259f998ff7301504829d2551c746502afe2f0a"
+EXPECTED_VLLM_HEAD_TREE = "bf3b2afdc9082606129662909c5a417df9a8d533"
+EXPECTED_MERGE_BASE = "c4f5cd60dae386d106c9b8a12dbab24e2e9dda0b"
+EXPECTED_COMPOSED_TREE = "72e7896e8bd04ba92d9ee6c446875c3745fc2668"
+EXPECTED_FLASHINFER_URL = "https://github.com/flashinfer-ai/flashinfer.git"
+EXPECTED_FLASHINFER_REF = "8eccd0c1352165302840c0e19066bc42d36dbd7a"
+EXPECTED_FLASHINFER_SHA = "8eccd0c1352165302840c0e19066bc42d36dbd7a"
 EXPECTED_FLASHINFER_VERSION = "0.6.15"
 EXPECTED_AMD64_DIGEST = (
-    "sha256:39e8d18a3b41e382f1955a3241326ec0fe61615fd51c7eef836fe606c0bfb887"
+    "sha256:99e7dd3cf74c489af0615671f3fdbde182de2930f1195a0ee39e914e38033a88"
 )
 BASELINE_PATH = Path("/opt/dynamo/nightly-base-provenance.json")
 OVERLAY_PROVENANCE_PATH = Path("/opt/dynamo/vllm-overlay-provenance.txt")
@@ -35,8 +42,7 @@ OVERLAY_PATHS = (
     "vllm/distributed/device_communicators/cuda_communicator.py",
     "vllm/distributed/device_communicators/flashinfer_all_reduce.py",
     "vllm/distributed/parallel_state.py",
-    "vllm/model_executor/layers/fused_moe/expert_map_manager.py",
-    "vllm/v1/worker/gpu_model_runner.py",
+    "vllm/v1/worker/gpu_worker.py",
 )
 
 
@@ -240,17 +246,37 @@ def validate() -> None:
     if current != baseline:
         raise RuntimeError("Nightly native vLLM/Torch/NCCL stack changed")
     source = parse_source_provenance(SOURCE_PROVENANCE_PATH)
+    dynamo_sha = os.environ.get("DYNAMO_COMMIT_SHA", "")
+    if len(dynamo_sha) != 40 or any(
+        char not in "0123456789abcdef" for char in dynamo_sha
+    ):
+        raise RuntimeError(f"Invalid Dynamo source SHA: {dynamo_sha!r}")
     expected_provenance = {
+        "dynamo_source_sha": dynamo_sha,
         "install_mode": "python-overlay",
         "vllm_runtime_base_image": ("vllm/vllm-openai@" + EXPECTED_BASE_DIGEST),
         "vllm_runtime_index_digest": EXPECTED_BASE_DIGEST,
         "vllm_runtime_amd64_digest": EXPECTED_AMD64_DIGEST,
+        "vllm_runtime_baseline_sbom": "vllm-openai@7f2bc168",
         "vllm_base_commit": EXPECTED_BASE_COMMIT,
+        "vllm_source_url": EXPECTED_VLLM_URL,
+        "vllm_source_ref": EXPECTED_VLLM_REF,
         "vllm_source_sha": EXPECTED_VLLM_HEAD,
-        "vllm_overlay_commits": "3",
+        "vllm_source_tree": EXPECTED_VLLM_HEAD_TREE,
+        "vllm_merge_base": EXPECTED_MERGE_BASE,
+        "vllm_composed_tree": EXPECTED_COMPOSED_TREE,
+        "vllm_pr_commits": "5",
         "vllm_overlay_files": str(len(OVERLAY_PATHS)),
+        "flashinfer_source_url": EXPECTED_FLASHINFER_URL,
+        "flashinfer_source_ref": EXPECTED_FLASHINFER_REF,
         "flashinfer_source_sha": EXPECTED_FLASHINFER_SHA,
         "flashinfer_source_version": EXPECTED_FLASHINFER_VERSION,
+        "flashinfer_pr3950_implementation_blob": (
+            "3ab1d3258545837b66d7beed340311f8f86317f2"
+        ),
+        "flashinfer_pr3950_test_blob": (
+            "54bd6a96935b4773e5a691bff90790b6c746e6b6"
+        ),
     }
     mismatches = {
         key: source.get(key)
