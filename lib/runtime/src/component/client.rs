@@ -463,7 +463,7 @@ pub struct Client {
     /// Interval for periodic reconciliation of instance_avail with instance_source.
     /// This ensures instances removed via `report_instance_down` are eventually restored.
     reconcile_interval: Duration,
-    /// DIS-2404: workers fenced on death/deregistration. Independent of the
+    /// workers fenced on death/deregistration. Independent of the
     /// routing snapshot — read only by the KV-router's `RoutingEligibility` to
     /// reject dead workers on every path (availability overrides cache affinity)
     /// while the candidate watch catches up, and to break a sticky session
@@ -472,7 +472,7 @@ pub struct Client {
     fenced_instances: Arc<std::sync::RwLock<HashMap<u64, std::time::Instant>>>,
 }
 
-/// DIS-2404: how long a fenced (dead) worker stays fenced. Only needs to exceed
+/// how long a fenced (dead) worker stays fenced. Only needs to exceed
 /// the candidate-watch convergence window — the affinity path re-binds after a
 /// single fenced rejection (`select_with_affinity`) — with margin. TTL-bounded
 /// so churn of unique-per-lease ids cannot grow the fenced set without limit.
@@ -622,7 +622,7 @@ impl Client {
         self.routing_instances.overloaded_ids()
     }
 
-    /// DIS-2404: fence workers that were just removed from discovery (dead /
+    /// fence workers that were just removed from discovery (dead /
     /// deregistered). A fenced worker is rejected by the KV-router on every
     /// eligibility path — unlike overload, it is not ignored by cache-affinity.
     pub fn fence_instances_removed(&self, removed_instance_ids: &[u64]) {
@@ -655,11 +655,7 @@ impl Client {
             .filter(|(_, fenced_at)| now.duration_since(**fenced_at) < FENCE_TTL)
             .map(|(id, _)| *id)
             .collect();
-        if live.is_empty() {
-            None
-        } else {
-            Some(live)
-        }
+        if live.is_empty() { None } else { Some(live) }
     }
 
     /// Monitor the key-value instance source and update instance_avail.

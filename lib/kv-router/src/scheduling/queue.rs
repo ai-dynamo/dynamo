@@ -227,7 +227,7 @@ struct SchedulerQueueActor<
     overlap_scores_refresh: Option<Arc<RF>>,
     overlap_refresh_after: Option<Duration>,
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
-    // DIS-2404: fenced (dead) workers, rejected on every eligibility path.
+    // fenced (dead) workers, rejected on every eligibility path.
     fenced_worker_provider: Option<FencedWorkerProvider>,
 }
 

@@ -36,7 +36,7 @@ pub enum WorkerEligibilityError {
 pub struct RoutingEligibility<'a> {
     allowed_worker_ids: Option<&'a HashSet<WorkerId>>,
     overloaded_worker_ids: Option<&'a HashSet<WorkerId>>,
-    // DIS-2404: workers fenced on death/deregistration. Unlike `overloaded`
+    // workers fenced on death/deregistration. Unlike `overloaded`
     // (a transient, affinity-ignorable condition), a fenced worker is never
     // eligible on any path — availability overrides cache affinity.
     fenced_worker_ids: Option<&'a HashSet<WorkerId>>,
@@ -376,7 +376,7 @@ mod tests {
         );
     }
 
-    // DIS-2404: a fenced (dead/deregistered) worker must be rejected on rank
+    // a fenced (dead/deregistered) worker must be rejected on rank
     // validation even though it is allowed, in range, taint-compatible, and not
     // overloaded — availability overrides cache affinity.
     #[test]
@@ -395,7 +395,7 @@ mod tests {
         );
     }
 
-    // DIS-2404: unlike transient overload (which the affinity/pinned pre-validation
+    // unlike transient overload (which the affinity/pinned pre-validation
     // path deliberately ignores), a fence must NOT be ignored — a dead worker is
     // never eligible, even for a cache-hit affinity pin.
     #[test]

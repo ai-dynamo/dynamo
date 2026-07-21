@@ -282,7 +282,7 @@ where
         let overloaded_worker_provider: OverloadedWorkerProvider =
             Arc::new(move || client_for_overload.overloaded_instance_ids());
 
-        // DIS-2404: fenced (dead) workers, populated by the worker monitor on
+        // fenced (dead) workers, populated by the worker monitor on
         // discovery removal and read at selection to reject them everywhere.
         let client_for_fence = client.clone();
         let fenced_worker_provider: FencedWorkerProvider =

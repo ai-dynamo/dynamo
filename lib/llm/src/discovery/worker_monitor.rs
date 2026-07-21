@@ -825,7 +825,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         worker_load_states.retain(|lease_id, _| runtime_configs.contains_key(lease_id));
                         overloaded_tracker.remove_workers(&removed_workers);
                         client.clear_overloaded_instances_for_removed(&removed_workers);
-                        // DIS-2404: fence removed workers so the router stops selecting
+                        // fence removed workers so the router stops selecting
                         // them (candidate/affinity) before the candidate watch converges.
                         client.fence_instances_removed(&removed_workers);
                         // Mirror the prune to the prefill Client (disagg). Prefill workers are
