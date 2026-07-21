@@ -109,21 +109,35 @@ fn validate_dynamo_trace_block_size(expected: Option<usize>, embedded: usize) ->
     Ok(())
 }
 
-fn synthesize_trace_tokens(
+pub(super) fn validate_synthesizable_prompt(
+    input_length: usize,
+    hash_ids: &[u64],
+    trace_block_size: usize,
+) -> Result<()> {
+    if trace_block_size == 0 {
+        bail!("trace_block_size must be greater than 0");
+    }
+    let synthesizable_capacity = hash_ids
+        .len()
+        .checked_mul(trace_block_size)
+        .context("synthesized prompt capacity overflow")?;
+    if synthesizable_capacity < input_length {
+        bail!(
+            "input_length {} exceeds synthesized capacity {}",
+            input_length,
+            synthesizable_capacity
+        );
+    }
+
+    Ok(())
+}
+
+pub(super) fn synthesize_trace_tokens(
     input_length: usize,
     hash_ids: &[u64],
     trace_block_size: usize,
 ) -> Result<Vec<u32>> {
-    if trace_block_size == 0 {
-        bail!("trace_block_size must be greater than 0");
-    }
-    if hash_ids.len() * trace_block_size < input_length {
-        bail!(
-            "input_length {} exceeds synthesized capacity {}",
-            input_length,
-            hash_ids.len() * trace_block_size
-        );
-    }
+    validate_synthesizable_prompt(input_length, hash_ids, trace_block_size)?;
 
     let mut tokens = Vec::with_capacity(input_length);
     for &hash_id in hash_ids {

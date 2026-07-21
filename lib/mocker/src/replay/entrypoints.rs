@@ -83,9 +83,12 @@ fn single_turn_trace_requests(
     trace_format: TraceFileFormat,
     trace: &Trace,
 ) -> Result<Option<Vec<DirectRequest>>> {
+    // Dynamo request traces retain compact prompt hashes in WorkloadDriver and
+    // materialize only ready requests. The legacy Mooncake path predates that
+    // representation and is intentionally unchanged here.
     if matches!(
         trace_format,
-        TraceFileFormat::Mooncake | TraceFileFormat::MooncakeDelta | TraceFileFormat::Dynamo
+        TraceFileFormat::Mooncake | TraceFileFormat::MooncakeDelta
     ) && trace.is_single_turn()
     {
         // The timestamped request path expects every request to carry an
@@ -1498,7 +1501,7 @@ mod tests {
     }
 
     #[test]
-    fn single_turn_request_trace_formats_use_request_path() {
+    fn single_turn_legacy_trace_formats_use_request_path() {
         let trace = Trace {
             block_size: 4,
             sessions: vec![
@@ -1527,7 +1530,7 @@ mod tests {
             ],
         };
 
-        for trace_format in [TraceFileFormat::Mooncake, TraceFileFormat::Dynamo] {
+        for trace_format in [TraceFileFormat::Mooncake, TraceFileFormat::MooncakeDelta] {
             let requests = single_turn_trace_requests(trace_format, &trace)
                 .unwrap()
                 .expect("single-turn traces should become request traces");
@@ -1536,6 +1539,13 @@ mod tests {
             assert_eq!(requests[0].arrival_timestamp_ms, Some(0.0));
             assert_eq!(requests[1].arrival_timestamp_ms, Some(0.0));
         }
+
+        assert!(
+            single_turn_trace_requests(TraceFileFormat::Dynamo, &trace)
+                .unwrap()
+                .is_none(),
+            "Dynamo traces must retain compact prompts in the workload path"
+        );
     }
 
     #[test]
@@ -1555,7 +1565,7 @@ mod tests {
             }],
         };
 
-        for trace_format in [TraceFileFormat::Mooncake, TraceFileFormat::Dynamo] {
+        for trace_format in [TraceFileFormat::Mooncake, TraceFileFormat::MooncakeDelta] {
             let err = single_turn_trace_requests(trace_format, &trace)
                 .expect_err("missing first_arrival_timestamp_ms must error before reaching the timestamped request path");
             assert!(
