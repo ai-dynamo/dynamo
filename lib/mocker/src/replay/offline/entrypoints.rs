@@ -1177,12 +1177,22 @@ mod tests {
     struct LengthLatency;
 
     impl AicCallback for LengthLatency {
-        fn predict_prefill(&self, _batch_size: usize, effective_isl: usize, _prefix: usize) -> f64 {
-            effective_isl as f64
+        fn predict_prefill(
+            &self,
+            _batch_size: usize,
+            effective_isl: usize,
+            _prefix: usize,
+        ) -> anyhow::Result<f64> {
+            Ok(effective_isl as f64)
         }
 
-        fn predict_decode(&self, _batch_size: usize, _isl: usize, _osl: usize) -> f64 {
-            1.0
+        fn predict_decode(
+            &self,
+            _batch_size: usize,
+            _isl: usize,
+            _osl: usize,
+        ) -> anyhow::Result<f64> {
+            Ok(1.0)
         }
     }
 

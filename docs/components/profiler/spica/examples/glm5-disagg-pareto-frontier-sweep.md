@@ -12,8 +12,8 @@ subtitle: Experimental Spica search for a GLM-5-FP8 Pareto frontier on B200 GPUs
 
 > [!IMPORTANT]
 > This experiment uses `kv_load_ratio` and requires an AI Configurator release that provides
-> `aiconfigurator.sdk.memory`. It fails closed in the default Planner/Profiler image, which currently
-> retains AI Configurator 0.9.
+> `aiconfigurator.sdk.memory`. It fails fast before search starts in the default Planner/Profiler
+> image, which currently retains AI Configurator 0.9.
 
 This replay-backed sweep targets the InferenceX/SemiAnalysis (SA) **GLM-5-FP8 / B200 /
 Dynamo with SGLang / 1k-1k / disaggregated** frontier. It tests whether Spica can discover competitive

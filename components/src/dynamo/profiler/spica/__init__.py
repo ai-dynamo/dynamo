@@ -10,10 +10,6 @@ provided for stable Dynamo APIs.
 
 from __future__ import annotations
 
-# First, before anything (lazily) imports vizier/jax: pin JAX to CPU + quiet the
-# jax/equinox/jaxopt import noise the Vizier GP-bandit pulls in. See
-# dynamo.profiler.spica._quiet.
-from . import _quiet as _quiet
 from .config import (
     Candidate,
     OptimizationGoal,

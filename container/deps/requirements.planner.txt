@@ -30,7 +30,6 @@ prophet==1.2.1
 protobuf>=5.29.5,<7.0.0
 scikit-learn==1.7.2
 scipy>=1.14.0,<2.0
-tensorflow-probability[jax]==0.25.0; python_version < '3.13'
 # Vizier's open-ended tfp-nightly dependency can select an incompatible future
 # build; pin the validated release used by experimental Spica.
-tfp-nightly==0.26.0.dev20260626; python_version < '3.13'
+tfp-nightly[jax]==0.26.0.dev20260626; python_version < '3.13'

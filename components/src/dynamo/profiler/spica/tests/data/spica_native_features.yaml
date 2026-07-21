@@ -59,5 +59,4 @@ sweep:
   max_rounds: 1
   parallel_evals: 1
   candidates_per_round: 1
-  random_seed: 1
   max_eval_seconds: 180

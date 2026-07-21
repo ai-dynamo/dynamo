@@ -24,6 +24,18 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         item.add_marker(pytest.mark.gpu_0)
         item.add_marker(pytest.mark.planner)
         item.add_marker(pytest.mark.pre_merge)
+        # Pinned third-party dependencies still use these deprecated APIs. Keep
+        # warning-as-error enabled for every other warning in the Spica suite.
+        item.add_marker(
+            pytest.mark.filterwarnings(
+                r"ignore:jax\.core\.Primitive is deprecated.*:DeprecationWarning:(equinox|jax)(\..*)?"
+            )
+        )
+        item.add_marker(
+            pytest.mark.filterwarnings(
+                r"ignore:datetime\.datetime\.utcnow\(\) is deprecated.*:DeprecationWarning:google\.protobuf\.internal\.well_known_types"
+            )
+        )
         if item_path.name in _INTEGRATION_TESTS:
             item.add_marker(pytest.mark.integration)
             item.add_marker(pytest.mark.timeout(300))

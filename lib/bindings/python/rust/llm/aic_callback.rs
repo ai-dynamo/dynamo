@@ -36,12 +36,6 @@ pub(super) struct PyAicCallback {
     session: Py<PyAny>,
 }
 
-// PyAicCallback enters Python only through Python::with_gil.
-#[cfg(feature = "aic-forward-pass")]
-unsafe impl Send for PyAicCallback {}
-#[cfg(feature = "aic-forward-pass")]
-unsafe impl Sync for PyAicCallback {}
-
 #[cfg(feature = "aic-forward-pass")]
 impl PyAicCallback {
     fn predict_prefill_ms(
@@ -60,18 +54,23 @@ impl PyAicCallback {
 
 #[cfg(feature = "aic-forward-pass")]
 impl AicCallback for PyAicCallback {
-    fn predict_prefill(&self, batch_size: usize, effective_isl: usize, prefix: usize) -> f64 {
+    fn predict_prefill(
+        &self,
+        batch_size: usize,
+        effective_isl: usize,
+        prefix: usize,
+    ) -> anyhow::Result<f64> {
         self.predict_prefill_ms(batch_size, effective_isl, prefix)
-            .unwrap_or_else(|e| panic!("AIC predict_prefill (python) failed: {e}"))
+            .map_err(|error| anyhow::anyhow!("AIC predict_prefill (python) failed: {error}"))
     }
 
-    fn predict_decode(&self, batch_size: usize, isl: usize, osl: usize) -> f64 {
+    fn predict_decode(&self, batch_size: usize, isl: usize, osl: usize) -> anyhow::Result<f64> {
         Python::with_gil(|py| {
             self.session
                 .call_method1(py, "predict_decode", (batch_size, isl, osl))
                 .and_then(|result| result.extract::<f64>(py))
-                .unwrap_or_else(|e| panic!("AIC predict_decode (python) failed: {e}"))
         })
+        .map_err(|error| anyhow::anyhow!("AIC predict_decode (python) failed: {error}"))
     }
 }
 
@@ -155,7 +154,7 @@ fn create_python_aic_callback(
 /// hot path — `AicEngine::{prefill,decode}_latency_ms` are pure Rust.
 ///
 /// `AicEngine` is `Send + Sync` (it is an `Arc<Engine>` over an
-/// `Arc<PerfDatabase>`), so no `unsafe impl` is needed, unlike `PyAicCallback`.
+/// `Arc<PerfDatabase>`), so no manual `Send` / `Sync` implementation is needed.
 #[cfg(feature = "aic-forward-pass")]
 pub(super) struct RustAicCallback {
     engine: Arc<AicEngine>,
@@ -163,7 +162,12 @@ pub(super) struct RustAicCallback {
 
 #[cfg(feature = "aic-forward-pass")]
 impl AicCallback for RustAicCallback {
-    fn predict_prefill(&self, batch_size: usize, effective_isl: usize, prefix: usize) -> f64 {
+    fn predict_prefill(
+        &self,
+        batch_size: usize,
+        effective_isl: usize,
+        prefix: usize,
+    ) -> anyhow::Result<f64> {
         // The engine's predict_prefill_latency takes the FULL isl and subtracts
         // `prefix` internally, while the mocker gives us the post-prefix
         // `effective_isl`. Pass `effective_isl + prefix` so the engine recovers
@@ -175,13 +179,13 @@ impl AicCallback for RustAicCallback {
                 (effective_isl + prefix) as u32,
                 prefix as u32,
             )
-            .unwrap_or_else(|e| panic!("AIC predict_prefill (rust) failed: {e}"))
+            .map_err(|error| anyhow::anyhow!("AIC predict_prefill (rust) failed: {error}"))
     }
 
-    fn predict_decode(&self, batch_size: usize, isl: usize, osl: usize) -> f64 {
+    fn predict_decode(&self, batch_size: usize, isl: usize, osl: usize) -> anyhow::Result<f64> {
         self.engine
             .decode_latency_ms(batch_size as u32, isl as u32, osl as u32)
-            .unwrap_or_else(|e| panic!("AIC predict_decode (rust) failed: {e}"))
+            .map_err(|error| anyhow::anyhow!("AIC predict_decode (rust) failed: {error}"))
     }
 }
 

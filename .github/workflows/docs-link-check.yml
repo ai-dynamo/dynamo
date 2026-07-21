@@ -45,6 +45,9 @@ jobs:
             --host-concurrency 10
             --host-request-interval 1s
             --host-stats
+            ${{ github.event_name == 'pull_request' && '--exclude https://github.com/ai-dynamo/dynamo/tree/main/examples/profiler/spica' || '' }}
+            ${{ github.event_name == 'pull_request' && '--exclude https://github.com/ai-dynamo/dynamo/tree/main/docs/components/profiler/spica' || '' }}
+            ${{ github.event_name == 'pull_request' && '--exclude https://github.com/ai-dynamo/dynamo/blob/main/examples/profiler/spica/configs/glm5-disagg-pareto-frontier.yaml' || '' }}
             .
           fail: true
         env:

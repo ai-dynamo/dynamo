@@ -58,8 +58,9 @@ Profiler. That release does not provide `aiconfigurator.sdk.memory`:
   is unavailable. Trace workloads and synthetic workloads with fixed `concurrency` remain usable;
   Replay and the GPU-budget checks still evaluate their candidates.
 - `kv_load_ratio` needs the compatible AI Configurator memory estimator to convert a relative load
-  into candidate-specific concurrency. Spica fails closed for this workload mode in the current
-  default Planner/Profiler image instead of evaluating an unverified load.
+  into candidate-specific concurrency. Spica fails fast before starting the search for this
+  workload mode in the current default Planner/Profiler image instead of evaluating an unverified
+  load or returning an empty candidate set after the sweep.
 
 Treat workloads and search modes not covered by image smoke tests as unsupported experimental paths.
 See [Traffic](traffic.md#kv-load-ratio-candidate-relative-concurrency) for the KV-load contract.
@@ -85,9 +86,10 @@ uv pip install --python .venv/bin/python "jax[cuda12]==0.4.38"
 The JAX CUDA wheels exist **only for Linux x86-64**. macOS, Windows, and Arm64 use the CPU-only
 `spica` extra. With no GPU present,
 JAX just warns and falls back to CPU, so there's no reason to install them without
-one. Spica detects the installed CUDA plugin and leaves JAX's
-platform selection enabled; an explicit `JAX_PLATFORMS=cpu` or `JAX_PLATFORMS=cuda`
-still overrides that behavior.
+one. When a Spica sampler is constructed, it detects the installed CUDA plugin and
+leaves JAX's platform selection enabled; an explicit `JAX_PLATFORMS=cpu` or
+`JAX_PLATFORMS=cuda` still overrides that behavior. Importing
+`dynamo.profiler.spica` alone does not modify JAX, logging, or warning settings.
 
 ### Real Replay
 

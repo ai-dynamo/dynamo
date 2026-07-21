@@ -147,6 +147,51 @@ def test_static_path_emits_goodput():
     assert report["gpu_hours"] > 0.0
 
 
+@pytest.mark.skipif(
+    not getattr(_core, "MOCKER_KVBM_OFFLOAD_ENABLED", False),
+    reason="planner wheel is required for the mocker-kvbm-offload feature",
+)
+def test_static_path_runs_with_kvbm_host_offload():
+    """The planner wheel must initialize and run replay with Spica's G2 knobs."""
+
+    cfg = _config()
+    cfg = cfg.model_copy(
+        update={
+            "search_space": cfg.search_space.model_copy(
+                update={
+                    "num_g2_blocks": 128,
+                    "kv_bytes_per_token": 131072,
+                    "offload_batch_size": 4,
+                }
+            )
+        }
+    )
+    pc = enumerate_branches(cfg)[0].parallel_configs[0]
+    selection = {
+        "deployment_mode": "agg",
+        "backend": "trtllm",
+        "agg_max_num_batched_tokens": 16384,
+        "agg_max_num_seqs": 512,
+        "router_mode": "round_robin",
+        "planner_scaling_policy": "disabled",
+        "planner_fpm_sampling": "default",
+        "planner_load_sensitivity": "default",
+    }
+    sample = unroll_sample(
+        search_space=cfg.search_space, selection=selection, parallel_config=pc
+    )
+    plan = build_deployment(
+        sample,
+        backend_version=resolve_backend_version("gb200", "trtllm"),
+        planner_sla=cfg.goal.sla,
+    )
+
+    assert plan.agg_engine_args["num_g2_blocks"] == 128
+    assert plan.agg_engine_args["kv_bytes_per_token"] == 131072
+    report = ReplayEvaluator(cfg.workload, cfg.goal).evaluate(plan)
+    assert report["goodput_output_throughput_tok_s"] > 0.0
+
+
 def test_smart_search_returns_ranked_candidate():
     """The full loop (Vizier sampler + real replay) returns ranked candidates."""
     candidates = run_smart_search(_config())

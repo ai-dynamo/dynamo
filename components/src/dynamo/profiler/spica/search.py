@@ -29,6 +29,7 @@ import uuid
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
+from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
 from typing import Any, Protocol
 
@@ -37,7 +38,7 @@ from tqdm import tqdm
 from .config import Candidate, OptimizationGoal, SmartSearchConfig
 from .deploy import build_deployment
 from .evaluator import ReplayEvaluator
-from .kv_estimate import resolve_backend_version
+from .kv_estimate import _load_memory_estimator, resolve_backend_version
 from .kv_load import InfeasibleKVCapacity, resolve_kv_load
 from .load_predictor_sweep import LoadPredictorResult, sweep_load_predictor
 from .planner import filter_scaling_policies, scaling_fields
@@ -226,6 +227,13 @@ def run_smart_search(
     candidate evaluations (live feasible/failed tally + best score) and prints a
     one-line summary at the end; set False for quiet/non-interactive runs.
     """
+    # AIConfigurator 0.9 does not provide the memory estimator needed to turn a
+    # candidate-relative KV ratio into concrete concurrency. Detect that unsupported
+    # mode before branch enumeration/Vizier work instead of returning an empty result
+    # after every candidate fails to build.
+    if config.workload.kv_load_ratio is not None:
+        _load_memory_estimator()
+
     goal = config.goal
     # Predictive throughput scaling only works under the planner's "sla" target
     # (a goodput sweep). For throughput/latency sweeps, drop the throughput-scaling
@@ -302,7 +310,7 @@ def run_smart_search(
     branches: list[BranchSpace] = enumerate_branches(
         config, max_seq_len=config.search_space.context_length
     )
-    load_predictor = sweep_load_predictor(config)
+    load_predictor = sweep_load_predictor(config, show_progress=show_progress)
     if evaluator is None:
         evaluator = ReplayEvaluator(config.workload, goal)
 
@@ -347,12 +355,13 @@ def run_smart_search(
     # initializer; one pool for the whole run amortizes the per-worker dynamo import.
     use_pool = sweep.parallel_evals > 1 and per_round > 1
     max_eval_seconds = sweep.max_eval_seconds
+    worker_count = min(sweep.parallel_evals, per_round)
 
     def _new_pool() -> ProcessPoolExecutor:
         # spawn (not fork — dynamo's tokio runtime isn't fork-safe); shared read-only state
         # goes once via the initializer; one pool amortizes the per-worker dynamo import.
         return ProcessPoolExecutor(
-            max_workers=min(sweep.parallel_evals, per_round),
+            max_workers=worker_count,
             mp_context=mp.get_context("spawn"),
             initializer=_init_worker,
             initargs=(config, goal, load_predictor, evaluator),
@@ -362,15 +371,44 @@ def run_smart_search(
     # (the closures below read/replace pool_box[0]).
     pool_box: list[Any] = [_new_pool() if use_pool else None]
 
+    def _terminate_pool(pool: ProcessPoolExecutor | None) -> None:
+        if pool is None:
+            return
+        for process in list((getattr(pool, "_processes", None) or {}).values()):
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                pass
+        pool.shutdown(wait=False, cancel_futures=True)
+
+    def _replace_pool() -> None:
+        _terminate_pool(pool_box[0])
+        pool_box[0] = _new_pool()
+
+    @contextmanager
+    def _pool_lifecycle():
+        try:
+            yield
+        finally:
+            _terminate_pool(pool_box[0])
+            pool_box[0] = None
+
+    def _pool_error(detail: str) -> RuntimeError:
+        return RuntimeError(
+            f"smart-sweep worker pool failed while {detail}. parallel_evals>1 uses "
+            "spawned processes; guard a script entrypoint with `if __name__ == "
+            '"__main__":`, or set sweep.parallel_evals=1 to evaluate sequentially.'
+        )
+
     def _eval_batch(todo: list[Suggestion]):
         """Yield ``(suggestion, _EvalResult)`` for each supported suggestion — across worker
         processes when a pool is set, else sequentially in-process. On the pool path it
-        enforces the per-candidate ``max_eval_seconds`` cap: a replay that overruns is
-        reported infeasible ("exceed runtime") and its worker is force-killed (a shared pool
-        can't cancel a running task), then a fresh pool is swapped in for the next rounds.
+        evaluates waves no larger than the worker count so queued work never consumes a
+        candidate's ``max_eval_seconds`` budget. A replay that overruns is reported
+        infeasible ("exceed runtime") and the wave's workers are force-killed (a shared
+        pool can't cancel a running task), then a fresh pool handles later waves.
         """
-        pool = pool_box[0]
-        if pool is None:
+        if pool_box[0] is None:
             for s in todo:
                 yield (
                     s,
@@ -384,51 +422,60 @@ def run_smart_search(
                     ),
                 )
             return
-        try:
-            # submit() can also raise BrokenProcessPool (a worker died before/while tasks
-            # were queued), so it must be inside the friendly-error wrapper too.
-            futures = {
-                pool.submit(_worker_eval, s.selection, s.parallel_config): s
-                for s in todo
-            }
-        except BrokenProcessPool as exc:
-            raise RuntimeError(
-                "smart-sweep worker pool died (parallel_evals>1 uses spawned processes). The "
-                "usual cause is calling run_smart_search at a script's top level without guarding "
-                "the entrypoint: spawn re-imports the module, so wrap it in `if __name__ == "
-                '"__main__":`. Or set sweep.parallel_evals=1 to evaluate sequentially (no pool)."'
-            ) from exc
-        pending = set(futures)
-        # Workers run concurrently (max_workers >= len(todo) here), so one wall-clock
-        # deadline approximates the per-candidate cap. None -> no cap.
-        deadline = (time.monotonic() + max_eval_seconds) if max_eval_seconds else None
-        while pending:
-            remaining = (
-                None if deadline is None else max(0.0, deadline - time.monotonic())
-            )
-            done, pending = wait(
-                pending, timeout=remaining, return_when=FIRST_COMPLETED
-            )
-            if not done:
-                break  # deadline hit with nothing newly finished -> the rest are hung
-            for fut in done:
-                yield futures[fut], fut.result()
-        if pending:
-            secs = max_eval_seconds or 0.0
-            for fut in pending:
-                yield (
-                    futures[fut],
-                    (None, None, "infeasible", f"exceed runtime: replay > {secs:.0f}s"),
-                )
-            # Force-kill the hung workers first (shutdown(wait=False) only lets running
-            # tasks finish, which never happens for a hang, and clears _processes), then
-            # tear the pool down and swap in a fresh one.
-            for proc in list((getattr(pool, "_processes", None) or {}).values()):
-                proc.terminate()
-            pool.shutdown(wait=False, cancel_futures=True)
-            pool_box[0] = _new_pool()
 
-    with tqdm(
+        for start in range(0, len(todo), worker_count):
+            wave = todo[start : start + worker_count]
+            pool = pool_box[0]
+            assert pool is not None
+            try:
+                # submit() can raise when an initializer or an earlier task killed
+                # the pool, so keep it inside the friendly-error wrapper.
+                futures = {
+                    pool.submit(
+                        _worker_eval, suggestion.selection, suggestion.parallel_config
+                    ): suggestion
+                    for suggestion in wave
+                }
+            except BrokenProcessPool as exc:
+                raise _pool_error("submitting a candidate wave") from exc
+
+            pending = set(futures)
+            deadline = time.monotonic() + max_eval_seconds if max_eval_seconds else None
+            while pending:
+                remaining = (
+                    None if deadline is None else max(0.0, deadline - time.monotonic())
+                )
+                done, pending = wait(
+                    pending, timeout=remaining, return_when=FIRST_COMPLETED
+                )
+                if not done:
+                    break
+                for future in done:
+                    try:
+                        result = future.result()
+                    except BrokenProcessPool as exc:
+                        raise _pool_error("collecting a candidate result") from exc
+                    except Exception as exc:
+                        raise _pool_error(
+                            f"collecting a candidate result ({type(exc).__name__}: {exc})"
+                        ) from exc
+                    yield futures[future], result
+
+            if pending:
+                seconds = max_eval_seconds or 0.0
+                for future in pending:
+                    yield (
+                        futures[future],
+                        (
+                            None,
+                            None,
+                            "infeasible",
+                            f"exceed runtime: replay > {seconds:.0f}s",
+                        ),
+                    )
+                _replace_pool()
+
+    with _pool_lifecycle(), tqdm(
         total=total, desc="smart-sweep", unit="eval", disable=not show_progress
     ) as bar:
 
@@ -546,13 +593,6 @@ def run_smart_search(
                     break
             if branch_stalled:
                 continue
-
-    # Tear down the (possibly recreated) worker pool; force-kill any lingering workers.
-    final_pool = pool_box[0]
-    if final_pool is not None:
-        for proc in list((getattr(final_pool, "_processes", None) or {}).values()):
-            proc.terminate()
-        final_pool.shutdown(wait=False, cancel_futures=True)
 
     # Single-objective -> rank best-first by score; pareto -> the non-dominated front.
     result = (

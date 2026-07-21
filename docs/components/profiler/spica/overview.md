@@ -19,7 +19,7 @@ YAML (`SmartSearchConfig`):
 | `search_space:` | `SearchSpace` | knobs to **explore** + pinned context (model, hardware, GPU budget) |
 | `workload:` | `Workload` | the **traffic** every candidate is replayed against (mostly pinned; Pareto may search KV load) |
 | `goal:` | `OptimizationGoal` | what **"better"** means (the target metric) + the SLA constraint |
-| `sweep:` | `SweepConfig` | run-control (`max_rounds`, `candidates_per_round`, `parallel_evals`, `random_seed`) |
+| `sweep:` | `SweepConfig` | run-control (`max_rounds`, `candidates_per_round`, `parallel_evals`, `max_eval_seconds`) |
 
 Spica returns the **best deployment config(s)** — a parallel shape + replica count +
 backend + engine/router/planner knobs — each scored by a **Dynamo Replay** (the
@@ -104,8 +104,8 @@ backends support each. `context_length` is threaded into KV feasibility.
 The default Planner/Profiler image currently uses AI Configurator 0.9, which does not expose
 `aiconfigurator.sdk.memory`. Spica warns and skips the pre-search KV-capacity shape filter in that
 environment. Trace and fixed-concurrency workloads can continue through Replay, but
-`kv_load_ratio` fails closed because it cannot derive candidate-specific concurrency without the
-memory estimator.
+`kv_load_ratio` fails fast before branch enumeration because it cannot derive candidate-specific
+concurrency without the memory estimator.
 
 ### 5. Per-branch Vizier study loop
 

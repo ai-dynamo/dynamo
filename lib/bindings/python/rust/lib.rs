@@ -183,6 +183,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
+    m.add(
+        "MOCKER_KVBM_OFFLOAD_ENABLED",
+        cfg!(feature = "mocker-kvbm-offload"),
+    )?;
 
     m.add_class::<DistributedRuntime>()?;
     m.add_class::<Endpoint>()?;

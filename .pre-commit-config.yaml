@@ -102,6 +102,14 @@ repos:
       pass_filenames: false
       additional_dependencies:
         - pyyaml
+    - id: check-spica-packaging
+      name: Validate experimental Spica packaging contracts
+      entry: python3 scripts/check_spica_packaging.py
+      language: python
+      files: ^(pyproject\.toml|container/deps/requirements\.planner\.txt|container/templates/wheel_builder\.Dockerfile|components/src/dynamo/profiler/__init__\.py|scripts/check_spica_packaging\.py)$
+      pass_filenames: false
+      additional_dependencies:
+        - tomli>=2.0.1; python_version < '3.11'
     - id: DCO check
       name: Checks the commit message for a developer certificate of origin signature
       entry: python3 scripts/dco_check.py

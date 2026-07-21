@@ -74,8 +74,8 @@ shared synthetic knobs threaded into the replay (`ReplayEvaluator._synthetic_kwa
 > [!WARNING]
 > `kv_load_ratio` requires an AI Configurator release that provides
 > `aiconfigurator.sdk.memory`. The default Planner/Profiler image currently retains AI Configurator
-> 0.9, so this workload mode fails closed in that image. Use a trace workload or fixed
-> `concurrency` with the default image.
+> 0.9, so this workload mode fails fast before search starts in that image. Use a trace workload
+> or fixed `concurrency` with the default image.
 
 Spica resolves a KV-load trial after the backend, parallel shape, replicas, and batching
 knobs have been selected. For every active role, it asks AI Configurator for the **per-rank** KV token

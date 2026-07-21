@@ -315,8 +315,9 @@ gpu_budget, backend)`:
    naive fallback). If no shape is feasible within budget, `NoViableParallelConfig` is raised
    for that branch. The default Planner/Profiler image retains AI Configurator 0.9, which does not
    provide `aiconfigurator.sdk.memory`; Spica warns and skips this pre-search filter in that image.
-   Trace and fixed-concurrency workloads still reach Replay, while `kv_load_ratio` fails closed
-   because candidate-relative concurrency cannot be derived without the estimator.
+   Trace and fixed-concurrency workloads still reach Replay, while `kv_load_ratio` fails fast
+   before branch enumeration because candidate-relative concurrency cannot be derived without the
+   estimator.
 6. **Replicas** fill the budget: for each kept worker shape, replica counts
    `r ∈ 1..(gpu_budget // g)` such that `g * r` lies in
    `[min_gpu_budget, gpu_budget]`.

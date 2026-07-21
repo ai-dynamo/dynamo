@@ -31,6 +31,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from ._quiet import configure_vizier_runtime
 from .parallel_enum import DisaggParallelConfig, ReplicaParallelConfig
 from .parallel_projection import ParallelConfigProjector, ParallelProjection
 from .search_space import BranchSpace
@@ -98,6 +99,7 @@ class VizierBranchSampler:
         study_id: str,
         objectives: list[tuple[str, bool]] | None = None,
     ):
+        configure_vizier_runtime()
         from vizier.service import clients
         from vizier.service import pyvizier as vz
 

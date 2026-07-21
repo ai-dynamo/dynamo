@@ -9,6 +9,7 @@ real replay."""
 import pytest
 
 import dynamo.profiler.spica.search as search_mod
+from dynamo._internal.aic import AicMemoryEstimatorUnavailableError
 from dynamo.profiler.spica.config import SmartSearchConfig
 from dynamo.profiler.spica.kv_load import KVLoadResolution
 from dynamo.profiler.spica.load_predictor_sweep import LoadPredictorResult
@@ -18,7 +19,13 @@ from dynamo.profiler.spica.search import run_smart_search
 from dynamo.profiler.spica.search_space import BranchSpace
 
 
-def _config(gpu_budget=32):
+def _config(gpu_budget=32, **sweep_overrides):
+    sweep = {
+        "max_rounds": 1,
+        "candidates_per_round": 3,
+        "parallel_evals": 1,
+    }
+    sweep.update(sweep_overrides)
     return SmartSearchConfig(
         search_space={
             "model_name": "deepseek-ai/DeepSeek-V3",
@@ -28,11 +35,7 @@ def _config(gpu_budget=32):
             "gpu_budget": gpu_budget,
         },
         workload={"trace_path": "/tmp/t.jsonl"},
-        sweep={
-            "max_rounds": 1,
-            "candidates_per_round": 3,
-            "parallel_evals": 1,
-        },  # sequential (fakes)
+        sweep=sweep,
         goal={"target": "throughput"},
     )
 
@@ -98,13 +101,14 @@ def _branch(parallel_config):
 
 
 def _stub(monkeypatch, branch):
+    monkeypatch.setattr(search_mod, "_load_memory_estimator", lambda: object())
     monkeypatch.setattr(
         search_mod, "enumerate_branches", lambda config, *, max_seq_len=None: [branch]
     )
     monkeypatch.setattr(
         search_mod,
         "sweep_load_predictor",
-        lambda config: LoadPredictorResult(reason="static"),
+        lambda config, **kwargs: LoadPredictorResult(reason="static"),
     )
     monkeypatch.setattr(
         search_mod, "resolve_backend_version", lambda hw, be: "1.3.0rc10"
@@ -123,6 +127,134 @@ def test_ranks_feasible_best_first(monkeypatch):
     assert all(c.used_gpus == 8 for c in cands)
     assert all(c.config["backend_version"] == "1.3.0rc10" for c in cands)
     assert cands[0].metrics["gpu_hours"] == 1.0
+
+
+def test_show_progress_is_forwarded_to_load_predictor_sweep(monkeypatch):
+    branch = _branch(
+        ReplicaParallelConfig(ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=2)
+    )
+    _stub(monkeypatch, branch)
+    seen = []
+
+    def fake_sweep(config, *, show_progress):
+        seen.append(show_progress)
+        return LoadPredictorResult(reason="static")
+
+    monkeypatch.setattr(search_mod, "sweep_load_predictor", fake_sweep)
+
+    run_smart_search(
+        _config(),
+        evaluator=_FakeEvaluator(),
+        sampler_factory=_FakeSampler,
+        show_progress=False,
+    )
+
+    assert seen == [False]
+
+
+def test_kv_load_fails_before_starting_search_without_memory_estimator(monkeypatch):
+    def missing_estimator():
+        raise AicMemoryEstimatorUnavailableError("AIC 0.10 or newer is required")
+
+    monkeypatch.setattr(search_mod, "_load_memory_estimator", missing_estimator)
+    monkeypatch.setattr(
+        search_mod,
+        "enumerate_branches",
+        lambda *args, **kwargs: pytest.fail("search must not enumerate branches"),
+    )
+
+    with pytest.raises(AicMemoryEstimatorUnavailableError, match=r"0\.10"):
+        run_smart_search(_pareto_config(), show_progress=False)
+
+
+def test_parallel_batch_uses_worker_sized_timeout_waves(monkeypatch):
+    branch = _branch(
+        ReplicaParallelConfig(ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=2)
+    )
+    _stub(monkeypatch, branch)
+    wave_sizes = []
+    pools = []
+
+    class ImmediateFuture:
+        def __init__(self, result):
+            self._result = result
+
+        def result(self):
+            return self._result
+
+    class FakeProcessPool:
+        def __init__(self, *, initializer, initargs, **kwargs):
+            self._processes = {}
+            self.shutdown_called = False
+            initializer(*initargs)
+            pools.append(self)
+
+        def submit(self, function, *args):
+            return ImmediateFuture(function(*args))
+
+        def shutdown(self, *, wait, cancel_futures):
+            self.shutdown_called = True
+
+    def fake_wait(pending, *, timeout, return_when):
+        wave_sizes.append(len(pending))
+        return set(pending), set()
+
+    monkeypatch.setattr(search_mod, "ProcessPoolExecutor", FakeProcessPool)
+    monkeypatch.setattr(search_mod, "wait", fake_wait)
+
+    candidates = run_smart_search(
+        _config(parallel_evals=2, max_eval_seconds=10),
+        evaluator=_FakeEvaluator(),
+        sampler_factory=_FakeSampler,
+        show_progress=False,
+    )
+
+    assert len(candidates) == 3
+    assert wave_sizes == [2, 1]
+    assert len(pools) == 1
+    assert pools[0].shutdown_called
+
+
+def test_broken_worker_pool_is_friendly_and_always_cleaned_up(monkeypatch):
+    branch = _branch(
+        ReplicaParallelConfig(ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=2)
+    )
+    _stub(monkeypatch, branch)
+    pools = []
+
+    class BrokenFuture:
+        def result(self):
+            raise search_mod.BrokenProcessPool("worker exited")
+
+    class FakeProcessPool:
+        def __init__(self, *, initializer, initargs, **kwargs):
+            self._processes = {}
+            self.shutdown_called = False
+            initializer(*initargs)
+            pools.append(self)
+
+        def submit(self, function, *args):
+            return BrokenFuture()
+
+        def shutdown(self, *, wait, cancel_futures):
+            self.shutdown_called = True
+
+    monkeypatch.setattr(search_mod, "ProcessPoolExecutor", FakeProcessPool)
+    monkeypatch.setattr(
+        search_mod,
+        "wait",
+        lambda pending, **kwargs: (set(pending), set()),
+    )
+
+    with pytest.raises(RuntimeError, match="guard a script entrypoint"):
+        run_smart_search(
+            _config(parallel_evals=2),
+            evaluator=_FakeEvaluator(),
+            sampler_factory=_FakeSampler,
+            show_progress=False,
+        )
+
+    assert pools[0].shutdown_called
 
 
 def test_over_budget_candidates_dropped(monkeypatch):
@@ -324,7 +456,7 @@ def test_e2e_only_goodput_drops_planner_scaling_and_proceeds(monkeypatch):
     monkeypatch.setattr(
         search_mod,
         "sweep_load_predictor",
-        lambda config: LoadPredictorResult(reason="static"),
+        lambda config, **kwargs: LoadPredictorResult(reason="static"),
     )
     monkeypatch.setattr(
         search_mod, "resolve_backend_version", lambda hw, be: "1.3.0rc10"
@@ -487,7 +619,7 @@ def test_projection_stall_only_stops_current_branch(monkeypatch):
     monkeypatch.setattr(
         search_mod,
         "sweep_load_predictor",
-        lambda config: LoadPredictorResult(reason="static"),
+        lambda config, **kwargs: LoadPredictorResult(reason="static"),
     )
     monkeypatch.setattr(
         search_mod, "resolve_backend_version", lambda hw, be: "1.3.0rc10"

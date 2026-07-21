@@ -715,7 +715,6 @@ class SweepConfig(BaseModel):
     # Successful unique replay configs per round; duplicate projections are told from
     # cache and replaced. Defaults to parallel_evals.
     candidates_per_round: int | None = Field(default=None, ge=1)
-    random_seed: int = 1
     # Per-candidate wall-clock cap for the replay. A candidate whose replay exceeds this is
     # killed and reported as infeasible ("exceed runtime") so the optimizer avoids that region
     # instead of hanging the sweep (e.g. an over-subscribed config that churns). Only enforced
