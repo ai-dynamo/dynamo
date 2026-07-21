@@ -69,8 +69,12 @@ use crate::request_template::{RequestTemplate, resolve_request_model};
 use crate::types::Annotated;
 use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_protocols::types::ChatCompletionMessageToolCallChunk;
+use dynamo_protocols::types::ChatCompletionRequestMessage;
+use dynamo_protocols::types::ChatCompletionRequestUserMessageContent;
+use dynamo_protocols::types::ChatCompletionRequestUserMessageContentPart;
 use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
 use dynamo_protocols::types::Choice;
+use dynamo_renderer::OAIChatLikeRequest;
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
 
@@ -1590,6 +1594,29 @@ fn is_annotation_frame<T>(e: &Annotated<T>) -> bool {
         && matches!(e.event.as_deref(), Some(tag) if tag != "error")
 }
 
+/// Whether a chat request contains media that a backend encoder must accept
+/// before an HTTP streaming response can safely commit status 200.
+fn chat_request_has_multimodal_content(request: &NvCreateChatCompletionRequest) -> bool {
+    request.typed_messages().is_some_and(|messages| {
+        messages.iter().any(|message| {
+            let ChatCompletionRequestMessage::User(user) = message else {
+                return false;
+            };
+            let ChatCompletionRequestUserMessageContent::Array(parts) = &user.content else {
+                return false;
+            };
+            parts.iter().any(|part| {
+                matches!(
+                    part,
+                    ChatCompletionRequestUserMessageContentPart::ImageUrl(_)
+                        | ChatCompletionRequestUserMessageContentPart::VideoUrl(_)
+                        | ChatCompletionRequestUserMessageContentPart::AudioUrl(_)
+                )
+            })
+        })
+    })
+}
+
 /// Cap on how many leading annotation frames `check_for_backend_error`
 /// will buffer before giving up the inspection. A pathological backend
 /// (or attacker who can influence the engine output) that emits only
@@ -1823,6 +1850,8 @@ async fn chat_completions(
     // Determine streaming mode early
     // todo - decide on default
     let streaming = request.inner.stream.unwrap_or(false);
+    let preflight_multimodal_stream =
+        streaming && chat_request_has_multimodal_content(request.content());
 
     // Apply template values first to resolve the model before creating metrics guards
     if let Some(template) = template {
@@ -1962,10 +1991,25 @@ async fn chat_completions(
     // note - we might do this as part of the post processing set to make it more generic
 
     if streaming {
-        // For streaming responses, we return HTTP 200 immediately without checking for errors.
-        // Once HTTP 200 OK is sent, we cannot change the status code, so any backend errors
-        // must be delivered as SSE events with `event: error` in the stream (handled by
-        // EventConverter and monitor_for_disconnects). This is standard SSE behavior.
+        // A multimodal backend can reject the submitted media or fail before
+        // producing its first token. Inspect that first event before committing
+        // the SSE 200 so clients receive the real status code. Text-only
+        // streams keep the existing immediate-header behavior: backend errors
+        // after commit are delivered as SSE `event: error` frames (handled by
+        // EventConverter and monitor_for_disconnects).
+        let stream = if preflight_multimodal_stream {
+            check_for_backend_error(stream)
+                .await
+                .map_err(|error_response| {
+                    tracing::error!(request_id, "Backend error detected: {:?}", error_response);
+                    inflight_guard.mark_error(extract_error_type_from_response(&error_response));
+                    error_response
+                })?
+                .boxed()
+        } else {
+            stream.boxed()
+        };
+
         stream_handle.arm(); // allows the system to detect client disconnects and cancel the LLM generation
 
         let mut http_queue_guard = Some(http_queue_guard);
@@ -2395,6 +2439,9 @@ async fn responses(
             continuous_usage_stats: false,
         });
 
+    let preflight_multimodal_stream =
+        streaming && chat_request_has_multimodal_content(&chat_request);
+
     let mut request = context.map(|mut _req| chat_request);
     if response_params.max_output_tokens.is_none() {
         request.insert(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, true);
@@ -2441,9 +2488,21 @@ async fn responses(
     let ctx = engine_stream.context();
 
     if streaming {
-        // For streaming responses, we return HTTP 200 immediately without checking for errors.
-        // Once HTTP 200 OK is sent, we cannot change the status code, so any backend errors
-        // must be delivered as SSE events in the stream. This is standard SSE behavior.
+        // Match Chat Completions: media errors must be resolved before the SSE
+        // response commits status 200. Text-only streams remain immediate.
+        let engine_stream = if preflight_multimodal_stream {
+            check_for_backend_error(engine_stream)
+                .await
+                .map_err(|error_response| {
+                    tracing::error!(request_id, "Backend error detected: {:?}", error_response);
+                    inflight_guard.mark_error(extract_error_type_from_response(&error_response));
+                    error_response
+                })?
+                .boxed()
+        } else {
+            engine_stream.boxed()
+        };
+
         stream_handle.arm(); // allows the system to detect client disconnects and cancel the LLM generation
 
         // Streaming path: convert chat completion stream chunks to Responses API SSE events.
@@ -4625,6 +4684,35 @@ mod tests {
             assert!(msg.contains("documents"));
             assert!(msg.contains("chat_template"));
         }
+    }
+
+    #[test]
+    fn test_multimodal_stream_preflight_detection() {
+        let text_request: NvCreateChatCompletionRequest = serde_json::from_str(
+            r#"{
+                "model": "test-model",
+                "stream": true,
+                "messages": [{"role": "user", "content": "Hello"}]
+            }"#,
+        )
+        .unwrap();
+        assert!(!chat_request_has_multimodal_content(&text_request));
+
+        let image_request: NvCreateChatCompletionRequest = serde_json::from_str(
+            r#"{
+                "model": "test-model",
+                "stream": true,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Describe this image"},
+                        {"type": "image_url", "image_url": {"url": "https://example.invalid/image.png"}}
+                    ]
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert!(chat_request_has_multimodal_content(&image_request));
     }
 
     #[test]
