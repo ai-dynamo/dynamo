@@ -1461,6 +1461,7 @@ impl<
             effective_overlap_blocks: selection.effective_overlap_blocks,
             cached_tokens: selection.cached_tokens,
             selected_worker_tiers,
+            selection_telemetry: selection.telemetry,
             request_progress,
             lifecycle_lease: None,
         };
@@ -1826,6 +1827,7 @@ mod tests {
                 required_blocks: request.request_blocks(block_size),
                 effective_overlap_blocks: request.effective_overlap_blocks_for(worker),
                 cached_tokens: request.effective_cached_tokens_for(worker),
+                telemetry: Default::default(),
             })
         }
     }

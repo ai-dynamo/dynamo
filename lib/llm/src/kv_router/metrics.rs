@@ -46,18 +46,16 @@
 use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
 
+use dynamo_kv_router::protocols::{WorkerSelectionTelemetry, WorkerWithDpRank};
 use dynamo_runtime::component::Component;
 use dynamo_runtime::metrics::MetricsHierarchy;
 use dynamo_runtime::metrics::prometheus_names::{
     frontend_service, kv_publisher, labels, name_prefix, router, router_request, routing_overhead,
 };
-
-/// Build a router metric name: `"router_" + frontend_service_suffix`.
-fn router_metric(suffix: &str) -> String {
-    format!("{}{}", router_request::METRIC_PREFIX, suffix)
-}
 use dynamo_runtime::traits::DistributedRuntimeProvider;
-use prometheus::{HistogramOpts, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts};
+use prometheus::{
+    HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
+};
 
 use crate::http::service::metrics::generate_log_buckets;
 
@@ -65,6 +63,15 @@ pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
 const TARGET_NAMESPACE_LABEL: &str = "target_namespace";
 const TARGET_COMPONENT_LABEL: &str = "target_component";
 const TARGET_ENDPOINT_LABEL: &str = "target_endpoint";
+const DECISION_LABEL: &str = "decision";
+const REASON_LABEL: &str = "reason";
+const DECISION_CACHE_HIT: &str = "cache_hit";
+const DECISION_CACHE_MISS: &str = "cache_miss";
+
+/// Build a router metric name: `"router_" + frontend_service_suffix`.
+fn router_metric(suffix: &str) -> String {
+    format!("{}{}", router_request::METRIC_PREFIX, suffix)
+}
 
 /// Buckets for CPU-bound compute phases (block hashing, sequence hashing).
 fn compute_overhead_buckets() -> Vec<f64> {
@@ -74,6 +81,16 @@ fn compute_overhead_buckets() -> Vec<f64> {
 /// Buckets for async phases (indexer find_matches, scheduling, total).
 fn async_overhead_buckets() -> Vec<f64> {
     prometheus::exponential_buckets(0.01, 3.0, 17).unwrap()
+}
+
+/// Buckets for eligible candidate worker/rank counts per router decision.
+fn candidate_worker_buckets() -> Vec<f64> {
+    prometheus::exponential_buckets(1.0, 2.0, 12).unwrap()
+}
+
+/// Buckets for non-negative router score components measured in decision-score units.
+fn router_score_buckets() -> Vec<f64> {
+    prometheus::exponential_buckets(0.5, 2.0, 18).unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -647,6 +664,14 @@ pub struct RouterRequestMetrics {
     pub kv_transfer_estimated_latency_seconds: prometheus::Histogram,
     pub shared_cache_hit_rate: prometheus::Histogram,
     pub shared_cache_beyond_blocks: prometheus::Histogram,
+    pub decisions_total: prometheus::IntCounterVec,
+    pub selected_worker_total: prometheus::IntCounterVec,
+    pub candidate_workers: HistogramVec,
+    pub kv_overlap_score: HistogramVec,
+    pub worker_load_score: HistogramVec,
+    pub final_score: HistogramVec,
+    pub tie_breaks_total: prometheus::IntCounterVec,
+    pub no_candidates_total: prometheus::IntCounterVec,
 }
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
@@ -763,6 +788,80 @@ impl RouterRequestMetrics {
                         Some(prometheus::exponential_buckets(1.0, 2.0, 12).unwrap()),
                     )
                     .expect("failed to create router_shared_cache_beyond_blocks");
+                let decisions_total = metrics
+                    .create_intcountervec(
+                        router::DECISIONS_TOTAL,
+                        "Total number of worker-selection decisions by cache outcome",
+                        &[labels::MODEL, labels::WORKER_TYPE, DECISION_LABEL],
+                        extra_labels,
+                    )
+                    .expect("failed to create router_decisions_total");
+                let selected_worker_total = metrics
+                    .create_intcountervec(
+                        router::SELECTED_WORKER_TOTAL,
+                        "Total number of times each backend worker/rank was selected by the router",
+                        &[
+                            labels::MODEL,
+                            labels::WORKER_TYPE,
+                            ROUTER_WORKER_ID_LABEL,
+                            labels::DP_RANK,
+                        ],
+                        extra_labels,
+                    )
+                    .expect("failed to create router_selected_worker_total");
+                let candidate_workers = metrics
+                    .create_histogramvec(
+                        router::CANDIDATE_WORKERS,
+                        "Number of eligible candidate worker/ranks considered for a router decision",
+                        &[labels::MODEL, labels::WORKER_TYPE],
+                        extra_labels,
+                        Some(candidate_worker_buckets()),
+                    )
+                    .expect("failed to create router_candidate_workers");
+                let kv_overlap_score = metrics
+                    .create_histogramvec(
+                        router::KV_OVERLAP_SCORE,
+                        "Cache-overlap score credited to the selected worker at decision time, in decision-score units",
+                        &[labels::MODEL, labels::WORKER_TYPE],
+                        extra_labels,
+                        Some(router_score_buckets()),
+                    )
+                    .expect("failed to create router_kv_overlap_score");
+                let worker_load_score = metrics
+                    .create_histogramvec(
+                        router::WORKER_LOAD_SCORE,
+                        "Load score for the selected worker at decision time, in decision-score units",
+                        &[labels::MODEL, labels::WORKER_TYPE],
+                        extra_labels,
+                        Some(router_score_buckets()),
+                    )
+                    .expect("failed to create router_worker_load_score");
+                let final_score = metrics
+                    .create_histogramvec(
+                        router::FINAL_SCORE,
+                        "Final score used to select the worker at decision time, in decision-score units",
+                        &[labels::MODEL, labels::WORKER_TYPE],
+                        extra_labels,
+                        Some(router_score_buckets()),
+                    )
+                    .expect("failed to create router_final_score");
+                let tie_breaks_total = metrics
+                    .create_intcountervec(
+                        router::TIE_BREAKS_TOTAL,
+                        "Total number of router decisions resolved by a tie-break",
+                        &[labels::MODEL, labels::WORKER_TYPE, REASON_LABEL],
+                        extra_labels,
+                    )
+                    .expect("failed to create router_tie_breaks_total");
+                let no_candidates_total = metrics
+                    .create_intcountervec(
+                        router::NO_CANDIDATES_TOTAL,
+                        "Total number of router decisions where no eligible worker/rank existed",
+                        &[labels::MODEL, labels::WORKER_TYPE],
+                        extra_labels,
+                    )
+                    .expect("failed to create router_no_candidates_total");
+
                 Arc::new(Self {
                     requests_total,
                     time_to_first_token_seconds,
@@ -773,9 +872,75 @@ impl RouterRequestMetrics {
                     kv_transfer_estimated_latency_seconds,
                     shared_cache_hit_rate,
                     shared_cache_beyond_blocks,
+                    decisions_total,
+                    selected_worker_total,
+                    candidate_workers,
+                    kv_overlap_score,
+                    worker_load_score,
+                    final_score,
+                    tie_breaks_total,
+                    no_candidates_total,
                 })
             })
             .clone()
+    }
+
+    pub fn observe_selection_decision(
+        &self,
+        model: &str,
+        worker_type: &str,
+        worker: WorkerWithDpRank,
+        cached_tokens: usize,
+        telemetry: WorkerSelectionTelemetry,
+    ) {
+        let has_cache_hit = cached_tokens > 0
+            || telemetry
+                .selected_scores
+                .is_some_and(|scores| scores.kv_overlap_score > 0.0);
+        let decision = if has_cache_hit {
+            DECISION_CACHE_HIT
+        } else {
+            DECISION_CACHE_MISS
+        };
+        self.decisions_total
+            .with_label_values(&[model, worker_type, decision])
+            .inc();
+
+        let worker_id = worker.worker_id.to_string();
+        let dp_rank = worker.dp_rank.to_string();
+        self.selected_worker_total
+            .with_label_values(&[model, worker_type, &worker_id, &dp_rank])
+            .inc();
+
+        if telemetry.candidate_workers > 0 {
+            self.candidate_workers
+                .with_label_values(&[model, worker_type])
+                .observe(telemetry.candidate_workers as f64);
+        }
+
+        if let Some(scores) = telemetry.selected_scores {
+            self.kv_overlap_score
+                .with_label_values(&[model, worker_type])
+                .observe(scores.kv_overlap_score.max(0.0));
+            self.worker_load_score
+                .with_label_values(&[model, worker_type])
+                .observe(scores.worker_load_score.max(0.0));
+            self.final_score
+                .with_label_values(&[model, worker_type])
+                .observe(scores.final_score.max(0.0));
+        }
+
+        if let Some(tie_break) = telemetry.tie_break {
+            self.tie_breaks_total
+                .with_label_values(&[model, worker_type, tie_break.as_label()])
+                .inc();
+        }
+    }
+
+    pub fn observe_no_candidates(&self, model: &str, worker_type: &str) {
+        self.no_candidates_total
+            .with_label_values(&[model, worker_type])
+            .inc();
     }
 }
 
@@ -837,6 +1002,45 @@ mod tests {
         let mut buffer = Vec::new();
         encoder.encode(&registry.gather(), &mut buffer).unwrap();
         String::from_utf8(buffer).unwrap()
+    }
+
+    fn test_histogram(name: &str) -> prometheus::Histogram {
+        prometheus::Histogram::with_opts(
+            prometheus::HistogramOpts::new(name, "test").buckets(vec![1.0, 2.0, 4.0]),
+        )
+        .unwrap()
+    }
+
+    fn test_router_request_metrics(
+        decisions_total: IntCounterVec,
+        selected_worker_total: IntCounterVec,
+        candidate_workers: HistogramVec,
+        kv_overlap_score: HistogramVec,
+        worker_load_score: HistogramVec,
+        final_score: HistogramVec,
+        tie_breaks_total: IntCounterVec,
+        no_candidates_total: IntCounterVec,
+    ) -> RouterRequestMetrics {
+        RouterRequestMetrics {
+            requests_total: prometheus::IntCounter::new("test_router_requests_total", "test")
+                .unwrap(),
+            time_to_first_token_seconds: test_histogram("test_router_ttft_seconds"),
+            inter_token_latency_seconds: test_histogram("test_router_itl_seconds"),
+            input_sequence_tokens: test_histogram("test_router_input_sequence_tokens"),
+            output_sequence_tokens: test_histogram("test_router_output_sequence_tokens"),
+            kv_hit_rate: test_histogram("test_router_kv_hit_rate"),
+            kv_transfer_estimated_latency_seconds: test_histogram("test_router_kv_transfer"),
+            shared_cache_hit_rate: test_histogram("test_router_shared_cache_hit_rate"),
+            shared_cache_beyond_blocks: test_histogram("test_router_shared_cache_beyond_blocks"),
+            decisions_total,
+            selected_worker_total,
+            candidate_workers,
+            kv_overlap_score,
+            worker_load_score,
+            final_score,
+            tie_breaks_total,
+            no_candidates_total,
+        }
     }
 
     #[test]
@@ -1122,6 +1326,212 @@ dynamo_frontend_router_queue_pending_requests{model=\"model\",policy_class=\"def
             Duration::from_millis(1),
         );
         // Reaching here without panic confirms saturating_sub works
+    }
+
+    #[test]
+    fn test_router_decision_metrics_pef() {
+        use dynamo_kv_router::protocols::{WorkerSelectionScores, WorkerSelectionTieBreak};
+
+        let registry = prometheus::Registry::new();
+        let decisions_total = IntCounterVec::new(
+            Opts::new(
+                format!("{}_{}", name_prefix::COMPONENT, router::DECISIONS_TOTAL),
+                "Total number of worker-selection decisions by cache outcome",
+            ),
+            &[labels::MODEL, labels::WORKER_TYPE, DECISION_LABEL],
+        )
+        .unwrap();
+        let selected_worker_total = IntCounterVec::new(
+            Opts::new(
+                format!(
+                    "{}_{}",
+                    name_prefix::COMPONENT,
+                    router::SELECTED_WORKER_TOTAL
+                ),
+                "Total number of times each backend worker/rank was selected by the router",
+            ),
+            &[
+                labels::MODEL,
+                labels::WORKER_TYPE,
+                ROUTER_WORKER_ID_LABEL,
+                labels::DP_RANK,
+            ],
+        )
+        .unwrap();
+        let candidate_workers = HistogramVec::new(
+            HistogramOpts::new(
+                format!("{}_{}", name_prefix::COMPONENT, router::CANDIDATE_WORKERS),
+                "Number of eligible candidate worker/ranks considered for a router decision",
+            )
+            .buckets(vec![1.0, 2.0, 4.0]),
+            &[labels::MODEL, labels::WORKER_TYPE],
+        )
+        .unwrap();
+        let kv_overlap_score = HistogramVec::new(
+            HistogramOpts::new(
+                format!("{}_{}", name_prefix::COMPONENT, router::KV_OVERLAP_SCORE),
+                "Cache-overlap score credited to the selected worker at decision time, in decision-score units",
+            )
+            .buckets(vec![1.0, 2.0, 4.0]),
+            &[labels::MODEL, labels::WORKER_TYPE],
+        )
+        .unwrap();
+        let worker_load_score = HistogramVec::new(
+            HistogramOpts::new(
+                format!("{}_{}", name_prefix::COMPONENT, router::WORKER_LOAD_SCORE),
+                "Load score for the selected worker at decision time, in decision-score units",
+            )
+            .buckets(vec![1.0, 4.0, 8.0]),
+            &[labels::MODEL, labels::WORKER_TYPE],
+        )
+        .unwrap();
+        let final_score = HistogramVec::new(
+            HistogramOpts::new(
+                format!("{}_{}", name_prefix::COMPONENT, router::FINAL_SCORE),
+                "Final score used to select the worker at decision time, in decision-score units",
+            )
+            .buckets(vec![1.0, 4.0, 8.0]),
+            &[labels::MODEL, labels::WORKER_TYPE],
+        )
+        .unwrap();
+        let tie_breaks_total = IntCounterVec::new(
+            Opts::new(
+                format!("{}_{}", name_prefix::COMPONENT, router::TIE_BREAKS_TOTAL),
+                "Total number of router decisions resolved by a tie-break",
+            ),
+            &[labels::MODEL, labels::WORKER_TYPE, REASON_LABEL],
+        )
+        .unwrap();
+        let no_candidates_total = IntCounterVec::new(
+            Opts::new(
+                format!("{}_{}", name_prefix::COMPONENT, router::NO_CANDIDATES_TOTAL),
+                "Total number of router decisions where no eligible worker/rank existed",
+            ),
+            &[labels::MODEL, labels::WORKER_TYPE],
+        )
+        .unwrap();
+
+        registry
+            .register(Box::new(decisions_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(selected_worker_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(candidate_workers.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(kv_overlap_score.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(worker_load_score.clone()))
+            .unwrap();
+        registry.register(Box::new(final_score.clone())).unwrap();
+        registry
+            .register(Box::new(tie_breaks_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(no_candidates_total.clone()))
+            .unwrap();
+
+        let metrics = test_router_request_metrics(
+            decisions_total,
+            selected_worker_total,
+            candidate_workers,
+            kv_overlap_score,
+            worker_load_score,
+            final_score,
+            tie_breaks_total,
+            no_candidates_total,
+        );
+
+        metrics.observe_selection_decision(
+            "model-a",
+            "decode",
+            WorkerWithDpRank::new(7, 1),
+            64,
+            WorkerSelectionTelemetry {
+                candidate_workers: 3,
+                selected_scores: Some(WorkerSelectionScores {
+                    kv_overlap_score: 2.0,
+                    worker_load_score: 6.0,
+                    final_score: 4.0,
+                }),
+                tie_break: Some(WorkerSelectionTieBreak::EqualScore),
+            },
+        );
+        metrics.observe_selection_decision(
+            "model-a",
+            "decode",
+            WorkerWithDpRank::new(8, 2),
+            0,
+            WorkerSelectionTelemetry {
+                candidate_workers: 2,
+                selected_scores: Some(WorkerSelectionScores {
+                    kv_overlap_score: 0.0,
+                    worker_load_score: 5.0,
+                    final_score: 5.0,
+                }),
+                tie_break: None,
+            },
+        );
+        metrics.observe_no_candidates("model-a", "prefill");
+
+        let output = gather_pef(&registry);
+        assert!(
+            output.contains(
+                "dynamo_component_router_decisions_total{decision=\"cache_hit\",model=\"model-a\",worker_type=\"decode\"} 1"
+            ),
+            "\nActual PEF:\n{output}"
+        );
+        assert!(
+            output.contains(
+                "dynamo_component_router_decisions_total{decision=\"cache_miss\",model=\"model-a\",worker_type=\"decode\"} 1"
+            ),
+            "\nActual PEF:\n{output}"
+        );
+        assert!(
+            output.contains(
+                "dynamo_component_router_selected_worker_total{dp_rank=\"1\",model=\"model-a\",router_worker_id=\"7\",worker_type=\"decode\"} 1"
+            ),
+            "\nActual PEF:\n{output}"
+        );
+        assert!(
+            output.contains(
+                "dynamo_component_router_candidate_workers_count{model=\"model-a\",worker_type=\"decode\"} 2"
+            ),
+            "\nActual PEF:\n{output}"
+        );
+        assert!(
+            output.contains(
+                "dynamo_component_router_kv_overlap_score_sum{model=\"model-a\",worker_type=\"decode\"} 2"
+            ),
+            "\nActual PEF:\n{output}"
+        );
+        assert!(
+            output.contains(
+                "dynamo_component_router_worker_load_score_sum{model=\"model-a\",worker_type=\"decode\"} 11"
+            ),
+            "\nActual PEF:\n{output}"
+        );
+        assert!(
+            output.contains(
+                "dynamo_component_router_final_score_sum{model=\"model-a\",worker_type=\"decode\"} 9"
+            ),
+            "\nActual PEF:\n{output}"
+        );
+        assert!(
+            output.contains(
+                "dynamo_component_router_tie_breaks_total{model=\"model-a\",reason=\"equal_score\",worker_type=\"decode\"} 1"
+            ),
+            "\nActual PEF:\n{output}"
+        );
+        assert!(
+            output.contains(
+                "dynamo_component_router_no_candidates_total{model=\"model-a\",worker_type=\"prefill\"} 1"
+            ),
+            "\nActual PEF:\n{output}"
+        );
     }
 
     #[test]

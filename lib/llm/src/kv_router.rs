@@ -129,6 +129,10 @@ pub const RADIX_STATE_FILE: &str = "radix-state";
 // for worker-local kvindexer query
 pub const WORKER_KV_INDEXER_BUFFER_SIZE: usize = 1024; // store 1024 most recent events in worker buffer
 
+fn should_observe_no_candidates(error: &KvSchedulerError) -> bool {
+    matches!(error, KvSchedulerError::NoEndpoints) || error.is_overload()
+}
+
 fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
     if !error.is_overload() {
         return error.into();
@@ -218,6 +222,8 @@ where
     /// narrowed to the LoRA's allocated/loaded replicas inside `find_best_match_details`,
     /// covering both the decode and prefill routers (both built via `kv_chooser_for`).
     lora_filter: Option<Arc<crate::lora::LoraFilter>>,
+    metrics_model: String,
+    worker_type: &'static str,
 }
 
 impl<Sel> KvRouter<Sel>
@@ -240,6 +246,7 @@ where
         shared_cache: Option<Box<dyn SharedKvCache>>,
         lora_filter: Option<Arc<crate::lora::LoraFilter>>,
     ) -> Result<Self> {
+        let metrics_model = model_name.clone().unwrap_or_else(|| "unknown".to_string());
         let kv_router_config = kv_router_config.unwrap_or_default();
         kv_router_config.validate().map_err(anyhow::Error::msg)?;
         let component = endpoint.component();
@@ -355,6 +362,8 @@ where
             _served_indexer_handle: served_indexer_handle,
             shared_cache,
             lora_filter,
+            metrics_model,
+            worker_type,
         })
     }
 
@@ -695,7 +704,14 @@ where
             Err(KvSchedulerError::QueueRejected(rejection)) => {
                 return Ok((FindBestMatchOutcome::QueueRejected { rejection }, None));
             }
-            Err(error) => return Err(map_scheduler_error(error)),
+            Err(error) => {
+                if should_observe_no_candidates(&error)
+                    && let Some(m) = metrics::RouterRequestMetrics::get()
+                {
+                    m.observe_no_candidates(&self.metrics_model, self.worker_type);
+                }
+                return Err(map_scheduler_error(error));
+            }
         };
         let total_elapsed = start.elapsed();
         let routing_hashes = routing_block_hashes.map(RoutingDecisionHashes::from_local_hashes);
@@ -721,6 +737,16 @@ where
             }
             let beyond = hits.hits_beyond(response.effective_overlap_blocks.round() as u32);
             m.shared_cache_beyond_blocks.observe(beyond as f64);
+        }
+
+        if let Some(m) = metrics::RouterRequestMetrics::get() {
+            m.observe_selection_decision(
+                &self.metrics_model,
+                self.worker_type,
+                response.best_worker,
+                response.cached_tokens,
+                response.selection_telemetry,
+            );
         }
 
         #[cfg(feature = "bench")]
@@ -1269,6 +1295,23 @@ mod tests {
     use crate::local_model::runtime_config::ModelRuntimeConfig;
 
     #[test]
+    fn no_candidate_metrics_include_overload_failures() {
+        assert!(should_observe_no_candidates(&KvSchedulerError::NoEndpoints));
+        assert!(should_observe_no_candidates(
+            &KvSchedulerError::AllEligibleWorkersOverloaded
+        ));
+        assert!(should_observe_no_candidates(
+            &KvSchedulerError::PinnedWorkerOverloaded { worker_id: 7 }
+        ));
+        assert!(!should_observe_no_candidates(
+            &KvSchedulerError::PinnedWorkerNotAllowed { worker_id: 7 }
+        ));
+        assert!(!should_observe_no_candidates(
+            &KvSchedulerError::BookingFailed("test".to_string())
+        ));
+    }
+
+    #[test]
     fn weighted_cache_hit_estimates_include_lower_tiers() {
         let worker_1 = WorkerWithDpRank::new(1, 0);
         let worker_2 = WorkerWithDpRank::new(2, 0);
@@ -1354,6 +1397,7 @@ mod tests {
                 required_blocks: request.isl_tokens.div_ceil(block_size as usize) as u64,
                 effective_overlap_blocks: 0.0,
                 cached_tokens: 0,
+                telemetry: Default::default(),
             })
         }
     }

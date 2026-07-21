@@ -607,6 +607,30 @@ pub mod router {
     /// Total number of requests processed by the router
     pub const REQUESTS_TOTAL: &str = "router_requests_total";
 
+    /// Total number of worker-selection decisions by cache outcome
+    pub const DECISIONS_TOTAL: &str = "router_decisions_total";
+
+    /// Total number of times each backend worker/rank was selected by the router
+    pub const SELECTED_WORKER_TOTAL: &str = "router_selected_worker_total";
+
+    /// Number of eligible candidate worker/ranks considered for a router decision
+    pub const CANDIDATE_WORKERS: &str = "router_candidate_workers";
+
+    /// Cache-overlap score credited to the selected worker at decision time
+    pub const KV_OVERLAP_SCORE: &str = "router_kv_overlap_score";
+
+    /// Load score for the selected worker at decision time
+    pub const WORKER_LOAD_SCORE: &str = "router_worker_load_score";
+
+    /// Final score used to select the worker at decision time
+    pub const FINAL_SCORE: &str = "router_final_score";
+
+    /// Total number of router decisions resolved by a tie-break
+    pub const TIE_BREAKS_TOTAL: &str = "router_tie_breaks_total";
+
+    /// Total number of router decisions where no eligible worker/rank existed
+    pub const NO_CANDIDATES_TOTAL: &str = "router_no_candidates_total";
+
     /// Total number of remote indexer overlap queries that failed
     pub const REMOTE_INDEXER_QUERY_FAILURES_TOTAL: &str =
         "router_remote_indexer_query_failures_total";
@@ -809,6 +833,18 @@ pub mod kvstats {
 
     /// GPU cache usage as a percentage (0.0-1.0)
     pub const GPU_CACHE_USAGE_PERCENT: &str = "gpu_cache_usage_percent";
+
+    /// Prefix cache hit rate (0.0-1.0), portable across vLLM / SGLang / TRT-LLM
+    pub const KV_CACHE_HIT_RATE: &str = "kv_cache_hit_rate";
+}
+
+/// Worker-lifecycle timing gauges set once per worker run by the framework.
+pub mod lifecycle {
+    /// Worker cleanup time in seconds.
+    pub const CLEANUP_TIME_SECONDS: &str = "cleanup_time_seconds";
+
+    /// Worker drain time in seconds.
+    pub const DRAIN_TIME_SECONDS: &str = "drain_time_seconds";
 }
 
 // Model information metrics

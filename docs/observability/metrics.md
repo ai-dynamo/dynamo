@@ -388,7 +388,7 @@ Not all metrics appear in every deployment. The chart below shows which metric g
 
 | Metric Group | Frontend + KV (agg) | Frontend + KV (disagg) | Frontend + non-KV (round-robin/random/direct) | Standalone Router |
 |---|---|---|---|---|
-| `dynamo_component_router_*` (request metrics) | Registered and populated | Registered and populated | Registered, **always zero** | Populated (on `DYN_SYSTEM_PORT`) |
+| `dynamo_component_router_*` (request and decision metrics) | Registered and populated | Registered and populated | Registered, **not populated** | Populated (on `DYN_SYSTEM_PORT`) |
 | `dynamo_router_overhead_*` (routing overhead) | Registered and populated | Registered and populated | **Not registered** | **Not created** |
 | `dynamo_frontend_router_queue_*` (queue depth) | Registered; populated when a CLI or policy-class queue threshold is set | Registered; populated when a CLI or policy-class queue threshold is set | **Not registered** | **Not created** |
 | `dynamo_component_kv_cache_events_applied` (indexer) | Populated when KV events are received | Populated when KV events are received | **Not registered** | Populated when KV events are received |
@@ -396,7 +396,7 @@ Not all metrics appear in every deployment. The chart below shows which metric g
 
 **Key:**
 - **Registered and populated**: Metric appears at `/metrics` with real values
-- **Registered, always zero**: Metric appears at `/metrics` but the counter/histogram is never incremented (useful for dashboards that expect the metric to exist)
+- **Registered, not populated**: Metric family exists, but counters and histograms do not receive observations. For labeled metrics, no time series appears until a label combination is observed.
 - **Not registered / Not created**: Metric does not appear at `/metrics` at all
 
 **Scrape endpoints:**
@@ -406,9 +406,9 @@ Not all metrics appear in every deployment. The chart below shows which metric g
 
 #### Router Request Metrics (`dynamo_component_router_*`)
 
-Histograms and counters for aggregate request-level statistics. Eagerly registered via `from_component()` with the DRT `MetricsRegistry` hierarchy. On the frontend, exposed at `/metrics` on the HTTP port (default 8000) via the `drt_metrics` bridge. On the standalone router (`python -m dynamo.router`), exposed on `DYN_SYSTEM_PORT` when set. Populated per-request when `--router-mode kv` is active; registered with zero values in non-KV modes.
+Histograms and counters for aggregate request-level statistics. Eagerly registered via `from_component()` with the DRT `MetricsRegistry` hierarchy. On the frontend, exposed at `/metrics` on the HTTP port (default 8000) via the `drt_metrics` bridge. On the standalone router (`python -m dynamo.router`), exposed on `DYN_SYSTEM_PORT` when set. Populated per request when `--router-mode kv` is active; registered but not populated in non-KV modes.
 
-All metrics carry the standard hierarchy labels (`dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`).
+All metrics carry the standard hierarchy labels (`dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`). Decision metrics also carry `model` and `worker_type`. Worker-selection metrics use `router_worker_id` for the selected backend worker because `worker_id` is reserved for the metric producer's discovery identity.
 
 | Metric | Type | Description |
 |--------|------|-------------|
@@ -419,6 +419,17 @@ All metrics carry the standard hierarchy labels (`dynamo_namespace`, `dynamo_com
 | `dynamo_component_router_input_sequence_tokens` | Histogram | Input sequence length (tokens) |
 | `dynamo_component_router_output_sequence_tokens` | Histogram | Output sequence length (tokens) |
 | `dynamo_component_router_kv_hit_rate` | Histogram | Predicted KV cache hit rate at routing time (0.0-1.0) |
+| `dynamo_component_router_kv_transfer_estimated_latency_seconds` | Histogram | Upper-bound KV transfer latency estimate in disaggregated serving |
+| `dynamo_component_router_shared_cache_hit_rate` | Histogram | Fraction of request blocks found in the shared KV cache (0.0-1.0) |
+| `dynamo_component_router_shared_cache_beyond_blocks` | Histogram | Shared cache blocks beyond the selected worker's device overlap |
+| `dynamo_component_router_decisions_total` | Counter | Worker-selection decisions by cache outcome. Labels: `model`, `worker_type`, `decision` (`cache_hit` or `cache_miss`) |
+| `dynamo_component_router_selected_worker_total` | Counter | Times each backend worker/rank was selected. Labels: `model`, `worker_type`, `router_worker_id`, `dp_rank` |
+| `dynamo_component_router_candidate_workers` | Histogram | Eligible worker/ranks considered for each router decision. Labels: `model`, `worker_type` |
+| `dynamo_component_router_kv_overlap_score` | Histogram | Cache-overlap credit applied to the selected worker, in decision-score units. Labels: `model`, `worker_type` |
+| `dynamo_component_router_worker_load_score` | Histogram | Selected worker load score before cache-overlap credit, in decision-score units. Labels: `model`, `worker_type` |
+| `dynamo_component_router_final_score` | Histogram | Final score used to select the worker, in decision-score units. Labels: `model`, `worker_type` |
+| `dynamo_component_router_tie_breaks_total` | Counter | Decisions resolved by a tie-break. Labels: `model`, `worker_type`, `reason` |
+| `dynamo_component_router_no_candidates_total` | Counter | Decisions where no eligible worker/rank existed. Labels: `model`, `worker_type` |
 
 #### Per-Request Routing Overhead (`dynamo_router_overhead_*`)
 
