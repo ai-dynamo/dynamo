@@ -11,6 +11,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
 #[cfg(feature = "mocker-kvbm-offload")]
@@ -378,7 +379,7 @@ fn main() -> Result<()> {
         .as_ref()
         .map(|path| {
             File::create(path)
-                .map(std::io::BufWriter::new)
+                .map(BufWriter::new)
                 .with_context(|| format!("failed to create timing output at {path:?}"))
         })
         .transpose()?;
@@ -387,7 +388,7 @@ fn main() -> Result<()> {
         .as_ref()
         .map(|path| {
             File::create(path)
-                .map(std::io::BufWriter::new)
+                .map(BufWriter::new)
                 .with_context(|| format!("failed to create canonical report output at {path:?}"))
         })
         .transpose()?;
@@ -431,8 +432,6 @@ fn main() -> Result<()> {
             }
         };
         if let Some(writer) = timing_writer.as_mut() {
-            use std::io::Write;
-
             serde_json::to_writer(
                 &mut *writer,
                 &serde_json::json!({
@@ -448,12 +447,20 @@ fn main() -> Result<()> {
             writer.write_all(b"\n")?;
         }
         if let Some(writer) = canonical_writer.as_mut() {
-            use std::io::Write;
-
             serde_json::to_writer(&mut *writer, &canonical_report(&report, args.engine_type)?)?;
             writer.write_all(b"\n")?;
         }
         last_report = Some(report);
+    }
+    if let Some(writer) = timing_writer.as_mut() {
+        writer
+            .flush()
+            .context("failed to flush timings JSONL output")?;
+    }
+    if let Some(writer) = canonical_writer.as_mut() {
+        writer
+            .flush()
+            .context("failed to flush canonical report JSONL output")?;
     }
     let report = last_report.expect("iterations must be at least 1");
 
