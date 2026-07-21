@@ -217,7 +217,7 @@ const LOWER_TIER_REMOVAL_SUFFIX: &str = "lower_tier_removal_total";
 #[cfg(feature = "metrics")]
 const LOWER_TIER_REMOVAL_NAME: &str = "dynamo_kvrouter_lower_tier_removal_total";
 #[cfg(feature = "metrics")]
-const LOWER_TIER_REMOVAL_HELP: &str = "Total number of lower-tier chunk-removal outcomes";
+const LOWER_TIER_REMOVAL_HELP: &str = "Lower-tier removal activity; removals_* count chunks, removal_hashes_* count unique event hashes, and entries_* count index entries; outcomes are not mutually exclusive";
 #[cfg(feature = "metrics")]
 const LOWER_TIER_REMOVAL_LABELS: &[&str] = &["outcome"];
 

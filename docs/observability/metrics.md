@@ -455,8 +455,8 @@ Tracks KV cache events applied to the frontend-embedded router's radix tree inde
 
 **Additional labels:** `status` (`ok` / `parent_block_not_found` / `block_not_found` / `invalid_block` / `capacity_exhausted` / `indexer_invariant_violation`), `event_type` (`stored` / `removed` / `cleared`)
 
-The standalone indexer exposes the device-tier-only counter
-`dynamo_kvrouter_kv_cache_events_applied`; see the [Standalone KV Indexer](../components/router/standalone-indexer.md).
+The standalone indexer exposes the same device- and lower-tier event scope through the process-local
+`dynamo_kvrouter_kv_cache_events_applied` counter; see the [Standalone KV Indexer](../components/router/standalone-indexer.md).
 
 #### Per-Worker Load and Timing Gauges (`dynamo_frontend_worker_*`)
 
