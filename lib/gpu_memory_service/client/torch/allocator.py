@@ -184,6 +184,7 @@ def get_or_create_scratch_manager(
     *,
     tag: str = "kv_cache",
     scratch_size: int = 512 * 1024 * 1024,
+    single_block: bool = False,
 ) -> "GMSClientMemoryManager":
     """Register an unconnected manager for client-local scratch allocation.
 
@@ -213,6 +214,11 @@ def get_or_create_scratch_manager(
                 f"GMS scratch allocator tag={tag} was initialized with "
                 f"scratch_size={state.manager.scratch_size}, not {scratch_size}"
             )
+        if state.manager.single_block != single_block:
+            raise RuntimeError(
+                f"GMS scratch allocator tag={tag} was initialized with "
+                f"single_block={state.manager.single_block}, not {single_block}"
+            )
         return state.manager
 
     manager = GMSClientMemoryManager(
@@ -220,6 +226,7 @@ def get_or_create_scratch_manager(
         device=device,
         tag=tag,
         scratch_size=scratch_size,
+        single_block=single_block,
     )
     _ensure_callbacks_initialized()
     mem_pool = _create_mem_pool()

@@ -16,10 +16,13 @@ from typing import TYPE_CHECKING
 
 import torch
 from gpu_memory_service.client.torch.allocator import (
+    get_gms_client_memory_manager,
     get_or_create_gms_client_memory_manager,
+    get_or_create_scratch_manager,
     gms_use_mem_pool,
 )
 from gpu_memory_service.client.torch.module import (
+    _iter_module_tensors,
     materialize_module_from_gms,
     rebind_nonparameter_tensors,
 )
@@ -30,7 +33,6 @@ from gpu_memory_service.integrations.common.utils import (
     get_gms_lock_mode,
     prepare_gms_write,
     publish_gms_write,
-    setup_meta_tensor_workaround,
     strip_gms_model_loader_config,
 )
 
@@ -52,6 +54,10 @@ if TYPE_CHECKING:
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 
 logger = logging.getLogger(__name__)
+
+# Allocator tag for the transient single-block scratch pool that backs RO model
+# construction (see _create_device_model). Torn down after materialize.
+_CONSTRUCT_TAG = "ro_construct"
 
 # Track imported weights plus the vLLM-local model_memory_usage adjustment.
 _last_imported_weights_bytes: int = 0
@@ -259,8 +265,24 @@ def _load_read_mode(
     global _last_imported_weights_bytes, _last_model_memory_usage_offset_bytes
 
     try:
-        model = _create_meta_model(vllm_config, model_config)
+        # Construct the RO skeleton on a REAL device (over aliased scratch)
+        # rather than on `meta`. Building on a real device sidesteps the
+        # meta-safety hazards the old meta path guarded against (.item()/
+        # .to(device)/data-dependent ops during __init__, fake-op signatures,
+        # post-load hooks that touch the device) — the source of most per-model
+        # RO patches. Construction allocates over a single-block scratch pool so
+        # the garbage skeleton costs one aliased physical block, not a
+        # weights-sized copy (see _create_device_model).
+        model = _create_device_model(vllm_config, model_config, device_index)
+        # materialize runs OUTSIDE the construct scratch pool: parameters are
+        # repointed to committed GMS views and buffers/attrs are cloned into
+        # ordinary (non-scratch) device memory, so nothing the model retains
+        # references construction scratch afterward.
         materialize_module_from_gms(gms_client, model, device_index=device_index)
+        # Hard-assert every construction-scratch tensor was replaced, then free
+        # the scratch pool. Any tensor still on scratch would dangle once the
+        # pool is torn down, so this fails loudly rather than serving garbage.
+        _finalize_construction_scratch(model)
 
         # MX: register materialized tensors (available for P2P transfer)
         mx_ctx = get_mx_load_context(vllm_config, model_config)
@@ -346,24 +368,106 @@ def _load_write_mode(
     return model.eval()
 
 
-def _create_meta_model(vllm_config, model_config) -> torch.nn.Module:
-    """Create model on meta device for RO mode materialization."""
+def _create_device_model(
+    vllm_config, model_config, device_index: int
+) -> torch.nn.Module:
+    """Create the RO model on a real CUDA device over aliased scratch backing.
+
+    Mirrors KV shadow-mode construction: parameters (and the derived tensors
+    ``process_weights_after_loading`` builds) are allocated through a
+    single-block scratch pool, so the whole garbage skeleton is backed by ONE
+    aliased physical block (~scratch_size) instead of a weights-sized copy —
+    which is what makes this fit the failover colocation budget.
+    ``materialize_module_from_gms`` then repoints each parameter to its committed
+    GMS view; the scratch pool is torn down afterward (see
+    ``_finalize_construction_scratch``).
+
+    Building on a real device (instead of ``meta``) lets model ``__init__`` and
+    ``process_weights_after_loading`` run on real tensors, so the meta-device
+    hazards the old meta path guarded against (``.item()``/``.to(device)``/data
+    dependent ops, custom-op fake signatures, post-load hooks that initialize
+    device scratch) simply do not arise.
+    """
     from vllm.model_executor.model_loader.utils import (
         initialize_model,
         process_weights_after_loading,
     )
     from vllm.utils.torch_utils import set_default_torch_dtype
 
-    setup_meta_tensor_workaround()
-    meta_device = torch.device("meta")
-
+    device = torch.device("cuda", device_index)
+    # Client-local scratch only (no GMS server session): one shared physical
+    # block aliased across every construction allocation.
+    get_or_create_scratch_manager(
+        get_socket_path(device_index, _CONSTRUCT_TAG),
+        device_index,
+        tag=_CONSTRUCT_TAG,
+        single_block=True,
+    )
     with set_default_torch_dtype(model_config.dtype):
-        with meta_device:
-            model = initialize_model(vllm_config=vllm_config, model_config=model_config)
-
-    try:
-        process_weights_after_loading(model, model_config, meta_device)
-    except Exception as e:
-        logger.debug("[GMS] Post-processing on meta tensors: %s", e)
+        with gms_use_mem_pool(_CONSTRUCT_TAG, device):
+            with device:
+                model = initialize_model(
+                    vllm_config=vllm_config, model_config=model_config
+                )
+            # Runs on real tensors, so post-load hooks that build derived tensors
+            # (MLA projections, MoE kernels, ...) execute normally. Values are
+            # garbage and are overwritten by materialize; only the resulting
+            # structure matters, and the scratch-coverage check backstops any
+            # tensor materialize does not replace. A garbage-value-sensitive hook
+            # is unexpected but must not abort bring-up.
+            try:
+                process_weights_after_loading(model, model_config, device)
+            except Exception as e:
+                logger.warning(
+                    "[GMS] Read mode: process_weights_after_loading raised during "
+                    "device construction (continuing; materialize fills committed "
+                    "tensors, scratch-coverage check guards the rest): %s",
+                    e,
+                )
 
     return model
+
+
+def _finalize_construction_scratch(model: torch.nn.Module) -> None:
+    """Assert construction scratch was fully replaced, then free the pool.
+
+    Unlike KV scratch (reallocated in place at the same VA on wake), construction
+    scratch is torn down after materialize. A parameter or buffer still backed by
+    it would dangle into freed memory once the pool is released, so any leftover
+    is a hard error — an uncommitted weight, or a derived tensor materialize never
+    filled — rather than a silently-served garbage/use-after-free model. On
+    success the shared scratch block and all its VA reservations are released and
+    the tag is evicted.
+    """
+    manager = get_gms_client_memory_manager(_CONSTRUCT_TAG)
+    if manager is None:
+        return
+
+    ranges = [
+        (base_va, scratch.va_reserved_size)
+        for base_va, scratch in manager.scratch_mappings.items()
+    ]
+
+    def _in_scratch(t: torch.Tensor) -> bool:
+        ptr = int(t.data_ptr())
+        return any(va <= ptr < va + size for va, size in ranges)
+
+    try:
+        # Enumerate exactly the tensor set materialize operates on (parameters,
+        # buffers, and bare tensor attributes) so a scratch-backed tensor_attr
+        # materialize never replaced is caught too, not just params/buffers.
+        dangling = [
+            name
+            for name, tensor, _ in _iter_module_tensors(model)
+            if tensor.numel() > 0 and _in_scratch(tensor)
+        ]
+        if dangling:
+            raise RuntimeError(
+                f"[GMS] Read mode: {len(dangling)} tensor(s) still backed by "
+                "construction scratch after materialize (uncommitted weight or "
+                f"unfilled derived tensor): {dangling[:10]}"
+            )
+    finally:
+        # Free the shared scratch block + VA reservations and evict the tag,
+        # whether or not the assertion above fired.
+        manager.close()

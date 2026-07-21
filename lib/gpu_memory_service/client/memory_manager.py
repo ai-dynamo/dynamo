@@ -153,11 +153,19 @@ class GMSClientMemoryManager:
         device: int = 0,
         tag: Optional[str] = None,
         scratch_size: int = 512 * 1024 * 1024,
+        single_block: bool = False,
     ) -> None:
         self.socket_path = socket_path
         self.device = device
         self.tag = tag
         self.scratch_size = scratch_size
+        # When True, every scratch mapping aliases ONE shared physical block
+        # instead of minting a fresh block per allocation. Construction-time
+        # weight skeletons make thousands of allocations; without sharing, the
+        # per-allocation blocks would cost hundreds of GiB. The shared handle is
+        # released once the last aliasing VA is torn down.
+        self.single_block = single_block
+        self._shared_scratch_handle: int = 0
         self._vmm = get_vmm()
 
         self._client: Optional[_GMSClientSession] = None
@@ -203,6 +211,10 @@ class GMSClientMemoryManager:
     @property
     def mappings(self) -> Dict[int, LocalMapping]:
         return self._mappings
+
+    @property
+    def scratch_mappings(self) -> Dict[int, "_ScratchMapping"]:
+        return self._scratch_mappings
 
     @property
     def total_bytes(self) -> int:
@@ -516,10 +528,14 @@ class GMSClientMemoryManager:
             if scratch.scratch_handle == 0:
                 continue
             self._vmm.unmap(base_va, scratch.va_reserved_size)
-            self._vmm.release(scratch.scratch_handle)
+            if not self.single_block:
+                self._vmm.release(scratch.scratch_handle)
             scratch.scratch_handle = 0
             unmapped_count += 1
             total_bytes += scratch.va_reserved_size
+        if self.single_block and self._shared_scratch_handle:
+            self._vmm.release(self._shared_scratch_handle)
+            self._shared_scratch_handle = 0
 
         self._va_preserved = True
         self._unmapped = True
@@ -694,15 +710,29 @@ class GMSClientMemoryManager:
         aligned_size = align_to_granularity(size, self.granularity)
         va_reserved_size = align_to_granularity(size, self.scratch_size)
 
-        ok, scratch_handle = self._vmm.create_tolerate_oom(
-            self.scratch_size, self.device
-        )
-        if not ok:
-            raise RuntimeError(
-                f"VMM physical memory allocation failed "
-                f"({self.scratch_size // (1 << 20)} MiB) on "
-                f"{self.device_type.value} device {self.device}"
+        if self.single_block:
+            # One physical block backs every scratch VA in this manager.
+            if self._shared_scratch_handle == 0:
+                ok, self._shared_scratch_handle = self._vmm.create_tolerate_oom(
+                    self.scratch_size, self.device
+                )
+                if not ok:
+                    raise RuntimeError(
+                        f"VMM physical memory allocation failed "
+                        f"({self.scratch_size // (1 << 20)} MiB) on "
+                        f"{self.device_type.value} device {self.device}"
+                    )
+            scratch_handle = self._shared_scratch_handle
+        else:
+            ok, scratch_handle = self._vmm.create_tolerate_oom(
+                self.scratch_size, self.device
             )
+            if not ok:
+                raise RuntimeError(
+                    f"VMM physical memory allocation failed "
+                    f"({self.scratch_size // (1 << 20)} MiB) on "
+                    f"{self.device_type.value} device {self.device}"
+                )
 
         va = self._vmm.address_reserve(va_reserved_size, self.scratch_size)
         for offset in range(0, va_reserved_size, self.scratch_size):
@@ -794,8 +824,18 @@ class GMSClientMemoryManager:
         self._vmm.synchronize()
         if scratch.scratch_handle:
             self._vmm.unmap(base_va, scratch.va_reserved_size)
-            self._vmm.release(scratch.scratch_handle)
+            # In single-block mode the physical is shared; release it once the
+            # last aliasing VA is gone (below), not per entry.
+            if not self.single_block:
+                self._vmm.release(scratch.scratch_handle)
         self._vmm.address_free(base_va, scratch.va_reserved_size)
+        if (
+            self.single_block
+            and self._shared_scratch_handle
+            and not self._scratch_mappings
+        ):
+            self._vmm.release(self._shared_scratch_handle)
+            self._shared_scratch_handle = 0
         return True
 
     # ==================== Lifecycle ====================
