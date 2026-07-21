@@ -136,16 +136,16 @@ Append these additional flags to tune the conditional disaggregation policy:
 
 For ISL-based policies, `effective ISL` is the request prompt length after subtracting the selected decode worker's cached prefix overlap. The absolute threshold limits the number of prompt tokens the decode worker may need to compute locally. The ratio threshold limits that local work as a fraction of the raw prompt length. These thresholds measure both "how much compute does this request require" (absolute) and "how compute/memory-bound is this request, due to the ratio of its computed / cached KV cache" (ratio), respectively.
 
-As a tuning starting point, we recommend choosing thresholds based on your workload's expected effective-ISL (and effective ISL / raw ISL ratio) distribution. For example, with `isl_bounding`, setting the absolute threshold to p25 of the workload's effective ISL would make the absolute-threshold check pass for roughly 25% of requests.
+As a tuning starting point, we recommend choosing thresholds based on your workload's expected effective-ISL and the `effective ISL : raw ISL` ratio distribution. For example, with `isl_bounding`, setting the absolute threshold to p25 of the workload's effective ISL would make the absolute-threshold check pass for roughly 25% of requests.
 
 | Flag                                                  | Default        | Use                                                                                                                                               |
 | ----------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--router-conditional-disagg`                         | Disabled       | Enables conditional disaggregation. Requires `--router-mode kv` and separate prefill/decode worker pools.                                         |
 | `--router-conditional-disagg-policy`                  | `isl_bounding` | Selects the bypass policy: `isl_bounding`, `prefill_load`, or `isl_or_load`.                                                                      |
-| `--router-conditional-disagg-eff-isl-threshold`       | `2048`         | For `isl_bounding` and the ISL arm of `isl_or_load`, require effective ISL to be below this many tokens.                                          |
-| `--router-conditional-disagg-eff-isl-ratio-threshold` | `0.7`          | For `isl_bounding` and the ISL arm of `isl_or_load`, require `effective ISL / raw ISL` to be below this value. Must be in `[0.0, 1.0]`.           |
+| `--router-conditional-disagg-eff-isl-threshold`       | `2048`         | For `isl_bounding` and the ISL condition within `isl_or_load`, require effective ISL to be below this many tokens.                                |
+| `--router-conditional-disagg-eff-isl-ratio-threshold` | `0.7`          | For `isl_bounding` and the ISL condition within `isl_or_load`, require the `effective ISL : raw ISL` ratio to be below this value. Must be in `[0.0, 1.0]`. |
 | `--router-conditional-disagg-prefill-busy-threshold`  | Unset          | Sets the prefill busy threshold for `prefill_load` and `isl_or_load`. When unset, those policies inherit `--router-queue-threshold` if it is set. |
-| `--router-conditional-disagg-decode-busy-threshold`   | Unset          | Decode-busy guard. When unset, the guard is disabled. When set, conditional-disagg bypass is disabled if the selected decode worker's projected decode load exceeds this fraction of KV capacity. |
+| `--router-conditional-disagg-decode-busy-threshold`   | Unset          | Decode-busy guard. When unset, the guard is disabled. When set, conditional-disagg bypass is disabled if the selected decode worker's projected active decode KV blocks exceed this fraction of KV capacity. This uses router-side active decode block accounting. |
 
 The available policies are:
 

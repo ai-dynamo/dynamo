@@ -24,6 +24,8 @@ from dynamo.common.configuration.utils import (
     nullable_float,
 )
 
+logger = logging.getLogger(__name__)
+
 # Authoritative field list — used by kv_router_kwargs() to extract values.
 _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "overlap_score_weight",
@@ -126,26 +128,26 @@ def warn_conditional_disagg_prefill_busy_threshold_resolution(
     if policy not in LOAD_AWARE_CONDITIONAL_DISAGG_POLICIES:
         return
     if busy_threshold is not None:
-        logging.getLogger(__name__).info(
+        logger.info(
             "conditional_disagg prefill-load condition using "
             "--router-conditional-disagg-prefill-busy-threshold=%s",
             busy_threshold,
         )
     elif queue_threshold is not None:
-        logging.getLogger(__name__).info(
+        logger.info(
             "conditional_disagg prefill-load condition using "
             "--router-queue-threshold=%s because "
             "--router-conditional-disagg-prefill-busy-threshold is unset",
             queue_threshold,
         )
     else:
-        warnings.warn(
-            f"--router-conditional-disagg-policy={policy!r} consumes the "
+        logger.warning(
+            "--router-conditional-disagg-policy=%r consumes the "
             "prefill-worker busy signal, but neither "
             "--router-conditional-disagg-prefill-busy-threshold nor "
             "--router-queue-threshold is set; the prefill-load condition "
             "will be disabled.",
-            stacklevel=3,
+            policy,
         )
 
 
@@ -440,9 +442,10 @@ class KvRouterArgGroup(ArgGroup):
             default=False,
             help=(
                 "[EXPERIMENTAL] KV Router: Enable conditional disaggregation. "
-                "When enabled, the frontend may skip remote prefill and route "
-                "a request directly to the cache-hot decode worker when the "
-                "configured policy decides local prefill+decode is preferable."
+                "When enabled, the router may bypass the remote prefill step "
+                "and route requests directly to a decode worker. The configured "
+                "policy determines whether local prefill and decode is preferable "
+                "for each request."
             ),
             dest="conditional_disagg_enabled",
         )
@@ -452,11 +455,11 @@ class KvRouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_CONDITIONAL_DISAGG_POLICY",
             default="isl_bounding",
             help=(
-                "KV Router: Conditional-disagg bypass policy. "
+                "[EXPERIMENTAL] KV Router: Conditional-disagg bypass policy. "
                 "'isl_bounding': bypass when effective ISL is below both the "
                 "absolute and ratio thresholds. 'prefill_load': bypass when "
                 "the chosen prefill worker is busy. 'isl_or_load': bypass "
-                "when either policy would bypass."
+                "when either the ISL condition or the prefill-load condition is met."
             ),
             arg_type=str,
             choices=list(CONDITIONAL_DISAGG_POLICY_CHOICES),
@@ -468,8 +471,9 @@ class KvRouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_CONDITIONAL_DISAGG_EFF_ISL_THRESHOLD",
             default=2048,
             help=(
-                "KV Router: For 'isl_bounding' and the ISL arm of "
-                "'isl_or_load', require effective ISL to be below this many tokens."
+                "[EXPERIMENTAL] KV Router: For 'isl_bounding' and the ISL "
+                "condition within 'isl_or_load', require effective ISL to be "
+                "below this many tokens."
             ),
             arg_type=int,
             dest="conditional_disagg_eff_isl_threshold",
@@ -480,9 +484,9 @@ class KvRouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_CONDITIONAL_DISAGG_EFF_ISL_RATIO_THRESHOLD",
             default=0.7,
             help=(
-                "KV Router: For 'isl_bounding' and the ISL arm of "
-                "'isl_or_load', require effective ISL / raw ISL to be below "
-                "this value. Must be in [0.0, 1.0]."
+                "[EXPERIMENTAL] KV Router: For 'isl_bounding' and the ISL "
+                "condition within 'isl_or_load', require the `effective ISL : raw ISL` "
+                "ratio to be below this value. Must be in [0.0, 1.0]."
             ),
             arg_type=float,
             dest="conditional_disagg_eff_isl_ratio_threshold",
@@ -493,7 +497,7 @@ class KvRouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_CONDITIONAL_DISAGG_PREFILL_BUSY_THRESHOLD",
             default=None,
             help=(
-                "KV Router: Dedicated prefill-worker busy-line fraction for "
+                "[EXPERIMENTAL] KV Router: Prefill-worker busy threshold for "
                 "'prefill_load' and 'isl_or_load'. A worker is busy when "
                 "active_tokens(W) > threshold * max_num_batched_tokens(W). "
                 "If unset, falls back to --router-queue-threshold."
@@ -507,9 +511,9 @@ class KvRouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_CONDITIONAL_DISAGG_DECODE_BUSY_THRESHOLD",
             default=None,
             help=(
-                "KV Router: Decode-busy guard for conditional disagg. "
+                "[EXPERIMENTAL] KV Router: Decode-busy guard for conditional disagg. "
                 "When set, conditional-disagg bypass is disabled if the selected "
-                "decode worker's projected decode load exceeds "
+                "decode worker's projected active decode KV blocks exceed "
                 "threshold * total_kv_blocks(W). If unset, the guard is disabled."
             ),
             arg_type=float,
