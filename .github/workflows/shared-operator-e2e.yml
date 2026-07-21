@@ -30,6 +30,7 @@ on:
 
 jobs:
   operator-e2e:
+    # TODO(sttts): Rework the GPU operator tests to run in CI too; today this lane only covers GPU-free specs.
     name: gpu_0
     runs-on: prod-deploy-tester-v1
     timeout-minutes: 120
