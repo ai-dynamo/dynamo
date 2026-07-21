@@ -55,6 +55,9 @@ class FlockFailoverLock(FailoverLock):
         every ``poll_interval`` seconds (default 100ms).
         Polling keeps us from blocking the event loop.
         """
+        # Reset per acquire so was_contended reflects *this* acquisition, not a
+        # prior one (a reused lock object must not report a stale contended flag).
+        self._was_contended = False
         # O_CREAT: create the file if it doesn't exist
         # O_RDWR:  open for reading and writing (flock requires a valid fd,
         #          and we write our engine_id into the file after acquiring)

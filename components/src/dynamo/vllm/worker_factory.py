@@ -365,14 +365,17 @@ class WorkerFactory:
     def _maybe_create_failover_metrics(self, config: Config, generate_endpoint):
         """Create + register per-engine failover metrics (shadow mode only).
 
-        Registered here (post engine-load, alongside the other engine metric
-        callbacks) so prometheus_client is safe to import. The bulk of model
-        init already happened; its duration is covered by
-        model_load_time_seconds, and the state timeline begins at 'init' here.
+        Called *before* the model loads so the ``init`` state spans the load
+        (the slowest part of bring-up) and is actually observable, and so a
+        restarted engine re-exposes its persisted switch counters within seconds
+        of process start rather than after a full reload. Uses a dedicated
+        registry, so early registration doesn't interfere with the engine's own
+        prometheus setup; registered on ``generate_endpoint`` so the metrics
+        surface on that endpoint's system /metrics.
         """
         if not config.gms_shadow_mode:
             return None
-        from dynamo.vllm.failover_metrics import create_failover_metrics
+        from gpu_memory_service.failover_metrics import create_failover_metrics
 
         persist_dir = (
             os.path.dirname(
@@ -482,6 +485,13 @@ class WorkerFactory:
                     list_loras_endpoint,
                 ]
             )
+
+        # Shadow mode: register failover metrics and enter 'init' BEFORE the
+        # model loads, so 'init' spans the load. Threaded through to the
+        # lock-wait and post-register hooks below.
+        failover_metrics = self._maybe_create_failover_metrics(
+            config, generate_endpoint
+        )
 
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
         fpm_worker_id = str(generate_endpoint.connection_id())
@@ -607,9 +617,6 @@ class WorkerFactory:
                 "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
             )
 
-        failover_metrics = self._maybe_create_failover_metrics(
-            config, generate_endpoint
-        )
         was_failover = await self._maybe_wait_for_failover_lock(
             handler, runtime, config, failover_metrics
         )
@@ -647,6 +654,10 @@ class WorkerFactory:
             worker_type=worker_type,
             needs=needs,
         )
+        # Registered with discovery and serving now, so a failover that reached
+        # here succeeded. Gated on was_failover (same gate as the attempt) so the
+        # initial bootup — an uncontended lock, not a switch — isn't counted, and
+        # success stays paired with attempt.
         if failover_metrics is not None:
             failover_metrics.set_state("active")
             if was_failover:
@@ -753,6 +764,12 @@ class WorkerFactory:
             else None
         )
 
+        # Shadow mode: register failover metrics and enter 'init' BEFORE the
+        # model loads, so 'init' spans the load. Threaded through below.
+        failover_metrics = self._maybe_create_failover_metrics(
+            config, generate_endpoint
+        )
+
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
         fpm_worker_id = str(generate_endpoint.connection_id())
         if snapshot_engine is not None:
@@ -845,9 +862,6 @@ class WorkerFactory:
             runtime, handler, lora_enabled=config.engine_args.enable_lora
         )
 
-        failover_metrics = self._maybe_create_failover_metrics(
-            config, generate_endpoint
-        )
         was_failover = await self._maybe_wait_for_failover_lock(
             handler, runtime, config, failover_metrics
         )
@@ -891,6 +905,10 @@ class WorkerFactory:
             worker_type=WorkerType.Prefill,
             needs=[prefill_needs_set],
         )
+        # Registered with discovery and serving now, so a failover that reached
+        # here succeeded. Gated on was_failover (same gate as the attempt) so the
+        # initial bootup — an uncontended lock, not a switch — isn't counted, and
+        # success stays paired with attempt.
         if failover_metrics is not None:
             failover_metrics.set_state("active")
             if was_failover:

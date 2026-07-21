@@ -1,31 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Observability for GMS shadow-engine failover.
+"""Prometheus metrics for GMS shadow-engine failover.
 
-Emits Prometheus metrics for the failover state machine driven by
-``worker_factory._maybe_wait_for_failover_lock``. Uses the same
-``prometheus_client`` + ``register_prometheus_expfmt_callback`` bridge as
-``register_embedding_cache_metrics`` (see ``common/utils/prometheus.py``), so the
-metrics land on the shared ``DYN_SYSTEM_PORT/metrics`` surface — no extra port,
-no standalone client.
-
-Design notes
-------------
-* **Event-driven, not polled.** Metric values are set at the state transitions
-  (in ``worker_factory``); the scrape callback only encodes the current registry.
-* **States:** ``init -> standby -> waking -> active``. A dead engine cannot
-  self-report — absence of the series (Prometheus staleness) plus a k8s restart
-  is the "dead" signal. ``active_engines``/``shadow_ready`` are derived downstream
-  as ``count(state=="active")`` / ``count(state=="standby")``.
-* **Switch counters are write-through persisted** to a per-engine file in the
-  shared failover dir (the GMS emptyDir). A counter increment that precedes a
-  process death survives on disk and is re-exposed after the container restarts
-  reload it — so a lost scrape doesn't lose the event. Failures are derived
-  downstream as ``attempts - success``; we never ask a dying process to report
-  its own failure.
-* Only real failovers (a shadow that won a *contended* lock) increment the switch
-  counters — an initial bootup acquires the lock immediately and is not a switch.
+Engine-agnostic: an engine integration constructs one :class:`FailoverMetrics`
+per engine and drives it from its failover lifecycle. Values are set at the
+state transitions (event-driven); the scrape callback only encodes the current
+registry. See ``docs/kubernetes/shadow-engine-failover-observability.md`` for
+the metric catalog and the durability scheme.
 """
 
 import json
@@ -36,17 +18,16 @@ import time
 
 logger = logging.getLogger(__name__)
 
-# Metric name prefix. Mirrors the `dynamo_component_` convention (name_prefix.COMPONENT)
-# used by the Rust registry and the existing Python engine metrics.
+# `dynamo_component_` matches the convention used by the other Dynamo engine
+# metrics (see common/utils/prometheus.py); k8s/DGD/pod identity is added by the
+# scrape relabeling, not baked in here.
 _PREFIX = "dynamo_component_engine_failover"
 
-# The failover lifecycle states (1-hot in the state gauge). "dead" is intentionally
-# absent: a dead engine can't emit — its series goes stale and k8s reports the restart.
 STATES = ("init", "standby", "waking", "active")
 
 
 class FailoverMetrics:
-    """Per-engine failover metrics, exposed via the engine's system /metrics."""
+    """Per-engine failover metrics, exposed on the engine's system /metrics."""
 
     def __init__(
         self,
@@ -55,16 +36,16 @@ class FailoverMetrics:
         component_name: str,
         persist_dir: str,
     ) -> None:
-        # Lazy import: prometheus_client must be imported after the vLLM multiproc
-        # dir is configured (mirrors register_embedding_cache_metrics). We use a
-        # dedicated CollectorRegistry, independent of the vLLM multiproc REGISTRY.
+        # Dedicated registry, independent of any engine multiproc registry.
         from prometheus_client import CollectorRegistry, Counter, Gauge, generate_latest
 
         self._generate_latest = generate_latest
         self._registry = CollectorRegistry()
-        # RLock: transition hooks and the scrape callback are mutually exclusive;
-        # re-entrant so a hook may call another under the same lock.
-        self._lock = threading.RLock()
+        # Guards the multi-step updates below (flipping the 1-hot gauge is
+        # several set() calls; persist is read-then-write) so a concurrent
+        # scrape can't observe a half-updated state. prometheus_client already
+        # makes a single metric op thread-safe; this is for the compound ops.
+        self._lock = threading.Lock()
         self._engine_id = str(engine_id)
         self._lv = {
             "engine_id": self._engine_id,
@@ -75,42 +56,51 @@ class FailoverMetrics:
 
         self._state = Gauge(
             f"{_PREFIX}_state",
-            "Current failover state (1 for the active state, 0 otherwise).",
+            "Current failover state, 1-hot over the state label "
+            "(init|standby|waking|active).",
             base + ["state"],
             registry=self._registry,
         )
         self._state_entered = Gauge(
             f"{_PREFIX}_state_entered_timestamp_seconds",
-            "Unix timestamp when the engine entered its current failover state.",
-            base,
-            registry=self._registry,
-        )
-        self._transitions = Counter(
-            f"{_PREFIX}_transitions_total",
-            "Total failover state transitions.",
-            base + ["from_state", "to_state"],
-            registry=self._registry,
-        )
-        self._attempts = Counter(
-            f"{_PREFIX}_switch_attempts_total",
-            "Total failover promotions attempted (a shadow won a contended lock).",
-            base,
-            registry=self._registry,
-        )
-        self._successes = Counter(
-            f"{_PREFIX}_switch_success_total",
-            "Total failover promotions that completed and began serving.",
+            "Unix time the engine entered its current failover state.",
             base,
             registry=self._registry,
         )
         self._last_state_duration = Gauge(
             f"{_PREFIX}_last_state_duration_seconds",
-            "Duration of the most recent completed occupancy of each state.",
+            "Duration of the most recent completed occupancy of each state "
+            "({state=waking} is the wake/switch time).",
             base + ["state"],
             registry=self._registry,
         )
+        self._transitions = Counter(
+            f"{_PREFIX}_transitions_total",
+            "Failover state transitions, by from_state/to_state.",
+            base + ["from_state", "to_state"],
+            registry=self._registry,
+        )
+        # Real failovers only (a shadow that won a *contended* lock); the initial
+        # bootup acquires the lock immediately and is not counted. Derived
+        # failures = attempts - success. These two are write-through persisted
+        # (see _persist) so an increment made just before the process dies isn't
+        # lost with an unscraped in-memory value; it is reloaded and re-exposed
+        # on restart. This is a lightweight hedge against the death-before-scrape
+        # gap -- a span/event is the fuller answer (future).
+        self._attempts = Counter(
+            f"{_PREFIX}_switch_attempts_total",
+            "Failover promotions attempted (contended-lock wins).",
+            base,
+            registry=self._registry,
+        )
+        self._successes = Counter(
+            f"{_PREFIX}_switch_success_total",
+            "Failover promotions that completed and began serving.",
+            base,
+            registry=self._registry,
+        )
 
-        # Export zeros from the first scrape (Prometheus best practice: zeros, not absent).
+        # Export zeros from the first scrape (zeros, not absent).
         for s in STATES:
             self._state.labels(state=s, **self._lv).set(0)
         self._attempts.labels(**self._lv)
@@ -120,21 +110,13 @@ class FailoverMetrics:
         self._cur_entered: float | None = None
         self._attempts_val = 0
         self._success_val = 0
-        # True between a recorded failover attempt and its success, so that
-        # success only ever counts a promotion that was itself counted as an
-        # attempt (keeps derived failures = attempts - success >= 0 and excludes
-        # the initial bootup, which is not a contended promotion).
-        self._promotion_pending = False
 
         self._persist_path = os.path.join(
             persist_dir, f"failover_metrics_engine-{self._engine_id}.json"
         )
         self._restore()
 
-    # ------------------------------------------------------------------ #
-    # Durability: write-through the switch counters to the shared dir so a
-    # pre-death increment survives and is re-exposed after a container restart.
-    # ------------------------------------------------------------------ #
+    # -- write-through durability for the switch counters ------------------- #
     def _restore(self) -> None:
         try:
             with open(self._persist_path) as f:
@@ -151,7 +133,7 @@ class FailoverMetrics:
             self._successes.labels(**self._lv).inc(success)
         if attempts or success:
             logger.info(
-                "[Shadow] Restored failover counters engine=%s attempts=%d success=%d",
+                "[Shadow] restored failover counters engine=%s attempts=%d success=%d",
                 self._engine_id,
                 attempts,
                 success,
@@ -168,19 +150,16 @@ class FailoverMetrics:
                 os.fsync(f.fileno())
             os.rename(tmp, self._persist_path)  # atomic replace
         except OSError as e:
-            logger.warning("[Shadow] Failed to persist failover counters: %s", e)
+            logger.warning("[Shadow] failed to persist failover counters: %s", e)
 
-    # ------------------------------------------------------------------ #
-    # Transition hooks — called from worker_factory at each state boundary.
-    # ------------------------------------------------------------------ #
+    # -- transition hooks, called from the engine at each state boundary ---- #
     def set_state(self, new_state: str) -> None:
         if new_state not in STATES:
-            logger.warning("[Shadow] Ignoring unknown failover state %r", new_state)
+            logger.warning("[Shadow] ignoring unknown failover state %r", new_state)
             return
         with self._lock:
             now = time.time()
             if self._cur_state is not None and self._cur_state != new_state:
-                # Record how long we sat in the state we're leaving.
                 self._last_state_duration.labels(state=self._cur_state, **self._lv).set(
                     max(0.0, now - (self._cur_entered or now))
                 )
@@ -197,31 +176,21 @@ class FailoverMetrics:
         )
 
     def record_switch_attempt(self) -> None:
-        """A real failover was triggered (shadow won a contended lock)."""
+        """Count a real failover attempt. Caller gates this on a contended lock."""
         with self._lock:
             self._attempts_val += 1
-            self._promotion_pending = True
             self._attempts.labels(**self._lv).inc()
             self._persist()
 
     def record_switch_success(self) -> None:
-        """A real failover completed and the engine began serving.
-
-        No-op unless a failover attempt is pending, so the initial bootup
-        (which is not a contended promotion and records no attempt) is not
-        miscounted as a successful switch.
-        """
+        """Count a completed failover. Caller gates this on the same contended lock,
+        so it always pairs with an attempt (keeps derived failures >= 0)."""
         with self._lock:
-            if not self._promotion_pending:
-                return
-            self._promotion_pending = False
             self._success_val += 1
             self._successes.labels(**self._lv).inc()
             self._persist()
 
-    # ------------------------------------------------------------------ #
-    # Scrape bridge.
-    # ------------------------------------------------------------------ #
+    # -- scrape bridge ------------------------------------------------------ #
     def _collect(self) -> str:
         with self._lock:
             return self._generate_latest(self._registry).decode("utf-8")
@@ -229,7 +198,7 @@ class FailoverMetrics:
     def register(self, endpoint) -> None:
         endpoint.metrics.register_prometheus_expfmt_callback(self._collect)
         logger.info(
-            "[Shadow] Registered failover metrics (engine=%s, persist=%s)",
+            "[Shadow] registered failover metrics (engine=%s, persist=%s)",
             self._engine_id,
             self._persist_path,
         )
