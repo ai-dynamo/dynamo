@@ -2139,10 +2139,6 @@ body:has(input[name="recipe-variant"][value="disagg-multi-node"]:checked) [data-
 body:has(input[name="recipe-variant"][value="trtllm-agg"]:checked) [data-variant]:not([data-variant~="trtllm-agg"]),
 body:has(input[name="recipe-variant"][value="trtllm-disagg"]:checked) [data-variant]:not([data-variant~="trtllm-disagg"]),
 body:has(input[name="recipe-variant"][value="vllm-disagg"]:checked) [data-variant]:not([data-variant~="vllm-disagg"]),
-body:has(input[name="recipe-variant"][value="vllm-agg-b200"]:checked) [data-variant]:not([data-variant~="vllm-agg-b200"]),
-body:has(input[name="recipe-variant"][value="vllm-agg-h200"]:checked) [data-variant]:not([data-variant~="vllm-agg-h200"]),
-body:has(input[name="recipe-variant"][value="vllm-disagg-b200"]:checked) [data-variant]:not([data-variant~="vllm-disagg-b200"]),
-body:has(input[name="recipe-variant"][value="vllm-disagg-h200"]:checked) [data-variant]:not([data-variant~="vllm-disagg-h200"]),
 body:has(input[name="recipe-variant"][value="standard"]:checked) [data-variant]:not([data-variant~="standard"]),
 body:has(input[name="recipe-variant"][value="efa"]:checked) [data-variant]:not([data-variant~="efa"]),
 body:has(input[name="recipe-variant"][value="kvbm"]:checked) [data-variant]:not([data-variant~="kvbm"]) {

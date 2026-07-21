@@ -12,7 +12,7 @@ model:
 status: validated
 targets:
 - id: trtllm-agg
-  recommended: true
+  recommended: false
   hardware:
     gpu: GB200
     count: 4
