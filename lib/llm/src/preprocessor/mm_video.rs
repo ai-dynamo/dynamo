@@ -514,4 +514,144 @@ mod tests {
             );
         }
     }
+
+    /// End-to-end parity against a REAL vLLM engine's KV events: the routing
+    /// stream rebuilt here (pre-expansion prompt ids + VideoTokenCounter +
+    /// pad_value fill) must block-hash identically to the engine's
+    /// BlockStored events after the production ZMQ normalization
+    /// (`decode_event_batch` + `ZmqEventNormalizer` with the video token id).
+    /// Capture with `e2e_capture.py`; run with:
+    /// `DYN_MM_VIDEO_E2E_CAPTURE=e2e_capture.json cargo test -p dynamo-llm \
+    ///    --no-default-features --features mm-routing --lib \
+    ///    vllm_e2e_event_parity -- --ignored --nocapture`
+    #[test]
+    #[ignore = "requires a vLLM KV-event capture via DYN_MM_VIDEO_E2E_CAPTURE"]
+    fn vllm_e2e_event_parity() {
+        use base64::Engine as _;
+        use dynamo_kv_router::protocols::{
+            BlockHashOptions, KvCacheEventData, WorkerWithDpRank, compute_block_hash_for_seq,
+            pad_value_for_mm_hash,
+        };
+        use dynamo_kv_router::zmq_wire::{ZmqEventNormalizer, decode_event_batch};
+
+        let path = std::env::var("DYN_MM_VIDEO_E2E_CAPTURE")
+            .expect("set DYN_MM_VIDEO_E2E_CAPTURE to the capture json path");
+        let fx: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let u32s = |v: &serde_json::Value| -> Vec<u32> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x.as_u64().unwrap() as u32)
+                .collect()
+        };
+
+        let dir = std::path::PathBuf::from(fx["local_dir"].as_str().unwrap());
+        let model_id = fx["model_id"].as_str().unwrap();
+        let block_size = fx["kv_block_size"].as_u64().unwrap() as usize;
+        let mm_hash = fx["mm_hash_u64"].as_u64().unwrap();
+        let video_tok = fx["video_token_id"].as_u64().unwrap() as u32;
+        let image_tok = fx["image_token_id"].as_u64().map(|x| x as u32);
+        let t = fx["num_frames"].as_u64().unwrap() as usize;
+        let h = fx["height"].as_u64().unwrap() as u32;
+        let w = fx["width"].as_u64().unwrap() as u32;
+
+        // ---- Frontend side: independent rebuild of the routing stream ----
+        let counter = VideoTokenCounter::try_new(model_id, None, &dir).unwrap();
+        let n = counter.count_tokens(t, h, w).unwrap();
+        let pre_ids = u32s(&fx["pre_expansion_input_ids"]);
+        assert_eq!(
+            pre_ids.iter().filter(|&&x| x == video_tok).count(),
+            1,
+            "expected exactly one video placeholder in the chat prompt"
+        );
+        let pad = pad_value_for_mm_hash(mm_hash);
+        let mut routing: Vec<u32> = Vec::with_capacity(pre_ids.len() + n);
+        for &tok in &pre_ids {
+            if tok == video_tok {
+                routing.extend(std::iter::repeat_n(pad, n));
+            } else {
+                routing.push(tok);
+            }
+        }
+
+        // Cross-check the expansion against the engine's actual prompt: same
+        // length, pad exactly where the engine has video_token_id.
+        let engine_prompt = u32s(&fx["engine_prompt_token_ids"]);
+        assert_eq!(routing.len(), engine_prompt.len(), "expanded prompt length");
+        for (i, (&r, &e)) in routing.iter().zip(engine_prompt.iter()).enumerate() {
+            if e == video_tok {
+                assert_eq!(r, pad, "expected pad at video position {i}");
+            } else {
+                assert_eq!(r, e, "token mismatch at {i}");
+            }
+        }
+
+        let frontend_hashes =
+            compute_block_hash_for_seq(&routing, block_size as u32, BlockHashOptions::default());
+
+        // ---- Event side: production decode + normalization ----
+        let mut normalizer = ZmqEventNormalizer::new(block_size as u32)
+            .with_image_token_id(image_tok)
+            .with_video_token_id(Some(video_tok));
+        let worker = WorkerWithDpRank::from_worker_id(0);
+        let mut event_hashes = Vec::new();
+        let mut normalized_mm_blocks = 0usize;
+        for (i, payload_b64) in fx["raw_event_payloads_b64"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            let payload = base64::engine::general_purpose::STANDARD
+                .decode(payload_b64.as_str().unwrap())
+                .unwrap();
+            let batch = decode_event_batch(&payload).unwrap();
+            for raw in batch.events {
+                let Some(placement) = normalizer.normalize(raw, i as u64, worker) else {
+                    continue;
+                };
+                if let KvCacheEventData::Stored(store) = placement.event.data {
+                    for b in store.blocks {
+                        if b.mm_extra_info.is_some() {
+                            normalized_mm_blocks += 1;
+                        }
+                        event_hashes.push(b.tokens_hash);
+                    }
+                }
+            }
+        }
+
+        // The engine also stores warm-up and generated-token blocks, so the
+        // video prompt's whole blocks must appear as a contiguous run inside
+        // the stored-hash sequence, in order.
+        let prompt_blocks = routing.len() / block_size;
+        assert!(prompt_blocks > 0, "prompt shorter than one block");
+        assert!(
+            event_hashes.len() >= prompt_blocks,
+            "engine stored {} blocks, need at least {prompt_blocks}",
+            event_hashes.len()
+        );
+        assert!(
+            normalized_mm_blocks > 0,
+            "no event block carried mm extra keys — uuid forwarding broken?"
+        );
+        let expected = &frontend_hashes[..prompt_blocks];
+        let found = event_hashes
+            .windows(prompt_blocks)
+            .any(|run| run == expected);
+        assert!(
+            found,
+            "frontend block hashes not found as a run in {} stored event hashes \
+             (first frontend hash {:?}, event hashes {:?})",
+            event_hashes.len(),
+            expected.first(),
+            &event_hashes[..event_hashes.len().min(8)]
+        );
+        println!(
+            "e2e parity ok: {model_id} — {prompt_blocks} prompt blocks match \
+             ({} video tokens, {normalized_mm_blocks} mm blocks normalized)",
+            n
+        );
+    }
 }
