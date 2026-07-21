@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import shutil
+from enum import Enum
 
 import pytest
 
@@ -40,6 +41,12 @@ logger = logging.getLogger(__name__)
 CANCELLATION_MAX_TOKENS = 16384
 XPU_CANCELLATION_MAX_TOKENS = 2096
 
+
+class WorkerMode(Enum):
+    AGGREGATED = "aggregated"
+    PREFILL = "prefill"
+    DECODE = "decode"
+
 pytestmark = [
     pytest.mark.fault_tolerance,
     pytest.mark.vllm,
@@ -56,9 +63,10 @@ class DynamoWorkerProcess(ManagedProcess):
         self,
         request,
         frontend_port: int,
-        is_prefill: bool | None = None,
+        mode: WorkerMode = WorkerMode.AGGREGATED,
         timeout_s: int = 300,
     ):
+        self.mode = mode
         # Allocate system port for this worker.
         self.system_port = allocate_port(DynamoPortRange.SERVE.value)
         # Register port cleanup early so partially constructed workers still release ports.
@@ -68,7 +76,7 @@ class DynamoWorkerProcess(ManagedProcess):
         # Determine max-model-len based on worker type:
         # Aggregated mode uses a smaller value (4096) to reduce GPU memory usage on XPU,
         # while disaggregated prefill/decode workers need 16384 for long-context KV transfer tests.
-        max_model_len = "4096" if is_prefill is None else "16384"
+        max_model_len = "4096" if mode == WorkerMode.AGGREGATED else "16384"
 
         command = [
             "python3",
@@ -86,7 +94,7 @@ class DynamoWorkerProcess(ManagedProcess):
         ]
 
         # Configure disaggregation mode, KV transfer, and health checks per worker type.
-        if is_prefill is True:
+        if mode == WorkerMode.PREFILL:
             # Prefill worker: disaggregated prefill mode; check own status endpoint only.
             command.extend(["--disaggregation-mode", "prefill"])
             command.extend(
@@ -98,7 +106,7 @@ class DynamoWorkerProcess(ManagedProcess):
             health_check_urls = [
                 (f"http://localhost:{self.system_port}/health", self.is_ready)
             ]
-        elif is_prefill is False:
+        elif mode == WorkerMode.DECODE:
             # Decode worker: disaggregated decode mode; also verify frontend sees the model.
             command.extend(["--disaggregation-mode", "decode"])
             command.extend(
@@ -132,13 +140,13 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_PORT"] = str(self.system_port)
         env["DYN_HTTP_PORT"] = str(frontend_port)
 
-        if is_prefill is not None:
+        if mode != WorkerMode.AGGREGATED:
             self.fpm_port = allocate_port(DynamoPortRange.FPM.value)
             env["DYN_FORWARDPASS_METRIC_PORT"] = str(self.fpm_port)
 
         # Set KV events config and NIXL side channel port only for prefill worker
         # to avoid conflicts with decode worker
-        if is_prefill is True:
+        if mode == WorkerMode.PREFILL:
             self.kv_event_port = allocate_port(DynamoPortRange.SERVE.value)
             self.nixl_side_channel_port = allocate_port(DynamoPortRange.NIXL.value)
             command.extend(
@@ -157,9 +165,9 @@ class DynamoWorkerProcess(ManagedProcess):
             env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(self.nixl_side_channel_port)
 
         # Set log directory based on worker type.
-        if is_prefill is True:
+        if mode == WorkerMode.PREFILL:
             worker_type = "prefill_worker"
-        elif is_prefill is False:
+        elif mode == WorkerMode.DECODE:
             worker_type = "decode_worker"
         else:
             worker_type = "worker"
@@ -185,8 +193,6 @@ class DynamoWorkerProcess(ManagedProcess):
             straggler_commands=["-m dynamo.vllm"],
             log_dir=log_dir,
         )
-
-        self.is_prefill = is_prefill
 
     def get_pid(self):
         """Get the PID of the worker process"""
@@ -221,13 +227,19 @@ class DynamoWorkerProcess(ManagedProcess):
         try:
             data = response.json()
             if data.get("status") == "ready":
-                worker_type = "Prefill worker" if self.is_prefill else "Worker"
+                worker_type = (
+                    "Prefill worker" if self.mode == WorkerMode.PREFILL else "Worker"
+                )
                 logger.info(f"{worker_type} status is ready")
                 return True
-            worker_type = "Prefill worker" if self.is_prefill else "Worker"
+            worker_type = (
+                "Prefill worker" if self.mode == WorkerMode.PREFILL else "Worker"
+            )
             logger.warning(f"{worker_type} status is not ready: {data.get('status')}")
         except ValueError:
-            worker_type = "Prefill worker" if self.is_prefill else "Worker"
+            worker_type = (
+                "Prefill worker" if self.mode == WorkerMode.PREFILL else "Worker"
+            )
             logger.warning(f"{worker_type} health response is not valid JSON")
         return False
 
@@ -394,13 +406,13 @@ def test_request_cancellation_vllm_decode_cancel(
 
         # Step 2: Start the prefill worker (allocates its own system_port)
         with DynamoWorkerProcess(
-            request, frontend.frontend_port, is_prefill=True
+            request, frontend.frontend_port, mode=WorkerMode.PREFILL
         ) as prefill_worker:
             logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
 
             # Step 3: Start the decode worker (allocates its own system_port)
             with DynamoWorkerProcess(
-                request, frontend.frontend_port, is_prefill=False
+                request, frontend.frontend_port, mode=WorkerMode.DECODE
             ) as decode_worker:
                 logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
 
@@ -499,13 +511,13 @@ def test_request_cancellation_vllm_prefill_cancel(
 
         # Step 2: Start the prefill worker (allocates its own system_port)
         with DynamoWorkerProcess(
-            request, frontend.frontend_port, is_prefill=True
+            request, frontend.frontend_port, mode=WorkerMode.PREFILL
         ) as prefill_worker:
             logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
 
             # Step 3: Start the decode worker (allocates its own system_port)
             with DynamoWorkerProcess(
-                request, frontend.frontend_port, is_prefill=False
+                request, frontend.frontend_port, mode=WorkerMode.DECODE
             ) as decode_worker:
                 logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
 
