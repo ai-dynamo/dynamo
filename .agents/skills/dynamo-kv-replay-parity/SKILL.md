@@ -1,6 +1,6 @@
 ---
 name: dynamo-kv-replay-parity
-description: Runs deterministic byte-parity and paired performance campaigns for Dynamo offline KV-aware replay across aggregated and disaggregated vLLM and SGLang configurations, including forced preemption and KVBM offload lifecycles. Use when validating replay refactors, routing changes, scheduler-event changes, or performance-sensitive offline simulation changes against a baseline revision.
+description: Runs deterministic byte-parity and paired performance campaigns for Dynamo offline KV-aware replay across aggregated and disaggregated vLLM and SGLang configurations, including forced preemption and KVBM offload lifecycles. It is used when validating replay refactors, routing changes, scheduler-event changes, or performance-sensitive offline simulation changes against a baseline revision.
 license: Apache-2.0
 metadata:
   author: NVIDIA
