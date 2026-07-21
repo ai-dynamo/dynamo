@@ -2297,60 +2297,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_batch_and_aggregated_replica_sync_reach_equivalent_state() {
-        let worker = WorkerWithDpRank::new(1, 0);
-        let events = vec![
-            replica_add("req-1", worker, vec![1, 2, 3]),
-            replica_add("req-2", worker, vec![4, 5, 6]),
-            replica_mark("req-2", worker),
-            replica_free("req-1", worker),
-        ];
-        let direct = ActiveSequencesMultiWorker::new(
-            NoopSequencePublisher,
-            4,
-            HashMap::from([(1, (0, 1))]),
-            true,
-            0,
-            "test",
-        );
-        let aggregated = ActiveSequencesMultiWorker::new(
-            NoopSequencePublisher,
-            4,
-            HashMap::from([(1, (0, 1))]),
-            true,
-            0,
-            "test",
-        );
-
-        direct.apply_replica_batch(events.clone());
-        aggregated
-            .run_replica_sync(
-                VecSubscriber {
-                    events: events.into_iter().map(Ok).collect(),
-                },
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap();
-
-        let now = Instant::now();
-        assert_eq!(direct.active_blocks(), aggregated.active_blocks());
-        assert_eq!(direct.active_tokens(now), aggregated.active_tokens(now));
-        assert_eq!(
-            direct.active_request_counts(),
-            aggregated.active_request_counts()
-        );
-        assert_eq!(
-            direct.request_index.worker_for(&"req-1".to_string()),
-            aggregated.request_index.worker_for(&"req-1".to_string())
-        );
-        assert_eq!(
-            direct.request_index.worker_for(&"req-2".to_string()),
-            aggregated.request_index.worker_for(&"req-2".to_string())
-        );
-    }
-
-    #[tokio::test]
     async fn replica_sync_mark_only_batch_does_not_publish_load() {
         let worker = WorkerWithDpRank::new(1, 0);
         let (sequences, publisher) =

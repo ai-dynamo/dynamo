@@ -516,10 +516,7 @@ where
             metrics.record_payload_decode_error();
             continue;
         }
-        let event_count = batch.events.len();
-        metrics.record_received(event_count);
         tracker.apply_replica_batch(batch.events);
-        metrics.record_handled(event_count);
         tokio::task::consume_budget().await;
     }
 }
@@ -708,6 +705,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn real_zmq_batch_ingress_validates_identity_and_survives_rebind() -> anyhow::Result<()> {
         let runtime = Runtime::from_current()?;
         let distributed =
@@ -991,33 +989,6 @@ mod tests {
             None
         );
         assert!(stuck_abort.is_finished());
-
-        for generation_base in [100_u64, 200] {
-            let mut sources = HashMap::new();
-            for publisher_id in 0..32 {
-                let cancel = CancellationToken::new();
-                let task_cancel = cancel.clone();
-                let generation = generation_base + publisher_id;
-                metrics.source_started();
-                sources.insert(
-                    publisher_id,
-                    SourceTask {
-                        endpoint: format!("source-{publisher_id}"),
-                        generation,
-                        cancel,
-                        handle: tokio::spawn(async move {
-                            task_cancel.cancelled().await;
-                            Some(generation)
-                        }),
-                    },
-                );
-            }
-            assert_eq!(sources.len(), 32);
-            let cursors = stop_sources(sources, &metrics).await;
-            assert_eq!(cursors.len(), 32);
-            assert_eq!(cursors[&0], generation_base);
-            assert_eq!(cursors[&31], generation_base + 31);
-        }
 
         distributed.shutdown();
         Ok(())

@@ -264,10 +264,6 @@ impl KvZmqIngressMetrics {
 
 pub(crate) struct ActiveSequenceZmqIngressMetrics {
     tracked_sources: IntGauge,
-    received_batches_total: IntCounter,
-    received_events_total: IntCounter,
-    handled_batches_total: IntCounter,
-    handled_events_total: IntCounter,
     sequence_gaps_total: IntCounter,
     out_of_order_total: IntCounter,
     reconnects_total: IntCounter,
@@ -299,22 +295,6 @@ impl ActiveSequenceZmqIngressMetrics {
                             &[],
                         )
                         .expect("failed to create router_active_sequence_zmq_ingress_sources"),
-                    received_batches_total: counter(
-                        "router_active_sequence_zmq_ingress_received_batches_total",
-                        "Direct-ZMQ active-sequence batches decoded from the wire",
-                    ),
-                    received_events_total: counter(
-                        "router_active_sequence_zmq_ingress_received_events_total",
-                        "Active-sequence events decoded from direct-ZMQ batches",
-                    ),
-                    handled_batches_total: counter(
-                        "router_active_sequence_zmq_ingress_handled_batches_total",
-                        "Direct-ZMQ active-sequence batches handed to the tracker",
-                    ),
-                    handled_events_total: counter(
-                        "router_active_sequence_zmq_ingress_handled_events_total",
-                        "Active-sequence events handed to the tracker",
-                    ),
                     sequence_gaps_total: counter(
                         "router_active_sequence_zmq_ingress_sequence_gaps_total",
                         "Missing direct-ZMQ active-sequence envelopes inferred from sequence gaps",
@@ -358,16 +338,6 @@ impl ActiveSequenceZmqIngressMetrics {
 
     pub(crate) fn source_stopped(&self) {
         self.tracked_sources.dec();
-    }
-
-    pub(crate) fn record_received(&self, events: usize) {
-        self.received_batches_total.inc();
-        self.received_events_total.inc_by(events as u64);
-    }
-
-    pub(crate) fn record_handled(&self, events: usize) {
-        self.handled_batches_total.inc();
-        self.handled_events_total.inc_by(events as u64);
     }
 
     pub(crate) fn record_gap(&self, missing: u64) {
