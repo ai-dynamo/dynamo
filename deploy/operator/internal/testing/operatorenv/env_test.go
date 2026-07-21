@@ -31,10 +31,8 @@ func TestWebhookInstallOptionsSelectsValidatingConfiguration(t *testing.T) {
 	}
 }
 
-func TestWebhookSetupIsRequiredWhenWebhooksAreEnabled(t *testing.T) {
-	_, err := startRuntime(normalizeOptions(Options{
-		Admission: AdmissionWebhooks{Validating: true},
-	}))
+func TestWebhookSetupIsRequired(t *testing.T) {
+	_, err := startRuntime(normalizeOptions(Options{}))
 
 	if err == nil || !strings.Contains(err.Error(), "SetupWebhooks is required") {
 		t.Fatalf("startRuntime() error = %v, want missing SetupWebhooks error", err)

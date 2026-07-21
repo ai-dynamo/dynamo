@@ -29,7 +29,6 @@ var (
 			Validating:  true,
 			BypassUsers: []string{admissionBypassUsername},
 		},
-		Conversion:      true,
 		SetupWebhooks:   setupProductionWebhooks,
 		OperatorVersion: "1.1.0",
 	})

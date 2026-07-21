@@ -64,9 +64,7 @@ type WebhookSetupFunc func(ctrl.Manager, WebhookSetupOptions) error
 type Options struct {
 	// Admission selects the Helm-rendered admission configurations to install.
 	Admission AdmissionWebhooks
-	// Conversion starts the conversion webhook server.
-	Conversion bool
-	// SetupWebhooks registers the handlers served when admission or conversion is enabled.
+	// SetupWebhooks registers the handlers served by the environment.
 	SetupWebhooks WebhookSetupFunc
 
 	// OperatorVersion is passed to SetupWebhooks.
@@ -175,8 +173,8 @@ type runtimeEnv struct {
 }
 
 func startRuntime(opts Options) (*runtimeEnv, error) {
-	if webhooksEnabled(opts) && opts.SetupWebhooks == nil {
-		return nil, fmt.Errorf("operatorenv: SetupWebhooks is required when admission or conversion is enabled")
+	if opts.SetupWebhooks == nil {
+		return nil, fmt.Errorf("operatorenv: SetupWebhooks is required")
 	}
 	scheme := newScheme()
 	operatorCfg := defaultOperatorConfig(opts.Config)
@@ -213,11 +211,9 @@ func startRuntime(opts Options) (*runtimeEnv, error) {
 		operatorCfg:   operatorCfg,
 		runtimeConfig: runtimeConfig,
 	}
-	if webhooksEnabled(opts) {
-		if err := rt.startWebhookManager(); err != nil {
-			_ = testEnv.Stop()
-			return nil, err
-		}
+	if err := rt.startWebhookManager(); err != nil {
+		_ = testEnv.Stop()
+		return nil, err
 	}
 	return rt, nil
 }
@@ -446,10 +442,6 @@ func normalizeOptions(opts Options) Options {
 		opts.EventuallyTimeout = 10 * time.Second
 	}
 	return opts
-}
-
-func webhooksEnabled(opts Options) bool {
-	return opts.Admission.Mutating || opts.Admission.Validating || opts.Conversion
 }
 
 func defaultOperatorConfig(in *configv1alpha1.OperatorConfiguration) *configv1alpha1.OperatorConfiguration {

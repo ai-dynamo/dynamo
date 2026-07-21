@@ -42,7 +42,6 @@ var (
 			Validating:  true,
 			BypassUsers: []string{legacySeedUsername},
 		},
-		Conversion:        true,
 		SetupWebhooks:     setupAdmissionWebhooks,
 		OperatorVersion:   "1.1.0",
 		OperatorPrincipal: admissionOperatorPrincipal,

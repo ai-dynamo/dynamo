@@ -14,7 +14,6 @@ var sharedEnv = operatorenv.New(operatorenv.Options{
         Mutating:   true,
         Validating: true,
     },
-    Conversion:    true,
     SetupWebhooks: setupProductionWebhooks,
 })
 
@@ -48,12 +47,13 @@ func TestIsolated(t *testing.T) {
 
 ## Webhooks
 
-The envtest API server renders the production Helm webhook configuration and
-installs the selected mutating and validating webhook objects. A dedicated
-webhook manager invokes the configured `SetupWebhooks` function, which normally
-registers the production handlers via `webhooksetup.SetupAll`, including
-conversion endpoints. Therefore normal `Client` CRUD reaches the API server,
-CRD CEL validation, and production webhook code.
+The envtest API server always configures CRD conversion webhooks from the
+registered API versions. It also renders the production Helm webhook
+configuration and installs the selected mutating and validating webhook
+objects. A dedicated webhook manager invokes the required `SetupWebhooks`
+function, which normally registers the production handlers via
+`webhooksetup.Setup`, including conversion endpoints. Therefore normal `Client`
+CRUD reaches the API server, CRD CEL validation, and production webhook code.
 
 The webhook manager is separate from controller managers. It runs for the
 lifetime of the environment and is the only always-on manager.

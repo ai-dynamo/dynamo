@@ -46,10 +46,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-const (
-	defaultNamespace = "default"
-)
-
 // MockRBACManager implements RBACManager for testing
 type MockRBACManager struct {
 	EnsureServiceAccountWithRBACFunc func(ctx context.Context, targetNamespace, serviceAccountName, clusterRoleName string) error
@@ -357,7 +353,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 		It("Should deliver the version-matched override tool when a DGD override is present", func() {
 			ctx := context.Background()
 			dgdrName := "test-dgdr-override-tool"
-			namespace := defaultNamespace
+			namespace := envtestNamespace
 
 			sa := &corev1.ServiceAccount{
 				ObjectMeta: metav1.ObjectMeta{
@@ -609,7 +605,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 		It("Should preserve output written before the Job create event is observed", func() {
 			ctx := context.Background()
 			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
-				ObjectMeta: metav1.ObjectMeta{Name: "test-dgdr-fast-output", Namespace: defaultNamespace},
+				ObjectMeta: metav1.ObjectMeta{Name: "test-dgdr-fast-output", Namespace: envtestNamespace},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model: "test-model", Backend: "vllm", Image: "test-profiler:latest",
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
@@ -781,7 +777,7 @@ spec:
 			ctx := context.Background()
 			dgdrName := "test-dgdr-generated-annotation-conflict"
 			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
-				ObjectMeta: metav1.ObjectMeta{Name: dgdrName, Namespace: defaultNamespace},
+				ObjectMeta: metav1.ObjectMeta{Name: dgdrName, Namespace: envtestNamespace},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model: "test-model", Backend: "vllm", AutoApply: ptr.To(false),
 				},
@@ -792,7 +788,7 @@ spec:
 			Expect(k8sClient.Status().Update(ctx, dgdr)).Should(Succeed())
 
 			job := &batchv1.Job{
-				ObjectMeta: metav1.ObjectMeta{Name: getProfilingJobName(dgdr), Namespace: defaultNamespace},
+				ObjectMeta: metav1.ObjectMeta{Name: getProfilingJobName(dgdr), Namespace: envtestNamespace},
 				Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{Name: "test", Image: "test"}}, RestartPolicy: corev1.RestartPolicyNever,
 				}}},
@@ -803,7 +799,7 @@ spec:
 			Expect(k8sClient.Status().Update(ctx, job)).Should(Succeed())
 
 			outputCM := &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{Name: getOutputConfigMapName(dgdr), Namespace: defaultNamespace},
+				ObjectMeta: metav1.ObjectMeta{Name: getOutputConfigMapName(dgdr), Namespace: envtestNamespace},
 				Data: map[string]string{ProfilingOutputFile: `apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -819,13 +815,13 @@ spec:
 			Expect(apierrors.IsConflict(err)).Should(BeTrue())
 
 			var persisted nvidiacomv1beta1.DynamoGraphDeploymentRequest
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: defaultNamespace}, &persisted)).Should(Succeed())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: envtestNamespace}, &persisted)).Should(Succeed())
 			Expect(persisted.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseProfiling))
 			Expect(persisted.Annotations).NotTo(HaveKey(AnnotationGeneratedDGDSpec))
 
 			_, err = reconciler.handleProfilingPhase(ctx, &persisted)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: defaultNamespace}, &persisted)).Should(Succeed())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: envtestNamespace}, &persisted)).Should(Succeed())
 			Expect(persisted.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseReady))
 			Expect(persisted.Annotations).To(HaveKey(AnnotationGeneratedDGDSpec))
 		})
@@ -833,7 +829,7 @@ spec:
 		It("Should wait for the watched ConfigMap to contain final output", func() {
 			ctx := context.Background()
 			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
-				ObjectMeta: metav1.ObjectMeta{Name: "test-dgdr-output-not-ready", Namespace: defaultNamespace},
+				ObjectMeta: metav1.ObjectMeta{Name: "test-dgdr-output-not-ready", Namespace: envtestNamespace},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model: "test-model", Backend: "vllm", AutoApply: ptr.To(false),
 				},
@@ -844,7 +840,7 @@ spec:
 			Expect(k8sClient.Status().Update(ctx, dgdr)).Should(Succeed())
 
 			job := &batchv1.Job{
-				ObjectMeta: metav1.ObjectMeta{Name: getProfilingJobName(dgdr), Namespace: defaultNamespace},
+				ObjectMeta: metav1.ObjectMeta{Name: getProfilingJobName(dgdr), Namespace: envtestNamespace},
 				Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{Name: "test", Image: "test"}}, RestartPolicy: corev1.RestartPolicyNever,
 				}}},
@@ -855,7 +851,7 @@ spec:
 			Expect(k8sClient.Status().Update(ctx, job)).Should(Succeed())
 
 			outputCM := &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{Name: getOutputConfigMapName(dgdr), Namespace: defaultNamespace},
+				ObjectMeta: metav1.ObjectMeta{Name: getOutputConfigMapName(dgdr), Namespace: envtestNamespace},
 				Data:       map[string]string{"profiler_status": "success"},
 			}
 			Expect(k8sClient.Create(ctx, outputCM)).Should(Succeed())
@@ -1350,6 +1346,8 @@ spec:
 				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
 			})
 			Expect(err).NotTo(HaveOccurred())
+
+			t.Log("Read the initialized generation")
 			var current nvidiacomv1beta1.DynamoGraphDeploymentRequest
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
 			initialGeneration := current.Generation
