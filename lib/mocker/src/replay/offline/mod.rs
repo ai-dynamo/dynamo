@@ -32,9 +32,8 @@ mod firewall_tests {
     use std::mem::size_of;
     use std::path::Path;
 
-    use dynamo_kv_router::protocols::RouterEvent;
-
-    use super::core::{EngineObservation, NoEngineEvents};
+    use super::components::ReplayEngineObservation;
+    use super::core::NoEngineEvents;
 
     fn rust_sources(root: &Path, sources: &mut Vec<std::path::PathBuf>) {
         for entry in fs::read_dir(root).unwrap() {
@@ -50,7 +49,7 @@ mod firewall_tests {
     #[test]
     fn offline_core_has_no_dynamo_adapter_dependencies() {
         const FORBIDDEN: &[&str] = &[
-            "dynamo_kv_router",
+            concat!("dynamo_", "kv_router"),
             "crate::loadgen",
             "crate::scheduler",
             "OfflineWorkerState",
@@ -75,8 +74,27 @@ mod firewall_tests {
     }
 
     #[test]
+    fn offline_kv_router_crate_references_are_extension_owned() {
+        let offline = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/replay/offline");
+        let extensions = offline.join("extensions");
+        let mut sources = Vec::new();
+        rust_sources(&offline, &mut sources);
+        for path in sources {
+            if path.starts_with(&extensions) {
+                continue;
+            }
+            let source = fs::read_to_string(&path).unwrap();
+            assert!(
+                !source.contains(concat!("dynamo_", "kv_router")),
+                "{} directly depends on the KV-router crate outside the extension firewall",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
     fn default_round_robin_observation_is_zero_sized() {
-        type Batch = <NoEngineEvents as EngineObservation<Vec<RouterEvent>>>::Batch;
+        type Batch = <NoEngineEvents as ReplayEngineObservation>::Batch;
 
         assert_eq!(size_of::<NoEngineEvents>(), 0);
         assert_eq!(size_of::<Batch>(), 0);

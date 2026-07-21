@@ -71,8 +71,12 @@ class ReplayConfig:
     name: str
     serving_mode: str
     router_mode: str
+    engine_type: str
+    native_router_event_visibility: str
 
     def arguments(self, *, kvbm_stress: bool = False) -> list[str]:
+        if kvbm_stress and self.engine_type != "vllm":
+            raise ValidationFailure("KVBM parity supports only the vllm engine")
         arrival_speedup_ratio = "64" if kvbm_stress else "4"
         num_gpu_blocks = "3072" if kvbm_stress else "16384"
         args = [
@@ -81,7 +85,7 @@ class ReplayConfig:
             "--router-mode",
             self.router_mode,
             "--engine-type",
-            "vllm",
+            self.engine_type,
             "--arrival-speedup-ratio",
             arrival_speedup_ratio,
             "--trace-block-size",
@@ -129,11 +133,77 @@ class ReplayConfig:
         ]
 
 
-CONFIGURATIONS = (
-    ReplayConfig("aggregated_rr", "aggregated", "round-robin"),
-    ReplayConfig("aggregated_kv", "aggregated", "kv-router"),
-    ReplayConfig("disaggregated_rr", "disagg", "round-robin"),
-    ReplayConfig("disaggregated_kv", "disagg", "kv-router"),
+PERFORMANCE_CONFIGURATIONS = (
+    ReplayConfig("aggregated_rr", "aggregated", "round-robin", "vllm", "pass-start"),
+    ReplayConfig("aggregated_kv", "aggregated", "kv-router", "vllm", "pass-start"),
+    ReplayConfig("disaggregated_rr", "disagg", "round-robin", "vllm", "pass-start"),
+    ReplayConfig("disaggregated_kv", "disagg", "kv-router", "vllm", "pass-start"),
+)
+
+PARITY_CONFIGURATIONS = (
+    ReplayConfig(
+        "vllm_pass_start_aggregated_rr",
+        "aggregated",
+        "round-robin",
+        "vllm",
+        "pass-start",
+    ),
+    ReplayConfig(
+        "vllm_pass_start_aggregated_kv",
+        "aggregated",
+        "kv-router",
+        "vllm",
+        "pass-start",
+    ),
+    ReplayConfig(
+        "vllm_pass_start_disaggregated_rr",
+        "disagg",
+        "round-robin",
+        "vllm",
+        "pass-start",
+    ),
+    ReplayConfig(
+        "vllm_pass_start_disaggregated_kv",
+        "disagg",
+        "kv-router",
+        "vllm",
+        "pass-start",
+    ),
+    ReplayConfig(
+        "sglang_pass_end_aggregated_rr",
+        "aggregated",
+        "round-robin",
+        "sglang",
+        "pass-end",
+    ),
+    ReplayConfig(
+        "sglang_pass_end_aggregated_kv",
+        "aggregated",
+        "kv-router",
+        "sglang",
+        "pass-end",
+    ),
+    ReplayConfig(
+        "sglang_pass_end_disaggregated_rr",
+        "disagg",
+        "round-robin",
+        "sglang",
+        "pass-end",
+    ),
+    ReplayConfig(
+        "sglang_pass_end_disaggregated_kv",
+        "disagg",
+        "kv-router",
+        "sglang",
+        "pass-end",
+    ),
+)
+
+KVBM_CONFIGURATIONS = (
+    ReplayConfig("aggregated_rr", "aggregated", "round-robin", "vllm", "pass-start"),
+    ReplayConfig("aggregated_kv", "aggregated", "kv-router", "vllm", "pass-start"),
+    ReplayConfig("disaggregated_rr", "disagg", "round-robin", "vllm", "pass-start"),
+    ReplayConfig("disaggregated_kv", "disagg", "kv-router", "vllm", "pass-start"),
 )
 
 
@@ -383,6 +453,7 @@ def run_parity_matrix(
     trace: Path,
     root: Path,
     results: dict[str, Any],
+    configurations: tuple[ReplayConfig, ...],
     *,
     kvbm_stress: bool,
 ) -> None:
@@ -391,10 +462,12 @@ def run_parity_matrix(
     matrix_results: dict[str, Any] = {}
     results["matrices"][matrix_name] = matrix_results
 
-    for config in CONFIGURATIONS:
+    for config in configurations:
         config_result: dict[str, Any] = {
             "status": "running",
             "arguments": config.arguments(kvbm_stress=kvbm_stress),
+            "engine_type": config.engine_type,
+            "native_router_event_visibility": config.native_router_event_visibility,
         }
         matrix_results[config.name] = config_result
         revision_lines: dict[str, list[bytes]] = {}
@@ -428,12 +501,26 @@ def run_parity_matrix(
             hashes = [hashlib.sha256(line).hexdigest() for line in lines]
             config_result[f"{revision}_report_count"] = len(lines)
             config_result[f"{revision}_report_sha256"] = hashes
-            if any(json.loads(line).get("replay_bench") is not True for line in lines):
+            reports = [json.loads(line) for line in lines]
+            if any(report.get("replay_bench") is not True for report in reports):
                 config_result["status"] = "fail"
                 raise ValidationFailure(
                     f"{matrix_name} {config.name} {revision} was not emitted by a "
                     "replay-bench binary"
                 )
+            for field, expected in (
+                ("engine_type", config.engine_type),
+                (
+                    "native_router_event_visibility",
+                    config.native_router_event_visibility,
+                ),
+            ):
+                if any(report.get(field) != expected for report in reports):
+                    config_result["status"] = "fail"
+                    raise ValidationFailure(
+                        f"{matrix_name} {config.name} {revision} emitted unexpected "
+                        f"{field}; expected {expected!r}"
+                    )
             if len(lines) != 20:
                 config_result["status"] = "fail"
                 raise ValidationFailure(
@@ -520,6 +607,7 @@ def parity(args: argparse.Namespace, results: dict[str, Any]) -> int:
             trace,
             root,
             results,
+            PARITY_CONFIGURATIONS,
             kvbm_stress=False,
         )
         run_parity_matrix(
@@ -529,6 +617,7 @@ def parity(args: argparse.Namespace, results: dict[str, Any]) -> int:
             trace,
             root,
             results,
+            KVBM_CONFIGURATIONS,
             kvbm_stress=True,
         )
 
@@ -561,6 +650,18 @@ def elapsed_sample(
             f"{' '.join(command)} emitted replay_bench={record.get('replay_bench')!r}, "
             f"expected {expected_replay_bench}"
         )
+    for field, expected in (
+        ("engine_type", config.engine_type),
+        (
+            "native_router_event_visibility",
+            config.native_router_event_visibility,
+        ),
+    ):
+        if record.get(field) != expected:
+            raise ValidationFailure(
+                f"{' '.join(command)} emitted {field}={record.get(field)!r}, "
+                f"expected {expected!r}"
+            )
     return float(record["wall_time_ms"])
 
 
@@ -611,6 +712,8 @@ def measure_configuration(
             "baseline_wall_time_ms": [],
             "candidate_wall_time_ms": [],
             "arguments": config.arguments(),
+            "engine_type": config.engine_type,
+            "native_router_event_visibility": config.native_router_event_visibility,
         }
     )
     for warmup in range(WARMUPS):
@@ -823,7 +926,7 @@ def performance(args: argparse.Namespace, results: dict[str, Any]) -> int:
 
     with tempfile.TemporaryDirectory(prefix="offline-replay-performance-") as directory:
         root = Path(directory)
-        for index, config in enumerate(CONFIGURATIONS):
+        for index, config in enumerate(PERFORMANCE_CONFIGURATIONS):
             config_root = root / config.name
             config_root.mkdir()
             config_result: dict[str, Any] = {}
@@ -845,7 +948,7 @@ def performance(args: argparse.Namespace, results: dict[str, Any]) -> int:
         if seeded_baseline is not None and seeded_candidate is not None:
             for index, config in enumerate(
                 configuration
-                for configuration in CONFIGURATIONS
+                for configuration in PERFORMANCE_CONFIGURATIONS
                 if configuration.router_mode == "kv-router"
             ):
                 config_root = root / f"seeded-{config.name}"

@@ -6,19 +6,22 @@ use std::marker::PhantomData;
 
 use anyhow::bail;
 
-use super::super::core::{
-    EngineEventBatch, EngineObservation, EngineProgress, NoEngineEvents, WorkerTopology,
-};
+use super::super::core::{EngineEventBatch, EngineProgress, NoEngineEvents, WorkerTopology};
 use super::super::events::SimulationWorkerStage;
 use super::super::runtime_utils::WorkerCompletionPayload;
 #[cfg(test)]
 use super::super::state::OfflineWorkerSnapshot;
 use super::super::state::OfflineWorkerState;
-use super::{EngineEffects, EnginePassMode, ScheduledWorkerCompletion};
+#[cfg(feature = "kvbm-offload")]
+use super::ObservedOffloadEffects;
+use super::{
+    EngineEffects, EnginePassMode, ObservedCommandEffects, ReplayEngineObservation,
+    ScheduledWorkerCompletion,
+};
 use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArgs};
 use crate::replay::TraceCollector;
 use crate::scheduler::RouterEventVisibility;
-use crate::scheduler::{SchedulerCommand, SchedulerCommandEffects};
+use crate::scheduler::SchedulerCommand;
 
 fn fpm_has_scheduled_work(snapshot: &ForwardPassSnapshot) -> bool {
     snapshot.num_prefill_requests > 0 || snapshot.num_decode_requests > 0
@@ -26,7 +29,7 @@ fn fpm_has_scheduled_work(snapshot: &ForwardPassSnapshot) -> bool {
 
 pub(in crate::replay::offline) struct EngineComponent<Observation = NoEngineEvents>
 where
-    Observation: EngineObservation<Vec<dynamo_kv_router::protocols::RouterEvent>>,
+    Observation: ReplayEngineObservation,
 {
     stage: SimulationWorkerStage,
     pass_mode: EnginePassMode,
@@ -51,7 +54,7 @@ where
 
 impl<Observation> EngineComponent<Observation>
 where
-    Observation: EngineObservation<Vec<dynamo_kv_router::protocols::RouterEvent>>,
+    Observation: ReplayEngineObservation,
 {
     pub(in crate::replay::offline) fn new(
         stage: SimulationWorkerStage,
@@ -332,12 +335,18 @@ where
         &mut self,
         worker_id: usize,
         command: SchedulerCommand,
-    ) -> anyhow::Result<SchedulerCommandEffects> {
+    ) -> anyhow::Result<ObservedCommandEffects<Observation::Batch>> {
         let worker = self
             .workers
             .get_mut(&worker_id)
             .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown worker {worker_id}"))?;
-        worker.apply_command(command)
+        let mut effects = worker.apply_command(command)?;
+        let engine_events = Observation::take_command_events(&mut effects);
+        Ok(ObservedCommandEffects {
+            result: effects.result,
+            lifecycle_events: effects.lifecycle_events,
+            engine_events,
+        })
     }
 
     pub(in crate::replay::offline) fn worker_is_busy(
@@ -446,20 +455,10 @@ where
                 }
 
                 let admitted_requests = !executed.admissions.is_empty();
-                effects.admissions.extend(executed.admissions);
                 let had_raw_observations = !executed.kv_events.is_empty();
                 let published_pass_start_kv = executed.router_event_visibility
                     == RouterEventVisibility::PassStart
                     && had_raw_observations;
-                let completion_events =
-                    if executed.router_event_visibility == RouterEventVisibility::PassStart {
-                        effects
-                            .pass_start_events
-                            .append(Observation::observe(executed.kv_events));
-                        Observation::Batch::default()
-                    } else {
-                        Observation::observe(executed.kv_events)
-                    };
                 let made_progress = admitted_requests
                     || published_pass_start_kv
                     || executed.completed_requests > 0
@@ -467,6 +466,15 @@ where
                     || !executed.lifecycle_events.is_empty()
                     || had_raw_observations
                     || executed.fpm.as_ref().is_some_and(fpm_has_scheduled_work);
+                let observed_events = Observation::take_pass_events(&mut executed);
+                effects.admissions.extend(executed.admissions);
+                let completion_events =
+                    if executed.router_event_visibility == RouterEventVisibility::PassStart {
+                        effects.pass_start_events.append(observed_events);
+                        Observation::Batch::default()
+                    } else {
+                        observed_events
+                    };
                 let payload = WorkerCompletionPayload {
                     stage: self.stage,
                     worker_idx: rank_id,
@@ -541,12 +549,11 @@ where
         payload
             .lifecycle_events
             .extend(worker.retry_pending_destinations());
-        let raw_events = worker.drain_kv_events();
-        payload.progress.had_raw_observations |= !raw_events.is_empty();
-        payload.progress.made_progress |= !raw_events.is_empty();
-        payload
-            .engine_events
-            .append(Observation::observe(raw_events));
+        let had_raw_observations = worker.has_engine_events();
+        let engine_events = Observation::drain_worker_events(worker);
+        payload.progress.had_raw_observations |= had_raw_observations;
+        payload.progress.made_progress |= had_raw_observations;
+        payload.engine_events.append(engine_events);
         Ok(payload)
     }
 
@@ -582,18 +589,23 @@ where
     pub(in crate::replay::offline) fn tick_offload_engines(
         &mut self,
         now_ms: f64,
-    ) -> crate::scheduler::OffloadTickEffects {
-        let mut effects = crate::scheduler::OffloadTickEffects {
-            kv_events: Vec::new(),
+    ) -> ObservedOffloadEffects<Observation::Batch> {
+        let mut effects = ObservedOffloadEffects {
+            engine_events: Observation::Batch::default(),
             lifecycle_events: Vec::new(),
+            progress: EngineProgress::default(),
         };
         for worker in self.workers.values_mut() {
-            let worker_effects = if worker.is_busy() {
+            let mut worker_effects = if worker.is_busy() {
                 worker.tick_offload_transport_only(now_ms)
             } else {
                 worker.tick_offload_only(now_ms)
             };
-            effects.kv_events.extend(worker_effects.kv_events);
+            let had_raw_observations = !worker_effects.kv_events.is_empty();
+            let engine_events = Observation::take_offload_events(&mut worker_effects);
+            effects.engine_events.append(engine_events);
+            effects.progress.had_raw_observations |= had_raw_observations;
+            effects.progress.made_progress |= had_raw_observations;
             effects
                 .lifecycle_events
                 .extend(worker_effects.lifecycle_events);
@@ -624,7 +636,7 @@ mod tests {
     use uuid::Uuid;
 
     #[cfg(feature = "kvbm-offload")]
-    use dynamo_kv_router::protocols::StorageTier;
+    use crate::replay::offline::extensions::kv_events::StorageTier;
 
     fn engine_with_startup(num_workers: usize, startup_time: Option<f64>) -> EngineComponent {
         let args = MockEngineArgs {
@@ -1193,7 +1205,8 @@ mod tests {
         assert!(transport.lifecycle_events.is_empty());
         assert!(
             transport
-                .kv_events
+                .engine_events
+                .0
                 .iter()
                 .any(|event| event.storage_tier == StorageTier::HostPinned)
         );

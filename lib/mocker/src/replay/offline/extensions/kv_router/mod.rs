@@ -7,7 +7,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use dynamo_kv_router::LocalBlockHash;
+pub(in crate::replay) use dynamo_kv_router::config::KvRouterConfig as ReplayKvRouterConfig;
 use dynamo_kv_router::config::KvRouterConfig;
+#[cfg(test)]
+pub(in crate::replay) use dynamo_kv_router::config::RouterQueuePolicy;
 use dynamo_kv_router::protocols::{
     BlockHashOptions, OverlapScores, PrefillLoadHint, RouterEvent, RoutingConstraints,
     WorkerConfigLike, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
@@ -40,6 +43,15 @@ use crate::replay::offline::extensions::kv_events::RouterEventBatch;
 use crate::replay::router_shared::{
     ReplayNoopPublisher, ReplayWorkerConfig, replay_router_config, replay_selector, replay_slots,
     replay_worker_config, replay_workers_with_configs,
+};
+
+mod composition_agg;
+pub(in crate::replay) use composition_agg::AggRuntime;
+mod composition_disagg;
+pub(in crate::replay) use composition_disagg::DisaggRuntime;
+#[cfg(test)]
+pub(in crate::replay::offline) use composition_disagg::{
+    derive_decode_router_config, derive_prefill_router_config,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

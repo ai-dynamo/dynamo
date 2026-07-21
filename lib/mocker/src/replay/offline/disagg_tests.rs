@@ -257,17 +257,17 @@ fn pending_destination_scale_down_config() -> OfflineDisaggReplayConfig {
     }
 }
 
-fn router_config() -> KvRouterConfig {
-    KvRouterConfig {
+fn router_config() -> ReplayKvRouterConfig {
+    ReplayKvRouterConfig {
         router_queue_threshold: Some(1.25),
-        ..KvRouterConfig::default()
+        ..ReplayKvRouterConfig::default()
     }
 }
 
-fn planner_router_config() -> KvRouterConfig {
-    KvRouterConfig {
+fn planner_router_config() -> ReplayKvRouterConfig {
+    ReplayKvRouterConfig {
         router_queue_threshold: Some(0.5),
-        ..KvRouterConfig::default()
+        ..ReplayKvRouterConfig::default()
     }
 }
 
@@ -336,7 +336,7 @@ fn planner_tick_emits_idle_fpm_for_both_disagg_pools() {
 fn run_trace_with_details(
     config: &OfflineDisaggReplayConfig,
     requests: Vec<DirectRequest>,
-    router_config: Option<KvRouterConfig>,
+    router_config: Option<ReplayKvRouterConfig>,
     router_mode: ReplayRouterMode,
 ) -> TraceSimulationReport {
     let pending = crate::replay::normalize_trace_requests(requests, 1.0).unwrap();
@@ -403,12 +403,12 @@ fn transition_index(transitions: &[DisaggTransition], needle: DisaggTransition) 
 
 #[test]
 fn test_derive_stage_router_configs_force_required_overrides() {
-    let config = KvRouterConfig {
+    let config = ReplayKvRouterConfig {
         overlap_score_credit: 1.0,
         router_track_active_blocks: true,
         router_assume_kv_reuse: true,
         router_track_prefill_tokens: true,
-        ..KvRouterConfig::default()
+        ..ReplayKvRouterConfig::default()
     };
     let args = staged_args(WorkerType::Prefill, 1.0);
     let prefill = derive_prefill_router_config(&args, Some(config.clone()));

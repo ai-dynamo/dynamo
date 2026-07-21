@@ -4,29 +4,26 @@
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
 use anyhow::{Result, anyhow, bail};
-use dynamo_kv_router::config::KvRouterConfig;
-use dynamo_kv_router::protocols::{KvCacheEventData, LocalBlockHash, RouterEvent};
 use uuid::Uuid;
 
 pub(super) use super::components::ReplayMode;
 #[cfg(test)]
 use super::components::TrafficStats;
 use super::components::{
-    AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, KvReplayMetadata,
-    NoReplayMetadata, ReplayAdmissionMetadata, ScheduledWorkerCompletion, TrafficAccumulator,
+    AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, NoReplayMetadata,
+    ReplayAdmissionMetadata, ReplayEngineObservation, ScheduledWorkerCompletion,
+    TrafficAccumulator,
 };
-#[cfg(test)]
-use super::core::PlacementEffects;
 use super::core::round_robin::PoolRoundRobinPlacement;
 use super::core::{
     AdmissionSource as CoreAdmissionSource, EngineEventBatch, NoEngineEvents, Placement,
     PlacementDecision, PlacementPolicy, ReadyArrival, WorkerTopology,
 };
 use super::events::{SimulationEvent, SimulationWorkerStage};
-use super::extensions::kv_events::{
-    ReplayEngineObservation, RouterEventBatch, RouterEventObservation,
+#[cfg(test)]
+use super::extensions::kv_router::{
+    DisaggRuntime, ReplayKvRouterConfig, derive_decode_router_config, derive_prefill_router_config,
 };
-use super::extensions::kv_router::KvRouterPlacement;
 use super::planner_hook::{LatestFpmBuffer, PlannerHook, PlannerTickMetrics};
 use super::progress::ReplayProgress;
 use super::runtime_utils::{
@@ -46,9 +43,10 @@ use crate::common::handoff::{
 use crate::common::protocols::ForwardPassSnapshot;
 use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs, OutputSignal};
 use crate::loadgen::{ReplayRequestHashes, WorkloadDriver};
+#[cfg(test)]
+use crate::replay::ReplayRouterMode;
 use crate::replay::{
-    OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode, ReplayTerminalStatus,
-    SlaThresholds, TraceCollector,
+    OfflineDisaggReplayConfig, ReplayTerminalStatus, SlaThresholds, TraceCollector,
 };
 use crate::scheduler::{
     AdmissionEvent, SchedulerCommand, SchedulerCommandResult, SchedulerLifecycleEvent,
@@ -97,37 +95,28 @@ struct HandoffConformanceCapture {
     source_output_tokens: usize,
     stored_before_activation: usize,
     stored_on_activation: usize,
-    activation_stored_hashes: HashSet<LocalBlockHash>,
+    activation_stored_hashes: HashSet<u64>,
     repeated_activation_hashes_after_activation: usize,
 }
 
 impl HandoffConformanceCapture {
-    fn record_before_activation(&mut self, events: &[RouterEvent]) {
-        self.stored_before_activation += stored_hashes(events).count();
+    fn record_before_activation(&mut self, stored_hashes: &[u64]) {
+        self.stored_before_activation += stored_hashes.len();
     }
 
-    fn record_activation(&mut self, events: &[RouterEvent]) {
-        for hash in stored_hashes(events) {
+    fn record_activation(&mut self, stored_hashes: &[u64]) {
+        for &hash in stored_hashes {
             self.stored_on_activation += 1;
             self.activation_stored_hashes.insert(hash);
         }
     }
 
-    fn record_after_activation(&mut self, events: &[RouterEvent]) {
-        self.repeated_activation_hashes_after_activation += stored_hashes(events)
+    fn record_after_activation(&mut self, stored_hashes: &[u64]) {
+        self.repeated_activation_hashes_after_activation += stored_hashes
+            .iter()
             .filter(|hash| self.activation_stored_hashes.contains(hash))
             .count();
     }
-}
-
-fn stored_hashes(events: &[RouterEvent]) -> impl Iterator<Item = LocalBlockHash> + '_ {
-    events
-        .iter()
-        .flat_map(|event| match &event.event.data {
-            KvCacheEventData::Stored(store) => store.blocks.as_slice(),
-            KvCacheEventData::Removed(_) | KvCacheEventData::Cleared => &[],
-        })
-        .map(|block| block.tokens_hash)
 }
 
 enum ActionExecution {
@@ -448,14 +437,14 @@ impl DisaggFlowState {
         uuid: Uuid,
         worker_idx: usize,
         action: IssuedHandoffAction,
-        kv_events: &[RouterEvent],
+        stored_hashes: &[u64],
         lifecycle_events: Vec<SchedulerLifecycleEvent>,
         now_ms: f64,
         collector: &mut TraceCollector,
         stats: &mut DisaggRuntimeStats,
     ) -> Result<()> {
         if let Some(capture) = self.conformance_capture.as_mut() {
-            capture.record_before_activation(kv_events);
+            capture.record_before_activation(stored_hashes);
             capture
                 .lifecycle
                 .push(NormalizedHandoffEvent::DestinationAccepted);
@@ -689,14 +678,14 @@ impl DisaggFlowState {
         &mut self,
         uuid: Uuid,
         action: IssuedHandoffAction,
-        kv_events: &[RouterEvent],
+        stored_hashes: &[u64],
         lifecycle_events: Vec<SchedulerLifecycleEvent>,
         now_ms: f64,
         collector: &mut TraceCollector,
         stats: &mut DisaggRuntimeStats,
     ) -> Result<()> {
         if let Some(capture) = self.conformance_capture.as_mut() {
-            capture.record_activation(kv_events);
+            capture.record_activation(stored_hashes);
             capture
                 .lifecycle
                 .push(NormalizedHandoffEvent::DestinationActivated);
@@ -851,22 +840,6 @@ where
     fn is_router(&self) -> bool;
 }
 
-pub(in crate::replay) trait ConfiguredPoolPlacement<Events, Metadata>:
-    PoolPlacement<Events, Metadata>
-where
-    Events: EngineEventBatch,
-    Metadata: ReplayAdmissionMetadata,
-{
-    fn create(
-        args: &MockEngineArgs,
-        router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-        num_workers: usize,
-        router_mode: ReplayRouterMode,
-        topology: Vec<WorkerTopology>,
-    ) -> Result<Self>;
-}
-
 impl<Events: EngineEventBatch> PoolPlacement<Events, ()> for PoolRoundRobinPlacement<Events> {
     #[inline]
     fn is_router(&self) -> bool {
@@ -874,189 +847,8 @@ impl<Events: EngineEventBatch> PoolPlacement<Events, ()> for PoolRoundRobinPlace
     }
 }
 
-impl PoolPlacement<RouterEventBatch, KvReplayMetadata> for KvRouterPlacement {
-    #[inline]
-    fn is_router(&self) -> bool {
-        true
-    }
-}
-
-impl ConfiguredPoolPlacement<RouterEventBatch, KvReplayMetadata> for KvRouterPlacement {
-    fn create(
-        args: &MockEngineArgs,
-        router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-        num_workers: usize,
-        router_mode: ReplayRouterMode,
-        _topology: Vec<WorkerTopology>,
-    ) -> Result<Self> {
-        if router_mode != ReplayRouterMode::KvRouter {
-            bail!("KV replay composition received round-robin mode");
-        }
-        Self::new(args, router_config, prefill_load_estimator, num_workers)
-    }
-}
-
-#[cfg(test)]
-// The adaptive test adapter is not instantiated in production hot paths.
-#[allow(clippy::large_enum_variant)]
-pub(in crate::replay) enum AdaptivePoolPlacement {
-    RoundRobin(PoolRoundRobinPlacement<RouterEventBatch>),
-    Kv(KvRouterPlacement),
-}
-
-#[cfg(test)]
-impl AdaptivePoolPlacement {
-    fn debug_snapshot(&self, now_ms: f64) -> super::components::OfflineRouterSnapshot {
-        match self {
-            Self::RoundRobin(_) => panic!("expected KV router placement"),
-            Self::Kv(policy) => policy.debug_snapshot(now_ms),
-        }
-    }
-}
-
-#[cfg(test)]
-impl PlacementPolicy<DirectRequest> for AdaptivePoolPlacement {
-    type Metadata = KvReplayMetadata;
-    type Observation = RouterEventBatch;
-
-    fn place(
-        &mut self,
-        request: &DirectRequest,
-        metadata: Self::Metadata,
-        session_id: Option<String>,
-        now_ms: f64,
-    ) -> Result<PlacementEffects> {
-        match self {
-            Self::RoundRobin(policy) => policy.place(request, (), session_id, now_ms),
-            Self::Kv(policy) => policy.place(request, metadata, session_id, now_ms),
-        }
-    }
-
-    fn observe(&mut self, observation: Self::Observation, now_ms: f64) -> Result<Vec<Placement>> {
-        match self {
-            Self::RoundRobin(policy) => {
-                PlacementPolicy::<DirectRequest>::observe(policy, observation, now_ms)
-            }
-            Self::Kv(policy) => policy.observe(observation, now_ms),
-        }
-    }
-
-    fn cancel_pending(&mut self, request_id: Uuid) -> bool {
-        match self {
-            Self::RoundRobin(policy) => {
-                PlacementPolicy::<DirectRequest>::cancel_pending(policy, request_id)
-            }
-            Self::Kv(policy) => policy.cancel_pending(request_id),
-        }
-    }
-
-    fn request_terminal(&mut self, request_id: Uuid, now_ms: f64) -> Result<Vec<Placement>> {
-        match self {
-            Self::RoundRobin(policy) => {
-                PlacementPolicy::<DirectRequest>::request_terminal(policy, request_id, now_ms)
-            }
-            Self::Kv(policy) => policy.request_terminal(request_id, now_ms),
-        }
-    }
-
-    fn prefill_completed(&mut self, request_id: Uuid, now_ms: f64) -> Result<Vec<Placement>> {
-        match self {
-            Self::RoundRobin(policy) => {
-                PlacementPolicy::<DirectRequest>::prefill_completed(policy, request_id, now_ms)
-            }
-            Self::Kv(policy) => policy.prefill_completed(request_id, now_ms),
-        }
-    }
-
-    fn pending_count(&self) -> usize {
-        match self {
-            Self::RoundRobin(policy) => PlacementPolicy::<DirectRequest>::pending_count(policy),
-            Self::Kv(policy) => policy.pending_count(),
-        }
-    }
-
-    fn worker_ready(&mut self, worker: WorkerTopology, now_ms: f64) -> Result<Vec<Placement>> {
-        match self {
-            Self::RoundRobin(policy) => {
-                PlacementPolicy::<DirectRequest>::worker_ready(policy, worker, now_ms)
-            }
-            Self::Kv(policy) => policy.worker_ready(worker, now_ms),
-        }
-    }
-
-    fn worker_draining(&mut self, worker: WorkerTopology, now_ms: f64) -> Result<Vec<Placement>> {
-        match self {
-            Self::RoundRobin(policy) => {
-                PlacementPolicy::<DirectRequest>::worker_draining(policy, worker, now_ms)
-            }
-            Self::Kv(policy) => policy.worker_draining(worker, now_ms),
-        }
-    }
-
-    fn worker_removed(&mut self, worker: WorkerTopology, now_ms: f64) -> Result<Vec<Placement>> {
-        match self {
-            Self::RoundRobin(policy) => {
-                PlacementPolicy::<DirectRequest>::worker_removed(policy, worker, now_ms)
-            }
-            Self::Kv(policy) => policy.worker_removed(worker, now_ms),
-        }
-    }
-
-    fn topology_settled(&mut self, now_ms: f64) -> Result<Vec<Placement>> {
-        match self {
-            Self::RoundRobin(policy) => {
-                PlacementPolicy::<DirectRequest>::topology_settled(policy, now_ms)
-            }
-            Self::Kv(policy) => policy.topology_settled(now_ms),
-        }
-    }
-}
-
-#[cfg(test)]
-impl PoolPlacement<RouterEventBatch, KvReplayMetadata> for AdaptivePoolPlacement {
-    fn is_router(&self) -> bool {
-        matches!(self, Self::Kv(_))
-    }
-}
-
-#[cfg(test)]
-impl ConfiguredPoolPlacement<RouterEventBatch, KvReplayMetadata> for AdaptivePoolPlacement {
-    fn create(
-        args: &MockEngineArgs,
-        router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-        num_workers: usize,
-        router_mode: ReplayRouterMode,
-        topology: Vec<WorkerTopology>,
-    ) -> Result<Self> {
-        match router_mode {
-            ReplayRouterMode::RoundRobin => {
-                Ok(Self::RoundRobin(PoolRoundRobinPlacement::new(topology)))
-            }
-            ReplayRouterMode::KvRouter => Ok(Self::Kv(KvRouterPlacement::new(
-                args,
-                router_config,
-                prefill_load_estimator,
-                num_workers,
-            )?)),
-        }
-    }
-}
-
-#[cfg(test)]
-pub(in crate::replay) type DisaggRuntime =
-    DisaggRuntimeImpl<AdaptivePoolPlacement, RouterEventObservation, KvReplayMetadata>;
-#[cfg(not(test))]
-pub(in crate::replay) type DisaggRuntime =
-    DisaggRuntimeImpl<KvRouterPlacement, RouterEventObservation, KvReplayMetadata>;
 pub(in crate::replay) type RoundRobinDisaggRuntime =
     DisaggRuntimeImpl<PoolRoundRobinPlacement<()>, NoEngineEvents, NoReplayMetadata>;
-pub(in crate::replay) type HandoffDisaggRuntime = DisaggRuntimeImpl<
-    PoolRoundRobinPlacement<RouterEventBatch>,
-    RouterEventObservation,
-    NoReplayMetadata,
->;
 
 pub(in crate::replay) struct DisaggRuntimeImpl<PlacementPolicyImpl, Observation, Metadata>
 where
@@ -1129,29 +921,6 @@ impl DisaggRuntimeImpl<PoolRoundRobinPlacement<()>, NoEngineEvents, NoReplayMeta
     }
 }
 
-impl
-    DisaggRuntimeImpl<
-        PoolRoundRobinPlacement<RouterEventBatch>,
-        RouterEventObservation,
-        NoReplayMetadata,
-    >
-{
-    pub(super) fn new_handoff_conformance(
-        config: &OfflineDisaggReplayConfig,
-        pending: VecDeque<DirectRequest>,
-    ) -> Result<Self> {
-        Self::new_composed(
-            config,
-            AdmissionQueue::new_requests(pending, ReplayMode::Trace),
-            false,
-            true,
-            true,
-            |_, topology| Ok(PoolRoundRobinPlacement::new(topology)),
-            |_, topology| Ok(PoolRoundRobinPlacement::new(topology)),
-        )
-    }
-}
-
 impl<PlacementPolicyImpl, Observation, Metadata>
     DisaggRuntimeImpl<PlacementPolicyImpl, Observation, Metadata>
 where
@@ -1159,109 +928,8 @@ where
     Metadata: ReplayAdmissionMetadata,
     PlacementPolicyImpl: PoolPlacement<Observation::Batch, Metadata>,
 {
-    /// Create a disaggregated offline runtime seeded from an explicit request queue.
-    pub(in crate::replay) fn new(
-        config: &OfflineDisaggReplayConfig,
-        router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-        pending: VecDeque<DirectRequest>,
-        mode: ReplayMode,
-        router_mode: ReplayRouterMode,
-    ) -> Result<Self>
-    where
-        PlacementPolicyImpl: ConfiguredPoolPlacement<Observation::Batch, Metadata>,
-    {
-        Self::new_with_source(
-            config,
-            router_config,
-            prefill_load_estimator,
-            AdmissionQueue::<Metadata>::new_requests(pending, mode),
-            router_mode,
-            false,
-        )
-    }
-
-    /// Create a disaggregated offline runtime whose admissions come from a workload driver.
-    pub(in crate::replay) fn new_workload(
-        config: &OfflineDisaggReplayConfig,
-        router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-        driver: WorkloadDriver,
-        mode: ReplayMode,
-        router_mode: ReplayRouterMode,
-    ) -> Result<Self>
-    where
-        PlacementPolicyImpl: ConfiguredPoolPlacement<Observation::Batch, Metadata>,
-    {
-        Self::new_with_source(
-            config,
-            router_config,
-            prefill_load_estimator,
-            AdmissionQueue::<Metadata>::new_workload(driver, mode),
-            router_mode,
-            false,
-        )
-    }
-
-    /// Shared constructor for both raw-request and workload-driven admissions.
-    fn new_with_source(
-        config: &OfflineDisaggReplayConfig,
-        router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-        admission: AdmissionQueue<Metadata>,
-        router_mode: ReplayRouterMode,
-        capture_conformance: bool,
-    ) -> Result<Self>
-    where
-        PlacementPolicyImpl: ConfiguredPoolPlacement<Observation::Batch, Metadata>,
-    {
-        let (prefill_router_config, decode_router_config) = match router_mode {
-            ReplayRouterMode::RoundRobin => (None, None),
-            ReplayRouterMode::KvRouter => (
-                Some(derive_prefill_router_config(
-                    &config.prefill_args,
-                    router_config.clone(),
-                )),
-                Some(derive_decode_router_config(
-                    &config.decode_args,
-                    router_config,
-                )),
-            ),
-        };
-
-        let prefill_capture_kv =
-            router_mode == ReplayRouterMode::KvRouter && Observation::CAPTURE_RAW;
-        Self::new_composed(
-            config,
-            admission,
-            prefill_capture_kv,
-            capture_conformance && Observation::CAPTURE_RAW,
-            capture_conformance,
-            |args, topology| {
-                PlacementPolicyImpl::create(
-                    args,
-                    prefill_router_config,
-                    prefill_load_estimator,
-                    config.num_prefill_workers,
-                    router_mode,
-                    topology,
-                )
-            },
-            |args, topology| {
-                PlacementPolicyImpl::create(
-                    args,
-                    decode_router_config,
-                    None,
-                    config.num_decode_workers,
-                    router_mode,
-                    topology,
-                )
-            },
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
-    fn new_composed(
+    pub(in crate::replay::offline) fn new_composed(
         config: &OfflineDisaggReplayConfig,
         admission: AdmissionQueue<Metadata>,
         prefill_capture_raw: bool,
@@ -1529,11 +1197,17 @@ where
         ) {
             bail!("offline disagg replay destination acceptance returned an unexpected result");
         }
+        let stored_hashes = self
+            .flow
+            .conformance_capture
+            .as_ref()
+            .map(|_| Observation::stored_hashes(&effects.engine_events))
+            .unwrap_or_default();
         self.flow.finish_destination_reservation(
             uuid,
             worker_idx,
             action,
-            &effects.kv_events,
+            &stored_hashes,
             effects.lifecycle_events,
             self.now_ms,
             &mut self.collector,
@@ -1729,10 +1403,16 @@ where
                     )?;
                     return Ok(ActionExecution::Applied);
                 }
+                let stored_hashes = self
+                    .flow
+                    .conformance_capture
+                    .as_ref()
+                    .map(|_| Observation::stored_hashes(&effects.engine_events))
+                    .unwrap_or_default();
                 self.flow.finish_destination_activation(
                     uuid,
                     issued,
-                    &effects.kv_events,
+                    &stored_hashes,
                     effects.lifecycle_events,
                     self.now_ms,
                     &mut self.collector,
@@ -1760,7 +1440,7 @@ where
                     _ => bail!("source release returned an unexpected result"),
                 };
                 self.flow.record_source_release(uuid, &mut self.stats);
-                self.apply_prefill_raw_observations(effects.kv_events)?;
+                self.apply_prefill_observations(effects.engine_events)?;
                 self.flow.finish_source_release(
                     uuid,
                     issued,
@@ -1788,7 +1468,7 @@ where
                     .prefill_engine
                     .apply_command(worker_idx, SchedulerCommand::CancelSource { handoff_id })?;
                 let outcome = command_cleanup_outcome(effects.result)?;
-                self.apply_prefill_raw_observations(effects.kv_events)?;
+                self.apply_prefill_observations(effects.engine_events)?;
                 self.acknowledge_action(uuid, issued, outcome)?;
                 self.process_lifecycle_events(effects.lifecycle_events)?;
             }
@@ -1991,24 +1671,17 @@ where
         self.dispatch_prefill_placements(placements)
     }
 
-    fn apply_prefill_raw_observations(&mut self, events: Vec<RouterEvent>) -> Result<()> {
-        self.apply_prefill_observations(Observation::observe(events))
-    }
-
     #[cfg(feature = "kvbm-offload")]
     fn tick_offload_engines(&mut self) -> Result<bool> {
         let prefill = self.prefill_engine.tick_offload_engines(self.now_ms);
         let decode = self.decode_engine.tick_offload_engines(self.now_ms);
-        let changed = !prefill.kv_events.is_empty()
-            || !decode.kv_events.is_empty()
+        let changed = prefill.progress.made_progress
+            || decode.progress.made_progress
             || !prefill.lifecycle_events.is_empty()
             || !decode.lifecycle_events.is_empty();
-        self.apply_prefill_raw_observations(prefill.kv_events)?;
-        if !decode.kv_events.is_empty() {
-            tracing::debug!(
-                events = decode.kv_events.len(),
-                "offline disagg replay dropping decode-side offload router events"
-            );
+        self.apply_prefill_observations(prefill.engine_events)?;
+        if !decode.engine_events.is_empty() {
+            tracing::debug!("offline disagg replay dropping decode-side offload router events");
         }
         self.process_lifecycle_events(prefill.lifecycle_events)?;
         self.process_lifecycle_events(decode.lifecycle_events)?;
@@ -2101,7 +1774,7 @@ where
         accept_length_decode_forwards: usize,
     ) -> Result<()> {
         if let Some(capture) = self.flow.conformance_capture.as_mut() {
-            capture.record_after_activation(Observation::as_router_events(&engine_events));
+            capture.record_after_activation(&Observation::stored_hashes(&engine_events));
         }
         let placements = self.decode_placement.observe(engine_events, self.now_ms)?;
         self.dispatch_decode_placements(placements)?;
@@ -2918,38 +2591,6 @@ fn command_cleanup_outcome(result: SchedulerCommandResult) -> Result<HandoffActi
         SchedulerCommandResult::Noop => Ok(HandoffActionOutcome::Noop),
         _ => bail!("handoff cleanup returned an unexpected scheduler result"),
     }
-}
-
-fn base_router_config(
-    args: &MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
-) -> KvRouterConfig {
-    let mut config = router_config.unwrap_or_default();
-    if let Some(policy) = args.router_queue_policy {
-        config.router_queue_policy = policy;
-    }
-    config
-}
-
-fn derive_prefill_router_config(
-    args: &MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
-) -> KvRouterConfig {
-    let mut config = base_router_config(args, router_config);
-    config.router_track_active_blocks = false;
-    config
-}
-
-fn derive_decode_router_config(
-    args: &MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
-) -> KvRouterConfig {
-    let mut config = base_router_config(args, router_config);
-    config.overlap_score_credit = 0.0;
-    config.router_assume_kv_reuse = false;
-    config.router_track_prefill_tokens = false;
-    config.router_prefill_load_model = dynamo_kv_router::config::RouterPrefillLoadModel::None;
-    config
 }
 
 #[cfg(test)]

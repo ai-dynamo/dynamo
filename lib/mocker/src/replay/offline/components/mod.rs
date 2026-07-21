@@ -12,9 +12,12 @@ pub(in crate::replay::offline) use admission::{
     AdmissionQueue, KvReplayMetadata, NoReplayMetadata, ReplayAdmissionMetadata,
 };
 pub(in crate::replay::offline) use engine::EngineComponent;
+#[cfg(feature = "kvbm-offload")]
+pub(in crate::replay::offline) use types::ObservedOffloadEffects;
 pub(in crate::replay) use types::ReplayMode;
 pub use types::TrafficStats;
 pub(in crate::replay::offline) use types::{
-    EngineEffects, EnginePassMode, ScheduledWorkerCompletion, TrafficAccumulator,
+    EngineEffects, EnginePassMode, ObservedCommandEffects, ReplayEngineObservation,
+    ScheduledWorkerCompletion, TrafficAccumulator,
 };
 pub(crate) use worker_core::ReplayWorkerCore;

@@ -375,8 +375,16 @@ impl OfflineWorkerState {
         self.core.retry_pending_destinations()
     }
 
-    pub(crate) fn drain_kv_events(&self) -> Vec<dynamo_kv_router::protocols::RouterEvent> {
-        self.core.drain_kv_events()
+    pub(in crate::replay) fn engine_core(&self) -> &EngineCore {
+        &self.core
+    }
+
+    pub(crate) fn has_engine_events(&self) -> bool {
+        self.core.has_kv_events()
+    }
+
+    pub(crate) fn discard_engine_events(&self) {
+        self.core.drain_kv_events();
     }
 
     fn increment_in_flight(&mut self) {
@@ -444,8 +452,8 @@ mod tests {
     use super::{DisaggRequestState, OfflineWorkerState};
     use crate::common::handoff::{HandoffId, HandoffOrder};
     use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs, WorkerType};
+    use crate::replay::offline::extensions::kv_events::KvCacheEventData;
     use crate::scheduler::{SchedulerCommand, SchedulerCommandResult};
-    use dynamo_kv_router::protocols::KvCacheEventData;
 
     fn worker(
         engine_type: EngineType,
@@ -511,7 +519,7 @@ mod tests {
                 worker.mark_completed(pass.completed_requests);
                 events.extend(pass.kv_events);
             }
-            events.extend(worker.drain_kv_events());
+            events.extend(worker.core.drain_kv_events());
 
             assert!(!events.is_empty());
             assert!(events.iter().all(|event| event.worker_id == 7));

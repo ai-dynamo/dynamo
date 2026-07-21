@@ -6,18 +6,14 @@ use super::components::OfflineRouterSnapshot;
 pub(super) use super::components::ReplayMode;
 #[cfg(test)]
 use super::components::TrafficStats;
-#[cfg(test)]
-use super::core::PlacementEffects;
 use super::core::round_robin::AggregatedRoundRobinPlacement;
 use super::core::{
     AdmissionSource as CoreAdmissionSource, EngineEventBatch, NoEngineEvents, Placement,
     PlacementDecision, PlacementPolicy, ReadyArrival, WorkerTopology,
 };
 use super::events::{SimulationEvent, SimulationWorkerStage};
-use super::extensions::kv_events::{
-    ReplayEngineObservation, RouterEventBatch, RouterEventObservation,
-};
-use super::extensions::kv_router::KvRouterPlacement;
+#[cfg(test)]
+use super::extensions::kv_router::AggRuntime;
 use super::planner_hook::{LatestFpmBuffer, PlannerHook, PlannerTickMetrics};
 use super::progress::ReplayProgress;
 use super::runtime_utils::{
@@ -30,19 +26,18 @@ use super::state::AggRequestPhase;
 use super::state::OfflineWorkerSnapshot;
 use super::{
     components::{
-        AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, KvReplayMetadata,
-        NoReplayMetadata, ReplayAdmissionMetadata, ScheduledWorkerCompletion, TrafficAccumulator,
+        AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, NoReplayMetadata,
+        ReplayAdmissionMetadata, ReplayEngineObservation, ScheduledWorkerCompletion,
+        TrafficAccumulator,
     },
     state::AggRequestState,
 };
 use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArgs, OutputSignal};
 use crate::loadgen::WorkloadDriver;
-use crate::replay::{
-    ReplayPrefillLoadEstimator, ReplayRouterMode, ReplayTerminalStatus, SlaThresholds,
-    TraceCollector,
-};
-use anyhow::{Result, bail};
-use dynamo_kv_router::config::KvRouterConfig;
+#[cfg(test)]
+use crate::replay::ReplayRouterMode;
+use crate::replay::{ReplayTerminalStatus, SlaThresholds, TraceCollector};
+use anyhow::bail;
 use rustc_hash::FxHashMap;
 #[cfg(test)]
 use std::collections::HashMap;
@@ -90,22 +85,6 @@ where
     fn debug_router_snapshot(&self, now_ms: f64) -> Option<OfflineRouterSnapshot>;
 }
 
-pub(in crate::replay) trait ConfiguredAggregatedPlacement<Events, Metadata>:
-    AggregatedPlacement<Events, Metadata>
-where
-    Events: EngineEventBatch,
-    Metadata: ReplayAdmissionMetadata,
-{
-    fn create(
-        args: &MockEngineArgs,
-        router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-        num_workers: usize,
-        router_mode: ReplayRouterMode,
-        topology: Vec<WorkerTopology>,
-    ) -> Result<Self>;
-}
-
 impl<Events: EngineEventBatch> AggregatedPlacement<Events, ()>
     for AggregatedRoundRobinPlacement<Events>
 {
@@ -121,196 +100,6 @@ impl<Events: EngineEventBatch> AggregatedPlacement<Events, ()>
     }
 }
 
-impl AggregatedPlacement<RouterEventBatch, KvReplayMetadata> for KvRouterPlacement {
-    #[cfg(test)]
-    #[inline]
-    fn is_router(&self) -> bool {
-        true
-    }
-
-    #[cfg(test)]
-    fn debug_router_snapshot(&self, now_ms: f64) -> Option<OfflineRouterSnapshot> {
-        Some(self.debug_snapshot(now_ms))
-    }
-}
-
-impl ConfiguredAggregatedPlacement<RouterEventBatch, KvReplayMetadata> for KvRouterPlacement {
-    fn create(
-        args: &MockEngineArgs,
-        router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-        num_workers: usize,
-        router_mode: ReplayRouterMode,
-        _topology: Vec<WorkerTopology>,
-    ) -> Result<Self> {
-        if router_mode != ReplayRouterMode::KvRouter {
-            bail!("KV replay composition received round-robin mode");
-        }
-        Self::new(args, router_config, prefill_load_estimator, num_workers)
-    }
-}
-
-#[cfg(test)]
-// The adaptive test adapter is not instantiated in production hot paths.
-#[allow(clippy::large_enum_variant)]
-pub(in crate::replay) enum AdaptiveAggPlacement {
-    RoundRobin(AggregatedRoundRobinPlacement<RouterEventBatch>),
-    Kv(KvRouterPlacement),
-}
-
-#[cfg(test)]
-impl AdaptiveAggPlacement {
-    fn tracked_round_robin_workers(&self) -> &FxHashMap<usize, u32> {
-        let Self::RoundRobin(policy) = self else {
-            panic!("expected round-robin placement");
-        };
-        policy.tracked_workers()
-    }
-}
-
-#[cfg(test)]
-impl PlacementPolicy<DirectRequest> for AdaptiveAggPlacement {
-    type Metadata = KvReplayMetadata;
-    type Observation = RouterEventBatch;
-
-    fn place(
-        &mut self,
-        request: &DirectRequest,
-        metadata: Self::Metadata,
-        session_id: Option<String>,
-        now_ms: f64,
-    ) -> Result<PlacementEffects> {
-        match self {
-            Self::RoundRobin(policy) => policy.place(request, (), session_id, now_ms),
-            Self::Kv(policy) => policy.place(request, metadata, session_id, now_ms),
-        }
-    }
-
-    fn observe(&mut self, observation: Self::Observation, now_ms: f64) -> Result<Vec<Placement>> {
-        match self {
-            Self::RoundRobin(policy) => {
-                PlacementPolicy::<DirectRequest>::observe(policy, observation, now_ms)
-            }
-            Self::Kv(policy) => policy.observe(observation, now_ms),
-        }
-    }
-
-    fn cancel_pending(&mut self, request_id: Uuid) -> bool {
-        match self {
-            Self::RoundRobin(policy) => {
-                PlacementPolicy::<DirectRequest>::cancel_pending(policy, request_id)
-            }
-            Self::Kv(policy) => policy.cancel_pending(request_id),
-        }
-    }
-
-    fn request_terminal(&mut self, request_id: Uuid, now_ms: f64) -> Result<Vec<Placement>> {
-        match self {
-            Self::RoundRobin(policy) => {
-                PlacementPolicy::<DirectRequest>::request_terminal(policy, request_id, now_ms)
-            }
-            Self::Kv(policy) => policy.request_terminal(request_id, now_ms),
-        }
-    }
-
-    fn prefill_completed(&mut self, request_id: Uuid, now_ms: f64) -> Result<Vec<Placement>> {
-        match self {
-            Self::RoundRobin(policy) => {
-                PlacementPolicy::<DirectRequest>::prefill_completed(policy, request_id, now_ms)
-            }
-            Self::Kv(policy) => policy.prefill_completed(request_id, now_ms),
-        }
-    }
-
-    fn pending_count(&self) -> usize {
-        match self {
-            Self::RoundRobin(policy) => PlacementPolicy::<DirectRequest>::pending_count(policy),
-            Self::Kv(policy) => policy.pending_count(),
-        }
-    }
-
-    fn worker_ready(&mut self, worker: WorkerTopology, now_ms: f64) -> Result<Vec<Placement>> {
-        match self {
-            Self::RoundRobin(policy) => {
-                PlacementPolicy::<DirectRequest>::worker_ready(policy, worker, now_ms)
-            }
-            Self::Kv(policy) => policy.worker_ready(worker, now_ms),
-        }
-    }
-
-    fn worker_draining(&mut self, worker: WorkerTopology, now_ms: f64) -> Result<Vec<Placement>> {
-        match self {
-            Self::RoundRobin(policy) => {
-                PlacementPolicy::<DirectRequest>::worker_draining(policy, worker, now_ms)
-            }
-            Self::Kv(policy) => policy.worker_draining(worker, now_ms),
-        }
-    }
-
-    fn worker_removed(&mut self, worker: WorkerTopology, now_ms: f64) -> Result<Vec<Placement>> {
-        match self {
-            Self::RoundRobin(policy) => {
-                PlacementPolicy::<DirectRequest>::worker_removed(policy, worker, now_ms)
-            }
-            Self::Kv(policy) => policy.worker_removed(worker, now_ms),
-        }
-    }
-
-    fn topology_settled(&mut self, now_ms: f64) -> Result<Vec<Placement>> {
-        match self {
-            Self::RoundRobin(policy) => {
-                PlacementPolicy::<DirectRequest>::topology_settled(policy, now_ms)
-            }
-            Self::Kv(policy) => policy.topology_settled(now_ms),
-        }
-    }
-}
-
-#[cfg(test)]
-impl AggregatedPlacement<RouterEventBatch, KvReplayMetadata> for AdaptiveAggPlacement {
-    #[cfg(test)]
-    fn is_router(&self) -> bool {
-        matches!(self, Self::Kv(_))
-    }
-
-    fn debug_router_snapshot(&self, now_ms: f64) -> Option<OfflineRouterSnapshot> {
-        match self {
-            Self::RoundRobin(_) => None,
-            Self::Kv(policy) => Some(policy.debug_snapshot(now_ms)),
-        }
-    }
-}
-
-#[cfg(test)]
-impl ConfiguredAggregatedPlacement<RouterEventBatch, KvReplayMetadata> for AdaptiveAggPlacement {
-    fn create(
-        args: &MockEngineArgs,
-        router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-        num_workers: usize,
-        router_mode: ReplayRouterMode,
-        topology: Vec<WorkerTopology>,
-    ) -> Result<Self> {
-        match router_mode {
-            ReplayRouterMode::RoundRobin => Ok(Self::RoundRobin(
-                AggregatedRoundRobinPlacement::new(args.dp_size, topology),
-            )),
-            ReplayRouterMode::KvRouter => Ok(Self::Kv(KvRouterPlacement::new(
-                args,
-                router_config,
-                prefill_load_estimator,
-                num_workers,
-            )?)),
-        }
-    }
-}
-
-#[cfg(test)]
-pub(in crate::replay) type AggRuntime =
-    AggRuntimeImpl<AdaptiveAggPlacement, RouterEventObservation, KvReplayMetadata>;
-#[cfg(not(test))]
-pub(in crate::replay) type AggRuntime =
-    AggRuntimeImpl<KvRouterPlacement, RouterEventObservation, KvReplayMetadata>;
 pub(in crate::replay) type RoundRobinAggRuntime =
     AggRuntimeImpl<AggregatedRoundRobinPlacement<()>, NoEngineEvents, NoReplayMetadata>;
 
@@ -389,77 +178,7 @@ where
     Metadata: ReplayAdmissionMetadata,
     PlacementPolicyImpl: AggregatedPlacement<Observation::Batch, Metadata>,
 {
-    /// Create an aggregated offline runtime seeded from an explicit request queue.
-    pub(in crate::replay) fn new(
-        args: &MockEngineArgs,
-        router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-        pending: VecDeque<DirectRequest>,
-        num_workers: usize,
-        mode: ReplayMode,
-        router_mode: ReplayRouterMode,
-    ) -> anyhow::Result<Self>
-    where
-        PlacementPolicyImpl: ConfiguredAggregatedPlacement<Observation::Batch, Metadata>,
-    {
-        Self::new_with_source(
-            args,
-            router_config,
-            prefill_load_estimator,
-            AdmissionQueue::<Metadata>::new_requests(pending, mode),
-            num_workers,
-            router_mode,
-        )
-    }
-
-    /// Create an aggregated offline runtime whose admissions come from a workload driver.
-    pub(in crate::replay) fn new_workload(
-        args: &MockEngineArgs,
-        router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-        driver: WorkloadDriver,
-        num_workers: usize,
-        mode: ReplayMode,
-        router_mode: ReplayRouterMode,
-    ) -> anyhow::Result<Self>
-    where
-        PlacementPolicyImpl: ConfiguredAggregatedPlacement<Observation::Batch, Metadata>,
-    {
-        Self::new_with_source(
-            args,
-            router_config,
-            prefill_load_estimator,
-            AdmissionQueue::<Metadata>::new_workload(driver, mode),
-            num_workers,
-            router_mode,
-        )
-    }
-
-    /// Shared constructor for both raw-request and workload-driven admissions.
-    fn new_with_source(
-        args: &MockEngineArgs,
-        router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-        admission: AdmissionQueue<Metadata>,
-        num_workers: usize,
-        router_mode: ReplayRouterMode,
-    ) -> anyhow::Result<Self>
-    where
-        PlacementPolicyImpl: ConfiguredAggregatedPlacement<Observation::Batch, Metadata>,
-    {
-        Self::new_composed(args, admission, num_workers, |args, topology| {
-            PlacementPolicyImpl::create(
-                args,
-                router_config,
-                prefill_load_estimator,
-                num_workers,
-                router_mode,
-                topology,
-            )
-        })
-    }
-
-    fn new_composed(
+    pub(in crate::replay::offline) fn new_composed(
         args: &MockEngineArgs,
         admission: AdmissionQueue<Metadata>,
         num_workers: usize,
@@ -773,9 +492,10 @@ where
 
     #[cfg(feature = "kvbm-offload")]
     fn tick_offload_engines(&mut self) -> anyhow::Result<bool> {
-        let crate::scheduler::OffloadTickEffects {
-            kv_events,
+        let super::components::ObservedOffloadEffects {
+            engine_events,
             lifecycle_events,
+            progress,
         } = self.engine.tick_offload_engines(self.now_ms);
         if !lifecycle_events.is_empty() {
             bail!(
@@ -783,9 +503,8 @@ where
                 lifecycle_events.len()
             );
         }
-        let changed = !kv_events.is_empty();
-        self.apply_engine_observations(Observation::observe(kv_events))?;
-        Ok(changed)
+        self.apply_engine_observations(engine_events)?;
+        Ok(progress.made_progress)
     }
 
     /// Consume one output signal, updating router state, collector state, and completion counts.
@@ -1398,8 +1117,8 @@ mod tests {
     use super::*;
     use crate::common::protocols::{EngineType, SglangArgs};
     use crate::loadgen::{AgenticTrace, AgenticTurnTrace, SessionTrace, Trace, TurnTrace};
+    use crate::replay::offline::extensions::kv_router::{ReplayKvRouterConfig, RouterQueuePolicy};
     use crate::replay::{TraceRequestStatsSnapshot, normalize_trace_requests};
-    use dynamo_kv_router::config::{KvRouterConfig, RouterQueuePolicy};
     use rstest::rstest;
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -1615,11 +1334,11 @@ mod tests {
             .unwrap()
     }
 
-    fn queueing_router_config(policy: RouterQueuePolicy) -> KvRouterConfig {
-        KvRouterConfig {
+    fn queueing_router_config(policy: RouterQueuePolicy) -> ReplayKvRouterConfig {
+        ReplayKvRouterConfig {
             router_queue_threshold: Some(0.5),
             router_queue_policy: policy,
-            ..KvRouterConfig::default()
+            ..ReplayKvRouterConfig::default()
         }
     }
 
@@ -1665,10 +1384,10 @@ mod tests {
         .unwrap()
     }
 
-    fn planner_router_config() -> KvRouterConfig {
-        KvRouterConfig {
+    fn planner_router_config() -> ReplayKvRouterConfig {
+        ReplayKvRouterConfig {
             router_queue_threshold: Some(0.5),
-            ..KvRouterConfig::default()
+            ..ReplayKvRouterConfig::default()
         }
     }
 

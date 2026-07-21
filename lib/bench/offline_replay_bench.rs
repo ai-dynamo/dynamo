@@ -65,6 +65,23 @@ enum EngineTypeArg {
     Trtllm,
 }
 
+impl EngineTypeArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Vllm => "vllm",
+            Self::Sglang => "sglang",
+            Self::Trtllm => "trtllm",
+        }
+    }
+
+    fn native_router_event_visibility(self) -> &'static str {
+        match self {
+            Self::Vllm | Self::Trtllm => "pass-start",
+            Self::Sglang => "pass-end",
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum KvTransferTimingModeArg {
     FullPrompt,
@@ -317,7 +334,7 @@ fn canonicalize_json(value: Value) -> Value {
     }
 }
 
-fn canonical_report(report: &TraceSimulationReport) -> Result<Value> {
+fn canonical_report(report: &TraceSimulationReport, engine_type: EngineTypeArg) -> Result<Value> {
     let mut per_request = serde_json::to_value(&report.per_request)?;
     if let Value::Array(records) = &mut per_request {
         records.sort_unstable_by(|left, right| {
@@ -338,6 +355,8 @@ fn canonical_report(report: &TraceSimulationReport) -> Result<Value> {
     summary.remove("processed_tokens_per_s");
     summary.remove("processed_output_tokens_per_s");
     Ok(canonicalize_json(json!({
+        "engine_type": engine_type.as_str(),
+        "native_router_event_visibility": engine_type.native_router_event_visibility(),
         "replay_bench": cfg!(feature = "replay-bench"),
         "summary": summary,
         "per_request": per_request,
@@ -421,6 +440,8 @@ fn main() -> Result<()> {
                     "wall_time_ms": report.throughput.wall_time_ms,
                     "serving_mode": args.serving_mode.as_str(),
                     "router_mode": args.router_mode.as_str(),
+                    "engine_type": args.engine_type.as_str(),
+                    "native_router_event_visibility": args.engine_type.native_router_event_visibility(),
                     "replay_bench": cfg!(feature = "replay-bench"),
                 }),
             )?;
@@ -429,7 +450,7 @@ fn main() -> Result<()> {
         if let Some(writer) = canonical_writer.as_mut() {
             use std::io::Write;
 
-            serde_json::to_writer(&mut *writer, &canonical_report(&report)?)?;
+            serde_json::to_writer(&mut *writer, &canonical_report(&report, args.engine_type)?)?;
             writer.write_all(b"\n")?;
         }
         last_report = Some(report);

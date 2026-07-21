@@ -12,12 +12,10 @@
 use std::path::Path;
 use std::time::Instant;
 
-use anyhow::Result;
-use dynamo_kv_router::config::KvRouterConfig;
-
-use super::offline::agg::{AggRuntime, RoundRobinAggRuntime};
+use super::offline::agg::RoundRobinAggRuntime;
 use super::offline::components::ReplayMode;
-use super::offline::disagg::{DisaggRuntime, RoundRobinDisaggRuntime};
+use super::offline::disagg::RoundRobinDisaggRuntime;
+use super::offline::extensions::kv_router::{AggRuntime, DisaggRuntime, ReplayKvRouterConfig};
 use super::offline::planner_hook::PlannerHook;
 use super::{
     OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode, SlaThresholds,
@@ -25,6 +23,7 @@ use super::{
 };
 use crate::common::protocols::MockEngineArgs;
 use crate::loadgen::{Trace, WorkloadDriver};
+use anyhow::Result;
 
 #[allow(clippy::large_enum_variant)]
 enum RuntimeKind {
@@ -92,7 +91,7 @@ impl PlannerReplayHandle {
     #[allow(clippy::too_many_arguments)]
     pub fn from_trace(
         args: MockEngineArgs,
-        router_config: Option<KvRouterConfig>,
+        router_config: Option<ReplayKvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         trace: Trace,
         num_workers: usize,
@@ -136,7 +135,7 @@ impl PlannerReplayHandle {
     #[allow(clippy::too_many_arguments)]
     pub fn from_trace_file(
         args: MockEngineArgs,
-        router_config: Option<KvRouterConfig>,
+        router_config: Option<ReplayKvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         trace_path: &Path,
         trace_block_size: usize,
@@ -169,7 +168,7 @@ impl PlannerReplayHandle {
     #[allow(clippy::too_many_arguments)]
     pub fn from_trace_disagg(
         config: OfflineDisaggReplayConfig,
-        router_config: Option<KvRouterConfig>,
+        router_config: Option<ReplayKvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         trace: Trace,
         max_in_flight: Option<usize>,
@@ -210,7 +209,7 @@ impl PlannerReplayHandle {
     #[allow(clippy::too_many_arguments)]
     pub fn from_trace_file_disagg(
         config: OfflineDisaggReplayConfig,
-        router_config: Option<KvRouterConfig>,
+        router_config: Option<ReplayKvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         trace_path: &Path,
         trace_block_size: usize,

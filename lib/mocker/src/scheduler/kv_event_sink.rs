@@ -29,6 +29,10 @@ impl CapturedRouterEventBuffer {
     pub(crate) fn drain(&self) -> Vec<RouterEvent> {
         std::mem::take(&mut *self.events.lock().unwrap())
     }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.events.lock().unwrap().is_empty()
+    }
 }
 
 /// Sink implementation that records `RouterEvent`s into

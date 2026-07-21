@@ -5,18 +5,15 @@ use std::collections::VecDeque;
 use std::time::Instant;
 
 use anyhow::Result;
-use dynamo_kv_router::config::KvRouterConfig;
-use dynamo_kv_router::protocols::WorkerId;
 
 #[cfg(test)]
 use super::agg::AggRuntimeStats;
-use super::agg::{AggRuntime, ReplayMode as AggReplayMode, RoundRobinAggRuntime};
-use super::components::ReplayWorkerCore;
+use super::agg::{ReplayMode as AggReplayMode, RoundRobinAggRuntime};
 #[cfg(test)]
 use super::disagg::DisaggRuntimeStats;
-use super::disagg::{
-    DisaggRuntime, HandoffDisaggRuntime, ReplayMode as DisaggReplayMode, RoundRobinDisaggRuntime,
-};
+use super::disagg::{ReplayMode as DisaggReplayMode, RoundRobinDisaggRuntime};
+use super::extensions::kv_events::{self, HandoffDisaggRuntime};
+use super::extensions::kv_router::{AggRuntime, DisaggRuntime, ReplayKvRouterConfig};
 use super::normalize_trace_requests;
 use super::single::{SingleReplayMode, SingleRuntime};
 use crate::common::handoff::NormalizedHandoffConformance;
@@ -24,19 +21,10 @@ use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs, Sglang
 use crate::loadgen::{AgenticTrace, Trace, WorkloadDriver};
 use crate::replay::OfflineDisaggReplayConfig;
 use crate::replay::{
-    ReplayPrefillLoadEstimator, ReplayRouterMode, ReplayTimedKvEvent, ReplayTimedOutputSignal,
-    ReplayTimedRequest, ReplayWorkerArtifacts, SlaThresholds, TraceCollector,
-    TraceSimulationReport,
+    ReplayPrefillLoadEstimator, ReplayRouterMode, ReplayWorkerArtifacts, SlaThresholds,
+    TraceCollector, TraceSimulationReport,
 };
 use crate::scheduler::RouterEventVisibility;
-
-fn timestamp_us_from_ms(timestamp_ms: f64) -> u64 {
-    if !timestamp_ms.is_finite() || timestamp_ms <= 0.0 {
-        return 0;
-    }
-
-    (timestamp_ms * 1000.0) as u64
-}
 
 fn finish_with_replay_wall_time(
     collector: TraceCollector,
@@ -120,84 +108,17 @@ pub(crate) fn generate_trace_worker_artifacts_with_visibility(
     trace: Trace,
     router_event_visibility_override: Option<RouterEventVisibility>,
 ) -> Result<ReplayWorkerArtifacts> {
-    let args = args.normalized()?;
-    let engine_block_size = args.block_size;
-    let mut worker = ReplayWorkerCore::new_with_kv_capture(args, WorkerId::default());
-    let mut driver = trace.into_trace_driver_with_block_size(engine_block_size)?;
-    let mut collector = TraceCollector::default();
-    let mut artifacts = ReplayWorkerArtifacts::default();
-    let mut current_time_ms = 0.0;
-
-    while !driver.is_drained() || !worker.is_empty() {
-        for ready_turn in driver.pop_ready(current_time_ms, usize::MAX) {
-            let replay_hashes = ready_turn
-                .replay_hashes
-                .ok_or_else(|| anyhow::anyhow!("offline artifacts require synthesized hashes"))?;
-            collector.on_arrival(
-                ready_turn.request_uuid,
-                ready_turn.scheduled_ready_at_ms,
-                ready_turn.request.tokens.len(),
-                ready_turn.request.max_output_tokens,
-            );
-            artifacts.requests.push(ReplayTimedRequest {
-                uuid: ready_turn.request_uuid,
-                timestamp_us: timestamp_us_from_ms(current_time_ms),
-                scheduled_ready_at_ms: ready_turn.scheduled_ready_at_ms,
-                input_length: ready_turn.request.tokens.len(),
-                output_length: ready_turn.request.max_output_tokens,
-                replay_hashes,
-            });
-            worker.receive(ready_turn.request);
-        }
-
-        if worker.is_empty() {
-            let Some(next_ready_ms) = driver.next_ready_time_ms() else {
-                break;
-            };
-            current_time_ms = next_ready_ms;
-            continue;
-        }
-
-        let pass_start_ms = current_time_ms;
-        let pass = worker.execute_pass(&mut collector, current_time_ms);
-        current_time_ms = pass.end_ms;
-
-        let router_event_visibility =
-            router_event_visibility_override.unwrap_or(pass.router_event_visibility);
-        let kv_event_timestamp_us = match router_event_visibility {
-            RouterEventVisibility::PassStart => timestamp_us_from_ms(pass_start_ms),
-            RouterEventVisibility::PassEnd => timestamp_us_from_ms(current_time_ms),
-        };
-        artifacts
-            .kv_events
-            .extend(pass.kv_events.into_iter().map(|event| ReplayTimedKvEvent {
-                storage_tier: event.storage_tier,
-                event: event.event,
-                timestamp_us: kv_event_timestamp_us,
-            }));
-
-        let output_timestamp_us = timestamp_us_from_ms(current_time_ms);
-        for signal in pass.output_signals {
-            if let Some(token_id) = signal.token_id {
-                driver.on_output_token(signal.uuid, token_id)?;
-            }
-            if signal.completed {
-                driver.on_terminal(signal.uuid, current_time_ms, signal.rejected)?;
-            }
-            artifacts.output_signals.push(ReplayTimedOutputSignal {
-                signal,
-                timestamp_us: output_timestamp_us,
-            });
-        }
-    }
-
-    Ok(artifacts)
+    kv_events::generate_trace_worker_artifacts_with_visibility(
+        args,
+        trace,
+        router_event_visibility_override,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_trace(
     args: MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
+    router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
     num_workers: usize,
@@ -235,7 +156,7 @@ pub(crate) fn simulate_trace(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_concurrency(
     args: MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
+    router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
     max_in_flight: usize,
@@ -273,7 +194,7 @@ pub(crate) fn simulate_concurrency(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_trace_workload(
     args: MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
+    router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     num_workers: usize,
@@ -298,7 +219,7 @@ pub(crate) fn simulate_trace_workload(
 
 pub(crate) fn simulate_agentic_trace_workload(
     args: MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
+    router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: AgenticTrace,
     num_workers: usize,
@@ -323,7 +244,7 @@ pub(crate) fn simulate_agentic_trace_workload(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_trace_workload_accumulating_deltas(
     args: MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
+    router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     num_workers: usize,
@@ -349,7 +270,7 @@ pub(crate) fn simulate_trace_workload_accumulating_deltas(
 #[allow(clippy::too_many_arguments)]
 fn simulate_trace_workload_with_delta_mode(
     args: MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
+    router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     num_workers: usize,
@@ -387,7 +308,7 @@ fn simulate_trace_workload_with_delta_mode(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_concurrency_workload(
     args: MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
+    router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     max_in_flight: usize,
@@ -415,7 +336,7 @@ pub(crate) fn simulate_concurrency_workload(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_concurrency_workload_accumulating_deltas(
     args: MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
+    router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     max_in_flight: usize,
@@ -443,7 +364,7 @@ pub(crate) fn simulate_concurrency_workload_accumulating_deltas(
 #[allow(clippy::too_many_arguments)]
 fn simulate_concurrency_workload_with_delta_mode(
     args: MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
+    router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     max_in_flight: usize,
@@ -484,7 +405,7 @@ fn simulate_concurrency_workload_with_delta_mode(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_trace_disagg(
     config: OfflineDisaggReplayConfig,
-    router_config: Option<KvRouterConfig>,
+    router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
     arrival_speedup_ratio: f64,
@@ -520,7 +441,7 @@ pub(crate) fn simulate_trace_disagg(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_concurrency_disagg(
     config: OfflineDisaggReplayConfig,
-    router_config: Option<KvRouterConfig>,
+    router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
     max_in_flight: usize,
@@ -558,7 +479,7 @@ pub(crate) fn simulate_concurrency_disagg(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_trace_workload_disagg(
     config: OfflineDisaggReplayConfig,
-    router_config: Option<KvRouterConfig>,
+    router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     router_mode: ReplayRouterMode,
@@ -595,7 +516,7 @@ pub(crate) fn simulate_trace_workload_disagg(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_concurrency_workload_disagg(
     config: OfflineDisaggReplayConfig,
-    router_config: Option<KvRouterConfig>,
+    router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     max_in_flight: usize,
@@ -741,7 +662,7 @@ pub(crate) fn simulate_concurrency_workload_single(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_trace_multi(
     args: MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
+    router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
     num_workers: usize,
@@ -783,7 +704,7 @@ pub(crate) fn simulate_trace_multi(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_concurrency_multi(
     args: MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
+    router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
     max_in_flight: usize,
@@ -825,7 +746,7 @@ pub(crate) fn simulate_concurrency_multi(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_trace_workload_multi(
     args: MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
+    router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     num_workers: usize,
@@ -870,7 +791,7 @@ pub(crate) fn simulate_trace_workload_multi(
 
 pub(crate) fn simulate_agentic_trace_workload_multi(
     args: MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
+    router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: AgenticTrace,
     num_workers: usize,
@@ -905,7 +826,7 @@ pub(crate) fn simulate_agentic_trace_workload_multi(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_concurrency_workload_multi(
     args: MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
+    router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     max_in_flight: usize,
@@ -1157,7 +1078,7 @@ pub(super) fn run_agentic_trace_multi_collect_with_stats(
 pub(super) fn run_trace_collect(
     config: &OfflineDisaggReplayConfig,
     requests: Vec<DirectRequest>,
-    router_config: Option<KvRouterConfig>,
+    router_config: Option<ReplayKvRouterConfig>,
     arrival_speedup_ratio: f64,
     router_mode: ReplayRouterMode,
 ) -> (TraceCollector, DisaggRuntimeStats) {
@@ -1179,7 +1100,7 @@ pub(super) fn run_trace_collect(
 pub(super) fn run_concurrency_collect(
     config: &OfflineDisaggReplayConfig,
     requests: Vec<DirectRequest>,
-    router_config: Option<KvRouterConfig>,
+    router_config: Option<ReplayKvRouterConfig>,
     max_in_flight: usize,
     router_mode: ReplayRouterMode,
 ) -> (TraceCollector, DisaggRuntimeStats) {
@@ -1200,7 +1121,7 @@ pub(super) fn run_concurrency_collect(
 pub(super) fn run_trace_workload_collect(
     config: &OfflineDisaggReplayConfig,
     trace: Trace,
-    router_config: Option<KvRouterConfig>,
+    router_config: Option<ReplayKvRouterConfig>,
     router_mode: ReplayRouterMode,
 ) -> (TraceCollector, DisaggRuntimeStats) {
     DisaggRuntime::new_workload(
@@ -1222,7 +1143,7 @@ pub(super) fn run_trace_workload_collect(
 pub(super) fn run_concurrency_workload_collect(
     config: &OfflineDisaggReplayConfig,
     trace: Trace,
-    router_config: Option<KvRouterConfig>,
+    router_config: Option<ReplayKvRouterConfig>,
     max_in_flight: usize,
     router_mode: ReplayRouterMode,
 ) -> (TraceCollector, DisaggRuntimeStats) {

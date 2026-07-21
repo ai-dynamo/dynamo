@@ -115,22 +115,5 @@ impl EngineEventBatch for () {
     fn append(&mut self, _other: Self) {}
 }
 
-pub(crate) trait EngineObservation<Raw> {
-    type Batch: EngineEventBatch;
-
-    const CAPTURE_RAW: bool;
-
-    fn observe(raw: Raw) -> Self::Batch;
-}
-
 #[derive(Debug, Default)]
 pub(crate) struct NoEngineEvents;
-
-impl<Raw> EngineObservation<Raw> for NoEngineEvents {
-    type Batch = ();
-
-    const CAPTURE_RAW: bool = false;
-
-    #[inline]
-    fn observe(_raw: Raw) -> Self::Batch {}
-}

@@ -3,11 +3,15 @@
 
 use uuid::Uuid;
 
-use super::super::core::{EngineEventBatch, EngineProgress};
+use super::super::core::{EngineEventBatch, EngineProgress, NoEngineEvents};
 use super::super::runtime_utils::WorkerCompletionPayload;
+use super::super::state::OfflineWorkerState;
 use crate::common::protocols::DirectRequest;
 use crate::replay::offline::core::RequestIdentity;
-use crate::scheduler::AdmissionEvent;
+use crate::scheduler::{
+    AdmissionEvent, EnginePassResult, SchedulerCommandEffects, SchedulerCommandResult,
+    SchedulerLifecycleEvent,
+};
 
 impl RequestIdentity for DirectRequest {
     fn request_id(&self) -> Option<Uuid> {
@@ -25,6 +29,63 @@ pub(in crate::replay) enum ReplayMode {
 pub(in crate::replay::offline) enum EnginePassMode {
     Visible,
     Hidden,
+}
+
+pub(in crate::replay) trait ReplayEngineObservation {
+    type Batch: EngineEventBatch;
+
+    const CAPTURE_RAW: bool;
+
+    fn take_pass_events(pass: &mut EnginePassResult) -> Self::Batch;
+    fn take_command_events(effects: &mut SchedulerCommandEffects) -> Self::Batch;
+    fn drain_worker_events(worker: &OfflineWorkerState) -> Self::Batch;
+
+    #[cfg(feature = "kvbm-offload")]
+    fn take_offload_events(effects: &mut crate::scheduler::OffloadTickEffects) -> Self::Batch;
+
+    fn stored_hashes(_events: &Self::Batch) -> Vec<u64> {
+        Vec::new()
+    }
+}
+
+impl ReplayEngineObservation for NoEngineEvents {
+    type Batch = ();
+
+    const CAPTURE_RAW: bool = false;
+
+    #[inline]
+    fn take_pass_events(pass: &mut EnginePassResult) -> Self::Batch {
+        pass.kv_events.clear();
+    }
+
+    #[inline]
+    fn take_command_events(effects: &mut SchedulerCommandEffects) -> Self::Batch {
+        effects.kv_events.clear();
+    }
+
+    #[inline]
+    fn drain_worker_events(worker: &OfflineWorkerState) -> Self::Batch {
+        worker.discard_engine_events();
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    #[inline]
+    fn take_offload_events(effects: &mut crate::scheduler::OffloadTickEffects) -> Self::Batch {
+        effects.kv_events.clear();
+    }
+}
+
+pub(in crate::replay) struct ObservedCommandEffects<Events: EngineEventBatch> {
+    pub(in crate::replay::offline) result: SchedulerCommandResult,
+    pub(in crate::replay::offline) lifecycle_events: Vec<SchedulerLifecycleEvent>,
+    pub(in crate::replay::offline) engine_events: Events,
+}
+
+#[cfg(feature = "kvbm-offload")]
+pub(in crate::replay) struct ObservedOffloadEffects<Events: EngineEventBatch> {
+    pub(in crate::replay::offline) lifecycle_events: Vec<SchedulerLifecycleEvent>,
+    pub(in crate::replay::offline) engine_events: Events,
+    pub(in crate::replay::offline) progress: EngineProgress,
 }
 
 #[derive(Debug)]
