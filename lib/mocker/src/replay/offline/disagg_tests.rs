@@ -1059,7 +1059,10 @@ fn source_only_reuse_does_not_reduce_destination_missing_transfer() {
     for engine_type in [EngineType::Vllm, EngineType::Sglang] {
         let report = run_trace_with_details(
             &transfer_timing_config(engine_type, KvTransferTimingMode::DestinationMissing, 2),
-            vec![request(1, 64, 1, 0.0), request(2, 64, 2, 1_000.0)],
+            // Two full blocks leave one reusable block after vLLM's required
+            // final-block recompute. A one-block prompt correctly reports
+            // zero reuse and would not exercise this test's source-hit path.
+            vec![request(1, 128, 1, 0.0), request(2, 128, 2, 1_000.0)],
             None,
             ReplayRouterMode::RoundRobin,
         );
@@ -1073,7 +1076,7 @@ fn source_only_reuse_does_not_reduce_destination_missing_transfer() {
 
         assert!(measured.reused_input_tokens > 0);
         assert_eq!(measured.decode_reused_input_tokens, Some(0));
-        assert!(transfer_span >= 64.0 && transfer_span - 64.0 < 1.0);
+        assert!(transfer_span >= 128.0 && transfer_span - 128.0 < 1.0);
     }
 }
 

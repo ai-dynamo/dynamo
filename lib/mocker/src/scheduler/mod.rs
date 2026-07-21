@@ -516,7 +516,7 @@ pub(crate) fn handoff_channel_capacity(args: &crate::common::protocols::MockEngi
 #[cfg(feature = "kvbm-offload")]
 pub async fn init_kvbm_live(
     args: &crate::common::protocols::MockEngineArgs,
-    kv_manager: &mut crate::kv_manager::KvManager,
+    kv_manager: &mut crate::kv_manager::G1Manager,
 ) -> anyhow::Result<Option<std::sync::Arc<std::sync::Mutex<crate::kvbm_offload::MockOffloadEngine>>>>
 {
     use crate::kvbm_offload::KvbmOffloadConfig;
@@ -535,7 +535,7 @@ pub async fn init_kvbm_live(
 #[cfg(feature = "kvbm-offload")]
 pub fn init_kvbm_offline(
     args: &crate::common::protocols::MockEngineArgs,
-    kv_manager: &mut crate::kv_manager::KvManager,
+    kv_manager: &mut crate::kv_manager::G1Manager,
 ) -> anyhow::Result<Option<std::sync::Arc<std::sync::Mutex<crate::kvbm_offload::MockOffloadEngine>>>>
 {
     use crate::kvbm_offload::KvbmOffloadConfig;
@@ -1279,10 +1279,10 @@ mod tests {
 mod offload_init_tests {
     use super::{init_kvbm_live, init_kvbm_offline};
     use crate::common::protocols::{KvEventPublishers, MockEngineArgs};
-    use crate::kv_manager::KvManager;
+    use crate::kv_manager::G1Manager;
 
-    fn make_kv_manager() -> KvManager {
-        KvManager::new_with_event_sink(8, 4, KvEventPublishers::default(), 0)
+    fn make_kv_manager() -> G1Manager {
+        G1Manager::new_with_event_sink(8, 4, KvEventPublishers::default(), 0)
     }
 
     fn args_with_g2_and_bpt(bpt: usize) -> MockEngineArgs {

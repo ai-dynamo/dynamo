@@ -483,7 +483,12 @@ fn trtllm_oversized_request_rejected_unblocks_follower_live() {
 #[test]
 fn test_online_trace_replay_populates_admit_reuse_stats() {
     let args = replay_args();
-    let requests = vec![request(1, 77, Some(0.0)), request(2, 77, Some(5.0))];
+    let mut requests = vec![request(1, 77, Some(0.0)), request(2, 77, Some(5.0))];
+    // A fully cached one-block prompt must recompute that block to produce
+    // logits. Use two blocks so this remains a positive-reuse metrics test.
+    for request in &mut requests {
+        request.tokens.resize(128, 77);
+    }
 
     let report = simulate_trace_requests(
         args,

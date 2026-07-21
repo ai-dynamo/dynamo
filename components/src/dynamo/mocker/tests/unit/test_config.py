@@ -39,6 +39,7 @@ def make_args(**overrides):
         "max_num_seqs": 256,
         "max_num_batched_tokens": 8192,
         "enable_prefix_caching": True,
+        "g1_backend": "kvbm",
         "enable_chunked_prefill": True,
         "preemption_mode": "lifo",
         "speedup_ratio": 1.0,
@@ -132,6 +133,29 @@ def test_build_mocker_engine_args_trtllm_accepts_guaranteed_no_evict():
     )
 
     assert engine_args.block_size == 32
+
+
+def test_build_mocker_engine_args_trtllm_accepts_native_g1():
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(engine_type="trtllm", g1_backend="native")
+    )
+
+    assert engine_args.g1_backend == "native"
+    assert engine_args.block_size == 32
+
+
+@pytest.mark.parametrize("engine_type", ["vllm", "trtllm"])
+def test_build_mocker_engine_args_accepts_native_g1_with_mtp(engine_type):
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(
+            engine_type=engine_type,
+            g1_backend="native",
+            aic_nextn=1,
+        )
+    )
+
+    assert engine_args.g1_backend == "native"
+    assert engine_args.aic_nextn == 1
 
 
 def test_build_mocker_engine_args_trtllm_rejects_unsupported_policy():
@@ -392,6 +416,13 @@ def test_mocker_cli_accepts_mtp_configuration():
     assert args.aic_nextn == 3
     assert args.aic_nextn_accept_rates == "1,0.5"
     assert args.aic_mtp_seed == 99
+
+
+def test_mocker_cli_accepts_native_g1_for_trtllm():
+    args = parse_args(["--engine-type", "trtllm", "--g1-backend", "native"])
+
+    assert args.engine_type == "trtllm"
+    assert args.g1_backend == "native"
 
 
 def test_mocker_cli_accepts_max_model_len():
