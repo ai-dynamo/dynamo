@@ -75,7 +75,7 @@ function block(data: Data, fw: string, ch: "stable" | "nightly", e: Entry, i: nu
   const cmd = (e.commands as Record<string, string>)[form];
   const hint = !isStable && e.note ? `<p class="is-hint">${esc(e.note)}</p>` : "";
   const body = cmd
-    ? `<div class="is-cmd"><button type="button" class="is-copy" onclick="navigator.clipboard&&navigator.clipboard.writeText(this.parentElement.querySelector('pre').innerText);this.textContent='Copied!';setTimeout(()=>{this.textContent='Copy'},1200)">Copy</button><pre>${esc(cmd)}</pre>${hint}</div>`
+    ? `<div class="is-cmd"><div class="is-cmd-bar"><button type="button" class="is-copy" onclick="navigator.clipboard&&navigator.clipboard.writeText(this.closest('.is-cmd').querySelector('pre').innerText);this.textContent='Copied!';setTimeout(()=>{this.textContent='Copy'},1200)">Copy</button></div><pre>${esc(cmd)}</pre>${hint}</div>`
     : `<div class="is-cmd is-note"><pre>${esc(label)} has no PyPI wheel — use the Container option above.</pre></div>`;
 
   return (
@@ -204,14 +204,15 @@ const STATIC_CSS = `
 .is-sel .is-rec.is-stable .is-badge { background:var(--is-green); color:#0a0b09; }
 .is-sel .is-rec.is-nightly .is-badge { background:#5b6472; color:#fff; }
 .is-sel .is-ships { margin-top:4px; font-size:12.5px; color:var(--is-muted); }
-.is-sel .is-cmd { position:relative; padding:15px 18px; background:var(--is-code); }
-.is-sel .is-cmd pre { margin:0; overflow-x:auto; color:var(--is-text);
+.is-sel .is-cmd { background:var(--is-code); }
+.is-sel .is-cmd-bar { display:flex; justify-content:flex-end; padding:8px 10px 0; }
+.is-sel .is-cmd pre { margin:0; padding:4px 18px 16px; overflow-x:auto; color:var(--is-text);
   font:13px/1.5 "Roboto Mono",ui-monospace,SFMono-Regular,Menlo,monospace; }
-.is-sel .is-copy { position:absolute; top:11px; right:12px; cursor:pointer; font-size:12px;
+.is-sel .is-copy { cursor:pointer; font-size:12px;
   padding:4px 10px; border-radius:7px; border:1px solid var(--is-border); background:var(--is-surface); color:var(--is-text); }
 .is-sel .is-copy:hover { border-color:var(--is-green); }
-.is-sel .is-hint { margin:9px 0 0; font-size:11.5px; color:var(--is-muted); }
-.is-sel .is-cmd.is-note pre { color:var(--is-muted); white-space:pre-wrap; }
+.is-sel .is-hint { margin:0; padding:0 18px 14px; font-size:11.5px; color:var(--is-muted); }
+.is-sel .is-cmd.is-note pre { padding:15px 18px; color:var(--is-muted); white-space:pre-wrap; }
 `;
 
 export function InstallSelector() {
