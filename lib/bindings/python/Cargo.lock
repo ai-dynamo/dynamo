@@ -4789,7 +4789,7 @@ dependencies = [
 [[package]]
 name = "modelexpress-client"
 version = "0.3.0"
-source = "git+https://github.com/rushilbhat/modelexpress?rev=46e4633a33a9a9183bda97ee5bb3411dd4992d7c#46e4633a33a9a9183bda97ee5bb3411dd4992d7c"
+source = "git+https://github.com/doublewordai/modelexpress?rev=46e4633a33a9a9183bda97ee5bb3411dd4992d7c#46e4633a33a9a9183bda97ee5bb3411dd4992d7c"
 dependencies = [
  "anyhow",
  "clap",
@@ -4810,7 +4810,7 @@ dependencies = [
 [[package]]
 name = "modelexpress-common"
 version = "0.3.0"
-source = "git+https://github.com/rushilbhat/modelexpress?rev=46e4633a33a9a9183bda97ee5bb3411dd4992d7c#46e4633a33a9a9183bda97ee5bb3411dd4992d7c"
+source = "git+https://github.com/doublewordai/modelexpress?rev=46e4633a33a9a9183bda97ee5bb3411dd4992d7c#46e4633a33a9a9183bda97ee5bb3411dd4992d7c"
 dependencies = [
  "anyhow",
  "async-trait",
