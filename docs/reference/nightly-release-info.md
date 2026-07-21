@@ -56,7 +56,7 @@ Backend extras such as `ai-dynamo[vllm]` use the same flags. For TensorRT-LLM, u
 
 ## Backend Versions
 
-Nightlies track `main`, so the backend versions they ship change as `main` advances. To find which nightly — or stable — build ships a given backend version, and get the exact pull/install command, use the **[Get Dynamo selector](../getting-started/get-dynamo.mdx)**.
+Nightlies track `main`, so the backend versions they ship change as `main` advances. To find which nightly — or stable — build ships a given backend version, and get the exact pull/install command, use the **[backend selector in the Quickstart](../getting-started/quickstart.mdx#pull-a-container)**.
 
 To confirm the exact versions a specific nightly shipped, read them from the pulled image:
 

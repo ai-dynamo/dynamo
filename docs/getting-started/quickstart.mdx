@@ -5,6 +5,8 @@ title: Quickstart
 subtitle: Get a Dynamo OpenAI-compatible endpoint running in a container in about 5 minutes.
 ---
 
+import { InstallSelector } from "@/components/InstallSelector";
+
 {/* Looking for the project README? See /README.md at the repo root: https://github.com/ai-dynamo/dynamo/blob/main/README.md */}
 
 ## Choose Your Path
@@ -30,25 +32,9 @@ Dynamo is backend-agnostic and Kubernetes-native without being Kubernetes-only. 
 
 ## Pull a Container
 
-Containers have all dependencies pre-installed. Pick your backend:
+Containers have all dependencies pre-installed. Pick your backend and version — the default (stable release, container) gives a `docker run` that drops you straight into a ready-to-use container:
 
-<Tabs>
-  <Tab title="SGLang" language="sglang">
-    ```bash
-    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
-    ```
-  </Tab>
-  <Tab title="TensorRT-LLM" language="trtllm">
-    ```bash
-    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
-    ```
-  </Tab>
-  <Tab title="vLLM" language="vllm">
-    ```bash
-    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
-    ```
-  </Tab>
-</Tabs>
+<InstallSelector />
 
 <Warning>
 **Hugging Face token required for gated models.** Llama, Kimi, Qwen-VL, and other gated models require `HF_TOKEN` in your environment and accepting the model card's license on huggingface.co. Set `export HF_TOKEN=hf_…` before launching.
