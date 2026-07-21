@@ -183,7 +183,7 @@ metadata:
 spec:
   model: meta-llama/Llama-3.3-70B-Instruct
   backend: vllm
-  image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1  # dynamo-frontend for Dynamo < 1.1.0
+  image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.3.0  # dynamo-frontend for Dynamo < 1.1.0
   workload:
     isl: 2048
     osl: 256

@@ -132,7 +132,7 @@ spec:
             export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
             /sbin/ldconfig
             python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --disaggregation-mode decode
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
           name: main
           resources:
             limits:

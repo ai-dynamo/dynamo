@@ -9,17 +9,14 @@ subtitle: Hardware, software, and build compatibility for Dynamo
 
 ## At a Glance
 
-**Latest stable release:** [v1.2.1](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.1) -- SGLang `0.5.11` (NIXL `1.0.1`) | TensorRT-LLM `1.3.0rc14` (NIXL `0.10.1`) | vLLM `0.20.1` (NIXL `0.10.1`)
-
-**Experimental release:** [v1.3.0-dev.1](https://github.com/ai-dynamo/dynamo/tree/release/1.3.0-dev.1) *(full-platform preview of v1.3.0 -- all runtime + component containers, wheels, crates, Helm)* -- SGLang `0.5.12.post1` | TensorRT-LLM `1.3.0rc17` | vLLM `0.22.0` | NIXL `1.1.0` (vLLM); `1.0.1` (SGLang); `0.10.1` (TRT-LLM)
+**Latest stable release:** [v1.3.0](https://github.com/ai-dynamo/dynamo/releases/tag/v1.3.0) -- SGLang `0.5.14` (NIXL `1.0.1`) | TensorRT-LLM `1.3.0rc19` (NIXL `1.0.1`) | vLLM `0.23.0` (NIXL `1.1.0`)
 
 | Requirement | Supported |
 | :--- | :--- |
 | **GPU** | NVIDIA Ampere, Ada Lovelace, Hopper, Blackwell |
 | **OS** | Ubuntu 22.04, Ubuntu 24.04, CentOS Stream 9 (experimental) |
 | **Arch** | x86_64, ARM64 (ARM64 requires Ubuntu 24.04) |
-| **CUDA 12** | Container images for SGLang and vLLM (CUDA 12.9) |
-| **CUDA 13** | Container images for TensorRT-LLM (CUDA 13.1), SGLang and vLLM (CUDA 13.0) |
+| **CUDA 13** | Container images for TensorRT-LLM (CUDA 13.1), SGLang and vLLM (CUDA 13.0). CUDA 12 container images are discontinued starting v1.3.0; v1.2.x and earlier retain their CUDA 12.9 builds. |
 
 **On this page:** [Backend Dependencies](#backend-dependencies) | [CUDA and Drivers](#cuda-and-driver-requirements) | [Hardware](#hardware-compatibility) | [Platform](#platform-architecture-compatibility) | [Cloud](#cloud-service-provider-compatibility) | [Build Support](#build-support)
 
@@ -31,7 +28,8 @@ The following table shows the backend framework versions included with each Dyna
 
 | **Dynamo** | **SGLang** | **TensorRT-LLM** | **vLLM** | **NIXL** |
 | :--- | :--- | :--- | :--- | :--- |
-| **main (ToT)** | `0.5.11` | `1.3.0rc19` | `0.23.0` | `1.0.1` (TRT-LLM); `1.1.0` (vLLM); `1.0.1` (SGLang) |
+| **main (ToT)** | `0.5.15` | `1.3.0rc21` | `0.25.1` | `1.0.1` (TRT-LLM); `1.1.0` (vLLM); `1.3.0` (SGLang) |
+| **v1.3.0** | `0.5.14` | `1.3.0rc19` | `0.23.0` | `1.0.1` (TRT-LLM); `1.1.0` (vLLM); `1.0.1` (SGLang) |
 | **v1.3.0-dev.1** *(experimental)* | `0.5.12.post1` | `1.3.0rc17` | `0.22.0` | `0.10.1` (TRT-LLM); `1.1.0` (vLLM); `1.0.1` (SGLang) |
 | **v1.2.1** | `0.5.11` | `1.3.0rc14` | `0.20.1` | `0.10.1` (TRT-LLM, vLLM); `1.0.1` (SGLang) |
 | **v1.2.0** | `0.5.11` | `1.3.0rc14` | `0.20.1` | `0.10.1` (TRT-LLM, vLLM); `1.0.1` (SGLang) |
@@ -78,6 +76,9 @@ Dynamo container images include CUDA toolkit libraries. The host machine must ha
 
 | Dynamo Version | Backend | CUDA Toolkit | Min Driver | Notes |
 | :--- | :--- | :--- | :--- | :--- |
+| **1.3.0** | **SGLang** | 13.0 | 580.xx+ | CUDA 12 discontinued |
+| | **TensorRT-LLM** | 13.1 | 580.xx+ | |
+| | **vLLM** | 13.0 | 580.xx+ | CUDA 12 discontinued |
 | **1.2.1** | **SGLang** | 12.9 | 575.xx+ | |
 | | | 13.0 | 580.xx+ | |
 | | **TensorRT-LLM** | 13.1 | 580.xx+ | |
@@ -214,11 +215,11 @@ For version-specific artifact details, installation commands, and release histor
 - **Dynamo Container Images**: We distribute multi-arch images (x86 & ARM64 compatible) on [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo):
   - [Dynamo Frontend](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/dynamo-frontend) *(New in v0.8.0)*
   - [SGLang Runtime](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/sglang-runtime)
-  - [SGLang Runtime (CUDA 13)](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/sglang-runtime?version=1.2.1-cuda13)
+  - [SGLang Runtime (CUDA 13)](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/sglang-runtime?version=1.3.0-cuda13)
   - [TensorRT-LLM Runtime](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/tensorrtllm-runtime)
   - [TensorRT-LLM Runtime (EFA)](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/tensorrtllm-runtime) *(New in v1.0.0, Experimental, AMD64 only)*
   - [vLLM Runtime](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime)
-  - [vLLM Runtime (CUDA 13)](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime?version=1.2.1-cuda13)
+  - [vLLM Runtime (CUDA 13)](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime?version=1.3.0-cuda13)
   - [vLLM Runtime (EFA)](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime) *(New in v1.0.0, Experimental, AMD64 only)*
   - [Kubernetes Operator](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/kubernetes-operator)
   - [Snapshot Agent](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/snapshot-agent) *(New in v1.0.0, Preview)*

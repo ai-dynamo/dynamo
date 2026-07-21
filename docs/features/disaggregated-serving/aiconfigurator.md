@@ -294,7 +294,7 @@ spec:
           value: /opt/models
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
           imagePullPolicy: IfNotPresent
 
     VLLMWorker:
@@ -314,7 +314,7 @@ spec:
           value: /opt/models
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
           workingDir: /workspace
           imagePullPolicy: IfNotPresent
           command:
