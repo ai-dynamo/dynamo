@@ -447,7 +447,7 @@ fn ingest_streaming_usage(ctx: &mut RequestContext, chunk: &[u8], end_of_stream:
     }
 
     let Some(complete_len) = chunk.iter().rposition(|&b| b == b'\n').map(|i| i + 1) else {
-        ctx.sse_usage_buf.extend_from_slice(chunk);
+        buffer_incomplete_sse(&mut ctx.sse_usage_buf, chunk);
         return;
     };
 
@@ -460,13 +460,25 @@ fn ingest_streaming_usage(ctx: &mut RequestContext, chunk: &[u8], end_of_stream:
         }
         ctx.sse_usage_buf.clear();
     }
-    ctx.sse_usage_buf.extend_from_slice(&chunk[complete_len..]);
+    buffer_incomplete_sse(&mut ctx.sse_usage_buf, &chunk[complete_len..]);
 }
 
 fn update_streaming_usage(ctx: &mut RequestContext, complete: &[u8]) {
     if let Some(usage) = parse_streaming_usage(complete) {
         ctx.parsed_usage = Some(usage);
     }
+}
+
+/// Append an incomplete SSE line, bounding memory. A `usage` event is small, so
+/// a partial line larger than the cap can't be one; drop it (self-corrects once
+/// the next newline lands).
+fn buffer_incomplete_sse(buf: &mut Vec<u8>, bytes: &[u8]) {
+    const MAX_SSE_USAGE_BUF: usize = 64 * 1024;
+    if buf.len() + bytes.len() > MAX_SSE_USAGE_BUF {
+        buf.clear();
+        return;
+    }
+    buf.extend_from_slice(bytes);
 }
 
 /// Parse `usage` from complete SSE `data:` lines (last wins).
@@ -971,6 +983,24 @@ mod tests {
         let usage = ctx.parsed_usage.expect("usage after completing suffix");
         assert_eq!(usage.cached_tokens, Some(1));
         assert!(ctx.sse_usage_buf.is_empty());
+    }
+
+    #[test]
+    fn ingest_streaming_usage_bounds_incomplete_buffer() {
+        let mut ctx = RequestContext::new();
+        // A very long newline-less run must not grow the buffer unboundedly.
+        let huge = vec![b'x'; 128 * 1024];
+        ingest_streaming_usage(&mut ctx, &huge, false);
+        assert!(ctx.sse_usage_buf.len() <= 64 * 1024);
+
+        // Once a real usage event completes afterward, it is still parsed.
+        let tail = concat!(
+            "\n\n",
+            "data: {\"choices\":[],\"usage\":{\"total_tokens\":10,\"prompt_tokens_details\":{\"cached_tokens\":4}}}\n\n"
+        );
+        ingest_streaming_usage(&mut ctx, tail.as_bytes(), true);
+        let usage = ctx.parsed_usage.expect("usage after oversized run");
+        assert_eq!(usage.cached_tokens, Some(4));
     }
 
     struct Tracker {
