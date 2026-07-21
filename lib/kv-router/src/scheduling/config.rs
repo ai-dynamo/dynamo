@@ -15,7 +15,9 @@ use crate::protocols::{
     BlockHashOptions, LocalBlockHash, complete_block_count, compute_block_hash_for_seq,
     compute_seq_hash_for_block,
 };
-use crate::tracking_hash::{TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope};
+use crate::tracking_hash::{
+    TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope, validate_tracking_hash_options,
+};
 
 const fn default_track_prefill_tokens() -> bool {
     true
@@ -627,15 +629,12 @@ pub struct KvRouterConfig {
     pub router_track_prefill_tokens: bool,
 
     /// Hash algorithm used for router-derived active-sequence identities.
-    #[serde(default)]
     pub router_tracking_hash: TrackingHashAlgorithm,
 
     /// File containing the 32-byte provider key used by keyed tracking mode.
-    #[serde(default)]
     pub router_tracking_key_file: Option<PathBuf>,
 
     /// Provider-managed epoch identifier mixed into keyed tracking scope derivation.
-    #[serde(default)]
     pub router_tracking_key_id: Option<String>,
 
     /// Optional model for estimating effective prompt-side prefill load over time.
@@ -845,29 +844,11 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
 }
 
 fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), String> {
-    match config.router_tracking_hash {
-        TrackingHashAlgorithm::PublicXxh3V1 => {
-            if config.router_tracking_key_file.is_some() || config.router_tracking_key_id.is_some()
-            {
-                return Err(
-                    "router tracking key options require router_tracking_hash=keyed-xxh3-v1"
-                        .to_string(),
-                );
-            }
-        }
-        TrackingHashAlgorithm::KeyedXxh3V1 => {
-            if config.router_tracking_key_file.is_none() {
-                return Err("keyed-xxh3-v1 requires router_tracking_key_file".to_string());
-            }
-            let valid_key_id = config
-                .router_tracking_key_id
-                .as_deref()
-                .is_some_and(|value| !value.is_empty() && value.trim() == value);
-            if !valid_key_id {
-                return Err("keyed-xxh3-v1 requires a nonempty router_tracking_key_id".to_string());
-            }
-        }
-    }
+    validate_tracking_hash_options(
+        config.router_tracking_hash,
+        config.router_tracking_key_file.is_some(),
+        config.router_tracking_key_id.as_deref(),
+    )?;
     if config.router_track_output_blocks && !config.router_track_active_blocks {
         return Err(
             "router_track_output_blocks requires router_track_active_blocks=true".to_string(),

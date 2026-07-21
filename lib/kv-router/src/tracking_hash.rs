@@ -7,7 +7,7 @@ use std::fmt;
 use std::fs;
 use std::str::FromStr;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use dynamo_tokens::SequenceHash;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -59,6 +59,27 @@ impl FromStr for TrackingHashAlgorithm {
     }
 }
 
+pub(crate) fn validate_tracking_hash_options(
+    algorithm: TrackingHashAlgorithm,
+    has_key_file: bool,
+    key_id: Option<&str>,
+) -> std::result::Result<(), String> {
+    match algorithm {
+        TrackingHashAlgorithm::PublicXxh3V1 if has_key_file || key_id.is_some() => Err(
+            "router tracking key options require router_tracking_hash=keyed-xxh3-v1".to_string(),
+        ),
+        TrackingHashAlgorithm::KeyedXxh3V1 if !has_key_file => {
+            Err("keyed-xxh3-v1 requires router_tracking_key_file".to_string())
+        }
+        TrackingHashAlgorithm::KeyedXxh3V1
+            if !key_id.is_some_and(|value| !value.is_empty() && value.trim() == value) =>
+        {
+            Err("keyed-xxh3-v1 requires a nonempty router_tracking_key_id".to_string())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Stable, trusted scope shared by router instances that should produce the
 /// same derived tracking identities.
 #[derive(Clone, Copy, Debug)]
@@ -93,31 +114,28 @@ impl fmt::Debug for TrackingHashContext {
 impl TrackingHashContext {
     /// Load and validate the runtime context from router configuration.
     pub fn from_config(config: &KvRouterConfig) -> Result<Self> {
+        validate_tracking_hash_options(
+            config.router_tracking_hash,
+            config.router_tracking_key_file.is_some(),
+            config.router_tracking_key_id.as_deref(),
+        )
+        .map_err(anyhow::Error::msg)?;
+
         match config.router_tracking_hash {
-            TrackingHashAlgorithm::PublicXxh3V1 => {
-                if config.router_tracking_key_file.is_some()
-                    || config.router_tracking_key_id.is_some()
-                {
-                    bail!("router tracking key options require router_tracking_hash=keyed-xxh3-v1");
-                }
-                Ok(Self {
-                    algorithm: TrackingHashAlgorithm::PublicXxh3V1,
-                    key_id: None,
-                    provider_key: None,
-                })
-            }
+            TrackingHashAlgorithm::PublicXxh3V1 => Ok(Self {
+                algorithm: TrackingHashAlgorithm::PublicXxh3V1,
+                key_id: None,
+                provider_key: None,
+            }),
             TrackingHashAlgorithm::KeyedXxh3V1 => {
                 let key_id = config
                     .router_tracking_key_id
                     .as_deref()
-                    .filter(|value| !value.is_empty() && value.trim() == *value)
-                    .ok_or_else(|| {
-                        anyhow!("keyed-xxh3-v1 requires a nonempty router_tracking_key_id")
-                    })?;
+                    .expect("validated keyed tracking config must have a key ID");
                 let key_path = config
                     .router_tracking_key_file
                     .as_ref()
-                    .ok_or_else(|| anyhow!("keyed-xxh3-v1 requires router_tracking_key_file"))?;
+                    .expect("validated keyed tracking config must have a key file");
                 let key_bytes = Zeroizing::new(
                     fs::read(key_path).context("failed to read router tracking key file")?,
                 );
@@ -553,19 +571,42 @@ mod tests {
 
     #[test]
     fn config_validation_enforces_mode_specific_options() {
+        let assert_rejected_by_both = |config: &KvRouterConfig, expected: &str| {
+            assert_eq!(config.validate_config().unwrap_err(), expected);
+            assert_eq!(
+                TrackingHashContext::from_config(config)
+                    .unwrap_err()
+                    .to_string(),
+                expected
+            );
+        };
+
         let public_with_key = KvRouterConfig {
             router_tracking_key_file: Some("key".into()),
             ..Default::default()
         };
-        assert!(public_with_key.validate_config().is_err());
+        assert_rejected_by_both(
+            &public_with_key,
+            "router tracking key options require router_tracking_hash=keyed-xxh3-v1",
+        );
 
         let keyed_without_options = KvRouterConfig {
             router_tracking_hash: TrackingHashAlgorithm::KeyedXxh3V1,
             ..Default::default()
         };
-        assert!(keyed_without_options.validate_config().is_err());
+        assert_rejected_by_both(
+            &keyed_without_options,
+            "keyed-xxh3-v1 requires router_tracking_key_file",
+        );
+
+        let (_key_file, keyed_with_whitespace_id) = keyed_config(" 2026-01", &[1; KEY_SIZE]);
+        assert_rejected_by_both(
+            &keyed_with_whitespace_id,
+            "keyed-xxh3-v1 requires a nonempty router_tracking_key_id",
+        );
 
         let (_key_file, keyed) = keyed_config("2026-01", &[1; KEY_SIZE]);
         assert!(keyed.validate_config().is_ok());
+        assert!(TrackingHashContext::from_config(&keyed).is_ok());
     }
 }
