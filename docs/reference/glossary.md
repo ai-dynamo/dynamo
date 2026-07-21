@@ -11,7 +11,7 @@ subtitle: Definitions of core Dynamo terms covering disaggregated serving, KV ca
 ## C
 **Component** - The fundamental deployable unit in Dynamo. A discoverable service entity that can host multiple endpoints and typically maps to a Docker container (such as VllmWorker, Router, Processor).
 
-**Conditional Disaggregation** - Dynamo's intelligent decision-making process within disaggregated serving that determines whether a request is processed locally or sent to a remote prefill engine based on prefill length and queue status.
+**Conditional Disaggregation** - Dynamo's router policy within disaggregated serving that decides whether a request should use remote prefill or run local prefill+decode on a decode worker based on decode-side KV overlap, effective ISL, and prefill/decode load signals.
 
 ## D
 **Decode Phase** - The second phase of LLM inference that generates output tokens one at a time.
