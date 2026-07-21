@@ -177,8 +177,6 @@ navigation:
                     path: kubernetes/observability/logging.md
                   - page: Operator Metrics
                     path: kubernetes/observability/operator-metrics.md
-                  - page: Shadow Engine Failover Metrics
-                    path: kubernetes/observability/shadow-engine-failover-metrics.md
           - section: Scale
             contents:
               - page: Multinode Deployments
