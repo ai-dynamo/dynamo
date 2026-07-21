@@ -76,6 +76,20 @@ jobs:
         with:
           python-version: '3.12'
           architecture: x64
+      - name: Make historical SBOM helper accept immutable digest refs
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("container/compliance/base_sboms/capture_baseline_sbom.py")
+          source = path.read_text()
+          old = '                repo = ref.rsplit(":", 1)[0]\n'
+          new = '                repo = ref.split("@", 1)[0] if "@" in ref else ref.rsplit(":", 1)[0]\n'
+          if source.count(old) != 1:
+              raise SystemExit("historical SBOM helper did not match expected source")
+          path.write_text(source.replace(old, new))
+          PY
       - name: Verify immutable vLLM base
         shell: bash
         env:
