@@ -84,11 +84,19 @@ jobs:
 
           path = Path("container/compliance/base_sboms/capture_baseline_sbom.py")
           source = path.read_text()
-          old = '                repo = ref.rsplit(":", 1)[0]\n'
-          new = '                repo = ref.split("@", 1)[0] if "@" in ref else ref.rsplit(":", 1)[0]\n'
-          if source.count(old) != 1:
-              raise SystemExit("historical SBOM helper did not match expected source")
-          path.write_text(source.replace(old, new))
+          replacements = {
+              '                repo = ref.rsplit(":", 1)[0]\n':
+                  '                repo = ref.split("@", 1)[0] if "@" in ref else ref.rsplit(":", 1)[0]\n',
+              '    image, tag = ref.rsplit(":", 1)\n':
+                  '    image, tag = ref.split("@", 1) if "@" in ref else ref.rsplit(":", 1)\n',
+          }
+          for old, new in replacements.items():
+              if source.count(old) != 1:
+                  raise SystemExit(
+                      f"historical SBOM helper did not match expected source: {old!r}"
+                  )
+              source = source.replace(old, new)
+          path.write_text(source)
           PY
       - name: Verify immutable vLLM base
         shell: bash
