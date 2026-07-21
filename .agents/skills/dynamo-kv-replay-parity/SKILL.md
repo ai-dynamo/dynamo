@@ -84,16 +84,19 @@ Tune one shared configuration until the campaign can prove that it exercised:
 
 - KV-overlap-sensitive routing;
 - immediate and queued placement;
-- preemption near the block-capacity edge;
+- a small, bounded number of preemptions at the block-capacity edge;
 - disaggregated prefill/decode handoff;
 - terminal cleanup;
 - G1 to G2 eviction; and
 - G2 to G1 restoration.
 
 Use coverage counters, lifecycle traces, or report evidence rather than inferring these
-paths from successful completion. Lower block capacity or raise concurrency identically
-for baseline and candidate when necessary. Freeze the qualified configuration before the
-comparison; never tune each revision separately.
+paths from successful completion. Target one to three preemptions per configuration. Zero
+means the edge was not exercised; repeated preempt/re-admit cycling, a rapidly growing
+preemption count, or failure to advance virtual time invalidates the fixture. Tune capacity
+or concurrency minimally and identically for baseline and candidate, and back off rather
+than accepting a preemption flood. Freeze the qualified configuration before the comparison;
+never tune each revision separately.
 
 ## Stage 4: Run byte parity
 
@@ -144,13 +147,14 @@ Use small deterministic fixtures only for required paths the long corpus cannot 
 trigger:
 
 - single-worker KV-router queueing;
-- a deliberately constrained preemption edge;
+- a preemption-edge fixture that targets one to three preemptions and then completes;
 - scale-to-zero followed by scale-up and pending-work release;
 - G1 to G2 eviction followed by G2 to G1 restoration; and
 - backend-specific prefill/decode handoff ordering.
 
-Assert the lifecycle itself. A final-completion smoke test does not prove offload,
-preemption, queueing, or restoration occurred.
+Assert bounded preemption, continued virtual-time progress, and the lifecycle itself. A
+final-completion smoke test does not prove offload, preemption, queueing, or restoration
+occurred.
 
 ## Stage 7: Measure performance
 
