@@ -31,12 +31,14 @@ pub mod metrics;
 pub mod openapi_docs;
 pub mod realtime;
 pub mod service_v2;
+pub mod system_extension;
 
 pub use axum;
 pub use metrics::Metrics;
+pub use system_extension::{SystemRouteContext, SystemRouteExtension, SystemRouteSet};
 
 /// Documentation for a route
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RouteDoc {
     method: axum::http::Method,
     path: String,
@@ -54,5 +56,13 @@ impl RouteDoc {
             method,
             path: path.into(),
         }
+    }
+
+    pub fn method(&self) -> &axum::http::Method {
+        &self.method
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
     }
 }
