@@ -50,7 +50,7 @@ REGISTRY = "nvcr.io/nvidia/ai-dynamo"
 PYPI = "https://pypi.nvidia.com"
 
 STABLE_RELEASES_BACK = 3  # show only the N most recent stable releases
-NIGHTLY_DAYS_BACK = 30    # show nightly builds pinned within N days of the latest
+NIGHTLY_DAYS_BACK = 30  # show nightly builds pinned within N days of the latest
 
 # label -> (image stem, wheel extra, has PyPI wheel)
 META = {
@@ -106,14 +106,20 @@ def read_current(repo_root: Path) -> dict[str, tuple[str, str]]:
     for fw in FRAMEWORKS:
         tag = tag_from_context(doc, fw)
         if tag is None:
-            raise SystemExit(f"{CONTEXT}: no runtime_image_tag for {fw.key}.{fw.device}")
+            raise SystemExit(
+                f"{CONTEXT}: no runtime_image_tag for {fw.key}.{fw.device}"
+            )
         out[fw.label] = (parse_version(tag), tag)
     return out
 
 
 def read_history(repo_root: Path) -> dict[str, list[tuple[str, str]]]:
     """{label: [(version, start_date), ...]} oldest-first, from git history."""
-    lines = git(["log", "--reverse", "--format=%H|%cs", "--", CONTEXT], repo_root).strip().splitlines()
+    lines = (
+        git(["log", "--reverse", "--format=%H|%cs", "--", CONTEXT], repo_root)
+        .strip()
+        .splitlines()
+    )
     changes: dict[str, list[tuple[str, str]]] = {fw.label: [] for fw in FRAMEWORKS}
     for line in lines:
         sha, date = line.split("|", 1)
@@ -153,7 +159,9 @@ def update_tot(text: str, current: dict[str, tuple[str, str]]) -> str:
     )
     new, n = TOT_RE.subn(repl, text)
     if n != 1:
-        raise SystemExit(f"{SUPPORT_MATRIX}: expected exactly 1 main (ToT) row, found {n}")
+        raise SystemExit(
+            f"{SUPPORT_MATRIX}: expected exactly 1 main (ToT) row, found {n}"
+        )
     return new
 
 
@@ -203,7 +211,8 @@ def ngc_dated_tags(image: str) -> dict[int, tuple[str, str]]:
 def ngc_release_tags(image: str) -> set[str]:
     """Plain ``X.Y.Z`` release tags published for a public ``-runtime`` image."""
     return {
-        t for t in ngc_tag_list(f"nvidia/ai-dynamo/{image}-runtime")
+        t
+        for t in ngc_tag_list(f"nvidia/ai-dynamo/{image}-runtime")
         if re.fullmatch(r"\d+\.\d+\.\d+", t)
     }
 
@@ -238,7 +247,9 @@ def stable_by_framework(live: dict[str, set[str]]) -> dict[str, list[dict]]:
             if relnum not in live.get(img, set()):
                 continue
             bver = norm(label, releases[release][label])
-            existing = next((e for e in out[label] if e["backend_version"] == bver), None)
+            existing = next(
+                (e for e in out[label] if e["backend_version"] == bver), None
+            )
             if existing:
                 existing["releases"].append(relnum)
             else:
@@ -257,7 +268,9 @@ def windows(label: str, changes: dict[str, list[tuple[str, str]]]):
     ]
 
 
-def latest_in_window(dated: dict[int, tuple[str, str]], start_iso: str, end_iso: str | None):
+def latest_in_window(
+    dated: dict[int, tuple[str, str]], start_iso: str, end_iso: str | None
+):
     s = int(compact(start_iso))
     e = int(compact(end_iso)) if end_iso else None
     hits = [d for d in dated if d >= s and (e is None or d < e)]
@@ -293,17 +306,21 @@ def nightly_latest_commands(label: str) -> dict[str, str]:
     img, extra, wheel = META[label]
     cmds = {"container": run(f"{REGISTRY}/{img}-runtime-nightly:latest")}
     if wheel:
-        cmds["wheel"] = f'uv pip install --pre --extra-index-url {PYPI}/ "ai-dynamo[{extra}]"'
+        cmds[
+            "wheel"
+        ] = f'uv pip install --pre --extra-index-url {PYPI}/ "ai-dynamo[{extra}]"'
     return cmds
 
 
-def nightly_pinned_commands(label: str, date: str, sha: str, wheel_version: str | None) -> dict[str, str]:
+def nightly_pinned_commands(
+    label: str, date: str, sha: str, wheel_version: str | None
+) -> dict[str, str]:
     img, extra, wheel = META[label]
     cmds = {"container": run(f"{REGISTRY}/{img}-runtime-nightly:{date}-{sha}")}
     if wheel and wheel_version:
-        cmds["wheel"] = (
-            f'uv pip install --pre --extra-index-url {PYPI}/ "ai-dynamo[{extra}]=={wheel_version}"'
-        )
+        cmds[
+            "wheel"
+        ] = f'uv pip install --pre --extra-index-url {PYPI}/ "ai-dynamo[{extra}]=={wheel_version}"'
     return cmds
 
 
@@ -334,33 +351,47 @@ def build() -> dict:
     for fw in FRAMEWORKS:
         label = fw.label
         img, extra, has_wheel = META[label]
-        entry: dict = {"label": label, "image": img, "extra": extra, "wheel": has_wheel,
-                       "stable": [], "nightly": []}
+        entry: dict = {
+            "label": label,
+            "image": img,
+            "extra": extra,
+            "wheel": has_wheel,
+            "stable": [],
+            "nightly": [],
+        }
 
         for s in stable[label]:
-            entry["stable"].append({
-                "backend_version": s["backend_version"],
-                "dynamo": s["releases"][0],
-                "also": s["releases"][1:],
-                "commands": stable_commands(label, s["releases"][0]),
-            })
+            entry["stable"].append(
+                {
+                    "backend_version": s["backend_version"],
+                    "dynamo": s["releases"][0],
+                    "also": s["releases"][1:],
+                    "commands": stable_commands(label, s["releases"][0]),
+                }
+            )
 
         dated = dated_by_img[img]
         cutoff = None
         if dated:
             newest = max(dated)
             cutoff = int(
-                (datetime.strptime(str(newest), "%Y%m%d") - timedelta(days=NIGHTLY_DAYS_BACK)).strftime("%Y%m%d")
+                (
+                    datetime.strptime(str(newest), "%Y%m%d")
+                    - timedelta(days=NIGHTLY_DAYS_BACK)
+                ).strftime("%Y%m%d")
             )
 
         wins = windows(label, changes)
         for idx in range(len(wins) - 1, -1, -1):  # newest-first
             version, start, end = wins[idx]
             if end is None:  # current build
-                entry["nightly"].append({
-                    "backend_version": version, "latest": True,
-                    "commands": nightly_latest_commands(label),
-                })
+                entry["nightly"].append(
+                    {
+                        "backend_version": version,
+                        "latest": True,
+                        "commands": nightly_latest_commands(label),
+                    }
+                )
                 continue
             hit = latest_in_window(dated, start, end)
             if not hit:
@@ -370,11 +401,17 @@ def build() -> dict:
                 continue
             base = base_version_at(sha)
             wheel_version = f"{base}.dev{date}" if base else None
-            entry["nightly"].append({
-                "backend_version": version, "window": [start, end], "pin_date": iso(date),
-                "note": f"In nightlies {start} → {end}; pinned to {iso(date)} (latest in range).",
-                "commands": nightly_pinned_commands(label, date, sha, wheel_version),
-            })
+            entry["nightly"].append(
+                {
+                    "backend_version": version,
+                    "window": [start, end],
+                    "pin_date": iso(date),
+                    "note": f"In nightlies {start} → {end}; pinned to {iso(date)} (latest in range).",
+                    "commands": nightly_pinned_commands(
+                        label, date, sha, wheel_version
+                    ),
+                }
+            )
 
         data[img] = entry
 
@@ -396,17 +433,28 @@ def as_ts_module(data: dict) -> str:
         "// Generated by .github/scripts/build_install_selector.py — do not edit.\n\n"
     )
     body = json.dumps(data["frameworks"], indent=2, ensure_ascii=False)
-    return f"{header}export const INSTALL_DATA = {body};\n\nexport default INSTALL_DATA;\n"
+    return (
+        f"{header}export const INSTALL_DATA = {body};\n\nexport default INSTALL_DATA;\n"
+    )
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--stdout", action="store_true", help="print JSON instead of writing")
-    ap.add_argument("--check", action="store_true", help="exit 1 if the on-disk JSON is stale")
-    ap.add_argument("--refresh-support-matrix", action="store_true",
-                    help="also rewrite the main (ToT) row in support-matrix.md (docs-build time)")
+    ap.add_argument(
+        "--stdout", action="store_true", help="print JSON instead of writing"
+    )
+    ap.add_argument(
+        "--check", action="store_true", help="exit 1 if the on-disk JSON is stale"
+    )
+    ap.add_argument(
+        "--refresh-support-matrix",
+        action="store_true",
+        help="also rewrite the main (ToT) row in support-matrix.md (docs-build time)",
+    )
     ap.add_argument("--out", default=OUT, help="JSON data path")
-    ap.add_argument("--ts-out", default=TS_OUT, help="TypeScript module path for the component")
+    ap.add_argument(
+        "--ts-out", default=TS_OUT, help="TypeScript module path for the component"
+    )
     args = ap.parse_args()
 
     data = build()
@@ -416,7 +464,9 @@ def main() -> int:
         target = REPO_ROOT / args.out
         current = target.read_text() if target.exists() else ""
         if current != json_text:
-            print(f"{args.out} is stale — run build_install_selector.py", file=sys.stderr)
+            print(
+                f"{args.out} is stale — run build_install_selector.py", file=sys.stderr
+            )
             return 1
         return 0
     if args.stdout:
