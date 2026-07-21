@@ -30,55 +30,69 @@ func ExecuteRestore(
 	m *types.CheckpointManifest,
 	checkpointPath string,
 	log logr.Logger,
-) (int32, error) {
+) (int32, func(), error) {
 	settings := m.CRIUDump.CRIU
+
+	// Return the FD closers as cleanup() rather than deferring them here, so the
+	// caller can run them after cuda unlock instead of between the CRIU restore
+	// and unlock. That keeps the window where the restored process runs with CUDA
+	// still locked as short as possible. cleanup is called on the error paths below.
+	var openFiles, inheritedFiles []*os.File
+	cleanup := func() {
+		closeFiles(inheritedFiles)
+		closeFiles(openFiles)
+	}
 
 	// Open image dir FD
 	imageDir, imageDirFD, err := openPathForCRIU(checkpointPath)
 	if err != nil {
-		return 0, fmt.Errorf("failed to open image directory: %w", err)
+		return 0, nil, fmt.Errorf("failed to open image directory: %w", err)
 	}
-	defer imageDir.Close()
+	openFiles = append(openFiles, imageDir)
 	criuOpts.ImagesDirFd = proto.Int32(imageDirFD)
 
 	// Open work dir FD
 	if settings.WorkDir != "" {
 		if err := os.MkdirAll(settings.WorkDir, 0755); err != nil {
-			return 0, fmt.Errorf("failed to create CRIU work directory: %w", err)
+			cleanup()
+			return 0, nil, fmt.Errorf("failed to create CRIU work directory: %w", err)
 		}
 		workDirFile, workDirFD, err := openPathForCRIU(settings.WorkDir)
 		if err != nil {
-			return 0, fmt.Errorf("failed to open CRIU work directory: %w", err)
+			cleanup()
+			return 0, nil, fmt.Errorf("failed to open CRIU work directory: %w", err)
 		}
-		defer workDirFile.Close()
+		openFiles = append(openFiles, workDirFile)
 		criuOpts.WorkDirFd = proto.Int32(workDirFD)
 	}
 
 	c := criulib.MakeCriu()
 	if _, err := os.Stat(settings.BinaryPath); err != nil {
-		return 0, fmt.Errorf("criu binary not found at %s: %w", settings.BinaryPath, err)
+		cleanup()
+		return 0, nil, fmt.Errorf("criu binary not found at %s: %w", settings.BinaryPath, err)
 	}
 	c.SetCriuPath(settings.BinaryPath)
 
 	netNsFile, err := os.Open(netNsPath)
 	if err != nil {
-		return 0, fmt.Errorf("failed to open net NS at %s: %w", netNsPath, err)
+		cleanup()
+		return 0, nil, fmt.Errorf("failed to open net NS at %s: %w", netNsPath, err)
 	}
-	defer netNsFile.Close()
+	openFiles = append(openFiles, netNsFile)
 	c.AddInheritFd("extNetNs", netNsFile)
 
-	inheritedFiles := registerInheritFDs(c, m.K8s.StdioFDs, log)
-	defer closeFiles(inheritedFiles)
+	inheritedFiles = registerInheritFDs(c, m.K8s.StdioFDs, log)
 
 	notify := &restoreNotify{log: log}
 	log.V(1).Info("Executing go-criu Restore call")
 	if err := c.Restore(criuOpts, notify); err != nil {
 		log.Error(err, "go-criu Restore returned error")
 		logging.LogRestoreErrors(checkpointPath, settings.WorkDir, log)
-		return 0, fmt.Errorf("CRIU restore failed: %w", err)
+		cleanup()
+		return 0, nil, fmt.Errorf("CRIU restore failed: %w", err)
 	}
 
-	return notify.restoredPID, nil
+	return notify.restoredPID, cleanup, nil
 }
 
 // BuildRestoreOpts assembles CriuOpts for a CRIU restore from the checkpoint manifest.

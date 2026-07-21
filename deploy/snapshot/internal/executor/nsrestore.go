@@ -122,10 +122,14 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 
 	// CRIU restore
 	criuRestoreStart := time.Now()
-	restoredPID, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, log)
+	restoredPID, cleanup, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, log)
 	if err != nil {
 		return nil, 0, err
 	}
+	// Run the restore's FD cleanup at return, after cuda unlock and the
+	// restore-complete sentinel below, so nothing but the required PID resolve
+	// sits between the CRIU restore and unlock. Runs on any return, incl. errors.
+	defer cleanup()
 	timings.criuRestoreDuration = time.Since(criuRestoreStart)
 
 	cudaStart := time.Now()

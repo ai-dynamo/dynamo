@@ -128,13 +128,30 @@ jobs:
             --exclude='index.yml' \
             source-checkout/docs/ docs-checkout/fern/pages-dev/
 
-          # Sync Fern's native-localization mirror as-is:
+          # Sync Fern's native-localization mirror:
           # fern/translations/<lang>/pages-dev/<path> pairs with the base page
-          # at fern/pages-dev/<path>, per locale
-          rm -rf docs-checkout/fern/translations
+          # at fern/pages-dev/<path>, per locale. Replace only the pages-dev
+          # mirrors -- versioned snapshots (pages-v*) are committed to this
+          # branch by the release job and must survive dev syncs (see #11195).
+          for d in docs-checkout/fern/translations/*/pages-dev; do
+            if [ -d "$d" ]; then
+              lang=$(basename "$(dirname "$d")")
+              if [ ! -d "source-checkout/fern/translations/$lang/pages-dev" ]; then
+                echo "Removing dev mirror for retired locale $lang..."
+                rm -rf "$d"
+              fi
+            fi
+          done
           if [ -d source-checkout/fern/translations ]; then
             echo "Syncing translations/ to docs-website branch..."
-            cp -r source-checkout/fern/translations docs-checkout/fern/translations
+            for lang_dir in source-checkout/fern/translations/*/; do
+              lang=$(basename "$lang_dir")
+              if [ -d "$lang_dir/pages-dev" ]; then
+                rm -rf "docs-checkout/fern/translations/$lang/pages-dev"
+                mkdir -p "docs-checkout/fern/translations/$lang"
+                cp -r "$lang_dir/pages-dev" "docs-checkout/fern/translations/$lang/pages-dev"
+              fi
+            done
           fi
 
           # Sync index.yml as versions/dev.yml and transform paths for docs-website layout
@@ -445,14 +462,36 @@ jobs:
           echo "Created docs-checkout/fern/pages-$TAG/"
           ls -la "docs-checkout/fern/pages-$TAG/" | head -20
 
+          # Snapshot the translation mirrors alongside the base pages so the
+          # tagged version pairs its locales (see #11195). Same mirror-path
+          # convention as dev: fern/translations/<lang>/pages-$TAG/<path>
+          # pairs with fern/pages-$TAG/<path>.
+          if [ -d source-checkout/fern/translations ]; then
+            for lang_dir in source-checkout/fern/translations/*/; do
+              lang=$(basename "$lang_dir")
+              if [ -d "$lang_dir/pages-dev" ]; then
+                echo "Snapshotting translations for $lang -> pages-$TAG..."
+                rm -rf "docs-checkout/fern/translations/$lang/pages-$TAG"
+                mkdir -p "docs-checkout/fern/translations/$lang/pages-$TAG"
+                rsync -a "$lang_dir/pages-dev/" "docs-checkout/fern/translations/$lang/pages-$TAG/"
+              fi
+            done
+          fi
+
       - name: Update GitHub links to version tag
         run: |
           TAG="${{ steps.version.outputs.tag }}"
 
           echo "Pinning GitHub links from main to $TAG in docs-checkout/fern/pages-$TAG/..."
 
+          # Base pages plus any translation snapshots for this tag.
+          SNAP_DIRS="docs-checkout/fern/pages-$TAG"
+          for d in docs-checkout/fern/translations/*/"pages-$TAG"; do
+            [ -d "$d" ] && SNAP_DIRS="$SNAP_DIRS $d"
+          done
+
           # Pin tree/main and blob/main links before callout conversion.
-          find "docs-checkout/fern/pages-$TAG" -type f \( -name "*.md" -o -name "*.mdx" \) | while read -r file; do
+          find $SNAP_DIRS -type f \( -name "*.md" -o -name "*.mdx" \) | while read -r file; do
             if grep -q "github.com/ai-dynamo/dynamo/tree/main" "$file"; then
               echo "Updating tree links: $file"
               sed -i "s|github.com/ai-dynamo/dynamo/tree/main|github.com/ai-dynamo/dynamo/tree/$TAG|g" "$file"
@@ -460,7 +499,7 @@ jobs:
           done
 
           # Also update blob/main references (for direct file links)
-          find "docs-checkout/fern/pages-$TAG" -type f \( -name "*.md" -o -name "*.mdx" \) | while read -r file; do
+          find $SNAP_DIRS -type f \( -name "*.md" -o -name "*.mdx" \) | while read -r file; do
             if grep -q "github.com/ai-dynamo/dynamo/blob/main" "$file"; then
               echo "Updating blob links: $file"
               sed -i "s|github.com/ai-dynamo/dynamo/blob/main|github.com/ai-dynamo/dynamo/blob/$TAG|g" "$file"
@@ -475,7 +514,36 @@ jobs:
 
           echo "Converting callouts in pages-$TAG/ with the tag's convert_callouts.py..."
           python3 source-checkout/fern/convert_callouts.py --dir "docs-checkout/fern/pages-$TAG"
+          for d in docs-checkout/fern/translations/*/"pages-$TAG"; do
+            [ -d "$d" ] && python3 source-checkout/fern/convert_callouts.py --dir "$d"
+          done
           echo "Callout conversion complete."
+
+      - name: Resolve relative links in translated snapshot
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+
+          # Rewrites relative page links in the translation snapshot to site
+          # URLs under this tag's version slug, from the tag's nav (see
+          # fern/resolve_translation_links.py). --github-ref pins the
+          # GitHub-fallback links to the tag itself, which stays faithful on
+          # workflow_dispatch rebuilds where GITHUB_SHA is not the tag commit.
+          if compgen -G "docs-checkout/fern/translations/*/pages-$TAG" > /dev/null; then
+            # The tag's own resolver runs; tags cut between the introduction
+            # of fern/translations and of --pages-dir carry an older script,
+            # so capability-gate to keep workflow_dispatch rebuilds of such
+            # tags working (skipping matches what their tag-push produced).
+            if grep -q -- '--pages-dir' source-checkout/fern/resolve_translation_links.py; then
+              pip install --quiet pyyaml
+              python3 source-checkout/fern/resolve_translation_links.py \
+                --nav source-checkout/docs/index.yml \
+                --translations-root docs-checkout/fern/translations \
+                --site-root /dynamo --version-slug "$TAG" \
+                --pages-dir "pages-$TAG" --github-ref "$TAG"
+            else
+              echo "::warning::$TAG's resolver predates --pages-dir; skipping translated-snapshot link resolution"
+            fi
+          fi
 
       - name: Create version config file
         run: |
@@ -591,6 +659,11 @@ jobs:
           git add "fern/pages-$TAG/"
           git add "fern/versions/$TAG.yml"
           git add fern/docs.yml
+          # Versioned translation snapshots (see #11195); the glob is empty
+          # for tags cut from branches without fern/translations.
+          for d in fern/translations/*/"pages-$TAG"; do
+            [ -d "$d" ] && git add "$d"
+          done
 
           if git diff --cached --quiet; then
             echo "No release artifact changes for $TAG; skipping commit and push."
@@ -602,6 +675,7 @@ jobs:
           - Created fern/pages-$TAG/ with documentation snapshot
           - Created fern/versions/$TAG.yml version navigation config
           - Updated fern/docs.yml to include $TAG in version list
+          - Snapshotted translation mirrors (fern/translations/*/pages-$TAG), when present
 
           Automated by fern-docs workflow
           Source tag: $TAG"

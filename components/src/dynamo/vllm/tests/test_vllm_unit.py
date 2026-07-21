@@ -89,6 +89,33 @@ def test_base_model_lora_capacity(enable_lora, model_type, expected):
     assert _load_vllm_main()._base_model_lora_capacity(config, model_type) == expected
 
 
+def test_kv_event_block_size_prefers_cached_main_attention_value():
+    """LoRA MDC registration relies on this: the cached main-attention block
+    size (configured at engine setup) wins over cache_config.block_size, so
+    adapter cards carry the same block size as the base-model card on
+    hybrid-attention models where vLLM inflates the attention block size."""
+    from dynamo.vllm.cache_info import (
+        DYNAMO_KV_EVENT_BLOCK_SIZE_KEY,
+        get_configured_kv_event_block_size,
+    )
+
+    vllm_config = SimpleNamespace(
+        additional_config={DYNAMO_KV_EVENT_BLOCK_SIZE_KEY: 1056},
+        cache_config=SimpleNamespace(block_size=16),
+    )
+    assert get_configured_kv_event_block_size(vllm_config) == 1056
+
+
+def test_kv_event_block_size_falls_back_to_cache_config():
+    from dynamo.vllm.cache_info import get_configured_kv_event_block_size
+
+    vllm_config = SimpleNamespace(
+        additional_config=None,
+        cache_config=SimpleNamespace(block_size=16),
+    )
+    assert get_configured_kv_event_block_size(vllm_config) == 16
+
+
 def test_custom_jinja_template_invalid_path(mock_vllm_cli):
     """Test that invalid file path raises FileNotFoundError."""
     invalid_path = "/nonexistent/path/to/template.jinja"
@@ -815,6 +842,38 @@ class TestBenchmarkConfig:
             "prefix_max_batch_size_samples": 3,
         }
 
+    def test_benchmark_points_file_is_embedded_in_benchmark_config(
+        self, mock_vllm_cli, tmp_path
+    ):
+        points_path = tmp_path / "points.json"
+        points = {
+            "schema_version": 1,
+            "prefill": [
+                {
+                    "total_prefill_tokens": 8,
+                    "total_kv_read_tokens": 0,
+                    "batch_size": 1,
+                }
+            ],
+            "decode": [{"total_kv_read_tokens": 32, "batch_size": 2}],
+        }
+        points_path.write_text(json.dumps(points))
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--benchmark-mode",
+            "agg",
+            "--benchmark-points-file",
+            str(points_path),
+        )
+
+        config = parse_args()
+
+        bench = config._benchmark_additional_config
+        assert bench["points"] == points
+        assert "benchmark_points_file" not in bench
+        assert not any(key.endswith("_samples") for key in bench)
+
     def test_benchmark_sampling_controls_reach_scheduler_config(self, mock_vllm_cli):
         mock_vllm_cli(
             "--model",
@@ -1216,6 +1275,7 @@ def _make_dynamo_config(**overrides):
         "decode_max_kv_read_token_samples": 128,
         "decode_max_batch_size_samples": 128,
         "prefix_max_batch_size_samples": 3,
+        "_benchmark_points": None,
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)

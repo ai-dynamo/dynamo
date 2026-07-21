@@ -237,3 +237,35 @@ async def test_agg_retries_with_custom_pool_priorities(tmp_path):
     assert slow.calls == 1
     assert mid.calls == 1
     assert fast.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_agg_handler_routes_by_input_sequence_length(tmp_path):
+    config = _agg_config()
+    config["enable_priority_retry"] = False
+    config["num_agg_pools"] = 2
+    config["agg_pool_dynamo_namespaces"] = ["agg-short", "agg-long"]
+    config["agg_pool_priorities"] = [0, 1]
+    strategy = config["agg_pool_selection_strategy"]
+    strategy.update(
+        {
+            "isl_min": 0,
+            "isl_max": 24576,
+            "isl_resolution": 2,
+            "agg_pool_mapping": [[[0]], [[1]]],
+        }
+    )
+    handler = _handler(_write_config(tmp_path, config))
+    short = FakeClient("agg-short", outputs=[{"pool": "agg-short"}])
+    long = FakeClient("agg-long", outputs=[{"pool": "agg-long"}])
+    handler.agg_clients = {"agg-short": short, "agg-long": long}
+
+    short_outputs = await _collect_outputs(
+        handler.handle_generate({"token_ids": [1] * 4096})
+    )
+    long_outputs = await _collect_outputs(
+        handler.handle_generate({"token_ids": [1] * 16384})
+    )
+
+    assert short_outputs == [{"pool": "agg-short"}]
+    assert long_outputs == [{"pool": "agg-long"}]

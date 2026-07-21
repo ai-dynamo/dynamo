@@ -77,12 +77,14 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                 WorkerTask::RemoveWorker {
                     worker_id,
                     sweep_tree,
+                    resp,
                 } => {
                     self.erase_worker_coverage(
                         &mut lookup,
                         WorkerRemovalTarget::WorkerId(worker_id),
                         sweep_tree,
                     );
+                    let _ = resp.send(());
                 }
                 WorkerTask::RemoveWorkerDpRank {
                     worker_id,
@@ -226,6 +228,10 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
     }
 
     fn dump_events(&self) -> Option<Vec<RouterEvent>> {
+        // NOTE: A live CRTC dump is intentionally not a consistent cut. Thread-pool markers
+        // drain earlier commands, but mutation lanes may resume while this traversal samples
+        // nodes independently. Core CRTC recovery does not use this diagnostic/parity surface;
+        // do not add a global mutation gate solely to strengthen its snapshot semantics.
         Some(self.dump_tree_as_events())
     }
 }

@@ -1,0 +1,205 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "DeepSeek-V4-Pro"
+subtitle: "Serve DeepSeek-V4-Pro with Dynamo and vLLM — aggregated or disaggregated, on B200 or H200, tuned for the agentic workload."
+---
+
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
+Each target below is an agentic-workload vLLM deployment of DeepSeek-V4-Pro — a MoE model (1.6T total / 49B active) with hybrid CSA + HCA attention, a Blackwell FP4 indexer cache, and mHC residual connections. B200 serves the `nvidia/DeepSeek-V4-Pro-NVFP4` checkpoint at the full 1M context; H200 serves the public `deepseek-ai/DeepSeek-V4-Pro` (FP8), capped at `max_model_len=86016` by HBM. Pick your GPU and topology; every command updates to match. Text only; reasoning + tool calling supported.
+
+<div className="dynamo-target-picker">
+<p className="dynamo-target-picker-title">Choose your deployment target</p>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">GPU</span>
+<input type="radio" id="recipe-sku-b200" name="recipe-sku" value="b200" defaultChecked />
+<label htmlFor="recipe-sku-b200">B200 <span className="dynamo-target-picker-hint">Recommended</span></label>
+<input type="radio" id="recipe-sku-h200" name="recipe-sku" value="h200" />
+<label htmlFor="recipe-sku-h200">H200</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Topology</span>
+<input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" defaultChecked />
+<label htmlFor="recipe-variant-disagg">Disaggregated</label>
+<input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" />
+<label htmlFor="recipe-variant-agg">Aggregated</label>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="b200" data-variant="agg" data-usecase="agentic">
+<span><b>Checkpoint</b> nvidia/DeepSeek-V4-Pro-NVFP4</span>
+<span><b>GPUs</b> 8x B200, TP8 + EP</span>
+<span><b>MoE / spec</b> FLASHINFER_TRTLLM, MTP-2</span>
+<span><b>KV / routing</b> FP8 KV (block 256), KV-aware</span>
+<span><b>Context</b> 1,048,576</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="b200" data-variant="disagg" data-usecase="agentic">
+<span><b>Checkpoint</b> nvidia/DeepSeek-V4-Pro-NVFP4 <span className="dynamo-target-picker-hint">Recommended</span></span>
+<span><b>GPUs</b> 16x B200 — 1P1D (TP8 + EP per worker)</span>
+<span><b>MoE / spec</b> FLASHINFER_TRTLLM, decode MTP-2</span>
+<span><b>Transfer</b> NIXL over RDMA/GDR</span>
+<span><b>Context</b> 1,048,576</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="h200" data-variant="agg" data-usecase="agentic">
+<span><b>Checkpoint</b> deepseek-ai/DeepSeek-V4-Pro (FP8) <span className="dynamo-target-picker-hint">Recommended on H200</span></span>
+<span><b>GPUs</b> 8x H200, TP8 + EP</span>
+<span><b>MoE</b> MARLIN</span>
+<span><b>KV / routing</b> FP8 KV (block 256), KV-aware</span>
+<span><b>Context</b> 86,016 (HBM cap)</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="h200" data-variant="disagg" data-usecase="agentic">
+<span><b>Checkpoint</b> deepseek-ai/DeepSeek-V4-Pro (FP8)</span>
+<span><b>GPUs</b> 32x H200 — 1P3D (TP8 + EP per worker)</span>
+<span><b>MoE</b> MARLIN</span>
+<span><b>Transfer</b> NIXL over RDMA/GDR</span>
+<span><b>Context</b> 86,016 (HBM cap)</span>
+</div>
+</div>
+
+<Note>
+Recommended picks differ by SKU: **B200 → Disaggregated (1P1D)** (highest tok/s/GPU); **H200 → Aggregated** (AGG beats the 1P3D disagg lane). H200 targets are a secondary/best-effort lane on the public FP8 checkpoint.
+</Note>
+
+## Prerequisites
+
+- A Kubernetes cluster with the Dynamo Platform (operator) installed.
+
+<div data-sku="b200">
+
+- **8x B200** (aggregated) or **16x B200** (disaggregated, 1P1D) available.
+- A Hugging Face token with access to `nvidia/DeepSeek-V4-Pro-NVFP4`.
+
+</div>
+
+<div data-sku="h200">
+
+- **8x H200** (aggregated) or **32x H200** (disaggregated, 1P3D) available.
+- A Hugging Face token with access to `deepseek-ai/DeepSeek-V4-Pro`.
+
+</div>
+
+- The `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0` image (pinned in each `deploy.yaml`).
+
+Create the namespace and token secret:
+
+```bash
+export NAMESPACE=your-namespace
+kubectl create namespace ${NAMESPACE}
+kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN="your-token" -n ${NAMESPACE}
+```
+
+<Warning>
+Edit cluster-specific values before applying: `storageClassName` in `model-cache/model-cache.yaml` (a RWX class). For **disaggregated** targets, also set `VLLM_GPU_NIC_PCIE_MAPPING` in the manifest — see [Per-rank NIC mapping](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4/README.md#per-rank-nic-mapping-b200--h200-disaggregated).
+</Warning>
+
+## Deploy
+
+Create storage, download the checkpoint (~865 GB, 1.5–3 h first apply), then apply the target's `deploy.yaml`:
+
+```bash
+kubectl apply -f recipes/deepseek-v4/deepseek-v4-pro/model-cache/model-cache.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/deepseek-v4/deepseek-v4-pro/model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=14400s
+```
+
+<div data-sku="b200" data-variant="agg">
+
+```bash
+RECIPE=recipes/deepseek-v4/deepseek-v4-pro/vllm/agg-b200-agentic
+```
+
+</div>
+
+<div data-sku="b200" data-variant="disagg">
+
+```bash
+RECIPE=recipes/deepseek-v4/deepseek-v4-pro/vllm/disagg-b200-agentic
+```
+
+</div>
+
+<div data-sku="h200" data-variant="agg">
+
+```bash
+RECIPE=recipes/deepseek-v4/deepseek-v4-pro/vllm/agg-h200-agentic
+```
+
+</div>
+
+<div data-sku="h200" data-variant="disagg">
+
+```bash
+RECIPE=recipes/deepseek-v4/deepseek-v4-pro/vllm/disagg-h200-agentic
+```
+
+</div>
+
+```bash
+kubectl apply -f ${RECIPE}/deploy.yaml -n ${NAMESPACE}
+
+# DGD name = metadata.name in that deploy.yaml:
+DGD=$(awk '/^metadata:/{m=1} m && /name:/{print $2; exit}' ${RECIPE}/deploy.yaml)
+kubectl wait --for=condition=Ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=${DGD} -n ${NAMESPACE} --timeout=5400s
+```
+
+First launch loads weights across 8 TP ranks and warms CUDA graphs — up to ~90 min; the startup probes allow for it.
+
+## Smoke Test
+
+The `model` field must be the **served model name for your SKU** (the `--served-model-name` in the deploy): B200 serves `nvidia/DeepSeek-V4-Pro-NVFP4`, H200 serves `deepseek-ai/DeepSeek-V4-Pro`.
+
+<div data-sku="b200">
+
+```bash
+kubectl port-forward svc/${DGD}-frontend 8000:8000 -n ${NAMESPACE}
+
+curl http://localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"nvidia/DeepSeek-V4-Pro-NVFP4","messages":[{"role":"user","content":"Hello!"}],"max_tokens":512}'
+```
+
+</div>
+
+<div data-sku="h200">
+
+```bash
+kubectl port-forward svc/${DGD}-frontend 8000:8000 -n ${NAMESPACE}
+
+curl http://localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"deepseek-ai/DeepSeek-V4-Pro","messages":[{"role":"user","content":"Hello!"}],"max_tokens":512}'
+```
+
+</div>
+
+Pro emits chain-of-thought into `message.reasoning_content` and the answer into `message.content`. Reasoning effort is selected via `chat_template_kwargs` (`{"thinking":true,"reasoning_effort":"high"|"max"}`; Think Max needs `--max-model-len >= 393216`).
+
+## Benchmark
+
+The shared [`perf.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4/perf/perf.yaml) replays the agentic MoonTrace (64K avg ISL / 400 OSL, 90% KV reuse) with AIPerf. Point `ENDPOINT` at `${DGD}-frontend:8000` and apply it:
+
+```bash
+kubectl apply -f recipes/deepseek-v4/perf/perf.yaml -n ${NAMESPACE}
+```
+
+## Compare All Targets
+
+| Target | GPUs | Parallelism | MoE backend | Spec. decode | max_model_len | Transfer |
+|---|---|---|---|---|---|---|
+| agg-b200 | 8x B200 | TP8 + EP | FLASHINFER_TRTLLM | MTP-2 | 1,048,576 | — |
+| disagg-b200 (1P1D) | 16x B200 | TP8 + EP | FLASHINFER_TRTLLM | decode MTP-2 | 1,048,576 | NIXL GDR |
+| agg-h200 | 8x H200 | TP8 + EP | MARLIN | none | 86,016 | — |
+| disagg-h200 (1P3D) | 32x H200 | TP8 + EP | MARLIN | none | 86,016 | NIXL GDR |
+
+## Notes
+
+- **Recommended per SKU:** B200 ships **disaggregated 1P1D** (+6% tok/s/GPU over AGG); H200 ships **aggregated** (AGG > the 1P3D disagg lane). H200 is a secondary/best-effort lane on the public FP8 checkpoint at `max_model_len=86016`.
+- **Reasoning / tool parsers** are wired via `--dyn-reasoning-parser deepseek_v4` / `--dyn-tool-call-parser deepseek_v4`.
+- **Disaggregated** targets require the per-rank NIC map (`VLLM_GPU_NIC_PCIE_MAPPING`); B200 ships `rdma/shared_ib`, H200 ships `rdma/ib`. See the [top-level README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4/README.md#per-rank-nic-mapping-b200--h200-disaggregated).
+- Day-0 / GB200 (vLLM + SGLang, ComputeDomain/MNNVL) variants exist in the recipe tree but are experimental (dev images) and not shown here.
+
+## Source
+
+- Recipe README: [recipes/deepseek-v4/deepseek-v4-pro/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4/deepseek-v4-pro/README.md)
+- Top-level DeepSeek-V4 README (shared workloads, NIC mapping, limitations): [recipes/deepseek-v4/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4/README.md)
+- Manifests: [vllm/](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-pro/vllm) and shared [perf/perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4/perf/perf.yaml)

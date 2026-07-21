@@ -214,6 +214,12 @@ jobs:
       needs.changed-files.outputs.deploy == 'true'
     name: Snapshot Agent
     runs-on: prod-default-v2
+    # actions: read lets the compliance step download a prior run's baseline
+    # snapshot compliance artifact to diff the OSRB CSV against. Missing -> the
+    # diff soft-degrades, build stays green.
+    permissions:
+      contents: read
+      actions: read
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -231,6 +237,13 @@ jobs:
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
           extra_tags: |
             ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
+          # OSRB CSV diff baseline: the target branch selects the rule, while the
+          # merge-base pins PR->main diffs to the PR's fork point.
+          diff_event_context: pr
+          diff_current_branch: ${{ github.ref_name }}
+          diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
+          diff_merge_base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
+          gh_token: ${{ secrets.GITHUB_TOKEN }}
 
 # ============================================================================
 # Power Agent
@@ -575,7 +588,21 @@ jobs:
       cuda_version: '[""]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      inline_compliance: true
+      artifact_retention_days: '7'
       build_timeout_minutes: 45
+      # OSRB CSV diff baseline: the target branch selects the rule, while the
+      # merge-base pins PR->main diffs to the PR's fork point.
+      diff_event_context: pr
+      diff_current_branch: ${{ github.ref_name }}
+      diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
+      diff_merge_base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
+    # actions: read lets the build download a prior run's baseline compliance
+    # artifact to diff against (a reusable workflow's token can't exceed the
+    # caller's). Missing -> the diff soft-degrades, build stays green.
+    permissions:
+      contents: read
+      actions: read
     secrets: inherit
 
   # ============================================================================
@@ -797,8 +824,28 @@ jobs:
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       baseline_sbom_file: ${{ needs.trtllm-build.outputs.baseline_sbom_file }}
 
-  # planner / frontend stay on the legacy shared-compliance scan until they
-  # migrate to the inline system that vllm/sglang/trtllm use above.
+  frontend-compliance-audit:
+    name: frontend # grouped in the UI with other frontend jobs
+    needs: [changed-files, frontend-build]
+    # Mirror frontend-build's trigger so every rebuilt frontend image gets an
+    # audit report, including operator/snapshot/deploy-driven rebuilds.
+    if: |
+      needs.changed-files.outputs.frontend == 'true' ||
+      needs.changed-files.outputs.operator == 'true' ||
+      needs.changed-files.outputs.snapshot == 'true' ||
+      needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-compliance-audit.yml
+    with:
+      framework: dynamo
+      target: frontend
+      # frontend ships amd64+arm64; the audit scans the amd64 image only,
+      # matching the single-arch framework audits above. Report-only.
+      cuda_version: ''
+      target_tag_plain: ${{ needs.frontend-build.outputs.target_tag_plain }}
+      baseline_sbom_file: ${{ needs.frontend-build.outputs.baseline_sbom_file }}
+
+  # planner stays on the legacy shared-compliance scan until it migrates to
+  # the inline system that vllm/sglang/trtllm/frontend use above.
   planner-compliance:
     name: planner # This name overlaps with other planner jobs to group them in the UI
     needs: [changed-files, planner-build]
@@ -808,19 +855,6 @@ jobs:
       framework: dynamo
       target: planner
       target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
-      cuda_version: '[""]'
-      platform: '["amd64", "arm64"]'
-    secrets: inherit
-
-  frontend-compliance:
-    name: frontend # This name overlaps with other frontend jobs to group them in the UI
-    needs: [changed-files, frontend-build]
-    if: needs.changed-files.outputs.frontend == 'true'
-    uses: ./.github/workflows/shared-compliance.yml
-    with:
-      framework: dynamo
-      target: frontend
-      target_tag_plain: ${{ needs.frontend-build.outputs.target_tag_plain }}
       cuda_version: '[""]'
       platform: '["amd64", "arm64"]'
     secrets: inherit

@@ -144,6 +144,29 @@ image-multiarch: ## Build multi-arch image (requires --push ; --load not support
 image-multiarch-push: PUSH=--push ## Build and push multi-arch image to registry
 image-multiarch-push: image-multiarch
 
+# Export the Go compliance SBOM + harvested license texts to SBOM_DEST as plain
+# host files (no image push/load). amd64 basis: cyclonedx-gomod app is
+# build-constraint aware, but EPP's Go module set doesn't vary by GOARCH (linux
+# only), so one amd64 export is authoritative for all frontend arches. Reuses the
+# warm build cache from a preceding image-multiarch[-push] — the build args mirror
+# image-multiarch exactly so the go-builder stage cache-hits. The frontend build
+# then reads these from its build context instead of re-pulling the pushed EPP
+# image (see Dockerfile sbom-export).
+SBOM_DEST ?= $(DYNAMO_DIR)/.epp-sbom
+.PHONY: sbom-export
+sbom-export: ## Export Go SBOM + license texts to SBOM_DEST (reuses build cache)
+	$(IMAGE_BUILD_CMD) \
+		--platform=linux/amd64 \
+		--target sbom-export \
+		--build-context dynamo=$(DYNAMO_DIR) \
+		--build-arg RUST_IMAGE=$(RUST_IMAGE) \
+		--build-arg BASE_IMAGE=$(BASE_IMAGE) \
+		--build-arg BUILDER_IMAGE=$(BUILDER_IMAGE) \
+		--build-arg COMMIT_SHA=$(GIT_COMMIT_SHA) \
+		--build-arg BUILD_REF=$(GIT_TAG) \
+		$(SCCACHE_ARGS) $(EXTRA_BUILD_ARGS) \
+		--output type=local,dest=$(SBOM_DEST) .
+
 
 ##@ Local Development with Buildx
 
