@@ -4,7 +4,7 @@
 ## This example demonstrates KV-aware routing with the --no-kv-events flag.
 ## Instead of receiving KV events from workers, the router predicts cache state
 ## locally based on routing decisions with TTL-based expiration and pruning.
-## Note: This mode does not require NATS or JetStream during dynamo platform deployment.
+## Note: This mode does not require NATS during Dynamo platform deployment.
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:

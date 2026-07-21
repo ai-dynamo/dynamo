@@ -17,6 +17,7 @@ from dynamo.profiler.utils.config import (
     get_worker_service_from_config,
     remove_valued_arguments,
     set_argument_value,
+    set_unique_argument_value,
     setup_worker_service_resources,
     update_image,
     validate_and_get_worker_args,
@@ -45,6 +46,7 @@ DEFAULT_VLLM_DISAGG_CONFIG_PATH = resolve_deploy_path(
 DEFAULT_VLLM_AGG_CONFIG_PATH = resolve_deploy_path(
     "examples/backends/vllm/deploy/agg.yaml"
 )
+DEFAULT_VLLM_KV_TRANSFER_CONFIG = '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
 
 
 def _get_valued_arg(args: list[str], key: str) -> str | None:
@@ -67,6 +69,29 @@ def _set_valued_arg(args: list[str], key: str, value: str) -> list[str]:
     return set_argument_value(args, key, value)
 
 
+def _finalize_disagg_cli_args(args: list[str], role: SubComponentType) -> list[str]:
+    """Restore the Dynamo runtime arguments omitted by AIC engine tuning."""
+    tokens = break_arguments(args)
+    cleaned_args = [
+        arg
+        for arg in tokens
+        if arg not in ("--is-prefill-worker", "--is-decode-worker")
+    ]
+    finalized = set_unique_argument_value(
+        cleaned_args, "--disaggregation-mode", role.value
+    )
+    if (
+        role == SubComponentType.PREFILL
+        and _get_valued_arg(finalized, "--kv-transfer-config") is None
+    ):
+        finalized = set_unique_argument_value(
+            finalized,
+            "--kv-transfer-config",
+            DEFAULT_VLLM_KV_TRANSFER_CONFIG,
+        )
+    return finalized
+
+
 class VllmV1ConfigModifier(BaseConfigModifier):
     BACKEND = "vllm"
     # vllm uses a different arg for model path
@@ -86,6 +111,33 @@ class VllmV1ConfigModifier(BaseConfigModifier):
     def update_image(cls, config, image: str) -> dict:
         """Update container image for all DGD services (frontend, planner, workers)."""
         return update_image(config, image)
+
+    @classmethod
+    def _apply_disagg_workers(
+        cls,
+        cfg: Config,
+        prefill_cli_args: list[str],
+        prefill_replicas: int,
+        prefill_gpus: int,
+        decode_cli_args: list[str],
+        decode_replicas: int,
+        decode_gpus: int,
+        num_gpus_per_node: int | None = None,
+    ) -> None:
+        super()._apply_disagg_workers(
+            cfg,
+            prefill_cli_args=_finalize_disagg_cli_args(
+                prefill_cli_args, SubComponentType.PREFILL
+            ),
+            prefill_replicas=prefill_replicas,
+            prefill_gpus=prefill_gpus,
+            decode_cli_args=_finalize_disagg_cli_args(
+                decode_cli_args, SubComponentType.DECODE
+            ),
+            decode_replicas=decode_replicas,
+            decode_gpus=decode_gpus,
+            num_gpus_per_node=num_gpus_per_node,
+        )
 
     @classmethod
     def convert_config(

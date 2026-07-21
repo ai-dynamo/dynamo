@@ -15,7 +15,7 @@ import shutil
 
 import pytest
 
-from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
+from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DynamoPortRange
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_port
@@ -95,7 +95,8 @@ class DynamoWorkerProcess(ManagedProcess):
         disagg_mode: str | None = None,
     ):
         self.worker_id = worker_id
-        self.system_port = allocate_port(9100)
+        self.system_port = allocate_port(DynamoPortRange.SERVE.value)
+        request.addfinalizer(lambda port=self.system_port: deallocate_port(port))
         self.bootstrap_port: int | None = None
         self.prefill_port: int | None = None
         self.disagg_mode = disagg_mode
@@ -123,7 +124,8 @@ class DynamoWorkerProcess(ManagedProcess):
             command.append("--skip-tokenizer-init")
         else:
             # Disaggregated
-            self.bootstrap_port = allocate_port(12340)
+            self.bootstrap_port = allocate_port(DynamoPortRange.BOOTSTRAP.value)
+            request.addfinalizer(lambda port=self.bootstrap_port: deallocate_port(port))
             command.extend(
                 [
                     "--disaggregation-mode",
@@ -137,7 +139,10 @@ class DynamoWorkerProcess(ManagedProcess):
                 ]
             )
             if disagg_mode == "prefill":
-                self.prefill_port = allocate_port(20000)
+                self.prefill_port = allocate_port(DynamoPortRange.PREFILL.value)
+                request.addfinalizer(
+                    lambda port=self.prefill_port: deallocate_port(port)
+                )
                 command.extend(["--port", str(self.prefill_port)])
 
         # Set environment variables

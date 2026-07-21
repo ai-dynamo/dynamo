@@ -201,7 +201,7 @@ impl SequenceSubscriber for ChannelSequenceSubscriber {
 
 fn generate_process_id() -> u64 {
     loop {
-        let id = rand::random();
+        let id = fastrand::u64(..);
         if id != 0 {
             return id;
         }

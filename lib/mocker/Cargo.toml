@@ -16,6 +16,7 @@ readme = "README.md"
 default = []
 profile = []
 aic-forward-pass = ["dep:aiconfigurator-core"]
+zmq-events = ["dep:tmq"]
 # Enables G1↔G2 offload simulation via kvbm-engine.
 kvbm-offload = ["dep:kvbm-engine", "dep:kvbm-physical", "dep:kvbm-common", "dep:velo"]
 
@@ -24,6 +25,7 @@ kvbm-offload = ["dep:kvbm-engine", "dep:kvbm-physical", "dep:kvbm-common", "dep:
 dynamo-data-gen = { workspace = true }
 dynamo-kv-router = { workspace = true }
 dynamo-tokens = { workspace = true }
+dynamo-truthy = { workspace = true }
 kvbm-logical = { workspace = true }
 
 # kvbm-offload feature dependencies (G1↔G2 transport simulation)
@@ -46,7 +48,7 @@ rmp-serde = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_path_to_error = { workspace = true }
-tmq = { workspace = true }
+tmq = { workspace = true, optional = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
@@ -64,5 +66,8 @@ rustc-hash = "2"
 tokio-timerfd = "0.2"
 
 [dev-dependencies]
+dynamo-kv-router = { workspace = true, features = ["metrics"] }
 rstest = "0.18.2"
 tempfile = { workspace = true }
+tmq = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

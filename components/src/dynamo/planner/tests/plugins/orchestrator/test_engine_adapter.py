@@ -34,7 +34,7 @@ from dynamo.planner.core.types import (
     WorkerCapabilities,
     WorkerCounts,
 )
-from dynamo.planner.plugins.clock import VirtualClock
+from dynamo.planner.plugins.clock import Clock, VirtualClock
 from dynamo.planner.plugins.merge.types import ChainAugmentOutcome
 from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
 from dynamo.planner.plugins.orchestrator.pipeline import PipelineOutcome
@@ -523,7 +523,7 @@ async def test_tick_propagates_pipeline_execute_action_to_diagnostics():
         ],
     )
 
-    async def fake_tick(ctx, baseline):
+    async def fake_tick(ctx, baseline, *, tick_now=None):
         return canned_outcome
 
     adapter._orchestrator.tick = fake_tick  # type: ignore[method-assign]
@@ -716,6 +716,79 @@ def test_lazy_fpm_pull_only_when_load_builtin_is_due():
     assert not load_tick.run_throughput_scaling
 
 
+@pytest.mark.asyncio
+async def test_observation_prefetch_and_dispatch_share_tick_timestamp():
+    """A clock advance between adapter and orchestrator must not change due-ness.
+
+    Observation prefetch plans against the next tick's monotonic timestamp. In
+    production, sampling the clock again during dispatch produces a slightly
+    later value. When the load interval equals the pipeline interval, recording
+    that later value as ``last_call_at`` makes the following prefetch check miss
+    by the sampling delta, even though the plugin is due when dispatch runs.
+    """
+
+    class _DriftingMonoClock(Clock):
+        def __init__(self, step: float = 0.001) -> None:
+            self._mono = 0.0
+            self._step = step
+
+        def set_monotonic(self, value: float) -> None:
+            self._mono = value
+
+        def now(self) -> float:
+            return 1.7e9 + self._mono
+
+        def monotonic(self) -> float:
+            current = self._mono
+            self._mono += self._step
+            return current
+
+        async def sleep(self, seconds: float) -> None:  # pragma: no cover
+            return None
+
+    cfg = PlannerConfig.model_validate(
+        {
+            "mode": "agg",
+            "enable_load_scaling": True,
+            "enable_throughput_scaling": False,
+            "optimization_target": "load",
+            "served_model_name": "test",
+            "load_adjustment_interval_seconds": 5.0,
+            "throughput_adjustment_interval_seconds": 60.0,
+            "decode_scale_up_kv_rate": 90.0,
+            "decode_scale_down_kv_rate": 50.0,
+        }
+    )
+    clock = _DriftingMonoClock()
+    adapter = OrchestratorEngineAdapter(cfg, _caps(), clock=clock)
+
+    # Adapter construction registers plugins and may read the clock. Reset it
+    # so this test controls the cadence boundary exactly.
+    clock.set_monotonic(0.0)
+    first = adapter.initial_tick(start_s=0.0)
+    assert first.at_monotonic_s == pytest.approx(5.0)
+    assert first.need_worker_fpm is True
+
+    clock.set_monotonic(first.at_monotonic_s)
+    effects = await adapter.tick(
+        first,
+        TickInput(
+            now_s=first.at_s,
+            worker_counts=WorkerCounts(
+                ready_num_decode=1,
+                expected_num_decode=1,
+            ),
+            fpm_observations=FpmObservations(decode={("w1", 0): _make_fpm("w1")}),
+        ),
+    )
+
+    load_plugin = adapter._orchestrator.registry.get_plugin("builtin_load_propose")
+    assert load_plugin is not None
+    assert load_plugin.last_call_at == pytest.approx(first.at_monotonic_s)
+    assert effects.next_tick is not None
+    assert effects.next_tick.need_worker_fpm is True
+
+
 def test_throughput_only_sla_still_pulls_fpm_for_live_regression():
     cfg = PlannerConfig.model_validate(
         {
@@ -798,7 +871,7 @@ async def test_external_fpm_request_does_not_feed_builtin_regression_early():
     assert tick.need_worker_fpm is True
     assert not tick.run_load_scaling
 
-    async def fake_orchestrator_tick(ctx, baseline):
+    async def fake_orchestrator_tick(ctx, baseline, *, tick_now=None):
         return PipelineOutcome(execute_action="skip_no_targets", final_proposal=None)
 
     adapter._orchestrator.tick = fake_orchestrator_tick  # type: ignore[method-assign]
@@ -832,7 +905,7 @@ async def test_internal_load_tick_feeds_builtin_regression():
     assert tick.need_worker_fpm is True
     assert tick.run_load_scaling
 
-    async def fake_orchestrator_tick(ctx, baseline):
+    async def fake_orchestrator_tick(ctx, baseline, *, tick_now=None):
         return PipelineOutcome(execute_action="skip_no_targets", final_proposal=None)
 
     adapter._orchestrator.tick = fake_orchestrator_tick  # type: ignore[method-assign]
@@ -875,7 +948,7 @@ async def test_disabled_load_scaling_reports_disabled_on_load_tick():
     assert tick.run_load_scaling
     assert not tick.run_throughput_scaling
 
-    async def fake_orchestrator_tick(ctx, baseline):
+    async def fake_orchestrator_tick(ctx, baseline, *, tick_now=None):
         return PipelineOutcome(execute_action="skip_no_targets", final_proposal=None)
 
     adapter._orchestrator.tick = fake_orchestrator_tick  # type: ignore[method-assign]
@@ -899,7 +972,7 @@ async def test_predict_failed_reason_surfaces_on_throughput_tick():
     tick = adapter._compute_next_scheduled_tick()
     assert tick.run_throughput_scaling
 
-    async def fake_orchestrator_tick(ctx, baseline):
+    async def fake_orchestrator_tick(ctx, baseline, *, tick_now=None):
         return PipelineOutcome(
             execute_action="skip_no_targets",
             final_proposal=None,

@@ -53,7 +53,7 @@ webhooks:
   {{- else if .Values.namespaceRestriction.enabled }}
   namespaceSelector:
     matchLabels:
-      kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      kubernetes.io/metadata.name: {{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace | quote }}
   {{- end }}
   rules:
   - apiGroups:
@@ -87,7 +87,7 @@ webhooks:
   {{- else if .Values.namespaceRestriction.enabled }}
   namespaceSelector:
     matchLabels:
-      kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      kubernetes.io/metadata.name: {{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace | quote }}
   {{- end }}
   rules:
   - apiGroups:
@@ -121,7 +121,7 @@ webhooks:
   {{- else if .Values.namespaceRestriction.enabled }}
   namespaceSelector:
     matchLabels:
-      kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      kubernetes.io/metadata.name: {{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace | quote }}
   {{- end }}
   rules:
   - apiGroups:
@@ -155,7 +155,7 @@ webhooks:
   {{- else if .Values.namespaceRestriction.enabled }}
   namespaceSelector:
     matchLabels:
-      kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      kubernetes.io/metadata.name: {{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace | quote }}
   {{- end }}
   rules:
   - apiGroups:
@@ -189,7 +189,7 @@ webhooks:
   {{- else if .Values.namespaceRestriction.enabled }}
   namespaceSelector:
     matchLabels:
-      kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      kubernetes.io/metadata.name: {{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace | quote }}
   {{- end }}
   rules:
   - apiGroups:
@@ -243,7 +243,7 @@ webhooks:
   {{- else if .Values.namespaceRestriction.enabled }}
   namespaceSelector:
     matchLabels:
-      kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      kubernetes.io/metadata.name: {{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace | quote }}
   {{- end }}
   rules:
   - apiGroups:
@@ -278,7 +278,7 @@ webhooks:
   {{- else if .Values.namespaceRestriction.enabled }}
   namespaceSelector:
     matchLabels:
-      kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      kubernetes.io/metadata.name: {{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace | quote }}
   {{- end }}
   rules:
   - apiGroups:
@@ -312,7 +312,7 @@ webhooks:
   {{- else if .Values.namespaceRestriction.enabled }}
   namespaceSelector:
     matchLabels:
-      kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      kubernetes.io/metadata.name: {{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace | quote }}
   {{- end }}
   rules:
   - apiGroups:
@@ -346,7 +346,7 @@ webhooks:
   {{- else if .Values.namespaceRestriction.enabled }}
   namespaceSelector:
     matchLabels:
-      kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      kubernetes.io/metadata.name: {{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace | quote }}
   {{- end }}
   rules:
   - apiGroups:

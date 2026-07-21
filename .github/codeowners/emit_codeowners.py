@@ -1,15 +1,24 @@
 """Emit a GitHub CODEOWNERS file (+ advisory-reviewers.yaml) from areas.yaml.
 
-GitHub CODEOWNERS is last-match-wins. The base tier is emitted as a *minimal
-last-match cover* (broad parent globs + carve-out exceptions) computed against
-the live tree, grouped per area for readability, with cross-area carve-outs
-pulled into a trailing override section. Shared co-ownership and file-type
-co-ownership are emitted LAST so they win over the base rules they refine.
+GitHub CODEOWNERS is last-match-wins. The base tier is emitted by rendering
+each area's declared ``path_globs`` verbatim as anchored rules, grouped per
+area for readability, with cross-area carve-outs (a glob that lexically nests
+under another area's dir glob) pulled into a trailing override section.
+File-type rules are defaults over the base tier. Explicit path overrides and
+shared co-ownership are emitted after them so declarations for a specific path
+remain effective.
 
-Reads ``areas.yaml`` directly via ``codeowners_match.compute_resolution`` --
-no more ``/tmp/areas.resolved.yaml`` round-trip with ``build_codeowners.py``.
-The shared module is the single source of truth, so the coverage gate and the
-file emitted here cannot disagree.
+Emission is a PURE FUNCTION of the policy inputs (``areas.yaml`` and
+``external_contributors.yaml``): the repository tree is NEVER read at emit
+time. That fixes a base-branch race the old generator suffered from -- the
+tree-dependent minimal-cover / singleton-file optimization used to rewrite
+rules whenever an unrelated commit on ``main`` added, deleted, or moved a
+file under an already-owned prefix, breaking the ``codeowners`` CI check on
+long-running PRs that had touched nothing structural.
+
+Coverage is still validated by ``build_codeowners.py --strict`` (which does
+read ``git ls-files``). Emit and gate share ``codeowners_match``'s pure
+resolver, so a tree file that the gate accepts also gets a rule at emit.
 
 Nobody reads this file to find a reviewer -- GitHub auto-requests the owning
 team, and ``who_owns.py`` answers "who reviews this path" on demand. The
@@ -22,7 +31,7 @@ inherit the team's globs without duplicating them. The same file drives
 
 Usage:
   uv run python .github/codeowners/emit_codeowners.py \\
-      --areas .github/codeowners/areas.yaml --repo . \\
+      --areas .github/codeowners/areas.yaml \\
       --out CODEOWNERS \\
       --advisory-out .github/codeowners/advisory-reviewers.yaml \\
       --external .github/codeowners/external_contributors.yaml \\
@@ -38,14 +47,7 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parent))
-from codeowners_match import (  # noqa: E402
-    ResolvedModel,
-    anchor,
-    compute_resolution,
-    load_tree,
-    minimal_cover,
-    resolve_owners,
-)
+from codeowners_match import ResolvedModel, anchor, compute_resolution  # noqa: E402
 
 
 def _owners_str(label_to_team: dict[str, str], owners: list[str]) -> str:
@@ -205,39 +207,36 @@ def render_contributors_md(contributors: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _base_rules(model: ResolvedModel, tree: list[str]) -> list[tuple[str, str]]:
-    """Compute the minimal last-match cover for the base (single-owner) tier."""
-    label_to_team = model.label_to_team()
-    base_lookup = sorted(
-        ((anchor(g), [a.github_team]) for a in model.areas for g in a.path_globs),
-        key=lambda r: len(r[0]),
-    )
-    file_team: dict[str, str] = {}
-    for f in tree:
-        owners = resolve_owners(base_lookup, f)
-        file_team[f] = owners[0] if owners else (model.catch_all or "")
-    rules = minimal_cover(file_team, model.catch_all)
+def _base_rules(model: ResolvedModel) -> list[tuple[str, str]]:
+    """Render every declared ``path_globs`` entry as an anchored ``(pat, team)``.
 
-    # Drop accidental duplicates while preserving order.
+    Pure function of the resolved model -- no tree access. Duplicates that
+    would arise from the same glob showing up in two areas (a configuration
+    smell) are collapsed while preserving first-seen order so downstream
+    grouping stays stable.
+    """
     seen: set[tuple[str, str]] = set()
-    deduped: list[tuple[str, str]] = []
-    for p, t in rules:
-        if (p, t) in seen:
-            continue
-        seen.add((p, t))
-        deduped.append((p, t))
-    # Suppress unused; label_to_team is consumed by callers above when needed.
-    _ = label_to_team
-    return deduped
+    rules: list[tuple[str, str]] = []
+    for area in model.areas:
+        for g in area.path_globs:
+            key = (anchor(g), area.github_team)
+            if key in seen:
+                continue
+            seen.add(key)
+            rules.append(key)
+    return rules
 
 
 def _render_codeowners(
     model: ResolvedModel,
-    tree: list[str],
     group: bool,
     external: list[dict] | None = None,
 ) -> tuple[list[str], dict[str, int]]:
-    """Build the CODEOWNERS file body. Returns (lines, stats)."""
+    """Build the CODEOWNERS file body. Returns (lines, stats).
+
+    Pure function of the resolved model plus the external-contributors list:
+    no tree, no filesystem. Same inputs -> byte-identical output.
+    """
     catch_all = model.catch_all
     label_to_team = model.label_to_team()
     team_to_label = {a.github_team: a.label for a in model.areas}
@@ -250,7 +249,7 @@ def _render_codeowners(
     def deco(owners: str) -> str:
         return decorate_owners(owners, team_externals)
 
-    base_rules = _base_rules(model, tree)
+    base_rules = _base_rules(model)
 
     shared_rules = sorted(
         (
@@ -259,13 +258,15 @@ def _render_codeowners(
         ),
         key=lambda r: (len(r[0]), r[0]),
     )
-    ft_rules = sorted(
-        (
-            (anchor(fs.glob), _owners_str(label_to_team, fs.owners))
-            for fs in model.filetype_shared
-        ),
-        key=lambda r: (len(r[0]), r[0]),
-    )
+    # Filetype patterns emit UNANCHORED (bare ``*Dockerfile*`` matches by
+    # basename at any depth under GitHub CODEOWNERS rules). Anchoring them
+    # would silently narrow ``*Dockerfile*`` to only match root-level files.
+    # Preserve declaration order: overlapping filetype patterns also use
+    # CODEOWNERS last-match-wins semantics, so a later YAML rule is an
+    # intentional refinement of an earlier one.
+    ft_rules = [
+        (fs.glob, _owners_str(label_to_team, fs.owners)) for fs in model.filetype_shared
+    ]
 
     teams = sorted(
         {a.github_team for a in model.areas}
@@ -333,11 +334,19 @@ def _render_codeowners(
             lines += ["", f"# === {lbl} ==="]
             lines += [fmt(p, deco(t)) for p, t in rules]
 
+    if ft_rules:
+        lines += [
+            "",
+            "# --- File-type ownership defaults: unanchored patterns at any depth. ---",
+            "# Explicit path overrides and shared rules below take precedence.",
+        ]
+        lines += [fmt(p, deco(t)) for p, t in ft_rules]
+
     if overrides:
         lines += [
             "",
             "# === Path overrides: a subsystem nested inside another area's tree.",
-            "# More specific, so they win via last-match over the area globs above. ===",
+            "# More specific, so they win via last-match over area and file-type rules. ===",
         ]
         lines += [fmt(p, deco(t)) for p, t in overrides]
 
@@ -347,12 +356,6 @@ def _render_codeowners(
             "# --- Shared ownership: multi-team (any one approves; wins via last-match) ---",
         ]
         lines += [fmt(p, deco(t)) for p, t in shared_rules]
-    if ft_rules:
-        lines += [
-            "",
-            "# --- File-type co-ownership: area + type owner (wins via last-match) ---",
-        ]
-        lines += [fmt(p, deco(t)) for p, t in ft_rules]
 
     stats = {
         "base": len(base_rules),
@@ -404,7 +407,12 @@ def main() -> int:
         "--areas", required=True, help="path to areas.yaml (source of truth)"
     )
     ap.add_argument(
-        "--repo", default=".", help="repo whose tree the cover is built against"
+        "--repo",
+        default=None,
+        help=(
+            "DEPRECATED: emission no longer reads the tree. Accepted for "
+            "backward compatibility with older CI invocations and ignored."
+        ),
     )
     ap.add_argument("--out", default="CODEOWNERS", help="CODEOWNERS output path")
     ap.add_argument(
@@ -430,8 +438,7 @@ def main() -> int:
     args = ap.parse_args()
 
     spec = yaml.safe_load(Path(args.areas).read_text())
-    tree = load_tree(Path(args.repo))
-    model = compute_resolution(spec, tree)
+    model = compute_resolution(spec)
 
     external_path = (
         Path(args.external)
@@ -440,9 +447,7 @@ def main() -> int:
     )
     external = load_external_contributors(external_path)
 
-    lines, stats = _render_codeowners(
-        model, tree, group=not args.no_group, external=external
-    )
+    lines, stats = _render_codeowners(model, group=not args.no_group, external=external)
     Path(args.out).write_text("\n".join(lines) + "\n")
     total = (
         stats["base"]

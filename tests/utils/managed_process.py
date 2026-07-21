@@ -15,7 +15,7 @@ from typing import Any, List, Optional
 import psutil
 import requests
 
-from tests.utils.constants import DefaultPort
+from tests.utils.constants import DefaultPort, DynamoPortRange
 from tests.utils.port_utils import allocate_port, deallocate_port
 from tests.utils.test_output import resolve_test_output_path
 
@@ -930,7 +930,7 @@ class DynamoFrontendProcess(ManagedProcess):
         if frontend_port == 0:
             # Treat `0` as "allocate a random free port" for xdist-safe tests.
             # We allocate within the i16-safe range required by the Rust side.
-            frontend_port = allocate_port(DefaultPort.FRONTEND.value)
+            frontend_port = allocate_port(DynamoPortRange.FRONTEND.value)
             self._allocated_http_port = frontend_port
 
         # If frontend_port is unset, dynamo.frontend defaults to DefaultPort.FRONTEND.

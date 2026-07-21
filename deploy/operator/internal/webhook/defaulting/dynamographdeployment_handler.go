@@ -25,6 +25,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	admissionv1 "k8s.io/api/admission/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -45,7 +46,6 @@ const (
 // for version-gated behavior changes in the controller.
 type DGDDefaulter struct {
 	OperatorVersion string
-	GroveEnabled    bool
 }
 
 // dgdV1Alpha1Defaulter keeps the previous endpoint available during the
@@ -56,10 +56,9 @@ type dgdV1Alpha1Defaulter struct {
 }
 
 // NewDGDDefaulter creates a new DGDDefaulter with the given operator version.
-func NewDGDDefaulter(operatorVersion string, groveEnabled bool) *DGDDefaulter {
+func NewDGDDefaulter(operatorVersion string) *DGDDefaulter {
 	return &DGDDefaulter{
 		OperatorVersion: operatorVersion,
-		GroveEnabled:    groveEnabled,
 	}
 }
 
@@ -99,7 +98,7 @@ func (d *DGDDefaulter) defaultV1Beta1(
 	// default the controller panics on a nil pointer dereference in
 	// expandRolesForComponent(). Apply on every operation so that components
 	// added via UPDATE also get the default.
-	grovePathway := d.isGrovePathway(dgd)
+	grovePathway := d.isGrovePathway(ctx, dgd)
 	for i := range dgd.Spec.Components {
 		component := &dgd.Spec.Components[i]
 		if component.Replicas == nil {
@@ -127,24 +126,26 @@ func (d *DGDDefaulter) defaultV1Beta1(
 	return nil
 }
 
-func (d *DGDDefaulter) isGrovePathway(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
-	return d.GroveEnabled && (dgd.Annotations == nil ||
+func (d *DGDDefaulter) isGrovePathway(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
+	return features.MustGateFrom(ctx).Enabled(features.Grove) && (dgd.Annotations == nil ||
 		strings.ToLower(dgd.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse)
 }
 
 // RegisterWithManager registers the defaulting webhook with the manager.
-func (d *DGDDefaulter) RegisterWithManager(mgr manager.Manager) error {
-	betaWebhook := admission.
-		WithCustomDefaulter(mgr.GetScheme(), &nvidiacomv1beta1.DynamoGraphDeployment{}, d).
-		WithRecoverPanic(true)
+func (d *DGDDefaulter) RegisterWithManager(mgr manager.Manager, gate features.Gate) error {
+	betaDefaulter := internalwebhook.NewLeaseAwareDefaulter(d, internalwebhook.GetExcludedNamespaces())
+	betaWebhook := internalwebhook.WithGate(admission.
+		WithCustomDefaulter(mgr.GetScheme(), &nvidiacomv1beta1.DynamoGraphDeployment{}, betaDefaulter).
+		WithRecoverPanic(true), gate)
 	mgr.GetWebhookServer().Register(dgdV1Beta1DefaultingWebhookPath, betaWebhook)
 
 	// TODO(1.5): Remove the v1alpha1 endpoint and defaulter after 1.3 is no longer
 	// a supported upgrade or rollback target.
 	alphaDefaulter := &dgdV1Alpha1Defaulter{defaulter: d}
-	alphaWebhook := admission.
-		WithCustomDefaulter(mgr.GetScheme(), &nvidiacomv1alpha1.DynamoGraphDeployment{}, alphaDefaulter).
-		WithRecoverPanic(true)
+	alphaDefaulterWithLease := internalwebhook.NewLeaseAwareDefaulter(alphaDefaulter, internalwebhook.GetExcludedNamespaces())
+	alphaWebhook := internalwebhook.WithGate(admission.
+		WithCustomDefaulter(mgr.GetScheme(), &nvidiacomv1alpha1.DynamoGraphDeployment{}, alphaDefaulterWithLease).
+		WithRecoverPanic(true), gate)
 	mgr.GetWebhookServer().Register(dgdV1Alpha1DefaultingWebhookPath, alphaWebhook)
 	return nil
 }

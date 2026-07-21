@@ -122,9 +122,8 @@ enforce:
 | `--admission-control token-capacity` without thresholds | Set each threshold you want to enable. The former preset values were `1.0`, `10000000`, and `64.0`, respectively. |
 
 Earlier behavior filled unspecified thresholds with preset values after any one threshold was set.
-That implicit coupling has been removed: an unset threshold stays disabled. The
-`--router-queue-threshold` option remains independent and retains its existing default and queueing
-behavior.
+That implicit coupling has been removed: an unset threshold stays disabled. The independent
+`--router-queue-threshold` option also remains disabled until set to a numeric value.
 
 ## Busy Detection Logic
 

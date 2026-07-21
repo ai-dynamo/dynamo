@@ -143,8 +143,13 @@ impl Store for FileStore {
             // Create
             fs::create_dir_all(&p).map_err(to_fs_err)?;
         }
-        let dir = Directory::new(self.root.clone(), p.clone(), ttl.unwrap_or(DEFAULT_TTL));
-        self.active_dirs.lock().insert(p, dir.clone());
+        let candidate = Directory::new(self.root.clone(), p.clone(), ttl.unwrap_or(DEFAULT_TTL));
+        let dir = self
+            .active_dirs
+            .lock()
+            .entry(p)
+            .or_insert(candidate)
+            .clone();
         Ok(dir)
     }
 
@@ -164,8 +169,13 @@ impl Store for FileStore {
             ));
         }
         // The filesystem itself doesn't store the TTL so for now default it
-        let dir = Directory::new(self.root.clone(), p.clone(), DEFAULT_TTL);
-        self.active_dirs.lock().insert(p, dir.clone());
+        let candidate = Directory::new(self.root.clone(), p.clone(), DEFAULT_TTL);
+        let dir = self
+            .active_dirs
+            .lock()
+            .entry(p)
+            .or_insert(candidate)
+            .clone();
         Ok(Some(dir))
     }
 
@@ -614,12 +624,48 @@ mod tests {
     use std::collections::HashSet;
     use std::fs;
     use std::os::unix::fs::symlink;
+    use std::sync::Arc;
     use std::time::Duration;
 
     use futures::StreamExt;
+    use tokio::sync::Barrier;
     use tokio_util::sync::CancellationToken;
 
     use crate::storage::kv::{Bucket as _, FileStore, Key, Store as _, StoreOutcome};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_bucket_open_shares_ownership_registry() {
+        let t = tempfile::tempdir().unwrap();
+        let cancel_token = CancellationToken::new();
+        let store = FileStore::new(cancel_token.clone(), t.path());
+        let barrier = Arc::new(Barrier::new(32));
+
+        let mut tasks = Vec::new();
+        for _ in 0..32 {
+            let store = store.clone();
+            let barrier = barrier.clone();
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                store
+                    .get_or_create_bucket("v1/concurrent", None)
+                    .await
+                    .unwrap()
+            }));
+        }
+
+        let mut directories = Vec::new();
+        for task in tasks {
+            directories.push(task.await.unwrap());
+        }
+        cancel_token.cancel();
+
+        let ownership = &directories[0].owned_files;
+        assert!(
+            directories
+                .iter()
+                .all(|directory| Arc::ptr_eq(ownership, &directory.owned_files))
+        );
+    }
 
     #[test]
     fn deleted_event_path_canonicalizes_existing_parent() {

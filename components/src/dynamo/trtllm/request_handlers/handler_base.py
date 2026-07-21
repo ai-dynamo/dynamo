@@ -35,6 +35,8 @@ from tensorrt_llm.scheduling_params import SchedulingParams
 
 from dynamo._core import Client, Context
 from dynamo.common.backend import logprobs as _shared_logprobs
+from dynamo.common.backend.engine import is_generation_stage
+from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.llm.exceptions import EngineShutdown
@@ -43,6 +45,12 @@ from dynamo.nixl_connect import Connector
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.constants import DisaggregationMode
+from dynamo.trtllm.conversation_affinity import (
+    CONVERSATION_PARAMS_AVAILABLE,
+    conversation_params_for,
+    engine_conversation_affinity_enabled,
+    session_id_from_request,
+)
 from dynamo.trtllm.engine import TensorRTLLMEngine
 from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
 from dynamo.trtllm.metrics import AdditionalMetricsCollector
@@ -53,7 +61,11 @@ from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
     DisaggregatedParamsCodec,
 )
-from dynamo.trtllm.utils.request_utils import request_cache_salt
+from dynamo.trtllm.utils.request_utils import (
+    apply_stop_conditions_to_sampling_params,
+    normalize_top_k_for_trtllm,
+    request_cache_salt,
+)
 
 if TYPE_CHECKING:
     # tensorrt_llm may use a different version that doesn't have MetricsCollector,
@@ -236,6 +248,8 @@ class RequestHandlerConfig:
     additional_metrics: Optional["AdditionalMetricsCollector"] = None
     max_seq_len: Optional[int] = None
     disagg_machine_id: int = 0  # 10-bit machine_id for snowflake disagg_request_id
+    # Force engine-owned conversation-affinity ADP routing regardless of engine detection.
+    conversation_affinity: bool = False
 
 
 class HandlerBase(BaseGenerativeHandler):
@@ -256,6 +270,13 @@ class HandlerBase(BaseGenerativeHandler):
         self.publisher = config.publisher
         self.metrics_collector = config.metrics_collector
         self.disaggregation_mode = config.disaggregation_mode
+        # Engine-owned conversation-affinity ADP routing gate; resolved lazily on first
+        # request (engine may not be initialized at handler construction). See
+        # conversation_affinity.py. None = not yet resolved.
+        self._conversation_affinity: Optional[bool] = None
+        # Manual override (--conversation-affinity / DYN_ENGINE_CONV_AFFINITY) to force
+        # engine-side assignment of conversation-affinity regardless of engine detection.
+        self._engine_conversation_affinity_override: bool = config.conversation_affinity
         self.encode_client = config.encode_client
         self.multimodal_processor = config.multimodal_processor
         self.first_generation = True
@@ -623,12 +644,19 @@ class HandlerBase(BaseGenerativeHandler):
         # Serialize first_gen_log_probs for the Rust transport layer.
         DisaggregatedParamsCodec.serialize_first_gen_log_probs(params_dict)
 
+        # Text-only decode requests already carry the original token_ids.
+        # Prompt metadata is only needed to avoid reprocessing multimodal input.
+        if not self._request_has_multimodal(request) and not any(
+            key in request for key in ("_epd_processed_prompt", "_epd_prompt_token_ids")
+        ):
+            return params_dict
+
         # Pack prefill metadata for DECODE worker optimization
         # The frontend only forwards disaggregated_params from prefill response
         # Note: max_tokens is already handled by Rust frontend's PrefillRouter
         prefill_metadata = {}
 
-        # ALWAYS pack prompt info for DECODE to skip re-processing
+        # Pack prompt info for DECODE to skip re-processing
         # Per TRT-LLM team: DECODE never needs to reload images - KV cache has the context
         # Use processed_input['prompt'] (from process_openai_request) which is the actual
         # multimodal prompt used by TRT-LLM, not res.prompt which might be raw
@@ -1030,48 +1058,36 @@ class HandlerBase(BaseGenerativeHandler):
                         sampling_params, "prompt_logprobs", int(prompt_logprobs_value)
                     )
 
+        expanded_prompt_len = (
+            processed_input.pop("expanded_prompt_len", None)
+            if isinstance(processed_input, dict)
+            else None
+        )
+
         max_tokens = request["stop_conditions"]["max_tokens"]
         if max_tokens is not None:
             sampling_params.max_tokens = max_tokens
-        elif self.max_seq_len is not None:
-            if self.multimodal_processor and processed_input is not None:
-                logging.debug(
-                    "Skipping dynamic max_tokens default for multimodal request..."
-                )
-            else:
-                token_ids = request.get("token_ids", [])
-                input_length = len(token_ids)
-                dynamic_default = max(1, self.max_seq_len - input_length)
-                sampling_params.max_tokens = dynamic_default
+        else:
+            has_images = self._request_has_images(processed_input)
+            prompt_token_ids = (
+                processed_input.get("prompt_token_ids")
+                if isinstance(processed_input, dict)
+                else None
+            )
+            default_max_tokens = self._default_max_tokens(
+                self.max_seq_len,
+                prompt_token_ids
+                if prompt_token_ids is not None
+                else request.get("token_ids", []),
+                has_images,
+                expanded_prompt_len,
+            )
+            if default_max_tokens is not None:
+                sampling_params.max_tokens = default_max_tokens
 
-        stop_conditions = request["stop_conditions"]
-        ignore_eos = stop_conditions.get("ignore_eos")
-        visible_stop_token_ids = set(
-            stop_conditions.get("stop_token_ids_visible") or []
-        )
-        # TRT-LLM PyTorch backend has no per-token "visible stop" hook, so
-        # visible stop tokens (e.g. Harmony's `<|call|>` for gpt-oss) are
-        # stripped before Dynamo sees them. Force `ignore_eos=True` to disable
-        # engine-side stopping and let backend.rs (`VisibleStopTokenDetected` /
-        # `HiddenStopTokenDetected`) own all stopping.
-        #
-        # TODO: revisit once TRT-LLM exposes a per-token visible-stop hook.
-        if ignore_eos or visible_stop_token_ids:
-            sampling_params.ignore_eos = True
-
-        min_tokens = stop_conditions.get("min_tokens")
-        if min_tokens:
-            sampling_params.min_tokens = min_tokens
-
-        stop_token_ids = stop_conditions.get("stop_token_ids_hidden")
-        if stop_token_ids:
-            existing = sampling_params.stop_token_ids or []
-            engine_stop_token_ids = set(existing).union(stop_token_ids)
-            engine_stop_token_ids.difference_update(visible_stop_token_ids)
-            sampling_params.stop_token_ids = list(engine_stop_token_ids)
-        elif visible_stop_token_ids and sampling_params.stop_token_ids:
-            sampling_params.stop_token_ids = list(
-                set(sampling_params.stop_token_ids) - visible_stop_token_ids
+        if is_generation_stage(CommonDisaggregationMode[self.disaggregation_mode.name]):
+            apply_stop_conditions_to_sampling_params(
+                sampling_params, request["stop_conditions"]
             )
 
         # TODO: Instead of True, we should use streaming from the request.
@@ -1096,11 +1112,43 @@ class HandlerBase(BaseGenerativeHandler):
         # Build trace headers for distributed tracing
         trace_headers = context.trace_headers()
 
+        # Resolve the engine-owned conversation-affinity gate once (lazily; the engine is
+        # initialized by first request). When on, the engine's ConversationAwareADPRouter
+        # picks the attention-DP rank from the conversation id, so we must NOT force a rank.
+        if self._conversation_affinity is None:
+            if (
+                self._engine_conversation_affinity_override
+                and not CONVERSATION_PARAMS_AVAILABLE
+            ):
+                raise RuntimeError(
+                    "--conversation-affinity / DYN_ENGINE_CONV_AFFINITY is set but "
+                    "the installed TensorRT-LLM build has no ConversationParams API (requires a "
+                    "release newer than 1.3.0rc20)."
+                )
+            self._conversation_affinity = (
+                self._engine_conversation_affinity_override
+                or engine_conversation_affinity_enabled(self.engine.llm)
+            )
+            if self._conversation_affinity and not CONVERSATION_PARAMS_AVAILABLE:
+                raise RuntimeError(
+                    "attention_dp_config.kv_cache_routing_conversation_affinity is enabled but "
+                    "the installed TensorRT-LLM build has no ConversationParams API (requires a "
+                    "release newer than 1.3.0rc20)."
+                )
+        conv_affinity = self._conversation_affinity
+
         # Extract dp_rank from request's routing hints for attention DP routing
         routing = request.get("routing", {})
         dp_rank = routing.get("dp_rank") if routing else None
+        conversation_params = None
         scheduling_params = None
-        if dp_rank is not None:
+        if conv_affinity:
+            # Let the engine pick the rank from the conversation id (agent_context.session_id);
+            # do NOT force a rank (an explicit rank is honored before affinity and bypasses it).
+            conversation_params = conversation_params_for(
+                session_id_from_request(request)
+            )
+        elif dp_rank is not None:
             scheduling_params = SchedulingParams(
                 attention_dp_rank=dp_rank,
                 attention_dp_relax=False,  # Strict routing - use the rank dynamo router selected
@@ -1115,6 +1163,11 @@ class HandlerBase(BaseGenerativeHandler):
 
         try:
             # NEW: Updated engine call to include multimodal data
+            # Only pass conversation_params in affinity mode — older TRT-LLM builds'
+            # generate_async does not accept the keyword.
+            conv_kwargs = (
+                {"conversation_params": conversation_params} if conv_affinity else {}
+            )
             generation_result = self.engine.llm.generate_async(
                 inputs=processed_input,  # Use the correctly extracted inputs
                 sampling_params=sampling_params,
@@ -1122,6 +1175,7 @@ class HandlerBase(BaseGenerativeHandler):
                 streaming=streaming,
                 trace_headers=trace_headers,
                 scheduling_params=scheduling_params,
+                **conv_kwargs,
                 priority=priority,
                 cache_salt=cache_salt,
             )
@@ -1336,12 +1390,55 @@ class HandlerBase(BaseGenerativeHandler):
             await self._initiate_shutdown(e)
 
     @staticmethod
+    def _request_has_images(processed_input) -> bool:
+        """Whether the processed input carries image content, as opposed to a
+        text-only request served by a multimodal worker.
+
+        This distinction drives max_tokens sizing: only image requests have
+        unexpanded placeholders in token_ids, so only they need the expanded
+        length; text requests use len(token_ids) directly.
+        """
+        return bool(
+            isinstance(processed_input, dict)
+            and (
+                processed_input.get("multi_modal_data")
+                or processed_input.get("multi_modal_embeddings")
+            )
+        )
+
+    @staticmethod
+    def _default_max_tokens(
+        max_seq_len: Optional[int],
+        token_ids: list,
+        has_images: bool,
+        expanded_prompt_len: Optional[int],
+    ) -> Optional[int]:
+        """Default for an omitted max_tokens: fill the model's remaining context.
+
+        For image requests, token_ids hold unexpanded placeholders, so sizing uses
+        expanded_prompt_len (placeholders replaced by their per-image token counts);
+        when that is unavailable, returns None to defer to the engine default rather
+        than overestimate. Text requests (including text-only requests to a
+        multimodal worker) use len(token_ids) directly. Returns None when no default
+        applies.
+        """
+        if max_seq_len is None:
+            return None
+        if has_images:
+            if expanded_prompt_len is None:
+                return None
+            return max(1, max_seq_len - expanded_prompt_len)
+        return max(1, max_seq_len - len(token_ids))
+
+    @staticmethod
     def _override_sampling_params(sampling_params, request: dict) -> SamplingParams:
         overrides = {
             key: value
             for key, value in request["sampling_options"].items()
             if value is not None
         }
+        if "top_k" in overrides:
+            overrides["top_k"] = normalize_top_k_for_trtllm(overrides["top_k"])
 
         # Convert guided_decoding dict (from Rust serialization) to GuidedDecodingParams.
         # Explicit field mapping avoids breakage if either side adds fields the other

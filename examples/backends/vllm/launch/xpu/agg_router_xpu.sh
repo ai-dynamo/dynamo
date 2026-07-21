@@ -51,8 +51,7 @@ print_launch_banner "Launching Aggregated + KV Routing (2 GPUs: $GPU_WORKER1, $G
 
 # run frontend + KV router
 python -m dynamo.frontend \
-    --router-mode kv \
-    --router-reset-states &
+    --router-mode kv &
 
 # run workers
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag

@@ -368,6 +368,7 @@ _Appears in:_
 | `location` _string_ | Deprecated: Location is ignored and no longer populated. It is retained<br />only so older objects continue to validate. |  | Optional: \{\} <br /> |
 | `storageType` _[DynamoCheckpointStorageType](#dynamocheckpointstoragetype)_ | Deprecated: StorageType is ignored and no longer populated. It is retained<br />only so older objects continue to validate. |  | Enum: [pvc s3 oci] <br />Optional: \{\} <br /> |
 | `jobName` _string_ | JobName is the name of the checkpoint creation Job |  | Optional: \{\} <br /> |
+| `podSnapshotName` _string_ | PodSnapshotName is the name of the PodSnapshot this checkpoint created to drive capture. It is<br />the authoritative pointer to the snapshot (which is otherwise located by label, not by<br />reconstructing its name) and lets the controller distinguish a never-created snapshot (empty)<br />from one that was created and later went missing (set, but no longer found). |  | Optional: \{\} <br /> |
 | `createdAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | CreatedAt is the timestamp when the checkpoint became ready |  | Optional: \{\} <br /> |
 | `message` _string_ | Message provides additional information about the current state |  | Optional: \{\} <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | DEPRECATED: Conditions are deprecated. Use status.phase instead. |  | Optional: \{\} <br /> |
@@ -792,6 +793,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `endpoints` _[EndpointInfo](#endpointinfo) array_ | Endpoints is the current list of all endpoints for this model |  | Optional: \{\} <br /> |
 | `readyEndpoints` _integer_ | ReadyEndpoints is the count of endpoints that are ready |  |  |
+| `loraFallbackCoveredEndpoints` _integer_ | LoRAFallbackCoveredEndpoints is the count of legacy prefill endpoints<br />covered by a capable prefill during a rolling upgrade. These endpoints are<br />excluded from ReadyEndpoints because they cannot serve the adapter directly. |  | Optional: \{\} <br /> |
 | `totalEndpoints` _integer_ | TotalEndpoints is the total count of endpoints |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions represents the latest available observations of the model's state |  | Optional: \{\} <br /> |
 
@@ -830,7 +832,8 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `address` _string_ | Address is the full address of the endpoint (e.g., "http://10.0.1.5:9090") |  |  |
 | `podName` _string_ | PodName is the name of the pod serving this endpoint |  | Optional: \{\} <br /> |
-| `ready` _boolean_ | Ready indicates whether the endpoint is ready to serve traffic<br />For LoRA models: true if the POST /loras request succeeded with a 2xx status code<br />For base models: always false (no probing performed) |  |  |
+| `ready` _boolean_ | Ready indicates whether this endpoint is ready to serve traffic.<br />For LoRA models: true only if this endpoint's lifecycle request succeeded.<br />For base models: always false (no probing performed). |  |  |
+| `loraFallbackCovered` _boolean_ | LoRAFallbackCovered indicates a legacy prefill endpoint that cannot manage<br />LoRAs itself is covered by a capable prefill in the same topology during a<br />rolling upgrade. It does not make this endpoint ready to serve the adapter. |  | Optional: \{\} <br /> |
 
 
 #### ExtraPodMetadata
@@ -1602,6 +1605,7 @@ _Appears in:_
 | `updatedReplicas` _integer_ | UpdatedReplicas is the number of replicas at the current/desired revision.<br />Required for all component kinds. |  | Minimum: 0 <br /> |
 | `readyReplicas` _integer_ | ReadyReplicas is the number of ready replicas.<br />Populated for PodClique, Deployment, and LeaderWorkerSet.<br />Not available for PodCliqueScalingGroup.<br />When nil, the field is omitted from the API response. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `availableReplicas` _integer_ | AvailableReplicas is the number of available replicas.<br />For Deployment: replicas ready for >= minReadySeconds.<br />For PodCliqueScalingGroup: replicas where all constituent PodCliques have >= MinAvailable ready pods.<br />Not available for PodClique or LeaderWorkerSet.<br />When nil, the field is omitted from the API response. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `scheduledReplicas` _integer_ | ScheduledReplicas is the number of replicas the backend scheduler has<br />scheduled, in Dynamo component-replica units. Optional; omitted (nil)<br />when the backend cannot derive it reliably. A nil value means "not<br />reported", never "zero scheduled". |  | Minimum: 0 <br />Optional: \{\} <br /> |
 
 
 #### SharedMemorySpec
@@ -1911,6 +1915,7 @@ _Appears in:_
 | `updatedReplicas` _integer_ | updatedReplicas is the number of replicas at the current/desired revision. |  | Minimum: 0 <br /> |
 | `readyReplicas` _integer_ | readyReplicas is the number of ready replicas. Populated for<br />`PodClique`, `Deployment`, and `LeaderWorkerSet`; not available for<br />`PodCliqueScalingGroup`. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `availableReplicas` _integer_ | availableReplicas is the number of available replicas. Populated for<br />`Deployment` and `PodCliqueScalingGroup`; not available for<br />`PodClique` or `LeaderWorkerSet`. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `scheduledReplicas` _integer_ | scheduledReplicas is the number of replicas the backend scheduler has<br />scheduled, expressed strictly in Dynamo component-replica units (not<br />raw backend pod counts). It is a diagnostic aid for distinguishing<br />capacity/scheduling shortfalls from runtime readiness.<br />It is optional and omitted (nil) when the active backend cannot derive<br />it reliably in component-replica units — for example before the backing<br />resource's status has been observed, or for backends that do not report<br />a scheduling count. A nil value therefore means "not reported", never<br />"zero scheduled"; consumers must not treat absence as a scheduling<br />failure. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 
 
 #### ComponentType
@@ -3453,16 +3458,15 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `restricted` _string_ | Deprecated: Namespace-restricted mode is deprecated and will be removed in a future release.<br />Use cluster-wide mode (leave Restricted empty) instead. |  |  |
-| `scope` _[NamespaceScopeConfiguration](#namespacescopeconfiguration)_ | Deprecated: Scope is only used in namespace-restricted mode, which is deprecated. |  |  |
+| `restricted` _string_ | Restricted enables namespace-restricted mode for development and testing.<br />Namespace-restricted mode is not supported for production. |  |  |
+| `scope` _[NamespaceScopeConfiguration](#namespacescopeconfiguration)_ | Scope configures the namespace ownership claim in namespace-restricted mode. |  |  |
 
 
 #### NamespaceScopeConfiguration
 
 
 
-Deprecated: NamespaceScopeConfiguration is used only by the deprecated namespace-restricted
-mode and will be removed in a future release.
+NamespaceScopeConfiguration configures the development/test namespace ownership claim.
 
 
 
@@ -3800,12 +3804,17 @@ For multinode deployments, the operator modifies probes based on the backend fra
 
 #### VLLM Backend
 
-The operator automatically selects between two deployment modes based on parallelism configuration:
+The operator automatically applies distributed execution configuration based on parallelism settings:
 
-**Tensor/Pipeline Parallel Mode** (when `world_size > GPUs_per_node`):
-- Uses Ray for distributed execution (`--distributed-executor-backend ray`)
-- **Leader nodes**: Starts Ray head and runs vLLM; all probes remain active
-- **Worker nodes**: Run Ray agents only; all probes (liveness, readiness, startup) are removed
+**Tensor/Pipeline Parallel Mode (Recommended)** (when `world_size > GPUs_per_node`):
+- Uses PyTorch multiprocessing (mp) backend for distributed execution (`--distributed-executor-backend mp`)
+- Supports multi-node deployments with PyTorch's native distributed initialization
+- **All nodes**: Run vLLM with proper `--nnodes`, `--node-rank`, `--master-addr` flags injected
+- **Probes**: Worker probes adjusted; leader probes remain active
+
+**Ray Backend**:
+- Used for use cases such as Elastic EP
+- Install with `pip install "ray>=2.55.0"` and configure `--distributed-executor-backend ray`
 
 **Data Parallel Mode** (when `world_size × data_parallel_size > GPUs_per_node`):
 - **Worker nodes**: All probes (liveness, readiness, startup) are removed
@@ -3886,7 +3895,7 @@ These are injected into all components when the corresponding infrastructure ser
 | Variable | Purpose | Default | Type |
 | --- | --- | --- | --- |
 | `USE_STREAMING` | Enables streaming mode for inference request proxying | `true` | `string` (boolean) |
-| `RUST_LOG` | Rust log level and filter configuration | `debug,dynamo_llm::kv_router=trace` | `string` |
+| `RUST_LOG` | Rust log level and filter configuration | `info` | `string` |
 
 ### VLLM Backend
 
@@ -3969,7 +3978,8 @@ Default container ports are configured based on component type:
 ## Backend-Specific Configurations
 
 ### VLLM
-- **Ray Head Port**: 6379 (for Ray cluster coordination in multinode TP/PP deployments)
+- **Ray Head Port**: 6379 (for Ray-based multinode deployments)
+- **MP Master Port**: 29500 (for PyTorch distributed multinode TP/PP deployments with mp backend)
 - **Data Parallel RPC Port**: 13445 (for data parallel multinode deployments)
 
 ### SGLang
