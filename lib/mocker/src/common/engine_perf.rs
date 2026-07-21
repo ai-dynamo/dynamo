@@ -15,6 +15,7 @@ use aiconfigurator_core::{
     BackendKind, DataType, ENGINE_CONFIG_SCHEMA_VERSION, EngineConfig, FPM_VERSION,
     ForwardPassMetrics, ForwardPassPerfDiagnostics, ForwardPassPerfModel, ForwardPassPerfOptions,
     ParallelMapping, QuantizationConfig, QueuedRequestMetrics, ScheduledRequestMetrics,
+    SpeculativeConfig,
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -26,8 +27,8 @@ const DEFAULT_AIC_SYSTEM: &str = "h200_sxm";
 const MAX_CAPACITY_SEARCH_CANDIDATES: u32 = 128;
 const MAX_KV_HIT_RATE_DISCOUNT: f64 = 0.95;
 const AIC_NEXTN_KEY: &str = "nextn";
-const AIC_NEXTN_ACCEPT_RATES_KEY: &str = "nextn_accept_rates";
-const RAW_AIC_NEXTN_ACCEPT_RATES: &str = "0,0,0,0,0";
+const AIC_NEXTN_ACCEPTED_KEY: &str = "nextn_accepted";
+const RAW_AIC_NEXTN_ACCEPTED: f64 = 0.0;
 
 /// Engine limits needed by planner/router-level queries.
 ///
@@ -65,10 +66,49 @@ pub struct AicEngineConfig {
 }
 
 impl AicEngineConfig {
-    pub fn into_aic_config(self) -> Result<EngineConfig> {
+    pub fn into_aic_config(mut self) -> Result<EngineConfig> {
         // `model_arch` is intentionally not forwarded: aiconfigurator main
         // dropped it from `EngineConfig` (architecture is inferred from the HF
         // model_path) and its deserializer ignores a stray `model_arch` key.
+        let nextn = self
+            .extra
+            .remove(AIC_NEXTN_KEY)
+            .map(|value| {
+                value
+                    .parse::<u32>()
+                    .with_context(|| format!("invalid {AIC_NEXTN_KEY} value {value:?}"))
+            })
+            .transpose()?;
+        let nextn_accepted = self
+            .extra
+            .remove(AIC_NEXTN_ACCEPTED_KEY)
+            .map(|value| {
+                value
+                    .parse::<f64>()
+                    .with_context(|| format!("invalid {AIC_NEXTN_ACCEPTED_KEY} value {value:?}"))
+            })
+            .transpose()?;
+        let speculative = match nextn {
+            Some(nextn) if nextn > 0 => {
+                let nextn_accepted = nextn_accepted.unwrap_or(RAW_AIC_NEXTN_ACCEPTED);
+                ensure!(
+                    nextn_accepted.is_finite()
+                        && (0.0..=f64::from(nextn)).contains(&nextn_accepted),
+                    "{AIC_NEXTN_ACCEPTED_KEY} must be finite and within [0, nextn={nextn}], got {nextn_accepted}"
+                );
+                Some(SpeculativeConfig {
+                    nextn: Some(nextn),
+                    nextn_accepted: Some(nextn_accepted),
+                })
+            }
+            Some(_) | None => {
+                ensure!(
+                    nextn_accepted.is_none(),
+                    "{AIC_NEXTN_ACCEPTED_KEY} requires a positive {AIC_NEXTN_KEY}"
+                );
+                None
+            }
+        };
         Ok(EngineConfig {
             schema_version: ENGINE_CONFIG_SCHEMA_VERSION,
             model_name: self.model_name,
@@ -83,6 +123,7 @@ impl AicEngineConfig {
                 attention_dp_size: self.attention_dp_size,
                 moe_tp_size: self.moe_tp_size,
                 moe_ep_size: self.moe_ep_size,
+                cp_size: None,
             },
             quantization: QuantizationConfig {
                 weight_dtype: self
@@ -102,17 +143,19 @@ impl AicEngineConfig {
                     .map(parse_data_type)
                     .transpose()?,
             },
-            speculative: None,
+            speculative,
+            perf_db_sources: Default::default(),
             extra: self.extra,
         })
     }
 }
 
 fn aic_config_for_raw_iteration_time(mut config: EngineConfig) -> EngineConfig {
-    config.extra.insert(
-        AIC_NEXTN_ACCEPT_RATES_KEY.to_string(),
-        RAW_AIC_NEXTN_ACCEPT_RATES.to_string(),
-    );
+    // Raw iteration metrics already describe one scheduler iteration. Preserve
+    // the MTP verification cost (`nextn`) but remove the accepted-token benefit.
+    if let Some(speculative) = config.speculative.as_mut() {
+        speculative.nextn_accepted = Some(RAW_AIC_NEXTN_ACCEPTED);
+    }
     config
 }
 
@@ -1033,14 +1076,6 @@ pub fn aic_config_from_mock_engine_args(args: &MockEngineArgs) -> Result<Option<
     let Some(model_name) = args.aic_model_path.clone() else {
         bail!("aic_model_path is required when aic_backend is set");
     };
-    let mut extra = BTreeMap::new();
-    if let Some(nextn) = args.aic_nextn {
-        extra.insert(AIC_NEXTN_KEY.to_string(), nextn.to_string());
-    }
-    extra.insert(
-        AIC_NEXTN_ACCEPT_RATES_KEY.to_string(),
-        RAW_AIC_NEXTN_ACCEPT_RATES.to_string(),
-    );
     Ok(Some(aic_config_for_raw_iteration_time(EngineConfig {
         schema_version: ENGINE_CONFIG_SCHEMA_VERSION,
         model_name,
@@ -1067,6 +1102,7 @@ pub fn aic_config_from_mock_engine_args(args: &MockEngineArgs) -> Result<Option<
                 .aic_moe_ep_size
                 .map(|value| to_u32(value, "aic_moe_ep_size"))
                 .transpose()?,
+            cp_size: None,
         },
         // Native analytics path: quant dtypes are parsed by `parse_data_type`
         // into `aiconfigurator_core::DataType` (accepted: bfloat16, float16,
@@ -1097,8 +1133,17 @@ pub fn aic_config_from_mock_engine_args(args: &MockEngineArgs) -> Result<Option<
                 .map(parse_data_type)
                 .transpose()?,
         },
-        speculative: None,
-        extra,
+        speculative: args
+            .aic_nextn
+            .map(|nextn| -> Result<SpeculativeConfig> {
+                Ok(SpeculativeConfig {
+                    nextn: Some(to_u32(nextn, "aic_nextn")?),
+                    nextn_accepted: Some(RAW_AIC_NEXTN_ACCEPTED),
+                })
+            })
+            .transpose()?,
+        perf_db_sources: Default::default(),
+        extra: BTreeMap::new(),
     })))
 }
 
@@ -1558,13 +1603,10 @@ mod tests {
     }
 
     #[test]
-    fn raw_iteration_time_aic_config_forces_zero_accept_rates() {
+    fn raw_iteration_time_aic_config_forces_zero_accepted_tokens() {
         let mut extra = BTreeMap::new();
         extra.insert(AIC_NEXTN_KEY.to_string(), "3".to_string());
-        extra.insert(
-            AIC_NEXTN_ACCEPT_RATES_KEY.to_string(),
-            "0.85,0.3,0,0,0".to_string(),
-        );
+        extra.insert(AIC_NEXTN_ACCEPTED_KEY.to_string(), "1.105".to_string());
         let config = AicEngineConfig {
             model_name: "model".to_string(),
             model_arch: Some("arch".to_string()),
@@ -1586,15 +1628,14 @@ mod tests {
 
         let config = aic_engine_config_for_raw_iteration_time(config).unwrap();
 
-        assert_eq!(config.extra.get(AIC_NEXTN_KEY), Some(&"3".to_string()));
-        assert_eq!(
-            config.extra.get(AIC_NEXTN_ACCEPT_RATES_KEY),
-            Some(&RAW_AIC_NEXTN_ACCEPT_RATES.to_string())
-        );
+        assert!(config.extra.is_empty());
+        let speculative = config.speculative.expect("MTP config");
+        assert_eq!(speculative.nextn, Some(3));
+        assert_eq!(speculative.nextn_accepted, Some(RAW_AIC_NEXTN_ACCEPTED));
     }
 
     #[test]
-    fn mock_engine_args_aic_config_forces_zero_accept_rates() {
+    fn mock_engine_args_aic_config_forces_zero_accepted_tokens() {
         let args = MockEngineArgs::builder()
             .aic_backend(Some("vllm".to_string()))
             .aic_model_path(Some("model".to_string()))
@@ -1607,11 +1648,10 @@ mod tests {
 
         let config = aic_config_from_mock_engine_args(&args).unwrap().unwrap();
 
-        assert_eq!(config.extra.get(AIC_NEXTN_KEY), Some(&"2".to_string()));
-        assert_eq!(
-            config.extra.get(AIC_NEXTN_ACCEPT_RATES_KEY),
-            Some(&RAW_AIC_NEXTN_ACCEPT_RATES.to_string())
-        );
+        assert!(config.extra.is_empty());
+        let speculative = config.speculative.expect("MTP config");
+        assert_eq!(speculative.nextn, Some(2));
+        assert_eq!(speculative.nextn_accepted, Some(RAW_AIC_NEXTN_ACCEPTED));
     }
 
     #[test]
