@@ -383,6 +383,23 @@ impl LocalModelBuilder {
         if let Some(source_path) = self.source_path.take() {
             card.set_source_path(source_path);
         }
+
+        // If model_path resolved into an HF-cache-style snapshot dir, record the
+        // commit SHA so the frontend can pin to the same revision when resolving
+        // hf:// URIs — regardless of whether --model-path was a bare repo id, an
+        // absolute snapshot path, or a relative path.
+        if let Some(repo) = super::hub::hf_repo_from_snapshot_path(&model_path) {
+            card.set_hf_commit_sha(&repo, &model_path);
+            // Normalize source_path to the HF repo id, not the resolved snapshot's
+            // filesystem path. checked_file_uri's cross-host fallback
+            // (hf://{source_path}/{filename}) and hf_commit_sha's map must agree on
+            // the same repo identity string, or a different frontend host parses a
+            // garbage "repo" out of the filesystem path and hub::from_hf() is called
+            // with it — this only matters for absolute/relative snapshot-path
+            // `--model-path` inputs; bare repo ids already had this identity.
+            card.set_source_path(PathBuf::from(&repo));
+        }
+
         // The served model name defaults to the full model path.
         // This matches what vllm and sglang do.
         let alt = card.source_path().to_string();
@@ -451,8 +468,17 @@ impl LocalModel {
     /// If ignore_weights is true, model weight files will be skipped and only the model config
     /// will be downloaded.
     /// Returns the path to the model files
-    pub async fn fetch(remote_name: &str, ignore_weights: bool) -> anyhow::Result<PathBuf> {
-        super::hub::from_hf(remote_name, ignore_weights).await
+    pub async fn fetch(
+        remote_name: &str,
+        revision: Option<&str>,
+        ignore_weights: bool,
+    ) -> anyhow::Result<PathBuf> {
+        match revision {
+            Some(rev) => {
+                super::hub::from_hf_at_revision(remote_name, rev, None, ignore_weights).await
+            }
+            None => super::hub::from_hf(remote_name, ignore_weights).await,
+        }
     }
 
     pub fn card(&self) -> &ModelDeploymentCard {

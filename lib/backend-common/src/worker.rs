@@ -1692,7 +1692,7 @@ async fn build_local_model(
         })? {
             PathBuf::from(&source)
         } else {
-            LocalModel::fetch(&source, false).await.map_err(|e| {
+            LocalModel::fetch(&source, None, false).await.map_err(|e| {
                 err(
                     ErrorType::Backend(BackendError::CannotConnect),
                     format!("fetch '{source}': {e}"),

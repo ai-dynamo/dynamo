@@ -506,7 +506,7 @@ async def parse_args(
     # For non-HF models use a path instead of an HF name, and ensure all workers have
     # that path (ideally via a shared folder).
     if should_fetch_model(parsed_args, model_path):
-        await fetch_model(model_path)
+        await fetch_model(model_path, revision=getattr(parsed_args, "revision", None))
 
     if is_snapshot_enabled():
         configure_snapshot_capture_env()

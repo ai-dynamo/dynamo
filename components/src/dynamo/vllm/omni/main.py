@@ -85,6 +85,7 @@ async def init_omni(
             # frontend, so they register as Aggregated.
             worker_type=WorkerType.Aggregated,
             needs=[],
+            revision=getattr(config.engine_args, "revision", None),
         )
 
         logger.info("Starting to serve Omni worker endpoint...")
@@ -125,7 +126,9 @@ async def worker():
         config.served_model_name = config.engine_args.served_model_name = config.model
 
     if not os.path.exists(config.model):
-        await fetch_model(config.model)
+        await fetch_model(
+            config.model, revision=getattr(config.engine_args, "revision", None)
+        )
 
     shutdown_event = asyncio.Event()
     runtime, loop = create_runtime(

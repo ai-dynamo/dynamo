@@ -703,7 +703,7 @@ pub fn make_engine<'p>(
                 // model name differs (e.g., --model-name model-1 --model-path
                 // Qwen/Qwen3-0.6B).
                 builder.source_path(model_path.clone());
-                LocalModel::fetch(&model_path.display().to_string(), ignore_weights)
+                LocalModel::fetch(&model_path.display().to_string(), None, ignore_weights)
                     .await
                     .map_err(to_pyerr)?
             };
