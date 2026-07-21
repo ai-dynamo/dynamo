@@ -151,6 +151,17 @@ html.dark,
     display: none !important;
 }
 
+/* Product entries declare no custom icon, so Fern falls back to the FontAwesome
+   "code" glyph (</>) in every product row of the switcher (dropdown menu items
+   and the mobile trigger). Hide that fallback so the switcher is text-only,
+   matching the collapsed header trigger, which already shows just the product
+   name. Scoped to the code glyph via :has() so the version selector keeps its
+   own (Lucide) icon; collapsing the whole icon box (not just the <svg>) avoids
+   leaving an empty bordered square beside the product name. */
+.fern-selection-item-icon:has(svg[icon="code"]) {
+    display: none !important;
+}
+
 .fern-product-selector .product-dropdown-trigger p{
     font-weight: bold !important;
 }
