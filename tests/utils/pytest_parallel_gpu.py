@@ -457,6 +457,8 @@ def _reap_running(running: dict[int, _RunningTest], reason: str) -> None:
     """
     if not running:
         return
+    import psutil
+
     from tests.utils.managed_process import terminate_process_tree
 
     _print(f"[cleanup] terminating {len(running)} running test(s) — {reason}")
@@ -465,7 +467,7 @@ def _reap_running(running: dict[int, _RunningTest], reason: str) -> None:
         # workers that setsid into their own session (killpg alone misses them).
         try:
             terminate_process_tree(run_info.proc.pid, immediate_kill=True, timeout=5)
-        except Exception as exc:  # never let one test's cleanup abort the rest
+        except (psutil.Error, OSError) as exc:  # keep reaping remaining tests
             _print(f"[cleanup] w{w_id} tree kill error: {exc}")
         if run_info.pgid is not None:
             try:
