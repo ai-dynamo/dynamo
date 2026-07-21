@@ -773,6 +773,7 @@ mod tests {
             None,
             None::<Arc<NoopOverlapScoresRefresh>>,
             None,
+            None,
             Duration::from_secs(60),
             true,
             cancel.clone(),

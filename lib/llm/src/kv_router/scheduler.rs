@@ -492,6 +492,7 @@ mod tests {
             None,
             None::<Arc<NoopOverlapScoresRefresh>>,
             None,
+            None,
             Some("test-model"),
             "decode",
             cancellation_token.clone(),
