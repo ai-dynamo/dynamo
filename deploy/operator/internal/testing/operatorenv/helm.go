@@ -8,6 +8,7 @@ package operatorenv
 import (
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -22,7 +23,10 @@ import (
 	"k8s.io/apimachinery/pkg/util/yaml"
 )
 
-const webhookConfigurationTemplate = "templates/webhook-configuration.yaml"
+const (
+	operatorChartDirectoryEnv    = "OPERATOR_CHART_DIR"
+	webhookConfigurationTemplate = "templates/webhook-configuration.yaml"
+)
 
 func addValidationBypassUsers(configurations []*admissionregistrationv1.ValidatingWebhookConfiguration, usernames []string) {
 	for _, configuration := range configurations {
@@ -86,6 +90,9 @@ func retainWebhookTemplate(chart *helmchart.Chart) error {
 }
 
 func operatorChartDirectory() string {
+	if directory := os.Getenv(operatorChartDirectoryEnv); directory != "" {
+		return directory
+	}
 	return filepath.Join(operatorRoot(), "..", "helm", "charts", "platform", "components", "operator")
 }
 

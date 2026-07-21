@@ -54,6 +54,9 @@ objects. A dedicated webhook manager invokes the required `SetupWebhooks`
 function, which normally registers the production handlers via
 `webhooksetup.Setup`, including conversion endpoints. Therefore normal `Client`
 CRUD reaches the API server, CRD CEL validation, and production webhook code.
+Set `OPERATOR_CHART_DIR` when the chart is not available at its
+repository-relative path; the operator tester image uses this override for its
+copied chart.
 
 The webhook manager is separate from controller managers. It runs for the
 lifetime of the environment and is the only always-on manager.

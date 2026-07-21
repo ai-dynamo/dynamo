@@ -45,6 +45,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends make && apt-get
 
 # Make the production Helm configuration available to operatorenv tests.
 COPY --from=operator-chart . /helm/charts/platform/components/operator/
+ENV OPERATOR_CHART_DIR=/helm/charts/platform/components/operator
 
 # Run tests using Makefile
 RUN make test

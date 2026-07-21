@@ -35,6 +35,7 @@ const (
 )
 
 var (
+	// Admission cases must remain sequential because they share this gate and a cluster-scoped topology fixture.
 	admissionGate = &mutableFeatureGate{}
 	admissionEnv  = operatorenv.New(operatorenv.Options{
 		Admission: operatorenv.AdmissionWebhooks{
