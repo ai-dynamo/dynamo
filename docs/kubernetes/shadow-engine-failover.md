@@ -119,6 +119,12 @@ active/passive failover; use the `failover` field for the shadow engine flow.
 - It is not covered by the normal v1beta1 compatibility guarantees while it
   lives under `experimental`.
 
+## Observability
+
+Shadow-mode engines emit failover-lifecycle metrics (state, transitions, and
+real-failover counters) and ship a per-DGD Grafana dashboard with the platform
+chart. See [Shadow Engine Failover Metrics](observability/shadow-engine-failover-metrics.md).
+
 ## API Placement
 
 For `v1alpha1` `DynamoGraphDeployment`, GMS and failover are service-level
