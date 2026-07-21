@@ -120,3 +120,6 @@ tracing-subscriber = { version = "0.3", features = ["registry"] }
 inherits = "release"
 debug = true
 strip = false
+
+[patch.crates-io]
+dynamo-tokenizers = { git = "https://github.com/ai-dynamo/frontend-crates.git", branch = "rmccormick/kimi-linear-tokenizer" }

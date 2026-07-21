@@ -2544,9 +2544,8 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokenizers"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61fb9c031ea19d99d1faf8ff304fe666eb2dbd4666fcb416af3f08ae88f5be80"
+version = "1.5.3"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?branch=rmccormick%2Fkimi-linear-tokenizer#d377887d657893525c094669441d004d5c13f4d0"
 dependencies = [
  "aho-corasick",
  "anyhow",
