@@ -916,11 +916,11 @@ jobs:
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
     secrets: inherit
 
-  deploy-test-operator-e2e:
-    name: Operator E2E
+  deploy-test-dgdr:
+    name: DGDR Deploy Test
     needs: [deploy-operator, planner-copy-to-acr]
     if: github.event_name != 'workflow_dispatch'
-    uses: ./.github/workflows/shared-operator-e2e.yml
+    uses: ./.github/workflows/shared-dgdr-deploy-test.yml
     with:
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
@@ -1344,7 +1344,7 @@ jobs:
 
   deploy-cleanup:
     if: always()
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-operator-e2e, deploy-test-gaie]
+    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-dgdr, deploy-test-gaie]
     runs-on: prod-deploy-tester-v1
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -1464,7 +1464,7 @@ jobs:
       - deploy-test-vllm
       - deploy-test-sglang
       - deploy-test-trtllm
-      - deploy-test-operator-e2e
+      - deploy-test-dgdr
       - planner-copy-to-acr
       - deploy-operator-checkpoint-vllm
       - deploy-operator-checkpoint-sglang

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Deployment tests for Kubernetes-based LLM deployments.
+DynamoGraphDeployment tests for Kubernetes-based LLM deployments.
 
 These tests verify that deployments can be created, become ready, and respond
 to chat completion requests correctly.

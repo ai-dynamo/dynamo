@@ -6,6 +6,7 @@
 #   snapshot -> snapshot-agent build and test
 #   power_agent -> power-agent image build
 #   deploy   -> deploy tests
+#   dgdr     -> DGDR deploy tests
 #   planner  -> dynamo build-test
 #   vllm     -> vllm build and test
 #   sglang   -> sglang build and test

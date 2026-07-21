@@ -29,6 +29,7 @@ jobs:
       snapshot: ${{ steps.changes.outputs.snapshot }}
       power_agent: ${{ steps.changes.outputs.power_agent }}
       deploy: ${{ steps.changes.outputs.deploy }}
+      dgdr: ${{ steps.changes.outputs.dgdr }}
       vllm: ${{ steps.changes.outputs.vllm }}
       sglang: ${{ steps.changes.outputs.sglang }}
       trtllm: ${{ steps.changes.outputs.trtllm }}
@@ -100,7 +101,7 @@ jobs:
       - deploy-test-vllm
       - deploy-test-sglang
       - deploy-test-trtllm
-      - deploy-test-operator-e2e
+      - deploy-test-dgdr
       - deploy-operator-checkpoint-vllm
       - deploy-operator-checkpoint-sglang
       - deploy-operator-checkpoint-trtllm
@@ -147,6 +148,7 @@ jobs:
       needs.changed-files.outputs.sglang == 'true' ||
       needs.changed-files.outputs.trtllm == 'true' ||
       needs.changed-files.outputs.deploy == 'true' ||
+      needs.changed-files.outputs.dgdr == 'true' ||
       needs.changed-files.outputs.snapshot == 'true'
     name: Operator
     runs-on: prod-default-v2
@@ -907,7 +909,8 @@ jobs:
     needs: [changed-files, planner-build]
     if: |
       always() && !cancelled() &&
-      needs.changed-files.outputs.operator == 'true' &&
+      (needs.changed-files.outputs.operator == 'true' ||
+       needs.changed-files.outputs.dgdr == 'true') &&
       needs.planner-build.result == 'success'
     uses: ./.github/workflows/shared-copy.yml
     with:
@@ -1059,7 +1062,8 @@ jobs:
        needs.changed-files.outputs.vllm == 'true' ||
        needs.changed-files.outputs.sglang == 'true' ||
        needs.changed-files.outputs.trtllm == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
+       needs.changed-files.outputs.deploy == 'true' ||
+       needs.changed-files.outputs.dgdr == 'true') &&
       needs.operator.result == 'success'
     needs: [changed-files, operator]
     runs-on: prod-deploy-tester-v1
@@ -1141,13 +1145,14 @@ jobs:
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
     secrets: inherit
 
-  deploy-test-operator-e2e:
-    name: Operator E2E
+  deploy-test-dgdr:
+    name: DGDR Deploy Test
     needs: [changed-files, deploy-operator, planner-copy-to-acr]
     if: |
       !cancelled() && !failure() &&
-      needs.changed-files.outputs.operator == 'true'
-    uses: ./.github/workflows/shared-operator-e2e.yml
+      (needs.changed-files.outputs.operator == 'true' ||
+       needs.changed-files.outputs.dgdr == 'true')
+    uses: ./.github/workflows/shared-dgdr-deploy-test.yml
     with:
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
@@ -1586,7 +1591,7 @@ jobs:
 
   deploy-cleanup:
     if: always()
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-operator-e2e]
+    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-dgdr]
     runs-on: prod-deploy-tester-v1
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
