@@ -176,6 +176,17 @@ struct ReasoningState {
     // TODO: Track this per choice.index for n > 1. The current bypass
     // decision and parser state are shared across all streamed choices.
     guided_json_bypass_decision: Option<bool>,
+    // Last emitted response, reused as the envelope to carry any text the
+    // parser is still buffering when the upstream stream ends. Only retained
+    // when `flush_buffered_reasoning_on_eof` is set, to keep the per-token
+    // clone off the common reasoning hot path.
+    last_response: Option<Annotated<NvCreateChatCompletionStreamResponse>>,
+    eof_flushed: bool,
+    // Whether to flush the parser's still-buffered text at end-of-stream.
+    // Only the Nemotron force_nonempty_content path needs this (a truncated
+    // `<think>` prefix must survive); every other parser keeps the original
+    // behavior of returning nothing at EOF, so no shared path changes.
+    flush_buffered_reasoning_on_eof: bool,
 }
 
 /// Per-image routing payload accumulated by `gather_multi_modal_data` and
@@ -2173,12 +2184,20 @@ impl OpenAIPreprocessor {
                 Box::pin(stream)
             };
 
+        // Only the Nemotron force_nonempty_content path needs the EOF flush of
+        // a truncated `<think>` prefix; gating it here keeps the per-token clone
+        // and the finish_reasoning_stream() flush off every other parser's path.
+        let flush_buffered_reasoning_on_eof = Self::wants_reasoning_as_content_when_empty(
+            self.runtime_config.reasoning_parser.as_deref(),
+            request.chat_template_args.as_ref(),
+        );
         let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_parse_reasoning {
             Box::pin(Self::parse_reasoning_content_from_stream_inner(
                 stream,
                 self.runtime_config.reasoning_parser.clone().unwrap(), // Safety: We already checked that parser is some, so gtg
                 prompt_injected_reasoning,
                 bypass_reasoning_for_bare_guided_json,
+                flush_buffered_reasoning_on_eof,
             ))
         } else if should_strip_disabled_reasoning_start {
             Box::pin(Self::strip_leading_reasoning_start_from_stream(
@@ -2852,6 +2871,34 @@ impl OpenAIPreprocessor {
         )
     }
 
+    /// Whether a non-streaming request should surface parsed `reasoning_content`
+    /// as `content` when no content was generated: a Nemotron force-reasoning
+    /// parser requested with `force_nonempty_content=true`. The chat
+    /// HTTP handler passes this into the aggregator via
+    /// `ParsingOptions::move_reasoning_to_content_when_empty`. Streaming keeps the
+    /// parser on too (so reasoning+answer no longer leaks), but the reasoning-only
+    /// move is not done for streaming — see `is_reasoning_disabled_by_request`.
+    pub(crate) fn wants_reasoning_as_content_when_empty(
+        reasoning_parser: Option<&str>,
+        chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
+    ) -> bool {
+        Self::is_nemotron_force_reasoning(reasoning_parser)
+            && Self::requests_force_nonempty_content(chat_template_args)
+    }
+
+    /// True when the request's `chat_template_args` contain
+    /// `force_nonempty_content: true` — the Nemotron chat-template kwarg
+    /// promising non-empty `content`. Drives the non-streaming move flag
+    /// (`wants_reasoning_as_content_when_empty`); the parser now stays on for
+    /// both streaming and non-streaming force_nonempty_content requests.
+    fn requests_force_nonempty_content(
+        chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
+    ) -> bool {
+        chat_template_args.is_some_and(|args| {
+            args.get("force_nonempty_content") == Some(&serde_json::Value::Bool(true))
+        })
+    }
+
     /// Parsers that begin streaming in reasoning mode (force_reasoning=true).
     /// These swallow any leading text without an open `<think>` tag as
     /// reasoning_content, so they cannot run on guided-decoding output where
@@ -2959,7 +3006,10 @@ impl OpenAIPreprocessor {
     /// Check if reasoning parsing should be disabled based on per-request parameters.
     /// For kimi_k25: disabled when chat_template_args contains "thinking": false.
     /// For Nemotron force-reasoning aliases: disabled when chat_template_args
-    ///   contains "enable_thinking": false or "force_nonempty_content": true.
+    ///   contains "enable_thinking": false. "force_nonempty_content": true does
+    ///   NOT disable parsing (streaming or non-streaming): the parser stays on so
+    ///   reasoning is split from the answer, and reasoning is surfaced as content
+    ///   only when no content was generated (non-streaming, in the aggregator).
     /// For DeepSeek: follows the same effective mode used by the prompt renderer.
     /// For Mistral: disabled unless `reasoning_effort` is present and not `none`.
     /// For gemma4: disabled when chat_template_args contains "enable_thinking": false.
@@ -2979,16 +3029,23 @@ impl OpenAIPreprocessor {
                 dynamo_renderer::thinking_bool_from_args(chat_template_args) == Some(false)
             }
             parser if Self::is_nemotron_force_reasoning(parser) => {
-                if dynamo_renderer::thinking_bool_from_args(chat_template_args) == Some(false) {
-                    return true;
-                }
-                if let Some(args) = chat_template_args
-                    && let Some(force_nonempty) = args.get("force_nonempty_content")
-                    && force_nonempty == &serde_json::Value::Bool(true)
-                {
-                    return true;
-                }
-                false
+                // `enable_thinking=false` turns reasoning off entirely (streaming
+                // and non-streaming). `force_nonempty_content=true` does NOT
+                // disable parsing: keeping the parser on splits reasoning from the
+                // answer, so a reasoning+answer turn no longer leaks the reasoning
+                // text and `</think>` into `content`.
+                //
+                // The reasoning-*only* move (surface reasoning as content when the
+                // answer is empty) is handled for non-streaming in the aggregator
+                // via ParsingOptions::move_reasoning_to_content_when_empty. It is
+                // deliberately NOT done for streaming: matching the non-streaming
+                // move would require buffering all reasoning deltas until end-of-
+                // stream (you cannot retract reasoning_content already sent to the
+                // client once you learn no answer is coming), which regresses live
+                // reasoning streaming. That is deferred until it is shown to be a
+                // real problem in production; a reasoning-only streaming turn
+                // leaves `content` empty (no leak) rather than moving reasoning in.
+                dynamo_renderer::thinking_bool_from_args(chat_template_args) == Some(false)
             }
             Some("deepseek_v3" | "deepseek_v3_1") => {
                 !Self::deepseek_renderer_reasoning_enabled(chat_template_args, false)
@@ -3040,6 +3097,7 @@ impl OpenAIPreprocessor {
             parser_name,
             prompt_injected_reasoning,
             false,
+            false,
         )
     }
 
@@ -3048,6 +3106,7 @@ impl OpenAIPreprocessor {
         parser_name: String,
         prompt_injected_reasoning: bool,
         bypass_bare_guided_json: bool,
+        flush_buffered_reasoning_on_eof: bool,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
@@ -3066,6 +3125,9 @@ impl OpenAIPreprocessor {
             reasoning_parser: Some(reasoning_parser),
             bypass_bare_guided_json,
             guided_json_bypass_decision: None,
+            last_response: None,
+            eof_flushed: false,
+            flush_buffered_reasoning_on_eof,
         };
 
         stream::unfold(state, |mut state| async move {
@@ -3129,9 +3191,50 @@ impl OpenAIPreprocessor {
                     response
                 };
 
+                // Retain a spare envelope only when an EOF flush may follow, so
+                // the common reasoning path avoids a full per-token clone.
+                if state.flush_buffered_reasoning_on_eof {
+                    state.last_response = Some(processed_response.clone());
+                }
                 Some((processed_response, state))
-            } else {
+            } else if !state.flush_buffered_reasoning_on_eof || state.eof_flushed {
                 None
+            } else {
+                // Upstream ended. Flush any text the parser is still buffering
+                // (e.g. a truncated `<think>` prefix that never completed) so it
+                // is not silently dropped. `finish_reasoning_stream` returns it
+                // as normal_text when the parser never entered reasoning, else as
+                // reasoning_text. Only the force_nonempty_content path reaches
+                // here; every other parser took the `None` branch above,
+                // preserving its original no-flush behavior at EOF.
+                state.eof_flushed = true;
+                let flushed = match state.reasoning_parser.as_mut() {
+                    Some(parser) => parser.finish_reasoning_stream(),
+                    None => return None,
+                };
+                if flushed.normal_text.is_empty() && flushed.reasoning_text.is_empty() {
+                    return None;
+                }
+                let mut response = state.last_response.clone()?;
+                let data = response.data.as_mut()?;
+                data.inner.usage = None;
+                for choice in data.inner.choices.iter_mut() {
+                    choice.delta.role = None;
+                    choice.delta.tool_calls = None;
+                    choice.delta.function_call = None;
+                    choice.delta.refusal = None;
+                    choice.finish_reason = None;
+                    choice.logprobs = None;
+                    choice.delta.content = (!flushed.normal_text.is_empty())
+                        .then(|| ChatCompletionMessageContent::Text(flushed.normal_text.clone()));
+                    choice.delta.reasoning_content = (!flushed.reasoning_text.is_empty())
+                        .then(|| flushed.reasoning_text.clone());
+                }
+                if data.inner.choices.is_empty() {
+                    None
+                } else {
+                    Some((response, state))
+                }
             }
         })
         .fuse()
@@ -4581,7 +4684,7 @@ mod tests {
                     "SGLang gate mismatch for {description}"
                 );
                 assert_eq!(
-                    !OpenAIPreprocessor::is_reasoning_disabled_by_request(Some("kimi_k25"), args),
+                    !OpenAIPreprocessor::is_reasoning_disabled_by_request(Some("kimi_k25"), args,),
                     expected,
                     "postprocessor gate mismatch for {description}"
                 );
@@ -4857,8 +4960,8 @@ mod tests {
             (
                 Some("nemotron3"),
                 Some(&force_nonempty_content_true),
-                true,
-                "nemotron3 + force_nonempty_content=true → disabled",
+                false,
+                "nemotron3 + force_nonempty_content=true → NOT disabled (parser stays on)",
             ),
             (
                 Some("nemotron_v3"),
@@ -4869,8 +4972,8 @@ mod tests {
             (
                 Some("nemotron_v3"),
                 Some(&force_nonempty_content_true),
-                true,
-                "nemotron_v3 + force_nonempty_content=true → disabled",
+                false,
+                "nemotron_v3 + force_nonempty_content=true → NOT disabled (parser stays on)",
             ),
             // deepseek_v4 — same convention as deepseek_r1; verify all three aliases
             // (deepseek_v4 / deepseek-v4 / deepseekv4) plus both signal keys.
@@ -4991,6 +5094,8 @@ mod tests {
             ),
         ];
 
+        // The disable decision no longer depends on streaming — `enable_thinking`
+        // and the per-family signals decide it identically for both paths.
         for (parser, args, expected, desc) in cases {
             assert_eq!(
                 OpenAIPreprocessor::is_reasoning_disabled_by_request(parser, args),
@@ -4998,6 +5103,37 @@ mod tests {
                 "FAILED: {desc}",
             );
         }
+
+        // force_nonempty_content=true does NOT disable reasoning parsing for
+        // either path: the parser stays on so reasoning is split from the answer
+        // (no leak). Non-streaming additionally moves reasoning into content when
+        // no content was generated (the aggregator); streaming skips that move.
+        assert!(
+            !OpenAIPreprocessor::is_reasoning_disabled_by_request(
+                Some("nemotron3"),
+                Some(&force_nonempty_content_true),
+            ),
+            "nemotron3 + force_nonempty_content=true → NOT disabled",
+        );
+        assert!(
+            !OpenAIPreprocessor::is_reasoning_disabled_by_request(
+                Some("nemotron_v3"),
+                Some(&force_nonempty_content_true),
+            ),
+            "nemotron_v3 + force_nonempty_content=true → NOT disabled",
+        );
+        // enable_thinking=false disables entirely (user turned thinking off).
+        assert!(
+            OpenAIPreprocessor::is_reasoning_disabled_by_request(
+                Some("nemotron3"),
+                Some(&enable_thinking_false),
+            ),
+            "nemotron3 + enable_thinking=false → disabled",
+        );
+
+        // The force_nonempty_content=true → NOT disabled behavior is what lets a
+        // reasoning-only non-streaming turn surface reasoning as content; verify
+        // the aggregator half in test_move_reasoning_to_content_when_empty.
     }
 
     /// Different query strings must produce different hashes. `?v=1` and

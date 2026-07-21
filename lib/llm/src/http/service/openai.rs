@@ -1920,6 +1920,19 @@ async fn chat_completions(
         ),
     );
 
+    // for a Nemotron force-reasoning parser requested with
+    // force_nonempty_content=true, surface reasoning as content when a
+    // non-streaming turn produced no content (handled in the aggregator). The
+    // streaming path keeps the parser on too — reasoning+answer no longer leaks —
+    // but does not do the reasoning-only move (see is_reasoning_disabled_by_request).
+    let move_reasoning_to_content_when_empty =
+        crate::preprocessor::OpenAIPreprocessor::wants_reasoning_as_content_when_empty(
+            parsing_options.reasoning_parser.as_deref(),
+            request.chat_template_args.as_ref(),
+        );
+    let parsing_options = parsing_options
+        .with_move_reasoning_to_content_when_empty(move_reasoning_to_content_when_empty);
+
     let mut response_collector = state
         .metrics_clone()
         .create_response_collector(&metric_model);
@@ -2418,6 +2431,14 @@ async fn responses(
             request.inner.tool_choice.as_ref(),
         ),
     );
+
+    // NOTE: the move-reasoning-into-content fix is scoped to
+    // /v1/chat/completions. It is intentionally NOT wired here: this handler
+    // pre-forces the converted chat request to stream=true, so the preprocessor
+    // sees a streaming request and disables reasoning parsing for
+    // force_nonempty_content — there is no reasoning_content to move. Extending
+    // this to /v1/responses requires preserving the original streaming mode on
+    // the converted request; tracked as follow-up.
 
     let mut response_collector = state
         .metrics_clone()
