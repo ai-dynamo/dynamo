@@ -29,7 +29,9 @@ from dynamo.planner.core.types import (
     TickInput,
     WorkerCounts,
 )
+from dynamo.planner.environment.state import DeploymentState
 from dynamo.planner.monitoring.planner_metrics import PREFIX, PlannerPrometheusMetrics
+from dynamo.planner.monitoring.traffic_metrics import Metrics
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -37,6 +39,18 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.planner,
 ]
+
+
+def _make_environment(config: PlannerConfig) -> Mock:
+    state = DeploymentState()
+    state.prefill.num_gpus = config.prefill_engine_num_gpu
+    state.decode.num_gpus = config.decode_engine_num_gpu
+
+    environment = Mock()
+    environment.deployment_state.return_value = state
+    environment.runtime_namespace.return_value = config.namespace
+    environment.metrics_state.return_value = Metrics()
+    return environment
 
 
 def _make_planner(prometheus_enabled: bool = True) -> NativePlannerBase:
@@ -79,7 +93,7 @@ def _make_planner(prometheus_enabled: bool = True) -> NativePlannerBase:
             load_scaling_down_sensitivity=80,
             load_min_observations=5,
         )
-        planner = NativePlannerBase(None, config)
+        planner = NativePlannerBase(None, config, _make_environment(config))
     # Gate the methods under test without binding a real port.
     planner.prometheus_port = 1 if prometheus_enabled else 0
     return planner
@@ -139,8 +153,9 @@ class TestPublishInventoryAndGpuHours:
         """gpu_hours increases monotonically across successive ticks."""
         planner = _make_planner()
         # Two 5-second ticks with 1 prefill + 1 decode worker each on single GPUs.
-        planner.config.prefill_engine_num_gpu = 1
-        planner.config.decode_engine_num_gpu = 1
+        state = planner.environment.deployment_state()
+        state.prefill.num_gpus = 1
+        state.decode.num_gpus = 1
 
         planner._publish_inventory_and_gpu_hours(
             _tick_input(now_s=0.0, num_p=1, num_d=1)
@@ -358,7 +373,7 @@ def _make_planner_with_port(
             load_metric_samples=10,
             load_min_observations=5,
         )
-        planner = NativePlannerBase(None, config)
+        planner = NativePlannerBase(None, config, _make_environment(config))
     return planner
 
 

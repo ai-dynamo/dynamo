@@ -189,7 +189,7 @@ Values you will see in the `dynamo_endpoint` label on backend workers:
 | Value | Meaning |
 |-------|---------|
 | `generate` | Main inference RPC; one increment per request received. On a prefill worker this counts prefill-stage `generate` calls (one per request the router routes through); on a decode worker this counts decode-stage `generate` calls. |
-| `clear_kv_blocks` | Admin RPC to flush the worker's KV cache. Registered on both prefill and decode workers. |
+| `clear_kv_blocks` | Legacy vLLM distributed admin RPC to flush the worker's KV cache, registered on prefill and decode workers. Unified vLLM workers expose the operation through `/engine/control/clear_kv_blocks` on the system server instead; that route is not a component endpoint and does not emit this `dynamo_endpoint` label. |
 | `worker_kv_indexer_query_dp{N}` | KV-router queries to the worker's local KV indexer about its cached prefix blocks. One endpoint per data-parallel rank (`_dp0`, `_dp1`, …). Appears on the worker that owns the prefix caches the router consults — in disaggregated serving that is the prefill worker. |
 
 #### Component Error Types
@@ -224,6 +224,10 @@ The Dynamo HTTP Frontend (`python -m dynamo.frontend`) exposes `dynamo_frontend_
 - `dynamo_frontend_disconnected_clients`: Number of disconnected clients (gauge)
 - `dynamo_frontend_input_sequence_tokens`: Input sequence length (histogram)
 - `dynamo_frontend_cached_tokens`: Number of cached tokens (prefix cache hits) per request (histogram)
+- `dynamo_frontend_tokenizer_cache_hits_total`: L1 tokenizer prefix-cache hits across all models (counter)
+- `dynamo_frontend_tokenizer_cache_misses_total`: L1 tokenizer prefix-cache misses across all models (counter)
+- `dynamo_frontend_tokenizer_cache_cached_tokens_total`: Tokens returned from the L1 tokenizer prefix cache (counter, label: `model`)
+- `dynamo_frontend_tokenizer_cache_uncached_tokens_total`: Tokens freshly encoded after an L1 tokenizer prefix-cache lookup (counter, label: `model`)
 - `dynamo_frontend_inter_token_latency_seconds`: Inter-token latency (histogram)
 - `dynamo_frontend_output_sequence_tokens`: Output sequence length (histogram)
 - `dynamo_frontend_output_tokens_total`: Total number of output tokens generated (counter)
@@ -236,6 +240,33 @@ The Dynamo HTTP Frontend (`python -m dynamo.frontend`) exposes `dynamo_frontend_
 ```bash
 curl http://localhost:8000/metrics
 ```
+
+#### Tokenizer Cache Metrics
+
+The hit and miss counters record one cache outcome per encode operation across the frontend process.
+A batch encode records one outcome per item. The cached and uncached token counters report exact
+token totals for each served model. When L1 is active, a partial hit increments both token counters
+because it returns a cached prefix and freshly encodes the remaining suffix. A full hit increments
+only the cached-token counter, and a full miss increments only the uncached-token counter.
+
+Use the following PromQL expression to calculate the token reuse ratio for each model over five
+minutes:
+
+```promql
+sum by (model) (rate(dynamo_frontend_tokenizer_cache_cached_tokens_total[5m]))
+/
+(
+  sum by (model) (rate(dynamo_frontend_tokenizer_cache_cached_tokens_total[5m]))
+  +
+  sum by (model) (rate(dynamo_frontend_tokenizer_cache_uncached_tokens_total[5m]))
+)
+```
+
+The ratio is meaningful only for a model with an active L1 cache and observed tokens. The token
+counters do not increment when `DYN_TOKENIZER_CACHE=0`, when encoding fails, or when the cache has no
+registered special-token boundaries. The tiktoken path currently has no registered boundaries, so it
+bypasses L1 and exposes zero-valued token counter series; its ratio remains undefined until the cache
+observes tokens.
 
 #### Stage and phase labels
 
@@ -359,7 +390,7 @@ Not all metrics appear in every deployment. The chart below shows which metric g
 |---|---|---|---|---|
 | `dynamo_component_router_*` (request metrics) | Registered and populated | Registered and populated | Registered, **always zero** | Populated (on `DYN_SYSTEM_PORT`) |
 | `dynamo_router_overhead_*` (routing overhead) | Registered and populated | Registered and populated | **Not registered** | **Not created** |
-| `dynamo_frontend_router_queue_*` (queue depth) | Registered; populated when `--router-queue-threshold` set | Registered; populated when `--router-queue-threshold` set | **Not registered** | **Not created** |
+| `dynamo_frontend_router_queue_*` (queue depth) | Registered; populated when a CLI or policy-class queue threshold is set | Registered; populated when a CLI or policy-class queue threshold is set | **Not registered** | **Not created** |
 | `dynamo_component_kv_cache_events_applied` (indexer) | Populated when KV events are received | Populated when KV events are received | **Not registered** | Populated when KV events are received |
 | `dynamo_frontend_worker_*` (per-worker load/timing) | Registered and populated | Registered and populated (`worker_type`=`prefill`/`decode`) | Registered and populated (`worker_type`=`decode`) | **Not created** |
 
@@ -381,6 +412,7 @@ All metrics carry the standard hierarchy labels (`dynamo_namespace`, `dynamo_com
 
 | Metric | Type | Description |
 |--------|------|-------------|
+| `dynamo_component_router_requests_started_total` | Counter | Requests admitted by the router scheduler |
 | `dynamo_component_router_requests_total` | Counter | Total requests processed by the router |
 | `dynamo_component_router_time_to_first_token_seconds` | Histogram | Time to first token (seconds) |
 | `dynamo_component_router_inter_token_latency_seconds` | Histogram | Average inter-token latency (seconds) |
@@ -402,7 +434,7 @@ Histograms (in milliseconds) tracking the time spent in each phase of the routin
 
 #### Router Queue Metrics (`dynamo_frontend_router_queue_*`)
 
-Gauges track pending work in each router policy class. They are registered by the frontend and are populated when queueing is enabled through either `--router-queue-threshold` or `--router-policy-config`.
+Gauges track pending work in each router policy class. They are registered by the frontend and are populated when queueing is enabled through either `--router-queue-threshold` or a threshold in `--router-policy-config`.
 
 | Metric | Type | Description |
 |--------|------|-------------|
@@ -415,13 +447,16 @@ Gauges track pending work in each router policy class. They are registered by th
 
 #### KV Indexer Metrics
 
-Tracks KV cache events applied to the router's radix tree index. Only appears when `--router-kv-overlap-score-credit` is greater than 0 (default) and workers are publishing KV events. Will not appear if `--router-kv-overlap-score-credit 0` is set or no KV events have been received.
+Tracks KV cache events applied to the frontend-embedded router's radix tree index. The counter includes events applied to both the device tier and lower tiers such as host-pinned memory and disk. Only appears when `--router-kv-overlap-score-credit` is greater than 0 (default) and workers are publishing KV events. Will not appear if `--router-kv-overlap-score-credit 0` is set or no KV events have been received.
 
 | Metric | Type | Description |
 |--------|------|-------------|
 | `dynamo_component_kv_cache_events_applied` | Counter | KV cache events applied to the index |
 
-**Additional labels:** `status` (`ok` / `parent_block_not_found` / `block_not_found` / `invalid_block`), `event_type` (`stored` / `removed` / `cleared`)
+**Additional labels:** `status` (`ok` / `parent_block_not_found` / `block_not_found` / `invalid_block` / `capacity_exhausted` / `indexer_invariant_violation`), `event_type` (`stored` / `removed` / `cleared`)
+
+The standalone indexer exposes the device-tier-only counter
+`dynamo_kvrouter_kv_cache_events_applied`; see the [Standalone KV Indexer](../components/router/standalone-indexer.md).
 
 #### Per-Worker Load and Timing Gauges (`dynamo_frontend_worker_*`)
 
@@ -473,5 +508,5 @@ For the full list of metrics, configuration options, and architecture details, s
 - [Distributed Runtime Architecture](../design-docs/distributed-runtime.md)
 - [Dynamo Architecture Overview](../design-docs/architecture.md)
 - [Backend Guide](../development/backend-guide.md)
-- [Forward Pass Metrics (SGLang)](../backends/sglang/sglang-observability.md#forward-pass-metrics-fpm) — Per-iteration scheduler telemetry via ZMQ/NATS for planner-driven scaling (intended architecture; not available in the 1.2.1 SGLang runtime image)
+- [Forward Pass Metrics (SGLang)](../backends/sglang/sglang-observability.md#forward-pass-metrics-fpm) — Per-iteration scheduler telemetry via ZMQ/NATS for planner-driven scaling (requires the SGLang runtime to ship the upstream FPM module; available as of `sglang==0.5.13.post1`)
 - [Forward Pass Metrics RFC](../proposals/vllm-rfc-forward-pass-metrics.md) - Design rationale for per-iteration metrics

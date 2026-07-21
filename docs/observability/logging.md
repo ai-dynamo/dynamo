@@ -29,20 +29,32 @@ enabled via the `DYN_LOGGING_SPAN_EVENTS` environment variable.
 | `DYN_SKIP_SGLANG_LOG_FORMATTING` | Disable Dynamo's SGLang log configuration | `false` | `true` |
 | `OTEL_SERVICE_NAME` | Service name for trace and span information | `dynamo` | `dynamo-frontend` |
 | `OTEL_EXPORT_ENABLED` | Enable OTLP export of both traces and logs | `false` | `true` |
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | OTLP gRPC endpoint for traces | `http://localhost:4317` | `http://tempo:4317` |
-| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | OTLP gRPC endpoint for logs (defaults to `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` if not set) | same as traces endpoint | `http://localhost:4317` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Default OTLP endpoint for traces and logs when signal-specific endpoints are unset | `http://localhost:4317` (`grpc`) / `http://localhost:4318` (`http/protobuf`) | `http://otel-collector:4317` |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Override endpoint for traces, used as-is | unset | `http://tempo:4317` |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | Override endpoint for logs, used as-is | unset | `http://loki-collector:4317` |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | Default OTLP protocol for traces and logs | `grpc` | `http/protobuf` |
+| `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` | Override protocol for traces | unset | `grpc` |
+| `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL` | Override protocol for logs | unset | `grpc` |
+| `OTEL_TRACES_SAMPLE_RATIO` | Trace head-sampling ratio in `[0.0, 1.0]`; unset exports every trace | unset (export all) | `0.01` |
 
 ## OTLP Log Export
 
 When `OTEL_EXPORT_ENABLED=true`, Dynamo exports both **traces and logs** via OTLP. Logs are sent to an OpenTelemetry Collector which routes them to Grafana Loki for aggregation and querying.
 
-By default, logs are exported to the same endpoint as traces (`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`). To send logs to a different endpoint, set `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`:
+Set `OTEL_EXPORTER_OTLP_ENDPOINT` to configure the default OTLP collector endpoint for both traces and logs. To send logs somewhere else, set `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`; to send traces somewhere else, set `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`.
+
+Signal-specific endpoints are used as-is. When using the generic `OTEL_EXPORTER_OTLP_ENDPOINT` with `http/protobuf`, Dynamo appends the signal path (`/v1/logs` or `/v1/traces`). With `grpc`, the endpoint is used without a path.
+
+> [!WARNING]
+> Changed in v1.3.0: `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` no longer falls back to `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. It now falls back to the generic `OTEL_EXPORTER_OTLP_ENDPOINT`, then the protocol default. A deployment that sets only the traces endpoint sends logs to the protocol default (`http://localhost:4317` for `grpc`, `http://localhost:4318/v1/logs` for `http/protobuf`), where they are silently dropped if no collector is listening. Also set `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, or use the generic `OTEL_EXPORTER_OTLP_ENDPOINT` for both signals.
 
 ```bash
 export OTEL_EXPORT_ENABLED=true
-export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4317
-# Optional: send logs to a different endpoint
-# export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://localhost:4317
+# Generic endpoint applies to both traces and logs:
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+# Optional per-signal overrides:
+# export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://tempo:4317
+# export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://loki-collector:4317
 ```
 
 The local observability stack (see [Getting Started](README.md#getting-started-quickly)) includes an OpenTelemetry Collector that receives OTLP on `localhost:4317` and routes traces to Tempo and logs to Loki. In Grafana, the Loki datasource is pre-configured with a derived field that links `trace_id` labels to Tempo, so you can jump directly from a log line to its corresponding trace.
@@ -251,7 +263,7 @@ You can provide a custom request ID using the `x-request-id` header. This ID wil
 
 ### Example Request with Custom Request ID
 
-```sh
+```bash
 curl -X POST http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -H 'x-request-id: 8372eac7-5f43-4d76-beca-0a94cfb311d0' \
@@ -330,6 +342,118 @@ export DYN_SKIP_SGLANG_LOG_FORMATTING=true
 Alternatively, pass the `--log-level` argument to the SGLang worker
 command to set the SGLang engine's log level directly (e.g.
 `--log-level DEBUG`). This is independent of `DYN_LOG`.
+
+## Request Payload Logging (OTLP)
+
+Dynamo emits per-request `/v1/chat/completions` payloads through request trace.
+The `request_payload` row carries the client request and, when one completes,
+the response. The same `DYN_REQUEST_TRACE_SINKS` setting selects local
+files, stderr, NATS, and OTLP log export.
+
+Request payload logging is opt-in and independent of `OTEL_EXPORT_ENABLED`
+(which controls application log and trace export). By default, Dynamo does not
+emit request or response payload rows, even when the OpenAI request sets
+`store=true`. Set `DYN_REQUEST_TRACE_RECORDS=request_payload` to emit payload
+rows for every captured chat-completions request, or include `request_payload` alongside
+other selected record types.
+
+> [!WARNING]
+> Audit payload logging has migrated to request trace. This is a breaking
+> migration for legacy audit consumers: the `store=true` audit trigger and old
+> audit wire schema are not preserved. Payload rows use
+> `dynamo.request.trace.v1` with `event_type=request_payload`.
+
+> [!IMPORTANT]
+> The OTLP payload path is enabled by `DYN_REQUEST_TRACE_SINKS=otel`, or
+> by combining sinks such as `DYN_REQUEST_TRACE_SINKS=file,otel`.
+> Setting `DYN_REQUEST_TRACE_SINKS=stderr` together with
+> `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` writes request trace JSON directly to
+> stderr only; it does not export payload records over OTLP.
+
+### How records are emitted
+
+- One `dynamo.request.trace.v1` record with `event_type=request_payload` is
+  published per chat-completions request.
+- When requests are cancelled or fail, the record is
+  still emitted with `payload.response` omitted, so those cases remain
+  inspectable. A hard process crash before emission can lose a record.
+- When `DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST` is set, allowlisted headers
+  are included only in `event_type=request_payload` records as
+  `payload.http_request_headers` (case-insensitive; omitted when no listed
+  header is present); other record types do not include HTTP headers. Listed
+  headers with empty or non-UTF-8 values are also omitted. These
+  payload records are emitted to every configured sink. Captured values are
+  unredacted, so avoid allowlisting credential-bearing headers.
+- Each `otel` sink record maps to one OTLP `LogRecord`: scope
+  `dynamo.request_trace`, body `request_payload`, with attributes `schema`,
+  `event_type`, `rid`, `endpoint`, `model`, `streaming`, `payload_complete`,
+  and `payload` (the request trace row serialized as a JSON string).
+
+### Configuration
+
+Payload-related request trace variables:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `DYN_REQUEST_TRACE` | Master switch for request trace. | unset (disabled) |
+| `DYN_REQUEST_TRACE_RECORDS` | Comma-separated record types: `request_end`, `request_payload`, `tool`. Include `request_payload` to emit request and response payload bodies. | `request_end,tool`  |
+| `DYN_REQUEST_TRACE_SINKS` | Comma-separated sinks: `file`, `stderr`, `nats`, `otel`. | `file` |
+| `DYN_REQUEST_TRACE_NATS_SUBJECT` | Subject used by the `nats` sink. | `dynamo.request_trace.v1` |
+| `DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES` | Max serialized OTLP payload size. | `4194304` (4 MiB) |
+| `DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST` | Comma/whitespace-separated allowlist of HTTP request header names to record in `payload.http_request_headers`, case-insensitive. Only listed headers are captured. Applies to every sink. | unset (none) |
+
+> [!WARNING]
+> Deprecated. `DYN_AUDIT_SINKS`, `DYN_AUDIT_FORCE_LOGGING`,
+> `DYN_AUDIT_NATS_SUBJECT`, and `DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES` are
+> migration shims, not legacy audit compatibility aliases.
+> A truthy `DYN_AUDIT_FORCE_LOGGING` maps to
+> `DYN_REQUEST_TRACE_RECORDS=request_payload`; `DYN_AUDIT_SINKS` only selects
+> destinations and does not enable `request_end` replay metadata. Prefer the
+> `DYN_REQUEST_TRACE_*` variables for new deployments.
+
+The `otel` sink ships over OTLP using the standard
+`OTEL_EXPORTER_OTLP_*` variables, resolved the same way as the runtime log and
+trace exporter:
+
+- **Protocol**: `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL` →
+  `OTEL_EXPORTER_OTLP_PROTOCOL` → `grpc`.
+- **Endpoint**: `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` (used as-is) →
+  `OTEL_EXPORTER_OTLP_ENDPOINT` (`/v1/logs` appended only for
+  `http/protobuf`) → default (`http://localhost:4317` for `grpc`,
+  `http://localhost:4318/v1/logs` for `http/protobuf`).
+- `OTEL_SERVICE_NAME` sets the service name on exported records (default
+  `dynamo`).
+
+> [!NOTE]
+> Keep the endpoint consistent with the protocol: a `grpc` endpoint is used
+> verbatim, while `http/protobuf` expects an HTTP URL and gets `/v1/logs`
+> appended. Because the request trace OTLP sink and the runtime exporter
+> share these variables and the same `grpc` default, request payload records and
+> application telemetry resolve to the same destination unless you override the
+> logs signal explicitly.
+
+### Example
+
+Export chat-completion payload rows over OTLP gRPC to a collector, logging every
+request:
+
+```bash
+export DYN_REQUEST_TRACE_RECORDS=request_payload
+export DYN_REQUEST_TRACE_SINKS=otel
+export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://otel-collector:4317
+export OTEL_EXPORTER_OTLP_LOGS_PROTOCOL=grpc
+```
+
+To also write request trace JSON to stderr:
+
+```bash
+export DYN_REQUEST_TRACE_SINKS=stderr,otel
+```
+
+For local files, set `DYN_REQUEST_TRACE_SINKS=file` and configure
+`DYN_REQUEST_TRACE_FILE_PATH` and `DYN_REQUEST_TRACE_FILE_FORMAT`. See
+[Request Replay Tracing](request-tracing.md) for the full request trace
+configuration and record schema.
 
 ## Related Documentation
 

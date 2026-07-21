@@ -32,7 +32,7 @@ spec:
           args:
             - |
               set -eux
-              pip install --no-cache-dir huggingface_hub==1.11.0 click==8.1.8
+              pip install --no-cache-dir huggingface_hub==1.16.4
               # Downloads ONE checkpoint per your SKU (the PVC in the README holds one, not both).
               # B200 (NVFP4) is active by default; for H200, comment the NVFP4 line and uncomment
               # the public checkpoint line instead.

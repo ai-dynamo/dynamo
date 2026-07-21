@@ -10,17 +10,18 @@ use dynamo_kv_router::{
     indexer::{KvRouterError, RoutingDecisionHashes},
     protocols::KV_EVENT_SUBJECT,
     protocols::{
-        BlockExtraInfo, BlockHashOptions, DpRank, LocalBlockHash, PrefillLoadHint, RouterEvent,
+        BlockExtraInfo, BlockHashOptions, LocalBlockHash, PrefillLoadHint, RouterEvent,
         RouterRequest, RouterResponse, RoutingConstraints, TokensWithHashes, WorkerConfigLike,
         WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
     scheduling::{
-        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, ScheduleMode,
-        ScheduleRequest, TieredOverlapRefresher, effective_prefill_tokens,
-        overlap::cache_hit_estimates_from_tiered_matches,
+        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, RequestLifecycleLease,
+        RequestProgressUpdater, ScheduleMode, ScheduleRequest, TieredOverlapRefresher,
+        effective_prefill_tokens, overlap::cache_hit_estimates_from_tiered_matches,
     },
 };
 use dynamo_runtime::{
+    CancellationToken,
     component::{Client, Endpoint},
     discovery::DiscoveryQuery,
     error::{DynamoError, ErrorType},
@@ -34,7 +35,6 @@ use dynamo_runtime::{
 };
 use futures::stream;
 use tracing::Instrument;
-use validator::Validate;
 
 // Re-export from dynamo-kv-router crate
 pub use dynamo_kv_router::approx;
@@ -42,6 +42,7 @@ pub use dynamo_kv_router::protocols;
 pub use dynamo_kv_router::scheduling;
 pub use dynamo_kv_router::selector;
 
+pub mod encoder_router;
 pub mod indexer;
 pub mod metrics;
 pub mod prefill_router;
@@ -55,12 +56,13 @@ pub mod shared_cache;
 pub use dynamo_kv_router::scheduling::{
     OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlapScore,
 };
+pub use encoder_router::EncoderRouter;
 pub use indexer::{Indexer, ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};
 
 use crate::{
-    discovery::RuntimeConfigWatch,
+    discovery::{KvSourceMembershipWatch, RuntimeConfigWatch},
     kv_router::{
         scheduler::{DefaultWorkerSelector, KvScheduler, PotentialLoad},
         sequence::{SequenceError, SequenceRequest},
@@ -150,20 +152,6 @@ fn cancelled_error(context_id: &str) -> anyhow::Error {
         .into()
 }
 
-/// Generates a dp_rank-specific endpoint name for the worker KV indexer query service.
-/// Each dp_rank has its own LocalKvIndexer and query endpoint to ensure per-dp_rank monotonicity.
-pub fn worker_kv_indexer_query_endpoint(dp_rank: DpRank) -> String {
-    format!("worker_kv_indexer_query_dp{dp_rank}")
-}
-
-/// Generates a query endpoint name for a dp_rank whose events are attributed to `worker_id`.
-pub fn worker_kv_indexer_query_endpoint_for_worker(worker_id: WorkerId, dp_rank: DpRank) -> String {
-    format!(
-        "{}_worker{worker_id}",
-        worker_kv_indexer_query_endpoint(dp_rank)
-    )
-}
-
 fn log_routing_input_hashes(
     request_id: Option<&str>,
     block_size: u32,
@@ -219,13 +207,17 @@ where
     block_size: u32,
     kv_router_config: KvRouterConfig,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-    cancellation_token: tokio_util::sync::CancellationToken,
+    cancellation_token: CancellationToken,
     client: Client,
     is_eagle: bool,
     _served_indexer_handle: Option<ServedIndexerHandle>,
     /// Optional external shared KV cache pool. When present, `find_best_match`
     /// queries it in parallel with the indexer and factors shared hits into scoring.
     shared_cache: Option<Box<dyn SharedKvCache>>,
+    /// Optional LoRA filter. When present (LoRA serving enabled), candidate workers are
+    /// narrowed to the LoRA's allocated/loaded replicas inside `find_best_match_details`,
+    /// covering both the decode and prefill routers (both built via `kv_chooser_for`).
+    lora_filter: Option<Arc<crate::lora::LoraFilter>>,
 }
 
 impl<Sel> KvRouter<Sel>
@@ -237,6 +229,7 @@ where
         endpoint: Endpoint,
         client: Client,
         workers_with_configs: RuntimeConfigWatch,
+        kv_source_membership: Option<KvSourceMembershipWatch>,
         block_size: u32,
         selector: Sel,
         kv_router_config: Option<KvRouterConfig>,
@@ -245,11 +238,14 @@ where
         model_name: Option<String>,
         is_eagle: bool,
         shared_cache: Option<Box<dyn SharedKvCache>>,
+        lora_filter: Option<Arc<crate::lora::LoraFilter>>,
     ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
-        kv_router_config.validate()?;
+        kv_router_config.validate().map_err(anyhow::Error::msg)?;
         let component = endpoint.component();
-        let cancellation_token = component.drt().primary_token();
+        // Router-owned tasks derive from this token so a rebuild cannot cancel the runtime.
+        let cancellation_token = component.drt().child_token();
+        let cancellation_guard = cancellation_token.clone().drop_guard();
         let min_initial_workers = min_initial_workers_from_env()?;
 
         let indexer = Indexer::new(
@@ -257,6 +253,7 @@ where
             &kv_router_config,
             block_size,
             model_name.as_deref(),
+            cancellation_token.child_token(),
         )
         .await?;
 
@@ -285,7 +282,7 @@ where
             Arc::new(move || client_for_overload.overloaded_instance_ids());
 
         let scheduler = KvScheduler::start(
-            component.clone(),
+            endpoint.clone(),
             block_size,
             workers_with_configs.clone(),
             selector,
@@ -295,6 +292,8 @@ where
             Some(overloaded_worker_provider),
             model_name.as_deref(),
             worker_type,
+            cancellation_token.child_token(),
+            Default::default(),
         )
         .await?;
 
@@ -302,8 +301,20 @@ where
         if kv_router_config.use_remote_indexer {
             tracing::info!("Skipping KV event subscription (using remote indexer)");
         } else if kv_router_config.should_subscribe_to_kv_events() {
-            indexer::start_subscriber(component.clone(), &kv_router_config, indexer.clone())
-                .await?;
+            let membership_watch = kv_source_membership.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "KV source membership watch is required when local KV event subscription is enabled"
+                )
+            })?;
+            indexer::start_subscriber(
+                endpoint.clone(),
+                indexer.clone(),
+                membership_watch,
+                model_name.clone().unwrap_or_else(|| "unknown".to_string()),
+                worker_type,
+                cancellation_token.child_token(),
+            )
+            .await?;
         } else {
             tracing::info!(
                 "Skipping KV event subscription (use_kv_events={}, overlap_score_credit={})",
@@ -330,6 +341,7 @@ where
         };
 
         tracing::info!("KV Routing initialized");
+        let cancellation_token = cancellation_guard.disarm();
         Ok(Self {
             indexer,
             scheduler,
@@ -342,6 +354,7 @@ where
             is_eagle,
             _served_indexer_handle: served_indexer_handle,
             shared_cache,
+            lora_filter,
         })
     }
 
@@ -401,6 +414,53 @@ where
             .await
     }
 
+    /// Narrow the candidate workers to this LoRA's allocated/loaded replicas, staying strictly
+    /// within the existing candidate universe (never widening). Returns the (possibly narrowed)
+    /// `allowed_worker_ids` to pass to the scheduler.
+    ///
+    /// - No filter (LoRA serving disabled) or base-model request (`lora_name` is `None`):
+    ///   returns `allowed_worker_ids` unchanged.
+    /// - Pinned worker: KV-cache correctness wins — it is always retained even if not in the
+    ///   LoRA replica set (the worker lazy-loads the adapter).
+    /// - If narrowing would exclude every candidate, falls back to the original set so the
+    ///   request stays routable (lazy-load path) rather than failing.
+    fn narrow_allowed_by_lora(
+        &self,
+        lora_name: Option<&str>,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+        pinned_worker: Option<&WorkerWithDpRank>,
+    ) -> Option<HashSet<WorkerId>> {
+        let (Some(filter), Some(lora_name)) = (self.lora_filter.as_ref(), lora_name) else {
+            return allowed_worker_ids;
+        };
+        // Base candidate universe: explicit allow-set if present, else all current workers.
+        let base: Vec<WorkerId> = match &allowed_worker_ids {
+            Some(allowed) => allowed.iter().copied().collect(),
+            None => self.workers_with_configs.borrow().keys().copied().collect(),
+        };
+        if base.is_empty() {
+            return allowed_worker_ids;
+        }
+        let mut narrowed: HashSet<WorkerId> = filter
+            .filter_worker_ids_for_lora(Some(lora_name), &base)
+            .into_iter()
+            .collect();
+        // Retain a pinned worker only if it is already within the candidate universe — never
+        // widen the caller's `allowed_worker_ids` (KV-cache / EPP / migration invariants depend
+        // on that set). If the filter excluded an in-universe pinned worker, re-add it so the
+        // pin still wins for cache correctness; if the pin is outside the universe, honor the
+        // caller's constraint and drop it.
+        if let Some(p) = pinned_worker
+            && base.contains(&p.worker_id)
+        {
+            narrowed.insert(p.worker_id);
+        }
+        if narrowed.is_empty() {
+            return allowed_worker_ids;
+        }
+        Some(narrowed)
+    }
+
     /// Give these tokens, find the worker with the best weighted cache hit.
     /// Returns the full match details for the selected worker.
     ///
@@ -418,6 +478,7 @@ where
         update_states: bool,
         return_routing_hashes: bool,
         lora_name: Option<String>,
+        cache_namespace: Option<String>,
         priority_jump: f64,
         strict_priority: u32,
         expected_output_tokens: Option<u32>,
@@ -433,8 +494,10 @@ where
             update_states,
             return_routing_hashes,
             lora_name,
+            cache_namespace,
             priority_jump,
             strict_priority,
+            None,
             None,
             expected_output_tokens,
             pinned_worker,
@@ -454,20 +517,73 @@ where
         update_states: bool,
         return_routing_hashes: bool,
         lora_name: Option<String>,
+        cache_namespace: Option<String>,
         priority_jump: f64,
         strict_priority: u32,
         policy_class: Option<String>,
+        session_id: Option<String>,
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
     ) -> anyhow::Result<FindBestMatchOutcome> {
+        self.find_best_match_details_with_policy_class_inner(
+            context_id,
+            tokens,
+            block_mm_infos,
+            router_config_override,
+            update_states,
+            return_routing_hashes,
+            lora_name,
+            cache_namespace,
+            priority_jump,
+            strict_priority,
+            policy_class,
+            session_id,
+            expected_output_tokens,
+            pinned_worker,
+            allowed_worker_ids,
+            routing_constraints,
+            false,
+        )
+        .await
+        .map(|(outcome, _)| outcome)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn find_best_match_details_with_policy_class_inner(
+        &self,
+        context_id: Option<&str>,
+        tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        router_config_override: Option<&RouterConfigOverride>,
+        update_states: bool,
+        return_routing_hashes: bool,
+        lora_name: Option<String>,
+        cache_namespace: Option<String>,
+        priority_jump: f64,
+        strict_priority: u32,
+        policy_class: Option<String>,
+        session_id: Option<String>,
+        expected_output_tokens: Option<u32>,
+        pinned_worker: Option<WorkerWithDpRank>,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
+        track_lifecycle: bool,
+    ) -> anyhow::Result<(
+        FindBestMatchOutcome,
+        Option<(RequestProgressUpdater, RequestLifecycleLease)>,
+    )> {
         let start = Instant::now();
 
         if update_states && context_id.is_none() {
-            anyhow::bail!("context_id must be provided when update_states is true");
+            anyhow::bail!("context_id must be provided if update_states is true");
         }
-        let mode = if update_states {
+        let mode = if update_states && track_lifecycle {
+            ScheduleMode::TrackedWithLifecycle {
+                request_id: context_id.expect("validated above").to_string(),
+            }
+        } else if update_states {
             ScheduleMode::Tracked {
                 request_id: context_id.expect("validated above").to_string(),
             }
@@ -481,6 +597,7 @@ where
         let hash_options = BlockHashOptions {
             block_mm_infos,
             lora_name: lora_name.as_deref(),
+            cache_namespace: cache_namespace.as_deref(),
             is_eagle: Some(self.is_eagle),
         };
 
@@ -515,6 +632,7 @@ where
             tokens,
             self.block_size,
             block_hashes,
+            cache_namespace.as_deref(),
             retain_block_hashes,
         )
         .await?;
@@ -541,6 +659,15 @@ where
         let num_blocks = isl_tokens / self.block_size as usize;
         let sc_hits_for_metrics = shared_cache_hits.clone();
 
+        // LoRA-aware candidate narrowing: restrict to this LoRA's allocated/loaded replicas,
+        // strictly within the existing candidate universe (never widening). Covers both the
+        // decode and prefill routers, since both flow through this method.
+        let allowed_worker_ids = self.narrow_allowed_by_lora(
+            lora_name.as_deref(),
+            allowed_worker_ids,
+            pinned_worker.as_ref(),
+        );
+
         let response = match self
             .scheduler
             .schedule_request(ScheduleRequest {
@@ -554,6 +681,7 @@ where
                 priority_jump,
                 strict_priority,
                 policy_class,
+                session_id,
                 expected_output_tokens,
                 pinned_worker,
                 allowed_worker_ids,
@@ -565,7 +693,7 @@ where
         {
             Ok(response) => response,
             Err(KvSchedulerError::QueueRejected(rejection)) => {
-                return Ok(FindBestMatchOutcome::QueueRejected { rejection });
+                return Ok((FindBestMatchOutcome::QueueRejected { rejection }, None));
             }
             Err(error) => return Err(map_scheduler_error(error)),
         };
@@ -606,13 +734,21 @@ where
             "find_best_match completed"
         );
 
-        Ok(FindBestMatchOutcome::Routed {
-            worker: response.best_worker,
-            overlap_blocks: response.effective_overlap_blocks.round() as u32,
-            effective_overlap_blocks: response.effective_overlap_blocks,
-            cached_tokens: response.cached_tokens,
-            routing_hashes,
-        })
+        debug_assert_eq!(
+            response.request_progress.is_some(),
+            response.lifecycle_lease.is_some()
+        );
+        let lifecycle = response.request_progress.zip(response.lifecycle_lease);
+        Ok((
+            FindBestMatchOutcome::Routed {
+                worker: response.best_worker,
+                overlap_blocks: response.effective_overlap_blocks.round() as u32,
+                effective_overlap_blocks: response.effective_overlap_blocks,
+                cached_tokens: response.cached_tokens,
+                routing_hashes,
+            },
+            lifecycle,
+        ))
     }
 
     /// Give these tokens, find the worker with the best match in its KV cache.
@@ -626,6 +762,7 @@ where
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
         lora_name: Option<String>,
+        cache_namespace: Option<String>,
         priority_jump: f64,
         strict_priority: u32,
         expected_output_tokens: Option<u32>,
@@ -641,6 +778,7 @@ where
                 update_states,
                 false,
                 lora_name,
+                cache_namespace,
                 priority_jump,
                 strict_priority,
                 expected_output_tokens,
@@ -674,12 +812,14 @@ where
         expected_output_tokens: Option<u32>,
         worker: WorkerWithDpRank,
         lora_name: Option<String>,
+        cache_namespace: Option<String>,
         router_config_override: Option<&RouterConfigOverride>,
     ) {
         let isl_tokens = tokens.len();
         let hash_options = BlockHashOptions {
             block_mm_infos,
             lora_name: lora_name.as_deref(),
+            cache_namespace: cache_namespace.as_deref(),
             is_eagle: Some(self.is_eagle),
         };
 
@@ -717,6 +857,7 @@ where
         self.scheduler.mark_prefill_completed(request_id).await
     }
 
+    /// Legacy slot cleanup. Lifecycle-tracked requests use their `RequestLifecycleLease`.
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.scheduler.free(request_id).await
     }
@@ -801,9 +942,10 @@ where
         block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         worker: WorkerWithDpRank,
         lora_name: Option<&str>,
+        cache_namespace: Option<&str>,
     ) -> Result<u32, KvRouterError> {
         Ok(self
-            .get_cache_hit_estimate(tokens, block_mm_infos, worker, lora_name)
+            .get_cache_hit_estimate(tokens, block_mm_infos, worker, lora_name, cache_namespace)
             .await?
             .rounded_overlap_blocks())
     }
@@ -814,10 +956,18 @@ where
         block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         worker: WorkerWithDpRank,
         lora_name: Option<&str>,
+        cache_namespace: Option<&str>,
     ) -> Result<WorkerCacheHitEstimate, KvRouterError> {
-        self.get_cache_hit_estimate_with_hashes(tokens, block_mm_infos, worker, lora_name, false)
-            .await
-            .map(|(estimate, _)| estimate)
+        self.get_cache_hit_estimate_with_hashes(
+            tokens,
+            block_mm_infos,
+            worker,
+            lora_name,
+            cache_namespace,
+            false,
+        )
+        .await
+        .map(|(estimate, _)| estimate)
     }
 
     pub(crate) async fn get_cache_hit_estimate_with_hashes(
@@ -826,6 +976,7 @@ where
         block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         worker: WorkerWithDpRank,
         lora_name: Option<&str>,
+        cache_namespace: Option<&str>,
         return_routing_hashes: bool,
     ) -> Result<(WorkerCacheHitEstimate, Option<RoutingDecisionHashes>), KvRouterError> {
         let block_hashes = compute_block_hash_for_seq(
@@ -834,6 +985,7 @@ where
             BlockHashOptions {
                 block_mm_infos,
                 lora_name,
+                cache_namespace,
                 is_eagle: Some(self.is_eagle),
             },
         );
@@ -860,11 +1012,13 @@ where
         router_config_override: Option<&RouterConfigOverride>,
         block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         lora_name: Option<&str>,
+        cache_namespace: Option<&str>,
     ) -> Result<Vec<PotentialLoad>> {
         let isl_tokens = tokens.len();
         let hash_options = BlockHashOptions {
             block_mm_infos,
             lora_name,
+            cache_namespace,
             is_eagle: Some(self.is_eagle),
         };
         let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, hash_options);
@@ -901,11 +1055,13 @@ where
         router_config_override: Option<&RouterConfigOverride>,
         block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         lora_name: Option<&str>,
+        cache_namespace: Option<&str>,
         include_shared: bool,
     ) -> Result<OverlapScoresResponse, KvRouterError> {
         let hash_options = BlockHashOptions {
             block_mm_infos,
             lora_name,
+            cache_namespace,
             is_eagle: Some(self.is_eagle),
         };
         let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, hash_options);
@@ -915,7 +1071,10 @@ where
 
         let (shared_hits, shared_error) = if include_shared {
             if let Some(shared_cache) = self.shared_cache.as_ref() {
-                match shared_cache.check_blocks(tokens, self.block_size).await {
+                match shared_cache
+                    .check_blocks(tokens, self.block_size, cache_namespace)
+                    .await
+                {
                     Ok(hits) => (Some(hits), None),
                     Err(err) => {
                         tracing::warn!(error = %err, "Shared cache overlap query failed");
@@ -984,6 +1143,7 @@ where
                 priority_jump,
                 strict_priority,
                 lora_name,
+                cache_namespace,
             } => {
                 let request_context = ctx.context();
                 let mut schedule = Box::pin(self.find_best_match_details_with_policy_class(
@@ -994,9 +1154,11 @@ where
                     true,
                     false,
                     lora_name,
+                    cache_namespace,
                     priority_jump,
                     strict_priority,
                     policy_class,
+                    None,
                     None,
                     None,
                     None,
@@ -1040,6 +1202,7 @@ where
                 tokens,
                 block_mm_infos,
                 lora_name,
+                cache_namespace,
             } => RouterResponse::PotentialLoads {
                 loads: self
                     .get_potential_loads(
@@ -1047,6 +1210,7 @@ where
                         None,
                         block_mm_infos.as_deref(),
                         lora_name.as_deref(),
+                        cache_namespace.as_deref(),
                     )
                     .await?,
                 pending_count: self.pending_count(),
@@ -1156,6 +1320,7 @@ mod tests {
             &self,
             _tokens: &[u32],
             _block_size: u32,
+            _cache_namespace: Option<&str>,
         ) -> Result<dynamo_kv_router::protocols::SharedCacheHits, KvRouterError> {
             if self.should_error {
                 Err(KvRouterError::IndexerOffline)
@@ -1250,6 +1415,7 @@ mod tests {
             endpoint,
             client,
             rx,
+            None,
             2,
             selector,
             Some(config),
@@ -1258,6 +1424,7 @@ mod tests {
             None,
             false,
             shared_cache,
+            None,
         )
         .await
         .unwrap()
@@ -1287,6 +1454,7 @@ mod tests {
                 None,
                 None,
                 false,
+                None,
                 None,
                 0.0,
                 0,
@@ -1323,6 +1491,7 @@ mod tests {
                 None,
                 false,
                 None,
+                None,
                 0.0,
                 0,
                 None,
@@ -1347,6 +1516,7 @@ mod tests {
                 None,
                 None,
                 false,
+                None,
                 None,
                 0.0,
                 0,
@@ -1389,6 +1559,7 @@ mod tests {
                 false,
                 true,
                 None,
+                None,
                 0.0,
                 0,
                 None,
@@ -1412,6 +1583,7 @@ mod tests {
             BlockHashOptions {
                 block_mm_infos: None,
                 lora_name: None,
+                cache_namespace: None,
                 is_eagle: Some(false),
             },
         );
@@ -1440,6 +1612,7 @@ mod tests {
                 None,
                 false,
                 false,
+                None,
                 None,
                 0.0,
                 0,
@@ -1475,7 +1648,7 @@ mod tests {
         .await;
 
         let scores = router
-            .get_overlap_scores(&[11, 12, 21, 22], None, None, None, true)
+            .get_overlap_scores(&[11, 12, 21, 22], None, None, None, None, true)
             .await
             .unwrap();
 

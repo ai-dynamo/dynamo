@@ -27,8 +27,9 @@ use super::driver::WorkloadDriver;
 use super::types::{
     AgenticTrace, AgenticTurnTrace, ArrivalSpec, DelaySpec, DynamoRequestTrace, LengthSpec,
     ReplayRequestHashes, RouterSequence, SequenceHashMode, SessionPartitionSpec, SessionTrace,
-    SyntheticTraceSpec, Trace, TraceFileFormat, TurnTrace,
+    SyntheticTraceSpec, Trace, TraceFileFormat, TurnTrace, effective_replay_key,
 };
+use super::{SYNTHETIC_OUTPUT_SEED, planned_output_token_ids};
 use crate::common::protocols::DirectRequest;
 
 #[derive(Debug, Deserialize)]
@@ -176,6 +177,7 @@ impl TurnTrace {
         Ok(DirectRequest {
             tokens,
             max_output_tokens: self.max_output_tokens,
+            output_token_ids: self.output_token_ids.clone(),
             uuid: Some(request_uuid),
             dp_rank: 0,
             arrival_timestamp_ms,
@@ -240,8 +242,10 @@ impl MooncakeTraceBuilder {
     }
 
     fn push(&mut self, line_idx: usize, raw: MooncakeRow) -> Result<()> {
-        let session_id = raw
-            .session_id
+        let request_id = raw.request_id;
+        let raw_session_id = raw.session_id;
+        let session_id = raw_session_id
+            .clone()
             .unwrap_or_else(|| format!("request_{}", line_idx + 1));
         let hash_ids = raw
             .hash_ids
@@ -260,6 +264,17 @@ impl MooncakeTraceBuilder {
         let output_length = raw
             .output_length
             .ok_or_else(|| anyhow!("trace line {} is missing output_length", line_idx + 1))?;
+        let output_token_ids = raw.output_token_ids;
+        if let Some(output_token_ids) = output_token_ids.as_ref()
+            && output_token_ids.len() != output_length
+        {
+            bail!(
+                "trace line {} output_length {} does not match output_token_ids length {}",
+                line_idx + 1,
+                output_length,
+                output_token_ids.len()
+            );
+        }
         let timestamp_ms = raw.timestamp;
         let explicit_delay_ms = raw.delay;
         let priority = raw.priority.unwrap_or(0);
@@ -285,6 +300,14 @@ impl MooncakeTraceBuilder {
             .get_mut(session_index)
             .expect("newly inserted session must exist");
         let turn_idx = session.turns.len();
+        let replay_key = output_token_ids.as_ref().map(|_| {
+            effective_replay_key(
+                request_id.as_deref(),
+                raw_session_id.as_deref(),
+                turn_idx,
+                line_idx,
+            )
+        });
         let delay_after_previous_ms = if turn_idx == 0 {
             let delay = explicit_delay_ms.unwrap_or(0.0);
             if delay != 0.0 {
@@ -330,6 +353,8 @@ impl MooncakeTraceBuilder {
         session.turns.push(TurnTrace {
             input_length,
             max_output_tokens: output_length,
+            output_token_ids,
+            replay_key,
             hash_ids,
             delay_after_previous_ms,
             priority,
@@ -860,6 +885,7 @@ impl Trace {
 
     pub fn to_single_turn_requests(&self) -> Result<Vec<DirectRequest>> {
         let mut requests = Vec::with_capacity(self.sessions.len());
+        let mut output_rng = StdRng::seed_from_u64(SYNTHETIC_OUTPUT_SEED);
         for session in &self.sessions {
             if session.turns.len() != 1 {
                 bail!(
@@ -868,11 +894,17 @@ impl Trace {
                     session.turns.len()
                 );
             }
-            requests.push(session.turns[0].to_direct_request(
+            let mut request = session.turns[0].to_direct_request(
                 self.block_size,
                 Uuid::new_v4(),
                 session.first_arrival_timestamp_ms,
-            )?);
+            )?;
+            request.output_token_ids = Some(planned_output_token_ids(
+                request.output_token_ids,
+                request.max_output_tokens,
+                &mut output_rng,
+            ));
+            requests.push(request);
         }
         Ok(requests)
     }
@@ -1000,6 +1032,17 @@ impl Trace {
             }
 
             for (turn_idx, turn) in session.turns.iter().enumerate() {
+                if let Some(output_token_ids) = turn.output_token_ids.as_ref()
+                    && output_token_ids.len() != turn.max_output_tokens
+                {
+                    bail!(
+                        "session {} turn {} max_output_tokens {} does not match output_token_ids length {}",
+                        session.session_id,
+                        turn_idx,
+                        turn.max_output_tokens,
+                        output_token_ids.len()
+                    );
+                }
                 if turn.input_length == 0 {
                     bail!(
                         "session {} turn {} must have a positive input_length",
@@ -1100,6 +1143,17 @@ impl AgenticTraceBuilder {
         let output_length = raw
             .output_length
             .ok_or_else(|| anyhow!("trace line {} is missing output_length", line_idx + 1))?;
+        let output_token_ids = raw.output_token_ids;
+        if let Some(output_token_ids) = output_token_ids.as_ref()
+            && output_token_ids.len() != output_length
+        {
+            bail!(
+                "trace line {} output_length {} does not match output_token_ids length {}",
+                line_idx + 1,
+                output_length,
+                output_token_ids.len()
+            );
+        }
         if !delay_after_dependencies_ms.is_finite() || delay_after_dependencies_ms < 0.0 {
             bail!(
                 "trace line {} has invalid dependency delay {}",
@@ -1117,13 +1171,23 @@ impl AgenticTraceBuilder {
             );
         }
 
+        let replay_key = output_token_ids.as_ref().map(|_| {
+            effective_replay_key(
+                Some(raw.request_id.as_str()),
+                raw.session_id.as_deref(),
+                0,
+                line_idx,
+            )
+        });
         self.turns.push(AgenticTurnTrace {
+            replay_key,
             request_id: raw.request_id,
             session_id: raw
                 .session_id
                 .unwrap_or_else(|| format!("request_{}", line_idx + 1)),
             input_length,
             max_output_tokens: output_length,
+            output_token_ids,
             hash_ids,
             first_ready_timestamp_ms: raw.timestamp,
             delay_after_dependencies_ms,

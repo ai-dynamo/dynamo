@@ -12,7 +12,7 @@ A hierarchical routing service that sits between the Dynamo frontend and local r
 The Global Router supports two modes:
 
 - **Disagg mode** (default): Registers as both prefill and decode worker. Routes prefill requests based on (ISL, TTFT) and decode requests based on (context_length, ITL) to separate pool types.
-- **Agg mode**: Registers as a single generate worker. Routes all requests based on (TTFT target, ITL target) to unified pools that handle both prefill and decode.
+- **Agg mode**: Registers as a single generate worker. Routes all requests by (TTFT target, ITL target), with an optional ISL dimension, to unified pools that handle both prefill and decode.
 
 Both modes support priority-based pool overrides from agent hints and optional priority retry to faster pools.
 
@@ -20,9 +20,9 @@ Both modes support priority-based pool overrides from agent hints and optional p
 
 - **vLLM** - Uses synchronous prefill path (frontend waits for prefill to complete)
 - **Mocker** - Uses same synchronous path as vLLM
+- **SGLang** - Uses the bootstrap path (async KV transfer)
 
 **Not supported:**
-- **SGLang** - Bootstrap path (async KV transfer) not implemented
 - **TensorRT-LLM** - Bootstrap path not implemented
 
 ## Architecture
@@ -151,15 +151,18 @@ The configuration file format depends on the mode. The `mode` field determines w
         "itl_min_ms": <float>,              // Minimum ITL target (ms)
         "itl_max_ms": <float>,              // Maximum ITL target (ms)
         "itl_resolution": <int>,          // Number of grid columns for ITL dimension
-        "agg_pool_mapping": [[]],         // 2D array [ttft_resolution][itl_resolution] -> pool index
+        "isl_min": <int>,                  // Optional: minimum input sequence length
+        "isl_max": <int>,                  // Optional: maximum input sequence length
+        "isl_resolution": <int>,           // Optional: number of ISL grid rows
+        "agg_pool_mapping": [[]],         // 2D [ttft][itl], or 3D [isl][ttft][itl] when all isl_* fields are set
         "priority_overrides": []          // Optional
     }
 }
 ```
 
-### Why TTFT x ITL for Agg Mode
+### Aggregate Pool Selection
 
-In aggregated mode, the same pool handles both prefill and decode. Both SLA targets matter for a single routing decision:
+In aggregated mode, the same pool handles both prefill and decode. By default, the router uses TTFT × ITL because both SLA targets matter for a single routing decision:
 
 - **TTFT target** captures the user's prefill latency requirement. ISL is implicitly accounted for — a user sending a large prompt with a tight TTFT target is saying "I need a fast pool."
 - **ITL target** captures the user's decode latency requirement. With chunked prefill, ITL reflects the combined prefill+decode contention. Without chunked prefill, ITL reflects pure decode performance.
@@ -170,9 +173,28 @@ This creates natural pool separation:
 - Tight TTFT + relaxed ITL -> prefill-optimized pool
 - Relaxed TTFT + relaxed ITL -> batch/throughput pool
 
+For workload classes whose prompt length matters independently of the SLA targets, configure all three `isl_*` fields. This adds ISL as the leading mapping dimension, yielding `agg_pool_mapping[isl_idx][ttft_idx][itl_idx]`. For example, this routes 4K prompts to pool 0 and 16K prompts to pool 1 while keeping one SLA bucket:
+
+```json
+{
+  "ttft_min_ms": 1,
+  "ttft_max_ms": 10000,
+  "ttft_resolution": 1,
+  "itl_min_ms": 1,
+  "itl_max_ms": 100,
+  "itl_resolution": 1,
+  "isl_min": 0,
+  "isl_max": 24576,
+  "isl_resolution": 2,
+  "agg_pool_mapping": [[[0]], [[1]]]
+}
+```
+
+The `isl_*` fields must be configured together. Existing aggregate configurations without them keep the 2D TTFT × ITL mapping.
+
 ### Pool Selection
 
-The pool selection uses a 2D grid lookup. Each dimension is divided into buckets based on the resolution.
+The default pool selection uses a 2D grid lookup. Each dimension is divided into buckets based on the resolution.
 
 **Prefill Pool Selection** (disagg mode, based on ISL and TTFT target):
 
@@ -187,9 +209,9 @@ The pool selection uses a 2D grid lookup. Each dimension is divided into buckets
 
 Same logic but using `context_length` and `itl_target` with `decode_pool_mapping`.
 
-**Agg Pool Selection** (agg mode, based on TTFT and ITL targets):
+**Agg Pool Selection** (agg mode, based on TTFT and ITL targets, with optional ISL):
 
-Same grid logic using `ttft_target` and `itl_target` with `agg_pool_mapping`.
+Without `isl_*`, the grid uses `ttft_target` and `itl_target` with `agg_pool_mapping[ttft_idx][itl_idx]`. With all three `isl_*` fields, it first computes `isl_idx` using the same clamped bucket logic as prefill selection, then uses `agg_pool_mapping[isl_idx][ttft_idx][itl_idx]`.
 
 ### Priority-Based Pool Override
 
@@ -277,7 +299,7 @@ The preprocessor forwards `nvext.router` to the backend as the typed `router` fi
 ### Agg Mode
 
 1. Frontend receives request and sends to Global Router (registered as Chat + Completions)
-2. Global Router selects agg pool based on (TTFT_target, ITL_target, priority)
+2. Global Router selects agg pool based on (ISL, TTFT_target, ITL_target, priority) when ISL routing is configured; otherwise it uses (TTFT_target, ITL_target, priority)
 3. Request is forwarded to local router in the selected agg pool namespace
 4. If forwarding fails before streaming tokens and priority retry is enabled, Global Router retries faster agg pools
 5. Local router forwards to a worker that handles both prefill and decode

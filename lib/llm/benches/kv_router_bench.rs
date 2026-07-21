@@ -33,14 +33,13 @@ use tokio::sync::{Mutex, Semaphore};
 
 use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
-    KvCacheStoredBlockData, LocalBlockHash, RouterEvent, WorkerId, compute_hash,
+    KvCacheStoredBlockData, LocalBlockHash, RouterEvent, WorkerId, compute_block_hash,
     compute_seq_hash_for_block,
 };
 use dynamo_llm::model_card::ModelDeploymentCard;
-use dynamo_llm::preprocessor::prompt::{
-    ChatTemplate, ContextMixins, OAIChatLikeRequest, PromptFormatter,
-};
+use dynamo_llm::preprocessor::prompt::prompt_formatter_from_mdc;
 use dynamo_mocker::loadgen::RouterSequence;
+use dynamo_renderer::{ChatTemplate, ContextMixins, OAIChatLikeRequest, PromptFormatter};
 
 /// KV Router event subject suffix (appended to Component.subject())
 /// Full subject format: namespace.{namespace}.component.{component}.kv-events
@@ -192,7 +191,7 @@ fn compute_block_hashes(tokens: &[u32], kv_block_size: u32) -> Vec<LocalBlockHas
         .chunks_exact(kv_block_size as usize)
         .map(|chunk| {
             let bytes: Vec<u8> = chunk.iter().flat_map(|&num| num.to_le_bytes()).collect();
-            LocalBlockHash(compute_hash(&bytes))
+            compute_block_hash(&bytes)
         })
         .collect()
 }
@@ -319,7 +318,7 @@ fn try_load_prompt_renderer(model_or_path: &str) -> Option<PromptRenderer> {
     }
 
     let card = ModelDeploymentCard::load_from_disk(path, None).ok()?;
-    let formatter = PromptFormatter::from_mdc(&card).ok()?;
+    let formatter = prompt_formatter_from_mdc(&card).ok()?;
     Some(PromptRenderer::Formatter(formatter))
 }
 
@@ -744,7 +743,8 @@ async fn build_tree_via_nats(
 
     for (event_id, seq) in sequences.iter().enumerate() {
         let event = sequence_to_router_event(seq, event_id as u64);
-        let data = encode_event_with_envelope(&event, KV_EVENT_SUBJECT)?;
+        let event_batch = vec![event];
+        let data = encode_event_with_envelope(&event_batch, KV_EVENT_SUBJECT)?;
         nats_client
             .publish(subject.clone(), data.into())
             .await
@@ -1160,8 +1160,9 @@ async fn publish_events_at_rate(
     while start.elapsed() < duration {
         let seq = &sequences[(event_id as usize) % sequences.len()];
         let event = sequence_to_router_event(seq, event_id);
+        let event_batch = vec![event];
 
-        match encode_event_with_envelope(&event, KV_EVENT_SUBJECT) {
+        match encode_event_with_envelope(&event_batch, KV_EVENT_SUBJECT) {
             Ok(data) => {
                 if let Err(e) = nats_client.publish(subject.clone(), data.into()).await {
                     publish_failures += 1;

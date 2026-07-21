@@ -168,23 +168,17 @@ class TestUsageStatistics:
     """Tests for usage statistics calculation."""
 
     @pytest.mark.parametrize(
-        "prompt_token_ids,embedding_seq_len,completion_tokens,expected_prompt,expected_total",
+        "prompt_token_ids,completion_tokens,expected_prompt,expected_total",
         [
-            # Embeddings: use embedding_sequence_length
-            ([], 10, 5, 10, 15),
-            # Text: use len(prompt_token_ids)
-            ([1, 2, 3, 4, 5, 6, 7], None, 3, 7, 10),
-            # Embeddings override token_ids
-            ([1, 2, 3], 20, 2, 20, 22),
-            # Zero sequence length edge case
-            ([], 0, 2, 0, 2),
+            ([0] * 10, 5, 10, 15),
+            ([1, 2, 3, 4, 5, 6, 7], 3, 7, 10),
+            ([], 2, None, None),
         ],
-        ids=["embeddings", "text", "embeddings-override", "zero-seq-len"],
+        ids=["embeddings", "text", "empty-token-ids"],
     )
     def test_build_completion_usage(
         self,
         prompt_token_ids,
-        embedding_seq_len,
         completion_tokens,
         expected_prompt,
         expected_total,
@@ -195,9 +189,7 @@ class TestUsageStatistics:
         mock_output.outputs = [Mock(token_ids=list(range(completion_tokens)))]
         mock_output.num_cached_tokens = 0
 
-        result = BaseWorkerHandler._build_completion_usage(
-            mock_output, embedding_sequence_length=embedding_seq_len
-        )
+        result = BaseWorkerHandler._build_completion_usage(mock_output)
 
         assert result["prompt_tokens"] == expected_prompt
         assert result["completion_tokens"] == completion_tokens
@@ -210,25 +202,31 @@ class TestUsageStatistics:
         mock_output.outputs = [Mock(token_ids=[1, 2, 3])]
         mock_output.num_cached_tokens = 0
 
-        result = BaseWorkerHandler._build_completion_usage(
-            mock_output, embedding_sequence_length=None
-        )
+        result = BaseWorkerHandler._build_completion_usage(mock_output)
 
         assert result["prompt_tokens"] is None
         assert result["completion_tokens"] == 3
         assert result["total_tokens"] is None
 
-    def test_build_completion_usage_with_cached_tokens(self):
-        """Test that cached tokens are reported in prompt_tokens_details."""
+    @pytest.mark.parametrize(
+        ("num_cached_tokens", "expected_prompt_tokens_details"),
+        [
+            (None, None),
+            (0, {"cached_tokens": 0}),
+            (3, {"cached_tokens": 3}),
+        ],
+    )
+    def test_build_completion_usage_with_cached_tokens(
+        self, num_cached_tokens, expected_prompt_tokens_details
+    ):
+        """Test that cached-token availability and counts remain distinct."""
         mock_output = Mock()
         mock_output.prompt_token_ids = [1, 2, 3, 4, 5]
         mock_output.outputs = [Mock(token_ids=[6, 7])]
-        mock_output.num_cached_tokens = 3
+        mock_output.num_cached_tokens = num_cached_tokens
 
-        result = BaseWorkerHandler._build_completion_usage(
-            mock_output, embedding_sequence_length=None
-        )
+        result = BaseWorkerHandler._build_completion_usage(mock_output)
 
         assert result["prompt_tokens"] == 5
         assert result["completion_tokens"] == 2
-        assert result["prompt_tokens_details"] == {"cached_tokens": 3}
+        assert result["prompt_tokens_details"] == expected_prompt_tokens_details

@@ -8,9 +8,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use derive_builder::Builder;
-use rand::Rng;
 use serde::{Deserialize, Serialize};
-use validator::{Validate, ValidationError};
 
 use crate::protocols::{
     BlockHashOptions, LocalBlockHash, compute_block_hash_for_seq, compute_seq_hash_for_block,
@@ -53,31 +51,35 @@ const fn default_overlap_score_credit_decay() -> f64 {
 }
 
 pub const OVERLAP_SCORE_CREDIT_RANGE_ERROR: &str =
-    "overlap_score_credit must be between 0.0 and 1.0";
-pub const OVERLAP_SCORE_CREDIT_MIGRATION_ERROR: &str = concat!(
-    "overlap_score_credit must be between 0.0 and 1.0; values above 1.0 are probably not what ",
-    "you intended. If you want to weigh TTFT/prompt-side prefill load more heavily, keep ",
-    "overlap_score_credit <= 1.0 and use that larger value for prefill_load_scale instead; ",
-    "prefill_load_scale is applied after overlap credits."
-);
+    "overlap_score_credit must be a finite, non-negative number";
 
 pub fn overlap_score_credit_error_message(value: f64) -> Option<&'static str> {
-    if (0.0..=1.0).contains(&value) {
+    if value.is_finite() && value >= 0.0 {
         None
-    } else if value > 1.0 {
-        Some(OVERLAP_SCORE_CREDIT_MIGRATION_ERROR)
     } else {
         Some(OVERLAP_SCORE_CREDIT_RANGE_ERROR)
     }
 }
 
-fn validate_overlap_score_credit(value: f64) -> Result<(), ValidationError> {
+fn validate_overlap_score_credit(value: f64) -> Result<(), String> {
     let Some(message) = overlap_score_credit_error_message(value) else {
         return Ok(());
     };
-    let mut error = ValidationError::new("overlap_score_credit_out_of_range");
-    error.message = Some(message.into());
-    Err(error)
+    Err(message.to_string())
+}
+
+fn validate_min(field: &str, value: f64, min: f64) -> Result<(), String> {
+    if value >= min {
+        return Ok(());
+    }
+    Err(format!("{field} must be greater than or equal to {min}"))
+}
+
+fn validate_range(field: &str, value: f64, min: f64, max: f64) -> Result<(), String> {
+    if value >= min && value <= max {
+        return Ok(());
+    }
+    Err(format!("{field} must be between {min} and {max}"))
 }
 
 pub fn apply_deprecated_overlap_score_weight_override(
@@ -118,11 +120,8 @@ fn kv_router_config_from_lookup(get_env: impl Fn(&str) -> Option<String>) -> KvR
     }
 
     fn parse_bool(get_env: &impl Fn(&str) -> Option<String>, key: &str) -> Option<bool> {
-        get_env(key).and_then(|value| match value.to_ascii_lowercase().as_str() {
-            "true" | "1" | "yes" | "on" => Some(true),
-            "false" | "0" | "no" | "off" => Some(false),
-            _ => None,
-        })
+        // Empty or unrecognized values yield None so the default is preserved.
+        get_env(key).and_then(|value| dynamo_truthy::parse_bool_opt(&value))
     }
 
     let mut config = KvRouterConfig::default();
@@ -190,18 +189,6 @@ fn apply_deprecated_overlap_score_weight_override_option(
     if value == 0.0 {
         *overlap_score_credit = Some(0.0);
     }
-}
-
-fn validate_and_return<T: Validate>(config: T) -> Result<T, String> {
-    config.validate().map_err(|error| error.to_string())?;
-    Ok(config)
-}
-
-fn validate_router_config_override(config: &RouterConfigOverride) -> Result<(), ValidationError> {
-    if let Some(credit) = config.overlap_score_credit {
-        validate_overlap_score_credit(credit)?;
-    }
-    Ok(())
 }
 
 /// Type of external shared KV cache to query during routing.
@@ -321,23 +308,21 @@ struct RouterConfigOverrideSerde {
 }
 
 /// Override configuration for router settings that can be specified per-request
-#[derive(Debug, Clone, Default, Builder, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, Default, Builder, Serialize, Deserialize)]
 #[serde(try_from = "RouterConfigOverrideSerde")]
-#[validate(schema(function = "validate_router_config_override"))]
 pub struct RouterConfigOverride {
     /// Device-local prefix-overlap credit multiplier applied to the prefill
-    /// load before sampling (0.0 to 1.0). Set to 0.0 to ignore prefix matching.
+    /// load before sampling. Values must be finite and non-negative. Values above
+    /// 1.0 give device overlap extra credit. Set to 0.0 to ignore prefix matching.
     #[builder(default)]
     pub overlap_score_credit: Option<f64>,
 
     /// Scale applied to the adjusted prefill load after device/lower-tier
     /// cache-hit credits have been subtracted.
     #[builder(default)]
-    #[validate(range(min = 0.0))]
     pub prefill_load_scale: Option<f64>,
 
     #[builder(default)]
-    #[validate(range(min = 0.0))]
     pub router_temperature: Option<f64>,
 
     #[builder(default)]
@@ -348,8 +333,25 @@ pub struct RouterConfigOverride {
 
     /// Per-request override of `shared_cache_multiplier`.
     #[builder(default)]
-    #[validate(range(min = 0.0, max = 1.0))]
     pub shared_cache_multiplier: Option<f64>,
+}
+
+impl RouterConfigOverride {
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(value) = self.overlap_score_credit {
+            validate_overlap_score_credit(value)?;
+        }
+        if let Some(value) = self.prefill_load_scale {
+            validate_min("prefill_load_scale", value, 0.0)?;
+        }
+        if let Some(value) = self.router_temperature {
+            validate_min("router_temperature", value, 0.0)?;
+        }
+        if let Some(value) = self.shared_cache_multiplier {
+            validate_range("shared_cache_multiplier", value, 0.0, 1.0)?;
+        }
+        Ok(())
+    }
 }
 
 impl TryFrom<RouterConfigOverrideSerde> for RouterConfigOverride {
@@ -367,14 +369,16 @@ impl TryFrom<RouterConfigOverrideSerde> for RouterConfigOverride {
             );
         }
 
-        validate_and_return(Self {
+        let config = Self {
             overlap_score_credit,
             prefill_load_scale,
             router_temperature: compat.router_temperature,
             assume_kv_reuse: compat.assume_kv_reuse,
             track_prefill_tokens: compat.track_prefill_tokens,
             shared_cache_multiplier: compat.shared_cache_multiplier,
-        })
+        };
+        config.validate()?;
+        Ok(config)
     }
 }
 
@@ -389,15 +393,12 @@ struct KvRouterConfigSerde {
     disk_cache_hit_weight: f64,
     router_temperature: f64,
     use_kv_events: bool,
-    durable_kv_events: bool,
     router_replica_sync: bool,
     router_track_active_blocks: bool,
     router_track_output_blocks: bool,
     router_assume_kv_reuse: bool,
     router_track_prefill_tokens: bool,
     router_prefill_load_model: RouterPrefillLoadModel,
-    router_snapshot_threshold: Option<u32>,
-    router_reset_states: bool,
     router_ttl_secs: f64,
     router_queue_threshold: Option<f64>,
     #[serde(default)]
@@ -424,15 +425,12 @@ impl Default for KvRouterConfigSerde {
             disk_cache_hit_weight: config.disk_cache_hit_weight,
             router_temperature: config.router_temperature,
             use_kv_events: config.use_kv_events,
-            durable_kv_events: config.durable_kv_events,
             router_replica_sync: config.router_replica_sync,
             router_track_active_blocks: config.router_track_active_blocks,
             router_track_output_blocks: config.router_track_output_blocks,
             router_assume_kv_reuse: config.router_assume_kv_reuse,
             router_track_prefill_tokens: config.router_track_prefill_tokens,
             router_prefill_load_model: config.router_prefill_load_model,
-            router_snapshot_threshold: config.router_snapshot_threshold,
-            router_reset_states: config.router_reset_states,
             router_ttl_secs: config.router_ttl_secs,
             router_queue_threshold: config.router_queue_threshold,
             router_policy_config: config.router_policy_config,
@@ -449,43 +447,32 @@ impl Default for KvRouterConfigSerde {
 }
 
 /// KV Router configuration parameters
-#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(try_from = "KvRouterConfigSerde")]
-#[validate(schema(function = "validate_kv_router_config"))]
 pub struct KvRouterConfig {
     /// Device-local prefix-overlap credit multiplier applied to the prefill
-    /// load before sampling (0.0 to 1.0). Set to 0.0 to ignore prefix matching.
-    #[validate(custom(function = "validate_overlap_score_credit"))]
+    /// load before sampling. Values must be finite and non-negative. Values above
+    /// 1.0 give device overlap extra credit. Set to 0.0 to ignore prefix matching.
     pub overlap_score_credit: f64,
 
     /// Decay rate for device-local overlap credit as active prefill load rises
     /// above the least-loaded eligible worker. A value of 0.0 disables decay.
     #[serde(default = "default_overlap_score_credit_decay")]
-    #[validate(range(min = 0.0))]
     pub overlap_score_credit_decay: f64,
 
     /// Scale applied after overlap/cache-hit credits reduce the prompt-side
     /// prefill load. Defaults to 1.0.
-    #[validate(range(min = 0.0))]
     pub prefill_load_scale: f64,
 
     #[serde(default = "default_host_cache_hit_weight")]
-    #[validate(range(min = 0.0, max = 1.0))]
     pub host_cache_hit_weight: f64,
 
     #[serde(default = "default_disk_cache_hit_weight")]
-    #[validate(range(min = 0.0, max = 1.0))]
     pub disk_cache_hit_weight: f64,
 
-    #[validate(range(min = 0.0))]
     pub router_temperature: f64,
 
     pub use_kv_events: bool,
-
-    /// **Deprecated:** Enable durable KV events using NATS JetStream instead of the default event plane.
-    /// This option will be removed in a future release. The event-plane subscriber
-    /// (local_indexer mode) is now the recommended path.
-    pub durable_kv_events: bool,
 
     pub router_replica_sync: bool,
 
@@ -511,22 +498,13 @@ pub struct KvRouterConfig {
     /// Optional model for estimating effective prompt-side prefill load over time.
     pub router_prefill_load_model: RouterPrefillLoadModel,
 
-    /// Threshold for triggering snapshots. If None, no snapshots will be performed.
-    #[validate(range(min = 1))]
-    pub router_snapshot_threshold: Option<u32>,
-
-    /// Whether to reset the router state on startup (default: false)
-    pub router_reset_states: bool,
-
     /// TTL for blocks in seconds (only used when use_kv_events is false, default: 120.0)
-    #[validate(range(min = 0.0))]
     pub router_ttl_secs: f64,
 
     /// Queue threshold fraction for prefill token capacity.
     /// When set, requests are queued if all workers exceed this fraction of max_num_batched_tokens.
     /// If None, queueing is disabled and all requests go directly to ready.
-    /// Default: 16.0. Must be >= 0. Use 0.0 for maximum queueing sensitivity.
-    #[validate(range(min = 0.0))]
+    /// Disabled by default. Must be >= 0. Use 0.0 for maximum queueing sensitivity.
     pub router_queue_threshold: Option<f64>,
 
     /// Optional startup-only YAML policy-class configuration.
@@ -546,7 +524,6 @@ pub struct KvRouterConfig {
     /// Number of KV indexer worker threads.
     /// When > 1, uses ConcurrentRadixTree with a thread pool for event-driven
     /// and approximate routing writes. Default: 4.
-    #[validate(range(min = 1))]
     pub router_event_threads: u32,
 
     pub skip_initial_worker_wait: bool,
@@ -570,7 +547,6 @@ pub struct KvRouterConfig {
     /// because they need to be fetched. A value of 0.5 means each shared cache hit
     /// counts as half a device-local hit. Default: 0.0 (shared cache scoring disabled);
     /// the CLI sets this to 0.5 when shared cache is enabled.
-    #[validate(range(min = 0.0, max = 1.0))]
     pub shared_cache_multiplier: f64,
 
     /// Type of external shared KV cache to query during routing.
@@ -584,7 +560,6 @@ pub struct KvRouterConfig {
     /// event-driven primary and local side indexer and returns the per-worker
     /// maximum overlap.
     #[serde(default)]
-    #[validate(range(min = 0.0))]
     pub router_predicted_ttl_secs: Option<f64>,
 }
 
@@ -598,17 +573,14 @@ impl Default for KvRouterConfig {
             disk_cache_hit_weight: default_disk_cache_hit_weight(),
             router_temperature: 0.0,
             use_kv_events: true,
-            durable_kv_events: false, // default to NATS Core (local indexer mode)
             router_replica_sync: false,
             router_track_active_blocks: true,
             router_track_output_blocks: false,
             router_assume_kv_reuse: true,
             router_track_prefill_tokens: default_track_prefill_tokens(),
             router_prefill_load_model: RouterPrefillLoadModel::default(),
-            router_snapshot_threshold: Some(1000000),
-            router_reset_states: false,
             router_ttl_secs: 120.0,
-            router_queue_threshold: Some(16.0),
+            router_queue_threshold: None,
             router_policy_config: None,
             policy_model_name: None,
             policy_config_cache: OnceLock::new(),
@@ -639,7 +611,7 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             );
         }
 
-        validate_and_return(Self {
+        let config = Self {
             overlap_score_credit,
             overlap_score_credit_decay: compat.overlap_score_credit_decay,
             prefill_load_scale,
@@ -647,15 +619,12 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             disk_cache_hit_weight: compat.disk_cache_hit_weight,
             router_temperature: compat.router_temperature,
             use_kv_events: compat.use_kv_events,
-            durable_kv_events: compat.durable_kv_events,
             router_replica_sync: compat.router_replica_sync,
             router_track_active_blocks: compat.router_track_active_blocks,
             router_track_output_blocks: compat.router_track_output_blocks,
             router_assume_kv_reuse: compat.router_assume_kv_reuse,
             router_track_prefill_tokens: compat.router_track_prefill_tokens,
             router_prefill_load_model: compat.router_prefill_load_model,
-            router_snapshot_threshold: compat.router_snapshot_threshold,
-            router_reset_states: compat.router_reset_states,
             router_ttl_secs: compat.router_ttl_secs,
             router_queue_threshold: compat.router_queue_threshold,
             router_policy_config: compat.router_policy_config,
@@ -669,51 +638,34 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             shared_cache_multiplier: compat.shared_cache_multiplier,
             shared_cache_type: compat.shared_cache_type,
             router_predicted_ttl_secs: compat.router_predicted_ttl_secs,
-        })
+        };
+        config.validate()?;
+        Ok(config)
     }
 }
 
-fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationError> {
-    if config.durable_kv_events {
-        tracing::warn!(
-            "--durable-kv-events is deprecated and will be removed in a future release. \
-             The event-plane subscriber (local_indexer mode) is now the recommended path."
+fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), String> {
+    if config.router_track_output_blocks && !config.router_track_active_blocks {
+        return Err(
+            "router_track_output_blocks requires router_track_active_blocks=true".to_string(),
         );
     }
-    if config.durable_kv_events && !config.use_kv_events {
-        return Err(ValidationError::new(
-            "durable_kv_events requires use_kv_events=true",
-        ));
-    }
-    if config.router_track_output_blocks && !config.router_track_active_blocks {
-        return Err(ValidationError::new(
-            "router_track_output_blocks requires router_track_active_blocks=true",
-        ));
-    }
     if config.router_prefill_load_model.is_enabled() && !config.router_track_prefill_tokens {
-        return Err(ValidationError::new(
-            "router_prefill_load_model requires router_track_prefill_tokens=true",
-        ));
+        return Err(
+            "router_prefill_load_model requires router_track_prefill_tokens=true".to_string(),
+        );
     }
     if config.use_remote_indexer && config.serve_indexer {
-        return Err(ValidationError::new(
-            "use_remote_indexer and serve_indexer are mutually exclusive",
-        ));
+        return Err("use_remote_indexer and serve_indexer are mutually exclusive".to_string());
     }
     if config.serve_indexer && config.overlap_score_credit == 0.0 {
-        return Err(ValidationError::new(
-            "serve_indexer requires overlap_score_credit > 0",
-        ));
+        return Err("serve_indexer requires overlap_score_credit > 0".to_string());
     }
     if config.router_predicted_ttl_secs.is_some() && !config.use_kv_events {
-        return Err(ValidationError::new(
-            "router_predicted_ttl_secs requires use_kv_events=true",
-        ));
+        return Err("router_predicted_ttl_secs requires use_kv_events=true".to_string());
     }
     if let Err(error) = config.loaded_policy_config() {
-        let mut validation_error = ValidationError::new("router_policy_config");
-        validation_error.message = Some(error.to_string().into());
-        return Err(validation_error);
+        return Err(format!("router_policy_config: {error}"));
     }
     Ok(())
 }
@@ -766,7 +718,47 @@ impl KvRouterConfig {
     }
 
     pub fn validate_config(&self) -> Result<(), String> {
-        self.validate().map_err(|error| error.to_string())
+        self.validate()
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        validate_overlap_score_credit(self.overlap_score_credit)?;
+        validate_min(
+            "overlap_score_credit_decay",
+            self.overlap_score_credit_decay,
+            0.0,
+        )?;
+        validate_min("prefill_load_scale", self.prefill_load_scale, 0.0)?;
+        validate_range(
+            "host_cache_hit_weight",
+            self.host_cache_hit_weight,
+            0.0,
+            1.0,
+        )?;
+        validate_range(
+            "disk_cache_hit_weight",
+            self.disk_cache_hit_weight,
+            0.0,
+            1.0,
+        )?;
+        validate_min("router_temperature", self.router_temperature, 0.0)?;
+        validate_min("router_ttl_secs", self.router_ttl_secs, 0.0)?;
+        if let Some(value) = self.router_queue_threshold {
+            validate_min("router_queue_threshold", value, 0.0)?;
+        }
+        if self.router_event_threads == 0 {
+            return Err("router_event_threads must be at least 1".to_string());
+        }
+        validate_range(
+            "shared_cache_multiplier",
+            self.shared_cache_multiplier,
+            0.0,
+            1.0,
+        )?;
+        if let Some(value) = self.router_predicted_ttl_secs {
+            validate_min("router_predicted_ttl_secs", value, 0.0)?;
+        }
+        validate_kv_router_config(self)
     }
 
     pub fn router_queue_recheck_interval(&self) -> Duration {
@@ -833,8 +825,7 @@ impl KvRouterConfig {
             };
             Some(compute_seq_hash_for_block(block_hashes))
         } else {
-            let mut rng = rand::rng();
-            Some((0..num_blocks).map(|_| rng.random::<u64>()).collect())
+            Some((0..num_blocks).map(|_| fastrand::u64(..)).collect())
         }
     }
 
@@ -926,8 +917,14 @@ mod tests {
             default.router_track_active_blocks
         );
 
-        let out_of_range = config_from_values(&[("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "1.5")]);
-        assert!(out_of_range.validate_config().is_err());
+        let amplified = config_from_values(&[("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "1.5")]);
+        assert!(amplified.validate_config().is_ok());
+
+        for value in ["-0.5", "NaN", "inf"] {
+            let invalid_credit =
+                config_from_values(&[("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", value)]);
+            assert!(invalid_credit.validate_config().is_err());
+        }
     }
 
     #[test]
@@ -1203,19 +1200,20 @@ models:
     }
 
     #[test]
-    fn test_kv_router_config_rejects_out_of_range_overlap_score_credit() {
-        let too_small = KvRouterConfig {
-            overlap_score_credit: -0.1,
-            ..Default::default()
-        };
-        let too_large = KvRouterConfig {
+    fn test_kv_router_config_accepts_credit_above_one() {
+        let amplified = KvRouterConfig {
             overlap_score_credit: 1.1,
             ..Default::default()
         };
 
-        assert!(too_small.validate().is_err());
-        let error = too_large.validate().unwrap_err().to_string();
-        assert!(error.contains("prefill_load_scale"));
+        assert!(amplified.validate().is_ok());
+        for value in [-0.1, f64::NAN, f64::INFINITY] {
+            let invalid = KvRouterConfig {
+                overlap_score_credit: value,
+                ..Default::default()
+            };
+            assert!(invalid.validate().is_err());
+        }
     }
 
     #[test]
@@ -1260,16 +1258,19 @@ models:
     }
 
     #[test]
-    fn test_kv_router_config_deserialize_rejects_invalid_values() {
+    fn test_kv_router_config_deserialize_accepts_credit_above_one() {
+        let amplified: KvRouterConfig =
+            serde_json::from_str(r#"{"overlap_score_credit":1.5}"#).unwrap();
         let credit_error =
-            serde_json::from_str::<KvRouterConfig>(r#"{"overlap_score_credit":1.1}"#)
+            serde_json::from_str::<KvRouterConfig>(r#"{"overlap_score_credit":-0.1}"#)
                 .unwrap_err()
                 .to_string();
         let scale_error = serde_json::from_str::<KvRouterConfig>(r#"{"prefill_load_scale":-0.1}"#)
             .unwrap_err()
             .to_string();
 
-        assert!(credit_error.contains("prefill_load_scale"));
+        assert_eq!(amplified.overlap_score_credit, 1.5);
+        assert!(credit_error.contains("overlap_score_credit"));
         assert!(scale_error.contains("prefill_load_scale"));
     }
 
@@ -1314,9 +1315,11 @@ models:
     }
 
     #[test]
-    fn test_router_config_override_deserialize_rejects_invalid_values() {
+    fn test_router_config_override_deserialize_accepts_credit_above_one() {
+        let amplified: RouterConfigOverride =
+            serde_json::from_str(r#"{"overlap_score_credit":1.5}"#).unwrap();
         let credit_error =
-            serde_json::from_str::<RouterConfigOverride>(r#"{"overlap_score_credit":1.1}"#)
+            serde_json::from_str::<RouterConfigOverride>(r#"{"overlap_score_credit":-0.1}"#)
                 .unwrap_err()
                 .to_string();
         let scale_error =
@@ -1324,7 +1327,8 @@ models:
                 .unwrap_err()
                 .to_string();
 
-        assert!(credit_error.contains("prefill_load_scale"));
+        assert_eq!(amplified.overlap_score_credit, Some(1.5));
+        assert!(credit_error.contains("overlap_score_credit"));
         assert!(scale_error.contains("prefill_load_scale"));
     }
 
@@ -1363,16 +1367,8 @@ models:
     }
 
     #[test]
-    fn test_router_config_override_rejects_out_of_range_overlap_score_credit() {
-        let too_small = RouterConfigOverride {
-            overlap_score_credit: Some(-0.1),
-            prefill_load_scale: None,
-            router_temperature: None,
-            assume_kv_reuse: None,
-            track_prefill_tokens: None,
-            shared_cache_multiplier: None,
-        };
-        let too_large = RouterConfigOverride {
+    fn test_router_config_override_accepts_credit_above_one() {
+        let amplified = RouterConfigOverride {
             overlap_score_credit: Some(1.1),
             prefill_load_scale: None,
             router_temperature: None,
@@ -1381,13 +1377,23 @@ models:
             shared_cache_multiplier: None,
         };
 
-        assert!(too_small.validate().is_err());
-        let error = too_large.validate().unwrap_err().to_string();
-        assert!(error.contains("prefill_load_scale"));
+        assert!(amplified.validate().is_ok());
+        for value in [-0.1, f64::NAN, f64::INFINITY] {
+            let invalid = RouterConfigOverride {
+                overlap_score_credit: Some(value),
+                prefill_load_scale: None,
+                router_temperature: None,
+                assume_kv_reuse: None,
+                track_prefill_tokens: None,
+                shared_cache_multiplier: None,
+            };
+            assert!(invalid.validate().is_err());
+        }
     }
 
     #[test]
-    fn test_kv_router_config_default_shared_cache_multiplier_is_disabled() {
+    fn test_kv_router_config_defaults_are_disabled() {
+        assert_eq!(KvRouterConfig::default().router_queue_threshold, None);
         assert_eq!(KvRouterConfig::default().shared_cache_multiplier, 0.0);
     }
 }

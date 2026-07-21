@@ -5,10 +5,13 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
 use anyhow::{Context, Result, anyhow, bail};
+use rand::SeedableRng;
+use rand::rngs::StdRng;
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
 use super::types::{AgenticTrace, ReadyTurn, ReplayRequestHashes, Trace};
+use super::{SYNTHETIC_OUTPUT_SEED, planned_output_token_ids};
 use crate::common::protocols::DirectRequest;
 
 #[derive(Debug)]
@@ -41,6 +44,7 @@ enum PromptMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TurnOutcome {
     Completed,
+    Rejected,
     Cancelled,
 }
 
@@ -63,8 +67,10 @@ struct SessionRuntime {
 #[derive(Debug)]
 struct TurnRuntime {
     request_id: Option<String>,
+    replay_key: Option<String>,
     tokens: Vec<u32>,
     max_output_tokens: usize,
+    output_token_ids: Option<Vec<u32>>,
     delay_after_previous_ms: f64,
     priority: i32,
     strict_priority: u32,
@@ -76,6 +82,7 @@ struct TurnRuntime {
 struct InFlightTurn {
     session_index: usize,
     turn_index: usize,
+    emitted_output_tokens: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -304,6 +311,7 @@ impl WorkloadDriver {
         let mut remaining_dependencies = Vec::with_capacity(trace.turns.len());
         let mut ready_after_ms = Vec::with_capacity(trace.turns.len());
         let mut sessions = Vec::with_capacity(trace.turns.len());
+        let mut output_rng = StdRng::seed_from_u64(SYNTHETIC_OUTPUT_SEED);
 
         for (session_index, turn) in trace.turns.into_iter().enumerate() {
             for dependency in &turn.wait_for {
@@ -317,6 +325,11 @@ impl WorkloadDriver {
 
             let replay_hashes = Some(turn.to_replay_hashes(trace_block_size, engine_block_size)?);
             let tokens = turn.synthesize_tokens(trace_block_size)?;
+            let output_token_ids = Some(planned_output_token_ids(
+                turn.output_token_ids,
+                turn.max_output_tokens,
+                &mut output_rng,
+            ));
             let next_ready_at_ms = if turn.wait_for.is_empty() {
                 Some(turn.first_ready_timestamp_ms.unwrap_or(0.0))
             } else {
@@ -326,8 +339,10 @@ impl WorkloadDriver {
                 session_id: turn.session_id,
                 turns: vec![TurnRuntime {
                     request_id: Some(turn.request_id),
+                    replay_key: turn.replay_key,
                     tokens,
                     max_output_tokens: turn.max_output_tokens,
+                    output_token_ids,
                     delay_after_previous_ms: turn.delay_after_dependencies_ms,
                     priority: turn.priority,
                     strict_priority: turn.strict_priority,
@@ -380,6 +395,7 @@ impl WorkloadDriver {
             u32::try_from(engine_block_size).context("engine_block_size does not fit in u32")?;
         let trace_block_size = trace.block_size;
         let is_concurrency = matches!(&policy, SchedulingPolicy::Concurrency(_));
+        let mut output_rng = StdRng::seed_from_u64(SYNTHETIC_OUTPUT_SEED);
         let sessions: Vec<SessionRuntime> = trace
             .sessions
             .into_iter()
@@ -398,10 +414,18 @@ impl WorkloadDriver {
                         } else {
                             None
                         };
+                        let tokens = turn.synthesize_tokens(trace_block_size)?;
+                        let output_token_ids = Some(planned_output_token_ids(
+                            turn.output_token_ids,
+                            turn.max_output_tokens,
+                            &mut output_rng,
+                        ));
                         Ok(TurnRuntime {
                             request_id: None,
-                            tokens: turn.synthesize_tokens(trace_block_size)?,
+                            tokens,
+                            replay_key: turn.replay_key,
                             max_output_tokens: turn.max_output_tokens,
+                            output_token_ids,
                             delay_after_previous_ms: turn.delay_after_previous_ms,
                             priority: turn.priority,
                             strict_priority: turn.strict_priority,
@@ -411,7 +435,16 @@ impl WorkloadDriver {
                     })
                     .collect::<Result<Vec<_>>>()?;
                 let cumulative_capacity = if prompt_mode == PromptMode::DeltaCumulative {
-                    turns.iter().map(|turn| turn.tokens.len()).sum()
+                    turns
+                        .iter()
+                        .map(|turn| {
+                            turn.tokens.len()
+                                + turn
+                                    .output_token_ids
+                                    .as_ref()
+                                    .map_or(0, |output| output.len())
+                        })
+                        .sum()
                 } else {
                     0
                 };
@@ -517,6 +550,7 @@ impl WorkloadDriver {
             let request = DirectRequest {
                 tokens: request_tokens,
                 max_output_tokens: turn.max_output_tokens,
+                output_token_ids: turn.output_token_ids.clone(),
                 uuid: Some(request_uuid),
                 dp_rank: 0,
                 arrival_timestamp_ms,
@@ -531,12 +565,14 @@ impl WorkloadDriver {
                 InFlightTurn {
                     session_index,
                     turn_index,
+                    emitted_output_tokens: 0,
                 },
             );
             emitted.push(ReadyTurn {
                 request_uuid,
                 session_id: session.session_id.clone(),
                 turn_index,
+                replay_key: turn.replay_key.clone(),
                 scheduled_ready_at_ms,
                 replay_hashes: Some(replay_hashes),
                 request,
@@ -545,9 +581,60 @@ impl WorkloadDriver {
         emitted
     }
 
+    pub fn on_output_token(&mut self, request_uuid: Uuid, token_id: u32) -> Result<()> {
+        if self.prompt_mode == PromptMode::Full {
+            return Ok(());
+        }
+        let in_flight = self
+            .in_flight
+            .get(&request_uuid)
+            .copied()
+            .ok_or_else(|| anyhow!("unknown workload request output for {request_uuid}"))?;
+
+        let turn = &self.sessions[in_flight.session_index].turns[in_flight.turn_index];
+        let planned_output_tokens = turn
+            .output_token_ids
+            .as_ref()
+            .expect("delta turns must have planned output tokens");
+        let expected_token = planned_output_tokens
+            .get(in_flight.emitted_output_tokens)
+            .ok_or_else(|| {
+                anyhow!(
+                    "workload request {request_uuid} emitted more than {} planned output tokens",
+                    planned_output_tokens.len()
+                )
+            })?;
+        if token_id != *expected_token {
+            bail!(
+                "workload request {request_uuid} emitted token {token_id} at position {}, expected {}",
+                in_flight.emitted_output_tokens,
+                expected_token
+            );
+        }
+
+        let in_flight = self
+            .in_flight
+            .get_mut(&request_uuid)
+            .expect("validated in-flight request must still exist");
+        in_flight.emitted_output_tokens = in_flight
+            .emitted_output_tokens
+            .checked_add(1)
+            .context("workload emitted output token count overflow")?;
+        Ok(())
+    }
+
     pub fn on_complete(&mut self, request_uuid: Uuid, now_ms: f64) -> Result<()> {
+        self.on_terminal(request_uuid, now_ms, false)
+    }
+
+    pub fn on_terminal(&mut self, request_uuid: Uuid, now_ms: f64, rejected: bool) -> Result<()> {
+        let outcome = if rejected {
+            TurnOutcome::Rejected
+        } else {
+            TurnOutcome::Completed
+        };
         let resolution = self
-            .resolve_turn(request_uuid, now_ms, TurnOutcome::Completed)?
+            .resolve_turn(request_uuid, now_ms, outcome)?
             .expect("completed turns require an in-flight request");
         self.apply_resolution(resolution, now_ms);
         Ok(())
@@ -561,7 +648,7 @@ impl WorkloadDriver {
     ) -> Result<Option<TurnResolution>> {
         let Some(in_flight) = self.in_flight.get(&request_uuid).copied() else {
             return match outcome {
-                TurnOutcome::Completed => Err(anyhow!(
+                TurnOutcome::Completed | TurnOutcome::Rejected => Err(anyhow!(
                     "unknown workload request completion for {request_uuid}"
                 )),
                 TurnOutcome::Cancelled => Ok(None),
@@ -596,8 +683,23 @@ impl WorkloadDriver {
         }
 
         let request_id = turn.request_id.clone();
+        if outcome == TurnOutcome::Rejected && in_flight.emitted_output_tokens != 0 {
+            bail!(
+                "rejected workload request {request_uuid} emitted {} output tokens",
+                in_flight.emitted_output_tokens
+            );
+        }
+        let completed_output_tokens = (outcome == TurnOutcome::Completed
+            && self.prompt_mode == PromptMode::DeltaCumulative)
+            .then(|| {
+                let planned_output_tokens = turn
+                    .output_token_ids
+                    .as_ref()
+                    .expect("delta turns must have planned output tokens");
+                planned_output_tokens[..in_flight.emitted_output_tokens].to_vec()
+            });
         let (next_turn_index, next_ready_at_ms, session_ended) = match outcome {
-            TurnOutcome::Completed => {
+            TurnOutcome::Completed | TurnOutcome::Rejected => {
                 let next_turn_index = in_flight
                     .turn_index
                     .checked_add(1)
@@ -618,6 +720,11 @@ impl WorkloadDriver {
         session.in_flight = None;
         session.next_turn_index = next_turn_index;
         session.next_ready_at_ms = next_ready_at_ms;
+        if next_ready_at_ms.is_some()
+            && let Some(output_tokens) = completed_output_tokens
+        {
+            session.cumulative_tokens.extend(output_tokens);
+        }
         if let Some(ready_at_ms) = next_ready_at_ms {
             self.ready_sessions.push(ReadySession {
                 ready_at_ms,
@@ -691,6 +798,26 @@ impl WorkloadDriver {
 mod tests {
     use super::*;
     use crate::loadgen::{AgenticTrace, AgenticTurnTrace, SessionTrace, Trace, TurnTrace};
+
+    fn assert_deterministic_output_plan(
+        mut first_driver: WorkloadDriver,
+        mut second_driver: WorkloadDriver,
+        expected_len: usize,
+    ) {
+        let first = first_driver.pop_ready(0.0, usize::MAX);
+        let second = second_driver.pop_ready(0.0, usize::MAX);
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_eq!(
+            first[0].request.output_token_ids,
+            second[0].request.output_token_ids
+        );
+        assert_eq!(
+            first[0].request.output_token_ids.as_ref().map(Vec::len),
+            Some(expected_len)
+        );
+    }
 
     fn two_session_trace() -> Trace {
         Trace {
@@ -1049,7 +1176,48 @@ mod tests {
     }
 
     #[test]
-    fn accumulating_delta_mode_emits_cumulative_input_tokens() {
+    fn full_prompt_modes_plan_missing_output_token_ids_deterministically() {
+        let trace = Trace {
+            block_size: 1,
+            sessions: vec![SessionTrace {
+                session_id: "a".into(),
+                first_arrival_timestamp_ms: Some(0.0),
+                turns: vec![TurnTrace {
+                    input_length: 2,
+                    max_output_tokens: 3,
+                    hash_ids: vec![10, 11],
+                    ..Default::default()
+                }],
+            }],
+        };
+        assert_deterministic_output_plan(
+            WorkloadDriver::new_trace(trace.clone(), 1).unwrap(),
+            WorkloadDriver::new_trace(trace, 1).unwrap(),
+            3,
+        );
+
+        let trace = AgenticTrace {
+            block_size: 1,
+            turns: vec![AgenticTurnTrace {
+                request_id: "r1".into(),
+                session_id: "a".into(),
+                input_length: 2,
+                max_output_tokens: 3,
+                hash_ids: vec![10, 11],
+                first_ready_timestamp_ms: Some(0.0),
+                prefix_reset: true,
+                ..Default::default()
+            }],
+        };
+        assert_deterministic_output_plan(
+            WorkloadDriver::new_agentic_trace(trace.clone(), 1).unwrap(),
+            WorkloadDriver::new_agentic_trace(trace, 1).unwrap(),
+            3,
+        );
+    }
+
+    #[test]
+    fn accumulating_delta_mode_includes_previous_output_tokens() {
         let trace = Trace {
             block_size: 4,
             sessions: vec![SessionTrace {
@@ -1058,7 +1226,9 @@ mod tests {
                 turns: vec![
                     TurnTrace {
                         input_length: 6,
-                        max_output_tokens: 1,
+                        max_output_tokens: 2,
+                        output_token_ids: Some(vec![20, 21]),
+                        replay_key: None,
                         hash_ids: vec![10, 11],
                         delay_after_previous_ms: 0.0,
                         priority: 3,
@@ -1068,6 +1238,8 @@ mod tests {
                     TurnTrace {
                         input_length: 3,
                         max_output_tokens: 1,
+                        output_token_ids: None,
+                        replay_key: None,
                         hash_ids: vec![12],
                         delay_after_previous_ms: 5.0,
                         priority: -2,
@@ -1082,18 +1254,143 @@ mod tests {
         let first = driver.pop_ready(0.0, usize::MAX);
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].request.tokens, vec![10, 10, 10, 10, 11, 11]);
+        assert_eq!(first[0].request.output_token_ids, Some(vec![20, 21]));
         assert_eq!(first[0].request.priority, 3);
         assert_eq!(first[0].request.strict_priority, 4);
+        driver.on_output_token(first[0].request_uuid, 20).unwrap();
+        driver.on_output_token(first[0].request_uuid, 21).unwrap();
         driver.on_complete(first[0].request_uuid, 10.0).unwrap();
 
         let second = driver.pop_ready(15.0, usize::MAX);
         assert_eq!(second.len(), 1);
         assert_eq!(
             second[0].request.tokens,
-            vec![10, 10, 10, 10, 11, 11, 12, 12, 12]
+            vec![10, 10, 10, 10, 11, 11, 20, 21, 12, 12, 12]
         );
         assert_eq!(second[0].request.priority, -2);
         assert_eq!(second[0].request.strict_priority, 7);
+    }
+
+    #[test]
+    fn accumulating_delta_mode_plans_missing_output_token_ids() {
+        let trace = Trace {
+            block_size: 1,
+            sessions: vec![SessionTrace {
+                session_id: "a".into(),
+                first_arrival_timestamp_ms: Some(0.0),
+                turns: vec![
+                    TurnTrace {
+                        input_length: 2,
+                        max_output_tokens: 3,
+                        hash_ids: vec![10, 11],
+                        ..Default::default()
+                    },
+                    TurnTrace {
+                        input_length: 1,
+                        max_output_tokens: 1,
+                        hash_ids: vec![12],
+                        ..Default::default()
+                    },
+                ],
+            }],
+        };
+        let mut driver = WorkloadDriver::new_concurrency_accumulating_deltas(trace, 1, 1).unwrap();
+
+        let first = driver.pop_ready(0.0, usize::MAX);
+        assert_eq!(first.len(), 1);
+        let planned_output = first[0]
+            .request
+            .output_token_ids
+            .clone()
+            .expect("delta replay should plan synthetic outputs");
+        assert_eq!(planned_output.len(), 3);
+        for &token_id in &planned_output {
+            driver
+                .on_output_token(first[0].request_uuid, token_id)
+                .unwrap();
+        }
+        driver.on_complete(first[0].request_uuid, 1.0).unwrap();
+
+        let second = driver.pop_ready(1.0, usize::MAX);
+        assert_eq!(second.len(), 1);
+        let mut expected = vec![10, 11];
+        expected.extend(planned_output);
+        expected.push(12);
+        assert_eq!(second[0].request.tokens, expected);
+        assert_eq!(
+            second[0].request.output_token_ids.as_ref().map(Vec::len),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn accumulating_delta_mode_appends_only_emitted_output_tokens() {
+        let trace = Trace {
+            block_size: 1,
+            sessions: vec![SessionTrace {
+                session_id: "a".into(),
+                first_arrival_timestamp_ms: Some(0.0),
+                turns: vec![
+                    TurnTrace {
+                        input_length: 1,
+                        max_output_tokens: 3,
+                        output_token_ids: Some(vec![20, 21, 22]),
+                        hash_ids: vec![10],
+                        ..Default::default()
+                    },
+                    TurnTrace {
+                        input_length: 1,
+                        max_output_tokens: 1,
+                        hash_ids: vec![12],
+                        ..Default::default()
+                    },
+                ],
+            }],
+        };
+        let mut driver = WorkloadDriver::new_concurrency_accumulating_deltas(trace, 1, 1).unwrap();
+
+        let first = driver.pop_ready(0.0, usize::MAX);
+        driver.on_output_token(first[0].request_uuid, 20).unwrap();
+        driver.on_output_token(first[0].request_uuid, 21).unwrap();
+        driver.on_complete(first[0].request_uuid, 1.0).unwrap();
+
+        let second = driver.pop_ready(1.0, usize::MAX);
+        assert_eq!(second[0].request.tokens, vec![10, 20, 21, 12]);
+    }
+
+    #[test]
+    fn accumulating_delta_mode_does_not_append_rejected_output_tokens() {
+        let trace = Trace {
+            block_size: 1,
+            sessions: vec![SessionTrace {
+                session_id: "a".into(),
+                first_arrival_timestamp_ms: Some(0.0),
+                turns: vec![
+                    TurnTrace {
+                        input_length: 1,
+                        max_output_tokens: 2,
+                        output_token_ids: Some(vec![20, 21]),
+                        hash_ids: vec![10],
+                        ..Default::default()
+                    },
+                    TurnTrace {
+                        input_length: 1,
+                        max_output_tokens: 1,
+                        hash_ids: vec![12],
+                        ..Default::default()
+                    },
+                ],
+            }],
+        };
+        let mut driver = WorkloadDriver::new_concurrency_accumulating_deltas(trace, 1, 1).unwrap();
+
+        let first = driver.pop_ready(0.0, usize::MAX);
+        driver
+            .on_terminal(first[0].request_uuid, 1.0, true)
+            .unwrap();
+
+        let second = driver.pop_ready(1.0, usize::MAX);
+        assert_eq!(second[0].request.tokens, vec![10, 12]);
     }
 
     #[test]

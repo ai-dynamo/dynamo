@@ -1,17 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! A WorkerSet represents a group of workers deployed from the same configuration,
-//! identified by their shared namespace. Each WorkerSet owns a complete pipeline
-//! (engines, KV router, prefill router) built from its specific ModelDeploymentCard.
+//! A WorkerSet represents a group of workers behind one serving endpoint. Each
+//! WorkerSet owns a complete pipeline (engines, KV router, prefill router) built
+//! from its specific ModelDeploymentCard.
 
 use std::sync::Arc;
 
+use dynamo_runtime::protocols::EndpointId;
 use tokio::sync::watch;
 
 use crate::{
     discovery::KvWorkerMonitor,
-    kv_router::{KvRouter, PrefillRouter},
+    kv_router::{EncoderRouter, KvRouter, PrefillRouter},
     model_card::ModelDeploymentCard,
     types::{
         RealtimeBidirectionalEngine,
@@ -20,8 +21,8 @@ use crate::{
             audios::OpenAIAudiosStreamingEngine,
             chat_completions::OpenAIChatCompletionsStreamingEngine,
             completions::OpenAICompletionsStreamingEngine,
-            embeddings::OpenAIEmbeddingsStreamingEngine, images::OpenAIImagesStreamingEngine,
-            videos::OpenAIVideosStreamingEngine,
+            embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
+            images::OpenAIImagesStreamingEngine, videos::OpenAIVideosStreamingEngine,
         },
     },
 };
@@ -30,6 +31,10 @@ use crate::{
 pub struct WorkerSet {
     /// Full namespace (e.g., "ns-abc12345")
     namespace: String,
+
+    /// Exact serving pool identity. Discovery-backed WorkerSets always set
+    /// this; in-process models have no distributed endpoint.
+    endpoint_id: Option<EndpointId>,
 
     /// MDC checksum for this set's configuration
     mdcsum: String,
@@ -46,6 +51,7 @@ pub struct WorkerSet {
     pub(crate) audios_engine: Option<OpenAIAudiosStreamingEngine>,
     pub(crate) tensor_engine: Option<TensorStreamingEngine>,
     pub(crate) realtime_engine: Option<RealtimeBidirectionalEngine>,
+    pub(crate) generate_engine: Option<GenerateStreamingEngine>,
 
     /// KV router for this set's workers (if KV mode)
     pub(crate) kv_router: Option<Arc<KvRouter>>,
@@ -57,6 +63,10 @@ pub struct WorkerSet {
     /// deactivate it when all prefill workers die, and reactivate when they rejoin.
     pub(crate) prefill_router: Option<Arc<PrefillRouter>>,
 
+    /// Optional multimodal encoder hop. Stored for discovery-driven
+    /// deactivation/reactivation when Encode workers leave or rejoin.
+    pub(crate) encoder_router: Option<Arc<EncoderRouter>>,
+
     /// Watcher for available instance IDs (from the Client's discovery watch).
     /// None for in-process models (http/grpc) which don't have a discovery client.
     instance_count_rx: Option<watch::Receiver<Vec<u64>>>,
@@ -66,6 +76,7 @@ impl WorkerSet {
     pub fn new(namespace: String, mdcsum: String, card: ModelDeploymentCard) -> Self {
         Self {
             namespace,
+            endpoint_id: None,
             mdcsum,
             card,
             chat_engine: None,
@@ -76,15 +87,25 @@ impl WorkerSet {
             audios_engine: None,
             tensor_engine: None,
             realtime_engine: None,
+            generate_engine: None,
             kv_router: None,
             worker_monitor: None,
             prefill_router: None,
+            encoder_router: None,
             instance_count_rx: None,
         }
     }
 
     pub fn namespace(&self) -> &str {
         &self.namespace
+    }
+
+    pub fn endpoint_id(&self) -> Option<&EndpointId> {
+        self.endpoint_id.as_ref()
+    }
+
+    pub(crate) fn set_endpoint_id(&mut self, endpoint_id: EndpointId) {
+        self.endpoint_id = Some(endpoint_id);
     }
 
     pub fn mdcsum(&self) -> &str {
@@ -127,6 +148,10 @@ impl WorkerSet {
         self.realtime_engine.is_some()
     }
 
+    pub fn has_generate_engine(&self) -> bool {
+        self.generate_engine.is_some()
+    }
+
     /// Whether this set has any decode engine (chat or completions)
     pub fn has_decode_engine(&self) -> bool {
         self.has_chat_engine() || self.has_completions_engine()
@@ -145,6 +170,7 @@ impl WorkerSet {
             || self.has_videos_engine()
             || self.has_audios_engine()
             || self.has_realtime_engine()
+            || self.has_generate_engine()
     }
 
     /// Whether this set tracks an Encode worker. Encode WorkerSets carry
@@ -197,22 +223,14 @@ impl WorkerSet {
     pub fn set_instance_watcher(&mut self, rx: watch::Receiver<Vec<u64>>) {
         self.instance_count_rx = Some(rx);
     }
-
-    /// Whether this WorkerSet can serve requests. Delegates to the prefill router
-    /// if one exists; otherwise always returns true.
-    /// When the prefill router is deactivated and enforce_disagg is set, this returns
-    /// false, causing the model to be hidden from /v1/models and requests to be rejected.
-    pub fn can_serve_requests(&self) -> bool {
-        self.prefill_router
-            .as_ref()
-            .is_none_or(|pr| pr.can_serve_requests())
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model_card::ModelDeploymentCard;
+    use crate::protocols::common::llm_backend::LLMEngineOutput;
+    use crate::protocols::common::preprocessor::PreprocessedRequest;
     use crate::types::Annotated;
     use crate::types::generic::tensor::{NvCreateTensorRequest, NvCreateTensorResponse};
     use crate::types::openai::audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest};
@@ -280,6 +298,7 @@ mod tests {
         assert!(!ws.has_audios_engine());
         assert!(!ws.has_tensor_engine());
         assert!(!ws.has_realtime_engine());
+        assert!(!ws.has_generate_engine());
         assert!(!ws.has_decode_engine());
         assert!(ws.is_prefill_set());
     }
@@ -351,6 +370,12 @@ mod tests {
             has_realtime_engine,
             Arc::new(crate::engines::EchoBidirectionalEngine),
             "realtime"
+        );
+        check!(
+            generate_engine,
+            has_generate_engine,
+            StubEngine::<PreprocessedRequest, LLMEngineOutput>::new(),
+            "generate"
         );
     }
 

@@ -18,6 +18,7 @@ pub mod common_ext;
 pub mod completions;
 pub(crate) mod delta_common;
 pub mod embeddings;
+pub mod generate;
 pub mod images;
 pub mod models;
 pub mod responses;
@@ -118,7 +119,9 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
                 .map_err(|e| anyhow::anyhow!("Error validating frequency_penalty: {}", e))?;
         let presence_penalty = validate_range(self.get_presence_penalty(), &PRESENCE_PENALTY_RANGE)
             .map_err(|e| anyhow::anyhow!("Error validating presence_penalty: {}", e))?;
-        let top_k = CommonExtProvider::get_top_k(self);
+        // Canonicalize the public disabled sentinels before backend dispatch.
+        // Backend adapters translate -1 when their native API uses a different value.
+        let top_k = CommonExtProvider::get_top_k(self).map(|k| if k == 0 { -1 } else { k });
         let repetition_penalty = CommonExtProvider::get_repetition_penalty(self);
         let include_stop_str_in_output = CommonExtProvider::get_include_stop_str_in_output(self);
         let seed = self.get_seed();

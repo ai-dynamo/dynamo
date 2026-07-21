@@ -7,12 +7,12 @@ import os
 from dataclasses import dataclass, field
 
 import pytest
+import yaml
 
 from tests.serve.common import (
     SERVE_TEST_DIR,
     WORKSPACE_DIR,
     params_with_model_mark,
-    run_prefill_drain_deployment,
     run_serve_deployment,
 )
 from tests.utils.constants import DefaultPort
@@ -41,6 +41,16 @@ class TRTLLMConfig(EngineConfig):
 
 trtllm_dir = os.environ.get("TRTLLM_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/trtllm"
+)
+qwen3_vl_engine_config_dir = os.path.join(
+    WORKSPACE_DIR,
+    "examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct",
+)
+qwen3_vl_engine_config_files = (
+    "agg.yaml",
+    "decode.yaml",
+    "encode.yaml",
+    "prefill.yaml",
 )
 
 # TensorRT-LLM test configurations
@@ -82,29 +92,6 @@ trtllm_configs = {
             ),
             completion_payload_default(),
             metric_payload_default(min_num_requests=6, backend="trtllm"),
-        ],
-    ),
-    "aggregated_unified": TRTLLMConfig(
-        name="aggregated_unified",
-        directory=trtllm_dir,
-        script_name="agg.sh",
-        script_args=["--unified"],
-        marks=[
-            pytest.mark.core,
-            pytest.mark.gpu_1,
-            pytest.mark.trtllm,
-            pytest.mark.profiled_vram_gib(3.9),
-            pytest.mark.requested_trtllm_kv_tokens(2592),
-            pytest.mark.timeout(600),  # 3x ~200s (trtllm gpu_1 log)
-            pytest.mark.pre_merge,
-            pytest.mark.unified,
-        ],
-        model="Qwen/Qwen3-0.6B",
-        frontend_port=DefaultPort.FRONTEND.value,
-        delayed_start=5,
-        request_payloads=[
-            chat_payload_default(),
-            completion_payload_default(),
         ],
     ),
     "disaggregated": TRTLLMConfig(
@@ -280,7 +267,12 @@ trtllm_configs = {
             pytest.mark.multimodal,
             pytest.mark.nightly,
         ],
-        model="Qwen/Qwen2-VL-7B-Instruct",
+        # Must match the disagg engine configs shipped in disagg_multimodal.sh
+        # (engine_configs/qwen3-vl-2b-instruct/{prefill,decode}.yaml). Qwen2-VL-7B
+        # only ships an agg.yaml, so loading it against the 2B disagg configs
+        # crashes the worker during multimodal KV-cache profiling
+        # ("Number of mm_embeds does not match expected total").
+        model="Qwen/Qwen3-VL-2B-Instruct",
         frontend_port=DefaultPort.FRONTEND.value,
         timeout=900,
         delayed_start=60,
@@ -679,67 +671,28 @@ def test_deployment(
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
 
 
-# ---------------------------------------------------------------------------
-# Prefill drain on graceful shutdown, unified entry point. A concurrent burst
-# keeps the prefill worker busy; it's then SIGTERMed mid-flight, and the test
-# asserts the Rust Worker drove a graceful shutdown (drain -> cleanup). TRT-LLM's
-# llm.shutdown() aborts the MPI job if it races pending KV transfers, so the
-# burst is sized small (see the call site) for the drain budget to clear them.
-# ---------------------------------------------------------------------------
-_PREFILL_DRAIN_CONFIG = TRTLLMConfig(
-    name="prefill_drain_unified",
-    directory=trtllm_dir,
-    script_name="disagg_same_gpu.sh",
-    script_args=["--unified"],
-    marks=[],  # applied on the test function below
-    model="Qwen/Qwen3-0.6B",
-    delayed_start=10,
-    health_check_workers=True,
-    env={
-        "MODEL_PATH": "Qwen/Qwen3-0.6B",
-        "SERVED_MODEL_NAME": "Qwen/Qwen3-0.6B",
-        "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS": "0",
-        "DYN_PREFILL_DRAIN_TIMEOUT_S": "30",
-        "DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT": "60",
-        "DYN_SYSTEM_STARTING_HEALTH_STATUS": "ready",
-    },
-    request_payloads=[chat_payload_default()],
-)
-
-
+@pytest.mark.unit
 @pytest.mark.trtllm
-@pytest.mark.e2e
-@pytest.mark.gpu_1
-@pytest.mark.model("Qwen/Qwen3-0.6B")
-@pytest.mark.profiled_vram_gib(6.6)
-@pytest.mark.requested_trtllm_kv_tokens(2592)
-@pytest.mark.timeout(432)
-@pytest.mark.post_merge
-@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
-def test_prefill_drain_unified(
-    request,
-    runtime_services_dynamic_ports,
-    dynamo_dynamic_ports,
-    num_system_ports,
-    predownload_models,
-):
-    """Burst + mid-flight prefill SIGTERM; assert the Rust Worker drove
-    graceful shutdown (drain -> cleanup) to completion without the engine
-    teardown aborting."""
-    config = dataclasses.replace(
-        _PREFILL_DRAIN_CONFIG, frontend_port=dynamo_dynamic_ports.frontend_port
-    )
-    # Keep the burst small with short decode: TRT-LLM has no quiescence signal
-    # so it waits the full drain budget, and a small burst lets decode clear the
-    # KV before cleanup — otherwise llm.shutdown() racing pending transfers can
-    # abort the MPI job. Still large enough (vs the in-flight gate) to engage.
-    run_prefill_drain_deployment(
-        config,
-        request,
-        ports=dynamo_dynamic_ports,
-        burst_size=12,
-        burst_max_tokens=16,
-    )
+@pytest.mark.multimodal
+@pytest.mark.gpu_0
+@pytest.mark.pre_merge
+@pytest.mark.parametrize("config_file", qwen3_vl_engine_config_files)
+def test_qwen3_vl_multimodal_engine_configs_set_torch_dtype(config_file):
+    config_path = os.path.join(qwen3_vl_engine_config_dir, config_file)
+    with open(config_path, encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+    model_kwargs = config.get("model_kwargs")
+    assert isinstance(model_kwargs, dict), f"{config_path} missing model_kwargs"
+    assert (
+        model_kwargs.get("torch_dtype") is not None
+    ), f"{config_path} missing model_kwargs.torch_dtype"
+
+    text_config = model_kwargs.get("text_config")
+    assert isinstance(text_config, dict), f"{config_path} missing text_config"
+    assert (
+        text_config.get("torch_dtype") is not None
+    ), f"{config_path} missing model_kwargs.text_config.torch_dtype"
 
 
 # TODO make this a normal guy

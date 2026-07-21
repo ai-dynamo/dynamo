@@ -9,6 +9,10 @@
 mod handoff;
 mod metrics;
 
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
@@ -17,7 +21,7 @@ use crate::backend::ExecutionContext;
 use crate::kv_router::publisher::{KvEventPublisher, KvEventSourceConfig, WorkerMetricsPublisher};
 use crate::protocols::TokenIdType;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use dashmap::DashMap;
 use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
 use dynamo_mocker::common::handoff::HandoffId;
@@ -26,6 +30,7 @@ use dynamo_mocker::common::protocols::{
     RawKvEventSink,
 };
 use dynamo_mocker::engine::create_engine;
+use dynamo_mocker::loadgen::{OUTPUT_REPLAY_ID_ANNOTATION_KEY, effective_replay_key};
 use dynamo_mocker::scheduler::{SchedulerCommandEnvelope, SchedulerHandle};
 use dynamo_mocker::services::bootstrap::{
     BootstrapIdentity, BootstrapParticipantRole, BootstrapServer, BootstrapServerConfig,
@@ -36,13 +41,14 @@ use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::metrics::MetricsHierarchy;
 use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_runtime::{
-    component::Component,
+    component::Endpoint,
     engine::AsyncEngineContextProvider,
     pipeline::{AsyncEngine, Error, ManyOut, ResponseStream, SingleIn, async_trait},
     traits::DistributedRuntimeProvider,
 };
 use futures::StreamExt;
 use rand::Rng;
+use serde::Deserialize;
 use tokio::sync::{Notify, OnceCell, Semaphore, mpsc, oneshot};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::sync::CancellationToken;
@@ -56,6 +62,107 @@ use self::handoff::{
 use self::metrics::NativeMockerMetrics;
 
 pub const MOCKER_COMPONENT: &str = "mocker";
+
+#[derive(Debug, Clone, Deserialize)]
+struct ResponseReplayTraceRow {
+    #[serde(default)]
+    request_id: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default, alias = "output_tokens")]
+    output_length: Option<usize>,
+    #[serde(default)]
+    output_token_ids: Option<Vec<TokenIdType>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ResponseReplayTable {
+    rows: HashMap<String, Vec<TokenIdType>>,
+}
+
+impl ResponseReplayTable {
+    fn from_path(path: &Path) -> Result<Self> {
+        let file = File::open(path)
+            .with_context(|| format!("failed to open response replay trace {}", path.display()))?;
+        let reader = BufReader::new(file);
+        let mut rows = HashMap::new();
+        let mut session_turns: HashMap<String, usize> = HashMap::new();
+
+        for (line_index, line) in reader.lines().enumerate() {
+            let line = line.with_context(|| {
+                format!(
+                    "failed to read line {} from response replay trace {}",
+                    line_index + 1,
+                    path.display()
+                )
+            })?;
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            let row: ResponseReplayTraceRow = serde_json::from_str(&line).with_context(|| {
+                format!(
+                    "failed to parse line {} from response replay trace {}",
+                    line_index + 1,
+                    path.display()
+                )
+            })?;
+            let turn_index = row
+                .session_id
+                .as_ref()
+                .map(|session_id| {
+                    let entry = session_turns.entry(session_id.clone()).or_default();
+                    let turn_index = *entry;
+                    *entry += 1;
+                    turn_index
+                })
+                .unwrap_or(0);
+
+            let Some(output_token_ids) = row.output_token_ids else {
+                continue;
+            };
+            let output_length = row.output_length.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "response replay trace line {} has output_token_ids but no output_length",
+                    line_index + 1
+                )
+            })?;
+            if output_length != output_token_ids.len() {
+                bail!(
+                    "response replay trace line {} output_length {} does not match output_token_ids length {}",
+                    line_index + 1,
+                    output_length,
+                    output_token_ids.len()
+                );
+            }
+
+            let key = effective_replay_key(
+                row.request_id.as_deref(),
+                row.session_id.as_deref(),
+                turn_index,
+                line_index,
+            );
+            if rows.insert(key.clone(), output_token_ids).is_some() {
+                bail!(
+                    "response replay trace line {} duplicates output_replay_id key {}",
+                    line_index + 1,
+                    key
+                );
+            }
+        }
+
+        Ok(Self { rows })
+    }
+
+    fn get(&self, key: &str) -> Option<Vec<TokenIdType>> {
+        self.rows.get(key).cloned()
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.rows.len()
+    }
+}
 
 /// Wrapper to adapt KvEventPublisher to the KvCacheEventSink trait
 struct KvEventSinkAdapter(KvEventPublisher);
@@ -75,6 +182,15 @@ impl KvCacheEventSink for KvEventSinkAdapter {
         self.0
             .publish_with_storage_tier(event, storage_tier)
             .map_err(|e| anyhow::anyhow!("Failed to send KV event: {}", e))
+    }
+
+    fn publish_batch_with_storage_tiers(
+        &self,
+        events: Vec<(KvCacheEvent, StorageTier)>,
+    ) -> anyhow::Result<()> {
+        self.0
+            .publish_batch_with_storage_tiers(events)
+            .map_err(|e| anyhow::anyhow!("Failed to send KV event batch: {}", e))
     }
 }
 
@@ -113,6 +229,7 @@ pub struct MockEngine {
     handoff_session_permits: OnceCell<Vec<Arc<Semaphore>>>,
     senders_ready: Notify,
     engine_args: MockEngineArgs,
+    response_replay_table: Option<ResponseReplayTable>,
     unset_dp_rank_counter: AtomicU32,
     /// Bootstrap server for prefill workers in disaggregated mode
     bootstrap_server: Arc<OnceCell<Arc<BootstrapServer>>>,
@@ -139,6 +256,23 @@ impl MockEngine {
     pub fn new(engine_args: MockEngineArgs) -> Self {
         let native_metrics = NativeMockerMetrics::new(engine_args.engine_type, engine_args.dp_size)
             .expect("mocker native metrics collectors should be valid");
+        let response_replay_table = engine_args
+            .response_replay_trace_path
+            .as_deref()
+            .map(|path| {
+                ResponseReplayTable::from_path(path).unwrap_or_else(|error| {
+                    panic!(
+                        "failed to load response replay trace {}: {error:#}",
+                        path.display()
+                    )
+                })
+            });
+        if let Some(table) = response_replay_table.as_ref() {
+            tracing::info!(
+                rows = table.rows.len(),
+                "loaded response replay token table"
+            );
+        }
         Self {
             active_requests: Arc::new(DashMap::new()),
             request_senders: OnceCell::new(),
@@ -146,6 +280,7 @@ impl MockEngine {
             handoff_session_permits: OnceCell::new(),
             senders_ready: Notify::new(),
             engine_args,
+            response_replay_table,
             unset_dp_rank_counter: AtomicU32::new(0),
             bootstrap_server: Arc::new(OnceCell::new()),
             source_handoff_manager: OnceCell::new(),
@@ -223,7 +358,8 @@ impl MockEngine {
         );
     }
 
-    pub async fn start(&self, component: Component) -> Result<()> {
+    pub async fn start(&self, endpoint: dynamo_runtime::component::Endpoint) -> Result<()> {
+        let component = endpoint.component().clone();
         // Use primary_token() instead of child_token() so the mocker continues running
         // during graceful shutdown (Phase 1/2) and only stops in Phase 3.
         // child_token() is a child of endpoint_shutdown_token which is cancelled in Phase 1.
@@ -239,13 +375,13 @@ impl MockEngine {
             tracing::info!("Engine startup simulation completed");
         }
 
-        let kv_component = if self.engine_args.needs_kv_publisher() {
+        let kv_endpoint = if self.engine_args.needs_kv_publisher() {
             tracing::info!(
                 "Initializing KV event publisher with block_size {}, enable_local_indexer={}",
                 self.engine_args.block_size,
                 self.engine_args.enable_local_indexer
             );
-            Some(&component)
+            Some(&endpoint)
         } else {
             None
         };
@@ -254,7 +390,7 @@ impl MockEngine {
         // Create FPM publisher upfront and get per-dp-rank sink handles.
         let worker_id = component.drt().connection_id().to_string();
         let fpm_sinks = match crate::fpm_publisher::FpmDirectPublisher::new(
-            component.clone(),
+            endpoint.clone(),
             worker_id,
             self.engine_args.dp_size,
         )
@@ -273,7 +409,7 @@ impl MockEngine {
         };
 
         let schedulers = self
-            .start_schedulers(kv_component, self.scheduler_shutdown.clone(), fpm_sinks)
+            .start_schedulers(kv_endpoint, self.scheduler_shutdown.clone(), fpm_sinks)
             .await;
 
         if let Some(prepared) = prepared_bootstrap {
@@ -282,7 +418,7 @@ impl MockEngine {
 
         Self::start_metrics_publishing(
             &schedulers,
-            component.clone(),
+            endpoint,
             self.native_metrics.clone(),
             self.scheduler_shutdown.clone(),
             self.scheduler_tasks.clone(),
@@ -375,7 +511,7 @@ impl MockEngine {
     /// Create schedulers and spawn their background tasks for distributing token notifications.
     async fn start_schedulers(
         &self,
-        component: Option<&Component>,
+        endpoint: Option<&dynamo_runtime::component::Endpoint>,
         cancel_token: CancellationToken,
         fpm_sinks: Vec<dynamo_mocker::common::protocols::FpmPublisher>,
     ) -> Vec<Box<dyn SchedulerHandle>> {
@@ -391,8 +527,8 @@ impl MockEngine {
             let (kv_event_publishers, relay_publisher): (
                 KvEventPublishers,
                 Option<KvEventPublisher>,
-            ) = match component {
-                Some(comp) if args.zmq_kv_events_port.is_some() => {
+            ) = match endpoint {
+                Some(endpoint) if args.zmq_kv_events_port.is_some() => {
                     let zmq_port = args.zmq_kv_events_port.unwrap() + dp_rank as u16;
                     let replay_port = args.zmq_replay_port.map(|p| p + dp_rank as u16);
                     match ZmqKvEventSink::new(
@@ -410,7 +546,7 @@ impl MockEngine {
                                 image_token_id: None,
                             });
                             match KvEventPublisher::new_with_local_indexer(
-                                comp.clone(),
+                                endpoint.clone(),
                                 args.block_size as u32,
                                 source_config,
                                 args.enable_local_indexer,
@@ -440,9 +576,9 @@ impl MockEngine {
                         }
                     }
                 }
-                Some(comp) => {
+                Some(endpoint) => {
                     match KvEventPublisher::new_with_local_indexer(
-                        comp.clone(),
+                        endpoint.clone(),
                         args.block_size as u32,
                         None,
                         args.enable_local_indexer,
@@ -554,14 +690,14 @@ impl MockEngine {
     /// Start background tasks to publish metrics on change
     async fn start_metrics_publishing(
         schedulers: &[Box<dyn SchedulerHandle>],
-        component: Component,
+        endpoint: Endpoint,
         native_metrics: Arc<NativeMockerMetrics>,
         cancel_token: CancellationToken,
         tasks: TaskTracker,
     ) -> Result<()> {
         let metrics_publisher = Arc::new(WorkerMetricsPublisher::new()?);
 
-        if let Err(e) = metrics_publisher.create_endpoint(component).await {
+        if let Err(e) = metrics_publisher.create_endpoint(endpoint).await {
             tracing::error!("Metrics endpoint failed: {e}");
         }
         for scheduler in schedulers.iter() {
@@ -630,7 +766,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
 
         let request_uuid = ctx.id().parse().unwrap_or(Uuid::new_v4());
         let is_prefill = self.engine_args.is_prefill();
-        let max_output_tokens = if is_prefill {
+        let requested_max_output_tokens = if is_prefill {
             1
         } else {
             request
@@ -639,6 +775,38 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                 .ok_or_else(|| Error::msg("max_output_tokens must be specified for mocker"))?
                 as usize
         };
+        let replay_key = (!is_prefill)
+            .then(|| request.get_annotation_value(OUTPUT_REPLAY_ID_ANNOTATION_KEY))
+            .flatten();
+        let planned_output_token_ids = replay_key.as_deref().and_then(|key| {
+            let Some(table) = self.response_replay_table.as_ref() else {
+                tracing::warn!(
+                    replay_key = key,
+                    "request asked for output token replay but mocker has no response replay trace"
+                );
+                return None;
+            };
+            match table.get(key) {
+                Some(tokens) => Some(tokens),
+                None => {
+                    tracing::warn!(
+                        replay_key = key,
+                        "request asked for output token replay but key was not found"
+                    );
+                    None
+                }
+            }
+        });
+        let has_planned_output_tokens = planned_output_token_ids.is_some();
+        let max_output_tokens = planned_output_token_ids
+            .as_ref()
+            .map_or(requested_max_output_tokens, Vec::len);
+        let effective_max_output_tokens =
+            self.engine_args
+                .max_model_len
+                .map_or(max_output_tokens, |max_model_len| {
+                    max_output_tokens.min(max_model_len.saturating_sub(request.token_ids.len()))
+                });
         let native_timing = self
             .native_metrics
             .request_timing(&request.model, dp_rank, is_prefill, request_start)
@@ -648,6 +816,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         let direct_request = DirectRequest {
             tokens: request.token_ids.clone(),
             max_output_tokens,
+            output_token_ids: planned_output_token_ids.clone(),
             uuid: Some(request_uuid),
             dp_rank,
             arrival_timestamp_ms: request.request_timestamp_ms,
@@ -860,20 +1029,22 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             break;
                         };
 
-                        // A terminally rejected request never ran (its footprint
-                        // exceeds the KV pool): emit no token and do not complete the
-                        // bootstrap room — surface the rejection and end the stream
-                        // before any token/prefill bookkeeping.
+                        // A terminally rejected request never ran because it violated
+                        // a worker admission limit. Emit no token and do not complete
+                        // the bootstrap room; surface the rejection before any
+                        // token/prefill bookkeeping.
                         if signal.rejected {
                             handoff_cancel.cancel();
                             let _ = stream_tx.send(LLMEngineOutput::error(
-                                "request rejected: KV footprint exceeds pool capacity".to_string(),
+                                "request rejected: request exceeds worker admission limits".to_string(),
                             ));
                             break;
                         }
 
                         // Generate a token (with thinking boundaries if configured)
-                        let token_id = if token_count == 0 && think_len > 0 {
+                        let token_id = if has_planned_output_tokens {
+                            signal.token_id.unwrap_or_else(generate_random_token)
+                        } else if token_count == 0 && think_len > 0 {
                             reasoning.as_ref().unwrap().start_thinking_token_id
                         } else if think_len > 0 && token_count == think_len - 1 {
                             reasoning.as_ref().unwrap().end_thinking_token_id
@@ -888,7 +1059,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             ..Default::default()
                         };
 
-                        if signal.completed && token_count < max_output_tokens {
+                        if signal.completed && token_count < effective_max_output_tokens {
                             let _ = stream_tx.send(LLMEngineOutput::error("Completion signal received before max tokens reached".to_string()));
                             break;
                         }
@@ -1016,7 +1187,8 @@ impl AnnotatedMockEngine {
             };
 
             tracing::debug!("Component service is now available, starting mocker engine");
-            if let Err(e) = inner_clone.start(component).await {
+            let endpoint = component.endpoint(endpoint_id.name);
+            if let Err(e) = inner_clone.start(endpoint).await {
                 tracing::error!("Failed to start mocker engine: {e}");
             }
         });
@@ -1059,12 +1231,13 @@ pub async fn make_mocker_engine(
 
 #[cfg(test)]
 mod tests {
-    use super::MockEngine;
+    use super::*;
     use crate::protocols::common::llm_backend::PreprocessedRequest;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use dynamo_mocker::common::protocols::{MockEngineArgs, OutputSignal, WorkerType};
     use dynamo_runtime::pipeline::{AsyncEngine, SingleIn};
     use futures::StreamExt;
+    use std::io::Write;
     use std::time::Duration;
 
     fn prefill_request() -> PreprocessedRequest {
@@ -1073,6 +1246,22 @@ mod tests {
             .token_ids(vec![1, 2, 3])
             .stop_conditions(StopConditions {
                 max_tokens: Some(1),
+                ..Default::default()
+            })
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .eos_token_ids(vec![])
+            .annotations(vec![])
+            .build()
+            .unwrap()
+    }
+
+    fn decode_request(prompt_tokens: usize, max_tokens: u32) -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("mock".to_string())
+            .token_ids(vec![1; prompt_tokens])
+            .stop_conditions(StopConditions {
+                max_tokens: Some(max_tokens),
                 ..Default::default()
             })
             .sampling_options(SamplingOptions::default())
@@ -1105,6 +1294,7 @@ mod tests {
             .unwrap()
             .send(OutputSignal {
                 uuid: request_id,
+                token_id: None,
                 completed: true,
                 rejected: false,
                 handoff_delay_ms: Some(100.0),
@@ -1124,6 +1314,43 @@ mod tests {
         let finish = stream.next().await.unwrap();
         assert!(finish.token_ids.is_empty());
         assert!(finish.finish_reason.is_some());
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn context_capped_completion_maps_to_length() {
+        let args = MockEngineArgs::builder()
+            .max_model_len(Some(4))
+            .build()
+            .unwrap();
+        let engine = MockEngine::new(args);
+        let (request_tx, mut request_rx) = tokio::sync::mpsc::unbounded_channel();
+        engine.request_senders.set(vec![request_tx]).unwrap();
+
+        let mut stream = engine
+            .generate(SingleIn::new(decode_request(3, 4)))
+            .await
+            .unwrap();
+        let request = request_rx.recv().await.unwrap();
+        assert_eq!(request.max_output_tokens, 4);
+        let request_id = request.uuid.unwrap();
+        engine
+            .active_requests
+            .get(&request_id)
+            .unwrap()
+            .send(OutputSignal {
+                uuid: request_id,
+                token_id: Some(42),
+                completed: true,
+                rejected: false,
+                handoff_delay_ms: None,
+            })
+            .unwrap();
+
+        let token = stream.next().await.unwrap();
+        assert_eq!(token.token_ids.len(), 1);
+        assert!(token.finish_reason.is_none());
+        assert_eq!(stream.next().await.unwrap(), LLMEngineOutput::length());
         assert!(stream.next().await.is_none());
     }
 
@@ -1175,5 +1402,51 @@ mod tests {
             .expect("released bootstrap port must be reusable");
         engine.handoff_shutdown.cancel();
         prepared.server.wait_closed().await;
+    }
+
+    fn write_replay_trace(lines: &[serde_json::Value]) -> tempfile::NamedTempFile {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        for line in lines {
+            writeln!(file, "{}", serde_json::to_string(line).unwrap()).unwrap();
+        }
+        file
+    }
+
+    #[test]
+    fn response_replay_table_derives_keys_and_validates_lengths() {
+        let file = write_replay_trace(&[
+            serde_json::json!({
+                "request_id": "explicit",
+                "session_id": "s",
+                "output_length": 2,
+                "output_token_ids": [7, 8],
+            }),
+            serde_json::json!({
+                "session_id": "s",
+                "output_length": 1,
+                "output_token_ids": [9],
+            }),
+            serde_json::json!({
+                "output_length": 1,
+                "output_token_ids": [10],
+            }),
+        ]);
+
+        let table = ResponseReplayTable::from_path(file.path()).unwrap();
+        assert_eq!(table.len(), 3);
+        assert_eq!(table.get("explicit").as_deref(), Some(&[7, 8][..]));
+        assert_eq!(table.get("s:1").as_deref(), Some(&[9][..]));
+        assert_eq!(table.get("line:2").as_deref(), Some(&[10][..]));
+
+        let invalid = write_replay_trace(&[serde_json::json!({
+            "output_length": 2,
+            "output_token_ids": [1],
+        })]);
+        let err = ResponseReplayTable::from_path(invalid.path()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("output_length 2 does not match output_token_ids length 1"),
+            "{err:#}"
+        );
     }
 }

@@ -13,6 +13,7 @@ use dynamo_tokens::SequenceHash;
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
 use std::collections::HashMap;
+use std::env;
 use std::future::Future;
 use std::sync::Arc;
 #[cfg(test)]
@@ -23,11 +24,11 @@ use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 use super::prefill_tracker::PrefillTimeLoad;
-#[cfg(any(test, feature = "bench"))]
-use super::prompt_membership_trie::lookup_live_hashes;
 use super::prompt_registry::{PromptRegistry, WorkerLoadSnapshot};
 use super::request_maps::RequestIndex;
-use super::single::{ActiveSequences, PromptMembershipDelta, RequestId};
+use super::single::{
+    ActiveSequences, DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION, PromptMembershipDelta, RequestId,
+};
 use super::topology::{WorkerDpRange, WorkerTable, WorkerTopologyChange, WorkerTopologyError};
 use super::{PotentialLoadMaps, PrefillTokenDeltas, WorkerLoadProjection};
 use crate::protocols::{
@@ -39,6 +40,44 @@ use crate::protocols::{
 // in ActiveSequencesMultiWorker::force_expire_requests_across_all_workers for
 // more details.
 const FORCE_EXPIRE_REQUESTS_ACROSS_ALL_WORKERS_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Environment override for the stale active-request cleanup guard.
+const DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS: &str = "DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS";
+
+/// Returns the configured stale active-request cleanup guard.
+fn active_request_expiry_duration() -> Duration {
+    active_request_expiry_duration_from_lookup(|key| env::var(key).ok())
+}
+
+/// Parses the cleanup guard from an environment lookup, falling back on invalid input.
+fn active_request_expiry_duration_from_lookup(
+    get_env: impl Fn(&str) -> Option<String>,
+) -> Duration {
+    let Some(raw) = get_env(DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS) else {
+        return DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION;
+    };
+
+    let Ok(seconds) = raw.parse::<u64>() else {
+        tracing::warn!(
+            env = DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
+            value = %raw,
+            default_secs = DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION.as_secs(),
+            "invalid active request expiry override, falling back to default"
+        );
+        return DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION;
+    };
+
+    if seconds == 0 {
+        tracing::warn!(
+            env = DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
+            default_secs = DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION.as_secs(),
+            "active request expiry override must be greater than zero, falling back to default"
+        );
+        return DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION;
+    }
+
+    Duration::from_secs(seconds)
+}
 
 // ---------------------------------------------------------------------------
 // Traits
@@ -109,6 +148,12 @@ pub enum ReplicaWorkerPolicy {
     LazyRegister,
     /// Drop replica events until the worker rank has been registered locally.
     RequireRegistered,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SequenceTrackerOptions {
+    replica_worker_policy: ReplicaWorkerPolicy,
+    expiry_duration: Option<Duration>,
 }
 
 /// Errors that can occur during sequence management operations.
@@ -188,6 +233,61 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         )
     }
 
+    /// Create a tracker that relies exclusively on explicit request lifecycle events.
+    pub fn new_without_expiry(
+        publisher: P,
+        block_size: usize,
+        dp_range: HashMap<u64, (u32, u32)>,
+        replica_sync: bool,
+        router_id: u64,
+        worker_type: &'static str,
+    ) -> Self {
+        Self::new_with_options(
+            publisher,
+            block_size,
+            dp_range,
+            replica_sync,
+            router_id,
+            worker_type,
+            SequenceTrackerOptions {
+                replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
+                expiry_duration: None,
+            },
+        )
+    }
+
+    /// Create a tracker with an explicit stale active-request cleanup guard.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `expiry_duration` or `block_size` is zero.
+    pub fn new_with_expiry_duration(
+        publisher: P,
+        block_size: usize,
+        dp_range: HashMap<u64, (u32, u32)>,
+        replica_sync: bool,
+        router_id: u64,
+        worker_type: &'static str,
+        expiry_duration: Duration,
+    ) -> Self {
+        assert!(
+            !expiry_duration.is_zero(),
+            "expiry_duration must be greater than zero"
+        );
+        Self::new_with_options(
+            publisher,
+            block_size,
+            dp_range,
+            replica_sync,
+            router_id,
+            worker_type,
+            SequenceTrackerOptions {
+                replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
+                expiry_duration: Some(expiry_duration),
+            },
+        )
+    }
+
     /// Create a tracker with an explicit worker-admission policy for replica events.
     pub fn new_with_replica_worker_policy(
         publisher: P,
@@ -198,9 +298,38 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         worker_type: &'static str,
         replica_worker_policy: ReplicaWorkerPolicy,
     ) -> Self {
+        Self::new_with_options(
+            publisher,
+            block_size,
+            dp_range,
+            replica_sync,
+            router_id,
+            worker_type,
+            SequenceTrackerOptions {
+                replica_worker_policy,
+                expiry_duration: Some(active_request_expiry_duration()),
+            },
+        )
+    }
+
+    /// Builds a tracker from resolved replica-admission and expiry policies.
+    fn new_with_options(
+        publisher: P,
+        block_size: usize,
+        dp_range: HashMap<u64, (u32, u32)>,
+        replica_sync: bool,
+        router_id: u64,
+        worker_type: &'static str,
+        options: SequenceTrackerOptions,
+    ) -> Self {
         assert!(block_size > 0, "block_size must be greater than 0");
         let (remote_state_updates, _) = watch::channel(());
-        let workers = WorkerTable::new(block_size, &dp_range);
+        let workers = match options.expiry_duration {
+            Some(duration) => {
+                WorkerTable::new_with_expiry_duration(block_size, &dp_range, duration)
+            }
+            None => WorkerTable::new_without_expiry(block_size, &dp_range),
+        };
         let initial_workers: Vec<_> = workers.workers().collect();
         let prompt_registry = PromptRegistry::new(initial_workers.iter().copied());
         let publisher = Arc::new(publisher);
@@ -219,7 +348,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             #[cfg(test)]
             remote_state_update_count: AtomicUsize::new(0),
             replica_sync,
-            replica_worker_policy,
+            replica_worker_policy: options.replica_worker_policy,
             worker_type,
         }
     }
@@ -257,23 +386,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         assert!(
             self.prompt_registry.is_block_index_empty(),
             "expected reverse block index to be empty after drain",
-        );
-
-        let trie_lookup_live_hashes: Vec<_> = {
-            let table = self.workers.read();
-            table
-                .slots
-                .iter()
-                .filter_map(|slot| {
-                    let live_hashes = lookup_live_hashes(&slot.trie_lookup);
-                    (!live_hashes.is_empty()).then_some((slot.worker, live_hashes))
-                })
-                .collect()
-        };
-        assert!(
-            trie_lookup_live_hashes.is_empty(),
-            "expected all worker trie lookups to reference only dead nodes after drain, found {:?}",
-            trie_lookup_live_hashes,
         );
     }
 
@@ -357,7 +469,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         for worker in &change.added {
             tracing::debug!("Registering worker {:?}", worker);
         }
-        self.apply_worker_topology_change(change);
+        self.apply_worker_topology_change(&change);
+        self.finish_worker_topology_change(&change);
         Ok(())
     }
 
@@ -378,7 +491,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         for worker in &change.added {
             tracing::debug!("Registering external worker rank {:?}", worker);
         }
-        self.apply_worker_topology_change(change);
+        self.apply_worker_topology_change(&change);
+        self.finish_worker_topology_change(&change);
         Ok(())
     }
 
@@ -392,7 +506,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         for removed in &change.removed {
             tracing::warn!("Removing worker {:?}", removed.worker);
         }
-        self.apply_worker_topology_change(change);
+        self.apply_worker_topology_change(&change);
+        self.finish_worker_topology_change(&change);
         Ok(())
     }
 
@@ -415,7 +530,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             tracing::warn!("Adding worker {:?}", worker);
         }
 
-        self.apply_worker_topology_change(change);
+        self.apply_worker_topology_change(&change);
+        self.finish_worker_topology_change(&change);
         Ok(())
     }
 
@@ -429,9 +545,19 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         self.workers.read().has_registered_workers()
     }
 
-    fn apply_worker_topology_change(&self, change: WorkerTopologyChange) {
+    /// Maintains the same topology-change invariant as the prior implementation:
+    /// mutate `WorkerTable` under `workers.write()`, then clean up derived state
+    /// after releasing the table lock.
+    fn apply_worker_topology_change(&self, change: &WorkerTopologyChange) {
         for removed in &change.removed {
             self.request_index.remove_worker_requests(removed.worker);
+        }
+        self.prompt_registry
+            .apply_topology_change_without_cleanup(change);
+    }
+
+    fn finish_worker_topology_change(&self, change: &WorkerTopologyChange) {
+        for removed in &change.removed {
             self.publisher
                 .observe_worker_removed(&removed.worker, self.worker_type);
         }
@@ -439,7 +565,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             self.publisher
                 .observe_worker_registered(worker, self.worker_type);
         }
-        self.prompt_registry.apply_topology_change(change);
+        self.prompt_registry.maybe_cleanup();
     }
 
     pub fn add_request(
@@ -485,6 +611,10 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             self.spawn_publish_event(event);
         }
         Ok(())
+    }
+
+    pub(crate) fn request_worker(&self, request_id: &RequestId) -> Option<WorkerWithDpRank> {
+        self.request_index.worker_for(request_id)
     }
 
     /// Free all blocks associated with a request.
@@ -732,7 +862,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 let load = seq.worker_load_snapshot();
                 self.prompt_registry.apply_membership_delta_and_load(
                     slot.worker,
-                    &slot.trie_lookup,
                     outcome.membership_delta,
                     load,
                 );
@@ -801,7 +930,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         let change = table.ensure_worker(self.block_size, worker);
         drop(table);
 
-        self.apply_worker_topology_change(change);
+        self.apply_worker_topology_change(&change);
+        self.finish_worker_topology_change(&change);
     }
 
     fn add_request_local(
@@ -855,7 +985,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             let load = seq.worker_load_snapshot();
             self.prompt_registry.apply_membership_delta_and_load(
                 worker,
-                &slot.trie_lookup,
                 outcome.membership_delta,
                 load,
             );
@@ -916,12 +1045,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             let mut seq = slot.sequences.write();
             let delta = mutate_fn(&mut seq, request_id, decay_now);
             let load = seq.worker_load_snapshot();
-            self.prompt_registry.apply_membership_delta_and_load(
-                worker,
-                &slot.trie_lookup,
-                delta,
-                load,
-            );
+            self.prompt_registry
+                .apply_membership_delta_and_load(worker, delta, load);
             load
         };
 
@@ -1034,6 +1159,51 @@ mod tests {
     };
     use crate::sequences::prefill_tracker::PrefillTimeLoadError;
     use crate::test_utils::NoopSequencePublisher;
+
+    /// Verifies that a positive expiry override is accepted.
+    #[test]
+    fn active_request_expiry_duration_override_uses_positive_seconds() {
+        let lookup =
+            |key: &str| (key == DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS).then(|| "3600".to_string());
+
+        assert_eq!(
+            active_request_expiry_duration_from_lookup(lookup),
+            Duration::from_secs(3600)
+        );
+    }
+
+    /// Verifies that absent and invalid expiry overrides use the default.
+    #[test]
+    fn active_request_expiry_duration_override_falls_back_to_default() {
+        assert_eq!(
+            active_request_expiry_duration_from_lookup(|_| None),
+            DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION
+        );
+        for value in ["", "abc", "0"] {
+            let lookup = |key: &str| {
+                (key == DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS).then(|| value.to_string())
+            };
+            assert_eq!(
+                active_request_expiry_duration_from_lookup(lookup),
+                DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION
+            );
+        }
+    }
+
+    /// Verifies that zero duration is rejected before worker-table construction.
+    #[test]
+    #[should_panic(expected = "expiry_duration must be greater than zero")]
+    fn custom_expiry_rejects_zero_duration_at_multi_worker_boundary() {
+        let _ = ActiveSequencesMultiWorker::new_with_expiry_duration(
+            NoopSequencePublisher,
+            4,
+            HashMap::new(),
+            false,
+            0,
+            "test",
+            Duration::ZERO,
+        );
+    }
 
     fn make_sequences() -> ActiveSequencesMultiWorker<NoopSequencePublisher> {
         ActiveSequencesMultiWorker::new(
@@ -1810,6 +1980,56 @@ mod tests {
         assert!(sequences.prompt_registry.is_block_index_empty());
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));
         assert_eq!(active_request_count(&sequences, worker), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn disabled_expiry_requires_explicit_cleanup_for_all_workers() {
+        let sequences = ActiveSequencesMultiWorker::new_without_expiry(
+            NoopSequencePublisher,
+            4,
+            HashMap::from([(1_u64, (0_u32, 1_u32))]),
+            false,
+            0,
+            "test",
+        );
+        let initial_worker = WorkerWithDpRank::new(1, 0);
+        let dynamic_worker = WorkerWithDpRank::new(2, 0);
+        sequences
+            .register_worker(WorkerDpRange::new(2, 0, 1))
+            .unwrap();
+
+        for (request_id, token_sequence, worker) in [
+            ("initial", vec![1, 2], initial_worker),
+            ("dynamic", vec![3], dynamic_worker),
+        ] {
+            sequences
+                .add_request(
+                    SequenceRequest {
+                        request_id: request_id.to_string(),
+                        token_sequence: Some(token_sequence),
+                        track_prefill_tokens: true,
+                        expected_output_tokens: None,
+                        prefill_load_hint: tracking_hint(4),
+                        worker,
+                        lora_name: None,
+                    },
+                    Instant::now(),
+                )
+                .unwrap();
+        }
+
+        tokio::time::advance(Duration::from_secs(331)).await;
+        sequences.force_expire_requests_across_all_workers();
+
+        assert_eq!(active_request_count(&sequences, initial_worker), 1);
+        assert_eq!(active_request_count(&sequences, dynamic_worker), 1);
+        assert_eq!(sequences.active_blocks().get(&initial_worker), Some(&2));
+        assert_eq!(sequences.active_blocks().get(&dynamic_worker), Some(&1));
+
+        let now = Instant::now();
+        sequences.free(&"initial".to_string(), now).unwrap();
+        sequences.free(&"dynamic".to_string(), now).unwrap();
+        sequences.assert_completely_drained(now);
     }
 
     #[tokio::test(start_paused = true)]

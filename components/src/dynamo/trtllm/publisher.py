@@ -37,6 +37,7 @@ from prometheus_client import CollectorRegistry
 
 from dynamo.common.utils.prometheus import LLMBackendMetrics
 from dynamo.llm import FpmDirectPublisher, KvEventPublisher, WorkerMetricsPublisher
+from dynamo.trtllm.utils.request_utils import stored_event_cache_salt
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +161,7 @@ class ZmqKvEventPublisher:
         block_mm_infos: Optional[list[dict | None]] = None,
         attention_dp_rank: int = 0,
         lora_name: Optional[str] = None,
+        cache_salt: Optional[str] = None,
     ) -> None:
         """Publish a BlockStored event.
 
@@ -182,6 +184,8 @@ class ZmqKvEventPublisher:
         }
         if lora_name is not None:
             event["lora_name"] = lora_name
+        if cache_salt is not None:
+            event["cache_salt"] = cache_salt
 
         # Add multimodal info if present
         if block_mm_infos is not None:
@@ -206,10 +210,10 @@ class ZmqKvEventPublisher:
 
         self._publish_event(event, attention_dp_rank)
 
-    def publish_all_cleared(self) -> None:
-        """Publish an AllBlocksCleared event."""
+    def publish_all_cleared(self, attention_dp_rank: int = 0) -> None:
+        """Publish an AllBlocksCleared event for one attention DP rank."""
         event = {"type": "AllBlocksCleared"}
-        self._publish_event(event)
+        self._publish_event(event, attention_dp_rank)
 
     def _publish_event(self, event: dict, attention_dp_rank: int = 0):
         """Publish a single event to ZMQ in vLLM batch format."""
@@ -371,6 +375,10 @@ class Publisher:
     Note: The ZmqKvEventPublisher used here is the pure Python ZMQ publisher defined
     in this module, not the Rust-based KvEventPublisher from dynamo.llm (which is
     used in main.py as the worker-side subscriber from consolidator to NATS).
+
+    ``kv_state_endpoint`` selects the exact Dynamo endpoint that owns the published
+    KV event and recovery state. ``None`` maps KV state to the serving endpoint; it
+    does not change the endpoint used for request routing.
     """
 
     def __init__(
@@ -386,6 +394,7 @@ class Publisher:
         zmq_endpoint: Optional[str] = None,
         enable_local_indexer: bool = False,
         metrics_collector: Any = None,
+        kv_state_endpoint: Optional[str] = None,
     ) -> None:
         self.endpoint = endpoint
         self.engine = engine
@@ -399,6 +408,7 @@ class Publisher:
             self.additional_metrics.set_kv_event_buffer_capacity(event_buffer_max_size)
         self.enable_local_indexer = enable_local_indexer
         self.metrics_collector = metrics_collector
+        self.kv_state_endpoint = kv_state_endpoint
         self.attention_dp_size = engine.get_attention_dp_size()
 
         # The first few kv events from the model engine are always "created" type events.
@@ -506,6 +516,7 @@ class Publisher:
                     kv_block_size=self.kv_block_size,
                     dp_rank=rank,
                     enable_local_indexer=self.enable_local_indexer,
+                    kv_state_endpoint=self.kv_state_endpoint,
                 )
             logging.info(
                 f"Created {self.attention_dp_size} KV event publisher(s) for attention DP ranks"
@@ -868,16 +879,28 @@ class Publisher:
                     block_mm_infos.append(None)
 
             lora_name = data.get("lora_name")
+            try:
+                cache_salt = stored_event_cache_salt(data)
+            except ValueError as error:
+                logger.warning(
+                    "Dropping stored KV event with invalid cache namespace: "
+                    "engine_event_id=%s attention_dp_rank=%s error=%s",
+                    event_id,
+                    attention_dp_rank,
+                    error,
+                )
+                return
 
             logger.debug(
                 "Publishing stored KV event: engine_event_id=%s "
-                "attention_dp_rank=%s blocks=%s tokens=%s lora_name=%s "
+                "attention_dp_rank=%s blocks=%s tokens=%s lora_name=%s has_cache_salt=%s "
                 "has_parent=%s",
                 event_id,
                 attention_dp_rank,
                 len(block_hashes),
                 len(token_ids),
                 lora_name,
+                cache_salt is not None,
                 parent_hash is not None,
             )
             # Publish to ZMQ if consolidator is enabled, otherwise publish to NATS
@@ -892,6 +915,7 @@ class Publisher:
                     block_mm_infos,
                     attention_dp_rank,
                     lora_name,
+                    cache_salt,
                 )
             elif self.kv_event_publishers:
                 # No consolidator: publish to NATS (router subscribes directly)
@@ -905,6 +929,7 @@ class Publisher:
                         parent_hash,
                         block_mm_infos,
                         lora_name=lora_name,
+                        cache_salt=cache_salt,
                     )
                 else:
                     logging.warning(
@@ -1064,6 +1089,7 @@ async def get_publisher(
     zmq_endpoint: Optional[str] = None,
     enable_local_indexer: bool = False,
     metrics_collector: Any = None,
+    kv_state_endpoint: Optional[str] = None,
 ) -> AsyncGenerator[Publisher, None]:
     publisher = Publisher(
         endpoint,
@@ -1077,6 +1103,7 @@ async def get_publisher(
         zmq_endpoint=zmq_endpoint,
         enable_local_indexer=enable_local_indexer,
         metrics_collector=metrics_collector,
+        kv_state_endpoint=kv_state_endpoint,
     )
     try:
         publisher.initialize()

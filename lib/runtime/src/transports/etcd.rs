@@ -19,7 +19,7 @@ use etcd_client::{
     WatchStream, Watcher,
 };
 pub use etcd_client::{ConnectOptions, KeyValue, LeaseClient};
-use tokio::time::{Duration, interval};
+use tokio::time::{Duration, Instant, interval};
 use tokio_util::sync::CancellationToken;
 
 mod connector;
@@ -32,6 +32,13 @@ pub use lock::*;
 
 use super::utils::build_in_runtime;
 use crate::config::environment_names::etcd as env_etcd;
+
+const STARTUP_CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
+const STARTUP_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+const STARTUP_CONNECT_MAX_BACKOFF: Duration = Duration::from_secs(30);
+const WATCH_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
+const WATCH_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(5);
+const WATCH_RESYNC_GET_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// ETCD Client
 #[derive(Clone)]
@@ -65,38 +72,10 @@ impl Client {
     /// If the lease expires, the [`Runtime`] will be shutdown.
     /// If the [`Runtime`] is shutdown, the lease will be revoked.
     pub async fn new(config: ClientOptions, runtime: Runtime) -> Result<Self> {
-        let token = runtime.primary_token();
+        let runtime_for_lease = runtime.clone();
 
         let ((connector, lease_id), rt) = build_in_runtime(
-            async move {
-                let etcd_urls = config.etcd_url.clone();
-                let connect_options = config.etcd_connect_options.clone();
-
-                // Create the connector
-                let connector = Connector::new(etcd_urls, connect_options)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "Unable to connect to etcd server at {}. Check etcd server status",
-                            config.etcd_url.join(", ")
-                        )
-                    })?;
-
-                let lease_id = if config.attach_lease {
-                    create_lease(connector.clone(), config.lease_ttl, token)
-                        .await
-                        .with_context(|| {
-                            format!(
-                                "Unable to create lease. Check etcd server status at {}",
-                                config.etcd_url.join(", ")
-                            )
-                        })?
-                } else {
-                    0
-                };
-
-                Ok((connector, lease_id))
-            },
+            async move { Self::connect_with_startup_retry(&config, runtime_for_lease).await },
             1,
         )
         .await?;
@@ -107,6 +86,82 @@ impl Client {
             rt,
             runtime,
         })
+    }
+
+    /// Connect to etcd during startup, retrying with exponential backoff for up to 2 minutes.
+    async fn connect_with_startup_retry(
+        config: &ClientOptions,
+        runtime: Runtime,
+    ) -> Result<(Arc<Connector>, u64)> {
+        let token = runtime.primary_token();
+        let deadline = Instant::now() + STARTUP_CONNECT_TIMEOUT;
+        let mut backoff = STARTUP_CONNECT_INITIAL_BACKOFF;
+
+        loop {
+            if token.is_cancelled() {
+                anyhow::bail!("etcd startup connection cancelled");
+            }
+
+            let attempt = Self::connect_startup_attempt(config, &runtime).await;
+
+            match attempt {
+                Ok(connection) => return Ok(connection),
+                Err(err) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(err);
+                    }
+
+                    let sleep_duration = backoff.min(deadline.saturating_duration_since(now));
+
+                    tracing::warn!(
+                        error = %err,
+                        retry_in = ?sleep_duration,
+                        remaining = ?deadline.saturating_duration_since(now),
+                        "etcd not reachable yet; retrying startup connection"
+                    );
+
+                    tokio::select! {
+                        biased;
+
+                        _ = token.cancelled() => {
+                            anyhow::bail!("etcd startup connection cancelled");
+                        }
+
+                        _ = tokio::time::sleep(sleep_duration) => {}
+                    }
+                    backoff = backoff.saturating_mul(2).min(STARTUP_CONNECT_MAX_BACKOFF);
+                }
+            }
+        }
+    }
+
+    async fn connect_startup_attempt(
+        config: &ClientOptions,
+        runtime: &Runtime,
+    ) -> Result<(Arc<Connector>, u64)> {
+        let token = runtime.primary_token();
+        let connector =
+            Connector::new(config.etcd_url.clone(), config.etcd_connect_options.clone()).await?;
+
+        let lease_id = if config.attach_lease {
+            create_lease(connector.clone(), config.lease_ttl, runtime.clone())
+                .await
+                .with_context(|| {
+                    format!(
+                        "Unable to create lease. Check etcd server status at {}",
+                        config.etcd_url.join(", ")
+                    )
+                })?
+        } else {
+            0
+        };
+
+        if token.is_cancelled() {
+            anyhow::bail!("etcd startup connection cancelled");
+        }
+
+        Ok((connector, lease_id))
     }
 
     /// Get a clone of the underlying [`etcd_client::Client`] instance.
@@ -367,15 +422,72 @@ impl Client {
         // Watch for new events in background
         let connector = self.connector.clone();
         let prefix_str = prefix.as_ref().to_string();
+        let cancel_token = self.runtime.primary_token();
         self.rt.spawn(async move {
+            let mut first_connect = true;
             let mut reconnect = true;
             while reconnect {
+                if !first_connect {
+                    let mut retry_attempt = 0u64;
+                    let mut retry_backoff = WATCH_RETRY_INITIAL_BACKOFF;
+                    while let Err(err) = Self::resync_watch_prefix(
+                        &connector,
+                        &prefix_str,
+                        &mut start_revision,
+                        &tx,
+                        &cancel_token,
+                    )
+                    .await
+                    {
+                        if tx.is_closed() || cancel_token.is_cancelled() {
+                            return;
+                        }
+
+                        retry_attempt = retry_attempt.saturating_add(1);
+                        if retry_attempt == 1 {
+                            tracing::warn!(
+                                error = %err,
+                                prefix = %prefix_str,
+                                "failed to resync etcd watch prefix after reconnect; retrying"
+                            );
+                        } else {
+                            tracing::info!(
+                                error = %err,
+                                prefix = %prefix_str,
+                                retry_attempt,
+                                backoff_ms = retry_backoff.as_millis(),
+                                "still failing to resync etcd watch prefix after reconnect; retrying"
+                            );
+                        }
+
+                        if Self::is_etcd_connection_error(&err) {
+                            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                            if let Err(err) = connector.reconnect(deadline).await {
+                                tracing::warn!(
+                                    error = %err,
+                                    prefix = %prefix_str,
+                                    "failed to reconnect to ETCD before watch resync; retrying"
+                                );
+                            }
+                        }
+
+                        tokio::select! {
+                            _ = cancel_token.cancelled() => return,
+                            _ = tokio::time::sleep(Self::watch_retry_backoff(retry_backoff)) => {}
+                        }
+                        retry_backoff =
+                            retry_backoff.saturating_mul(2).min(WATCH_RETRY_MAX_BACKOFF);
+                    }
+                }
+
                 // Start a new watch stream
                 let watch_stream =
                     match Self::new_watch_stream(&connector, &prefix_str, start_revision).await {
                         Ok(stream) => stream,
                         Err(_) => return,
                     };
+
+                first_connect = false;
 
                 // Watch the stream
                 reconnect =
@@ -417,6 +529,88 @@ impl Client {
         });
 
         Ok((start_revision, existing_kvs))
+    }
+
+    /// Fetch current prefix state after reconnect and publish it as an authoritative snapshot.
+    async fn resync_watch_prefix(
+        connector: &Arc<Connector>,
+        prefix: &str,
+        start_revision: &mut i64,
+        tx: &mpsc::Sender<WatchEvent>,
+        cancel_token: &CancellationToken,
+    ) -> Result<()> {
+        let mut kv_client = connector.get_client().kv_client();
+        let get_result = tokio::select! {
+            _ = cancel_token.cancelled() => anyhow::bail!("watch resync cancelled"),
+            result = tokio::time::timeout(
+                WATCH_RESYNC_GET_TIMEOUT,
+                kv_client.get(prefix, Some(GetOptions::new().with_prefix())),
+            ) => result,
+        };
+        let mut response = get_result
+            .with_context(|| format!("timed out fetching etcd prefix snapshot for '{prefix}'"))?
+            .with_context(|| format!("failed to fetch etcd prefix snapshot for '{prefix}'"))?;
+
+        let header = response
+            .header()
+            .ok_or_else(|| anyhow::anyhow!("missing header during watch resync for '{prefix}'"))?;
+        *start_revision = header.revision() + 1;
+
+        let kvs = response.take_kvs();
+        tracing::warn!(
+            prefix,
+            kv_count = kvs.len(),
+            start_revision = *start_revision,
+            "resyncing etcd watch prefix after reconnect"
+        );
+
+        tokio::select! {
+            _ = cancel_token.cancelled() => anyhow::bail!("watch resync cancelled"),
+            result = tx.send(WatchEvent::Resync(kvs)) => {
+                result.context("failed to send WatchEvent::Resync")
+            }
+        }
+    }
+
+    fn is_etcd_connection_error(err: &anyhow::Error) -> bool {
+        if err.chain().any(|cause| {
+            cause
+                .downcast_ref::<tokio::time::error::Elapsed>()
+                .is_some()
+        }) {
+            return true;
+        }
+
+        err.chain().any(|cause| {
+            let Some(err) = cause.downcast_ref::<etcd_client::Error>() else {
+                return false;
+            };
+
+            match err {
+                etcd_client::Error::IoError(_)
+                | etcd_client::Error::TransportError(_)
+                | etcd_client::Error::EndpointError(_) => true,
+                etcd_client::Error::GRpcStatus(status) => matches!(
+                    status.code() as i32,
+                    // tonic::Code::Cancelled
+                    1
+                    // tonic::Code::Unknown
+                    | 2
+                    // tonic::Code::DeadlineExceeded
+                    | 4
+                    // tonic::Code::Unavailable
+                    | 14
+                ),
+                _ => false,
+            }
+        })
+    }
+
+    fn watch_retry_backoff(current: Duration) -> Duration {
+        let max_ms = u64::try_from(current.as_millis()).unwrap_or(u64::MAX);
+        let min_ms = (max_ms / 2).max(1);
+        let jitter_range = max_ms.saturating_sub(min_ms).saturating_add(1);
+        Duration::from_millis(min_ms + rand::random::<u64>() % jitter_range)
     }
 
     /// Establish a new watch stream with automatic retry and reconnection.
@@ -556,6 +750,11 @@ pub struct PrefixWatcher {
 pub enum WatchEvent {
     Put(KeyValue),
     Delete(KeyValue),
+    /// Full prefix state after watch reconnection.
+    ///
+    /// Consumers that maintain local state should replace that state with this
+    /// authoritative snapshot before applying subsequent incremental events.
+    Resync(Vec<KeyValue>),
 }
 
 /// ETCD client configuration options
@@ -725,6 +924,22 @@ impl KvCache {
                             let mut cache_write = cache.write().await;
                             cache_write.remove(&key);
                         }
+                        WatchEvent::Resync(kvs) => {
+                            let mut replacement = HashMap::with_capacity(kvs.len());
+                            for kv in kvs {
+                                let key = String::from_utf8_lossy(kv.key()).to_string();
+                                let value = kv.value().to_vec();
+                                replacement.insert(key, value);
+                            }
+
+                            tracing::warn!(
+                                prefix,
+                                new_count = replacement.len(),
+                                "KvCache replacing state from etcd watch resync"
+                            );
+                            let mut cache_write = cache.write().await;
+                            *cache_write = replacement;
+                        }
                     }
                 }
 
@@ -776,6 +991,43 @@ impl KvCache {
         cache_write.remove(&full_key);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn classifies_etcd_connection_errors() {
+        let err = anyhow::Error::new(etcd_client::Error::EndpointError(
+            "endpoint unavailable".to_string(),
+        ));
+        assert!(Client::is_etcd_connection_error(&err));
+
+        let err = anyhow::Error::new(etcd_client::Error::IoError(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "connection refused",
+        )));
+        assert!(Client::is_etcd_connection_error(&err));
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let elapsed = runtime.block_on(async {
+            tokio::time::timeout(Duration::from_millis(0), std::future::pending::<()>())
+                .await
+                .unwrap_err()
+        });
+        let err = anyhow::Error::new(elapsed).context("timed out fetching etcd prefix snapshot");
+        assert!(Client::is_etcd_connection_error(&err));
+
+        let err = anyhow::Error::new(etcd_client::Error::InvalidArgs("bad request".to_string()));
+        assert!(!Client::is_etcd_connection_error(&err));
+
+        let err = anyhow::anyhow!("missing header during watch resync");
+        assert!(!Client::is_etcd_connection_error(&err));
     }
 }
 

@@ -16,6 +16,7 @@
 # This test verifies that the HTTP server can be started and responds correctly to requests.
 
 import asyncio
+import contextlib
 import json
 import time
 from typing import AsyncGenerator, Dict
@@ -28,6 +29,7 @@ from dynamo.runtime import DistributedRuntime
 
 MSG_CONTAINS_ERROR = "This message contains an 400error."
 MSG_CONTAINS_STATUS_ERROR = "This message contains a 415 status error."
+MSG_CONTAINS_INVALID_ARGUMENT = "This message contains an invalid argument."
 MSG_CONTAINS_INTERNAL_ERROR = "This message contains an internal server error."
 
 
@@ -55,7 +57,7 @@ class MockHttpEngine:
 
     async def generate(self, request: Dict, context) -> AsyncGenerator[Dict, None]:
         """
-        Raises HttpError if message contains 'error', otherwise streams a mock response.
+        Raises the requested exception, otherwise streams a mock response.
         """
         user_message = ""
         for message in request.get("messages", []):
@@ -71,8 +73,10 @@ class MockHttpEngine:
             raise HttpError(code=400, message=MSG_CONTAINS_ERROR)
         elif MSG_CONTAINS_STATUS_ERROR.lower() in user_message.lower():
             raise _StatusLikeError(status=415, message=MSG_CONTAINS_STATUS_ERROR)
+        elif MSG_CONTAINS_INVALID_ARGUMENT.lower() in user_message.lower():
+            raise ValueError(MSG_CONTAINS_INVALID_ARGUMENT)
         elif MSG_CONTAINS_INTERNAL_ERROR.lower() in user_message.lower():
-            raise ValueError("Simulated internal error")
+            raise RuntimeError("Simulated internal error")
 
         # Stream a mock response
         created = int(time.time())
@@ -124,22 +128,47 @@ async def http_server(runtime: DistributedRuntime):
             raise ValueError(f"Server failed to start: {e}")
 
     server_task = asyncio.create_task(worker())
-    await asyncio.wait_for(start_done.wait(), timeout=30.0)
-    if server_task.done() and server_task.exception():
-        raise ValueError(f"Server task failed to start {server_task.exception()}")
+
+    def raise_if_server_exited():
+        # A finished startup task means the server never came up.
+        if server_task.done():
+            raise ValueError(
+                "HTTP server exited during startup"
+            ) from server_task.exception()
+
+    async def wait_until_accepting():
+        # start_done fires when service.run() returns, but the socket is bound
+        # later on the runtime's background threads; wait until it accepts.
+        while True:
+            try:
+                _, writer = await asyncio.open_connection("localhost", port)
+                writer.close()
+            except OSError:
+                # open_connection raises a bare OSError, not ConnectionError,
+                # when every resolved address is refused; don't narrow this.
+                raise_if_server_exited()
+                await asyncio.sleep(0.1)
+                continue
+            raise_if_server_exited()  # a stale listener may answer; confirm ours bound
+            return
+
+    async def stop_server():
+        service.shutdown()
+        server_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await asyncio.wait_for(server_task, timeout=10.0)
+
+    try:
+        await asyncio.wait_for(start_done.wait(), timeout=30.0)
+        raise_if_server_exited()
+        await asyncio.wait_for(wait_until_accepting(), timeout=10.0)
+    except BaseException:
+        await stop_server()  # teardown past the yield won't run on setup failure
+        raise
+
     yield f"http://localhost:{port}", model_name
 
-    # Teardown: Cancel the server task if it's still running
-    service.shutdown()  # Shutdown service
-    await asyncio.sleep(0.1)  # Give some time for graceful shutdown
-    if not server_task.done():
-        server_task.cancel()
-        try:
-            # Await cancellation to ensure proper cleanup for up to 10s
-            await asyncio.wait_for(server_task, timeout=10.0)
-        except asyncio.CancelledError:
-            print("Server task cancelled during teardown.")
-            pass
+    await stop_server()
 
 
 @pytest.mark.asyncio
@@ -176,38 +205,52 @@ async def test_chat_completion_success(http_server):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "msg_to_code",
+    ("trigger", "status", "expected_message", "expected_type"),
     [
-        (MSG_CONTAINS_ERROR, 400),
-        (MSG_CONTAINS_STATUS_ERROR, 415),
-        (MSG_CONTAINS_INTERNAL_ERROR, 500),
+        (MSG_CONTAINS_ERROR, 400, MSG_CONTAINS_ERROR, "Bad Request"),
+        (
+            MSG_CONTAINS_STATUS_ERROR,
+            415,
+            MSG_CONTAINS_STATUS_ERROR,
+            "Unsupported Media Type",
+        ),
+        (
+            MSG_CONTAINS_INVALID_ARGUMENT,
+            400,
+            f"ValueError: {MSG_CONTAINS_INVALID_ARGUMENT}",
+            "Bad Request",
+        ),
+        (
+            MSG_CONTAINS_INTERNAL_ERROR,
+            500,
+            "Internal server error",
+            "Internal Server Error",
+        ),
     ],
 )
 @pytest.mark.forked
-async def test_chat_completion_http_error(http_server, msg_to_code: tuple[str, int]):
-    """Tests that an HttpError is raised when the message contains 'error'."""
+async def test_chat_completion_http_error(
+    http_server,
+    trigger: str,
+    status: int,
+    expected_message: str,
+    expected_type: str,
+):
+    """Tests that backend exceptions map to the expected HTTP responses."""
     base_url, model_name = http_server
     url = f"{base_url}/v1/chat/completions"
     data = {
         "model": model_name,
-        "messages": [{"role": "user", "content": msg_to_code[0]}],
+        "messages": [{"role": "user", "content": trigger}],
     }
     async with aiohttp.ClientSession(
         timeout=aiohttp.ClientTimeout(total=10)
     ) as session:
         async with session.post(url, json=data) as response:
-            assert response.status == msg_to_code[1]
+            assert response.status == status
             error_json = await response.json()
-            if msg_to_code[0] == MSG_CONTAINS_ERROR:
-                # 4xx HTTP protocol contract: backend message is forwarded
-                # to the client so callers can react to validation errors.
-                assert MSG_CONTAINS_ERROR in str(error_json)
-            elif msg_to_code[0] == MSG_CONTAINS_STATUS_ERROR:
-                # Same 4xx contract via the duck-typed `.status` path.
-                assert MSG_CONTAINS_STATUS_ERROR in str(error_json)
-            elif msg_to_code[0] == MSG_CONTAINS_INTERNAL_ERROR:
-                # 5xx is sanitized: the client receives a static message
-                # and never the raw backend error text; the underlying
-                # detail is logged server-side.
-                assert "simulated internal error" not in str(error_json).lower()
-                assert "internal server error" in str(error_json).lower()
+            assert error_json == {
+                "message": expected_message,
+                "type": expected_type,
+                "code": status,
+            }

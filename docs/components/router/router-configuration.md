@@ -2,33 +2,38 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Configuration and Tuning
-subtitle: Router flags, event transport, load tracking, and tuning guidance
+subtitle: Router behavior, event transport, load tracking, and tuning guidance
 ---
 
-This page collects the main router flags for frontend-embedded and standalone deployments. For the routing cost model and worker-selection behavior, see [Routing Concepts](router-concepts.md).
+This page explains router behavior and tuning for frontend-embedded and standalone
+deployments. For the exact frontend flag names, environment variables, defaults, and
+boolean forms, use the [Frontend Configuration Reference](../frontend/configuration.md#router).
+For the routing cost model and worker-selection behavior, see
+[Routing Concepts](router-concepts.md).
 
 ## Routing Behavior
 
-- `--router-kv-overlap-score-credit`: Device-local prefix-overlap credit multiplier in the prefill cost calculation, from 0.0 to 1.0. Higher values improve Time To First Token (TTFT) at the cost of Inter-Token Latency (ITL). When set to 0, the router ignores prefix caches and skips creating a local indexer. Defaults to 1.
+- `--router-kv-overlap-score-credit`: Device-local prefix-overlap credit multiplier in the prefill cost calculation. It must be finite and nonnegative. Values greater than `1.0` give overlap extra credit and can make adjusted prefill cost negative. When set to `0`, the router ignores prefix caches and skips creating a local indexer. Defaults to `1.0`.
 - `--router-kv-overlap-score-credit-decay`: Decays device-local overlap credit for workers whose active prefill load exceeds the least-loaded eligible worker. `0` disables decay. Defaults to 0.
 - `--router-prefill-load-scale`: Scale applied to adjusted prompt-side prefill load after device, lower-tier, and shared-cache credits are subtracted. Defaults to 1.
 - `--router-host-cache-hit-weight`: Credit multiplier for host-pinned (CPU offload) prefix overlap, from 0.0 to 1.0. Symmetric to `--router-kv-overlap-score-credit` but applied to the host-pinned tier when a backend exposes CPU offload via a KV connector. Defaults to 0.75.
 - `--router-disk-cache-hit-weight`: Credit multiplier for disk/lower-tier (e.g. NVMe-backed) prefix overlap, from 0.0 to 1.0. Defaults to 0.25.
-- `--load-aware`: Preset for load-aware KV routing without cache-reuse signals. On the frontend, it implies `--router-mode kv`. It sets `overlap_score_credit=0`, disables KV events, durable KV events, and KV reuse assumptions, enables active-block and prefill-token load tracking, disables remote/shared cache indexers, and preserves `--router-prefill-load-scale`, `--router-host-cache-hit-weight`, and `--router-disk-cache-hit-weight`.
+- `--load-aware`: Preset for load-aware KV routing without cache-reuse signals. On the frontend, it implies `--router-mode kv`. It sets `overlap_score_credit=0`, disables KV events and KV reuse assumptions, enables active-block and prefill-token load tracking, disables remote/shared cache indexers, and preserves `--router-prefill-load-scale`, `--router-host-cache-hit-weight`, and `--router-disk-cache-hit-weight`.
 - `--router-temperature`: Controls worker selection randomness through softmax sampling of normalized router cost logits. A value of 0 (default) ensures deterministic selection of the lowest-cost worker, while higher values introduce more randomness.
 - `--router-track-prefill-tokens`: Enables prompt-side load accounting in the worker cost model. This should stay enabled if you want queue thresholds, `active_prefill_tokens`, and AIC prefill load decay to reflect prompt work.
 - `--router-prefill-load-model`: Selects the router's prompt-side load model. `none` keeps the existing static prompt load accounting. `aic` predicts one expected prefill duration per admitted request and lazily decays only the oldest active prefill request on each worker.
-- `--router-queue-threshold`: Queue threshold fraction for prefill token capacity (default: 16.0). The router holds incoming requests in a priority queue while all eligible workers exceed `threshold * max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is actually sent to a worker. `nvext.agent_hints.strict_priority` selects an absolute pending-queue tier, while `nvext.agent_hints.priority` adjusts ordering within the configured policy. Must be greater than or equal to 0; use `0.0` for maximum queueing sensitivity. Set to `None` to disable queueing. See the SGLang note under [Tuning Guidelines](#tuning-guidelines) for caveats around how `max_num_batched_tokens` is populated on that backend, and see [Priority Scheduling](priority-scheduling.md) for how router priority differs from backend engine priority.
-- `--router-queue-policy`: Scheduling policy for the router queue (default: `fcfs`).
-- `--router-policy-config`: Startup-only policy-family and cache-bucket YAML path. When omitted, `--router-queue-threshold` and `--router-queue-policy` retain the single default queue. The equivalent environment variable is `DYN_ROUTER_POLICY_CONFIG`.
+- `--router-queue-threshold`: Optional queue threshold fraction for prefill token capacity. Queueing is disabled by default; setting a numeric value enables it. The router holds incoming requests in a priority queue while all eligible workers exceed `threshold * max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is sent to a worker. `nvext.agent_hints.strict_priority` selects an absolute pending-queue tier, while `nvext.agent_hints.priority` adjusts ordering within the configured policy. Must be greater than or equal to 0; use `0.0` for maximum queueing sensitivity. See the SGLang note under [Tuning Guidelines](#tuning-guidelines) for caveats around how `max_num_batched_tokens` is populated on that backend, and see [Priority Scheduling](priority-scheduling.md) for how router priority differs from backend engine priority.
+- `--router-queue-policy`: Scheduling policy for the router queue: `fcfs` (default) or `wspt`.
+- `--router-policy-config`: Startup-only policy-family and cache-bucket YAML path. When omitted, `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class. The equivalent environment variable is `DYN_ROUTER_POLICY_CONFIG`.
 
 For how queue backpressure differs from candidate filtering and busy-threshold overload handling, see [Router Filtering](router-filtering.md).
 
 `fcfs` orders by adjusted arrival time (`priority_jump - arrival_offset`) and optimizes tail TTFT.
-`lcfs` orders by adjusted reverse arrival time (`priority_jump + arrival_offset`) and mainly serves controlled comparison experiments.
 `wspt` orders by `(1 + priority_jump) / isl_tokens` and optimizes average TTFT.
+Policy-class YAML can additionally select `lcfs` for controlled comparison experiments;
+the `--router-queue-policy` CLI option does not accept it.
 
-For all three policies, the complete pending-queue key is
+For each policy, the complete pending-queue key is
 `(strict_priority, policy_key)`. Higher strict tiers always win; the selected
 policy orders requests within a tier.
 
@@ -50,9 +55,9 @@ matrix class directly.
 
 Each class owns its FCFS or WSPT heap, busy thresholds, queue limits, quantum,
 deficit, and counters. Absolute and fractional busy thresholds use OR
-semantics. When neither is specified, the fractional threshold defaults to
-`16.0`. A class queues only when every eligible worker is busy for that class,
-but a new arrival cannot bypass an existing backlog in the same class.
+semantics. A class queues only when at least one threshold is configured and
+every eligible worker is busy for that class, but a new arrival cannot bypass
+an existing backlog in the same class.
 
 Queue limits are configured per discovered worker endpoint with
 `request_queue_limit_per_worker`, `raw_isl_token_queue_limit_per_worker`, and
@@ -77,8 +82,9 @@ Class, family, and bucket names use metric-safe identifiers.
 Profiles resolve in this order: exact model profile, root profile, then the
 synthetic single-class fallback. A model profile completely replaces the root
 profile; fields, buckets, families, and classes are not inherited. With no
-YAML, the router preserves the existing synthetic `default` queue and does not
-compute cache state for classification. See the tested
+YAML, the router uses a synthetic `default` class and does not compute cache
+state for classification. The synthetic class queues only when
+`--router-queue-threshold` is set. See the tested
 [sample policy](../../../examples/router/policy-class-queues.yaml).
 
 ```bash
@@ -123,9 +129,33 @@ The configured value is the idle timeout. It is independent of
 `--router-ttl-secs` and `--router-predicted-ttl-secs`. Omit the session-affinity
 option to keep affinity disabled.
 
+When session affinity is enabled, routers synchronize affinity bindings through the
+Runtime event plane. The origin publishes a binding after successful dispatch so
+concurrent requests can observe it, then publishes it again when the request lease
+ends so peer idle timers restart when the request becomes idle. The extra event
+fanout is an intentional tradeoff.
+
+Synchronization is advisory. Each replica owns its local idle TTL and uses the
+first live binding it observes. A matching update refreshes that local deadline,
+an expired binding can be replaced, and a conflicting live binding is ignored.
+Events use the same component scope as active-sequence synchronization, and the
+session-affinity subscriber additionally rejects targets outside its local worker
+set. Stronger cross-model or worker-role isolation is future work.
+
+Dropped, delayed, or reordered events do not affect request correctness, but can
+temporarily reduce affinity. In particular, a long request can outlive a peer's
+local TTL, and a dropped lease-completion update can leave peer deadlines out of
+sync until a later request republishes the binding.
+
 If the bound worker disappears, Dynamo invalidates the binding so a subsequent
 selection can bind an available worker. Router restart clears all bindings. Bindings
-are not shared between frontend replicas.
+received from replicas are not authoritative storage. For strict affinity, configure
+the ingress or load balancer to consistently route a session to one frontend, or use
+an authoritative external binding store. When hashing at ingress, hash the raw
+session header rather than Dynamo's normalized internal `session_id`: canonical
+clients send `X-Dynamo-Session-ID`, while agent-native clients use the corresponding
+header listed in [Session IDs](../../agents/session-ids.md). Agent-native identity is
+normalized only after the request reaches the frontend.
 
 Direct mode still requires the phase-appropriate explicit worker ID on every
 affinity request. The stored binding validates that target but does not supply a
@@ -173,12 +203,9 @@ For MoE models, these values must satisfy AIC's parallelism constraint:
 For Kimi-style TP-only MoE runs, use `--aic-moe-tp-size` equal to `--aic-tp-size`,
 `--aic-moe-ep-size 1`, and `--aic-attention-dp-size 1`.
 
-## KV Event Transport and Persistence
+## KV Event Transport
 
 - `--no-router-kv-events`: Disables KV event tracking. By default, the router consumes KV events to monitor block creation and deletion from workers that publish them. When disabled, the router predicts cache state from routing decisions with TTL-based expiration.
-- `--router-durable-kv-events`: **Deprecated.** Enables JetStream mode for KV event transport. The event-plane subscriber in local indexer mode is now the recommended path.
-- `--router-reset-states`: Only applies in JetStream mode (`--router-durable-kv-events`). Resets the router state on startup by clearing both the JetStream event stream and NATS object store, starting from a fresh state.
-- `--router-snapshot-threshold`: Only applies in JetStream mode (`--router-durable-kv-events`). Sets the number of messages in JetStream before triggering a snapshot.
 
 ## Topology-Aware KV Transfer
 
@@ -193,7 +220,7 @@ For Kubernetes deployment examples, see [Kubernetes Topology-Aware KV Transfer](
 - `--router-track-output-blocks`: **Experimental.** Enables tracking of output blocks during generation. When enabled, the router adds placeholder blocks as tokens are generated and applies fractional decay based on progress toward the expected output sequence length (`agent_hints.osl` in `nvext`). For the cost-model behavior, see [Decode Load Modeling](router-concepts.md#decode-load-modeling).
 - `--no-router-assume-kv-reuse`: When tracking active blocks, disables the assumption of KV cache reuse. This is useful in disaggregated setups where transferred blocks are not actually deduplicated on the decode side.
 - `--no-router-track-prefill-tokens`: Disables prompt-side prefill token accounting in the router's active load model. Use this for decode-only routing paths where prompt processing already happened elsewhere.
-- `--router-replica-sync`: Disabled by default. Enables NATS-based synchronization of local routing decisions between router replicas.
+- `--router-replica-sync`: Disabled by default. Enables best-effort Runtime event-plane synchronization of KV active-sequence state. Session-affinity synchronization is independent and starts when `--router-session-affinity-ttl-secs` is set.
 
 ## KV Indexer / Approx KV Indexer
 
@@ -214,7 +241,7 @@ For details on per-request agent hints (`priority`, `osl`, `speculative_prefill`
 
 ## Tuning Guidelines
 
-`--router-kv-overlap-score-credit` is the primary knob for cache reuse. It credits device-local prefix overlap against the prefill load and must be between 0.0 and 1.0. Higher values steer requests toward workers with better cache overlap and reduce TTFT. Lower values distribute load more evenly and reduce ITL. The default of 1.0 is a reasonable starting point. For direct router APIs and EPP integrations, the same router policy can be overridden per request with `router_config_override.overlap_score_credit`; it is not an `nvext.agent_hints` field.
+`--router-kv-overlap-score-credit` is the primary knob for cache reuse. It credits device-local prefix overlap against the prefill load and must be finite and nonnegative. Higher values steer requests toward workers with better cache overlap and reduce TTFT. Values above `1.0` can subtract more than the matched device-local prefix and make adjusted prefill cost negative, so use them deliberately. Lower values distribute load more evenly and reduce ITL. The default of `1.0` is a reasonable starting point. For direct router APIs and EPP integrations, the same router policy can be overridden per request with `router_config_override.overlap_score_credit`; it is not an `nvext.agent_hints` field.
 
 Use `--router-kv-overlap-score-credit-decay` to reduce that device-local credit when a worker has more active prefill work than the least-loaded eligible worker. This helps prevent busy, cache-rich workers from repeatedly winning while newly autoscaled or lightly loaded workers receive too little traffic. The router normalizes the excess active prefill blocks by the incoming request size and multiplies the configured overlap credit by `1 / (1 + decay * normalized_excess)`. For example, a decay of `1` halves device credit at one request-equivalent of excess prefill load. Host, disk, and shared-cache credits are unchanged. This setting requires prefill-token tracking to have an effect and defaults to `0`.
 
@@ -222,7 +249,7 @@ Use `--load-aware` when you want the KV scheduler's active load model without pr
 
 Deprecated: `--router-kv-overlap-score-weight`, `--kv-overlap-score-weight`, `DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT`, and `DYN_OVERLAP_SCORE_WEIGHT` are still accepted, but emit deprecation warnings. Nonzero legacy values map to `prefill_load_scale` to preserve existing behavior without changing overlap credit. A legacy value of 0 maps to both `prefill_load_scale=0` and `overlap_score_credit=0`, which preserves the old no-overlap/no-indexer behavior. If a deprecated overlap score weight is still present, it takes precedence over the newer prefill load scale field; a legacy value of 0 also takes precedence over the newer overlap credit field. When migrating to `--router-prefill-load-scale` or `DYN_ROUTER_PREFILL_LOAD_SCALE`, remove the deprecated flag, env var, or JSON field from the deployment config. Use `--router-kv-overlap-score-credit` or `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT` only when you mean to tune the cache-overlap credit itself.
 
-If an older config used overlap score weight above 1.0 to make the router care more about TTFT, keep the overlap credit at or below 1.0 and move that larger value to `--router-prefill-load-scale` instead. `prefill_load_scale` multiplies the overlap-adjusted prompt-side load, so it still implicitly accounts for device, host, disk, and shared-cache credits.
+When migrating the deprecated overlap score weight, use `--router-prefill-load-scale` to preserve its scaling role. Tune `--router-kv-overlap-score-credit` separately only when you intend to change device-local cache credit; values above `1.0` are supported but can produce negative adjusted prefill cost.
 
 Use `--router-prefill-load-scale` when prompt-side load should count more or less than decode-side block load after cache-hit credits are applied. The final score is `prefill_load_scale * adjusted_prefill_blocks + decode_blocks`.
 

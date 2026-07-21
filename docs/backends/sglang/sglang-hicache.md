@@ -137,9 +137,9 @@ W0 wins because it combines device-local reuse with shared-pool hits beyond that
 ## Requirements
 
 > [!IMPORTANT]
-> Tier-aware shared cache routing requires SGLang changes from [sgl-project/sglang#22894](https://github.com/sgl-project/sglang/pull/22894) ("fix(hicache): emit KV events for L2 host cache insertions"). This PR is **not yet merged** to SGLang main. Until it lands and a SGLang release includes it, the feature is not accessible from a stock `pip install sglang` — you must build SGLang from the PR branch (`gh pr checkout 22894 && pip install -e python/` from the SGLang repo). This section will be updated with the minimum required version once #22894 ships in a release.
+> Tier-aware shared cache routing requires SGLang 0.5.11 or later. SGLang 0.5.11 includes [sgl-project/sglang#22894](https://github.com/sgl-project/sglang/pull/22894) ("fix(hicache): emit KV events for L2 host cache insertions"), which adds the host-tier KV events used by the router. The Dynamo 1.3.0 SGLang runtime image ships with SGLang 0.5.15 and satisfies this requirement.
 
-Without PR #22894, worker events carry only `medium=GPU` and the router is blind to Host-tier residency — regardless of Mooncake configuration.
+Earlier SGLang versions do not emit `medium=CPU_PINNED` for Host-tier residency, so the router can only track GPU events regardless of Mooncake configuration.
 
 You also need:
 
@@ -149,7 +149,7 @@ You also need:
 ## Setup
 
 > [!WARNING]
-> **Known limitation in 1.2.0.** With both `--enable-metrics` and `--disable-piecewise-cuda-graph` set on the SGLang worker, the process can crash on the first KV-cache write due to a race in the upstream `mooncake-transfer-engine` thread pool. The recipe below omits these flags; per-process metrics scraping via the `dynamo.frontend` is unaffected. The mooncake-side fix is being tracked upstream.
+> SGLang 0.5.11 through 0.5.12.x bundle Mooncake 0.3.10.post2, which is affected by an upstream `MemcpyWorkerPool` crash when both `--enable-metrics` and `--disable-piecewise-cuda-graph` are set on the worker. Upgrade to SGLang 0.5.13 or later, which bundles Mooncake 0.3.11.post1 with [the upstream fix](https://github.com/kvcache-ai/Mooncake/pull/2001), or omit both flags. The setup below omits them.
 
 **SGLang worker** — HiCache with Mooncake storage:
 
@@ -198,7 +198,7 @@ python -m dynamo.sglang ... --log-level debug 2>&1 | grep -E 'BlockStored|BlockR
 # BlockRemoved(block_hashes=[...], medium=GPU)
 ```
 
-If `medium` is missing or always reads `GPU`, the worker is running an SGLang build without PR #22894.
+If `medium` is missing or Host-tier transitions never report `CPU_PINNED`, confirm that the worker runs SGLang 0.5.11 or later (or a custom build that includes PR #22894).
 
 **Router sees the shared pool.** Two new histograms are exposed on the frontend's Prometheus endpoint:
 
@@ -216,7 +216,7 @@ curl -s localhost:8000/metrics | grep shared_cache
 | Symptom                                                  | Likely cause                                                                 | Fix                                                                                           |
 | -------------------------------------------------------- | ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | `shared_cache_hit_rate` is always 0                      | Mooncake master unreachable from the router host                             | Check network path; the router logs `Shared cache query failed` when it can't reach Mooncake. |
-| Events only ever carry `medium=GPU`                      | SGLang missing [PR #22894](https://github.com/sgl-project/sglang/pull/22894) | Rebuild SGLang from the PR branch.                                                            |
+| Events only ever carry `medium=GPU`                      | SGLang older than 0.5.11 or a custom build missing [PR #22894](https://github.com/sgl-project/sglang/pull/22894) | Upgrade to SGLang 0.5.11 or later.                                                      |
 | Workers registered but router never queries shared cache | `--shared-cache-type` left at default `none`                                 | Set `--shared-cache-type hicache` on the frontend.                                            |
 | Queries issued but winning worker rarely changes         | `--shared-cache-multiplier 0.0`                                              | Raise the multiplier — typical starting range is `0.3`–`0.7`.                                 |
 | Page-size mismatch warnings                              | Router `--page-size` doesn't match worker `--page-size`                      | They must agree; the router hashes pages using the worker's page size.                        |

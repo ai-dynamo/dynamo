@@ -35,6 +35,7 @@ def make_args(**overrides):
         "engine_type": "vllm",
         "num_gpu_blocks": None,
         "block_size": None,
+        "max_model_len": None,
         "max_num_seqs": 256,
         "max_num_batched_tokens": 8192,
         "enable_prefix_caching": True,
@@ -44,10 +45,10 @@ def make_args(**overrides):
         "decode_speedup_ratio": 1.0,
         "dp_size": 1,
         "startup_time": None,
-        "durable_kv_events": False,
         "kv_transfer_bandwidth": 64.0,
         "kv_transfer_timing_mode": "full_prompt",
         "reasoning": None,
+        "response_replay_trace_path": None,
         "sglang_schedule_policy": None,
         "sglang_page_size": None,
         "sglang_max_prefill_tokens": None,
@@ -89,6 +90,7 @@ def test_build_runtime_config_uses_normalized_sglang_page_size_alias():
     assert runtime_config.total_kv_blocks == 16384
     assert runtime_config.max_num_seqs == 256
     assert runtime_config.max_num_batched_tokens == 8192
+    assert runtime_config.runtime_data["output_replay_consumer"] == "true"
 
 
 def test_build_mocker_engine_args_rejects_mismatched_sglang_sizes():
@@ -222,9 +224,7 @@ def test_g4_args_allow_kv_bytes_per_token_worker_override():
 
 
 def test_runtime_config_disables_local_indexer_for_decode_worker():
-    engine_args = CONFIG.build_mocker_engine_args(
-        make_args(is_decode_worker=True, durable_kv_events=False)
-    )
+    engine_args = CONFIG.build_mocker_engine_args(make_args(is_decode_worker=True))
 
     _, runtime_config = CONFIG.build_runtime_config(engine_args)
 
@@ -271,10 +271,10 @@ def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
         planner_profile_data=planner_profile_data,
         is_prefill_worker=True,
         is_decode_worker=False,
-        durable_kv_events=False,
         kv_bytes_per_token=131072,
         kv_transfer_bandwidth=123.0,
         kv_transfer_timing_mode="destination_missing",
+        response_replay_trace_path=None,
         num_g2_blocks=8192,
         num_g3_blocks=16384,
         offload_batch_size=32,
@@ -392,6 +392,119 @@ def test_mocker_cli_accepts_mtp_configuration():
     assert args.aic_nextn == 3
     assert args.aic_nextn_accept_rates == "1,0.5"
     assert args.aic_mtp_seed == 99
+
+
+def test_mocker_cli_accepts_max_model_len():
+    args = parse_args(["--max-model-len", "32768"])
+
+    engine_args = CONFIG.build_mocker_engine_args(args)
+    _, runtime_config = CONFIG.build_runtime_config(engine_args)
+
+    assert engine_args.max_model_len == 32768
+    assert runtime_config.context_length == 32768
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_mocker_cli_rejects_non_positive_max_model_len(value):
+    with pytest.raises(SystemExit):
+        parse_args(["--max-model-len", value])
+
+
+def test_build_mocker_engine_args_keeps_max_model_len_explicit_only():
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(model_path="/models/mock", num_gpu_blocks=4096)
+    )
+
+    assert engine_args.max_model_len is None
+
+
+def test_build_mocker_engine_args_preserves_explicit_max_model_len():
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(
+            model_path="/models/mock",
+            max_model_len=32768,
+            num_gpu_blocks=4096,
+        )
+    )
+
+    assert engine_args.max_model_len == 32768
+
+
+def test_replay_engine_args_keeps_max_model_len_explicit_only():
+    import dynamo.replay.main as replay_main
+
+    engine_args = replay_main._load_engine_args(
+        json.dumps(
+            {
+                "num_gpu_blocks": 4096,
+                "aic_model_path": "/models/mock",
+            }
+        )
+    )
+
+    assert engine_args.max_model_len is None
+
+
+def test_replay_engine_args_preserves_explicit_max_model_len():
+    import dynamo.replay.main as replay_main
+
+    engine_args = replay_main._load_engine_args(
+        json.dumps(
+            {
+                "num_gpu_blocks": 4096,
+                "max_model_len": 32768,
+                "aic_model_path": "/models/mock",
+            }
+        )
+    )
+
+    assert engine_args.max_model_len == 32768
+
+
+def test_replay_attention_dp_sets_rank_topology_with_explicit_kv_capacity():
+    import dynamo.replay.main as replay_main
+
+    engine_args = replay_main._load_engine_args(
+        json.dumps(
+            {
+                "num_gpu_blocks": 4096,
+                "aic_attention_dp_size": 4,
+            }
+        )
+    )
+
+    assert engine_args.num_gpu_blocks == 4096
+    assert engine_args.dp_size == 4
+
+
+def test_replay_rejects_mismatched_dp_topology():
+    import dynamo.replay.main as replay_main
+
+    with pytest.raises(ValueError, match="dp_size must match"):
+        replay_main._load_engine_args(
+            json.dumps(
+                {
+                    "num_gpu_blocks": 4096,
+                    "dp_size": 2,
+                    "aic_attention_dp_size": 4,
+                }
+            )
+        )
+
+
+def test_replay_rejects_dp_topology_without_aic_attention_dp():
+    import dynamo.replay.main as replay_main
+
+    with pytest.raises(ValueError, match="dp_size must match"):
+        replay_main._load_engine_args(
+            json.dumps(
+                {
+                    "num_gpu_blocks": 4096,
+                    "dp_size": 2,
+                    "aic_backend": "vllm",
+                }
+            )
+        )
 
 
 def test_replay_engine_args_compute_kv_bytes_for_g3_before_validation(monkeypatch):
@@ -537,6 +650,23 @@ def test_build_mocker_engine_args_estimates_aic_blocks(monkeypatch):
             "attention_dp_size": None,
         }
     ]
+
+
+def test_build_mocker_engine_args_falls_back_when_aic_estimator_missing(
+    monkeypatch, caplog
+):
+    def missing_memory(module_name):
+        raise ModuleNotFoundError(name=module_name)
+
+    monkeypatch.setattr("dynamo._internal.aic.importlib.import_module", missing_memory)
+
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(aic_perf_model=True, model_path="/models/mock")
+    )
+
+    assert engine_args.num_gpu_blocks == 16384
+    assert "Falling back to default num_gpu_blocks=16384" in caplog.text
+    assert "--num-gpu-blocks-override" in caplog.text
 
 
 def test_aic_capacity_estimation_preserves_explicit_zero_inputs(monkeypatch):

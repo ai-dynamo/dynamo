@@ -29,23 +29,36 @@ from gpu_memory_service.client.torch.allocator import (
     is_scratch,
 )
 from gpu_memory_service.common.locks import RequestedLockType
-from gpu_memory_service.common.utils import get_socket_path, is_scratch_kv_enabled
+from gpu_memory_service.common.utils import (
+    GMS_TAGS,
+    get_socket_path,
+    is_scratch_kv_enabled,
+)
 from gpu_memory_service.integrations.common import patch_empty_cache
 from gpu_memory_service.integrations.common.utils import (
-    GMS_TAGS,
     get_gms_lock_mode,
     get_gms_ro_connect_timeout_ms,
+    torch_device,
 )
 from gpu_memory_service.integrations.vllm.model_loader import (
+    abort_pending_gms_write,
+    get_imported_weights_bytes,
     get_mx_load_context,
+    has_pending_gms_write,
+    publish_pending_gms_write,
     register_gms_loader,
 )
 from gpu_memory_service.integrations.vllm.patches import (
     apply_scratch_kv_patches,
     patch_memory_snapshot,
 )
+from gpu_memory_service.integrations.vllm.utils import configure_gms_worker_logging
 
 logger = logging.getLogger(__name__)
+
+# Make gpu_memory_service INFO/DEBUG visible in the vLLM worker subprocess, where
+# vLLM's logging config would otherwise drop them.
+configure_gms_worker_logging()
 
 # Trigger model loader registration and utility patches on import
 register_gms_loader()
@@ -151,13 +164,32 @@ class GMSWorker(Worker):
         # Parent will set device again (harmless) and do memory checks
         super().init_device()
 
+    @torch.inference_mode()
     def determine_available_memory(self) -> int:
         """
         Determine actual available memory for the engine.
 
         During a failover scenario, this function may be called while there is an active engine colocated on the same device.
         We want our assessment to ignore the kv cache allocation of the active engine if there is one.
+
+        A first writer defers its GMS commit until profiling completes here:
+        waiting RO consumers (snapshot saver, peer engines) would otherwise
+        attach to the device mid-profile and perturb vLLM's memory accounting.
+        On failure the pending write is released and the error propagates;
+        the GMS server also clears an uncommitted layout if this process dies.
         """
+        try:
+            available = self._determine_available_memory_before_gms_publish()
+        except BaseException:
+            try:
+                abort_pending_gms_write()
+            except BaseException:
+                logger.exception("[GMS] Failed to release pending write")
+            raise
+        publish_pending_gms_write()
+        return available
+
+    def _determine_available_memory_before_gms_publish(self) -> int:
         if not is_scratch_kv_enabled():
             return super().determine_available_memory()
 
@@ -165,10 +197,16 @@ class GMSWorker(Worker):
         from vllm.config import CUDAGraphMode
         from vllm.platforms import current_platform
 
-        torch.cuda.reset_peak_memory_stats()
+        # A pending first writer's GMS MemPool and private rebound
+        # allocations are both visible in PyTorch's absolute peak. An RO
+        # import's GMS mappings are not, so only those imported bytes need
+        # adding below.
+        has_pending_write = has_pending_gms_write()
+
+        torch_device().reset_peak_memory_stats()
         self.model_runner.profile_run()
-        torch.cuda.synchronize()
-        torch_peak = torch.cuda.max_memory_allocated()
+        torch_device().synchronize()
+        torch_peak = torch_device().max_memory_allocated()
 
         cudagraph_memory_estimate = 0
         if (
@@ -183,14 +221,10 @@ class GMSWorker(Worker):
         )
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
-        # GMS weights mapped via cuMemMap are invisible to PyTorch's memory
-        # stats on RO engines. Add them explicitly. On RW engines, torch_peak
-        # already includes weights so skip to avoid double-counting.
-        weights_memory = int(getattr(self.model_runner, "model_memory_usage", 0))
-        if torch_peak < weights_memory:
-            non_kv_cache_memory = torch_peak + weights_memory
-        else:
-            non_kv_cache_memory = torch_peak
+        invisible_weights_memory = (
+            0 if has_pending_write else get_imported_weights_bytes()
+        )
+        non_kv_cache_memory = torch_peak + invisible_weights_memory
 
         projected_available = (
             self.requested_memory
@@ -199,23 +233,19 @@ class GMSWorker(Worker):
         )
         self.available_kv_cache_memory_bytes = int(projected_available)
 
-        msg = (
+        logger.info(
             "[GMS] projected available memory "
             "%.2f GiB (requested=%.2f GiB, non_kv=%.2f GiB, "
-            "torch_peak=%.2f GiB, weights=%.2f GiB, "
-            "cudagraph_estimate=%.2f GiB, cudagraph_applied=%.2f GiB)"
-            % (
-                projected_available / (1 << 30),
-                self.requested_memory / (1 << 30),
-                non_kv_cache_memory / (1 << 30),
-                torch_peak / (1 << 30),
-                weights_memory / (1 << 30),
-                cudagraph_memory_estimate / (1 << 30),
-                cudagraph_memory_estimate_applied / (1 << 30),
-            )
+            "torch_peak=%.2f GiB, invisible_weights=%.2f GiB, "
+            "cudagraph_estimate=%.2f GiB, cudagraph_applied=%.2f GiB)",
+            projected_available / (1 << 30),
+            self.requested_memory / (1 << 30),
+            non_kv_cache_memory / (1 << 30),
+            torch_peak / (1 << 30),
+            invisible_weights_memory / (1 << 30),
+            cudagraph_memory_estimate / (1 << 30),
+            cudagraph_memory_estimate_applied / (1 << 30),
         )
-        logger.info(msg)
-        print(msg, flush=True)
 
         return int(projected_available)
 
@@ -228,6 +258,10 @@ class GMSWorker(Worker):
         enable_sleep_mode the manager connects RW at init and allocates real
         backing immediately.
         """
+        # EngineCore can skip determine_available_memory for models with no
+        # KV cache. Publish before connector setup, allocation, or warm-up.
+        publish_pending_gms_write()
+
         from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
@@ -270,11 +304,11 @@ class GMSWorker(Worker):
 
             imported_weights_bytes = get_imported_weights_bytes()
             memory_usage_offset_bytes = get_model_memory_usage_offset_bytes()
-            # The offset is not committed/restored GMS weight state. It is the
-            # load-time allocation footprint pruned before commit. vLLM uses
-            # model_memory_usage for KV-cache sizing, not only as a literal
-            # live-weight counter; reporting committed GMS bytes only can
-            # overestimate safe KV capacity and allocate an oversized cache.
+            # The offset is not committed/restored GMS weight state. It is
+            # load-time memory excluded from committed GMS bytes (pruned
+            # load-time allocations plus private rebound clones). vLLM uses
+            # model_memory_usage for KV sizing, so omitting it can allocate
+            # an oversized cache.
             model_memory_usage_bytes = int(
                 imported_weights_bytes + memory_usage_offset_bytes
             )
@@ -303,7 +337,7 @@ class GMSWorker(Worker):
         reservations. Wake reconnects and rebuilds via the standard
         prepare_scratch_for_reallocation → reallocate → remap pipeline.
         """
-        free_bytes_before = torch.cuda.mem_get_info()[0]
+        free_bytes_before = torch_device().mem_get_info()[0]
 
         # Pause MX serving before GMS unmap
         mx_ctx = get_mx_load_context()
@@ -318,9 +352,9 @@ class GMSWorker(Worker):
             manager.abort()
 
         gc.collect()
-        torch.cuda.empty_cache()
+        torch_device().empty_cache()
 
-        free_bytes_after, total = torch.cuda.mem_get_info()
+        free_bytes_after, total = torch_device().mem_get_info()
         freed_bytes = free_bytes_after - free_bytes_before
         used_bytes = total - free_bytes_after
         logger.info(

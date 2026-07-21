@@ -476,6 +476,15 @@ impl DistributedRuntime {
         subject: String,
         payload: bytes::Bytes,
     ) -> anyhow::Result<()> {
+        self.kv_router_nats_publish_subject(subject.into(), payload)
+            .await
+    }
+
+    pub(crate) async fn kv_router_nats_publish_subject(
+        &self,
+        subject: async_nats::Subject,
+        payload: bytes::Bytes,
+    ) -> anyhow::Result<()> {
         let Some(nats_client) = self.nats_client.as_ref() else {
             // NATS not available - this is expected in approximate mode (--no-kv-events)
             tracing::trace!("Skipping NATS publish (NATS not configured): {subject}");
@@ -688,7 +697,7 @@ impl DistributedConfig {
         let event_transport_kind = discovery_backend.resolve_event_transport_kind();
 
         // NATS is used for more than just NATS request-plane RPC:
-        // - KV router events (JetStream or NATS core + local indexer)
+        // - KV router events (NATS core event plane)
         // - inter-router replica sync (NATS core)
         //
         // Enable the NATS client when any of these hold:

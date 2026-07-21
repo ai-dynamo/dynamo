@@ -7,6 +7,8 @@ use serde::ser::{SerializeMap, Serializer};
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use uuid::Uuid;
 
+use crate::common::protocols::OutputSignal;
+
 #[derive(Debug, Clone)]
 pub struct TraceSimulationReport {
     pub request_counts: TraceRequestCounts,
@@ -56,8 +58,9 @@ pub struct TraceThroughputStats {
     pub prefill_worker_seconds: f64,
     pub decode_worker_seconds: f64,
     /// GPUs per worker per role, derived from the mocker engine parallelism
-    /// (`MockEngineArgs::aic_gpus_per_worker` = aic_tp × aic_attention_dp); the
-    /// runtime sets it on the collector. 0 when not set (e.g. the online path).
+    /// (`MockEngineArgs::aic_gpus_per_worker` = tensor parallelism × materialized
+    /// DP topology); the runtime sets it on the collector. 0 when not set
+    /// (e.g. the online path).
     pub prefill_gpus_per_worker: usize,
     pub decode_gpus_per_worker: usize,
     /// GPU-hours = Σ_role `worker_seconds × gpus_per_worker / 3600` — the
@@ -325,7 +328,7 @@ struct TraceRequestStats {
     first_admit_ms: Option<f64>,
     token_times_ms: Vec<f64>,
     input_length: usize,
-    output_length: usize,
+    requested_output_length: usize,
     reused_input_tokens: usize,
     first_admission_reused_input_tokens: usize,
     /// Index of the prefill worker that handled this request, if any.
@@ -397,6 +400,9 @@ pub struct PerRequestRecord {
     /// AIPerf's `inter_token_latency` field — one scalar per request.
     pub itl_ms: Option<f64>,
     pub input_length: usize,
+    /// Number of output tokens requested by the workload trace.
+    pub requested_output_length: usize,
+    /// Number of output tokens actually emitted by the mock engine.
     pub output_length: usize,
     pub reused_input_tokens: usize,
     pub prefill_worker_idx: Option<usize>,
@@ -421,6 +427,7 @@ pub(crate) struct TraceRequestStatsSnapshot {
     pub first_token_ms: Option<f64>,
     pub last_token_ms: Option<f64>,
     pub input_length: usize,
+    pub requested_output_length: usize,
     pub output_length: usize,
     pub reused_input_tokens: usize,
     pub first_admission_reused_input_tokens: usize,
@@ -512,6 +519,10 @@ impl TraceRequestStats {
         self.token_times_ms.last().copied()
     }
 
+    fn actual_output_length(&self) -> usize {
+        self.token_times_ms.len()
+    }
+
     fn mean_tpot_ms(&self) -> Option<f64> {
         let num_gaps = self.token_times_ms.len().saturating_sub(1);
         if num_gaps == 0 {
@@ -580,16 +591,16 @@ impl TraceCollector {
         uuid: Uuid,
         arrival_time_ms: f64,
         input_length: usize,
-        output_length: usize,
+        requested_output_length: usize,
     ) {
         self.requests.insert(
             uuid,
             TraceRequestStats {
                 arrival_time_ms,
                 first_admit_ms: None,
-                token_times_ms: Vec::with_capacity(output_length),
+                token_times_ms: Vec::with_capacity(requested_output_length),
                 input_length,
-                output_length,
+                requested_output_length,
                 reused_input_tokens: 0,
                 prefill_worker_idx: None,
                 decode_worker_idx: None,
@@ -748,6 +759,35 @@ impl TraceCollector {
         }
     }
 
+    /// Move the tokens emitted by one scheduler pass to a shared completion
+    /// boundary. Scheduler cores record their rank-local end time while the
+    /// pass is formed; attention-DP replay then aligns every rank in the group
+    /// to the slowest rank before the pass becomes externally visible.
+    pub(crate) fn align_pass_token_times(
+        &mut self,
+        output_signals: &[OutputSignal],
+        completion_time_ms: f64,
+    ) {
+        let mut emitted_by_request = FxHashMap::default();
+        for signal in output_signals {
+            if signal.token_id.is_some() {
+                *emitted_by_request.entry(signal.uuid).or_insert(0usize) += 1;
+            }
+        }
+
+        for (uuid, emitted) in emitted_by_request {
+            let Some(stats) = self.requests.get_mut(&uuid) else {
+                continue;
+            };
+            let start = stats
+                .token_times_ms
+                .len()
+                .checked_sub(emitted)
+                .expect("scheduler emitted more output signals than collector tokens");
+            stats.token_times_ms[start..].fill(completion_time_ms);
+        }
+    }
+
     /// Return (ttft_ms, mean_itl_ms) for a completed request, if available.
     pub(crate) fn request_latencies(&self, uuid: Uuid) -> Option<(f64, f64)> {
         let stats = self.requests.get(&uuid)?;
@@ -755,6 +795,12 @@ impl TraceCollector {
         let ttft_ms = (first_token_ms - stats.arrival_time_ms).max(0.0);
         let mean_itl_ms = stats.mean_tpot_ms().unwrap_or(0.0);
         Some((ttft_ms, mean_itl_ms))
+    }
+
+    pub(crate) fn actual_output_length(&self, uuid: Uuid) -> Option<usize> {
+        self.requests
+            .get(&uuid)
+            .map(TraceRequestStats::actual_output_length)
     }
 
     pub(crate) fn finish(self) -> TraceSimulationReport {
@@ -805,7 +851,8 @@ impl TraceCollector {
 
             completed_requests += 1;
             total_input_tokens += stats.input_length;
-            total_output_tokens += stats.output_length;
+            let output_length = stats.actual_output_length();
+            total_output_tokens += output_length;
             total_reused_tokens += stats.reused_input_tokens;
             total_first_admission_reused_tokens += stats.first_admission_reused_input_tokens;
             duration_ms = duration_ms.max(last_token_ms);
@@ -816,9 +863,9 @@ impl TraceCollector {
             e2e_latencies.push(e2e_ms);
 
             // Goodput classification (aiperf avg-ITL; see SlaThresholds::is_good).
-            if sla.is_set() && sla.is_good(ttft_ms, e2e_ms, stats.output_length) {
+            if sla.is_set() && sla.is_good(ttft_ms, e2e_ms, output_length) {
                 goodput_requests += 1;
-                goodput_output_tokens += stats.output_length;
+                goodput_output_tokens += output_length;
             }
 
             if let Some(ttst_ms) = stats.ttst_ms() {
@@ -937,7 +984,8 @@ impl TraceCollector {
                 e2e_latency_ms: last_token_ms.map(|time| (time - stats.arrival_time_ms).max(0.0)),
                 itl_ms: stats.mean_tpot_ms(),
                 input_length: stats.input_length,
-                output_length: stats.output_length,
+                requested_output_length: stats.requested_output_length,
+                output_length: stats.actual_output_length(),
                 reused_input_tokens: detail
                     .prefill_reused_input_tokens
                     .unwrap_or(stats.reused_input_tokens),
@@ -976,7 +1024,8 @@ impl TraceCollector {
                 first_token_ms: stats.first_token_ms(),
                 last_token_ms: stats.last_token_ms(),
                 input_length: stats.input_length,
-                output_length: stats.output_length,
+                requested_output_length: stats.requested_output_length,
+                output_length: stats.actual_output_length(),
                 reused_input_tokens: stats.reused_input_tokens,
                 first_admission_reused_input_tokens: stats.first_admission_reused_input_tokens,
             })
@@ -992,7 +1041,8 @@ impl TraceCollector {
                 first_token_ms: stats.first_token_ms(),
                 last_token_ms: stats.last_token_ms(),
                 input_length: stats.input_length,
-                output_length: stats.output_length,
+                requested_output_length: stats.requested_output_length,
+                output_length: stats.actual_output_length(),
                 reused_input_tokens: stats.reused_input_tokens,
                 first_admission_reused_input_tokens: stats.first_admission_reused_input_tokens,
             })

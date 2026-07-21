@@ -23,12 +23,85 @@ use crate::model_type::{ModelInput, ModelType};
 use crate::protocols::tensor::TensorModelConfig;
 use anyhow::{Context, Result};
 use derive_builder::Builder;
+use dynamo_kv_router::identity::{ExplicitIdentityMap, IndexerIdentitySpec};
 use dynamo_runtime::{slug::Slug, storage::kv};
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer as HfTokenizer;
 
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
 use crate::protocols::TokenIdType;
+
+const DEFAULT_TOKENIZER_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+fn append_indexer_identity_checksum(bytes: &mut Vec<u8>, spec: &IndexerIdentitySpec) {
+    bytes.extend_from_slice(b"dynamo/model-card/indexer-identity/v1");
+    append_identity_dimension(bytes, spec.semantics());
+    append_identity_dimension(bytes, spec.routing_scope());
+}
+
+fn append_identity_dimension(bytes: &mut Vec<u8>, dimension: Option<&ExplicitIdentityMap>) {
+    let Some(dimension) = dimension else {
+        bytes.push(0);
+        return;
+    };
+    bytes.push(1);
+    bytes.extend_from_slice(&(dimension.entries().len() as u32).to_le_bytes());
+    for (key, value) in dimension.entries() {
+        append_framed_identity_value(bytes, key.as_bytes());
+        append_framed_identity_value(bytes, value.as_bytes());
+    }
+}
+
+fn append_framed_identity_value(bytes: &mut Vec<u8>, value: &[u8]) {
+    let len = u32::try_from(value.len()).expect("validated identity values fit u32");
+    bytes.extend_from_slice(&len.to_le_bytes());
+    bytes.extend_from_slice(value);
+}
+
+fn tokenizer_cache_enabled(value: Option<&str>) -> bool {
+    !matches!(value, Some("0"))
+}
+
+fn tokenizer_cache_bytes(value: Option<&str>) -> usize {
+    value
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_TOKENIZER_CACHE_BYTES)
+}
+
+fn tokenizer_cache_token_observer(model: &str) -> crate::tokenizers::CacheTokenUsageFn {
+    let cached_tokens = dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_CACHED_TOKENS_TOTAL
+        .with_label_values(&[model]);
+    let uncached_tokens =
+        dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL
+            .with_label_values(&[model]);
+
+    Arc::new(move |usage| {
+        cached_tokens.inc_by(usage.cached_tokens as u64);
+        uncached_tokens.inc_by(usage.uncached_tokens as u64);
+    })
+}
+
+fn instrumented_tokenizer_cache(
+    raw: Arc<dyn crate::tokenizers::traits::Tokenizer>,
+    special_tokens: Vec<String>,
+    cache_bytes: usize,
+    cache_extend: bool,
+    model: &str,
+) -> Arc<dyn crate::tokenizers::traits::Tokenizer> {
+    Arc::new(
+        crate::tokenizers::CachedTokenizer::new(raw, special_tokens, cache_bytes)
+            .with_extend(cache_extend)
+            .with_observer(
+                Arc::new(|| {
+                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_HITS_TOTAL.inc();
+                }),
+                Arc::new(|| {
+                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_MISSES_TOTAL.inc();
+                }),
+            )
+            .with_token_observer(tokenizer_cache_token_observer(model)),
+    )
+}
 
 /// Identify model deployment cards in the key-value store
 pub const ROOT_PATH: &str = "v1/mdc";
@@ -48,6 +121,105 @@ fn extract_hf_special_tokens(hf: &HfTokenizer) -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+/// serde `deserialize_with` that maps an explicitly-present value -- *including
+/// an explicit JSON `null`* -- to `Some`. Paired with `#[serde(default)]` (which
+/// supplies `None` only when the key is absent), this distinguishes "field
+/// missing" from "field present but null/invalid". A plain `Option<Value>` would
+/// collapse an explicit `null` into `None`, letting a malformed present
+/// `max_position_embeddings` silently fall through to the next source instead of
+/// surfacing the documented deserialization error.
+fn deserialize_present_json_value<'de, D>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
+}
+
+/// Minimal projection of `config.json`, holding only the fields consulted when
+/// deriving the architectural context length. Every other entry is skipped by
+/// serde. This matters because some HF configs (e.g. Nemotron-H) serialize
+/// fields such as `time_step_limit` with non-finite literals (`Infinity`,
+/// `NaN`) that are valid JSON5 but not strict JSON; deserializing the whole
+/// document into `serde_json::Value` would reject them, whereas projecting into
+/// this struct via the JSON5 parser never materializes those unread fields.
+///
+/// The two consulted fields are captured as raw `serde_json::Value` (rather than
+/// `u32`) so the original per-field error messages are preserved when a value is
+/// present but not a valid integer. `deserialize_present_json_value` keeps an
+/// explicit `null` distinguishable from an absent key (see its docs).
+#[derive(Deserialize)]
+struct ArchMaxContextConfig {
+    #[serde(default, deserialize_with = "deserialize_present_json_value")]
+    max_position_embeddings: Option<serde_json::Value>,
+    text_config: Option<ArchMaxContextTextConfig>,
+}
+
+#[derive(Deserialize)]
+struct ArchMaxContextTextConfig {
+    #[serde(default, deserialize_with = "deserialize_present_json_value")]
+    max_position_embeddings: Option<serde_json::Value>,
+}
+
+/// Resolve the static architectural context limit from local HF metadata.
+///
+/// `config.json` is authoritative when it declares `max_position_embeddings`;
+/// multimodal configs may instead nest it under `text_config`; tokenizer
+/// `model_max_length` is only a last resort. Missing fields fall through to the
+/// next source, but malformed present fields return an error so bad model
+/// metadata cannot silently resize request validation and planner limits.
+///
+/// This was added for the MiniMax-M3-VL : its multimodal
+/// Hugging Face config keeps the language model context under
+/// `config.json.text_config.max_position_embeddings`
+fn architectural_max_context_length_from_repo(local_path: &Path) -> anyhow::Result<Option<u32>> {
+    let tokenizer_context_length = || {
+        crate::file_json_field(
+            &local_path.join("tokenizer_config.json"),
+            "model_max_length",
+        )
+        .ok()
+    };
+
+    let config_path = local_path.join("config.json");
+    let config_json = match std::fs::read_to_string(&config_path) {
+        Ok(config_json) => Some(config_json),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => {
+            return Err(err).with_context(|| format!("Failed to read {}", config_path.display()));
+        }
+    };
+    let Some(config_json) = config_json else {
+        return Ok(tokenizer_context_length().filter(|context_length| *context_length > 0));
+    };
+    // Parse with the JSON5 parser (a lenient superset of JSON) into a minimal
+    // projection, mirroring `HFConfig::from_json_file`. This tolerates non-finite
+    // literals (`Infinity`, `NaN`) that HF configs may emit in fields we don't
+    // read, which strict `serde_json` would reject.
+    let config: ArchMaxContextConfig = json_five::from_str(&config_json)
+        .with_context(|| format!("Failed to parse JSON from file: {}", config_path.display()))?;
+
+    let context_length = match config.max_position_embeddings {
+        Some(value) => Some(
+            serde_json::from_value(value)
+                .context("Failed to deserialize max_position_embeddings")?,
+        ),
+        None => match config
+            .text_config
+            .and_then(|text_config| text_config.max_position_embeddings)
+        {
+            Some(value) => Some(
+                serde_json::from_value(value)
+                    .context("Failed to deserialize text_config.max_position_embeddings")?,
+            ),
+            None => tokenizer_context_length(),
+        },
+    };
+
+    Ok(context_length.filter(|context_length| *context_length > 0))
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -728,6 +900,11 @@ pub struct ModelDeploymentCard {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lora: Option<LoraInfo>,
 
+    /// Additional names this model responds to (aliases).
+    /// Requests using any of these names will be routed to this worker.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+
     /// User-defined metadata for custom worker behavior
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_data: Option<serde_json::Value>,
@@ -753,6 +930,14 @@ pub struct ModelDeploymentCard {
     /// Falls back to the frontend-level config when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router_config: Option<RouterConfig>,
+
+    /// Optional authoritative KV-indexer compatibility and isolation material.
+    ///
+    /// A present dimension replaces its component-derived default. Entry labels are deliberately
+    /// uninterpreted so engine-specific compatibility facts do not expand this schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub indexer_identity: Option<IndexerIdentitySpec>,
 
     /// Sibling files (e.g. `preprocessor_config.json`) the worker
     /// advertises alongside the typed slots.
@@ -946,6 +1131,29 @@ impl ModelDeploymentCard {
                     bytes_to_hash.extend(blake3::hash(&bytes).as_bytes());
                 }
 
+                if let Some(identity) = self.indexer_identity.as_ref() {
+                    append_indexer_identity_checksum(&mut bytes_to_hash, identity);
+                }
+
+                // Aliases participate in the checksum. Every worker in a
+                // deployment carries the same static --served-model-name list,
+                // so their checksums still match and they share one WorkerSet;
+                // changing the alias list rolls a new WorkerSet (consistent per
+                // set) rather than mutating a live one in place. `aliases` holds
+                // only the alternate names (the primary is `display_name`, hashed
+                // above), so order within the list still matters — hash in order.
+                // Skipped entirely when empty so a card without aliases keeps the
+                // same checksum as before this field existed (no spurious
+                // WorkerSet split on upgrade); this is the last hashed field, so
+                // omission is unambiguous.
+                if !self.aliases.is_empty() {
+                    bytes_to_hash.extend((self.aliases.len() as u32).to_be_bytes());
+                    for alias in &self.aliases {
+                        bytes_to_hash.extend((alias.len() as u32).to_be_bytes());
+                        bytes_to_hash.extend(alias.as_bytes());
+                    }
+                }
+
                 // TODO: Do we want any of user_data or runtime_config?
 
                 blake3::hash(&bytes_to_hash).to_string()
@@ -962,39 +1170,27 @@ impl ModelDeploymentCard {
     /// Load the tokenizer as a generic, backend-agnostic `Tokenizer` trait object.
     /// This supports both HuggingFace `tokenizer.json` and tiktoken `.model`/`.tiktoken` files.
     ///
-    /// Env-var controls:
-    /// - `DYN_TOKENIZER=fastokens` — use `fastokens` as the encoding backend
-    /// - `DYN_TOKENIZER_CACHE=1` — wrap the tokenizer in an L1 prefix cache that records
-    ///   tokenizations at special-token boundaries (massive speed-up for shared chat
-    ///   prefixes; default off, zero cost when unset)
-    /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — L1 cache byte budget (default 50 MB)
+    /// Tokenizer backend controls:
+    /// - `runtime_config.tokenizer_backend=fastokens` — use `fastokens` as the encoding backend
+    /// - `DYN_TOKENIZER=fastokens` — fallback backend for callers without explicit runtime config
+    /// - `DYN_TOKENIZER_CACHE=0` — disable the L1 prefix cache that records tokenizations
+    ///   at special-token boundaries (enabled by default; any other value keeps it enabled)
+    /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — L1 cache byte budget (default 64 MiB)
     /// - `DYN_TOKENIZER_CACHE_EXTEND=0` — disable partial-hit extension. By default
     ///   (when the cache is enabled) a partial hit also caches the new suffix so each
     ///   turn of a growing multi-turn conversation hits deeper than the last, keeping
     ///   per-turn tokenization cost flat instead of growing with history. Set to `0` to
     ///   fall back to the original hit-without-insert behavior.
     pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
-        let use_fast = match std::env::var("DYN_TOKENIZER") {
-            Ok(v) if v == "fastokens" => true,
-            Ok(v) if v == "default" || v.is_empty() => false,
-            Ok(v) => {
-                tracing::warn!(
-                    value = %v,
-                    "Unrecognized DYN_TOKENIZER value, expected 'fastokens' or 'default'; falling back to default"
-                );
-                false
-            }
-            Err(_) => false,
-        };
+        let use_fast = self
+            .runtime_config
+            .effective_tokenizer_backend()
+            .is_fastokens();
 
-        let cache_enabled = matches!(
-            std::env::var("DYN_TOKENIZER_CACHE").ok().as_deref(),
-            Some("1")
-        );
-        let cache_bytes = std::env::var("DYN_TOKENIZER_CACHE_BYTES")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(50 * 1024 * 1024);
+        let cache_enabled =
+            tokenizer_cache_enabled(std::env::var("DYN_TOKENIZER_CACHE").ok().as_deref());
+        let cache_bytes =
+            tokenizer_cache_bytes(std::env::var("DYN_TOKENIZER_CACHE_BYTES").ok().as_deref());
         // Partial-hit extension is on by default; disable with DYN_TOKENIZER_CACHE_EXTEND=0.
         let cache_extend = !matches!(
             std::env::var("DYN_TOKENIZER_CACHE_EXTEND").ok().as_deref(),
@@ -1031,6 +1227,24 @@ impl ModelDeploymentCard {
                 if let Some(model_dir) = p.parent() {
                     crate::tokenizers::hf::merge_special_tokens_from_config(&mut hf, model_dir);
                 }
+
+                // Disable any truncation baked into `tokenizer.json`: the HF
+                // `tokenizers` crate honors it on `encode()`, silently clipping every
+                // prompt (e.g. `stepfun-ai/Step-3.7-Flash-*` caps at 2048), unlike
+                // Python `transformers`, which resets it on load. Match that: never
+                // truncate implicitly; over-length prompts are rejected elsewhere.
+                if hf.get_truncation().is_some() {
+                    tracing::warn!(
+                        "tokenizer.json declares a truncation config; disabling it so \
+                         prompts are not silently clipped"
+                    );
+                    // Hard-fail rather than warn: if we can't clear it, the prompt
+                    // would still be silently clipped, defeating the purpose.
+                    hf.with_truncation(None)
+                        .map_err(anyhow::Error::msg)
+                        .context("failed to disable tokenizer.json truncation")?;
+                }
+
                 // Hold onto specials before any move of `hf`.
                 let specials: Vec<String> = if cache_enabled {
                     extract_hf_special_tokens(&hf)
@@ -1076,19 +1290,12 @@ impl ModelDeploymentCard {
                         specials = specials.len(),
                         "wrapping tokenizer in L1 prefix cache",
                     );
-                    Arc::new(
-                        crate::tokenizers::CachedTokenizer::new(raw, specials, cache_bytes)
-                            .with_extend(cache_extend)
-                            .with_observer(
-                                Arc::new(|| {
-                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_HITS_TOTAL
-                                        .inc();
-                                }),
-                                Arc::new(|| {
-                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_MISSES_TOTAL
-                                        .inc();
-                                }),
-                            ),
+                    instrumented_tokenizer_cache(
+                        raw,
+                        specials,
+                        cache_bytes,
+                        cache_extend,
+                        self.name(),
                     )
                 } else {
                     raw
@@ -1106,27 +1313,21 @@ impl ModelDeploymentCard {
                         format!("Failed to load tiktoken tokenizer from {}", p.display())
                     })?;
 
+                let specials = tokenizer.special_tokens().to_vec();
                 let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = Arc::new(tokenizer);
                 if cache_enabled {
-                    // Empty specials -> L1 always misses; wrapper is a thin passthrough.
-                    // Special-token extraction for tiktoken is out of scope for v1.
                     tracing::info!(
                         cache_bytes,
-                        "wrapping tiktoken tokenizer in L1 cache (no special tokens registered; L1 will not hit until tiktoken special-token extraction is added)",
+                        cache_extend,
+                        boundaries = specials.len(),
+                        "wrapping tiktoken tokenizer in L1 prefix cache",
                     );
-                    Arc::new(
-                        crate::tokenizers::CachedTokenizer::new(raw, Vec::new(), cache_bytes)
-                            .with_extend(cache_extend)
-                            .with_observer(
-                                Arc::new(|| {
-                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_HITS_TOTAL
-                                        .inc();
-                                }),
-                                Arc::new(|| {
-                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_MISSES_TOTAL
-                                        .inc();
-                                }),
-                            ),
+                    instrumented_tokenizer_cache(
+                        raw,
+                        specials,
+                        cache_bytes,
+                        cache_extend,
+                        self.name(),
                     )
                 } else {
                     raw
@@ -1160,6 +1361,11 @@ impl ModelDeploymentCard {
 
     pub fn source_path(&self) -> &str {
         self.source_path.as_ref().unwrap_or(&self.display_name)
+    }
+
+    /// Set additional names (aliases) this model responds to.
+    pub fn set_aliases(&mut self, aliases: Vec<String>) {
+        self.aliases = aliases;
     }
 
     /// Build an in-memory ModelDeploymentCard from a folder containing config.json,
@@ -1438,18 +1644,12 @@ impl ModelDeploymentCard {
     ) -> anyhow::Result<Self> {
         let local_path = local_path.as_ref();
 
-        // This is usually the right choice
+        // Prefer the model config's architectural context length. Some
+        // multimodal HF configs, including MiniMax-M3-VL, store the language
+        // model config under `text_config`; tokenizer `model_max_length` can
+        // be a much larger sentinel/default and must be a last resort.
         let architectural_max_context_length =
-            crate::file_json_field(&local_path.join("config.json"), "max_position_embeddings")
-                // But sometimes this is
-                .or_else(|_| {
-                    crate::file_json_field(
-                        &local_path.join("tokenizer_config.json"),
-                        "model_max_length",
-                    )
-                })
-                .ok()
-                .filter(|context_length| *context_length > 0);
+            architectural_max_context_length_from_repo(local_path)?;
 
         let is_mistral_model = is_exclusively_mistral_model(local_path);
 
@@ -1512,12 +1712,14 @@ impl ModelDeploymentCard {
             worker_type: Default::default(), // set later
             needs: Default::default(),       // set later
             lora: None,
+            aliases: Vec::new(),
             user_data: None,
             runtime_config: ModelRuntimeConfig::default(),
             tensor_model_config: None,
             media_decoder: None,
             media_fetcher: None,
             router_config: None,
+            indexer_identity: None,
             extra_files: Vec::new(),
             checksum: OnceLock::new(),
         })
@@ -2034,6 +2236,71 @@ mod tests {
     use super::{HFConfig, ModelDeploymentCard};
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn tokenizer_cache_token_observer_records_per_model_totals() {
+        let model_a = "token-observer-test-model-a";
+        let model_b = "token-observer-test-model-b";
+        let cached_a = dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_CACHED_TOKENS_TOTAL
+            .with_label_values(&[model_a]);
+        let uncached_a =
+            dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL
+                .with_label_values(&[model_a]);
+        let cached_b = dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_CACHED_TOKENS_TOTAL
+            .with_label_values(&[model_b]);
+        let uncached_b =
+            dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL
+                .with_label_values(&[model_b]);
+
+        let before_a = (cached_a.get(), uncached_a.get());
+        let before_b = (cached_b.get(), uncached_b.get());
+
+        super::tokenizer_cache_token_observer(model_a)(crate::tokenizers::CacheTokenUsage {
+            cached_tokens: 7,
+            uncached_tokens: 5,
+        });
+
+        assert_eq!(
+            (cached_a.get(), uncached_a.get()),
+            (before_a.0 + 7, before_a.1 + 5)
+        );
+        assert_eq!((cached_b.get(), uncached_b.get()), before_b);
+
+        super::tokenizer_cache_token_observer(model_b)(crate::tokenizers::CacheTokenUsage {
+            cached_tokens: 3,
+            uncached_tokens: 11,
+        });
+
+        assert_eq!(
+            (cached_a.get(), uncached_a.get()),
+            (before_a.0 + 7, before_a.1 + 5)
+        );
+        assert_eq!(
+            (cached_b.get(), uncached_b.get()),
+            (before_b.0 + 3, before_b.1 + 11)
+        );
+    }
+
+    #[test]
+    fn tokenizer_cache_is_enabled_by_default_and_disabled_only_by_zero() {
+        assert!(super::tokenizer_cache_enabled(None));
+        assert!(super::tokenizer_cache_enabled(Some("1")));
+        assert!(!super::tokenizer_cache_enabled(Some("0")));
+        assert!(super::tokenizer_cache_enabled(Some("true")));
+    }
+
+    #[test]
+    fn tokenizer_cache_bytes_defaults_to_64_mib_and_accepts_valid_overrides() {
+        assert_eq!(
+            super::tokenizer_cache_bytes(None),
+            super::DEFAULT_TOKENIZER_CACHE_BYTES
+        );
+        assert_eq!(super::tokenizer_cache_bytes(Some("1024")), 1024);
+        assert_eq!(
+            super::tokenizer_cache_bytes(Some("invalid")),
+            super::DEFAULT_TOKENIZER_CACHE_BYTES
+        );
+    }
 
     #[test]
     pub fn test_config_json_llama3() -> anyhow::Result<()> {
@@ -2563,6 +2830,131 @@ mod ownership_tests {
     use super::*;
 
     #[test]
+    fn architectural_context_prefers_config_then_text_config_then_tokenizer() -> anyhow::Result<()>
+    {
+        let dir = tempfile::tempdir()?;
+
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"max_position_embeddings": 4096}"#,
+        )?;
+        std::fs::write(
+            dir.path().join("tokenizer_config.json"),
+            r#"{"model_max_length": 131072}"#,
+        )?;
+        assert_eq!(
+            architectural_max_context_length_from_repo(dir.path())?,
+            Some(4096)
+        );
+
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"text_config": {"max_position_embeddings": 8192}}"#,
+        )?;
+        assert_eq!(
+            architectural_max_context_length_from_repo(dir.path())?,
+            Some(8192)
+        );
+
+        std::fs::write(dir.path().join("config.json"), r#"{"model_type": "mock"}"#)?;
+        assert_eq!(
+            architectural_max_context_length_from_repo(dir.path())?,
+            Some(131072)
+        );
+
+        std::fs::write(dir.path().join("config.json"), r#"{"text_config": {}}"#)?;
+        assert_eq!(
+            architectural_max_context_length_from_repo(dir.path())?,
+            Some(131072)
+        );
+
+        std::fs::remove_file(dir.path().join("config.json"))?;
+        assert_eq!(
+            architectural_max_context_length_from_repo(dir.path())?,
+            Some(131072)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn architectural_context_errors_on_malformed_present_fields() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(
+            dir.path().join("tokenizer_config.json"),
+            r#"{"model_max_length": 131072}"#,
+        )?;
+
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"max_position_embeddings": "not-a-number"}"#,
+        )?;
+        let err = architectural_max_context_length_from_repo(dir.path()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Failed to deserialize max_position_embeddings"),
+            "{err:?}"
+        );
+
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"text_config": {"max_position_embeddings": "not-a-number"}}"#,
+        )?;
+        let err = architectural_max_context_length_from_repo(dir.path()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Failed to deserialize text_config.max_position_embeddings"),
+            "{err:?}"
+        );
+
+        // An explicit null is a present-but-malformed value: it must error, not
+        // silently fall through to text_config/tokenizer (regression guard for
+        // the Option<Value> projection collapsing null into None).
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"max_position_embeddings": null}"#,
+        )?;
+        let err = architectural_max_context_length_from_repo(dir.path()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Failed to deserialize max_position_embeddings"),
+            "{err:?}"
+        );
+
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"text_config": {"max_position_embeddings": null}}"#,
+        )?;
+        let err = architectural_max_context_length_from_repo(dir.path()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Failed to deserialize text_config.max_position_embeddings"),
+            "{err:?}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn architectural_context_tolerates_non_finite_literals() -> anyhow::Result<()> {
+        // Some HF configs (e.g. Nemotron-H) serialize fields such as
+        // `time_step_limit` with the bare literal `Infinity`, which is valid
+        // JSON5 but not strict JSON. Deriving max_position_embeddings must not
+        // choke on such literals in fields we never read.
+        let dir = tempfile::tempdir()?;
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"max_position_embeddings": 262144, "time_step_limit": [0.0, Infinity]}"#,
+        )?;
+        assert_eq!(
+            architectural_max_context_length_from_repo(dir.path())?,
+            Some(262144)
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn effective_context_prefers_runtime_then_architecture_then_unknown() {
         let mut card = ModelDeploymentCard::with_name_only("model");
         assert_eq!(card.effective_context_length(), 0);
@@ -2607,6 +2999,7 @@ mod worker_type_tests {
 
     use super::*;
     use crate::worker_type::WorkerType;
+    use std::collections::BTreeMap;
 
     #[test]
     fn default_card_has_no_worker_type_and_no_needs() {
@@ -2746,5 +3139,37 @@ mod worker_type_tests {
         let back: ModelDeploymentCard = serde_json::from_str(&stripped).unwrap();
         assert_eq!(back.worker_type, None);
         assert!(back.needs.is_empty());
+    }
+
+    #[test]
+    fn indexer_identity_changes_mdcsum_and_missing_field_is_backward_compatible() {
+        fn spec(value: &str) -> IndexerIdentitySpec {
+            IndexerIdentitySpec::new(
+                Some(
+                    ExplicitIdentityMap::new(BTreeMap::from([(
+                        "weights".to_string(),
+                        value.to_string(),
+                    )]))
+                    .unwrap(),
+                ),
+                None,
+            )
+        }
+
+        let baseline = ModelDeploymentCard::with_name_only("model");
+        let mut explicit = ModelDeploymentCard::with_name_only("model");
+        explicit.indexer_identity = Some(spec("revision-a"));
+        assert_ne!(baseline.mdcsum(), explicit.mdcsum());
+
+        let mut serialized = serde_json::to_value(&explicit).unwrap();
+        assert!(
+            serialized
+                .as_object_mut()
+                .unwrap()
+                .remove("indexer_identity")
+                .is_some()
+        );
+        let restored: ModelDeploymentCard = serde_json::from_value(serialized).unwrap();
+        assert!(restored.indexer_identity.is_none());
     }
 }

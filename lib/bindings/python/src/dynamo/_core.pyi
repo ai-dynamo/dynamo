@@ -246,6 +246,41 @@ class PyAsyncRequestStream:
     def __aiter__(self) -> "PyAsyncRequestStream": ...
     async def __anext__(self) -> JsonLike: ...
 
+class TransportType:
+    """
+    A read-only view of an instance's transport, wrapping the runtime
+    ``TransportType``. ``kind`` is the transport variant ("tcp" / "nats_tcp")
+    and ``address`` is its (transport-specific) address. The address format is
+    not a stable parse target.
+    """
+
+    @property
+    def kind(self) -> str: ...
+    @property
+    def address(self) -> str: ...
+
+class Instance:
+    """
+    A read-only view of a single registered instance of an endpoint, wrapping a
+    snapshot of the runtime ``Instance``. ``str(instance)`` yields
+    ``"namespace/component/endpoint/instance_id"``.
+    """
+
+    @property
+    def instance_id(self) -> int: ...
+    @property
+    def namespace(self) -> str: ...
+    @property
+    def component(self) -> str: ...
+    @property
+    def endpoint(self) -> str: ...
+    @property
+    def transport(self) -> TransportType: ...
+    @property
+    def device_type(self) -> Optional[str]:
+        """Device type, e.g. "cpu" or "cuda", or None if unspecified."""
+        ...
+
 class Client:
     """
     A client capable of calling served instances of an endpoint
@@ -259,6 +294,20 @@ class Client:
 
         Returns:
             A list of currently available instance IDs
+        """
+        ...
+
+    def instances(self) -> List[Instance]:
+        """
+        Get a snapshot of the current instances with full transport details.
+
+        Like ``instance_ids()``, the result is a snapshot of the watched
+        instance set; pair with ``wait_for_instances()`` to block until
+        instances exist.
+
+        Returns:
+            A list of ``Instance`` for the currently available instances,
+            across all transports (TCP, NATS, ...).
         """
         ...
 
@@ -346,6 +395,7 @@ def compute_block_hash_for_seq(
     block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
     lora_name: Optional[str] = None,
     is_eagle: Optional[bool] = None,
+    cache_namespace: Optional[str] = None,
 ) -> List[int]:
     """
     Compute block hashes for a sequence of tokens, optionally including multimodal metadata.
@@ -456,6 +506,13 @@ class Context:
         """
         ...
 
+    def detached(self, id: str) -> "Context":
+        """
+        Create a context with a fresh cancellation controller and request ID
+        while preserving trace parentage and a metadata snapshot.
+        """
+        ...
+
     def async_killed_or_stopped(self) -> asyncio.Future[bool]:
         """
         Asynchronously wait until the context is killed or stopped.
@@ -517,8 +574,8 @@ class Context:
         Build W3C trace headers for propagating to downstream inference engines.
 
         Returns:
-            ``{"traceparent": "00-<trace_id>-<span_id>-01"}`` when this request
-            carries trace context, ``None`` otherwise. Also emits ``tracestate``,
+            ``{"traceparent": "00-<trace_id>-<span_id>-<flags>"}`` when this
+            request carries trace context, ``None`` otherwise. Also emits ``tracestate``,
             ``x-request-id``, ``request-id`` when upstream propagated them.
             Forward unchanged to the inference engine's ``trace_headers`` kwarg.
         """
@@ -595,10 +652,10 @@ class WorkerMetricsPublisher:
 
     async def create_endpoint(self, endpoint: Endpoint) -> None:
         """
-        Initialize the NATS endpoint for publishing worker metrics. Must be awaited.
+        Initialize event-plane publishing for worker metrics. Must be awaited.
 
         Extracts component information from the endpoint to set up metrics publishing
-        on the correct NATS subject for routing decisions.
+        on the endpoint-scoped event subject used for routing decisions.
 
         Args:
             endpoint: The endpoint to extract component information from for metrics publishing
@@ -634,7 +691,7 @@ class MultimodalEmbeddingCachePublisher:
 
     async def create_endpoint(self, endpoint: Endpoint) -> None:
         """
-        Initialize the NATS endpoint for publishing multimodal cache state.
+        Initialize event-plane publishing for multimodal cache state.
 
         Args:
             endpoint: The endpoint to extract component information from.
@@ -650,12 +707,34 @@ class MultimodalEmbeddingCachePublisher:
         """
         ...
 
+class SelectionCacheConfig:
+    """
+    Bounds for the in-flight selection cache. Each field defaults to the
+    service default when omitted.
+    """
+
+    def __init__(
+        self,
+        *,
+        ttl_secs: Optional[float] = None,
+        max_entries: Optional[int] = None,
+        max_bytes: Optional[int] = None,
+    ) -> None: ...
+
 class SelectionService:
     """
     In-process handle to a runtime-free Dynamo selection core.
     """
 
-    def __init__(self, *, indexer_threads: int = 4) -> None:
+    def __init__(
+        self,
+        *,
+        indexer_threads: int = 4,
+        indexer_peers: Optional[list[str]] = None,
+        replica_sync_port: Optional[int] = None,
+        replica_sync_peers: Optional[list[str]] = None,
+        selection_cache: Optional[SelectionCacheConfig] = None,
+    ) -> None:
         """Create a selection service. `indexer_threads` sizes the KV indexer pool."""
         ...
 
@@ -678,9 +757,9 @@ class SelectionService:
         ...
 
     def list_workers(
-        self, *, model_name: Optional[str] = None, tenant_id: Optional[str] = None
+        self, *, model_name: Optional[str] = None, routing_group: Optional[str] = None
     ) -> JsonLike:
-        """List catalog records, optionally filtered by model and tenant."""
+        """List catalog records, optionally filtered by model and routing group."""
         ...
 
     def ready(self) -> JsonLike:
@@ -700,25 +779,32 @@ class SelectionService:
         ...
 
     async def create_reservation(self, request: JsonLike) -> JsonLike:
-        """Book a request's load against a chosen worker."""
+        """Book a request's load against a worker, keyed by ``selection_id``.
+
+        Without a ``worker_id``, replays the matching ``select``'s cached
+        selection (same model/routing-group), booked under ``selection_id``;
+        other request fields are ignored. With a ``worker_id`` and the prompt,
+        books explicitly under ``selection_id`` on that worker and discards any
+        cached selection for the id. ``selection_id`` is required.
+        """
         ...
 
-    async def prefill_complete(self, reservation_id: str) -> None:
+    async def prefill_complete(self, selection_id: str) -> None:
         """Mark a reservation's prefill complete; its load shifts prefill -> decode."""
         ...
 
     def add_output_block(
-        self, reservation_id: str, *, decay_fraction: Optional[float] = None
+        self, selection_id: str, *, decay_fraction: Optional[float] = None
     ) -> None:
         """Record one decode output block for a reservation, advancing its decode load."""
         ...
 
-    async def free_reservation(self, reservation_id: str) -> None:
+    async def free_reservation(self, selection_id: str) -> None:
         """Free a finished reservation, releasing its tracked load."""
         ...
 
     def loads(
-        self, *, model_name: Optional[str] = None, tenant_id: Optional[str] = None
+        self, *, model_name: Optional[str] = None, routing_group: Optional[str] = None
     ) -> JsonLike:
         """Current per-model active load (pending counts + per-worker potential loads)."""
         ...
@@ -773,10 +859,12 @@ class ModelRuntimeConfig:
     max_num_batched_tokens: int | None
     tool_call_parser: str | None
     reasoning_parser: str | None
+    tokenizer_backend: str | None
     exclude_tools_when_tool_choice_none: bool
     data_parallel_start_rank: int
     data_parallel_size: int
     enable_local_indexer: bool
+    kv_state_endpoint: str | None
     enable_eagle: bool
     taints: Set[str]
     stable_routing_id: str | None
@@ -1061,6 +1149,7 @@ class KvEventPublisher:
         zmq_topic: Optional[str] = None,
         batching_timeout_ms: Optional[int] = None,
         image_token_id: Optional[int] = None,
+        kv_state_endpoint: Optional[str] = None,
     ) -> None:
         """
         Create a `KvEventPublisher` object.
@@ -1078,6 +1167,7 @@ class KvEventPublisher:
             enable_local_indexer: Enable worker-local KV indexer
             zmq_endpoint: Optional ZMQ endpoint for relay mode (e.g. "tcp://127.0.0.1:5557")
             zmq_topic: ZMQ topic to subscribe to (defaults to "" when zmq_endpoint is set)
+            kv_state_endpoint: KV event ownership endpoint; defaults to endpoint.
         """
 
     def publish_stored(
@@ -1089,6 +1179,7 @@ class KvEventPublisher:
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
         is_eagle: Optional[bool] = None,
+        cache_salt: Optional[str] = None,
     ) -> None:
         """
         Publish a KV stored event.
@@ -1554,6 +1645,7 @@ class RouterConfig:
         active_prefill_tokens_threshold: Optional[int] = None,
         active_prefill_tokens_threshold_frac: Optional[float] = None,
         enforce_disagg: bool = False,
+        session_affinity_ttl_secs: Optional[int] = None,
     ) -> None:
         """
         Create a RouterConfig.
@@ -1564,7 +1656,8 @@ class RouterConfig:
             active_decode_blocks_threshold: Threshold percentage (0.0-1.0) for decode blocks busy detection
             active_prefill_tokens_threshold: Literal token count threshold for prefill busy detection
             active_prefill_tokens_threshold_frac: Fraction of max_num_batched_tokens for busy detection
-            enforce_disagg: Strictly enforce disaggregated mode, failing requests if no prefill workers are available
+            enforce_disagg: Deprecated and ignored. Routing topology and readiness come from registered worker types.
+            session_affinity_ttl_secs: Router-local session-affinity idle TTL in seconds.
         """
         ...
 
@@ -1757,17 +1850,15 @@ class KvRouterConfig:
         disk_cache_hit_weight: float = 0.25,
         router_temperature: float = 0.0,
         use_kv_events: bool = True,
-        durable_kv_events: bool = False,
+        *,
         router_replica_sync: bool = False,
         router_track_active_blocks: bool = True,
         router_track_output_blocks: bool = False,
         router_assume_kv_reuse: bool = True,
         router_track_prefill_tokens: bool = True,
         router_prefill_load_model: str = "none",
-        router_snapshot_threshold: Optional[int] = 1000000,
-        router_reset_states: bool = False,
         router_ttl_secs: float = 120.0,
-        router_queue_threshold: Optional[float] = 16.0,
+        router_queue_threshold: Optional[float] = None,
         router_event_threads: int = 4,
         router_queue_policy: str = "fcfs",
         use_remote_indexer: bool = False,
@@ -1775,7 +1866,6 @@ class KvRouterConfig:
         shared_cache_multiplier: float = 0.0,
         shared_cache_type: str = "none",
         router_predicted_ttl_secs: Optional[float] = None,
-        *,
         overlap_score_credit: float = 1.0,
         overlap_score_credit_decay: float = 0.0,
         prefill_load_scale: float = 1.0,
@@ -1786,15 +1876,12 @@ class KvRouterConfig:
 
         Args:
             overlap_score_weight: Deprecated positional/keyword alias for prefill_load_scale. When present, it takes precedence over prefill_load_scale; a value of 0 also sets overlap_score_credit to 0.
-            overlap_score_credit: Credit multiplier for device-local prefix overlap, from 0.0 to 1.0 (default: 1.0). Use prefill_load_scale above 1.0 to weigh TTFT/prompt-side load more heavily.
+            overlap_score_credit: Finite, non-negative credit multiplier for device-local prefix overlap (default: 1.0). Values above 1.0 give device overlap extra credit and can make adjusted prefill cost negative.
             prefill_load_scale: Scale for adjusted prompt-side prefill load after cache-hit credits (default: 1.0)
             host_cache_hit_weight: Credit multiplier for host-pinned cache hits (default: 0.75)
             disk_cache_hit_weight: Credit multiplier for disk/external cache hits (default: 0.25)
             router_temperature: Temperature for normalized worker sampling via softmax (default: 0.0)
             use_kv_events: Whether to use KV events from workers (default: True)
-            durable_kv_events: **Deprecated.** Enable durable KV events using NATS JetStream (default: False).
-                This option will be removed in a future release. The event-plane subscriber
-                (local_indexer mode) is now the recommended path.
             router_replica_sync: Enable replica synchronization (default: False)
             router_track_active_blocks: Track active blocks for load balancing (default: True)
             router_track_output_blocks: Track output blocks during generation (default: False).
@@ -1807,16 +1894,14 @@ class KvRouterConfig:
             router_prefill_load_model: Prompt-side prefill load model (default: "none").
                 "none" keeps static prompt load accounting.
                 "aic" decays the oldest active prefill request using AIC-predicted duration.
-            router_snapshot_threshold: Number of messages before snapshot (default: 1000000)
-            router_reset_states: Reset router state on startup (default: False)
             router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)
-            router_queue_threshold: Queue threshold fraction for prefill token capacity (default: 16.0).
+            router_queue_threshold: Optional queue threshold fraction for prefill token capacity (default: None).
                 Requests are queued if all workers exceed this fraction of max_num_batched_tokens.
                 Enables priority scheduling via request priority hints.
-                Set to None to disable queueing (all requests go directly to the scheduler).
+                Set a numeric value to enable queueing.
             router_policy_config: Startup-only policy-family and cache-bucket queue
                 YAML path. When omitted, router_queue_threshold and
-                router_queue_policy define one default queue.
+                router_queue_policy define one synthetic policy class.
             router_event_threads: Number of KV indexer worker threads (default: 4).
                 When > 1, uses a concurrent radix tree with a thread pool,
                 including for approximate routing when KV events are disabled.
@@ -1940,6 +2025,7 @@ class MockEngineArgs:
         kv_transfer_bandwidth: Optional[float] = None,
         kv_transfer_timing_mode: str = "full_prompt",
         reasoning: Optional[ReasoningConfig] = None,
+        response_replay_trace_path: Optional[str | os.PathLike[str]] = None,
         zmq_kv_events_port: Optional[int] = None,
         zmq_replay_port: Optional[int] = None,
         preemption_mode: str = "lifo",
@@ -1956,6 +2042,7 @@ class MockEngineArgs:
         enable_g4_storage: bool = False,
         bandwidth_g2_to_g4_gbps: Optional[float] = None,
         bandwidth_g4_to_g2_gbps: Optional[float] = None,
+        max_model_len: Optional[int] = None,
     ) -> None:
         ...
 
@@ -1973,6 +2060,9 @@ class MockEngineArgs:
 
     @num_gpu_blocks.setter
     def num_gpu_blocks(self, value: int) -> None: ...
+
+    @property
+    def max_model_len(self) -> Optional[int]: ...
 
     @property
     def max_num_seqs(self) -> Optional[int]: ...
@@ -2003,6 +2093,9 @@ class MockEngineArgs:
 
     @property
     def engine_type(self) -> str: ...
+
+    @property
+    def response_replay_trace_path(self) -> Optional[os.PathLike[str]]: ...
 
     @property
     def num_g2_blocks(self) -> Optional[int]: ...
@@ -2228,6 +2321,8 @@ async def register_model(
     needs: Optional[List[List[WorkerType]]] = None,
     self_host_metadata: Optional[bool] = None,
     ignore_weights: bool = False,
+    max_gpu_lora_count: Optional[int] = None,
+    model_aliases: Optional[List[str]] = None,
 ) -> None:
     """
     Attach the model at path to the given endpoint, and advertise it as model_type.
@@ -2281,7 +2376,7 @@ class LoRADownloader:
     def __init__(self, cache_path: Optional[str] = None) -> None: ...
     def download_if_needed(self, lora_uri: str) -> Awaitable[str]: ...
     def get_cache_path(self, cache_key: str) -> str: ...
-    def is_cached(self, cache_key: str) -> bool: ...
+    def is_cached(self, lora_uri: str) -> bool: ...
     def validate_cached(self, cache_key: str) -> bool: ...
 
     @staticmethod
@@ -2718,6 +2813,31 @@ class KvbmRequest:
     def __init__(self, request_id: int, tokens: List[int], block_size: int) -> None:
         ...
 
+class KvDcRelay:
+    def __init__(
+        self,
+        endpoint: Endpoint,
+        dc_id: str,
+        namespace_filter: Optional[str] = None,
+        endpoint_prefix: Optional[str] = None,
+        publication_threshold: int = 16,
+        publication_delay_ms: int = 1,
+        recovery_attempt_timeout_ms: int = 30_000,
+    ) -> None:
+        ...
+
+    async def start(self) -> None:
+        ...
+
+    async def health(self) -> Dict[str, Any]:
+        ...
+
+    async def flush(self) -> None:
+        ...
+
+    async def shutdown(self) -> None:
+        ...
+
 class KvRouter:
     """
     A KV-aware router that performs intelligent routing based on KV cache overlap.
@@ -2828,6 +2948,7 @@ class KvRouter:
         routing_constraints: Optional[RoutingConstraints] = None,
         strict_priority: int = 0,
         policy_class: Optional[str] = None,
+        cache_namespace: Optional[str] = None,
     ) -> Tuple[int, int, int]:
         """
         Find the best matching worker for the given tokens.
@@ -2845,6 +2966,7 @@ class KvRouter:
             block_mm_infos: Optional block-level multimodal metadata aligned to request
                            blocks. When provided, this is used in block hash computation
                            to enable MM-aware worker selection.
+            cache_namespace: Optional cache namespace used in block hash computation.
             policy_class: Requested policy family, or an exact explicit class.
                           Missing, unknown, and ordinary physical-class names use the
                           configured default family before cache-bucket resolution.
@@ -2862,6 +2984,7 @@ class KvRouter:
         token_ids: List[int],
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
+        cache_namespace: Optional[str] = None,
     ) -> List[Dict[str, int]]:
         """
         Get potential prefill and decode loads for all workers.
@@ -2894,6 +3017,7 @@ class KvRouter:
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
         include_shared: bool = True,
+        cache_namespace: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Get per-worker KV overlap by storage tier.
@@ -2992,8 +3116,16 @@ class EntrypointArgs:
         is_prefill: bool = False,
         is_decode: bool = False,
         migration_limit: int = 0,
+        migration_max_seq_len: Optional[int] = None,
         chat_engine_factory: Optional[Callable] = None,
         aic_perf_config: Optional[AicPerfConfig] = None,
+        *,
+        metrics_prefix: Optional[str] = None,
+        enable_anthropic_api: Optional[bool] = None,
+        strip_anthropic_preamble: Optional[bool] = None,
+        enable_streaming_tool_dispatch: Optional[bool] = None,
+        enable_streaming_reasoning_dispatch: Optional[bool] = None,
+        tokenizer_backend: Optional[str] = None,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -3019,8 +3151,15 @@ class EntrypointArgs:
             is_prefill: Whether this is a prefill worker
             is_decode: Whether this is a decode worker (disaggregated); pairs with a prefill peer for readiness
             migration_limit: Maximum number of request migrations (0=disabled)
+            migration_max_seq_len: Optional max sequence length for migration
             chat_engine_factory: Optional Python chat completions engine factory callback
             aic_perf_config: Optional AIC perf-model configuration for default KV routing
+            metrics_prefix: Optional Prometheus metrics prefix override
+            enable_anthropic_api: Optional Anthropic Messages API override
+            strip_anthropic_preamble: Optional Anthropic preamble stripping override
+            enable_streaming_tool_dispatch: Optional streaming tool dispatch override
+            enable_streaming_reasoning_dispatch: Optional streaming reasoning dispatch override
+            tokenizer_backend: Optional tokenizer backend override ("default" or "fastokens")
         """
         ...
 
@@ -3052,6 +3191,10 @@ class VirtualConnectorCoordinator:
         ...
 
     async def wait_for_scaling_completion(self) -> None:
+        ...
+
+    async def is_scaling_ready(self) -> bool:
+        """Return whether the client acknowledged the current scaling decision."""
         ...
 
 class VirtualConnectorClient:
@@ -3153,6 +3296,11 @@ class SelectionServiceError(DynamoException):
 # ---------------------------------------------------------------------------
 
 class backend:
+    @staticmethod
+    def _run_sglang_sidecar(argv: Optional[List[str]] = None) -> None:
+        """Run the native SGLang sidecar with CLI-style arguments."""
+        ...
+
     class DisaggregationMode:
         # Mirrors `dynamo_backend_common::DisaggregationMode`. Engines consult
         # this on the WorkerConfig to switch their per-mode protocol behavior;
@@ -3244,6 +3392,9 @@ class backend:
             structural_tag_scope: str = ...,
             structural_tag_schema: str = ...,
             route_to_encoder: bool = ...,
+            media_decoder: Optional[MediaDecoder] = None,
+            media_fetcher: Optional[MediaFetcher] = None,
+            kv_state_endpoint: Optional[str] = None,
         ) -> None: ...
 
     class Worker:

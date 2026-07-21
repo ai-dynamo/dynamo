@@ -7,11 +7,13 @@ use super::*;
 use dynamo_kv_router::protocols::{
     KvTransferEnforcement as RsKvTransferEnforcement, RoutingConstraints as RsRoutingConstraints,
 };
+use dynamo_runtime::protocols::EndpointId;
 use llm_rs::local_model::runtime_config::DisaggregatedEndpoint as RsDisaggregatedEndpoint;
 use llm_rs::local_model::runtime_config::ModelRuntimeConfig as RsModelRuntimeConfig;
 use llm_rs::local_model::runtime_config::StructuralTagMode as RsStructuralTagMode;
 use llm_rs::local_model::runtime_config::StructuralTagSchemaMode as RsStructuralTagSchemaMode;
 use llm_rs::local_model::runtime_config::StructuralTagScope as RsStructuralTagScope;
+use llm_rs::local_model::runtime_config::TokenizerBackend as RsTokenizerBackend;
 use llm_rs::protocols::tensor::TensorModelConfig;
 use pyo3::exceptions::PyValueError;
 
@@ -129,6 +131,18 @@ impl ModelRuntimeConfig {
     }
 
     #[setter]
+    fn set_tokenizer_backend(&mut self, tokenizer_backend: Option<String>) -> PyResult<()> {
+        self.inner.tokenizer_backend = tokenizer_backend
+            .map(|backend| {
+                backend
+                    .parse::<RsTokenizerBackend>()
+                    .map_err(PyValueError::new_err)
+            })
+            .transpose()?;
+        Ok(())
+    }
+
+    #[setter]
     fn set_data_parallel_start_rank(&mut self, data_parallel_start_rank: u32) {
         self.inner.data_parallel_start_rank = data_parallel_start_rank;
     }
@@ -141,6 +155,11 @@ impl ModelRuntimeConfig {
     #[setter]
     fn set_enable_local_indexer(&mut self, enable_local_indexer: bool) {
         self.inner.enable_local_indexer = enable_local_indexer;
+    }
+
+    #[setter]
+    fn set_kv_state_endpoint(&mut self, kv_state_endpoint: Option<String>) {
+        self.inner.kv_state_endpoint = kv_state_endpoint.as_deref().map(EndpointId::from);
     }
 
     #[setter]
@@ -210,8 +229,23 @@ impl ModelRuntimeConfig {
     }
 
     #[getter]
+    fn tokenizer_backend(&self) -> Option<String> {
+        self.inner
+            .tokenizer_backend
+            .map(|backend| backend.as_str().to_string())
+    }
+
+    #[getter]
     fn enable_local_indexer(&self) -> bool {
         self.inner.enable_local_indexer
+    }
+
+    #[getter]
+    fn kv_state_endpoint(&self) -> Option<String> {
+        self.inner
+            .kv_state_endpoint
+            .as_ref()
+            .map(ToString::to_string)
     }
 
     #[getter]

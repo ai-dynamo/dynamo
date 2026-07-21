@@ -62,6 +62,9 @@ use prometheus::{HistogramOpts, IntCounter, IntCounterVec, IntGauge, IntGaugeVec
 use crate::http::service::metrics::generate_log_buckets;
 
 pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
+const TARGET_NAMESPACE_LABEL: &str = "target_namespace";
+const TARGET_COMPONENT_LABEL: &str = "target_component";
+const TARGET_ENDPOINT_LABEL: &str = "target_endpoint";
 
 /// Buckets for CPU-bound compute phases (block hashing, sequence hashing).
 fn compute_overhead_buckets() -> Vec<f64> {
@@ -196,6 +199,7 @@ pub(crate) fn kv_publisher_metrics() -> Option<Arc<KvPublisherMetrics>> {
 /// Component-scoped router gauges for worker discovery.
 pub(crate) struct RouterWorkerStatusMetrics {
     pub registered: IntGaugeVec,
+    pub kv_event_source_mismatch_workers: IntGaugeVec,
 }
 
 static ROUTER_WORKER_STATUS_METRICS: OnceLock<Arc<RouterWorkerStatusMetrics>> = OnceLock::new();
@@ -218,8 +222,25 @@ impl RouterWorkerStatusMetrics {
                         &[],
                     )
                     .expect("failed to create router_worker_registered gauge");
+                let kv_event_source_mismatch_workers = metrics
+                    .create_intgaugevec(
+                        router::KV_EVENT_SOURCE_MISMATCH_WORKERS,
+                        "Number of serving workers with missing or ambiguous KV sources, or without an expected RecoveryTarget",
+                        &[
+                            labels::MODEL,
+                            labels::WORKER_TYPE,
+                            TARGET_NAMESPACE_LABEL,
+                            TARGET_COMPONENT_LABEL,
+                            TARGET_ENDPOINT_LABEL,
+                        ],
+                        &[],
+                    )
+                    .expect("failed to create router_kv_event_source_mismatch_workers gauge");
 
-                Arc::new(Self { registered })
+                Arc::new(Self {
+                    registered,
+                    kv_event_source_mismatch_workers,
+                })
             })
             .clone()
     }
@@ -236,6 +257,26 @@ impl RouterWorkerStatusMetrics {
         let dp_rank = dp_rank.to_string();
         let labels = &[worker_id.as_str(), dp_rank.as_str(), worker_type];
         let _ = self.registered.remove_label_values(labels);
+    }
+
+    pub fn set_kv_event_source_mismatch_workers(
+        &self,
+        model: &str,
+        worker_type: &str,
+        target_namespace: &str,
+        target_component: &str,
+        target_endpoint: &str,
+        count: usize,
+    ) {
+        self.kv_event_source_mismatch_workers
+            .with_label_values(&[
+                model,
+                worker_type,
+                target_namespace,
+                target_component,
+                target_endpoint,
+            ])
+            .set(count as i64);
     }
 }
 
@@ -609,11 +650,19 @@ pub struct RouterRequestMetrics {
 }
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
+static ROUTER_REQUESTS_STARTED_TOTAL: OnceLock<prometheus::IntCounter> = OnceLock::new();
 
 impl RouterRequestMetrics {
     /// Returns the registered metrics if `from_component()` was called earlier.
     pub fn get() -> Option<Arc<Self>> {
         ROUTER_REQUEST_METRICS.get().cloned()
+    }
+
+    /// Total requests admitted by the router scheduler.
+    pub fn requests_started_total(&self) -> &prometheus::IntCounter {
+        ROUTER_REQUESTS_STARTED_TOTAL
+            .get()
+            .expect("router request metrics must be initialized")
     }
 
     /// Create from a Component, memoized in a static OnceLock.
@@ -630,6 +679,19 @@ impl RouterRequestMetrics {
                 let extra_labels: &[(&str, &str)] = &[(labels::ROUTER_ID, &router_id)];
 
                 let metrics = component.metrics();
+                let requests_started_total = metrics
+                    .create_intcounter(
+                        &router_metric(frontend_service::REQUESTS_STARTED_TOTAL),
+                        "Total number of requests admitted by the router scheduler",
+                        extra_labels,
+                    )
+                    .expect("failed to create router_requests_started_total");
+                assert!(
+                    ROUTER_REQUESTS_STARTED_TOTAL
+                        .set(requests_started_total)
+                        .is_ok(),
+                    "router_requests_started_total already initialized"
+                );
                 let requests_total = metrics
                     .create_intcounter(
                         &router_metric(frontend_service::REQUESTS_TOTAL),
@@ -846,17 +908,56 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
                 &[ROUTER_WORKER_ID_LABEL, labels::DP_RANK, labels::WORKER_TYPE],
             )
             .unwrap(),
+            kv_event_source_mismatch_workers: IntGaugeVec::new(
+                Opts::new(
+                    format!(
+                        "{}_{}",
+                        name_prefix::COMPONENT,
+                        router::KV_EVENT_SOURCE_MISMATCH_WORKERS
+                    ),
+                    "Number of workers expected to publish KV events but missing worker-local KV indexer query endpoints",
+                ),
+                &[
+                    labels::MODEL,
+                    labels::WORKER_TYPE,
+                    TARGET_NAMESPACE_LABEL,
+                    TARGET_COMPONENT_LABEL,
+                    TARGET_ENDPOINT_LABEL,
+                ],
+            )
+            .unwrap(),
         };
         registry
             .register(Box::new(metrics.registered.clone()))
             .unwrap();
+        registry
+            .register(Box::new(metrics.kv_event_source_mismatch_workers.clone()))
+            .unwrap();
 
         metrics.set_registered(123, 0, "decode");
+        metrics.set_kv_event_source_mismatch_workers(
+            "model-a", "decode", "ns-a", "decode", "generate", 2,
+        );
+        metrics.set_kv_event_source_mismatch_workers(
+            "model-a", "prefill", "ns-a", "prefill", "generate", 0,
+        );
 
         let output = gather_pef(&registry);
         assert!(
             output.contains(
                 "dynamo_component_router_worker_registered{dp_rank=\"0\",router_worker_id=\"123\",worker_type=\"decode\"} 1"
+            ),
+            "\nActual PEF:\n{output}"
+        );
+        assert!(
+            output.contains(
+                "dynamo_component_router_kv_event_source_mismatch_workers{model=\"model-a\",target_component=\"decode\",target_endpoint=\"generate\",target_namespace=\"ns-a\",worker_type=\"decode\"} 2"
+            ),
+            "\nActual PEF:\n{output}"
+        );
+        assert!(
+            output.contains(
+                "dynamo_component_router_kv_event_source_mismatch_workers{model=\"model-a\",target_component=\"prefill\",target_endpoint=\"generate\",target_namespace=\"ns-a\",worker_type=\"prefill\"} 0"
             ),
             "\nActual PEF:\n{output}"
         );

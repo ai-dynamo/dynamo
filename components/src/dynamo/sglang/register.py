@@ -13,6 +13,7 @@ from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
 from dynamo._core import Endpoint
+from dynamo.common.native_offloading import NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY
 from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import (
@@ -27,6 +28,7 @@ from dynamo.llm import (
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import DynamoConfig, use_modelexpress_remote_instance
 from dynamo.sglang.capacity import (
+    get_hicache_native_offloading_capacity,
     get_spec_decode_runtime_data,
     model_card_dp_rank_bounds,
     runtime_capacity,
@@ -95,6 +97,7 @@ async def _register_model_with_runtime_config(
     *,
     worker_type: WorkerType,
     needs: Optional[List[List[WorkerType]]] = None,
+    serves_lora_load: bool = False,
 ) -> bool:
     """Register LLM with the Dynamo runtime.
 
@@ -132,6 +135,24 @@ async def _register_model_with_runtime_config(
     if getattr(dynamo_args, "frontend_decoding", False):
         media_decoder, media_fetcher = _build_media_decoder_and_fetcher()
 
+    # Advertise the worker's LoRA slot budget on the BASE registration so the frontend allocator
+    # can place adapters onto idle-but-LoRA-capable workers before any adapter is loaded here.
+    # Only workers that actually SERVE the LoRA load endpoints (init_decode / init_prefill, which
+    # pass serves_lora_load=True) may advertise capacity. Other worker modes (embedding, diffusion,
+    # multimodal-encode) register through this same wrapper but do not serve load_lora, so they
+    # must never advertise capacity they cannot fulfill -- hence an explicit allowlist flag rather
+    # than an output_type denylist.
+    lora_enabled = bool(
+        getattr(server_args, "enable_lora", None)
+        or getattr(server_args, "lora_paths", None)
+    )
+    max_gpu_lora_count = (
+        getattr(server_args, "max_loras_per_batch", None)
+        if (serves_lora_load and lora_enabled)
+        else None
+    )
+
+    aliases = list(getattr(dynamo_args, "served_model_aliases", []) or [])
     try:
         await register_model(
             input_type,
@@ -147,6 +168,8 @@ async def _register_model_with_runtime_config(
             worker_type=worker_type,
             needs=needs,
             ignore_weights=use_modelexpress_remote_instance(server_args),
+            max_gpu_lora_count=max_gpu_lora_count,
+            model_aliases=aliases or None,
         )
         logging.info("Successfully registered LLM with runtime config")
         return True
@@ -294,6 +317,33 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
     }
 
 
+def _eagle_enabled_for(speculative_algorithm: Optional[str]) -> bool:
+    """Whether to publish ``ModelRuntimeConfig.enable_eagle`` for this speculative algorithm.
+
+    Derived from sglang's ``SpeculativeAlgorithm.is_eagle()`` -- the SAME predicate the radix
+    cache uses to bigram-key its KV-event block hashes (``srt/managers/scheduler.py``). The KV
+    router uses ``enable_eagle`` to bigram-align the frontend's prompt-block hashes; deriving it
+    from ``is_eagle()`` (instead of a hand-maintained name set) keeps the two in lockstep and
+    covers every eagle variant -- currently EAGLE, EAGLE3, FROZEN_KV_MTP. (NEXTN/EAGLE are
+    normalized to EAGLE/FROZEN_KV_MTP in ServerArgs before we see them.)
+    """
+    try:
+        return SpeculativeAlgorithm.from_string(speculative_algorithm).is_eagle()
+    except Exception as e:
+        # Graceful degradation: registration must not crash on an unexpected speculative-algorithm
+        # value. ``from_string`` raises ValueError on unknown/unregistered names (and returns NONE for
+        # ``None``, so the default case does not raise); catch broadly -- matching the sibling
+        # ``_get_mooncake_runtime_data`` above, per python-guidelines.md -- so any future signature/enum
+        # change can't crash the worker either. Default to not enabling eagle bigram routing; the
+        # previous membership check ``in ("EAGLE", "NEXTN")`` never raised, so this preserves behavior.
+        logging.warning(
+            "Could not derive enable_eagle from speculative_algorithm %r: %s; leaving it disabled.",
+            speculative_algorithm,
+            e,
+        )
+        return False
+
+
 async def _get_runtime_config(
     engine: sgl.Engine, server_args: ServerArgs, dynamo_args: DynamoConfig
 ) -> Optional[ModelRuntimeConfig]:
@@ -308,6 +358,7 @@ async def _get_runtime_config(
         ModelRuntimeConfig with extracted values, or None if extraction fails.
     """
     runtime_config = ModelRuntimeConfig()
+    runtime_config.kv_state_endpoint = dynamo_args.kv_state_endpoint
     runtime_config.context_length = server_args.context_length
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.dyn_reasoning_parser
@@ -374,7 +425,7 @@ async def _get_runtime_config(
     if base_capacity.max_num_batched_tokens is not None:
         runtime_config.max_num_batched_tokens = base_capacity.max_num_batched_tokens
 
-    if server_args.speculative_algorithm in ("EAGLE", "NEXTN"):
+    if _eagle_enabled_for(server_args.speculative_algorithm):
         runtime_config.enable_eagle = True
 
     spec_decode_runtime_data = get_spec_decode_runtime_data(server_args)
@@ -436,11 +487,27 @@ async def _get_runtime_config(
                 f"{unpublished} will not be published; SGLang will use its internal defaults."
             )
 
-        return runtime_config
-
     except Exception as e:
         logging.warning(f"Failed to get runtime config: {e}. Proceeding without it.")
         return runtime_config
+
+    try:
+        offloading_capacity = get_hicache_native_offloading_capacity(
+            server_args, scheduler_info
+        )
+        if offloading_capacity is not None:
+            runtime_config.set_engine_specific(
+                NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY,
+                json.dumps(offloading_capacity),
+            )
+            logging.info("Published native offloading capacity from SGLang HiCache.")
+    except Exception as e:
+        logging.warning(
+            "Failed to attach native offloading capacity from SGLang HiCache: %s",
+            e,
+        )
+
+    return runtime_config
 
 
 async def register_model_with_readiness_gate(
@@ -454,6 +521,7 @@ async def register_model_with_readiness_gate(
     *,
     worker_type: WorkerType,
     needs: Optional[List[List[WorkerType]]] = None,
+    serves_lora_load: bool = False,
 ) -> None:
     """Wrapper function to register LLM with the Dynamo runtime and use optional readiness gate to signal success.
 
@@ -480,6 +548,7 @@ async def register_model_with_readiness_gate(
         output_type,
         worker_type=worker_type,
         needs=needs,
+        serves_lora_load=serves_lora_load,
     )
     if not registration_success:
         logging.error("Model registration failed; shutting down")

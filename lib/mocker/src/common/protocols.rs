@@ -44,6 +44,23 @@ pub trait KvCacheEventSink: Send + Sync {
     ) -> anyhow::Result<()> {
         self.publish(event)
     }
+
+    /// Publishes events that share one source visibility boundary.
+    ///
+    /// Implementations that do not have a native batch representation retain
+    /// singleton delivery semantics by default.
+    fn publish_batch_with_storage_tiers(
+        &self,
+        events: Vec<(KvCacheEvent, StorageTier)>,
+    ) -> anyhow::Result<()> {
+        let mut first_error = None;
+        for (event, storage_tier) in events {
+            if let Err(error) = self.publish_with_storage_tier(event, storage_tier) {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
 }
 
 /// Raw KV event payload used by transport-specific publishers such as the
@@ -58,6 +75,20 @@ pub struct RawKvEvent {
 /// Trait for publishing transport-specific raw KV event payloads.
 pub trait RawKvEventSink: Send + Sync {
     fn publish(&self, event: RawKvEvent) -> anyhow::Result<()>;
+
+    /// Publishes raw events that share one source visibility boundary.
+    ///
+    /// Implementations that do not have a native batch representation retain
+    /// singleton delivery semantics by default.
+    fn publish_batch(&self, events: Vec<RawKvEvent>) -> anyhow::Result<()> {
+        let mut first_error = None;
+        for event in events {
+            if let Err(error) = self.publish(event) {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
 }
 
 /// Shared KV event publisher bundle used by schedulers and KV managers.
@@ -112,6 +143,28 @@ impl KvEventPublishers {
             })?;
         }
 
+        Ok(())
+    }
+
+    /// Publishes normal KV events without also forwarding them to a raw sink.
+    ///
+    /// Deferred live-scheduler forwarding uses this to preserve its source
+    /// visibility boundary for normal and raw sinks independently.
+    pub(crate) fn publish_event_sink_batch_only(
+        &self,
+        events: Vec<(KvCacheEvent, StorageTier)>,
+    ) -> anyhow::Result<()> {
+        if let Some(sink) = self.event_sink.as_ref() {
+            sink.publish_batch_with_storage_tiers(events)?;
+        }
+        Ok(())
+    }
+
+    /// Publishes raw events as one source visibility boundary.
+    pub(crate) fn publish_raw_batch(&self, events: Vec<RawKvEvent>) -> anyhow::Result<()> {
+        if let Some(sink) = self.raw_sink.as_ref() {
+            sink.publish_batch(events)?;
+        }
         Ok(())
     }
 }
@@ -211,6 +264,8 @@ pub enum MoveBlockResponse {
 pub struct DirectRequest {
     pub tokens: Vec<Token>,
     pub max_output_tokens: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_token_ids: Option<Vec<Token>>,
     pub uuid: Option<Uuid>,
     pub dp_rank: u32,
     pub arrival_timestamp_ms: Option<f64>,
@@ -269,6 +324,8 @@ impl PrefillCost {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputSignal {
     pub uuid: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_id: Option<Token>,
     /// Terminal flag: the request's lifecycle has ended. Replay drivers free
     /// resources and advance/notify on this.
     pub completed: bool,
@@ -515,6 +572,7 @@ struct MockEngineArgsSerde {
     engine_type: OptionalConfigValue<String>,
     num_gpu_blocks: OptionalConfigValue<usize>,
     block_size: OptionalConfigValue<usize>,
+    max_model_len: OptionalConfigValue<usize>,
     max_num_seqs: OptionalConfigValue<usize>,
     max_num_batched_tokens: OptionalConfigValue<usize>,
     enable_prefix_caching: OptionalConfigValue<bool>,
@@ -563,6 +621,7 @@ struct MockEngineArgsSerde {
     bandwidth_g2_to_g4_gbps: OptionalConfigValue<f64>,
     bandwidth_g4_to_g2_gbps: OptionalConfigValue<f64>,
     reasoning: OptionalConfigValue<ReasoningConfig>,
+    response_replay_trace_path: OptionalConfigValue<PathBuf>,
     zmq_kv_events_port: OptionalConfigValue<u16>,
     zmq_replay_port: OptionalConfigValue<u16>,
     preemption_mode: OptionalConfigValue<String>,
@@ -606,6 +665,12 @@ pub struct MockEngineArgs {
 
     #[builder(default = "0")]
     pub block_size: usize,
+
+    /// Optional vLLM sequence-length limit, including prompt and generated
+    /// tokens. Requests with no room to generate are rejected before admission.
+    #[builder(default = "None")]
+    #[validate(range(min = 1))]
+    pub max_model_len: Option<usize>,
 
     // This was 1024 in the past but reverted back to 256
     #[builder(default = Some(256))]
@@ -865,6 +930,12 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     pub reasoning: Option<ReasoningConfig>,
 
+    /// Optional Mooncake trace with exact output token IDs keyed by
+    /// `output_replay_id` annotations. Direct replay paths carry the same token
+    /// IDs on `DirectRequest` and do not need this lookup.
+    #[builder(default = "None")]
+    pub response_replay_trace_path: Option<PathBuf>,
+
     /// ZMQ port for publishing KV events in vLLM's native wire format.
     /// When set, the scheduler publishes to a ZMQ PUB socket instead of directly to NATS.
     /// A KvEventPublisher relay subscribes to this socket and forwards events to NATS.
@@ -914,6 +985,16 @@ fn validate_mock_engine_args(args: &MockEngineArgs) -> Result<(), ValidationErro
         return Err(mock_engine_args_validation_error(
             "g3_requires_g2",
             "num_g3_blocks requires num_g2_blocks because mocker stages G3 through G2".to_string(),
+        ));
+    }
+
+    if args.max_model_len.is_some() && args.engine_type != EngineType::Vllm {
+        return Err(mock_engine_args_validation_error(
+            "max_model_len_requires_vllm",
+            format!(
+                "max_model_len is supported only for engine_type=vllm, got engine_type={:?}",
+                args.engine_type
+            ),
         ));
     }
     if args.enable_g4_storage && args.num_g2_blocks.is_none() {
@@ -1003,6 +1084,9 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         }
         if let Some(block_size) = compat.block_size.into_non_null("block_size")? {
             builder = builder.block_size(block_size);
+        }
+        if let Some(max_model_len) = compat.max_model_len.into_nullable() {
+            builder = builder.max_model_len(max_model_len);
         }
         if let Some(max_num_seqs) = compat.max_num_seqs.into_nullable() {
             builder = builder.max_num_seqs(max_num_seqs);
@@ -1193,6 +1277,10 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         if let Some(reasoning) = compat.reasoning.into_nullable() {
             builder = builder.reasoning(reasoning);
         }
+        if let Some(response_replay_trace_path) = compat.response_replay_trace_path.into_nullable()
+        {
+            builder = builder.response_replay_trace_path(response_replay_trace_path);
+        }
         if let Some(zmq_kv_events_port) = compat.zmq_kv_events_port.into_nullable() {
             builder = builder.zmq_kv_events_port(zmq_kv_events_port);
         }
@@ -1242,14 +1330,13 @@ impl MockEngineArgs {
         MockEngineArgsBuilder::default()
     }
 
-    /// GPUs occupied by one worker (engine), derived from the AIC parallelism:
-    /// `aic_tp_size × aic_attention_dp_size` (the attention width, which by the
-    /// MoE constraint equals `aic_moe_tp_size × aic_moe_ep_size`). Falls back to
-    /// 1 when AIC parallelism is not configured (non-AIC / polynomial perf
-    /// model, where a worker is a single logical engine). Used to turn
+    /// GPUs occupied by one worker (engine), derived from tensor parallelism
+    /// and the materialized DP topology. AIC-backed replay uses
+    /// `aic_tp_size × aic_attention_dp_size`; non-AIC replay still counts one
+    /// GPU for every independently modeled `dp_size` rank. Used to turn
     /// provisioned worker-seconds into GPU-hours.
     pub fn aic_gpus_per_worker(&self) -> usize {
-        self.aic_tp_size.unwrap_or(1) * self.aic_attention_dp_size.unwrap_or(1)
+        self.aic_tp_size.unwrap_or(1) * self.dp_size.max(1) as usize
     }
 
     /// Finite ownership bound for live handoff queues and sessions.
@@ -1362,8 +1449,48 @@ impl MockEngineArgs {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
     use serde_json::json;
+
+    #[derive(Default)]
+    struct FailingRawSink {
+        attempts: Mutex<Vec<u64>>,
+    }
+
+    impl RawKvEventSink for FailingRawSink {
+        fn publish(&self, event: RawKvEvent) -> anyhow::Result<()> {
+            self.attempts.lock().unwrap().push(event.event.event_id);
+            if event.event.event_id == 2 {
+                anyhow::bail!("injected raw sink failure");
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn raw_sink_batch_fallback_attempts_later_events_after_failure() {
+        let sink = FailingRawSink::default();
+        let error = sink
+            .publish_batch(
+                (1..=3)
+                    .map(|event_id| RawKvEvent {
+                        event: KvCacheEvent {
+                            event_id,
+                            data: dynamo_kv_router::protocols::KvCacheEventData::Cleared,
+                            dp_rank: 0,
+                        },
+                        block_token_ids: None,
+                        storage_tier: StorageTier::Device,
+                    })
+                    .collect(),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "injected raw sink failure");
+        assert_eq!(*sink.attempts.lock().unwrap(), vec![1, 2, 3]);
+    }
 
     #[test]
     fn direct_request_priorities_are_backward_compatible() {
@@ -1413,6 +1540,7 @@ mod tests {
     fn test_mock_engine_args_json_round_trip_preserves_worker_type_and_nulls() {
         let args = MockEngineArgs::builder()
             .worker_type(WorkerType::Decode)
+            .max_model_len(Some(32768))
             .max_num_seqs(None)
             .max_num_batched_tokens(None)
             .reasoning(None)
@@ -1422,7 +1550,7 @@ mod tests {
             .normalized()
             .unwrap();
 
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "engine_type": "vllm",
             "num_gpu_blocks": args.num_gpu_blocks,
             "block_size": args.block_size,
@@ -1465,10 +1593,12 @@ mod tests {
             "sglang": args.sglang,
             "has_perf_model": true,
         });
+        payload["max_model_len"] = serde_json::json!(args.max_model_len);
 
         let restored = MockEngineArgs::from_json_str(&payload.to_string()).unwrap();
 
         assert_eq!(restored.worker_type, WorkerType::Decode);
+        assert_eq!(restored.max_model_len, Some(32768));
         assert_eq!(restored.max_num_seqs, None);
         assert_eq!(restored.max_num_batched_tokens, None);
         assert_eq!(
@@ -1673,6 +1803,21 @@ mod tests {
             .unwrap()
             .normalized()
             .expect("in-range aic_nextn should validate");
+    }
+
+    #[test]
+    fn test_normalized_rejects_zero_max_model_len() {
+        let error = MockEngineArgs::builder()
+            .max_model_len(Some(0))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("max_model_len"),
+            "unexpected error: {error}",
+        );
     }
 
     #[test]

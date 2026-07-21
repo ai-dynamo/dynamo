@@ -141,6 +141,140 @@ fn test_from_mooncake_single_turn_preserves_fields() {
 }
 
 #[test]
+fn single_turn_requests_plan_missing_output_tokens_deterministically() {
+    let trace = Trace {
+        block_size: 1,
+        sessions: vec![
+            SessionTrace {
+                session_id: "missing".into(),
+                first_arrival_timestamp_ms: Some(0.0),
+                turns: vec![TurnTrace {
+                    input_length: 2,
+                    max_output_tokens: 3,
+                    hash_ids: vec![10, 11],
+                    ..Default::default()
+                }],
+            },
+            SessionTrace {
+                session_id: "authored".into(),
+                first_arrival_timestamp_ms: Some(1.0),
+                turns: vec![TurnTrace {
+                    input_length: 1,
+                    max_output_tokens: 2,
+                    output_token_ids: Some(vec![20, 21]),
+                    hash_ids: vec![12],
+                    ..Default::default()
+                }],
+            },
+        ],
+    };
+
+    let first = trace.to_single_turn_requests().unwrap();
+    let second = trace.to_single_turn_requests().unwrap();
+
+    assert_eq!(first[0].output_token_ids, second[0].output_token_ids);
+    assert_eq!(first[0].output_token_ids.as_ref().map(Vec::len), Some(3));
+    assert_eq!(first[1].output_token_ids.as_deref(), Some(&[20, 21][..]));
+}
+
+#[test]
+fn test_from_mooncake_preserves_output_token_replay_keys() {
+    let file = write_trace(&[
+        serde_json::json!({
+            "request_id": "explicit",
+            "session_id": "s",
+            "input_length": 4,
+            "output_length": 2,
+            "output_token_ids": [10, 11],
+            "hash_ids": [1],
+        }),
+        serde_json::json!({
+            "session_id": "s",
+            "input_length": 4,
+            "output_length": 1,
+            "output_token_ids": [12],
+            "hash_ids": [2],
+        }),
+        serde_json::json!({
+            "input_length": 4,
+            "output_length": 1,
+            "output_token_ids": [13],
+            "hash_ids": [3],
+        }),
+    ]);
+
+    let trace = Trace::from_mooncake(file.path(), 4).unwrap();
+    assert_eq!(
+        trace.sessions[0].turns[0].replay_key.as_deref(),
+        Some("explicit")
+    );
+    assert_eq!(
+        trace.sessions[0].turns[0].output_token_ids.as_deref(),
+        Some(&[10, 11][..])
+    );
+    assert_eq!(
+        trace.sessions[0].turns[1].replay_key.as_deref(),
+        Some("s:1")
+    );
+    assert_eq!(
+        trace.sessions[0].turns[1].output_token_ids.as_deref(),
+        Some(&[12][..])
+    );
+    assert_eq!(
+        trace.sessions[1].turns[0].replay_key.as_deref(),
+        Some("line:2")
+    );
+
+    let request = trace.sessions[0].turns[0]
+        .to_direct_request(4, Uuid::from_u128(1), None)
+        .unwrap();
+    assert_eq!(request.output_token_ids.as_deref(), Some(&[10, 11][..]));
+}
+
+#[test]
+fn test_from_mooncake_rejects_output_token_length_mismatch() {
+    let file = write_trace(&[serde_json::json!({
+        "input_length": 4,
+        "output_length": 2,
+        "output_token_ids": [10],
+        "hash_ids": [1],
+    })]);
+
+    let err = Trace::from_mooncake(file.path(), 4).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("output_length 2 does not match output_token_ids length 1"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn test_trace_validate_rejects_programmatic_output_token_length_mismatch() {
+    let trace = Trace {
+        block_size: 4,
+        sessions: vec![SessionTrace {
+            session_id: "s".to_string(),
+            first_arrival_timestamp_ms: Some(0.0),
+            turns: vec![TurnTrace {
+                input_length: 4,
+                max_output_tokens: 2,
+                output_token_ids: Some(vec![10]),
+                hash_ids: vec![1],
+                delay_after_previous_ms: 0.0,
+                ..Default::default()
+            }],
+        }],
+    };
+
+    let err = trace.validate_for_trace_mode().unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("max_output_tokens 2 does not match output_token_ids length 1"),
+        "{err:#}"
+    );
+}
+
+#[test]
 fn test_from_mooncake_multi_turn_uses_session_id_and_delay() {
     let file = write_trace(&[
         serde_json::json!({
@@ -337,6 +471,8 @@ fn test_turn_to_direct_request_repeats_hash_ids_by_block_size() {
     let turn = TurnTrace {
         input_length: 6,
         max_output_tokens: 3,
+        output_token_ids: None,
+        replay_key: None,
         hash_ids: vec![1, 2],
         delay_after_previous_ms: 0.0,
         priority: -2,

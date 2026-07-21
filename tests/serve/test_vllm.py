@@ -14,7 +14,6 @@ import pytest
 from tests.serve.common import (
     WORKSPACE_DIR,
     params_with_model_mark,
-    run_prefill_drain_deployment,
     run_serve_deployment,
 )
 from tests.serve.conftest import MULTIMODAL_IMG_URL
@@ -157,24 +156,40 @@ vllm_configs = {
             metric_payload_default(min_num_requests=6, backend="vllm"),
         ],
     ),
-    "aggregated_unified": VLLMConfig(
-        name="aggregated_unified",
+    # Speculative decoding: Llama-3.1-8B main model with an EAGLE3 draft model
+    # (see launch/agg_spec_decoding.sh). The base model is gated on HF, so this
+    # needs HF_TOKEN set and only runs where the token + VRAM are available.
+    # Nightly-only: the 8B base plus EAGLE3 draft model is intentionally outside pre-merge CI.
+    "aggregated_spec_decoding": VLLMConfig(
+        name="aggregated_spec_decoding",
         directory=vllm_dir,
-        script_name="agg.sh",
-        script_args=["--unified"],
+        script_name="agg_spec_decoding.sh",
         marks=[
-            pytest.mark.core,
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(3.8),
-            pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000),
-            pytest.mark.timeout(610),  # 3x ~203s unified, new scheduler (3d1554f)
-            pytest.mark.pre_merge,
-            pytest.mark.unified,
+            # Also predownload the EAGLE3 draft: CI workers run HF_HUB_OFFLINE=True
+            # and only the base cfg.model is auto-registered, so the draft repo
+            # can't be resolved offline without this.
+            pytest.mark.model("yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"),
+            # Profiled with a 1 GiB KV cap (peak ~18.6 GiB: 8B weights + EAGLE3
+            # draft + capped KV). The byte cap (build_vllm_gpu_mem_args) makes
+            # this GPU-size-independent, so it fits the 24 GiB parallel stage.
+            pytest.mark.profiled_vram_gib(20.0),
+            pytest.mark.requested_vllm_kv_cache_bytes(1_073_741_824),
+            pytest.mark.timeout(900),
+            pytest.mark.nightly,
         ],
-        model="Qwen/Qwen3-0.6B",
+        model="meta-llama/Meta-Llama-3.1-8B-Instruct",
+        # 8B weights leave little KV room on the 24 GiB gpu_1 lane; cap context (payloads are tiny).
+        script_args=["--max-model-len", "4096"],
         request_payloads=[
             chat_payload_default(),
-            completion_payload_default(),
+            chat_payload(
+                "What is the capital of France? Answer in one word.",
+                repeat_count=1,
+                expected_response=["Paris"],
+                temperature=0.0,
+                max_tokens=16,
+            ),
         ],
     ),
     "aggregated_logprobs": VLLMConfig(
@@ -312,8 +327,8 @@ vllm_configs = {
             pytest.mark.gpu_2,
             pytest.mark.router,
             pytest.mark.pre_merge,
-            pytest.mark.skip(reason="DYN-2263"),
-        ],  # TODO: profile to get max_vram and timeout
+            pytest.mark.timeout(600),
+        ],  # TODO: profile to get max_vram
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             router_selection_chat_payload_default(),
@@ -329,8 +344,8 @@ vllm_configs = {
             pytest.mark.gpu_2,
             pytest.mark.router,
             pytest.mark.pre_merge,
-            pytest.mark.skip(reason="DYN-2264"),
-        ],  # TODO: profile to get max_vram and timeout
+            pytest.mark.timeout(600),
+        ],  # TODO: profile to get max_vram
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             # Test approximate KV routing (--no-kv-events mode)
@@ -688,8 +703,12 @@ vllm_configs = {
                 repeat_count=1,
                 expected_response=["Generated 3 embeddings with dimension"],
             ),
-            # `dimensions` truncation (Matryoshka). Qwen3-Embedding-0.6B has a
-            # hidden dim of 1024, so the truncated vector should be exactly 128.
+            # `dimensions` reduction (Matryoshka). Qwen3-Embedding-0.6B has a
+            # hidden dim of 1024, so the reduced vector should be exactly 128.
+            # The worker forwards `dimensions` to vLLM's pooler (truncate +
+            # re-normalize); `agg_embed.sh` launches this model with
+            # `--hf-overrides '{"is_matryoshka": true}'` so vLLM accepts the
+            # request (Qwen3-Embedding's config doesn't declare Matryoshka).
             # Built inline because the `embedding_payload()` helper doesn't
             # expose an `extra_body` kwarg yet.
             EmbeddingPayload(
@@ -745,64 +764,6 @@ def test_serve_deployment(
         vllm_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
-
-
-# ---------------------------------------------------------------------------
-# Prefill drain on graceful shutdown, unified entry point. A concurrent burst
-# gives the prefill worker in-flight work; it's then SIGTERMed mid-flight, and
-# the test asserts the Rust Worker drove a graceful shutdown (drain -> cleanup).
-# vLLM has no is_quiescent() override, so the drain waits the full budget.
-# ---------------------------------------------------------------------------
-_PREFILL_DRAIN_CONFIG = VLLMConfig(
-    name="prefill_drain_unified",
-    directory=vllm_dir,
-    script_name="disagg_same_gpu.sh",
-    script_args=["--unified"],
-    marks=[],  # applied on the test function below
-    model="Qwen/Qwen3-0.6B",
-    delayed_start=10,
-    health_check_workers=True,
-    env={
-        "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS": "0",
-        "DYN_PREFILL_DRAIN_TIMEOUT_S": "3",
-        "DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT": "30",
-        # The unified decode worker disables its health canary by design
-        # (NixlConnector has no local-only bypass), so its system /health is
-        # gated on starting status, which defaults to NotReady. Mark it
-        # ready-on-liveness so the harness's worker health check passes; the
-        # prefill worker still gates on its real canary.
-        "DYN_SYSTEM_STARTING_HEALTH_STATUS": "ready",
-    },
-    # Required by EngineConfig and used to add frontend readiness checks; the
-    # burst issues its own requests.
-    request_payloads=[chat_payload_default()],
-)
-
-
-@pytest.mark.vllm
-@pytest.mark.e2e
-@pytest.mark.gpu_1
-@pytest.mark.model("Qwen/Qwen3-0.6B")
-@pytest.mark.profiled_vram_gib(7.3)
-@pytest.mark.requested_vllm_kv_cache_bytes(1_023_525_000)
-@pytest.mark.timeout(360)
-@pytest.mark.post_merge
-@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
-def test_prefill_drain_unified(
-    request,
-    runtime_services_dynamic_ports,
-    dynamo_dynamic_ports,
-    num_system_ports,
-    predownload_models,
-):
-    """Fire a concurrent burst, SIGTERM the prefill worker mid-flight, and
-    assert the Rust Worker drove graceful shutdown (drain -> cleanup). vLLM has
-    no is_quiescent() override, so the framework drains prefill for the full
-    budget (safe-by-default)."""
-    config = dataclasses.replace(
-        _PREFILL_DRAIN_CONFIG, frontend_port=dynamo_dynamic_ports.frontend_port
-    )
-    run_prefill_drain_deployment(config, request, ports=dynamo_dynamic_ports)
 
 
 # LoRA Test Directory
