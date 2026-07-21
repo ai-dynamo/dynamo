@@ -15,7 +15,7 @@ use super::prefill_load::effective_prefill_tokens;
 pub use crate::protocols::PotentialLoad;
 use crate::protocols::{
     LocalBlockHash, RoutingConstraints, SharedCacheHits, WorkerConfigLike, WorkerId,
-    WorkerSelectionTelemetry, WorkerWithDpRank,
+    WorkerWithDpRank,
 };
 use crate::scheduling::policy_queue::QueueRejection;
 use crate::scheduling::queue_admission::RequestProgressUpdater;
@@ -76,7 +76,6 @@ pub struct SchedulingResponse {
     pub effective_overlap_blocks: f64,
     pub cached_tokens: usize,
     pub selected_worker_tiers: SelectedWorkerTierSnapshot,
-    pub selection_telemetry: WorkerSelectionTelemetry,
     pub request_progress: Option<RequestProgressUpdater>,
     pub lifecycle_lease: Option<super::queue::RequestLifecycleLease>,
 }

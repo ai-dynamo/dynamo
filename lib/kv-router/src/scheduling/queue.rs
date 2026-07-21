@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 use std::time::Duration;
 
 use crossbeam_queue::SegQueue;
+use dashmap::DashMap;
 use rustc_hash::FxHashSet;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
@@ -31,7 +32,8 @@ use super::types::{
     SchedulingResponse,
 };
 use crate::protocols::{
-    LocalBlockHash, PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    LocalBlockHash, PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerSelectionTelemetry,
+    WorkerWithDpRank,
 };
 use crate::sequences::topology::WorkerDpRange;
 use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRequest};
@@ -45,6 +47,69 @@ struct ClassQueueCounters {
     pending_count: AtomicUsize,
     pending_isl_tokens: AtomicUsize,
     pending_cached_tokens: AtomicUsize,
+}
+
+#[derive(Default)]
+struct SelectionTelemetryStore {
+    requested: DashMap<String, ()>,
+    telemetry: DashMap<String, WorkerSelectionTelemetry>,
+}
+
+impl SelectionTelemetryStore {
+    fn reserve(self: &Arc<Self>, key: String) -> SelectionTelemetryReservation {
+        self.requested.insert(key.clone(), ());
+        SelectionTelemetryReservation {
+            store: Arc::clone(self),
+            key,
+            active: true,
+        }
+    }
+
+    fn record_for(&self, request: &SchedulingRequest, telemetry: WorkerSelectionTelemetry) {
+        let Some(key) = request.mode.request_id() else {
+            return;
+        };
+        if self.requested.contains_key(key) {
+            self.telemetry.insert(key.to_string(), telemetry);
+            if !self.requested.contains_key(key) {
+                self.telemetry.remove(key);
+            }
+        }
+    }
+
+    fn take(&self, key: &str) -> WorkerSelectionTelemetry {
+        self.requested.remove(key);
+        self.telemetry
+            .remove(key)
+            .map(|(_, telemetry)| telemetry)
+            .unwrap_or_default()
+    }
+
+    fn remove(&self, key: &str) {
+        self.requested.remove(key);
+        self.telemetry.remove(key);
+    }
+}
+
+pub(crate) struct SelectionTelemetryReservation {
+    store: Arc<SelectionTelemetryStore>,
+    key: String,
+    active: bool,
+}
+
+impl SelectionTelemetryReservation {
+    pub(crate) fn take(mut self) -> WorkerSelectionTelemetry {
+        self.active = false;
+        self.store.take(&self.key)
+    }
+}
+
+impl Drop for SelectionTelemetryReservation {
+    fn drop(&mut self) {
+        if self.active {
+            self.store.remove(&self.key);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,6 +292,7 @@ struct SchedulerQueueActor<
     overlap_scores_refresh: Option<Arc<RF>>,
     overlap_refresh_after: Option<Duration>,
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+    selection_telemetry: Arc<SelectionTelemetryStore>,
 }
 
 /// Queue that gates scheduling requests behind a capacity check.
@@ -253,6 +319,7 @@ pub struct SchedulerQueue<
     queueing_enabled: bool,
     admission_enabled: bool,
     supports_overlap_refresh: bool,
+    selection_telemetry: Arc<SelectionTelemetryStore>,
     _marker: PhantomData<(Sel, RF)>,
 }
 
@@ -384,6 +451,7 @@ impl<
         );
         let (admission_tx, admission_rx) = mpsc::channel(admission_channel_capacity);
         let cleanup = Arc::new(AdmissionCleanup::default());
+        let selection_telemetry = Arc::new(SelectionTelemetryStore::default());
         let now = Instant::now();
         let actor = SchedulerQueueActor {
             pending,
@@ -405,6 +473,7 @@ impl<
             overlap_scores_refresh,
             overlap_refresh_after,
             overloaded_worker_provider,
+            selection_telemetry: Arc::clone(&selection_telemetry),
         };
         tokio::spawn(actor.run(admission_rx));
         Ok(Self {
@@ -418,6 +487,7 @@ impl<
             queueing_enabled,
             admission_enabled,
             supports_overlap_refresh: overlap_refresh_after.is_some(),
+            selection_telemetry,
             _marker: PhantomData,
         })
     }
@@ -662,6 +732,10 @@ impl<
 
     pub fn supports_overlap_refresh(&self) -> bool {
         self.supports_overlap_refresh
+    }
+
+    pub(crate) fn reserve_selection_telemetry(&self, key: String) -> SelectionTelemetryReservation {
+        self.selection_telemetry.reserve(key)
     }
 
     fn prepare_block_hashes_for_refresh(
@@ -1461,10 +1535,11 @@ impl<
             effective_overlap_blocks: selection.effective_overlap_blocks,
             cached_tokens: selection.cached_tokens,
             selected_worker_tiers,
-            selection_telemetry,
             request_progress,
             lifecycle_lease: None,
         };
+        self.selection_telemetry
+            .record_for(&request, selection_telemetry);
 
         if !request.mode.is_tracked() {
             request.respond(Ok(response));

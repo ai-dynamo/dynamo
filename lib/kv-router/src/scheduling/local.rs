@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::Duration;
 
 use rustc_hash::FxHashMap;
@@ -22,14 +23,31 @@ use super::types::{
     KvSchedulerError, OverloadedWorkerProvider, PotentialLoad, ScheduleMode, ScheduleRequest,
     SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
 };
-use crate::protocols::RoutingConstraints;
 use crate::protocols::{LocalBlockHash, WorkerConfigLike, WorkerId, WorkerWithDpRank};
+use crate::protocols::{RoutingConstraints, WorkerSelectionTelemetry};
 use crate::sequences::topology::WorkerDpRange;
 use crate::sequences::{
     ActiveSequencesMultiWorker, PrefillTokenDeltas, SequenceError, SequencePublisher,
     SequenceRequest,
 };
 use dynamo_tokens::SequenceHash;
+
+static NEXT_TELEMETRY_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+fn selection_telemetry_key(mode: &mut ScheduleMode) -> String {
+    match mode {
+        ScheduleMode::QueryOnly { request_id } => request_id
+            .get_or_insert_with(|| {
+                format!(
+                    "selection-telemetry-{}",
+                    NEXT_TELEMETRY_REQUEST_ID.fetch_add(1, AtomicOrdering::Relaxed)
+                )
+            })
+            .clone(),
+        ScheduleMode::Tracked { request_id }
+        | ScheduleMode::TrackedWithLifecycle { request_id } => request_id.clone(),
+    }
+}
 
 pub struct LocalScheduler<P, C, Sel = DefaultWorkerSelector, RF = NoopOverlapScoresRefresh>
 where
@@ -242,6 +260,24 @@ where
     }
 
     pub async fn schedule_request(
+        &self,
+        request: ScheduleRequest,
+    ) -> Result<SchedulingResponse, KvSchedulerError> {
+        self.schedule_request_inner(request).await
+    }
+
+    pub async fn schedule_request_with_telemetry(
+        &self,
+        mut request: ScheduleRequest,
+    ) -> Result<(SchedulingResponse, WorkerSelectionTelemetry), KvSchedulerError> {
+        let telemetry_key = selection_telemetry_key(&mut request.mode);
+        let reservation = self.queue.reserve_selection_telemetry(telemetry_key);
+        let response = self.schedule_request_inner(request).await?;
+        let selection_telemetry = reservation.take();
+        Ok((response, selection_telemetry))
+    }
+
+    async fn schedule_request_inner(
         &self,
         request: ScheduleRequest,
     ) -> Result<SchedulingResponse, KvSchedulerError> {

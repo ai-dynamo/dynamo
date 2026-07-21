@@ -677,9 +677,9 @@ where
             pinned_worker.as_ref(),
         );
 
-        let response = match self
+        let (response, selection_telemetry) = match self
             .scheduler
-            .schedule_request(ScheduleRequest {
+            .schedule_request_with_telemetry(ScheduleRequest {
                 mode,
                 token_seq: maybe_seq_hashes,
                 block_hashes: block_hashes_for_refresh,
@@ -745,7 +745,7 @@ where
                 self.worker_type,
                 response.best_worker,
                 response.cached_tokens,
-                response.selection_telemetry,
+                selection_telemetry,
             );
         }
 
