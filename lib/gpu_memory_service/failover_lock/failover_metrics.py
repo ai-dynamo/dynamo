@@ -4,10 +4,8 @@
 """Prometheus metrics for GMS shadow-engine failover.
 
 Engine-agnostic: an engine integration constructs one :class:`FailoverMetrics`
-per engine and drives it from its failover lifecycle. Values are set at the
-state transitions (event-driven); the scrape callback only encodes the current
-registry. See ``docs/kubernetes/shadow-engine-failover-observability.md`` for
-the metric catalog and the durability scheme.
+per engine and drives it from its failover lifecycle. Values are set at state
+transitions; the scrape callback only encodes the current registry.
 """
 
 import json

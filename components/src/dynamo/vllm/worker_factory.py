@@ -365,17 +365,15 @@ class WorkerFactory:
     def _maybe_create_failover_metrics(self, config: Config, generate_endpoint):
         """Create + register per-engine failover metrics (shadow mode only).
 
-        Called *before* the model loads so the ``init`` state spans the load
-        (the slowest part of bring-up) and is actually observable, and so a
-        restarted engine re-exposes its persisted switch counters within seconds
-        of process start rather than after a full reload. Uses a dedicated
-        registry, so early registration doesn't interfere with the engine's own
-        prometheus setup; registered on ``generate_endpoint`` so the metrics
-        surface on that endpoint's system /metrics.
+        Called before the model loads so ``init`` spans the load and a restarted
+        engine re-exposes its persisted switch counters within seconds. Uses a
+        dedicated registry surfaced on ``generate_endpoint``'s system /metrics.
         """
         if not config.gms_shadow_mode:
             return None
-        from gpu_memory_service.failover_metrics import create_failover_metrics
+        from gpu_memory_service.failover_lock.failover_metrics import (
+            create_failover_metrics,
+        )
 
         persist_dir = (
             os.path.dirname(
@@ -400,10 +398,8 @@ class WorkerFactory:
         config: Config,
         failover_metrics=None,
     ) -> bool:
-        # Shadow mode: lock-driven activation.
-        # Flow: sleep → startup probe passes → block on lock → wake → register.
-        # Returns True if this promotion was a real failover (won a *contended*
-        # lock); False for an immediate initial bootup (or non-shadow mode).
+        # Shadow mode: sleep → probe → block on lock → wake. True only for a real
+        # (contended) failover, not the initial bootup.
         if not config.gms_shadow_mode:
             return False
 
@@ -486,9 +482,7 @@ class WorkerFactory:
                 ]
             )
 
-        # Shadow mode: register failover metrics and enter 'init' BEFORE the
-        # model loads, so 'init' spans the load. Threaded through to the
-        # lock-wait and post-register hooks below.
+        # Shadow mode: create metrics + enter 'init' before load, so 'init' spans it.
         failover_metrics = self._maybe_create_failover_metrics(
             config, generate_endpoint
         )
@@ -654,10 +648,8 @@ class WorkerFactory:
             worker_type=worker_type,
             needs=needs,
         )
-        # Registered with discovery and serving now, so a failover that reached
-        # here succeeded. Gated on was_failover (same gate as the attempt) so the
-        # initial bootup — an uncontended lock, not a switch — isn't counted, and
-        # success stays paired with attempt.
+        # Serving now: a failover that got here succeeded. Gated on was_failover
+        # (same as the attempt) so bootup isn't counted and success pairs with attempt.
         if failover_metrics is not None:
             failover_metrics.set_state("active")
             if was_failover:
@@ -764,8 +756,7 @@ class WorkerFactory:
             else None
         )
 
-        # Shadow mode: register failover metrics and enter 'init' BEFORE the
-        # model loads, so 'init' spans the load. Threaded through below.
+        # Shadow mode: create metrics + enter 'init' before load, so 'init' spans it.
         failover_metrics = self._maybe_create_failover_metrics(
             config, generate_endpoint
         )
@@ -905,10 +896,8 @@ class WorkerFactory:
             worker_type=WorkerType.Prefill,
             needs=[prefill_needs_set],
         )
-        # Registered with discovery and serving now, so a failover that reached
-        # here succeeded. Gated on was_failover (same gate as the attempt) so the
-        # initial bootup — an uncontended lock, not a switch — isn't counted, and
-        # success stays paired with attempt.
+        # Serving now: a failover that got here succeeded. Gated on was_failover
+        # (same as the attempt) so bootup isn't counted and success pairs with attempt.
         if failover_metrics is not None:
             failover_metrics.set_state("active")
             if was_failover:
