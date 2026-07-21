@@ -33,6 +33,7 @@ class PoolSpec:
     """Snapshot of one pool's state read from the DGD spec."""
 
     sub_type: str
+    component_name: str
     current_replicas: int
     gpu_per_replica: int
 
@@ -266,6 +267,12 @@ class ScaleRequestHandler:
             return role_hints.get(component_name, "")
         return ""
 
+    @staticmethod
+    def _gpu_per_replica(component: dict, service: Service) -> int:
+        multinode = component.get("multinode")
+        node_count = 1 if multinode is None else multinode.get("nodeCount", 2)
+        return service.get_gpu_count() * int(node_count)
+
     def _read_dgd_pools(
         self,
         connector: KubernetesConnector,
@@ -289,7 +296,7 @@ class ScaleRequestHandler:
                 V1BETA1_GENERIC_WORKER_COMPONENT_TYPE,
             ):
                 try:
-                    gpu_per_replica = service.get_gpu_count()
+                    gpu_per_replica = self._gpu_per_replica(component, service)
                 except ValueError:
                     if component_type == "":
                         # An untyped non-worker component is not a pool.
@@ -303,11 +310,12 @@ class ScaleRequestHandler:
                 continue
             pools[pool_key] = PoolSpec(
                 sub_type=pool_key,
+                component_name=component_name,
                 current_replicas=service.number_replicas(),
                 gpu_per_replica=(
                     gpu_per_replica
                     if gpu_per_replica is not None
-                    else service.get_gpu_count()
+                    else self._gpu_per_replica(component, service)
                 ),
             )
         return pools
@@ -993,10 +1001,11 @@ class ScaleRequestHandler:
                 # patch. Cross-DGD partners get separate per-DGD patches.
                 dgd_targets: dict[str, list[TargetReplica]] = defaultdict(list)
                 dgd_targets[request_key].extend(request.target_replicas)
-                for p_dgd, p_sub, p_desired, _ in selected_partners:
+                for p_dgd, p_sub, p_desired, p_spec in selected_partners:
                     dgd_targets[p_dgd].append(
                         TargetReplica(
                             sub_component_type=SubComponentType(p_sub),
+                            component_name=p_spec.component_name,
                             desired_replicas=p_desired,
                         )
                     )
