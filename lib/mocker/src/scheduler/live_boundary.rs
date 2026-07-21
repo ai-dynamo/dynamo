@@ -199,6 +199,11 @@ async fn run_live_scheduler<C: LiveBoundaryCore>(
     let mut deferred_commands = VecDeque::new();
 
     loop {
+        // Productive zero-duration passes may never enter one of the
+        // cancellation-aware waits below.
+        if cancel_token.is_cancelled() {
+            break;
+        }
         if !receive_until_live_schedulable(
             core,
             &mut request_rx,

@@ -13,6 +13,8 @@ struct FakeCore {
     publishers: KvEventPublishers,
     command_effects: bool,
     midpass_kv_effects: bool,
+    execute_count: usize,
+    cancel_after_execute: Option<(usize, CancellationToken)>,
 }
 
 impl FakeCore {
@@ -32,13 +34,32 @@ impl FakeCore {
 
 impl LiveBoundaryCore for FakeCore {
     fn live_is_empty(&self) -> bool {
-        true
+        self.cancel_after_execute.is_none()
     }
 
     fn receive_live_request(&mut self, _request: DirectRequest) {}
 
     fn execute_live_pass(&mut self, _scheduler_start: &Instant) -> LivePassExecution {
-        panic!("boundary-only fake does not execute live passes")
+        let (cancel_after, cancel_token) = self
+            .cancel_after_execute
+            .as_ref()
+            .expect("boundary-only fake does not execute live passes");
+        self.execute_count += 1;
+        assert!(
+            self.execute_count <= *cancel_after,
+            "scheduler did not observe shutdown between productive zero-duration passes"
+        );
+        if self.execute_count == *cancel_after {
+            cancel_token.cancel();
+        }
+        let mut pass = pass();
+        pass.admissions.clear();
+        pass.lifecycle_events.clear();
+        pass.fpm = None;
+        LivePassExecution {
+            pass,
+            duration: Duration::ZERO,
+        }
     }
 
     fn apply_live_command(
@@ -137,6 +158,8 @@ async fn pass_effects_publish_once_in_boundary_order_and_isolate_midpass_ack() {
         publishers: buffering_publishers,
         command_effects: false,
         midpass_kv_effects: false,
+        execute_count: 0,
+        cancel_after_execute: None,
     };
     core.publish_kv(1);
     let (output_tx, output_rx) = mpsc::unbounded_channel();
@@ -193,6 +216,8 @@ async fn controlled_pass_start_router_effects_precede_midpass_ack_without_duplic
         publishers: buffering_publishers,
         command_effects: false,
         midpass_kv_effects: true,
+        execute_count: 0,
+        cancel_after_execute: None,
     };
     core.publish_kv(1);
     let (output_tx, _output_rx) = mpsc::unbounded_channel();
@@ -254,6 +279,8 @@ async fn command_effects_publish_kv_before_ack_then_lifecycle_and_metrics() {
         publishers: buffering_publishers,
         command_effects: true,
         midpass_kv_effects: false,
+        execute_count: 0,
+        cancel_after_execute: None,
     };
     let (output_tx, _output_rx) = mpsc::unbounded_channel();
     let log = Arc::new(Mutex::new(Vec::new()));
@@ -287,4 +314,35 @@ async fn command_effects_publish_kv_before_ack_then_lifecycle_and_metrics() {
             PublishedEffect::Metrics,
         ]
     );
+}
+
+// Regression: a productive zero-duration core could spin forever without
+// observing shutdown because it never entered a cancellation-aware wait.
+#[tokio::test]
+async fn shutdown_stops_a_nonempty_zero_duration_progress_loop() {
+    let cancel_token = CancellationToken::new();
+    let (captured, buffering_publishers) = capture_deferred_kv_publish_sink(false, false);
+    let mut core = FakeCore {
+        publishers: buffering_publishers,
+        command_effects: false,
+        midpass_kv_effects: false,
+        execute_count: 0,
+        cancel_after_execute: Some((3, cancel_token.clone())),
+    };
+    let (output_tx, _output_rx) = mpsc::unbounded_channel();
+    let publisher = publisher(output_tx, captured, Arc::new(Mutex::new(Vec::new())));
+    let (_request_tx, request_rx) = mpsc::unbounded_channel();
+    let (_command_tx, command_rx) = mpsc::channel(1);
+
+    run_live_scheduler(
+        &mut core,
+        request_rx,
+        command_rx,
+        publisher,
+        cancel_token,
+        false,
+    )
+    .await;
+
+    assert_eq!(core.execute_count, 3);
 }
