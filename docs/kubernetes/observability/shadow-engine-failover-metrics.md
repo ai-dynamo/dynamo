@@ -15,18 +15,22 @@ Each shadow-mode engine emits a small set of self-reported Prometheus metrics
 describing its position in the failover lifecycle (`init → standby → waking →
 active`), plus counters for real failovers. They are exposed on the engine's
 system `/metrics` surface (no extra port) and scraped by the standard
-`dynamo-worker` PodMonitor. A Grafana dashboard renders them per
-DynamoGraphDeployment (DGD).
+`dynamo-worker` PodMonitor — **one PodMonitor per platform install** that selects
+all Dynamo worker pods by label, not one per DGD. The per-DGD split is a
+relabeling (below), defined in the operator chart's `prometheus.yaml`, so changes
+there are what flow through to the generated scrape config. A Grafana dashboard
+renders them per DynamoGraphDeployment (DGD).
 
 ## The dashboard
 
-The **Dynamo · GMS Shadow-Failover** dashboard ships as a ConfigMap in the
-platform Helm chart (labeled `grafana_dashboard`), so any kube-prometheus-stack
-Grafana with the dashboards sidecar auto-imports it — no manual step. It is
-**multi-DGD aware**: two template variables, **Namespace** and **DGD**, select a
-deployment, and every panel filters to that deployment's failover engines. The
-DGD name comes from the `nvidia.com/dynamo-graph-deployment-name` pod label,
-exposed as the `dynamo_graph_deployment` metric label by the PodMonitor.
+The **Dynamo · GMS Shadow-Failover** dashboard ships alongside the other Dynamo
+dashboards from the cluster infra repo, as a ConfigMap labeled
+`grafana_dashboard`, so any kube-prometheus-stack Grafana with the dashboards
+sidecar auto-imports it — no manual step. It is **multi-DGD aware**: two template
+variables, **Namespace** and **DGD**, select a deployment, and every panel
+filters to that deployment's failover engines. The DGD name comes from the
+`nvidia.com/dynamo-graph-deployment-name` pod label, which the worker
+PodMonitor's relabeling exposes as the `dynamo_graph_deployment` metric label.
 
 ## Metric catalog
 
