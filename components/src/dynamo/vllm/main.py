@@ -31,6 +31,7 @@ from dynamo.common.snapshot.restore_context import (
 )
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.common.utils.prometheus import (
+    EMBEDDING_CACHE_METRIC_PREFIX,
     LLMBackendMetrics,
     register_engine_metrics_callback,
 )
@@ -214,6 +215,20 @@ def setup_metrics_collection(
         Additional labels can be provided via inject_labels parameter.
     """
     metrics_model_name = get_metrics_model_name(config)
+
+    # The DynamoMultimodalEmbeddingCacheConnector (scheduler side, EngineCore
+    # process) publishes its cache metrics through the multiprocess .db files.
+    # Forward that family only when the connector is configured — the
+    # encode-routing path exposes the same metric names in-process via
+    # register_embedding_cache_metrics instead.
+    engine_metric_prefixes = ["vllm:", "lmcache:"]
+    ec_config = getattr(config.engine_args, "ec_transfer_config", None)
+    if (
+        getattr(ec_config, "ec_connector", None)
+        == "DynamoMultimodalEmbeddingCacheConnector"
+    ):
+        engine_metric_prefixes.append(EMBEDDING_CACHE_METRIC_PREFIX)
+
     if config.engine_args.disable_log_stats is False:
         # Register the dedicated dynamo_component registry callback
         # IMPORTANT: We do NOT use MultiProcessCollector for DYNAMO_COMPONENT_REGISTRY
@@ -243,7 +258,7 @@ def setup_metrics_collection(
                 register_engine_metrics_callback(
                     endpoint=generate_endpoint,
                     registry=REGISTRY,
-                    metric_prefix_filters=["vllm:", "lmcache:"],
+                    metric_prefix_filters=engine_metric_prefixes,
                     namespace_name=config.namespace,
                     component_name=config.component,
                     endpoint_name=config.endpoint,
@@ -273,7 +288,7 @@ def setup_metrics_collection(
                 register_engine_metrics_callback(
                     endpoint=generate_endpoint,
                     registry=multiproc_registry,
-                    metric_prefix_filters=["vllm:", "lmcache:"],
+                    metric_prefix_filters=engine_metric_prefixes,
                     namespace_name=config.namespace,
                     component_name=config.component,
                     endpoint_name=config.endpoint,
@@ -560,6 +575,7 @@ def setup_vllm_engine(
         capacity_gb=config.multimodal_embedding_cache_capacity_gb,
         namespace=config.namespace,
         component=config.component,
+        model_name=get_metrics_model_name(config),
     )
 
     # Taken from build_async_engine_client_from_engine_args()

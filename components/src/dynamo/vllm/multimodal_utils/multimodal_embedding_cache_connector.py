@@ -51,6 +51,90 @@ class MultimodalEmbeddingCacheConnectorMetadata(ECConnectorMetadata):
     evicts: list[str] = field(default_factory=list)
 
 
+class _SchedulerCacheMetrics:
+    """Prometheus metrics for the scheduler-side logical CPU cache.
+
+    Emits the same EmbeddingCacheMetrics family as
+    register_embedding_cache_metrics (the worker-layer
+    MultimodalEmbeddingCacheManager used by encode-routing deployments), so
+    dashboards see one embedding-cache family regardless of which
+    implementation serves the model.
+
+    The scheduler-side connector runs in vLLM's EngineCore process, not the
+    process serving /metrics. Values reach the frontend through Dynamo's
+    multiprocess Prometheus setup: PROMETHEUS_MULTIPROC_DIR is set before the
+    engine starts (see setup_vllm_engine), so prometheus_client mmap-persists
+    values that setup_metrics_collection's MultiProcessCollector exposes. The
+    private CollectorRegistry keeps these metrics out of this process's global
+    REGISTRY so they are never exported twice when the engine core runs
+    in-process.
+    """
+
+    def __init__(
+        self, model_name: str, component_name: str, capacity_bytes: int
+    ) -> None:
+        # Deferred imports: prometheus_client must be imported after
+        # PROMETHEUS_MULTIPROC_DIR is set (inherited from the parent process).
+        from prometheus_client import CollectorRegistry, Counter, Gauge
+
+        from dynamo.common.utils.prometheus import EmbeddingCacheMetrics as ECM
+        from dynamo.prometheus_names import labels
+
+        self._capacity_bytes = capacity_bytes
+        self.registry = CollectorRegistry()
+        labelnames = [labels.MODEL, labels.COMPONENT]
+        labelvalues = {
+            labels.MODEL: model_name,
+            labels.COMPONENT: component_name,
+        }
+
+        def _counter(name: str, doc: str):
+            return Counter(name, doc, labelnames, registry=self.registry).labels(
+                **labelvalues
+            )
+
+        def _gauge(name: str, doc: str):
+            # "mostrecent" so MultiProcessCollector reports this process's
+            # latest snapshot instead of aggregating across dead pids.
+            return Gauge(
+                name,
+                doc,
+                labelnames,
+                registry=self.registry,
+                multiprocess_mode="mostrecent",
+            ).labels(**labelvalues)
+
+        self._hits = _counter(ECM.HITS_TOTAL, "Total embedding cache hits.")
+        self._misses = _counter(ECM.MISSES_TOTAL, "Total embedding cache misses.")
+        self._evictions = _counter(
+            ECM.EVICTIONS_TOTAL, "Total embedding cache evictions."
+        )
+        self._utilization = _gauge(
+            ECM.UTILIZATION, "Cache memory utilization ratio (0.0-1.0)."
+        )
+        self._current_bytes = _gauge(
+            ECM.CURRENT_BYTES, "Current cache memory usage in bytes."
+        )
+        self._entries = _gauge(ECM.ENTRIES, "Number of entries in the cache.")
+        self.update_usage(0, 0)
+
+    def record_hit(self) -> None:
+        self._hits.inc()
+
+    def record_miss(self) -> None:
+        self._misses.inc()
+
+    def record_evictions(self, count: int) -> None:
+        self._evictions.inc(count)
+
+    def update_usage(self, used_bytes: int, entries: int) -> None:
+        self._current_bytes.set(used_bytes)
+        self._entries.set(entries)
+        self._utilization.set(
+            used_bytes / self._capacity_bytes if self._capacity_bytes else 0.0
+        )
+
+
 class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
     """EC connector with scheduler-authoritative CPU embedding cache.
 
@@ -106,6 +190,19 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         self._loads_this_step: set[str] = set()
         self._saves_this_step: set[str] = set()
         self._evicts_this_step: set[str] = set()
+
+        # Only the scheduler role does cache accounting, so only it emits
+        # metrics; worker-role instances would just publish idle zeros.
+        extra_config = transfer_config.ec_connector_extra_config
+        self._metrics: _SchedulerCacheMetrics | None = (
+            _SchedulerCacheMetrics(
+                model_name=extra_config.get("model_name", ""),
+                component_name=extra_config.get("component", ""),
+                capacity_bytes=self._capacity_bytes,
+            )
+            if role == ECConnectorRole.SCHEDULER
+            else None
+        )
 
         # --- Worker-side: dumb CPU tensor store ---
         self._cpu_store: dict[str, torch.Tensor] = {}
@@ -166,13 +263,19 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         if mm_hash in self._cache_order:
             self._cache_order.move_to_end(mm_hash)
             self._loads_this_step.add(mm_hash)
+            if self._metrics is not None:
+                self._metrics.record_hit()
             return
+
+        if self._metrics is not None:
+            self._metrics.record_miss()
 
         if size_bytes > self._capacity_bytes:
             return
 
         self._saves_this_step.add(mm_hash)
 
+        num_evicted = 0
         while (
             self._num_used_bytes + size_bytes > self._capacity_bytes
             and self._cache_order
@@ -180,9 +283,15 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
             evicted_hash, evicted_bytes = self._cache_order.popitem(last=False)
             self._num_used_bytes -= evicted_bytes
             self._evicts_this_step.add(evicted_hash)
+            num_evicted += 1
 
         self._cache_order[mm_hash] = size_bytes
         self._num_used_bytes += size_bytes
+
+        if self._metrics is not None:
+            if num_evicted:
+                self._metrics.record_evictions(num_evicted)
+            self._metrics.update_usage(self._num_used_bytes, len(self._cache_order))
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
