@@ -1046,6 +1046,7 @@ impl VllmCore {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn request_residency(&self, request_id: Uuid) -> Option<RequestResidency> {
         if self.state.running_members.contains(&request_id) {
             Some(RequestResidency::Running)
@@ -1053,6 +1054,18 @@ impl VllmCore {
             Some(RequestResidency::Waiting)
         } else {
             None
+        }
+    }
+
+    pub(crate) fn visit_request_residencies(
+        &self,
+        visitor: &mut dyn FnMut(Uuid, RequestResidency),
+    ) {
+        for request_id in &self.state.running_members {
+            visitor(*request_id, RequestResidency::Running);
+        }
+        for request_id in &self.state.waiting_members {
+            visitor(*request_id, RequestResidency::Waiting);
         }
     }
 

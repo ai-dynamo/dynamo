@@ -513,6 +513,7 @@ impl SglangCore {
         self.mocker_metrics_with_cache(0, 0)
     }
 
+    #[cfg(test)]
     pub(crate) fn request_residency(&self, request_id: Uuid) -> Option<RequestResidency> {
         if self
             .running
@@ -529,6 +530,18 @@ impl SglangCore {
             Some(RequestResidency::Waiting)
         } else {
             None
+        }
+    }
+
+    pub(crate) fn visit_request_residencies(
+        &self,
+        visitor: &mut dyn FnMut(Uuid, RequestResidency),
+    ) {
+        for request in &self.running {
+            visitor(request.uuid, RequestResidency::Running);
+        }
+        for request in self.waiting.iter().chain(self.prebuilt_ready.iter()) {
+            visitor(request.uuid, RequestResidency::Waiting);
         }
     }
 

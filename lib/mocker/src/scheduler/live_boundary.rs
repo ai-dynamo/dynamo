@@ -65,7 +65,7 @@ pub(crate) trait LiveBoundaryCore {
 
     fn pass_boundary_metrics(&self, pass_metrics: MockerMetrics) -> MockerMetrics;
 
-    fn live_request_residency(&self, request_id: Uuid) -> Option<RequestResidency>;
+    fn visit_live_request_residencies(&self, visitor: &mut dyn FnMut(Uuid, RequestResidency));
 
     fn live_internal_deadline_ms(&self) -> Option<f64> {
         None
@@ -661,14 +661,6 @@ impl LiveEffectsPublisher {
         self.metrics_tx.borrow().clone()
     }
 
-    #[cfg(test)]
-    fn set_visible_request_residency(&self, request_id: Uuid, residency: RequestResidency) {
-        self.visible_residencies
-            .lock()
-            .unwrap()
-            .insert(request_id, residency);
-    }
-
     pub(crate) fn capture_pass(&self, pass: EnginePassResult) -> PendingLivePass {
         PendingLivePass {
             pass,
@@ -799,14 +791,6 @@ impl LiveEffectsPublisher {
                 }
                 self.record(PublishedEffect::Ack);
                 let _ = reply.send(Ok(effects));
-                if let SchedulerCommandResult::Submitted(request_id) = command_result
-                    && let Some(residency) = core.live_request_residency(request_id)
-                {
-                    self.visible_residencies
-                        .lock()
-                        .unwrap()
-                        .insert(request_id, residency);
-                }
                 let cancelled_residency = if command_result == SchedulerCommandResult::Applied {
                     cancellation_id.and_then(|request_id| {
                         self.visible_residencies.lock().unwrap().remove(&request_id)
@@ -816,6 +800,7 @@ impl LiveEffectsPublisher {
                 };
                 if allow_destination_admission {
                     self.publish_lifecycle(lifecycle_events).await;
+                    self.refresh_visible_residencies(core);
                     self.record(PublishedEffect::Metrics);
                     let _ = self.metrics_tx.send(core.live_metrics());
                 } else if let Some(residency) = cancelled_residency {
@@ -845,16 +830,11 @@ impl LiveEffectsPublisher {
     }
 
     fn refresh_visible_residencies<C: LiveBoundaryCore>(&self, core: &C) {
-        self.visible_residencies
-            .lock()
-            .unwrap()
-            .retain(|request_id, residency| {
-                let Some(current) = core.live_request_residency(*request_id) else {
-                    return false;
-                };
-                *residency = current;
-                true
-            });
+        let mut visible_residencies = self.visible_residencies.lock().unwrap();
+        visible_residencies.clear();
+        core.visit_live_request_residencies(&mut |request_id, residency| {
+            visible_residencies.insert(request_id, residency);
+        });
     }
 
     pub(crate) async fn retry_destinations<C: LiveBoundaryCore>(

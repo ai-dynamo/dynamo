@@ -93,8 +93,8 @@ impl LiveBoundaryCore for FakeCore {
         pass_metrics
     }
 
-    fn live_request_residency(&self, _request_id: Uuid) -> Option<RequestResidency> {
-        None
+    fn visit_live_request_residencies(&self, visitor: &mut dyn FnMut(Uuid, RequestResidency)) {
+        visitor(Uuid::from_u128(1), RequestResidency::Running);
     }
 
     fn output_delivery_failed(&mut self, _signals: Vec<OutputSignal>) {
@@ -179,7 +179,7 @@ async fn midpass_cancellation_is_observed_without_controls_and_suppresses_pendin
         ..Default::default()
     };
     let publisher = publisher_with_metrics(output_tx, captured, log, metrics);
-    publisher.set_visible_request_residency(request_id, RequestResidency::Running);
+    publisher.refresh_visible_residencies(&core);
     let mut pending = publisher.capture_pass(pass());
     let (_command_tx, mut command_rx) = mpsc::channel(1);
     let (cancellation_tx, mut cancellation_rx) = mpsc::channel(1);

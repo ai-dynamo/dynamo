@@ -209,8 +209,11 @@ impl LiveBoundaryCore for VllmCore {
         self.mocker_metrics()
     }
 
-    fn live_request_residency(&self, request_id: uuid::Uuid) -> Option<RequestResidency> {
-        self.request_residency(request_id)
+    fn visit_live_request_residencies(
+        &self,
+        visitor: &mut dyn FnMut(uuid::Uuid, RequestResidency),
+    ) {
+        self.visit_request_residencies(visitor);
     }
 
     fn live_internal_deadline_ms(&self) -> Option<f64> {
