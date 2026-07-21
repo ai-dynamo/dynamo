@@ -19,9 +19,9 @@ use dynamo_kv_router::scheduling::{
 };
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::{
-    ActiveSequencesMultiWorker, DefaultWorkerSelector, RadixTree, SchedulingRequest,
-    SequenceRequest, TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope,
-    WorkerLoadProjection, WorkerSelector, scheduling::TierOverlapBlocks,
+    ActiveSequencesMultiWorker, DefaultWorkerSelector, RadixTree, RoutingPartitionRef,
+    SchedulingRequest, SequenceRequest, TrackingHashAlgorithm, TrackingHashContext,
+    TrackingHashScope, WorkerLoadProjection, WorkerSelector, scheduling::TierOverlapBlocks,
 };
 use dynamo_tokens::SequenceHash;
 use rustc_hash::FxHashMap;
@@ -552,8 +552,7 @@ impl OfflineReplayRouter {
 
     fn tracking_hash_scope(&self) -> TrackingHashScope<'_> {
         TrackingHashScope {
-            model_name: "replay",
-            routing_group: "default",
+            partition: RoutingPartitionRef::new("replay", "default"),
             block_size: self.block_size,
         }
     }

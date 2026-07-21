@@ -5,8 +5,8 @@ use std::{collections::HashSet, sync::Arc, time::Instant};
 
 use anyhow::Result;
 use dynamo_kv_router::{
-    DEFAULT_TRACKING_ROUTING_GROUP, KvSchedulerError, PrefillLoadEstimator, SharedKvCache,
-    TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope,
+    DEFAULT_ROUTING_GROUP, KvSchedulerError, PrefillLoadEstimator, RoutingPartitionRef,
+    SharedKvCache, TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope,
     config::{KvRouterConfig, RouterConfigOverride, min_initial_workers_from_env},
     indexer::{KvRouterError, RoutingDecisionHashes},
     protocols::KV_EVENT_SUBJECT,
@@ -414,8 +414,7 @@ where
 
     fn tracking_hash_scope(&self) -> TrackingHashScope<'_> {
         TrackingHashScope {
-            model_name: &self.tracking_model_name,
-            routing_group: DEFAULT_TRACKING_ROUTING_GROUP,
+            partition: RoutingPartitionRef::new(&self.tracking_model_name, DEFAULT_ROUTING_GROUP),
             block_size: self.block_size,
         }
     }
