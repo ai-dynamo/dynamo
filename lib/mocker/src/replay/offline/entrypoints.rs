@@ -45,6 +45,63 @@ fn use_single_runtime(num_workers: usize, dp_size: u32, router_mode: ReplayRoute
     num_workers == 1 && dp_size <= 1 && router_mode != ReplayRouterMode::KvRouter
 }
 
+fn trace_workload_driver(
+    trace: Trace,
+    engine_block_size: usize,
+    router_mode: ReplayRouterMode,
+    accumulate_session_deltas: bool,
+) -> Result<WorkloadDriver> {
+    match router_mode {
+        ReplayRouterMode::RoundRobin => WorkloadDriver::new_trace_without_replay_hashes(
+            trace,
+            engine_block_size,
+            accumulate_session_deltas,
+        ),
+        ReplayRouterMode::KvRouter if accumulate_session_deltas => {
+            trace.into_delta_accumulating_trace_driver_with_block_size(engine_block_size)
+        }
+        ReplayRouterMode::KvRouter => trace.into_trace_driver_with_block_size(engine_block_size),
+    }
+}
+
+fn concurrency_workload_driver(
+    trace: Trace,
+    engine_block_size: usize,
+    max_in_flight: usize,
+    router_mode: ReplayRouterMode,
+    accumulate_session_deltas: bool,
+) -> Result<WorkloadDriver> {
+    match router_mode {
+        ReplayRouterMode::RoundRobin => WorkloadDriver::new_concurrency_without_replay_hashes(
+            trace,
+            engine_block_size,
+            max_in_flight,
+            accumulate_session_deltas,
+        ),
+        ReplayRouterMode::KvRouter if accumulate_session_deltas => trace
+            .into_delta_accumulating_concurrency_driver_with_block_size(
+                engine_block_size,
+                max_in_flight,
+            ),
+        ReplayRouterMode::KvRouter => {
+            trace.into_concurrency_driver_with_block_size(engine_block_size, max_in_flight)
+        }
+    }
+}
+
+fn agentic_workload_driver(
+    trace: AgenticTrace,
+    engine_block_size: usize,
+    router_mode: ReplayRouterMode,
+) -> Result<WorkloadDriver> {
+    match router_mode {
+        ReplayRouterMode::RoundRobin => {
+            WorkloadDriver::new_agentic_trace_without_replay_hashes(trace, engine_block_size)
+        }
+        ReplayRouterMode::KvRouter => trace.into_trace_driver_with_block_size(engine_block_size),
+    }
+}
+
 /// Run the deterministic offline half of the live/offline handoff conformance
 /// fixture. This is public only for cross-crate conformance tests.
 #[doc(hidden)]
@@ -488,7 +545,7 @@ pub(crate) fn simulate_trace_workload_disagg(
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
-    let driver = WorkloadDriver::new_trace(trace, config.prefill_args.block_size)?;
+    let driver = trace_workload_driver(trace, config.prefill_args.block_size, router_mode, false)?;
     let (collector, _) = match router_mode {
         ReplayRouterMode::RoundRobin => RoundRobinDisaggRuntime::new_round_robin_workload(
             &config,
@@ -526,8 +583,13 @@ pub(crate) fn simulate_concurrency_workload_disagg(
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
-    let driver =
-        WorkloadDriver::new_concurrency(trace, config.prefill_args.block_size, max_in_flight)?;
+    let driver = concurrency_workload_driver(
+        trace,
+        config.prefill_args.block_size,
+        max_in_flight,
+        router_mode,
+        false,
+    )?;
     let (collector, _) = match router_mode {
         ReplayRouterMode::RoundRobin => RoundRobinDisaggRuntime::new_round_robin_workload(
             &config,
@@ -603,11 +665,11 @@ pub(crate) fn simulate_trace_workload_single(
     let started_at = Instant::now();
     let args = args.normalized()?;
     let engine_block_size = args.block_size;
-    let driver = if accumulate_session_deltas {
-        trace.into_delta_accumulating_trace_driver_with_block_size(engine_block_size)?
-    } else {
-        trace.into_trace_driver_with_block_size(engine_block_size)?
-    };
+    let driver = WorkloadDriver::new_trace_without_replay_hashes(
+        trace,
+        engine_block_size,
+        accumulate_session_deltas,
+    )?;
     let collector = SingleRuntime::new_workload(args, driver, SingleReplayMode::Trace)
         .with_per_request_records(record_per_request)
         .with_max_sim_time_ms(max_sim_time_ms)
@@ -623,7 +685,7 @@ pub(crate) fn simulate_agentic_trace_workload_single(
     let started_at = Instant::now();
     let args = args.normalized()?;
     let engine_block_size = args.block_size;
-    let driver = trace.into_trace_driver_with_block_size(engine_block_size)?;
+    let driver = WorkloadDriver::new_agentic_trace_without_replay_hashes(trace, engine_block_size)?;
     let collector = SingleRuntime::new_workload(args, driver, SingleReplayMode::Trace).run()?;
     Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
@@ -640,14 +702,12 @@ pub(crate) fn simulate_concurrency_workload_single(
     let started_at = Instant::now();
     let args = args.normalized()?;
     let engine_block_size = args.block_size;
-    let driver = if accumulate_session_deltas {
-        trace.into_delta_accumulating_concurrency_driver_with_block_size(
-            engine_block_size,
-            max_in_flight,
-        )?
-    } else {
-        trace.into_concurrency_driver_with_block_size(engine_block_size, max_in_flight)?
-    };
+    let driver = WorkloadDriver::new_concurrency_without_replay_hashes(
+        trace,
+        engine_block_size,
+        max_in_flight,
+        accumulate_session_deltas,
+    )?;
     let collector = SingleRuntime::new_workload(
         args,
         driver,
@@ -758,11 +818,12 @@ pub(crate) fn simulate_trace_workload_multi(
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
-    let driver = if accumulate_session_deltas {
-        trace.into_delta_accumulating_trace_driver_with_block_size(args.block_size)?
-    } else {
-        trace.into_trace_driver_with_block_size(args.block_size)?
-    };
+    let driver = trace_workload_driver(
+        trace,
+        args.block_size,
+        router_mode,
+        accumulate_session_deltas,
+    )?;
     let (collector, _) = match router_mode {
         ReplayRouterMode::RoundRobin => RoundRobinAggRuntime::new_round_robin_workload(
             &args,
@@ -800,7 +861,7 @@ pub(crate) fn simulate_agentic_trace_workload_multi(
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
-    let driver = trace.into_trace_driver_with_block_size(args.block_size)?;
+    let driver = agentic_workload_driver(trace, args.block_size, router_mode)?;
     let (collector, _) = match router_mode {
         ReplayRouterMode::RoundRobin => RoundRobinAggRuntime::new_round_robin_workload(
             &args,
@@ -839,14 +900,13 @@ pub(crate) fn simulate_concurrency_workload_multi(
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
-    let driver = if accumulate_session_deltas {
-        trace.into_delta_accumulating_concurrency_driver_with_block_size(
-            args.block_size,
-            max_in_flight,
-        )?
-    } else {
-        trace.into_concurrency_driver_with_block_size(args.block_size, max_in_flight)?
-    };
+    let driver = concurrency_workload_driver(
+        trace,
+        args.block_size,
+        max_in_flight,
+        router_mode,
+        accumulate_session_deltas,
+    )?;
     let (collector, _) = match router_mode {
         ReplayRouterMode::RoundRobin => RoundRobinAggRuntime::new_round_robin_workload(
             &args,

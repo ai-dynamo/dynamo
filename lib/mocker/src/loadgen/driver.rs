@@ -245,6 +245,7 @@ pub struct WorkloadDriver {
     policy: SchedulingPolicy,
     prompt_mode: PromptMode,
     engine_block_size: u32,
+    include_replay_hashes: bool,
     sessions: Vec<SessionRuntime>,
     in_flight: FxHashMap<Uuid, InFlightTurn>,
     ready_sessions: BinaryHeap<ReadySession>,
@@ -257,6 +258,27 @@ impl WorkloadDriver {
             engine_block_size,
             SchedulingPolicy::Trace,
             PromptMode::Full,
+            true,
+        )
+    }
+
+    pub(crate) fn new_trace_without_replay_hashes(
+        trace: Trace,
+        engine_block_size: usize,
+        accumulate_session_deltas: bool,
+    ) -> Result<Self> {
+        trace.validate_for_trace_mode()?;
+        let prompt_mode = if accumulate_session_deltas {
+            PromptMode::DeltaCumulative
+        } else {
+            PromptMode::Full
+        };
+        Self::new(
+            trace,
+            engine_block_size,
+            SchedulingPolicy::Trace,
+            prompt_mode,
+            false,
         )
     }
 
@@ -269,6 +291,7 @@ impl WorkloadDriver {
             engine_block_size,
             SchedulingPolicy::Trace,
             PromptMode::DeltaCumulative,
+            true,
         )
     }
 
@@ -285,6 +308,28 @@ impl WorkloadDriver {
             engine_block_size,
             SchedulingPolicy::Concurrency(ConcurrencyState::new(max_in_flight)),
             PromptMode::Full,
+            true,
+        )
+    }
+
+    pub(crate) fn new_concurrency_without_replay_hashes(
+        trace: Trace,
+        engine_block_size: usize,
+        max_in_flight: usize,
+        accumulate_session_deltas: bool,
+    ) -> Result<Self> {
+        trace.validate_for_concurrency_mode()?;
+        let prompt_mode = if accumulate_session_deltas {
+            PromptMode::DeltaCumulative
+        } else {
+            PromptMode::Full
+        };
+        Self::new(
+            trace,
+            engine_block_size,
+            SchedulingPolicy::Concurrency(ConcurrencyState::new(max_in_flight)),
+            prompt_mode,
+            false,
         )
     }
 
@@ -298,10 +343,26 @@ impl WorkloadDriver {
             engine_block_size,
             SchedulingPolicy::Concurrency(ConcurrencyState::new(max_in_flight)),
             PromptMode::DeltaCumulative,
+            true,
         )
     }
 
     pub(crate) fn new_agentic_trace(trace: AgenticTrace, engine_block_size: usize) -> Result<Self> {
+        Self::new_agentic_trace_with_replay_hashes(trace, engine_block_size, true)
+    }
+
+    pub(crate) fn new_agentic_trace_without_replay_hashes(
+        trace: AgenticTrace,
+        engine_block_size: usize,
+    ) -> Result<Self> {
+        Self::new_agentic_trace_with_replay_hashes(trace, engine_block_size, false)
+    }
+
+    fn new_agentic_trace_with_replay_hashes(
+        trace: AgenticTrace,
+        engine_block_size: usize,
+        include_replay_hashes: bool,
+    ) -> Result<Self> {
         if engine_block_size == 0 {
             bail!("engine_block_size must be greater than 0");
         }
@@ -325,8 +386,9 @@ impl WorkloadDriver {
             remaining_dependencies.push(turn.wait_for.len());
             ready_after_ms.push(0.0);
 
-            let replay_hashes = Some(turn.to_replay_hashes(trace_block_size, engine_block_size)?);
             let tokens = turn.synthesize_tokens(trace_block_size)?;
+            let replay_hashes = include_replay_hashes
+                .then(|| ReplayRequestHashes::from_tokens(&tokens, engine_block_size_u32));
             let output_token_ids = Some(planned_output_token_ids(
                 turn.output_token_ids,
                 turn.max_output_tokens,
@@ -382,6 +444,7 @@ impl WorkloadDriver {
             }),
             prompt_mode: PromptMode::Full,
             engine_block_size: engine_block_size_u32,
+            include_replay_hashes,
             sessions,
             in_flight: FxHashMap::default(),
             ready_sessions,
@@ -393,6 +456,7 @@ impl WorkloadDriver {
         engine_block_size: usize,
         policy: SchedulingPolicy,
         prompt_mode: PromptMode,
+        include_replay_hashes: bool,
     ) -> Result<Self> {
         if engine_block_size == 0 {
             bail!("engine_block_size must be greater than 0");
@@ -417,12 +481,11 @@ impl WorkloadDriver {
                     .turns
                     .into_iter()
                     .map(|turn| -> Result<TurnRuntime> {
-                        let replay_hashes = if prompt_mode == PromptMode::Full {
-                            Some(turn.to_replay_hashes(trace_block_size, engine_block_size)?)
-                        } else {
-                            None
-                        };
                         let tokens = turn.synthesize_tokens(trace_block_size)?;
+                        let replay_hashes =
+                            (include_replay_hashes && prompt_mode == PromptMode::Full).then(|| {
+                                ReplayRequestHashes::from_tokens(&tokens, engine_block_size_u32)
+                            });
                         let output_token_ids = Some(planned_output_token_ids(
                             turn.output_token_ids,
                             turn.max_output_tokens,
@@ -495,6 +558,7 @@ impl WorkloadDriver {
             policy,
             prompt_mode,
             engine_block_size: engine_block_size_u32,
+            include_replay_hashes,
             sessions,
             in_flight: FxHashMap::default(),
             ready_sessions,
@@ -591,16 +655,18 @@ impl WorkloadDriver {
             let (request_tokens, replay_hashes) = match self.prompt_mode {
                 PromptMode::Full => (
                     turn.tokens.clone(),
-                    turn.replay_hashes
-                        .as_ref()
-                        .expect("full-prompt workload turns precompute replay hashes")
-                        .clone(),
+                    if self.include_replay_hashes {
+                        turn.replay_hashes.clone()
+                    } else {
+                        None
+                    },
                 ),
                 PromptMode::DeltaCumulative => {
                     session.cumulative_tokens.extend_from_slice(&turn.tokens);
                     let request_tokens = session.cumulative_tokens.clone();
-                    let replay_hashes =
-                        ReplayRequestHashes::from_tokens(&request_tokens, self.engine_block_size);
+                    let replay_hashes = self.include_replay_hashes.then(|| {
+                        ReplayRequestHashes::from_tokens(&request_tokens, self.engine_block_size)
+                    });
                     (request_tokens, replay_hashes)
                 }
             };
@@ -631,7 +697,7 @@ impl WorkloadDriver {
                 turn_index,
                 replay_key: turn.replay_key.clone(),
                 scheduled_ready_at_ms,
-                replay_hashes: Some(replay_hashes),
+                replay_hashes,
                 request,
             });
         }
@@ -873,6 +939,40 @@ mod tests {
         assert_eq!(
             first[0].request.output_token_ids.as_ref().map(Vec::len),
             Some(expected_len)
+        );
+    }
+
+    #[test]
+    fn hash_free_admission_preserves_request_without_router_metadata() {
+        let trace = Trace {
+            block_size: 2,
+            sessions: vec![SessionTrace {
+                session_id: "a".into(),
+                first_arrival_timestamp_ms: Some(0.0),
+                turns: vec![TurnTrace {
+                    input_length: 4,
+                    max_output_tokens: 1,
+                    hash_ids: vec![10, 11],
+                    ..Default::default()
+                }],
+            }],
+        };
+        let mut with_hashes = WorkloadDriver::new_trace(trace.clone(), 2).unwrap();
+        let mut without_hashes =
+            WorkloadDriver::new_trace_without_replay_hashes(trace, 2, false).unwrap();
+
+        assert!(with_hashes.sessions[0].turns[0].replay_hashes.is_some());
+        assert!(without_hashes.sessions[0].turns[0].replay_hashes.is_none());
+
+        let with_hashes = with_hashes.pop_ready(0.0, 1).pop().unwrap();
+        let without_hashes = without_hashes.pop_ready(0.0, 1).pop().unwrap();
+
+        assert!(with_hashes.replay_hashes.is_some());
+        assert!(without_hashes.replay_hashes.is_none());
+        assert_eq!(without_hashes.request.tokens, with_hashes.request.tokens);
+        assert_eq!(
+            without_hashes.request.output_token_ids,
+            with_hashes.request.output_token_ids
         );
     }
 
