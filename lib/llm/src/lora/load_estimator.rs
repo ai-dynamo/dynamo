@@ -743,6 +743,12 @@ impl Default for LoadEstimator {
 mod tests {
     use super::*;
     use dynamo_kv_router::protocols::{ActiveSequenceEventBatch, WorkerWithDpRank};
+    use dynamo_runtime::config::environment_names::zmq_broker as broker_env;
+    use dynamo_runtime::distributed::DistributedConfig;
+    use dynamo_runtime::transports::event_plane::EventPublisher;
+    use dynamo_runtime::{DistributedRuntime, Runtime};
+
+    use crate::kv_router::ACTIVE_SEQUENCES_SUBJECT;
 
     fn lora_event(
         request_id: &str,
@@ -767,34 +773,98 @@ mod tests {
         }
     }
 
-    #[test]
-    fn mixed_replica_batch_updates_lora_load_in_order() {
-        let estimator = LoadEstimator::new();
-        let batch = ActiveSequenceEventBatch {
-            events: vec![
-                lora_event("alpha", Some("lora-alpha"), add_request()),
-                lora_event(
-                    "alpha",
-                    Some("lora-alpha"),
-                    ActiveSequenceEventData::MarkPrefillCompleted,
-                ),
-                lora_event("beta", Some("lora-beta"), add_request()),
-                lora_event("alpha", Some("lora-alpha"), ActiveSequenceEventData::Free),
-                lora_event("no-lora", None, add_request()),
+    #[tokio::test]
+    async fn mixed_replica_batch_updates_lora_load_in_order() {
+        temp_env::async_with_vars(
+            [
+                (broker_env::DYN_ZMQ_BROKER_URL, None::<&str>),
+                (broker_env::DYN_ZMQ_BROKER_ENABLED, None::<&str>),
             ],
-        };
-        for event in batch.events {
-            estimator.handle_event(event);
-        }
+            async {
+                let runtime = Runtime::from_current().expect("create runtime handle");
+                let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+                    .await
+                    .expect("create distributed runtime");
+                let endpoint = drt
+                    .namespace(format!("lora-replica-batch-test-{}", uuid::Uuid::new_v4()))
+                    .expect("create namespace")
+                    .component("worker")
+                    .expect("create component")
+                    .endpoint("generate");
+                let publisher = EventPublisher::for_endpoint(&endpoint, ACTIVE_SEQUENCES_SUBJECT)
+                    .await
+                    .expect("create publisher");
+                let mut subscriber = RuntimeSequenceSubscriber::for_endpoint(&endpoint)
+                    .await
+                    .expect("create sequence subscriber");
+                let batch = ActiveSequenceEventBatch {
+                    events: vec![
+                        lora_event("alpha", Some("lora-alpha"), add_request()),
+                        lora_event(
+                            "alpha",
+                            Some("lora-alpha"),
+                            ActiveSequenceEventData::MarkPrefillCompleted,
+                        ),
+                        lora_event("beta", Some("lora-beta"), add_request()),
+                        lora_event("alpha", Some("lora-alpha"), ActiveSequenceEventData::Free),
+                        lora_event("no-lora", None, add_request()),
+                    ],
+                };
 
-        let inflight = estimator.get_inflight_counts();
-        assert!(!inflight.contains_key("lora-alpha"));
-        assert_eq!(inflight.get("lora-beta"), Some(&1));
+                let events = tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        publisher
+                            .publish(&batch)
+                            .await
+                            .expect("publish active-sequence batch");
+                        let receive_batch = async {
+                            let mut events = Vec::with_capacity(batch.events.len());
+                            while events.len() < batch.events.len() {
+                                match subscriber.next_event().await {
+                                    Some(Ok(event)) => events.push(event),
+                                    Some(Err(error)) => {
+                                        panic!("receive active-sequence batch: {error}")
+                                    }
+                                    None => panic!("active-sequence event stream closed"),
+                                }
+                            }
+                            events
+                        };
+                        match tokio::time::timeout(Duration::from_millis(100), receive_batch).await
+                        {
+                            Ok(events) => break events,
+                            Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+                        }
+                    }
+                })
+                .await
+                .expect("subscriber should receive an active-sequence batch");
 
-        let arrivals = estimator.get_raw_arrival_counts();
-        assert_eq!(arrivals.get("lora-alpha"), Some(&1));
-        assert_eq!(arrivals.get("lora-beta"), Some(&1));
-        assert_eq!(arrivals.len(), 2);
+                assert_eq!(
+                    events
+                        .iter()
+                        .map(|event| event.request_id.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["alpha", "alpha", "beta", "alpha", "no-lora"]
+                );
+
+                let estimator = LoadEstimator::new();
+                for event in events {
+                    estimator.handle_event(event);
+                }
+
+                let inflight = estimator.get_inflight_counts();
+                assert!(!inflight.contains_key("lora-alpha"));
+                assert_eq!(inflight.get("lora-beta"), Some(&1));
+
+                let arrivals = estimator.get_raw_arrival_counts();
+                assert_eq!(arrivals.get("lora-alpha"), Some(&1));
+                assert_eq!(arrivals.get("lora-beta"), Some(&1));
+                assert_eq!(arrivals.len(), 2);
+                drt.shutdown();
+            },
+        )
+        .await;
     }
 
     #[test]
