@@ -173,6 +173,16 @@ deploy:
   - '!**/*.md'
   - '!**/*.rst'
 
+dgdr:
+  - '.github/workflows/shared-dgdr-deploy-test.yml'
+  - 'tests/conftest.py'
+  - 'tests/deploy/conftest.py'
+  - 'tests/deploy/dgdr_utils.py'
+  - 'tests/deploy/test_dgdr.py'
+  - 'tests/deploy/test_dgdr_h100.py'
+  - 'tests/deploy/test_dgdr_utils.py'
+  - 'tests/utils/managed_deployment.py'
+
 planner:
   - 'container/templates/planner.Dockerfile'
   - 'components/src/dynamo/planner/**'
