@@ -31,7 +31,6 @@ runs:
       shell: bash
       working-directory: ./deploy/${{ inputs.component }}
       run: |
-        # The operator tester reads production webhook configuration from this chart.
         docker buildx build \
           --platform ${{ inputs.platform }} \
           --target tester \
