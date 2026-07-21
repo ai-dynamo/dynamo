@@ -1137,7 +1137,10 @@ mod tests {
             KvSourceAmbiguity, KvSourceMembershipCoordinator, KvSourceMembershipView,
             KvStateEndpointResolution, runtime_config_watch,
         },
-        kv_router::indexer::{Indexer, LowerTierIndexers},
+        kv_router::{
+            indexer::{Indexer, LowerTierIndexers},
+            metrics::RouterWorkerStatusMetrics,
+        },
         local_model::runtime_config::ModelRuntimeConfig,
         model_card::ModelDeploymentCard,
     };
@@ -3061,8 +3064,27 @@ mod tests {
             assert!(!contains_rank_block(&final_events, delayed_rank, 2));
             assert!(configs.borrow().contains_key(&logical_worker_id));
 
+            let status_metrics = RouterWorkerStatusMetrics::from_component(&frontend);
+            let mismatch_labels = [
+                "test-model",
+                "decode",
+                serving_id.namespace.as_str(),
+                serving_id.component.as_str(),
+                serving_id.name.as_str(),
+            ];
+            status_metrics
+                .kv_event_source_mismatch_workers
+                .with_label_values(&mismatch_labels)
+                .set(4);
             cancel.cancel();
             subscription.shutdown().await;
+            assert_eq!(
+                status_metrics
+                    .kv_event_source_mismatch_workers
+                    .with_label_values(&mismatch_labels)
+                    .get(),
+                0
+            );
             for source in &replacement_node_1_sources {
                 source_discovery
                     .unregister(source.instance.clone())

@@ -166,16 +166,13 @@ async fn run_subscription_supervisor<T: RecoveryTarget>(
     }
 
     client.shutdown().await;
-    if cancellation_token.is_cancelled() {
-        metrics.set_kv_event_source_mismatch_workers(
-            &model,
-            worker_type,
-            &serving_endpoint.namespace,
-            &serving_endpoint.component,
-            &serving_endpoint.name,
-            0,
-        );
-    }
+    clear_mismatch_metric_on_cancellation(
+        &metrics,
+        &cancellation_token,
+        &model,
+        worker_type,
+        &serving_endpoint,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -277,6 +274,26 @@ pub(super) fn update_subscription_failure_metric(
         &serving_endpoint.component,
         &serving_endpoint.name,
         view.sources.len(),
+    );
+}
+
+pub(super) fn clear_mismatch_metric_on_cancellation(
+    metrics: &RouterWorkerStatusMetrics,
+    cancellation_token: &CancellationToken,
+    model: &str,
+    worker_type: &str,
+    serving_endpoint: &EndpointId,
+) {
+    if !cancellation_token.is_cancelled() {
+        return;
+    }
+    metrics.set_kv_event_source_mismatch_workers(
+        model,
+        worker_type,
+        &serving_endpoint.namespace,
+        &serving_endpoint.component,
+        &serving_endpoint.name,
+        0,
     );
 }
 

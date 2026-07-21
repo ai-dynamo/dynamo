@@ -29,7 +29,10 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     IndexerRecoveryTarget,
-    subscriber::{update_mismatch_metric, update_subscription_failure_metric},
+    subscriber::{
+        clear_mismatch_metric_on_cancellation, update_mismatch_metric,
+        update_subscription_failure_metric,
+    },
     worker_query::{ReadyKvSource, WorkerQueryClient},
 };
 use crate::{
@@ -209,6 +212,13 @@ pub(super) async fn run_direct_zmq_supervisor(
     }
 
     client.shutdown().await;
+    clear_mismatch_metric_on_cancellation(
+        &status_metrics,
+        &cancellation_token,
+        &model,
+        worker_type,
+        &serving_endpoint,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
