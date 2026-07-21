@@ -940,14 +940,15 @@ async fn fake_tonic_server_discovery_and_aggregate_stream() {
         .collect::<Vec<_>>()
         .await;
     assert_eq!(formatted_outputs.len(), 2);
-    let forwarded = state.requests.lock();
-    assert_eq!(forwarded.last().unwrap().media.len(), 1);
-    assert!(matches!(
-        forwarded.last().unwrap().input,
-        Some(pb::generate_request::Input::Prompt(ref prompt))
-            if prompt == "<image>describe it"
-    ));
-    drop(forwarded);
+    {
+        let forwarded = state.requests.lock();
+        assert_eq!(forwarded.last().unwrap().media.len(), 1);
+        assert!(matches!(
+            forwarded.last().unwrap().input,
+            Some(pb::generate_request::Input::Prompt(ref prompt))
+                if prompt == "<image>describe it"
+        ));
+    }
 
     let mut bypass = request();
     bypass.extra_args = Some(serde_json::json!({"bypass_prefix_cache": true}));

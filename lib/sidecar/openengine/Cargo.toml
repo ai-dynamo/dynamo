@@ -13,7 +13,7 @@ description = "Engine-neutral Dynamo backend for out-of-process OpenEngine serve
 build = "build.rs"
 
 [package.metadata.openengine]
-commit = "7d6ac3848bba9c9a2b1aabcd4fab5f1a4ea04558"
+commit = "f1a7189311770f8aa1f0dd787561df809847595d"
 
 [[bin]]
 name = "dynamo-openengine-sidecar"
@@ -25,7 +25,7 @@ dynamo-kv-router = { workspace = true }
 dynamo-llm = { workspace = true }
 dynamo-protocols = { workspace = true }
 dynamo-runtime = { workspace = true }
-openengine-proto = { version = "0.2.0", path = "../../../../openengine-trtllm/packages/rust/openengine-proto" }
+openengine-proto = { version = "0.2.0", git = "https://github.com/ai-dynamo/openengine.git", rev = "f1a7189311770f8aa1f0dd787561df809847595d" }
 
 anyhow = { workspace = true }
 async-stream = { workspace = true }

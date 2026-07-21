@@ -6212,6 +6212,7 @@ dependencies = [
 [[package]]
 name = "openengine-proto"
 version = "0.2.0"
+source = "git+https://github.com/ai-dynamo/openengine.git?rev=f1a7189311770f8aa1f0dd787561df809847595d#f1a7189311770f8aa1f0dd787561df809847595d"
 dependencies = [
  "prost 0.14.4",
  "prost-types 0.14.4",

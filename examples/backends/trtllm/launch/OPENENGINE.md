@@ -10,7 +10,7 @@ against the same `LLM`, then register a CPU-only `dynamo-openengine-sidecar`
 worker with Dynamo.
 
 The examples use the OpenEngine schema release
-`7d6ac3848bba9c9a2b1aabcd4fab5f1a4ea04558`. Install the matching local
+`f1a7189311770f8aa1f0dd787561df809847595d`. Install the matching local
 OpenEngine Python package in the TRT-LLM environment and build the Rust sidecar
 against the same local checkout before launching them.
 
