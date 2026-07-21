@@ -14,6 +14,8 @@
 #[cfg(feature = "mm-routing")]
 pub mod lightseek_mm;
 pub mod media;
+#[cfg(feature = "mm-routing")]
+pub mod mm_video;
 pub mod prompt;
 pub mod speculative_prefill;
 mod structural_tag;
@@ -175,13 +177,39 @@ struct ReasoningState {
     guided_json_bypass_decision: Option<bool>,
 }
 
-/// Per-image routing payload accumulated by `gather_multi_modal_data` and
+/// Media modality of an [`MmMediaEntry`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MmModality {
+    Image,
+    Video,
+}
+
+/// Per-media routing payload accumulated by `gather_multi_modal_data` and
 /// consumed by `gather_mm_exact_routing_info`.
-#[derive(Debug, Clone, Copy)]
-pub struct MmImageEntry {
+#[derive(Debug, Clone)]
+pub struct MmMediaEntry {
+    pub modality: MmModality,
     pub mm_hash: u64,
     pub width: u32,
     pub height: u32,
+    /// Sampled frame count; 1 for images. Video token counts depend on it.
+    pub num_frames: usize,
+    /// Sampled frame timestamps in seconds. Only populated for video on the
+    /// frontend-decoding path; Qwen3-VL interleaves them as text tokens.
+    pub sampled_timestamps: Vec<f64>,
+}
+
+impl MmMediaEntry {
+    fn image(mm_hash: u64, width: u32, height: u32) -> Self {
+        Self {
+            modality: MmModality::Image,
+            mm_hash,
+            width,
+            height,
+            num_frames: 1,
+            sampled_timestamps: Vec::new(),
+        }
+    }
 }
 
 /// Per-request media content-part counts, carried to the metrics annotation.
@@ -294,6 +322,19 @@ pub struct OpenAIPreprocessor {
     /// back to text-prefix routing.
     #[cfg(feature = "mm-routing")]
     routing_image_token_id: Option<crate::protocols::TokenIdType>,
+    /// Per-video token-count engine (in-tree Qwen-VL math; see `mm_video`).
+    /// `None` when the feature is disabled or the family is unsupported.
+    #[cfg(feature = "mm-routing")]
+    video_token_counter: Option<mm_video::VideoTokenCounter>,
+    /// Video-placeholder token id from `config.json`'s `video_token_id`.
+    /// `None` disables video MM-aware routing for this model.
+    #[cfg(feature = "mm-routing")]
+    routing_video_token_id: Option<crate::protocols::TokenIdType>,
+    /// `(vision_start_token_id, vision_end_token_id)` from `config.json`.
+    /// Qwen3-VL replaces the whole `<start><video_pad><end>` triple during
+    /// expansion, so matching needs both bounds.
+    #[cfg(feature = "mm-routing")]
+    routing_vision_bounds: Option<(crate::protocols::TokenIdType, crate::protocols::TokenIdType)>,
     /// BOS token id to prepend to the routing-side sequence so per-block
     /// hashes match the backend's HF processor output on models with
     /// `add_bos_token: true` (LLaVA-1.5 and other `LlamaTokenizer`
@@ -316,17 +357,17 @@ impl OpenAIPreprocessor {
     }
 
     /// Prompt length for sizing the omitted-`max_tokens` cap. Prefers the
-    /// MM-expanded length; a 0 (serde-default / absent) counts as missing. With
-    /// images but no expanded length, defers to the backend (`None`); text-only
-    /// uses `token_ids_len`.
+    /// MM-expanded length; a 0 (serde-default / absent) counts as missing.
+    /// With images/videos but no expanded length, defers to the backend
+    /// (`None`); text-only uses `token_ids_len`.
     fn effective_prompt_len_for_cap(
         expanded_prompt_len: Option<usize>,
-        has_images: bool,
+        has_expandable_media: bool,
         token_ids_len: usize,
     ) -> Option<usize> {
         match expanded_prompt_len {
             Some(n) if n > 0 => Some(n),
-            _ if has_images => None,
+            _ if has_expandable_media => None,
             _ => Some(token_ids_len),
         }
     }
@@ -589,80 +630,124 @@ impl OpenAIPreprocessor {
         };
 
         #[cfg(feature = "mm-routing")]
-        let (image_token_counter, routing_image_token_id, bos_token_string) =
-            match image_token_inputs {
-                Some((model_id, model_type, model_dir)) => {
-                    // Resolve counter + image-token id independently so the
-                    // summary log can name which piece is missing.
-                    let (counter, counter_err): (
-                        Option<lightseek_mm::LightseekMmCounter>,
-                        Option<String>,
-                    ) = match lightseek_mm::LightseekMmCounter::try_new(
-                        &model_id,
-                        Some(&model_type),
-                        &model_dir,
-                    ) {
-                        Ok(c) => (Some(c), None),
-                        Err(e) => (None, Some(e.to_string())),
-                    };
-                    // One-shot config/tokenizer_config read for all
-                    // routing-side token info. Parsing lives next to the
-                    // spec resolution in the MM-routing module.
-                    let routing_tokens =
-                        lightseek_mm::resolve_routing_tokens(&model_id, &model_dir);
-                    // `chat_placeholder_token_id` already prefers config.json's
-                    // explicit field and falls back to the spec value, so it's
-                    // the single id used both for the engagement gate and the
-                    // routing-fill below.
-                    let img_tok = routing_tokens.chat_placeholder_token_id;
-                    let bos_tok_string = routing_tokens.bos_token_string;
+        let (
+            image_token_counter,
+            video_token_counter,
+            routing_image_token_id,
+            routing_video_token_id,
+            routing_vision_bounds,
+            bos_token_string,
+        ) = match image_token_inputs {
+            Some((model_id, model_type, model_dir)) => {
+                // Resolve counter + image-token id independently so the
+                // summary log can name which piece is missing.
+                let (counter, counter_err): (
+                    Option<lightseek_mm::LightseekMmCounter>,
+                    Option<String>,
+                ) = match lightseek_mm::LightseekMmCounter::try_new(
+                    &model_id,
+                    Some(&model_type),
+                    &model_dir,
+                ) {
+                    Ok(c) => (Some(c), None),
+                    Err(e) => (None, Some(e.to_string())),
+                };
+                // One-shot config/tokenizer_config read for all
+                // routing-side token info. Parsing lives next to the
+                // spec resolution in the MM-routing module.
+                let routing_tokens = lightseek_mm::resolve_routing_tokens(&model_id, &model_dir);
+                // `chat_placeholder_token_id` already prefers config.json's
+                // explicit field and falls back to the spec value, so it's
+                // the single id used both for the engagement gate and the
+                // routing-fill below.
+                let img_tok = routing_tokens.chat_placeholder_token_id;
+                let bos_tok_string = routing_tokens.bos_token_string;
 
-                    match (counter.is_some(), img_tok.is_some()) {
-                        (true, true) => tracing::info!(
+                // Video counting is in-tree (`mm_video`) — the upstream
+                // image crate has no temporal API. Unsupported families
+                // simply leave video routing off; image routing is
+                // unaffected.
+                let video_counter = match mm_video::VideoTokenCounter::try_new(
+                    &model_id,
+                    Some(&model_type),
+                    &model_dir,
+                ) {
+                    Ok(c) => Some(c),
+                    Err(e) => {
+                        tracing::debug!(
                             target: "mm_routing",
                             model = %model_id,
-                            model_dir = %model_dir.display(),
-                            "MM-aware KV routing enabled"
-                        ),
-                        (counter_ok, img_ok) => {
-                            let mut reasons: Vec<String> = Vec::new();
-                            if !counter_ok {
-                                reasons.push(format!(
-                                    "model not supported by the MM-routing registry ({})",
-                                    counter_err.as_deref().unwrap_or("unknown error")
-                                ));
-                            }
-                            if !img_ok {
-                                reasons.push(
-                                    "image-placeholder token unresolvable from \
+                            err = %e,
+                            "video token counter unavailable; video MM-aware routing disabled"
+                        );
+                        None
+                    }
+                };
+                let video_tok = routing_tokens.video_token_id;
+                let vision_bounds = routing_tokens
+                    .vision_start_token_id
+                    .zip(routing_tokens.vision_end_token_id);
+                if video_counter.is_some() && video_tok.is_some() {
+                    tracing::info!(
+                        target: "mm_routing",
+                        model = %model_id,
+                        "video MM-aware KV routing enabled (frontend-decode path)"
+                    );
+                }
+
+                match (counter.is_some(), img_tok.is_some()) {
+                    (true, true) => tracing::info!(
+                        target: "mm_routing",
+                        model = %model_id,
+                        model_dir = %model_dir.display(),
+                        "MM-aware KV routing enabled"
+                    ),
+                    (counter_ok, img_ok) => {
+                        let mut reasons: Vec<String> = Vec::new();
+                        if !counter_ok {
+                            reasons.push(format!(
+                                "model not supported by the MM-routing registry ({})",
+                                counter_err.as_deref().unwrap_or("unknown error")
+                            ));
+                        }
+                        if !img_ok {
+                            reasons.push(
+                                "image-placeholder token unresolvable from \
                                  config.json / processor_config.json / \
                                  tokenizer_config.json / vocab probe"
-                                        .to_string(),
-                                );
-                            }
-                            tracing::warn!(
-                                target: "mm_routing",
-                                model = %model_id,
-                                reasons = %reasons.join("; "),
-                                "{} is not supported for MM-aware KV routing ({}). \
-                                 Falling back to KV routing without MM awareness — \
-                                 text-prefix overlap still works but the router \
-                                 cannot distinguish requests by image content.",
-                                model_id,
-                                reasons.join("; ")
+                                    .to_string(),
                             );
                         }
+                        tracing::warn!(
+                            target: "mm_routing",
+                            model = %model_id,
+                            reasons = %reasons.join("; "),
+                            "{} is not supported for MM-aware KV routing ({}). \
+                             Falling back to KV routing without MM awareness — \
+                             text-prefix overlap still works but the router \
+                             cannot distinguish requests by image content.",
+                            model_id,
+                            reasons.join("; ")
+                        );
                     }
-                    (counter, img_tok, bos_tok_string)
                 }
-                None => {
-                    tracing::debug!(
-                        target: "mm_routing",
-                        "model directory not derivable from MDC; MM-aware routing disabled"
-                    );
-                    (None, None, None)
-                }
-            };
+                (
+                    counter,
+                    video_counter,
+                    img_tok,
+                    video_tok,
+                    vision_bounds,
+                    bos_tok_string,
+                )
+            }
+            None => {
+                tracing::debug!(
+                    target: "mm_routing",
+                    "model directory not derivable from MDC; MM-aware routing disabled"
+                );
+                (None, None, None, None, None, None)
+            }
+        };
 
         // Force the dim-fetch HTTP client to build at startup for any
         // MM-routable preprocessor, so TLS / env-var / reqwest-init
@@ -731,6 +816,12 @@ impl OpenAIPreprocessor {
             image_token_counter,
             #[cfg(feature = "mm-routing")]
             routing_image_token_id,
+            #[cfg(feature = "mm-routing")]
+            video_token_counter,
+            #[cfg(feature = "mm-routing")]
+            routing_video_token_id,
+            #[cfg(feature = "mm-routing")]
+            routing_vision_bounds,
             #[cfg(feature = "mm-routing")]
             routing_prepend_bos,
         }))
@@ -809,7 +900,7 @@ impl OpenAIPreprocessor {
         };
         TOKENIZE_SECONDS.observe(tokenize_start.elapsed().as_secs_f64());
 
-        let _mm_image_entries = self
+        let _mm_media_entries = self
             .gather_multi_modal_data(
                 request,
                 &mut builder,
@@ -819,11 +910,11 @@ impl OpenAIPreprocessor {
             .await
             .with_context(|| "Failed to gather multimodal data")?;
 
-        // Build the MM-aware view (expanded routing_token_ids + per-block
-        // mm_hashes) for the KV router. No-op when no images are present or
-        // the model has no resolved image-placeholder.
+        // Build the MM-aware view (expanded routing_token_ids) for the KV
+        // router. No-op when no image/video media is present or the model has
+        // no resolved placeholder tokens.
         #[cfg(feature = "mm-routing")]
-        self.gather_mm_exact_routing_info(&mut builder, &_mm_image_entries, &token_ids)
+        self.gather_mm_exact_routing_info(&mut builder, &_mm_media_entries, &token_ids)
             .with_context(|| "Failed to build MM routing info")?;
 
         // Install tokens on the builder. Done after MM routing built its
@@ -847,19 +938,20 @@ impl OpenAIPreprocessor {
         // preserve omission so backend adapters can compute the dynamic cap from their
         // effective prompt length/tokenization.
         //
-        // Multimodal `token_ids` carry unexpanded image placeholders, so prefer
-        // the MM-expanded length when available, else defer to the backend.
-        let has_images = preprocessed
-            .multi_modal_data
-            .as_ref()
-            .and_then(|m| m.get("image_url"))
-            .is_some_and(|v| !v.is_empty());
+        // Multimodal `token_ids` carry unexpanded image/video placeholders,
+        // so prefer the MM-expanded length when available, else defer to the
+        // backend.
+        let has_expandable_media = preprocessed.multi_modal_data.as_ref().is_some_and(|m| {
+            ["image_url", "video_url"]
+                .iter()
+                .any(|key| m.get(*key).is_some_and(|v| !v.is_empty()))
+        });
         let effective_prompt_len = Self::effective_prompt_len_for_cap(
             preprocessed
                 .mm_routing_info
                 .as_ref()
                 .map(|mm| mm.expanded_prompt_len),
-            has_images,
+            has_expandable_media,
             preprocessed.token_ids.len(),
         );
         if preprocessed.stop_conditions.max_tokens.is_none()
@@ -1172,7 +1264,7 @@ impl OpenAIPreprocessor {
         // forwarding on the same placeholder-count precondition as
         // `gather_mm_exact_routing_info`, so the two never diverge.
         token_ids: &[crate::protocols::TokenIdType],
-    ) -> Result<Vec<MmImageEntry>> {
+    ) -> Result<Vec<MmMediaEntry>> {
         // `token_ids` is only consumed by the mm-routing `mm_hashes` gate below.
         #[cfg(not(feature = "mm-routing"))]
         let _ = token_ids;
@@ -1180,25 +1272,31 @@ impl OpenAIPreprocessor {
         let mut media_map: MultimodalDataMap = HashMap::new();
         let mut fetch_tasks: Vec<(String, &ChatCompletionRequestUserMessageContentPart)> =
             Vec::new();
-        // Per-image (mm_hash, width, height) for the MM-routing path.
-        // Accumulated in message order so we don't walk messages twice.
-        // Cleared and returned to the caller; empty for non-image / text-only requests.
+        // Per-media (modality, mm_hash, dims, frames) for the MM-routing
+        // path. Accumulated in message order so we don't walk messages twice.
+        // Cleared and returned to the caller; empty for text-only requests.
         #[cfg(feature = "mm-routing")]
-        let mut mm_image_entries: Vec<MmImageEntry> = Vec::new();
+        let mut mm_media_entries: Vec<MmMediaEntry> = Vec::new();
         // Total `image_url` content parts in the request. Bumped at every
         // image part regardless of which fetch path handles it. Used at
-        // `mm_hashes` forwarding time: if `mm_image_entries.len()` is
+        // `mm_hashes` forwarding time: if the resolved image-entry count is
         // smaller, we omit `mm_hashes` for the whole request rather than
         // ship a partial / misaligned UUID list to vLLM.
         //
         // The mismatch is only reachable on the URL-passthrough path
         // (no media_loader): each `fetch_image_dims_uncached` failure logs
-        // a warn and skips its `mm_image_entries.push`, but doesn't abort
+        // a warn and skips its entry push, but doesn't abort
         // the request. The decoded path (`has_media_loader`) propagates
         // any dim-fetch failure via `?`, so the request errors out before
         // mm_hashes forwarding is even considered.
         #[cfg(feature = "mm-routing")]
         let mut total_image_count: usize = 0;
+        // Total `video_url` content parts. Video entries are only resolvable
+        // on the frontend-decoding path (frame sampling determines the token
+        // count), so a passthrough video keeps this total ahead of the
+        // resolved entries and fails the gate closed to text-prefix routing.
+        #[cfg(feature = "mm-routing")]
+        let mut total_video_count: usize = 0;
         // For the URL-passthrough case (media_loader is None) we collect image
         // URLs here and resolve dims via header-only HTTP after the loop so we
         // can issue all fetches in parallel.
@@ -1227,8 +1325,10 @@ impl OpenAIPreprocessor {
                         _ => continue,
                     };
                     #[cfg(feature = "mm-routing")]
-                    if type_str == "image_url" {
-                        total_image_count += 1;
+                    match type_str {
+                        "image_url" => total_image_count += 1,
+                        "video_url" => total_video_count += 1,
+                        _ => {}
                     }
                     fetch_tasks.push((type_str.to_string(), content_part));
                 } else {
@@ -1245,10 +1345,17 @@ impl OpenAIPreprocessor {
                         _ => continue,
                     };
                     #[cfg(feature = "mm-routing")]
-                    if type_str == "image_url" {
-                        total_image_count += 1;
-                        let mm_hash = Self::hash_image_url(url.as_str());
-                        url_passthrough_images.push((mm_hash, url.to_string()));
+                    match type_str {
+                        "image_url" => {
+                            total_image_count += 1;
+                            let mm_hash = Self::hash_image_url(url.as_str());
+                            url_passthrough_images.push((mm_hash, url.to_string()));
+                        }
+                        // URL-passthrough video is not MM-routable: the token
+                        // count depends on frame sampling only the decode path
+                        // performs. Counting it fails the gate closed.
+                        "video_url" => total_video_count += 1,
+                        _ => {}
                     }
                     media_map
                         .entry(type_str.to_string())
@@ -1271,52 +1378,115 @@ impl OpenAIPreprocessor {
                 // if one item fails, errors the whole request, other items will be cleaned up by Drop
                 let rdma_descriptor = result?;
 
-                // Decoded RDMA descriptor carries shape `[H, W, C]`.
-                // Image-only; MM-routing doesn't cover audio/video.
+                // Decoded RDMA descriptors carry shape `[H, W, C]` for
+                // images and `[T, H, W, C]` for video. Audio is not
+                // MM-routable yet.
                 #[cfg(feature = "mm-routing")]
-                if type_str == "image_url" {
-                    let shape = &rdma_descriptor.tensor_info.shape;
-                    if shape.len() >= 2 {
-                        let h = shape[0] as u32;
-                        let w = shape[1] as u32;
-                        let url_str = match _content_part {
-                            ChatCompletionRequestUserMessageContentPart::ImageUrl(p) => {
-                                p.image_url.url.as_str()
+                match type_str.as_str() {
+                    "image_url" => {
+                        let shape = &rdma_descriptor.tensor_info.shape;
+                        if shape.len() >= 2 {
+                            let h = shape[0] as u32;
+                            let w = shape[1] as u32;
+                            let url_str = match _content_part {
+                                ChatCompletionRequestUserMessageContentPart::ImageUrl(p) => {
+                                    p.image_url.url.as_str()
+                                }
+                                _ => unreachable!(
+                                    "rdma image_url descriptor only originates from ImageUrl content parts"
+                                ),
+                            };
+                            // Frontend-decode path: hash the decoded RGB bytes so
+                            // the same image reached via different (signed) URLs
+                            // collides on the same `mm_hash` and routes to the
+                            // worker that already has those KV blocks. Fall back
+                            // to URL hashing only if the descriptor lost local
+                            // storage (e.g. reconstructed from the wire), which
+                            // shouldn't happen on the frontend.
+                            let (mm_hash, hash_source) = match rdma_descriptor.content_hash() {
+                                Some(h) => (h, "decoded_bytes"),
+                                None => (Self::hash_image_url(url_str), "url_fallback"),
+                            };
+                            if let Some(counter) = self.image_token_counter.as_ref() {
+                                let n = counter.count_tokens(w, h);
+                                tracing::debug!(
+                                    target: "mm_routing",
+                                    model = counter.model_id(),
+                                    width = w,
+                                    height = h,
+                                    tokens = n,
+                                    mm_hash = mm_hash,
+                                    source = hash_source,
+                                    "image-token count"
+                                );
                             }
-                            _ => unreachable!(
-                                "rdma image_url descriptor only originates from ImageUrl content parts"
-                            ),
-                        };
-                        // Frontend-decode path: hash the decoded RGB bytes so
-                        // the same image reached via different (signed) URLs
-                        // collides on the same `mm_hash` and routes to the
-                        // worker that already has those KV blocks. Fall back
-                        // to URL hashing only if the descriptor lost local
-                        // storage (e.g. reconstructed from the wire), which
-                        // shouldn't happen on the frontend.
-                        let (mm_hash, hash_source) = match rdma_descriptor.content_hash() {
-                            Some(h) => (h, "decoded_bytes"),
-                            None => (Self::hash_image_url(url_str), "url_fallback"),
-                        };
-                        if let Some(counter) = self.image_token_counter.as_ref() {
-                            let n = counter.count_tokens(w, h);
-                            tracing::debug!(
-                                target: "mm_routing",
-                                model = counter.model_id(),
-                                width = w,
-                                height = h,
-                                tokens = n,
-                                mm_hash = mm_hash,
-                                source = hash_source,
-                                "image-token count"
-                            );
+                            mm_media_entries.push(MmMediaEntry::image(mm_hash, w, h));
                         }
-                        mm_image_entries.push(MmImageEntry {
-                            mm_hash,
-                            width: w,
-                            height: h,
-                        });
                     }
+                    "video_url" => {
+                        let shape = &rdma_descriptor.tensor_info.shape;
+                        if shape.len() == 4 {
+                            let num_frames = shape[0];
+                            let h = shape[1] as u32;
+                            let w = shape[2] as u32;
+                            let url_str = match _content_part {
+                                ChatCompletionRequestUserMessageContentPart::VideoUrl(p) => {
+                                    p.video_url.url.as_str()
+                                }
+                                _ => unreachable!(
+                                    "rdma video_url descriptor only originates from VideoUrl content parts"
+                                ),
+                            };
+                            // Same content-hash rationale as images: decoded
+                            // frame bytes, so rotating signed URLs of the same
+                            // clip share KV blocks.
+                            let (mm_hash, hash_source) = match rdma_descriptor.content_hash() {
+                                Some(hash) => (hash, "decoded_bytes"),
+                                None => (Self::hash_image_url(url_str), "url_fallback"),
+                            };
+                            // Sampled-frame timestamps ride on the decoder
+                            // metadata; Qwen3-VL interleaves them as text
+                            // tokens in the expanded sequence.
+                            #[cfg(feature = "media-ffmpeg")]
+                            let sampled_timestamps = match &rdma_descriptor.tensor_info.metadata {
+                                Some(media::DecodedMediaMetadata::Video(v)) => {
+                                    v.sampled_timestamps.clone()
+                                }
+                                _ => Vec::new(),
+                            };
+                            #[cfg(not(feature = "media-ffmpeg"))]
+                            let sampled_timestamps: Vec<f64> = Vec::new();
+                            if let Some(counter) = self.video_token_counter.as_ref() {
+                                match counter.count_tokens(num_frames, h, w) {
+                                    Ok(n) => tracing::debug!(
+                                        target: "mm_routing",
+                                        model = counter.model_id(),
+                                        num_frames,
+                                        width = w,
+                                        height = h,
+                                        tokens = n,
+                                        mm_hash = mm_hash,
+                                        source = hash_source,
+                                        "video-token count"
+                                    ),
+                                    Err(e) => tracing::debug!(
+                                        target: "mm_routing",
+                                        err = %e,
+                                        "video-token count failed"
+                                    ),
+                                }
+                            }
+                            mm_media_entries.push(MmMediaEntry {
+                                modality: MmModality::Video,
+                                mm_hash,
+                                width: w,
+                                height: h,
+                                num_frames,
+                                sampled_timestamps,
+                            });
+                        }
+                    }
+                    _ => {}
                 }
 
                 media_map
@@ -1354,11 +1524,7 @@ impl OpenAIPreprocessor {
                                 "image-token count"
                             );
                         }
-                        mm_image_entries.push(MmImageEntry {
-                            mm_hash,
-                            width: w,
-                            height: h,
-                        });
+                        mm_media_entries.push(MmMediaEntry::image(mm_hash, w, h));
                     }
                     Err(e) => {
                         // Redact `data:` URIs to just the media-type prefix —
@@ -1429,75 +1595,242 @@ impl OpenAIPreprocessor {
             // positions the backend derives from `multi_modal_data`, and
             // the wrong UUIDs would get injected onto the wrong images.
             //
-            // Also gate on the single-token placeholder count matching the
-            // image count — the same precondition `gather_mm_exact_routing_info`
-            // uses to build routing info. Forwarding `mm_hashes` makes the
-            // worker pad_value-key its KV blocks; if the router then falls back
-            // to plain `token_ids` (e.g. numbered-placeholder models like Phi-3,
-            // where the count won't match), the keys diverge and overlap is
-            // lost. Keeping both gated together leaves that fallback as clean
-            // text-prefix routing.
+            // Also gate on the placeholder structure matching per modality —
+            // the same precondition `gather_mm_exact_routing_info` uses to
+            // build routing info. Forwarding `mm_hashes` makes the worker
+            // pad_value-key its KV blocks; if the router then falls back to
+            // plain `token_ids` (e.g. numbered-placeholder models like Phi-3,
+            // where the count won't match, or URL-passthrough video, whose
+            // token count is unknowable without frame sampling), the keys
+            // diverge and overlap is lost. Keeping both gated together leaves
+            // that fallback as clean text-prefix routing.
             #[cfg(feature = "mm-routing")]
-            if let Some(find_token_id) = self.routing_image_token_id
-                && !mm_image_entries.is_empty()
-                && mm_image_entries.len() == total_image_count
-                && token_ids.iter().filter(|&&t| t == find_token_id).count()
-                    == mm_image_entries.len()
             {
-                let hexes: Vec<serde_json::Value> = mm_image_entries
+                let n_images = mm_media_entries
                     .iter()
-                    .map(|e| serde_json::Value::String(format!("{:016x}", e.mm_hash)))
-                    .collect();
-                extra_args["mm_hashes"] = serde_json::Value::Array(hexes);
-            } else if !mm_image_entries.is_empty() && self.routing_image_token_id.is_some() {
-                tracing::warn!(
-                    target: "mm_routing",
-                    resolved = mm_image_entries.len(),
-                    expected = total_image_count,
-                    "mm-routing: exact MM routing info not built (dim resolution or placeholder-count mismatch); skipping mm_hashes forwarding"
-                );
+                    .filter(|e| e.modality == MmModality::Image)
+                    .count();
+                let n_videos = mm_media_entries.len() - n_images;
+                if !mm_media_entries.is_empty()
+                    && n_images == total_image_count
+                    && n_videos == total_video_count
+                    && self.mm_placeholders_match(token_ids, n_images, n_videos)
+                {
+                    let hexes = |modality: MmModality| -> Vec<serde_json::Value> {
+                        mm_media_entries
+                            .iter()
+                            .filter(|e| e.modality == modality)
+                            .map(|e| serde_json::Value::String(format!("{:016x}", e.mm_hash)))
+                            .collect()
+                    };
+                    let image_hexes = hexes(MmModality::Image);
+                    let video_hexes = hexes(MmModality::Video);
+                    // Legacy image-only key, still read by backends that
+                    // predate the by-modality form.
+                    if !image_hexes.is_empty() {
+                        extra_args["mm_hashes"] = serde_json::Value::Array(image_hexes.clone());
+                    }
+                    // Grouped form (`{"image": [...], "video": [...]}`) —
+                    // the only key that can carry video identities.
+                    if !video_hexes.is_empty() {
+                        let mut by_modality = serde_json::Map::new();
+                        if !image_hexes.is_empty() {
+                            by_modality
+                                .insert("image".to_string(), serde_json::Value::Array(image_hexes));
+                        }
+                        by_modality
+                            .insert("video".to_string(), serde_json::Value::Array(video_hexes));
+                        extra_args["mm_hashes_by_modality"] =
+                            serde_json::Value::Object(by_modality);
+                    }
+                } else if !mm_media_entries.is_empty() || total_video_count > 0 {
+                    tracing::warn!(
+                        target: "mm_routing",
+                        resolved_images = n_images,
+                        expected_images = total_image_count,
+                        resolved_videos = n_videos,
+                        expected_videos = total_video_count,
+                        "mm-routing: exact MM routing info not built (dim/frame resolution or placeholder mismatch); skipping mm_hashes forwarding"
+                    );
+                }
             }
 
             builder.extra_args(Some(extra_args));
         }
 
         #[cfg(feature = "mm-routing")]
-        return Ok(mm_image_entries);
+        return Ok(mm_media_entries);
         #[cfg(not(feature = "mm-routing"))]
         Ok(Vec::new())
     }
 
+    /// True when the tokenized prompt's placeholder structure can be aligned
+    /// to the resolved media entries: exactly one `routing_image_token_id`
+    /// per image (Qwen-VL `<|image_pad|>`, LLaVA `<image>`), and per video
+    /// either one `routing_video_token_id` (Qwen2/2.5-VL) or one
+    /// `<vision_start><video_pad><vision_end>` triple (Qwen3-VL). Any other
+    /// shape (e.g. numbered-text placeholders that BPE-shatter) can't be
+    /// aligned here. Shared by `mm_hashes` forwarding and
+    /// `gather_mm_exact_routing_info` so worker-side keying and router-side
+    /// expansion never diverge.
+    #[cfg(feature = "mm-routing")]
+    fn mm_placeholders_match(
+        &self,
+        token_ids: &[crate::protocols::TokenIdType],
+        n_images: usize,
+        n_videos: usize,
+    ) -> bool {
+        if n_images + n_videos == 0 {
+            return false;
+        }
+        if n_images > 0 {
+            if self.image_token_counter.is_none() {
+                return false;
+            }
+            let Some(img_tok) = self.routing_image_token_id else {
+                return false;
+            };
+            if token_ids.iter().filter(|&&t| t == img_tok).count() != n_images {
+                return false;
+            }
+        }
+        if n_videos > 0 {
+            let Some(counter) = self.video_token_counter.as_ref() else {
+                return false;
+            };
+            let Some(vid_tok) = self.routing_video_token_id else {
+                return false;
+            };
+            if counter.family().expands_placeholder_triple() {
+                let Some((vs, ve)) = self.routing_vision_bounds else {
+                    return false;
+                };
+                if Self::count_video_triples(token_ids, vs, vid_tok, ve) != n_videos {
+                    return false;
+                }
+            } else if token_ids.iter().filter(|&&t| t == vid_tok).count() != n_videos {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Count `<vision_start><video_pad><vision_end>` triples. Windows can't
+    /// double-count: a match's end token differs from the start token, so
+    /// triples never overlap.
+    #[cfg(feature = "mm-routing")]
+    fn count_video_triples(
+        token_ids: &[crate::protocols::TokenIdType],
+        vision_start: crate::protocols::TokenIdType,
+        video_tok: crate::protocols::TokenIdType,
+        vision_end: crate::protocols::TokenIdType,
+    ) -> usize {
+        token_ids
+            .windows(3)
+            .filter(|w| w[0] == vision_start && w[1] == video_tok && w[2] == vision_end)
+            .count()
+    }
+
+    /// Routing-side replacement for one video placeholder.
+    /// Qwen2/2.5-VL: N pad_value tokens replacing `<|video_pad|>` in place.
+    /// Qwen3-VL: the whole placeholder triple becomes, per temporal grid
+    /// group, `<ts text><vision_start><pad_value x per_group><vision_end>`,
+    /// with the timestamp text encoded by the model tokenizer — mirroring the
+    /// backend HF processor so per-block hashes align. `None` means this
+    /// video can't be expanded exactly (missing timestamps, count failure);
+    /// the caller skips MM routing for the request.
+    #[cfg(feature = "mm-routing")]
+    fn video_replacement_tokens(
+        &self,
+        entry: &MmMediaEntry,
+    ) -> Option<Vec<crate::protocols::TokenIdType>> {
+        use dynamo_kv_router::protocols::pad_value_for_mm_hash;
+
+        let counter = self.video_token_counter.as_ref()?;
+        let pad = pad_value_for_mm_hash(entry.mm_hash);
+        if !counter.family().expands_placeholder_triple() {
+            let n = match counter.count_tokens(entry.num_frames, entry.height, entry.width) {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "mm_routing",
+                        err = %e,
+                        "video token count failed; skipping MM routing info"
+                    );
+                    return None;
+                }
+            };
+            return Some(vec![pad; n]);
+        }
+
+        let (vision_start, vision_end) = self.routing_vision_bounds?;
+        if entry.sampled_timestamps.len() != entry.num_frames {
+            tracing::warn!(
+                target: "mm_routing",
+                num_frames = entry.num_frames,
+                timestamps = entry.sampled_timestamps.len(),
+                "sampled timestamps do not cover the decoded frames; skipping MM routing info"
+            );
+            return None;
+        }
+        let per_group =
+            match counter.tokens_per_frame_group(entry.num_frames, entry.height, entry.width) {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "mm_routing",
+                        err = %e,
+                        "video frame-group token count failed; skipping MM routing info"
+                    );
+                    return None;
+                }
+            };
+        let group_timestamps = counter.group_timestamps(&entry.sampled_timestamps);
+        // Rough capacity: label tokens vary per timestamp; 8 is a safe upper
+        // bound for "<123.4 seconds>" under BPE without being wasteful.
+        let mut out = Vec::with_capacity(group_timestamps.len() * (per_group + 10));
+        for ts in group_timestamps {
+            let label = mm_video::VideoTokenCounter::timestamp_label(ts);
+            let encoding = match self.tokenizer.encode(&label) {
+                Ok(encoding) => encoding,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "mm_routing",
+                        err = %e,
+                        "timestamp label failed to encode; skipping MM routing info"
+                    );
+                    return None;
+                }
+            };
+            out.extend_from_slice(encoding.token_ids());
+            out.push(vision_start);
+            out.extend(std::iter::repeat_n(pad, per_group));
+            out.push(vision_end);
+        }
+        Some(out)
+    }
+
     /// Build `MmRoutingInfo` for exact MM-aware KV routing. The worker-bound
     /// `token_ids` are unchanged — only the routing-side view is expanded.
-    /// Supports single-special-token placeholder families (Qwen-VL, LLaVA).
+    /// Images: single-special-token placeholder families (Qwen-VL, LLaVA).
+    /// Videos: Qwen-VL families, frontend-decoding path only — the token
+    /// count depends on the frontend's frame sampling, which is exactly why
+    /// URL-passthrough video stays on text-prefix routing.
     /// Returns `Ok(())` with no work performed on any precondition miss
     /// (caller falls back to text-prefix routing).
     #[cfg(feature = "mm-routing")]
     pub fn gather_mm_exact_routing_info(
         &self,
         builder: &mut PreprocessedRequestBuilder,
-        mm_image_entries: &[MmImageEntry],
+        mm_media_entries: &[MmMediaEntry],
         token_ids: &[crate::protocols::TokenIdType],
     ) -> Result<()> {
         use crate::protocols::common::preprocessor::MmRoutingInfo;
+        use dynamo_kv_router::protocols::pad_value_for_mm_hash;
 
-        if mm_image_entries.is_empty() {
+        if mm_media_entries.is_empty() {
             return Ok(());
         }
-        let Some(find_token_id) = self.routing_image_token_id else {
-            tracing::debug!(
-                target: "mm_routing",
-                "routing_image_token_id unresolved; skipping MM routing info"
-            );
-            return Ok(());
-        };
-        let Some(counter) = self.image_token_counter.as_ref() else {
-            tracing::debug!(
-                target: "mm_routing",
-                "image_token_counter unavailable; skipping MM routing info"
-            );
-            return Ok(());
-        };
         let block_size = self.kv_cache_block_size;
         if block_size == 0 {
             tracing::debug!(
@@ -1507,33 +1840,48 @@ impl OpenAIPreprocessor {
             return Ok(());
         }
 
-        // Single-special-token placeholders (Qwen-VL `<|image_pad|>`, LLaVA
-        // `<image>`) emit exactly one `find_token_id` per image in the
-        // tokenized prompt. Any other shape (e.g. numbered-text placeholders
-        // that BPE-shatter) can't be aligned to images here, so we skip MM
-        // routing and let the caller fall back to text-prefix routing.
-        let placeholder_count = token_ids.iter().filter(|&&t| t == find_token_id).count();
-        if placeholder_count != mm_image_entries.len() {
+        let images: Vec<&MmMediaEntry> = mm_media_entries
+            .iter()
+            .filter(|e| e.modality == MmModality::Image)
+            .collect();
+        let videos: Vec<&MmMediaEntry> = mm_media_entries
+            .iter()
+            .filter(|e| e.modality == MmModality::Video)
+            .collect();
+        if !self.mm_placeholders_match(token_ids, images.len(), videos.len()) {
             tracing::warn!(
                 target: "mm_routing",
-                placeholder_count,
-                image_count = mm_image_entries.len(),
-                routing_image_token_id = find_token_id,
-                "placeholder token count in tokenized prompt does not match image count; \
+                n_images = images.len(),
+                n_videos = videos.len(),
+                "placeholder structure in tokenized prompt does not match media entries; \
                  skipping MM routing info (text-prefix routing only)"
             );
             return Ok(());
         }
-        let normalized_token_ids = token_ids;
 
-        // Compute per-image N via the registry + run the expansion.
-        let n_tokens: Vec<usize> = mm_image_entries
-            .iter()
-            .map(|e| counter.count_tokens(e.width, e.height))
-            .collect();
-        let n_total: usize = n_tokens.iter().sum();
+        // Per-image pad fill via the registry counter; per-video full
+        // replacement streams. `mm_placeholders_match` guaranteed the
+        // counters and token ids exist for the modalities present.
+        let mut image_fill: Vec<(crate::protocols::TokenIdType, usize)> =
+            Vec::with_capacity(images.len());
+        if let Some(counter) = self.image_token_counter.as_ref() {
+            for e in &images {
+                image_fill.push((
+                    pad_value_for_mm_hash(e.mm_hash),
+                    counter.count_tokens(e.width, e.height),
+                ));
+            }
+        }
+        let mut video_fill: Vec<Vec<crate::protocols::TokenIdType>> =
+            Vec::with_capacity(videos.len());
+        for e in &videos {
+            match self.video_replacement_tokens(e) {
+                Some(v) => video_fill.push(v),
+                None => return Ok(()),
+            }
+        }
 
-        // Canonical pad_value fill at image positions for ALL backends. sglang
+        // Canonical pad_value fill at media positions for ALL backends. sglang
         // consumes pad_value natively; vLLM events are normalized to pad_value
         // in the kv-router (see `create_stored_blocks`), so the frontend stays
         // backend-agnostic. pad_value formula pinned by
@@ -1542,23 +1890,31 @@ impl OpenAIPreprocessor {
         // Prepend the routing-side BOS for `add_bos_token: true` models
         // (LlamaTokenizer family, e.g. LLaVA-1.5) so per-block hashes match
         // the backend's HF processor output.
+        let video_triple = self
+            .video_token_counter
+            .as_ref()
+            .is_some_and(|c| c.family().expands_placeholder_triple());
+        let img_tok = self.routing_image_token_id;
+        let vid_tok = self.routing_video_token_id;
+        let vision_bounds = self.routing_vision_bounds;
+
+        let n_total: usize = image_fill.iter().map(|(_, n)| *n).sum::<usize>()
+            + video_fill.iter().map(|v| v.len()).sum::<usize>();
         let bos_extra = self.routing_prepend_bos.is_some() as usize;
         let mut expanded: Vec<crate::protocols::TokenIdType> =
-            Vec::with_capacity(normalized_token_ids.len() + n_total + bos_extra);
+            Vec::with_capacity(token_ids.len() + n_total + bos_extra);
         if let Some(bos) = self.routing_prepend_bos {
             expanded.push(bos);
         }
-        let mut i = 0usize;
-        for &t in normalized_token_ids.iter() {
-            if t == find_token_id && i < mm_image_entries.len() {
-                let fill_token =
-                    dynamo_kv_router::protocols::pad_value_for_mm_hash(mm_image_entries[i].mm_hash);
-                expanded.extend(std::iter::repeat_n(fill_token, n_tokens[i]));
-                i += 1;
-            } else {
-                expanded.push(t);
-            }
-        }
+        expand_media_placeholders(
+            &mut expanded,
+            token_ids,
+            img_tok,
+            &image_fill,
+            vid_tok,
+            video_triple.then_some(vision_bounds).flatten(),
+            &video_fill,
+        );
 
         // Unpadded expanded length, before the block-padding added below.
         let expanded_prompt_len = expanded.len();
@@ -1580,7 +1936,8 @@ impl OpenAIPreprocessor {
         // side channel.
         tracing::debug!(
             target: "mm_routing",
-            n_images = mm_image_entries.len(),
+            n_images = images.len(),
+            n_videos = videos.len(),
             block_size,
             total_tokens,
             "MmRoutingInfo built (exact, pad_value)"
@@ -4733,5 +5090,133 @@ mod tests {
             s3a, s3b,
             "s3:// query params identify objects and must not collide"
         );
+    }
+}
+
+/// Expand media placeholders in `token_ids` into `out`, in prompt order.
+/// Images: one `image_token` becomes its pad_value run from `image_fill`.
+/// Videos: with `triple_bounds` set (Qwen3-VL), a
+/// `<vision_start><video_token><vision_end>` triple is replaced wholesale by
+/// the next `video_fill` stream; otherwise a single `video_token` is
+/// replaced in place (Qwen2/2.5-VL). Placeholders beyond the fill lists are
+/// copied through untouched — callers validate counts beforehand.
+#[cfg(feature = "mm-routing")]
+fn expand_media_placeholders(
+    out: &mut Vec<crate::protocols::TokenIdType>,
+    token_ids: &[crate::protocols::TokenIdType],
+    image_token: Option<crate::protocols::TokenIdType>,
+    image_fill: &[(crate::protocols::TokenIdType, usize)],
+    video_token: Option<crate::protocols::TokenIdType>,
+    triple_bounds: Option<(crate::protocols::TokenIdType, crate::protocols::TokenIdType)>,
+    video_fill: &[Vec<crate::protocols::TokenIdType>],
+) {
+    let (mut img_i, mut vid_i) = (0usize, 0usize);
+    let mut i = 0usize;
+    while i < token_ids.len() {
+        let t = token_ids[i];
+        if Some(t) == image_token && img_i < image_fill.len() {
+            let (pad, n) = image_fill[img_i];
+            out.extend(std::iter::repeat_n(pad, n));
+            img_i += 1;
+            i += 1;
+        } else if let Some((vs, ve)) = triple_bounds
+            && vid_i < video_fill.len()
+            && i + 2 < token_ids.len()
+            && t == vs
+            && Some(token_ids[i + 1]) == video_token
+            && token_ids[i + 2] == ve
+        {
+            out.extend_from_slice(&video_fill[vid_i]);
+            vid_i += 1;
+            i += 3;
+        } else if triple_bounds.is_none() && Some(t) == video_token && vid_i < video_fill.len() {
+            out.extend_from_slice(&video_fill[vid_i]);
+            vid_i += 1;
+            i += 1;
+        } else {
+            out.push(t);
+            i += 1;
+        }
+    }
+}
+
+#[cfg(all(test, feature = "mm-routing"))]
+mod mm_expand_tests {
+    use super::expand_media_placeholders;
+
+    const IMG: u32 = 151655;
+    const VID: u32 = 151656;
+    const VS: u32 = 151652;
+    const VE: u32 = 151653;
+
+    fn expand(
+        token_ids: &[u32],
+        image_fill: &[(u32, usize)],
+        triple: bool,
+        video_fill: &[Vec<u32>],
+    ) -> Vec<u32> {
+        let mut out = Vec::new();
+        expand_media_placeholders(
+            &mut out,
+            token_ids,
+            Some(IMG),
+            image_fill,
+            Some(VID),
+            triple.then_some((VS, VE)),
+            video_fill,
+        );
+        out
+    }
+
+    /// Qwen2/2.5-VL: single video placeholder expands in place; the
+    /// template's vision start/end tokens stay as-is.
+    #[test]
+    fn single_token_video_expands_in_place() {
+        let out = expand(&[1, VS, VID, VE, 2], &[], false, &[vec![900, 900, 900]]);
+        assert_eq!(out, vec![1, VS, 900, 900, 900, VE, 2]);
+    }
+
+    /// Qwen3-VL: the whole triple is replaced by the per-frame-group stream
+    /// (which carries its own vision start/end pairs).
+    #[test]
+    fn triple_video_replaced_wholesale() {
+        let ts = [70u32, 71];
+        let stream = vec![
+            ts[0], ts[1], VS, 900, 900, VE, ts[0], ts[1], VS, 900, 900, VE,
+        ];
+        let out = expand(&[1, VS, VID, VE, 2], &[], true, &[stream.clone()]);
+        let mut expected = vec![1u32];
+        expected.extend_from_slice(&stream);
+        expected.push(2);
+        assert_eq!(out, expected);
+    }
+
+    /// Mixed prompt: image and video placeholders each consume their own
+    /// queue in prompt order.
+    #[test]
+    fn mixed_image_and_video() {
+        let out = expand(
+            &[1, IMG, 2, VS, VID, VE, 3, IMG],
+            &[(801, 2), (802, 1)],
+            true,
+            &[vec![905, 905]],
+        );
+        assert_eq!(out, vec![1, 801, 801, 2, 905, 905, 3, 802]);
+    }
+
+    /// Placeholders beyond the fill lists copy through untouched — the
+    /// caller's count validation makes this unreachable, but stay safe.
+    #[test]
+    fn surplus_placeholders_copy_through() {
+        let out = expand(&[IMG, IMG], &[(801, 1)], false, &[]);
+        assert_eq!(out, vec![801, IMG]);
+    }
+
+    /// An image triple (`<vs><image_pad><ve>`) must not match the video
+    /// triple pattern.
+    #[test]
+    fn image_triple_not_confused_with_video_triple() {
+        let out = expand(&[VS, IMG, VE], &[(801, 3)], true, &[vec![999]]);
+        assert_eq!(out, vec![VS, 801, 801, 801, VE]);
     }
 }

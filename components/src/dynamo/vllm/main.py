@@ -294,23 +294,30 @@ def setup_metrics_collection(
             )
 
 
-def _resolve_image_token_id(config: Config, vllm_config: VllmConfig) -> Optional[int]:
-    """Routing-side image-placeholder token id for the served model.
+def _resolve_routing_token_ids(
+    config: Config, vllm_config: VllmConfig
+) -> tuple[Optional[int], Optional[int]]:
+    """Routing-side (image, video) placeholder token ids for the served model.
 
     Resolved via the SAME Rust logic the frontend uses
-    (`dynamo._core.resolve_routing_image_token_id` ->
-    `lightseek_mm::resolve_routing_tokens`), returning `chat_placeholder_token_id`
-    so the KV-event normalizer keys on the identical token the frontend
+    (`dynamo._core.resolve_routing_image_token_id` /
+    `resolve_routing_video_token_id` -> `lightseek_mm::resolve_routing_tokens`)
+    so the KV-event normalizer keys on the identical tokens the frontend
     substitutes `pad_value` over — no per-family drift between the two.
 
-    Returns None when the bindings lack the `mm-routing` feature or the model
-    isn't in the MM-routing registry — in both cases the frontend also skips MM
-    routing, so a worker-side no-op is consistent (events pass through).
+    Returns (None, None) when the bindings lack the `mm-routing` feature or
+    the model isn't in the MM-routing registry — in both cases the frontend
+    also skips MM routing, so a worker-side no-op is consistent (events pass
+    through).
     """
     try:
         from dynamo._core import resolve_routing_image_token_id
     except ImportError:
-        return None
+        return None, None
+    try:
+        from dynamo._core import resolve_routing_video_token_id
+    except ImportError:
+        resolve_routing_video_token_id = None
 
     # `model_config.model` is the user-supplied `--model` argument verbatim, so
     # for HF ids ("Qwen/Qwen3.5-0.8B") it points nowhere on disk. Resolve via
@@ -337,7 +344,13 @@ def _resolve_image_token_id(config: Config, vllm_config: VllmConfig) -> Optional
             vllm_config.model_config.model,
         )
         model_dir = vllm_config.model_config.model
-    return resolve_routing_image_token_id(config.model, model_dir)
+    image_token_id = resolve_routing_image_token_id(config.model, model_dir)
+    video_token_id = (
+        resolve_routing_video_token_id(config.model, model_dir)
+        if resolve_routing_video_token_id is not None
+        else None
+    )
+    return image_token_id, video_token_id
 
 
 def setup_kv_event_publisher(
@@ -384,12 +397,13 @@ def setup_kv_event_publisher(
     dp_start, dp_size = get_dp_range_for_worker(vllm_config)
     kv_publishers = []
     kv_event_block_size = get_configured_kv_event_block_size(vllm_config)
-    # The image-placeholder token id the frontend substitutes pad_value over.
-    # Passed to the KV publisher so the router-side normalizer rewrites those
-    # runs in vLLM BlockStored events to the same canonical pad_value scheme.
-    # None (no mm-routing, model not in registry, text-only) leaves events
-    # unchanged — consistent with the frontend also skipping MM routing.
-    image_token_id = _resolve_image_token_id(config, vllm_config)
+    # The image/video placeholder token ids the frontend substitutes
+    # pad_value over. Passed to the KV publisher so the router-side normalizer
+    # rewrites those runs in vLLM BlockStored events to the same canonical
+    # pad_value scheme. None (no mm-routing, model not in registry, text-only)
+    # leaves events unchanged — consistent with the frontend also skipping MM
+    # routing.
+    image_token_id, video_token_id = _resolve_routing_token_ids(config, vllm_config)
 
     for dp_rank in range(dp_start, dp_start + dp_size):
         if consolidator_enabled:
@@ -416,6 +430,7 @@ def setup_kv_event_publisher(
             enable_local_indexer=config.enable_local_indexer,
             dp_rank=dp_rank,
             image_token_id=image_token_id,
+            video_token_id=video_token_id,
         )
         kv_publishers.append(kv_publisher)
 

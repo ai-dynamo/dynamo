@@ -2349,6 +2349,13 @@ async def run_input(runtime: DistributedRuntime, input: str, engine_config: Engi
     """Start an engine, connect it to an input, and run until stopped."""
     ...
 
+
+def resolve_routing_video_token_id(model_id: str, model_dir: str) -> Optional[int]:
+    """Routing-side video-placeholder token id (config.json `video_token_id`).
+
+    Same resolution logic as the frontend; None disables video MM routing.
+    """
+    ...
 def run_mocker_trace_replay(
     trace_files: Sequence[str | os.PathLike[str]],
     extra_engine_args: Optional[MockEngineArgs] = None,

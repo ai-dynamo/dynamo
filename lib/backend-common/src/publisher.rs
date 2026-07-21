@@ -61,6 +61,7 @@ fn setup_kv_publishers(
                     endpoint,
                     topic,
                     image_token_id: None,
+                    video_token_id: None,
                 }),
                 None,
             ),

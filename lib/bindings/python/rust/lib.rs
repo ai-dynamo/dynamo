@@ -169,6 +169,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(lora_name_to_id, m)?)?;
     #[cfg(feature = "mm-routing")]
     m.add_function(wrap_pyfunction!(resolve_routing_image_token_id, m)?)?;
+    #[cfg(feature = "mm-routing")]
+    m.add_function(wrap_pyfunction!(resolve_routing_video_token_id, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_model, m)?)?;
     m.add_function(wrap_pyfunction!(unregister_model, m)?)?;
@@ -343,6 +345,23 @@ fn resolve_routing_image_token_id(model_id: &str, model_dir: &str) -> Option<u32
     let dir = std::path::Path::new(model_dir);
     llm_rs::preprocessor::lightseek_mm::resolve_routing_tokens(model_id, dir)
         .chat_placeholder_token_id
+}
+
+/// Routing-side video-placeholder token id (`config.json`'s
+/// `video_token_id`), the token the frontend substitutes pad_value over for
+/// video content. Same resolution logic as the frontend
+/// (`lightseek_mm::resolve_routing_tokens`), so the KV-event normalizer and
+/// the router key on the identical token id.
+///
+/// Returns `None` when the config lacks the field or can't be read — the
+/// frontend then also skips video MM routing, so a worker-side no-op is
+/// consistent.
+#[cfg(feature = "mm-routing")]
+#[pyfunction]
+#[pyo3(text_signature = "(model_id, model_dir)")]
+fn resolve_routing_video_token_id(model_id: &str, model_dir: &str) -> Option<u32> {
+    let dir = std::path::Path::new(model_dir);
+    llm_rs::preprocessor::lightseek_mm::resolve_routing_tokens(model_id, dir).video_token_id
 }
 
 /// Create an engine and attach it to an endpoint to make it visible to the frontend.

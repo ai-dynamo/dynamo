@@ -235,6 +235,16 @@ pub struct RoutingTokens {
     /// produce the routing-side prepend id. `None` for models that don't
     /// prepend BOS.
     pub bos_token_string: Option<String>,
+    /// Literal `video_token_id` from `config.json` (Qwen-VL families): the
+    /// token the chat template emits per video and the backend HF processor
+    /// expands per patch. `None` disables video MM-aware routing.
+    pub video_token_id: Option<TokenIdType>,
+    /// Literal `vision_start_token_id` from `config.json`. Needed to match
+    /// Qwen3-VL's `<|vision_start|><|video_pad|><|vision_end|>` placeholder
+    /// triple, which is replaced wholesale during expansion.
+    pub vision_start_token_id: Option<TokenIdType>,
+    /// Literal `vision_end_token_id` from `config.json` (see above).
+    pub vision_end_token_id: Option<TokenIdType>,
 }
 
 /// Resolve all routing-side token info from a model directory in a single
@@ -252,16 +262,28 @@ pub fn resolve_routing_tokens(model_id: &str, model_dir: &Path) -> RoutingTokens
         .and_then(|c| resolve_image_token_id_with_config(model_id, model_dir, c));
     let chat_placeholder_token_id = config
         .as_ref()
-        .and_then(extract_chat_placeholder_from_config)
+        .and_then(|c| extract_token_id_field(c, "image_token_id"))
         .or(image_token_id);
     let bos_token_string = tokenizer_config
         .as_ref()
         .and_then(extract_bos_token_from_tokenizer_config);
+    let video_token_id = config
+        .as_ref()
+        .and_then(|c| extract_token_id_field(c, "video_token_id"));
+    let vision_start_token_id = config
+        .as_ref()
+        .and_then(|c| extract_token_id_field(c, "vision_start_token_id"));
+    let vision_end_token_id = config
+        .as_ref()
+        .and_then(|c| extract_token_id_field(c, "vision_end_token_id"));
 
     RoutingTokens {
         image_token_id,
         chat_placeholder_token_id,
         bos_token_string,
+        video_token_id,
+        vision_start_token_id,
+        vision_end_token_id,
     }
 }
 
@@ -297,12 +319,13 @@ fn read_json(model_dir: &Path, filename: &str) -> Option<serde_json::Value> {
     }
 }
 
-/// Read the literal `image_token_id` field from a pre-parsed `config.json`.
-/// Used by Qwen2-VL / Qwen2.5-VL where the chat-template-emitted placeholder
-/// differs from the per-patch expansion token returned by the spec.
-fn extract_chat_placeholder_from_config(config: &serde_json::Value) -> Option<TokenIdType> {
+/// Read a literal token-id field from a pre-parsed `config.json`. Used for
+/// `image_token_id` (Qwen2-VL / Qwen2.5-VL, where the chat-template-emitted
+/// placeholder differs from the per-patch expansion token returned by the
+/// spec), `video_token_id`, and the `vision_start/end_token_id` pair.
+fn extract_token_id_field(config: &serde_json::Value, field: &str) -> Option<TokenIdType> {
     config
-        .get("image_token_id")
+        .get(field)
         .and_then(|x| x.as_u64())
         .and_then(|id| u32::try_from(id).ok())
 }

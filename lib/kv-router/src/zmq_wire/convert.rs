@@ -21,6 +21,7 @@ pub fn convert_event(
     worker: WorkerWithDpRank,
     warning_count: &Arc<AtomicU32>,
     image_token_id: Option<u32>,
+    video_token_id: Option<u32>,
 ) -> Option<PlacementEvent> {
     let storage_tier = match &raw {
         RawKvEvent::BlockStored { medium, .. } | RawKvEvent::BlockRemoved { medium, .. } => {
@@ -96,6 +97,7 @@ pub fn convert_event(
                         block_mm_infos.as_deref(),
                         is_eagle,
                         image_token_id,
+                        video_token_id,
                     ),
                 }),
                 dp_rank,
@@ -129,25 +131,41 @@ pub fn convert_event(
     ))
 }
 
-/// Rewrite each `image_token_id` run in `token_ids` to `pad_value(mm_hash)`,
-/// one mm_hash per run in order, so the recomputed `tokens_hash` matches the
-/// frontend's pad_value expansion. Exact when images are separated by a
-/// non-image token (true for Qwen2/2.5/3-VL); a run-vs-mm_object count mismatch
-/// (adjacent images, no separator) is logged below rather than silent.
-fn substitute_pad_values(token_ids: &[u32], image_token_id: u32, mm_objects: &[u64]) -> Vec<u32> {
+/// Rewrite each placeholder run (`image_token_id` or `video_token_id`) in
+/// `token_ids` to `pad_value(mm_hash)`, one mm_hash per run in order, so the
+/// recomputed `tokens_hash` matches the frontend's pad_value expansion. A run
+/// is a maximal stretch of one placeholder id; an id change starts a new run.
+/// Exact when each mm object contributes one run to the block (true for
+/// images and Qwen2/2.5-VL video). Qwen3-VL video emits several
+/// `video_token_id` runs per clip (timestamp/vision tokens separate frame
+/// groups); runs beyond the object list clamp to the last object, which is
+/// correct unless a block mixes such tail runs with a later mm object — that
+/// count mismatch is logged below rather than silent. vLLM 0.19+ extra_keys
+/// carry per-object start offsets that would make the assignment exact; use
+/// them here if the clamp ever shows up in practice.
+fn substitute_pad_values(
+    token_ids: &[u32],
+    image_token_id: Option<u32>,
+    video_token_id: Option<u32>,
+    mm_objects: &[u64],
+) -> Vec<u32> {
+    let is_placeholder = |t: u32| Some(t) == image_token_id || Some(t) == video_token_id;
     let mut out = Vec::with_capacity(token_ids.len());
     // `obj_idx` advances once per completed run, so run N fills with
     // mm_objects[N], clamped to the last object if runs outnumber mm_objects.
     let mut obj_idx = 0usize;
-    let mut in_run = false;
+    let mut current_run: Option<u32> = None;
     let mut runs = 0usize;
     // pad_value for the current run, computed once on entry and reused for the
     // rest of the run (one mm_hash per run, so it's constant within a run).
     let mut run_pad = 0u32;
     for &t in token_ids {
-        if t == image_token_id {
-            if !in_run {
-                in_run = true;
+        if is_placeholder(t) {
+            if current_run != Some(t) {
+                if current_run.is_some() {
+                    obj_idx += 1;
+                }
+                current_run = Some(t);
                 runs += 1;
                 // Safety: the sole caller (`create_stored_block_from_parts`)
                 // only reaches here with a non-empty `mm_objects`, so `last()`
@@ -160,8 +178,7 @@ fn substitute_pad_values(token_ids: &[u32], image_token_id: u32, mm_objects: &[u
             }
             out.push(run_pad);
         } else {
-            if in_run {
-                in_run = false;
+            if current_run.take().is_some() {
                 obj_idx += 1;
             }
             out.push(t);
@@ -171,7 +188,7 @@ fn substitute_pad_values(token_ids: &[u32], image_token_id: u32, mm_objects: &[u
         tracing::debug!(
             runs,
             mm_objects = mm_objects.len(),
-            "image_token_id run count != mm_object count; pad_value assignment is best-effort by run order"
+            "placeholder run count != mm_object count; pad_value assignment is best-effort by run order"
         );
     }
     out
@@ -184,6 +201,7 @@ pub struct StoredBlockOptions<'a> {
     pub mm_extra_info: Option<BlockExtraInfo>,
     pub is_eagle: Option<bool>,
     pub image_token_id: Option<u32>,
+    pub video_token_id: Option<u32>,
 }
 
 pub fn create_stored_block_from_parts(
@@ -198,18 +216,21 @@ pub fn create_stored_block_from_parts(
         mm_extra_info,
         is_eagle,
         image_token_id,
+        video_token_id,
     } = options;
 
-    // When the model has a routing image token and this block carries mm
-    // objects (vLLM events), normalize to the canonical pad_value scheme:
-    // substitute pad_value over the image_token_id runs and hash WITHOUT
+    // When the model has a routing image/video token and this block carries
+    // mm objects (vLLM events), normalize to the canonical pad_value scheme:
+    // substitute pad_value over the placeholder runs and hash WITHOUT
     // block_mm_infos, matching the frontend. sglang events carry no
-    // image_token_id tokens nor mm_extra_info, so they take the else branch
+    // placeholder tokens nor mm_extra_info, so they take the else branch
     // unchanged.
-    let tokens_hash = match (image_token_id, mm_extra_info.as_ref()) {
-        (Some(img_tok), Some(info)) if !info.mm_objects.is_empty() => {
+    let has_placeholder_id = image_token_id.is_some() || video_token_id.is_some();
+    let tokens_hash = match mm_extra_info.as_ref() {
+        Some(info) if has_placeholder_id && !info.mm_objects.is_empty() => {
             let mm_hashes: Vec<u64> = info.mm_objects.iter().map(|o| o.mm_hash).collect();
-            let substituted = substitute_pad_values(token_ids, img_tok, &mm_hashes);
+            let substituted =
+                substitute_pad_values(token_ids, image_token_id, video_token_id, &mm_hashes);
             compute_block_hash_for_seq(
                 &substituted,
                 kv_block_size,
@@ -263,6 +284,7 @@ pub fn create_stored_blocks(
     block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
     is_eagle: Option<bool>,
     image_token_id: Option<u32>,
+    video_token_id: Option<u32>,
 ) -> Vec<KvCacheStoredBlockData> {
     let mut blocks: Vec<KvCacheStoredBlockData> = Vec::new();
 
@@ -310,6 +332,7 @@ pub fn create_stored_blocks(
                 mm_extra_info,
                 is_eagle,
                 image_token_id,
+                video_token_id,
             },
         ));
         token_offset += *num_tokens_it as usize;
@@ -363,6 +386,70 @@ mod normalize_tests {
             stored.tokens_hash, expected,
             "normalized vLLM event hash must match frontend pad_value hash"
         );
+    }
+
+    /// A vLLM Qwen3-VL video block interleaves timestamp/vision text tokens
+    /// with several `video_token_id` runs of the SAME clip. All runs must
+    /// normalize to the same pad_value (clamp to the single mm object) so the
+    /// hash matches the frontend's expansion of that structure.
+    #[test]
+    fn vllm_video_multi_run_normalizes_to_frontend_pad_value_hash() {
+        let block_size = 8u32;
+        let video_token_id = 151656u32;
+        let mm_hash = 0x1234_5678_9abc_def0u64;
+        // [ts][vs][pad pad][ve][ts][vs][pad] — two runs, one video.
+        let vllm_tokens = vec![
+            77u32,
+            151652,
+            video_token_id,
+            video_token_id,
+            151653,
+            88,
+            151652,
+            video_token_id,
+        ];
+        let mm_info = BlockExtraInfo {
+            mm_objects: vec![BlockMmObjectInfo {
+                mm_hash,
+                offsets: vec![],
+            }],
+        };
+
+        let stored = create_stored_block_from_parts(
+            block_size,
+            0xabcd,
+            &vllm_tokens,
+            StoredBlockOptions {
+                mm_extra_info: Some(mm_info),
+                image_token_id: Some(151655),
+                video_token_id: Some(video_token_id),
+                ..Default::default()
+            },
+        );
+
+        let pad = pad_value_for_mm_hash(mm_hash);
+        let frontend_tokens = vec![77u32, 151652, pad, pad, 151653, 88, 151652, pad];
+        let expected =
+            compute_block_hash_for_seq(&frontend_tokens, block_size, BlockHashOptions::default())
+                [0];
+        assert_eq!(stored.tokens_hash, expected);
+    }
+
+    /// Adjacent image and video runs (id change, no separator token) are
+    /// distinct runs and consume mm_objects in order.
+    #[test]
+    fn adjacent_image_video_runs_map_to_distinct_objects() {
+        let img = 151655u32;
+        let vid = 151656u32;
+        let (hash_a, hash_b) = (11u64, 22u64);
+        let out = substitute_pad_values(
+            &[1, img, img, vid, 2],
+            Some(img),
+            Some(vid),
+            &[hash_a, hash_b],
+        );
+        let (pad_a, pad_b) = (pad_value_for_mm_hash(hash_a), pad_value_for_mm_hash(hash_b));
+        assert_eq!(out, vec![1, pad_a, pad_a, pad_b, 2]);
     }
 
     /// sglang-style events carry no image_token_id tokens nor mm_extra_info, so
