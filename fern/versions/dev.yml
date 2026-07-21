@@ -415,6 +415,8 @@ navigation:
                 path: ../pages-dev/components/frontend/frontend-guide.md
               - page: Configuration Reference
                 path: ../pages-dev/components/frontend/configuration.md
+              - page: Python Route Extensions
+                path: ../pages-dev/components/frontend/python-route-extensions.md
               - page: Tokenizer
                 path: ../pages-dev/components/frontend/Tokenizer.md
           - section: Router
