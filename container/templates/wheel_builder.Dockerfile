@@ -16,6 +16,27 @@ FROM --platform=linux/amd64 quay.io/pypa/manylinux_2_28_x86_64 AS manylinux_amd6
 FROM --platform=linux/arm64 quay.io/pypa/manylinux_2_28_aarch64 AS manylinux_arm64
 {% endif %}
 
+{% if device == "cuda" and make_efa == true %}
+# The EFA NGC packages are Debian-specific. Install them in a short-lived
+# Ubuntu stage and copy only the libfabric SDK into the manylinux builder.
+FROM ubuntu:24.04 AS efa_sdk
+
+ARG EFA_VERSION
+ARG EFA_INSTALLER_SHA256
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN --mount=type=cache,target=/var/cache/efa-installer,sharing=locked \
+    --mount=type=bind,source=./container/deps/efa/install_efa.sh,target=/tmp/install_efa.sh,readonly \
+    /tmp/install_efa.sh \
+        "${EFA_VERSION}" "${EFA_INSTALLER_SHA256}" --skip-plugin
+{% endif %}
+
 ##################################
 ##### wheel_builder_base #########
 ##################################
@@ -183,6 +204,11 @@ ENV PATH="/opt/rh/gcc-toolset-14/root/usr/bin:${PATH}" \
     LD_LIBRARY_PATH="/opt/rh/gcc-toolset-14/root/usr/lib64:${LD_LIBRARY_PATH}" \
     CC="/opt/rh/gcc-toolset-14/root/usr/bin/gcc" \
     CXX="/opt/rh/gcc-toolset-14/root/usr/bin/g++"
+
+{% if make_efa == true %}
+# Compile NIXL against the same AWS libfabric SDK shipped in the final image.
+COPY --from=efa_sdk /opt/amazon/efa /opt/amazon/efa
+{% endif %}
 {% endif %}
 
 # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
@@ -421,41 +447,6 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
      echo "/usr/local/ucx/lib/ucx" >> /etc/ld.so.conf.d/ucx.conf && \
      ldconfig
 
-{% if device == "cuda" %}
-ARG NIXL_LIBFABRIC_REPO
-ARG NIXL_LIBFABRIC_REF
-RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
-    --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
-    export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
-    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}}" && \
-    if [ "$USE_SCCACHE" = "true" ]; then \
-        eval $(/tmp/use-sccache.sh setup-env); \
-    fi && \
-    cd /usr/local/src && \
-    git clone "${NIXL_LIBFABRIC_REPO}" && \
-    cd libfabric && \
-    git checkout $NIXL_LIBFABRIC_REF && \
-    ./autogen.sh && \
-    ./configure --prefix="/usr/local/libfabric" \
-                --disable-verbs \
-                --disable-psm3 \
-                --disable-opx \
-                --disable-usnic \
-                --disable-rstream \
-                --enable-efa \
-                --with-cuda=/usr/local/cuda \
-                --enable-cuda-dlopen \
-                --with-gdrcopy \
-                --enable-gdrcopy-dlopen && \
-    make -j$(nproc) && \
-    make install && \
-    /tmp/use-sccache.sh show-stats "LIBFABRIC" && \
-    echo "/usr/local/libfabric/lib" > /etc/ld.so.conf.d/libfabric.conf && \
-    ldconfig
-
-ENV PKG_CONFIG_PATH="/usr/local/libfabric/lib/pkgconfig:${PKG_CONFIG_PATH}"
-{% endif %}
-
 {% if framework == "vllm" and device == "cuda" %}
 # Build and install AWS SDK C++ (required for NIXL OBJ backend / S3 support)
 ARG AWS_SDK_CPP_VERSION
@@ -653,7 +644,11 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
             -Dcudapath_lib="/usr/local/cuda/lib64" \
             -Dcudapath_inc="/usr/local/cuda/include" \
             -Ducx_path="/usr/local/ucx" \
-            -Dlibfabric_path="/usr/local/libfabric"; \
+{% if make_efa == true %}
+            -Dlibfabric_path="/opt/amazon/efa"; \
+{% else %}
+            -Ddisable_plugins=LIBFABRIC; \
+{% endif %}
     elif [ "$DEVICE" = "xpu" ]; then \
         meson setup build/ --prefix=/opt/intel/intel_nixl --buildtype=release \
             -Ducx_path="/usr/local/ucx"; \

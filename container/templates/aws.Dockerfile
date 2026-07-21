@@ -12,59 +12,99 @@
 #
 # Use this stage when deploying on AWS infrastructure with EFA support
 
-FROM ${EFA_BASE_IMAGE} AS aws
+FROM ${EFA_BASE_IMAGE} AS aws_base
 
 ARG EFA_VERSION
+ARG EFA_INSTALLER_SHA256
 
-{% if target == "runtime" %}
 USER root
-{% endif %}
 
-# Install AWS EFA installer with bundled libfabric and aws-ofi-nccl
-# Flags explanation:
-#   --skip-kmod: Skip kernel module installation (handled by host)
-#   --skip-limit-conf: Skip ulimit configuration (handled by container runtime)
-#   --no-verify: Skip GPG verification (optional, can be removed if verification is needed)
-# Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
+# Install the pinned EFA 1.49 NGC userspace stack. Its AWS-patched libfabric is
+# used unchanged; no source-built libfabric is overlaid afterward.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    mkdir -p /tmp/efa && \
-    cd /tmp/efa && \
-    curl --retry 3 --retry-delay 2 -fsSL -o aws-efa-installer-${EFA_VERSION}.tar.gz \
-        https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_VERSION}.tar.gz && \
-    tar -xf aws-efa-installer-${EFA_VERSION}.tar.gz && \
-    cd aws-efa-installer && \
-    apt-get update && \
-    ./efa_installer.sh -y --skip-kmod --skip-limit-conf --no-verify && \
-    rm -rf /tmp/efa && \
-    rm -rf /opt/amazon/aws-ofi-nccl /etc/ld.so.conf.d/aws-ofi-nccl.conf && \
+    --mount=type=cache,target=/var/cache/efa-installer,sharing=locked \
+    --mount=type=bind,source=./container/deps/efa/install_efa.sh,target=/tmp/install_efa.sh,readonly \
+    /tmp/install_efa.sh "${EFA_VERSION}" "${EFA_INSTALLER_SHA256}" && \
+    printf '%s\n' /opt/amazon/efa/lib > /etc/ld.so.conf.d/000_efa.conf && \
     ldconfig
 
 ENV EFA_VERSION="${EFA_VERSION}"
+ENV LD_LIBRARY_PATH=/opt/amazon/efa/lib:${LD_LIBRARY_PATH}
 
-ARG NIXL_LIBFABRIC_REF
+RUN /opt/amazon/efa/bin/fi_info --version | grep -F "libfabric: 2.4.0amzn5.0"
 
-# Copy the wheel_builder-built libfabric and register it with the dynamic linker
-# ONLY if the EFA-bundled libfabric is older than NIXL_LIBFABRIC_REF.
-# When a future EFA installer ships libfabric >= the version we build, the
-# version comparison evaluates to false and this becomes a no-op automatically.
-RUN --mount=from=wheel_builder,source=/usr/local/libfabric,target=/tmp/libfabric_build \
-    EFA_PC=$(find /opt/amazon/efa -path '*/pkgconfig/libfabric.pc' 2>/dev/null | head -n1) && \
-    EFA_LIBFABRIC_RAW=$(cat "$EFA_PC" 2>/dev/null | grep '^Version:' | awk '{print $2}') && \
-    EFA_LIBFABRIC_VER=$(echo "$EFA_LIBFABRIC_RAW" | grep -oE '^[0-9]+\.[0-9]+(\.[0-9]+)?') && \
-    REF_VER=$(echo "${NIXL_LIBFABRIC_REF}" | sed 's/^v//') && \
-    if [ -n "$EFA_LIBFABRIC_VER" ] && [ -n "$REF_VER" ] && \
-       [ "$(printf '%s\n' "$EFA_LIBFABRIC_VER" "$REF_VER" | sort -V | head -n1)" = "$EFA_LIBFABRIC_VER" ] && \
-       [ "$EFA_LIBFABRIC_VER" != "$REF_VER" ]; then \
-        rm -rf /opt/amazon/efa && \
-        cp -Pfr /tmp/libfabric_build /opt/amazon/efa && \
-        sed -i 's|^prefix=.*|prefix=/opt/amazon/efa|' /opt/amazon/efa/lib/pkgconfig/libfabric.pc && \
-        echo "/opt/amazon/efa/lib" > /etc/ld.so.conf.d/000_efa.conf && \
-        rm -f /etc/ld.so.conf.d/efa.conf && \
-        ldconfig && \
-        echo "[aws] libfabric overlay: ${REF_VER} (overwrites EFA stock ${EFA_LIBFABRIC_RAW})"; \
-    else \
-        echo "[aws] libfabric overlay: skipped (EFA stock ${EFA_LIBFABRIC_RAW:-unknown} >= ${REF_VER})"; \
-    fi
+{% if framework == "sglang" and device == "cuda" and target == "runtime" %}
+# SGLang 0.5.14 carries NIXL 1.3.0. Rebuild only its LIBFABRIC plugin with the
+# release/1.3 backport of NIXL PR #1966, using the final EFA headers and library.
+FROM aws_base AS sglang_nixl_efa_builder
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        binutils \
+        build-essential \
+        git \
+        libhwloc-dev \
+        libnuma-dev \
+        ninja-build \
+        patchelf \
+        pkg-config && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    python3 -m pip install --break-system-packages \
+        "meson=={{ context.sglang.efa_nixl_patch.meson_version }}"
+
+COPY --chmod=0755 container/deps/sglang/nixl/build_pr1966_plugin.sh \
+    /tmp/build_pr1966_plugin.sh
+COPY --chmod=0644 container/deps/sglang/nixl/pr1966-1.3.0-backport.patch \
+    /tmp/pr1966-1.3.0-backport.patch
+
+RUN /tmp/build_pr1966_plugin.sh \
+    "{{ context.sglang.efa_nixl_patch.nixl_version }}" \
+    "{{ context.sglang.efa_nixl_patch.source_ref }}" \
+    "{{ context.sglang.efa_nixl_patch.patch_sha256 }}" \
+    /tmp/pr1966-1.3.0-backport.patch
+
+FROM aws_base AS aws
+
+COPY --from=sglang_nixl_efa_builder \
+    /usr/local/lib/python3.12/dist-packages/.nixl_cu13.mesonpy.libs/plugins/libplugin_LIBFABRIC.so \
+    /usr/local/lib/python3.12/dist-packages/.nixl_cu13.mesonpy.libs/plugins/libplugin_LIBFABRIC.so
+COPY --from=sglang_nixl_efa_builder \
+    /usr/local/lib/python3.12/dist-packages/nixl_cu13.libs/nixl/libplugin_LIBFABRIC.so \
+    /usr/local/lib/python3.12/dist-packages/nixl_cu13.libs/nixl/libplugin_LIBFABRIC.so
+
+# Check the two wheel locations actually used by SGLang. Unset LD_PRELOAD so
+# this proves each plugin resolves the EFA library on its own.
+RUN set -eux; \
+    mkdir -p /tmp/cuda-stubs; \
+    ln -s /usr/local/cuda/lib64/stubs/libcuda.so /tmp/cuda-stubs/libcuda.so.1; \
+    core=/usr/local/lib/python3.12/dist-packages/.nixl_cu13.mesonpy.libs; \
+    vendor=/usr/local/lib/python3.12/dist-packages/nixl_cu13.libs; \
+    for plugin in \
+        "${core}/plugins/libplugin_LIBFABRIC.so" \
+        "${vendor}/nixl/libplugin_LIBFABRIC.so"; do \
+        case "${plugin}" in \
+            "${core}"/*) plugin_root="${core}" ;; \
+            *) plugin_root="${vendor}" ;; \
+        esac; \
+        env -u LD_PRELOAD \
+            LD_LIBRARY_PATH="/tmp/cuda-stubs:/opt/amazon/efa/lib:${plugin_root}" \
+            ldd "${plugin}" | tee /tmp/nixl-libfabric.ldd; \
+        ! grep -Fq "not found" /tmp/nixl-libfabric.ldd; \
+        grep -F "libfabric.so.1 => /opt/amazon/efa/lib/libfabric.so.1" \
+            /tmp/nixl-libfabric.ldd; \
+        env -u LD_PRELOAD \
+            LD_LIBRARY_PATH="/tmp/cuda-stubs:/opt/amazon/efa/lib:${plugin_root}" \
+            PLUGIN="${plugin}" python3 -c \
+                'import ctypes, os; ctypes.CDLL(os.environ["PLUGIN"], mode=os.RTLD_NOW | os.RTLD_LOCAL)'; \
+    done
+
+ENV LD_PRELOAD=/opt/amazon/efa/lib/libfabric.so.1
+{% else %}
+FROM aws_base AS aws
+{% endif %}
 
 {% if framework == "trtllm" %}
 # After the upstream mesonpy refactor, libplugin_LIBFABRIC.so lands under the
@@ -75,7 +115,7 @@ RUN --mount=from=wheel_builder,source=/usr/local/libfabric,target=/tmp/libfabric
 #
 # Also clear LD_PRELOAD (the upstream trtllm_runtime stage's ai-dynamo/nixl#1668
 # workaround force-loads TRT-LLM's bundled NIXL 0.9.0; that conflicts with the
-# Dynamo-built NIXL 0.10.1 plugins). LIBFABRIC goes through libfabric directly
+# Dynamo-built NIXL 1.0.1 plugins). LIBFABRIC goes through libfabric directly
 # (not UCX), so it is unaffected by the UCX 1.20.0 hang that LD_PRELOAD works
 # around — and LIBFABRIC is the recommended backend for EFA.
 RUN --mount=from=wheel_builder,source=/opt/nvidia/nvda_nixl,target=/tmp/nvda_nixl \
