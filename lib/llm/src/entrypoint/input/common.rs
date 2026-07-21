@@ -307,6 +307,9 @@ pub async fn build_preprocessed_routing(
         )
     });
     let encoder_router = encoder_chooser.unwrap_or_else(EncoderRouter::disabled);
+    if router_mode.is_kv_routing() && prefill_router.conditional_disagg_enabled() {
+        prefill_router.set_decode_session_affinity(affinity.clone());
+    }
 
     let backend_engine = preprocessed_backend_engine(
         router,

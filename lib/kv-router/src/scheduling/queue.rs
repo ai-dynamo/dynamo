@@ -14,6 +14,7 @@ use tokio::time::Instant;
 
 use super::config::RouterQueuePolicy;
 use super::filter::RoutingEligibility;
+use super::overlap::SelectedWorkerTierSnapshot;
 use super::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, read_overlap_refresh_after, refresh_overlap,
 };
@@ -73,6 +74,10 @@ enum AdmissionCommand {
         block_hashes: Option<Vec<LocalBlockHash>>,
         lease: Option<Box<RequestLifecycleLease>>,
         ack_tx: oneshot::Sender<Option<Box<RequestLifecycleLease>>>,
+    },
+    SelectWithoutAdmission {
+        request: SchedulingRequest,
+        resp_tx: oneshot::Sender<Result<SchedulingResponse, KvSchedulerError>>,
     },
     Update {
         worker: Option<WorkerWithDpRank>,
@@ -588,6 +593,27 @@ impl<
         }))
     }
 
+    /// Select a worker from current scheduler state without entering admission.
+    ///
+    /// This is for advisory policy probes that must not wait in the router
+    /// queue and must not book active scheduler state.
+    pub async fn select_without_admission(
+        &self,
+        request: SchedulingRequest,
+    ) -> Result<SchedulingResponse, KvSchedulerError> {
+        request.eligibility().validate_pinned_worker_allowed()?;
+
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let command = AdmissionCommand::SelectWithoutAdmission { request, resp_tx };
+        if self.admission_tx.send(command).await.is_err() {
+            return Err(KvSchedulerError::SubscriberShutdown);
+        }
+
+        resp_rx
+            .await
+            .map_err(|_| KvSchedulerError::SubscriberShutdown)?
+    }
+
     /// Called on prefill_complete/free. Drains pending requests while workers have capacity.
     /// Each scheduled request updates active_tokens via add_request, so the prefill-busy check
     /// sees fresh state on the next iteration.
@@ -664,6 +690,31 @@ impl<
         self.supports_overlap_refresh
     }
 
+    pub(crate) fn worker_is_prefill_busy(
+        &self,
+        worker: WorkerWithDpRank,
+        decay_now: Instant,
+        threshold: f64,
+    ) -> Option<bool> {
+        let active_tokens = self.slots.active_tokens(decay_now);
+        let workers = self.workers_with_configs.borrow();
+        let config = workers.get(&worker.worker_id)?;
+        let capacity = config.max_num_batched_tokens()? as f64;
+        Some(active_tokens.get(&worker).copied().unwrap_or(0) as f64 > threshold * capacity)
+    }
+
+    pub(crate) fn projected_decode_load_exceeds(
+        &self,
+        worker: WorkerWithDpRank,
+        projected_blocks: usize,
+        threshold: f64,
+    ) -> Option<bool> {
+        let workers = self.workers_with_configs.borrow();
+        let config = workers.get(&worker.worker_id)?;
+        let capacity = config.total_kv_blocks()? as f64;
+        Some(projected_blocks as f64 > threshold * capacity)
+    }
+
     fn prepare_block_hashes_for_refresh(
         &self,
         block_hashes: Option<Vec<LocalBlockHash>>,
@@ -720,6 +771,13 @@ impl<
                         self.handle_update(None).await;
                     }
                     let _ = ack_tx.send(lease);
+                }
+                AdmissionCommand::SelectWithoutAdmission {
+                    mut request,
+                    resp_tx,
+                } => {
+                    let result = self.select_without_admission_inner(&mut request, Instant::now());
+                    let _ = resp_tx.send(result);
                 }
                 AdmissionCommand::Update { worker, ack_tx } => {
                     self.handle_update(worker).await;
@@ -1395,6 +1453,61 @@ impl<
         }
     }
 
+    fn select_worker_for_request(
+        &self,
+        request: &mut SchedulingRequest,
+        decay_now: Instant,
+    ) -> Result<
+        (
+            crate::protocols::WorkerSelectionResult,
+            SelectedWorkerTierSnapshot,
+        ),
+        KvSchedulerError,
+    > {
+        request.worker_loads = self
+            .slots
+            .project_worker_loads(request.token_seq.as_deref(), decay_now);
+
+        {
+            let workers = self.workers_with_configs.borrow();
+            let overloaded_worker_ids = self
+                .overloaded_worker_provider
+                .as_ref()
+                .and_then(|provider| provider());
+            let eligibility = request.eligibility_with_overloaded(overloaded_worker_ids.as_ref());
+            self.selector
+                .select_worker(&workers, request, eligibility, self.block_size)
+                .map(|selection| {
+                    let config = workers
+                        .get(&selection.worker.worker_id)
+                        .expect("selected worker config must exist");
+                    let selected_worker_tiers = request
+                        .overlap
+                        .selected_worker_tiers(selection.worker, config);
+                    (selection, selected_worker_tiers)
+                })
+        }
+    }
+
+    fn select_without_admission_inner(
+        &self,
+        request: &mut SchedulingRequest,
+        decay_now: Instant,
+    ) -> Result<SchedulingResponse, KvSchedulerError> {
+        let (selection, selected_worker_tiers) =
+            self.select_worker_for_request(request, decay_now)?;
+
+        Ok(SchedulingResponse {
+            best_worker: selection.worker,
+            effective_overlap_blocks: selection.effective_overlap_blocks,
+            cached_tokens: selection.cached_tokens,
+            selected_worker_tiers,
+            request_progress: None,
+            lifecycle_lease: None,
+            potential_decode_blocks: selection.potential_decode_blocks,
+        })
+    }
+
     /// Run the full scheduling pipeline for a single request:
     /// compute projected load -> select worker -> book tracked state -> respond.
     fn admit_one(
@@ -1410,46 +1523,24 @@ impl<
                 .expect("admitted request is tracked")
                 .to_owned()
         });
-        request.worker_loads = self
-            .slots
-            .project_worker_loads(request.token_seq.as_deref(), decay_now);
 
-        let selection = {
-            let workers = self.workers_with_configs.borrow();
-            let overloaded_worker_ids = self
-                .overloaded_worker_provider
-                .as_ref()
-                .and_then(|provider| provider());
-            let eligibility = request.eligibility_with_overloaded(overloaded_worker_ids.as_ref());
-            self.selector
-                .select_worker(&workers, &request, eligibility, self.block_size)
-                .map(|selection| {
-                    let config = workers
-                        .get(&selection.worker.worker_id)
-                        .expect("selected worker config must exist");
-                    let selected_worker_tiers = request
-                        .overlap
-                        .selected_worker_tiers(selection.worker, config);
-                    (selection, selected_worker_tiers)
-                })
-        };
-
-        let (selection, selected_worker_tiers) = match selection {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("scheduling failed: {e}");
-                request.respond(Err(e));
-                if let Some(request_id) = admission_key.as_deref() {
-                    self.tracked_admissions.remove(request_id);
+        let (selection, selected_worker_tiers) =
+            match self.select_worker_for_request(&mut request, decay_now) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("scheduling failed: {e}");
+                    request.respond(Err(e));
+                    if let Some(request_id) = admission_key.as_deref() {
+                        self.tracked_admissions.remove(request_id);
+                    }
+                    return (
+                        admission
+                            .as_ref()
+                            .is_some_and(|admission| self.abort_admission(admission.ticket)),
+                        false,
+                    );
                 }
-                return (
-                    admission
-                        .as_ref()
-                        .is_some_and(|admission| self.abort_admission(admission.ticket)),
-                    false,
-                );
-            }
-        };
+            };
 
         let (admission, request_progress) = match admission {
             Some(RequestAdmission { ticket, progress }) => (Some(ticket), Some(progress)),
