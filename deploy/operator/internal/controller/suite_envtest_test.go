@@ -29,8 +29,7 @@ var (
 			Validating:  true,
 			BypassUsers: []string{admissionBypassUsername},
 		},
-		SetupWebhooks:   setupProductionWebhooks,
-		OperatorVersion: "1.1.0",
+		SetupWebhooks: setupProductionWebhooks,
 	})
 	k8sClient             client.Client
 	admissionBypassClient client.Client
