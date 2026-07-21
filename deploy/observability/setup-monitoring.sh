@@ -137,8 +137,6 @@ fi
 echo ""
 echo "Step 9: Deploying Grafana disaggregated dashboard ConfigMap..."
 kubectl apply -f "$SCRIPT_DIR/grafana-disagg-dashboard-configmap.yaml"
-# Note: the GMS shadow-failover dashboard ships with the platform Helm chart
-# (operator subchart) since it only applies to operator/failover deployments.
 echo "✅ Dashboard ConfigMap deployed - Grafana sidecar will auto-import it within a few seconds"
 
 # Step 10: Get Grafana credentials
