@@ -2,6 +2,7 @@ package criu
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -9,6 +10,10 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
+
+func compressionThreads(value uint32) *uint32 {
+	return &value
+}
 
 func TestParseManageCgroupsMode(t *testing.T) {
 	tests := []struct {
@@ -257,6 +262,89 @@ func TestBuildRestoreExtMounts(t *testing.T) {
 		_, err := buildRestoreExtMounts(m)
 		if err == nil {
 			t.Error("expected error for empty ExtMnt")
+		}
+	})
+}
+
+func TestBuildCRIUConfCompression(t *testing.T) {
+	tests := []struct {
+		name        string
+		settings    types.CRIUSettings
+		wantLines   []string
+		unwantLines []string
+	}{
+		{
+			name:        "off remains uncompressed",
+			settings:    types.CRIUSettings{CompressionMode: types.CRIUCompressionModeOff},
+			unwantLines: []string{"compress\n", "compress-region", "compress-acceleration"},
+		},
+		{
+			name: "per page",
+			settings: types.CRIUSettings{
+				CompressionMode:         types.CRIUCompressionModePerPage,
+				CompressionAcceleration: 2,
+				DecompressThreads:       compressionThreads(0),
+			},
+			wantLines: []string{"compress\n", "compress-acceleration 2\n", "decompress-threads 0\n"},
+		},
+		{
+			name: "region",
+			settings: types.CRIUSettings{
+				CompressionMode:         types.CRIUCompressionModeRegion,
+				CompressionAcceleration: 4,
+				CompressionRegionSize:   1024 * 1024,
+			},
+			wantLines:   []string{"compress-region 1048576\n", "compress-acceleration 4\n"},
+			unwantLines: []string{"compress\n"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.settings.Validate(); err != nil {
+				t.Fatalf("Validate() error = %v", err)
+			}
+			content := buildCRIUConf(&tc.settings)
+			for _, line := range tc.wantLines {
+				if !strings.Contains(content, line) {
+					t.Errorf("config %q does not contain %q", content, line)
+				}
+			}
+			for _, line := range tc.unwantLines {
+				if strings.Contains(content, line) {
+					t.Errorf("config %q unexpectedly contains %q", content, line)
+				}
+			}
+		})
+	}
+}
+
+func TestCheckCompressionSupport(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		binary := filepath.Join(t.TempDir(), "criu")
+		script := `#!/bin/sh
+if [ "$#" -ne 3 ] || [ "$1" != "check" ] || [ "$2" != "--feature" ] || [ "$3" != "compress" ]; then
+	echo "unexpected arguments: $*" >&2
+	exit 2
+fi
+exit 0
+`
+		if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		if err := checkCompressionSupport(binary); err != nil {
+			t.Fatalf("checkCompressionSupport() error = %v", err)
+		}
+	})
+
+	t.Run("failure includes output", func(t *testing.T) {
+		binary := filepath.Join(t.TempDir(), "criu")
+		if err := os.WriteFile(binary, []byte("#!/bin/sh\necho missing-lz4 >&2\nexit 1\n"), 0o700); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		err := checkCompressionSupport(binary)
+		if err == nil || !strings.Contains(err.Error(), "missing-lz4") {
+			t.Fatalf("checkCompressionSupport() error = %v, want command output", err)
 		}
 	})
 }

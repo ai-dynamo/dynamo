@@ -59,6 +59,9 @@ func BuildDumpOptions(
 	if settings == nil {
 		return criuOpts, nil
 	}
+	if err := settings.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid CRIU settings: %w", err)
+	}
 
 	if err := applyCommonSettings(criuOpts, settings); err != nil {
 		return nil, err
@@ -103,6 +106,16 @@ func ExecuteDump(
 
 	criuDumpStart := time.Now()
 	criuClient := criulib.MakeCriu()
+	if settings != nil && settings.CompressionMode != types.CRIUCompressionModeOff {
+		if err := checkCompressionSupport(settings.BinaryPath); err != nil {
+			return 0, err
+		}
+		log.Info("CRIU memory compression enabled",
+			"mode", settings.CompressionMode,
+			"acceleration", settings.CompressionAcceleration,
+			"region_size", settings.CompressionRegionSize,
+		)
+	}
 	if settings != nil && strings.TrimSpace(settings.BinaryPath) != "" {
 		if _, err := os.Stat(settings.BinaryPath); err != nil {
 			return 0, fmt.Errorf("criu binary not found at %s: %w", settings.BinaryPath, err)
@@ -151,6 +164,18 @@ func buildCRIUConf(c *types.CRIUSettings) string {
 	}
 	if c.SkipInFlight {
 		content += "skip-in-flight\n"
+	}
+	switch c.CompressionMode {
+	case types.CRIUCompressionModePerPage:
+		content += "compress\n"
+	case types.CRIUCompressionModeRegion:
+		content += fmt.Sprintf("compress-region %d\n", c.CompressionRegionSize)
+	}
+	if c.CompressionMode != "" && c.CompressionMode != types.CRIUCompressionModeOff {
+		content += fmt.Sprintf("compress-acceleration %d\n", c.CompressionAcceleration)
+	}
+	if c.DecompressThreads != nil {
+		content += fmt.Sprintf("decompress-threads %d\n", *c.DecompressThreads)
 	}
 	return content
 }

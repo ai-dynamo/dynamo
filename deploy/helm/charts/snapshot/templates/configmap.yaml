@@ -46,6 +46,10 @@ data:
       extMasters: {{ .Values.config.criu.extMasters }}
       manageCgroupsMode: {{ .Values.config.criu.manageCgroupsMode | quote }}
       imageIoMode: {{ .Values.config.criu.imageIoMode | quote }}
+      compressionMode: {{ .Values.config.criu.compressionMode | quote }}
+      compressionAcceleration: {{ .Values.config.criu.compressionAcceleration }}
+      compressionRegionSize: {{ .Values.config.criu.compressionRegionSize }}
+      decompressThreads: {{ .Values.config.criu.decompressThreads }}
       rstSibling: {{ .Values.config.criu.rstSibling }}
       mntnsCompatMode: {{ .Values.config.criu.mntnsCompatMode }}
       evasiveDevices: {{ .Values.config.criu.evasiveDevices }}

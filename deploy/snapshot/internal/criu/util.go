@@ -3,6 +3,7 @@ package criu
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
@@ -11,6 +12,22 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
+
+func checkCompressionSupport(binaryPath string) error {
+	binaryPath = strings.TrimSpace(binaryPath)
+	if binaryPath == "" {
+		binaryPath = "criu"
+	}
+	output, err := exec.Command(binaryPath, "check", "--feature", "compress").CombinedOutput()
+	if err != nil {
+		message := strings.TrimSpace(string(output))
+		if message == "" {
+			message = err.Error()
+		}
+		return fmt.Errorf("CRIU binary %q failed the memory compression feature check: %s", binaryPath, message)
+	}
+	return nil
+}
 
 // parseManageCgroupsMode normalizes and validates the CRIU cgroup mode setting.
 func parseManageCgroupsMode(raw string) (criurpc.CriuCgMode, string, error) {

@@ -485,6 +485,33 @@ snapshotctl restore \
 
 This patches restore metadata onto an existing pod that is already snapshot-compatible and returns after the patch is accepted.
 
+### CPU memory compression
+
+The Snapshot agent asks CRIU to compress CPU memory-page images with LZ4 by
+default. This does not compress the CUDA checkpoint payload. The Snapshot chart
+uses per-page compression and automatic restore concurrency:
+
+```yaml
+config:
+  criu:
+    compressionMode: per-page
+    compressionAcceleration: 1
+    decompressThreads: 0
+```
+
+Valid modes are `off`, `per-page`, and `region`. Per-page compression is the
+recommended starting point. Region compression can improve the ratio for
+heap-shaped data and defaults to 256 KiB regions, but is local-image-only and
+cannot be used with CRIU page-server or image streaming. `decompressThreads=0`
+lets CRIU select restore concurrency; `1` keeps decompression serial.
+
+Compression consumes additional CPU during checkpoint and restore. Compare
+artifact size and latency on the target PVC, and set `compressionMode: off` if
+the tradeoff does not suit the workload. Changing the chart setting does not
+transform or replace Ready checkpoints, so delete and recreate checkpoints when
+changing modes. Compressed artifacts use artifact version 2 and require
+matching LZ4-capable agent and placeholder images.
+
 ## Checkpoint IDs and Legacy Identity
 
 `status.checkpointID` is the artifact ID used by the snapshot protocol and the

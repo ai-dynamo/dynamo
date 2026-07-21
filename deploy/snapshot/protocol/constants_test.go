@@ -240,8 +240,8 @@ func TestResolveCheckpointStorageValidatesBasePath(t *testing.T) {
 		if storage.BasePath != "/" {
 			t.Fatalf("BasePath = %q, want /", storage.BasePath)
 		}
-		if storage.Location != "/hash/versions/1" {
-			t.Fatalf("Location = %q, want /hash/versions/1", storage.Location)
+		if storage.Location != "/hash/versions/"+DefaultCheckpointArtifactVersion {
+			t.Fatalf("Location = %q, want default artifact version", storage.Location)
 		}
 	})
 }

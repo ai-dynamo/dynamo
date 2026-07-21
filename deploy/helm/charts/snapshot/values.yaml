@@ -205,6 +205,13 @@ config:
     manageCgroupsMode: soft # CRIU cgroup management mode (ignore/soft/full/strict)
     imageIoMode: direct     # CRIU image I/O mode (writeback/direct); direct uses O_DIRECT to avoid page-cache double-buffering
 
+    # CPU memory-page compression. This does not compress CUDA checkpoint data.
+    # Per-page is compatible with local images, page-server, and image streaming.
+    compressionMode: "per-page"   # off | per-page | region; quote "off" because YAML treats bare off as boolean
+    compressionAcceleration: 1    # LZ4 acceleration (1=best ratio, up to 65537=faster)
+    compressionRegionSize: 262144 # Region bytes; page-aligned and at most 4 MiB
+    decompressThreads: 0          # 0=automatic, 1=serial, 2..1024=parallel
+
     # Restore-specific options (only apply during CRIU restore, not dump)
     rstSibling: true         # Restore as sibling process (required for go-criu swrk mode)
     mntnsCompatMode: false   # Mount namespace compatibility mode

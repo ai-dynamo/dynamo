@@ -26,6 +26,18 @@ const (
 	// StorageAccessModePodMount means workload pods mount the checkpoint PVC,
 	// and snapshot-agent reaches it through /host/proc/<pid>/root.
 	StorageAccessModePodMount = "podMount"
+
+	CRIUCompressionModeOff     = "off"
+	CRIUCompressionModePerPage = "per-page"
+	CRIUCompressionModeRegion  = "region"
+
+	DefaultCRIUCompressionAcceleration uint32 = 1
+	DefaultCRIUCompressionRegionSize   uint32 = 256 * 1024
+	DefaultCRIUDecompressThreads       uint32 = 1
+	MaxCRIUCompressionAcceleration     uint32 = 65537
+	MaxCRIUCompressionRegionSize       uint32 = 4 * 1024 * 1024
+	MaxCRIUDecompressThreads           uint32 = 1024
+	criuPageSize                       uint32 = 4096
 )
 
 func (c *AgentConfig) LoadEnvOverrides() {
@@ -66,19 +78,8 @@ func (c *AgentConfig) Validate() error {
 		}
 	}
 	c.Storage.AccessMode = accessMode
-	if c.CRIU.TcpClose && c.CRIU.TcpEstablished {
-		return &ConfigError{
-			Field:   "criu",
-			Message: "tcpClose and tcpEstablished cannot both be true",
-		}
-	}
-	switch strings.ToLower(strings.TrimSpace(c.CRIU.ImageIoMode)) {
-	case "", "writeback", "direct":
-	default:
-		return &ConfigError{
-			Field:   "criu.imageIoMode",
-			Message: fmt.Sprintf("unsupported imageIoMode %q; expected %q, %q, or empty", c.CRIU.ImageIoMode, "writeback", "direct"),
-		}
+	if err := c.CRIU.Validate(); err != nil {
+		return err
 	}
 	return c.Restore.Validate()
 }
@@ -115,30 +116,96 @@ func (c *RestoreSpec) Validate() error {
 
 // CRIUSettings holds CRIU-specific configuration options.
 type CRIUSettings struct {
-	GhostLimit        uint32 `yaml:"ghostLimit"`
-	LogLevel          int32  `yaml:"logLevel"`
-	WorkDir           string `yaml:"workDir"`
-	AutoDedup         bool   `yaml:"autoDedup"`
-	LazyPages         bool   `yaml:"lazyPages"`
-	LeaveRunning      bool   `yaml:"leaveRunning"`
-	ShellJob          bool   `yaml:"shellJob"`
-	TcpClose          bool   `yaml:"tcpClose"`
-	TcpEstablished    bool   `yaml:"tcpEstablished"`
-	FileLocks         bool   `yaml:"fileLocks"`
-	OrphanPtsMaster   bool   `yaml:"orphanPtsMaster"`
-	ExtUnixSk         bool   `yaml:"extUnixSk"`
-	LinkRemap         bool   `yaml:"linkRemap"`
-	ExtMasters        bool   `yaml:"extMasters"`
-	ManageCgroupsMode string `yaml:"manageCgroupsMode"`
-	ImageIoMode       string `yaml:"imageIoMode"`
-	RstSibling        bool   `yaml:"rstSibling"`
-	MntnsCompatMode   bool   `yaml:"mntnsCompatMode"`
-	EvasiveDevices    bool   `yaml:"evasiveDevices"`
-	ForceIrmap        bool   `yaml:"forceIrmap"`
-	BinaryPath        string `yaml:"binaryPath"`
-	LibDir            string `yaml:"libDir"`
-	AllowUprobes      bool   `yaml:"allowUprobes"`
-	SkipInFlight      bool   `yaml:"skipInFlight"`
+	GhostLimit              uint32  `yaml:"ghostLimit"`
+	LogLevel                int32   `yaml:"logLevel"`
+	WorkDir                 string  `yaml:"workDir"`
+	AutoDedup               bool    `yaml:"autoDedup"`
+	LazyPages               bool    `yaml:"lazyPages"`
+	LeaveRunning            bool    `yaml:"leaveRunning"`
+	ShellJob                bool    `yaml:"shellJob"`
+	TcpClose                bool    `yaml:"tcpClose"`
+	TcpEstablished          bool    `yaml:"tcpEstablished"`
+	FileLocks               bool    `yaml:"fileLocks"`
+	OrphanPtsMaster         bool    `yaml:"orphanPtsMaster"`
+	ExtUnixSk               bool    `yaml:"extUnixSk"`
+	LinkRemap               bool    `yaml:"linkRemap"`
+	ExtMasters              bool    `yaml:"extMasters"`
+	ManageCgroupsMode       string  `yaml:"manageCgroupsMode"`
+	ImageIoMode             string  `yaml:"imageIoMode"`
+	CompressionMode         string  `yaml:"compressionMode,omitempty"`
+	CompressionAcceleration uint32  `yaml:"compressionAcceleration,omitempty"`
+	CompressionRegionSize   uint32  `yaml:"compressionRegionSize,omitempty"`
+	DecompressThreads       *uint32 `yaml:"decompressThreads,omitempty"`
+	RstSibling              bool    `yaml:"rstSibling"`
+	MntnsCompatMode         bool    `yaml:"mntnsCompatMode"`
+	EvasiveDevices          bool    `yaml:"evasiveDevices"`
+	ForceIrmap              bool    `yaml:"forceIrmap"`
+	BinaryPath              string  `yaml:"binaryPath"`
+	LibDir                  string  `yaml:"libDir"`
+	AllowUprobes            bool    `yaml:"allowUprobes"`
+	SkipInFlight            bool    `yaml:"skipInFlight"`
+}
+
+// Validate normalizes CRIU settings and rejects combinations CRIU cannot use.
+func (c *CRIUSettings) Validate() error {
+	if c.TcpClose && c.TcpEstablished {
+		return &ConfigError{Field: "criu", Message: "tcpClose and tcpEstablished cannot both be true"}
+	}
+
+	switch strings.ToLower(strings.TrimSpace(c.ImageIoMode)) {
+	case "", "writeback", "direct":
+	default:
+		return &ConfigError{
+			Field:   "criu.imageIoMode",
+			Message: fmt.Sprintf("unsupported imageIoMode %q; expected %q, %q, or empty", c.ImageIoMode, "writeback", "direct"),
+		}
+	}
+
+	mode := strings.ToLower(strings.TrimSpace(c.CompressionMode))
+	if mode == "" {
+		mode = CRIUCompressionModeOff
+	}
+	switch mode {
+	case CRIUCompressionModeOff, CRIUCompressionModePerPage, CRIUCompressionModeRegion:
+	default:
+		return &ConfigError{
+			Field:   "criu.compressionMode",
+			Message: fmt.Sprintf("unsupported compressionMode %q; expected %q, %q, or %q", c.CompressionMode, CRIUCompressionModeOff, CRIUCompressionModePerPage, CRIUCompressionModeRegion),
+		}
+	}
+	c.CompressionMode = mode
+
+	if mode != CRIUCompressionModeOff {
+		if c.CompressionAcceleration == 0 {
+			c.CompressionAcceleration = DefaultCRIUCompressionAcceleration
+		}
+		if c.CompressionAcceleration > MaxCRIUCompressionAcceleration {
+			return &ConfigError{
+				Field:   "criu.compressionAcceleration",
+				Message: fmt.Sprintf("must be between 1 and %d", MaxCRIUCompressionAcceleration),
+			}
+		}
+	}
+
+	if mode == CRIUCompressionModeRegion {
+		if c.CompressionRegionSize == 0 {
+			c.CompressionRegionSize = DefaultCRIUCompressionRegionSize
+		}
+		if c.CompressionRegionSize%criuPageSize != 0 || c.CompressionRegionSize > MaxCRIUCompressionRegionSize {
+			return &ConfigError{
+				Field:   "criu.compressionRegionSize",
+				Message: fmt.Sprintf("must be a multiple of %d and no greater than %d", criuPageSize, MaxCRIUCompressionRegionSize),
+			}
+		}
+	}
+
+	if c.DecompressThreads != nil && *c.DecompressThreads > MaxCRIUDecompressThreads {
+		return &ConfigError{
+			Field:   "criu.decompressThreads",
+			Message: fmt.Sprintf("must be between 0 and %d", MaxCRIUDecompressThreads),
+		}
+	}
+	return nil
 }
 
 // OverlaySettings is the static config for rootfs exclusions.

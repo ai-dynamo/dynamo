@@ -119,6 +119,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-protobuf \
     libgnutls28-dev \
     libnftables-dev \
+    liblz4-dev \
     uuid-dev \
     && rm -rf /var/lib/apt/lists/*
 
@@ -128,6 +129,7 @@ RUN git init /tmp/criu \
     && git fetch --depth 1 origin ${CRIU_REF} \
     && git checkout FETCH_HEAD \
     && make -j$(nproc) \
+    && ldd ./criu/criu | grep -q 'liblz4' \
     && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin
 
 COPY plugins/inet-remap/snapshot_inet_remap.c /tmp/snapshot_inet_remap.c
@@ -160,6 +162,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libprotobuf-c1 \
     libgnutls30t64 \
     libnftables1 \
+    liblz4-1 \
     iproute2 \
     iptables \
     procps \
@@ -172,7 +175,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy CRIU from builder
 COPY --from=criu-builder /criu-install/usr/local /usr/local
 COPY --from=criu-builder /tmp/criu/COPYING /legal/CRIU/COPYING
-RUN criu --version
+RUN criu --version \
+    && ldd "$(command -v criu)" | grep -q 'liblz4'
 
 # Copy CUDA checkpoint binaries
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
@@ -221,6 +225,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libprotobuf-c1 \
     libgnutls30t64 \
     libnftables1 \
+    liblz4-1 \
     iproute2 \
     iptables \
     procps \
@@ -232,7 +237,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy CRIU from builder (needed by nsrestore running inside these namespaces)
 COPY --from=criu-builder /criu-install/usr/local /usr/local
 COPY --from=criu-builder /tmp/criu/COPYING /legal/CRIU/COPYING
-RUN criu --version && echo "CRIU installed successfully"
+RUN criu --version \
+    && ldd "$(command -v criu)" | grep -q 'liblz4' \
+    && echo "CRIU installed successfully"
 
 # Copy CUDA checkpoint binaries
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint

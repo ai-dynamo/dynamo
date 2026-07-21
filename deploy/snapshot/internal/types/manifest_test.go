@@ -16,9 +16,11 @@ func TestManifestRoundTrip(t *testing.T) {
 		"sha256:abc123",
 		CRIUDumpManifest{
 			CRIU: CRIUSettings{
-				LogLevel: 4,
-				ShellJob: true,
-				LibDir:   "/usr/lib/criu",
+				LogLevel:          4,
+				ShellJob:          true,
+				LibDir:            "/usr/lib/criu",
+				CompressionMode:   CRIUCompressionModePerPage,
+				DecompressThreads: uint32Ptr(0),
 			},
 			ExtMnt:   map[string]string{"/etc/hostname": "/etc/hostname", "/proc/acpi": "/dev/null"},
 			External: []string{"net[12345]:extNetNs"},
@@ -53,6 +55,12 @@ func TestManifestRoundTrip(t *testing.T) {
 	if loaded.CRIUDump.CRIU.ShellJob != true {
 		t.Error("CRIU.ShellJob should be true")
 	}
+	if loaded.CRIUDump.CRIU.CompressionMode != CRIUCompressionModePerPage {
+		t.Errorf("CRIU.CompressionMode = %q, want %q", loaded.CRIUDump.CRIU.CompressionMode, CRIUCompressionModePerPage)
+	}
+	if loaded.CRIUDump.CRIU.DecompressThreads == nil || *loaded.CRIUDump.CRIU.DecompressThreads != 0 {
+		t.Errorf("CRIU.DecompressThreads = %v, want explicit 0", loaded.CRIUDump.CRIU.DecompressThreads)
+	}
 	if len(loaded.CRIUDump.ExtMnt) != 2 {
 		t.Errorf("ExtMnt count = %d, want 2", len(loaded.CRIUDump.ExtMnt))
 	}
@@ -85,6 +93,25 @@ func TestManifestRoundTrip(t *testing.T) {
 	}
 	if len(loaded.CUDA.SourceGPUUUIDs) != 2 || loaded.CUDA.SourceGPUUUIDs[0] != "GPU-aaa" {
 		t.Errorf("CUDA.SourceGPUUUIDs = %v", loaded.CUDA.SourceGPUUUIDs)
+	}
+}
+
+func TestReadLegacyManifestLeavesCompressionUnset(t *testing.T) {
+	dir := t.TempDir()
+	content := []byte("checkpointId: legacy\ncreatedAt: 2026-03-31T00:00:00Z\ncriuDump:\n  criu:\n    logLevel: 4\n")
+	if err := os.WriteFile(filepath.Join(dir, manifestFilename), content, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	manifest, err := ReadManifest(dir)
+	if err != nil {
+		t.Fatalf("ReadManifest: %v", err)
+	}
+	if manifest.CRIUDump.CRIU.CompressionMode != "" {
+		t.Fatalf("CompressionMode = %q, want legacy empty value", manifest.CRIUDump.CRIU.CompressionMode)
+	}
+	if manifest.CRIUDump.CRIU.DecompressThreads != nil {
+		t.Fatalf("DecompressThreads = %v, want nil", manifest.CRIUDump.CRIU.DecompressThreads)
 	}
 }
 

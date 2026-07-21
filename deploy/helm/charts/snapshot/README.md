@@ -116,6 +116,10 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `runtime.socketPath` | CRI socket (empty = default for `runtime.type`) | `""` |
 | `runtime.storagePath` | CRI storage root (empty = default for `runtime.type`) | `""` |
 | `openshift.enabled` | OpenShift RBAC / SCC-related chart pieces | `false` |
+| `config.criu.compressionMode` | CPU memory-page compression: `off`, `per-page`, or `region` | `per-page` |
+| `config.criu.compressionAcceleration` | LZ4 speed/ratio setting; larger values favor speed | `1` |
+| `config.criu.compressionRegionSize` | Region-compression block size in bytes; page-aligned, maximum 4 MiB | `262144` |
+| `config.criu.decompressThreads` | Restore decompression concurrency; `0` selects automatic concurrency | `0` |
 
 Reserved `s3` and `oci` values remain chart-owned placeholders for future
 snapshot backends, but only `pvc` is implemented today.
@@ -150,6 +154,31 @@ restores, multi-node simultaneous access, or backends that cannot reattach an
 RWO volume to the node selected for restore.
 
 See [values.yaml](./values.yaml) for the full configuration surface.
+
+## Memory compression
+
+The Snapshot chart enables CRIU compression of CPU memory-page images with LZ4
+by default. It does not compress CUDA checkpoint payloads. The chart uses the
+broadly compatible per-page mode and lets CRIU select restore concurrency:
+
+```bash
+helm upgrade --install snapshot ./deploy/helm/charts/snapshot \
+  --namespace ${NAMESPACE} \
+  --set config.criu.compressionMode=per-page \
+  --set config.criu.decompressThreads=0
+```
+
+`region` mode generally produces smaller page images for heap-shaped data, but
+it is limited to local CRIU images and cannot be combined with page-server or
+image-streamer operation. Compression adds CPU work to checkpoint and restore,
+so benchmark it against the storage used by the cluster. Set
+`config.criu.compressionMode=off` to disable it.
+
+Changing compression settings does not rewrite an existing checkpoint. Delete
+and recreate a checkpoint when evaluating a new mode. Compressed artifacts use
+Snapshot artifact version 2 and require an LZ4-capable Snapshot agent and
+placeholder image; keep those images at the same release during rollout or
+rollback.
 
 ## Next steps
 
