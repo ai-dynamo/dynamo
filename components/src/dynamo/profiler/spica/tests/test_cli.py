@@ -16,17 +16,20 @@ def test_package_is_marked_experimental():
     assert "experimental" in (spica.__doc__ or "").lower()
 
 
+@pytest.mark.timeout(30)
 def test_cli_help_is_marked_experimental():
     result = subprocess.run(
         [sys.executable, "-m", "dynamo.profiler.spica", "--help"],
         check=True,
         capture_output=True,
         text=True,
+        timeout=30,
     )
 
     assert "[EXPERIMENTAL]" in result.stdout
 
 
+@pytest.mark.timeout(30)
 def test_cli_rejects_malformed_yaml(tmp_path):
     config_path = tmp_path / "malformed.yaml"
     config_path.write_text("search_space: [")
@@ -42,12 +45,14 @@ def test_cli_rejects_malformed_yaml(tmp_path):
         check=False,
         capture_output=True,
         text=True,
+        timeout=30,
     )
 
     assert result.returncode == 2
     assert "malformed YAML" in result.stderr
 
 
+@pytest.mark.timeout(30)
 def test_cli_rejects_invalid_config(tmp_path):
     config_path = tmp_path / "invalid.yaml"
     config_path.write_text("search_space:\n  gpu_budget: 0\n")
@@ -63,6 +68,7 @@ def test_cli_rejects_invalid_config(tmp_path):
         check=False,
         capture_output=True,
         text=True,
+        timeout=30,
     )
 
     assert result.returncode == 2

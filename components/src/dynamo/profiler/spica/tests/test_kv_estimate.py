@@ -171,6 +171,7 @@ def _require_memory_estimator() -> None:
         pytest.skip(str(exc))
 
 
+@pytest.mark.model("Qwen/Qwen3-32B")
 def test_real_estimate_dense_qwen_feasible():
     _require_memory_estimator()
     try:
@@ -191,6 +192,7 @@ def test_real_estimate_dense_qwen_feasible():
     assert tokens is not None and tokens > 0
 
 
+@pytest.mark.model("deepseek-ai/DeepSeek-V3")
 def test_real_estimate_deepseek_two_gpus_oom():
     _require_memory_estimator()
     try:

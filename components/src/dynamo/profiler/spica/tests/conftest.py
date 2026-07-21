@@ -9,6 +9,8 @@ import pytest
 
 _INTEGRATION_TESTS = {
     "test_load_predictor_sweep_integration.py",
+    "test_kv_estimate.py",
+    "test_model_hw.py",
     "test_replay_integration.py",
 }
 _TEST_ROOT = Path(__file__).parent
@@ -23,7 +25,6 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
 
         item.add_marker(pytest.mark.gpu_0)
         item.add_marker(pytest.mark.planner)
-        item.add_marker(pytest.mark.pre_merge)
         # Pinned third-party dependencies still use these deprecated APIs. Keep
         # warning-as-error enabled for every other warning in the Spica suite.
         item.add_marker(
@@ -38,6 +39,8 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         )
         if item_path.name in _INTEGRATION_TESTS:
             item.add_marker(pytest.mark.integration)
+            item.add_marker(pytest.mark.post_merge)
             item.add_marker(pytest.mark.timeout(300))
         else:
             item.add_marker(pytest.mark.unit)
+            item.add_marker(pytest.mark.pre_merge)

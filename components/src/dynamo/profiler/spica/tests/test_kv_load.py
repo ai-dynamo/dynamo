@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from types import SimpleNamespace
+
 import pytest
 
 import dynamo.profiler.spica.kv_estimate as kv_estimate_mod
@@ -122,6 +124,46 @@ def test_capacity_smaller_than_one_average_request_is_infeasible(monkeypatch):
             workload=Workload(
                 isl=100, osl=100, kv_load_ratio=1.0, num_request_ratio=10
             ),
+            parallel_config=config,
+            ratio=1.0,
+            backend_version="v",
+        )
+
+
+def test_block_size_must_be_positive():
+    config = ReplicaParallelConfig(
+        ParallelShape(tp=1, dp=1, moe_tp=1, moe_ep=1), replicas=1
+    )
+    sample = _sample("agg")
+    sample["agg_block_size"] = 0
+
+    with pytest.raises(ValueError, match="agg_block_size must be greater than zero"):
+        resolve_kv_load(
+            sample,
+            workload=Workload(
+                isl=100, osl=100, kv_load_ratio=1.0, num_request_ratio=10
+            ),
+            parallel_config=config,
+            ratio=1.0,
+            backend_version="v",
+        )
+
+
+def test_average_tokens_per_request_must_be_positive(monkeypatch):
+    config = ReplicaParallelConfig(
+        ParallelShape(tp=1, dp=1, moe_tp=1, moe_ep=1), replicas=1
+    )
+    monkeypatch.setattr(
+        "dynamo.profiler.spica.kv_load._role_capacity_tokens",
+        lambda *args, **kwargs: 10_000,
+    )
+
+    with pytest.raises(
+        InfeasibleKVCapacity, match="positive average tokens per request"
+    ):
+        resolve_kv_load(
+            _sample("agg"),
+            workload=SimpleNamespace(isl=0, osl=0),
             parallel_config=config,
             ratio=1.0,
             backend_version="v",

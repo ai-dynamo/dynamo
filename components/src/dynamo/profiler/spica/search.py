@@ -23,6 +23,7 @@ without real replay / Vizier (use ``parallel_evals=1`` to avoid spawning process
 
 from __future__ import annotations
 
+import logging
 import multiprocessing as mp
 import time
 import uuid
@@ -46,6 +47,8 @@ from .sample import unroll_sample
 from .sampler import BranchSampler, Suggestion, make_branch_sampler
 from .score import is_feasible, make_candidate, pareto_front, rank
 from .search_space import BranchSpace, enumerate_branches
+
+logger = logging.getLogger(__name__)
 
 
 class _Evaluator(Protocol):
@@ -148,6 +151,7 @@ def _evaluate_one(
     except InfeasibleKVCapacity as exc:
         return None, None, "infeasible", f"candidate KV capacity infeasible: {exc}"
     except Exception as exc:
+        logger.exception("Spica candidate build failed")
         return (
             None,
             None,
@@ -157,6 +161,7 @@ def _evaluate_one(
     try:
         report = evaluator.evaluate(plan, concurrency_override=concurrency)
     except Exception as exc:  # one candidate failing must not abort the sweep
+        logger.exception("Spica candidate replay failed")
         return None, None, "failed", f"replay failed: {type(exc).__name__}: {exc}"
     if not is_feasible(int(sample["used_gpus"]), config.search_space.gpu_budget):
         # Over gpu_budget: report as infeasible to the optimizer (observe_infeasible, not
@@ -566,12 +571,18 @@ def run_smart_search(
                                 sampler.observe_infeasible(duplicate, reason)
                             if outcome == "failed":
                                 failure_reasons[reason] = (
-                                    failure_reasons.get(reason, 0) + 1
+                                    failure_reasons.get(reason, 0) + 1 + len(duplicates)
                                 )
                             _record(outcome, None)
+                            for _duplicate in duplicates:
+                                _record(outcome, None)
                             continue
 
-                        assert candidate is not None and observe_metrics is not None
+                        if candidate is None or observe_metrics is None:
+                            raise RuntimeError(
+                                "Spica evaluator contract violation: a feasible outcome "
+                                "must include both a candidate and observation metrics"
+                            )
                         sampler.observe(suggestion, observe_metrics)
                         replay_cache[key] = (candidate, dict(observe_metrics))
                         for duplicate in duplicates:

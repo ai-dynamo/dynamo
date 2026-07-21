@@ -271,7 +271,7 @@ def test_suggest_observe_round_trips():
             scores.append(score)
             sampler.observe(s, {"objective": score})
     assert len(scores) == 4
-    best = list(sampler._study.optimal_trials())[0].materialize()
+    best = next(iter(sampler._study.optimal_trials())).materialize()
     assert best.final_measurement.metrics["objective"].value == max(scores)
 
 

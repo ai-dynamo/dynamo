@@ -7,6 +7,7 @@
 
 import dataclasses
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -24,6 +25,8 @@ from dynamo.profiler.spica.config import (
 from dynamo.profiler.spica.deploy import DeploymentPlan
 from dynamo.profiler.spica.evaluator import ReplayEvaluator
 
+TRACE = str(Path(__file__).parent / "data" / "mooncake_tiny.jsonl")
+
 
 class _FakeArgs:
     @classmethod
@@ -32,7 +35,7 @@ class _FakeArgs:
 
 
 def _wl():
-    return Workload(trace_path="/tmp/t.jsonl")
+    return Workload(trace_path=TRACE)
 
 
 def _agg_plan(static):
@@ -84,7 +87,7 @@ def test_static_agg_uses_plain_path(monkeypatch):
     assert report["output_throughput_tok_s"] == 42.0
     assert (
         rec["num_workers"] == 2
-        and rec["trace_files"] == "/tmp/t.jsonl"
+        and rec["trace_files"] == TRACE
         and rec["router_mode"] == "round_robin"
     )
     assert "sla_ttft_ms" not in rec  # no SLA on a throughput goal -> none threaded
@@ -150,7 +153,7 @@ def test_current_trace_api_filters_legacy_kwargs_and_fails_closed_without_goodpu
     )
     with pytest.raises(RuntimeError, match="per-request SLA accounting"):
         ReplayEvaluator(_wl(), goal).evaluate(_agg_plan(static=True))
-    assert rec["trace_file"] == "/tmp/t.jsonl"
+    assert rec["trace_file"] == TRACE
     assert set(rec) == {
         "trace_file",
         "extra_engine_args",
@@ -253,7 +256,7 @@ def test_static_trace_threads_replay_concurrency(monkeypatch):
         "run_trace_replay",
         lambda **kw: rec.update(kw) or {"output_throughput_tok_s": 1.0},
     )
-    wl = Workload(trace_path="/tmp/t.jsonl", replay_concurrency=32)
+    wl = Workload(trace_path=TRACE, replay_concurrency=32)
     ReplayEvaluator(
         wl, OptimizationGoal(target=OptimizationTarget.THROUGHPUT)
     ).evaluate(_agg_plan(static=True))
@@ -271,13 +274,13 @@ def test_scaling_trace_threads_replay_concurrency_when_supported(monkeypatch):
         lambda **kw: rec.update(kw)
         or {"gpu_hours": 1.0, "goodput_output_throughput_tok_s": 1.0},
     )
-    wl = Workload(trace_path="/tmp/t.jsonl", replay_concurrency=32)
+    wl = Workload(trace_path=TRACE, replay_concurrency=32)
     goal = OptimizationGoal(
         target=OptimizationTarget.GOODPUT_PER_GPU,
         sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0),
     )
     ReplayEvaluator(wl, goal).evaluate(_agg_plan(static=False))
-    assert rec["replay_concurrency"] == 32 and rec["trace_files"] == "/tmp/t.jsonl"
+    assert rec["replay_concurrency"] == 32 and rec["trace_files"] == TRACE
 
 
 def _syn_wl(**kw):
@@ -467,7 +470,7 @@ def test_synthetic_planner_disagg_threads_planner_config_when_supported(monkeypa
 
 def test_workload_validation():
     with pytest.raises(ValueError, match="positive integer"):  # trace + bad cap
-        Workload(trace_path="/tmp/t.jsonl", replay_concurrency=0)
+        Workload(trace_path=TRACE, replay_concurrency=0)
     with pytest.raises(
         ValueError, match="for trace workloads"
     ):  # synthetic can't use replay_concurrency
@@ -481,4 +484,4 @@ def test_workload_validation():
     ):
         _syn_wl(request_rate=10.0, concurrency=4.0)  # not both
     with pytest.raises(ValueError, match="must not set synthetic fields"):
-        Workload(trace_path="/tmp/t.jsonl", isl=128)
+        Workload(trace_path=TRACE, isl=128)

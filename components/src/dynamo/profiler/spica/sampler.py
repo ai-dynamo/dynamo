@@ -82,6 +82,18 @@ def _index_decoder(choices: list[Any]) -> Callable[[Any], Any]:
     return lambda v: choices[round(float(v))]
 
 
+def _vizier_modules() -> tuple[Any, Any]:
+    """Import the optional Vizier runtime only after the caller opts into sampling.
+
+    Keeping this dependency behind sampler construction lets configuration and package
+    imports remain lightweight and free of Vizier/JAX process-wide initialization.
+    """
+    from vizier.service import clients
+    from vizier.service import pyvizier as vz
+
+    return clients, vz
+
+
 class VizierBranchSampler:
     """A Vizier study over one :class:`BranchSpace`.
 
@@ -100,8 +112,7 @@ class VizierBranchSampler:
         objectives: list[tuple[str, bool]] | None = None,
     ):
         configure_vizier_runtime()
-        from vizier.service import clients
-        from vizier.service import pyvizier as vz
+        clients, vz = _vizier_modules()
 
         # Vizier's embedded service defaults its SQLite database to the installed
         # package directory, which is read-only in the planner image. Spica studies
@@ -233,7 +244,7 @@ class VizierBranchSampler:
     def _update_projection_metadata(suggestion: Suggestion) -> None:
         if suggestion.projection is None:
             return
-        from vizier.service import pyvizier as vz
+        _, vz = _vizier_modules()
 
         metadata = vz.Metadata()
         metadata["spica_projection"] = json.dumps(
@@ -242,7 +253,7 @@ class VizierBranchSampler:
         suggestion.handle.update_metadata(metadata)
 
     def observe(self, suggestion: Suggestion, metrics: dict[str, float]) -> None:
-        from vizier.service import pyvizier as vz
+        _, vz = _vizier_modules()
 
         self._update_projection_metadata(suggestion)
         suggestion.handle.complete(
@@ -252,7 +263,7 @@ class VizierBranchSampler:
     def observe_infeasible(self, suggestion: Suggestion, reason: str) -> None:
         """Mark a candidate that could not be evaluated (e.g. replay error) so the
         study still closes the trial and the optimizer moves on."""
-        from vizier.service import pyvizier as vz
+        _, vz = _vizier_modules()
 
         self._update_projection_metadata(suggestion)
         suggestion.handle.complete(vz.Measurement(), infeasible_reason=reason)

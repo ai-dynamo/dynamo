@@ -6,6 +6,8 @@
 """Per-branch candidate space. The branch enumeration calls the KV-feasibility
 path, so it needs aiconfigurator + a perf DB (skips otherwise)."""
 
+from pathlib import Path
+
 import pytest
 
 pytest.importorskip("aiconfigurator")
@@ -17,6 +19,8 @@ from dynamo.profiler.spica.model_hw import NoViableParallelConfig
 from dynamo.profiler.spica.parallel_enum import ParallelShape, ReplicaParallelConfig
 from dynamo.profiler.spica.search_space import branch_knob_choices, enumerate_branches
 
+TRACE = str(Path(__file__).parent / "data" / "mooncake_tiny.jsonl")
+
 
 def _config(**ss_overrides) -> SmartSearchConfig:
     ss = {
@@ -27,7 +31,7 @@ def _config(**ss_overrides) -> SmartSearchConfig:
         "gpu_budget": 16,
     }
     ss.update(ss_overrides)
-    return SmartSearchConfig(search_space=ss, workload={"trace_path": "/tmp/t.jsonl"})
+    return SmartSearchConfig(search_space=ss, workload={"trace_path": TRACE})
 
 
 def _require_memory_estimator() -> None:

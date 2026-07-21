@@ -69,6 +69,10 @@ def _role_capacity_tokens(
 ) -> int:
     """Aggregate scheduler-visible KV tokens across attention-DP ranks and replicas."""
     block_size = int(sample[f"{role}_block_size"])
+    if block_size <= 0:
+        raise ValueError(
+            f"{role}_block_size must be greater than zero, got {block_size}"
+        )
     per_rank_tokens = _per_rank_capacity_tokens(
         config.shape,
         model_name=str(sample["model_name"]),
@@ -125,6 +129,11 @@ def resolve_kv_load(
         for role, config in role_configs.items()
     }
     expected_tokens_per_request = int(workload.isl) + int(workload.osl) // 2
+    if expected_tokens_per_request <= 0:
+        raise InfeasibleKVCapacity(
+            "kv_load_ratio requires positive average tokens per request, got "
+            f"isl={workload.isl}, osl={workload.osl}"
+        )
     concurrency_capacity = capacities[load_role] // expected_tokens_per_request
     if concurrency_capacity < 1:
         raise InfeasibleKVCapacity(

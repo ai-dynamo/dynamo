@@ -8,6 +8,10 @@ import importlib.util
 import subprocess
 import sys
 
+import pytest
+
+pytestmark = pytest.mark.timeout(30)
+
 
 def test_spica_has_no_console_script():
     scripts = importlib.metadata.entry_points(group="console_scripts")
@@ -29,4 +33,5 @@ def test_profiler_does_not_eagerly_reexport_spica():
         check=True,
         text=True,
         capture_output=True,
+        timeout=30,
     )

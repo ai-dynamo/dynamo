@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import warnings
 from dataclasses import dataclass
+from typing import Any
 
 from aiconfigurator.generator.naive import (
     _estimate_model_weight_bytes,
@@ -53,6 +54,18 @@ _GQA_MOE_ARCHITECTURES = frozenset({"Qwen3MoeForCausalLM"})
 
 class NoViableParallelConfig(ValueError):
     """No parallel config can hold the model+sequence within the GPU budget."""
+
+
+def _aic_model_system_facts(
+    model_name: str, hardware_sku: str
+) -> tuple[dict[str, Any], int]:
+    """Isolate the AIConfigurator 0.9 private-helper compatibility boundary.
+
+    AIConfigurator 0.9 has no public equivalents for its normalized system config
+    and weight estimator. Keeping both calls here makes that dependency explicit and
+    gives the pinned integration contract one focused test boundary.
+    """
+    return _get_system_config(hardware_sku), _estimate_model_weight_bytes(model_name)
 
 
 def _validate_hardware_sku(hardware_sku: str) -> None:
@@ -105,11 +118,10 @@ def resolve_model_hardware(
     max_context = model_config.get("context")
 
     _validate_hardware_sku(hardware_sku)
-    sys_cfg = _get_system_config(hardware_sku)
+    sys_cfg, weight_bytes = _aic_model_system_facts(model_name, hardware_sku)
     vram_per_gpu = sys_cfg["vram_per_gpu"]
     gpus_per_node = sys_cfg["gpus_per_node"]
 
-    weight_bytes = _estimate_model_weight_bytes(model_name)
     # Large MoE (a node can't hold ~2x the weights) auto-enables multi-node wideEP.
     enable_wideep = is_moe and gpus_per_node * vram_per_gpu < 2 * weight_bytes
 

@@ -113,7 +113,7 @@ Every resulting candidate records `kv_load_ratio`, the derived `concurrency`,
 
 `resolved_request_count(concurrency_override=None)` computes the synthetic request count as
 
-```
+```text
 num_requests = max(1, round(num_request_ratio * load))
 ```
 

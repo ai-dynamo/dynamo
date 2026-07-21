@@ -6,6 +6,8 @@ are stubbed and a fake sampler + evaluator are injected, so this exercises the
 suggest->unroll->deploy->evaluate->score->observe->rank loop without Vizier or
 real replay."""
 
+from pathlib import Path
+
 import pytest
 
 import dynamo.profiler.spica.search as search_mod
@@ -17,6 +19,8 @@ from dynamo.profiler.spica.parallel_enum import ParallelShape, ReplicaParallelCo
 from dynamo.profiler.spica.sampler import Suggestion
 from dynamo.profiler.spica.search import run_smart_search
 from dynamo.profiler.spica.search_space import BranchSpace
+
+TRACE = str(Path(__file__).parent / "data" / "mooncake_tiny.jsonl")
 
 
 def _config(gpu_budget=32, **sweep_overrides):
@@ -34,7 +38,7 @@ def _config(gpu_budget=32, **sweep_overrides):
             "deployment_mode": ["agg"],
             "gpu_budget": gpu_budget,
         },
-        workload={"trace_path": "/tmp/t.jsonl"},
+        workload={"trace_path": TRACE},
         sweep=sweep,
         goal={"target": "throughput"},
     )
@@ -390,7 +394,7 @@ def _config_with_policies(policies, target="throughput"):
             "gpu_budget": 32,
             "planner_scaling_policy": policies,
         },
-        workload={"trace_path": "/tmp/t.jsonl"},
+        workload={"trace_path": TRACE},
         sweep={
             "max_rounds": 1,
             "candidates_per_round": 2,
@@ -475,7 +479,7 @@ def test_e2e_only_goodput_drops_planner_scaling_and_proceeds(monkeypatch):
                 "hybrid_180_5",
             ],
         },
-        workload={"trace_path": "/tmp/t.jsonl"},
+        workload={"trace_path": TRACE},
         sweep={"max_rounds": 1, "candidates_per_round": 1, "parallel_evals": 1},
         goal={"target": "goodput_per_gpu", "sla": {"e2e_ms": 5000.0}},
     )
@@ -516,6 +520,7 @@ def test_candidate_build_error_is_reported_not_raised(monkeypatch, capsys):
                     parallel_config=self.branch.parallel_configs[0],
                     handle=sel,
                 )
+                for _ in range(count)
             ]
 
     def factory(b, study_id, objectives=None):
@@ -532,15 +537,12 @@ def test_candidate_build_error_is_reported_not_raised(monkeypatch, capsys):
 
     assert cands == []
     scored = sampler_seen["s"].scored
-    assert (
-        len(scored) == 33
-    )  # one bad suggestion per replacement ask, up to the safety cap
+    assert len(scored) == 33  # every duplicate trial is observed, up to the safety cap
     assert scored[0][0] == "infeasible"
     assert "candidate build failed" in scored[0][1]
-    assert (
-        "smart-sweep failure reason(s): candidate build failed"
-        in capsys.readouterr().out
-    )
+    output = capsys.readouterr().out
+    assert "smart-sweep failure reason(s): candidate build failed" in output
+    assert "(x33)" in output
 
 
 def test_duplicate_full_samples_use_cache_and_are_replaced(monkeypatch):

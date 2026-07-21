@@ -32,6 +32,7 @@ def _require_memory_estimator() -> None:
         pytest.skip(str(exc))
 
 
+@pytest.mark.model(DEEPSEEK)
 def test_resolve_deepseek_is_moe_mla_wideep():
     mh = resolve_model_hardware(DEEPSEEK, "h200_sxm", backend="trtllm")
     assert mh.is_moe and mh.mla and mh.enable_wideep
@@ -39,6 +40,7 @@ def test_resolve_deepseek_is_moe_mla_wideep():
     assert mh.max_context == 163840  # DeepSeek-V3 max context
 
 
+@pytest.mark.model(QWEN)
 def test_resolve_dense_qwen():
     mh = resolve_model_hardware(QWEN, "h200_sxm", backend="trtllm")
     assert not mh.is_moe
@@ -47,12 +49,35 @@ def test_resolve_dense_qwen():
     assert mh.max_context == 40960  # Qwen3-32B max context
 
 
+@pytest.mark.model(QWEN)
 def test_unknown_hardware_sku_raises():
     # A typo/unknown SKU must fail loudly rather than silently using default VRAM/GPUs.
     with pytest.raises(ValueError, match="unknown hardware_sku"):
         resolve_model_hardware(QWEN, "h200_typo", backend="trtllm")
 
 
+def test_aic_private_helper_compatibility_boundary(monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        mh_mod,
+        "_get_system_config",
+        lambda hardware: seen.append(("system", hardware))
+        or {"vram_per_gpu": 80, "gpus_per_node": 8},
+    )
+    monkeypatch.setattr(
+        mh_mod,
+        "_estimate_model_weight_bytes",
+        lambda model: seen.append(("weight", model)) or 123,
+    )
+
+    system, weight_bytes = mh_mod._aic_model_system_facts("model", "hardware")
+
+    assert system == {"vram_per_gpu": 80, "gpus_per_node": 8}
+    assert weight_bytes == 123
+    assert seen == [("system", "hardware"), ("weight", "model")]
+
+
+@pytest.mark.model(DEEPSEEK)
 def test_max_seq_len_defaults_to_model_context(monkeypatch):
     # Omitting max_seq_len uses the model's max context length.
     seen = {}
@@ -71,6 +96,7 @@ def test_max_seq_len_defaults_to_model_context(monkeypatch):
 # --- KV-cache validity (the sole feasibility filter; no weight floor) ---
 
 
+@pytest.mark.model(DEEPSEEK)
 def test_kv_filter_keeps_only_feasible_shapes(monkeypatch):
     # Pretend only workers with >= 4 GPUs hold a sequence (KV estimate stubbed).
     def fake_feasible(shapes, **kwargs):
@@ -92,6 +118,7 @@ def test_kv_filter_keeps_only_feasible_shapes(monkeypatch):
     assert all(c.total_gpus <= 16 for c in cfgs)
 
 
+@pytest.mark.model(DEEPSEEK)
 def test_kv_filter_disagg_requires_both_roles_feasible(monkeypatch):
     def fake_feasible(shapes, **kwargs):
         return {s: 100_000 for s in dict.fromkeys(shapes) if s.gpus_per_worker >= 4}
@@ -111,6 +138,7 @@ def test_kv_filter_disagg_requires_both_roles_feasible(monkeypatch):
         assert c.decode.shape.gpus_per_worker >= 4
 
 
+@pytest.mark.model(DEEPSEEK)
 def test_kv_filter_no_feasible_shape_raises(monkeypatch):
     monkeypatch.setattr(mh_mod, "feasible_shape_tokens", lambda shapes, **kwargs: {})
     with pytest.raises(NoViableParallelConfig, match="KV-cache estimate"):
@@ -124,6 +152,7 @@ def test_kv_filter_no_feasible_shape_raises(monkeypatch):
         )
 
 
+@pytest.mark.model(DEEPSEEK)
 def test_missing_memory_estimator_warns_and_keeps_enumerated_configs(monkeypatch):
     def unavailable(*args, **kwargs):
         raise AicMemoryEstimatorUnavailableError("estimator unavailable")
@@ -147,6 +176,7 @@ def test_missing_memory_estimator_warns_and_keeps_enumerated_configs(monkeypatch
     assert all(config.total_gpus <= 16 for config in configs)
 
 
+@pytest.mark.model(DEEPSEEK)
 def test_kv_path_end_to_end_deepseek_gb200():
     # Real native estimate; skipped without the gb200 perf DB / model build.
     _require_memory_estimator()
@@ -171,6 +201,7 @@ def test_kv_path_end_to_end_deepseek_gb200():
     assert all(c.total_gpus <= 16 for c in cfgs)
 
 
+@pytest.mark.model(DEEPSEEK)
 def test_kv_path_tiny_budget_raises():
     # 2 GPUs cannot hold DeepSeek-V3 at any shape -> no feasible config.
     _require_memory_estimator()

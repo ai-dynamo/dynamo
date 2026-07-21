@@ -202,7 +202,7 @@ def test_direct_replay_preserves_other_capacity_errors(monkeypatch):
 
     with pytest.raises(
         Exception,
-        match="Failed to estimate AIC KV cache capacity.*invalid capacity request",
+        match=r"Failed to estimate AIC KV cache capacity.*invalid capacity request",
     ):
         _run_direct_aic_replay()
 

@@ -10,6 +10,8 @@ subtitle: Experimental Spica search for a GLM-5-FP8 Pareto frontier on B200 GPUs
 > treat them as production capacity guidance or a performance commitment. Spica's search behavior
 > and output may change without a standard deprecation period.
 
+<!-- -->
+
 > [!IMPORTANT]
 > This experiment uses `kv_load_ratio` and requires an AI Configurator release that provides
 > `aiconfigurator.sdk.memory`. It fails fast before search starts in the default Planner/Profiler

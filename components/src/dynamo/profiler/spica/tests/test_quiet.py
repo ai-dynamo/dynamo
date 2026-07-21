@@ -7,6 +7,10 @@ import subprocess
 import sys
 import textwrap
 
+import pytest
+
+pytestmark = pytest.mark.timeout(30)
+
 
 def _run_isolated(script: str) -> None:
     subprocess.run(
@@ -14,6 +18,7 @@ def _run_isolated(script: str) -> None:
         check=True,
         text=True,
         capture_output=True,
+        timeout=30,
     )
 
 

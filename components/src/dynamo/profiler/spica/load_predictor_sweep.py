@@ -196,6 +196,8 @@ def window_loss(
 # Lazy dynamo imports (Rust runtime + prophet/pmdarima/filterpy)
 # --------------------------------------------------------------------------
 def _load_predictors():
+    # Defer Planner's optional forecasting stack until a trace workload actually
+    # requests a predictor sweep; importing Spica's config/package must stay light.
     from dynamo.planner.core.load.predictors import LOAD_PREDICTORS
 
     return LOAD_PREDICTORS
@@ -204,6 +206,7 @@ def _load_predictors():
 def build_windows(trace_path: str, interval_s: int) -> list[Window]:
     """Aggregate a mooncake trace into per-interval windows via the planner's
     own (densify-fixed) tool, so middle empty windows are preserved."""
+    # This module transitively loads the same optional forecasting dependencies.
     from dynamo.planner.offline.trace_data import extract_metrics_from_mooncake
 
     return [

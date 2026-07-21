@@ -192,6 +192,7 @@ def test_static_path_runs_with_kvbm_host_offload():
     assert report["goodput_output_throughput_tok_s"] > 0.0
 
 
+@pytest.mark.timeout(300)
 def test_smart_search_returns_ranked_candidate():
     """The full loop (Vizier sampler + real replay) returns ranked candidates."""
     candidates = run_smart_search(_config())
