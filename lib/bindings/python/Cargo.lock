@@ -2180,6 +2180,7 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "async-nats 0.49.1",
+ "async-openai",
  "async-stream",
  "async-trait",
  "axum",
