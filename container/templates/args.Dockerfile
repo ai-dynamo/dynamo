@@ -31,6 +31,9 @@ ARG BASE_IMAGE_TAG={{ context[framework][device_key].base_image_tag }}
 {% if framework in ["sglang", "trtllm", "vllm"] -%}
 ARG RUNTIME_IMAGE={{ context[framework][device_key].runtime_image }}
 ARG RUNTIME_IMAGE_TAG={{ context[framework][device_key].runtime_image_tag }}
+{% if framework == "vllm" and device == "cuda" -%}
+ARG VLLM_RUNTIME_BASE_IMAGE=${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG}
+{% endif -%}
 {%- endif %}
 
 # wheel builder image selection

@@ -17,17 +17,19 @@
 # =============================================================================
 ARG DOCKER_PROXY
 ARG GO_VERSION=1.26.3
-# Default to a pinned upstream CRIU commit. Custom forks can override both
-# args at build time, for example:
-#   --build-arg CRIU_REPO=<git-remote-url>
-#   --build-arg CRIU_REF=<fork-branch-or-sha>
 ARG CRIU_REPO=https://github.com/checkpoint-restore/criu.git
 ARG CRIU_REF=b47c692bb3a73ae45ee1c4ab215a8f6869d40efd
+ARG CRIU_SHA=
+ARG CUDA_CHECKPOINT_REPO=https://github.com/NVIDIA/cuda-checkpoint.git
+ARG CUDA_CHECKPOINT_REF=
+ARG CUDA_CHECKPOINT_SHA=
 ARG AGENT_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04
+ARG DYNAMO_COMMIT_SHA
 
 # For placeholder target only - this default allows agent builds to succeed,
 # but placeholder builds MUST override it with --build-arg BASE_IMAGE=<image>
 ARG BASE_IMAGE=placeholder-requires-base-image-arg
+ARG BASE_IMAGE_USER=root
 
 # =============================================================================
 # Stage: Go base - Common setup for Go builds
@@ -145,6 +147,11 @@ FROM ubuntu:24.04 AS criu-builder
 
 ARG CRIU_REPO
 ARG CRIU_REF
+ARG CRIU_SHA
+ARG CUDA_CHECKPOINT_REPO
+ARG CUDA_CHECKPOINT_REF
+ARG CUDA_CHECKPOINT_SHA
+ARG DYNAMO_COMMIT_SHA
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
@@ -169,9 +176,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN git init /tmp/criu \
     && cd /tmp/criu \
-    && git remote add origin ${CRIU_REPO} \
-    && git fetch --depth 1 origin ${CRIU_REF} \
-    && git checkout FETCH_HEAD \
+    && git remote add origin "${CRIU_REPO}" \
+    && if [ -n "${CRIU_SHA}" ] && [ "${CRIU_REF}" != "${CRIU_SHA}" ]; then \
+         test "$(git ls-remote --exit-code origin "${CRIU_REF}" | awk 'NR == 1 { print $1 } END { if (NR != 1) exit 1 }')" = "${CRIU_SHA}"; \
+       fi \
+    && git fetch --depth 1 origin "${CRIU_SHA:-${CRIU_REF}}" \
+    && git checkout --detach FETCH_HEAD \
+    && { [ -z "${CRIU_SHA}" ] || test "$(git rev-parse HEAD)" = "${CRIU_SHA}"; } \
     && make -j$(nproc) \
     && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin
 
@@ -182,7 +193,31 @@ RUN mkdir -p /criu-install/usr/local/lib/snapshot/criu-plugins \
       -o /criu-install/usr/local/lib/snapshot/criu-plugins/snapshot_inet_remap.so \
       /tmp/snapshot_inet_remap.c
 
-RUN git clone https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint
+RUN git init /tmp/cuda-checkpoint \
+    && cd /tmp/cuda-checkpoint \
+    && git remote add origin "${CUDA_CHECKPOINT_REPO}" \
+    && if [ -n "${CUDA_CHECKPOINT_SHA}" ] && [ "${CUDA_CHECKPOINT_REF}" != "${CUDA_CHECKPOINT_SHA}" ]; then \
+         test "$(git ls-remote --exit-code origin "${CUDA_CHECKPOINT_REF}" | awk 'NR == 1 { print $1 } END { if (NR != 1) exit 1 }')" = "${CUDA_CHECKPOINT_SHA}"; \
+       fi \
+    && if [ -n "${CUDA_CHECKPOINT_SHA}" ]; then \
+         git fetch --depth 1 origin "${CUDA_CHECKPOINT_SHA}" \
+         && git checkout --detach FETCH_HEAD \
+         && test "$(git rev-parse HEAD)" = "${CUDA_CHECKPOINT_SHA}"; \
+       else \
+         git fetch --depth 1 origin "${CUDA_CHECKPOINT_REF:-HEAD}" \
+         && git checkout --detach FETCH_HEAD; \
+       fi
+
+RUN { [ -z "${DYNAMO_COMMIT_SHA}" ] || printf '%s\n' "${DYNAMO_COMMIT_SHA}" | grep -Eq '^[0-9a-f]{40}$'; } \
+    && printf '%s\n' \
+      "dynamo_source_sha=${DYNAMO_COMMIT_SHA}" \
+      "criu_source_url=${CRIU_REPO}" \
+      "criu_source_ref=${CRIU_REF}" \
+      "criu_source_sha=${CRIU_SHA}" \
+      "cuda_checkpoint_source_url=${CUDA_CHECKPOINT_REPO}" \
+      "cuda_checkpoint_source_ref=${CUDA_CHECKPOINT_REF}" \
+      "cuda_checkpoint_source_sha=${CUDA_CHECKPOINT_SHA}" \
+      > /restore-tool-source-provenance.txt
 
 # =============================================================================
 # Stage: Agent (pre-compliance) - Everything that ships, minus /legal
@@ -193,6 +228,13 @@ RUN git clone https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint
 FROM ${AGENT_BASE_IMAGE} AS agent_pre
 
 ARG TARGETARCH=amd64
+ARG DYNAMO_COMMIT_SHA
+ARG CRIU_SHA
+ARG CUDA_CHECKPOINT_SHA
+ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
+LABEL org.opencontainers.image.revision=${DYNAMO_COMMIT_SHA} \
+    ai.dynamo.criu.source-sha=${CRIU_SHA} \
+    ai.dynamo.cuda-checkpoint.source-sha=${CUDA_CHECKPOINT_SHA}
 
 RUN if [ "${TARGETARCH}" != "amd64" ]; then \
       echo "ERROR: Dynamo Snapshot requires x86_64 (cuda-checkpoint has no ${TARGETARCH} binary)" >&2; exit 1; \
@@ -220,6 +262,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy CRIU from builder
 COPY --from=criu-builder /criu-install/usr/local /usr/local
 COPY --from=criu-builder /tmp/criu/COPYING /legal/CRIU/COPYING
+COPY --from=criu-builder /restore-tool-source-provenance.txt /opt/dynamo/restore-tool-source-provenance.txt
 RUN criu --version
 
 # Copy CUDA checkpoint binaries
@@ -360,6 +403,104 @@ COPY --from=licenses /legal /legal
 
 ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 
+# Restore tools for the pinned vLLM nightly's Jammy ABI. These stages are used
+# only by the glm52-placeholder target below; the canonical placeholder target
+# retains its current Noble composition.
+FROM ${BASE_IMAGE} AS cuda-helper-builder-placeholder
+
+USER root
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+COPY cmd/cuda-checkpoint-helper/main.c ./cmd/cuda-checkpoint-helper/main.c
+
+RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
+    ./cmd/cuda-checkpoint-helper/main.c \
+    -I/usr/local/cuda/include \
+    -L/usr/local/cuda/lib64/stubs \
+    -lcuda
+
+FROM ubuntu:22.04 AS criu-builder-placeholder
+
+ARG CRIU_REPO
+ARG CRIU_REF
+ARG CRIU_SHA
+ARG CUDA_CHECKPOINT_REPO
+ARG CUDA_CHECKPOINT_REF
+ARG CUDA_CHECKPOINT_SHA
+ARG DYNAMO_COMMIT_SHA
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    ca-certificates \
+    build-essential \
+    pkg-config \
+    libbsd-dev \
+    libcap-dev \
+    libnet1-dev \
+    libnl-3-dev \
+    libnl-route-3-dev \
+    libprotobuf-dev \
+    libprotobuf-c-dev \
+    protobuf-c-compiler \
+    protobuf-compiler \
+    python3 \
+    python3-pip \
+    python3-protobuf \
+    libgnutls28-dev \
+    libnftables-dev \
+    uuid-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git init /tmp/criu \
+    && cd /tmp/criu \
+    && git remote add origin "${CRIU_REPO}" \
+    && if [ -n "${CRIU_SHA}" ] && [ "${CRIU_REF}" != "${CRIU_SHA}" ]; then \
+         test "$(git ls-remote --exit-code origin "${CRIU_REF}" | awk 'NR == 1 { print $1 } END { if (NR != 1) exit 1 }')" = "${CRIU_SHA}"; \
+       fi \
+    && git fetch --depth 1 origin "${CRIU_SHA:-${CRIU_REF}}" \
+    && git checkout --detach FETCH_HEAD \
+    && { [ -z "${CRIU_SHA}" ] || test "$(git rev-parse HEAD)" = "${CRIU_SHA}"; } \
+    && make -j$(nproc) \
+    && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin
+
+COPY plugins/inet-remap/snapshot_inet_remap.c /tmp/snapshot_inet_remap.c
+RUN mkdir -p /criu-install/usr/local/lib/snapshot/criu-plugins \
+    && gcc -O2 -Wall -Wextra -fPIC -shared \
+      -idirafter /tmp/criu/criu/include \
+      -o /criu-install/usr/local/lib/snapshot/criu-plugins/snapshot_inet_remap.so \
+      /tmp/snapshot_inet_remap.c
+
+RUN git init /tmp/cuda-checkpoint \
+    && cd /tmp/cuda-checkpoint \
+    && git remote add origin "${CUDA_CHECKPOINT_REPO}" \
+    && if [ -n "${CUDA_CHECKPOINT_SHA}" ] && [ "${CUDA_CHECKPOINT_REF}" != "${CUDA_CHECKPOINT_SHA}" ]; then \
+         test "$(git ls-remote --exit-code origin "${CUDA_CHECKPOINT_REF}" | awk 'NR == 1 { print $1 } END { if (NR != 1) exit 1 }')" = "${CUDA_CHECKPOINT_SHA}"; \
+       fi \
+    && if [ -n "${CUDA_CHECKPOINT_SHA}" ]; then \
+         git fetch --depth 1 origin "${CUDA_CHECKPOINT_SHA}" \
+         && git checkout --detach FETCH_HEAD \
+         && test "$(git rev-parse HEAD)" = "${CUDA_CHECKPOINT_SHA}"; \
+       else \
+         git fetch --depth 1 origin "${CUDA_CHECKPOINT_REF:-HEAD}" \
+         && git checkout --detach FETCH_HEAD; \
+       fi
+
+RUN { [ -z "${DYNAMO_COMMIT_SHA}" ] || printf '%s\n' "${DYNAMO_COMMIT_SHA}" | grep -Eq '^[0-9a-f]{40}$'; } \
+    && printf '%s\n' \
+      "dynamo_source_sha=${DYNAMO_COMMIT_SHA}" \
+      "criu_source_url=${CRIU_REPO}" \
+      "criu_source_ref=${CRIU_REF}" \
+      "criu_source_sha=${CRIU_SHA}" \
+      "cuda_checkpoint_source_url=${CUDA_CHECKPOINT_REPO}" \
+      "cuda_checkpoint_source_ref=${CUDA_CHECKPOINT_REF}" \
+      "cuda_checkpoint_source_sha=${CUDA_CHECKPOINT_SHA}" \
+      > /restore-tool-source-provenance.txt
+
 # =============================================================================
 # Stage: Placeholder - Runtime-compatible restore image (requires BASE_IMAGE arg)
 # This image is a superset of the runtime image: same default execution contract
@@ -415,3 +556,78 @@ RUN chmod +x /usr/local/bin/nsrestore
 
 # Create directories
 RUN mkdir -p /checkpoints /var/run/criu /var/criu-work
+
+# =============================================================================
+# GLM 5.2 pinned-nightly placeholder
+# =============================================================================
+FROM ${BASE_IMAGE} AS glm52-placeholder
+
+ARG BASE_IMAGE
+ARG BASE_IMAGE_USER
+ARG DYNAMO_COMMIT_SHA
+ARG CRIU_SHA
+ARG CUDA_CHECKPOINT_SHA
+ARG TARGETARCH=amd64
+ENV ORIGINAL_BASE_IMAGE=${BASE_IMAGE}
+ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
+LABEL org.opencontainers.image.revision=${DYNAMO_COMMIT_SHA} \
+    ai.dynamo.criu.source-sha=${CRIU_SHA} \
+    ai.dynamo.cuda-checkpoint.source-sha=${CUDA_CHECKPOINT_SHA}
+
+USER root
+
+RUN if [ "${TARGETARCH}" != "amd64" ]; then \
+      echo "ERROR: Dynamo Snapshot requires x86_64 (cuda-checkpoint has no ${TARGETARCH} binary)" >&2; exit 1; \
+    fi
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libbsd0 \
+    libcap2 \
+    libnet1 \
+    libnl-3-200 \
+    libnl-route-3-200 \
+    libprotobuf-c1 \
+    libgnutls30 \
+    libnftables1 \
+    iproute2 \
+    iptables \
+    procps \
+    uuid-runtime \
+    tar \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=criu-builder-placeholder /criu-install/usr/local /usr/local
+COPY --from=criu-builder-placeholder /tmp/criu/COPYING /legal/CRIU/COPYING
+COPY --from=criu-builder-placeholder /restore-tool-source-provenance.txt /opt/dynamo/restore-tool-source-provenance.txt
+
+COPY --from=criu-builder-placeholder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
+COPY --from=criu-builder-placeholder /tmp/cuda-checkpoint/LICENSE /legal/cuda-checkpoint/LICENSE
+COPY --from=cuda-helper-builder-placeholder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
+RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper
+
+COPY --from=builder /nsrestore /usr/local/bin/nsrestore
+RUN chmod +x /usr/local/bin/nsrestore
+
+# Fail the image build if any restore-tool binary has the wrong runtime ABI.
+# cuda-checkpoint reaches main with the build-only CUDA stub, then exits 255
+# because the real NVIDIA driver is intentionally not present during builds.
+RUN criu --version \
+    && test -f /usr/local/cuda-13.0/targets/x86_64-linux/lib/stubs/libcuda.so \
+    && cuda_stub_dir="$(mktemp -d)" \
+    && ln -s /usr/local/cuda-13.0/targets/x86_64-linux/lib/stubs/libcuda.so "${cuda_stub_dir}/libcuda.so.1" \
+    && if LD_LIBRARY_PATH="${cuda_stub_dir}" cuda-checkpoint --help >/dev/null 2>"${cuda_stub_dir}/cuda-checkpoint.stderr"; then \
+         :; \
+       else \
+         test "$?" -eq 255 \
+         && grep -Fxq "Insufficient driver" "${cuda_stub_dir}/cuda-checkpoint.stderr"; \
+       fi \
+    && LD_LIBRARY_PATH="${cuda_stub_dir}" cuda-checkpoint-helper --help >/dev/null \
+    && rm -rf "${cuda_stub_dir}" \
+    && nsrestore -h >/dev/null 2>&1 \
+    && echo "Snapshot restore tools installed successfully"
+
+# Create directories
+RUN mkdir -p /checkpoints /var/run/criu /var/criu-work
+
+USER ${BASE_IMAGE_USER}
