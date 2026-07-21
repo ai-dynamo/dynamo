@@ -16,6 +16,7 @@ default = []
 dc-ckf-bench = []
 mocker-kvbm-offload = ["dynamo-mocker/kvbm-offload"]
 profile = ["dynamo-mocker/profile"]
+replay-bench = ["dynamo-mocker/replay-bench"]
 
 [[bench]]
 name = "multiturn_bench"

@@ -109,6 +109,15 @@ fn validate_dynamo_trace_block_size(expected: Option<usize>, embedded: usize) ->
     Ok(())
 }
 
+fn single_turn_request_uuid(_request_ordinal: usize) -> Uuid {
+    #[cfg(feature = "replay-bench")]
+    {
+        return Uuid::from_u128(_request_ordinal as u128 + 1);
+    }
+    #[cfg(not(feature = "replay-bench"))]
+    Uuid::new_v4()
+}
+
 fn synthesize_trace_tokens(
     input_length: usize,
     hash_ids: &[u64],
@@ -886,7 +895,7 @@ impl Trace {
     pub fn to_single_turn_requests(&self) -> Result<Vec<DirectRequest>> {
         let mut requests = Vec::with_capacity(self.sessions.len());
         let mut output_rng = StdRng::seed_from_u64(SYNTHETIC_OUTPUT_SEED);
-        for session in &self.sessions {
+        for (request_ordinal, session) in self.sessions.iter().enumerate() {
             if session.turns.len() != 1 {
                 bail!(
                     "to_single_turn_requests requires exactly one turn per session, but session {} has {} turns",
@@ -894,9 +903,10 @@ impl Trace {
                     session.turns.len()
                 );
             }
+            let request_uuid = single_turn_request_uuid(request_ordinal);
             let mut request = session.turns[0].to_direct_request(
                 self.block_size,
-                Uuid::new_v4(),
+                request_uuid,
                 session.first_arrival_timestamp_ms,
             )?;
             request.output_token_ids = Some(planned_output_token_ids(

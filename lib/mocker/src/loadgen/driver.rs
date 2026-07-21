@@ -76,6 +76,8 @@ struct TurnRuntime {
     strict_priority: u32,
     policy_class: Option<String>,
     replay_hashes: Option<ReplayRequestHashes>,
+    #[cfg(any(test, feature = "replay-bench"))]
+    deterministic_request_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -348,6 +350,10 @@ impl WorkloadDriver {
                     strict_priority: turn.strict_priority,
                     policy_class: turn.policy_class,
                     replay_hashes,
+                    #[cfg(feature = "replay-bench")]
+                    deterministic_request_id: Some(Uuid::from_u128(session_index as u128 + 1)),
+                    #[cfg(all(test, not(feature = "replay-bench")))]
+                    deterministic_request_id: None,
                 }],
                 cumulative_tokens: Vec::new(),
                 next_turn_index: 0,
@@ -396,6 +402,8 @@ impl WorkloadDriver {
         let trace_block_size = trace.block_size;
         let is_concurrency = matches!(&policy, SchedulingPolicy::Concurrency(_));
         let mut output_rng = StdRng::seed_from_u64(SYNTHETIC_OUTPUT_SEED);
+        #[cfg(feature = "replay-bench")]
+        let mut next_deterministic_request_id = 1_u128;
         let sessions: Vec<SessionRuntime> = trace
             .sessions
             .into_iter()
@@ -420,6 +428,14 @@ impl WorkloadDriver {
                             turn.max_output_tokens,
                             &mut output_rng,
                         ));
+                        #[cfg(feature = "replay-bench")]
+                        let deterministic_request_id = {
+                            let request_id = Uuid::from_u128(next_deterministic_request_id);
+                            next_deterministic_request_id = next_deterministic_request_id
+                                .checked_add(1)
+                                .expect("deterministic replay request UUID overflow");
+                            Some(request_id)
+                        };
                         Ok(TurnRuntime {
                             request_id: None,
                             tokens,
@@ -431,6 +447,10 @@ impl WorkloadDriver {
                             strict_priority: turn.strict_priority,
                             policy_class: turn.policy_class,
                             replay_hashes,
+                            #[cfg(feature = "replay-bench")]
+                            deterministic_request_id,
+                            #[cfg(all(test, not(feature = "replay-bench")))]
+                            deterministic_request_id: None,
                         })
                     })
                     .collect::<Result<Vec<_>>>()?;
@@ -485,6 +505,34 @@ impl WorkloadDriver {
         Ok(driver)
     }
 
+    /// Use stable monotonically increasing UUIDs for replay parity fixtures.
+    /// This is unavailable in production builds so normal request identity and
+    /// randomness remain unchanged.
+    #[cfg(any(test, feature = "replay-bench"))]
+    pub fn with_deterministic_request_ids(mut self, first_id: u128) -> Self {
+        let mut next_id = first_id;
+        for session in &mut self.sessions {
+            for turn in &mut session.turns {
+                turn.deterministic_request_id = Some(Uuid::from_u128(next_id));
+                next_id = next_id
+                    .checked_add(1)
+                    .expect("deterministic replay request UUID overflow");
+            }
+        }
+        self
+    }
+
+    fn request_uuid(&self, _session_index: usize, _turn_index: usize) -> Uuid {
+        #[cfg(any(test, feature = "replay-bench"))]
+        if let Some(request_id) =
+            self.sessions[_session_index].turns[_turn_index].deterministic_request_id
+        {
+            return request_id;
+        }
+
+        Uuid::new_v4()
+    }
+
     /// Failure-path companion: release a cap slot and terminate the owning session.
     /// No-op if `on_complete` already ran. Used when a request task is cancelled
     /// or panics before reaching `on_complete`.
@@ -517,18 +565,27 @@ impl WorkloadDriver {
             }
 
             let session_index = ready_session.session_index;
-            let session = &mut self.sessions[session_index];
-            if session.in_flight.is_some()
-                || session.next_turn_index != ready_session.turn_index
-                || session.next_ready_at_ms != Some(ready_session.ready_at_ms)
-            {
+            let Some((turn_index, scheduled_ready_at_ms)) = self
+                .sessions
+                .get(session_index)
+                .filter(|session| {
+                    session.in_flight.is_none()
+                        && session.next_turn_index == ready_session.turn_index
+                        && session.next_ready_at_ms == Some(ready_session.ready_at_ms)
+                })
+                .map(|session| {
+                    (
+                        session.next_turn_index,
+                        session
+                            .next_ready_at_ms
+                            .expect("ready session must have a timestamp"),
+                    )
+                })
+            else {
                 continue;
-            }
-            let turn_index = session.next_turn_index;
-            let scheduled_ready_at_ms = session
-                .next_ready_at_ms
-                .expect("ready session must have a timestamp");
-            let request_uuid = Uuid::new_v4();
+            };
+            let request_uuid = self.request_uuid(session_index, turn_index);
+            let session = &mut self.sessions[session_index];
             let turn = &session.turns[turn_index];
             let arrival_timestamp_ms = self.policy.arrival_timestamp_ms(scheduled_ready_at_ms);
             let (request_tokens, replay_hashes) = match self.prompt_mode {

@@ -9,6 +9,7 @@
 //!
 //! Run with: cargo bench --package dynamo-bench --bench offline_replay_bench -- --help
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::PathBuf;
 
@@ -21,9 +22,11 @@ use dynamo_mocker::common::protocols::{
 };
 use dynamo_mocker::loadgen::Trace;
 use dynamo_mocker::replay::{
-    OfflineDisaggReplayConfig, ReplayRouterMode, SlaThresholds,
-    simulate_trace_workload_disagg_with_router_mode, simulate_trace_workload_with_router_mode,
+    OfflineDisaggReplayConfig, ReplayRouterMode, SlaThresholds, TraceSimulationReport,
+    simulate_loaded_trace_disagg_with_router_mode_and_options,
+    simulate_loaded_trace_with_router_mode_and_options,
 };
+use serde_json::{Map, Value, json};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum RouterModeArg {
@@ -31,10 +34,28 @@ enum RouterModeArg {
     KvRouter,
 }
 
+impl RouterModeArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::RoundRobin => "round-robin",
+            Self::KvRouter => "kv-router",
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum ServingModeArg {
     Aggregated,
     Disagg,
+}
+
+impl ServingModeArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Aggregated => "aggregated",
+            Self::Disagg => "disagg",
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -210,6 +231,14 @@ struct Args {
     #[arg(long, default_value_t = 1)]
     iterations: usize,
 
+    /// Emit one JSON object per measured replay iteration to this path.
+    #[arg(long)]
+    timings_jsonl: Option<PathBuf>,
+
+    /// Emit one canonical full replay report per iteration for parity checks.
+    #[arg(long)]
+    canonical_reports_jsonl: Option<PathBuf>,
+
     /// Ignored -- passed by cargo bench
     #[arg(long, hide = true)]
     bench: bool,
@@ -273,6 +302,48 @@ fn build_engine_args(args: &Args) -> Result<MockEngineArgs> {
         .normalized()
 }
 
+fn canonicalize_json(value: Value) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(values.into_iter().map(canonicalize_json).collect()),
+        Value::Object(values) => Value::Object(
+            values
+                .into_iter()
+                .map(|(key, value)| (key, canonicalize_json(value)))
+                .collect::<BTreeMap<_, _>>()
+                .into_iter()
+                .collect::<Map<_, _>>(),
+        ),
+        scalar => scalar,
+    }
+}
+
+fn canonical_report(report: &TraceSimulationReport) -> Result<Value> {
+    let mut per_request = serde_json::to_value(&report.per_request)?;
+    if let Value::Array(records) = &mut per_request {
+        records.sort_unstable_by(|left, right| {
+            let left_uuid = left.get("uuid").and_then(Value::as_str).unwrap_or_default();
+            let right_uuid = right
+                .get("uuid")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            left_uuid.cmp(right_uuid)
+        });
+    }
+
+    let mut summary = serde_json::to_value(report)?;
+    let summary = summary
+        .as_object_mut()
+        .context("serialized replay report must be an object")?;
+    summary.remove("wall_time_ms");
+    summary.remove("processed_tokens_per_s");
+    summary.remove("processed_output_tokens_per_s");
+    Ok(canonicalize_json(json!({
+        "replay_bench": cfg!(feature = "replay-bench"),
+        "summary": summary,
+        "per_request": per_request,
+    })))
+}
+
 fn main() -> Result<()> {
     if is_bench_harness_invocation() {
         eprintln!("offline_replay_bench: skipping no-arg harness invocation");
@@ -281,19 +352,40 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
     let engine_args = build_engine_args(&args)?;
-    let trace = Trace::from_mooncake(&args.trace_file, args.trace_block_size)?
-        .normalize_session_starts()?
-        .speed_up_timing(args.arrival_speedup_ratio)?;
+    let trace = Trace::from_mooncake(&args.trace_file, args.trace_block_size)?;
+    anyhow::ensure!(args.iterations > 0, "iterations must be greater than 0");
+    let mut timing_writer = args
+        .timings_jsonl
+        .as_ref()
+        .map(|path| {
+            File::create(path)
+                .map(std::io::BufWriter::new)
+                .with_context(|| format!("failed to create timing output at {path:?}"))
+        })
+        .transpose()?;
+    let mut canonical_writer = args
+        .canonical_reports_jsonl
+        .as_ref()
+        .map(|path| {
+            File::create(path)
+                .map(std::io::BufWriter::new)
+                .with_context(|| format!("failed to create canonical report output at {path:?}"))
+        })
+        .transpose()?;
+    let record_per_request = canonical_writer.is_some();
     let mut last_report = None;
-    for _ in 0..args.iterations {
+    for iteration in 0..args.iterations {
         let report = match args.serving_mode {
-            ServingModeArg::Aggregated => simulate_trace_workload_with_router_mode(
+            ServingModeArg::Aggregated => simulate_loaded_trace_with_router_mode_and_options(
                 engine_args.clone(),
                 None,
                 None,
                 trace.clone(),
                 args.num_workers,
+                args.arrival_speedup_ratio,
                 args.router_mode.into(),
+                record_per_request,
+                None,
                 SlaThresholds::default(),
             )?,
             ServingModeArg::Disagg => {
@@ -301,7 +393,7 @@ fn main() -> Result<()> {
                 prefill_args.worker_type = WorkerType::Prefill;
                 let mut decode_args = engine_args.clone();
                 decode_args.worker_type = WorkerType::Decode;
-                simulate_trace_workload_disagg_with_router_mode(
+                simulate_loaded_trace_disagg_with_router_mode_and_options(
                     OfflineDisaggReplayConfig {
                         prefill_args,
                         decode_args,
@@ -311,11 +403,35 @@ fn main() -> Result<()> {
                     None,
                     None,
                     trace.clone(),
+                    args.arrival_speedup_ratio,
                     args.router_mode.into(),
+                    record_per_request,
+                    None,
                     SlaThresholds::default(),
                 )?
             }
         };
+        if let Some(writer) = timing_writer.as_mut() {
+            use std::io::Write;
+
+            serde_json::to_writer(
+                &mut *writer,
+                &serde_json::json!({
+                    "iteration": iteration,
+                    "wall_time_ms": report.throughput.wall_time_ms,
+                    "serving_mode": args.serving_mode.as_str(),
+                    "router_mode": args.router_mode.as_str(),
+                    "replay_bench": cfg!(feature = "replay-bench"),
+                }),
+            )?;
+            writer.write_all(b"\n")?;
+        }
+        if let Some(writer) = canonical_writer.as_mut() {
+            use std::io::Write;
+
+            serde_json::to_writer(&mut *writer, &canonical_report(&report)?)?;
+            writer.write_all(b"\n")?;
+        }
         last_report = Some(report);
     }
     let report = last_report.expect("iterations must be at least 1");
