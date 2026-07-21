@@ -622,8 +622,11 @@ pub mod router {
     /// Load score for the selected worker at decision time
     pub const WORKER_LOAD_SCORE: &str = "router_worker_load_score";
 
-    /// Final score used to select the worker at decision time
-    pub const FINAL_SCORE: &str = "router_final_score";
+    /// Positive portion of the final score used to select the worker at decision time
+    pub const FINAL_SCORE_POSITIVE: &str = "router_final_score_positive";
+
+    /// Absolute value of the negative portion of the final score used to select the worker at decision time
+    pub const FINAL_SCORE_NEGATIVE_ABS: &str = "router_final_score_negative_abs";
 
     /// Total number of router decisions resolved by a tie-break
     pub const TIE_BREAKS_TOTAL: &str = "router_tie_breaks_total";

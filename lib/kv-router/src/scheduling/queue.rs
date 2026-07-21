@@ -1422,19 +1422,19 @@ impl<
                 .and_then(|provider| provider());
             let eligibility = request.eligibility_with_overloaded(overloaded_worker_ids.as_ref());
             self.selector
-                .select_worker(&workers, &request, eligibility, self.block_size)
-                .map(|selection| {
+                .select_worker_with_telemetry(&workers, &request, eligibility, self.block_size)
+                .map(|(selection, selection_telemetry)| {
                     let config = workers
                         .get(&selection.worker.worker_id)
                         .expect("selected worker config must exist");
                     let selected_worker_tiers = request
                         .overlap
                         .selected_worker_tiers(selection.worker, config);
-                    (selection, selected_worker_tiers)
+                    (selection, selected_worker_tiers, selection_telemetry)
                 })
         };
 
-        let (selection, selected_worker_tiers) = match selection {
+        let (selection, selected_worker_tiers, selection_telemetry) = match selection {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("scheduling failed: {e}");
@@ -1461,7 +1461,7 @@ impl<
             effective_overlap_blocks: selection.effective_overlap_blocks,
             cached_tokens: selection.cached_tokens,
             selected_worker_tiers,
-            selection_telemetry: selection.telemetry,
+            selection_telemetry,
             request_progress,
             lifecycle_lease: None,
         };
@@ -1827,7 +1827,6 @@ mod tests {
                 required_blocks: request.request_blocks(block_size),
                 effective_overlap_blocks: request.effective_overlap_blocks_for(worker),
                 cached_tokens: request.effective_cached_tokens_for(worker),
-                telemetry: Default::default(),
             })
         }
     }

@@ -427,9 +427,12 @@ All metrics carry the standard hierarchy labels (`dynamo_namespace`, `dynamo_com
 | `dynamo_component_router_candidate_workers` | Histogram | Eligible worker/ranks considered for each router decision. Labels: `model`, `worker_type` |
 | `dynamo_component_router_kv_overlap_score` | Histogram | Cache-overlap credit applied to the selected worker, in decision-score units. Labels: `model`, `worker_type` |
 | `dynamo_component_router_worker_load_score` | Histogram | Selected worker load score before cache-overlap credit, in decision-score units. Labels: `model`, `worker_type` |
-| `dynamo_component_router_final_score` | Histogram | Final score used to select the worker, in decision-score units. Labels: `model`, `worker_type` |
+| `dynamo_component_router_final_score_positive` | Histogram | Positive portion of the final score used to select the worker, in decision-score units. Labels: `model`, `worker_type` |
+| `dynamo_component_router_final_score_negative_abs` | Histogram | Absolute value of the negative portion of the final score used to select the worker, in decision-score units. Labels: `model`, `worker_type` |
 | `dynamo_component_router_tie_breaks_total` | Counter | Decisions resolved by a tie-break. Labels: `model`, `worker_type`, `reason` |
 | `dynamo_component_router_no_candidates_total` | Counter | Decisions where no eligible worker/rank existed. Labels: `model`, `worker_type` |
+
+Signed final-score averages can be reconstructed as `(final_score_positive_sum - final_score_negative_abs_sum) / final_score_positive_count`; both final-score histograms are observed once per selected worker.
 
 #### Per-Request Routing Overhead (`dynamo_router_overhead_*`)
 

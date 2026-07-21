@@ -3077,8 +3077,8 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (worker_type) (rate(dynamo_component_router_final_score_sum{model=\"$model\"}[$__rate_interval])) / clamp_min(sum by (worker_type) (rate(dynamo_component_router_final_score_count{model=\"$model\"}[$__rate_interval])), 1)",
-          "legendFormat": "final avg | {{worker_type}}",
+          "expr": "(sum by (worker_type) (rate(dynamo_component_router_final_score_positive_sum{model=\"$model\"}[$__rate_interval])) - sum by (worker_type) (rate(dynamo_component_router_final_score_negative_abs_sum{model=\"$model\"}[$__rate_interval]))) / clamp_min(sum by (worker_type) (rate(dynamo_component_router_final_score_positive_count{model=\"$model\"}[$__rate_interval])), 1)",
+          "legendFormat": "signed final avg | {{worker_type}}",
           "range": true,
           "refId": "E"
         },
@@ -3088,10 +3088,21 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.90, sum by (worker_type, le) (rate(dynamo_component_router_final_score_bucket{model=\"$model\"}[$__rate_interval])))",
-          "legendFormat": "final P90 | {{worker_type}}",
+          "expr": "histogram_quantile(0.90, sum by (worker_type, le) (rate(dynamo_component_router_final_score_positive_bucket{model=\"$model\"}[$__rate_interval])))",
+          "legendFormat": "final positive P90 | {{worker_type}}",
           "range": true,
           "refId": "F"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.90, sum by (worker_type, le) (rate(dynamo_component_router_final_score_negative_abs_bucket{model=\"$model\"}[$__rate_interval])))",
+          "legendFormat": "final negative abs P90 | {{worker_type}}",
+          "range": true,
+          "refId": "G"
         }
       ],
       "title": "Router Score Components",

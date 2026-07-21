@@ -24,6 +24,17 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
         eligibility: RoutingEligibility<'_>,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
+
+    fn select_worker_with_telemetry(
+        &self,
+        workers: &HashMap<WorkerId, C>,
+        request: &SchedulingRequest,
+        eligibility: RoutingEligibility<'_>,
+        block_size: u32,
+    ) -> Result<(WorkerSelectionResult, WorkerSelectionTelemetry), KvSchedulerError> {
+        self.select_worker(workers, request, eligibility, block_size)
+            .map(|selection| (selection, WorkerSelectionTelemetry::default()))
+    }
 }
 
 /// Helper function for softmax sampling.
@@ -274,6 +285,17 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         eligibility: RoutingEligibility<'_>,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
+        self.select_worker_with_telemetry(workers, request, eligibility, block_size)
+            .map(|(selection, _)| selection)
+    }
+
+    fn select_worker_with_telemetry(
+        &self,
+        workers: &HashMap<WorkerId, C>,
+        request: &SchedulingRequest,
+        eligibility: RoutingEligibility<'_>,
+        block_size: u32,
+    ) -> Result<(WorkerSelectionResult, WorkerSelectionTelemetry), KvSchedulerError> {
         assert!(request.isl_tokens > 0);
         eligibility.validate_pinned_worker_allowed()?;
 
@@ -350,13 +372,15 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 effective_overlap_blocks,
             );
 
-            return Ok(WorkerSelectionResult {
-                worker,
-                required_blocks: request_blocks,
-                effective_overlap_blocks,
-                cached_tokens,
-                telemetry: score.telemetry(1),
-            });
+            return Ok((
+                WorkerSelectionResult {
+                    worker,
+                    required_blocks: request_blocks,
+                    effective_overlap_blocks,
+                    cached_tokens,
+                },
+                score.telemetry(1),
+            ));
         }
 
         let temperature = request
@@ -485,13 +509,15 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             let effective_overlap_blocks = request.effective_overlap_blocks_for(best_worker);
             let cached_tokens = request.effective_cached_tokens_for(best_worker);
 
-            return Ok(WorkerSelectionResult {
-                worker: best_worker,
-                required_blocks: request_blocks,
-                effective_overlap_blocks,
-                cached_tokens,
+            return Ok((
+                WorkerSelectionResult {
+                    worker: best_worker,
+                    required_blocks: request_blocks,
+                    effective_overlap_blocks,
+                    cached_tokens,
+                },
                 telemetry,
-            });
+            ));
         }
 
         let best_overlap = request.effective_overlap_blocks_for(best_worker);
@@ -514,13 +540,15 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             "Selected worker"
         );
 
-        Ok(WorkerSelectionResult {
-            worker: best_worker,
-            required_blocks: request_blocks,
-            effective_overlap_blocks: best_overlap,
-            cached_tokens: best_cached_tokens,
+        Ok((
+            WorkerSelectionResult {
+                worker: best_worker,
+                required_blocks: request_blocks,
+                effective_overlap_blocks: best_overlap,
+                cached_tokens: best_cached_tokens,
+            },
             telemetry,
-        })
+        ))
     }
 }
 
@@ -757,8 +785,8 @@ mod tests {
         let mut selected = [false; 3];
 
         for _ in 0..120 {
-            let result = selector
-                .select_worker(&workers, &request, request.eligibility(), 16)
+            let (result, telemetry) = selector
+                .select_worker_with_telemetry(&workers, &request, request.eligibility(), 16)
                 .unwrap();
             match result.worker.worker_id {
                 10 => selected[0] = true,
@@ -766,12 +794,12 @@ mod tests {
                 30 => selected[2] = true,
                 worker_id => panic!("unexpected worker id: {worker_id}"),
             }
-            assert_eq!(result.telemetry.candidate_workers, 3);
+            assert_eq!(telemetry.candidate_workers, 3);
             assert_eq!(
-                result.telemetry.tie_break,
+                telemetry.tie_break,
                 Some(WorkerSelectionTieBreak::EqualScore)
             );
-            assert!(result.telemetry.selected_scores.is_some());
+            assert!(telemetry.selected_scores.is_some());
         }
 
         let selected_count = selected.into_iter().filter(|seen| *seen).count();
@@ -806,8 +834,8 @@ mod tests {
         request.overlap.effective_cached_tokens.insert(worker0, 64);
 
         let overloaded_worker_ids = HashSet::from([0]);
-        let result = selector
-            .select_worker(
+        let (result, telemetry) = selector
+            .select_worker_with_telemetry(
                 &workers,
                 &request,
                 request.eligibility_with_overloaded(Some(&overloaded_worker_ids)),
@@ -816,9 +844,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.worker.worker_id, 1);
-        assert_eq!(result.telemetry.candidate_workers, 1);
-        assert_eq!(result.telemetry.tie_break, None);
-        assert!(result.telemetry.selected_scores.is_some());
+        assert_eq!(telemetry.candidate_workers, 1);
+        assert_eq!(telemetry.tie_break, None);
+        assert!(telemetry.selected_scores.is_some());
     }
 
     #[test]
@@ -1098,11 +1126,11 @@ mod tests {
             resp_tx: None,
         };
 
-        let result = selector
-            .select_worker(&workers, &request, request.eligibility(), 16)
+        let (result, telemetry) = selector
+            .select_worker_with_telemetry(&workers, &request, request.eligibility(), 16)
             .unwrap();
         assert_eq!(result.worker.worker_id, 10);
-        let scores = result.telemetry.selected_scores.unwrap();
+        let scores = telemetry.selected_scores.unwrap();
         assert!(
             (scores.worker_load_score - scores.kv_overlap_score - scores.final_score).abs() < 1e-9
         );
@@ -1312,15 +1340,15 @@ mod tests {
             resp_tx: Some(tx),
         };
 
-        let result = selector
-            .select_worker(&workers, &request, request.eligibility(), block_size)
+        let (result, telemetry) = selector
+            .select_worker_with_telemetry(&workers, &request, request.eligibility(), block_size)
             .unwrap();
 
         assert_eq!(
             result.worker, worker0,
             "prefill load scale should apply before adding decode block load"
         );
-        let scores = result.telemetry.selected_scores.unwrap();
+        let scores = telemetry.selected_scores.unwrap();
         assert_eq!(scores.kv_overlap_score, 4.0);
         assert_eq!(scores.worker_load_score, 11.0);
         assert_eq!(scores.final_score, 7.0);

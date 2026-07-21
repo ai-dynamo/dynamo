@@ -379,8 +379,10 @@ class router:
     KV_OVERLAP_SCORE = "router_kv_overlap_score"
     # Load score for the selected worker at decision time
     WORKER_LOAD_SCORE = "router_worker_load_score"
-    # Final score used to select the worker at decision time
-    FINAL_SCORE = "router_final_score"
+    # Positive portion of the final score used to select the worker at decision time
+    FINAL_SCORE_POSITIVE = "router_final_score_positive"
+    # Absolute value of the negative portion of the final score used to select the worker at decision time
+    FINAL_SCORE_NEGATIVE_ABS = "router_final_score_negative_abs"
     # Total number of router decisions resolved by a tie-break
     TIE_BREAKS_TOTAL = "router_tie_breaks_total"
     # Total number of router decisions where no eligible worker/rank existed

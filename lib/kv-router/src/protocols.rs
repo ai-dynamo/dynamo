@@ -547,9 +547,6 @@ pub struct WorkerSelectionResult {
 
     /// Approximate cached-token count derived from the weighted cache hit.
     pub cached_tokens: usize,
-
-    /// Request-local telemetry captured while selecting this worker.
-    pub telemetry: WorkerSelectionTelemetry,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]

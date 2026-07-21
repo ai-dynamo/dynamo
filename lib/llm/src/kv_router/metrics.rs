@@ -669,7 +669,8 @@ pub struct RouterRequestMetrics {
     pub candidate_workers: HistogramVec,
     pub kv_overlap_score: HistogramVec,
     pub worker_load_score: HistogramVec,
-    pub final_score: HistogramVec,
+    pub final_score_positive: HistogramVec,
+    pub final_score_negative_abs: HistogramVec,
     pub tie_breaks_total: prometheus::IntCounterVec,
     pub no_candidates_total: prometheus::IntCounterVec,
 }
@@ -836,15 +837,24 @@ impl RouterRequestMetrics {
                         Some(router_score_buckets()),
                     )
                     .expect("failed to create router_worker_load_score");
-                let final_score = metrics
+                let final_score_positive = metrics
                     .create_histogramvec(
-                        router::FINAL_SCORE,
-                        "Final score used to select the worker at decision time, in decision-score units",
+                        router::FINAL_SCORE_POSITIVE,
+                        "Positive portion of the final score used to select the worker at decision time, in decision-score units",
                         &[labels::MODEL, labels::WORKER_TYPE],
                         extra_labels,
                         Some(router_score_buckets()),
                     )
-                    .expect("failed to create router_final_score");
+                    .expect("failed to create router_final_score_positive");
+                let final_score_negative_abs = metrics
+                    .create_histogramvec(
+                        router::FINAL_SCORE_NEGATIVE_ABS,
+                        "Absolute value of the negative portion of the final score used to select the worker at decision time, in decision-score units",
+                        &[labels::MODEL, labels::WORKER_TYPE],
+                        extra_labels,
+                        Some(router_score_buckets()),
+                    )
+                    .expect("failed to create router_final_score_negative_abs");
                 let tie_breaks_total = metrics
                     .create_intcountervec(
                         router::TIE_BREAKS_TOTAL,
@@ -877,7 +887,8 @@ impl RouterRequestMetrics {
                     candidate_workers,
                     kv_overlap_score,
                     worker_load_score,
-                    final_score,
+                    final_score_positive,
+                    final_score_negative_abs,
                     tie_breaks_total,
                     no_candidates_total,
                 })
@@ -925,9 +936,12 @@ impl RouterRequestMetrics {
             self.worker_load_score
                 .with_label_values(&[model, worker_type])
                 .observe(scores.worker_load_score.max(0.0));
-            self.final_score
+            self.final_score_positive
                 .with_label_values(&[model, worker_type])
                 .observe(scores.final_score.max(0.0));
+            self.final_score_negative_abs
+                .with_label_values(&[model, worker_type])
+                .observe((-scores.final_score).max(0.0));
         }
 
         if let Some(tie_break) = telemetry.tie_break {
@@ -1017,7 +1031,8 @@ mod tests {
         candidate_workers: HistogramVec,
         kv_overlap_score: HistogramVec,
         worker_load_score: HistogramVec,
-        final_score: HistogramVec,
+        final_score_positive: HistogramVec,
+        final_score_negative_abs: HistogramVec,
         tie_breaks_total: IntCounterVec,
         no_candidates_total: IntCounterVec,
     }
@@ -1029,7 +1044,8 @@ mod tests {
             candidate_workers,
             kv_overlap_score,
             worker_load_score,
-            final_score,
+            final_score_positive,
+            final_score_negative_abs,
             tie_breaks_total,
             no_candidates_total,
         } = metric_vecs;
@@ -1050,7 +1066,8 @@ mod tests {
             candidate_workers,
             kv_overlap_score,
             worker_load_score,
-            final_score,
+            final_score_positive,
+            final_score_negative_abs,
             tie_breaks_total,
             no_candidates_total,
         }
@@ -1398,10 +1415,27 @@ dynamo_frontend_router_queue_pending_requests{model=\"model\",policy_class=\"def
             &[labels::MODEL, labels::WORKER_TYPE],
         )
         .unwrap();
-        let final_score = HistogramVec::new(
+        let final_score_positive = HistogramVec::new(
             HistogramOpts::new(
-                format!("{}_{}", name_prefix::COMPONENT, router::FINAL_SCORE),
-                "Final score used to select the worker at decision time, in decision-score units",
+                format!(
+                    "{}_{}",
+                    name_prefix::COMPONENT,
+                    router::FINAL_SCORE_POSITIVE
+                ),
+                "Positive portion of the final score used to select the worker at decision time, in decision-score units",
+            )
+            .buckets(vec![1.0, 4.0, 8.0]),
+            &[labels::MODEL, labels::WORKER_TYPE],
+        )
+        .unwrap();
+        let final_score_negative_abs = HistogramVec::new(
+            HistogramOpts::new(
+                format!(
+                    "{}_{}",
+                    name_prefix::COMPONENT,
+                    router::FINAL_SCORE_NEGATIVE_ABS
+                ),
+                "Absolute value of the negative portion of the final score used to select the worker at decision time, in decision-score units",
             )
             .buckets(vec![1.0, 4.0, 8.0]),
             &[labels::MODEL, labels::WORKER_TYPE],
@@ -1439,7 +1473,12 @@ dynamo_frontend_router_queue_pending_requests{model=\"model\",policy_class=\"def
         registry
             .register(Box::new(worker_load_score.clone()))
             .unwrap();
-        registry.register(Box::new(final_score.clone())).unwrap();
+        registry
+            .register(Box::new(final_score_positive.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(final_score_negative_abs.clone()))
+            .unwrap();
         registry
             .register(Box::new(tie_breaks_total.clone()))
             .unwrap();
@@ -1453,7 +1492,8 @@ dynamo_frontend_router_queue_pending_requests{model=\"model\",policy_class=\"def
             candidate_workers,
             kv_overlap_score,
             worker_load_score,
-            final_score,
+            final_score_positive,
+            final_score_negative_abs,
             tie_breaks_total,
             no_candidates_total,
         });
@@ -1468,7 +1508,7 @@ dynamo_frontend_router_queue_pending_requests{model=\"model\",policy_class=\"def
                 selected_scores: Some(WorkerSelectionScores {
                     kv_overlap_score: 2.0,
                     worker_load_score: 6.0,
-                    final_score: 4.0,
+                    final_score: -4.0,
                 }),
                 tie_break: Some(WorkerSelectionTieBreak::EqualScore),
             },
@@ -1529,7 +1569,13 @@ dynamo_frontend_router_queue_pending_requests{model=\"model\",policy_class=\"def
         );
         assert!(
             output.contains(
-                "dynamo_component_router_final_score_sum{model=\"model-a\",worker_type=\"decode\"} 9"
+                "dynamo_component_router_final_score_positive_sum{model=\"model-a\",worker_type=\"decode\"} 5"
+            ),
+            "\nActual PEF:\n{output}"
+        );
+        assert!(
+            output.contains(
+                "dynamo_component_router_final_score_negative_abs_sum{model=\"model-a\",worker_type=\"decode\"} 4"
             ),
             "\nActual PEF:\n{output}"
         );

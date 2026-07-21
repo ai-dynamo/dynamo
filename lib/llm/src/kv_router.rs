@@ -1397,7 +1397,6 @@ mod tests {
                 required_blocks: request.isl_tokens.div_ceil(block_size as usize) as u64,
                 effective_overlap_blocks: 0.0,
                 cached_tokens: 0,
-                telemetry: Default::default(),
             })
         }
     }
