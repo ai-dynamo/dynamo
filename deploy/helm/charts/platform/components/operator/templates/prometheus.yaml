@@ -88,6 +88,11 @@ spec:
       sourceLabels:
       - __meta_kubernetes_pod_label_nvidia_com_dynamo_component_type
       targetLabel: dynamo_component_type
+    # Expose the DGD name so the failover dashboard can select among deployments.
+    - action: replace
+      sourceLabels:
+      - __meta_kubernetes_pod_label_nvidia_com_dynamo_graph_deployment_name
+      targetLabel: dynamo_graph_deployment
   - interval: 5s
     path: /metrics
     port: system-1
@@ -96,6 +101,10 @@ spec:
       sourceLabels:
       - __meta_kubernetes_pod_label_nvidia_com_dynamo_component_type
       targetLabel: dynamo_component_type
+    - action: replace
+      sourceLabels:
+      - __meta_kubernetes_pod_label_nvidia_com_dynamo_graph_deployment_name
+      targetLabel: dynamo_graph_deployment
 {{- if .Values.dynamo.metrics.podMonitors.nixlTelemetry }}
   - interval: 5s
     path: /metrics
