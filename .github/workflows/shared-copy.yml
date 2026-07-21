@@ -29,6 +29,11 @@ on:
         required: false
         type: string
         default: ''
+      source_ref:
+        description: 'Source commit SHA used in the source and destination image tag. Empty = caller SHA.'
+        required: false
+        type: string
+        default: ''
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -60,8 +65,9 @@ jobs:
         run: |
           CUDA_VERSION="${{ matrix.cuda_version }}"
           TARGET_TAG_PLAIN="${{ inputs.target_tag_plain }}"
+          SOURCE_SHA="${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}"
 
-          IMAGE_TAG=${{ github.sha }}-${TARGET_TAG_PLAIN}
+          IMAGE_TAG=${SOURCE_SHA}-${TARGET_TAG_PLAIN}
           if [ -n "${CUDA_VERSION}" ]; then
             CUDA_MAJOR=${CUDA_VERSION%%.*}
             # cuda13 is the implicit default — the primary ECR tag carries

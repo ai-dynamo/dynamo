@@ -36,6 +36,7 @@ on:
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
+  CONTROL_SOURCE_SHA: 8a8035b9799fc21ac24ae73013a6411f99f11ed4
 
 jobs:
 
@@ -68,6 +69,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
+          ref: ${{ env.CONTROL_SOURCE_SHA }}
           persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
@@ -77,7 +79,7 @@ jobs:
       - name: Verify immutable vLLM base
         shell: bash
         env:
-          BASE_IMAGE: vllm/vllm-openai:nightly-8e981630c9336233ca9de91452f68918bddbc4e2
+          BASE_IMAGE: vllm/vllm-openai@sha256:f2ac337893360e23462249c3897e1c92dc8ba8a1ebbc3dd15c4ac931e957438e
           EXPECTED_INDEX_DIGEST: sha256:f2ac337893360e23462249c3897e1c92dc8ba8a1ebbc3dd15c4ac931e957438e
           EXPECTED_AMD64_DIGEST: sha256:39e8d18a3b41e382f1955a3241326ec0fe61615fd51c7eef836fe606c0bfb887
         run: |
@@ -116,7 +118,7 @@ jobs:
       - name: Capture deterministic amd64 baseline
         shell: bash
         env:
-          BASE_IMAGE: vllm/vllm-openai:nightly-8e981630c9336233ca9de91452f68918bddbc4e2
+          BASE_IMAGE: vllm/vllm-openai@sha256:f2ac337893360e23462249c3897e1c92dc8ba8a1ebbc3dd15c4ac931e957438e
         run: |
           set -euo pipefail
           mkdir -p "${RUNNER_TEMP}/baseline"
@@ -159,6 +161,7 @@ jobs:
       builder_name: ${{ needs.init.outputs.builder_name }}
       build_timeout_minutes: ${{ inputs.build_vllm_placeholder && 90 || 60 }}
       build_only: ${{ inputs.build_vllm_placeholder }}
+      source_ref: 8a8035b9799fc21ac24ae73013a6411f99f11ed4
       image_tag_suffix: ${{ inputs.build_vllm_placeholder && format('-run-{0}-{1}', github.run_id, github.run_attempt) || '' }}
       baseline_sbom_artifact: ${{ inputs.build_vllm_placeholder && format('vllm-nightly-f2ac3378-amd64-{0}-{1}', github.run_id, github.run_attempt) || '' }}
       extra_build_args: |
@@ -210,6 +213,7 @@ jobs:
       cuda_version: '["13.0"]'
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 10
+      source_ref: 8a8035b9799fc21ac24ae73013a6411f99f11ed4
       image_tag_suffix: ${{ inputs.build_vllm_placeholder && format('-run-{0}-{1}', github.run_id, github.run_attempt) || '' }}
     secrets: inherit
 
@@ -248,13 +252,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
+          ref: ${{ env.CONTROL_SOURCE_SHA }}
           persist-credentials: false
       - name: Build and push snapshot agent
         uses: ./.github/actions/build-deploy-component
         with:
           component: snapshot
           target: agent
-          image_tag: ${{ github.sha }}-snapshot-agent-run-${{ github.run_id }}-${{ github.run_attempt }}
+          image_tag: ${{ env.CONTROL_SOURCE_SHA }}-snapshot-agent-run-${{ github.run_id }}-${{ github.run_attempt }}
           builder_name: ${{ needs.init.outputs.builder_name }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
@@ -263,7 +268,7 @@ jobs:
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
           extra_tags: |
             ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.init.outputs.sanitized_ref_name }}-snapshot-agent
-            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent-run-${{ github.run_id }}-${{ github.run_attempt }}
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ env.CONTROL_SOURCE_SHA }}-snapshot-agent-run-${{ github.run_id }}-${{ github.run_attempt }}
             ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.init.outputs.sanitized_ref_name }}-snapshot-agent
           extra_build_args: |
             CRIU_REPO=https://github.com/galletas1712/criu.git
@@ -282,13 +287,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
+          ref: ${{ env.CONTROL_SOURCE_SHA }}
           persist-credentials: false
       - name: Build and push vLLM snapshot placeholder
         uses: ./.github/actions/build-deploy-component
         with:
           component: snapshot
           target: placeholder
-          image_tag: ${{ github.sha }}-vllm-placeholder-run-${{ github.run_id }}-${{ github.run_attempt }}
+          image_tag: ${{ env.CONTROL_SOURCE_SHA }}-vllm-placeholder-run-${{ github.run_id }}-${{ github.run_attempt }}
           builder_name: ${{ needs.init.outputs.builder_name }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
@@ -297,10 +303,10 @@ jobs:
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
           extra_tags: |
             ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.init.outputs.sanitized_ref_name }}-vllm-placeholder
-            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-placeholder-run-${{ github.run_id }}-${{ github.run_attempt }}
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ env.CONTROL_SOURCE_SHA }}-vllm-placeholder-run-${{ github.run_id }}-${{ github.run_attempt }}
             ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.init.outputs.sanitized_ref_name }}-vllm-placeholder
           extra_build_args: |
-            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime-run-${{ github.run_id }}-${{ github.run_attempt }}
+            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ env.CONTROL_SOURCE_SHA }}-vllm-runtime-run-${{ github.run_id }}-${{ github.run_attempt }}
             BASE_IMAGE_USER=dynamo
             CRIU_REPO=https://github.com/galletas1712/criu.git
             CRIU_REF=3dd2420c16e54fb7cd08b3e511d3a8bfb03cd001
@@ -325,6 +331,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ env.CONTROL_SOURCE_SHA }}
       - name: Initialize Dynamo Builder
         uses: ./.github/actions/init-dynamo-builder
         with:
@@ -345,7 +353,7 @@ jobs:
         run: |
           ECR_DEFAULT_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
           ACR_IMAGE_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
-          DEFAULT_TAG="${{ github.sha }}-operator${{ inputs.build_vllm_placeholder && format('-run-{0}-{1}', github.run_id, github.run_attempt) || '' }}"
+          DEFAULT_TAG="${{ env.CONTROL_SOURCE_SHA }}-operator${{ inputs.build_vllm_placeholder && format('-run-{0}-{1}', github.run_id, github.run_attempt) || '' }}"
           BRANCH_TAG="${{ needs.init.outputs.sanitized_ref_name }}-operator"
           IMAGE_URIS=(
             "${ECR_DEFAULT_IMAGE_BASE}:${DEFAULT_TAG}"
