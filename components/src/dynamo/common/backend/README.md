@@ -466,8 +466,6 @@ Lifecycle and runtime:
     unchanged.
   - Loaded adapters appear in `GET /v1/models`; inference selects an
     adapter by sending `"model": "<lora_name>"`.
-<<<<<<< HEAD
-=======
 - **Sleep/wake (vLLM)** — `sleep` / `wake_up` controls via
   `VllmEnginePauseController` (discovery unregister before sleep,
   re-register after wake; `worker.rs` `engine_control_policy`)
@@ -502,7 +500,6 @@ Lifecycle and runtime:
   bypassing DistributedRuntime; `dynamo.vllm.main` routes them to
   `run_dynamo_headless` before the Worker/engine path. Distinct from
   elastic EP, which uses the Ray backend above.
->>>>>>> 51702e3508c (fix: DYN-3361: Update ray documentation to recommend mp instead (#11259))
 - **Disaggregated serving** (`agg`/`prefill`/`decode`) — KV transfer
   uses NIXL across all three engines; SGLang exchanges a Dynamo-level
   bootstrap address, vLLM and TRT-LLM use an engine-internal handshake.
