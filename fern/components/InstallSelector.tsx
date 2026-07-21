@@ -22,7 +22,6 @@ type Cmds = { container: string; wheel?: string };
 type Entry = {
   backend_version: string;
   dynamo?: string;
-  also?: string[];
   latest?: boolean;
   pin_date?: string;
   note?: string;
@@ -71,8 +70,7 @@ function block(data: Data, fw: string, ch: "stable" | "nightly", e: Entry, i: nu
     : e.latest
       ? "Latest nightly build"
       : "Latest nightly in this version's range";
-  let ships = `Supports ${label} ${e.backend_version}`;
-  if (isStable && e.also && e.also.length) ships += ` · also in Dynamo ${e.also.join(", ")}`;
+  const ships = `Supports ${label} ${e.backend_version}`;
 
   const cmd = (e.commands as Record<string, string>)[form];
   const hint = !isStable && e.note ? `<p class="is-hint">${esc(e.note)}</p>` : "";

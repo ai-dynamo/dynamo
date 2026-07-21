@@ -247,13 +247,7 @@ def stable_by_framework(live: dict[str, set[str]]) -> dict[str, list[dict]]:
             if relnum not in live.get(img, set()):
                 continue
             bver = norm(label, releases[release][label])
-            existing = next(
-                (e for e in out[label] if e["backend_version"] == bver), None
-            )
-            if existing:
-                existing["releases"].append(relnum)
-            else:
-                out[label].append({"backend_version": bver, "releases": [relnum]})
+            out[label].append({"backend_version": bver, "release": relnum})
     return out
 
 
@@ -364,9 +358,8 @@ def build() -> dict:
             entry["stable"].append(
                 {
                     "backend_version": s["backend_version"],
-                    "dynamo": s["releases"][0],
-                    "also": s["releases"][1:],
-                    "commands": stable_commands(label, s["releases"][0]),
+                    "dynamo": s["release"],
+                    "commands": stable_commands(label, s["release"]),
                 }
             )
 
@@ -449,7 +442,7 @@ def main() -> int:
     ap.add_argument(
         "--refresh-support-matrix",
         action="store_true",
-        help="also rewrite the main (ToT) row in support-matrix.md (docs-build time)",
+        help="also rewrite the main (ToT) row in support-matrix.md",
     )
     ap.add_argument("--out", default=OUT, help="JSON data path")
     ap.add_argument(
