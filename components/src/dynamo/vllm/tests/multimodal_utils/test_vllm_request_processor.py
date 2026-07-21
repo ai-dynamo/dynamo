@@ -139,6 +139,24 @@ async def test_extracts_uuid_only_media_as_aligned_none_slots():
 
 
 @pytest.mark.asyncio
+async def test_extracts_uuid_only_unified_vision_chunk_as_bare_none_slot():
+    processor = _processor(unified_vision_chunk=True)
+    image_items = [{"UuidOnly": "cached-image"}]
+    processor.image_loader.load_image_batch.return_value = [None]
+
+    result = await processor.extract_multimodal_data(
+        {"multi_modal_data": {"image_url": image_items}},
+        "request-cached-vision-chunk",
+        None,
+    )
+
+    assert result == {"vision_chunk": [None]}
+    processor.image_loader.load_image_batch.assert_awaited_once_with(
+        image_items, preserve_uuid_slots=True
+    )
+
+
+@pytest.mark.asyncio
 async def test_rejects_media_when_multimodal_is_disabled():
     processor = _processor(enabled=False)
 
@@ -341,7 +359,7 @@ def test_build_tokens_prompt_prefers_opaque_user_uuids_without_padding():
 
 def test_build_tokens_prompt_forwards_opaque_uuid_for_unified_vision_chunk():
     processor = _processor(unified_vision_chunk=True)
-    mm_data = {"vision_chunk": {"type": "image", "image": None, "uuid": None}}
+    mm_data = {"vision_chunk": [None]}
 
     prompt = processor.build_tokens_prompt(
         {
@@ -356,32 +374,61 @@ def test_build_tokens_prompt_forwards_opaque_uuid_for_unified_vision_chunk():
     assert prompt["multi_modal_uuids"] == {"vision_chunk": ["catalog/image:v2"]}
 
 
-def test_vllm_uses_prompt_uuid_for_unified_vision_chunk():
+def test_vllm_processor_cache_handles_uuid_only_unified_vision_chunk():
     from vllm.multimodal.parse import (
         MultiModalDataItems,
         VisionChunkProcessorItems,
         parse_mm_uuids,
     )
     from vllm.multimodal.processing.inputs import ProcessorInputs
+    from vllm.multimodal.processing.processor import BaseMultiModalProcessor
     from vllm.renderers.base import BaseRenderer
 
-    chunk = {"type": "image", "image": None, "uuid": None}
     data_items = MultiModalDataItems(
-        {"vision_chunk": VisionChunkProcessorItems([chunk])}
+        {"vision_chunk": VisionChunkProcessorItems([None])}
     )
     uuid_items = parse_mm_uuids({"vision_chunk": ["catalog/image:v2"]})
 
     BaseRenderer._validate_mm_uuids(
         None,
-        {"vision_chunk": [chunk]},
+        {"vision_chunk": [None]},
         data_items,
         uuid_items,
     )
     processor_inputs = ProcessorInputs([], data_items, uuid_items)
+    mm_hashes = processor_inputs.get_mm_hashes("test-model")
 
-    assert processor_inputs.get_mm_hashes("test-model") == {
-        "vision_chunk": ["catalog/image:v2"]
-    }
+    assert mm_hashes == {"vision_chunk": ["catalog/image:v2"]}
+
+    empty_items = MultiModalDataItems()
+    parse_mm_data = MagicMock(return_value=empty_items)
+    processor = SimpleNamespace(info=SimpleNamespace(parse_mm_data=parse_mm_data))
+    cache = SimpleNamespace(is_cached=MagicMock(return_value=[True]))
+
+    is_cached, missing_items = BaseMultiModalProcessor._get_cache_missing_items(
+        processor,
+        cache,
+        data_items,
+        mm_hashes,
+    )
+
+    assert is_cached == {"vision_chunk": [True]}
+    assert missing_items is empty_items
+    parse_mm_data.assert_called_once_with({"vision_chunk": []}, validate=False)
+
+    cache.is_cached.return_value = [False]
+    parse_mm_data.reset_mock()
+    with pytest.raises(
+        ValueError,
+        match="Cache miss for vision_chunk at index 0 but data is not provided",
+    ):
+        BaseMultiModalProcessor._get_cache_missing_items(
+            processor,
+            cache,
+            data_items,
+            mm_hashes,
+        )
+    parse_mm_data.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -441,7 +488,7 @@ def test_build_tokens_prompt_rejects_malformed_user_uuids(
     "multi_modal_data",
     [
         {"image": [None]},
-        {"vision_chunk": {"type": "image", "image": None, "uuid": None}},
+        {"vision_chunk": [None]},
     ],
 )
 def test_build_tokens_prompt_reports_uuid_only_cache_miss(

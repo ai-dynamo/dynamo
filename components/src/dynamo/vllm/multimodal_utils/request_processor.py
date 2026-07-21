@@ -201,9 +201,9 @@ def compute_mm_uuids(
         chunks = multi_modal_data[modality]
         if not isinstance(chunks, list):
             chunks = [chunks]
-        if not all(isinstance(chunk, dict) for chunk in chunks):
-            raise ValueError("vision_chunk entries must be objects")
-        images = [chunk.get("image") for chunk in chunks]
+        if not all(chunk is None or isinstance(chunk, dict) for chunk in chunks):
+            raise ValueError("vision_chunk entries must be objects or null")
+        images = [None if chunk is None else chunk.get("image") for chunk in chunks]
     elif isinstance(images, dict):
         # Pre-computed embedding dictionaries do not have a stable raw-image
         # preimage here. Their identity is carried by the upstream encoder/cache.
@@ -407,12 +407,18 @@ class VllmMultimodalRequestProcessor:
                     if self.use_unified_vision_chunk:
                         # vLLM reads cache identities from the prompt-level
                         # multi_modal_uuids map, not this chunk metadata field.
+                        # Keep UUID-only slots as bare None so cache misses fail
+                        # before model-specific vision processing.
                         chunks = [
-                            {"type": "image", "image": image, "uuid": None}
+                            None
+                            if image is None
+                            else {"type": "image", "image": image, "uuid": None}
                             for image in images
                         ]
                         vllm_mm_data[image_key] = (
-                            chunks[0] if len(chunks) == 1 else chunks
+                            chunks[0]
+                            if len(chunks) == 1 and chunks[0] is not None
+                            else chunks
                         )
                     else:
                         vllm_mm_data[image_key] = (
