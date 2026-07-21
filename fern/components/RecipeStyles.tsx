@@ -37,6 +37,19 @@ const RECIPE_CSS = `
     --pst-color-surface: #1a1a1a !important;
 }
 
+/* Wider content column on recipe/benchmark pages.
+   These pages set hide-toc: true, so the right-hand TOC rail is empty, yet
+   Fern still caps prose at the site-wide --content-width (812px, defined on
+   :root), wasting the freed horizontal space and cramping the model-card grid
+   and target-picker tables. Re-declare the variable here; because this
+   stylesheet only loads on recipe/benchmark pages, the wider column is scoped
+   to them while every other page keeps 812px. Held under --page-width (1376px)
+   minus --sidebar-width (248px) so content never overflows the layout.
+   !important wins over the :root default regardless of style-tag order. */
+:root {
+    --content-width: 1100px !important;
+}
+
 /* Recipe catalog */
 .dynamo-recipe-selector {
     margin: 24px 0;
