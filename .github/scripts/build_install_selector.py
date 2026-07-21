@@ -225,7 +225,7 @@ _ROW = re.compile(
 )
 
 
-def stable_by_framework(live: dict[str, set[str]]) -> dict[str, list[dict]]:
+def stable_by_framework(live: dict[str, set[str] | None]) -> dict[str, list[dict]]:
     text = (REPO_ROOT / SUPPORT_MATRIX).read_text()
     releases: dict[str, dict[str, str]] = {}
     for line in text.splitlines():
@@ -244,7 +244,8 @@ def stable_by_framework(live: dict[str, set[str]]) -> dict[str, list[dict]]:
         relnum = release.lstrip("v")
         for label in META:
             img = META[label][0]
-            if relnum not in live.get(img, set()):
+            live_tags = live.get(img)
+            if live_tags is not None and relnum not in live_tags:
                 continue
             bver = norm(label, releases[release][label])
             out[label].append({"backend_version": bver, "release": relnum})
@@ -296,13 +297,18 @@ def stable_commands(label: str, release: str) -> dict[str, str]:
     return cmds
 
 
-def nightly_latest_commands(label: str) -> dict[str, str]:
+def nightly_latest_commands(
+    label: str, wheel_version: str | None = None
+) -> dict[str, str]:
     img, extra, wheel = META[label]
     cmds = {"container": run(f"{REGISTRY}/{img}-runtime-nightly:latest")}
     if wheel:
+        # Pin the wheel: --extra-index-url pools with public PyPI, so an unpinned
+        # --pre install can resolve a stable release instead of the nightly.
+        pin = f"=={wheel_version}" if wheel_version else ""
         cmds[
             "wheel"
-        ] = f'uv pip install --pre --extra-index-url {PYPI}/ "ai-dynamo[{extra}]"'
+        ] = f'uv pip install --pre --extra-index-url {PYPI}/ "ai-dynamo[{extra}]{pin}"'
     return cmds
 
 
@@ -336,8 +342,10 @@ def build() -> dict:
         try:
             reltags_by_img[img] = ngc_release_tags(img)
         except Exception as exc:
+            # None means "couldn't verify" — keep all releases rather than dropping
+            # every stable option (which would blank the default view).
             print(f"warning: NGC release tags failed for {img}: {exc}", file=sys.stderr)
-            reltags_by_img[img] = set()
+            reltags_by_img[img] = None
 
     stable = stable_by_framework(reltags_by_img)
     data: dict[str, dict] = {}
@@ -378,11 +386,17 @@ def build() -> dict:
         for idx in range(len(wins) - 1, -1, -1):  # newest-first
             version, start, end = wins[idx]
             if end is None:  # current build
+                hit = latest_in_window(dated, start, None)
+                wheel_version = None
+                if hit:
+                    date, sha = hit
+                    base = base_version_at(sha)
+                    wheel_version = f"{base}.dev{date}" if base else None
                 entry["nightly"].append(
                     {
                         "backend_version": version,
                         "latest": True,
-                        "commands": nightly_latest_commands(label),
+                        "commands": nightly_latest_commands(label, wheel_version),
                     }
                 )
                 continue

@@ -79,7 +79,7 @@ function block(data: Data, fw: string, ch: "stable" | "nightly", e: Entry, i: nu
     : `<div class="is-cmd is-note"><pre>${esc(label)} has no PyPI wheel — use the Container option above.</pre></div>`;
 
   return (
-    `<div class="is-block" data-block data-fw="${fw}" data-ch="${ch}" data-ver="${i}" data-form="${form}">` +
+    `<div class="is-block" data-block data-fw="${esc(fw)}" data-ch="${esc(ch)}" data-ver="${i}" data-form="${esc(form)}">` +
     `<div class="is-rec is-${ch}"><div class="is-eyebrow">${esc(role)}</div>` +
     `<div class="is-headline"><span class="is-badge">${esc(badge)}</span>${esc(title)}</div>` +
     `<div class="is-ships">${esc(ships)}</div></div>${body}</div>`
