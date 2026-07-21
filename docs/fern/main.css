@@ -207,6 +207,18 @@ html.dark,
 .fern-sidebar-group > li > .fern-sidebar-link:has(+ .fern-sidebar-group) {
     padding-left: 0.25rem !important;
 }
+/* Top-level section headings (e.g. Getting Started, Installation, Model
+   Deployment, Operations) in the User Guide's tab *variants* (Kubernetes /
+   Local CLI). Moving that tab to `variants:` nests these one level deeper, so
+   Fern renders each as a level-1 group whose title looks lighter than the
+   pre-variant fixed headers. Bump the weight to match. Scoped via
+   `#fern-sidebar:has(.fern-variant-selector)` so it ONLY affects variant tabs
+   (the variant switcher lives in that sidebar) and leaves every other tab's
+   sidebar untouched. Chevron and click behaviour are intentionally left alone
+   so the sections stay collapsible/expandable across tab switches. */
+#fern-sidebar:has(.fern-variant-selector) .fern-sidebar-link.fern-sidebar-level-1 .fern-sidebar-link-title {
+    font-weight: 600 !important;
+}
 .fern-sidebar-group{
     padding: 0 !important
 }
