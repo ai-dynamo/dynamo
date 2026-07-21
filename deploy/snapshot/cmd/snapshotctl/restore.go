@@ -34,7 +34,7 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 	}
 
 	checkpointID := strings.TrimSpace(opts.CheckpointID)
-	clientset, currentNamespace, err := loadClientset(opts.KubeContext)
+	clientset, _, currentNamespace, err := loadClientset(opts.KubeContext)
 	if err != nil {
 		return nil, err
 	}

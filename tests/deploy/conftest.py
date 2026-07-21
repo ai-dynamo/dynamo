@@ -50,7 +50,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--checkpoint-backend",
         type=str,
         default="vllm",
-        choices=("vllm", "sglang"),
+        choices=("vllm", "sglang", "trtllm"),
         help="DynamoCheckpoint backend to test.",
     )
 

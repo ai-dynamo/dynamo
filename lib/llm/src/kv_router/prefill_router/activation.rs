@@ -22,6 +22,7 @@ use crate::{
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
         timing::WORKER_TYPE_PREFILL,
     },
+    session_affinity::create_affinity_coordinator,
 };
 
 impl PrefillRouter {
@@ -148,6 +149,8 @@ impl PrefillRouter {
             // Extract client from kv_chooser to ensure shared state
             let client = kv_chooser.client().clone();
             Self::attach_prefill_client(worker_monitor, &client);
+            let affinity =
+                create_affinity_coordinator(self.session_affinity_ttl, client.clone()).await?;
 
             // Build the PushRouter for prefill with KV mode using the shared client
             let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
@@ -158,15 +161,17 @@ impl PrefillRouter {
             .await?;
 
             // Wrap it in KvPushRouter
-            InnerPrefillRouter::KvRouter(Arc::new(KvPushRouter::new(
+            InnerPrefillRouter::KvRouter(Arc::new(KvPushRouter::new_with_coordinator(
                 push_router,
                 kv_chooser,
-                self.session_affinity_ttl,
-            )?))
+                affinity,
+            )))
         } else {
             // Create client for simple router
             let client = endpoint.client().await?;
             Self::attach_prefill_client(worker_monitor, &client);
+            let affinity =
+                create_affinity_coordinator(self.session_affinity_ttl, client.clone()).await?;
 
             // Create simple push router with the frontend's router mode
             // Note: Per-worker metrics (active_prefill_tokens, active_decode_blocks) are only
@@ -179,11 +184,11 @@ impl PrefillRouter {
             .await?;
 
             InnerPrefillRouter::SimpleRouter(Arc::new(
-                crate::session_affinity::SessionAffinityPushRouter::new(
+                crate::session_affinity::SessionAffinityPushRouter::new_with_coordinator(
                     push_router,
-                    self.session_affinity_ttl,
+                    affinity,
                     self.router_mode.is_direct_routing(),
-                )?,
+                ),
             ))
         };
 

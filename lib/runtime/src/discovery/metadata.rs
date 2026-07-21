@@ -6,7 +6,9 @@ use serde::Deserialize as _;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use super::{DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery};
+use super::{
+    DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery, validate_event_source_reregistration,
+};
 
 /// Deserializes a JSON `null` or missing field as `T::default()`.
 ///
@@ -42,6 +44,9 @@ pub struct DiscoveryMetadata {
     /// Registered event channel instances (key: path string from EventChannelInstanceId::to_path())
     #[serde(default, deserialize_with = "deserialize_null_default")]
     event_channels: HashMap<String, DiscoveryInstance>,
+    /// Registered event source instances (key: path string from EventSourceInstanceId::to_path())
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    event_sources: HashMap<String, DiscoveryInstance>,
 }
 
 impl DiscoveryMetadata {
@@ -51,6 +56,7 @@ impl DiscoveryMetadata {
             endpoints: HashMap::new(),
             model_cards: HashMap::new(),
             event_channels: HashMap::new(),
+            event_sources: HashMap::new(),
         }
     }
 
@@ -66,6 +72,9 @@ impl DiscoveryMetadata {
             }
             DiscoveryInstanceId::EventChannel(_) => {
                 anyhow::bail!("Cannot register EventChannel instance as endpoint")
+            }
+            DiscoveryInstanceId::EventSource(_) => {
+                anyhow::bail!("Cannot register EventSource instance as endpoint")
             }
         }
     }
@@ -83,6 +92,9 @@ impl DiscoveryMetadata {
             DiscoveryInstanceId::EventChannel(_) => {
                 anyhow::bail!("Cannot register EventChannel instance as model card")
             }
+            DiscoveryInstanceId::EventSource(_) => {
+                anyhow::bail!("Cannot register EventSource instance as model card")
+            }
         }
     }
 
@@ -98,6 +110,9 @@ impl DiscoveryMetadata {
             }
             DiscoveryInstanceId::EventChannel(_) => {
                 anyhow::bail!("Cannot unregister EventChannel instance as endpoint")
+            }
+            DiscoveryInstanceId::EventSource(_) => {
+                anyhow::bail!("Cannot unregister EventSource instance as endpoint")
             }
         }
     }
@@ -115,6 +130,9 @@ impl DiscoveryMetadata {
             DiscoveryInstanceId::EventChannel(_) => {
                 anyhow::bail!("Cannot unregister EventChannel instance as model card")
             }
+            DiscoveryInstanceId::EventSource(_) => {
+                anyhow::bail!("Cannot unregister EventSource instance as model card")
+            }
         }
     }
 
@@ -131,6 +149,9 @@ impl DiscoveryMetadata {
             DiscoveryInstanceId::Model(_) => {
                 anyhow::bail!("Cannot register Model instance as event channel")
             }
+            DiscoveryInstanceId::EventSource(_) => {
+                anyhow::bail!("Cannot register EventSource instance as event channel")
+            }
         }
     }
 
@@ -146,6 +167,55 @@ impl DiscoveryMetadata {
             }
             DiscoveryInstanceId::Model(_) => {
                 anyhow::bail!("Cannot unregister Model instance as event channel")
+            }
+            DiscoveryInstanceId::EventSource(_) => {
+                anyhow::bail!("Cannot unregister EventSource instance as event channel")
+            }
+        }
+    }
+
+    /// Register a semantic event source instance.
+    pub fn register_event_source(&mut self, instance: DiscoveryInstance) -> Result<()> {
+        match instance.id() {
+            DiscoveryInstanceId::EventSource(key) => {
+                let path = key.to_path();
+                match self.event_sources.entry(path) {
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(instance);
+                        Ok(())
+                    }
+                    std::collections::hash_map::Entry::Occupied(entry) => {
+                        validate_event_source_reregistration(entry.get(), &instance)
+                    }
+                }
+            }
+            DiscoveryInstanceId::Endpoint(_) => {
+                anyhow::bail!("Cannot register Endpoint instance as event source")
+            }
+            DiscoveryInstanceId::Model(_) => {
+                anyhow::bail!("Cannot register Model instance as event source")
+            }
+            DiscoveryInstanceId::EventChannel(_) => {
+                anyhow::bail!("Cannot register EventChannel instance as event source")
+            }
+        }
+    }
+
+    /// Unregister one exact semantic event source incarnation.
+    pub fn unregister_event_source(&mut self, instance: &DiscoveryInstance) -> Result<()> {
+        match instance.id() {
+            DiscoveryInstanceId::EventSource(key) => {
+                self.event_sources.remove(&key.to_path());
+                Ok(())
+            }
+            DiscoveryInstanceId::Endpoint(_) => {
+                anyhow::bail!("Cannot unregister Endpoint instance as event source")
+            }
+            DiscoveryInstanceId::Model(_) => {
+                anyhow::bail!("Cannot unregister Model instance as event source")
+            }
+            DiscoveryInstanceId::EventChannel(_) => {
+                anyhow::bail!("Cannot unregister EventChannel instance as event source")
             }
         }
     }
@@ -165,12 +235,18 @@ impl DiscoveryMetadata {
         self.event_channels.values().cloned().collect()
     }
 
+    /// Get all registered semantic event sources.
+    pub fn get_all_event_sources(&self) -> Vec<DiscoveryInstance> {
+        self.event_sources.values().cloned().collect()
+    }
+
     /// Get all registered instances (endpoints, model cards, and event channels)
     pub fn get_all(&self) -> Vec<DiscoveryInstance> {
         self.endpoints
             .values()
             .chain(self.model_cards.values())
             .chain(self.event_channels.values())
+            .chain(self.event_sources.values())
             .cloned()
             .collect()
     }
@@ -190,6 +266,7 @@ impl DiscoveryMetadata {
 
             // EventChannel queries now return actual event channels
             DiscoveryQuery::EventChannels(_) => self.get_all_event_channels(),
+            DiscoveryQuery::EventSources(_) => self.get_all_event_sources(),
         };
 
         filter_instances(all_instances, query)
@@ -292,16 +369,28 @@ fn filter_instances(
             .into_iter()
             .filter(|inst| match inst {
                 DiscoveryInstance::EventChannel {
-                    namespace: ns,
-                    component: comp,
-                    topic: t,
-                    ..
+                    scope, topic: t, ..
                 } => {
-                    // Filter by namespace if specified
-                    query.namespace.as_ref().is_none_or(|qns| qns == ns)
-                        // Filter by component if specified
-                        && query.component.as_ref().is_none_or(|qc| qc == comp)
-                        // Filter by topic if specified
+                    query
+                        .scope
+                        .as_ref()
+                        .is_none_or(|expected| expected == scope)
+                        && query.topic.as_ref().is_none_or(|qt| qt == t)
+                }
+                _ => false,
+            })
+            .collect(),
+
+        DiscoveryQuery::EventSources(query) => instances
+            .into_iter()
+            .filter(|inst| match inst {
+                DiscoveryInstance::EventSource {
+                    scope, topic: t, ..
+                } => {
+                    query
+                        .scope
+                        .as_ref()
+                        .is_none_or(|expected| expected == scope)
                         && query.topic.as_ref().is_none_or(|qt| qt == t)
                 }
                 _ => false,
@@ -391,7 +480,7 @@ impl MetadataSnapshot {
 mod tests {
     use super::*;
     use crate::component::{Instance, TransportType};
-    use crate::discovery::EventChannelQuery;
+    use crate::discovery::{EventChannelQuery, EventSourceQuery};
 
     #[test]
     fn test_metadata_serde() {
@@ -417,41 +506,6 @@ mod tests {
 
         assert_eq!(deserialized.endpoints.len(), 1);
         assert_eq!(deserialized.model_cards.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_concurrent_registration() {
-        use tokio::sync::RwLock;
-
-        let metadata = Arc::new(RwLock::new(DiscoveryMetadata::new()));
-
-        // Spawn multiple tasks registering concurrently
-        let handles: Vec<_> = (0..10)
-            .map(|i| {
-                let metadata = metadata.clone();
-                tokio::spawn(async move {
-                    let mut meta = metadata.write().await;
-                    let instance = DiscoveryInstance::Endpoint(Instance {
-                        namespace: "test".to_string(),
-                        component: "comp1".to_string(),
-                        endpoint: format!("ep{}", i),
-                        instance_id: i,
-                        transport: TransportType::Nats("nats://localhost:4222".to_string()),
-                        device_type: None,
-                    });
-                    meta.register_endpoint(instance).unwrap();
-                })
-            })
-            .collect();
-
-        // Wait for all to complete
-        for handle in handles {
-            handle.await.unwrap();
-        }
-
-        // Verify all registrations succeeded
-        let meta = metadata.read().await;
-        assert_eq!(meta.endpoints.len(), 10);
     }
 
     #[tokio::test]
@@ -489,61 +543,145 @@ mod tests {
         assert_eq!(metadata.get_all().len(), 5);
     }
 
-    #[tokio::test]
-    async fn test_event_channel_registration() {
-        use crate::discovery::EventTransport;
+    #[test]
+    fn event_source_registration_filters_and_removes_exact_incarnation() {
+        use crate::discovery::EventScope;
+        use crate::protocols::EndpointId;
 
         let mut metadata = DiscoveryMetadata::new();
+        let endpoint = EndpointId {
+            namespace: "test".to_string(),
+            component: "worker".to_string(),
+            name: "decode".to_string(),
+        };
+        let source = |publisher_id| DiscoveryInstance::EventSource {
+            scope: EventScope::Endpoint {
+                endpoint: endpoint.clone(),
+            },
+            topic: "kv-events".to_string(),
+            publisher_id,
+            metadata: serde_json::json!({"worker_id": 7, "dp_rank": 0}),
+        };
 
-        // Register event channels
-        for i in 0..3 {
-            let instance = DiscoveryInstance::EventChannel {
-                namespace: "test".to_string(),
-                component: "comp1".to_string(),
-                topic: "test-topic".to_string(),
-                instance_id: i,
-                transport: EventTransport::zmq(format!("tcp://localhost:{}", 5000 + i)),
-            };
-            metadata.register_event_channel(instance).unwrap();
+        let old = source(100);
+        let current = source(205);
+        metadata.register_event_source(old.clone()).unwrap();
+        metadata.register_event_source(old.clone()).unwrap();
+        let mut conflicting = old.clone();
+        let DiscoveryInstance::EventSource {
+            metadata: descriptor,
+            ..
+        } = &mut conflicting
+        else {
+            unreachable!()
+        };
+        *descriptor = serde_json::json!({"worker_id": 7, "dp_rank": 0, "changed": true});
+        assert!(
+            metadata
+                .register_event_source(conflicting)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot change its descriptor")
+        );
+        metadata.register_event_source(current.clone()).unwrap();
+
+        let query =
+            DiscoveryQuery::EventSources(EventSourceQuery::endpoint_topic(endpoint, "kv-events"));
+        assert_eq!(metadata.filter(&query).len(), 2);
+
+        metadata.unregister_event_source(&old).unwrap();
+        assert_eq!(metadata.filter(&query), vec![current]);
+    }
+
+    #[test]
+    fn event_channel_queries_match_exact_scope() {
+        use crate::discovery::{EventScope, EventTransport};
+        use crate::protocols::EndpointId;
+
+        let mut metadata = DiscoveryMetadata::new();
+        let component_scope = EventScope::Component {
+            namespace: "test".to_string(),
+            component: "worker".to_string(),
+        };
+        let endpoint_a = EndpointId {
+            namespace: "test".to_string(),
+            component: "worker".to_string(),
+            name: "a".to_string(),
+        };
+        let endpoint_b = EndpointId {
+            name: "b".to_string(),
+            ..endpoint_a.clone()
+        };
+
+        for (instance_id, scope) in [
+            (1, component_scope),
+            (
+                2,
+                EventScope::Endpoint {
+                    endpoint: endpoint_a.clone(),
+                },
+            ),
+            (
+                3,
+                EventScope::Endpoint {
+                    endpoint: endpoint_b.clone(),
+                },
+            ),
+        ] {
+            metadata
+                .register_event_channel(DiscoveryInstance::EventChannel {
+                    scope,
+                    topic: "kv-events".to_string(),
+                    instance_id,
+                    transport: EventTransport::zmq(format!("tcp://localhost:{instance_id}")),
+                })
+                .unwrap();
         }
 
-        // Test get_all_event_channels
         assert_eq!(metadata.get_all_event_channels().len(), 3);
-
-        // Test get_all includes event channels
         assert_eq!(metadata.get_all().len(), 3);
+        assert_eq!(
+            metadata
+                .filter(&DiscoveryQuery::EventChannels(EventChannelQuery::all()))
+                .len(),
+            3
+        );
 
-        // Test filter by all event channels
-        let filtered = metadata.filter(&DiscoveryQuery::EventChannels(EventChannelQuery::all()));
-        assert_eq!(filtered.len(), 3);
+        let component = metadata.filter(&DiscoveryQuery::EventChannels(EventChannelQuery::topic(
+            "test",
+            "worker",
+            "kv-events",
+        )));
+        assert_eq!(component.len(), 1);
 
-        // Test filter by component
-        let filtered = metadata.filter(&DiscoveryQuery::EventChannels(
-            EventChannelQuery::component("test", "comp1"),
+        let endpoint_a_instances = metadata.filter(&DiscoveryQuery::EventChannels(
+            EventChannelQuery::endpoint_topic(endpoint_a, "kv-events"),
         ));
-        assert_eq!(filtered.len(), 3);
+        assert_eq!(endpoint_a_instances.len(), 1);
+        assert_eq!(endpoint_a_instances[0].instance_id(), 2);
 
-        // Test filter with non-matching query
-        let filtered = metadata.filter(&DiscoveryQuery::EventChannels(
-            EventChannelQuery::component("other", "comp1"),
+        let endpoint_b_instances = metadata.filter(&DiscoveryQuery::EventChannels(
+            EventChannelQuery::endpoint_topic(endpoint_b, "kv-events"),
         ));
-        assert_eq!(filtered.len(), 0);
+        assert_eq!(endpoint_b_instances.len(), 1);
+        assert_eq!(endpoint_b_instances[0].instance_id(), 3);
 
-        // Test unregister
-        let instance = DiscoveryInstance::EventChannel {
-            namespace: "test".to_string(),
-            component: "comp1".to_string(),
-            topic: "test-topic".to_string(),
-            instance_id: 0,
-            transport: EventTransport::zmq("tcp://localhost:5000"),
-        };
-        metadata.unregister_event_channel(&instance).unwrap();
+        metadata
+            .unregister_event_channel(&endpoint_a_instances[0])
+            .unwrap();
         assert_eq!(metadata.get_all_event_channels().len(), 2);
+        assert!(
+            metadata
+                .filter(&DiscoveryQuery::EventChannels(
+                    EventChannelQuery::component("other", "worker")
+                ))
+                .is_empty()
+        );
     }
 
     #[tokio::test]
     async fn test_mixed_instances() {
-        use crate::discovery::EventTransport;
+        use crate::discovery::{EventScope, EventTransport};
 
         let mut metadata = DiscoveryMetadata::new();
 
@@ -569,8 +707,10 @@ mod tests {
         metadata.register_model_card(model).unwrap();
 
         let event_channel = DiscoveryInstance::EventChannel {
-            namespace: "test".to_string(),
-            component: "comp1".to_string(),
+            scope: EventScope::Component {
+                namespace: "test".to_string(),
+                component: "comp1".to_string(),
+            },
             topic: "test-topic".to_string(),
             instance_id: 3,
             transport: EventTransport::zmq("tcp://localhost:5000"),

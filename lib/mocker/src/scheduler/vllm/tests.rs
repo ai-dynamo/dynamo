@@ -1396,6 +1396,58 @@ mod core_behavior {
     }
 
     #[test]
+    fn test_mtp_recomputes_last_prefix_cache_block() {
+        fn second_request_admission_reuse(mtp_enabled: bool) -> (usize, u64, u64) {
+            let mut builder = MockEngineArgs::builder()
+                .block_size(4)
+                .num_gpu_blocks(16)
+                .max_num_batched_tokens(Some(16))
+                .max_num_seqs(Some(1))
+                .enable_prefix_caching(true)
+                .speedup_ratio(0.0);
+            if mtp_enabled {
+                builder = builder
+                    .aic_nextn(Some(1))
+                    .aic_nextn_accept_rates(Some("1".to_string()));
+            }
+            let mut core = VllmCore::new(builder.build().unwrap());
+            let mut collector = crate::replay::TraceCollector::default();
+
+            core.receive(DirectRequest {
+                tokens: (0..8).collect(),
+                max_output_tokens: 1,
+                output_token_ids: None,
+                uuid: Some(Uuid::from_u128(1)),
+                dp_rank: 0,
+                arrival_timestamp_ms: None,
+                ..Default::default()
+            });
+            core.execute_pass(&mut collector, 0.0);
+            assert!(core.is_empty());
+
+            core.receive(DirectRequest {
+                tokens: (0..12).collect(),
+                max_output_tokens: 1,
+                output_token_ids: None,
+                uuid: Some(Uuid::from_u128(2)),
+                dp_rank: 0,
+                arrival_timestamp_ms: None,
+                ..Default::default()
+            });
+            let pass = core.execute_pass(&mut collector, 1.0);
+            let fpm = pass.fpm.expect("forward-pass metrics should be present");
+            (
+                pass.admissions[0].reused_input_tokens,
+                fpm.sum_prefill_tokens,
+                fpm.sum_prefill_kv_tokens,
+            )
+        }
+
+        assert_eq!(second_request_admission_reuse(false), (8, 4, 8));
+        assert_eq!(second_request_admission_reuse(true), (4, 8, 4));
+    }
+
+    #[test]
     fn test_mtp_releases_unused_block_reservations() {
         let args = MockEngineArgs::builder()
             .block_size(2)
@@ -3140,6 +3192,8 @@ mod offload {
             .enable_chunked_prefill(true)
             .enable_prefix_caching(true)
             .speedup_ratio(0.0)
+            .aic_nextn(Some(1))
+            .aic_nextn_accept_rates(Some("1".to_string()))
             .build()
             .unwrap();
         let mut core = VllmCore::new(args);

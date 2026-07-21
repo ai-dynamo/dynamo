@@ -78,6 +78,19 @@ async fn post_with_policy_class(
         .unwrap()
 }
 
+async fn patch(app: Router, uri: &str, body: &str) -> Response {
+    app.oneshot(
+        Request::builder()
+            .method("PATCH")
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+}
+
 async fn register_worker(app: Router, max_tokens: Option<u64>) -> Response {
     register_worker_id(app, 1, max_tokens).await
 }
@@ -270,6 +283,35 @@ async fn incomplete_worker_is_accepted_but_not_schedulable() {
 }
 
 #[tokio::test]
+async fn threshold_free_policy_does_not_require_max_num_batched_tokens() {
+    let policy_file = tempfile::NamedTempFile::new().expect("create policy file");
+    std::fs::write(
+        policy_file.path(),
+        r#"
+default_policy_family: standard
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: standard
+    policy_family: standard
+    cache_bucket: all
+    quantum: 1
+"#,
+    )
+    .expect("write policy file");
+
+    let mut config = test_config();
+    config.router_policy_config = Some(policy_file.path().to_string_lossy().into_owned());
+    let service = Arc::new(SelectionService::new_local_for_test(config, 1));
+    let app = create_router(Arc::new(AppState { service }));
+
+    let response = register_worker(app, None).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(response_json(response).await["lifecycle"], "schedulable");
+}
+
+#[tokio::test]
 async fn select_echoes_selection_id_and_does_not_book_load() {
     let app = app();
     assert_eq!(
@@ -367,12 +409,12 @@ async fn select_and_reserve_books_and_duplicate_reservation_conflicts() {
     let response = post(
         app.clone(),
         "/select_and_reserve",
-        r#"{"model_name":"model","token_ids":[1,2,3,4],"reservation_id":"res-a"}"#,
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"res-a"}"#,
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["reservation_id"], "res-a");
+    assert_eq!(body["selection_id"], "res-a");
     assert_eq!(body["effective_prefill_tokens"], 4);
 
     let loads_response = app
@@ -391,7 +433,7 @@ async fn select_and_reserve_books_and_duplicate_reservation_conflicts() {
     let duplicate = post(
         app.clone(),
         "/select_and_reserve",
-        r#"{"model_name":"model","token_ids":[1,2,3,4],"reservation_id":"res-a"}"#,
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"res-a"}"#,
     )
     .await;
     assert_eq!(duplicate.status(), StatusCode::CONFLICT);
@@ -450,7 +492,7 @@ policy_classes:
     let reserved = post_with_policy_class(
         app.clone(),
         "/select_and_reserve",
-        r#"{"model_name":"model","token_ids":[1,2,3,4],"reservation_id":"latency-active"}"#,
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"latency-active"}"#,
         Some("latency"),
     )
     .await;
@@ -491,7 +533,7 @@ async fn output_block_endpoint_updates_reserved_load() {
     let response = post(
         app.clone(),
         "/select_and_reserve",
-        r#"{"model_name":"model","token_ids":[1,2,3,4],"reservation_id":"res-output"}"#,
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"res-output"}"#,
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -562,7 +604,7 @@ async fn explicit_reservation_books_after_select() {
 
     let reservation = serde_json::json!({
         "model_name": "model",
-        "reservation_id": "res-b",
+        "selection_id": "res-b",
         "worker_id": selected["worker_id"],
         "dp_rank": selected["dp_rank"],
         "sequence_hashes": [1],
@@ -598,7 +640,7 @@ async fn explicit_reservation_rejects_effective_prefill_above_isl() {
     );
     let reservation = serde_json::json!({
         "model_name": "model",
-        "reservation_id": "res-too-large",
+        "selection_id": "res-too-large",
         "worker_id": 1,
         "sequence_hashes": [1],
         "isl_tokens": 4,
@@ -634,13 +676,447 @@ async fn explicit_reservation_rejects_unschedulable_worker() {
 
     let reservation = serde_json::json!({
         "model_name": "model",
-        "reservation_id": "res-unschedulable",
+        "selection_id": "res-unschedulable",
         "worker_id": 1,
         "sequence_hashes": [1],
         "isl_tokens": 4
     });
     let reserve_response = post(app, "/reservations", &reservation.to_string()).await;
     assert_eq!(reserve_response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn cached_reservation_books_from_select() {
+    let app = app();
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+
+    // `select` records the chosen worker + normalized prompt under selection_id.
+    let select_response = post(
+        app.clone(),
+        "/select",
+        r#"{"model_name":"model","selection_id":"sel-1","token_ids":[1,2,3,4]}"#,
+    )
+    .await;
+    assert_eq!(select_response.status(), StatusCode::OK);
+    let selected = response_json(select_response).await;
+    assert_eq!(selected["effective_prefill_tokens"], 4);
+
+    // `create_reservation` replays and books under selection_id: no worker_id,
+    // no token_ids.
+    let reserve_response = post(
+        app.clone(),
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"sel-1"}"#,
+    )
+    .await;
+    assert_eq!(reserve_response.status(), StatusCode::CREATED);
+    let reservation = response_json(reserve_response).await;
+    assert_eq!(reservation["selection_id"], "sel-1");
+    assert_eq!(reservation["worker_id"], selected["worker_id"]);
+    assert_eq!(reservation["dp_rank"], selected["dp_rank"]);
+
+    // The booking actually landed: potential prefill load reflects the prompt.
+    let loads_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/loads")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let loads = response_json(loads_response).await;
+    assert_eq!(loads[0]["loads"][0]["potential_prefill_tokens"], 4);
+
+    // Lifecycle endpoints work for a cache-booked reservation.
+    let prefill_response = post(app.clone(), "/reservations/sel-1/prefill_complete", "{}").await;
+    assert_eq!(prefill_response.status(), StatusCode::OK);
+
+    // The cached entry is single-use: a second replay finds nothing.
+    let replay = post(
+        app,
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"sel-1"}"#,
+    )
+    .await;
+    assert_eq!(replay.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn reservation_requires_selection_id() {
+    let app = app();
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+
+    // selection_id is the single booking id and is always required, even for
+    // the explicit worker_id form.
+    let response = post(
+        app,
+        "/reservations",
+        r#"{"model_name":"model","worker_id":1}"#,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        response_json(response).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("selection_id")
+    );
+}
+
+#[tokio::test]
+async fn cached_reservation_ignores_request_overrides() {
+    let app = app();
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+    let select_response = post(
+        app.clone(),
+        "/select",
+        r#"{"model_name":"model","selection_id":"req-1","token_ids":[1,2,3,4]}"#,
+    )
+    .await;
+    assert_eq!(select_response.status(), StatusCode::OK);
+
+    // A request-side effective_prefill_tokens override is
+    // ignored in favor of the value captured by `select`.
+    let response = post(
+        app.clone(),
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"req-1","effective_prefill_tokens":5}"#,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let loads_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loads")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let loads = response_json(loads_response).await;
+    assert_eq!(loads[0]["loads"][0]["potential_prefill_tokens"], 4);
+}
+
+#[tokio::test]
+async fn cached_reservation_needs_matching_model() {
+    let app = app();
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+    let select_response = post(
+        app.clone(),
+        "/select",
+        r#"{"model_name":"model","selection_id":"req-1","token_ids":[1,2,3,4]}"#,
+    )
+    .await;
+    assert_eq!(select_response.status(), StatusCode::OK);
+
+    // A different model is a plain miss...
+    let mismatch = post(
+        app.clone(),
+        "/reservations",
+        r#"{"model_name":"other","selection_id":"req-1"}"#,
+    )
+    .await;
+    assert_eq!(mismatch.status(), StatusCode::NOT_FOUND);
+
+    // ...and does not consume the entry: the matching model still books.
+    let matched = post(
+        app,
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"req-1"}"#,
+    )
+    .await;
+    assert_eq!(matched.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn failed_cached_booking_is_retryable() {
+    let app = app();
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+    let select_response = post(
+        app.clone(),
+        "/select",
+        r#"{"model_name":"model","selection_id":"req-1","token_ids":[1,2,3,4]}"#,
+    )
+    .await;
+    assert_eq!(select_response.status(), StatusCode::OK);
+
+    // The only worker goes away before the booking.
+    let deleted = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/workers/1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(deleted.status().is_success());
+
+    // The booking fails with the real error, not a missing-selection 404...
+    let failed = post(
+        app.clone(),
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"req-1"}"#,
+    )
+    .await;
+    assert_eq!(failed.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    // ...and preserves the pending selection: once a worker is back, the same
+    // minimal call books without re-sending the prompt.
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+    let retried = post(
+        app,
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"req-1"}"#,
+    )
+    .await;
+    assert_eq!(retried.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn cached_booking_retryable_after_scheduler_conflict() {
+    let app = app();
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+    let select_response = post(
+        app.clone(),
+        "/select",
+        r#"{"model_name":"model","selection_id":"sel-1","token_ids":[1,2,3,4]}"#,
+    )
+    .await;
+    assert_eq!(select_response.status(), StatusCode::OK);
+
+    // Occupy the scheduler id "sel-1" with an atomic select_and_reserve, which
+    // does not touch the cache, so replaying the cached "sel-1" collides there.
+    let occupy = post(
+        app.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","selection_id":"sel-1","token_ids":[1,2,3,4]}"#,
+    )
+    .await;
+    assert_eq!(occupy.status(), StatusCode::OK);
+
+    // Replaying "sel-1" fails at the scheduler with a duplicate conflict.
+    let conflict = post(
+        app.clone(),
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"sel-1"}"#,
+    )
+    .await;
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
+
+    // The booking never landed, so the selection survives. Freeing the occupant
+    // lets the same replay book without re-sending the prompt.
+    let free = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/reservations/sel-1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(free.status().is_success());
+
+    let retried = post(
+        app,
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"sel-1"}"#,
+    )
+    .await;
+    assert_eq!(retried.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn cached_reservation_rejects_stale_dp_rank() {
+    let app = app();
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+    // `select` caches (worker 1, dp_rank 0).
+    let select_response = post(
+        app.clone(),
+        "/select",
+        r#"{"model_name":"model","selection_id":"req-1","token_ids":[1,2,3,4]}"#,
+    )
+    .await;
+    assert_eq!(select_response.status(), StatusCode::OK);
+
+    // Move the worker's DP range so the cached rank 0 is no longer valid.
+    assert!(
+        patch(
+            app.clone(),
+            "/workers/1",
+            r#"{"data_parallel_start_rank":1,"data_parallel_size":1}"#,
+        )
+        .await
+        .status()
+        .is_success()
+    );
+    // The stale rank is rejected, not silently booked against a recreated rank.
+    let stale = post(
+        app.clone(),
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"req-1"}"#,
+    )
+    .await;
+    assert_eq!(stale.status(), StatusCode::NOT_FOUND);
+
+    // Restoring the rank re-inserts the pending selection: the same replay books.
+    assert!(
+        patch(
+            app.clone(),
+            "/workers/1",
+            r#"{"data_parallel_start_rank":0,"data_parallel_size":1}"#,
+        )
+        .await
+        .status()
+        .is_success()
+    );
+    let retried = post(
+        app,
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"req-1"}"#,
+    )
+    .await;
+    assert_eq!(retried.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn explicit_reservation_discards_cached_selection() {
+    let app = app();
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+    let select_response = post(
+        app.clone(),
+        "/select",
+        r#"{"model_name":"model","selection_id":"req-1","token_ids":[1,2,3,4]}"#,
+    )
+    .await;
+    assert_eq!(select_response.status(), StatusCode::OK);
+
+    // An explicit booking (worker_id) for the same selection_id supersedes the
+    // cached selection...
+    let explicit = post(
+        app.clone(),
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"req-1","worker_id":1,"sequence_hashes":[1],"isl_tokens":4}"#,
+    )
+    .await;
+    assert_eq!(explicit.status(), StatusCode::CREATED);
+
+    // ...and discards it: a later replay cannot book stale state.
+    let replay = post(
+        app,
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"req-1"}"#,
+    )
+    .await;
+    assert_eq!(replay.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn cached_booking_honors_prefill_tracking() {
+    let config = crate::config::KvRouterConfig {
+        router_track_prefill_tokens: false,
+        ..test_config()
+    };
+    let service = Arc::new(SelectionService::new_local_for_test(config, 1));
+    let app = create_router(Arc::new(AppState { service }));
+
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+    let select_response = post(
+        app.clone(),
+        "/select",
+        r#"{"model_name":"model","selection_id":"req-1","token_ids":[1,2,3,4]}"#,
+    )
+    .await;
+    assert_eq!(select_response.status(), StatusCode::OK);
+
+    let reserve_response = post(
+        app.clone(),
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"req-1"}"#,
+    )
+    .await;
+    assert_eq!(reserve_response.status(), StatusCode::CREATED);
+
+    // With tracking disabled, the cached booking adds no prefill load,
+    // matching explicit and select-booked reservations under this config.
+    let loads_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/loads")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let loads = response_json(loads_response).await;
+    assert_eq!(loads[0]["loads"][0]["potential_prefill_tokens"], 0);
+
+    // A select-time override is captured and replayed: this booking tracks
+    // prefill load despite the config default.
+    let select_response = post(
+        app.clone(),
+        "/select",
+        r#"{"model_name":"model","selection_id":"req-2","token_ids":[1,2,3,4],"router_config_override":{"track_prefill_tokens":true}}"#,
+    )
+    .await;
+    assert_eq!(select_response.status(), StatusCode::OK);
+    let reserve_response = post(
+        app.clone(),
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"req-2"}"#,
+    )
+    .await;
+    assert_eq!(reserve_response.status(), StatusCode::CREATED);
+
+    let loads_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loads")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let loads = response_json(loads_response).await;
+    assert_eq!(loads[0]["loads"][0]["potential_prefill_tokens"], 4);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -654,6 +1130,7 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
         replica_sync_port: Some(port_a),
         replica_sync_peers: Vec::new(),
         kv_router_config: test_config(),
+        selection_cache: SelectionCacheConfig::default(),
     };
     let service_a = Arc::new(config_a.service_builder().build().await.unwrap());
     let service_b = Arc::new(
@@ -689,7 +1166,7 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
     let response = post(
         app_a.clone(),
         "/select_and_reserve",
-        r#"{"model_name":"model","token_ids":[1,2,3,4],"reservation_id":"replicated"}"#,
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"replicated"}"#,
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);

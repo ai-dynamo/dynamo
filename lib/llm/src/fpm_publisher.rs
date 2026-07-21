@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_mocker::common::protocols::{ForwardPassSnapshot, FpmPublisher, FpmSink};
-use dynamo_runtime::component::Component;
+use dynamo_runtime::component::{Component, Endpoint};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventPublisher;
 
@@ -104,18 +104,19 @@ pub struct FpmEventRelay {
 impl FpmEventRelay {
     /// Create and start a new relay.
     ///
-    /// - `component`: Dynamo component (provides runtime + discovery scope).
+    /// - `endpoint`: Dynamo endpoint that owns the published FPM stream.
     /// - `zmq_endpoint`: Local ZMQ PUB address to subscribe to
     ///   (e.g., `tcp://127.0.0.1:20380`).
-    pub fn new(component: Component, zmq_endpoint: String) -> Result<Self> {
+    pub fn new(endpoint: Endpoint, zmq_endpoint: String) -> Result<Self> {
+        let component = endpoint.component();
         let rt = component.drt().runtime().secondary();
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
 
-        let trace = rt.block_on(init_fpm_trace(&component));
+        let trace = rt.block_on(init_fpm_trace(component));
 
         let publisher =
-            rt.block_on(async { EventPublisher::for_component(&component, FPM_TOPIC).await })?;
+            rt.block_on(async { EventPublisher::for_endpoint(&endpoint, FPM_TOPIC).await })?;
 
         rt.spawn(async move {
             Self::relay_loop(zmq_endpoint, publisher, cancel_clone, trace).await;
@@ -318,19 +319,20 @@ impl FpmDirectPublisher {
     /// serialization + event-plane publish pipeline. The scheduler passes
     /// one to each engine via the deferred-sink model.
     ///
-    /// - `component`: Dynamo component (provides runtime + discovery scope).
+    /// - `endpoint`: Dynamo endpoint that owns the published FPM stream.
     /// - `worker_id`: Unique worker identifier (typically `connection_id().to_string()`).
     /// - `dp_size`: Number of data-parallel ranks.
     pub async fn new(
-        component: Component,
+        endpoint: Endpoint,
         worker_id: String,
         dp_size: u32,
     ) -> Result<(Self, Vec<FpmPublisher>)> {
+        let component = endpoint.component();
         let rt = component.drt().runtime().secondary();
         let cancel = CancellationToken::new();
 
-        let publisher = EventPublisher::for_component(&component, FPM_TOPIC).await?;
-        let trace = init_fpm_trace(&component).await;
+        let publisher = EventPublisher::for_endpoint(&endpoint, FPM_TOPIC).await?;
+        let trace = init_fpm_trace(component).await;
 
         // Shared channel: per-dp_rank tasks send snapshots here. A single publisher task
         // serializes them into a reusable buffer and preserves event-plane publish ordering.

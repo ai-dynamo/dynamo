@@ -83,9 +83,9 @@ For Kubernetes deployments, [Shadow Engine Failover](../kubernetes/shadow-engine
 | Canary health checks | `DYN_HEALTH_CHECK_ENABLED` | `false` |
 | Canary wait time | `DYN_CANARY_WAIT_TIME` | `10` seconds |
 | Health check timeout | `DYN_HEALTH_CHECK_REQUEST_TIMEOUT` | `3` seconds |
-| Decode blocks threshold | `DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD` | `1.0` |
-| Prefill tokens threshold | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD` | `10000000` |
-
+| Decode blocks threshold | `DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD` | unset |
+| Prefill tokens threshold | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD` | unset |
+| Prefill tokens fraction threshold | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC` | unset |
 
 ## Failure Scenarios and Recovery
 

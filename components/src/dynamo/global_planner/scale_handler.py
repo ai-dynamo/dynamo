@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Iterator, Optional
 
 from dynamo.planner import KubernetesConnector, SubComponentType, TargetReplica
-from dynamo.planner.connectors.kubernetes_api import KubernetesAPI
+from dynamo.planner.connectors.clients.kubernetes_api import KubernetesAPI
 from dynamo.planner.connectors.protocol import ScaleRequest, ScaleResponse, ScaleStatus
 from dynamo.planner.core import budget
 from dynamo.planner.errors import DynamoGraphDeploymentNotReadyError

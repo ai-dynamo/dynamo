@@ -101,6 +101,13 @@ const (
 	// on generated pod templates for debugging and admission.
 	CheckpointStartupPolicyAnnotation = "nvidia.com/dynamo-checkpoint-startup-policy"
 
+	// SnapshotOwnerLabel is stamped by the checkpoint controller on the PodSnapshot and on the
+	// checkpoint Job's pod template, with the owning DynamoCheckpoint's name as the value. It is the
+	// stable lookup/search key for a checkpoint's PodSnapshot (decoupled from the object name, which
+	// may change in a future naming scheme) and lets the source-pod watch map a Job pod back to its
+	// DynamoCheckpoint. It follows the nvidia.com/snapshot-* label convention.
+	SnapshotOwnerLabel = "nvidia.com/snapshot-owner"
+
 	KubeLabelValueFalse = "false"
 	KubeLabelValueTrue  = "true"
 
@@ -142,10 +149,6 @@ const (
 	DynamoNamespaceWorkerSuffixEnvVar = "DYN_NAMESPACE_WORKER_SUFFIX"
 	DynamoComponentEnvVar             = "DYN_COMPONENT"
 	DynamoDiscoveryBackendEnvVar      = "DYN_DISCOVERY_BACKEND"
-
-	// DynamoOperatorAllowGMSSnapshotEnvVar enables the temporary internal
-	// GMS + Snapshot admission gate when set to "1".
-	DynamoOperatorAllowGMSSnapshotEnvVar = "DYN_OPERATOR_ALLOW_GMS_SNAPSHOT"
 
 	GlobalDynamoNamespace = "dynamo"
 
@@ -237,23 +240,15 @@ const (
 	ResourceStateUnknown  = "unknown"
 
 	// Worker hash rolling-update annotations are controller-owned annotations on
-	// DynamoGraphDeployment. They record the active worker generation and must not
-	// be treated as user-configurable inputs. During a managed rolling update,
-	// these annotations remain on the previously serving worker generation until
-	// the new generation is fully ready and old workers have drained.
+	// DynamoGraphDeployment, not on worker DCDs. During a managed rolling update,
+	// they remain on the previously serving generation until the new generation
+	// is fully ready and old workers have drained.
 	//
-	// The compatibility contract is intentionally additive: existing annotation
-	// and label keys keep their old meaning. AnnotationCurrentWorkerHash stores
-	// the v1alpha1-compatible worker hash so a downgrade can still understand the
-	// active generation. AnnotationCurrentWorkerHashV2 stores the v2 worker hash
-	// for the same active generation. A worker DCD whose
-	// KubeLabelDynamoWorkerHash value matches either annotation is current. While
-	// v1 compatibility is required, generated worker DCDs use the v1 hash as the
-	// label value. If a worker change is visible only to v2, the controller
-	// removes the v1 annotation and rolls to a v2-labeled DCD because the v1 hash
-	// can no longer prove pod-template compatibility. A future v2-only release
-	// can start using the v2 value with the same label key and keep accepting the
-	// v1 annotation until the next v2 generation change drains old workers.
+	// Existing 1.2 DGDs keep both annotations until a worker change completes.
+	// AnnotationCurrentWorkerHash stores their active v1 hash and
+	// AnnotationCurrentWorkerHashV2 the v2 hash for the same worker spec. Fresh
+	// DGDs and completed v2 generations omit AnnotationCurrentWorkerHash and use
+	// AnnotationCurrentWorkerHashV2 as the active DCD generation hash.
 
 	// AnnotationCurrentWorkerHash stores the active v1alpha1-compatible worker
 	// generation hash.

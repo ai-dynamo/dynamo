@@ -5,6 +5,8 @@
 
 import asyncio
 import json
+import logging
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -46,6 +48,48 @@ def _make_config(**overrides) -> Mock:
     return Mock(**defaults)
 
 
+def _single_rank_benchmark_payload(
+    *,
+    status: str = "complete",
+    expected_points: int = 1,
+) -> dict:
+    point = {"benchmark_id": 1, "point_type": "decode"}
+    fpm = {"counter_id": 1, "dp_rank": 0, "wall_time": 0.01}
+    partial = status == "partial"
+    return {
+        "status": status,
+        "valid": not partial,
+        "usable": True,
+        "stop_reason": "timeout" if partial else None,
+        "run_id": "run-1",
+        "grid_digest": "grid-1",
+        "timing": {
+            "started_at": "2026-07-13T12:00:00Z",
+            "completed_at": "2026-07-13T12:00:01Z",
+            "benchmark_elapsed_seconds": 1.0,
+            "measured_iteration_seconds": 0.01,
+        },
+        "dp": {"rank": 0, "size": 1},
+        "coverage": {
+            "expected_points": expected_points,
+            "completed_points": 1,
+            "skipped_points": 0,
+        },
+        "results": [{"point": point, "fpms": [fpm]}],
+        "iteration_groups": [
+            {
+                "benchmark_id": 1,
+                "point": point,
+                "expected_dp_ranks": [0],
+                "complete": True,
+                "wall_time": 0.01,
+                "rank_results": [{"dp_rank": 0, "fpms": [fpm]}],
+            }
+        ],
+        "skipped_points": [],
+    }
+
+
 @pytest.mark.asyncio
 async def test_wait_and_load_benchmark_rejects_invalid_results(monkeypatch, tmp_path):
     output_path = tmp_path / "benchmark.json"
@@ -75,20 +119,186 @@ async def test_wait_and_load_benchmark_rejects_invalid_results(monkeypatch, tmp_
 
 
 @pytest.mark.asyncio
+async def test_wait_and_load_benchmark_accepts_timeout_partial(monkeypatch, tmp_path):
+    output_path = tmp_path / "benchmark.json"
+    output_path.write_text(
+        json.dumps(_single_rank_benchmark_payload(status="partial", expected_points=2))
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 1)
+    )
+
+    merged = await _wait_and_load_benchmark(
+        {"output_path": str(output_path), "timeout": 1}, Mock()
+    )
+
+    assert merged["status"] == "partial"
+    assert merged["valid"] is False
+    assert merged["usable"] is True
+    assert merged["stop_reason"] == "timeout"
+    assert merged["coverage"] == {
+        "expected_points": 2,
+        "completed_points": 1,
+        "skipped_points": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_wait_and_load_benchmark_warns_then_waits_for_partial(
+    monkeypatch, tmp_path, caplog
+):
+    output_path = tmp_path / "benchmark.json"
+    payload = _single_rank_benchmark_payload(status="partial", expected_points=2)
+    monotonic_times = iter([0.0, 2.0])
+
+    async def finish_current_iteration(_delay):
+        output_path.write_text(json.dumps(payload))
+
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 1)
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory._time.monotonic",
+        lambda: next(monotonic_times, 2.0),
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.asyncio.sleep", finish_current_iteration
+    )
+    caplog.set_level(logging.WARNING)
+
+    merged = await _wait_and_load_benchmark(
+        {"output_path": str(output_path), "timeout": 1}, Mock()
+    )
+
+    assert merged["status"] == "partial"
+    assert "for the current profiling iteration" in caplog.text
+    assert "Engine startup will continue" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_wait_and_load_benchmark_bounds_post_timeout_grace(
+    monkeypatch, tmp_path, caplog
+):
+    output_path = tmp_path / "benchmark.json"
+    monotonic_times = iter([0.0, 2.0, 3.0])
+
+    async def no_result(_delay):
+        return None
+
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 1)
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS", 1
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory._time.monotonic",
+        lambda: next(monotonic_times, 3.0),
+    )
+    monkeypatch.setattr("dynamo.vllm.worker_factory.asyncio.sleep", no_result)
+    caplog.set_level(logging.WARNING)
+
+    with pytest.raises(TimeoutError, match="cleanup grace"):
+        await _wait_and_load_benchmark(
+            {"output_path": str(output_path), "timeout": 1}, Mock()
+        )
+
+    assert "waiting up to 1s" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mutation",
+    ["partial_valid", "partial_skipped", "complete_invalid", "complete_unusable"],
+)
+async def test_wait_and_load_benchmark_rejects_inconsistent_status(
+    monkeypatch, tmp_path, mutation
+):
+    output_path = tmp_path / "benchmark.json"
+    if mutation in {"complete_invalid", "complete_unusable"}:
+        payload = _single_rank_benchmark_payload()
+        if mutation == "complete_invalid":
+            payload["valid"] = False
+        else:
+            payload["usable"] = False
+    else:
+        payload = _single_rank_benchmark_payload(status="partial", expected_points=3)
+        if mutation == "partial_valid":
+            payload["valid"] = True
+        else:
+            payload["coverage"]["skipped_points"] = 1
+            payload["skipped_points"] = [{"reason": "shape mismatch"}]
+    output_path.write_text(json.dumps(payload))
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 1)
+    )
+
+    with pytest.raises(RuntimeError, match="incomplete results"):
+        await _wait_and_load_benchmark(
+            {"output_path": str(output_path), "timeout": 1}, Mock()
+        )
+
+
+@pytest.mark.asyncio
 async def test_wait_and_load_benchmark_aggregates_dp_coverage(monkeypatch, tmp_path):
     base_path = tmp_path / "benchmark.json"
-    rank_payload = {
-        "valid": True,
-        "coverage": {
-            "expected_points": 1,
-            "completed_points": 1,
-            "skipped_points": 0,
+    point = {"benchmark_id": 1, "point_type": "prefill"}
+    rank_results = [
+        {
+            "dp_rank": 0,
+            "fpms": [{"counter_id": 1, "dp_rank": 0, "wall_time": 0.01}],
         },
-        "results": [{"point": {"point_type": "prefill"}, "fpms": [{}]}],
-        "skipped_points": [],
-    }
-    base_path.write_text(json.dumps(rank_payload))
-    (tmp_path / "benchmark_dp1.json").write_text(json.dumps(rank_payload))
+        {
+            "dp_rank": 1,
+            "fpms": [{"counter_id": 1, "dp_rank": 1, "wall_time": 0.02}],
+        },
+    ]
+    iteration_groups = [
+        {
+            "benchmark_id": 1,
+            "point": point,
+            "expected_dp_ranks": [0, 1],
+            "complete": True,
+            "wall_time": 0.02,
+            "rank_results": rank_results,
+        }
+    ]
+
+    def rank_payload(dp_rank: int, wall_time: float) -> dict:
+        return {
+            "valid": True,
+            "run_id": "run-1",
+            "grid_digest": "grid-1",
+            "timing": {
+                "started_at": f"2026-07-10T12:00:0{dp_rank}Z",
+                "completed_at": f"2026-07-10T12:00:1{dp_rank}Z",
+                "benchmark_elapsed_seconds": 10.0 + dp_rank,
+                "measured_iteration_seconds": 0.02,
+            },
+            "dp": {"rank": dp_rank, "size": 2},
+            "coverage": {
+                "expected_points": 1,
+                "completed_points": 1,
+                "skipped_points": 0,
+            },
+            "results": [
+                {
+                    "point": point,
+                    "fpms": [
+                        {
+                            "counter_id": 1,
+                            "dp_rank": dp_rank,
+                            "wall_time": wall_time,
+                        }
+                    ],
+                }
+            ],
+            "iteration_groups": iteration_groups,
+            "skipped_points": [],
+        }
+
+    base_path.write_text(json.dumps(rank_payload(0, 0.01)))
+    (tmp_path / "benchmark_dp1.json").write_text(json.dumps(rank_payload(1, 0.02)))
     monkeypatch.setattr(
         "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 2)
     )
@@ -102,7 +312,145 @@ async def test_wait_and_load_benchmark_aggregates_dp_coverage(monkeypatch, tmp_p
         "completed_points": 2,
         "skipped_points": 0,
     }
+    assert merged["timing"] == {
+        "started_at": "2026-07-10T12:00:01Z",
+        "completed_at": "2026-07-10T12:00:11Z",
+        "benchmark_elapsed_seconds": 11.0,
+        "measured_iteration_seconds": 0.02,
+        "rank_benchmark_elapsed_seconds": {"0": 10.0, "1": 11.0},
+    }
     assert [result["point"]["dp_rank"] for result in merged["results"]] == [0, 1]
+    assert merged["iteration_groups"] == [
+        {
+            "benchmark_id": 1,
+            "point": point,
+            "expected_dp_ranks": [0, 1],
+            "complete": True,
+            "wall_time": 0.02,
+            "rank_results": [
+                {
+                    "dp_rank": 0,
+                    "fpms": [{"counter_id": 1, "dp_rank": 0, "wall_time": 0.01}],
+                },
+                {
+                    "dp_rank": 1,
+                    "fpms": [{"counter_id": 1, "dp_rank": 1, "wall_time": 0.02}],
+                },
+            ],
+        }
+    ]
+    merged_path = tmp_path / "benchmark_merged.json"
+    assert merged_path.exists()
+    assert json.loads(merged_path.read_text()) == merged
+
+    bad_rank = rank_payload(1, 0.02)
+    bad_rank["results"][0]["fpms"][0]["counter_id"] = 2
+    (tmp_path / "benchmark_dp1.json").write_text(json.dumps(bad_rank))
+    with pytest.raises(RuntimeError, match="FPM counter mismatch"):
+        await _wait_and_load_benchmark(
+            {"output_path": str(base_path), "timeout": 1}, Mock()
+        )
+
+    partial_ranks = [rank_payload(0, 0.01), rank_payload(1, 0.02)]
+    for data in partial_ranks:
+        data.update(
+            {
+                "status": "partial",
+                "valid": False,
+                "usable": True,
+                "stop_reason": "timeout",
+            }
+        )
+        data["coverage"]["expected_points"] = 2
+    base_path.write_text(json.dumps(partial_ranks[0]))
+    (tmp_path / "benchmark_dp1.json").write_text(json.dumps(partial_ranks[1]))
+
+    partial_merged = await _wait_and_load_benchmark(
+        {"output_path": str(base_path), "timeout": 1}, Mock()
+    )
+
+    assert partial_merged["status"] == "partial"
+    assert partial_merged["coverage"] == {
+        "expected_points": 4,
+        "completed_points": 2,
+        "skipped_points": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_wait_and_load_benchmark_external_dp_keeps_global_group(
+    monkeypatch, tmp_path
+):
+    base_path = tmp_path / "benchmark.json"
+    point = {"benchmark_id": 1, "point_type": "decode"}
+    rank_results = [
+        {
+            "dp_rank": 0,
+            "fpms": [{"counter_id": 1, "dp_rank": 0, "wall_time": 0.01}],
+        },
+        {
+            "dp_rank": 1,
+            "fpms": [{"counter_id": 1, "dp_rank": 1, "wall_time": 0.02}],
+        },
+    ]
+    base_path.write_text(
+        json.dumps(
+            {
+                "valid": True,
+                "run_id": "run-1",
+                "grid_digest": "grid-1",
+                "timing": {
+                    "started_at": "2026-07-10T12:00:00Z",
+                    "completed_at": "2026-07-10T12:00:10Z",
+                    "benchmark_elapsed_seconds": 10.0,
+                    "measured_iteration_seconds": 0.02,
+                },
+                "dp": {"rank": 0, "size": 2},
+                "coverage": {
+                    "expected_points": 1,
+                    "completed_points": 1,
+                    "skipped_points": 0,
+                },
+                "results": [
+                    {
+                        "point": point,
+                        "fpms": rank_results[0]["fpms"],
+                    }
+                ],
+                "iteration_groups": [
+                    {
+                        "benchmark_id": 1,
+                        "point": point,
+                        "expected_dp_ranks": [0, 1],
+                        "complete": True,
+                        "wall_time": 0.02,
+                        "rank_results": rank_results,
+                    }
+                ],
+                "skipped_points": [],
+            }
+        )
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 1)
+    )
+
+    merged = await _wait_and_load_benchmark(
+        {"output_path": str(base_path), "timeout": 1}, Mock()
+    )
+
+    assert merged["dp"] == {
+        "ranks": [0, 1],
+        "source_ranks": [0],
+        "managed_size": 1,
+        "global_size": 2,
+    }
+    assert [result["point"]["dp_rank"] for result in merged["results"]] == [0, 1]
+    assert merged["coverage"] == {
+        "expected_points": 2,
+        "completed_points": 2,
+        "skipped_points": 0,
+    }
 
 
 @pytest.mark.asyncio
@@ -305,17 +653,20 @@ class TestPrefillRegistrationContract:
             model="m",
             frontend_decoding=False,
             enable_multimodal=False,
+            enable_rl=False,
+            engine_args=SimpleNamespace(enable_lora=True),
         )
 
         runtime = Mock()
         runtime.endpoint.return_value = Mock(connection_id=Mock(return_value="cid"))
+        shutdown_endpoints: list = []
 
         with pytest.raises(RuntimeError, match="stop-after-register"):
             await factory._create_prefill_worker(
                 runtime,
                 config,
                 asyncio.Event(),
-                [],
+                shutdown_endpoints,
             )
 
         assert captured["model_input"] == ModelInput.Tokens
@@ -327,3 +678,101 @@ class TestPrefillRegistrationContract:
         if route_to_encoder:
             expected_needs_set.append(WorkerType.Encode)
         assert captured["needs"] == [expected_needs_set]
+        endpoint_names = [call.args[0] for call in runtime.endpoint.call_args_list]
+        assert "dyn.prefill.load_lora" in endpoint_names
+        assert "dyn.prefill.unload_lora" in endpoint_names
+        assert "dyn.prefill.list_loras" in endpoint_names
+        # generate, clear, perf, and all three LoRA lifecycle endpoints.
+        assert len(shutdown_endpoints) == 6
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lora_enabled", [True, False])
+async def test_prefill_serves_lora_lifecycle_endpoints_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    lora_enabled: bool,
+) -> None:
+    engine_client = Mock()
+    vllm_config = Mock(additional_config={})
+    engine_tuple: EngineSetupResult = (
+        engine_client,
+        vllm_config,
+        Mock(),
+        "/tmp/prom",
+        Mock(),
+    )
+    factory = WorkerFactory(
+        setup_vllm_engine_fn=Mock(return_value=engine_tuple),
+        setup_kv_event_publisher_fn=Mock(return_value=None),
+        register_vllm_model_fn=AsyncMock(),
+        setup_fpm_relay_fn=Mock(return_value=None),
+        setup_metrics_collection_fn=Mock(),
+    )
+    factory._maybe_get_encode_worker_client = AsyncMock(return_value=None)  # type: ignore[assignment]
+    factory._maybe_wait_for_failover_lock = AsyncMock()  # type: ignore[assignment]
+    factory.register_engine_routes = Mock()  # type: ignore[assignment]
+
+    handler = Mock(embedding_cache_manager=None)
+    handler.cleanup = Mock()
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.PrefillWorkerHandler",
+        Mock(return_value=handler),
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.VllmPrefillHealthCheckPayload",
+        Mock(return_value=Mock(to_dict=Mock(return_value={}))),
+    )
+
+    async def _noop(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.configure_kv_event_block_size", _noop
+    )
+
+    endpoints: dict[str, Mock] = {}
+
+    def _endpoint(name: str) -> Mock:
+        endpoint = Mock(connection_id=Mock(return_value="cid"))
+        endpoint.serve_endpoint = AsyncMock(return_value=None)
+        endpoints[name] = endpoint
+        return endpoint
+
+    runtime = Mock()
+    runtime.endpoint.side_effect = _endpoint
+    config = _make_config(
+        disaggregation_mode=DisaggregationMode.PREFILL,
+        route_to_encoder=False,
+        use_vllm_tokenizer=False,
+        namespace="dyn",
+        component="prefill",
+        endpoint="generate",
+        served_model_name="m",
+        model="m",
+        frontend_decoding=False,
+        enable_multimodal=False,
+        enable_rl=False,
+        engine_args=SimpleNamespace(enable_lora=lora_enabled),
+    )
+    shutdown_endpoints: list = []
+
+    await factory._create_prefill_worker(
+        runtime,
+        config,
+        asyncio.Event(),
+        shutdown_endpoints,
+    )
+
+    lifecycle_names = {
+        "dyn.prefill.load_lora",
+        "dyn.prefill.unload_lora",
+        "dyn.prefill.list_loras",
+    }
+    if lora_enabled:
+        assert lifecycle_names <= endpoints.keys()
+        for name in lifecycle_names:
+            endpoints[name].serve_endpoint.assert_awaited_once()
+        assert len(shutdown_endpoints) == 6
+    else:
+        assert lifecycle_names.isdisjoint(endpoints)
+        assert len(shutdown_endpoints) == 3

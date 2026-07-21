@@ -29,8 +29,7 @@ print_launch_banner "Launching Disaggregated + KV Routing on Gaudi (4 HPUs)" "$M
 # edit --router-mode to random / round-robin / kv
 python -m dynamo.frontend \
     --router-mode kv \
-    --http-port "$HTTP_PORT" \
-    --router-reset-states &
+    --http-port "$HTTP_PORT" &
 
 # two decode workers
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag

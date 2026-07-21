@@ -1,12 +1,59 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use axum::http::HeaderMap;
 
 use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
 };
+
+/// Context key for the allowlisted headers captured at the HTTP layer.
+pub const HTTP_HEADERS_CONTEXT_KEY: &str = "request_trace.http.request.headers";
+
+/// True when payload records are being captured and a header allowlist is set.
+pub(crate) fn http_header_capture_active() -> bool {
+    if !super::config::capture_enabled() {
+        return false;
+    }
+    let policy = super::policy();
+    policy.emit_request_payload_records() && !policy.http_header_capture_list.is_empty()
+}
+
+/// Collect the allowlisted request headers (case-insensitive, comma-joined on
+/// repeats). `None` unless payload capture is active and the allowlist is non-empty.
+pub fn capture_http_headers(headers: &HeaderMap) -> Option<BTreeMap<String, String>> {
+    if !http_header_capture_active() {
+        return None;
+    }
+    capture_http_headers_with_list(headers, &super::policy().http_header_capture_list)
+}
+
+fn capture_http_headers_with_list(
+    headers: &HeaderMap,
+    capture_list: &[String],
+) -> Option<BTreeMap<String, String>> {
+    if capture_list.is_empty() {
+        return None;
+    }
+    let mut out = BTreeMap::new();
+    for name in capture_list {
+        let joined = headers
+            .get_all(name.as_str())
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !joined.is_empty() {
+            out.insert(name.clone(), joined);
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
 
 pub struct RequestPayloadHandle {
     requested_streaming: bool,
@@ -14,6 +61,7 @@ pub struct RequestPayloadHandle {
     model: String,
     event_time: SystemTime,
     request: Arc<NvCreateChatCompletionRequest>,
+    http_request_headers: Option<Arc<BTreeMap<String, String>>>,
 }
 
 impl RequestPayloadHandle {
@@ -37,6 +85,7 @@ impl RequestPayloadHandle {
                 model: self.model,
                 request: Some(self.request),
                 response,
+                http_request_headers: self.http_request_headers,
                 payload_complete: true,
                 payload_drop_reason: None,
             },
@@ -48,6 +97,7 @@ impl RequestPayloadHandle {
 pub fn create_handle(
     req: &NvCreateChatCompletionRequest,
     request_id: &str,
+    http_request_headers: Option<Arc<BTreeMap<String, String>>>,
 ) -> Option<RequestPayloadHandle> {
     let policy = super::policy();
     // `capture_enabled()` is `policy.enabled && CAPTURE_ACTIVE`: it additionally
@@ -58,6 +108,7 @@ pub fn create_handle(
         request_id,
         super::config::capture_enabled(),
         policy.emit_request_payload_records(),
+        http_request_headers,
     )
 }
 
@@ -72,6 +123,7 @@ fn create_handle_with_config(
     request_id: &str,
     enabled: bool,
     emit_request_payload: bool,
+    http_request_headers: Option<Arc<BTreeMap<String, String>>>,
 ) -> Option<RequestPayloadHandle> {
     if !enabled || !emit_request_payload {
         return None;
@@ -88,6 +140,7 @@ fn create_handle_with_config(
         // thread, so the record reflects what the client sent and when.
         event_time: SystemTime::now(),
         request: Arc::new(req.clone()),
+        http_request_headers,
     })
 }
 
@@ -127,7 +180,7 @@ mod tests {
     #[test]
     fn request_payload_records_emit_even_when_store_is_false() {
         let request = create_test_request("test-model", false);
-        let handle = create_handle_with_config(&request, "test-id", true, true);
+        let handle = create_handle_with_config(&request, "test-id", true, true, None);
 
         assert!(
             handle.is_some(),
@@ -138,12 +191,88 @@ mod tests {
     #[test]
     fn request_payload_records_disabled_skips_store_true_payloads() {
         let request = create_test_request("test-model", true);
-        let handle = create_handle_with_config(&request, "test-id", true, false);
+        let handle = create_handle_with_config(&request, "test-id", true, false, None);
 
         assert!(
             handle.is_none(),
             "request_payload records disabled should skip payloads even with store=true"
         );
+    }
+
+    #[test]
+    fn capture_http_headers_records_only_allowlisted() {
+        let capture_list = vec!["x-request-id".to_string(), "nvcf-function-id".to_string()];
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-request-id", "abc-123".parse().unwrap());
+        headers.insert("NVCF-Function-Id", "fn-9".parse().unwrap());
+        headers.insert("authorization", "Bearer secret".parse().unwrap());
+
+        let captured = capture_http_headers_with_list(&headers, &capture_list)
+            .expect("allowlisted headers are captured");
+        assert_eq!(
+            captured.get("x-request-id").map(String::as_str),
+            Some("abc-123")
+        );
+        assert_eq!(
+            captured.get("nvcf-function-id").map(String::as_str),
+            Some("fn-9")
+        );
+        assert!(
+            !captured.contains_key("authorization"),
+            "non-allowlisted header must never be captured"
+        );
+    }
+
+    #[test]
+    fn capture_http_headers_empty_list_captures_nothing() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-request-id", "abc-123".parse().unwrap());
+
+        assert!(
+            capture_http_headers_with_list(&headers, &[]).is_none(),
+            "empty allowlist must capture nothing"
+        );
+    }
+
+    #[test]
+    fn capture_http_headers_joins_repeated_headers() {
+        let capture_list = vec!["x-tag".to_string()];
+
+        let mut headers = HeaderMap::new();
+        headers.append("x-tag", "a".parse().unwrap());
+        headers.append("x-tag", "b".parse().unwrap());
+
+        let captured = capture_http_headers_with_list(&headers, &capture_list)
+            .expect("repeated header is captured");
+        assert_eq!(captured.get("x-tag").map(String::as_str), Some("a, b"));
+    }
+
+    #[test]
+    fn capture_http_headers_omits_repeated_empty_values() {
+        let capture_list = vec!["x-tag".to_string()];
+
+        let mut headers = HeaderMap::new();
+        headers.append("x-tag", "".parse().unwrap());
+        headers.append("x-tag", "".parse().unwrap());
+
+        assert!(
+            capture_http_headers_with_list(&headers, &capture_list).is_none(),
+            "repeated empty values must be omitted, not joined into \", \""
+        );
+    }
+
+    #[test]
+    fn capture_http_headers_skips_empty_values_when_joining() {
+        let capture_list = vec!["x-tag".to_string()];
+
+        let mut headers = HeaderMap::new();
+        headers.append("x-tag", "".parse().unwrap());
+        headers.append("x-tag", "tenant-a".parse().unwrap());
+
+        let captured = capture_http_headers_with_list(&headers, &capture_list)
+            .expect("non-empty value is captured");
+        assert_eq!(captured.get("x-tag").map(String::as_str), Some("tenant-a"));
     }
 
     /// Test-only constructor. `create_handle` gates on env vars + a cached
@@ -156,6 +285,7 @@ mod tests {
                 model: model.to_string(),
                 event_time: SystemTime::now(),
                 request: Arc::new(create_test_request(model, true)),
+                http_request_headers: None,
             }
         }
     }
