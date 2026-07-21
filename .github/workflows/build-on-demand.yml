@@ -71,7 +71,7 @@ jobs:
       - name: Verify immutable historical vLLM base
         shell: bash
         env:
-          BASE_IMAGE: vllm/vllm-openai:nightly-8e981630c9336233ca9de91452f68918bddbc4e2
+          BASE_IMAGE: vllm/vllm-openai@sha256:f2ac337893360e23462249c3897e1c92dc8ba8a1ebbc3dd15c4ac931e957438e
           EXPECTED_INDEX_DIGEST: sha256:f2ac337893360e23462249c3897e1c92dc8ba8a1ebbc3dd15c4ac931e957438e
           EXPECTED_AMD64_DIGEST: sha256:39e8d18a3b41e382f1955a3241326ec0fe61615fd51c7eef836fe606c0bfb887
         run: |
@@ -89,7 +89,7 @@ jobs:
       - name: Capture exact historical base SBOM
         shell: bash
         env:
-          BASE_IMAGE: vllm/vllm-openai:nightly-8e981630c9336233ca9de91452f68918bddbc4e2
+          BASE_IMAGE: vllm/vllm-openai@sha256:f2ac337893360e23462249c3897e1c92dc8ba8a1ebbc3dd15c4ac931e957438e
         run: |
           set -euo pipefail
           python3 -m venv "${RUNNER_TEMP}/sbom-venv"
