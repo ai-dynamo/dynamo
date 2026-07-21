@@ -1,12 +1,12 @@
 # Evaluation Report
 
-Evaluation of the `dynamo-troubleshoot` skill before publication through NVSkills-Eval.
+Evaluation of the `troubleshoot-dynamo` skill before publication through NVSkills-Eval.
 
 This benchmark summarizes 3-Tier Evaluation from NVSkills-Eval results for the skill. The goal is to document whether the skill is safe, discoverable, effective, and useful for agents before it is published for broader workflow use.
 
 ## Evaluation Summary
 
-- Skill: `dynamo-troubleshoot`
+- Skill: `troubleshoot-dynamo`
 - Evaluation date: 2026-05-28
 - NVSkills-Eval profile: `external`
 - Overall verdict: FAIL
@@ -47,8 +47,8 @@ Top findings:
 - MEDIUM SECURITY/Unknown (LP3): MCP Least Privilege: The skill invokes shell commands (kubectl, python3) and writes output files (debug bundle) without declaring explicit pe (`SKILL.md:1`)
 - MEDIUM SECURITY/Unknown (SDI-4): The 'Limitations' section explicitly claims the skill is 'Read-only. Never mutates the cluster; remediation commands are (`SKILL.md:144`)
 - MEDIUM SECURITY/Unknown (SQP-2): The skill card documents that outputs include 'Shell commands' and 'Configuration instructions' but does not include any (`skill-card.md:26`)
-- LOW QUALITY/quality_discoverability: Description very long (221 chars, recommend 50-150) (`skills/dynamo-troubleshoot/SKILL.md`)
-- LOW SCHEMA/unexpected_file: Unexpected 'skill-card.md' in skill root (`skills/dynamo-troubleshoot/skill-card.md`)
+- LOW QUALITY/quality_discoverability: Description very long (221 chars, recommend 50-150) (`skills/troubleshoot-dynamo/SKILL.md`)
+- LOW SCHEMA/unexpected_file: Unexpected 'skill-card.md' in skill root (`skills/troubleshoot-dynamo/skill-card.md`)
 
 ## Tier 2: Deduplication Summary
 

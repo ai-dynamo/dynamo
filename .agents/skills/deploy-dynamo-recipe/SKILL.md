@@ -1,5 +1,5 @@
 ---
-name: dynamo-recipe-deployer
+name: deploy-dynamo-recipe
 description: Deploy one already-selected Dynamo Kubernetes recipe or DGD manifest and prove it with an OpenAI-compatible smoke test. Use when recipe-explorer or hypothesis-challenger has already selected the deploy.yaml/DGD.
 license: Apache-2.0
 metadata:
@@ -11,7 +11,7 @@ metadata:
     - deployment
 ---
 
-# Dynamo Recipe Deployer
+# Deploy Dynamo Recipe
 
 ## Purpose
 
