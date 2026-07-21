@@ -29,8 +29,12 @@ pub(in crate::replay) struct AggregatedRoundRobinPlacement<Events: EngineEventBa
 
 impl<Events: EngineEventBatch> AggregatedRoundRobinPlacement<Events> {
     pub(in crate::replay) fn new(dp_size: u32, workers: Vec<WorkerTopology>) -> Self {
+        let mut counter = AggregatedRoundRobin::new(dp_size);
+        for worker in &workers {
+            counter.worker_ready(worker.worker_id);
+        }
         Self {
-            counter: AggregatedRoundRobin::new(dp_size),
+            counter,
             workers: workers
                 .into_iter()
                 .map(|worker| (worker.worker_id, worker.scheduler_ids))
@@ -108,6 +112,7 @@ where
     }
 
     fn worker_ready(&mut self, worker: WorkerTopology, _now_ms: f64) -> Result<Vec<Placement>> {
+        self.counter.worker_ready(worker.worker_id);
         self.workers.insert(worker.worker_id, worker.scheduler_ids);
         Ok(Vec::new())
     }
@@ -258,6 +263,10 @@ impl AggregatedRoundRobin {
 
     pub(in crate::replay::offline) fn worker_removed(&mut self, worker_id: usize) {
         self.next_rank_by_worker.remove(&worker_id);
+    }
+
+    fn worker_ready(&mut self, worker_id: usize) {
+        self.next_rank_by_worker.entry(worker_id).or_default();
     }
 
     #[cfg(test)]
