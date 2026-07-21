@@ -408,4 +408,110 @@ mod tests {
         assert_eq!(VideoTokenCounter::timestamp_label(1.25), "<1.2 seconds>");
         assert_eq!(VideoTokenCounter::timestamp_label(3.0), "<3.0 seconds>");
     }
+
+    /// Parity against real HF processor outputs (counts AND the full
+    /// expanded token stream). Fixtures are produced by running the pinned
+    /// Transformers processors over synthetic clips; regenerate them when
+    /// bumping the supported Transformers range. Run with:
+    /// `DYN_MM_VIDEO_FIXTURE=a.json;b.json cargo test -p dynamo-llm \
+    ///    --no-default-features --features mm-routing hf_fixture_parity \
+    ///    -- --ignored --nocapture`
+    #[test]
+    #[ignore = "requires HF-generated fixture files via DYN_MM_VIDEO_FIXTURE"]
+    fn hf_fixture_parity() {
+        let paths = std::env::var("DYN_MM_VIDEO_FIXTURE")
+            .expect("set DYN_MM_VIDEO_FIXTURE to ';'-separated fixture json paths");
+        let u32s = |v: &serde_json::Value| -> Vec<u32> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x.as_u64().unwrap() as u32)
+                .collect()
+        };
+        for path in paths.split(';').filter(|p| !p.is_empty()) {
+            let fx: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            let model_id = fx["model_id"].as_str().unwrap();
+            let dir = std::path::PathBuf::from(fx["local_dir"].as_str().unwrap());
+            let counter = VideoTokenCounter::try_new(model_id, None, &dir).unwrap();
+            let video_tok = fx["video_token_id"].as_u64().unwrap() as u32;
+            let pre_ids = u32s(&fx["pre_expansion_input_ids"]);
+            let tokenizer = crate::tokenizers::Tokenizer::from_file(
+                dir.join("tokenizer.json").to_str().unwrap(),
+            )
+            .unwrap();
+            for case in fx["cases"].as_array().unwrap() {
+                let t = case["num_frames"].as_u64().unwrap() as usize;
+                let h = case["height"].as_u64().unwrap() as u32;
+                let w = case["width"].as_u64().unwrap() as u32;
+                let label = format!("{model_id} T={t} {h}x{w}");
+                let expect_n = case["n_video_tokens"].as_u64().unwrap() as usize;
+                let grid = u32s(&case["video_grid_thw"]);
+                let expect_ids = u32s(&case["expanded_input_ids"]);
+
+                assert_eq!(
+                    counter.count_tokens(t, h, w).unwrap(),
+                    expect_n,
+                    "count {label}"
+                );
+                let per_group = counter.tokens_per_frame_group(t, h, w).unwrap();
+                assert_eq!(per_group, expect_n / grid[0] as usize, "per-group {label}");
+
+                // Rebuild the expansion exactly as the frontend does, filling
+                // video positions with video_tok instead of pad_value, so the
+                // result must be bit-identical to HF's expanded input_ids.
+                let rebuilt = if counter.family().expands_placeholder_triple() {
+                    let vs = fx["vision_start_token_id"].as_u64().unwrap() as u32;
+                    let ve = fx["vision_end_token_id"].as_u64().unwrap() as u32;
+                    let ts: Vec<f64> = case["sampled_timestamps"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|x| x.as_f64().unwrap())
+                        .collect();
+                    let mut repl = Vec::new();
+                    for g in counter.group_timestamps(&ts) {
+                        let enc = tokenizer
+                            .encode(&VideoTokenCounter::timestamp_label(g))
+                            .unwrap();
+                        repl.extend_from_slice(enc.token_ids());
+                        repl.push(vs);
+                        repl.extend(std::iter::repeat_n(video_tok, per_group));
+                        repl.push(ve);
+                    }
+                    let mut out = Vec::with_capacity(pre_ids.len() + repl.len());
+                    let mut i = 0usize;
+                    while i < pre_ids.len() {
+                        if i + 2 < pre_ids.len()
+                            && pre_ids[i] == vs
+                            && pre_ids[i + 1] == video_tok
+                            && pre_ids[i + 2] == ve
+                        {
+                            out.extend_from_slice(&repl);
+                            i += 3;
+                        } else {
+                            out.push(pre_ids[i]);
+                            i += 1;
+                        }
+                    }
+                    out
+                } else {
+                    let mut out = Vec::with_capacity(pre_ids.len() + expect_n);
+                    for &tok in &pre_ids {
+                        if tok == video_tok {
+                            out.extend(std::iter::repeat_n(video_tok, expect_n));
+                        } else {
+                            out.push(tok);
+                        }
+                    }
+                    out
+                };
+                assert_eq!(rebuilt, expect_ids, "expanded ids {label}");
+            }
+            println!(
+                "fixture parity ok: {model_id} ({} cases)",
+                fx["cases"].as_array().unwrap().len()
+            );
+        }
+    }
 }
