@@ -46,6 +46,7 @@ areas:
 - label: router
   github_team: '@ai-dynamo/dynamo-router-codeowners'
   path_globs:
+  - components/src/dynamo/kv_dc_relay/
   - components/src/dynamo/global_router/
   - components/src/dynamo/global_router/tests/
   - components/src/dynamo/router/
@@ -84,6 +85,7 @@ areas:
   - components/src/dynamo/trtllm/utils/
   - components/src/dynamo/trtllm/workers/
   - examples/backends/trtllm/
+  - lib/sidecar/trtllm/
 - label: backend-sglang
   github_team: '@ai-dynamo/dynamo-backend-sglang-codeowners'
   path_globs:
