@@ -422,22 +422,18 @@ impl
 }
 
 impl PrefillRouter {
-    pub(crate) fn get_or_create_decode_session_affinity(
-        &self,
-        ttl: Option<std::time::Duration>,
-    ) -> Result<Option<AffinityCoordinator>> {
-        let Some(ttl) = ttl else {
-            return Ok(None);
-        };
-        if let Some(affinity) = self.decode_session_affinity.get() {
-            return Ok(Some(affinity.clone()));
-        }
+    pub(crate) fn conditional_disagg_enabled(&self) -> bool {
+        self.conditional_disagg_policy.is_enabled()
+    }
 
-        let affinity = AffinityCoordinator::new(ttl)?;
-        if self.decode_session_affinity.set(affinity.clone()).is_ok() {
-            return Ok(Some(affinity));
+    pub(crate) fn set_decode_session_affinity(&self, affinity: Option<AffinityCoordinator>) {
+        let Some(affinity) = affinity else {
+            return;
+        };
+        if self.decode_session_affinity.get().is_some() {
+            return;
         }
-        Ok(self.decode_session_affinity.get().cloned())
+        let _ = self.decode_session_affinity.set(affinity);
     }
 
     fn decode_session_affinity_target(
