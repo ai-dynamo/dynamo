@@ -3,17 +3,18 @@
 
 mod admission;
 mod engine;
-mod router;
 mod types;
+mod worker_core;
 
-pub(in crate::replay::offline) use admission::AdmissionQueue;
-pub(in crate::replay::offline) use engine::EngineComponent;
-pub(crate) use router::OfflineReplayRouter;
 #[cfg(test)]
-pub(crate) use router::OfflineRouterSnapshot;
+pub(crate) use super::extensions::kv_router::OfflineRouterSnapshot;
+pub(in crate::replay::offline) use admission::{
+    AdmissionQueue, KvReplayMetadata, NoReplayMetadata, ReplayAdmissionMetadata,
+};
+pub(in crate::replay::offline) use engine::EngineComponent;
 pub(in crate::replay) use types::ReplayMode;
 pub use types::TrafficStats;
 pub(in crate::replay::offline) use types::{
-    EngineEffects, EnginePassMode, ReadyArrival, ScheduledWorkerCompletion, TrafficAccumulator,
+    EngineEffects, EnginePassMode, ScheduledWorkerCompletion, TrafficAccumulator,
 };
-pub(crate) use types::{RouterEffects, WorkerAdmission};
+pub(crate) use worker_core::ReplayWorkerCore;

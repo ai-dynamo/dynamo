@@ -1,13 +1,19 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_kv_router::protocols::RouterEvent;
 use uuid::Uuid;
 
+use super::super::core::{EngineEventBatch, EngineProgress};
 use super::super::runtime_utils::WorkerCompletionPayload;
 use crate::common::protocols::DirectRequest;
-use crate::loadgen::ReplayRequestHashes;
+use crate::replay::offline::core::RequestIdentity;
 use crate::scheduler::AdmissionEvent;
+
+impl RequestIdentity for DirectRequest {
+    fn request_id(&self) -> Option<Uuid> {
+        self.uuid
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(in crate::replay) enum ReplayMode {
@@ -21,58 +27,29 @@ pub(in crate::replay::offline) enum EnginePassMode {
     Hidden,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct WorkerAdmission {
-    pub(crate) uuid: Uuid,
-    pub(crate) worker_idx: usize,
-    /// Number of blocks the router matched against the prefix cache at
-    /// admission time. Used by the traffic accumulator to derive an
-    /// average KV hit rate for the planner.
-    pub(crate) overlap_blocks: u32,
-    /// Total ISL expressed in blocks (ceil(isl_tokens / block_size)),
-    /// paired with ``overlap_blocks`` for the hit-rate ratio.
-    pub(crate) isl_blocks: u32,
-}
-
 #[derive(Debug)]
-pub(in crate::replay::offline) struct ScheduledWorkerCompletion {
+pub(in crate::replay::offline) struct ScheduledWorkerCompletion<Events: EngineEventBatch = ()> {
     pub(in crate::replay::offline) at_ms: f64,
-    pub(in crate::replay::offline) payload: WorkerCompletionPayload,
+    pub(in crate::replay::offline) payload: WorkerCompletionPayload<Events>,
 }
 
 #[derive(Debug, Default)]
-pub(in crate::replay::offline) struct EngineEffects {
+pub(in crate::replay::offline) struct EngineEffects<Events: EngineEventBatch = ()> {
     pub(in crate::replay::offline) admissions: Vec<AdmissionEvent>,
-    pub(in crate::replay::offline) pass_start_kv_events: Vec<RouterEvent>,
-    pub(in crate::replay::offline) immediate_completions: Vec<WorkerCompletionPayload>,
-    pub(in crate::replay::offline) scheduled_completions: Vec<ScheduledWorkerCompletion>,
+    pub(in crate::replay::offline) pass_start_events: Events,
+    pub(in crate::replay::offline) immediate_completions: Vec<WorkerCompletionPayload<Events>>,
+    pub(in crate::replay::offline) scheduled_completions: Vec<ScheduledWorkerCompletion<Events>>,
+    pub(in crate::replay::offline) progress: EngineProgress,
 }
 
-impl EngineEffects {
+impl<Events: EngineEventBatch> EngineEffects<Events> {
     pub(in crate::replay::offline) fn is_empty(&self) -> bool {
         self.admissions.is_empty()
-            && self.pass_start_kv_events.is_empty()
+            && self.pass_start_events.is_empty()
             && self.immediate_completions.is_empty()
             && self.scheduled_completions.is_empty()
+            && !self.progress.made_progress
     }
-}
-
-#[derive(Debug, Default)]
-pub(crate) struct RouterEffects {
-    pub(crate) admissions: Vec<WorkerAdmission>,
-}
-
-#[derive(Debug)]
-pub(in crate::replay::offline) struct ReadyArrival {
-    pub(in crate::replay::offline) request: DirectRequest,
-    pub(in crate::replay::offline) arrival_time_ms: f64,
-    pub(in crate::replay::offline) replay_hashes: Option<ReplayRequestHashes>,
-    /// Session identifier and turn index, when the trace source carries them
-    /// (Mooncake workload, applied-compute-agentic). `None` for raw request
-    /// lists (`Requests` admission source) and for any path that doesn't
-    /// preserve session structure.
-    pub(in crate::replay::offline) session_id: Option<String>,
-    pub(in crate::replay::offline) turn_index: Option<usize>,
 }
 
 /// Accumulated traffic statistics returned by [`TrafficAccumulator::drain`].

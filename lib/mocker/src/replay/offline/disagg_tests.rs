@@ -755,7 +755,7 @@ fn chunked_prefill_handoff_waits_for_full_materialization(#[case] engine_type: E
     );
     assert!(runtime.prefill_engine.is_drained());
     assert!(runtime.decode_engine.is_drained());
-    assert!(runtime.action_queues.is_empty());
+    assert!(runtime.flow.action_queues.is_empty());
     assert_eq!(
         runtime.stats.request_snapshots[&uuid].phase,
         DisaggPhase::Done
@@ -1126,14 +1126,14 @@ fn test_source_first_handoff_waits_for_decode_scale_up() {
         assert_eq!(runtime.total_decode_count(), 0);
 
         for _ in 0..16 {
-            if !runtime.action_queues.waiting_decode.is_empty() {
+            if !runtime.flow.action_queues.waiting_decode.is_empty() {
                 break;
             }
             let next = runtime.next_timestamp().unwrap();
             runtime.advance_now_ms(next);
             runtime.drain_current_timestamp().unwrap();
         }
-        assert_eq!(runtime.action_queues.waiting_decode.len(), 1);
+        assert_eq!(runtime.flow.action_queues.waiting_decode.len(), 1);
         assert!(!runtime.state(uuid).unwrap().coordinator.is_complete());
 
         let wait_until = runtime.now_ms() + 100.0;
@@ -1190,11 +1190,7 @@ fn pending_destination_booking_survives_scale_down_until_cleanup() {
             .contains(&DisaggTransition::DestinationReserved { uuid: pending })
     );
     assert_eq!(runtime.state(pending).unwrap().decode_worker_idx(), Some(0));
-    let before = runtime
-        .decode_router
-        .as_ref()
-        .unwrap()
-        .debug_snapshot(runtime.now_ms());
+    let before = runtime.decode_placement.debug_snapshot(runtime.now_ms());
     assert!(
         before
             .active_tokens_by_worker
@@ -1222,11 +1218,7 @@ fn pending_destination_booking_survives_scale_down_until_cleanup() {
     assert_eq!(runtime.state(pending).unwrap().phase, DisaggPhase::Done);
     assert_eq!(runtime.total_decode_count(), 0);
     assert_eq!(runtime.stats.decode_router_freed_count, 1);
-    let after = runtime
-        .decode_router
-        .as_ref()
-        .unwrap()
-        .debug_snapshot(runtime.now_ms());
+    let after = runtime.decode_placement.debug_snapshot(runtime.now_ms());
     assert!(after.pending.is_empty());
     assert!(after.active_tokens_by_worker.is_empty());
     assert!(after.active_blocks_by_worker.is_empty());

@@ -10,11 +10,13 @@ use dynamo_kv_router::protocols::WorkerId;
 
 #[cfg(test)]
 use super::agg::AggRuntimeStats;
-use super::agg::{AggRuntime, ReplayMode as AggReplayMode};
-use super::core::ReplayWorkerCore;
+use super::agg::{AggRuntime, ReplayMode as AggReplayMode, RoundRobinAggRuntime};
+use super::components::ReplayWorkerCore;
 #[cfg(test)]
 use super::disagg::DisaggRuntimeStats;
-use super::disagg::{DisaggRuntime, ReplayMode as DisaggReplayMode};
+use super::disagg::{
+    DisaggRuntime, HandoffDisaggRuntime, ReplayMode as DisaggReplayMode, RoundRobinDisaggRuntime,
+};
 use super::normalize_trace_requests;
 use super::single::{SingleReplayMode, SingleRuntime};
 use crate::common::handoff::NormalizedHandoffConformance;
@@ -102,7 +104,7 @@ pub fn run_offline_handoff_conformance(
         ..Default::default()
     };
 
-    DisaggRuntime::new_handoff_conformance(&config, VecDeque::from([request]))?
+    HandoffDisaggRuntime::new_handoff_conformance(&config, VecDeque::from([request]))?
         .run_handoff_conformance(engine_type)
 }
 
@@ -493,17 +495,25 @@ pub(crate) fn simulate_trace_disagg(
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let pending = normalize_trace_requests(requests, arrival_speedup_ratio)?;
-    let (collector, _) = DisaggRuntime::new(
-        &config,
-        router_config,
-        prefill_load_estimator,
-        pending,
-        DisaggReplayMode::Trace,
-        router_mode,
-    )?
-    .with_per_request_records(record_per_request)
-    .with_max_sim_time_ms(max_sim_time_ms)
-    .run()?;
+    let (collector, _) = match router_mode {
+        ReplayRouterMode::RoundRobin => {
+            RoundRobinDisaggRuntime::new_round_robin(&config, pending, DisaggReplayMode::Trace)?
+                .with_per_request_records(record_per_request)
+                .with_max_sim_time_ms(max_sim_time_ms)
+                .run()?
+        }
+        ReplayRouterMode::KvRouter => DisaggRuntime::new(
+            &config,
+            router_config,
+            prefill_load_estimator,
+            pending,
+            DisaggReplayMode::Trace,
+            router_mode,
+        )?
+        .with_per_request_records(record_per_request)
+        .with_max_sim_time_ms(max_sim_time_ms)
+        .run()?,
+    };
     Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
@@ -521,17 +531,27 @@ pub(crate) fn simulate_concurrency_disagg(
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let pending = VecDeque::from(requests);
-    let (collector, _) = DisaggRuntime::new(
-        &config,
-        router_config,
-        prefill_load_estimator,
-        pending,
-        DisaggReplayMode::Concurrency { max_in_flight },
-        router_mode,
-    )?
-    .with_per_request_records(record_per_request)
-    .with_max_sim_time_ms(max_sim_time_ms)
-    .run()?;
+    let (collector, _) = match router_mode {
+        ReplayRouterMode::RoundRobin => RoundRobinDisaggRuntime::new_round_robin(
+            &config,
+            pending,
+            DisaggReplayMode::Concurrency { max_in_flight },
+        )?
+        .with_per_request_records(record_per_request)
+        .with_max_sim_time_ms(max_sim_time_ms)
+        .run()?,
+        ReplayRouterMode::KvRouter => DisaggRuntime::new(
+            &config,
+            router_config,
+            prefill_load_estimator,
+            pending,
+            DisaggReplayMode::Concurrency { max_in_flight },
+            router_mode,
+        )?
+        .with_per_request_records(record_per_request)
+        .with_max_sim_time_ms(max_sim_time_ms)
+        .run()?,
+    };
     Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
@@ -548,17 +568,27 @@ pub(crate) fn simulate_trace_workload_disagg(
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let driver = WorkloadDriver::new_trace(trace, config.prefill_args.block_size)?;
-    let (collector, _) = DisaggRuntime::new_workload(
-        &config,
-        router_config,
-        prefill_load_estimator,
-        driver,
-        DisaggReplayMode::Trace,
-        router_mode,
-    )?
-    .with_per_request_records(record_per_request)
-    .with_max_sim_time_ms(max_sim_time_ms)
-    .run()?;
+    let (collector, _) = match router_mode {
+        ReplayRouterMode::RoundRobin => RoundRobinDisaggRuntime::new_round_robin_workload(
+            &config,
+            driver,
+            DisaggReplayMode::Trace,
+        )?
+        .with_per_request_records(record_per_request)
+        .with_max_sim_time_ms(max_sim_time_ms)
+        .run()?,
+        ReplayRouterMode::KvRouter => DisaggRuntime::new_workload(
+            &config,
+            router_config,
+            prefill_load_estimator,
+            driver,
+            DisaggReplayMode::Trace,
+            router_mode,
+        )?
+        .with_per_request_records(record_per_request)
+        .with_max_sim_time_ms(max_sim_time_ms)
+        .run()?,
+    };
     Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
@@ -577,17 +607,27 @@ pub(crate) fn simulate_concurrency_workload_disagg(
     let started_at = Instant::now();
     let driver =
         WorkloadDriver::new_concurrency(trace, config.prefill_args.block_size, max_in_flight)?;
-    let (collector, _) = DisaggRuntime::new_workload(
-        &config,
-        router_config,
-        prefill_load_estimator,
-        driver,
-        DisaggReplayMode::Concurrency { max_in_flight },
-        router_mode,
-    )?
-    .with_per_request_records(record_per_request)
-    .with_max_sim_time_ms(max_sim_time_ms)
-    .run()?;
+    let (collector, _) = match router_mode {
+        ReplayRouterMode::RoundRobin => RoundRobinDisaggRuntime::new_round_robin_workload(
+            &config,
+            driver,
+            DisaggReplayMode::Concurrency { max_in_flight },
+        )?
+        .with_per_request_records(record_per_request)
+        .with_max_sim_time_ms(max_sim_time_ms)
+        .run()?,
+        ReplayRouterMode::KvRouter => DisaggRuntime::new_workload(
+            &config,
+            router_config,
+            prefill_load_estimator,
+            driver,
+            DisaggReplayMode::Concurrency { max_in_flight },
+            router_mode,
+        )?
+        .with_per_request_records(record_per_request)
+        .with_max_sim_time_ms(max_sim_time_ms)
+        .run()?,
+    };
     Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
@@ -714,18 +754,29 @@ pub(crate) fn simulate_trace_multi(
     let started_at = Instant::now();
     let args = args.normalized()?;
     let pending = normalize_trace_requests(requests, arrival_speedup_ratio)?;
-    let (collector, _) = AggRuntime::new(
-        &args,
-        router_config,
-        prefill_load_estimator,
-        pending,
-        num_workers,
-        AggReplayMode::Trace,
-        router_mode,
-    )?
-    .with_per_request_records(record_per_request)
-    .with_max_sim_time_ms(max_sim_time_ms)
-    .run()?;
+    let (collector, _) = match router_mode {
+        ReplayRouterMode::RoundRobin => RoundRobinAggRuntime::new_round_robin(
+            &args,
+            pending,
+            num_workers,
+            AggReplayMode::Trace,
+        )?
+        .with_per_request_records(record_per_request)
+        .with_max_sim_time_ms(max_sim_time_ms)
+        .run()?,
+        ReplayRouterMode::KvRouter => AggRuntime::new(
+            &args,
+            router_config,
+            prefill_load_estimator,
+            pending,
+            num_workers,
+            AggReplayMode::Trace,
+            router_mode,
+        )?
+        .with_per_request_records(record_per_request)
+        .with_max_sim_time_ms(max_sim_time_ms)
+        .run()?,
+    };
     Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
@@ -745,18 +796,29 @@ pub(crate) fn simulate_concurrency_multi(
     let started_at = Instant::now();
     let args = args.normalized()?;
     let pending = VecDeque::from(requests);
-    let (collector, _) = AggRuntime::new(
-        &args,
-        router_config,
-        prefill_load_estimator,
-        pending,
-        num_workers,
-        AggReplayMode::Concurrency { max_in_flight },
-        router_mode,
-    )?
-    .with_per_request_records(record_per_request)
-    .with_max_sim_time_ms(max_sim_time_ms)
-    .run()?;
+    let (collector, _) = match router_mode {
+        ReplayRouterMode::RoundRobin => RoundRobinAggRuntime::new_round_robin(
+            &args,
+            pending,
+            num_workers,
+            AggReplayMode::Concurrency { max_in_flight },
+        )?
+        .with_per_request_records(record_per_request)
+        .with_max_sim_time_ms(max_sim_time_ms)
+        .run()?,
+        ReplayRouterMode::KvRouter => AggRuntime::new(
+            &args,
+            router_config,
+            prefill_load_estimator,
+            pending,
+            num_workers,
+            AggReplayMode::Concurrency { max_in_flight },
+            router_mode,
+        )?
+        .with_per_request_records(record_per_request)
+        .with_max_sim_time_ms(max_sim_time_ms)
+        .run()?,
+    };
     Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
@@ -780,18 +842,29 @@ pub(crate) fn simulate_trace_workload_multi(
     } else {
         trace.into_trace_driver_with_block_size(args.block_size)?
     };
-    let (collector, _) = AggRuntime::new_workload(
-        &args,
-        router_config,
-        prefill_load_estimator,
-        driver,
-        num_workers,
-        AggReplayMode::Trace,
-        router_mode,
-    )?
-    .with_per_request_records(record_per_request)
-    .with_max_sim_time_ms(max_sim_time_ms)
-    .run()?;
+    let (collector, _) = match router_mode {
+        ReplayRouterMode::RoundRobin => RoundRobinAggRuntime::new_round_robin_workload(
+            &args,
+            driver,
+            num_workers,
+            AggReplayMode::Trace,
+        )?
+        .with_per_request_records(record_per_request)
+        .with_max_sim_time_ms(max_sim_time_ms)
+        .run()?,
+        ReplayRouterMode::KvRouter => AggRuntime::new_workload(
+            &args,
+            router_config,
+            prefill_load_estimator,
+            driver,
+            num_workers,
+            AggReplayMode::Trace,
+            router_mode,
+        )?
+        .with_per_request_records(record_per_request)
+        .with_max_sim_time_ms(max_sim_time_ms)
+        .run()?,
+    };
     Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
@@ -807,16 +880,25 @@ pub(crate) fn simulate_agentic_trace_workload_multi(
     let started_at = Instant::now();
     let args = args.normalized()?;
     let driver = trace.into_trace_driver_with_block_size(args.block_size)?;
-    let (collector, _) = AggRuntime::new_workload(
-        &args,
-        router_config,
-        prefill_load_estimator,
-        driver,
-        num_workers,
-        AggReplayMode::Trace,
-        router_mode,
-    )?
-    .run()?;
+    let (collector, _) = match router_mode {
+        ReplayRouterMode::RoundRobin => RoundRobinAggRuntime::new_round_robin_workload(
+            &args,
+            driver,
+            num_workers,
+            AggReplayMode::Trace,
+        )?
+        .run()?,
+        ReplayRouterMode::KvRouter => AggRuntime::new_workload(
+            &args,
+            router_config,
+            prefill_load_estimator,
+            driver,
+            num_workers,
+            AggReplayMode::Trace,
+            router_mode,
+        )?
+        .run()?,
+    };
     Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
@@ -844,18 +926,29 @@ pub(crate) fn simulate_concurrency_workload_multi(
     } else {
         trace.into_concurrency_driver_with_block_size(args.block_size, max_in_flight)?
     };
-    let (collector, _) = AggRuntime::new_workload(
-        &args,
-        router_config,
-        prefill_load_estimator,
-        driver,
-        num_workers,
-        AggReplayMode::Concurrency { max_in_flight },
-        router_mode,
-    )?
-    .with_per_request_records(record_per_request)
-    .with_max_sim_time_ms(max_sim_time_ms)
-    .run()?;
+    let (collector, _) = match router_mode {
+        ReplayRouterMode::RoundRobin => RoundRobinAggRuntime::new_round_robin_workload(
+            &args,
+            driver,
+            num_workers,
+            AggReplayMode::Concurrency { max_in_flight },
+        )?
+        .with_per_request_records(record_per_request)
+        .with_max_sim_time_ms(max_sim_time_ms)
+        .run()?,
+        ReplayRouterMode::KvRouter => AggRuntime::new_workload(
+            &args,
+            router_config,
+            prefill_load_estimator,
+            driver,
+            num_workers,
+            AggReplayMode::Concurrency { max_in_flight },
+            router_mode,
+        )?
+        .with_per_request_records(record_per_request)
+        .with_max_sim_time_ms(max_sim_time_ms)
+        .run()?,
+    };
     Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
@@ -1150,17 +1243,18 @@ pub(super) fn run_concurrency_workload_collect(
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "kvbm-offload")]
-    use super::simulate_trace_disagg;
-    use super::{generate_trace_worker_artifacts, simulate_trace, use_single_runtime};
+    use super::{
+        generate_trace_worker_artifacts, simulate_concurrency, simulate_concurrency_disagg,
+        simulate_trace, simulate_trace_disagg, use_single_runtime,
+    };
     use crate::common::perf_model::{AicCallback, PerfModel};
     #[cfg(feature = "kvbm-offload")]
     use crate::common::protocols::WorkerType;
     use crate::common::protocols::{DirectRequest, MockEngineArgs};
     use crate::loadgen::{SessionTrace, Trace, TurnTrace};
-    #[cfg(feature = "kvbm-offload")]
-    use crate::replay::OfflineDisaggReplayConfig;
-    use crate::replay::{ReplayRouterMode, SlaThresholds};
+    use crate::replay::{OfflineDisaggReplayConfig, ReplayRouterMode, SlaThresholds};
+    use serde_json::{Map, Value, json};
+    use std::collections::BTreeMap;
     use std::sync::Arc;
     use uuid::Uuid;
 
@@ -1209,6 +1303,228 @@ mod tests {
             uuid: Some(Uuid::from_u128(uuid)),
             arrival_timestamp_ms: Some(0.0),
             ..Default::default()
+        }
+    }
+
+    fn canonicalize_json(value: Value) -> Value {
+        match value {
+            Value::Array(values) => {
+                Value::Array(values.into_iter().map(canonicalize_json).collect())
+            }
+            Value::Object(values) => Value::Object(
+                values
+                    .into_iter()
+                    .map(|(key, value)| (key, canonicalize_json(value)))
+                    .collect::<BTreeMap<_, _>>()
+                    .into_iter()
+                    .collect::<Map<_, _>>(),
+            ),
+            scalar => scalar,
+        }
+    }
+
+    fn canonical_report(report: crate::replay::TraceSimulationReport) -> Value {
+        let per_request = serde_json::to_value(&report.per_request).unwrap();
+        let mut summary = serde_json::to_value(report).unwrap();
+        let summary = summary
+            .as_object_mut()
+            .expect("serialized replay report must be an object");
+        summary.remove("wall_time_ms");
+        summary.remove("processed_tokens_per_s");
+        summary.remove("processed_output_tokens_per_s");
+        canonicalize_json(json!({
+            "summary": summary,
+            "per_request": per_request,
+        }))
+    }
+
+    fn parity_args(worker_type: crate::common::protocols::WorkerType) -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(32)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(2))
+            .enable_prefix_caching(true)
+            .speedup_ratio(1000.0)
+            .decode_speedup_ratio(1000.0)
+            .worker_type(worker_type)
+            .build()
+            .unwrap()
+    }
+
+    fn parity_requests() -> Vec<DirectRequest> {
+        vec![
+            DirectRequest {
+                tokens: vec![1, 2, 3, 4, 5, 6, 7, 8],
+                max_output_tokens: 3,
+                output_token_ids: Some(vec![101, 102, 103]),
+                uuid: Some(Uuid::from_u128(1)),
+                arrival_timestamp_ms: Some(0.0),
+                ..Default::default()
+            },
+            DirectRequest {
+                tokens: vec![1, 2, 3, 4, 9, 10, 11, 12],
+                max_output_tokens: 2,
+                output_token_ids: Some(vec![201, 202]),
+                uuid: Some(Uuid::from_u128(2)),
+                arrival_timestamp_ms: Some(0.5),
+                ..Default::default()
+            },
+        ]
+    }
+
+    fn collect_parity_fixture() -> String {
+        use crate::common::protocols::WorkerType;
+
+        let aggregated_args = parity_args(WorkerType::Aggregated);
+        let disagg_config = OfflineDisaggReplayConfig {
+            prefill_args: parity_args(WorkerType::Prefill),
+            decode_args: parity_args(WorkerType::Decode),
+            num_prefill_workers: 1,
+            num_decode_workers: 1,
+        };
+        let mut fixtures = BTreeMap::new();
+        fixtures.insert(
+            "single_rr_trace",
+            canonical_report(
+                simulate_trace(
+                    aggregated_args.clone(),
+                    None,
+                    None,
+                    parity_requests(),
+                    1,
+                    1.0,
+                    ReplayRouterMode::RoundRobin,
+                    true,
+                    None,
+                    SlaThresholds::default(),
+                )
+                .unwrap(),
+            ),
+        );
+        fixtures.insert(
+            "single_rr_closed_loop",
+            canonical_report(
+                simulate_concurrency(
+                    aggregated_args.clone(),
+                    None,
+                    None,
+                    parity_requests(),
+                    1,
+                    1,
+                    ReplayRouterMode::RoundRobin,
+                    true,
+                    None,
+                    SlaThresholds::default(),
+                )
+                .unwrap(),
+            ),
+        );
+        fixtures.insert(
+            "aggregated_rr_trace",
+            canonical_report(
+                simulate_trace(
+                    aggregated_args.clone(),
+                    None,
+                    None,
+                    parity_requests(),
+                    2,
+                    1.0,
+                    ReplayRouterMode::RoundRobin,
+                    true,
+                    None,
+                    SlaThresholds::default(),
+                )
+                .unwrap(),
+            ),
+        );
+        fixtures.insert(
+            "aggregated_kv_one_worker",
+            canonical_report(
+                simulate_trace(
+                    aggregated_args,
+                    None,
+                    None,
+                    parity_requests(),
+                    1,
+                    1.0,
+                    ReplayRouterMode::KvRouter,
+                    true,
+                    None,
+                    SlaThresholds::default(),
+                )
+                .unwrap(),
+            ),
+        );
+        fixtures.insert(
+            "disagg_rr_trace",
+            canonical_report(
+                simulate_trace_disagg(
+                    disagg_config.clone(),
+                    None,
+                    None,
+                    parity_requests(),
+                    1.0,
+                    ReplayRouterMode::RoundRobin,
+                    true,
+                    None,
+                    SlaThresholds::default(),
+                )
+                .unwrap(),
+            ),
+        );
+        fixtures.insert(
+            "disagg_kv_trace",
+            canonical_report(
+                simulate_trace_disagg(
+                    disagg_config.clone(),
+                    None,
+                    None,
+                    parity_requests(),
+                    1.0,
+                    ReplayRouterMode::KvRouter,
+                    true,
+                    None,
+                    SlaThresholds::default(),
+                )
+                .unwrap(),
+            ),
+        );
+        fixtures.insert(
+            "disagg_rr_closed_loop",
+            canonical_report(
+                simulate_concurrency_disagg(
+                    disagg_config,
+                    None,
+                    None,
+                    parity_requests(),
+                    1,
+                    ReplayRouterMode::RoundRobin,
+                    true,
+                    None,
+                    SlaThresholds::default(),
+                )
+                .unwrap(),
+            ),
+        );
+        serde_json::to_string_pretty(&fixtures).unwrap() + "\n"
+    }
+
+    #[test]
+    fn offline_replay_matches_canonical_baseline() {
+        let actual = collect_parity_fixture();
+
+        if std::env::var_os("UPDATE_OFFLINE_REPLAY_GOLDEN").is_some() {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src/replay/offline/parity/offline_replay.json");
+            std::fs::write(path, &actual).unwrap();
+            return;
+        }
+
+        let expected = include_str!("parity/offline_replay.json");
+        assert_eq!(actual, expected);
+        for _ in 1..20 {
+            assert_eq!(collect_parity_fixture(), actual);
         }
     }
 
@@ -1262,6 +1578,9 @@ mod tests {
             .worker_type(worker_type)
             .num_g2_blocks(Some(8))
             .kv_bytes_per_token(Some(1))
+            .offload_batch_size(Some(1))
+            .bandwidth_g1_to_g2_gbps(Some(1.0))
+            .bandwidth_g2_to_g1_gbps(Some(1.0))
             .build()
             .unwrap()
     }
@@ -1299,6 +1618,84 @@ mod tests {
         .unwrap();
 
         assert_eq!(report.request_counts.completed_requests, 1);
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    fn offload_lifecycle_requests() -> Vec<DirectRequest> {
+        [
+            (1_u128, 1_u32, 0.0),
+            (2_u128, 2_u32, 100.0),
+            (3_u128, 1_u32, 200.0),
+        ]
+        .into_iter()
+        .map(|(uuid, token, arrival_timestamp_ms)| DirectRequest {
+            tokens: vec![token; 4],
+            max_output_tokens: 1,
+            uuid: Some(Uuid::from_u128(uuid)),
+            arrival_timestamp_ms: Some(arrival_timestamp_ms),
+            ..Default::default()
+        })
+        .collect()
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    fn assert_g2_restore(report: &crate::replay::TraceSimulationReport) {
+        assert_eq!(report.request_counts.completed_requests, 3);
+        let restored = report
+            .per_request
+            .iter()
+            .find(|record| record.uuid == Uuid::from_u128(3).to_string())
+            .expect("restored request record must be present");
+        assert!(
+            restored.reused_input_tokens >= 4,
+            "third request should restore its full prompt from G2: {restored:?}"
+        );
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    #[test]
+    fn aggregated_replay_forces_g1_to_g2_and_g2_to_g1_for_rr_and_kv() {
+        for router_mode in [ReplayRouterMode::RoundRobin, ReplayRouterMode::KvRouter] {
+            let report = simulate_trace(
+                offload_args(WorkerType::Aggregated),
+                None,
+                None,
+                offload_lifecycle_requests(),
+                1,
+                1.0,
+                router_mode,
+                true,
+                None,
+                SlaThresholds::default(),
+            )
+            .unwrap();
+            assert_g2_restore(&report);
+        }
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    #[test]
+    fn disagg_replay_forces_g1_to_g2_and_g2_to_g1_for_rr_and_kv() {
+        for router_mode in [ReplayRouterMode::RoundRobin, ReplayRouterMode::KvRouter] {
+            let report = simulate_trace_disagg(
+                OfflineDisaggReplayConfig {
+                    prefill_args: offload_args(WorkerType::Prefill),
+                    decode_args: offload_args(WorkerType::Decode),
+                    num_prefill_workers: 1,
+                    num_decode_workers: 1,
+                },
+                None,
+                None,
+                offload_lifecycle_requests(),
+                1.0,
+                router_mode,
+                true,
+                None,
+                SlaThresholds::default(),
+            )
+            .unwrap();
+            assert_g2_restore(&report);
+        }
     }
 
     #[test]
