@@ -3,209 +3,204 @@
 
 name: Build On Demand
 
+permissions:
+  contents: read
+
 on:
   workflow_dispatch:
     inputs:
-      build_vllm:
-        description: 'Build and push vllm image, tagged with branch name'
+      source_sha:
+        description: 'Exact Dynamo commit SHA; empty uses the dispatched workflow SHA'
+        type: string
+        required: false
+        default: ''
+      build_glm52_gms_snapshot:
+        description: 'Build the pinned GLM 5.2 GMS runtime, placeholder, and snapshot agent to ACR'
         type: boolean
-        default: false
-      build_sglang:
-        description: 'Build and push sglang image, tagged with branch name'
-        type: boolean
-        default: false
-      build_trtllm:
-        description: 'Build and push trtllm image, tagged with branch name'
-        type: boolean
-        default: false
-      build_operator:
-        description: 'Build and push operator image, tagged with branch name'
-        type: boolean
+        required: true
         default: false
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
-
   init:
     runs-on: ubuntu-slim
     outputs:
-      builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
-      sanitized_ref_name: ${{ steps.sanitize-ref.outputs.sanitized_ref_name }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
     steps:
-      - name: Export builder name
-        id: export-builder-name
-        run: |
-          echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
-      - name: Sanitize ref name for container tags
-        id: sanitize-ref
+      - name: Validate immutable source
+        id: source
         shell: bash
+        env:
+          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+          WORKFLOW_SOURCE_SHA: ${{ github.sha }}
         run: |
-          sanitized=$(echo "${{ github.ref_name }}" | sed 's/[^a-zA-Z0-9._-]/-/g' | sed 's/^-//;s/-$//' | cut -c1-128)
-          echo "sanitized_ref_name=${sanitized}" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          source_sha="${REQUESTED_SOURCE_SHA:-${WORKFLOW_SOURCE_SHA}}"
+          [[ "${source_sha}" =~ ^[0-9a-f]{40}$ ]]
+          test "${source_sha}" = "${WORKFLOW_SOURCE_SHA}"
+          echo "source_sha=${source_sha}" >> "${GITHUB_OUTPUT}"
 
-  # ============================================================================
-  # FRAMEWORK PIPELINES (build-only)
-  # ============================================================================
-
-  vllm-build:
-    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [init]
-    if: inputs.build_vllm
-    uses: ./.github/workflows/shared-build-image.yml
-    with:
-      framework: vllm
-      target: runtime
-      cuda_version: '["13.0"]'
-      platform: 'linux/amd64,linux/arm64'
-      builder_name: ${{ needs.init.outputs.builder_name }}
-      build_timeout_minutes: 60
-    secrets: inherit
-
-  sglang-build:
-    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-    needs: [init]
-    if: inputs.build_sglang
-    uses: ./.github/workflows/shared-build-image.yml
-    with:
-      framework: sglang
-      target: runtime
-      cuda_version: '["13.0"]'
-      platform: 'linux/amd64,linux/arm64'
-      builder_name: ${{ needs.init.outputs.builder_name }}
-      build_timeout_minutes: 60
-    secrets: inherit
-
-  trtllm-build:
-    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
-    needs: [init]
-    if: inputs.build_trtllm
-    uses: ./.github/workflows/shared-build-image.yml
-    with:
-      framework: trtllm
-      target: runtime
-      cuda_version: '["13.1"]'
-      platform: 'linux/amd64,linux/arm64'
-      builder_name: ${{ needs.init.outputs.builder_name }}
-      build_timeout_minutes: 60
-    secrets: inherit
-
-  vllm-copy-to-acr:
-    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [vllm-build]
-    uses: ./.github/workflows/shared-copy.yml
-    with:
-      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.0"]'
-      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
-      copy_timeout_minutes: 10
-    secrets: inherit
-
-  sglang-copy-to-acr:
-    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-    needs: [sglang-build]
-    uses: ./.github/workflows/shared-copy.yml
-    with:
-      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["13.0"]'
-      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
-      copy_timeout_minutes: 10
-    secrets: inherit
-
-  trtllm-copy-to-acr:
-    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
-    needs: [trtllm-build]
-    uses: ./.github/workflows/shared-copy.yml
-    with:
-      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.1"]'
-      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
-      copy_timeout_minutes: 10
-    secrets: inherit
-
-  # ============================================================================
-  # OPERATOR (build-only)
-  # ============================================================================
-
-  operator:
-    needs: [init]
-    if: inputs.build_operator
-    name: Operator
-    runs-on: prod-default-v2
+  glm52-gms-snapshot:
+    name: GLM 5.2 GMS Snapshot Images
+    needs: init
+    if: inputs.build_glm52_gms_snapshot
+    runs-on: prod-builder-v3
+    timeout-minutes: 180
     env:
-      IMAGE_REGISTRY: ai-dynamo
-      IMAGE_REPOSITORY: dynamo
-      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+      SOURCE_SHA: ${{ needs.init.outputs.source_sha }}
+      ACR_IMAGE_BASE: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo
+      CRIU_SHA: 3dd2420c16e54fb7cd08b3e511d3a8bfb03cd001
+      CUDA_CHECKPOINT_SHA: 00d5cce84c628088d6caa203fc4af40c1538b6f7
+      FLASHINFER_SHA: 8eccd0c1352165302840c0e19066bc42d36dbd7a
+      VLLM_SHA: af259f998ff7301504829d2551c746502afe2f0a
+      VLLM_BASE_IMAGE: vllm/vllm-openai@sha256:7f2bc168366c77fbd8329368f00310d208531c14ece6c2de31a6611ef99f6ec8
     steps:
-      - name: Checkout code
+      - name: Checkout immutable source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      - name: Initialize Dynamo Builder
+        with:
+          ref: ${{ needs.init.outputs.source_sha }}
+          lfs: true
+          persist-credentials: false
+
+      - name: Verify source checkout
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
+
+      - name: Initialize Dynamo builder
         uses: ./.github/actions/init-dynamo-builder
         with:
-          builder_name: ${{ needs.init.outputs.builder_name }}
-          flavor: general
-          arch: 'linux/amd64,linux/arm64'
-      - name: Docker Login
+          builder_name: ${{ env.BUILDER_NAME }}
+          flavor: vllm
+          arch: linux/amd64
+          cuda_version: '13.0'
+
+      - name: Log in to ACR
         uses: ./.github/actions/docker-login
         with:
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Build and push Container
+
+      - name: Render vLLM runtime Dockerfile
         shell: bash
-        working-directory: ./deploy/operator
         run: |
-          ECR_DEFAULT_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
-          ACR_IMAGE_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
-          DEFAULT_TAG="${{ github.sha }}-operator"
-          BRANCH_TAG="${{ needs.init.outputs.sanitized_ref_name }}-operator"
-          IMAGE_URIS=(
-            "${ECR_DEFAULT_IMAGE_BASE}:${DEFAULT_TAG}"
-            "${ACR_IMAGE_BASE}:${DEFAULT_TAG}"
-            "${ECR_DEFAULT_IMAGE_BASE}:${BRANCH_TAG}"
-            "${ACR_IMAGE_BASE}:${BRANCH_TAG}"
-          )
+          python3 container/render.py \
+            --framework vllm \
+            --target runtime \
+            --platform linux/amd64 \
+            --cuda-version 13.0 \
+            --output-short-filename
 
-          TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
-          echo "flags for docker buildx: ${TAGGING_FLAGS}"
+      - name: Build and push pinned vLLM runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --builder "${BUILDER_NAME}" \
+            --progress plain \
+            --platform linux/amd64 \
+            --target runtime \
+            --push \
+            --provenance mode=max \
+            --metadata-file vllm-runtime-metadata.json \
+            --tag "${ACR_IMAGE_BASE}:${SOURCE_SHA}-vllm-runtime" \
+            --file container/rendered.Dockerfile \
+            --build-arg "DYNAMO_COMMIT_SHA=${SOURCE_SHA}" \
+            --build-arg "FLASHINFER_GIT_URL=https://github.com/flashinfer-ai/flashinfer.git" \
+            --build-arg "FLASHINFER_GIT_REF=${FLASHINFER_SHA}" \
+            --build-arg "FLASHINFER_GIT_SHA=${FLASHINFER_SHA}" \
+            --build-arg "VLLM_GIT_URL=https://github.com/vllm-project/vllm.git" \
+            --build-arg "VLLM_GIT_REF=${VLLM_SHA}" \
+            --build-arg "VLLM_GIT_SHA=${VLLM_SHA}" \
+            --build-arg "VLLM_INSTALL_MODE=python-overlay" \
+            --build-arg "VLLM_RUNTIME_BASE_IMAGE=${VLLM_BASE_IMAGE}" \
+            --build-arg "BASELINE_SBOM_FILE=vllm-openai@7f2bc168" \
+            .
 
-          docker buildx build --push \
-              --platform linux/amd64,linux/arm64 \
-              --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
-              --build-context snapshot=../snapshot \
-              ${TAGGING_FLAGS} -f Dockerfile .
+      - name: Build and push matching vLLM snapshot placeholder
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --builder "${BUILDER_NAME}" \
+            --progress plain \
+            --platform linux/amd64 \
+            --target glm52-placeholder \
+            --push \
+            --provenance mode=max \
+            --metadata-file vllm-placeholder-metadata.json \
+            --tag "${ACR_IMAGE_BASE}:${SOURCE_SHA}-vllm-placeholder" \
+            --file deploy/snapshot/Dockerfile \
+            --build-context operator=deploy/operator \
+            --build-arg "BASE_IMAGE=${ACR_IMAGE_BASE}:${SOURCE_SHA}-vllm-runtime" \
+            --build-arg "BASE_IMAGE_USER=dynamo" \
+            --build-arg "CRIU_REPO=https://github.com/galletas1712/criu.git" \
+            --build-arg "CRIU_REF=${CRIU_SHA}" \
+            --build-arg "CRIU_SHA=${CRIU_SHA}" \
+            --build-arg "CUDA_CHECKPOINT_REPO=https://github.com/NVIDIA/cuda-checkpoint.git" \
+            --build-arg "CUDA_CHECKPOINT_REF=${CUDA_CHECKPOINT_SHA}" \
+            --build-arg "CUDA_CHECKPOINT_SHA=${CUDA_CHECKPOINT_SHA}" \
+            --build-arg "DYNAMO_COMMIT_SHA=${SOURCE_SHA}" \
+            deploy/snapshot
 
-          echo "### Operator Container Images" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|" >> $GITHUB_STEP_SUMMARY
-          for image_uri in "${IMAGE_URIS[@]}"; do
-            echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
+      - name: Build and push matching snapshot agent
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --builder "${BUILDER_NAME}" \
+            --progress plain \
+            --platform linux/amd64 \
+            --target agent \
+            --push \
+            --provenance mode=max \
+            --metadata-file snapshot-agent-metadata.json \
+            --tag "${ACR_IMAGE_BASE}:${SOURCE_SHA}-snapshot-agent" \
+            --file deploy/snapshot/Dockerfile \
+            --build-context operator=deploy/operator \
+            --build-context compliance=container/compliance \
+            --build-arg "BASELINE_SBOM_FILE=cuda-dl-base@8315e245" \
+            --build-arg "CRIU_REPO=https://github.com/galletas1712/criu.git" \
+            --build-arg "CRIU_REF=${CRIU_SHA}" \
+            --build-arg "CRIU_SHA=${CRIU_SHA}" \
+            --build-arg "CUDA_CHECKPOINT_REPO=https://github.com/NVIDIA/cuda-checkpoint.git" \
+            --build-arg "CUDA_CHECKPOINT_REF=${CUDA_CHECKPOINT_SHA}" \
+            --build-arg "CUDA_CHECKPOINT_SHA=${CUDA_CHECKPOINT_SHA}" \
+            --build-arg "DYNAMO_COMMIT_SHA=${SOURCE_SHA}" \
+            deploy/snapshot
+
+      - name: Record immutable ACR image digests
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "### Immutable GLM 5.2 GMS snapshot images" >> "${GITHUB_STEP_SUMMARY}"
+          echo "" >> "${GITHUB_STEP_SUMMARY}"
+          echo "| Image | Digest | Build metadata |" >> "${GITHUB_STEP_SUMMARY}"
+          echo "|---|---|---|" >> "${GITHUB_STEP_SUMMARY}"
+          for entry in \
+            "vllm-runtime:vllm-runtime-metadata.json" \
+            "vllm-placeholder:vllm-placeholder-metadata.json" \
+            "snapshot-agent:snapshot-agent-metadata.json"; do
+            suffix="${entry%%:*}"
+            metadata="${entry#*:}"
+            digest="$(jq -er '."containerimage.digest"' "${metadata}")"
+            [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+            echo "| \`${ACR_IMAGE_BASE}:${SOURCE_SHA}-${suffix}\` | \`${digest}\` | \`${metadata}\` |" >> "${GITHUB_STEP_SUMMARY}"
           done
 
-  # ============================================================================
-  # CLEANUP
-  # ============================================================================
+      - name: Upload BuildKit metadata
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: glm52-gms-snapshot-build-metadata-${{ needs.init.outputs.source_sha }}
+          path: |
+            vllm-runtime-metadata.json
+            vllm-placeholder-metadata.json
+            snapshot-agent-metadata.json
+          retention-days: 30
 
-  clean-k8s-builder:
-    name: Clean K8s builder if exists
-    runs-on: prod-default-small-v2
-    if: always()
-    needs: [init, vllm-build, sglang-build, trtllm-build, operator]
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-    - name: Create K8s builders (skip bootstrap)
-      uses: ./.github/actions/bootstrap-buildkit
-      continue-on-error: true
-      with:
-        builder_name: ${{ needs.init.outputs.builder_name }}
-        buildkit_worker_addresses: ''
-        skip_bootstrap: true
-    - name: Builder Cleanup in case of k8s builder
-      shell: bash
-      run: |
-        docker buildx rm ${{ needs.init.outputs.builder_name }} || true
+      - name: Clean builder
+        if: always()
+        shell: bash
+        run: docker buildx rm "${BUILDER_NAME}" || true
