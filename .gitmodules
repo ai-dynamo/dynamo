@@ -1,0 +1,3 @@
+[submodule "submodules/aiperf"]
+	path = submodules/aiperf
+	url = https://github.com/ai-dynamo/aiperf.git
