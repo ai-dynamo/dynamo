@@ -100,7 +100,7 @@ jobs:
       - deploy-test-vllm
       - deploy-test-sglang
       - deploy-test-trtllm
-      - deploy-test-operator
+      - deploy-test-operator-e2e
       - deploy-operator-checkpoint-vllm
       - deploy-operator-checkpoint-sglang
       - deploy-operator-checkpoint-trtllm
@@ -1103,7 +1103,7 @@ jobs:
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
     secrets: inherit
 
-  deploy-test-operator:
+  deploy-test-operator-e2e:
     name: Operator E2E
     needs: [changed-files, deploy-operator, planner-copy-to-acr]
     if: |
@@ -1548,7 +1548,7 @@ jobs:
 
   deploy-cleanup:
     if: always()
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-operator]
+    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-operator-e2e]
     runs-on: prod-deploy-tester-v1
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
