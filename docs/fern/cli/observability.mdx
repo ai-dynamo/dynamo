@@ -1,0 +1,77 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Install Observability
+subtitle: Install the local Prometheus, Grafana, Tempo, and Loki stack with Docker Compose
+---
+
+Install Dynamo's local observability stack to collect metrics, logs, and traces from a CLI deployment.
+The Docker Compose stack includes Prometheus, Grafana, Tempo, Loki, an OpenTelemetry Collector, and
+the NATS Prometheus exporter.
+
+## Prerequisites
+
+Install the following software:
+
+- [Docker](https://docs.docker.com/get-docker/)
+- [Docker Compose](https://docs.docker.com/compose/install/)
+
+Run the commands on this page from the root of the Dynamo repository.
+
+## Install the Stack
+
+<Steps toc={true}>
+<Step title="Start the Dynamo infrastructure" id="start-the-dynamo-infrastructure">
+
+Start NATS and etcd. The observability stack joins the Docker network created by this command and
+collects metrics from both services.
+
+```bash
+docker compose -f dev/docker-compose.yml up -d
+```
+
+</Step>
+<Step title="Start the observability services" id="start-the-observability-services">
+
+Start Prometheus, Grafana, Tempo, Loki, the OpenTelemetry Collector, and the NATS Prometheus
+exporter:
+
+```bash
+docker compose -f dev/docker-observability.yml up -d
+```
+
+To collect NVIDIA GPU metrics, enable the optional DCGM exporter profile:
+
+```bash
+docker compose --profile nvidia -f dev/docker-observability.yml up -d
+```
+
+</Step>
+<Step title="Verify the installation" id="verify-the-installation">
+
+Check that the containers are running:
+
+```bash
+docker compose -f dev/docker-observability.yml ps
+```
+
+Open Grafana at `http://localhost:3000` and sign in with username `dynamo` and password `dynamo`.
+Open Prometheus at `http://localhost:9090`.
+
+</Step>
+</Steps>
+
+The stack is now installed. Continue with the [Metrics and Dashboards](../observability/metrics.mdx),
+[Tracing](../observability/tracing.mdx), or [Logging](../observability/logging.mdx) guide to configure a
+Dynamo deployment to emit each signal. For service ports and configuration files, see the
+[Local Observability Stack Reference](../reference/observability/local-stack.mdx).
+
+## Stop the Stack
+
+To stop the observability services without deleting stored data, run:
+
+```bash
+docker compose -f dev/docker-observability.yml down
+```
+
+To delete the Grafana, Tempo, and Loki volumes as well, add `--volumes`.

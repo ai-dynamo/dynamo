@@ -213,12 +213,8 @@ navigation:
                 path: cli/building-from-source.md
               - page: Minikube Setup
                 path: kubernetes/deployment/minikube.md
-              - section: Observability Setup
-                contents:
-                  - page: Overview
-                    path: cli/observability.md
-                  - page: Prometheus + Grafana
-                    path: observability/prometheus-grafana.md
+              - page: Observability
+                path: cli/observability.mdx
 
           - section: Model Deployment
             icon: microchip
@@ -255,12 +251,14 @@ navigation:
             icon: screwdriver-wrench
             collapsed: open-by-default
             contents:
+              - page: Metrics and Dashboards
+                path: observability/metrics.mdx
               - page: Health Checks
-                path: observability/health-checks.md
+                path: observability/health-checks.mdx
               - page: Tracing
-                path: observability/tracing.md
+                path: observability/tracing.mdx
               - page: Logging
-                path: observability/logging.md
+                path: observability/logging.mdx
 
   - tab: use-cases
     layout:
@@ -807,6 +805,8 @@ navigation:
       - section: Observability
         icon: gauge
         contents:
+          - page: Local Stack
+            path: reference/observability/local-stack.mdx
           - page: Environment Variables
             path: reference/observability/environment-variables.mdx
           - page: Metrics Catalog

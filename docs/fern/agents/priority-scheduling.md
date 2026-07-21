@@ -117,7 +117,7 @@ For router-priority validation:
 - Keep the model, input length, output length, streaming mode, and endpoint path
   identical across priority tiers.
 - Run at enough load for requests to wait in the router queue. Watch
-  [`dynamo_frontend_router_queue_pending_requests`](../observability/metrics.md#router-queue-metrics-dynamo_frontend_router_queue_)
+  [`dynamo_frontend_router_queue_pending_requests`](../reference/observability/metrics-catalog.mdx#router-queue-metrics)
   and confirm it is greater than zero during the measured window.
 - Configure the backend priority flag separately if the test is meant to measure
   engine scheduling, not only router queue ordering.
@@ -150,6 +150,6 @@ harness, or gateway path negated the priority before it reached Dynamo.
 - [Agent Hints](agent-hints.md)
 - [NVIDIA Request Extensions](../components/frontend/nvext.md#agent-hints)
 - [Router Configuration and Tuning](../components/router/router-configuration.md)
-- [Router Queue Metrics](../observability/metrics.md#router-queue-metrics-dynamo_frontend_router_queue_)
+- [Router Queue Metrics](../reference/observability/metrics-catalog.mdx#router-queue-metrics)
 - [vLLM Reference Guide](../backends/vllm/vllm-reference-guide.md#priority-scheduling)
 - [SGLang for Agentic Workloads](../backends/sglang/agents.md)

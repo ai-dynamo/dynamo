@@ -220,7 +220,9 @@ spec:
 
 Dynamo exports several metrics useful for autoscaling. These are available at the `/metrics` endpoint on each frontend pod.
 
-> **See also**: For a complete list of all Dynamo metrics, see the [Metrics Reference](../observability/metrics.md). For Prometheus and Grafana setup, see the [Prometheus and Grafana Setup Guide](../observability/prometheus-grafana.md).
+> **See also**: For a complete list of Dynamo metrics, see the
+> [Metrics Catalog](../reference/observability/metrics-catalog.mdx). For Kubernetes dashboards, see
+> [Observability](observability/metrics.md).
 
 #### Available Dynamo Metrics
 
@@ -234,7 +236,8 @@ Dynamo exports several metrics useful for autoscaling. These are available at th
 | `dynamo_frontend_inflight_requests` | Gauge | Concurrent requests to engine | ⚠️ **Deprecated** — use `dynamo_frontend_active_requests` |
 | `dynamo_frontend_queued_requests` | Gauge | Requests waiting in HTTP queue | ⚠️ **Deprecated** — use `sum(dynamo_frontend_stage_requests)` across `preprocess` + `route` + `dispatch` |
 
-For the full definition of the `stage` and `phase` labels and derived-signal formulas, see [Stage and phase labels](../observability/metrics.md#stage-and-phase-labels) in the Metrics Reference.
+For the definitions of the `stage` and `phase` labels, see
+[Metric Labels](../reference/observability/metric-labels.mdx#stage-values).
 
 #### Metric Labels
 
@@ -746,5 +749,5 @@ If you see unstable scaling:
 - [KEDA Documentation](https://keda.sh/)
 - [Prometheus Adapter](https://github.com/kubernetes-sigs/prometheus-adapter)
 - [Planner Documentation](../components/planner/planner-guide.md)
-- [Dynamo Metrics Reference](../observability/metrics.md)
-- [Prometheus and Grafana Setup](../observability/prometheus-grafana.md)
+- [Metrics Catalog](../reference/observability/metrics-catalog.mdx)
+- [Observability](observability/metrics.md)

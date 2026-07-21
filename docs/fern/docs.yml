@@ -185,6 +185,11 @@ redirects:
     destination: "/dynamo/dev/kubernetes-deployment/advanced-platform/developing-with-tilt"
   - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/inference-gateway-gaie"
     destination: "/dynamo/dev/integrations/kubernetes-integrations/gateway-api-inference-extension-gaie"
+  # Local observability restructure: installation, usage, and reference now have separate pages.
+  - source: "/dynamo/dev/cli/installation/observability-setup/overview"
+    destination: "/dynamo/dev/cli/installation/observability"
+  - source: "/dynamo/dev/cli/installation/observability-setup/prometheus-grafana"
+    destination: "/dynamo/dev/cli/operations/metrics-and-dashboards"
   # SGLang HiCache doc: canonical URL under Integrations > KV Cache Integrations.
   - source: "/dynamo/dev/backends/sg-lang/hi-cache"
     destination: "/dynamo/dev/integrations/kv-cache-integrations/hi-cache"

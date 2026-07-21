@@ -179,7 +179,8 @@ Kubernetes comes with some fault tolerance functionalities, but LLM deployment r
 
 ### Observability
 
-Dynamo provides built-in metrics, distributed tracing, and logging for monitoring inference deployments. See the [Observability Guide](../observability/README.md) for setup details.
+Dynamo provides built-in metrics, distributed tracing, and logging for monitoring inference
+deployments. For a local deployment, see [Install Observability](../cli/observability.mdx).
 
 ## What's Next?
 

@@ -12,9 +12,9 @@ When running vLLM through Dynamo, vLLM engine metrics are automatically passed t
 
 **For LMCache metrics and integration**, see the [LMCache Integration Guide](../../integrations/lmcache-integration.md).
 
-**For Dynamo runtime metrics**, see the [Dynamo Metrics Guide](../../observability/metrics.md).
+For Dynamo runtime metrics, see the [Metrics Catalog](../../reference/observability/metrics-catalog.mdx).
 
-**For visualization setup instructions**, see the [Prometheus and Grafana Setup Guide](../../observability/prometheus-grafana.md).
+For a visualization walkthrough, see [Metrics and Dashboards](../../observability/metrics.mdx).
 
 ## Environment Variables and Flags
 
@@ -28,7 +28,8 @@ This is a single machine example.
 
 ### Start Observability Stack
 
-For visualizing metrics with Prometheus and Grafana, start the observability stack. See [Observability Getting Started](../../observability/README.md#getting-started-quickly) for instructions.
+To visualize metrics with Prometheus and Grafana, start the stack as described in
+[Install Observability](../../cli/observability.mdx).
 
 ### Launch Dynamo Components
 
@@ -135,8 +136,8 @@ Troubleshooting LMCache-related metrics and logs is documented in:
 - [vLLM GitHub - Metrics Implementation](https://github.com/vllm-project/vllm/tree/main/vllm/v1/metrics)
 
 ### Dynamo Metrics
-- [Dynamo Metrics Guide](../../observability/metrics.md) - Complete documentation on Dynamo runtime metrics
-- [Prometheus and Grafana Setup](../../observability/prometheus-grafana.md) - Visualization setup instructions
+- [Metrics Catalog](../../reference/observability/metrics-catalog.mdx) - Dynamo runtime metric definitions
+- [Metrics and Dashboards](../../observability/metrics.mdx) - Visualization walkthrough
 - Dynamo runtime metrics (prefixed with `dynamo_*`) are available at the same `/metrics` endpoint alongside vLLM metrics
   - Implementation: `lib/runtime/src/metrics.rs` (Rust runtime metrics)
   - Metric names: `lib/runtime/src/metrics/prometheus_names.rs` (metric name constants)

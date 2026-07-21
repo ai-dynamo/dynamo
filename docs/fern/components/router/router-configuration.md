@@ -167,4 +167,5 @@ The router exposes Prometheus metrics on the frontend's HTTP port (default 8000)
 - **Router request metrics** (`dynamo_component_router_*`): Registered via the component's metrics hierarchy and exposed on the frontend via the `drt_metrics` bridge. In KV mode they are populated per request; in non-KV modes they are registered with zero values. The standalone router also registers these metrics, available on `DYN_SYSTEM_PORT` when set.
 - **Routing overhead metrics** (`dynamo_router_overhead_*`) and **per-worker gauges** (`dynamo_frontend_worker_*`): Registered on the frontend's own Prometheus registry. These are frontend-only and not available on the standalone router.
 
-For the full list of router metrics, see the [Metrics reference](../../observability/metrics.md#router-metrics).
+For the full list of router metrics, see the
+[Metrics Catalog](../../reference/observability/metrics-catalog.mdx#router-metrics).

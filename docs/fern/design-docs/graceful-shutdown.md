@@ -199,4 +199,4 @@ Kubernetes uses health endpoints to determine pod readiness:
 - [Graceful Shutdown](../fault-tolerance/graceful-shutdown.md) - How to tune grace periods and drain windows (use-case guide)
 - [Request Migration Architecture](request-migration.md) - How requests migrate during shutdown
 - [Request Cancellation Architecture](request-cancellation.md) - Canceling in-flight requests
-- [Health Checks](../observability/health-checks.md) - Liveness and readiness probes
+- [Health Checks](../observability/health-checks.mdx) - Liveness and readiness probes

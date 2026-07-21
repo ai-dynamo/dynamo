@@ -1,0 +1,95 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Metrics and Dashboards
+subtitle: Emit local Dynamo metrics and inspect them in Prometheus and Grafana
+---
+
+Connect a local Dynamo deployment to the Prometheus and Grafana services installed by the
+[Observability installation guide](../cli/observability.mdx). This tutorial starts a frontend and a
+vLLM worker, generates metrics, and opens the provisioned Dynamo dashboard.
+
+## Collect and View Metrics
+
+<Steps toc={true}>
+<Step title="Start the frontend" id="start-the-frontend">
+
+Start the frontend on port `8000`:
+
+```bash
+python -m dynamo.frontend
+```
+
+</Step>
+<Step title="Start a vLLM worker" id="start-a-vllm-worker">
+
+In another terminal, start a vLLM worker and expose its system metrics on port `8081`:
+
+```bash
+DYN_SYSTEM_PORT=8081 python -m dynamo.vllm \
+  --model Qwen/Qwen3-0.6B \
+  --enforce-eager
+```
+
+The supplied Prometheus configuration scrapes the frontend at `host.docker.internal:8000` and
+workers at `host.docker.internal:8081` and `host.docker.internal:8082`.
+
+</Step>
+<Step title="Generate metrics" id="generate-metrics">
+
+Send a request to the frontend:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "max_completion_tokens": 100
+  }'
+```
+
+</Step>
+<Step title="Inspect the metrics endpoints" id="inspect-the-metrics-endpoints">
+
+Inspect the Prometheus exposition endpoints:
+
+- Frontend: `http://localhost:8000/metrics`
+- Worker: `http://localhost:8081/metrics`
+
+Prometheus creates labeled series after the first matching request. A newly started process can
+therefore show empty metric families until it serves traffic.
+
+</Step>
+<Step title="View the Dynamo dashboard" id="view-the-dynamo-dashboard">
+
+Open Grafana at `http://localhost:3000` and sign in with username `dynamo` and password `dynamo`.
+Select **Dashboards**, open **Dynamo Dashboard**, and select the model from the `model` filter.
+
+The dashboard covers request rates and latency, frontend sequence lengths, KV router behavior, and
+worker throughput. Prometheus is also available at `http://localhost:9090` for direct PromQL queries.
+
+</Step>
+</Steps>
+
+For metric definitions and label values, see the [Metrics Catalog](../reference/observability/metrics-catalog.mdx)
+and [Metric Labels](../reference/observability/metric-labels.mdx).
+
+## Troubleshoot Collection
+
+Check the Prometheus targets at `http://localhost:9090/targets`. The `dynamo-frontend` and
+`dynamo-backend` targets should report `UP` after their processes start.
+
+If a target is down:
+
+1. Confirm that the frontend uses port `8000` and the worker sets `DYN_SYSTEM_PORT=8081` or `8082`.
+2. Confirm that the processes listen on an address reachable through `host.docker.internal`.
+3. Check the observability containers:
+
+   ```bash
+   docker compose -f dev/docker-observability.yml ps
+   docker compose -f dev/docker-observability.yml logs prometheus grafana
+   ```
+
+To change scrape targets or provisioned dashboards, see the
+[Local Observability Stack Reference](../reference/observability/local-stack.mdx).

@@ -4,8 +4,10 @@
 title: Logging
 ---
 
-> [!IMPORTANT]
-> Set `OTEL_EXPORT_ENABLED=true` on every Dynamo process. Without it, logs never leave the process and Loki will be silent regardless of `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`.
+<Info>
+Set `OTEL_EXPORT_ENABLED=true` on every Dynamo process. Without it, logs never leave the process,
+and Loki remains empty regardless of `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`.
+</Info>
 
 ## Overview
 
@@ -29,15 +31,21 @@ export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4317
 # export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://localhost:4317
 ```
 
-The local observability stack (see [Getting Started](README.md#getting-started-quickly)) includes an OpenTelemetry Collector that receives OTLP on `localhost:4317` and routes traces to Tempo and logs to Loki. In Grafana, the Loki datasource is pre-configured with a derived field that links `trace_id` labels to Tempo, so you can jump directly from a log line to its corresponding trace.
+The [local observability stack](../cli/observability.mdx) includes an OpenTelemetry Collector that
+receives OTLP on `localhost:4317` and routes traces to Tempo and logs to Loki. In Grafana, the Loki
+data source includes a derived field that links `trace_id` labels to Tempo.
 
 ## Getting Started Quickly
 
-### Start Observability Stack
+<Steps toc={true}>
+<Step title="Start the observability stack" id="start-the-observability-stack">
 
-For collecting and visualizing logs with Grafana Loki, or viewing trace context in logs alongside Grafana Tempo, start the observability stack. See [Observability Getting Started](README.md#getting-started-quickly) for instructions. The stack includes Loki, an OpenTelemetry Collector, and Tempo — all pre-wired together.
+To collect and visualize logs with Grafana Loki, or view trace context alongside Grafana Tempo,
+start the stack as described in [Install Observability](../cli/observability.mdx). The stack includes
+Loki, an OpenTelemetry Collector, and Tempo.
 
-### Enable Structured Logging
+</Step>
+<Step title="Enable structured logging" id="enable-structured-logging">
 
 Enable structured JSONL logging:
 
@@ -51,6 +59,9 @@ python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager &
 ```
 
 Logs will be written to stderr in JSONL format with trace context.
+
+</Step>
+</Steps>
 
 ## Available Logging Levels
 
@@ -106,9 +117,13 @@ When `DYN_LOGGING_JSONL` is enabled, all logs include `trace_id` and `span_id` f
 
 The trace and span information uses the OpenTelemetry format and libraries, which means the IDs are compatible with OpenTelemetry-based tracing backends like Tempo or Jaeger if you later choose to enable trace export.
 
-**Note:** This section has overlap with [Distributed Tracing with Tempo](tracing.md). For trace visualization in Grafana Tempo and persistent trace analysis, see [Distributed Tracing with Tempo](tracing.md).
+<Note>
+This workflow displays trace context in logs. For persistent trace analysis and visualization in
+Grafana Tempo, see [Tracing](tracing.mdx).
+</Note>
 
-### Configuration for Logging
+<Steps toc={true}>
+<Step title="Configure trace context in logs" id="configuration-for-logging">
 
 To see trace information in logs:
 
@@ -123,7 +138,8 @@ python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager &
 
 This enables JSONL logging with `trace_id` and `span_id` fields. Traces appear in logs but are not exported to any backend.
 
-### Example Request
+</Step>
+<Step title="Send a request" id="example-request">
 
 Send a request to generate logs with trace context:
 
@@ -140,7 +156,13 @@ curl -H 'Content-Type: application/json' \
 http://localhost:8000/v1/chat/completions
 ```
 
+</Step>
+<Step title="Inspect the logs" id="inspect-the-logs">
+
 Check the logs (stderr) for JSONL output containing `trace_id`, `span_id`, and `x_request_id` fields.
+
+</Step>
+</Steps>
 
 ## Trace and Span Information in Logs
 
@@ -280,8 +302,8 @@ The per-backend variables — `VLLM_LOGGING_LEVEL`, `TLLM_LOG_LEVEL` (read once 
 
 ## Related Documentation
 
-- [Distributed Tracing with Tempo](tracing.md)
-- [Observability Getting Started](README.md)
+- [Distributed Tracing with Tempo](tracing.mdx)
+- [Install Observability](../cli/observability.mdx)
 - [Distributed Runtime Architecture](../design-docs/distributed-runtime.md)
 - [Dynamo Architecture Overview](../design-docs/architecture.md)
 - [Backend Guide](../development/backend-guide.md)

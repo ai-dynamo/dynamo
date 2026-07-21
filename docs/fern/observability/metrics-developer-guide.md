@@ -130,7 +130,6 @@ let counter = endpoint.metrics().create_counter(
 
 ## Related Documentation
 
-- [Metrics Overview](metrics.md)
-- [Prometheus and Grafana Setup](prometheus-grafana.md)
+- [Metrics and Dashboards](metrics.mdx)
+- [Metrics Catalog](../reference/observability/metrics-catalog.mdx)
 - [Distributed Runtime Architecture](../design-docs/distributed-runtime.md)
-

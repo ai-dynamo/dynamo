@@ -10,19 +10,31 @@ Dynamo supports OpenTelemetry-based distributed tracing for visualizing request 
 
 **Requirements:** Set `DYN_LOGGING_JSONL=true` and `OTEL_EXPORT_ENABLED=true` to export traces to Tempo.
 
-**Note:** When OTLP export is enabled, Dynamo exports both **traces and logs**. Traces are sent to Tempo and logs are sent to Loki (via the OpenTelemetry Collector). To send logs to a separate endpoint, set `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`; otherwise it defaults to the traces endpoint. See [Logging](logging.md#otlp-log-export) for details.
+<Note>
+When OTLP export is enabled, Dynamo exports both traces and logs. Traces are sent to Tempo and logs
+are sent to Loki through the OpenTelemetry Collector. To send logs to a separate endpoint, set
+`OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`; otherwise, it defaults to the traces endpoint. See
+[Logging](logging.mdx#otlp-log-export) for details.
+</Note>
 
 This guide covers single GPU demo setup using Docker Compose.
 
-**Note:** This section has overlap with [Logging of OpenTelemetry Tracing](logging.md) since OpenTelemetry has aspects of both logging and tracing. The tracing approach documented here is for persistent trace visualization and analysis. For short debugging sessions examining trace context directly in logs, see the [Logging](logging.md) guide.
+<Note>
+OpenTelemetry covers both logging and tracing. This guide configures persistent trace visualization
+and analysis. For short debugging sessions that examine trace context directly in logs, see
+[Logging](logging.mdx).
+</Note>
 
 ## Getting Started Quickly
 
-### 1. Start Observability Stack
+<Steps toc={true}>
+<Step title="Start the observability stack" id="start-the-observability-stack">
 
-Start the observability stack (Prometheus, Grafana, Tempo, exporters). See [Observability Getting Started](README.md#getting-started-quickly) for instructions.
+Start the observability stack (Prometheus, Grafana, Tempo, and exporters). See
+[Install Observability](../cli/observability.mdx) for instructions.
 
-### 2. Start Dynamo Components (Single GPU)
+</Step>
+<Step title="Start Dynamo with tracing" id="start-dynamo-with-tracing">
 
 For a simple single-GPU deployment, run the aggregated tracing launch script. This script enables tracing, sets per-component service names, and starts a frontend with a single vLLM worker:
 
@@ -40,22 +52,22 @@ export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://tempo:4317
 
 This runs a single aggregated worker on one GPU, providing a simpler setup for testing tracing.
 
-### Alternative: Disaggregated Deployment (2 GPUs)
-
-For a disaggregated deployment with tracing, run the disaggregated tracing launch script. This script sets up tracing and launches a frontend, a decode worker on GPU 0, and a prefill worker on GPU 1:
+To trace a disaggregated deployment on two GPUs, run the disaggregated tracing launch script. The
+script starts a frontend, a decode worker on GPU 0, and a prefill worker on GPU 1:
 
 ```bash
 cd examples/backends/vllm/launch
 ./disagg_tracing.sh
 ```
 
-This separates prefill and decode onto different GPUs for better resource utilization.
-
-### 3. Generate Traces
+</Step>
+<Step title="Generate traces" id="generate-traces">
 
 Send requests to the frontend to generate traces (works for both aggregated and disaggregated deployments). The launch scripts print an example `curl` command on startup with the correct model name.
 
-**Tip:** Add an `x-request-id` header to easily search for a specific trace in Grafana:
+<Tip>
+Add an `x-request-id` header to search for a specific trace in Grafana.
+</Tip>
 
 ```bash
 curl -H 'Content-Type: application/json' \
@@ -70,7 +82,8 @@ curl -H 'Content-Type: application/json' \
 http://localhost:8000/v1/chat/completions
 ```
 
-### 4. View Traces in Grafana Tempo
+</Step>
+<Step title="View traces in Grafana" id="view-traces-in-grafana">
 
 1. Open Grafana at `http://localhost:3000`
 2. Login with username `dynamo` and password `dynamo`
@@ -83,13 +96,15 @@ http://localhost:8000/v1/chat/completions
    - Search by **Tags** (e.g., `x_request_id=test-trace-001`)
 7. Click on a trace to view the detailed flame graph
 
-#### Example Trace View
-
-Below is an example of what a trace looks like in Grafana Tempo:
+The following image shows a trace in Grafana Tempo:
 
 ![Trace Example](../assets/img/trace.png)
 
-### 5. Stop Services
+</Step>
+<Step title="Stop the services" id="stop-the-services">
 
-When done, stop the observability stack. See [Observability Getting Started](README.md#getting-started-quickly) for Docker Compose commands.
+When done, stop the observability stack. See [Install Observability](../cli/observability.mdx#stop-the-stack)
+for the Docker Compose command.
 
+</Step>
+</Steps>

@@ -14,7 +14,10 @@ The variables that configure these endpoints — `DYN_SYSTEM_PORT`, the health/l
 
 ## Getting Started Quickly
 
-Enable health checks and query endpoints:
+<Steps toc={true}>
+<Step title="Start Dynamo components" id="start-dynamo-components">
+
+Start the frontend and a vLLM worker with its system status server on port `8081`:
 
 ```bash
 # Start your Dynamo components (default port 8000, override with --http-port or DYN_HTTP_PORT env var)
@@ -24,7 +27,10 @@ python -m dynamo.frontend &
 DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager &
 ```
 
-Check health status:
+</Step>
+<Step title="Query the health endpoints" id="query-the-health-endpoints">
+
+Check the frontend and worker health status:
 
 ```bash
 # Frontend health (port 8000)
@@ -33,6 +39,9 @@ curl -s localhost:8000/health | jq
 # Worker health (port 8081)
 curl -s localhost:8081/health | jq
 ```
+
+</Step>
+</Steps>
 
 ## Frontend Liveness Check
 
@@ -223,10 +232,30 @@ The canary health check system:
 
 ### How It Works
 
-1. **Idle Detection**: After no activity on an endpoint for a configurable wait time (default: 10 seconds), a canary health check is triggered
-2. **Health Check Request**: A lightweight test request is sent to the endpoint with a minimal payload (generates 1 token)
-3. **Activity Resets Timer**: If normal requests arrive, the canary timer resets and no health check is sent
-4. **Timeout Handling**: If a health check doesn't respond within the timeout (default: 3 seconds), the endpoint is marked as unhealthy
+<Steps>
+<Step title="Detect an idle endpoint" id="detect-an-idle-endpoint">
+
+After no activity on an endpoint for a configurable wait time (10 seconds by default), Dynamo
+triggers a canary health check.
+
+</Step>
+<Step title="Send a health check request" id="send-a-health-check-request">
+
+Dynamo sends a lightweight request with a minimal payload that generates one token.
+
+</Step>
+<Step title="Reset the timer after activity" id="reset-the-timer-after-activity">
+
+If a normal request arrives, Dynamo resets the canary timer and skips the health check.
+
+</Step>
+<Step title="Handle a timeout" id="handle-a-timeout">
+
+If the health check does not respond within the timeout (three seconds by default), Dynamo marks
+the endpoint as unhealthy.
+
+</Step>
+</Steps>
 
 ### Configuration
 

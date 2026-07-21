@@ -8,7 +8,7 @@ title: Engine Metrics Comparison
 
 This document compares the Prometheus metrics exposed by the three inference backends supported by Dynamo: **vLLM**, **SGLang**, and **TensorRT-LLM**.
 
-For Dynamo's own runtime metrics (`dynamo_*`), see the [Metrics Guide](metrics.md). For backend-specific setup and details, see:
+For Dynamo's own runtime metrics (`dynamo_*`), see the [Metrics Guide](metrics.mdx). For backend-specific setup and details, see:
 
 - [vLLM Observability](../backends/vllm/vllm-observability.md)
 - [SGLang Observability](../backends/sglang/sglang-observability.md)
@@ -28,7 +28,7 @@ All frameworks share the common `dynamo_component_*` metrics from the Dynamo run
 
 These backend metrics are available across all backends on the worker port (`:8081/metrics`). Verified from live scrapes, 2026-04-10.
 
-For Dynamo frontend and router metrics (`dynamo_frontend_*`, `dynamo_component_router_*`), see the [Metrics Guide](metrics.md).
+For Dynamo frontend and router metrics (`dynamo_frontend_*`, `dynamo_component_router_*`), see the [Metrics Guide](metrics.mdx).
 
 | Metric Name | Type | Description |
 |-------------|------|-------------|
