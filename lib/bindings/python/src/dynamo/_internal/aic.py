@@ -105,13 +105,11 @@ def _resolve_quant_mode_name(field: str, value: str | None) -> str | None:
 def _pad_nextn_accept_rates(
     nextn_accept_rates: list[float] | str | None,
 ) -> list[float]:
-    """Normalize accept-rates to AIC's fixed length-5 slot.
+    """Normalize Dynamo's legacy conditional accept-rate input.
 
-    AIC caps MTP draft tokens at 5 (``ModelConfig.nextn`` "at most mtp5",
-    ``sdk/config.py:28``) and ``calc_expectation`` indexes into the list up
-    to ``nextn``. When rates are omitted entirely we fall back to AIC's CLI
-    default (``cli/main.py:795``); an explicit shorter list is zero-padded and
-    a longer one is truncated, so callers never trip over IndexError downstream.
+    Mocker burst sampling still uses at most five conditional probabilities.
+    When rates are omitted entirely, preserve Dynamo's historical AIC default;
+    shorter lists are zero-padded and longer lists are truncated.
     """
     if isinstance(nextn_accept_rates, str):
         try:
@@ -137,6 +135,31 @@ def _pad_nextn_accept_rates(
     elif len(rates) > _NEXTN_ACCEPT_RATES_LEN:
         rates = rates[:_NEXTN_ACCEPT_RATES_LEN]
     return rates
+
+
+def _nextn_accepted_from_accept_rates(
+    nextn: int,
+    nextn_accept_rates: list[float] | str | None,
+) -> float:
+    """Fold legacy conditional rates into AIC's scalar acceptance contract.
+
+    Draft token ``i`` can be accepted only when every earlier draft token was
+    accepted, so the expected accepted-token count is the sum of the cumulative
+    products. This is the same expectation formerly computed by AIC's
+    ``calc_expectation`` and lets Dynamo keep its stochastic mocker input while
+    consuming AIC's new ``nextn_accepted`` API.
+    """
+    if not 1 <= nextn <= _NEXTN_ACCEPT_RATES_LEN:
+        raise ValueError(
+            f"nextn must be 1..={_NEXTN_ACCEPT_RATES_LEN} when set, got {nextn}"
+        )
+    rates = _pad_nextn_accept_rates(nextn_accept_rates)
+    probability = 1.0
+    expected = 0.0
+    for rate in rates[:nextn]:
+        probability *= rate
+        expected += probability
+    return expected
 
 
 def _load_aiconfigurator():
@@ -225,15 +248,9 @@ class AicSession:
             if quant_mode is not None:
                 model_config_kwargs[cfg_key] = quant_mode
         if nextn:
-            # Mirror the Rust 1..=5 contract; AIC indexes accept_rates up to
-            # nextn, so >5 would IndexError in calc_expectation.
-            if not 1 <= nextn <= _NEXTN_ACCEPT_RATES_LEN:
-                raise ValueError(
-                    f"nextn must be 1..={_NEXTN_ACCEPT_RATES_LEN} when set, got {nextn}"
-                )
             model_config_kwargs["nextn"] = nextn
-            model_config_kwargs["nextn_accept_rates"] = _pad_nextn_accept_rates(
-                nextn_accept_rates
+            model_config_kwargs["nextn_accepted"] = _nextn_accepted_from_accept_rates(
+                nextn, nextn_accept_rates
             )
         model_config = aic["config"].ModelConfig(**model_config_kwargs)
         model = aic["get_model"](
