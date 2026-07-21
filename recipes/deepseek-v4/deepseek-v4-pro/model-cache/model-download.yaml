@@ -22,18 +22,22 @@ spec:
             - secretRef:
                 name: hf-token-secret
           env:
-            - name: MODEL_NAME
-              value: deepseek-ai/DeepSeek-V4-Pro
             - name: HF_HOME
               value: /model-store
-            # Uses up to 64 GB RAM for XET buffers; set "0" on low-memory nodes (8 GB cap): https://huggingface.co/docs/hub/en/xet/using-xet-storage#download-buffers
+            # Default "1" = fast: XET buffers use up to ~64 GB RAM, so the Job requests "64Gi" below
+            # and must land on a node with >=64Gi allocatable RAM. On memory-constrained clusters set
+            # "0" (buffers cap ~8 GB) and lower the memory to "8Gi"/"16Gi": https://huggingface.co/docs/hub/en/xet/using-xet-storage#download-buffers
             - name: HF_XET_HIGH_PERFORMANCE
               value: "1"
           args:
             - |
               set -eux
               pip install --no-cache-dir huggingface_hub==1.16.4
-              hf download $MODEL_NAME
+              # Downloads ONE checkpoint per your SKU (each is ~865 GB; the PVC in the README
+              # holds one, not both). B200 (NVFP4) is active by default; for H200, comment the
+              # NVFP4 line and uncomment the public FP8 line instead.
+              hf download --max-workers 4 nvidia/DeepSeek-V4-Pro-NVFP4   # B200 recipes (NVFP4) - default
+              # hf download --max-workers 4 deepseek-ai/DeepSeek-V4-Pro  # H200 recipes (public FP8)
           resources:
             requests:
               cpu: "2"

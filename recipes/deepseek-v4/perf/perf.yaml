@@ -1,0 +1,142 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# AIPerf trace-replay benchmark for DeepSeek-V4 DGDs.
+#
+# One Job covers Pro/Flash and vLLM/SGLang variants. Edit the env block below
+# to target the desired DGD and trace. Run one concurrency per Job, and reset
+# DGD worker/frontend state between independent rows.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dsv4-bench
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 7200
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: dsv4-bench
+    spec:
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: nvidia.com/dynamo-component-type
+                operator: In
+                values:
+                - frontend
+              - key: nvidia.com/dynamo-graph-deployment-name
+                operator: In
+                values:
+                # Must match the DGD behind ENDPOINT below so the benchmark Job co-locates
+                # with the target frontend. Change this together with ENDPOINT when you switch
+                # variants (one of: dsv4-{pro,flash}-{agg,disagg}-{b200,h200}-agentic).
+                - dsv4-pro-agg-b200-agentic
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: perf
+        image: python:3.12-slim
+        imagePullPolicy: IfNotPresent
+        workingDir: /workspace
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -euo pipefail
+          ulimit -n 600000
+          apt-get update && apt-get install -y --no-install-recommends curl jq procps git ca-certificates && apt-get clean
+          pip install --no-cache-dir "aiperf==${AIPERF_VERSION}" "protobuf==7.35.0" "transformers==4.57.3" "tiktoken==0.13.0"
+
+          wait_for_model_ready() {
+            local max_attempts=${WAIT_FOR_MODEL_MAX_ATTEMPTS:-720}
+            local attempt=0
+            echo "Waiting for model '${TARGET_MODEL}' at http://${ENDPOINT}/v1/models"
+            while ! curl -sf "http://${ENDPOINT}/v1/models" | jq -e --arg m "${TARGET_MODEL}" '.data[]? | select(.id == $m)' >/dev/null 2>&1; do
+              attempt=$((attempt + 1))
+              if [ "${attempt}" -ge "${max_attempts}" ]; then
+                echo "ERROR: model '${TARGET_MODEL}' did not become ready after ${max_attempts} attempts"
+                curl -s "http://${ENDPOINT}/v1/models" || true
+                exit 1
+              fi
+              echo "[$(date '+%H:%M:%S')] not ready (${attempt}/${max_attempts}), sleeping 5s"
+              sleep 5
+            done
+            curl -s "http://${ENDPOINT}/v1/models" | jq .
+          }
+
+          if [ ! -f "${TRACE_FILE}" ]; then
+            echo "ERROR: trace file not found: ${TRACE_FILE}"
+            exit 1
+          fi
+
+          wait_for_model_ready
+
+          EPOCH=$(date +%s)
+          ROOT_DIR="${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}"
+          RUN_DIR="${ROOT_DIR}/trace_c${CONCURRENCY}"
+          mkdir -p "${RUN_DIR}"
+
+          TRACE_LINES=$(wc -l < "${TRACE_FILE}")
+
+          echo "AIPerf trace replay: endpoint=${ENDPOINT} model=${TARGET_MODEL} trace=${TRACE_FILE} lines=${TRACE_LINES} concurrency=${CONCURRENCY}"
+          aiperf profile \
+            -m "${TARGET_MODEL}" \
+            --tokenizer "${TARGET_MODEL}" \
+            --tokenizer-trust-remote-code \
+            --input-file "${TRACE_FILE}" \
+            --custom-dataset-type mooncake_trace \
+            --num-requests "${TRACE_LINES}" \
+            --endpoint-type chat \
+            --url "http://${ENDPOINT}" \
+            --streaming \
+            --use-server-token-count \
+            --extra-inputs ignore_eos:true \
+            --concurrency "${CONCURRENCY}" \
+            --random-seed 42 \
+            --ui simple \
+            --artifact-dir "${RUN_DIR}/artifacts" \
+            --request-timeout-seconds "${REQUEST_TIMEOUT_SECONDS}" \
+            --workers-max "${CONCURRENCY}" \
+            --export-http-trace
+          echo "Done. Artifacts: ${RUN_DIR}"
+        env:
+        # Default targets Pro AGG B200; edit ENDPOINT + TARGET_MODEL + TRACE_FILE per
+        # variant AND update the podAffinity graph-deployment-name above to the same DGD
+        # (see perf/README.md for the variant -> ENDPOINT -> TRACE table).
+        - name: ENDPOINT
+          value: dsv4-pro-agg-b200-agentic-frontend:8000
+        - name: TARGET_MODEL
+          value: nvidia/DeepSeek-V4-Pro-NVFP4
+        - name: TRACE_FILE
+          value: /model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
+        - name: CONCURRENCY
+          value: "16"
+        - name: REQUEST_TIMEOUT_SECONDS
+          value: "1200"
+        - name: AIPERF_VERSION
+          value: "0.10.0"
+        - name: AIPERF_API_PORT
+          value: "18090"
+        - name: JOB_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.labels['job-name']
+        - name: ROOT_ARTIFACT_DIR
+          value: /model-cache/perf
+        - name: HF_HOME
+          value: /model-cache
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        volumeMounts:
+        - name: model-cache
+          mountPath: /model-cache
+      restartPolicy: Never
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: model-cache
