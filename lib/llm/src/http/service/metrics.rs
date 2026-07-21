@@ -15,7 +15,7 @@ use dynamo_runtime::{
     },
 };
 use prometheus::{
-    Encoder, GaugeVec, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, IntGaugeVec, Opts,
+    Encoder, GaugeVec, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts,
 };
 use serde::Serialize;
 use std::{
@@ -139,7 +139,7 @@ pub static LORA_REPLICA_FACTOR_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
             format!("dynamo_frontend_{}", frontend_service::LORA_REPLICA_FACTOR),
             "Number of replicas allocated for a LoRA adapter",
         ),
-        &["lora"],
+        &["endpoint", "lora"],
     )
     .expect("Failed to create lora_replica_factor gauge")
 });
@@ -150,7 +150,7 @@ pub static LORA_IS_ACTIVE_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
             format!("dynamo_frontend_{}", frontend_service::LORA_IS_ACTIVE),
             "Whether a LoRA adapter is active (1) or inactive (0)",
         ),
-        &["lora"],
+        &["endpoint", "lora"],
     )
     .expect("Failed to create lora_is_active gauge")
 });
@@ -164,7 +164,7 @@ pub static LORA_RAW_ARRIVAL_COUNT_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|
             ),
             "Raw arrival count (windowed rate counter) for a LoRA adapter",
         ),
-        &["lora"],
+        &["endpoint", "lora"],
     )
     .expect("Failed to create lora_raw_arrival_count gauge")
 });
@@ -175,7 +175,7 @@ pub static LORA_ESTIMATED_LOAD_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
             format!("dynamo_frontend_{}", frontend_service::LORA_ESTIMATED_LOAD),
             "Estimated load (windowed request count) for a LoRA adapter",
         ),
-        &["lora"],
+        &["endpoint", "lora"],
     )
     .expect("Failed to create lora_estimated_load gauge")
 });
@@ -186,37 +186,46 @@ pub static LORA_ACTIVE_REQUESTS_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| 
             format!("dynamo_frontend_{}", frontend_service::LORA_ACTIVE_REQUESTS),
             "Number of in-flight requests for a LoRA adapter",
         ),
-        &["lora"],
+        &["endpoint", "lora"],
     )
     .expect("Failed to create lora_active_requests gauge")
 });
 
-pub static LORA_CHURN_LOADS_GAUGE: LazyLock<IntGauge> = LazyLock::new(|| {
-    IntGauge::new(
-        format!(
-            "dynamo_frontend_{}",
-            frontend_service::LORA_CHURN_LOADS_TOTAL
+pub static LORA_CHURN_LOADS_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            format!(
+                "dynamo_frontend_{}",
+                frontend_service::LORA_CHURN_LOADS_TOTAL
+            ),
+            "Total LoRA loads (new placements) this tick",
         ),
-        "Total LoRA loads (new placements) this tick",
+        &["endpoint"],
     )
     .expect("Failed to create lora_churn_loads gauge")
 });
 
-pub static LORA_CHURN_UNLOADS_GAUGE: LazyLock<IntGauge> = LazyLock::new(|| {
-    IntGauge::new(
-        format!(
-            "dynamo_frontend_{}",
-            frontend_service::LORA_CHURN_UNLOADS_TOTAL
+pub static LORA_CHURN_UNLOADS_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            format!(
+                "dynamo_frontend_{}",
+                frontend_service::LORA_CHURN_UNLOADS_TOTAL
+            ),
+            "Total LoRA unloads (removed placements) this tick",
         ),
-        "Total LoRA unloads (removed placements) this tick",
+        &["endpoint"],
     )
     .expect("Failed to create lora_churn_unloads gauge")
 });
 
-pub static LORA_OVERFLOW_COUNT_GAUGE: LazyLock<IntGauge> = LazyLock::new(|| {
-    IntGauge::new(
-        format!("dynamo_frontend_{}", frontend_service::LORA_OVERFLOW_COUNT),
-        "MCF solver overflow count (unplaceable replicas)",
+pub static LORA_OVERFLOW_COUNT_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            format!("dynamo_frontend_{}", frontend_service::LORA_OVERFLOW_COUNT),
+            "MCF solver overflow count (unplaceable replicas)",
+        ),
+        &["endpoint"],
     )
     .expect("Failed to create lora_overflow_count gauge")
 });

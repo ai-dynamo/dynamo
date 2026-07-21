@@ -8,6 +8,8 @@ Unit tests for vLLM backend arguments.
 need to add more tests to cover different code paths of DynamoVllmConfig.
 """
 
+import json
+
 import pytest
 
 from dynamo.vllm.backend_args import DisaggregationMode, DynamoVllmConfig
@@ -43,6 +45,60 @@ def create_config() -> DynamoVllmConfig:
     config.use_vllm_tokenizer = False
     config.frontend_decoding = False
     return config
+
+
+def write_benchmark_points(tmp_path):
+    path = tmp_path / "points.json"
+    points = {
+        "schema_version": 1,
+        "prefill": [
+            {
+                "total_prefill_tokens": 8,
+                "total_kv_read_tokens": 0,
+                "batch_size": 1,
+            }
+        ],
+        "decode": [{"total_kv_read_tokens": 32, "batch_size": 2}],
+    }
+    path.write_text(json.dumps(points), encoding="utf-8")
+    return path, points
+
+
+class TestExplicitBenchmarkPoints:
+    def test_file_is_loaded_before_workers_start(self, tmp_path):
+        path, points = write_benchmark_points(tmp_path)
+        config = create_config()
+        config.benchmark_mode = "agg"
+        config.benchmark_points_file = str(path)
+
+        config._load_explicit_benchmark_points()
+
+        assert config._benchmark_points is not None
+        assert config._benchmark_points.model_dump(mode="json") == points
+
+    def test_file_requires_benchmark_mode(self, tmp_path):
+        path, _ = write_benchmark_points(tmp_path)
+        config = create_config()
+        config.benchmark_points_file = str(path)
+
+        with pytest.raises(ValueError, match="requires --benchmark-mode"):
+            config._load_explicit_benchmark_points()
+
+    def test_file_overrides_grid_controls(self, tmp_path):
+        path, points = write_benchmark_points(tmp_path)
+        config = create_config()
+        config.benchmark_mode = "agg"
+        config.benchmark_points_file = str(path)
+        config.prefill_max_new_token_samples = 1
+        config.prefill_max_new_token_samples_explicit = True
+        config.benchmark_decode_length_granularity = 0
+
+        config._load_explicit_benchmark_points()
+        config._resolve_legacy_benchmark_sampling()
+        config._validate_benchmark_sampling()
+
+        assert config._benchmark_points is not None
+        assert config._benchmark_points.model_dump(mode="json") == points
 
 
 class TestResolveDisaggregationModeFromLegacyMultimodalFlags:

@@ -19,6 +19,7 @@ from dynamo.common.constants import DisaggregationMode  # noqa: E402
 from dynamo.common.lora.manager import LoRAInfo  # noqa: E402
 from dynamo.llm import ModelType, WorkerType  # noqa: E402
 from dynamo.vllm import handlers as handlers_mod  # noqa: E402
+from dynamo.vllm.cache_info import DYNAMO_KV_EVENT_BLOCK_SIZE_KEY  # noqa: E402
 
 pytestmark = [
     pytest.mark.unit,
@@ -44,6 +45,13 @@ def _make_prefill_handler():
         add_lora=AsyncMock(),
         remove_lora=AsyncMock(),
         reset_prefix_cache=AsyncMock(),
+        # LoRA MDC registration reads the engine-actual main-attention block
+        # size from here (hybrid-attention models inflate it past the CLI's
+        # engine_args.block_size=16 above).
+        vllm_config=SimpleNamespace(
+            additional_config={DYNAMO_KV_EVENT_BLOCK_SIZE_KEY: 1056},
+            cache_config=SimpleNamespace(block_size=16),
+        ),
     )
     handler.generate_endpoint = object()
     handler.model_max_len = 8192
@@ -91,6 +99,9 @@ async def test_prefill_load_records_and_publishes_without_eager_engine_add(
     assert str(kwargs["model_type"]) == str(ModelType.Prefill)
     assert kwargs["worker_type"] == WorkerType.Prefill
     assert kwargs["needs"] == [[WorkerType.Decode]]
+    # The adapter card must carry the engine-actual main-attention block size,
+    # not engine_args.block_size (16) — see #11866.
+    assert kwargs["kv_cache_block_size"] == 1056
 
 
 @pytest.mark.asyncio

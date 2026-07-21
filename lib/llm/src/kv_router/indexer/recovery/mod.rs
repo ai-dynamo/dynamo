@@ -2,12 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod subscriber;
+mod target;
 mod worker_query;
-mod worker_query_directory;
 mod worker_query_endpoint;
-mod worker_query_health;
 mod worker_query_state;
 mod worker_query_transport;
 
-pub(crate) use subscriber::start_subscriber;
+pub(crate) use subscriber::{RecoverySupervisor, start_subscriber, start_target_subscriber};
+pub(crate) use target::{IndexerRecoveryTarget, RecoveryResetReason, RecoveryTarget, SourceEpoch};
+pub(crate) use worker_query::DEFAULT_RECOVERY_ATTEMPT_TIMEOUT;
+pub(crate) use worker_query::TargetFaultDisposition;
+#[cfg(feature = "ckf-diagnostics")]
+pub(crate) use worker_query::WorkerQueryHealthSnapshot;
 pub(crate) use worker_query_endpoint::start_worker_kv_query_endpoint;

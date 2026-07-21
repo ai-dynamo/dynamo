@@ -14,7 +14,7 @@ This module chooses a worker, sends the request to that worker, and wraps the re
 
 ## Response-stream rules
 
-- Immediately after selection, move the token counter and `AdmissionLease` cleanup handle into `RequestGuard`. The counter tracks the request's current prompt-plus-output length. Do this before sending the request to the worker so failure or cancellation still releases the worker reservation. Do not split cleanup ownership across another guard or spawned task.
+- Immediately after selection, move the token counter and `RequestLifecycleLease` cleanup handle into `RequestGuard`. The counter tracks the request's current prompt-plus-output length. Do this before sending the request to the worker so failure or cancellation still releases the worker reservation. Do not split cleanup ownership across another guard or spawned task.
 - After the worker accepts the request, call `RequestGuard::mark_dispatched`. It records dispatch on the cleanup handle before notifying the scheduler, so cleanup still reports `Dispatched` before `Completed` or `Aborted` if that notification is cancelled.
 - Mark `Stop`, `EoS`, or `Length` complete before sending the item to the caller, then stop when the caller asks for the next item. A normal stream close also completes; cancellation and error response items abort.
-- For requests with an `AdmissionLease`, dropping the handle performs scheduler cleanup. Do not also call `KvRouter::free`.
+- For requests with a `RequestLifecycleLease`, dropping the handle performs scheduler cleanup. Do not also call `KvRouter::free`.

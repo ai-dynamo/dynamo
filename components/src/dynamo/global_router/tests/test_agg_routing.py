@@ -179,6 +179,23 @@ class TestAggPoolSelection:
         result = strategy.select_pool(ttft_target_ms=100, itl_target_ms=10, priority=50)
         assert result == 0  # no overrides configured, grid result
 
+    def test_isl_grid_routes_short_and_long_prompts_to_different_pools(self):
+        strategy = AggPoolSelectionStrategy(
+            ttft_min_ms=1,
+            ttft_max_ms=10000,
+            ttft_resolution=1,
+            itl_min_ms=1,
+            itl_max_ms=100,
+            itl_resolution=1,
+            agg_pool_mapping=[[[0]], [[1]]],
+            isl_min=0,
+            isl_max=24576,
+            isl_resolution=2,
+        )
+
+        assert strategy.select_pool(isl=4096) == 0
+        assert strategy.select_pool(isl=16384) == 1
+
 
 # --- AggPoolSelectionStrategy with custom mapping ---
 
@@ -384,6 +401,20 @@ class TestAggConfigValidation:
         with pytest.raises(ValueError, match="itl_min_ms.*must be less than"):
             config.validate()
 
+    def test_isl_fields_must_be_configured_together(self):
+        strategy = _make_agg_strategy()
+        strategy.isl_min = 0
+        config = GlobalRouterConfig(
+            mode="agg",
+            num_agg_pools=2,
+            agg_pool_dynamo_namespaces=["a", "b"],
+            agg_pool_selection_strategy=strategy,
+        )
+        with pytest.raises(ValueError, match="isl_min, isl_max, and isl_resolution"):
+            config.validate()
+        with pytest.raises(ValueError, match="isl_min, isl_max, and isl_resolution"):
+            strategy.select_pool()
+
     def test_agg_priorities_default_to_pool_order(self):
         config = GlobalRouterConfig(
             mode="agg",
@@ -491,4 +522,24 @@ class TestLoadAggConfig:
         assert (
             strategy.select_pool(ttft_target_ms=2000, itl_target_ms=150, priority=75)
             == 0
+        )
+
+    def test_agg_config_with_isl_mapping(self, tmp_path):
+        config_data = _agg_base_config()
+        strategy_data = config_data["agg_pool_selection_strategy"]
+        strategy_data.update(
+            {
+                "isl_min": 0,
+                "isl_max": 24576,
+                "isl_resolution": 2,
+                "agg_pool_mapping": [[[0, 0], [0, 0]], [[1, 1], [1, 1]]],
+            }
+        )
+        config = load_config(_write_config(tmp_path, config_data))
+
+        strategy = config.agg_pool_selection_strategy
+        assert strategy is not None
+        assert strategy.select_pool(isl=4096, ttft_target_ms=100, itl_target_ms=10) == 0
+        assert (
+            strategy.select_pool(isl=16384, ttft_target_ms=100, itl_target_ms=10) == 1
         )

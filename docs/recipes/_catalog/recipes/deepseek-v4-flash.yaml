@@ -1,0 +1,130 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: deepseek-v4-flash
+title: DeepSeek-V4-Flash
+page: recipes/deepseek-v4-flash.mdx
+provider: deepseek
+model:
+  name: DeepSeek-V4-Flash
+  hf_id: nvidia/DeepSeek-V4-Flash-NVFP4
+  precision: NVFP4 (B200) / FP8 (H200)
+status: validated
+targets:
+- id: agg-b200-agentic
+  recommended: false
+  hardware:
+    gpu: B200
+    count: 4
+  runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+  topology: aggregated
+  techniques:
+  - expert-parallel
+  - fp8-kv-cache
+  - kv-aware-routing
+  - prefix-caching
+  workload:
+    type: trace-replay
+    traffic: 'Agentic MoonTrace: 64K avg ISL / 400 OSL, 90% KV reuse, default temperature'
+    sla: user output >= 50 tok/s (floor-pick)
+  deploy:
+    asset: recipes/deepseek-v4/deepseek-v4-flash/vllm/agg-b200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/deepseek-v4/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: Floor-pick c38 = 362.1 system tok/s/GPU @ user 50.6.
+- id: disagg-b200-agentic
+  recommended: true
+  hardware:
+    gpu: B200
+    count: 12
+  runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - expert-parallel
+  - fp8-kv-cache
+  - kv-aware-routing
+  - prefix-caching
+  - nixl-gdr
+  workload:
+    type: trace-replay
+    traffic: 'Agentic MoonTrace: 64K avg ISL / 400 OSL, 90% KV reuse; 2P1D (2 prefill + 1 decode, TP4 each)'
+    sla: user output >= 50 tok/s (floor-pick)
+  deploy:
+    asset: recipes/deepseek-v4/deepseek-v4-flash/vllm/disagg-b200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/deepseek-v4/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: Floor-pick c128 = 409.9 system tok/s/GPU @ user 50.35 (2P1D, 12 GPU).
+- id: agg-h200-agentic
+  recommended: false
+  hardware:
+    gpu: H200
+    count: 4
+  runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+  topology: aggregated
+  techniques:
+  - data-parallel-attention
+  - expert-parallel
+  - fp8-kv-cache
+  - kv-aware-routing
+  - prefix-caching
+  - mtp-speculative-decoding
+  workload:
+    type: trace-replay
+    traffic: 'Agentic MoonTrace: 64K avg ISL / 400 OSL, 90% KV reuse; DP4 + TP1 + EP, MTP-1'
+    sla: user output >= 50 tok/s (floor-pick)
+  deploy:
+    asset: recipes/deepseek-v4/deepseek-v4-flash/vllm/agg-h200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/deepseek-v4/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: Floor-pick c16 = 145.4 system tok/s/GPU @ user 50.7; H200 serves the public checkpoint.
+- id: disagg-h200-agentic
+  recommended: false
+  hardware:
+    gpu: H200
+    count: 28
+  runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - data-parallel-attention
+  - expert-parallel
+  - fp8-kv-cache
+  - kv-aware-routing
+  - prefix-caching
+  - mtp-speculative-decoding
+  - nixl-gdr
+  workload:
+    type: trace-replay
+    traffic: 'Agentic MoonTrace: 64K avg ISL / 400 OSL, 90% KV reuse; 4P3D (DP4+TP1+EP per worker), decode MTP-1'
+    sla: user output >= 50 tok/s (floor-pick)
+  deploy:
+    asset: recipes/deepseek-v4/deepseek-v4-flash/vllm/disagg-h200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/deepseek-v4/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: Floor-pick c128 = 201.9 system tok/s/GPU @ user 51.8 (4P3D); decode-ITL bound.
+related_benchmarks: []
+maintainer: null
+gaps:
+- maintainer unknown
+- Day-0 / GB200 SGLang variants (experimental, dev images) are intentionally excluded from this customer page.
