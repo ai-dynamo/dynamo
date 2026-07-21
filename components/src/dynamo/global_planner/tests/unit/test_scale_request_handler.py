@@ -56,14 +56,7 @@ async def test_handler_authorization_success(mock_runtime):
         mock_connector.set_component_replicas = AsyncMock()
         mock_connector.kube_api = MagicMock()
         mock_connector.kube_api.get_graph_deployment = MagicMock(
-            return_value={
-                "spec": {
-                    "services": {
-                        "prefill-svc": {"subComponentType": "prefill", "replicas": 3},
-                        "decode-svc": {"subComponentType": "decode", "replicas": 5},
-                    }
-                }
-            }
+            return_value=_dgd_spec(prefill_replicas=3, decode_replicas=5)
         )
 
         # Process request (pass as dict to match endpoint behavior)
@@ -149,7 +142,7 @@ async def test_handler_multiple_dgds(mock_runtime):
         mock_connector.set_component_replicas = AsyncMock()
         mock_connector.kube_api = MagicMock()
         mock_connector.kube_api.get_graph_deployment = MagicMock(
-            return_value={"spec": {"services": {}}}
+            return_value={"spec": {"components": []}}
         )
 
         # Process both requests
@@ -331,7 +324,7 @@ async def test_handler_blocking_mode(mock_runtime):
         mock_connector.set_component_replicas = AsyncMock()
         mock_connector.kube_api = MagicMock()
         mock_connector.kube_api.get_graph_deployment = MagicMock(
-            return_value={"spec": {"services": {}}}
+            return_value={"spec": {"components": []}}
         )
 
         # Process request (pass as dict to match endpoint behavior)
@@ -350,23 +343,70 @@ async def test_handler_blocking_mode(mock_runtime):
 
 
 def _dgd_spec(prefill_replicas, decode_replicas, prefill_gpu=1, decode_gpu=1):
-    """Build a DGD deployment spec with prefill + decode services."""
+    """Build a v1beta1 DGD spec with prefill and decode components."""
     return {
         "spec": {
-            "services": {
-                "prefill-svc": {
-                    "subComponentType": "prefill",
+            "components": [
+                {
+                    "name": "prefill-svc",
+                    "type": "prefill",
                     "replicas": prefill_replicas,
-                    "resources": {"limits": {"gpu": prefill_gpu}},
+                    "podTemplate": {
+                        "spec": {
+                            "containers": [
+                                {
+                                    "name": "main",
+                                    "resources": {
+                                        "limits": {"nvidia.com/gpu": prefill_gpu}
+                                    },
+                                }
+                            ]
+                        }
+                    },
                 },
-                "decode-svc": {
-                    "subComponentType": "decode",
+                {
+                    "name": "decode-svc",
+                    "type": "decode",
                     "replicas": decode_replicas,
-                    "resources": {"limits": {"gpu": decode_gpu}},
+                    "podTemplate": {
+                        "spec": {
+                            "containers": [
+                                {
+                                    "name": "main",
+                                    "resources": {
+                                        "limits": {"nvidia.com/gpu": decode_gpu}
+                                    },
+                                }
+                            ]
+                        }
+                    },
                 },
-            }
+            ]
         }
     }
+
+
+def _worker_dgd_spec(
+    replicas, gpu=1, component_name="worker-svc", component_type="worker"
+):
+    """Build a v1beta1 DGD spec with one generic worker component."""
+    component = {
+        "name": component_name,
+        "replicas": replicas,
+        "podTemplate": {
+            "spec": {
+                "containers": [
+                    {
+                        "name": "main",
+                        "resources": {"limits": {"nvidia.com/gpu": gpu}},
+                    }
+                ]
+            }
+        },
+    }
+    if component_type is not None:
+        component["type"] = component_type
+    return {"spec": {"components": [component]}}
 
 
 def _install_connector(handler, dgd_key, dgd_spec_dict, parent_dgd_name="my-dgd"):
@@ -387,6 +427,8 @@ def _scale_req(
     caller_ns="app-ns",
     prefill=None,
     decode=None,
+    prefill_component_name=None,
+    decode_component_name=None,
 ):
     """Build a ScaleRequest with one or both pool targets set."""
     targets = []
@@ -394,6 +436,7 @@ def _scale_req(
         targets.append(
             TargetReplica(
                 sub_component_type=SubComponentType.PREFILL,
+                component_name=prefill_component_name,
                 desired_replicas=prefill,
             )
         )
@@ -401,6 +444,7 @@ def _scale_req(
         targets.append(
             TargetReplica(
                 sub_component_type=SubComponentType.DECODE,
+                component_name=decode_component_name,
                 desired_replicas=decode,
             )
         )
@@ -423,6 +467,113 @@ async def _run(handler, request):
 # ---------------------------------------------------------------------------- #
 # min_total_gpus / arbitration tests                                           #
 # ---------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_generic_worker_role_used_for_budget_and_readback(mock_runtime):
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["default-my-dgd"],
+        k8s_namespace="default",
+    )
+    handler.max_total_gpus = 4
+    connector = _install_connector(
+        handler,
+        "default/my-dgd",
+        _worker_dgd_spec(replicas=1, gpu=2),
+    )
+
+    req = _scale_req(
+        caller_ns="default-my-dgd",
+        decode=2,
+        decode_component_name="worker-svc",
+    )
+    results = await _run(handler, req)
+
+    assert results[0]["status"] == "success"
+    assert results[0]["current_replicas"] == {"decode": 1}
+    connector.set_component_replicas.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_generic_worker_scale_rejected_above_budget(mock_runtime):
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["default-my-dgd"],
+        k8s_namespace="default",
+    )
+    handler.max_total_gpus = 2
+    connector = _install_connector(
+        handler,
+        "default/my-dgd",
+        _worker_dgd_spec(replicas=1, gpu=2),
+    )
+
+    req = _scale_req(
+        caller_ns="default-my-dgd",
+        decode=2,
+        decode_component_name="worker-svc",
+    )
+    results = await _run(handler, req)
+
+    assert results[0]["status"] == "rejected"
+    connector.set_component_replicas.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_untyped_worker_in_other_dgd_counts_toward_budget(mock_runtime):
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["default-dgd-a", "default-dgd-b"],
+        k8s_namespace="default",
+    )
+    handler.max_total_gpus = 6
+    connector_a = _install_connector(
+        handler,
+        "default/dgd-a",
+        _dgd_spec(prefill_replicas=1, decode_replicas=1),
+        parent_dgd_name="dgd-a",
+    )
+    connector_b = _install_connector(
+        handler,
+        "default/dgd-b",
+        _worker_dgd_spec(replicas=2, gpu=2, component_type=None),
+        parent_dgd_name="dgd-b",
+    )
+
+    results = await _run(
+        handler,
+        _scale_req(dgd="dgd-a", caller_ns="default-dgd-a", prefill=2),
+    )
+
+    assert results[0]["status"] == "rejected"
+    connector_a.set_component_replicas.assert_not_called()
+    connector_b.set_component_replicas.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_budget_request_fails_when_dgd_snapshot_is_incomplete(mock_runtime):
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["default-my-dgd"],
+        k8s_namespace="default",
+    )
+    handler.max_total_gpus = 6
+    connector = _install_connector(
+        handler,
+        "default/my-dgd",
+        _dgd_spec(prefill_replicas=1, decode_replicas=1),
+    )
+    connector.kube_api.get_graph_deployment.side_effect = RuntimeError("API timeout")
+
+    results = await _run(
+        handler,
+        _scale_req(caller_ns="default-my-dgd", prefill=2),
+    )
+
+    assert results[0]["status"] == "error"
+    assert "Failed to read DGD" in results[0]["message"]
+    connector.set_component_replicas.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -760,7 +911,7 @@ async def test_cross_dgd_asymmetric_pair_rejected_above_ceiling(mock_runtime):
         max_total_gpus=10,
     )
     # DGD-A: prefill=4 (1 GPU each) + decode=0 → 4 GPUs.
-    # DGD-B: one agg pool reusing "decode" subComponentType with 2 GPU/worker,
+    # DGD-B: one agg pool reusing the "decode" component type with 2 GPU/worker,
     #   3 workers → 6 GPUs. Total cluster=10.
     _install_connector(
         handler,
