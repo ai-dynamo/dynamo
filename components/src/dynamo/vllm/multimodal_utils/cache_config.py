@@ -15,6 +15,7 @@ def configure_multimodal_embedding_cache(
     capacity_gb: float,
     namespace: str,
     component: str,
+    model_name: str = "",
 ) -> None:
     """Configure vLLM's CPU embedding cache before engine creation.
 
@@ -40,6 +41,11 @@ def configure_multimodal_embedding_cache(
             ),
             ec_connector_extra_config={
                 "multimodal_embedding_cache_capacity_gb": capacity_gb,
+                # Prometheus label values for the connector's cache metrics —
+                # the scheduler-side connector has no other channel to learn
+                # its Dynamo identity.
+                "component": component,
+                "model_name": model_name,
             },
         ),
     )

@@ -38,15 +38,18 @@ if TYPE_CHECKING:
 
 
 # Single source of truth for embedding cache metric names.
+EMBEDDING_CACHE_METRIC_PREFIX = f"{name_prefix.COMPONENT}_embedding_cache"
+
+
 class EmbeddingCacheMetrics(str, enum.Enum):
     """Prometheus metric names for the multimodal embedding cache."""
 
-    HITS_TOTAL = f"{name_prefix.COMPONENT}_embedding_cache_hits_total"
-    MISSES_TOTAL = f"{name_prefix.COMPONENT}_embedding_cache_misses_total"
-    EVICTIONS_TOTAL = f"{name_prefix.COMPONENT}_embedding_cache_evictions_total"
-    UTILIZATION = f"{name_prefix.COMPONENT}_embedding_cache_utilization"
-    CURRENT_BYTES = f"{name_prefix.COMPONENT}_embedding_cache_current_bytes"
-    ENTRIES = f"{name_prefix.COMPONENT}_embedding_cache_entries"
+    HITS_TOTAL = f"{EMBEDDING_CACHE_METRIC_PREFIX}_hits_total"
+    MISSES_TOTAL = f"{EMBEDDING_CACHE_METRIC_PREFIX}_misses_total"
+    EVICTIONS_TOTAL = f"{EMBEDDING_CACHE_METRIC_PREFIX}_evictions_total"
+    UTILIZATION = f"{EMBEDDING_CACHE_METRIC_PREFIX}_utilization"
+    CURRENT_BYTES = f"{EMBEDDING_CACHE_METRIC_PREFIX}_current_bytes"
+    ENTRIES = f"{EMBEDDING_CACHE_METRIC_PREFIX}_entries"
 
 
 def register_engine_metrics_callback(
