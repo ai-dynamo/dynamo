@@ -25,9 +25,9 @@ use super::request::SglangRequest;
 use crate::scheduler::{
     ActiveHandoffRequests, AdmissionInvariant, AdmissionStage, CapturedRouterEventBuffer,
     DestinationHolds, EnginePassResult, MockerMetrics, PendingDestinations, RemovedSource,
-    RouterEventVisibility, SchedulerCommand, SchedulerCommandEffects, SchedulerCommandResult,
-    SchedulerLifecycleEvent, SourceCompletion, SourceHolds, accept_length_sample,
-    build_fpm_snapshot, capture_router_event_sink,
+    RequestResidency, RouterEventVisibility, SchedulerCommand, SchedulerCommandEffects,
+    SchedulerCommandResult, SchedulerLifecycleEvent, SourceCompletion, SourceHolds,
+    accept_length_sample, build_fpm_snapshot, capture_router_event_sink,
 };
 
 pub(crate) struct SglangCore {
@@ -186,6 +186,18 @@ impl SglangCore {
                 Ok(SchedulerCommandEffects::new(
                     SchedulerCommandResult::Submitted(self.submit(request)?),
                 ))
+            }
+            SchedulerCommand::CancelRequest { request_id } => {
+                let result = if self.cancel_active_request(request_id) {
+                    SchedulerCommandResult::Applied
+                } else {
+                    SchedulerCommandResult::Noop
+                };
+                if allow_destination_admission {
+                    Ok(self.effects_after_capacity_change(result))
+                } else {
+                    Ok(SchedulerCommandEffects::new(result))
+                }
             }
             SchedulerCommand::SubmitHandoffPrefill {
                 handoff_id,
@@ -499,6 +511,25 @@ impl SglangCore {
 
     pub(crate) fn mocker_metrics(&self) -> MockerMetrics {
         self.mocker_metrics_with_cache(0, 0)
+    }
+
+    pub(crate) fn request_residency(&self, request_id: Uuid) -> Option<RequestResidency> {
+        if self
+            .running
+            .iter()
+            .any(|request| request.uuid == request_id)
+        {
+            Some(RequestResidency::Running)
+        } else if self
+            .waiting
+            .iter()
+            .chain(self.prebuilt_ready.iter())
+            .any(|request| request.uuid == request_id)
+        {
+            Some(RequestResidency::Waiting)
+        } else {
+            None
+        }
     }
 
     fn mocker_metrics_with_cache(

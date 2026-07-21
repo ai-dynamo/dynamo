@@ -15,9 +15,9 @@ use crate::common::protocols::{
     DirectRequest, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
 };
 use crate::scheduler::{
-    AdmissionEvent, LiveBoundaryCore, LivePassExecution, LiveSchedulerState, SchedulerCommand,
-    SchedulerCommandEffects, SchedulerCommandEnvelope, SchedulerHandle, SchedulerLifecycleEvent,
-    spawn_live_scheduler,
+    AdmissionEvent, LiveBoundaryCore, LivePassExecution, LiveSchedulerState, RequestResidency,
+    SchedulerCancellationEnvelope, SchedulerCommand, SchedulerCommandEffects,
+    SchedulerCommandEnvelope, SchedulerHandle, SchedulerLifecycleEvent, spawn_live_scheduler,
 };
 
 use super::core::VllmCore;
@@ -159,6 +159,10 @@ impl SchedulerHandle for Scheduler {
         self.inner.command_sender()
     }
 
+    fn cancellation_sender(&self) -> mpsc::Sender<SchedulerCancellationEnvelope> {
+        self.inner.cancellation_sender()
+    }
+
     fn take_lifecycle_receiver(&mut self) -> Option<mpsc::Receiver<SchedulerLifecycleEvent>> {
         self.inner.take_lifecycle_receiver()
     }
@@ -203,6 +207,10 @@ impl LiveBoundaryCore for VllmCore {
 
     fn pass_boundary_metrics(&self, _pass_metrics: MockerMetrics) -> MockerMetrics {
         self.mocker_metrics()
+    }
+
+    fn live_request_residency(&self, request_id: uuid::Uuid) -> Option<RequestResidency> {
+        self.request_residency(request_id)
     }
 
     fn live_internal_deadline_ms(&self) -> Option<f64> {

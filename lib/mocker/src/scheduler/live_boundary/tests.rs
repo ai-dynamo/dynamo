@@ -96,6 +96,10 @@ impl LiveBoundaryCore for FakeCore {
         pass_metrics
     }
 
+    fn live_request_residency(&self, _request_id: Uuid) -> Option<RequestResidency> {
+        None
+    }
+
     fn output_delivery_failed(&mut self, _signals: Vec<OutputSignal>) {
         self.publish_kv(3);
     }
@@ -136,9 +140,18 @@ fn publisher(
     captured: DeferredKvPublishBuffer,
     log: Arc<Mutex<Vec<PublishedEffect>>>,
 ) -> LiveEffectsPublisher {
+    publisher_with_metrics(output_tx, captured, log, MockerMetrics::default())
+}
+
+fn publisher_with_metrics(
+    output_tx: mpsc::UnboundedSender<Vec<OutputSignal>>,
+    captured: DeferredKvPublishBuffer,
+    log: Arc<Mutex<Vec<PublishedEffect>>>,
+    metrics: MockerMetrics,
+) -> LiveEffectsPublisher {
     let (admission_tx, _admission_rx) = mpsc::unbounded_channel();
     let (lifecycle_tx, _lifecycle_rx) = mpsc::channel(4);
-    let (metrics_tx, _metrics_rx) = watch::channel(MockerMetrics::default());
+    let (metrics_tx, _metrics_rx) = watch::channel(metrics);
     LiveEffectsPublisher::new(
         Some(output_tx),
         Some(admission_tx),
@@ -149,6 +162,63 @@ fn publisher(
         captured,
     )
     .with_publication_log(log)
+}
+
+#[tokio::test]
+async fn midpass_cancellation_is_observed_without_controls_and_suppresses_pending_output() {
+    let request_id = Uuid::from_u128(1);
+    let (captured, buffering_publishers) = capture_deferred_kv_publish_sink(false, false);
+    let mut core = FakeCore {
+        publishers: buffering_publishers,
+        command_effects: false,
+        midpass_kv_effects: false,
+        execute_count: 0,
+        cancel_after_execute: None,
+    };
+    let (output_tx, _output_rx) = mpsc::unbounded_channel();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let metrics = MockerMetrics {
+        running_requests: 1,
+        ..Default::default()
+    };
+    let publisher = publisher_with_metrics(output_tx, captured, log, metrics);
+    publisher.set_visible_request_residency(request_id, RequestResidency::Running);
+    let mut pending = publisher.capture_pass(pass());
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+    let (cancellation_tx, mut cancellation_rx) = mpsc::channel(1);
+    let (reply, reply_rx) = tokio::sync::oneshot::channel();
+    cancellation_tx
+        .send(SchedulerCancellationEnvelope {
+            request_id,
+            discard_pending_output: false,
+            reply,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        wait_for_live_pass_boundary(
+            &mut core,
+            &mut command_rx,
+            &mut cancellation_rx,
+            &mut VecDeque::new(),
+            &mut pending,
+            &publisher,
+            &Instant::now(),
+            &CancellationToken::new(),
+            Instant::now() + Duration::from_millis(1),
+            false,
+        )
+        .await
+    );
+    assert_eq!(
+        reply_rx.await.unwrap().unwrap().result,
+        SchedulerCommandResult::Applied
+    );
+    assert!(pending.pass.output_signals.is_empty());
+    assert_eq!(pending.pass.completed_requests, 0);
+    assert_eq!(pending.pass.accept_length_output_tokens, 0);
+    assert_eq!(publisher.published_metrics().running_requests, 0);
 }
 
 #[tokio::test]
@@ -333,11 +403,13 @@ async fn shutdown_stops_a_nonempty_zero_duration_progress_loop() {
     let publisher = publisher(output_tx, captured, Arc::new(Mutex::new(Vec::new())));
     let (_request_tx, request_rx) = mpsc::unbounded_channel();
     let (_command_tx, command_rx) = mpsc::channel(1);
+    let (_cancellation_tx, cancellation_rx) = mpsc::channel(1);
 
     run_live_scheduler(
         &mut core,
         request_rx,
         command_rx,
+        cancellation_rx,
         publisher,
         cancel_token,
         false,

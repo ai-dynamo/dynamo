@@ -307,6 +307,7 @@ impl OfflineWorkerState {
         enum Accounting {
             Submit,
             ReserveDestination,
+            CancelRequest,
             CancelSource,
             CancelDestination,
             None,
@@ -317,6 +318,7 @@ impl OfflineWorkerState {
                 Accounting::Submit
             }
             SchedulerCommand::ReserveDestination { .. } => Accounting::ReserveDestination,
+            SchedulerCommand::CancelRequest { .. } => Accounting::CancelRequest,
             SchedulerCommand::CancelSource { .. } => Accounting::CancelSource,
             SchedulerCommand::CancelDestination { .. } => Accounting::CancelDestination,
             SchedulerCommand::ReleaseSource { .. }
@@ -332,6 +334,9 @@ impl OfflineWorkerState {
                 SchedulerCommandResult::DestinationAccepted { .. },
             ) => self.increment_in_flight(),
             (Accounting::CancelDestination, SchedulerCommandResult::Applied) => {
+                self.decrement_in_flight(1)
+            }
+            (Accounting::CancelRequest, SchedulerCommandResult::Applied) => {
                 self.decrement_in_flight(1)
             }
             (Accounting::CancelSource, SchedulerCommandResult::Applied) => {

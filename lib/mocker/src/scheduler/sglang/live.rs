@@ -11,8 +11,8 @@ use crate::common::protocols::{
 };
 use crate::scheduler::{
     AdmissionEvent, LiveBoundaryCore, LivePassExecution, LiveSchedulerState, MockerMetrics,
-    SchedulerCommand, SchedulerCommandEffects, SchedulerCommandEnvelope, SchedulerHandle,
-    SchedulerLifecycleEvent, spawn_live_scheduler,
+    RequestResidency, SchedulerCancellationEnvelope, SchedulerCommand, SchedulerCommandEffects,
+    SchedulerCommandEnvelope, SchedulerHandle, SchedulerLifecycleEvent, spawn_live_scheduler,
 };
 
 use super::core::SglangCore;
@@ -102,6 +102,10 @@ impl SchedulerHandle for SglangScheduler {
         self.inner.command_sender()
     }
 
+    fn cancellation_sender(&self) -> mpsc::Sender<SchedulerCancellationEnvelope> {
+        self.inner.cancellation_sender()
+    }
+
     fn take_lifecycle_receiver(&mut self) -> Option<mpsc::Receiver<SchedulerLifecycleEvent>> {
         self.inner.take_lifecycle_receiver()
     }
@@ -140,6 +144,10 @@ impl LiveBoundaryCore for SglangCore {
         pass_metrics.running_requests = current.running_requests;
         pass_metrics.waiting_requests = current.waiting_requests;
         pass_metrics
+    }
+
+    fn live_request_residency(&self, request_id: uuid::Uuid) -> Option<RequestResidency> {
+        self.request_residency(request_id)
     }
 
     fn execute_live_pass(&mut self, _scheduler_start: &Instant) -> LivePassExecution {

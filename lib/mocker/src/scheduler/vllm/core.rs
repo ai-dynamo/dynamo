@@ -29,9 +29,10 @@ use crate::scheduler::vllm::policy::{self, AdmissionDecision};
 use crate::scheduler::{
     ActiveHandoffRequests, AdmissionEvent, AdmissionInvariant, AdmissionStage,
     CapturedRouterEventBuffer, DestinationHolds, EnginePassResult, ForwardPassSnapshot,
-    MockerMetrics, PendingDestinations, RemovedSource, RouterEventVisibility, SchedulerCommand,
-    SchedulerCommandEffects, SchedulerCommandResult, SchedulerLifecycleEvent, SourceCompletion,
-    SourceHolds, accept_length_sample, build_fpm_snapshot, capture_router_event_sink,
+    MockerMetrics, PendingDestinations, RemovedSource, RequestResidency, RouterEventVisibility,
+    SchedulerCommand, SchedulerCommandEffects, SchedulerCommandResult, SchedulerLifecycleEvent,
+    SourceCompletion, SourceHolds, accept_length_sample, build_fpm_snapshot,
+    capture_router_event_sink,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -573,6 +574,19 @@ impl VllmCore {
                     SchedulerCommandResult::Submitted(self.submit(request)?),
                 ))
             }
+            SchedulerCommand::CancelRequest { request_id } => {
+                let result = if self.state.requests.contains_key(&request_id) {
+                    self.drop_request(request_id);
+                    SchedulerCommandResult::Applied
+                } else {
+                    SchedulerCommandResult::Noop
+                };
+                if allow_destination_admission {
+                    Ok(self.effects_after_capacity_change(result, reservation_now_ms))
+                } else {
+                    Ok(SchedulerCommandEffects::new(result))
+                }
+            }
             SchedulerCommand::SubmitHandoffPrefill {
                 handoff_id,
                 mut request,
@@ -1030,6 +1044,16 @@ impl VllmCore {
             0,
             0,
         )
+    }
+
+    pub(crate) fn request_residency(&self, request_id: Uuid) -> Option<RequestResidency> {
+        if self.state.running_members.contains(&request_id) {
+            Some(RequestResidency::Running)
+        } else if self.state.waiting_members.contains(&request_id) {
+            Some(RequestResidency::Waiting)
+        } else {
+            None
+        }
     }
 
     pub(crate) fn execute_pass(

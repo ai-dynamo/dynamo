@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -17,12 +17,19 @@ use crate::scheduler::kv_event_sink::{
 };
 use crate::scheduler::vllm::MockerMetrics;
 use crate::scheduler::{
-    AdmissionEvent, EnginePassResult, RouterEventVisibility, SchedulerCommand,
-    SchedulerCommandEffects, SchedulerCommandEnvelope, SchedulerHandle, SchedulerLifecycleEvent,
-    handoff_channel_capacity,
+    AdmissionEvent, EnginePassResult, RouterEventVisibility, SchedulerCancellationEnvelope,
+    SchedulerCommand, SchedulerCommandEffects, SchedulerCommandEnvelope, SchedulerCommandResult,
+    SchedulerHandle, SchedulerLifecycleEvent, handoff_channel_capacity,
 };
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RequestResidency {
+    Running,
+    Waiting,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PublishedEffect {
@@ -57,6 +64,8 @@ pub(crate) trait LiveBoundaryCore {
     fn live_metrics(&self) -> MockerMetrics;
 
     fn pass_boundary_metrics(&self, pass_metrics: MockerMetrics) -> MockerMetrics;
+
+    fn live_request_residency(&self, request_id: Uuid) -> Option<RequestResidency>;
 
     fn live_internal_deadline_ms(&self) -> Option<f64> {
         None
@@ -96,6 +105,7 @@ impl Drop for LiveCancelGuard {
 pub(crate) struct LiveSchedulerState {
     request_tx: mpsc::UnboundedSender<DirectRequest>,
     command_tx: mpsc::Sender<SchedulerCommandEnvelope>,
+    cancellation_tx: mpsc::Sender<SchedulerCancellationEnvelope>,
     lifecycle_rx: Arc<Mutex<Option<mpsc::Receiver<SchedulerLifecycleEvent>>>>,
     metrics_rx: watch::Receiver<MockerMetrics>,
     _cancel_guard: Arc<LiveCancelGuard>,
@@ -116,6 +126,10 @@ impl SchedulerHandle for LiveSchedulerState {
 
     fn command_sender(&self) -> mpsc::Sender<SchedulerCommandEnvelope> {
         self.command_tx.clone()
+    }
+
+    fn cancellation_sender(&self) -> mpsc::Sender<SchedulerCancellationEnvelope> {
+        self.cancellation_tx.clone()
     }
 
     fn take_lifecycle_receiver(&mut self) -> Option<mpsc::Receiver<SchedulerLifecycleEvent>> {
@@ -144,6 +158,7 @@ where
     let (request_tx, request_rx) = mpsc::unbounded_channel();
     let control_capacity = handoff_channel_capacity(&args);
     let (command_tx, command_rx) = mpsc::channel(control_capacity);
+    let (cancellation_tx, cancellation_rx) = mpsc::channel(control_capacity);
     let (lifecycle_tx, lifecycle_rx) = mpsc::channel(control_capacity);
     let initial_metrics = MockerMetrics::new(dp_rank, 0, args.num_gpu_blocks as u64);
     let (metrics_tx, metrics_rx) = watch::channel(initial_metrics);
@@ -171,6 +186,7 @@ where
             &mut core,
             request_rx,
             command_rx,
+            cancellation_rx,
             publisher,
             actor_cancel_token,
             controls_enabled,
@@ -181,6 +197,7 @@ where
     LiveSchedulerState {
         request_tx,
         command_tx,
+        cancellation_tx,
         lifecycle_rx: Arc::new(Mutex::new(Some(lifecycle_rx))),
         metrics_rx,
         _cancel_guard: cancel_guard,
@@ -191,6 +208,7 @@ async fn run_live_scheduler<C: LiveBoundaryCore>(
     core: &mut C,
     mut request_rx: mpsc::UnboundedReceiver<DirectRequest>,
     mut command_rx: mpsc::Receiver<SchedulerCommandEnvelope>,
+    mut cancellation_rx: mpsc::Receiver<SchedulerCancellationEnvelope>,
     publisher: LiveEffectsPublisher,
     cancel_token: CancellationToken,
     controls_enabled: bool,
@@ -208,6 +226,7 @@ async fn run_live_scheduler<C: LiveBoundaryCore>(
             core,
             &mut request_rx,
             &mut command_rx,
+            &mut cancellation_rx,
             &publisher,
             &scheduler_start,
             &cancel_token,
@@ -227,58 +246,45 @@ async fn run_live_scheduler<C: LiveBoundaryCore>(
         publisher.publish_pass_start(&mut pending);
         if execution.duration > Duration::ZERO {
             let deadline = iteration_start + execution.duration;
-            if controls_enabled {
-                if !wait_for_live_pass_boundary(
-                    core,
-                    &mut command_rx,
-                    &mut deferred_commands,
-                    &publisher,
-                    &scheduler_start,
-                    &cancel_token,
-                    deadline,
-                )
-                .await
-                {
-                    break;
-                }
-            } else {
-                sleep_until_precise(deadline).await;
-            }
-        }
-        publisher.publish_pass(core, pending).await;
-        if controls_enabled {
-            let control_progress = apply_live_post_pass_controls(
+            if !wait_for_live_pass_boundary(
                 core,
                 &mut command_rx,
+                &mut cancellation_rx,
                 &mut deferred_commands,
+                &mut pending,
                 &publisher,
                 &scheduler_start,
+                &cancel_token,
+                deadline,
+                controls_enabled,
             )
-            .await;
-            if zero_progress
-                && !control_progress
-                && !wait_for_live_progress(
-                    core,
-                    &mut request_rx,
-                    &mut command_rx,
-                    &publisher,
-                    &scheduler_start,
-                    &cancel_token,
-                    true,
-                )
-                .await
+            .await
             {
                 break;
             }
-        } else if zero_progress
+        }
+        publisher.publish_pass(core, pending).await;
+        let control_progress = apply_live_post_pass_controls(
+            core,
+            &mut command_rx,
+            &mut cancellation_rx,
+            &mut deferred_commands,
+            &publisher,
+            &scheduler_start,
+            controls_enabled,
+        )
+        .await;
+        if zero_progress
+            && !control_progress
             && !wait_for_live_progress(
                 core,
                 &mut request_rx,
                 &mut command_rx,
+                &mut cancellation_rx,
                 &publisher,
                 &scheduler_start,
                 &cancel_token,
-                false,
+                controls_enabled,
             )
             .await
         {
@@ -298,6 +304,7 @@ pub(crate) struct LiveEffectsPublisher {
     kv_event_publishers: KvEventPublishers,
     fpm_publisher: FpmPublisher,
     captured_kv_events: DeferredKvPublishBuffer,
+    visible_residencies: Mutex<HashMap<Uuid, RequestResidency>>,
     #[cfg(test)]
     publication_log: Option<std::sync::Arc<std::sync::Mutex<Vec<PublishedEffect>>>>,
 }
@@ -319,6 +326,22 @@ impl PendingLivePass {
             || !self.kv_events.is_empty()
             || self.pass.mocker_metrics != *metrics_before
     }
+
+    pub(crate) fn suppress_request_outputs(&mut self, request_id: Uuid) {
+        self.pass
+            .output_signals
+            .retain(|signal| signal.uuid != request_id);
+        self.pass.completed_requests = self
+            .pass
+            .output_signals
+            .iter()
+            .filter(|signal| signal.completed)
+            .count();
+        let (output_tokens, decode_forwards) =
+            crate::scheduler::accept_length_sample(&self.pass.output_signals);
+        self.pass.accept_length_output_tokens = output_tokens;
+        self.pass.accept_length_decode_forwards = decode_forwards;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -326,33 +349,12 @@ async fn receive_until_live_schedulable<C: LiveBoundaryCore>(
     core: &mut C,
     request_rx: &mut mpsc::UnboundedReceiver<DirectRequest>,
     command_rx: &mut mpsc::Receiver<SchedulerCommandEnvelope>,
+    cancellation_rx: &mut mpsc::Receiver<SchedulerCancellationEnvelope>,
     publisher: &LiveEffectsPublisher,
     scheduler_start: &Instant,
     cancel_token: &CancellationToken,
     controls_enabled: bool,
 ) -> bool {
-    if !controls_enabled {
-        if cancel_token.is_cancelled() {
-            return false;
-        }
-        if core.live_is_empty() {
-            tokio::select! {
-                biased;
-                _ = cancel_token.cancelled() => return false,
-                request = request_rx.recv() => {
-                    let Some(request) = request else {
-                        return false;
-                    };
-                    core.receive_live_request(request);
-                }
-            }
-        }
-        while let Ok(request) = request_rx.try_recv() {
-            core.receive_live_request(request);
-        }
-        return true;
-    }
-
     while core.live_is_empty() {
         let internal_deadline_ms = core.live_internal_deadline_ms();
         let internal_deadline = wait_for_internal_deadline(scheduler_start, internal_deadline_ms);
@@ -360,7 +362,20 @@ async fn receive_until_live_schedulable<C: LiveBoundaryCore>(
         tokio::select! {
             biased;
             _ = cancel_token.cancelled() => return false,
-            command = command_rx.recv() => {
+            cancellation = cancellation_rx.recv() => {
+                let Some(cancellation) = cancellation else {
+                    return false;
+                };
+                let _ = publisher
+                    .apply_cancellation(
+                        core,
+                        cancellation,
+                        true,
+                        scheduler_elapsed_ms(scheduler_start),
+                    )
+                    .await;
+            }
+            command = command_rx.recv(), if controls_enabled => {
                 let Some(command) = command else {
                     return false;
                 };
@@ -374,7 +389,7 @@ async fn receive_until_live_schedulable<C: LiveBoundaryCore>(
                 };
                 core.receive_live_request(request);
             }
-            _ = &mut internal_deadline, if internal_deadline_ms.is_some() => {
+            _ = &mut internal_deadline, if controls_enabled && internal_deadline_ms.is_some() => {
                 #[cfg(feature = "kvbm-offload")]
                 {
                     let now_ms = scheduler_elapsed_ms(scheduler_start)
@@ -385,10 +400,22 @@ async fn receive_until_live_schedulable<C: LiveBoundaryCore>(
         }
     }
 
-    while let Ok(command) = command_rx.try_recv() {
-        publisher
-            .apply_command(core, command, true, scheduler_elapsed_ms(scheduler_start))
+    while let Ok(cancellation) = cancellation_rx.try_recv() {
+        let _ = publisher
+            .apply_cancellation(
+                core,
+                cancellation,
+                true,
+                scheduler_elapsed_ms(scheduler_start),
+            )
             .await;
+    }
+    if controls_enabled {
+        while let Ok(command) = command_rx.try_recv() {
+            publisher
+                .apply_command(core, command, true, scheduler_elapsed_ms(scheduler_start))
+                .await;
+        }
     }
     while let Ok(request) = request_rx.try_recv() {
         core.receive_live_request(request);
@@ -401,11 +428,14 @@ async fn receive_until_live_schedulable<C: LiveBoundaryCore>(
 async fn wait_for_live_pass_boundary<C: LiveBoundaryCore>(
     core: &mut C,
     command_rx: &mut mpsc::Receiver<SchedulerCommandEnvelope>,
+    cancellation_rx: &mut mpsc::Receiver<SchedulerCancellationEnvelope>,
     deferred_commands: &mut VecDeque<SchedulerCommandEnvelope>,
+    pending: &mut PendingLivePass,
     publisher: &LiveEffectsPublisher,
     scheduler_start: &Instant,
     cancel_token: &CancellationToken,
     deadline: Instant,
+    controls_enabled: bool,
 ) -> bool {
     let sleep = sleep_until_precise(deadline);
     tokio::pin!(sleep);
@@ -418,7 +448,25 @@ async fn wait_for_live_pass_boundary<C: LiveBoundaryCore>(
             biased;
             _ = cancel_token.cancelled() => return false,
             _ = &mut sleep => return true,
-            _ = &mut internal_deadline, if internal_deadline_ms.is_some() => {
+            cancellation = cancellation_rx.recv() => {
+                let Some(cancellation) = cancellation else {
+                    return false;
+                };
+                let request_id = cancellation.request_id;
+                let discard_pending_output = cancellation.discard_pending_output;
+                let outcome = publisher
+                    .apply_cancellation(
+                        core,
+                        cancellation,
+                        false,
+                        scheduler_elapsed_ms(scheduler_start),
+                    )
+                    .await;
+                if discard_pending_output || outcome != Some(SchedulerCommandResult::Noop) {
+                    pending.suppress_request_outputs(request_id);
+                }
+            }
+            _ = &mut internal_deadline, if controls_enabled && internal_deadline_ms.is_some() => {
                 #[cfg(feature = "kvbm-offload")]
                 {
                     let now_ms = scheduler_elapsed_ms(scheduler_start)
@@ -430,7 +478,7 @@ async fn wait_for_live_pass_boundary<C: LiveBoundaryCore>(
                     );
                 }
             }
-            command = command_rx.recv(), if accept_commands => {
+            command = command_rx.recv(), if controls_enabled && accept_commands => {
                 let Some(command) = command else {
                     return false;
                 };
@@ -455,27 +503,44 @@ async fn wait_for_live_pass_boundary<C: LiveBoundaryCore>(
 async fn apply_live_post_pass_controls<C: LiveBoundaryCore>(
     core: &mut C,
     command_rx: &mut mpsc::Receiver<SchedulerCommandEnvelope>,
+    cancellation_rx: &mut mpsc::Receiver<SchedulerCancellationEnvelope>,
     deferred_commands: &mut VecDeque<SchedulerCommandEnvelope>,
     publisher: &LiveEffectsPublisher,
     scheduler_start: &Instant,
+    controls_enabled: bool,
 ) -> bool {
     let mut made_progress = false;
-    while let Some(command) = deferred_commands.pop_front() {
+    while let Ok(cancellation) = cancellation_rx.try_recv() {
         made_progress = true;
-        publisher
-            .apply_command(core, command, true, scheduler_elapsed_ms(scheduler_start))
+        let _ = publisher
+            .apply_cancellation(
+                core,
+                cancellation,
+                true,
+                scheduler_elapsed_ms(scheduler_start),
+            )
             .await;
     }
-    while let Ok(command) = command_rx.try_recv() {
-        made_progress = true;
+    if controls_enabled {
+        while let Some(command) = deferred_commands.pop_front() {
+            made_progress = true;
+            publisher
+                .apply_command(core, command, true, scheduler_elapsed_ms(scheduler_start))
+                .await;
+        }
+        while let Ok(command) = command_rx.try_recv() {
+            made_progress = true;
+            publisher
+                .apply_command(core, command, true, scheduler_elapsed_ms(scheduler_start))
+                .await;
+        }
         publisher
-            .apply_command(core, command, true, scheduler_elapsed_ms(scheduler_start))
-            .await;
+            .retry_destinations(core, scheduler_elapsed_ms(scheduler_start))
+            .await
+            || made_progress
+    } else {
+        made_progress
     }
-    publisher
-        .retry_destinations(core, scheduler_elapsed_ms(scheduler_start))
-        .await
-        || made_progress
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -483,6 +548,7 @@ async fn wait_for_live_progress<C: LiveBoundaryCore>(
     core: &mut C,
     request_rx: &mut mpsc::UnboundedReceiver<DirectRequest>,
     command_rx: &mut mpsc::Receiver<SchedulerCommandEnvelope>,
+    cancellation_rx: &mut mpsc::Receiver<SchedulerCancellationEnvelope>,
     publisher: &LiveEffectsPublisher,
     scheduler_start: &Instant,
     cancel_token: &CancellationToken,
@@ -491,41 +557,40 @@ async fn wait_for_live_progress<C: LiveBoundaryCore>(
     let internal_deadline_ms = core.live_internal_deadline_ms();
     let internal_deadline = wait_for_internal_deadline(scheduler_start, internal_deadline_ms);
     tokio::pin!(internal_deadline);
-    if controls_enabled {
-        tokio::select! {
-            biased;
-            _ = cancel_token.cancelled() => false,
-            command = command_rx.recv() => {
-                let Some(command) = command else {
-                    return false;
-                };
-                publisher
-                    .apply_command(core, command, true, scheduler_elapsed_ms(scheduler_start))
-                    .await;
-                true
-            }
-            request = request_rx.recv() => {
-                let Some(request) = request else {
-                    return false;
-                };
-                core.receive_live_request(request);
-                true
-            }
-            _ = &mut internal_deadline => true,
+    tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => false,
+        cancellation = cancellation_rx.recv() => {
+            let Some(cancellation) = cancellation else {
+                return false;
+            };
+            let _ = publisher
+                .apply_cancellation(
+                    core,
+                    cancellation,
+                    true,
+                    scheduler_elapsed_ms(scheduler_start),
+                )
+                .await;
+            true
         }
-    } else {
-        tokio::select! {
-            biased;
-            _ = cancel_token.cancelled() => false,
-            request = request_rx.recv() => {
-                let Some(request) = request else {
-                    return false;
-                };
-                core.receive_live_request(request);
-                true
-            }
-            _ = &mut internal_deadline => true,
+        command = command_rx.recv(), if controls_enabled => {
+            let Some(command) = command else {
+                return false;
+            };
+            publisher
+                .apply_command(core, command, true, scheduler_elapsed_ms(scheduler_start))
+                .await;
+            true
         }
+        request = request_rx.recv() => {
+            let Some(request) = request else {
+                return false;
+            };
+            core.receive_live_request(request);
+            true
+        }
+        _ = &mut internal_deadline => true,
     }
 }
 
@@ -573,6 +638,7 @@ impl LiveEffectsPublisher {
             kv_event_publishers,
             fpm_publisher,
             captured_kv_events,
+            visible_residencies: Mutex::new(HashMap::new()),
             #[cfg(test)]
             publication_log: None,
         }
@@ -585,6 +651,19 @@ impl LiveEffectsPublisher {
     ) -> Self {
         self.publication_log = Some(log);
         self
+    }
+
+    #[cfg(test)]
+    fn published_metrics(&self) -> MockerMetrics {
+        self.metrics_tx.borrow().clone()
+    }
+
+    #[cfg(test)]
+    fn set_visible_request_residency(&self, request_id: Uuid, residency: RequestResidency) {
+        self.visible_residencies
+            .lock()
+            .unwrap()
+            .insert(request_id, residency);
     }
 
     pub(crate) fn capture_pass(&self, pass: EnginePassResult) -> PendingLivePass {
@@ -657,6 +736,7 @@ impl LiveEffectsPublisher {
         // disappeared. Those cleanup events belong to this same boundary.
         self.publish_router_effects(self.captured_kv_events.drain(), None);
         self.publish_lifecycle(pending.pass.lifecycle_events).await;
+        self.refresh_visible_residencies(core);
         let metrics = core.pass_boundary_metrics(pending.pass.mocker_metrics);
         self.record(PublishedEffect::Metrics);
         let _ = self.metrics_tx.send(metrics);
@@ -669,11 +749,43 @@ impl LiveEffectsPublisher {
         allow_destination_admission: bool,
         now_ms: f64,
     ) {
+        self.apply_command_inner(core, envelope, allow_destination_admission, now_ms)
+            .await;
+    }
+
+    pub(crate) async fn apply_cancellation<C: LiveBoundaryCore>(
+        &self,
+        core: &mut C,
+        cancellation: SchedulerCancellationEnvelope,
+        allow_destination_admission: bool,
+        now_ms: f64,
+    ) -> Option<SchedulerCommandResult> {
+        self.apply_command_inner(
+            core,
+            cancellation.into(),
+            allow_destination_admission,
+            now_ms,
+        )
+        .await
+    }
+
+    async fn apply_command_inner<C: LiveBoundaryCore>(
+        &self,
+        core: &mut C,
+        envelope: SchedulerCommandEnvelope,
+        allow_destination_admission: bool,
+        now_ms: f64,
+    ) -> Option<SchedulerCommandResult> {
         let SchedulerCommandEnvelope { command, reply } = envelope;
+        let cancellation_id = match &command {
+            SchedulerCommand::CancelRequest { request_id } => Some(*request_id),
+            _ => None,
+        };
         let result = core.apply_live_command(command, allow_destination_admission, now_ms);
         match result {
             Ok(mut effects) => {
                 let lifecycle_events = std::mem::take(&mut effects.lifecycle_events);
+                let command_result = effects.result;
                 if allow_destination_admission {
                     self.publish_router_effects(self.captured_kv_events.drain(), None);
                 } else {
@@ -684,17 +796,62 @@ impl LiveEffectsPublisher {
                 }
                 self.record(PublishedEffect::Ack);
                 let _ = reply.send(Ok(effects));
+                if let SchedulerCommandResult::Submitted(request_id) = command_result
+                    && let Some(residency) = core.live_request_residency(request_id)
+                {
+                    self.visible_residencies
+                        .lock()
+                        .unwrap()
+                        .insert(request_id, residency);
+                }
+                let cancelled_residency = if command_result == SchedulerCommandResult::Applied {
+                    cancellation_id.and_then(|request_id| {
+                        self.visible_residencies.lock().unwrap().remove(&request_id)
+                    })
+                } else {
+                    None
+                };
                 if allow_destination_admission {
                     self.publish_lifecycle(lifecycle_events).await;
                     self.record(PublishedEffect::Metrics);
                     let _ = self.metrics_tx.send(core.live_metrics());
+                } else if let Some(residency) = cancelled_residency {
+                    // The core has already executed the pending pass. Update
+                    // only the queue where this request lived at the last
+                    // published boundary; aggregate post-pass metrics cannot
+                    // identify which visible request was cancelled.
+                    let mut published = self.metrics_tx.borrow().clone();
+                    let visible_count = match residency {
+                        RequestResidency::Running => &mut published.running_requests,
+                        RequestResidency::Waiting => &mut published.waiting_requests,
+                    };
+                    if *visible_count > 0 {
+                        *visible_count -= 1;
+                        self.record(PublishedEffect::Metrics);
+                        self.metrics_tx.send_replace(published);
+                    }
                 }
+                Some(command_result)
             }
             Err(error) => {
                 self.record(PublishedEffect::Ack);
                 let _ = reply.send(Err(error));
+                None
             }
         }
+    }
+
+    fn refresh_visible_residencies<C: LiveBoundaryCore>(&self, core: &C) {
+        self.visible_residencies
+            .lock()
+            .unwrap()
+            .retain(|request_id, residency| {
+                let Some(current) = core.live_request_residency(*request_id) else {
+                    return false;
+                };
+                *residency = current;
+                true
+            });
     }
 
     pub(crate) async fn retry_destinations<C: LiveBoundaryCore>(

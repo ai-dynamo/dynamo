@@ -15,7 +15,7 @@ use crate::common::protocols::{DirectRequest, FpmPublisher, KvEventPublishers, O
 use dynamo_kv_router::protocols::RouterEvent;
 pub(crate) use kv_event_sink::{CapturedRouterEventBuffer, capture_router_event_sink};
 pub(crate) use live_boundary::{
-    LiveBoundaryCore, LivePassExecution, LiveSchedulerState, spawn_live_scheduler,
+    LiveBoundaryCore, LivePassExecution, LiveSchedulerState, RequestResidency, spawn_live_scheduler,
 };
 pub(crate) use source_holds::{
     ActiveHandoffRequests, DestinationHolds, PendingDestinations, RemovedSource, SourceCompletion,
@@ -411,6 +411,13 @@ impl SchedulerHandle for EngineScheduler {
         }
     }
 
+    fn cancellation_sender(&self) -> mpsc::Sender<SchedulerCancellationEnvelope> {
+        match self {
+            Self::Vllm(scheduler) => scheduler.cancellation_sender(),
+            Self::Sglang(scheduler) => scheduler.cancellation_sender(),
+        }
+    }
+
     fn take_lifecycle_receiver(&mut self) -> Option<mpsc::Receiver<SchedulerLifecycleEvent>> {
         match self {
             Self::Vllm(scheduler) => scheduler.take_lifecycle_receiver(),
@@ -422,6 +429,23 @@ impl SchedulerHandle for EngineScheduler {
 pub struct SchedulerCommandEnvelope {
     pub command: SchedulerCommand,
     pub reply: oneshot::Sender<anyhow::Result<SchedulerCommandEffects>>,
+}
+
+pub struct SchedulerCancellationEnvelope {
+    pub request_id: Uuid,
+    pub discard_pending_output: bool,
+    pub reply: oneshot::Sender<anyhow::Result<SchedulerCommandEffects>>,
+}
+
+impl From<SchedulerCancellationEnvelope> for SchedulerCommandEnvelope {
+    fn from(cancellation: SchedulerCancellationEnvelope) -> Self {
+        Self {
+            command: SchedulerCommand::CancelRequest {
+                request_id: cancellation.request_id,
+            },
+            reply: cancellation.reply,
+        }
+    }
 }
 
 /// Engine-agnostic scheduler interface.
@@ -440,6 +464,9 @@ pub trait SchedulerHandle: Send + Sync {
 
     /// Bounded lifecycle-control channel for disaggregated handoff sessions.
     fn command_sender(&self) -> mpsc::Sender<SchedulerCommandEnvelope>;
+
+    /// Bounded cancellation channel observed even while a modeled pass is running.
+    fn cancellation_sender(&self) -> mpsc::Sender<SchedulerCancellationEnvelope>;
 
     /// Take the single lifecycle-event stream owned by this DP-rank scheduler.
     fn take_lifecycle_receiver(&mut self) -> Option<mpsc::Receiver<SchedulerLifecycleEvent>>;
@@ -562,6 +589,62 @@ mod tests {
         match core {
             EngineCore::Vllm(core) => core.destination_reservation_attempts(),
             EngineCore::Sglang(core) => core.destination_reservation_attempts(),
+        }
+    }
+
+    fn request_residency(core: &EngineCore, request_id: Uuid) -> Option<RequestResidency> {
+        match core {
+            EngineCore::Vllm(core) => core.request_residency(request_id),
+            EngineCore::Sglang(core) => core.request_residency(request_id),
+        }
+    }
+
+    #[test]
+    fn request_cancellation_removes_waiting_and_running_requests_for_each_engine() {
+        for (case, engine_type) in [EngineType::Vllm, EngineType::Sglang]
+            .into_iter()
+            .enumerate()
+        {
+            let mut core = core(engine_type, WorkerType::Aggregated, 16);
+            let waiting_id = Uuid::from_u128(20_000 + case as u128);
+            core.receive(request(waiting_id, (0..4).collect()));
+            assert_eq!(
+                request_residency(&core, waiting_id),
+                Some(RequestResidency::Waiting)
+            );
+            assert_eq!(
+                core.apply_command(SchedulerCommand::CancelRequest {
+                    request_id: waiting_id,
+                })
+                .unwrap(),
+                SchedulerCommandResult::Applied
+            );
+            assert_eq!(
+                core.apply_command(SchedulerCommand::CancelRequest {
+                    request_id: waiting_id,
+                })
+                .unwrap(),
+                SchedulerCommandResult::Noop
+            );
+
+            let running_id = Uuid::from_u128(20_100 + case as u128);
+            let mut running_request = request(running_id, (100..108).collect());
+            running_request.max_output_tokens = 32;
+            core.receive(running_request);
+            core.execute_hidden_pass(0.0);
+            assert_eq!(
+                request_residency(&core, running_id),
+                Some(RequestResidency::Running)
+            );
+            assert_eq!(
+                core.apply_command(SchedulerCommand::CancelRequest {
+                    request_id: running_id,
+                })
+                .unwrap(),
+                SchedulerCommandResult::Applied
+            );
+            assert_eq!(request_residency(&core, running_id), None);
+            assert_eq!(core.num_requests(), 0);
         }
     }
 
