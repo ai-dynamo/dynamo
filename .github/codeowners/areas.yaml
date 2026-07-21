@@ -85,6 +85,7 @@ areas:
   - components/src/dynamo/trtllm/utils/
   - components/src/dynamo/trtllm/workers/
   - examples/backends/trtllm/
+  - lib/sidecar/trtllm/
 - label: backend-sglang
   github_team: '@ai-dynamo/dynamo-backend-sglang-codeowners'
   path_globs:

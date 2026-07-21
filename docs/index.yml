@@ -423,6 +423,8 @@ navigation:
                 path: components/frontend/frontend-guide.md
               - page: Configuration Reference
                 path: components/frontend/configuration.md
+              - page: Python Route Extensions
+                path: components/frontend/python-route-extensions.md
               - page: Tokenizer
                 path: components/frontend/Tokenizer.md
           - section: Router
