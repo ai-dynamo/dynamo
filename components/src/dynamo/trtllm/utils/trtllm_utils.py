@@ -7,6 +7,8 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
+from dynamo.trtllm.constants import DisaggregationMode
+
 
 def deep_update(target: dict[str, Any], source: Mapping[str, Any]) -> None:
     """Recursively update nested dictionaries.
@@ -77,3 +79,35 @@ def get_spec_decode_runtime_data(engine_args: Any) -> dict[str, Any] | None:
     if method:
         data["method"] = str(method)
     return data
+
+
+def per_dp_rank_max_num_seqs(engine: Any, data_parallel_size: int) -> int | None:
+    """Return TRT-LLM's post-initialization request capacity per attention-DP rank."""
+    if (
+        getattr(engine, "disaggregation_mode", None) == DisaggregationMode.ENCODE
+        and not engine.encoder_available
+    ):
+        return None
+
+    value = engine.llm.args.max_batch_size
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        return None
+    if (
+        not isinstance(data_parallel_size, int)
+        or isinstance(data_parallel_size, bool)
+        or data_parallel_size <= 0
+    ):
+        return None
+
+    per_rank = value // data_parallel_size
+    if per_rank <= 0:
+        return None
+    if value % data_parallel_size:
+        logging.warning(
+            "TRT-LLM max_batch_size=%d is not divisible by attention DP size=%d; "
+            "advertising conservative per-rank max_num_seqs=%d",
+            value,
+            data_parallel_size,
+            per_rank,
+        )
+    return per_rank

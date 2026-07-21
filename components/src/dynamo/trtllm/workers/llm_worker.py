@@ -65,7 +65,11 @@ from dynamo.trtllm.request_handlers.handlers import (
     RequestHandlerConfig,
     RequestHandlerFactory,
 )
-from dynamo.trtllm.utils.trtllm_utils import deep_update, get_spec_decode_runtime_data
+from dynamo.trtllm.utils.trtllm_utils import (
+    deep_update,
+    get_spec_decode_runtime_data,
+    per_dp_rank_max_num_seqs,
+)
 
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 100_000
@@ -537,18 +541,27 @@ async def init_llm_worker(
         runtime_config.kv_state_endpoint = config.kv_state_endpoint
         runtime_config.context_length = config.max_seq_len
 
-        # Set values from config that are available immediately
-        # Note: We populate max_num_seqs and max_num_batched_tokens from config
+        # Set values that are available immediately
+        # Note: We populate max_num_seqs and max_num_batched_tokens
         # to ensure Prometheus metrics are available even without engine stats
 
         # Naming clarification:
-        # - In vLLM: max_num_seqs = maximum concurrent requests (this is an unusual name due to vLLM's historic reasons)
-        # - In TensorRT-LLM: max_batch_size = maximum concurrent requests (clearer name)
+        # - In vLLM: max_num_seqs = maximum concurrent requests per DP rank (this is an unusual name due to vLLM's historic reasons)
+        # - In TensorRT-LLM: max_batch_size = maximum concurrent requests across all DP ranks (clearer name)
         # Both parameters control the same thing: how many requests can be processed simultaneously
 
-        # Need to get max_num_seqs and max_num_batched_tokens from engine_args
+        # Need to get max_num_seqs from the initialized engine and max_num_batched_tokens from engine_args
         # because they can be overridden by --extra-engine-args or --override-engine-args
-        runtime_config.max_num_seqs = engine_args["max_batch_size"]
+
+        # Set data_parallel_size for attention DP mode
+        # This enables the router's scheduler to correctly iterate over all dp_ranks
+        # Need to name ADP as `data_parallel_size` for parity with other frameworks
+        attention_dp_size = engine.get_attention_dp_size()
+        max_num_seqs = per_dp_rank_max_num_seqs(engine, attention_dp_size)
+        if max_num_seqs is not None:
+            runtime_config.max_num_seqs = max_num_seqs
+        runtime_config.data_parallel_size = attention_dp_size
+
         runtime_config.max_num_batched_tokens = engine_args["max_num_tokens"]
         runtime_config.reasoning_parser = config.dyn_reasoning_parser
         runtime_config.tool_call_parser = config.dyn_tool_call_parser
@@ -565,11 +578,6 @@ async def init_llm_worker(
             config.enable_local_indexer
             and config.disaggregation_mode != DisaggregationMode.DECODE
         )
-        # Set data_parallel_size for attention DP mode
-        # This enables the router's scheduler to correctly iterate over all dp_ranks
-        # Need to name ADP as `data_parallel_size` for parity with other frameworks
-        attention_dp_size = engine.get_attention_dp_size()
-        runtime_config.data_parallel_size = attention_dp_size
 
         # Set topology and KV transfer policy for topology-aware routing
         apply_topology_config(runtime_config)
