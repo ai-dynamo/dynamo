@@ -64,13 +64,14 @@ where
         let request_id = request
             .request_id()
             .ok_or_else(|| anyhow!("round-robin placement requires a request UUID"))?;
-        let active = self.workers.keys().copied().collect::<Vec<_>>();
-        let scheduler_id = self.counter.next(&active, |worker_id, rank| {
-            self.workers
-                .get(&worker_id)
-                .and_then(|ranks| ranks.get(rank as usize))
-                .copied()
-        });
+        let scheduler_id = self
+            .counter
+            .next(self.workers.keys().copied(), |worker_id, rank| {
+                self.workers
+                    .get(&worker_id)
+                    .and_then(|ranks| ranks.get(rank as usize))
+                    .copied()
+            });
         Ok(PlacementEffects {
             decision: PlacementDecision::Immediate(Placement {
                 request_id,
@@ -166,13 +167,14 @@ where
         let request_id = request
             .request_id()
             .ok_or_else(|| anyhow!("round-robin placement requires a request UUID"))?;
-        let active = self
+        let active_count = self.workers.values().map(Vec::len).sum::<usize>();
+        let index = self.next % active_count;
+        let scheduler_id = self
             .workers
             .values()
             .flat_map(|ranks| ranks.iter().copied())
-            .collect::<Vec<_>>();
-        let index = self.next % active.len();
-        let scheduler_id = active[index];
+            .nth(index)
+            .expect("active round-robin pool must contain a scheduler");
         self.next = index + 1;
         Ok(PlacementEffects {
             decision: PlacementDecision::Immediate(Placement {
@@ -236,16 +238,18 @@ impl AggregatedRoundRobin {
 
     pub(in crate::replay::offline) fn next(
         &mut self,
-        active_workers: &[usize],
+        mut active_workers: impl ExactSizeIterator<Item = usize>,
         rank_id: impl FnOnce(usize, u32) -> Option<usize>,
     ) -> usize {
         debug_assert!(
-            !active_workers.is_empty(),
+            active_workers.len() > 0,
             "no active workers for round-robin"
         );
         let index = self.next_worker % active_workers.len();
         self.next_worker = index + 1;
-        let worker_id = active_workers[index];
+        let worker_id = active_workers
+            .nth(index)
+            .expect("active round-robin worker must exist at the selected index");
         let next_rank = self.next_rank_by_worker.entry(worker_id).or_default();
         let rank = *next_rank % self.dp_size;
         *next_rank = rank + 1;
