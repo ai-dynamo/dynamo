@@ -811,7 +811,7 @@ class TestDecodeWorkerMultimodalBranching:
             return_value=None
         )
         handler._build_prompt_from_request = MagicMock(
-            return_value=(None, None, {"status": "error", "message": "test stop"})
+            return_value=(None, {"status": "error", "message": "test stop"})
         )
 
         request = {
@@ -838,7 +838,7 @@ class TestDecodeWorkerMultimodalBranching:
         """Text-only bypass does not require incoming prefill KV params."""
         handler = _make_decode_handler(disaggregation_mode="DECODE")
         handler._build_prompt_from_request = MagicMock(
-            return_value=(None, None, {"status": "error", "message": "stop"})
+            return_value=(None, {"status": "error", "message": "stop"})
         )
 
         request = {
