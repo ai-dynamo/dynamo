@@ -85,35 +85,29 @@ pub trait EndpointPicker: Send + Sync + 'static {
     /// Mirrors Go EPP's PostResponse → MarkPrefillComplete.
     async fn on_prefill_complete(&self, _request_id: &str) {}
 
-    /// Called when a request's response is fully complete (end-of-stream on
-    /// response body or trailers received). Allows the picker to free
-    /// bookkeeping state. Mirrors Go EPP's PostResponse → FreeRequest.
-    ///
-    /// `usage` carries token-usage stats parsed from the terminal response
-    /// payload when available (`None` when the response carried no `usage`
-    /// block, e.g. a streamed response without `stream_options.include_usage`).
-    /// Pickers can use it — most importantly `cached_tokens` — to calibrate
-    /// routing predictions against observed cache hits.
-    async fn on_request_complete(&self, _request_id: &str, _usage: Option<ResponseUsage>) {}
+    /// Called when a request's response is fully complete. Prefer
+    /// [`Self::on_request_complete_with_usage`] when usage is needed.
+    /// Mirrors Go EPP's PostResponse → FreeRequest.
+    async fn on_request_complete(&self, _request_id: &str) {}
+
+    /// Like [`Self::on_request_complete`], with optional parsed token usage.
+    /// Defaults to forwarding to [`Self::on_request_complete`].
+    async fn on_request_complete_with_usage(
+        &self,
+        request_id: &str,
+        _usage: Option<ResponseUsage>,
+    ) {
+        self.on_request_complete(request_id).await;
+    }
 }
 
-/// Token-usage statistics parsed from the terminal response payload.
-///
-/// Surfaced to pickers via [`EndpointPicker::on_request_complete`] so routing
-/// decisions can be calibrated against ground truth — most importantly
-/// `cached_tokens` (prompt tokens served from the KV cache), which can be
-/// compared against the prefix overlap the router predicted at selection time.
-/// All fields are optional because a given backend/response may omit them.
+/// Token usage from the terminal response (`None` fields may be omitted).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResponseUsage {
-    /// `usage.prompt_tokens`
     pub prompt_tokens: Option<u64>,
-    /// `usage.completion_tokens`
     pub completion_tokens: Option<u64>,
-    /// `usage.total_tokens`
     pub total_tokens: Option<u64>,
-    /// `usage.prompt_tokens_details.cached_tokens` — prompt tokens served from
-    /// the KV cache (a prefix-cache hit).
+    /// `usage.prompt_tokens_details.cached_tokens`
     pub cached_tokens: Option<u64>,
 }
 

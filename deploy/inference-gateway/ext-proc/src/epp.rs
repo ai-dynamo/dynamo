@@ -1094,13 +1094,10 @@ impl EndpointPicker for Router {
         }
     }
 
-    async fn on_request_complete(&self, request_id: &str, usage: Option<ResponseUsage>) {
+    async fn on_request_complete_with_usage(&self, request_id: &str, usage: Option<ResponseUsage>) {
         if request_id.is_empty() {
             return;
         }
-        // Surface observed token usage (notably `cached_tokens`) for calibration.
-        // The stock Router only logs it; a decorating picker can consume it to
-        // compare predicted prefix overlap against the actual cache hit.
         if let Some(usage) = usage {
             tracing::debug!(
                 request_id,

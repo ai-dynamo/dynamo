@@ -70,10 +70,11 @@ struct RequestContext {
     resp_body_resp: Vec<ProcessingResponse>,
     resp_trailer_resp: Option<ProcessingResponse>,
 
-    /// Token usage parsed from the response payload, surfaced to the picker on
-    /// completion. For streaming responses this holds the most recent `usage`
-    /// block seen (the final chunk when `include_usage` is set).
+    /// Parsed response `usage`, passed to the picker on completion.
     parsed_usage: Option<ResponseUsage>,
+
+    /// Incomplete trailing SSE bytes awaiting the next chunk / EOS.
+    sse_usage_buf: Vec<u8>,
 }
 
 impl RequestContext {
@@ -101,6 +102,7 @@ impl RequestContext {
             resp_body_resp: Vec::new(),
             resp_trailer_resp: None,
             parsed_usage: None,
+            sse_usage_buf: Vec::new(),
         }
     }
 
@@ -370,12 +372,8 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         ctx.response_size += chunk.len();
 
         if ctx.model_server_streaming {
-            // Scan each streamed chunk for a `usage` block; the final chunk
-            // carries it when the client set `stream_options.include_usage`.
-            // Later chunks overwrite earlier ones so we keep the last seen.
-            if let Some(usage) = parse_streaming_usage(chunk) {
-                ctx.parsed_usage = Some(usage);
-            }
+            // Reassemble SSE across Envoy chunk boundaries before parsing usage.
+            ingest_streaming_usage(ctx, chunk, end_of_stream);
             if end_of_stream {
                 ctx.response_complete = true;
             }
@@ -403,8 +401,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
     }
 }
 
-/// Extract a [`ResponseUsage`] from a JSON object's `usage` field. Returns
-/// `None` when there is no (non-null) `usage` object.
+/// Extract [`ResponseUsage`] from a JSON `usage` object.
 fn usage_from_json(value: &serde_json::Value) -> Option<ResponseUsage> {
     let usage = value.get("usage")?;
     if usage.is_null() {
@@ -428,16 +425,60 @@ fn usage_from_json(value: &serde_json::Value) -> Option<ResponseUsage> {
     })
 }
 
-/// Parse `usage` from a fully buffered (non-streaming) JSON response body.
+/// Parse `usage` from a buffered non-streaming JSON body.
 fn parse_unary_usage(body: &[u8]) -> Option<ResponseUsage> {
     let value: serde_json::Value = serde_json::from_slice(body).ok()?;
     usage_from_json(&value)
 }
 
-/// Parse `usage` from a streamed (SSE) chunk. Scans `data:` lines and returns
-/// the usage from the last event that carries one. `data: [DONE]` and
-/// non-JSON lines are ignored.
+/// Buffer SSE bytes across chunks; parse complete lines, keep the incomplete suffix.
+fn ingest_streaming_usage(ctx: &mut RequestContext, chunk: &[u8], end_of_stream: bool) {
+    if end_of_stream {
+        if ctx.sse_usage_buf.is_empty() {
+            update_streaming_usage(ctx, chunk);
+        } else {
+            ctx.sse_usage_buf.extend_from_slice(chunk);
+            if let Some(usage) = parse_streaming_usage(&ctx.sse_usage_buf) {
+                ctx.parsed_usage = Some(usage);
+            }
+            ctx.sse_usage_buf.clear();
+        }
+        return;
+    }
+
+    let Some(complete_len) = chunk.iter().rposition(|&b| b == b'\n').map(|i| i + 1) else {
+        ctx.sse_usage_buf.extend_from_slice(chunk);
+        return;
+    };
+
+    if ctx.sse_usage_buf.is_empty() {
+        update_streaming_usage(ctx, &chunk[..complete_len]);
+    } else {
+        ctx.sse_usage_buf.extend_from_slice(&chunk[..complete_len]);
+        if let Some(usage) = parse_streaming_usage(&ctx.sse_usage_buf) {
+            ctx.parsed_usage = Some(usage);
+        }
+        ctx.sse_usage_buf.clear();
+    }
+    ctx.sse_usage_buf.extend_from_slice(&chunk[complete_len..]);
+}
+
+fn update_streaming_usage(ctx: &mut RequestContext, complete: &[u8]) {
+    if let Some(usage) = parse_streaming_usage(complete) {
+        ctx.parsed_usage = Some(usage);
+    }
+}
+
+/// Parse `usage` from complete SSE `data:` lines (last wins).
 fn parse_streaming_usage(chunk: &[u8]) -> Option<ResponseUsage> {
+    // Skip JSON work unless the terminal `"usage"` field is present.
+    const USAGE_FIELD: &str = "\"usage\"";
+    if !chunk
+        .windows(USAGE_FIELD.len())
+        .any(|window| window == USAGE_FIELD.as_bytes())
+    {
+        return None;
+    }
     let text = std::str::from_utf8(chunk).ok()?;
     let mut latest = None;
     for line in text.lines() {
@@ -446,7 +487,7 @@ fn parse_streaming_usage(chunk: &[u8]) -> Option<ResponseUsage> {
             continue;
         };
         let payload = payload.trim();
-        if payload.is_empty() || payload == "[DONE]" {
+        if payload.is_empty() || payload == "[DONE]" || !payload.contains(USAGE_FIELD) {
             continue;
         }
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(payload)
@@ -628,7 +669,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
             // bookkeeping state (mirrors Go EPP PostResponse).
             if ctx.body_routed && !ctx.request_id.is_empty() {
                 picker
-                    .on_request_complete(&ctx.request_id, ctx.parsed_usage.take())
+                    .on_request_complete_with_usage(&ctx.request_id, ctx.parsed_usage.take())
                     .await;
             }
         });
@@ -863,8 +904,6 @@ mod tests {
 
     #[test]
     fn parse_streaming_usage_returns_last_event_with_usage() {
-        // Mirrors an SSE stream with `stream_options.include_usage`: the final
-        // data event carries usage; `[DONE]` and usage-less events are ignored.
         let chunk = concat!(
             "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
             "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":2,\"total_tokens\":10,\"prompt_tokens_details\":{\"cached_tokens\":4}}}\n\n",
@@ -879,6 +918,59 @@ mod tests {
     fn parse_streaming_usage_none_without_usage_event() {
         let chunk = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
         assert!(parse_streaming_usage(chunk.as_bytes()).is_none());
+    }
+
+    #[test]
+    fn ingest_streaming_usage_does_not_buffer_complete_chunks() {
+        let mut ctx = RequestContext::new();
+        let chunk = b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n";
+
+        ingest_streaming_usage(&mut ctx, chunk, false);
+
+        assert!(ctx.sse_usage_buf.is_empty());
+        assert!(ctx.parsed_usage.is_none());
+    }
+
+    #[test]
+    fn ingest_streaming_usage_survives_split_data_event() {
+        let mut ctx = RequestContext::new();
+        let part1 = br#"data: {"choices":[],"usage":{"prompt_tokens":8,"completion_tokens":2,"total_tokens":10,"prompt_tokens_details":{"cached_tokens":"#;
+        let part2 = br#"4}}}"#;
+        let part3 = b"\n\ndata: [DONE]\n\n";
+
+        ingest_streaming_usage(&mut ctx, part1, false);
+        assert!(ctx.parsed_usage.is_none());
+        assert!(!ctx.sse_usage_buf.is_empty());
+
+        ingest_streaming_usage(&mut ctx, part2, false);
+        assert!(ctx.parsed_usage.is_none());
+        assert!(!ctx.sse_usage_buf.is_empty());
+
+        ingest_streaming_usage(&mut ctx, part3, true);
+        let usage = ctx.parsed_usage.expect("usage across split chunks");
+        assert_eq!(usage.total_tokens, Some(10));
+        assert_eq!(usage.cached_tokens, Some(4));
+        assert!(ctx.sse_usage_buf.is_empty());
+    }
+
+    #[test]
+    fn ingest_streaming_usage_keeps_incomplete_suffix_only() {
+        let mut ctx = RequestContext::new();
+        let chunk = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":1"
+        );
+        ingest_streaming_usage(&mut ctx, chunk.as_bytes(), false);
+        assert!(ctx.parsed_usage.is_none());
+        assert_eq!(
+            std::str::from_utf8(&ctx.sse_usage_buf).unwrap(),
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":1"
+        );
+
+        ingest_streaming_usage(&mut ctx, b"}}}\n\n", true);
+        let usage = ctx.parsed_usage.expect("usage after completing suffix");
+        assert_eq!(usage.cached_tokens, Some(1));
+        assert!(ctx.sse_usage_buf.is_empty());
     }
 
     struct Tracker {
@@ -926,7 +1018,7 @@ mod tests {
         async fn on_prefill_complete(&self, _: &str) {
             self.prefill_complete.fetch_add(1, Ordering::SeqCst);
         }
-        async fn on_request_complete(&self, _: &str, _usage: Option<ResponseUsage>) {
+        async fn on_request_complete(&self, _: &str) {
             self.free.fetch_add(1, Ordering::SeqCst);
         }
     }
