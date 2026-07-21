@@ -35,6 +35,7 @@ use std::sync::Arc;
 #[cfg(feature = "kvbm-offload")]
 use std::sync::Mutex;
 
+use anyhow::{bail, ensure};
 use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash, StorageTier,
@@ -230,7 +231,67 @@ struct RegisteredBlockInfo {
     #[cfg_attr(not(feature = "kvbm-offload"), allow(dead_code))]
     local_hash: Option<BlockHash>,
     #[cfg_attr(not(feature = "kvbm-offload"), allow(dead_code))]
-    token_ids: Option<Vec<u32>>,
+    /// Immutable token payload shared with retained replay checkpoints. The
+    /// ownership/lifecycle metadata is copied per checkpoint, while cloning
+    /// this potentially large block payload is O(1).
+    token_ids: Option<Arc<[u32]>>,
+}
+
+/// Value-only memento for a quiescent vLLM prefix cache.
+///
+/// This deliberately records block identity and lineage metadata rather than
+/// cloning [`BlockManager`] or its RAII handles. Restoring creates a fresh
+/// physical block pool and re-registers each cached block into it. The first
+/// Rush Hour checkpoint spike only calls this after every request-owned block
+/// has been released, so there are no active mutable/immutable handles to
+/// preserve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct KvManagerQuiescentCheckpoint {
+    max_capacity: usize,
+    block_size: usize,
+    dp_rank: u32,
+    next_event_id: u64,
+    capacity_generation: u64,
+    next_inactive_tick: u64,
+    registered_blocks: Vec<RegisteredBlockCheckpoint>,
+}
+
+impl KvManagerQuiescentCheckpoint {
+    pub(crate) fn footprint(&self) -> (usize, usize, usize) {
+        (
+            self.block_size,
+            self.registered_blocks.len(),
+            self.max_capacity,
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+struct RegisteredBlockCheckpoint {
+    source_physical_block_id: usize,
+    plh: PositionalLineageHash,
+    seq_hash: SequenceHash,
+    parent_hash: Option<SequenceHash>,
+    local_hash: Option<BlockHash>,
+    token_ids: Option<Arc<[u32]>>,
+    inactive_tick: Option<u64>,
+}
+
+/// Value-only replay memento for active and inactive G1 ownership.
+/// Physical block handles are rebuilt in a fresh manager on restore.
+#[derive(Debug, Clone)]
+pub(crate) struct KvManagerReplayCheckpoint {
+    max_capacity: usize,
+    block_size: usize,
+    dp_rank: u32,
+    next_event_id: u64,
+    capacity_generation: u64,
+    next_inactive_tick: u64,
+    registered_blocks: Vec<RegisteredBlockCheckpoint>,
+    active_full: Vec<(SequenceHash, usize)>,
+    active_partial: Vec<Uuid>,
 }
 
 struct FullBlockMetadata {
@@ -300,6 +361,12 @@ pub struct KvManager {
     /// id is kept so offload simulation can enqueue the actual block shape when
     /// kvbm-logical later evicts it from the inactive pool.
     registered_blocks: FxHashMap<PositionalLineageHash, RegisteredBlockInfo>,
+
+    /// Logical insertion order of blocks currently in the inactive eviction
+    /// index. This lets replay restore the same lineage leaf ordering without
+    /// retaining physical handles from the source timeline.
+    inactive_ticks: FxHashMap<SequenceHash, u64>,
+    next_inactive_tick: u64,
 
     /// Handle to the G1↔G2 offload engine. `None` until
     /// [`attach_new_offload_engine`](Self::attach_new_offload_engine) wires
@@ -390,15 +457,340 @@ impl KvManager {
             active_partial: FxHashMap::default(),
             active_full: FxHashMap::default(),
             registered_blocks: FxHashMap::default(),
+            inactive_ticks: FxHashMap::default(),
+            next_inactive_tick: 0,
             #[cfg(feature = "kvbm-offload")]
             offload_engine: None,
             capacity_generation: 0,
         }
     }
 
+    /// Capture a deep, value-only snapshot of an idle G1 prefix cache.
+    ///
+    /// Active request ownership is intentionally rejected. Copying
+    /// `ImmutableBlock`/`MutableBlock` guards would keep the original block
+    /// store alive and make the restored timeline share KV lifecycle state
+    /// with its source. Busy-runtime checkpoints therefore need explicit
+    /// request/block-table mementos before this restriction can be lifted.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn checkpoint_quiescent(&self) -> anyhow::Result<KvManagerQuiescentCheckpoint> {
+        ensure!(
+            self.active_partial.is_empty() && self.active_full.is_empty(),
+            "quiescent KV checkpoint requires no request-owned blocks"
+        );
+        ensure!(
+            self.block_manager.available_blocks() == self.max_capacity,
+            "quiescent KV checkpoint requires every physical block to be available"
+        );
+        ensure!(
+            self.registered_blocks.len() == self.num_inactive_blocks(),
+            "quiescent KV checkpoint requires shadow metadata for every cached block"
+        );
+        #[cfg(feature = "kvbm-offload")]
+        ensure!(
+            self.offload_engine.is_none(),
+            "quiescent KV checkpoint does not yet support kvbm-offload"
+        );
+
+        let mut registered_blocks = self
+            .registered_blocks
+            .iter()
+            .map(|(plh, info)| RegisteredBlockCheckpoint {
+                source_physical_block_id: info.block_id,
+                plh: *plh,
+                seq_hash: info.seq_hash,
+                parent_hash: info.parent_hash,
+                local_hash: info.local_hash,
+                token_ids: info.token_ids.clone(),
+                inactive_tick: self.inactive_ticks.get(&info.seq_hash).copied(),
+            })
+            .collect::<Vec<_>>();
+        // This gives restore a deterministic traversal, but physical slot IDs
+        // do not reconstruct historical registration or eviction-policy order
+        // after slots have been reused. The containing replay checkpoint
+        // therefore proves that its fixed pending suffix cannot evict.
+        anyhow::ensure!(
+            registered_blocks
+                .iter()
+                .all(|block| block.inactive_tick.is_some()),
+            "quiescent KV checkpoint requires every registered block to be inactive"
+        );
+        registered_blocks.sort_unstable_by_key(|block| block.inactive_tick);
+
+        Ok(KvManagerQuiescentCheckpoint {
+            max_capacity: self.max_capacity,
+            block_size: self.block_size,
+            dp_rank: self.dp_rank,
+            next_event_id: self.next_event_id,
+            capacity_generation: self.capacity_generation,
+            next_inactive_tick: self.next_inactive_tick,
+            registered_blocks,
+        })
+    }
+
+    /// Capture active request ownership and inactive eviction ordering without
+    /// cloning any RAII block handle.
+    pub(crate) fn checkpoint_replay(&self) -> anyhow::Result<KvManagerReplayCheckpoint> {
+        #[cfg(feature = "kvbm-offload")]
+        ensure!(
+            self.offload_engine.is_none(),
+            "interactive KV checkpoint does not support kvbm-offload"
+        );
+        ensure!(
+            self.registered_blocks.len() == self.active_full.len() + self.inactive_ticks.len(),
+            "interactive KV checkpoint shadow ownership is incomplete"
+        );
+        ensure!(
+            self.block_manager.available_blocks()
+                == self
+                    .max_capacity
+                    .saturating_sub(self.active_full.len() + self.active_partial.len()),
+            "interactive KV checkpoint physical ownership does not match active maps"
+        );
+
+        let mut registered_blocks = self
+            .registered_blocks
+            .iter()
+            .map(|(plh, info)| RegisteredBlockCheckpoint {
+                source_physical_block_id: info.block_id,
+                plh: *plh,
+                seq_hash: info.seq_hash,
+                parent_hash: info.parent_hash,
+                local_hash: info.local_hash,
+                token_ids: info.token_ids.clone(),
+                inactive_tick: self.inactive_ticks.get(&info.seq_hash).copied(),
+            })
+            .collect::<Vec<_>>();
+        registered_blocks.sort_unstable_by_key(|block| block.source_physical_block_id);
+
+        let mut active_full = self
+            .active_full
+            .iter()
+            .map(|(seq_hash, active)| (*seq_hash, active.logical_refs))
+            .collect::<Vec<_>>();
+        active_full.sort_unstable_by_key(|(seq_hash, _)| *seq_hash);
+        let mut active_partial = self.active_partial.keys().copied().collect::<Vec<_>>();
+        active_partial.sort_unstable();
+
+        Ok(KvManagerReplayCheckpoint {
+            max_capacity: self.max_capacity,
+            block_size: self.block_size,
+            dp_rank: self.dp_rank,
+            next_event_id: self.next_event_id,
+            capacity_generation: self.capacity_generation,
+            next_inactive_tick: self.next_inactive_tick,
+            registered_blocks,
+            active_full,
+            active_partial,
+        })
+    }
+
+    /// Restore a quiescent prefix-cache memento into a newly constructed,
+    /// empty manager. Physical handles are recreated; none are shared with the
+    /// source timeline.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn restore_quiescent(
+        &mut self,
+        checkpoint: KvManagerQuiescentCheckpoint,
+    ) -> anyhow::Result<()> {
+        ensure!(
+            self.max_capacity == checkpoint.max_capacity
+                && self.block_size == checkpoint.block_size
+                && self.dp_rank == checkpoint.dp_rank,
+            "KV checkpoint configuration does not match the destination manager"
+        );
+        ensure!(
+            self.active_partial.is_empty()
+                && self.active_full.is_empty()
+                && self.registered_blocks.is_empty()
+                && self.inactive_ticks.is_empty()
+                && self.block_manager.available_blocks() == self.max_capacity,
+            "KV checkpoint destination must be freshly constructed"
+        );
+        #[cfg(feature = "kvbm-offload")]
+        ensure!(
+            self.offload_engine.is_none(),
+            "quiescent KV checkpoint does not yet support kvbm-offload"
+        );
+
+        let block_count = checkpoint.registered_blocks.len();
+        let slots = self
+            .block_manager
+            .allocate_blocks(block_count)
+            .ok_or_else(|| anyhow::anyhow!("KV checkpoint contains more blocks than capacity"))?;
+        if slots.len() != block_count {
+            bail!(
+                "KV checkpoint restore allocated {} of {block_count} blocks",
+                slots.len()
+            );
+        }
+
+        for (slot, saved) in slots.into_iter().zip(checkpoint.registered_blocks) {
+            let complete = slot
+                .stage(saved.plh, self.block_size)
+                .map_err(|_| anyhow::anyhow!("KV checkpoint block size mismatch"))?;
+            let immutable = self.block_manager.register_block(complete);
+            let block_id = immutable.block_id();
+            // A quiescent cache has no logical request owner. Dropping the
+            // only handle moves the block into the inactive cache.
+            drop(immutable);
+            let inactive_tick = saved
+                .inactive_tick
+                .expect("quiescent checkpoint block must have an inactive tick");
+            self.inactive_ticks.insert(saved.seq_hash, inactive_tick);
+            let previous = self.registered_blocks.insert(
+                saved.plh,
+                RegisteredBlockInfo {
+                    seq_hash: saved.seq_hash,
+                    block_id,
+                    parent_hash: saved.parent_hash,
+                    local_hash: saved.local_hash,
+                    token_ids: saved.token_ids,
+                },
+            );
+            ensure!(
+                previous.is_none(),
+                "KV checkpoint contains duplicate positional lineage hashes"
+            );
+        }
+
+        self.next_event_id = checkpoint.next_event_id;
+        self.capacity_generation = checkpoint.capacity_generation;
+        self.next_inactive_tick = checkpoint.next_inactive_tick;
+        Ok(())
+    }
+
+    /// Restore active and inactive replay ownership into a fresh manager.
+    pub(crate) fn restore_replay(
+        &mut self,
+        checkpoint: KvManagerReplayCheckpoint,
+    ) -> anyhow::Result<()> {
+        ensure!(
+            self.max_capacity == checkpoint.max_capacity
+                && self.block_size == checkpoint.block_size
+                && self.dp_rank == checkpoint.dp_rank,
+            "interactive KV checkpoint configuration does not match destination manager"
+        );
+        ensure!(
+            self.active_partial.is_empty()
+                && self.active_full.is_empty()
+                && self.registered_blocks.is_empty()
+                && self.inactive_ticks.is_empty()
+                && self.block_manager.available_blocks() == self.max_capacity,
+            "interactive KV checkpoint destination must be freshly constructed"
+        );
+        #[cfg(feature = "kvbm-offload")]
+        ensure!(
+            self.offload_engine.is_none(),
+            "interactive KV checkpoint does not support kvbm-offload"
+        );
+
+        let full_count = checkpoint.registered_blocks.len();
+        let partial_count = checkpoint.active_partial.len();
+        ensure!(
+            full_count.saturating_add(partial_count) <= self.max_capacity,
+            "interactive KV checkpoint owns more blocks than destination capacity"
+        );
+        // Reserve every physically active slot before registering/dropping
+        // inactive full blocks. Allocating partials afterward could otherwise
+        // evict the just-restored inactive cache behind our shadow metadata.
+        let mut slots = self
+            .block_manager
+            .allocate_blocks(full_count + partial_count)
+            .ok_or_else(|| anyhow::anyhow!("interactive KV checkpoint blocks exceed capacity"))?;
+        let partial_slots = slots.split_off(full_count);
+        let mut active_refs = checkpoint
+            .active_full
+            .into_iter()
+            .collect::<FxHashMap<_, _>>();
+        let mut inactive = Vec::new();
+
+        for (slot, saved) in slots.into_iter().zip(checkpoint.registered_blocks) {
+            let complete = slot
+                .stage(saved.plh, self.block_size)
+                .map_err(|_| anyhow::anyhow!("interactive KV checkpoint block size mismatch"))?;
+            let immutable = self.block_manager.register_block(complete);
+            let block_id = immutable.block_id();
+            let previous = self.registered_blocks.insert(
+                saved.plh,
+                RegisteredBlockInfo {
+                    seq_hash: saved.seq_hash,
+                    block_id,
+                    parent_hash: saved.parent_hash,
+                    local_hash: saved.local_hash,
+                    token_ids: saved.token_ids,
+                },
+            );
+            ensure!(
+                previous.is_none(),
+                "interactive KV checkpoint contains duplicate positional lineage hashes"
+            );
+
+            if let Some(logical_refs) = active_refs.remove(&saved.seq_hash) {
+                ensure!(
+                    logical_refs > 0,
+                    "interactive KV checkpoint active block has zero logical owners"
+                );
+                self.active_full.insert(
+                    saved.seq_hash,
+                    ActiveFullBlock {
+                        handle: immutable,
+                        logical_refs,
+                    },
+                );
+            } else {
+                let inactive_tick = saved.inactive_tick.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "interactive KV checkpoint block is neither active nor inactive"
+                    )
+                })?;
+                inactive.push((inactive_tick, saved.seq_hash, immutable));
+            }
+        }
+        ensure!(
+            active_refs.is_empty(),
+            "interactive KV checkpoint references an unregistered active block"
+        );
+        inactive.sort_unstable_by_key(|(tick, _, _)| *tick);
+        for (tick, seq_hash, handle) in inactive {
+            drop(handle);
+            let previous = self.inactive_ticks.insert(seq_hash, tick);
+            ensure!(
+                previous.is_none(),
+                "interactive KV checkpoint contains duplicate inactive block identity"
+            );
+        }
+
+        for (uuid, slot) in checkpoint.active_partial.into_iter().zip(partial_slots) {
+            ensure!(
+                self.active_partial.insert(uuid, slot).is_none(),
+                "interactive KV checkpoint contains duplicate partial block identity"
+            );
+        }
+
+        self.next_event_id = checkpoint.next_event_id;
+        self.capacity_generation = checkpoint.capacity_generation;
+        self.next_inactive_tick = checkpoint.next_inactive_tick;
+        Ok(())
+    }
+
+    fn mark_active(&mut self, seq_hash: SequenceHash) {
+        self.inactive_ticks.remove(&seq_hash);
+    }
+
+    fn mark_inactive(&mut self, seq_hash: SequenceHash) {
+        let tick = self.next_inactive_tick;
+        self.next_inactive_tick = self
+            .next_inactive_tick
+            .checked_add(1)
+            .expect("inactive KV ordering tick exhausted");
+        self.inactive_ticks.insert(seq_hash, tick);
+    }
+
     /// Install a newly acquired physical handle or merge it into an entry that
     /// became active earlier in the same serial commit.
     fn insert_or_retain_active_full(&mut self, seq_hash: SequenceHash, handle: ImmutableBlock<G1>) {
+        self.mark_active(seq_hash);
         match self.active_full.entry(seq_hash) {
             Entry::Vacant(entry) => {
                 entry.insert(ActiveFullBlock::new(handle));
@@ -438,10 +830,15 @@ impl KvManager {
             entry.get().logical_refs > 0,
             "active full block must retain at least one logical owner"
         );
-        if entry.get().logical_refs == 1 {
+        let became_inactive = if entry.get().logical_refs == 1 {
             entry.remove();
+            true
         } else {
             entry.get_mut().logical_refs -= 1;
+            false
+        };
+        if became_inactive {
+            self.mark_inactive(seq_hash);
         }
     }
 
@@ -637,9 +1034,10 @@ impl KvManager {
                     block_id,
                     parent_hash: metadata_parent_hash,
                     local_hash: entry.local_hash,
-                    token_ids: registry_token_ids,
+                    token_ids: registry_token_ids.map(Arc::from),
                 },
             );
+            self.mark_inactive(entry.seq_hash);
             stored_seq_hashes.push(entry.seq_hash);
             if let Some(local_hash) = entry.local_hash {
                 stored_local_hashes.push(local_hash);
@@ -1138,7 +1536,7 @@ impl KvManager {
                 block_id: canonical_block_id,
                 parent_hash,
                 local_hash,
-                token_ids,
+                token_ids: token_ids.map(Arc::from),
             },
         );
         debug_assert!(previous.is_none());
@@ -1851,7 +2249,8 @@ impl KvManager {
                     let local_hash = signal.local_hashes.get(full_idx).copied();
                     let registry_token_ids = signal
                         .token_ids
-                        .and_then(|token_ids| token_ids.get(full_idx).cloned());
+                        .and_then(|token_ids| token_ids.get(full_idx).cloned())
+                        .map(Arc::from);
                     let previous = self.registered_blocks.insert(
                         plh,
                         RegisteredBlockInfo {
@@ -1946,6 +2345,7 @@ impl KvManager {
             let Some(info) = self.registered_blocks.remove(&plh) else {
                 continue;
             };
+            self.inactive_ticks.remove(&info.seq_hash);
             evicted_seq_hashes.push(info.seq_hash);
             #[cfg(feature = "kvbm-offload")]
             offload_blocks.push(G2OffloadBlock {
@@ -1955,7 +2355,7 @@ impl KvManager {
                     seq_hash: info.seq_hash,
                     parent_hash: info.parent_hash,
                     local_hash: info.local_hash,
-                    token_ids: info.token_ids,
+                    token_ids: info.token_ids.map(|token_ids| token_ids.as_ref().to_vec()),
                 },
             });
         }
@@ -2121,6 +2521,11 @@ impl KvManager {
         self.block_size
     }
 
+    #[cfg(test)]
+    pub(crate) fn debug_block_manager_id(&self) -> kvbm_logical::ManagerId {
+        self.block_manager.id()
+    }
+
     pub fn dp_rank(&self) -> u32 {
         self.dp_rank
     }
@@ -2277,6 +2682,24 @@ mod tests {
         let mut mgr = make_mgr(1, 4);
         mgr.capacity_generation = 1;
         mgr.validate_retry_witness(0, false, 1, 0);
+    }
+
+    #[test]
+    fn replay_checkpoints_share_immutable_registered_token_payloads() {
+        let mut mgr = make_mgr(4, 4);
+        expect_ready(mgr.process(&MoveBlock::Use(
+            vec![UniqueBlock::FullBlock(1)],
+            vec![101],
+            vec![plh(100)],
+            Some(vec![vec![11, 12, 13, 14]]),
+            None,
+        )));
+
+        let first = mgr.checkpoint_replay().unwrap();
+        let second = mgr.checkpoint_replay().unwrap();
+        let first_tokens = first.registered_blocks[0].token_ids.as_ref().unwrap();
+        let second_tokens = second.registered_blocks[0].token_ids.as_ref().unwrap();
+        assert!(Arc::ptr_eq(first_tokens, second_tokens));
     }
 
     #[test]
@@ -2612,7 +3035,10 @@ mod tests {
             assert_eq!(info.seq_hash, seq_hash);
             assert_eq!(info.block_id, mgr.active_full[&seq_hash].handle.block_id());
             assert_eq!(info.local_hash, Some(local_hashes[signal_idx]));
-            assert_eq!(info.token_ids.as_ref(), Some(&token_ids[signal_idx]));
+            assert_eq!(
+                info.token_ids.as_deref(),
+                Some(token_ids[signal_idx].as_slice())
+            );
         }
         assert_eq!(mgr.registered_blocks[&plhs[0]].parent_hash, Some(5));
         assert_eq!(mgr.registered_blocks[&plhs[1]].parent_hash, Some(10));
@@ -2687,14 +3113,14 @@ mod tests {
         assert_eq!(a_info.block_id, mgr.active_full[&10].handle.block_id());
         assert_eq!(a_info.parent_hash, Some(5));
         assert_eq!(a_info.local_hash, Some(local_hashes[0]));
-        assert_eq!(a_info.token_ids.as_ref(), Some(&token_ids[0]));
+        assert_eq!(a_info.token_ids.as_deref(), Some(token_ids[0].as_slice()));
 
         let b_info = &mgr.registered_blocks[&b_plh];
         assert_eq!(b_info.seq_hash, 20);
         assert_eq!(b_info.block_id, mgr.active_full[&20].handle.block_id());
         assert_eq!(b_info.parent_hash, Some(10));
         assert_eq!(b_info.local_hash, Some(local_hashes[2]));
-        assert_eq!(b_info.token_ids.as_ref(), Some(&token_ids[2]));
+        assert_eq!(b_info.token_ids.as_deref(), Some(token_ids[2].as_slice()));
 
         let events = sink.events.lock().unwrap();
         assert_eq!(events.len(), 2, "the duplicate must split Stored groups");

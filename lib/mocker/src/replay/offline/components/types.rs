@@ -34,7 +34,7 @@ pub(crate) struct WorkerAdmission {
     pub(crate) isl_blocks: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(in crate::replay::offline) struct ScheduledWorkerCompletion {
     pub(in crate::replay::offline) at_ms: f64,
     pub(in crate::replay::offline) payload: WorkerCompletionPayload,
@@ -149,6 +149,23 @@ pub(in crate::replay::offline) struct TrafficAccumulator {
     accept_length_forward_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(in crate::replay::offline) struct TrafficAccumulatorCheckpoint {
+    window_start_ms: f64,
+    num_req: usize,
+    total_isl: usize,
+    total_osl: usize,
+    total_ttft_ms: f64,
+    total_itl_ms: f64,
+    ttft_count: usize,
+    itl_count: usize,
+    total_hit_rate: f64,
+    hit_rate_count: usize,
+    total_accept_length_tokens: usize,
+    accept_length_forward_count: usize,
+}
+
 impl TrafficAccumulator {
     pub(in crate::replay::offline) fn new() -> Self {
         Self {
@@ -164,6 +181,42 @@ impl TrafficAccumulator {
             hit_rate_count: 0,
             total_accept_length_tokens: 0,
             accept_length_forward_count: 0,
+        }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(in crate::replay::offline) fn checkpoint(&self) -> TrafficAccumulatorCheckpoint {
+        TrafficAccumulatorCheckpoint {
+            window_start_ms: self.window_start_ms,
+            num_req: self.num_req,
+            total_isl: self.total_isl,
+            total_osl: self.total_osl,
+            total_ttft_ms: self.total_ttft_ms,
+            total_itl_ms: self.total_itl_ms,
+            ttft_count: self.ttft_count,
+            itl_count: self.itl_count,
+            total_hit_rate: self.total_hit_rate,
+            hit_rate_count: self.hit_rate_count,
+            total_accept_length_tokens: self.total_accept_length_tokens,
+            accept_length_forward_count: self.accept_length_forward_count,
+        }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(in crate::replay::offline) fn restore(checkpoint: TrafficAccumulatorCheckpoint) -> Self {
+        Self {
+            window_start_ms: checkpoint.window_start_ms,
+            num_req: checkpoint.num_req,
+            total_isl: checkpoint.total_isl,
+            total_osl: checkpoint.total_osl,
+            total_ttft_ms: checkpoint.total_ttft_ms,
+            total_itl_ms: checkpoint.total_itl_ms,
+            ttft_count: checkpoint.ttft_count,
+            itl_count: checkpoint.itl_count,
+            total_hit_rate: checkpoint.total_hit_rate,
+            hit_rate_count: checkpoint.hit_rate_count,
+            total_accept_length_tokens: checkpoint.total_accept_length_tokens,
+            accept_length_forward_count: checkpoint.accept_length_forward_count,
         }
     }
 

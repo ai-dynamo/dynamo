@@ -10,7 +10,7 @@ mod core;
 mod live;
 mod policy;
 
-pub(crate) use core::VllmCore;
+pub(crate) use core::{VllmCore, VllmCoreQuiescentCheckpoint, VllmCoreReplayCheckpoint};
 pub use live::{MockerMetrics, Scheduler};
 
 /// Re-exported for policy tests that assert on request status through

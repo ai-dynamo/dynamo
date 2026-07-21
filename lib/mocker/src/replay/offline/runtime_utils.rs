@@ -14,7 +14,7 @@ use crate::common::protocols::DirectRequest;
 use crate::common::protocols::{ForwardPassSnapshot, OutputSignal};
 use crate::scheduler::SchedulerLifecycleEvent;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct WorkerCompletionPayload {
     pub stage: SimulationWorkerStage,
     pub worker_idx: usize,

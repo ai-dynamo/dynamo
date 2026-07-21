@@ -14,7 +14,7 @@ pub(crate) enum SimulationWorkerStage {
     Decode,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum SimulationEventKind {
     WorkerCompletion {
         stage: SimulationWorkerStage,
@@ -54,7 +54,7 @@ impl SimulationEventKind {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct SimulationEvent {
     pub(crate) at_ms: f64,
     pub(crate) seq_no: u64,

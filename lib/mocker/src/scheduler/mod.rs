@@ -147,8 +147,8 @@ pub(crate) fn accept_length_sample(output_signals: &[OutputSignal]) -> (usize, u
 
 pub(crate) use sglang::SglangCore;
 pub use sglang::SglangScheduler;
-pub(crate) use vllm::VllmCore;
 pub use vllm::{MockerMetrics, Scheduler};
+pub(crate) use vllm::{VllmCore, VllmCoreQuiescentCheckpoint, VllmCoreReplayCheckpoint};
 
 #[derive(Debug, Clone)]
 pub(crate) struct AdmissionEvent {

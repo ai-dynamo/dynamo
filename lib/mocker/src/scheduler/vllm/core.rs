@@ -12,8 +12,8 @@ use uuid::Uuid;
 
 use crate::common::handoff::HandoffId;
 use crate::common::protocols::{
-    DirectRequest, KvEventPublishers, MockEngineArgs, MoveBlock, OutputSignal, PreemptionMode,
-    PrefillCost, WorkerType,
+    DirectRequest, EngineType, KvEventPublishers, MockEngineArgs, MoveBlock, OutputSignal,
+    PreemptionMode, PrefillCost, WorkerType,
 };
 use crate::common::sequence::ActiveSequence;
 use crate::common::speculative::{SpeculativeDecodeSampler, normalize_conditional_accept_rates};
@@ -22,6 +22,7 @@ use crate::kv_manager::KvManager;
 #[cfg(feature = "kvbm-offload")]
 use crate::kv_manager::kvbm_backend::SwapInRegistrationBlock;
 use crate::kv_manager::kvbm_backend::{G1Acquire, OffloadDependency, VllmDestinationReservation};
+use crate::kv_manager::kvbm_backend::{KvManagerQuiescentCheckpoint, KvManagerReplayCheckpoint};
 #[cfg(feature = "kvbm-offload")]
 use crate::kvbm_offload::coordinator::SwapInTerminal;
 use crate::replay::TraceCollector;
@@ -42,6 +43,7 @@ pub(crate) enum RequestStatus {
     Preempted,
 }
 
+#[derive(Debug, Clone)]
 pub(crate) struct VllmRequestState {
     pub(crate) sequence: ActiveSequence,
     pub(crate) status: RequestStatus,
@@ -405,6 +407,38 @@ pub(crate) struct VllmCore {
     pub(super) requests_awaiting_swap_in: Vec<AwaitingSwapIn>,
 }
 
+/// Explicit state memento for the first, deliberately narrow checkpoint
+/// feasibility slice. It is valid only when the scheduler has fully drained;
+/// active request sequences and RAII KV ownership are never cloned.
+#[derive(Debug, Clone)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct VllmCoreQuiescentCheckpoint {
+    args: MockEngineArgs,
+    dp_rank: u32,
+    preemptions_total: u64,
+    capacity_generation: u64,
+    kv_manager: KvManagerQuiescentCheckpoint,
+}
+
+/// Value-only scheduler memento for the bounded interactive replay path.
+#[derive(Debug, Clone)]
+pub(crate) struct VllmCoreReplayCheckpoint {
+    args: MockEngineArgs,
+    dp_rank: u32,
+    waiting: VecDeque<Uuid>,
+    running: VecDeque<Uuid>,
+    requests: Vec<(Uuid, VllmRequestState)>,
+    preemptions_total: u64,
+    capacity_generation: u64,
+    kv_manager: KvManagerReplayCheckpoint,
+}
+
+impl VllmCoreQuiescentCheckpoint {
+    pub(crate) fn kv_footprint(&self) -> (usize, usize, usize) {
+        self.kv_manager.footprint()
+    }
+}
+
 struct HeldVllmPrefill {
     request: VllmRequestState,
     deferred_deref: Vec<MoveBlock>,
@@ -512,6 +546,186 @@ impl VllmCore {
             #[cfg(feature = "kvbm-offload")]
             requests_awaiting_swap_in: Vec::new(),
         }
+    }
+
+    /// Snapshot a fully drained vLLM core while preserving its inactive
+    /// prefix cache. Busy checkpoints require mementos for `ActiveSequence`,
+    /// scheduler queues, speculative RNG, and pending handoff state and are
+    /// intentionally rejected here instead of sharing live handles.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn checkpoint_quiescent(&self) -> anyhow::Result<VllmCoreQuiescentCheckpoint> {
+        anyhow::ensure!(
+            self.args.engine_type == EngineType::Vllm,
+            "quiescent checkpoint spike supports only the vLLM scheduler"
+        );
+        anyhow::ensure!(
+            self.args.enable_prefix_caching,
+            "quiescent checkpoint spike requires prefix caching"
+        );
+        anyhow::ensure!(
+            self.is_drained(),
+            "quiescent checkpoint requires a fully drained scheduler"
+        );
+        anyhow::ensure!(
+            self.lifecycle_events.is_empty(),
+            "quiescent checkpoint cannot retain pending lifecycle events"
+        );
+        anyhow::ensure!(
+            self.kv_event_buffer.is_none(),
+            "quiescent checkpoint spike does not support captured router events"
+        );
+        anyhow::ensure!(
+            self.speculative_sampler.is_none(),
+            "quiescent checkpoint spike does not yet snapshot speculative RNG state"
+        );
+
+        Ok(VllmCoreQuiescentCheckpoint {
+            args: self.args.clone(),
+            dp_rank: self.dp_rank,
+            preemptions_total: self.state.preemptions_total,
+            capacity_generation: self.capacity_generation,
+            kv_manager: self.kv_manager.checkpoint_quiescent()?,
+        })
+    }
+
+    /// Rebuild a drained core from a value-only memento. `worker_id` and
+    /// `seed_offset` come from the containing offline worker topology; capture
+    /// is always disabled because this slice is round-robin only.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn restore_quiescent(
+        checkpoint: VllmCoreQuiescentCheckpoint,
+        worker_id: WorkerId,
+        seed_offset: u64,
+    ) -> anyhow::Result<Self> {
+        let mut core = Self::new_with_worker_rank(
+            checkpoint.args,
+            worker_id,
+            checkpoint.dp_rank,
+            seed_offset,
+            false,
+        );
+        core.kv_manager.restore_quiescent(checkpoint.kv_manager)?;
+        core.state.preemptions_total = checkpoint.preemptions_total;
+        core.capacity_generation = checkpoint.capacity_generation;
+        Ok(core)
+    }
+
+    /// Snapshot a live aggregated-vLLM scheduler without retaining physical KV
+    /// handles. Handoff, router capture, speculative decode, and offload state
+    /// remain explicit capability errors in this first session slice.
+    pub(crate) fn checkpoint_replay(&self) -> anyhow::Result<VllmCoreReplayCheckpoint> {
+        anyhow::ensure!(
+            self.args.engine_type == EngineType::Vllm,
+            "interactive checkpoint supports only the vLLM scheduler"
+        );
+        anyhow::ensure!(
+            self.args.enable_prefix_caching,
+            "interactive checkpoint requires prefix caching"
+        );
+        anyhow::ensure!(
+            self.speculative_sampler.is_none(),
+            "interactive checkpoint does not support speculative sampler state"
+        );
+        anyhow::ensure!(
+            self.kv_event_buffer.is_none(),
+            "interactive checkpoint does not support captured router events"
+        );
+        anyhow::ensure!(
+            self.source_holds.is_empty()
+                && self.pending_destinations.is_empty()
+                && self.destination_holds.is_empty()
+                && self.active_destination_handoffs.is_empty(),
+            "interactive checkpoint does not support handoff state"
+        );
+        anyhow::ensure!(
+            self.lifecycle_events.is_empty(),
+            "interactive checkpoint cannot retain scheduler lifecycle events"
+        );
+        #[cfg(feature = "kvbm-offload")]
+        anyhow::ensure!(
+            self.requests_awaiting_swap_in.is_empty(),
+            "interactive checkpoint does not support pending swap-ins"
+        );
+        anyhow::ensure!(
+            self.state
+                .requests
+                .values()
+                .all(|request| request.offload_dependency.is_none()),
+            "interactive checkpoint does not support request offload dependencies"
+        );
+
+        let mut requests = self
+            .state
+            .requests
+            .iter()
+            .map(|(uuid, request)| (*uuid, request.clone()))
+            .collect::<Vec<_>>();
+        requests.sort_unstable_by_key(|(uuid, _)| *uuid);
+        Ok(VllmCoreReplayCheckpoint {
+            args: self.args.clone(),
+            dp_rank: self.dp_rank,
+            waiting: self.state.waiting.clone(),
+            running: self.state.running.clone(),
+            requests,
+            preemptions_total: self.state.preemptions_total,
+            capacity_generation: self.capacity_generation,
+            kv_manager: self.kv_manager.checkpoint_replay()?,
+        })
+    }
+
+    pub(crate) fn restore_replay(
+        checkpoint: VllmCoreReplayCheckpoint,
+        worker_id: WorkerId,
+        seed_offset: u64,
+    ) -> anyhow::Result<Self> {
+        let mut core = Self::new_with_worker_rank(
+            checkpoint.args,
+            worker_id,
+            checkpoint.dp_rank,
+            seed_offset,
+            false,
+        );
+        core.kv_manager.restore_replay(checkpoint.kv_manager)?;
+
+        let requests = checkpoint.requests.into_iter().collect::<FxHashMap<_, _>>();
+        let waiting_members = checkpoint.waiting.iter().copied().collect::<FxHashSet<_>>();
+        let running_members = checkpoint.running.iter().copied().collect::<FxHashSet<_>>();
+        anyhow::ensure!(
+            waiting_members.len() == checkpoint.waiting.len()
+                && running_members.len() == checkpoint.running.len(),
+            "interactive checkpoint scheduler queues contain duplicate request IDs"
+        );
+        anyhow::ensure!(
+            waiting_members.is_disjoint(&running_members),
+            "interactive checkpoint request appears in both scheduler queues"
+        );
+        anyhow::ensure!(
+            waiting_members
+                .iter()
+                .chain(&running_members)
+                .all(|uuid| requests.contains_key(uuid)),
+            "interactive checkpoint queue references an unknown request"
+        );
+        anyhow::ensure!(
+            requests.len() == waiting_members.len() + running_members.len(),
+            "interactive checkpoint scheduler request ownership is not represented by its queues"
+        );
+
+        core.state = SchedulerState {
+            waiting: checkpoint.waiting,
+            waiting_members,
+            running: checkpoint.running,
+            running_members,
+            requests,
+            preemptions_total: checkpoint.preemptions_total,
+        };
+        core.capacity_generation = checkpoint.capacity_generation;
+        Ok(core)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_block_manager_id(&self) -> kvbm_logical::ManagerId {
+        self.kv_manager.debug_block_manager_id()
     }
 
     /// Wire a live-mode (`ClockSource::Real`) offload engine onto this
@@ -1001,6 +1215,13 @@ impl VllmCore {
 
     pub(crate) fn num_requests(&self) -> usize {
         self.state.requests.len()
+    }
+
+    pub(crate) fn replay_queue_counts(&self) -> (usize, usize) {
+        (
+            self.state.waiting_members.len(),
+            self.state.running_members.len(),
+        )
     }
 
     fn bump_capacity_generation(&mut self) {

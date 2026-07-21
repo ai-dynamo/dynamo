@@ -79,6 +79,46 @@ pub struct ActiveSequence {
     emit_token_ids: bool,
 }
 
+impl Clone for ActiveSequence {
+    fn clone(&self) -> Self {
+        // `TokenBlockSequence` intentionally does not implement `Clone`, but
+        // replay checkpoints need an independent value copy of an in-flight
+        // sequence. Rebuilding it from the token IDs preserves the same block
+        // boundaries and deterministic lineage seed while avoiding shared
+        // mutable or RAII state.
+        let token_ids = self
+            .tokens
+            .blocks()
+            .iter()
+            .flat_map(|block| block.tokens().iter().copied())
+            .chain(self.tokens.current_block().tokens().iter().copied())
+            .collect::<Vec<_>>();
+        let tokens = Tokens::from(token_ids).into_sequence(self.block_size as u32, Some(1337));
+
+        let cloned = Self {
+            unique_blocks: self.unique_blocks.clone(),
+            block_hashes: self.block_hashes.clone(),
+            plhs: self.plhs.clone(),
+            tokens,
+            block_size: self.block_size,
+            max_output_tokens: self.max_output_tokens,
+            generated_tokens: self.generated_tokens,
+            planned_output_ids: self.planned_output_ids.clone(),
+            num_input_tokens: self.num_input_tokens,
+            num_allocated_tokens: self.num_allocated_tokens,
+            enable_prefix_caching: self.enable_prefix_caching,
+            emit_token_ids: self.emit_token_ids,
+        };
+        debug_assert_eq!(cloned.len(), self.len());
+        debug_assert_eq!(cloned.unique_blocks, self.unique_blocks);
+        debug_assert_eq!(cloned.block_hashes, self.block_hashes);
+        debug_assert_eq!(cloned.plhs, self.plhs);
+        debug_assert_eq!(cloned.num_allocated_tokens, self.num_allocated_tokens);
+        debug_assert!(cloned.validate().is_ok());
+        cloned
+    }
+}
+
 impl ActiveSequence {
     /// Create a new ActiveSequence instance with the provided tokens
     pub fn new(
@@ -743,5 +783,41 @@ mod tests {
         // current partial block; this is the replay/preemption path we rely on.
         seq.pop();
         assert_cached_hashes_match_promoted_blocks(&seq);
+    }
+
+    #[test]
+    fn test_clone_preserves_partial_block_and_continuation_state() {
+        let mut original = ActiveSequence::new((0..10).collect(), 4, Some(4), true, false);
+        original.commit_allocation(original.len());
+        let mut cloned = original.clone();
+
+        assert_eq!(cloned.len(), original.len());
+        assert_eq!(cloned.unique_blocks(), original.unique_blocks());
+        assert_eq!(cloned.block_hashes(), original.block_hashes());
+        assert_eq!(cloned.plhs(), original.plhs());
+        assert_eq!(
+            cloned.num_allocated_tokens(),
+            original.num_allocated_tokens()
+        );
+        cloned.validate().unwrap();
+
+        assert_eq!(cloned.push(10), original.push(10));
+        assert_eq!(cloned.push(11), original.push(11));
+        let cloned_boundary = cloned.push(12).unwrap();
+        let original_boundary = original.push(12).unwrap();
+        assert_eq!(cloned_boundary.len(), original_boundary.len());
+        assert!(matches!(cloned_boundary[0], MoveBlock::Promote(..)));
+        assert!(matches!(original_boundary[0], MoveBlock::Promote(..)));
+        assert!(matches!(cloned_boundary[1], MoveBlock::Use(..)));
+        assert!(matches!(original_boundary[1], MoveBlock::Use(..)));
+        assert_eq!(cloned.len(), original.len());
+        // A continuation branch receives an independent UUID for the newly
+        // opened partial block, while the promoted prefix identity is stable.
+        assert_eq!(
+            &cloned.unique_blocks()[..cloned.unique_blocks().len() - 1],
+            &original.unique_blocks()[..original.unique_blocks().len() - 1]
+        );
+        assert_eq!(cloned.block_hashes(), original.block_hashes());
+        assert_eq!(cloned.plhs(), original.plhs());
     }
 }

@@ -13,14 +13,15 @@ use super::runtime_utils::{
     next_timestamp as choose_next_timestamp, pop_ready_planner_tick, pop_ready_worker_completion,
     pop_ready_worker_ready, push_planner_tick, push_worker_completion, push_worker_ready,
 };
-#[cfg(test)]
 use super::state::AggRequestPhase;
 #[cfg(test)]
 use super::state::OfflineWorkerSnapshot;
 use super::{
     components::{
-        AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, OfflineReplayRouter,
-        ReadyArrival, ScheduledWorkerCompletion, TrafficAccumulator, WorkerAdmission,
+        AdmissionQueue, AdmissionQueueCheckpoint, EngineComponent, EngineEffects, EnginePassMode,
+        EngineQuiescentCheckpoint, EngineReplayCheckpoint, EngineWorkerSnapshot,
+        OfflineReplayRouter, ReadyArrival, ScheduledWorkerCompletion, TrafficAccumulator,
+        TrafficAccumulatorCheckpoint, WorkerAdmission,
     },
     state::AggRequestState,
 };
@@ -28,7 +29,7 @@ use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArg
 use crate::loadgen::{ReplayRequestHashes, WorkloadDriver};
 use crate::replay::{
     ReplayPrefillLoadEstimator, ReplayRouterMode, ReplayTerminalStatus, SlaThresholds,
-    TraceCollector,
+    TraceCollector, TraceCollectorCheckpoint, TraceCursorMetrics,
 };
 use anyhow::bail;
 use dynamo_kv_router::config::KvRouterConfig;
@@ -63,6 +64,60 @@ struct AggRuntimeSnapshot {
     router: Option<OfflineRouterSnapshot>,
 }
 
+/// First checkpoint feasibility memento for aggregated offline replay.
+///
+/// The scope is intentionally narrow: one drained vLLM worker, round-robin
+/// routing, raw trace admissions, and no planner. It proves that a warm prefix
+/// cache and all replay accounting can be rebuilt without sharing live KV
+/// handles. Arbitrary pause points still require explicit busy scheduler and
+/// pending-event mementos; callers get an error rather than an unsafe partial
+/// checkpoint until those exist.
+#[derive(Debug, Clone)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(in crate::replay) struct AggQuiescentCheckpoint {
+    now_ms: f64,
+    next_worker_idx: usize,
+    next_dp_rank_by_worker: FxHashMap<usize, u32>,
+    dp_size: u32,
+    next_event_seq: u64,
+    admission: AdmissionQueueCheckpoint,
+    engine: EngineQuiescentCheckpoint,
+    collector: TraceCollectorCheckpoint,
+    stats: AggRuntimeStats,
+    traffic: TrafficAccumulatorCheckpoint,
+    max_sim_time_ms: Option<f64>,
+    workload_terminal_ms: Option<f64>,
+    #[cfg(test)]
+    worker_active_requests: Vec<Vec<Uuid>>,
+    #[cfg(test)]
+    stepped: bool,
+}
+
+/// Deep, value-only memento for the bounded interactive aggregated replay.
+/// Active scheduler/KV ownership and the future event heap are reconstructed
+/// into fresh physical managers on restore.
+#[derive(Debug, Clone)]
+pub(in crate::replay) struct AggReplayCheckpoint {
+    now_ms: f64,
+    next_worker_idx: usize,
+    next_dp_rank_by_worker: FxHashMap<usize, u32>,
+    dp_size: u32,
+    next_event_seq: u64,
+    admission: AdmissionQueueCheckpoint,
+    requests: FxHashMap<Uuid, AggRequestState>,
+    engine: EngineReplayCheckpoint,
+    collector: TraceCollectorCheckpoint,
+    events: BinaryHeap<SimulationEvent>,
+    stats: AggRuntimeStats,
+    traffic: TrafficAccumulatorCheckpoint,
+    max_sim_time_ms: Option<f64>,
+    workload_terminal_ms: Option<f64>,
+    #[cfg(test)]
+    worker_active_requests: Vec<Vec<Uuid>>,
+    #[cfg(test)]
+    stepped: bool,
+}
+
 #[cfg(not(test))]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(in crate::replay) struct AggRuntimeStats;
@@ -89,6 +144,10 @@ pub(in crate::replay) struct AggRuntime {
     /// gracefully once the next scheduled timestamp exceeds this cap, leaving
     /// any in-flight requests as incomplete in the report.
     max_sim_time_ms: Option<f64>,
+    /// First logical timestamp at which all request-bearing work was terminal.
+    /// Kept separate from `now_ms` because an interactive cursor may continue
+    /// moving through an idle suffix after completion.
+    workload_terminal_ms: Option<f64>,
     /// Planner hook. When set, `run()` seeds a recurring `PlannerTick` event and
     /// calls back into the planner at each tick (the unified replacement for the
     /// old Python-driven `advance_to` stepping loop).
@@ -118,6 +177,27 @@ impl AggRuntime {
             router_config,
             prefill_load_estimator,
             AdmissionQueue::new_requests(pending, mode),
+            num_workers,
+            router_mode,
+        )
+    }
+
+    /// Create a resumable aggregated runtime whose immutable future admissions
+    /// can be shared by frequent interactive checkpoints.
+    pub(in crate::replay) fn new_checkpointable(
+        args: &MockEngineArgs,
+        router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+        pending: VecDeque<DirectRequest>,
+        num_workers: usize,
+        mode: ReplayMode,
+        router_mode: ReplayRouterMode,
+    ) -> anyhow::Result<Self> {
+        Self::new_with_source(
+            args,
+            router_config,
+            prefill_load_estimator,
+            AdmissionQueue::new_checkpointable_requests(pending, mode),
             num_workers,
             router_mode,
         )
@@ -198,6 +278,7 @@ impl AggRuntime {
             fpm_buffer: LatestFpmBuffer::default(),
             traffic: TrafficAccumulator::new(),
             max_sim_time_ms: None,
+            workload_terminal_ms: None,
             planner_hook: None,
             collect_fpm: false,
             #[cfg(test)]
@@ -255,10 +336,179 @@ impl AggRuntime {
         self
     }
 
+    /// Capture the completed-request/accounting state, pending raw arrivals,
+    /// and warm prefix cache at a fully settled idle boundary.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(in crate::replay) fn checkpoint_quiescent(&self) -> anyhow::Result<AggQuiescentCheckpoint> {
+        anyhow::ensure!(
+            self.router.is_none(),
+            "quiescent checkpoint spike supports round-robin routing only"
+        );
+        anyhow::ensure!(
+            self.planner_hook.is_none() && !self.collect_fpm,
+            "quiescent checkpoint spike does not yet snapshot planner state"
+        );
+        anyhow::ensure!(
+            self.requests.is_empty() && self.engine.is_drained(),
+            "quiescent checkpoint requires all admitted requests to be terminal"
+        );
+        anyhow::ensure!(
+            self.events.is_empty(),
+            "quiescent checkpoint does not yet snapshot pending simulation events"
+        );
+        #[cfg(test)]
+        anyhow::ensure!(
+            self.worker_active_requests.iter().all(Vec::is_empty),
+            "quiescent checkpoint test bookkeeping still owns active requests"
+        );
+
+        let admission = self.admission.checkpoint_requests()?;
+        let engine = self.engine.checkpoint_quiescent_agg_round_robin()?;
+        let (block_size, cached_blocks, capacity) = engine.kv_footprint()?;
+        let future_blocks = admission.future_kv_blocks_upper_bound(block_size)?;
+        let worst_case_blocks = cached_blocks
+            .checked_add(future_blocks)
+            .ok_or_else(|| anyhow::anyhow!("checkpoint KV footprint overflowed usize"))?;
+        anyhow::ensure!(
+            worst_case_blocks <= capacity,
+            "checkpoint spike cannot guarantee eviction-free continuation: {cached_blocks} cached + {future_blocks} future blocks exceeds capacity {capacity}"
+        );
+
+        Ok(AggQuiescentCheckpoint {
+            now_ms: self.now_ms,
+            next_worker_idx: self.next_worker_idx,
+            next_dp_rank_by_worker: self.next_dp_rank_by_worker.clone(),
+            dp_size: self.dp_size,
+            next_event_seq: self.next_event_seq,
+            admission,
+            engine,
+            collector: self.collector.checkpoint(),
+            stats: self.stats.clone(),
+            traffic: self.traffic.checkpoint(),
+            max_sim_time_ms: self.max_sim_time_ms,
+            workload_terminal_ms: self.workload_terminal_ms,
+            #[cfg(test)]
+            worker_active_requests: self.worker_active_requests.clone(),
+            #[cfg(test)]
+            stepped: self.stepped,
+        })
+    }
+
+    /// Restore a checkpoint into fresh scheduler/KV ownership. No `Arc`-backed
+    /// block handle from the source timeline is retained.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(in crate::replay) fn restore_quiescent(
+        checkpoint: AggQuiescentCheckpoint,
+    ) -> anyhow::Result<Self> {
+        let admission = AdmissionQueue::restore_requests(checkpoint.admission);
+        let collector = TraceCollector::restore(checkpoint.collector);
+        let total_requests = admission.total_requests() + collector.request_count();
+        let completed_requests = collector.request_count();
+        Ok(Self {
+            now_ms: checkpoint.now_ms,
+            next_worker_idx: checkpoint.next_worker_idx,
+            next_dp_rank_by_worker: checkpoint.next_dp_rank_by_worker,
+            dp_size: checkpoint.dp_size,
+            next_event_seq: checkpoint.next_event_seq,
+            admission,
+            requests: FxHashMap::default(),
+            engine: EngineComponent::restore_quiescent_agg_round_robin(checkpoint.engine)?,
+            collector,
+            events: BinaryHeap::new(),
+            router: None,
+            progress: ReplayProgress::new_at(total_requests, completed_requests, "offline replay"),
+            stats: checkpoint.stats,
+            fpm_buffer: LatestFpmBuffer::default(),
+            traffic: TrafficAccumulator::restore(checkpoint.traffic),
+            max_sim_time_ms: checkpoint.max_sim_time_ms,
+            workload_terminal_ms: checkpoint.workload_terminal_ms,
+            planner_hook: None,
+            collect_fpm: false,
+            #[cfg(test)]
+            worker_active_requests: checkpoint.worker_active_requests,
+            #[cfg(test)]
+            stepped: checkpoint.stepped,
+        })
+    }
+
+    /// Capture the complete supported interactive runtime, including active
+    /// requests, lifecycle transitions, and scheduled worker completions.
+    pub(in crate::replay) fn checkpoint_replay(&self) -> anyhow::Result<AggReplayCheckpoint> {
+        anyhow::ensure!(
+            self.router.is_none(),
+            "interactive checkpoint supports round-robin routing only"
+        );
+        anyhow::ensure!(
+            self.planner_hook.is_none() && !self.collect_fpm,
+            "interactive checkpoint does not support planner state"
+        );
+        Ok(AggReplayCheckpoint {
+            now_ms: self.now_ms,
+            next_worker_idx: self.next_worker_idx,
+            next_dp_rank_by_worker: self.next_dp_rank_by_worker.clone(),
+            dp_size: self.dp_size,
+            next_event_seq: self.next_event_seq,
+            admission: self.admission.checkpoint_requests()?,
+            requests: self.requests.clone(),
+            engine: self.engine.checkpoint_replay_agg_round_robin()?,
+            collector: self.collector.checkpoint(),
+            events: self.events.clone(),
+            stats: self.stats.clone(),
+            traffic: self.traffic.checkpoint(),
+            max_sim_time_ms: self.max_sim_time_ms,
+            workload_terminal_ms: self.workload_terminal_ms,
+            #[cfg(test)]
+            worker_active_requests: self.worker_active_requests.clone(),
+            #[cfg(test)]
+            stepped: self.stepped,
+        })
+    }
+
+    pub(in crate::replay) fn restore_replay(
+        checkpoint: AggReplayCheckpoint,
+    ) -> anyhow::Result<Self> {
+        let admission = AdmissionQueue::restore_requests(checkpoint.admission);
+        let collector = TraceCollector::restore(checkpoint.collector);
+        let total_requests = admission.total_requests() + collector.request_count();
+        let completed_requests = collector
+            .request_count()
+            .saturating_sub(checkpoint.requests.len());
+        Ok(Self {
+            now_ms: checkpoint.now_ms,
+            next_worker_idx: checkpoint.next_worker_idx,
+            next_dp_rank_by_worker: checkpoint.next_dp_rank_by_worker,
+            dp_size: checkpoint.dp_size,
+            next_event_seq: checkpoint.next_event_seq,
+            admission,
+            requests: checkpoint.requests,
+            engine: EngineComponent::restore_replay_agg_round_robin(checkpoint.engine)?,
+            collector,
+            events: checkpoint.events,
+            router: None,
+            progress: ReplayProgress::new_at(total_requests, completed_requests, "offline replay"),
+            stats: checkpoint.stats,
+            fpm_buffer: LatestFpmBuffer::default(),
+            traffic: TrafficAccumulator::restore(checkpoint.traffic),
+            max_sim_time_ms: checkpoint.max_sim_time_ms,
+            workload_terminal_ms: checkpoint.workload_terminal_ms,
+            planner_hook: None,
+            collect_fpm: false,
+            #[cfg(test)]
+            worker_active_requests: checkpoint.worker_active_requests,
+            #[cfg(test)]
+            stepped: checkpoint.stepped,
+        })
+    }
+
     #[cfg(test)]
     fn with_fpm_capture(mut self) -> Self {
         self.collect_fpm = true;
         self
+    }
+
+    #[cfg(test)]
+    fn debug_block_manager_id(&self) -> kvbm_logical::ManagerId {
+        self.engine.debug_block_manager_id()
     }
 
     /// Count all requests currently consuming cluster capacity, including router-queued ones.
@@ -446,6 +696,12 @@ impl AggRuntime {
             && self.admission.is_drained()
             && self.engine.is_drained()
             && self.only_idle_events_remain()
+    }
+
+    fn record_workload_terminal_time(&mut self) {
+        if self.workload_terminal_ms.is_none() && self.is_workload_done() {
+            self.workload_terminal_ms = Some(self.now_ms);
+        }
     }
 
     /// True if the event heap is empty or contains only "idle" events that carry no
@@ -775,6 +1031,47 @@ impl AggRuntime {
             }
         }
 
+        self.record_workload_terminal_time();
+
+        Ok(())
+    }
+
+    /// Settle events already scheduled at the cursor without starting a new
+    /// engine pass. Rush Hour applies a player action after this boundary; the
+    /// next call to `advance_until_pause` resumes scheduling from the mutated
+    /// topology.
+    fn settle_pause_timestamp(&mut self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.planner_hook.is_none(),
+            "interactive replay sessions do not support planner ticks"
+        );
+        loop {
+            #[cfg_attr(not(feature = "kvbm-offload"), allow(unused_mut))]
+            let mut changed = false;
+            #[cfg(feature = "kvbm-offload")]
+            {
+                changed |= self.tick_offload_engines()?;
+            }
+            changed |= self.apply_worker_completions()?;
+            changed |= self.apply_worker_ready_events()?;
+            changed |= self.release_ready_arrivals()?;
+
+            let removed = self.engine.try_remove_drained();
+            for worker_id in &removed {
+                self.next_dp_rank_by_worker.remove(worker_id);
+            }
+            if let Some(router) = self.router.as_mut() {
+                for worker_id in &removed {
+                    router.finalize_worker_removal(*worker_id)?;
+                }
+            }
+            changed |= !removed.is_empty();
+
+            if !changed {
+                break;
+            }
+        }
+        self.record_workload_terminal_time();
         Ok(())
     }
 
@@ -946,21 +1243,34 @@ impl AggRuntime {
     }
 
     // ------------------------------------------------------------------
-    // Test-only stepping helpers. White-box unit tests advance the sim to a
-    // chosen simulated time, inspect mid-flight state, apply a manual scaling
-    // decision, and resume — a granularity `run()` (which goes straight to
-    // completion) cannot offer. Not part of the production drive path.
+    // Incremental stepping helpers. ReplaySession uses these to pause at an
+    // exact logical cursor; white-box tests also use them to inspect mid-flight
+    // state and apply manual scaling decisions.
     // ------------------------------------------------------------------
 
     /// Advance the simulation up to `until_ms` simulated time, then pause.
     /// Returns `true` if the request workload is done — pending `WorkerReady`
     /// events do not block completion since there is no work for those workers.
-    #[cfg(test)]
-    fn advance_to(&mut self, until_ms: f64) -> anyhow::Result<bool> {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(in crate::replay) fn advance_to(&mut self, until_ms: f64) -> anyhow::Result<bool> {
+        anyhow::ensure!(
+            until_ms.is_finite() && until_ms >= 0.0,
+            "offline replay cursor must be finite and non-negative; got {until_ms}"
+        );
+        anyhow::ensure!(
+            until_ms >= self.now_ms,
+            "offline replay cannot advance backward from {} ms to {until_ms} ms; restore a checkpoint instead",
+            self.now_ms
+        );
         self.drain_current_timestamp()?;
 
-        while !self.is_done() {
+        while self.now_ms < until_ms {
             let Some(next_timestamp_ms) = self.next_timestamp() else {
+                if self.is_workload_done() {
+                    self.advance_now_ms(until_ms);
+                    self.settle_pause_timestamp()?;
+                    break;
+                }
                 bail!(
                     "offline replay reached a dead end with {} in-flight requests remaining",
                     self.cluster_in_flight()
@@ -981,10 +1291,139 @@ impl AggRuntime {
         Ok(self.is_workload_done())
     }
 
+    /// Advance to an interactive pause boundary. All pre-existing ordinary
+    /// events at `until_ms` settle, but no new engine pass starts there. This
+    /// gives a scale action at T deterministic ordering between completion /
+    /// arrival settlement and the next scheduling pass.
+    pub(in crate::replay) fn advance_until_pause(&mut self, until_ms: f64) -> anyhow::Result<bool> {
+        anyhow::ensure!(
+            until_ms.is_finite() && until_ms >= 0.0,
+            "offline replay cursor must be finite and non-negative; got {until_ms}"
+        );
+        anyhow::ensure!(
+            until_ms >= self.now_ms,
+            "offline replay cannot advance backward from {} ms to {until_ms} ms; restore a checkpoint instead",
+            self.now_ms
+        );
+
+        if until_ms == self.now_ms {
+            self.settle_pause_timestamp()?;
+            return Ok(self.is_workload_done());
+        }
+
+        // Resume work that was intentionally left ready at the prior pause.
+        self.drain_current_timestamp()?;
+        while self.now_ms < until_ms {
+            // Interactive sessions must keep consuming lifecycle events after
+            // the last request completes. Otherwise a scale-up issued near
+            // the workload tail can be reported as complete with replicas
+            // permanently stuck in `Starting`. Planner ticks cannot occur on
+            // this path (`settle_pause_timestamp` enforces that), so waiting
+            // for the finite WorkerReady/drain tail cannot make the loop live
+            // forever.
+            if self.is_done()
+                && self.starting_worker_count() == 0
+                && self.draining_worker_count() == 0
+            {
+                self.advance_now_ms(until_ms);
+                self.settle_pause_timestamp()?;
+                break;
+            }
+            let Some(next_timestamp_ms) = self.next_timestamp() else {
+                bail!(
+                    "offline replay reached a dead end with {} in-flight requests remaining",
+                    self.cluster_in_flight()
+                );
+            };
+
+            if next_timestamp_ms >= until_ms {
+                self.advance_now_ms(until_ms);
+                self.settle_pause_timestamp()?;
+                break;
+            }
+
+            self.advance_now_ms(next_timestamp_ms);
+            self.drain_current_timestamp()?;
+        }
+
+        Ok(self.is_workload_done())
+    }
+
     /// Current simulated time in milliseconds.
-    #[cfg(test)]
-    fn now_ms(&self) -> f64 {
+    pub(in crate::replay) fn now_ms(&self) -> f64 {
         self.now_ms
+    }
+
+    /// Whether all request-bearing work has completed. Idle startup events do
+    /// not keep a session alive after the workload itself is finished.
+    pub(in crate::replay) fn workload_done(&self) -> bool {
+        self.is_workload_done()
+    }
+
+    pub(in crate::replay) fn workload_terminal_ms(&self) -> Option<f64> {
+        self.workload_terminal_ms
+    }
+
+    /// Number of workers accepting new admissions now.
+    pub(in crate::replay) fn serving_worker_count(&self) -> usize {
+        self.engine.active_group_ids().len()
+    }
+
+    /// Absolute desired count after pending startup/drain transitions settle.
+    pub(in crate::replay) fn target_worker_count(&self) -> usize {
+        self.engine.target_worker_count()
+    }
+
+    /// Number of provisioned workers still in startup.
+    pub(in crate::replay) fn starting_worker_count(&self) -> usize {
+        self.engine.starting_worker_count()
+    }
+
+    /// Number of provisioned workers draining existing work.
+    pub(in crate::replay) fn draining_worker_count(&self) -> usize {
+        self.engine.draining_worker_count()
+    }
+
+    /// Request accounting visible at the current logical cursor as
+    /// `(admitted, completed, in_flight, pending_arrivals)`.
+    pub(in crate::replay) fn request_counts(&self) -> (usize, usize, usize, usize) {
+        let admitted = self.collector.request_count();
+        let in_flight = self.requests.len();
+        let completed = admitted.saturating_sub(in_flight);
+        (
+            admitted,
+            completed,
+            in_flight,
+            self.admission.total_requests(),
+        )
+    }
+
+    pub(in crate::replay) fn router_queue_count(&self) -> usize {
+        self.requests
+            .values()
+            .filter(|request| request.phase == AggRequestPhase::QueuedAtRouter)
+            .count()
+    }
+
+    pub(in crate::replay) fn cursor_metrics(
+        &self,
+        window_start_ms: f64,
+    ) -> (TraceCursorMetrics, Vec<EngineWorkerSnapshot>) {
+        (
+            self.collector.cursor_metrics(window_start_ms, self.now_ms),
+            self.engine.replay_worker_snapshots(),
+        )
+    }
+
+    pub(in crate::replay) fn traffic_cursor_metrics(
+        &self,
+        window_start_ms: f64,
+    ) -> (TraceCursorMetrics, Vec<EngineWorkerSnapshot>) {
+        (
+            self.collector
+                .traffic_cursor_metrics(window_start_ms, self.now_ms),
+            self.engine.replay_worker_snapshots(),
+        )
     }
 
     /// Drain accumulated traffic stats since the last drain.
@@ -1310,6 +1749,322 @@ mod tests {
             .speedup_ratio(1000.0)
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn quiescent_checkpoint_restores_warm_prefix_cache_and_deterministic_suffix() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(64)
+            .max_num_batched_tokens(Some(32))
+            .max_num_seqs(Some(1))
+            .enable_prefix_caching(true)
+            .enable_chunked_prefill(true)
+            .speedup_ratio(1000.0)
+            .build()
+            .unwrap();
+        let first_uuid = Uuid::from_u128(70_001);
+        let suffix_uuid = Uuid::from_u128(70_002);
+        let pending = normalize_trace_requests(
+            vec![
+                DirectRequest {
+                    tokens: vec![11, 12, 13, 14, 21, 22, 23, 24],
+                    max_output_tokens: 2,
+                    output_token_ids: Some(vec![101, 102]),
+                    uuid: Some(first_uuid),
+                    arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
+                },
+                DirectRequest {
+                    tokens: vec![11, 12, 13, 14, 21, 22, 23, 24],
+                    max_output_tokens: 2,
+                    output_token_ids: Some(vec![201, 202]),
+                    uuid: Some(suffix_uuid),
+                    arrival_timestamp_ms: Some(10_000.0),
+                    ..Default::default()
+                },
+            ],
+            1.0,
+        )
+        .unwrap();
+        let mut source = AggRuntime::new(
+            &args,
+            None,
+            None,
+            pending,
+            1,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap()
+        .with_per_request_records(true);
+
+        // The first request completes and leaves its full prompt blocks in the
+        // inactive prefix cache. The suffix arrival is intentionally later so
+        // this is a fully settled, event-free checkpoint boundary.
+        assert!(!source.advance_to(5_000.0).unwrap());
+        assert_eq!(source.now_ms(), 5_000.0);
+        assert_eq!(
+            source.collector.snapshot(first_uuid).unwrap().output_length,
+            2
+        );
+        let checkpoint = source.checkpoint_quiescent().unwrap();
+
+        // Restore while the source runtime is still alive. Both continuations
+        // must own independent scheduler/KV state and observe the same warm hit.
+        let restored = AggRuntime::restore_quiescent(checkpoint).unwrap();
+        assert_ne!(
+            source.debug_block_manager_id(),
+            restored.debug_block_manager_id(),
+            "restored timeline must own a fresh physical KV pool"
+        );
+        let (source_collector, source_stats) = source.run().unwrap();
+        let (restored_collector, restored_stats) = restored.run().unwrap();
+
+        assert_eq!(source_stats, restored_stats);
+        assert_eq!(
+            sorted_snapshots(&source_collector),
+            sorted_snapshots(&restored_collector)
+        );
+        let source_suffix = source_collector.snapshot(suffix_uuid).unwrap();
+        let restored_suffix = restored_collector.snapshot(suffix_uuid).unwrap();
+        assert_eq!(source_suffix, restored_suffix);
+        assert_eq!(source_suffix.reused_input_tokens, 8);
+        assert_eq!(
+            serde_json::to_value(source_collector.per_request_records()).unwrap(),
+            serde_json::to_value(restored_collector.per_request_records()).unwrap()
+        );
+
+        let source_report = source_collector.finish();
+        let restored_report = restored_collector.finish();
+        assert_eq!(
+            serde_json::to_value(&source_report).unwrap(),
+            serde_json::to_value(&restored_report).unwrap()
+        );
+        assert!(source_report.prefix_cache_reused_ratio > 0.0);
+    }
+
+    #[test]
+    fn busy_replay_checkpoint_owns_a_fresh_physical_kv_pool() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(16)
+            .max_num_batched_tokens(Some(4))
+            .max_num_seqs(Some(1))
+            .enable_prefix_caching(true)
+            .enable_chunked_prefill(true)
+            .speedup_ratio(1.0)
+            .build()
+            .unwrap();
+        let pending = normalize_trace_requests(
+            vec![DirectRequest {
+                tokens: vec![1; 16],
+                max_output_tokens: 4,
+                output_token_ids: Some(vec![31, 32, 33, 34]),
+                uuid: Some(Uuid::from_u128(70_051)),
+                arrival_timestamp_ms: Some(0.0),
+                ..Default::default()
+            }],
+            1.0,
+        )
+        .unwrap();
+        let mut source = AggRuntime::new(
+            &args,
+            None,
+            None,
+            pending,
+            1,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        source.advance_until_pause(0.001).unwrap();
+        assert_eq!(source.request_counts().2, 1);
+        let checkpoint = source.checkpoint_replay().unwrap();
+        let restored = AggRuntime::restore_replay(checkpoint).unwrap();
+        assert_ne!(
+            source.debug_block_manager_id(),
+            restored.debug_block_manager_id(),
+            "busy restore must reconstruct KV ownership in a fresh manager"
+        );
+
+        let source_report = source.run().unwrap().0.finish();
+        let restored_report = restored.run().unwrap().0.finish();
+        assert_eq!(
+            serde_json::to_value(source_report).unwrap(),
+            serde_json::to_value(restored_report).unwrap()
+        );
+    }
+
+    #[test]
+    fn quiescent_checkpoint_rejects_busy_pause_points() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(64)
+            .max_num_batched_tokens(Some(4))
+            .max_num_seqs(Some(1))
+            .enable_prefix_caching(true)
+            .enable_chunked_prefill(true)
+            .speedup_ratio(1.0)
+            .build()
+            .unwrap();
+        let pending = normalize_trace_requests(
+            vec![DirectRequest {
+                tokens: vec![1; 16],
+                max_output_tokens: 4,
+                output_token_ids: Some(vec![31, 32, 33, 34]),
+                uuid: Some(Uuid::from_u128(70_101)),
+                arrival_timestamp_ms: Some(0.0),
+                ..Default::default()
+            }],
+            1.0,
+        )
+        .unwrap();
+        let mut runtime = AggRuntime::new(
+            &args,
+            None,
+            None,
+            pending,
+            1,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        assert!(runtime.advance_one_timestamp().unwrap());
+        let error = runtime.checkpoint_quiescent().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("all admitted requests to be terminal"),
+            "unexpected checkpoint rejection: {error:#}"
+        );
+    }
+
+    #[test]
+    fn quiescent_checkpoint_rejects_nondeterministic_pending_requests() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(64)
+            .max_num_batched_tokens(Some(32))
+            .max_num_seqs(Some(1))
+            .enable_prefix_caching(true)
+            .enable_chunked_prefill(true)
+            .speedup_ratio(1000.0)
+            .build()
+            .unwrap();
+        let cases = [
+            ("missing UUID", None, Some(vec![201, 202]), "explicit UUID"),
+            (
+                "missing planned outputs",
+                Some(Uuid::from_u128(70_202)),
+                None,
+                "planned output token IDs",
+            ),
+            (
+                "mismatched planned outputs",
+                Some(Uuid::from_u128(70_203)),
+                Some(vec![201]),
+                "planned output token count",
+            ),
+        ];
+
+        for (case, uuid, output_token_ids, expected) in cases {
+            let pending = normalize_trace_requests(
+                vec![
+                    DirectRequest {
+                        tokens: vec![11, 12, 13, 14],
+                        max_output_tokens: 1,
+                        output_token_ids: Some(vec![101]),
+                        uuid: Some(Uuid::from_u128(70_201)),
+                        arrival_timestamp_ms: Some(0.0),
+                        ..Default::default()
+                    },
+                    DirectRequest {
+                        tokens: vec![21, 22, 23, 24],
+                        max_output_tokens: 2,
+                        output_token_ids,
+                        uuid,
+                        arrival_timestamp_ms: Some(10_000.0),
+                        ..Default::default()
+                    },
+                ],
+                1.0,
+            )
+            .unwrap();
+            let mut runtime = AggRuntime::new(
+                &args,
+                None,
+                None,
+                pending,
+                1,
+                ReplayMode::Trace,
+                ReplayRouterMode::RoundRobin,
+            )
+            .unwrap();
+
+            assert!(!runtime.advance_to(5_000.0).unwrap(), "{case}");
+            let error = runtime.checkpoint_quiescent().unwrap_err();
+            assert!(
+                error.to_string().contains(expected),
+                "unexpected {case} rejection: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn quiescent_checkpoint_rejects_suffix_that_could_evict() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(5)
+            .max_num_batched_tokens(Some(32))
+            .max_num_seqs(Some(1))
+            .enable_prefix_caching(true)
+            .enable_chunked_prefill(true)
+            .speedup_ratio(1000.0)
+            .build()
+            .unwrap();
+        let prompt = vec![11, 12, 13, 14, 21, 22, 23, 24, 31, 32, 33, 34];
+        let pending = normalize_trace_requests(
+            vec![
+                DirectRequest {
+                    tokens: prompt.clone(),
+                    max_output_tokens: 1,
+                    output_token_ids: Some(vec![101]),
+                    uuid: Some(Uuid::from_u128(70_301)),
+                    arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
+                },
+                DirectRequest {
+                    tokens: prompt,
+                    max_output_tokens: 1,
+                    output_token_ids: Some(vec![201]),
+                    uuid: Some(Uuid::from_u128(70_302)),
+                    arrival_timestamp_ms: Some(10_000.0),
+                    ..Default::default()
+                },
+            ],
+            1.0,
+        )
+        .unwrap();
+        let mut runtime = AggRuntime::new(
+            &args,
+            None,
+            None,
+            pending,
+            1,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        assert!(!runtime.advance_to(5_000.0).unwrap());
+        let error = runtime.checkpoint_quiescent().unwrap_err();
+        assert!(
+            error.to_string().contains("eviction-free continuation"),
+            "unexpected capacity rejection: {error:#}"
+        );
     }
 
     fn queueing_router_args(policy: RouterQueuePolicy) -> MockEngineArgs {

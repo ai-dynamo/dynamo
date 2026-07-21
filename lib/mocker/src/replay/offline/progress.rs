@@ -9,6 +9,14 @@ pub(super) struct ReplayProgress {
 
 impl ReplayProgress {
     pub(super) fn new(total_requests: usize, label: &'static str) -> Self {
+        Self::new_at(total_requests, 0, label)
+    }
+
+    pub(super) fn new_at(
+        total_requests: usize,
+        completed_requests: usize,
+        label: &'static str,
+    ) -> Self {
         let bar = ProgressBar::new(total_requests as u64);
         bar.set_style(
             ProgressStyle::with_template(
@@ -18,6 +26,7 @@ impl ReplayProgress {
             .progress_chars("#>-"),
         );
         bar.set_message(label);
+        bar.set_position(completed_requests.min(total_requests) as u64);
         Self { bar }
     }
 

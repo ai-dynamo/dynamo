@@ -9,7 +9,9 @@ use super::super::events::SimulationWorkerStage;
 use super::super::runtime_utils::WorkerCompletionPayload;
 #[cfg(test)]
 use super::super::state::OfflineWorkerSnapshot;
-use super::super::state::OfflineWorkerState;
+use super::super::state::{
+    OfflineWorkerQuiescentCheckpoint, OfflineWorkerReplayCheckpoint, OfflineWorkerState,
+};
 use super::{EngineEffects, EnginePassMode, ScheduledWorkerCompletion};
 use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArgs};
 use crate::replay::TraceCollector;
@@ -39,6 +41,61 @@ pub(in crate::replay::offline) struct EngineComponent {
     args: MockEngineArgs,
     /// Whether new workers should capture KV events (true when a router is present).
     capture_kv_events: bool,
+}
+
+/// Deep memento for the first aggregated checkpoint feasibility slice.
+/// Restricted to one fully drained vLLM rank so no live scheduler or KV
+/// handles cross timeline boundaries.
+#[derive(Debug, Clone)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(in crate::replay::offline) struct EngineQuiescentCheckpoint {
+    stage: SimulationWorkerStage,
+    pass_mode: EnginePassMode,
+    workers: Vec<(usize, OfflineWorkerQuiescentCheckpoint)>,
+    worker_groups: BTreeMap<usize, Vec<usize>>,
+    next_id: usize,
+    next_worker_id: usize,
+    args: MockEngineArgs,
+}
+
+#[derive(Debug, Clone)]
+pub(in crate::replay::offline) struct EngineReplayCheckpoint {
+    stage: SimulationWorkerStage,
+    pass_mode: EnginePassMode,
+    workers: Vec<(usize, OfflineWorkerReplayCheckpoint)>,
+    worker_groups: BTreeMap<usize, Vec<usize>>,
+    next_id: usize,
+    next_worker_id: usize,
+    pending_removal: BTreeSet<usize>,
+    pending_startup: BTreeSet<usize>,
+    args: MockEngineArgs,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::replay) enum EngineWorkerLifecycle {
+    Serving,
+    Starting,
+    Draining,
+    Inactive,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::replay) struct EngineWorkerSnapshot {
+    pub(in crate::replay) worker_id: usize,
+    pub(in crate::replay) lifecycle: EngineWorkerLifecycle,
+    pub(in crate::replay) queued_requests: usize,
+    pub(in crate::replay) running_requests: usize,
+    pub(in crate::replay) in_flight_requests: usize,
+    pub(in crate::replay) busy_ranks: usize,
+}
+
+impl EngineQuiescentCheckpoint {
+    pub(in crate::replay::offline) fn kv_footprint(&self) -> anyhow::Result<(usize, usize, usize)> {
+        let [(_, worker)] = self.workers.as_slice() else {
+            bail!("checkpoint spike requires exactly one worker memento");
+        };
+        Ok(worker.kv_footprint())
+    }
 }
 
 impl EngineComponent {
@@ -116,6 +173,147 @@ impl EngineComponent {
     ) {
         self.args = args;
         self.capture_kv_events = capture_kv_events;
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(in crate::replay::offline) fn checkpoint_quiescent_agg_round_robin(
+        &self,
+    ) -> anyhow::Result<EngineQuiescentCheckpoint> {
+        anyhow::ensure!(
+            self.stage == SimulationWorkerStage::Aggregated
+                && self.pass_mode == EnginePassMode::Visible,
+            "checkpoint spike requires the visible aggregated engine"
+        );
+        anyhow::ensure!(
+            self.args.dp_size.max(1) == 1
+                && self.workers.len() == 1
+                && self.worker_groups.len() == 1,
+            "checkpoint spike requires exactly one worker with one DP rank"
+        );
+        anyhow::ensure!(
+            self.pending_removal.is_empty() && self.pending_startup.is_empty(),
+            "checkpoint spike does not yet snapshot worker lifecycle transitions"
+        );
+        anyhow::ensure!(
+            !self.capture_kv_events,
+            "checkpoint spike supports round-robin routing only"
+        );
+
+        let workers = self
+            .workers
+            .iter()
+            .map(|(id, worker)| Ok((*id, worker.checkpoint_quiescent()?)))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(EngineQuiescentCheckpoint {
+            stage: self.stage,
+            pass_mode: self.pass_mode,
+            workers,
+            worker_groups: self.worker_groups.clone(),
+            next_id: self.next_id,
+            next_worker_id: self.next_worker_id,
+            args: self.args.clone(),
+        })
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(in crate::replay::offline) fn restore_quiescent_agg_round_robin(
+        checkpoint: EngineQuiescentCheckpoint,
+    ) -> anyhow::Result<Self> {
+        let workers = checkpoint
+            .workers
+            .into_iter()
+            .map(|(id, worker)| Ok((id, OfflineWorkerState::restore_quiescent(id, worker)?)))
+            .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
+        Ok(Self {
+            stage: checkpoint.stage,
+            pass_mode: checkpoint.pass_mode,
+            workers,
+            worker_groups: checkpoint.worker_groups,
+            next_id: checkpoint.next_id,
+            next_worker_id: checkpoint.next_worker_id,
+            pending_removal: BTreeSet::new(),
+            pending_startup: BTreeSet::new(),
+            args: checkpoint.args,
+            capture_kv_events: false,
+        })
+    }
+
+    pub(in crate::replay::offline) fn checkpoint_replay_agg_round_robin(
+        &self,
+    ) -> anyhow::Result<EngineReplayCheckpoint> {
+        anyhow::ensure!(
+            self.stage == SimulationWorkerStage::Aggregated
+                && self.pass_mode == EnginePassMode::Visible,
+            "interactive checkpoint requires the visible aggregated engine"
+        );
+        anyhow::ensure!(
+            self.args.dp_size.max(1) == 1,
+            "interactive checkpoint supports one DP rank per worker"
+        );
+        anyhow::ensure!(
+            !self.capture_kv_events,
+            "interactive checkpoint supports round-robin routing only"
+        );
+        let workers = self
+            .workers
+            .iter()
+            .map(|(id, worker)| Ok((*id, worker.checkpoint_replay()?)))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(EngineReplayCheckpoint {
+            stage: self.stage,
+            pass_mode: self.pass_mode,
+            workers,
+            worker_groups: self.worker_groups.clone(),
+            next_id: self.next_id,
+            next_worker_id: self.next_worker_id,
+            pending_removal: self.pending_removal.clone(),
+            pending_startup: self.pending_startup.clone(),
+            args: self.args.clone(),
+        })
+    }
+
+    pub(in crate::replay::offline) fn restore_replay_agg_round_robin(
+        checkpoint: EngineReplayCheckpoint,
+    ) -> anyhow::Result<Self> {
+        let workers = checkpoint
+            .workers
+            .into_iter()
+            .map(|(id, worker)| Ok((id, OfflineWorkerState::restore_replay(id, worker)?)))
+            .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
+        anyhow::ensure!(
+            checkpoint
+                .worker_groups
+                .values()
+                .flatten()
+                .all(|rank_id| workers.contains_key(rank_id)),
+            "interactive engine checkpoint topology references an unknown scheduler"
+        );
+        Ok(Self {
+            stage: checkpoint.stage,
+            pass_mode: checkpoint.pass_mode,
+            workers,
+            worker_groups: checkpoint.worker_groups,
+            next_id: checkpoint.next_id,
+            next_worker_id: checkpoint.next_worker_id,
+            pending_removal: checkpoint.pending_removal,
+            pending_startup: checkpoint.pending_startup,
+            args: checkpoint.args,
+            capture_kv_events: false,
+        })
+    }
+
+    #[cfg(test)]
+    pub(in crate::replay::offline) fn debug_block_manager_id(&self) -> kvbm_logical::ManagerId {
+        assert_eq!(
+            self.workers.len(),
+            1,
+            "checkpoint test requires exactly one worker"
+        );
+        self.workers
+            .values()
+            .next()
+            .expect("single checkpoint worker must exist")
+            .debug_block_manager_id()
     }
 
     /// Add a new mocker worker and all of its DP-rank schedulers, returning
@@ -531,6 +729,70 @@ impl EngineComponent {
 
     pub(in crate::replay::offline) fn worker_count(&self) -> usize {
         self.worker_groups.len()
+    }
+
+    /// Desired topology once startup and drain transitions settle.
+    pub(in crate::replay::offline) fn target_worker_count(&self) -> usize {
+        self.active_group_ids().len() + self.pending_startup.len()
+    }
+
+    pub(in crate::replay::offline) fn starting_worker_count(&self) -> usize {
+        self.pending_startup.len()
+    }
+
+    pub(in crate::replay::offline) fn draining_worker_count(&self) -> usize {
+        self.pending_removal.len()
+    }
+
+    pub(in crate::replay) fn replay_worker_snapshots(&self) -> Vec<EngineWorkerSnapshot> {
+        // Worker IDs are monotonic and never reused within a replay branch.
+        // Keep every ID allocated on this branch observable after scale-down
+        // so historical per-worker metrics do not disappear when the live
+        // scheduler state is reclaimed.
+        (0..self.next_worker_id)
+            .map(|worker_id| {
+                let Some(rank_ids) = self.worker_groups.get(&worker_id) else {
+                    return EngineWorkerSnapshot {
+                        worker_id,
+                        lifecycle: EngineWorkerLifecycle::Inactive,
+                        queued_requests: 0,
+                        running_requests: 0,
+                        in_flight_requests: 0,
+                        busy_ranks: 0,
+                    };
+                };
+                let lifecycle = if self.pending_startup.contains(&worker_id) {
+                    EngineWorkerLifecycle::Starting
+                } else if self.pending_removal.contains(&worker_id) {
+                    EngineWorkerLifecycle::Draining
+                } else {
+                    EngineWorkerLifecycle::Serving
+                };
+                let mut queued_requests = 0usize;
+                let mut running_requests = 0usize;
+                let mut in_flight_requests = 0usize;
+                let mut busy_ranks = 0usize;
+                for rank_id in rank_ids {
+                    let worker = self
+                        .workers
+                        .get(rank_id)
+                        .expect("worker group must reference an existing rank");
+                    let (queued, running) = worker.replay_queue_counts();
+                    queued_requests += queued;
+                    running_requests += running;
+                    in_flight_requests += worker.in_flight();
+                    busy_ranks += usize::from(worker.is_busy());
+                }
+                EngineWorkerSnapshot {
+                    worker_id,
+                    lifecycle,
+                    queued_requests,
+                    running_requests,
+                    in_flight_requests,
+                    busy_ranks,
+                }
+            })
+            .collect()
     }
 
     #[cfg(test)]
@@ -981,6 +1243,38 @@ mod tests {
         engine.apply_target_count(1);
         // Worker was removed from pending_startup and workers map.
         assert!(!engine.mark_worker_ready(new_id));
+    }
+
+    #[test]
+    fn replay_snapshots_retain_cancelled_startup_worker_as_inactive() {
+        let mut engine = engine_with_startup(1, Some(5.0));
+        let (added, _, _) = engine.apply_target_count(2);
+        assert_eq!(added, vec![1]);
+
+        engine.apply_target_count(1);
+
+        assert_eq!(engine.worker_count(), 1);
+        assert_eq!(
+            engine.replay_worker_snapshots(),
+            vec![
+                EngineWorkerSnapshot {
+                    worker_id: 0,
+                    lifecycle: EngineWorkerLifecycle::Serving,
+                    queued_requests: 0,
+                    running_requests: 0,
+                    in_flight_requests: 0,
+                    busy_ranks: 0,
+                },
+                EngineWorkerSnapshot {
+                    worker_id: 1,
+                    lifecycle: EngineWorkerLifecycle::Inactive,
+                    queued_requests: 0,
+                    running_requests: 0,
+                    in_flight_requests: 0,
+                    busy_ranks: 0,
+                },
+            ]
+        );
     }
 
     #[test]

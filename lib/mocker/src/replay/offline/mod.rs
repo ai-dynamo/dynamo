@@ -12,6 +12,7 @@ pub(crate) mod events;
 pub(crate) mod planner_hook;
 mod progress;
 pub(crate) mod runtime_utils;
+mod session;
 pub(crate) mod single;
 pub(crate) mod state;
 
@@ -23,4 +24,11 @@ pub(crate) use entrypoints::{
     simulate_concurrency_workload_disagg, simulate_trace, simulate_trace_disagg,
     simulate_trace_workload, simulate_trace_workload_accumulating_deltas,
     simulate_trace_workload_disagg,
+};
+pub use session::{
+    MAX_REPLAY_SESSION_OBSERVATIONS, MAX_REPLAY_SESSION_REPLICAS, MAX_REPLAY_SESSION_REQUESTS,
+    MAX_REPLAY_SESSION_SCALE_ACTIONS, ReplayAdvanceSnapshot, ReplayCheckpointKind,
+    ReplayReplicaLifecycle, ReplayReplicaTelemetry, ReplaySampledAdvance, ReplayScaleAction,
+    ReplaySession, ReplaySessionCheckpoint, ReplaySessionConfig, ReplaySessionState,
+    ReplaySessionTelemetry, ReplayTelemetryWindow, ReplayTimelineObservation,
 };

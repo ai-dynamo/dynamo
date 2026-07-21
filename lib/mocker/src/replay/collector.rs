@@ -4,7 +4,9 @@
 use rustc_hash::FxHashMap;
 use serde::Serialize;
 use serde::ser::{SerializeMap, Serializer};
+use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::common::protocols::OutputSignal;
@@ -326,7 +328,11 @@ where
 struct TraceRequestStats {
     arrival_time_ms: f64,
     first_admit_ms: Option<f64>,
-    token_times_ms: Vec<f64>,
+    /// Copy-on-write token history. Completed requests are immutable, so
+    /// retained replay checkpoints share their (potentially large) timestamp
+    /// vectors. Only an in-flight request's first mutation after a checkpoint
+    /// copies its own short history.
+    token_times_ms: Arc<Vec<f64>>,
     input_length: usize,
     requested_output_length: usize,
     reused_input_tokens: usize,
@@ -347,6 +353,7 @@ struct TraceRequestStats {
     /// single-shot request lists.
     session_id: Option<String>,
     turn_index: Option<usize>,
+    terminal_status: Option<ReplayTerminalStatus>,
     detail: Option<Box<PerRequestDetail>>,
 }
 
@@ -510,6 +517,238 @@ pub(crate) struct TraceCollector {
     decode_gpus_per_worker: usize,
 }
 
+/// Value-only collector memento used by resumable offline replay. Keeping a
+/// separate DTO makes the checkpoint boundary explicit and avoids teaching the
+/// live collector to be clonable as its internal accounting evolves.
+#[derive(Debug, Clone)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct TraceCollectorCheckpoint {
+    requests: Vec<(Uuid, TraceRequestStatsCheckpoint)>,
+    capture_per_request: bool,
+    sla: SlaThresholds,
+    prefill_worker_seconds: f64,
+    decode_worker_seconds: f64,
+    static_worker_count: Option<(usize, usize)>,
+    prefill_gpus_per_worker: usize,
+    decode_gpus_per_worker: usize,
+}
+
+/// Cursor-safe metrics for one requested time window. Scheduler passes may
+/// write their modeled completion timestamps before the completion event is
+/// externally visible; this snapshot filters every sample against `cursor_ms`
+/// so a paused UI never observes the future.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct TraceCursorMetricValues {
+    pub(crate) cumulative_arrivals: usize,
+    pub(crate) cumulative_admissions: usize,
+    pub(crate) cumulative_completions: usize,
+    pub(crate) cumulative_output_tokens: usize,
+    pub(crate) window_arrivals: usize,
+    pub(crate) window_admissions: usize,
+    /// Requests from the window-arrival cohort admitted by `cursor_ms`.
+    /// This is intentionally distinct from `window_admissions`, whose cohort
+    /// is selected by admission time rather than arrival time.
+    pub(crate) window_arrivals_admitted: usize,
+    pub(crate) window_completions: usize,
+    pub(crate) window_output_tokens: usize,
+    /// Mean simulated prompt length for the window-arrival cohort. `None`
+    /// means the window contained no arrivals.
+    pub(crate) avg_isl_tokens: Option<f64>,
+    /// Mean requested/planned output length for the same window-arrival cohort
+    /// as `avg_isl_tokens`. This is intentionally distinct from the number of
+    /// output tokens visible by the cursor.
+    pub(crate) avg_requested_osl_tokens: Option<f64>,
+    /// Visible non-first output tokens in the window, one per decode forward
+    /// in the currently supported non-speculative scheduler slice.
+    pub(crate) window_decode_tokens: usize,
+    pub(crate) p95_ttft_ms: Option<f64>,
+    pub(crate) p95_itl_ms: Option<f64>,
+    pub(crate) p95_e2e_ms: Option<f64>,
+    pub(crate) cumulative_kv_reuse_rate: Option<f64>,
+    pub(crate) window_kv_reuse_rate: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct TraceCursorMetrics {
+    pub(crate) aggregate: TraceCursorMetricValues,
+    pub(crate) per_worker: BTreeMap<usize, TraceCursorMetricValues>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TraceCursorMetricDetail {
+    Full,
+    TrafficOnly,
+}
+
+struct TraceCursorAccumulator {
+    detail: TraceCursorMetricDetail,
+    values: TraceCursorMetricValues,
+    ttft_ms: Vec<f64>,
+    itl_ms: Vec<f64>,
+    e2e_ms: Vec<f64>,
+    window_input_tokens: usize,
+    window_requested_output_tokens: usize,
+    cumulative_reused_input_tokens: usize,
+    cumulative_admitted_input_tokens: usize,
+    window_reused_input_tokens: usize,
+    window_admitted_input_tokens: usize,
+}
+
+impl TraceCursorAccumulator {
+    fn new(detail: TraceCursorMetricDetail) -> Self {
+        Self {
+            detail,
+            values: TraceCursorMetricValues::default(),
+            ttft_ms: Vec::new(),
+            itl_ms: Vec::new(),
+            e2e_ms: Vec::new(),
+            window_input_tokens: 0,
+            window_requested_output_tokens: 0,
+            cumulative_reused_input_tokens: 0,
+            cumulative_admitted_input_tokens: 0,
+            window_reused_input_tokens: 0,
+            window_admitted_input_tokens: 0,
+        }
+    }
+
+    fn observe(&mut self, stats: &TraceRequestStats, window_start_ms: f64, cursor_ms: f64) {
+        let in_window = |at_ms: f64| {
+            at_ms <= cursor_ms
+                && (at_ms > window_start_ms || (window_start_ms == 0.0 && at_ms >= 0.0))
+        };
+
+        let arrival_in_window =
+            stats.arrival_time_ms <= cursor_ms && in_window(stats.arrival_time_ms);
+        if stats.arrival_time_ms <= cursor_ms {
+            self.values.cumulative_arrivals += 1;
+            if arrival_in_window {
+                self.values.window_arrivals += 1;
+                self.window_input_tokens += stats.input_length;
+                self.window_requested_output_tokens += stats.requested_output_length;
+            }
+        }
+
+        if let Some(admit_ms) = stats.first_admit_ms.filter(|at_ms| *at_ms <= cursor_ms) {
+            self.values.cumulative_admissions += 1;
+            self.cumulative_reused_input_tokens += stats.first_admission_reused_input_tokens;
+            self.cumulative_admitted_input_tokens += stats.input_length;
+            if arrival_in_window {
+                self.values.window_arrivals_admitted += 1;
+            }
+            if in_window(admit_ms) {
+                self.values.window_admissions += 1;
+                self.window_reused_input_tokens += stats.first_admission_reused_input_tokens;
+                self.window_admitted_input_tokens += stats.input_length;
+            }
+        }
+
+        // Token times are appended monotonically. Binary searches avoid
+        // rescanning the entire completed history for every 1s UI sample; only
+        // ITL gaps whose second token falls inside this window are traversed.
+        let visible_count = stats
+            .token_times_ms
+            .partition_point(|at_ms| *at_ms <= cursor_ms);
+        let visible_token_times = &stats.token_times_ms[..visible_count];
+        let window_token_start = if window_start_ms == 0.0 {
+            visible_token_times.partition_point(|at_ms| *at_ms < 0.0)
+        } else {
+            visible_token_times.partition_point(|at_ms| *at_ms <= window_start_ms)
+        };
+        self.values.cumulative_output_tokens += visible_count;
+        self.values.window_output_tokens += visible_count - window_token_start;
+        let window_decode_start = window_token_start.max(1);
+        self.values.window_decode_tokens += visible_count.saturating_sub(window_decode_start);
+
+        if self.detail == TraceCursorMetricDetail::Full {
+            if let Some(first_token_ms) = visible_token_times.first().copied()
+                && in_window(first_token_ms)
+            {
+                self.ttft_ms
+                    .push((first_token_ms - stats.arrival_time_ms).max(0.0));
+            }
+            for second_index in window_decode_start..visible_count {
+                self.itl_ms.push(
+                    (visible_token_times[second_index] - visible_token_times[second_index - 1])
+                        .max(0.0),
+                );
+            }
+        }
+
+        if stats.terminal_status == Some(ReplayTerminalStatus::Completed)
+            && let Some(terminal_ms) = visible_token_times.last().copied()
+        {
+            self.values.cumulative_completions += 1;
+            if in_window(terminal_ms) {
+                self.values.window_completions += 1;
+                if self.detail == TraceCursorMetricDetail::Full {
+                    self.e2e_ms
+                        .push((terminal_ms - stats.arrival_time_ms).max(0.0));
+                }
+            }
+        }
+    }
+
+    fn finish(mut self) -> TraceCursorMetricValues {
+        if self.detail == TraceCursorMetricDetail::Full {
+            self.values.p95_ttft_ms = percentile_95(self.ttft_ms);
+            self.values.p95_itl_ms = percentile_95(self.itl_ms);
+            self.values.p95_e2e_ms = percentile_95(self.e2e_ms);
+        }
+        self.values.avg_isl_tokens = (self.values.window_arrivals > 0)
+            .then(|| self.window_input_tokens as f64 / self.values.window_arrivals as f64);
+        self.values.avg_requested_osl_tokens = (self.values.window_arrivals > 0).then(|| {
+            self.window_requested_output_tokens as f64 / self.values.window_arrivals as f64
+        });
+        self.values.cumulative_kv_reuse_rate =
+            (self.cumulative_admitted_input_tokens > 0).then(|| {
+                self.cumulative_reused_input_tokens as f64
+                    / self.cumulative_admitted_input_tokens as f64
+            });
+        self.values.window_kv_reuse_rate = (self.window_admitted_input_tokens > 0).then(|| {
+            self.window_reused_input_tokens as f64 / self.window_admitted_input_tokens as f64
+        });
+        self.values
+    }
+}
+
+fn percentile_95(values: Vec<f64>) -> Option<f64> {
+    (!values.is_empty()).then(|| build_distribution_stats(values).p95_ms)
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(not(test), allow(dead_code))]
+struct TraceRequestStatsCheckpoint {
+    arrival_time_ms: f64,
+    first_admit_ms: Option<f64>,
+    token_times_ms: Arc<Vec<f64>>,
+    input_length: usize,
+    requested_output_length: usize,
+    reused_input_tokens: usize,
+    first_admission_reused_input_tokens: usize,
+    prefill_worker_idx: Option<usize>,
+    decode_worker_idx: Option<usize>,
+    session_id: Option<String>,
+    turn_index: Option<usize>,
+    terminal_status: Option<ReplayTerminalStatus>,
+    detail: Option<PerRequestDetailCheckpoint>,
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(not(test), allow(dead_code))]
+struct PerRequestDetailCheckpoint {
+    prefill_reused_input_tokens: Option<usize>,
+    prefill_admit_ms: Option<f64>,
+    source_held_ms: Option<f64>,
+    destination_reserved_ms: Option<f64>,
+    destination_activated_ms: Option<f64>,
+    decode_admit_ms: Option<f64>,
+    source_released_ms: Option<f64>,
+    decode_reused_input_tokens: Option<usize>,
+    prefill_route_overlap_tokens: Option<usize>,
+    decode_route_overlap_tokens: Option<usize>,
+    terminal_status: Option<ReplayTerminalStatus>,
+}
+
 impl TraceRequestStats {
     fn first_token_ms(&self) -> Option<f64> {
         self.token_times_ms.first().copied()
@@ -549,6 +788,174 @@ impl TraceRequestStats {
 }
 
 impl TraceCollector {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn checkpoint(&self) -> TraceCollectorCheckpoint {
+        let mut requests = self
+            .requests
+            .iter()
+            .map(|(uuid, stats)| {
+                (
+                    *uuid,
+                    TraceRequestStatsCheckpoint {
+                        arrival_time_ms: stats.arrival_time_ms,
+                        first_admit_ms: stats.first_admit_ms,
+                        token_times_ms: stats.token_times_ms.clone(),
+                        input_length: stats.input_length,
+                        requested_output_length: stats.requested_output_length,
+                        reused_input_tokens: stats.reused_input_tokens,
+                        first_admission_reused_input_tokens: stats
+                            .first_admission_reused_input_tokens,
+                        prefill_worker_idx: stats.prefill_worker_idx,
+                        decode_worker_idx: stats.decode_worker_idx,
+                        session_id: stats.session_id.clone(),
+                        turn_index: stats.turn_index,
+                        terminal_status: stats.terminal_status,
+                        detail: stats
+                            .detail
+                            .as_deref()
+                            .map(|detail| PerRequestDetailCheckpoint {
+                                prefill_reused_input_tokens: detail.prefill_reused_input_tokens,
+                                prefill_admit_ms: detail.prefill_admit_ms,
+                                source_held_ms: detail.source_held_ms,
+                                destination_reserved_ms: detail.destination_reserved_ms,
+                                destination_activated_ms: detail.destination_activated_ms,
+                                decode_admit_ms: detail.decode_admit_ms,
+                                source_released_ms: detail.source_released_ms,
+                                decode_reused_input_tokens: detail.decode_reused_input_tokens,
+                                prefill_route_overlap_tokens: detail.prefill_route_overlap_tokens,
+                                decode_route_overlap_tokens: detail.decode_route_overlap_tokens,
+                                terminal_status: detail.terminal_status,
+                            }),
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        requests.sort_unstable_by_key(|(uuid, _)| *uuid);
+        TraceCollectorCheckpoint {
+            requests,
+            capture_per_request: self.capture_per_request,
+            sla: self.sla,
+            prefill_worker_seconds: self.prefill_worker_seconds,
+            decode_worker_seconds: self.decode_worker_seconds,
+            static_worker_count: self.static_worker_count,
+            prefill_gpus_per_worker: self.prefill_gpus_per_worker,
+            decode_gpus_per_worker: self.decode_gpus_per_worker,
+        }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn restore(checkpoint: TraceCollectorCheckpoint) -> Self {
+        let requests = checkpoint
+            .requests
+            .into_iter()
+            .map(|(uuid, stats)| {
+                (
+                    uuid,
+                    TraceRequestStats {
+                        arrival_time_ms: stats.arrival_time_ms,
+                        first_admit_ms: stats.first_admit_ms,
+                        token_times_ms: stats.token_times_ms,
+                        input_length: stats.input_length,
+                        requested_output_length: stats.requested_output_length,
+                        reused_input_tokens: stats.reused_input_tokens,
+                        first_admission_reused_input_tokens: stats
+                            .first_admission_reused_input_tokens,
+                        prefill_worker_idx: stats.prefill_worker_idx,
+                        decode_worker_idx: stats.decode_worker_idx,
+                        session_id: stats.session_id,
+                        turn_index: stats.turn_index,
+                        terminal_status: stats.terminal_status,
+                        detail: stats.detail.map(|detail| {
+                            Box::new(PerRequestDetail {
+                                prefill_reused_input_tokens: detail.prefill_reused_input_tokens,
+                                prefill_admit_ms: detail.prefill_admit_ms,
+                                source_held_ms: detail.source_held_ms,
+                                destination_reserved_ms: detail.destination_reserved_ms,
+                                destination_activated_ms: detail.destination_activated_ms,
+                                decode_admit_ms: detail.decode_admit_ms,
+                                source_released_ms: detail.source_released_ms,
+                                decode_reused_input_tokens: detail.decode_reused_input_tokens,
+                                prefill_route_overlap_tokens: detail.prefill_route_overlap_tokens,
+                                decode_route_overlap_tokens: detail.decode_route_overlap_tokens,
+                                terminal_status: detail.terminal_status,
+                            })
+                        }),
+                    },
+                )
+            })
+            .collect();
+        Self {
+            requests,
+            capture_per_request: checkpoint.capture_per_request,
+            sla: checkpoint.sla,
+            prefill_worker_seconds: checkpoint.prefill_worker_seconds,
+            decode_worker_seconds: checkpoint.decode_worker_seconds,
+            static_worker_count: checkpoint.static_worker_count,
+            prefill_gpus_per_worker: checkpoint.prefill_gpus_per_worker,
+            decode_gpus_per_worker: checkpoint.decode_gpus_per_worker,
+        }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn request_count(&self) -> usize {
+        self.requests.len()
+    }
+
+    /// Build a non-destructive metric window ending at a paused replay cursor.
+    /// Values recorded by a pass at modeled timestamps after `cursor_ms` are
+    /// intentionally ignored until the corresponding completion boundary is
+    /// reached. Worker keys are the stable aggregated scheduler IDs recorded
+    /// when each request was dispatched.
+    pub(in crate::replay) fn cursor_metrics(
+        &self,
+        window_start_ms: f64,
+        cursor_ms: f64,
+    ) -> TraceCursorMetrics {
+        self.cursor_metrics_with_detail(window_start_ms, cursor_ms, TraceCursorMetricDetail::Full)
+    }
+
+    /// Build the same cursor-safe traffic, admission, and token accounting as
+    /// `cursor_metrics` without retaining latency samples or calculating
+    /// distributions. Latency percentiles in the result remain `None`.
+    pub(in crate::replay) fn traffic_cursor_metrics(
+        &self,
+        window_start_ms: f64,
+        cursor_ms: f64,
+    ) -> TraceCursorMetrics {
+        self.cursor_metrics_with_detail(
+            window_start_ms,
+            cursor_ms,
+            TraceCursorMetricDetail::TrafficOnly,
+        )
+    }
+
+    fn cursor_metrics_with_detail(
+        &self,
+        window_start_ms: f64,
+        cursor_ms: f64,
+        detail: TraceCursorMetricDetail,
+    ) -> TraceCursorMetrics {
+        debug_assert!(window_start_ms >= 0.0 && window_start_ms <= cursor_ms);
+        let mut aggregate = TraceCursorAccumulator::new(detail);
+        let mut per_worker = BTreeMap::<usize, TraceCursorAccumulator>::new();
+        for stats in self.requests.values() {
+            aggregate.observe(stats, window_start_ms, cursor_ms);
+            if let Some(worker_idx) = stats.decode_worker_idx {
+                per_worker
+                    .entry(worker_idx)
+                    .or_insert_with(|| TraceCursorAccumulator::new(detail))
+                    .observe(stats, window_start_ms, cursor_ms);
+            }
+        }
+        TraceCursorMetrics {
+            aggregate: aggregate.finish(),
+            per_worker: per_worker
+                .into_iter()
+                .map(|(worker_idx, metrics)| (worker_idx, metrics.finish()))
+                .collect(),
+        }
+    }
+
     /// Toggle whether `finish()` should build per-request records. Off by
     /// default; the runtimes flip it on when the caller asks for JSONL output.
     pub(crate) fn set_capture_per_request(&mut self, value: bool) {
@@ -598,7 +1005,7 @@ impl TraceCollector {
             TraceRequestStats {
                 arrival_time_ms,
                 first_admit_ms: None,
-                token_times_ms: Vec::with_capacity(requested_output_length),
+                token_times_ms: Arc::new(Vec::with_capacity(requested_output_length)),
                 input_length,
                 requested_output_length,
                 reused_input_tokens: 0,
@@ -606,6 +1013,7 @@ impl TraceCollector {
                 decode_worker_idx: None,
                 session_id: None,
                 turn_index: None,
+                terminal_status: None,
                 first_admission_reused_input_tokens: 0,
                 detail: self
                     .capture_per_request
@@ -741,6 +1149,9 @@ impl TraceCollector {
     }
 
     pub(crate) fn on_terminal(&mut self, uuid: Uuid, status: ReplayTerminalStatus) {
+        if let Some(stats) = self.requests.get_mut(&uuid) {
+            stats.terminal_status.get_or_insert(status);
+        }
         if let Some(detail) = self.detail_mut(uuid) {
             detail.terminal_status.get_or_insert(status);
         }
@@ -755,7 +1166,7 @@ impl TraceCollector {
 
     pub(crate) fn on_token(&mut self, uuid: Uuid, token_time_ms: f64) {
         if let Some(stats) = self.requests.get_mut(&uuid) {
-            stats.token_times_ms.push(token_time_ms);
+            Arc::make_mut(&mut stats.token_times_ms).push(token_time_ms);
         }
     }
 
@@ -784,7 +1195,7 @@ impl TraceCollector {
                 .len()
                 .checked_sub(emitted)
                 .expect("scheduler emitted more output signals than collector tokens");
-            stats.token_times_ms[start..].fill(completion_time_ms);
+            Arc::make_mut(&mut stats.token_times_ms)[start..].fill(completion_time_ms);
         }
     }
 
@@ -1279,6 +1690,147 @@ mod tests {
         assert!(report.per_request.is_empty());
         // Summary stats still work.
         assert_eq!(report.request_counts.completed_requests, 1);
+    }
+
+    #[test]
+    fn replay_checkpoints_share_completed_token_histories() {
+        let mut collector = TraceCollector::default();
+        let uuid = Uuid::from_u128(99);
+        collector.on_arrival(uuid, 0.0, 4, 2);
+        collector.on_admit(uuid, 0.0, 0);
+        collector.on_token(uuid, 1.0);
+        collector.on_token(uuid, 2.0);
+        collector.on_terminal(uuid, ReplayTerminalStatus::Completed);
+
+        let first = collector.checkpoint();
+        let second = collector.checkpoint();
+        assert!(Arc::ptr_eq(
+            &first.requests[0].1.token_times_ms,
+            &second.requests[0].1.token_times_ms
+        ));
+    }
+
+    #[test]
+    fn cursor_metrics_count_terminal_context_truncation() {
+        let mut collector = TraceCollector::default();
+        let uuid = Uuid::from_u128(100);
+        collector.on_arrival(uuid, 0.0, 4, 4);
+        collector.on_admit(uuid, 0.0, 0);
+        collector.on_token(uuid, 1.0);
+        collector.on_token(uuid, 2.0);
+        collector.on_terminal(uuid, ReplayTerminalStatus::Completed);
+
+        let metrics = collector.cursor_metrics(0.0, 2.0).aggregate;
+        assert_eq!(metrics.cumulative_output_tokens, 2);
+        assert_eq!(metrics.cumulative_completions, 1);
+        assert_eq!(metrics.window_completions, 1);
+        assert_eq!(metrics.p95_e2e_ms, Some(2.0));
+    }
+
+    #[test]
+    fn cursor_metrics_keep_arrival_and_admission_cohorts_distinct() {
+        let mut collector = TraceCollector::default();
+        let earlier = Uuid::from_u128(101);
+        collector.on_arrival(earlier, 0.0, 4, 1);
+        collector.on_admit(earlier, 10.0, 0);
+
+        let recent = Uuid::from_u128(102);
+        collector.on_arrival(recent, 8.0, 4, 1);
+
+        let metrics = collector.cursor_metrics(5.0, 20.0).aggregate;
+        assert_eq!(metrics.window_arrivals, 1);
+        assert_eq!(metrics.window_admissions, 1);
+        assert_eq!(metrics.window_arrivals_admitted, 0);
+    }
+
+    #[test]
+    fn cursor_sequence_lengths_follow_arrival_boundaries_and_worker_assignment() {
+        let mut collector = TraceCollector::default();
+
+        let at_zero = Uuid::from_u128(103);
+        collector.on_arrival(at_zero, 0.0, 10, 2);
+        collector.on_decode_assigned(at_zero, 1);
+
+        let at_five_unassigned = Uuid::from_u128(104);
+        collector.on_arrival(at_five_unassigned, 5.0, 30, 6);
+
+        // A zero-based window includes time zero and its closed upper bound.
+        let through_five = collector.cursor_metrics(0.0, 5.0);
+        assert_eq!(through_five.aggregate.window_arrivals, 2);
+        assert_eq!(through_five.aggregate.avg_isl_tokens, Some(20.0));
+        assert_eq!(through_five.aggregate.avg_requested_osl_tokens, Some(4.0));
+        let worker_one = &through_five.per_worker[&1];
+        assert_eq!(worker_one.window_arrivals, 1);
+        assert_eq!(worker_one.avg_isl_tokens, Some(10.0));
+        assert_eq!(worker_one.avg_requested_osl_tokens, Some(2.0));
+        assert_eq!(through_five.per_worker.len(), 1);
+
+        let at_ten = Uuid::from_u128(105);
+        collector.on_arrival(at_ten, 10.0, 50, 10);
+        collector.on_decode_assigned(at_ten, 2);
+
+        // Non-zero windows are open on the left and closed on the right, so
+        // the request at 5ms is excluded and the request at 10ms is included.
+        let five_to_ten = collector.cursor_metrics(5.0, 10.0);
+        assert_eq!(five_to_ten.aggregate.window_arrivals, 1);
+        assert_eq!(five_to_ten.aggregate.avg_isl_tokens, Some(50.0));
+        assert_eq!(five_to_ten.aggregate.avg_requested_osl_tokens, Some(10.0));
+        assert_eq!(five_to_ten.per_worker[&2].avg_isl_tokens, Some(50.0));
+
+        let empty = collector.cursor_metrics(10.0, 11.0);
+        assert_eq!(empty.aggregate.window_arrivals, 0);
+        assert_eq!(empty.aggregate.avg_isl_tokens, None);
+        assert_eq!(empty.aggregate.avg_requested_osl_tokens, None);
+        assert!(
+            empty
+                .per_worker
+                .values()
+                .all(|metrics| metrics.avg_isl_tokens.is_none()
+                    && metrics.avg_requested_osl_tokens.is_none())
+        );
+    }
+
+    #[test]
+    fn traffic_cursor_metrics_match_full_non_latency_fields() {
+        let mut collector = TraceCollector::default();
+
+        let first = Uuid::from_u128(106);
+        collector.on_arrival(first, 0.0, 8, 3);
+        collector.on_decode_assigned(first, 0);
+        collector.on_admit(first, 1.0, 4);
+        collector.on_token(first, 2.0);
+        collector.on_token(first, 3.0);
+        collector.on_token(first, 4.0);
+        collector.on_terminal(first, ReplayTerminalStatus::Completed);
+
+        let second = Uuid::from_u128(107);
+        collector.on_arrival(second, 5.0, 12, 2);
+        collector.on_decode_assigned(second, 1);
+        collector.on_admit(second, 6.0, 0);
+        collector.on_token(second, 7.0);
+        collector.on_token(second, 9.0);
+        collector.on_terminal(second, ReplayTerminalStatus::Completed);
+
+        let mut expected = collector.cursor_metrics(0.0, 10.0);
+        assert!(expected.aggregate.p95_ttft_ms.is_some());
+        assert!(expected.aggregate.p95_itl_ms.is_some());
+        assert!(expected.aggregate.p95_e2e_ms.is_some());
+
+        expected.aggregate.p95_ttft_ms = None;
+        expected.aggregate.p95_itl_ms = None;
+        expected.aggregate.p95_e2e_ms = None;
+        for metrics in expected.per_worker.values_mut() {
+            metrics.p95_ttft_ms = None;
+            metrics.p95_itl_ms = None;
+            metrics.p95_e2e_ms = None;
+        }
+
+        let traffic = collector.traffic_cursor_metrics(0.0, 10.0);
+        assert_eq!(traffic, expected);
+        assert_eq!(traffic.aggregate.avg_isl_tokens, Some(10.0));
+        assert_eq!(traffic.aggregate.avg_requested_osl_tokens, Some(2.5));
+        assert_eq!(traffic.aggregate.window_kv_reuse_rate, Some(0.2));
+        assert!(traffic.aggregate.window_decode_tokens > 0);
     }
 
     /// Register a completed request: arrival, output length (osl), and the

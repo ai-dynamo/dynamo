@@ -19,13 +19,15 @@ use dynamo_kv_router::PrefillLoadEstimator;
 pub use artifacts::{
     ReplayTimedKvEvent, ReplayTimedOutputSignal, ReplayTimedRequest, ReplayWorkerArtifacts,
 };
-pub(crate) use collector::TraceCollector;
 #[cfg(test)]
 pub(crate) use collector::TraceRequestStatsSnapshot;
 pub use collector::{
     PerRequestRecord, ReplayTerminalStatus, SlaThresholds, TraceDistributionStats,
     TraceGoodputStats, TraceInterTokenLatencyStats, TraceLatencyStats, TraceRequestCounts,
     TraceSimulationReport, TraceThroughputStats,
+};
+pub(crate) use collector::{
+    TraceCollector, TraceCollectorCheckpoint, TraceCursorMetricValues, TraceCursorMetrics,
 };
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReplayRouterMode {
@@ -98,6 +100,13 @@ pub use offline::planner_hook::{
 };
 #[doc(hidden)]
 pub use offline::run_offline_handoff_conformance;
+pub use offline::{
+    MAX_REPLAY_SESSION_OBSERVATIONS, MAX_REPLAY_SESSION_REPLICAS, MAX_REPLAY_SESSION_REQUESTS,
+    MAX_REPLAY_SESSION_SCALE_ACTIONS, ReplayAdvanceSnapshot, ReplayCheckpointKind,
+    ReplayReplicaLifecycle, ReplayReplicaTelemetry, ReplaySampledAdvance, ReplayScaleAction,
+    ReplaySession, ReplaySessionCheckpoint, ReplaySessionConfig, ReplaySessionState,
+    ReplaySessionTelemetry, ReplayTelemetryWindow, ReplayTimelineObservation,
+};
 pub use planner_handle::PlannerReplayHandle;
 pub use validate::validate_replay_args_mode;
 

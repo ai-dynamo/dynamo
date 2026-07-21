@@ -12,7 +12,8 @@ use crate::loadgen::ReplayRequestHashes;
 use crate::replay::TraceCollector;
 use crate::scheduler::{
     EngineCore, EnginePassResult, SchedulerCommand, SchedulerCommandEffects,
-    SchedulerCommandResult, SchedulerLifecycleEvent,
+    SchedulerCommandResult, SchedulerLifecycleEvent, VllmCore, VllmCoreQuiescentCheckpoint,
+    VllmCoreReplayCheckpoint,
 };
 use uuid::Uuid;
 
@@ -22,6 +23,7 @@ pub(crate) enum AggRequestPhase {
     Running,
 }
 
+#[derive(Debug, Clone)]
 pub(crate) struct AggRequestState {
     request: Option<DirectRequest>,
     pub(in crate::replay::offline) phase: AggRequestPhase,
@@ -222,6 +224,29 @@ pub(crate) struct OfflineWorkerState {
     in_flight: usize,
 }
 
+#[derive(Debug, Clone)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(in crate::replay::offline) struct OfflineWorkerQuiescentCheckpoint {
+    worker_id: u64,
+    dp_rank: u32,
+    core: VllmCoreQuiescentCheckpoint,
+}
+
+#[derive(Debug, Clone)]
+pub(in crate::replay::offline) struct OfflineWorkerReplayCheckpoint {
+    worker_id: u64,
+    dp_rank: u32,
+    busy: bool,
+    in_flight: usize,
+    core: VllmCoreReplayCheckpoint,
+}
+
+impl OfflineWorkerQuiescentCheckpoint {
+    pub(in crate::replay::offline) fn kv_footprint(&self) -> (usize, usize, usize) {
+        self.core.kv_footprint()
+    }
+}
+
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OfflineWorkerSnapshot {
@@ -282,6 +307,82 @@ impl OfflineWorkerState {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(in crate::replay::offline) fn checkpoint_quiescent(
+        &self,
+    ) -> anyhow::Result<OfflineWorkerQuiescentCheckpoint> {
+        anyhow::ensure!(
+            !self.busy && self.in_flight == 0,
+            "quiescent worker checkpoint requires no scheduled or owned work"
+        );
+        let EngineCore::Vllm(core) = &self.core else {
+            bail!("quiescent checkpoint spike supports only vLLM workers");
+        };
+        Ok(OfflineWorkerQuiescentCheckpoint {
+            worker_id: self.worker_id,
+            dp_rank: self.dp_rank,
+            core: core.checkpoint_quiescent()?,
+        })
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(in crate::replay::offline) fn restore_quiescent(
+        worker_idx: usize,
+        checkpoint: OfflineWorkerQuiescentCheckpoint,
+    ) -> anyhow::Result<Self> {
+        let core =
+            VllmCore::restore_quiescent(checkpoint.core, checkpoint.worker_id, worker_idx as u64)?;
+        Ok(Self {
+            core: EngineCore::Vllm(core),
+            worker_id: checkpoint.worker_id,
+            dp_rank: checkpoint.dp_rank,
+            busy: false,
+            in_flight: 0,
+        })
+    }
+
+    pub(in crate::replay::offline) fn checkpoint_replay(
+        &self,
+    ) -> anyhow::Result<OfflineWorkerReplayCheckpoint> {
+        let EngineCore::Vllm(core) = &self.core else {
+            bail!("interactive checkpoint supports only vLLM workers");
+        };
+        Ok(OfflineWorkerReplayCheckpoint {
+            worker_id: self.worker_id,
+            dp_rank: self.dp_rank,
+            busy: self.busy,
+            in_flight: self.in_flight,
+            core: core.checkpoint_replay()?,
+        })
+    }
+
+    pub(in crate::replay::offline) fn restore_replay(
+        worker_idx: usize,
+        checkpoint: OfflineWorkerReplayCheckpoint,
+    ) -> anyhow::Result<Self> {
+        let core =
+            VllmCore::restore_replay(checkpoint.core, checkpoint.worker_id, worker_idx as u64)?;
+        anyhow::ensure!(
+            checkpoint.in_flight >= core.num_requests(),
+            "interactive worker checkpoint in-flight accounting is smaller than scheduler ownership"
+        );
+        Ok(Self {
+            core: EngineCore::Vllm(core),
+            worker_id: checkpoint.worker_id,
+            dp_rank: checkpoint.dp_rank,
+            busy: checkpoint.busy,
+            in_flight: checkpoint.in_flight,
+        })
+    }
+
+    #[cfg(test)]
+    pub(in crate::replay::offline) fn debug_block_manager_id(&self) -> kvbm_logical::ManagerId {
+        let EngineCore::Vllm(core) = &self.core else {
+            panic!("checkpoint test requires a vLLM worker");
+        };
+        core.debug_block_manager_id()
+    }
+
     pub(crate) fn rank_identity(&self) -> (u64, u32) {
         (self.worker_id, self.dp_rank)
     }
@@ -289,6 +390,13 @@ impl OfflineWorkerState {
     pub(crate) fn in_flight(&self) -> usize {
         debug_assert!(self.in_flight >= self.core.num_requests());
         self.in_flight
+    }
+
+    pub(in crate::replay::offline) fn replay_queue_counts(&self) -> (usize, usize) {
+        let EngineCore::Vllm(core) = &self.core else {
+            return (self.core.num_requests(), 0);
+        };
+        core.replay_queue_counts()
     }
 
     pub(crate) fn receive_request(&mut self, mut request: DirectRequest) {
