@@ -27,7 +27,8 @@ pub(super) struct WorkerSelection {
     pub(super) effective_overlap_blocks: f64,
     pub(super) cached_tokens: usize,
     pub(super) routing_hashes: Option<RoutingDecisionHashes>,
-    pub(super) lifecycle: Option<(RequestProgressUpdater, RequestLifecycleLease)>,
+    pub(super) request_progress: Option<RequestProgressUpdater>,
+    pub(super) lifecycle_lease: Option<RequestLifecycleLease>,
 }
 
 #[derive(Clone, Copy)]
@@ -72,7 +73,7 @@ struct BestMatchArgs<'a> {
 
 impl KvPushRouter {
     async fn select_best_match(&self, args: BestMatchArgs<'_>) -> Result<WorkerSelection, Error> {
-        let (outcome, lifecycle) = self
+        let (outcome, request_progress, lifecycle_lease) = self
             .chooser
             .find_best_match_details_with_policy_class_inner(
                 Some(args.context_id),
@@ -94,6 +95,7 @@ impl KvPushRouter {
                 true,
             )
             .await?;
+
         match outcome {
             FindBestMatchOutcome::Routed {
                 worker,
@@ -108,7 +110,8 @@ impl KvPushRouter {
                 effective_overlap_blocks,
                 cached_tokens,
                 routing_hashes,
-                lifecycle,
+                request_progress,
+                lifecycle_lease,
             }),
             FindBestMatchOutcome::QueueRejected { rejection } => Err(rejection.into()),
         }

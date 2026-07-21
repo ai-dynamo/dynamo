@@ -88,7 +88,7 @@ fn monitor_response_stream(
                     if completed_terminal {
                         guard.mark_completed_terminal();
                     }
-                    // Mark before yielding so a client drop completes admission, then keep
+                    // Mark before yielding so a client drop retains final progress, then keep
                     // polling for the request-plane EOF after the application terminal item.
                     yield item;
                 }
@@ -253,7 +253,8 @@ impl KvPushRouter {
             context_id.clone(),
             request,
             !is_query_only,
-            selection.lifecycle.take(),
+            selection.request_progress.take(),
+            selection.lifecycle_lease.take(),
         );
 
         let record_result: Result<(), Error> = async {
@@ -380,7 +381,7 @@ impl KvPushRouter {
             }
         };
 
-        guard.mark_dispatched().await;
+        guard.mark_dispatched();
         let stream_context = response_stream.context();
         let wrapped_stream = Box::pin(monitor_response_stream(
             response_stream,
@@ -657,25 +658,18 @@ mod tests {
     use std::{
         collections::HashMap,
         sync::{
-            Arc, Mutex,
+            Arc,
             atomic::{AtomicBool, Ordering},
         },
         time::Duration,
     };
 
     use dynamo_kv_router::{
-        ActiveSequencesMultiWorker, DefaultWorkerSelector, SequencePublisher,
-        config::{KvRouterConfig, RouterQueuePolicy},
-        protocols::{ActiveLoad, ActiveSequenceEvent, RoutingConstraints},
-        scheduling::{
-            AdmissionAction, AdmissionDecision, AdmissionEvent, AdmissionId, AdmissionRequest,
-            LocalScheduler, NoopOverlapScoresRefresh, OverlapSignals, PolicyClassAdmissionPolicies,
-            PolicyClassAdmissionPolicy, PolicyProfile, ScheduleMode, ScheduleRequest,
-            WorkerPlacement,
-        },
+        DefaultWorkerSelector, config::KvRouterConfig, scheduling::RequestProgress,
     };
+    use dynamo_protocols::types::CompletionUsage;
     use dynamo_runtime::{
-        CancellationToken, DistributedRuntime, Runtime,
+        DistributedRuntime, Runtime,
         distributed::DistributedConfig,
         error::{ErrorType, match_error_chain},
         pipeline::{AsyncEngineContext, Context, PushRouter, RouterMode, context::Controller},
@@ -699,31 +693,6 @@ mod tests {
             .unwrap()
     }
 
-    struct NoopSequencePublisher;
-
-    impl SequencePublisher for NoopSequencePublisher {
-        fn enqueue_event(&self, _event: ActiveSequenceEvent) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        fn publish_load(&self, _load: ActiveLoad) {}
-
-        fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize) {}
-    }
-
-    struct RecordingAdmissionPolicy(Arc<Mutex<Vec<AdmissionEvent>>>);
-
-    impl PolicyClassAdmissionPolicy for RecordingAdmissionPolicy {
-        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
-            AdmissionDecision::Ready(WorkerPlacement::Any)
-        }
-
-        fn on_event(&mut self, event: AdmissionEvent) -> Vec<AdmissionAction> {
-            self.0.lock().unwrap().push(event);
-            Vec::new()
-        }
-    }
-
     #[test]
     fn response_item_failed_includes_typed_terminal_failures() {
         let mut output = LLMEngineOutput::default();
@@ -737,139 +706,6 @@ mod tests {
 
         output.finish_reason = Some(FinishReason::Length);
         assert!(!response_item_failed(&Annotated::from_data(output)));
-    }
-
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn dropping_stream_after_terminal_item_reports_admission_completed() {
-        let (router, runtime) = router(None).await;
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let slots = Arc::new(ActiveSequencesMultiWorker::new(
-            NoopSequencePublisher,
-            16,
-            HashMap::from([(7, (0, 1))]),
-            false,
-            0,
-            "decode",
-        ));
-        let (_config_tx, config_rx) =
-            watch::channel(HashMap::from([(7, ModelRuntimeConfig::default())]));
-        let mut policies = PolicyClassAdmissionPolicies::new();
-        policies.insert(
-            "default".to_owned(),
-            Box::new(RecordingAdmissionPolicy(Arc::clone(&events))),
-        );
-        let cancel = CancellationToken::new();
-        let scheduler = LocalScheduler::new_with_policy_profile(
-            Arc::clone(&slots),
-            config_rx,
-            PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs),
-            16,
-            DefaultWorkerSelector::new(None, "decode"),
-            None,
-            None::<Arc<NoopOverlapScoresRefresh>>,
-            None,
-            Duration::from_secs(60),
-            true,
-            cancel.clone(),
-            "decode",
-            false,
-            policies,
-        )
-        .unwrap();
-
-        for (index, finish_reason) in [FinishReason::Stop, FinishReason::EoS, FinishReason::Length]
-            .into_iter()
-            .enumerate()
-        {
-            let request_id = format!("terminal-drop-{index}");
-            let mut response = scheduler
-                .schedule_request(ScheduleRequest {
-                    mode: ScheduleMode::TrackedWithLifecycle {
-                        request_id: request_id.clone(),
-                    },
-                    token_seq: Some(vec![1]),
-                    block_hashes: None,
-                    isl_tokens: 1,
-                    lora_name: None,
-                    expected_output_tokens: None,
-                    pinned_worker: None,
-                    allowed_worker_ids: None,
-                    routing_constraints: RoutingConstraints::default(),
-                    router_config_override: None,
-                    priority_jump: 0.0,
-                    strict_priority: 0,
-                    policy_class: None,
-                    session_id: None,
-                    overlap: OverlapSignals::default(),
-                    shared_cache_hits: None,
-                })
-                .await
-                .unwrap();
-            let worker = response.best_worker;
-            let mut guard = RequestGuard::new(
-                Arc::clone(&router.chooser),
-                Arc::clone(&router.request_metrics),
-                request_id.clone(),
-                &request(),
-                true,
-                response
-                    .request_progress
-                    .take()
-                    .zip(response.lifecycle_lease.take()),
-            );
-            guard.mark_dispatched().await;
-
-            let context = Context::new(()).context();
-            let source = ResponseStream::new(
-                Box::pin(stream::iter([Annotated::from_data(LLMEngineOutput {
-                    finish_reason: Some(finish_reason.clone()),
-                    ..Default::default()
-                })])),
-                Arc::clone(&context),
-            );
-            {
-                let monitored = monitor_response_stream(source, context, guard);
-                tokio::pin!(monitored);
-                let item = monitored.next().await.unwrap();
-                assert_eq!(
-                    item.data.and_then(|output| output.finish_reason),
-                    Some(finish_reason)
-                );
-            }
-
-            let expected_len = (index + 1) * 2;
-            tokio::time::timeout(Duration::from_secs(1), async {
-                while events.lock().unwrap().len() < expected_len {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .expect("terminal stream drop did not report admission completion");
-            assert_eq!(
-                &events.lock().unwrap()[index * 2..expected_len],
-                [
-                    AdmissionEvent::Dispatched {
-                        id: AdmissionId::new(index as u64),
-                        worker,
-                    },
-                    AdmissionEvent::Completed {
-                        id: AdmissionId::new(index as u64),
-                        context_tokens: 1,
-                    },
-                ]
-            );
-        }
-
-        assert!(
-            slots
-                .active_request_counts()
-                .values()
-                .all(|count| *count == 0)
-        );
-        cancel.cancel();
-        drop(router);
-        runtime.shutdown();
     }
 
     #[tokio::test]
@@ -896,6 +732,7 @@ mod tests {
             &request(),
             false,
             None,
+            None,
         );
         let monitored = monitor_response_stream(source, context, guard);
         tokio::pin!(monitored);
@@ -903,6 +740,56 @@ mod tests {
         assert!(monitored.next().await.is_some());
         assert!(monitored.next().await.is_none());
         assert!(drained.load(Ordering::Acquire));
+
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn response_stream_publishes_live_and_terminal_progress_before_yield() {
+        let (router, runtime) = router(None).await;
+        let (progress, updater) = RequestProgress::new(1);
+        let context = Context::new(()).context();
+        let source = ResponseStream::new(
+            Box::pin(stream::iter([
+                Annotated::from_data(LLMEngineOutput {
+                    token_ids: vec![1; 16],
+                    ..Default::default()
+                }),
+                Annotated::from_data(LLMEngineOutput {
+                    finish_reason: Some(FinishReason::Stop),
+                    completion_usage: Some(CompletionUsage {
+                        prompt_tokens: 64,
+                        completion_tokens: 35,
+                        total_tokens: 99,
+                        prompt_tokens_details: None,
+                        completion_tokens_details: None,
+                    }),
+                    ..Default::default()
+                }),
+            ])),
+            Arc::clone(&context),
+        );
+        let guard = RequestGuard::new(
+            Arc::clone(&router.chooser),
+            Arc::clone(&router.request_metrics),
+            "progress-before-yield".to_string(),
+            &request(),
+            false,
+            Some(updater),
+            None,
+        );
+
+        {
+            let monitored = monitor_response_stream(source, context, guard);
+            tokio::pin!(monitored);
+
+            assert!(monitored.next().await.is_some());
+            assert_eq!(progress.context_tokens(), 17);
+            assert!(monitored.next().await.is_some());
+            assert_eq!(progress.context_tokens(), 99);
+        }
 
         drop(router);
         runtime.shutdown();
@@ -1031,7 +918,7 @@ mod tests {
 
         let (_, _, mut completed_guard) = track_request(&router, false).await;
         completed_guard.start_dispatch("aggregated");
-        completed_guard.mark_dispatched().await;
+        completed_guard.mark_dispatched();
         completed_guard.finish().await;
         drop(completed_guard);
         assert_eq!(metrics.requests_started_total().get(), started_before + 3);
