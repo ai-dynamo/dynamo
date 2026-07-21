@@ -24,11 +24,11 @@ spec:
           env:
             - name: HF_HOME
               value: /model-store
-            # Default "0" = portable: XET buffers cap ~8 GB so the Job schedules on standard CPU nodes.
-            # For faster downloads on nodes with >=64Gi allocatable RAM, set "1" AND raise the memory
-            # request/limit below to "64Gi": https://huggingface.co/docs/hub/en/xet/using-xet-storage#download-buffers
+            # Default "1" = fast: XET buffers use up to ~64 GB RAM, so the Job requests "64Gi" below
+            # and must land on a node with >=64Gi allocatable RAM. On memory-constrained clusters set
+            # "0" (buffers cap ~8 GB) and lower the memory to "8Gi"/"16Gi": https://huggingface.co/docs/hub/en/xet/using-xet-storage#download-buffers
             - name: HF_XET_HIGH_PERFORMANCE
-              value: "0"
+              value: "1"
           args:
             - |
               set -eux
@@ -41,10 +41,10 @@ spec:
           resources:
             requests:
               cpu: "2"
-              memory: "8Gi"
+              memory: "64Gi"
             limits:
               cpu: "8"
-              memory: "16Gi"
+              memory: "64Gi"
           volumeMounts:
             - name: model-cache
               mountPath: /model-store
