@@ -169,6 +169,11 @@ def _planner_config_payload(
     # candidate) and the live dashboard, both of which default on.
     payload["report_interval_hours"] = None
     payload["live_dashboard_port"] = 0
+    # Avoid consulting the environment-backed default factory while replay builds a
+    # PlannerConfig. In particular, an unset PROMETHEUS_EXTRA_QUERY_PARAMS represents
+    # no extra parameters; pass that state explicitly so planner config validation does
+    # not try to parse the empty environment value as a strict query string.
+    payload["metric_pulling_prometheus_extra_query_params"] = None
     for key in _PLANNER_PASSTHROUGH:
         if key in sample:
             payload[key] = sample[key]

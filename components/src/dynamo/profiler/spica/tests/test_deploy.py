@@ -97,6 +97,28 @@ def test_agg_scaling_builds_planner_config():
     )  # ttft/itl seeded only under "sla"
 
 
+def test_scaling_planner_config_validates_without_prometheus_query_env(monkeypatch):
+    """Spica replay must not depend on a Prometheus-only environment variable."""
+    from dynamo.planner.config.planner_config import PlannerConfig
+
+    monkeypatch.delenv("PROMETHEUS_EXTRA_QUERY_PARAMS", raising=False)
+    sample = unroll_sample(
+        search_space=_space(),
+        selection=_agg_sel(planner_scaling_policy="load_180_5"),
+        parallel_config=AGG_MOE,
+    )
+
+    plan = build_deployment(
+        sample,
+        backend_version=BV,
+        optimization_target="sla",
+        planner_sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0),
+    )
+
+    config = PlannerConfig.model_validate(plan.planner_config)
+    assert config.metric_pulling_prometheus_extra_query_params is None
+
+
 def test_scaling_preserves_search_space_runtime_limits():
     sample = unroll_sample(
         search_space=_space(
