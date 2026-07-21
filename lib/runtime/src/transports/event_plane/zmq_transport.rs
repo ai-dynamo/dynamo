@@ -63,9 +63,17 @@ fn configure_subscribe_builder<T>(builder: SocketBuilder<T>) -> SocketBuilder<T>
 where
     T: tmq::FromZmqSocket<T>,
 {
-    builder
-        .set_rcvhwm(ZMQ_RCVHWM)
-        .set_rcvtimeo(ZMQ_RCVTIMEOUT_MS)
+    configure_subscribe_builder_with_hwm(builder, ZMQ_RCVHWM)
+}
+
+fn configure_subscribe_builder_with_hwm<T>(
+    builder: SocketBuilder<T>,
+    rcvhwm: i32,
+) -> SocketBuilder<T>
+where
+    T: tmq::FromZmqSocket<T>,
+{
+    builder.set_rcvhwm(rcvhwm).set_rcvtimeo(ZMQ_RCVTIMEOUT_MS)
 }
 
 /// Keeps a received ZMQ message alive for as long as any derived `Bytes` exists.
@@ -223,10 +231,17 @@ pub type ZmqWireStream =
 
 impl ZmqSubTransport {
     fn connect_socket(endpoint: &str, topic: &str) -> Result<Subscribe> {
+        Self::connect_socket_with_rcvhwm(endpoint, topic, ZMQ_RCVHWM)
+    }
+
+    fn connect_socket_with_rcvhwm(endpoint: &str, topic: &str, rcvhwm: i32) -> Result<Subscribe> {
+        anyhow::ensure!(rcvhwm > 0, "ZMQ receive HWM must be greater than zero");
         let ctx = shared_zmq_context();
-        Ok(configure_subscribe_builder(subscribe(&ctx))
-            .connect(endpoint)?
-            .subscribe(topic.as_bytes())?)
+        Ok(
+            configure_subscribe_builder_with_hwm(subscribe(&ctx), rcvhwm)
+                .connect(endpoint)?
+                .subscribe(topic.as_bytes())?,
+        )
     }
 
     /// Create a new ZMQ subscriber by connecting to a single endpoint.
@@ -255,13 +270,22 @@ impl ZmqSubTransport {
     /// therefore has no background pump or lossy broadcast hop and naturally
     /// applies backpressure at the configured ZMQ receive HWM.
     pub async fn connect_single_consumer(endpoint: &str, topic: &str) -> Result<ZmqWireStream> {
-        let mut socket = Self::connect_socket(endpoint, topic)?;
+        Self::connect_single_consumer_with_rcvhwm(endpoint, topic, ZMQ_RCVHWM).await
+    }
+
+    /// Connect one consumer directly to one ZMQ publisher with an explicit receive HWM.
+    pub async fn connect_single_consumer_with_rcvhwm(
+        endpoint: &str,
+        topic: &str,
+        rcvhwm: i32,
+    ) -> Result<ZmqWireStream> {
+        let mut socket = Self::connect_socket_with_rcvhwm(endpoint, topic, rcvhwm)?;
         let expected_topic = topic.as_bytes().to_vec();
 
         tracing::info!(
             endpoint,
             topic,
-            rcvhwm = ZMQ_RCVHWM,
+            rcvhwm,
             "Direct ZMQ single-consumer stream connected"
         );
 
@@ -547,6 +571,27 @@ mod tests {
         assert_eq!(decoded.publisher_id, 12345);
         assert_eq!(decoded.sequence, 1);
         assert_eq!(decoded.topic, topic);
+    }
+
+    #[tokio::test]
+    async fn single_consumer_applies_explicit_receive_hwm() {
+        let endpoint = format!("inproc://dynamo-zmq-explicit-hwm-{}", std::process::id());
+        let topic = "explicit-hwm";
+        let (_publisher, _) = ZmqPubTransport::bind(&endpoint, topic).await.unwrap();
+
+        let socket = ZmqSubTransport::connect_socket_with_rcvhwm(&endpoint, topic, 37).unwrap();
+        assert_eq!(socket.get_socket().get_rcvhwm().unwrap(), 37);
+
+        let default_socket = ZmqSubTransport::connect_socket(&endpoint, topic).unwrap();
+        assert_eq!(
+            default_socket.get_socket().get_rcvhwm().unwrap(),
+            ZMQ_RCVHWM
+        );
+        assert!(
+            ZmqSubTransport::connect_single_consumer_with_rcvhwm(&endpoint, topic, 0)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
