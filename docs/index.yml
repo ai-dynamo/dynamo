@@ -446,6 +446,8 @@ navigation:
                 path: components/router/router-disaggregated-serving.md
               - page: Topology-Aware KV Transfer
                 path: components/router/topology-aware-kv-transfer.md
+              - page: Offloading Support Matrix
+                path: components/router/router-offloading.md
               - page: Router Operations
                 path: components/router/router-operations.md
               - page: Router Examples

@@ -159,6 +159,7 @@ If device-tier events apply but this line never appears, the CPU events are plac
 
 ## Further Reading
 
+- [Offloading Support Matrix](../../components/router/router-offloading.md) — cross-framework support matrix for KV routing with offloading
 - [vLLM KV offloading guide](https://docs.vllm.ai/en/latest/features/kv_offloading_usage/) — connector configuration reference
 - [Configuration and Tuning](../../components/router/router-configuration.md) — full router flag reference, including lower-tier cache-hit weights
 - [Router Guide](../../components/router/router-guide.md) — routing modes and deployment matrix

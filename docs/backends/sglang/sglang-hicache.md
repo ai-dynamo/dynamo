@@ -33,6 +33,7 @@ python -m dynamo.sglang \
   --hicache-ratio 2 \
   --hicache-write-policy write_through \
   --hicache-storage-backend nixl \
+  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}' \
   --skip-tokenizer-init
 ```
 
@@ -162,10 +163,11 @@ python -m dynamo.sglang \
   --hicache-write-policy write_through \
   --hicache-storage-backend mooncake \
   --hicache-storage-backend-extra-config '{"master_server_address": "mooncake-master.internal:50051"}' \
+  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}' \
   --skip-tokenizer-init
 ```
 
-Launch additional workers on other GPUs / hosts with the same Mooncake config so they back to the same cluster.
+Launch additional workers on other GPUs / hosts with the same Mooncake config so they back to the same cluster. Give each worker on the same host its own `--kv-events-config` endpoint port (for example `tcp://*:5558`).
 
 **Dynamo frontend** — enable tier-aware routing:
 
@@ -224,6 +226,7 @@ curl -s localhost:8000/metrics | grep shared_cache
 
 ## Further Reading
 
+- [Offloading Support Matrix](../../components/router/router-offloading.md) — cross-framework support matrix for KV routing with offloading
 - [SGLang HiCache Design](https://docs.sglang.ai/advanced_features/hicache_design.html) and [Best Practices](https://docs.sglang.ai/advanced_features/hicache_best_practices.html)
 - [Mooncake](https://github.com/kvcache-ai/Mooncake) — the shared KV store used as the external tier
 - [SGLang PR #22894](https://github.com/sgl-project/sglang/pull/22894) — the tier-annotated events prerequisite
