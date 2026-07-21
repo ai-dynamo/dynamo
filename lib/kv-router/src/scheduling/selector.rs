@@ -8,7 +8,10 @@ use rustc_hash::FxHashMap;
 use super::config::KvRouterConfig;
 use super::filter::{RoutingEligibility, WorkerEligibilityError};
 use super::types::{KvSchedulerError, SchedulingRequest};
-use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
+use crate::protocols::{
+    WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerSelectionScores,
+    WorkerSelectionTelemetry, WorkerSelectionTieBreak, WorkerWithDpRank,
+};
 
 /// A trait that users can implement to define custom selection logic.
 ///
@@ -97,6 +100,27 @@ struct LogitWeights {
     shared_cache_multiplier: f64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct WorkerScore {
+    kv_overlap_score: f64,
+    worker_load_score: f64,
+    final_score: f64,
+}
+
+impl WorkerScore {
+    fn telemetry(self, candidate_workers: usize) -> WorkerSelectionTelemetry {
+        WorkerSelectionTelemetry {
+            candidate_workers,
+            selected_scores: Some(WorkerSelectionScores {
+                kv_overlap_score: self.kv_overlap_score,
+                worker_load_score: self.worker_load_score,
+                final_score: self.final_score,
+            }),
+            tie_break: None,
+        }
+    }
+}
+
 impl DefaultWorkerSelector {
     pub fn new(kv_router_config: Option<KvRouterConfig>, worker_type: &'static str) -> Self {
         Self {
@@ -105,7 +129,7 @@ impl DefaultWorkerSelector {
         }
     }
 
-    fn worker_logit(
+    fn worker_score(
         &self,
         request: &SchedulingRequest,
         worker: WorkerWithDpRank,
@@ -113,7 +137,7 @@ impl DefaultWorkerSelector {
         min_active_prefill_tokens: usize,
         weights: LogitWeights,
         formula_name: &'static str,
-    ) -> f64 {
+    ) -> WorkerScore {
         let block_size_f64 = block_size as f64;
         let effective_overlap_blocks = request.effective_overlap_blocks_for(worker);
         let has_tier_overlap_blocks = !request.overlap.tier_overlap_blocks.device.is_empty()
@@ -205,6 +229,7 @@ impl DefaultWorkerSelector {
         let worker_load = worker_load.unwrap_or_default();
         let decode_cost_blocks = worker_load.potential_decode_blocks() as f64;
         let logit = prefill_cost_blocks + decode_cost_blocks;
+        let worker_load_score = raw_prefill_blocks + decode_cost_blocks;
 
         if shared_beyond > 0 {
             tracing::debug!(
@@ -232,7 +257,11 @@ impl DefaultWorkerSelector {
             );
         }
 
-        logit
+        WorkerScore {
+            kv_overlap_score: overlap_credit_blocks,
+            worker_load_score,
+            final_score: logit,
+        }
     }
 }
 
@@ -300,7 +329,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             }
 
             let min_active_prefill_tokens = request.worker_load_for(worker).active_prefill_tokens;
-            let logit = self.worker_logit(
+            let score = self.worker_score(
                 request,
                 worker,
                 block_size,
@@ -316,7 +345,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 self.worker_type,
                 worker.worker_id,
                 worker.dp_rank,
-                logit,
+                score.final_score,
                 effective_overlap_blocks,
             );
 
@@ -325,6 +354,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 required_blocks: request_blocks,
                 effective_overlap_blocks,
                 cached_tokens,
+                telemetry: score.telemetry(1),
             });
         }
 
@@ -344,8 +374,8 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             } else {
                 0
             };
-        let get_score = |worker: WorkerWithDpRank| -> f64 {
-            let base_score = self.worker_logit(
+        let get_score = |worker: WorkerWithDpRank| -> WorkerScore {
+            let mut score = self.worker_score(
                 request,
                 worker,
                 block_size,
@@ -354,53 +384,73 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 "Formula",
             );
             let Some(config) = workers.get(&worker.worker_id) else {
-                return base_score;
+                return score;
             };
-            match request
+            if let Some(multiplier) = request
                 .routing_constraints
                 .preferred_taint_multiplier(config.taints())
             {
                 // NOTE: This multiplicative bias assumes a non-negative score. Negative
                 // overlap scores expose its pre-existing sign sensitivity; keep it for now.
-                Some(multiplier) => base_score * multiplier,
-                None => base_score,
+                score.final_score *= multiplier;
             }
+            score
         };
 
-        let (best_worker, best_logit) = if temperature == 0.0 {
+        let (best_worker, best_score, candidate_workers, tie_break) = if temperature == 0.0 {
             let mut best_worker = None;
-            let mut best_logit = f64::INFINITY;
+            let mut best_score = None;
             let mut tie_count = 0usize;
+            let mut candidate_workers = 0usize;
             eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
                 let score = get_score(worker);
-                if score < best_logit {
+                candidate_workers += 1;
+                if best_score.is_none_or(|best: WorkerScore| score.final_score < best.final_score) {
                     best_worker = Some(worker);
-                    best_logit = score;
+                    best_score = Some(score);
                     tie_count = 1;
                     return;
                 }
 
-                if score == best_logit {
+                if best_score.is_some_and(|best| score.final_score == best.final_score) {
                     tie_count += 1;
                     // Reservoir sampling keeps tied minima uniform without collecting workers.
                     if fastrand::usize(0..tie_count) == 0 {
                         best_worker = Some(worker);
+                        best_score = Some(score);
                     }
                 }
             });
 
             (
                 best_worker.expect("eligible worker rank non-empty"),
-                best_logit,
+                best_score.expect("eligible worker rank non-empty"),
+                candidate_workers,
+                (tie_count > 1).then_some(WorkerSelectionTieBreak::EqualScore),
             )
         } else {
             let mut worker_logits = FxHashMap::default();
+            let mut worker_scores = FxHashMap::default();
             eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
                 let score = get_score(worker);
-                worker_logits.insert(worker, score);
+                worker_logits.insert(worker, score.final_score);
+                worker_scores.insert(worker, score);
             });
 
-            softmax_sample(&worker_logits, temperature)
+            let (worker, _) = softmax_sample(&worker_logits, temperature);
+            (
+                worker,
+                *worker_scores
+                    .get(&worker)
+                    .expect("sampled worker score must exist"),
+                worker_scores.len(),
+                None,
+            )
+        };
+        let best_logit = best_score.final_score;
+        let telemetry = WorkerSelectionTelemetry {
+            tie_break,
+            ..best_score.telemetry(candidate_workers)
         };
 
         let best_host_pinned_overlap_blocks = request
@@ -437,6 +487,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 required_blocks: request_blocks,
                 effective_overlap_blocks,
                 cached_tokens,
+                telemetry,
             });
         }
 
@@ -465,6 +516,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             required_blocks: request_blocks,
             effective_overlap_blocks: best_overlap,
             cached_tokens: best_cached_tokens,
+            telemetry,
         })
     }
 }
@@ -711,6 +763,12 @@ mod tests {
                 30 => selected[2] = true,
                 worker_id => panic!("unexpected worker id: {worker_id}"),
             }
+            assert_eq!(result.telemetry.candidate_workers, 3);
+            assert_eq!(
+                result.telemetry.tie_break,
+                Some(WorkerSelectionTieBreak::EqualScore)
+            );
+            assert!(result.telemetry.selected_scores.is_some());
         }
 
         let selected_count = selected.into_iter().filter(|seen| *seen).count();
@@ -755,6 +813,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.worker.worker_id, 1);
+        assert_eq!(result.telemetry.candidate_workers, 1);
+        assert_eq!(result.telemetry.tie_break, None);
+        assert!(result.telemetry.selected_scores.is_some());
     }
 
     #[test]
@@ -1337,13 +1398,17 @@ mod tests {
         };
 
         assert_eq!(
-            selector.worker_logit(&request, worker, 16, 0, weights, "test"),
+            selector
+                .worker_score(&request, worker, 16, 0, weights, "test")
+                .final_score,
             7.0
         );
 
         request.track_prefill_tokens = false;
         assert_eq!(
-            selector.worker_logit(&request, worker, 16, 0, weights, "test"),
+            selector
+                .worker_score(&request, worker, 16, 0, weights, "test")
+                .final_score,
             -7.0
         );
     }

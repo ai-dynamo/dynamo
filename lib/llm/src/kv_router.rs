@@ -218,6 +218,8 @@ where
     /// narrowed to the LoRA's allocated/loaded replicas inside `find_best_match_details`,
     /// covering both the decode and prefill routers (both built via `kv_chooser_for`).
     lora_filter: Option<Arc<crate::lora::LoraFilter>>,
+    metrics_model: String,
+    worker_type: &'static str,
 }
 
 impl<Sel> KvRouter<Sel>
@@ -240,6 +242,7 @@ where
         shared_cache: Option<Box<dyn SharedKvCache>>,
         lora_filter: Option<Arc<crate::lora::LoraFilter>>,
     ) -> Result<Self> {
+        let metrics_model = model_name.clone().unwrap_or_else(|| "unknown".to_string());
         let kv_router_config = kv_router_config.unwrap_or_default();
         kv_router_config.validate().map_err(anyhow::Error::msg)?;
         let component = endpoint.component();
@@ -355,6 +358,8 @@ where
             _served_indexer_handle: served_indexer_handle,
             shared_cache,
             lora_filter,
+            metrics_model,
+            worker_type,
         })
     }
 
@@ -695,7 +700,14 @@ where
             Err(KvSchedulerError::QueueRejected(rejection)) => {
                 return Ok((FindBestMatchOutcome::QueueRejected { rejection }, None));
             }
-            Err(error) => return Err(map_scheduler_error(error)),
+            Err(error) => {
+                if matches!(error, KvSchedulerError::NoEndpoints)
+                    && let Some(m) = metrics::RouterRequestMetrics::get()
+                {
+                    m.observe_no_candidates(&self.metrics_model, self.worker_type);
+                }
+                return Err(map_scheduler_error(error));
+            }
         };
         let total_elapsed = start.elapsed();
         let routing_hashes = routing_block_hashes.map(RoutingDecisionHashes::from_local_hashes);
@@ -721,6 +733,16 @@ where
             }
             let beyond = hits.hits_beyond(response.effective_overlap_blocks.round() as u32);
             m.shared_cache_beyond_blocks.observe(beyond as f64);
+        }
+
+        if let Some(m) = metrics::RouterRequestMetrics::get() {
+            m.observe_selection_decision(
+                &self.metrics_model,
+                self.worker_type,
+                response.best_worker,
+                response.cached_tokens,
+                response.selection_telemetry,
+            );
         }
 
         #[cfg(feature = "bench")]
@@ -1354,6 +1376,7 @@ mod tests {
                 required_blocks: request.isl_tokens.div_ceil(block_size as usize) as u64,
                 effective_overlap_blocks: 0.0,
                 cached_tokens: 0,
+                telemetry: Default::default(),
             })
         }
     }

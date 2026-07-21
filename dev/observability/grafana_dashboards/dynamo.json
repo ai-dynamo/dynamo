@@ -2610,10 +2610,587 @@
       "type": "timeseries"
     },
     {
-      "collapsed": false,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "KV-router worker-selection decisions per second, broken down by cache-hit outcome and worker type.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "reqps",
+          "noValue": "0"
+        },
+        "overrides": []
+      },
       "gridPos": {
         "x": 0,
         "y": 55,
+        "w": 8,
+        "h": 8
+      },
+      "id": 112,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (worker_type, decision) (rate(dynamo_component_router_decisions_total{model=\"$model\"}[$__rate_interval]))",
+          "legendFormat": "{{worker_type}} | {{decision}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Router Decision Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Rate at which the KV router selects each backend worker/rank for the selected model.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "reqps",
+          "noValue": "0"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 55,
+        "w": 8,
+        "h": 8
+      },
+      "id": 113,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (worker_type, router_worker_id, dp_rank) (rate(dynamo_component_router_selected_worker_total{model=\"$model\"}[$__rate_interval]))",
+          "legendFormat": "worker={{router_worker_id}} | dp={{dp_rank}} | type={{worker_type}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Selected Worker Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Eligible worker/rank count considered for each KV-router decision.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "short",
+          "noValue": "0"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 55,
+        "w": 8,
+        "h": 8
+      },
+      "id": 114,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.50, sum by (worker_type, le) (rate(dynamo_component_router_candidate_workers_bucket{model=\"$model\"}[$__rate_interval])))",
+          "legendFormat": "P50 | {{worker_type}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.90, sum by (worker_type, le) (rate(dynamo_component_router_candidate_workers_bucket{model=\"$model\"}[$__rate_interval])))",
+          "legendFormat": "P90 | {{worker_type}}",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (worker_type) (rate(dynamo_component_router_candidate_workers_sum{model=\"$model\"}[$__rate_interval])) / clamp_min(sum by (worker_type) (rate(dynamo_component_router_candidate_workers_count{model=\"$model\"}[$__rate_interval])), 1)",
+          "legendFormat": "Average | {{worker_type}}",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(1.0, sum by (worker_type, le) (rate(dynamo_component_router_candidate_workers_bucket{model=\"$model\"}[$__rate_interval])))",
+          "legendFormat": "MAX | {{worker_type}}",
+          "range": true,
+          "refId": "D"
+        }
+      ],
+      "title": "Candidate Workers",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Average and p90 KV-overlap credit and worker-load score for the selected worker, measured in block units.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "short",
+          "noValue": "0"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 63,
+        "w": 12,
+        "h": 8
+      },
+      "id": 115,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (worker_type) (rate(dynamo_component_router_kv_overlap_score_sum{model=\"$model\"}[$__rate_interval])) / clamp_min(sum by (worker_type) (rate(dynamo_component_router_kv_overlap_score_count{model=\"$model\"}[$__rate_interval])), 1)",
+          "legendFormat": "kv overlap avg | {{worker_type}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.90, sum by (worker_type, le) (rate(dynamo_component_router_kv_overlap_score_bucket{model=\"$model\"}[$__rate_interval])))",
+          "legendFormat": "kv overlap P90 | {{worker_type}}",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (worker_type) (rate(dynamo_component_router_worker_load_score_sum{model=\"$model\"}[$__rate_interval])) / clamp_min(sum by (worker_type) (rate(dynamo_component_router_worker_load_score_count{model=\"$model\"}[$__rate_interval])), 1)",
+          "legendFormat": "worker load avg | {{worker_type}}",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.90, sum by (worker_type, le) (rate(dynamo_component_router_worker_load_score_bucket{model=\"$model\"}[$__rate_interval])))",
+          "legendFormat": "worker load P90 | {{worker_type}}",
+          "range": true,
+          "refId": "D"
+        }
+      ],
+      "title": "Router Score Components",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "No-candidate and tie-break decision rates. No-candidate spikes usually mean discovery, allowlist, taint, or overload constraints removed every eligible worker/rank.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "reqps",
+          "noValue": "0"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 63,
+        "w": 12,
+        "h": 8
+      },
+      "id": 116,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (worker_type) (rate(dynamo_component_router_no_candidates_total{model=\"$model\"}[$__rate_interval]))",
+          "legendFormat": "no candidates | {{worker_type}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (worker_type, reason) (rate(dynamo_component_router_tie_breaks_total{model=\"$model\"}[$__rate_interval]))",
+          "legendFormat": "tie={{reason}} | {{worker_type}}",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Router Selection Edge Cases",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 71,
         "w": 24,
         "h": 1
       },
@@ -2687,7 +3264,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 56,
+        "y": 72,
         "w": 8,
         "h": 8
       },
@@ -2809,7 +3386,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 56,
+        "y": 72,
         "w": 8,
         "h": 8
       },
@@ -2950,7 +3527,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 56,
+        "y": 72,
         "w": 8,
         "h": 8
       },
