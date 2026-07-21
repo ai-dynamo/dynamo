@@ -47,23 +47,26 @@ in the Actions tab, visible to external contributors.
 ## Flow 2: The `codeowners` CI check failed
 
 This is the coverage gate doing its job: the PR adds at least one file that no
-area claims. Nothing ships unowned.
+area claims. Nothing ships unowned. On pull requests the gate is diff-aware:
+only files YOUR PR adds or changes block it; unowned paths inherited from the
+base branch are a non-fatal warning. (A PR that edits ownership policy itself
+is judged against the full tree, since a policy edit can orphan any path.)
 
 1. Read the failing job log. The gate prints the exact uncovered files:
-   `catch-all-only sample (add an area or classify rule to cover these): [...]`.
+   `catch-all-only sample (add an explicit glob to cover these): [...]`.
 2. Decide which area owns the new path. Match it to the subsystem whose code it
    extends (the PR that introduced `examples/custom_encoder/` was a multimodal
    feature, so the claim went under the `multimodal` area).
 3. Add ONE line to `.github/codeowners/areas.yaml` under that area's
-   `path_globs` (directory claims end with `/`). If the path will recur under
-   many parents, a `classify.keyword_rules` entry (substring -> area) covers
-   future instances too.
+   `path_globs` (directory claims end with `/`). There is no keyword-based
+   auto-classification - every claim is an explicit glob (or a `shared:`
+   entry for multi-team paths).
 4. Regenerate and verify:
    ```bash
    python .github/codeowners/build_codeowners.py \
        --areas .github/codeowners/areas.yaml --repo . --strict
    python .github/codeowners/emit_codeowners.py \
-       --areas .github/codeowners/areas.yaml --repo . --out CODEOWNERS
+       --areas .github/codeowners/areas.yaml --out CODEOWNERS
    ```
    The strict run must report 100% coverage.
 5. Commit `areas.yaml` and `CODEOWNERS` together (same commit), signed
@@ -79,11 +82,28 @@ the `build_codeowners.py` report lists globs that no longer match any file.
 ## Flow 3: Change review routing
 
 Edit `.github/codeowners/areas.yaml` - move a glob between areas, add a
-`shared:` entry (multi-team co-ownership; any one team's approval satisfies
-the gate), or adjust `classify` rules. Then regenerate exactly as in Flow 2
-step 4 and commit both files. A routing PR auto-requests the ops team (which
-owns `.github/codeowners/`) and the process team (which owns the generated
-root `CODEOWNERS`); either review covers its half.
+`shared:` entry (multi-team co-ownership), or adjust `classify.filetype_rules`.
+Then regenerate exactly as in Flow 2 step 4 and commit both files. A routing
+PR auto-requests the ops team (which owns `.github/codeowners/`) and the
+process team (which owns the generated root `CODEOWNERS`); either review
+covers its half.
+
+Semantics worth knowing before you file one:
+
+- **Any one owner approves.** GitHub combines all owners on a CODEOWNERS line
+  with OR: for a co-owned file, one approval from any listed team satisfies
+  the branch protection. Co-ownership adds review visibility, not extra
+  required approvals.
+- **The PR UI can mislead.** When a reviewer belongs to more than one owning
+  team, GitHub's reviewers panel may drop a codeowner entry that is actually
+  satisfied (or pending). Branch protection still enforces correctly - trust
+  the merge gate, not the panel.
+- **Last match wins.** A more specific rule later in the generated file
+  replaces earlier owners for its paths - so a nested override can
+  intentionally narrow a parent's co-ownership. Paths whose joint ownership
+  must never be dropped are declared under `required_owners:` in
+  `areas.yaml`; the CI gate fails any policy change that removes a declared
+  owner from a matching path.
 
 ## Flow 4: Grant an external contributor area-scoped ownership
 
