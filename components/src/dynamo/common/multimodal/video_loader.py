@@ -138,6 +138,25 @@ class VideoLoader:
             return np.ascontiguousarray(frames), metadata
         except FileNotFoundError:
             raise
+        except ImportError as exc:
+            # The runtime image ships without the backend video decoder (OpenCV)
+            # for media-licensing reasons, so cv2 is imported lazily and fails
+            # here. Surface an actionable message instead of a bare
+            # "No module named 'cv2'".
+            missing = getattr(exc, "name", None) or "the video decoder"
+            logger.error(
+                "Backend video decoder missing (%s) while loading %s",
+                missing,
+                video_url,
+            )
+            raise RuntimeError(
+                f"Video decoding is unavailable in this image: the backend decoder "
+                f"'{missing}' is not installed. This backend path decodes every "
+                f"`video_url` (any codec, including VP8/VP9) via OpenCV — install it "
+                f"with `pip install opencv-python-headless`. Alternatively, enable "
+                f"frontend decoding so the frontend decodes the video (VP8/VP9) and "
+                f"sends decoded frames, and the backend no longer needs OpenCV."
+            ) from exc
         except Exception as exc:
             logger.error("Error loading video from %s: %s", video_url, exc)
             raise ValueError(f"Failed to load video from {video_url}: {exc}") from exc
