@@ -140,15 +140,16 @@ def finalize_gms_write(
     allocator: "GMSClientMemoryManager",
     model: torch.nn.Module,
 ) -> GMSCommittedMemoryStats:
-    """Finalize GMS write mode and reconnect in read mode.
+    """Finalize GMS write mode: register tensors, commit, reconnect in read mode.
 
-    Flow: register tensors -> rebind non-parameter tensors to private clones
-    -> sync -> unmap + commit -> connect(RO) -> remap
+    Flow: register tensors -> sync -> unmap + commit -> connect(RO) -> remap
+    -> rebind non-parameter tensors to private clones
 
     The rebind mirrors the importer binding semantics from
-    ``materialize_module_from_gms``. It runs before publication so a terminal
-    tensor swap failure cannot commit an unusable layout. Any failure releases
-    the writer best-effort without replacing the original exception.
+    ``materialize_module_from_gms``: after publish, the read-only GMS
+    mapping backs parameters only, while buffers and tensor attributes that
+    may be written later (fp8 KV scale re-initialization on wake,
+    quantization range updates) live in ordinary CUDA memory.
 
     Args:
         allocator: The GMS client memory manager in write mode.
@@ -157,16 +158,9 @@ def finalize_gms_write(
     Returns:
         Committed/pruned byte stats.
     """
-    try:
-        stats = prepare_gms_write(allocator, model)
-        rebound_bytes = rebind_nonparameter_tensors(allocator, model)
-        publish_gms_write(allocator)
-    except BaseException:
-        try:
-            allocator.close(best_effort=True)
-        except BaseException:
-            logger.exception("[GMS] Failed to release failed write finalization")
-        raise
+    stats = prepare_gms_write(allocator, model)
+    publish_gms_write(allocator)
+    rebound_bytes = rebind_nonparameter_tensors(allocator, model)
 
     logger.info(
         "[GMS] Committed %.2f GiB, switched to read mode with %d mappings "

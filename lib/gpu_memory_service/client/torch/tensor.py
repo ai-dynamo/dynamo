@@ -1,137 +1,228 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tensor storage utilities and the GMS module storage manifest."""
+"""Tensor utilities for GPU Memory Service.
+
+This module provides low-level tensor functionality:
+- Tensor creation from CUDA pointers
+- Tensor metadata serialization/deserialization
+- GMS tensor spec for metadata store entries
+"""
 
 from __future__ import annotations
 
-from enum import Enum
+import json
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Dict, List, Tuple
 
-import msgspec
 import torch
 
-STORAGE_MANIFEST_PREFIX = "torch.module.storage/"
+if TYPE_CHECKING:
+    from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 
 
-class ModuleTensorKind(str, Enum):
-    """Classify how a tensor is bound to a module."""
-
-    PARAMETER = "parameter"
-    PERSISTENT_BUFFER = "persistent_buffer"
-    NONPERSISTENT_BUFFER = "nonpersistent_buffer"
-    ATTRIBUTE = "attribute"
-
-
-class ModuleTensorBinding(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
-    """Name one module binding for a tensor object."""
-
-    path: str
-    kind: ModuleTensorKind
-
-
-class TensorObject(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
-    """Describe one tensor identity within a storage manifest."""
-
-    dtype: str
-    shape: tuple[int, ...]
-    stride: tuple[int, ...]
-    storage_offset_bytes: int
-    requires_grad: bool
-    bindings: tuple[ModuleTensorBinding, ...]
-
-
-class StorageManifest(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
-    """Describe one shared StorageImpl and its tensor objects."""
-
-    nbytes: int
-    objects: tuple[TensorObject, ...]
-
-
-def _dtype_from_name(name: str) -> torch.dtype:
-    dtype = getattr(torch, name, None)
-    if not isinstance(dtype, torch.dtype) or str(dtype) != f"torch.{name}":
-        raise ValueError(f"Unknown or noncanonical dtype: {name!r}")
-    return dtype
-
-
-def _storage_from_pointer(
-    data_ptr: int,
-    size_bytes: int,
-    device_index: int,
-) -> torch.UntypedStorage:
-    """Create non-owning CUDA storage for an existing mapped byte range."""
-    if data_ptr < 0 or size_bytes < 0:
-        raise ValueError("Storage pointer and size must be nonnegative")
-    return torch._C._construct_storage_from_data_pointer(
-        data_ptr,
-        torch.device("cuda", device_index),
-        size_bytes,
-    )
-
-
-def _tensor_from_storage(
-    storage: torch.UntypedStorage,
-    shape: list[int],
-    stride: list[int],
-    dtype: torch.dtype,
-    storage_offset: int = 0,
-) -> torch.Tensor:
-    """Create an independent TensorImpl wrapper over ``storage``."""
-    _validate_layout(shape, stride, dtype, storage_offset, storage.nbytes())
-    return torch.empty(0, dtype=dtype, device=storage.device).set_(
-        storage,
-        storage_offset,
-        shape,
-        stride,
-    )
+# =============================================================================
+# Tensor Creation from CUDA Pointer
+# =============================================================================
 
 
 def _tensor_from_pointer(
     data_ptr: int,
-    shape: list[int],
-    stride: list[int],
+    shape: List[int],
+    stride: List[int],
     dtype: torch.dtype,
     device_index: int,
 ) -> torch.Tensor:
-    """Create a non-owning CUDA tensor from a raw pointer."""
-    storage_size_bytes = _layout_end_bytes(shape, stride, dtype, 0)
-    storage = _storage_from_pointer(data_ptr, storage_size_bytes, device_index)
-    return _tensor_from_storage(storage, shape, stride, dtype)
+    """Create a torch.Tensor from a raw CUDA pointer without copying data.
 
+    Uses PyTorch's internal APIs to create a tensor that aliases existing
+    GPU memory. The tensor does NOT own the memory - the caller must ensure
+    the memory remains valid for the tensor's lifetime.
 
-def _layout_end_bytes(
-    shape: list[int] | tuple[int, ...],
-    stride: list[int] | tuple[int, ...],
-    dtype: torch.dtype,
-    storage_offset: int,
-) -> int:
-    """Return the exclusive byte end needed by a nonnegative strided layout."""
-    if len(shape) != len(stride):
-        raise ValueError(
-            f"Shape and stride length mismatch: {len(shape)} vs {len(stride)}"
+    Args:
+        data_ptr: CUDA device pointer (virtual address) to the tensor data.
+        shape: Tensor dimensions.
+        stride: Tensor strides (in elements, not bytes).
+        dtype: Tensor data type.
+        device_index: CUDA device index where the memory resides.
+
+    Returns:
+        A tensor aliasing the specified GPU memory.
+    """
+    device = torch.device("cuda", device_index)
+
+    # Calculate storage size in bytes based on stride (handles non-contiguous tensors)
+    # For non-contiguous tensors, the memory footprint is larger than numel * element_size
+    element_size = torch.tensor([], dtype=dtype).element_size()
+
+    if shape and stride:
+        if len(shape) != len(stride):
+            raise ValueError(
+                f"Shape and stride length mismatch: {len(shape)} vs {len(stride)}"
+            )
+        # Maximum offset = sum of stride[i] * (shape[i] - 1) for all dimensions
+        max_offset = sum(
+            s * (d - 1) for s, d in zip(stride, shape, strict=True) if d > 0
         )
-    if any(type(dim) is not int or dim < 0 for dim in shape):
-        raise ValueError("Tensor shape must contain nonnegative integers")
-    if any(type(step) is not int or step < 0 for step in stride):
-        raise ValueError("Tensor stride must contain nonnegative integers")
-    if type(storage_offset) is not int or storage_offset < 0:
-        raise ValueError("Tensor storage offset must be a nonnegative integer")
-    if any(dim == 0 for dim in shape):
-        return storage_offset * dtype.itemsize
-    last_element = storage_offset + sum(
-        step * (dim - 1) for dim, step in zip(shape, stride, strict=True)
+        required_elements = max_offset + 1
+    else:
+        # Scalar tensor or empty tensor
+        required_elements = 1
+
+    storage_size_bytes = required_elements * element_size
+
+    # Create storage from raw pointer (does not take ownership)
+    storage = torch._C._construct_storage_from_data_pointer(
+        data_ptr, device, storage_size_bytes
     )
-    return (last_element + 1) * dtype.itemsize
+
+    # Create tensor from storage with metadata
+    metadata = {
+        "size": torch.Size(shape),
+        "stride": stride,
+        "storage_offset": 0,
+        "dtype": dtype,
+    }
+
+    return torch._C._construct_CUDA_Tensor_From_Storage_And_Metadata(metadata, storage)
 
 
-def _validate_layout(
-    shape: list[int] | tuple[int, ...],
-    stride: list[int] | tuple[int, ...],
-    dtype: torch.dtype,
-    storage_offset: int,
-    storage_nbytes: int,
-) -> None:
-    if type(storage_nbytes) is not int or storage_nbytes < 0:
-        raise ValueError("Storage size must be a nonnegative integer")
-    if _layout_end_bytes(shape, stride, dtype, storage_offset) > storage_nbytes:
-        raise ValueError("Tensor layout exceeds its storage bounds")
+# =============================================================================
+# Tensor Metadata - serialization format for metadata store
+# =============================================================================
+
+
+def _parse_dtype(dtype_str: str) -> torch.dtype:
+    """Parse dtype string (e.g., 'torch.float16') to torch.dtype."""
+    s = str(dtype_str)
+    if s.startswith("torch."):
+        s = s.split(".", 1)[1]
+    dt = getattr(torch, s, None)
+    if not isinstance(dt, torch.dtype):
+        raise ValueError(f"Unknown dtype: {dtype_str!r}")
+    return dt
+
+
+@dataclass(frozen=True)
+class TensorMetadata:
+    """Metadata for a tensor stored in the GMS metadata store."""
+
+    shape: Tuple[int, ...]
+    dtype: torch.dtype
+    stride: Tuple[int, ...]
+    tensor_type: str = "parameter"  # "parameter", "buffer", or "tensor_attr"
+
+    @classmethod
+    def from_tensor(
+        cls, tensor: torch.Tensor, tensor_type: str = "parameter"
+    ) -> "TensorMetadata":
+        """Create TensorMetadata from an existing tensor."""
+        return cls(
+            shape=tuple(tensor.shape),
+            dtype=tensor.dtype,
+            stride=tuple(int(s) for s in tensor.stride()),
+            tensor_type=tensor_type,
+        )
+
+    @classmethod
+    def from_bytes(cls, value: bytes) -> "TensorMetadata":
+        """Parse metadata from JSON bytes."""
+        obj = json.loads(value.decode("utf-8"))
+        shape = tuple(int(x) for x in obj["shape"])
+        dtype = _parse_dtype(obj["dtype"])
+
+        if "stride" in obj and obj["stride"] is not None:
+            stride = tuple(int(x) for x in obj["stride"])
+        else:
+            # Legacy format: compute contiguous stride
+            stride = []
+            acc = 1
+            for d in reversed(shape):
+                stride.append(acc)
+                acc *= d
+            stride = tuple(reversed(stride)) if stride else ()
+
+        return cls(
+            shape=shape,
+            dtype=dtype,
+            stride=stride,
+            tensor_type=obj.get("tensor_type", "parameter"),
+        )
+
+    def to_bytes(self) -> bytes:
+        """Serialize to JSON bytes for metadata store."""
+        return json.dumps(
+            {
+                "shape": list(self.shape),
+                "dtype": str(self.dtype),
+                "stride": list(self.stride),
+                "tensor_type": self.tensor_type,
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+
+
+# =============================================================================
+# GMS Tensor Spec - metadata entry from store
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class GMSTensorSpec:
+    """A tensor entry from the GMS metadata store."""
+
+    key: str
+    name: str
+    allocation_id: str
+    offset_bytes: int
+    meta: TensorMetadata
+
+    @classmethod
+    def load_all(
+        cls, gms_client_memory_manager: "GMSClientMemoryManager"
+    ) -> Dict[str, "GMSTensorSpec"]:
+        """Load all metadata entries.
+
+        Returns:
+            Mapping of tensor name -> GMSTensorSpec.
+        """
+        specs: Dict[str, GMSTensorSpec] = {}
+
+        for key in gms_client_memory_manager.metadata_list():
+            got = gms_client_memory_manager.metadata_get(key)
+            if got is None:
+                raise RuntimeError(f"Metadata key disappeared: {key}")
+
+            allocation_id, offset_bytes, value = got
+
+            if key in specs:
+                raise RuntimeError(f"Duplicate tensor name: {key}")
+
+            specs[key] = cls(
+                key=key,
+                name=key,
+                allocation_id=str(allocation_id),
+                offset_bytes=int(offset_bytes),
+                meta=TensorMetadata.from_bytes(value),
+            )
+
+        return specs
+
+    def materialize(
+        self,
+        gms_client_memory_manager: "GMSClientMemoryManager",
+        device_index: int,
+    ) -> torch.Tensor:
+        """Create a tensor aliasing mapped CUDA memory."""
+        base_va = gms_client_memory_manager.create_mapping(
+            allocation_id=self.allocation_id
+        )
+        ptr = int(base_va) + int(self.offset_bytes)
+
+        return _tensor_from_pointer(
+            ptr,
+            list(self.meta.shape),
+            list(self.meta.stride),
+            self.meta.dtype,
+            device_index,
+        )

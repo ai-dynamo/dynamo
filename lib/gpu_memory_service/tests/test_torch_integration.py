@@ -36,19 +36,11 @@ import torch
 from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 from gpu_memory_service.client.torch.module import (
     materialize_module_from_gms,
-    rebind_nonparameter_tensors,
     register_module_tensors,
 )
-from gpu_memory_service.client.torch.tensor import (
-    _storage_from_pointer,
-    _tensor_from_pointer,
-    _tensor_from_storage,
-)
+from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
 from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.vmm import _reset_vmm_singleton
-from gpu_memory_service.integrations.common.utils import prepare_gms_write
-from gpu_memory_service.integrations.trtllm import model_loader as trtllm_model_loader
-from gpu_memory_service.integrations.vllm import model_loader
 from gpu_memory_service.server.rpc import GMSRPCServer
 
 pytestmark = [
@@ -78,69 +70,6 @@ class _TinyModule(torch.nn.Module):
         y = y + self.scale
         y = y * self.extra
         return torch.relu(y)
-
-
-class _AliasedRuntimeTensor(torch.nn.Module):
-    def __init__(self, tensor: torch.Tensor) -> None:
-        super().__init__()
-        self.register_buffer("runtime", tensor, persistent=False)
-        self.direct = tensor
-
-
-@pytest.mark.timeout(120)
-def test_trtllm_moves_complete_shared_parameter_storage_once(running_gms):
-    backing = torch.arange(16, device="cuda", dtype=torch.float32)
-    left = torch.nn.Parameter(backing[2:14:2], requires_grad=True)
-    sibling = torch.nn.Parameter(backing[3:12:2], requires_grad=False)
-    view = backing[1:15:3]
-    empty = torch.empty(0, device="cuda")
-    model = torch.nn.Module()
-    model.register_parameter("left", left)
-    model.register_parameter("left_alias", left)
-    model.register_parameter("sibling", sibling)
-    model.register_buffer("empty", empty)
-    model.backing = backing
-    model.view = view
-    model.view_alias = view
-    objects = (left, sibling, backing, view)
-    expected = tuple(tensor.detach().clone() for tensor in objects)
-    layouts = tuple((tensor.storage_offset(), tensor.stride()) for tensor in objects)
-    old_storage = backing.untyped_storage()._cdata
-    storage_nbytes = backing.untyped_storage().nbytes()
-
-    manager = GMSClientMemoryManager(running_gms, device=0)
-    manager.connect(RequestedLockType.RW)
-    tensor = expected_tensor = None
-    try:
-        trtllm_model_loader._move_untracked_params(
-            model,
-            manager,
-            torch.device("cuda", 0),
-        )
-
-        assert len(manager.mappings) == 1
-        assert next(iter(manager.mappings.values())).size == storage_nbytes
-        assert model.left is model.left_alias is left
-        assert model.sibling is sibling
-        assert model.empty is empty
-        assert model.backing is backing
-        assert model.view is model.view_alias is view
-        assert model.left.requires_grad
-        assert not model.sibling.requires_grad
-        storage_ids = {tensor.untyped_storage()._cdata for tensor in objects}
-        assert len(storage_ids) == 1
-        assert old_storage not in storage_ids
-        for tensor, expected_tensor, layout in zip(
-            objects, expected, layouts, strict=True
-        ):
-            assert (tensor.storage_offset(), tensor.stride()) == layout
-            torch.testing.assert_close(tensor, expected_tensor)
-        model.backing[3] = 123
-        assert model.sibling[0].item() == 123
-    finally:
-        del tensor, expected_tensor
-        del model, left, sibling, backing, view, empty, objects, expected
-        manager.close()
 
 
 @pytest.fixture
@@ -391,52 +320,6 @@ def test_finalize_gms_write_rebinds_nonparameter_tensors(running_gms):
         writer.close()
 
 
-@pytest.mark.timeout(120)
-def test_deferred_gms_write_reconstructs_runtime_tensor_aliases(
-    running_gms, monkeypatch
-):
-    monkeypatch.setattr(model_loader, "_pending_gms_client", None)
-    monkeypatch.setattr(model_loader, "_last_imported_weights_bytes", 0)
-    monkeypatch.setattr(model_loader, "_last_model_memory_usage_offset_bytes", 0)
-    writer = GMSClientMemoryManager(running_gms, device=0)
-    writer.connect(RequestedLockType.RW)
-    model: _AliasedRuntimeTensor | None = None
-    original: torch.Tensor | None = None
-
-    try:
-        original_values = torch.arange(8, device="cuda", dtype=torch.int32)
-        _, original = _make_gms_tensor(writer, original_values, tag="weights")
-        model = _AliasedRuntimeTensor(original)
-
-        stats = prepare_gms_write(writer, model)
-        rebound_bytes = rebind_nonparameter_tensors(writer, model)
-        assert rebound_bytes == original.numel() * original.element_size()
-        model_loader._store_pending_gms_write(writer, stats, rebound_bytes)
-        assert model_loader.publish_pending_gms_write()
-        assert model.runtime is model.direct
-        model.runtime.fill_(17)
-        _assert_exact_tensor_equal(torch.full_like(original, 17), model.direct)
-    finally:
-        if model_loader.has_pending_gms_write():
-            model_loader.abort_pending_gms_write()
-        model = None
-        original = None
-        writer.close()
-
-    with GMSClientMemoryManager(running_gms, device=0) as manager:
-        manager.connect(RequestedLockType.RO)
-        placeholder = torch.empty_like(original_values, device="meta")
-        reader = _AliasedRuntimeTensor(placeholder)
-        materialize_module_from_gms(manager, reader, device_index=0)
-
-        reconstructed = reader.runtime
-        assert reconstructed is reader.direct
-        assert reconstructed is not placeholder
-        assert "runtime" in reader._non_persistent_buffers_set
-        assert "runtime" not in reader.state_dict()
-        _assert_exact_tensor_equal(original_values, reconstructed)
-
-
 def test_live_gms_tensor_survives_unmap_and_remap(running_gms):
     socket_path = running_gms
     baseline = torch.arange(64, device="cuda", dtype=torch.float32).reshape(8, 8)
@@ -470,94 +353,6 @@ def test_live_gms_tensor_survives_unmap_and_remap(running_gms):
     _assert_exact_tensor_equal(expected, torch.relu((gms_tensor + 7.0).square()))
 
     reader.close()
-
-
-@pytest.mark.timeout(120)
-def test_shared_interior_storages_survive_import_and_remap(running_gms):
-    with GMSClientMemoryManager(running_gms, device=0) as writer:
-        writer.connect(RequestedLockType.RW)
-        data_storage = view_storage = None
-        data_tensor = view_tensor = None
-        writer_model = None
-        try:
-            allocation_va = writer.create_mapping(size=4096, tag="weights")
-            allocation_id = writer.mappings[allocation_va].allocation_id
-
-            data_storage = _storage_from_pointer(allocation_va + 128, 32, 0)
-            view_storage = _storage_from_pointer(allocation_va + 256, 48, 0)
-            data_tensor = _tensor_from_storage(data_storage, [8], [1], torch.float32)
-            view_tensor = _tensor_from_storage(view_storage, [12], [1], torch.float32)
-            data_tensor.copy_(torch.arange(8, device="cuda", dtype=torch.float32))
-            view_tensor.copy_(torch.arange(12, device="cuda", dtype=torch.float32) + 20)
-
-            writer_model = torch.nn.Module()
-            writer_model.register_parameter(
-                "data_weight", torch.nn.Parameter(data_tensor, requires_grad=True)
-            )
-            writer_model.data_exact = writer_model.data_weight
-            writer_model.data_view = writer_model.data_weight.data
-            writer_model.register_parameter(
-                "view_weight", torch.nn.Parameter(view_tensor, requires_grad=False)
-            )
-            writer_model.strided = writer_model.view_weight[2:10:2]
-            writer_model.transposed = writer_model.view_weight.reshape(3, 4).T
-            register_module_tensors(writer, writer_model)
-            assert writer.commit()
-        finally:
-            del writer_model, data_tensor, view_tensor, data_storage, view_storage
-
-    reader_model = torch.nn.Module()
-    reader_model.register_parameter(
-        "data_weight",
-        torch.nn.Parameter(torch.zeros(8, device="cuda"), requires_grad=True),
-    )
-    reader_model.data_exact = reader_model.data_weight
-    reader_model.data_view = reader_model.data_weight.data
-    reader_model.register_parameter(
-        "view_weight",
-        torch.nn.Parameter(torch.zeros(12, device="cuda"), requires_grad=False),
-    )
-    reader_model.strided = reader_model.view_weight[2:10:2]
-    reader_model.transposed = reader_model.view_weight.reshape(3, 4).T
-
-    with GMSClientMemoryManager(running_gms, device=0) as reader:
-        reader.connect(RequestedLockType.RO)
-        materialize_module_from_gms(reader, reader_model, device_index=0)
-        assert len(reader.mappings) == 1
-        assert next(iter(reader.mappings.values())).allocation_id == allocation_id
-        assert reader_model.data_weight is reader_model.data_exact
-        assert reader_model.data_weight is not reader_model.data_view
-        assert (
-            reader_model.data_weight.untyped_storage()._cdata
-            == reader_model.data_view.untyped_storage()._cdata
-        )
-        assert (
-            reader_model.view_weight.untyped_storage()._cdata
-            == reader_model.strided.untyped_storage()._cdata
-            == reader_model.transposed.untyped_storage()._cdata
-        )
-        reader_va = next(iter(reader.mappings))
-        assert reader_model.data_weight.data_ptr() == reader_va + 128
-        assert reader_model.strided.storage_offset() == 2
-        assert reader_model.transposed.stride() == (1, 4)
-
-        reader.unmap_all_vas()
-        reader.abort()
-        reader.connect(RequestedLockType.RO)
-        reader.remap_all_vas()
-        torch.testing.assert_close(
-            reader_model.data_view,
-            torch.arange(8, device="cuda", dtype=torch.float32),
-        )
-        torch.testing.assert_close(
-            reader_model.strided,
-            torch.tensor([22, 24, 26, 28], device="cuda", dtype=torch.float32),
-        )
-        torch.testing.assert_close(
-            reader_model.transposed,
-            (torch.arange(12, device="cuda", dtype=torch.float32) + 20).reshape(3, 4).T,
-        )
-        del reader_model
 
 
 def test_materialized_module_from_gms_matches_plain_module_forward(running_gms):
