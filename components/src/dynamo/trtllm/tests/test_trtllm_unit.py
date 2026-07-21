@@ -7,6 +7,7 @@ import asyncio
 import os
 import re
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
 from unittest import mock
 
@@ -22,9 +23,13 @@ if not torch.cuda.is_available():
 
 from dynamo.trtllm.args import Config, parse_args
 from dynamo.trtllm.constants import DisaggregationMode, Modality
+from dynamo.trtllm.engine import Backend
 from dynamo.trtllm.tests.conftest import make_cli_args_fixture
 from dynamo.trtllm.utils.trtllm_utils import deep_update, warn_override_collisions
-from dynamo.trtllm.workers.llm_worker import init_llm_worker
+from dynamo.trtllm.workers.llm_worker import (
+    DEFAULT_KV_EVENT_BUFFER_MAX_SIZE,
+    init_llm_worker,
+)
 
 # Get path relative to this test file
 REPO_ROOT = Path(__file__).resolve().parents[5]
@@ -317,6 +322,46 @@ def test_deep_update_adds_new_keys():
     assert target == {"a": 1, "b": 2, "c": {"nested": 3}}
 
 
+def test_deep_update_merges_model_dump_configs():
+    """deep_update preserves sibling settings from model-like configs."""
+
+    class ModelDumpConfig:
+        def model_dump(self):
+            return {
+                "event_buffer_max_size": 0,
+                "free_gpu_memory_fraction": 0.85,
+            }
+
+    target = {"kv_cache_config": ModelDumpConfig()}
+    source = {"kv_cache_config": {"event_buffer_max_size": 4096}}
+    deep_update(target, source)
+    assert target == {
+        "kv_cache_config": {
+            "event_buffer_max_size": 4096,
+            "free_gpu_memory_fraction": 0.85,
+        }
+    }
+
+
+def test_deep_update_merges_dataclass_configs():
+    """deep_update preserves sibling settings from dataclass configs."""
+
+    @dataclass
+    class DataclassConfig:
+        event_buffer_max_size: int = 0
+        free_gpu_memory_fraction: float = 0.85
+
+    target = {"kv_cache_config": DataclassConfig()}
+    source = {"kv_cache_config": {"event_buffer_max_size": 4096}}
+    deep_update(target, source)
+    assert target == {
+        "kv_cache_config": {
+            "event_buffer_max_size": 4096,
+            "free_gpu_memory_fraction": 0.85,
+        }
+    }
+
+
 # ---- Tests for trtllm_utils.warn_override_collisions ----
 
 
@@ -341,6 +386,77 @@ def test_warn_override_collisions_recurses_into_nested_dicts(caplog):
     assert any("kv_cache_config.max_tokens" in r.message for r in caplog.records)
     # free_gpu_memory_fraction wasn't in source — should not warn.
     assert not any("free_gpu_memory_fraction" in r.message for r in caplog.records)
+
+
+def test_warn_override_collisions_recurses_into_model_dump_configs(caplog):
+    """Nested overrides into model-like configs report the full dotted path."""
+
+    class ModelDumpConfig:
+        def model_dump(self):
+            return {
+                "event_buffer_max_size": 0,
+                "free_gpu_memory_fraction": 0.85,
+            }
+
+    target = {"kv_cache_config": ModelDumpConfig()}
+    source = {"kv_cache_config": {"free_gpu_memory_fraction": 0.7}}
+    with caplog.at_level("WARNING"):
+        warn_override_collisions(target, source)
+    assert any(
+        "kv_cache_config.free_gpu_memory_fraction" in r.message
+        and "0.85" in r.message
+        and "0.7" in r.message
+        for r in caplog.records
+    )
+
+
+def test_warn_override_collisions_recurses_into_dataclass_configs(caplog):
+    """Nested overrides into dataclass configs report the full dotted path."""
+
+    @dataclass
+    class DataclassConfig:
+        event_buffer_max_size: int = 0
+        free_gpu_memory_fraction: float = 0.85
+
+    target = {"kv_cache_config": DataclassConfig()}
+    source = {"kv_cache_config": {"free_gpu_memory_fraction": 0.7}}
+    with caplog.at_level("WARNING"):
+        warn_override_collisions(target, source)
+    assert any(
+        "kv_cache_config.free_gpu_memory_fraction" in r.message
+        and "0.85" in r.message
+        and "0.7" in r.message
+        for r in caplog.records
+    )
+
+
+def test_warn_override_collisions_does_not_recurse_into_unrelated_objects(caplog):
+    """Plain objects, enums, and mocks are not treated as nested config maps."""
+
+    class PlainObject:
+        def __init__(self):
+            self.value = "old"
+
+    target = {
+        "backend": Backend.PYTORCH,
+        "plain": PlainObject(),
+        "mock_value": mock.MagicMock(),
+    }
+    source = {
+        "backend": {"_name_": "PYTORCH"},
+        "plain": {"value": "new"},
+        "mock_value": {"called": True},
+    }
+    with caplog.at_level("WARNING"):
+        warn_override_collisions(target, source)
+
+    messages = [r.message for r in caplog.records]
+    assert any("backend" in message for message in messages)
+    assert any("plain" in message for message in messages)
+    assert any("mock_value" in message for message in messages)
+    assert not any("backend._name_" in message for message in messages)
+    assert not any("plain.value" in message for message in messages)
+    assert not any("mock_value.called" in message for message in messages)
 
 
 def test_warn_override_collisions_skips_new_keys(caplog):
@@ -376,14 +492,8 @@ def _mock_get_llm_engine(engine_args, *args, **kwargs):
     raise EngineArgsCaptured(engine_args)
 
 
-@pytest.mark.asyncio
-async def test_init_llm_worker_engine_args_without_overrides(monkeypatch):
-    """Without overrides, engine_args passed to get_llm_engine use CLI defaults."""
-    monkeypatch.delenv("DYN_TRTLLM_MAX_NUM_TOKENS", raising=False)
-    monkeypatch.delenv("DYN_TRTLLM_MAX_BATCH_SIZE", raising=False)
-
-    config = parse_args(["--model", "fake-model"])
-
+async def _capture_init_llm_worker_engine_args(config):
+    """Run init_llm_worker until engine creation and return resolved engine_args."""
     with (
         mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
         mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
@@ -401,9 +511,20 @@ async def test_init_llm_worker_engine_args_without_overrides(monkeypatch):
                 shutdown_event=asyncio.Event(),
             )
 
-        engine_args = exc_info.value.engine_args
-        assert engine_args["max_num_tokens"] == config.max_num_tokens
-        assert engine_args["max_batch_size"] == config.max_batch_size
+    return exc_info.value.engine_args
+
+
+@pytest.mark.asyncio
+async def test_init_llm_worker_engine_args_without_overrides(monkeypatch):
+    """Without overrides, engine_args passed to get_llm_engine use CLI defaults."""
+    monkeypatch.delenv("DYN_TRTLLM_MAX_NUM_TOKENS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_MAX_BATCH_SIZE", raising=False)
+
+    config = parse_args(["--model", "fake-model"])
+
+    engine_args = await _capture_init_llm_worker_engine_args(config)
+    assert engine_args["max_num_tokens"] == config.max_num_tokens
+    assert engine_args["max_batch_size"] == config.max_batch_size
 
 
 @pytest.mark.asyncio
@@ -435,41 +556,135 @@ async def test_init_llm_worker_engine_args_with_extra_engine_args(
     assert config.max_num_tokens != 32768
     assert config.max_batch_size != 512
 
-    with (
-        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
-        mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
-        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
-        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
-        mock.patch(
-            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
-            side_effect=_mock_get_llm_engine,
-        ),
-    ):
-        with pytest.raises(EngineArgsCaptured) as exc_info:
-            await init_llm_worker(
-                runtime=mock.MagicMock(),
-                config=config,
-                shutdown_event=asyncio.Event(),
-            )
+    engine_args = await _capture_init_llm_worker_engine_args(config)
+    assert engine_args["max_seq_len"] == 32768, (
+        f"Expected max_seq_len=32768 from YAML override, "
+        f"got {engine_args['max_seq_len']}"
+    )
+    assert engine_args["max_num_tokens"] == 32768, (
+        f"Expected max_num_tokens=32768 from YAML override, "
+        f"got {engine_args['max_num_tokens']}"
+    )
+    assert engine_args["max_batch_size"] == 512, (
+        f"Expected max_batch_size=512 from YAML override, "
+        f"got {engine_args['max_batch_size']}"
+    )
+    # MDC registration reads config.max_seq_len, so keep it in sync with
+    # the final engine args.
+    assert config.max_seq_len == 32768
+    assert config.max_num_tokens == 32768
+    assert config.max_batch_size == 512
 
-        engine_args = exc_info.value.engine_args
-        assert engine_args["max_seq_len"] == 32768, (
-            f"Expected max_seq_len=32768 from YAML override, "
-            f"got {engine_args['max_seq_len']}"
-        )
-        assert engine_args["max_num_tokens"] == 32768, (
-            f"Expected max_num_tokens=32768 from YAML override, "
-            f"got {engine_args['max_num_tokens']}"
-        )
-        assert engine_args["max_batch_size"] == 512, (
-            f"Expected max_batch_size=512 from YAML override, "
-            f"got {engine_args['max_batch_size']}"
-        )
-        # MDC registration reads config.max_seq_len, so keep it in sync with
-        # the final engine args.
-        assert config.max_seq_len == 32768
-        assert config.max_num_tokens == 32768
-        assert config.max_batch_size == 512
+
+@pytest.mark.asyncio
+async def test_init_llm_worker_publish_kv_events_adds_default_engine_args(monkeypatch):
+    """KV event publishing adds TRT-LLM event/metric defaults when unset."""
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_OVERRIDE_ENGINE_ARGS", raising=False)
+
+    config = parse_args(["--model", "fake-model", "--publish-kv-events"])
+
+    engine_args = await _capture_init_llm_worker_engine_args(config)
+    backend = engine_args["backend"]
+    assert getattr(backend, "value", backend) == Backend.PYTORCH.value
+    assert engine_args["return_perf_metrics"] is True
+    assert engine_args["enable_iter_perf_stats"] is True
+    assert (
+        engine_args["kv_cache_config"]["event_buffer_max_size"]
+        == DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
+    )
+
+
+@pytest.mark.asyncio
+async def test_init_llm_worker_publish_kv_events_preserves_user_engine_args(
+    monkeypatch,
+):
+    """KV event publishing preserves user-supplied final TRT-LLM engine args."""
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_OVERRIDE_ENGINE_ARGS", raising=False)
+
+    config = parse_args(
+        [
+            "--model",
+            "fake-model",
+            "--publish-kv-events",
+            "--trtllm.backend",
+            "pytorch",
+            "--trtllm.return_perf_metrics",
+            "false",
+            "--trtllm.enable_iter_perf_stats",
+            "false",
+            "--trtllm.kv_cache_config.event_buffer_max_size",
+            "4096",
+            "--trtllm.kv_cache_config.free_gpu_memory_fraction",
+            "0.73",
+            "--trtllm.kv_cache_config.cache_transceiver_config.backend",
+            "UCX",
+        ]
+    )
+
+    engine_args = await _capture_init_llm_worker_engine_args(config)
+    backend = engine_args["backend"]
+    kv_cache_config = engine_args["kv_cache_config"]
+
+    assert getattr(backend, "value", backend) == Backend.PYTORCH.value
+    assert engine_args["return_perf_metrics"] is False
+    assert engine_args["enable_iter_perf_stats"] is False
+    assert kv_cache_config["event_buffer_max_size"] == 4096
+    assert kv_cache_config["free_gpu_memory_fraction"] == 0.73
+    assert kv_cache_config["cache_transceiver_config"]["backend"] == "UCX"
+
+
+@pytest.mark.asyncio
+async def test_init_llm_worker_preserves_kv_cache_siblings_with_dynamic_flags(
+    monkeypatch,
+):
+    """Nested dynamic flags merge into KvCacheConfig without dropping siblings."""
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_OVERRIDE_ENGINE_ARGS", raising=False)
+
+    config = parse_args(
+        [
+            "--model",
+            "fake-model",
+            "--free-gpu-memory-fraction",
+            "0.85",
+            "--trtllm.kv_cache_config.event_buffer_max_size",
+            "4096",
+        ]
+    )
+
+    engine_args = await _capture_init_llm_worker_engine_args(config)
+    kv_cache_config = engine_args["kv_cache_config"]
+
+    assert kv_cache_config["event_buffer_max_size"] == 4096
+    assert kv_cache_config["free_gpu_memory_fraction"] == 0.85
+
+
+@pytest.mark.asyncio
+async def test_init_llm_worker_preserves_kvbm_partial_reuse_with_dynamic_flags(
+    monkeypatch,
+):
+    """Nested dynamic flags merge without dropping connector-specific settings."""
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_OVERRIDE_ENGINE_ARGS", raising=False)
+
+    config = parse_args(
+        [
+            "--model",
+            "fake-model",
+            "--connector",
+            "kvbm",
+            "--trtllm.kv_cache_config.event_buffer_max_size",
+            "4096",
+        ]
+    )
+
+    engine_args = await _capture_init_llm_worker_engine_args(config)
+    kv_cache_config = engine_args["kv_cache_config"]
+
+    assert kv_cache_config["event_buffer_max_size"] == 4096
+    assert kv_cache_config["enable_partial_reuse"] is False
 
 
 class MultimodalProcessorInstantiated(Exception):

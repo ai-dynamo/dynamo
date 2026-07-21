@@ -3,23 +3,35 @@
 
 """Shared utilities for the TRT-LLM backend."""
 
+import dataclasses
 import logging
 from collections.abc import Mapping
+from types import SimpleNamespace
 from typing import Any
 
 
 def deep_update(target: dict[str, Any], source: Mapping[str, Any]) -> None:
-    """Recursively update nested dictionaries.
+    """Recursively update nested dictionaries and model-like config values.
 
     Args:
         target: Dictionary to update.
         source: Dictionary with new values.
     """
     for key, value in source.items():
-        if isinstance(value, dict) and key in target and isinstance(target[key], dict):
-            deep_update(target[key], value)
-        else:
-            target[key] = value
+        if isinstance(value, Mapping) and key in target:
+            old_val = target[key]
+            if isinstance(old_val, dict):
+                deep_update(old_val, value)
+                continue
+
+            old_mapping = _as_mapping(old_val)
+            if old_mapping is not None:
+                merged = dict(old_mapping)
+                deep_update(merged, value)
+                target[key] = merged
+                continue
+
+        target[key] = value
 
 
 def warn_override_collisions(
@@ -30,8 +42,10 @@ def warn_override_collisions(
         full_key = f"{path}.{key}" if path else key
         if key in target:
             old_val = target[key]
-            if isinstance(new_val, dict) and isinstance(old_val, dict):
-                warn_override_collisions(old_val, new_val, full_key)
+            old_mapping = _as_mapping(old_val)
+            new_mapping = _as_mapping(new_val)
+            if old_mapping is not None and new_mapping is not None:
+                warn_override_collisions(old_mapping, new_mapping, full_key)
             elif old_val != new_val:
                 logging.warning(
                     "override_engine_args will replace %s: %r -> %r",
@@ -49,7 +63,9 @@ def _as_mapping(value: Any) -> dict[str, Any] | None:
     if hasattr(value, "model_dump"):
         dumped = value.model_dump()
         return dumped if isinstance(dumped, dict) else None
-    if hasattr(value, "__dict__"):
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return dataclasses.asdict(value)
+    if isinstance(value, SimpleNamespace):
         return vars(value)
     return None
 
