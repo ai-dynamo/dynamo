@@ -8,7 +8,7 @@ import logging
 import os
 from collections import OrderedDict
 from io import BytesIO
-from typing import Any, Coroutine, Dict, Final, List
+from typing import Any, Coroutine, Dict, Final, List, Literal, overload
 from urllib.parse import urlparse
 
 from PIL import Image
@@ -242,10 +242,28 @@ class ImageLoader:
         # It's not file:, http:, https:, or data:
         raise ValueError(f"Invalid image source scheme: {parsed_url.scheme}")
 
+    @overload
     async def load_image_batch(
         self,
         image_mm_items: List[Dict[str, Any]],
-    ) -> list[Image.Image | None]:
+        *,
+        preserve_uuid_slots: Literal[False] = False,
+    ) -> list[Image.Image]: ...
+
+    @overload
+    async def load_image_batch(
+        self,
+        image_mm_items: List[Dict[str, Any]],
+        *,
+        preserve_uuid_slots: Literal[True],
+    ) -> list[Image.Image | None]: ...
+
+    async def load_image_batch(
+        self,
+        image_mm_items: List[Dict[str, Any]],
+        *,
+        preserve_uuid_slots: bool = False,
+    ) -> list[Any]:
         """
         Load a batch of images from multimodal data items.
 
@@ -253,9 +271,12 @@ class ImageLoader:
         1. Url variant: Download and decode image from URL (default)
         2. Decoded variant: Read pre-decoded image via NIXL RDMA (requires enable_frontend_decoding=True)
         3. UuidOnly variant: Preserve an aligned empty slot for backend cache lookup
+           when preserve_uuid_slots=True
 
         Args:
             image_mm_items: List of multimodal data items for images
+            preserve_uuid_slots: Allow UUID-only items and preserve their positions
+                as None. This is enabled only by backends that resolve such slots.
 
         Returns:
             Loaded images, with None for UUID-only cache slots
@@ -268,6 +289,7 @@ class ImageLoader:
                 preserved as a ValueError so the frontend returns a 4xx, not 500.
             Exception: If any image fails to load for any other reason
             ValueError: If enable_frontend_decoding=True but nixl_connector is None
+            ValueError: If a UUID-only slot is received without opting in
         """
         image_futures: list[Coroutine[Any, Any, Image.Image]] = []
         slot_to_future_idx: list[int | None] = []
@@ -293,6 +315,10 @@ class ImageLoader:
                     )
                     raise ValueError("Could not load decoded media from frontend")
             elif isinstance(item, dict) and UUID_ONLY_VARIANT_KEY in item:
+                if not preserve_uuid_slots:
+                    raise ValueError(
+                        "UUID-only image slots require preserve_uuid_slots=True"
+                    )
                 slot_to_future_idx.append(None)
             else:
                 raise ValueError(

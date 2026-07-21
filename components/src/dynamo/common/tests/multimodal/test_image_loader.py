@@ -274,10 +274,16 @@ async def test_uuid_only_image_slots_preserve_batch_alignment(
             {"Url": "https://example.com/first.png"},
             {"UuidOnly": "cached-image"},
             {"Url": "https://example.com/second.png"},
-        ]
+        ],
+        preserve_uuid_slots=True,
     )
 
     assert images == [first, None, second]
+
+
+async def test_uuid_only_image_slots_require_opt_in(loader: ImageLoader) -> None:
+    with pytest.raises(ValueError, match="preserve_uuid_slots=True"):
+        await loader.load_image_batch([{"UuidOnly": "cached-image"}])
 
 
 async def test_batch_propagates_cancellation(loader: ImageLoader) -> None:
