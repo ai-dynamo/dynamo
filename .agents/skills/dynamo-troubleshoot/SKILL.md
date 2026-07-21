@@ -1,6 +1,6 @@
 ---
 name: dynamo-troubleshoot
-description: Diagnose failed or unhealthy Dynamo deployments. Use when pods, model-cache jobs, PVCs, workers, frontend/router health, endpoints, or benchmark jobs fail; use recipe-runner/router-starter before this for normal bring-up.
+description: Diagnose failed or unhealthy Dynamo deployments. Use when pods, model-cache jobs, PVCs, workers, frontend/router health, endpoints, or benchmark jobs fail; use dynamo-recipe-deployer or dynamo-router-starter before this for normal bring-up.
 license: Apache-2.0
 metadata:
   author: Dan Gil <dagil@nvidia.com>
