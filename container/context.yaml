@@ -104,6 +104,20 @@ sglang:
     # GPL ffmpeg/codec dpkgs; the GPL imageio-ffmpeg pip binary is replaced by an
     # in-tree LGPL ffmpeg in sglang_runtime.Dockerfile — no dpkg purge needed.)
     baseline_sbom: cuda@8b2705ea
+    # DYN-3429: the release/1.3 SGLang EFA image uses the native EFA 1.49
+    # userspace closure instead of the generic upstream libfabric overlay.
+    efa_version: 1.49.0
+    efa_installer_sha256: cf2e9281a2328a243c76f911a490faed43ca0fecfe4733c25e34b2e92a32c309
+    efa_installer_size: "702811844"
+    efa_runtime_sha256:
+      amd64:
+        libfabric: 5d5f48961cf9b30def1c8cdb0961b0683f0102ca9898641ef90f2d205379a5fd
+        libefa: 4fd773bd4943441011f6c671696f76a941381d2177deda9211ba378647787eef
+        libibverbs: 4a75b36b5462876f8a78c14e07cedef9d481ef436f22d81f9d8de9178745bbbd
+      arm64:
+        libfabric: 24291af4829bcdddc2d47d7eb35366c19246170091202b93814fda9b67f32248
+        libefa: 2c3bc675f5c19238dfd86d8e912a08a70eb89fdab32b5600a2d4595390691abb
+        libibverbs: 1b2f194c7b95a503eeb2f3f8e9977c067bc0e04ff2b168fcf9e5799a2c725ba4
   xpu:
     base_image: intel/deep-learning-essentials
     base_image_tag: 2025.3.2-0-devel-ubuntu24.04
@@ -121,6 +135,24 @@ sglang:
   # NIXL Python stack — its wheel COPY is narrowed to ai_dynamo*.whl so the SDK
   # build doesn't leak into the runtime image.
   nixl_ref: v1.0.1
+  # Temporary release/1.3-only backport. Remove this plugin overlay once the
+  # SGLang base image ships a NIXL release containing the finalized PR #1966.
+  # The previous tested PR head had an endpoint-selection regression; this
+  # candidate is a semantic backport of the corrected d1e60ec head and must be
+  # revalidated on H100 and GB200 before release.
+  efa_nixl_patch:
+    nixl_version: "1.3.0"
+    base_ref: f852e14226f0fd67378469d638bf45b12d1926e5
+    base_tree: 4e7e85eaad3947371e68c5bdace02340aea772ba
+    upstream_pr_head: d1e60ec95140ff018a1db6057e3f51dfa4c0f562
+    upstream_pr_tree: 76620c0937796f87187f335c0616367174f38ff1
+    backport_ref: pr1966-d1e60ec-1.3.0-semantic-backport
+    backport_sha256: c24dc80783ba949153e41efeb4c14e63147ca2cf2dfd4174bc727bdec28e7f26
+    backport_patch_id: ee6a6c7cdb388df65e5e8116f67c89ee4f76462d
+    patched_tree: 659b5b21f4d0d7ad0d79c54a8bd47be642ca21a2
+    builder_sha256: d558ce3c1e6ae46335601c4cce0472ccbaf8d45971855deeae77f5607a8a673a
+    validator_sha256: 869736ffa0be0cb517c02fcde2540225f4c8cb5c1356ed79a9cc46f04c46df1d
+    meson_version: "1.11.1"
   enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
   enable_kvbm: "false"

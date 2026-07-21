@@ -30,10 +30,10 @@ Each entry here is required for:
   CVE databases against our patches)
 - Engineering hygiene (every patch needs a path back to upstream)
 
-## Today
+## Current modifications
 
-This directory is empty. dynamo doesn't currently patch any vendored
-upstream sources. If that changes, follow the layout above.
+- `native/nixl-1.3.0/` contains the release/1.3 LIBFABRIC plugin backport for
+  DYN-3429. Its README records the upstream and patched tree identities.
 
 The OSRB packager (`container/compliance/osrb/package.py`) walks this
 directory and includes every patch + README in the submission bundle

@@ -125,6 +125,12 @@ ARG SGLANG_KERNEL_REF={{ context.sglang.xpu.sglang_kernel_ref }}
 {%- endif -%}
 
 {% if make_efa == true %}
+{% if framework == "sglang" and device == "cuda" and target == "runtime" -%}
+ARG EFA_VERSION={{ context.sglang[device_key].efa_version }}
+ARG EFA_INSTALLER_SHA256={{ context.sglang[device_key].efa_installer_sha256 }}
+ARG EFA_INSTALLER_SIZE={{ context.sglang[device_key].efa_installer_size }}
+{% else -%}
 ARG EFA_VERSION={{ context.dynamo.efa_version }}
+{% endif -%}
 ARG EFA_BASE_IMAGE={{ "runtime" if target=="runtime" else "dev" }}
 {%- endif -%}

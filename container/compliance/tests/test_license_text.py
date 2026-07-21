@@ -9,6 +9,7 @@ Run from the repo root with the compliance package on the path:
 
 from __future__ import annotations
 
+import hashlib
 import tomllib
 from pathlib import Path
 
@@ -26,6 +27,16 @@ from compliance.generators.common import (
 
 _REPO = Path(__file__).resolve().parents[3]
 _POLICY = _REPO / "container/compliance/policy/licenses.toml"
+_NATIVE_PACKAGES = _REPO / "container/compliance/native_packages.yaml"
+_RDMA_COPYRIGHT = (
+    _REPO / "container/compliance/native_licenses/rdma-core-v63.0-debian-copyright"
+)
+_NIXL_BUILD_PATCH = _REPO / "container/deps/sglang/nixl/pr1966-1.3.0-backport.patch"
+_NIXL_OSRB_PATCH = (
+    _REPO
+    / "container/compliance/osrb/modifications/native/nixl-1.3.0"
+    / "pr1966-1.3.0-backport.patch"
+)
 
 
 def _allowed_spdx_ids() -> set[str]:
@@ -86,6 +97,37 @@ def test_bundled_text_has_no_disclaimer():
     out = render_notices("python", [actual])
     assert "No license file was distributed" not in out
     assert "Real Author" in out
+
+
+def test_efa149_rdma_core_uses_exact_deb_copyright():
+    body = _RDMA_COPYRIGHT.read_bytes()
+    assert len(body) == 31_156
+    assert hashlib.sha256(body).hexdigest() == (
+        "347f499a99055771ef8d23f4832f7a88d4313a72c33210fe3f362cc73f0c78cf"
+    )
+
+    native_yaml = _NATIVE_PACKAGES.read_text()
+    anchor_start = native_yaml.index("  - &sglang_efa_rdma_core")
+    anchor_end = native_yaml.index("\n  - <<: *sglang_efa_rdma_core", anchor_start)
+    anchor = native_yaml[anchor_start:anchor_end]
+    assert 'version: "63.0-1"' in anchor
+    assert (
+        "license: LicenseRef-BSD-MIT AND BSD-2-Clause AND BSD-3-Clause "
+        "AND MIT AND CC0-1.0"
+    ) in anchor
+    assert (
+        "license_text_path: "
+        "/opt/compliance/native_licenses/rdma-core-v63.0-debian-copyright"
+    ) in anchor
+    assert native_yaml.count("<<: *sglang_efa_rdma_core") == 15
+
+
+def test_nixl_backport_osrb_disclosure_matches_build_input():
+    build_patch = _NIXL_BUILD_PATCH.read_bytes()
+    assert _NIXL_OSRB_PATCH.read_bytes() == build_patch
+    assert hashlib.sha256(build_patch).hexdigest() == (
+        "c24dc80783ba949153e41efeb4c14e63147ca2cf2dfd4174bc727bdec28e7f26"
+    )
 
 
 def test_go_module_path_escaping():
