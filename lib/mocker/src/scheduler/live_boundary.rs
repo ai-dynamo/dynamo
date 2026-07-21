@@ -290,6 +290,9 @@ async fn run_live_scheduler<C: LiveBoundaryCore>(
         {
             break;
         }
+        if execution.duration.is_zero() && !zero_progress {
+            tokio::task::coop::consume_budget().await;
+        }
     }
 }
 
