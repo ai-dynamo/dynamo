@@ -63,10 +63,16 @@ OwnershipContract = tuple[str, str, list[str]]
 
 
 def _ownership_contracts(model: ResolvedModel) -> list[OwnershipContract]:
-    """Flatten required, shared, and file-type contracts for validation."""
-    path_contracts = [*model.required_owners, *model.shared]
+    """Flatten required_owners and blocking file-type contracts for validation.
+
+    ``shared`` entries are additive co-ownership lines -- a more-specific area
+    rule may legitimately override them.  Only ``required_owners`` (explicit
+    joint-ownership guarantees) and ``filetype_shared`` (blocking file-type
+    co-ownership) are enforced as hard contracts here.
+    """
     contracts = [
-        (anchor(rule["glob"]), rule["glob"], rule["owners"]) for rule in path_contracts
+        (anchor(rule["glob"]), rule["glob"], rule["owners"])
+        for rule in model.required_owners
     ]
     contracts.extend(
         (rule.glob, rule.glob, rule.owners) for rule in model.filetype_shared

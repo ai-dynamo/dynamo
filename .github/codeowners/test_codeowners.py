@@ -856,9 +856,21 @@ class TestOwnershipContracts:
         assert violations[0].glob == "lib/"
         assert violations[0].missing == ("@docs",)
 
-    def test_later_shared_rule_cannot_silently_remove_declared_owner(self) -> None:
+    def test_shared_rule_may_be_overridden_by_more_specific_rule(self) -> None:
+        # shared entries are additive co-ownership lines, not hard contracts.
+        # A more-specific area or shared rule may legitimately override them.
         spec = self._spec()
         spec["shared"].append({"glob": "lib/private/", "owners": ["runtime"]})
+        model = compute_resolution(spec)
+
+        assert ownership_contract_violations(model, ["lib/private/a.rs"]) == []
+
+    def test_required_owner_blocks_override(self) -> None:
+        # required_owners are hard contracts; a more-specific rule that drops
+        # a declared owner is caught even when shared would not be.
+        spec = self._spec()
+        spec["required_owners"] = [{"glob": "lib/", "owners": ["docs"]}]
+        spec["shared"] = [{"glob": "lib/private/", "owners": ["runtime"]}]
         model = compute_resolution(spec)
 
         violations = ownership_contract_violations(model, ["lib/private/a.rs"])
@@ -887,6 +899,7 @@ class TestOwnershipContracts:
         assert violations[0].missing == ("@ops",)
 
     def test_strict_gate_fails_on_ownership_loss(self) -> None:
+        # shared alone has no contract: overrides don't trigger the gate
         model = compute_resolution(self._spec())
         violations = ownership_contract_violations(model, ["lib/private/a.rs"])
         message = strict_failure(
@@ -894,6 +907,8 @@ class TestOwnershipContracts:
         )
         assert message is None
 
+        # required_owners + a more-specific override does trigger the gate
+        model.required_owners.append({"glob": "lib/", "owners": ["docs"]})
         model.shared.append({"glob": "lib/private/", "owners": ["runtime"]})
         violations = ownership_contract_violations(model, ["lib/private/a.rs"])
         message = strict_failure(
