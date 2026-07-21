@@ -56,6 +56,31 @@ struct BrokerEndpoints {
     xpub_endpoints: Vec<String>,
 }
 
+/// Whether the configured event plane selects direct per-publisher ZMQ sockets.
+///
+/// This intentionally answers only the topology question needed by specialized
+/// consumers. Broker discovery and connection errors remain owned by the normal
+/// [`EventSubscriber`] construction path.
+pub fn uses_direct_zmq(transport_kind: EventTransportKind) -> bool {
+    uses_direct_zmq_from_lookup(transport_kind, |key| std::env::var_os(key))
+}
+
+fn uses_direct_zmq_from_lookup(
+    transport_kind: EventTransportKind,
+    mut get_env: impl FnMut(&str) -> Option<std::ffi::OsString>,
+) -> bool {
+    if transport_kind != EventTransportKind::Zmq {
+        return false;
+    }
+
+    if get_env(crate::config::environment_names::zmq_broker::DYN_ZMQ_BROKER_URL).is_some() {
+        return false;
+    }
+
+    !get_env(crate::config::environment_names::zmq_broker::DYN_ZMQ_BROKER_ENABLED)
+        .is_some_and(|value| crate::config::is_truthy(&value.to_string_lossy()))
+}
+
 /// Resolve ZMQ broker endpoints from environment or discovery
 /// Returns None if broker mode is not configured (direct mode)
 async fn resolve_zmq_broker(
@@ -886,6 +911,40 @@ fn current_timestamp_ms() -> u64 {
 mod tests {
     use super::*;
     use crate::config::environment_names::zmq_broker as broker_env;
+
+    #[test]
+    fn direct_zmq_topology_selection_is_narrow() {
+        let lookup = |url: Option<&str>, enabled: Option<&str>| {
+            let url = url.map(std::ffi::OsString::from);
+            let enabled = enabled.map(std::ffi::OsString::from);
+            move |key: &str| match key {
+                broker_env::DYN_ZMQ_BROKER_URL => url.clone(),
+                broker_env::DYN_ZMQ_BROKER_ENABLED => enabled.clone(),
+                _ => None,
+            }
+        };
+
+        assert!(uses_direct_zmq_from_lookup(
+            EventTransportKind::Zmq,
+            lookup(None, None)
+        ));
+        assert!(!uses_direct_zmq_from_lookup(
+            EventTransportKind::Zmq,
+            lookup(Some("xsub=tcp://broker:5555,xpub=tcp://broker:5556"), None)
+        ));
+        assert!(!uses_direct_zmq_from_lookup(
+            EventTransportKind::Zmq,
+            lookup(None, Some("true"))
+        ));
+        assert!(uses_direct_zmq_from_lookup(
+            EventTransportKind::Zmq,
+            lookup(None, Some("false"))
+        ));
+        assert!(!uses_direct_zmq_from_lookup(
+            EventTransportKind::Nats,
+            lookup(None, None)
+        ));
+    }
 
     #[tokio::test]
     async fn direct_zmq_endpoint_scopes_are_isolated() {

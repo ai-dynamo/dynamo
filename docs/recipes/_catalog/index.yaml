@@ -15,6 +15,8 @@ recipes:
 - nemotron-3-ultra
 - nemotron-3-super
 - glm-5-nvfp4
+- deepseek-v4-pro
+- deepseek-v4-flash
 - deepseek-v3-2-nvfp4
 - gpt-oss-120b
 - qwen3-32b

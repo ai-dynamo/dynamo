@@ -652,10 +652,10 @@ class WorkerMetricsPublisher:
 
     async def create_endpoint(self, endpoint: Endpoint) -> None:
         """
-        Initialize the NATS endpoint for publishing worker metrics. Must be awaited.
+        Initialize event-plane publishing for worker metrics. Must be awaited.
 
         Extracts component information from the endpoint to set up metrics publishing
-        on the correct NATS subject for routing decisions.
+        on the endpoint-scoped event subject used for routing decisions.
 
         Args:
             endpoint: The endpoint to extract component information from for metrics publishing
@@ -691,7 +691,7 @@ class MultimodalEmbeddingCachePublisher:
 
     async def create_endpoint(self, endpoint: Endpoint) -> None:
         """
-        Initialize the NATS endpoint for publishing multimodal cache state.
+        Initialize event-plane publishing for multimodal cache state.
 
         Args:
             endpoint: The endpoint to extract component information from.

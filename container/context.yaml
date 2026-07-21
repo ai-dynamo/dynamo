@@ -23,6 +23,9 @@ dynamo:
     # shared multi-arch index digest).
   epp_image: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v1.5.0-rc.2
   frontend_image: nvcr.io/nvidia/base/ubuntu:noble-20250619
+  # Self-baseline of the ubuntu frontend base; the licenses stage subtracts it so
+  # frontend NOTICES attribute only what dynamo (+ EPP's Go modules) add on top.
+  frontend_baseline_sbom: ubuntu@7291df36
   planner_build_image: python
   planner_build_image_tag: 3.12-slim
   planner_runtime_image: nvcr.io/nvidia/distroless/python

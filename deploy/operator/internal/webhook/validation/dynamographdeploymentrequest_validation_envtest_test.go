@@ -15,41 +15,43 @@
  * limitations under the License.
  */
 
-package validation
+package validation_test
 
 import (
-	"slices"
-	"strings"
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
-	admissionv1 "k8s.io/api/admission/v1"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
-	requestValidators := requestValidatorsFromCRD(t, "nvidia.com_dynamographdeploymentrequests.yaml")
+const alternateAdmissionModel = "Qwen/Qwen3-8B"
 
+func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 	tests := []struct {
-		name          string
-		request       runtime.Object
-		oldRequest    runtime.Object
-		gpuDiscovery  bool
-		wantSchemaErr string
-		wantCELErr    string
-		wantWebhook   []string
-		wantWarnings  []string
+		name               string
+		request            runtime.Object
+		oldRequest         runtime.Object
+		gpuDiscovery       bool
+		seedWithoutWebhook bool
+		wantImage          string
+		wantSchemaErr      string
+		wantCELErr         string
+		wantWebhook        []string
+		wantWarnings       []string
 	}{
 		// Source-version schema, CEL, and conversion boundaries.
 		{
-			name:         "valid v1beta1 request",
-			request:      betaDGDRForAdmission(nil),
+			name: "valid v1beta1 request is defaulted",
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.Image = ""
+			}),
 			gpuDiscovery: true,
+			wantImage:    "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.0",
 		},
 		{
 			name:         "valid v1alpha1 request converts through the production path",
@@ -190,7 +192,8 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 		},
 		{
-			name: "unchanged thorough and auto violation is ratcheted on update",
+			name:               "unchanged thorough and auto violation is ratcheted on update",
+			seedWithoutWebhook: true,
 			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
 				request.Spec.Backend = nvidiacomv1beta1.BackendTypeAuto
 				request.Spec.SearchStrategy = nvidiacomv1beta1.SearchStrategyThorough
@@ -235,76 +238,34 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			current := admissionUnstructured(t, tt.request)
-			var old map[string]any
-			if tt.oldRequest != nil {
-				old = admissionUnstructured(t, tt.oldRequest)
+			gates := features.Gates{GPUDiscovery: tt.gpuDiscovery}
+			test := admissionTestCase{
+				object:             tt.request,
+				oldObject:          tt.oldRequest,
+				gates:              gates,
+				seedWithoutWebhook: tt.seedWithoutWebhook,
+				withoutTopology:    true,
+				wantSchemaError:    tt.wantSchemaErr,
+				wantCELError:       tt.wantCELErr,
+				wantWebhookErrors:  tt.wantWebhook,
+				wantWarnings:       tt.wantWarnings,
 			}
-
-			version := admissionSourceVersion(t, tt.request)
-			if tt.oldRequest != nil && admissionSourceVersion(t, tt.oldRequest) != version {
-				t.Fatal("old and current source versions differ")
+			if tt.oldRequest != nil && !tt.gpuDiscovery {
+				seedGates := gates
+				seedGates.GPUDiscovery = true
+				test.seedGates = &seedGates
 			}
-			requestValidator, ok := requestValidators[version]
-			if !ok {
-				t.Fatalf("no request validator for source version %q", version)
-			}
-
-			schemaErrs := requestValidator.validateSchema(current, old)
-			if tt.wantSchemaErr != "" {
-				if tt.wantCELErr != "" || len(tt.wantWebhook) != 0 || len(tt.wantWarnings) != 0 {
-					t.Fatal("schema rejection cannot have downstream expectations")
+			actual := runAdmissionTest(t, test)
+			if tt.wantImage != "" {
+				image, found, err := unstructured.NestedString(actual.Object, "spec", "image")
+				if err != nil || !found {
+					t.Fatalf("read defaulted spec.image: found=%v, err=%v", found, err)
 				}
-				assertRequestValidationError(t, schemaErrs, tt.wantSchemaErr)
-				return
-			}
-			if len(schemaErrs) != 0 {
-				t.Fatalf("schema errors = %v, want none", schemaErrs)
-			}
-
-			celErrs := requestValidator.celValidator(current, old)
-			if tt.wantCELErr != "" {
-				if len(tt.wantWebhook) != 0 || len(tt.wantWarnings) != 0 {
-					t.Fatal("CEL rejection cannot have webhook expectations")
+				if image != tt.wantImage {
+					t.Fatalf("defaulted spec.image = %q, want %q", image, tt.wantImage)
 				}
-				assertRequestValidationError(t, celErrs, tt.wantCELErr)
-				return
-			}
-			if len(celErrs) != 0 {
-				t.Fatalf("CEL errors = %v, want none", celErrs)
-			}
-
-			handler := NewDynamoGraphDeploymentRequestHandler()
-			ctx := dgdAdmissionContext(dgdrAdmissionOperation(tt.oldRequest), nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK)
-			ctx = features.WithGate(ctx, features.Gates{GPUDiscovery: tt.gpuDiscovery})
-			var warnings []string
-			var err error
-			if tt.oldRequest == nil {
-				warnings, err = handler.ValidateCreate(ctx, dgdrAdmissionBeta(t, tt.request))
-			} else {
-				warnings, err = handler.ValidateUpdate(
-					ctx,
-					dgdrAdmissionBeta(t, tt.oldRequest),
-					dgdrAdmissionBeta(t, tt.request),
-				)
-			}
-			assertWebhookErrors(t, err, tt.wantWebhook)
-			if !slices.Equal(warnings, tt.wantWarnings) {
-				t.Fatalf("webhook warnings = %v, want %v", warnings, tt.wantWarnings)
 			}
 		})
-	}
-}
-
-func TestDynamoGraphDeploymentRequestHandlerBoundaryErrorsRemainRegular(t *testing.T) {
-	handler := NewDynamoGraphDeploymentRequestHandler()
-	ctx := dgdAdmissionContext(admissionv1.Create, nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK)
-	_, err := handler.ValidateCreate(ctx, &runtime.Unknown{})
-	if err == nil || !strings.Contains(err.Error(), "expected DynamoGraphDeploymentRequest") {
-		t.Fatalf("ValidateCreate() error = %v, want cast error", err)
-	}
-	if k8serrors.IsInvalid(err) {
-		t.Fatalf("ValidateCreate() error = %v, want regular boundary error", err)
 	}
 }
 
@@ -351,34 +312,4 @@ func alphaDGDRForAdmission(
 		mutate(request)
 	}
 	return request
-}
-
-func dgdrAdmissionBeta(
-	t *testing.T,
-	request runtime.Object,
-) *nvidiacomv1beta1.DynamoGraphDeploymentRequest {
-	t.Helper()
-	if request == nil {
-		return nil
-	}
-	switch request := request.(type) {
-	case *nvidiacomv1beta1.DynamoGraphDeploymentRequest:
-		return request.DeepCopy()
-	case *nvidiacomv1alpha1.DynamoGraphDeploymentRequest:
-		beta := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}
-		if err := request.ConvertTo(beta); err != nil {
-			t.Fatalf("convert v1alpha1 DGDR to v1beta1: %v", err)
-		}
-		return beta
-	default:
-		t.Fatalf("unsupported DGDR type %T", request)
-		return nil
-	}
-}
-
-func dgdrAdmissionOperation(oldRequest runtime.Object) admissionv1.Operation {
-	if oldRequest == nil {
-		return admissionv1.Create
-	}
-	return admissionv1.Update
 }
