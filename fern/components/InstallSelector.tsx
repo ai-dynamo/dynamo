@@ -129,7 +129,7 @@ function buildHtml(data: Data): string {
       });
 
   return (
-    `<div class="is-head"><h3>Choose your build</h3><p>Every command is complete and copy-pastable — no placeholders.</p></div>` +
+    `<div class="is-head"><h3>Choose your build</h3></div>` +
     `<div class="is-row"><span class="is-rl">Backend</span><div class="is-chips">${fwRow}</div></div>` +
     `<div class="is-row"><span class="is-rl">Dynamo build</span><div class="is-chips">${chRow}</div></div>` +
     `<div class="is-row">${verLabel}<div class="is-chips">${verRow}</div></div>` +
