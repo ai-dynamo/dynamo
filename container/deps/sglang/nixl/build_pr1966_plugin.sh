@@ -145,6 +145,8 @@ build_variant() {
 
 for name in \
     TARGETARCH \
+    SGLANG_EFA_NIXL_WHEEL_BUILD_REF \
+    SGLANG_EFA_NIXL_WHEEL_BUILD_TREE \
     SGLANG_EFA_NIXL_BASE_REF \
     SGLANG_EFA_NIXL_BASE_TREE \
     SGLANG_EFA_NIXL_UPSTREAM_PR_HEAD \
@@ -170,7 +172,7 @@ readonly SEMANTICS_VALIDATOR="$3"
 [[ "$OUT_ROOT" == /* && "$OUT_ROOT" != "/" ]] || \
     die "output root must be an absolute non-root path"
 
-for tool in git meson ninja patchelf readelf nm sha256sum python3; do
+for tool in git meson ninja patchelf readelf nm sha256sum strings python3; do
     command -v "$tool" >/dev/null || die "required tool not found: ${tool}"
 done
 
@@ -252,6 +254,9 @@ PY
 )
 [[ "${#CORE_PATHS[@]}" -eq "${#REQUIRED_CORE_RELS[@]}" ]] || \
     die "failed to locate the stock NIXL core libraries"
+readonly WHEEL_BUILD_SHORT="${SGLANG_EFA_NIXL_WHEEL_BUILD_REF:0:8}"
+[[ "$(strings "${CORE_PATHS[1]}" | grep -Fxc "$WHEEL_BUILD_SHORT")" -eq 1 ]] || \
+    die "stock nixl-cu13 wheel does not embed build revision ${WHEEL_BUILD_SHORT}"
 
 git clone --filter=blob:none --no-checkout https://github.com/ai-dynamo/nixl.git "$SOURCE_ROOT"
 git -C "$SOURCE_ROOT" checkout --detach "$SGLANG_EFA_NIXL_BASE_REF"
@@ -259,6 +264,15 @@ git -C "$SOURCE_ROOT" checkout --detach "$SGLANG_EFA_NIXL_BASE_REF"
     die "NIXL base commit mismatch"
 [[ "$(git -C "$SOURCE_ROOT" rev-parse HEAD^{tree})" == "$SGLANG_EFA_NIXL_BASE_TREE" ]] || \
     die "NIXL base tree mismatch"
+
+git -C "$SOURCE_ROOT" fetch --quiet --filter=blob:none --no-tags \
+    origin "$SGLANG_EFA_NIXL_WHEEL_BUILD_REF"
+[[ "$(git -C "$SOURCE_ROOT" rev-parse FETCH_HEAD)" == \
+    "$SGLANG_EFA_NIXL_WHEEL_BUILD_REF" ]] || die "wheel build commit mismatch"
+[[ "$(git -C "$SOURCE_ROOT" rev-parse FETCH_HEAD^{tree})" == \
+    "$SGLANG_EFA_NIXL_WHEEL_BUILD_TREE" ]] || die "wheel build tree mismatch"
+[[ "$SGLANG_EFA_NIXL_WHEEL_BUILD_TREE" == "$SGLANG_EFA_NIXL_BASE_TREE" ]] || \
+    die "wheel build and source-anchor trees differ"
 
 git -C "$SOURCE_ROOT" fetch --quiet --filter=blob:none --no-tags \
     origin "$SGLANG_EFA_NIXL_UPSTREAM_PR_HEAD"
@@ -353,6 +367,8 @@ cp "$PATCH_FILE" "${PROVENANCE}/pr1966-1.3.0-backport.patch"
 cp "$0" "${PROVENANCE}/build_pr1966_plugin.sh"
 cp "$SEMANTICS_VALIDATOR" "${PROVENANCE}/validate_pr1966_semantics.py"
 cp "${SOURCE_ROOT}/LICENSE" "${PROVENANCE}/NIXL-LICENSE"
+printf '%s\n' "$SGLANG_EFA_NIXL_WHEEL_BUILD_REF" > "${PROVENANCE}/WHEEL_BUILD_COMMIT"
+printf '%s\n' "$SGLANG_EFA_NIXL_WHEEL_BUILD_TREE" > "${PROVENANCE}/WHEEL_BUILD_TREE"
 printf '%s\n' "$SGLANG_EFA_NIXL_BASE_REF" > "${PROVENANCE}/BASE_COMMIT"
 printf '%s\n' "$SGLANG_EFA_NIXL_BASE_TREE" > "${PROVENANCE}/BASE_TREE"
 printf '%s\n' "$SGLANG_EFA_NIXL_UPSTREAM_PR_HEAD" > "${PROVENANCE}/UPSTREAM_PR_HEAD"

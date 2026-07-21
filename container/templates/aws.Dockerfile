@@ -225,6 +225,8 @@ COPY --chmod=0755 container/deps/sglang/nixl/validate_pr1966_semantics.py \
 
 RUN TARGETARCH="${TARGETARCH}" \
     SGLANG_EFA_NIXL_VERSION="{{ context.sglang.efa_nixl_patch.nixl_version }}" \
+    SGLANG_EFA_NIXL_WHEEL_BUILD_REF="{{ context.sglang.efa_nixl_patch.wheel_build_ref }}" \
+    SGLANG_EFA_NIXL_WHEEL_BUILD_TREE="{{ context.sglang.efa_nixl_patch.wheel_build_tree }}" \
     SGLANG_EFA_NIXL_BASE_REF="{{ context.sglang.efa_nixl_patch.base_ref }}" \
     SGLANG_EFA_NIXL_BASE_TREE="{{ context.sglang.efa_nixl_patch.base_tree }}" \
     SGLANG_EFA_NIXL_UPSTREAM_PR_HEAD="{{ context.sglang.efa_nixl_patch.upstream_pr_head }}" \
@@ -261,6 +263,10 @@ COPY --from=sglang_nixl_efa_builder \
 # Validate provenance, unchanged NIXL core libraries, both plugin copies, and
 # the final image's exact libfabric ABI before publishing either architecture.
 RUN set -eux; \
+    test "$(cat /opt/dynamo/patches/nixl-pr1966/WHEEL_BUILD_COMMIT)" = \
+        "{{ context.sglang.efa_nixl_patch.wheel_build_ref }}"; \
+    test "$(cat /opt/dynamo/patches/nixl-pr1966/WHEEL_BUILD_TREE)" = \
+        "{{ context.sglang.efa_nixl_patch.wheel_build_tree }}"; \
     test "$(cat /opt/dynamo/patches/nixl-pr1966/BASE_COMMIT)" = \
         "{{ context.sglang.efa_nixl_patch.base_ref }}"; \
     test "$(cat /opt/dynamo/patches/nixl-pr1966/BASE_TREE)" = \
@@ -327,6 +333,7 @@ ENV LD_PRELOAD=/opt/amazon/efa/lib/libfabric.so.1
 ENV LD_LIBRARY_PATH=/opt/amazon/efa/lib:${LD_LIBRARY_PATH}
 
 LABEL com.nvidia.dynamo.sglang.nixl-efa.base-revision="{{ context.sglang.efa_nixl_patch.base_ref }}" \
+      com.nvidia.dynamo.sglang.nixl-efa.wheel-revision="{{ context.sglang.efa_nixl_patch.wheel_build_ref }}" \
       com.nvidia.dynamo.sglang.nixl-efa.upstream-pr-head="{{ context.sglang.efa_nixl_patch.upstream_pr_head }}" \
       com.nvidia.dynamo.sglang.nixl-efa.backport-tree="{{ context.sglang.efa_nixl_patch.patched_tree }}"
 {% endif %}
