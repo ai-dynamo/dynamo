@@ -302,6 +302,7 @@ impl KvRouterConfig {
             shared_cache_multiplier,
             shared_cache_type: shared_cache_type.parse().map_err(PyValueError::new_err)?,
             router_predicted_ttl_secs,
+            ..Default::default()
         };
         validate_kv_router_config(&inner)?;
         Ok(KvRouterConfig { inner })

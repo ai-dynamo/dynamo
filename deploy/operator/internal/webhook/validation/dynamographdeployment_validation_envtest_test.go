@@ -15,15 +15,10 @@
  * limitations under the License.
  */
 
-package validation
+package validation_test
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
-	"slices"
 	"strings"
 	"testing"
 
@@ -31,57 +26,42 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
-	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	admissionv1 "k8s.io/api/admission/v1"
-	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/validation/field"
-	"k8s.io/client-go/rest"
 	k8sptr "k8s.io/utils/ptr"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 )
 
 const (
 	dgdAdmissionWorkerName      = "worker"
 	dgdAdmissionUpperWorkerName = "WORKER"
-	dgdAdmissionOperator        = "system:serviceaccount:dynamo-system:dynamo-operator"
 )
 
 const sglangBackendFramework = "sglang"
 
 func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
-	requestValidators := requestValidatorsFromCRD(t, "nvidia.com_dynamographdeployments.yaml")
-	defaultManager := newGroveTopologyTestManager(t, newTestClusterTopology())
-	missingTopologyManager := newGroveTopologyTestManager(t)
-	inferencePoolManager := newInferencePoolTestManager(t)
 	longDGDName := "test-graph-" + strings.Repeat("x", 50)
 	boundaryComponentName := "w" + strings.Repeat("x", 36)
 	tooLongComponentName := boundaryComponentName + "x"
 
 	tests := []struct {
-		name          string
-		deployment    runtime.Object
-		oldDeployment runtime.Object
-		mutateRequest func(*testing.T, map[string]any) // mutates the source-version request map
-		manager       ctrl.Manager                     // supplies webhook dependencies
-		groveDisabled bool                             // disables the configured Grove pathway
-		checkpointOff bool                             // disables checkpoint creation and restore
-		userInfo      *authenticationv1.UserInfo       // supplies the admission request identity
-		operator      string                           // sets the configured operator principal
+		name            string
+		deployment      runtime.Object
+		oldDeployment   runtime.Object
+		mutateRequest   func(*testing.T, map[string]any) // mutates the source-version request map
+		withoutTopology bool                             // omits the default cluster topology fixture
+		groveDisabled   bool                             // disables the configured Grove pathway
+		checkpointOff   bool                             // disables checkpoint creation and restore
+		username        string                           // supplies the admission request identity
 
-		wantSchemaErr   string
-		wantCELErr      string
-		wantWebhookErrs []string
-		wantWarnings    []string
-		notWantErr      string
+		wantSchemaErr     string
+		wantCELErr        string
+		wantAdmissionErrs []string
+		wantWebhookErrs   []string
+		wantWarnings      []string
+		notWantErr        string
 	}{
 		// Baseline create-path rules.
 		{
@@ -100,7 +80,10 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).Replicas = k8sptr.To(int32(-1))
 			}),
-			wantSchemaErr: "spec.components[1].replicas: Invalid value: -1: spec.components[1].replicas in body should be greater than or equal to 0",
+			wantAdmissionErrs: []string{
+				"spec.components[1].replicas: Invalid value: -1: spec.components[1].replicas in body should be greater than or equal to 0",
+				"spec.components[1]: Invalid value: minAvailable must be less than or equal to replicas unless replicas is 0",
+			},
 		},
 		{
 			name:          "component minAvailable requires Grove",
@@ -220,11 +203,8 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: alphaDGDForAdmissionWithServiceNames(dgdAdmissionWorkerName, dgdAdmissionUpperWorkerName),
 		},
 		{
-			name: "v1beta1 case-insensitive component names are rejected by CEL on update",
-			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Spec.Components[0].ComponentName = dgdAdmissionWorkerName
-				dgd.Spec.Components[1].ComponentName = dgdAdmissionUpperWorkerName
-			}),
+			name:          "v1beta1 introducing case-insensitive component names is rejected by CEL on update",
+			oldDeployment: betaDGDForAdmission(nil),
 			deployment: dgdAdmissionWithLabel(t, betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Components[0].ComponentName = dgdAdmissionWorkerName
 				dgd.Spec.Components[1].ComponentName = dgdAdmissionUpperWorkerName
@@ -249,13 +229,14 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantSchemaErr: `spec.components[1].compilationCache.pvcName: Invalid value: "": spec.components[1].compilationCache.pvcName in body should be at least 1 chars long`,
 		},
 		{
-			name: "v1alpha1 converted compilation cache mount with an empty PVC name reaches the webhook",
+			name: "v1alpha1 converted compilation cache mount with an empty PVC name is rejected",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["worker"].VolumeMounts = []nvidiacomv1alpha1.VolumeMount{{
 					UseAsCompilationCache: true,
 				}}
 			}),
 			mutateRequest: setAlphaCompilationCacheVolumeNameEmpty,
+			wantSchemaErr: `spec.services.worker.volumeMounts[0].name: Required value`,
 		},
 		{
 			name: "v1beta1 sidecars must provide an image in CEL",
@@ -419,12 +400,11 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantCELErr: "spec.components[1]: Invalid value: minAvailable is immutable after creation",
 		},
 		{
-			name: "v1beta1 removed minAvailable update is rejected by CEL",
+			name: "v1beta1 removed minAvailable update is restored by defaulting",
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).MinAvailable = k8sptr.To(int32(1))
 			}),
 			deployment: betaDGDForAdmission(nil),
-			wantCELErr: "spec.components[1]: Invalid value: minAvailable is immutable after creation",
 		},
 
 		// Checkpoint rules.
@@ -609,8 +589,8 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name:    "KV-transfer cluster topology policy rejects missing topology",
-			manager: missingTopologyManager,
+			name:            "KV-transfer cluster topology policy rejects missing topology",
+			withoutTopology: true,
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Experimental = &nvidiacomv1beta1.DynamoGraphDeploymentExperimentalSpec{
 					KvTransferPolicy: &nvidiacomv1beta1.KvTransferPolicy{ClusterTopologyName: "missing-topology", Domain: "rack"},
@@ -781,8 +761,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{"spec.services[worker].volumeMounts[0].mountPoint: Required value: is required when useAsCompilationCache is false"},
 		},
 		{
-			name:    "alpha EPP config sources are mutually exclusive",
-			manager: inferencePoolManager,
+			name: "alpha EPP config sources are mutually exclusive",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				worker := dgd.Spec.Services["worker"]
 				worker.ComponentType = consts.ComponentTypeEPP
@@ -840,11 +819,10 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantSchemaErr: `spec.services.worker.gpuMemoryService.extraClientContainers[0]: Invalid value: "Bad_Name": spec.services.worker.gpuMemoryService.extraClientContainers[0] in body should match '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'`,
 		},
 		{
-			name: "nil alpha service entry is rejected",
+			name: "nil alpha service entry is pruned",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["ghost"] = nil
 			}),
-			wantSchemaErr: `spec.services.ghost: Invalid value: "null": spec.services.ghost in body must be of type object: "null"`,
 		},
 		{
 			name: "valid preserved alpha-only fields are accepted",
@@ -937,8 +915,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name:    "v1alpha1 EPP config without a source reaches the webhook without v1beta1 CEL",
-			manager: inferencePoolManager,
+			name: "v1alpha1 EPP config without a source reaches the webhook without v1beta1 CEL",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				worker := dgd.Spec.Services["worker"]
 				worker.ComponentType = consts.ComponentTypeEPP
@@ -971,8 +948,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantCELErr: "spec.components[1].eppConfig: Invalid value: exactly one of configMapRef or config must be specified",
 		},
 		{
-			name:    "v1beta1 valid EPP config reaches the webhook",
-			manager: inferencePoolManager,
+			name: "v1beta1 valid EPP config reaches the webhook",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
 				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
@@ -1101,8 +1077,8 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name:    "missing cluster topology is rejected",
-			manager: missingTopologyManager,
+			name:            "missing cluster topology is rejected",
+			withoutTopology: true,
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.TopologyConstraint = &nvidiacomv1beta1.SpecTopologyConstraint{
 					ClusterTopologyName: "missing-topology",
@@ -1112,8 +1088,8 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{`spec.topologyConstraint.clusterTopologyName: Invalid value: "missing-topology": references a ClusterTopologyBinding resource that was not found`},
 		},
 		{
-			name:    "independent topology errors aggregate",
-			manager: missingTopologyManager,
+			name:            "independent topology errors aggregate",
+			withoutTopology: true,
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.TopologyConstraint = &nvidiacomv1beta1.SpecTopologyConstraint{ClusterTopologyName: "missing-topology"}
 				dgd.Spec.Components[1].TopologyConstraint = &nvidiacomv1beta1.TopologyConstraint{PackDomain: "rack"}
@@ -1407,7 +1383,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				LabelKey: "topology.kubernetes.io/zone",
 				Domain:   "zone",
 			}),
-			wantWebhookErrs: []string{`spec.experimental.kvTransferPolicy: Invalid value: {"labelKey":"topology.kubernetes.io/zone","domain":"zone"}: is immutable and cannot be added, removed, or changed after creation; delete and recreate the DynamoGraphDeployment to change the KV transfer policy`},
+			wantWebhookErrs: []string{`spec.experimental.kvTransferPolicy: Invalid value: {"labelKey":"topology.kubernetes.io/zone","domain":"zone","enforcement":"required"}: is immutable and cannot be added, removed, or changed after creation; delete and recreate the DynamoGraphDeployment to change the KV transfer policy`},
 		},
 		{
 			name: "unchanged kv transfer policy is allowed",
@@ -1493,10 +1469,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
 				worker.Replicas = k8sptr.To(int32(3))
 			}),
-			userInfo: &authenticationv1.UserInfo{
-				Username: "system:serviceaccount:default:regular-user",
-			},
-			operator:        dgdAdmissionOperator,
+			username:        "system:serviceaccount:default:regular-user",
 			wantWebhookErrs: []string{"spec.components[1].replicas: Forbidden: cannot be modified directly when scaling adapter is enabled; scale or update the related DynamoGraphDeploymentScalingAdapter instead"},
 		},
 		{
@@ -1509,7 +1482,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
 				worker.Replicas = k8sptr.To(int32(3))
 			}),
-			operator:        dgdAdmissionOperator,
 			wantWebhookErrs: []string{"spec.components[1].replicas: Forbidden: cannot be modified directly when scaling adapter is enabled; scale or update the related DynamoGraphDeploymentScalingAdapter instead"},
 		},
 		{
@@ -1522,10 +1494,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.ScalingAdapter = nil
 				worker.Replicas = k8sptr.To(int32(3))
 			}),
-			userInfo: &authenticationv1.UserInfo{
-				Username: "system:serviceaccount:default:regular-user",
-			},
-			operator:        dgdAdmissionOperator,
+			username:        "system:serviceaccount:default:regular-user",
 			wantWebhookErrs: []string{"spec.components[1].replicas: Forbidden: cannot be modified directly when scaling adapter is enabled; scale or update the related DynamoGraphDeploymentScalingAdapter instead"},
 		},
 		{
@@ -1538,10 +1507,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
 				worker.Replicas = k8sptr.To(int32(3))
 			}),
-			userInfo: &authenticationv1.UserInfo{
-				Username: dgdAdmissionOperator,
-			},
-			operator: dgdAdmissionOperator,
+			username: admissionOperatorPrincipal,
 		},
 
 		// Backend and restart updates.
@@ -1668,123 +1634,33 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			current := admissionUnstructured(t, tt.deployment)
-			if tt.mutateRequest != nil {
-				tt.mutateRequest(t, current)
+			gates := features.Gates{Checkpoint: !tt.checkpointOff, Grove: !tt.groveDisabled}
+			test := admissionTestCase{
+				object:            tt.deployment,
+				oldObject:         tt.oldDeployment,
+				mutateObject:      tt.mutateRequest,
+				gates:             gates,
+				withoutTopology:   tt.withoutTopology,
+				username:          tt.username,
+				wantSchemaError:   tt.wantSchemaErr,
+				wantCELError:      tt.wantCELErr,
+				wantAdmissionErrs: tt.wantAdmissionErrs,
+				wantWebhookErrors: tt.wantWebhookErrs,
+				wantWarnings:      tt.wantWarnings,
+				notWantError:      tt.notWantErr,
 			}
-			var old map[string]any
 			if tt.oldDeployment != nil {
-				old = admissionUnstructured(t, tt.oldDeployment)
+				test.oldBeforeUpdate = dgdBeforeRestart(t, tt.oldDeployment)
+				if tt.checkpointOff || tt.groveDisabled {
+					seedGates := gates
+					seedGates.Checkpoint = true
+					seedGates.Grove = true
+					test.seedGates = &seedGates
+				}
 			}
-
-			version := admissionSourceVersion(t, tt.deployment)
-			requestValidator, ok := requestValidators[version]
-			if !ok {
-				t.Fatalf("no request validator for source version %q", version)
-			}
-			schemaErrs := requestValidator.validateSchema(current, old)
-			if tt.wantSchemaErr != "" {
-				assertRequestValidationError(t, schemaErrs, tt.wantSchemaErr)
-				return
-			}
-			if len(schemaErrs) != 0 {
-				t.Fatalf("schema errors = %v, want none", schemaErrs)
-			}
-
-			celErrs := requestValidator.celValidator(current, old)
-			if tt.wantCELErr != "" {
-				assertRequestValidationError(t, celErrs, tt.wantCELErr)
-				return
-			}
-			if len(celErrs) != 0 {
-				t.Fatalf("CEL errors = %v, want none", celErrs)
-			}
-
-			oldBeta := dgdAdmissionBeta(t, tt.oldDeployment)
-			currentBeta := dgdAdmissionBeta(t, tt.deployment)
-			manager := tt.manager
-			if manager == nil {
-				manager = defaultManager
-			}
-			handler := NewDynamoGraphDeploymentHandler(manager, tt.operator)
-			ctx := dgdAdmissionContextWithUserInfo(
-				dgdAdmissionOperation(tt.oldDeployment),
-				nvidiacomv1beta1.DynamoGraphDeploymentGVK,
-				tt.userInfo,
-			)
-			ctx = features.WithGate(ctx, features.Gates{Checkpoint: !tt.checkpointOff, Grove: !tt.groveDisabled})
-
-			var (
-				warnings []string
-				err      error
-			)
-			if tt.oldDeployment == nil {
-				warnings, err = handler.ValidateCreate(ctx, currentBeta)
-			} else {
-				warnings, err = handler.ValidateUpdate(ctx, oldBeta, currentBeta)
-			}
-			assertBetaValidationErrors(t, err, tt.wantWebhookErrs)
-			if tt.notWantErr != "" && err != nil && strings.Contains(err.Error(), tt.notWantErr) {
-				t.Fatalf("webhook error = %q, must not contain %q", err.Error(), tt.notWantErr)
-			}
-			if !slices.Equal(warnings, tt.wantWarnings) {
-				t.Fatalf("warnings = %v, want %v", warnings, tt.wantWarnings)
-			}
+			runAdmissionTest(t, test)
 		})
 	}
-}
-
-func TestDynamoGraphDeploymentConversionFailureIsFatal(t *testing.T) {
-	dgd := newBetaDGDForValidation()
-	dgd.Spec.Components = append(dgd.Spec.Components, dgd.Spec.Components[0])
-
-	validator := newDynamoGraphDeploymentTestValidator(t)
-	ctx := features.WithGate(context.Background(), features.Gates{Grove: true})
-	_, err := validator.Validate(ctx, dgd)
-	if err == nil || !strings.Contains(err.Error(), "failed to reconstruct compatibility view") {
-		t.Fatalf("Validate() error = %v, want fatal conversion error", err)
-	}
-	if k8serrors.IsInvalid(err) {
-		t.Fatalf("Validate() error = %v, want fatal conversion error rather than field validation error", err)
-	}
-}
-
-func assertFieldPaths(t *testing.T, errs field.ErrorList, want []string) {
-	t.Helper()
-	got := make([]string, len(errs))
-	for i := range errs {
-		got[i] = errs[i].Field
-	}
-	if strings.Join(got, "\n") != strings.Join(want, "\n") {
-		t.Fatalf("field paths = %v, want %v", got, want)
-	}
-}
-
-func dgdAdmissionBeta(t *testing.T, deployment runtime.Object) *nvidiacomv1beta1.DynamoGraphDeployment {
-	t.Helper()
-	if deployment == nil {
-		return nil
-	}
-	switch deployment := deployment.(type) {
-	case *nvidiacomv1beta1.DynamoGraphDeployment:
-		return deployment.DeepCopy()
-	case *nvidiacomv1alpha1.DynamoGraphDeployment:
-		beta := &nvidiacomv1beta1.DynamoGraphDeployment{}
-		if err := deployment.ConvertTo(beta); err != nil {
-			t.Fatalf("convert v1alpha1 DGD to v1beta1: %v", err)
-		}
-		return beta
-	default:
-		t.Fatalf("unsupported DGD type %T", deployment)
-		return nil
-	}
-}
-
-func dgdAdmissionOperation(oldDeployment runtime.Object) admissionv1.Operation {
-	if oldDeployment == nil {
-		return admissionv1.Create
-	}
-	return admissionv1.Update
 }
 
 func setAlphaCompilationCacheVolumeNameEmpty(t *testing.T, request map[string]any) {
@@ -1861,6 +1737,31 @@ func dgdAdmissionWithLabel(t *testing.T, deployment runtime.Object) runtime.Obje
 		deployment = deployment.DeepCopy()
 		deployment.Labels = map[string]string{"updated": "true"}
 		return deployment
+	default:
+		t.Fatalf("unsupported DGD type %T", deployment)
+		return nil
+	}
+}
+
+func dgdBeforeRestart(t *testing.T, deployment runtime.Object) runtime.Object {
+	t.Helper()
+	switch deployment := deployment.(type) {
+	case *nvidiacomv1beta1.DynamoGraphDeployment:
+		if deployment.Spec.Restart == nil {
+			return nil
+		}
+		before := deployment.DeepCopy()
+		before.Spec.Restart = nil
+		before.Status = nvidiacomv1beta1.DynamoGraphDeploymentStatus{}
+		return before
+	case *nvidiacomv1alpha1.DynamoGraphDeployment:
+		if deployment.Spec.Restart == nil {
+			return nil
+		}
+		before := deployment.DeepCopy()
+		before.Spec.Restart = nil
+		before.Status = nvidiacomv1alpha1.DynamoGraphDeploymentStatus{}
+		return before
 	default:
 		t.Fatalf("unsupported DGD type %T", deployment)
 		return nil
@@ -2044,122 +1945,5 @@ func enableBetaInterPodFailover(
 	component.Experimental.Failover = &nvidiacomv1beta1.FailoverSpec{
 		Mode:       nvidiacomv1beta1.GMSModeInterPod,
 		NumShadows: numShadows,
-	}
-}
-
-type fakeManager struct {
-	ctrl.Manager  // satisfies the rest of the interface; panics if unexpected methods are used
-	client        client.Client
-	config        *rest.Config
-	scheme        *runtime.Scheme
-	webhookServer ctrlwebhook.Server
-}
-
-func (m *fakeManager) GetClient() client.Client             { return m.client }
-func (m *fakeManager) GetConfig() *rest.Config              { return m.config }
-func (m *fakeManager) GetScheme() *runtime.Scheme           { return m.scheme }
-func (m *fakeManager) GetWebhookServer() ctrlwebhook.Server { return m.webhookServer }
-
-func newDynamoGraphDeploymentTestValidator(t *testing.T) *DynamoGraphDeploymentValidator {
-	t.Helper()
-	return NewDynamoGraphDeploymentValidator(newGroveTopologyTestManager(t))
-}
-
-func newGroveTopologyTestManager(t *testing.T, objects ...runtime.Object) ctrl.Manager {
-	t.Helper()
-
-	scheme := runtime.NewScheme()
-	if err := grovev1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("add Grove scheme: %v", err)
-	}
-	return &fakeManager{
-		client: fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objects...).Build(),
-		config: &rest.Config{},
-	}
-}
-
-func newInferencePoolTestManager(t *testing.T) ctrl.Manager {
-	t.Helper()
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-
-		var response any
-		switch request.URL.Path {
-		case "/api":
-			response = &metav1.APIVersions{
-				TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "APIVersions"},
-				Versions: []string{"v1"},
-			}
-		case "/apis":
-			groupVersion := metav1.GroupVersionForDiscovery{
-				GroupVersion: "inference.networking.k8s.io/v1alpha2",
-				Version:      "v1alpha2",
-			}
-			response = &metav1.APIGroupList{
-				TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "APIGroupList"},
-				Groups: []metav1.APIGroup{{
-					Name:             "inference.networking.k8s.io",
-					Versions:         []metav1.GroupVersionForDiscovery{groupVersion},
-					PreferredVersion: groupVersion,
-				}},
-			}
-		default:
-			http.NotFound(w, request)
-			return
-		}
-
-		if err := json.NewEncoder(w).Encode(response); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
-	}))
-	t.Cleanup(server.Close)
-
-	manager := newGroveTopologyTestManager(t).(*fakeManager)
-	manager.config = &rest.Config{Host: server.URL}
-	return manager
-}
-
-func newTestClusterTopology() *grovev1alpha1.ClusterTopologyBinding {
-	return &grovev1alpha1.ClusterTopologyBinding{
-		ObjectMeta: metav1.ObjectMeta{Name: "grove-topology"},
-		Spec: grovev1alpha1.ClusterTopologyBindingSpec{
-			Levels: []grovev1alpha1.TopologyLevel{
-				{Domain: grovev1alpha1.TopologyDomainZone, Key: "topology.kubernetes.io/zone"},
-				{Domain: grovev1alpha1.TopologyDomainRack, Key: "nvidia.com/rack"},
-			},
-		},
-	}
-}
-
-func assertBetaValidationErrors(t *testing.T, err error, wantErrs []string) {
-	t.Helper()
-	if len(wantErrs) == 0 {
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		return
-	}
-	if err == nil {
-		t.Fatalf("expected errors %v but got nil", wantErrs)
-	}
-	statusErr, ok := err.(*k8serrors.StatusError)
-	if !ok || !k8serrors.IsInvalid(err) {
-		t.Fatalf("error = %T %v, want typed Kubernetes invalid error", err, err)
-	}
-	if statusErr.ErrStatus.Details == nil {
-		t.Fatalf("error = %v, want typed field causes", err)
-	}
-
-	causes := statusErr.ErrStatus.Details.Causes
-	gotErrs := make([]string, len(causes))
-	for i, cause := range causes {
-		if cause.Field == "" {
-			t.Fatalf("error cause = %#v, want an exact field path", cause)
-		}
-		gotErrs[i] = fmt.Sprintf("%s: %s", cause.Field, cause.Message)
-	}
-	if !slices.Equal(gotErrs, wantErrs) {
-		t.Fatalf("webhook errors = %v, want %v", gotErrs, wantErrs)
 	}
 }

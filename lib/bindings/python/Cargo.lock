@@ -2178,6 +2178,7 @@ version = "1.3.0"
 dependencies = [
  "aligned-vec",
  "anyhow",
+ "arc-swap",
  "async-nats 0.49.1",
  "async-stream",
  "async-trait",

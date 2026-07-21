@@ -430,6 +430,8 @@ navigation:
             contents:
               - page: Routing Concepts
                 path: components/router/router-concepts.md
+              - page: Multi-DC KV Routing and the DC Relay
+                path: components/router/multi-dc-kv-routing.md
               - page: Configuration and Tuning
                 path: components/router/router-configuration.md
               - page: Deficit Round Robin Queue Scheduling
@@ -650,6 +652,12 @@ navigation:
       - page: GLM-5 NVFP4
         path: recipes/glm-5-nvfp4.mdx
         slug: glm-5-nvfp4
+      - page: DeepSeek-V4-Pro
+        path: recipes/deepseek-v4-pro.mdx
+        slug: deepseek-v4-pro
+      - page: DeepSeek-V4-Flash
+        path: recipes/deepseek-v4-flash.mdx
+        slug: deepseek-v4-flash
       - page: DeepSeek V3.2 NVFP4
         path: recipes/deepseek-v3-2-nvfp4.mdx
         slug: deepseek-v3-2-nvfp4
