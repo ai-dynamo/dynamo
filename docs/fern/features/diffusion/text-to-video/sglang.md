@@ -41,4 +41,4 @@ curl http://localhost:8000/v1/videos \
 - [Image-to-Video with SGLang](../image-to-video/sglang.md)
 - [Text-to-Video with vLLM-Omni](vllm-omni.md)
 - [Text-to-Video with TensorRT-LLM](trtllm.md)
-- [SGLang Examples](../../../backends/sglang/sglang-examples.md)
+- [SGLang Examples](../../../backends/sglang/sglang-examples.mdx)

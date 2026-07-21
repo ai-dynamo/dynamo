@@ -129,4 +129,4 @@ The parser separates think tag content into the `reasoning_content` field and re
 
 - **[Tool Calling](../../tool-calling/README.md)**: General tool calling guide
 - **[Reference Guide](vllm-reference-guide.md)**: Full vLLM backend reference
-- **[Examples](vllm-examples.md)**: vLLM deployment examples
+- **[Examples](vllm-examples.mdx)**: vLLM local deployment examples

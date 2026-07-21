@@ -132,7 +132,7 @@ For full Kubernetes deployment instructions, see the [TensorRT-LLM Kubernetes De
 ## Next Steps
 
 - **[Reference Guide](trtllm-reference-guide.md)**: Features, configuration, and operational details
-- **[Examples](trtllm-examples.md)**: All deployment patterns with launch scripts
+- **[Examples](trtllm-examples.mdx)**: Local deployment launch scripts
 - **[KV Cache Transfer](trtllm-kv-cache-transfer.md)**: KV cache transfer methods for disaggregated serving
 - **[Observability](trtllm-observability.md)**: Metrics and monitoring
 - **[Multinode Examples](multinode/trtllm-multinode-examples.md)**: Multi-node deployment with SLURM

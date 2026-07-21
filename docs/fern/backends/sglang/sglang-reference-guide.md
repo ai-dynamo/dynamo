@@ -140,7 +140,7 @@ SGLang workers expose operational endpoints via Dynamo's system server:
 
 ## See Also
 
-- **[Examples](sglang-examples.md)**: All deployment patterns
+- **[Examples](sglang-examples.mdx)**: Local deployment launch scripts
 - **[Disaggregation](sglang-disaggregation.md)**: P/D architecture and KV transfer
 - **[Diffusion](../../features/diffusion/README.md)**: LLM, image, and video diffusion models
 - **[Configuration and Tuning](../../components/router/router-configuration.md)**: KV-aware routing configuration

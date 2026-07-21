@@ -1,0 +1,199 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: SGLang Local Deployment Examples
+subtitle: Copyable commands for running the SGLang launch scripts in the Dynamo repository.
+---
+
+Clone the NVIDIA Dynamo repository before running an example. The launch scripts load supporting
+files through paths relative to `examples/backends/sglang`.
+
+```bash
+git clone https://github.com/ai-dynamo/dynamo.git
+cd dynamo/examples/backends/sglang
+```
+
+Review the selected script and confirm its model, GPU, and environment requirements before running
+the command. Pass supported flags after the script name to override its defaults.
+
+## Aggregated
+
+<AccordionGroup>
+<Accordion title="Single-Worker Text Generation">
+
+Starts the frontend and one SGLang worker that handles both prefill and decode. The default
+configuration uses one GPU and is the baseline local text-generation deployment.
+
+```bash
+./launch/agg.sh
+```
+
+</Accordion>
+<Accordion title="Agentic Workloads with Session Affinity">
+
+Starts a tensor-parallel worker behind session-aware routing with KV-event tracking, sticky
+sessions, reasoning parsing, and tool-call parsing. The default model uses two GPUs.
+
+```bash
+./launch/agg_agent.sh
+```
+
+</Accordion>
+<Accordion title="Text Embeddings">
+
+Starts an SGLang embedding worker and exposes the OpenAI-compatible embeddings endpoint. Use it for
+vector search, retrieval, and other embedding workloads.
+
+```bash
+./launch/agg_embed.sh
+```
+
+</Accordion>
+<Accordion title="Cache-Aware Multimodal Routing">
+
+Routes multimodal requests by their text and media-derived cache keys so repeated images can reuse
+cached work. This example requires the `mm-routing` build feature and a compatible SGLang build.
+
+```bash
+./launch/agg_multimodal_router.sh
+```
+
+</Accordion>
+<Accordion title="KV-Aware Load Balancing">
+
+Starts two workers behind the KV router and publishes cache events for prefix-aware request
+placement. The default topology uses two GPUs.
+
+```bash
+./launch/agg_router.sh
+```
+
+</Accordion>
+<Accordion title="Image and Video Inputs">
+
+Serves a vision-language model for image and video prompts. Pass `--frontend-decoding` to decode
+media in the Dynamo frontend and transfer the result to SGLang.
+
+```bash
+./launch/agg_vision.sh
+```
+
+</Accordion>
+</AccordionGroup>
+
+## Disaggregated
+
+<AccordionGroup>
+<Accordion title="Dedicated Prefill and Decode Workers">
+
+Runs prefill and decode on separate workers so each stage can be scaled and tuned independently. The
+default topology uses two GPUs and transfers KV cache between the workers.
+
+```bash
+./launch/disagg.sh
+```
+
+</Accordion>
+<Accordion title="Independent Prefill and Decode Pools">
+
+Starts two prefill and two decode workers with KV-aware routing across both pools. Use this four-GPU
+example to test scaling and cache-aware placement.
+
+```bash
+./launch/disagg_router.sh
+```
+
+</Accordion>
+<Accordion title="Prefill and Decode on One GPU">
+
+Runs separate prefill and decode processes on the same GPU with reduced memory limits. Use it for
+functional testing of the disaggregated path without a multi-GPU host.
+
+```bash
+./launch/disagg_same_gpu.sh
+```
+
+</Accordion>
+<Accordion title="Separate Encode, Prefill, and Decode Workers">
+
+Splits vision encoding, language-model prefill, and decode into three workers. The default layout
+uses three GPUs; `--single-gpu` co-locates them for functional testing.
+
+```bash
+./launch/multimodal_disagg.sh
+```
+
+</Accordion>
+<Accordion title="Dedicated Encoder with a Combined Language-Model Worker">
+
+Runs vision encoding separately from a worker that performs both prefill and decode. The default
+layout uses two GPUs, with a single-GPU mode available for functional testing.
+
+```bash
+./launch/multimodal_epd.sh
+```
+
+</Accordion>
+</AccordionGroup>
+
+## Diffusion
+
+### Aggregated
+
+<AccordionGroup>
+<Accordion title="Diffusion Language Models">
+
+Serves LLaDA-style language models that generate text through iterative refinement instead of
+autoregressive decoding. The default configuration uses one GPU.
+
+```bash
+./launch/diffusion_llada.sh
+```
+
+</Accordion>
+<Accordion title="Text-to-Image Generation">
+
+Starts an image-diffusion worker and serves the generation endpoint. The default FLUX model requires
+one GPU with enough memory for the model.
+
+```bash
+./launch/image_diffusion.sh
+```
+
+</Accordion>
+<Accordion title="Text-to-Video Generation">
+
+Starts a video-generation worker for Wan models. Select the model size and generation settings with
+the script flags; the 14B option uses two GPUs.
+
+```bash
+./launch/text-to-video-diffusion.sh
+```
+
+</Accordion>
+</AccordionGroup>
+
+## LoRA
+
+The LoRA example also requires the setup described in the
+[`launch/lora` README](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/lora/README.md).
+
+### Aggregated
+
+<AccordionGroup>
+<Accordion title="Dynamic LoRA Adapter Serving">
+
+Starts one SGLang worker with Low-Rank Adaptation (LoRA) support and loads adapters from the
+configured object store. Complete the LoRA setup linked above before running it.
+
+```bash
+./launch/lora/agg_lora.sh
+```
+
+</Accordion>
+</AccordionGroup>
+
+## Source
+
+Browse all [SGLang launch scripts](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/launch)
+in the Dynamo repository.

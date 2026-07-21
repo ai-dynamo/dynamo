@@ -1,0 +1,659 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: vLLM Local Deployment Examples
+subtitle: Copyable commands for running the vLLM launch scripts in the Dynamo repository.
+---
+
+Clone the NVIDIA Dynamo repository before running an example. The launch scripts load supporting
+files through paths relative to `examples/backends/vllm`.
+
+```bash
+git clone https://github.com/ai-dynamo/dynamo.git
+cd dynamo/examples/backends/vllm
+```
+
+Review the selected script and confirm its model, accelerator, and environment requirements before
+running the command. Pass supported flags after the script name or set its documented environment
+variables to override defaults.
+
+## Aggregated
+
+<AccordionGroup>
+<Accordion title="Single-Worker Text Generation">
+
+Starts the frontend and one vLLM worker that handles both prefill and decode. The default
+configuration uses one GPU and is the baseline local text-generation deployment.
+
+```bash
+./launch/agg.sh
+```
+
+</Accordion>
+<Accordion title="Text Embeddings">
+
+Starts a vLLM pooling worker and exposes the OpenAI-compatible embeddings endpoint. Use it for
+vector search, retrieval, and other embedding workloads.
+
+```bash
+./launch/agg_embed.sh
+```
+
+</Accordion>
+<Accordion title="Embedding Load Balancing and Model Dispatch">
+
+Starts two embedding workers behind one frontend. Use identical model arguments to test load
+balancing, or different models to test model-name-based request dispatch.
+
+```bash
+./launch/agg_embed_multiworker.sh \
+  Qwen/Qwen3-Embedding-0.6B \
+  Qwen/Qwen3-Embedding-0.6B
+```
+
+</Accordion>
+<Accordion title="Image and Video Inputs">
+
+Serves a multimodal model with media preprocessing in the Dynamo frontend and one vLLM worker. Use
+it as the baseline image or video deployment.
+
+```bash
+./launch/agg_multimodal.sh
+```
+
+</Accordion>
+<Accordion title="Cache-Aware Multimodal Routing">
+
+Expands media placeholders into routing tokens, hashes each media item, and routes requests by text
+and media cache overlap. This path uses the Rust multimodal router in the frontend.
+
+```bash
+./launch/agg_multimodal_router.sh
+```
+
+</Accordion>
+<Accordion title="Multimodal Routing with vLLM Preprocessing">
+
+Uses vLLM's Python chat processor in the frontend to expand media tokens and compute media hashes
+for KV routing. Choose this variant when you need vLLM preprocessing or pre-rendered multimodal
+transfer.
+
+```bash
+./launch/agg_multimodal_router_chat_processor.sh
+```
+
+</Accordion>
+<Accordion title="Request-Plane Transport Modes">
+
+Starts the baseline worker through the request-plane mode selected by the script flags. Use it to
+compare or validate the available frontend-to-worker transports.
+
+```bash
+./launch/agg_request_planes.sh
+```
+
+</Accordion>
+<Accordion title="KV-Aware Load Balancing">
+
+Starts two workers behind the KV router and publishes cache events over ZeroMQ (ZMQ) for
+prefix-aware placement. The default topology uses two GPUs.
+
+```bash
+./launch/agg_router.sh
+```
+
+</Accordion>
+<Accordion title="KV Routing Without Cache Events">
+
+Runs the KV router in approximate mode, which predicts cache placement without consuming backend KV
+events. Use it when event publishing is unavailable.
+
+```bash
+./launch/agg_router_approx.sh
+```
+
+</Accordion>
+<Accordion title="Replicated Frontends and Routers">
+
+Starts two frontend and KV-router replicas on separate ports while sharing routing state. Use it to
+exercise multiple ingress replicas against the same worker pool.
+
+```bash
+./launch/agg_router_replicas.sh
+```
+
+</Accordion>
+<Accordion title="Speculative Decoding with EAGLE">
+
+Runs a main model with an EAGLE draft model so accepted draft tokens can reduce decode latency. Use
+the model and draft settings in the script as the starting configuration.
+
+```bash
+./launch/agg_spec_decoding.sh
+```
+
+</Accordion>
+<Accordion title="OpenTelemetry Tracing">
+
+Enables tracing on the frontend and worker so requests appear in the local observability stack.
+Start the tracing stack before running this example.
+
+```bash
+./launch/agg_tracing.sh
+```
+
+</Accordion>
+<Accordion title="Data-Parallel Attention and Expert Parallelism">
+
+Starts multiple data-parallel workers for a Mixture-of-Experts model and lets Dynamo route among the
+data-parallel ranks. The default Qwen configuration uses four GPUs.
+
+```bash
+./launch/dep.sh
+```
+
+</Accordion>
+<Accordion title="Multi-Node DeepSeek-R1 Expert Parallelism">
+
+Runs DeepSeek-R1 with data-parallel attention and expert parallelism across multiple nodes. Each
+node starts its assigned data-parallel ranks and joins the same distributed worker group.
+
+Replace `192.0.2.10` with the head node's reachable IP address. Run on the head node:
+
+```bash
+./launch/dsr1_dep.sh \
+  --num-nodes 2 \
+  --node-rank 0 \
+  --gpus-per-node 8 \
+  --master-addr 192.0.2.10
+```
+
+Run on the second node:
+
+```bash
+./launch/dsr1_dep.sh \
+  --num-nodes 2 \
+  --node-rank 1 \
+  --gpus-per-node 8 \
+  --master-addr 192.0.2.10
+```
+
+</Accordion>
+<Accordion title="Tensor Parallelism Across Nodes">
+
+Runs one tensor-parallel vLLM worker across a head node and a worker node using vLLM
+multiprocessing. Use it when the tensor-parallel size exceeds the GPUs available on one host.
+
+Replace `192.0.2.10` with the head node's reachable IP address. Run on the head node:
+
+```bash
+./launch/multi_node_tp.sh --head --head-ip 192.0.2.10
+```
+
+Run the worker command on the second node:
+
+```bash
+./launch/multi_node_tp.sh --worker --head-ip 192.0.2.10
+```
+
+</Accordion>
+</AccordionGroup>
+
+## Disaggregated
+
+<AccordionGroup>
+<Accordion title="Dedicated Prefill and Decode Workers">
+
+Runs prefill and decode in separate vLLM workers and transfers KV cache through NIXL. Use
+`--unified` to exercise the unified worker entry point with the same topology.
+
+```bash
+./launch/disagg.sh
+```
+
+</Accordion>
+<Accordion title="Dedicated Encoder with a Combined Language-Model Worker">
+
+Runs media encoding separately from a worker that performs both prefill and decode. Use it when
+encoding should scale independently but language-model stages can remain together.
+
+```bash
+./launch/disagg_multimodal_e_pd.sh
+```
+
+</Accordion>
+<Accordion title="Separate Encode, Prefill, and Decode Workers">
+
+Splits multimodal inference into dedicated encode, prefill, and decode workers. The script offers
+single-GPU and two-GPU modes for functional testing in addition to the full layout.
+
+```bash
+./launch/disagg_multimodal_epd.sh
+```
+
+</Accordion>
+<Accordion title="Multimodal Prefill and Decode Without a Separate Encoder">
+
+Runs a two-worker multimodal topology in which the prefill worker also performs vision encoding. It
+uses fewer processes than encode-prefill-decode at the cost of more work on prefill.
+
+```bash
+./launch/disagg_multimodal_p_d.sh
+```
+
+</Accordion>
+<Accordion title="Independent Prefill and Decode Pools">
+
+Routes requests across separate prefill and decode pools using cache events from the workers. The
+frontend also discovers prefill workers and activates its internal prefill router.
+
+```bash
+./launch/disagg_router.sh
+```
+
+</Accordion>
+<Accordion title="KV-Aware Routing on Intel Gaudi">
+
+Runs the disaggregated KV-routing topology with the device settings required for Intel Gaudi
+accelerators.
+
+```bash
+./launch/disagg_router_gaudi.sh
+```
+
+</Accordion>
+<Accordion title="Prefill and Decode on One GPU">
+
+Runs separate prefill and decode processes on the same GPU with reduced model-length and concurrency
+limits. Use it for functional testing of KV transfer without a multi-GPU host.
+
+```bash
+./launch/disagg_same_gpu.sh
+```
+
+</Accordion>
+<Accordion title="OpenTelemetry Tracing Across Prefill and Decode">
+
+Enables tracing on the frontend, prefill worker, and decode worker so a request can be followed
+across the full disaggregated path. Start the tracing stack first.
+
+```bash
+./launch/disagg_tracing.sh
+```
+
+</Accordion>
+</AccordionGroup>
+
+## KV Cache Offloading
+
+### Aggregated
+
+<AccordionGroup>
+<Accordion title="FlexKV Offloading for One Worker">
+
+Enables FlexKV on a worker that handles both prefill and decode. Use it to test external KV-cache
+storage without a router.
+
+```bash
+./launch/agg_flexkv.sh
+```
+
+</Accordion>
+<Accordion title="FlexKV Offloading with KV Routing">
+
+Combines FlexKV with KV-aware routing so the frontend places requests by cache locality while
+workers offload cache blocks.
+
+```bash
+./launch/agg_flexkv_router.sh
+```
+
+</Accordion>
+<Accordion title="KV Block Manager Offloading for One Worker">
+
+Enables the KV Block Manager (KVBM) on a single worker and configures CPU-backed cache capacity. Use
+it to test local KV-cache offloading.
+
+```bash
+./launch/agg_kvbm.sh
+```
+
+</Accordion>
+<Accordion title="KV Block Manager Offloading with KV Routing">
+
+Starts multiple KVBM-enabled workers behind the KV router. Each worker uses distinct event and
+coordination ports so the router can track its cache state.
+
+```bash
+./launch/agg_kvbm_router.sh
+```
+
+</Accordion>
+<Accordion title="LMCache Offloading for One Worker">
+
+Connects one vLLM worker to LMCache through the in-process connector. Use it as the baseline LMCache
+deployment.
+
+```bash
+./launch/agg_lmcache.sh
+```
+
+</Accordion>
+<Accordion title="Out-of-Process LMCache Server">
+
+Starts an LMCache server as a separate process and connects the vLLM worker through the multiprocess
+connector. Use it to isolate cache management from the inference worker.
+
+```bash
+./launch/agg_lmcache_mp.sh
+```
+
+</Accordion>
+<Accordion title="LMCache with Multiprocess Metrics">
+
+Runs the in-process LMCache connector while configuring a Prometheus multiprocess directory. Use it
+to validate metric collection in a multi-process-style environment.
+
+```bash
+./launch/agg_lmcache_multiproc.sh
+```
+
+</Accordion>
+</AccordionGroup>
+
+### Disaggregated
+
+<AccordionGroup>
+<Accordion title="FlexKV on the Prefill Worker">
+
+Runs separate prefill and decode workers and enables FlexKV on prefill. Use it to test offloading
+cache created during prompt processing before transfer to decode.
+
+```bash
+./launch/disagg_flexkv.sh
+```
+
+</Accordion>
+<Accordion title="KV Block Manager on the Prefill Worker">
+
+Runs separate prefill and decode workers with KVBM enabled on prefill and CPU cache storage. Decode
+receives the transferred KV state without enabling KVBM.
+
+```bash
+./launch/disagg_kvbm.sh
+```
+
+</Accordion>
+<Accordion title="Two Prefill and Two Decode Workers with KVBM">
+
+Scales the KVBM topology to two prefill and two decode workers behind the KV router. Distinct
+barrier identifiers keep the prefill workers' offload coordination separate.
+
+```bash
+./launch/disagg_kvbm_2p2d.sh
+```
+
+</Accordion>
+<Accordion title="KVBM with Cache-Aware Pool Routing">
+
+Combines separate prefill and decode pools, KV-aware routing, and KVBM-backed offloading. Use it to
+test cache placement and offload behavior together.
+
+```bash
+./launch/disagg_kvbm_router.sh
+```
+
+</Accordion>
+<Accordion title="LMCache on the Prefill Worker">
+
+Runs separate prefill and decode workers and enables LMCache on prefill. Use it to test
+LMCache-backed prompt-cache offloading in a disaggregated topology.
+
+```bash
+./launch/disagg_lmcache.sh
+```
+
+</Accordion>
+</AccordionGroup>
+
+## vLLM-Omni
+
+### Aggregated
+
+<AccordionGroup>
+<Accordion title="Audio Generation">
+
+Starts a vLLM-Omni worker for audio generation. Override the default model and generation settings
+through the script flags.
+
+```bash
+./launch/agg_omni_audio.sh
+```
+
+</Accordion>
+<Accordion title="Image-to-Video Generation">
+
+Starts a vLLM-Omni image-to-video pipeline with a Wan model by default. Pass a different model or
+worker arguments through the script options.
+
+```bash
+./launch/agg_omni_i2v.sh
+```
+
+</Accordion>
+<Accordion title="Text-to-Image Generation">
+
+Starts a vLLM-Omni image-generation worker and exposes the generation endpoint. Use the script flags
+to select the model.
+
+```bash
+./launch/agg_omni_image.sh
+```
+
+</Accordion>
+<Accordion title="Text-to-Video Generation">
+
+Starts a vLLM-Omni video-generation worker and exposes the generation endpoint. Use the script flags
+to select the model and generation settings.
+
+```bash
+./launch/agg_omni_video.sh
+```
+
+</Accordion>
+</AccordionGroup>
+
+### Disaggregated
+
+<AccordionGroup>
+<Accordion title="Two-Stage GLM-Image Generation">
+
+Splits GLM-Image across an autoregressive stage and a diffusion stage on separate GPUs. A router
+coordinates the intermediate token output and final image response.
+
+```bash
+./launch/disagg_omni_glm_image.sh
+```
+
+</Accordion>
+</AccordionGroup>
+
+## LoRA
+
+### Aggregated
+
+<AccordionGroup>
+<Accordion title="Dynamic LoRA Adapter Serving">
+
+Starts one vLLM worker with Low-Rank Adaptation (LoRA) support and loads adapters from the
+configured object store. Complete the LoRA setup for the example before running it.
+
+```bash
+./launch/lora/agg_lora.sh
+```
+
+</Accordion>
+<Accordion title="LoRA Adapters with KV-Aware Routing">
+
+Starts LoRA-capable workers behind the KV router. Use it to test adapter selection together with
+prefix-cache-aware request placement.
+
+```bash
+./launch/lora/agg_lora_router.sh
+```
+
+</Accordion>
+<Accordion title="Multimodal LoRA Adapters">
+
+Serves a multimodal model with dynamically selected LoRA adapters. Use it for image-and-text
+requests that require adapter-specific behavior.
+
+```bash
+./launch/lora/multimodal/lora_agg.sh
+```
+
+</Accordion>
+</AccordionGroup>
+
+## XPU
+
+### Aggregated
+
+<AccordionGroup>
+<Accordion title="LoRA Adapters with KV-Aware Routing">
+
+Runs LoRA-capable vLLM workers on Intel XPU devices behind the KV router.
+
+```bash
+./launch/lora/xpu/agg_lora_router_xpu.sh
+```
+
+</Accordion>
+<Accordion title="Dynamic LoRA Adapter Serving">
+
+Runs one LoRA-capable vLLM worker on an Intel XPU device.
+
+```bash
+./launch/lora/xpu/agg_lora_xpu.sh
+```
+
+</Accordion>
+<Accordion title="LMCache with Multiprocess Metrics">
+
+Runs LMCache on Intel XPU while configuring the Prometheus multiprocess directory used by
+multi-process deployments.
+
+```bash
+./launch/xpu/agg_lmcache_multiproc_xpu.sh
+```
+
+</Accordion>
+<Accordion title="LMCache Offloading">
+
+Connects a vLLM worker on Intel XPU to LMCache for KV-cache offloading.
+
+```bash
+./launch/xpu/agg_lmcache_xpu.sh
+```
+
+</Accordion>
+<Accordion title="Multimodal Routing with vLLM Preprocessing">
+
+Uses vLLM's Python chat processor on the frontend and routes multimodal requests to workers on Intel
+XPU devices.
+
+```bash
+./launch/xpu/agg_multimodal_router_chat_processor_xpu.sh
+```
+
+</Accordion>
+<Accordion title="Cache-Aware Multimodal Routing">
+
+Uses the Rust multimodal routing path to place image and text requests across vLLM workers on Intel
+XPU devices.
+
+```bash
+./launch/xpu/agg_multimodal_router_xpu.sh
+```
+
+</Accordion>
+<Accordion title="Image and Video Inputs">
+
+Serves multimodal requests with frontend media preprocessing and one vLLM worker on an Intel XPU
+device.
+
+```bash
+./launch/xpu/agg_multimodal_xpu.sh
+```
+
+</Accordion>
+<Accordion title="Request-Plane Transport Modes">
+
+Runs the selected frontend-to-worker request-plane transport with a vLLM worker on Intel XPU.
+
+```bash
+./launch/xpu/agg_request_planes_xpu.sh
+```
+
+</Accordion>
+<Accordion title="KV Routing Without Cache Events">
+
+Uses approximate cache tracking to route requests across vLLM workers on Intel XPU without backend
+KV events.
+
+```bash
+./launch/xpu/agg_router_approx_xpu.sh
+```
+
+</Accordion>
+<Accordion title="KV-Aware Load Balancing">
+
+Runs vLLM workers on Intel XPU behind the KV router and publishes cache events for prefix-aware
+placement.
+
+```bash
+./launch/xpu/agg_router_xpu.sh
+```
+
+</Accordion>
+<Accordion title="Single-Worker Text Generation">
+
+Starts the frontend and one vLLM worker on an Intel XPU device. Use it as the baseline XPU
+text-generation deployment.
+
+```bash
+./launch/xpu/agg_xpu.sh
+```
+
+</Accordion>
+</AccordionGroup>
+
+### Disaggregated
+
+<AccordionGroup>
+<Accordion title="Separate Encode, Prefill, and Decode Workers">
+
+Splits multimodal inference into encode, prefill, and decode workers on Intel XPU devices, with a
+single-device mode for functional testing.
+
+```bash
+./launch/xpu/disagg_multimodal_epd_xpu.sh
+```
+
+</Accordion>
+<Accordion title="KV Routing with Direct Device Transfer">
+
+Runs separate prefill and decode pools on Intel XPU with KV-aware routing and direct device-memory
+transfer between workers.
+
+```bash
+./launch/xpu/disagg_router_xpu_gdr.sh
+```
+
+</Accordion>
+</AccordionGroup>
+
+## Source
+
+Browse all [vLLM launch scripts](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/launch)
+in the Dynamo repository.

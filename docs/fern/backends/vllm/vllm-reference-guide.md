@@ -117,7 +117,7 @@ Dynamo supports [request migration](../../fault-tolerance/request-migration.md) 
 
 ## See Also
 
-- **[Examples](vllm-examples.md)**: All deployment patterns with launch scripts
+- **[Examples](vllm-examples.mdx)**: Local deployment launch scripts
 - **[vLLM README](README.md)**: Quick start and feature overview
 - **[Observability](vllm-observability.md)**: Metrics and monitoring setup
 - **[Configuration and Tuning](../../components/router/router-configuration.md)**: KV-aware routing configuration

@@ -195,5 +195,5 @@ When a model's tensor-parallel size exceeds the GPUs on a single node, you can s
 
 ## Next steps
 
-- **Deployment patterns** — add a router or split prefill and decode across workers. See the per-backend deployment guides: [vLLM](../backends/vllm/vllm-examples.md), [SGLang](../backends/sglang/sglang-examples.md), [TensorRT-LLM](../backends/trtllm/trtllm-examples.md). Each maps a pattern (aggregated, aggregated + router, disaggregated) to a ready-made `launch/*.sh` preset script in the repository.
+- **Deployment patterns** — add a router or split prefill and decode across workers. See the local deployment examples for [vLLM](../backends/vllm/vllm-examples.mdx), [SGLang](../backends/sglang/sglang-examples.mdx), and [TensorRT-LLM](../backends/trtllm/trtllm-examples.mdx). Each page provides copyable commands for the `launch/*.sh` scripts in the repository.
 - **KV cache offloading** — extend effective KV cache capacity by offloading to CPU memory or remote stores: [LMCache](../integrations/lmcache-integration.md), [HiCache](../backends/sglang/sglang-hicache.md), [FlexKV](../integrations/flexkv-integration.md), and [custom KV events](../integrations/kv-events-custom-engines.md).

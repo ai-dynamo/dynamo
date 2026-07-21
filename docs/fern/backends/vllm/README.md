@@ -153,7 +153,7 @@ reaches feature and operational parity with the Python vLLM backend.
 ## Next Steps
 
 - **[Reference Guide](vllm-reference-guide.md)**: Configuration, arguments, and operational details
-- **[Examples](vllm-examples.md)**: All deployment patterns with launch scripts
+- **[Examples](vllm-examples.mdx)**: Local deployment launch scripts
 - **[KV Cache Offloading](vllm-kv-offloading.md)**: KVBM, LMCache, and FlexKV integrations
 - **[Observability](vllm-observability.md)**: Metrics and monitoring
 - **[vLLM-Omni](../../features/diffusion/README.md)**: Multimodal model serving

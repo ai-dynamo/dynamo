@@ -41,5 +41,5 @@ This happens with diffusers models (FLUX.1-dev, Wan2.1, etc.) that use `model_in
 
 - [Text-to-Image with vLLM-Omni](vllm-omni.md)
 - [Text-to-Image with TensorRT-LLM](trtllm.md)
-- [SGLang Examples](../../../backends/sglang/sglang-examples.md)
+- [SGLang Examples](../../../backends/sglang/sglang-examples.mdx)
 - [SGLang Configuration reference](../../../backends/sglang/sglang-config-reference.mdx)

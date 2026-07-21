@@ -228,14 +228,6 @@ navigation:
                 path: cli/disaggregated-serving.mdx
               - page: Multi-Node Deployment
                 path: cli/multinode-deployment.mdx
-              - section: Backends
-                contents:
-                - page: vLLM Deployments
-                  path: backends/vllm/vllm-examples.md
-                - page: SGLang Deployments
-                  path: backends/sglang/sglang-examples.md
-                - page: TRT-LLM Deployments
-                  path: backends/trtllm/trtllm-examples.md
               - section: KV Cache Offloading
                 contents:
                   - page: LMCache Integration
@@ -753,6 +745,17 @@ navigation:
             path: templates/trtllm.mdx
           - page: SGLang
             path: templates/sglang.mdx
+
+      # ==================== Local Deployment Examples ====================
+      - section: Local Deployment Examples
+        icon: rectangle-terminal
+        contents:
+          - page: vLLM
+            path: backends/vllm/vllm-examples.mdx
+          - page: TensorRT-LLM
+            path: backends/trtllm/trtllm-examples.mdx
+          - page: SGLang
+            path: backends/sglang/sglang-examples.mdx
 
       # ==================== CRD References ====================
       - section: CRD References

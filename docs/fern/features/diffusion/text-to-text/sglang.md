@@ -35,5 +35,5 @@ curl -X POST http://localhost:8001/v1/chat/completions \
 ## See Also
 
 - [Diffusion Overview](../README.md)
-- [SGLang Examples](../../../backends/sglang/sglang-examples.md)
+- [SGLang Examples](../../../backends/sglang/sglang-examples.mdx)
 - [SGLang Diffusion LMs (upstream)](https://github.com/sgl-project/sglang/blob/main/docs/supported_models/text_generation/diffusion_language_models.md)
