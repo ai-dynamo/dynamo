@@ -14,6 +14,7 @@ import os
 import sys
 from typing import Optional
 
+import yaml
 from prometheus_client import REGISTRY
 from tensorrt_llm.llmapi import (
     CapacitySchedulerPolicy,
@@ -242,6 +243,11 @@ async def init_llm_worker(
             )
             engine_load_format = "auto"
 
+    # Tracks user-supplied return_perf_metrics from --extra-engine-args YAML.
+    # Set to None here so the later re-application guard can check whether the
+    # user explicitly overrode this field (vs. leaving it at the Dynamo default).
+    _user_return_perf_metrics = None
+
     arg_map = {
         "model": model_path,
         "scheduler_config": scheduler_config,
@@ -264,7 +270,8 @@ async def init_llm_worker(
         "kv_connector_config": kv_connector_config,
     }
 
-    arg_map["load_format"] = engine_load_format
+    if "load_format" not in arg_map:
+        arg_map["load_format"] = engine_load_format
 
     # Enable sleep_config when GMS manages weights — required for GMS
     # unmap/remap. Conditional because SleepConfig contains unpicklable
@@ -284,6 +291,18 @@ async def init_llm_worker(
 
     if config.extra_engine_args != "":
         # TODO: Support extra engine args from json file as well.
+        # Parse YAML once to (a) capture user-supplied return_perf_metrics
+        # for later re-application, and (b) detect collisions with _warn_override.
+        _parsed_extra = {}
+        try:
+            _parsed_extra = yaml.safe_load(config.extra_engine_args) or {}
+            if not isinstance(_parsed_extra, dict):
+                _parsed_extra = {}
+        except yaml.YAMLError:
+            pass  # YAML parse errors are handled by update_llm_args_with_extra_options
+        if isinstance(_parsed_extra, dict):
+            _user_return_perf_metrics = _parsed_extra.get("return_perf_metrics")
+        _warn_override_collisions(arg_map, _parsed_extra)
         arg_map = update_llm_args_with_extra_options(arg_map, config.extra_engine_args)
 
     # Apply override_engine_args if provided
@@ -375,6 +394,18 @@ async def init_llm_worker(
         )
 
     logging.info(f"TensorRT-LLM engine args: {arg_map}")
+
+    # Re-apply user-supplied return_perf_metrics from YAML (extra_engine_args)
+    # only when JSON overrides (override_engine_args) did not also set it.
+    # JSON overrides have higher precedence than YAML extra args, so we must
+    # not clobber a JSON-supplied value here.
+    _override_set_perf_metrics = (
+        config.override_engine_args != ""
+        and "return_perf_metrics" in json.loads(config.override_engine_args or "{}")
+    )
+    if _user_return_perf_metrics is not None and not _override_set_perf_metrics:
+        arg_map["return_perf_metrics"] = _user_return_perf_metrics
+
     engine_args = arg_map
 
     # Populate default sampling params from the model
