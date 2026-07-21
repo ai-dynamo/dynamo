@@ -9,11 +9,11 @@ readonly EXPECTED_BASE_DIGEST=sha256:7f2bc168366c77fbd8329368f00310d208531c14ece
 readonly EXPECTED_AMD64_DIGEST=sha256:99e7dd3cf74c489af0615671f3fdbde182de2930f1195a0ee39e914e38033a88
 readonly EXPECTED_BASELINE_SBOM=vllm-openai@7f2bc168
 readonly EXPECTED_VLLM_URL=https://github.com/galletas1712/vllm.git
-readonly EXPECTED_VLLM_REF=schwinns/gms-private-prefer-copy-20260721
-readonly EXPECTED_VLLM_HEAD=240b7b90ccfa040ac6b42030074ab49257d52bfd
-readonly EXPECTED_VLLM_HEAD_TREE=95912c9e759e32242656b81de71c29a7108eef29
+readonly EXPECTED_VLLM_REF=schwinns/gms-revert-mnnvl-quant-fusion-20260721
+readonly EXPECTED_VLLM_HEAD=4579c44ed46af70ac1a235f4115aa32207a87fcf
+readonly EXPECTED_VLLM_HEAD_TREE=da10364c047bbd48b8740cb6de6aaf74d0e5bbe6
 readonly EXPECTED_MERGE_BASE=c4f5cd60dae386d106c9b8a12dbab24e2e9dda0b
-readonly EXPECTED_COMPOSED_TREE=1ac8330bd4848f90315a715348369fb99af1cf01
+readonly EXPECTED_COMPOSED_TREE=b1df8583880f8a42c590c73ad2859fc52c552f9d
 readonly EXPECTED_FLASHINFER_URL=https://github.com/flashinfer-ai/flashinfer.git
 readonly EXPECTED_FLASHINFER_REF=8eccd0c1352165302840c0e19066bc42d36dbd7a
 readonly EXPECTED_FLASHINFER_SHA=8eccd0c1352165302840c0e19066bc42d36dbd7a
@@ -23,6 +23,7 @@ readonly OVERLAY_PROVENANCE_FILE=/opt/dynamo/vllm-overlay-provenance.txt
 readonly FLASHINFER_SHA_FILE=/opt/dynamo/flashinfer-source-sha.txt
 
 readonly -a OVERLAY_PATHS=(
+    vllm/compilation/passes/fusion/allreduce_rms_fusion.py
     vllm/distributed/device_communicators/all2all.py
     vllm/distributed/device_communicators/base_device_communicator.py
     vllm/distributed/device_communicators/cuda_communicator.py
@@ -34,6 +35,7 @@ readonly -a OVERLAY_PATHS=(
 
 readonly -a EXPECTED_DIFF=(
     "A	tests/model_executor/test_utils.py"
+    "M	vllm/compilation/passes/fusion/allreduce_rms_fusion.py"
     "M	vllm/distributed/device_communicators/all2all.py"
     "M	vllm/distributed/device_communicators/base_device_communicator.py"
     "M	vllm/distributed/device_communicators/cuda_communicator.py"
@@ -96,7 +98,7 @@ validate_and_compose_vllm() {
     require_exact "vLLM PR commit count" \
         "$(git -C "${source}" rev-list --count \
             "${EXPECTED_MERGE_BASE}..${EXPECTED_VLLM_HEAD}")" \
-        6
+        7
 
     git -C "${source}" checkout --quiet --detach "${EXPECTED_BASE_COMMIT}"
     if ! git -C "${source}" \
@@ -258,7 +260,7 @@ vllm_source_sha=${EXPECTED_VLLM_HEAD}
 vllm_source_tree=${EXPECTED_VLLM_HEAD_TREE}
 vllm_merge_base=${EXPECTED_MERGE_BASE}
 vllm_composed_tree=${EXPECTED_COMPOSED_TREE}
-vllm_pr_commits=6
+vllm_pr_commits=7
 vllm_overlay_files=${#OVERLAY_PATHS[@]}
 flashinfer_source_url=${EXPECTED_FLASHINFER_URL}
 flashinfer_source_ref=${EXPECTED_FLASHINFER_REF}
