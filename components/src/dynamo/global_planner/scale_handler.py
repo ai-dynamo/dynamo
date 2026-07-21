@@ -245,23 +245,70 @@ class ScaleRequestHandler:
         Returns a map from sub_component_type to PoolSpec. Pools with 0
         gpu_per_replica are included for completeness but contribute 0 to
         budget math.
+
+        Handles both DGD schemas: v1beta1 (the version the planner requests
+        from the API server) lists workers under ``spec.components`` (sub-type
+        in ``type``, GPU on the pod template containers under the standard
+        ``nvidia.com/gpu`` resource key); legacy v1alpha1 lists them under
+        ``spec.services`` (sub-type in ``subComponentType``, GPU in
+        ``resources.limits.gpu``).
+
+        v1beta1 ``type: worker`` components are included keyed by
+        ``worker/<name>`` so their GPUs count toward budget totals, while the
+        typed ``prefill``/``decode`` keys remain the only scalable pools.
         """
         deployment = connector.kube_api.get_graph_deployment(connector.parent_dgd_name)
         pools: dict[str, PoolSpec] = {}
-        services = deployment.get("spec", {}).get("services", {})
-        for svc_spec in services.values():
-            sub_type = svc_spec.get("subComponentType", "")
-            if not sub_type:
+        typed_workers = {
+            SubComponentType.PREFILL.value,
+            SubComponentType.DECODE.value,
+        }
+        for component in deployment.get("spec", {}).get("components", []):
+            sub_type = component.get("type", "")
+            if sub_type in typed_workers:
+                key = sub_type
+            elif sub_type == "worker":
+                # Generic workers can't be addressed by SubComponentType, so
+                # requests never scale them through this handler's typed
+                # lookups — but their GPUs are real cluster usage and must
+                # count toward the min/max budget totals. Key them by
+                # component name (prefixed to avoid colliding with the typed
+                # keys); they never enter pairing because intents are only
+                # recorded for typed pools.
+                key = f"worker/{component.get('name', '')}"
+            else:
                 continue
-            gpu_per_replica = int(
-                svc_spec.get("resources", {}).get("limits", {}).get("gpu", 0)
+            gpu_per_replica = 0
+            containers = (
+                component.get("podTemplate", {}).get("spec", {}).get("containers", [])
             )
-            replicas = svc_spec.get("replicas", 0)
-            pools[sub_type] = PoolSpec(
-                sub_type=sub_type,
-                current_replicas=replicas,
+            for container in containers:
+                limits = container.get("resources", {}).get("limits", {})
+                gpu_per_replica += int(limits.get("nvidia.com/gpu", 0))
+            pools[key] = PoolSpec(
+                sub_type=key,
+                current_replicas=component.get("replicas", 0),
                 gpu_per_replica=gpu_per_replica,
             )
+        # Legacy v1alpha1 DGDs expose workers under spec.services (a map)
+        # rather than spec.components; without this fallback their GPU budget
+        # reads as zero and the max/min-total-gpus bounds are silently
+        # disabled.
+        if not pools:
+            services = deployment.get("spec", {}).get("services", {})
+            for svc_spec in services.values():
+                sub_type = svc_spec.get("subComponentType", "")
+                if not sub_type:
+                    continue
+                gpu_per_replica = int(
+                    svc_spec.get("resources", {}).get("limits", {}).get("gpu", 0)
+                )
+                replicas = svc_spec.get("replicas", 0)
+                pools[sub_type] = PoolSpec(
+                    sub_type=sub_type,
+                    current_replicas=replicas,
+                    gpu_per_replica=gpu_per_replica,
+                )
         return pools
 
     def _read_all_pools(self) -> dict[str, dict[str, PoolSpec]]:
@@ -1011,15 +1058,14 @@ class ScaleRequestHandler:
                             f"{patch_err}; will self-correct on next tick"
                         )
 
-            # Get current replica counts
-            current_replicas = {}
-            deployment = connector.kube_api.get_graph_deployment(
-                connector.parent_dgd_name
-            )
-            for service_name, service_spec in deployment["spec"]["services"].items():
-                sub_type = service_spec.get("subComponentType", "")
-                if sub_type:
-                    current_replicas[sub_type] = service_spec.get("replicas", 0)
+            # Get current replica counts via the shared schema-aware reader
+            # (v1beta1 spec.components with a v1alpha1 spec.services fallback);
+            # a direct spec.services parse would KeyError on v1beta1 DGDs and
+            # turn a completed scale into an ERROR response.
+            current_replicas = {
+                sub_type: spec.current_replicas
+                for sub_type, spec in self._read_dgd_pools(connector).items()
+            }
 
             logger.info(
                 f"Successfully scaled {request.graph_deployment_name}: {current_replicas}"
