@@ -378,12 +378,13 @@ pub async fn create_multi_worker_sequences(
     if replica_sync {
         let direct_config = direct_zmq::DirectZmqSequenceConfig::from_env();
         if direct_config.should_use_direct(transport_kind) {
-            direct_zmq::start(
+            let _direct_zmq_task = direct_zmq::start(
                 endpoint,
                 arc.clone(),
                 direct_config.rcvhwm,
                 cancellation_token.child_token(),
-            );
+            )
+            .await?;
         } else {
             let subscriber = RuntimeSequenceSubscriber::for_endpoint(&endpoint).await?;
             arc.start_replica_sync(subscriber, cancellation_token.child_token());
