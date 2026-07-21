@@ -291,6 +291,7 @@ impl AgenticState {
 pub struct WorkloadDriver {
     policy: SchedulingPolicy,
     prompt_mode: PromptMode,
+    emit_session_metadata: bool,
     trace_block_size: usize,
     engine_block_size: u32,
     sessions: Vec<SessionRuntime>,
@@ -427,6 +428,7 @@ impl WorkloadDriver {
                 dependents,
             }),
             prompt_mode: PromptMode::Full,
+            emit_session_metadata: true,
             trace_block_size,
             engine_block_size: engine_block_size_u32,
             sessions,
@@ -530,6 +532,7 @@ impl WorkloadDriver {
         let mut driver = Self {
             policy,
             prompt_mode,
+            emit_session_metadata: true,
             trace_block_size,
             engine_block_size: engine_block_size_u32,
             sessions,
@@ -540,6 +543,11 @@ impl WorkloadDriver {
             state.activate_pending(&mut driver.sessions, &mut driver.ready_sessions, 0.0);
         }
         Ok(driver)
+    }
+
+    pub(crate) fn without_session_metadata(mut self) -> Self {
+        self.emit_session_metadata = false;
+        self
     }
 
     /// Failure-path companion: release a cap slot and terminate the owning session.
@@ -633,6 +641,7 @@ impl WorkloadDriver {
                 replay_key: turn.replay_key.clone(),
                 scheduled_ready_at_ms,
                 replay_hashes: Some(replay_hashes),
+                emit_session_metadata: self.emit_session_metadata,
                 request,
             });
         }

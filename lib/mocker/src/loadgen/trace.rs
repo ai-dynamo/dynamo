@@ -121,7 +121,8 @@ pub(super) fn validate_synthesizable_prompt(
         .len()
         .checked_mul(trace_block_size)
         .context("synthesized prompt capacity overflow")?;
-    if synthesizable_capacity < input_length {
+    let required_hash_ids = input_length.div_ceil(trace_block_size);
+    if hash_ids.len() < required_hash_ids {
         bail!(
             "input_length {} exceeds synthesized capacity {}",
             input_length,
@@ -142,9 +143,12 @@ pub(super) fn synthesize_trace_tokens(
     let mut tokens = Vec::with_capacity(input_length);
     for &hash_id in hash_ids {
         let token_id = hash_id as u32;
-        tokens.extend((0..trace_block_size).map(|_| token_id));
-        if tokens.len() >= input_length {
-            tokens.truncate(input_length);
+        let remaining = input_length - tokens.len();
+        tokens.extend(std::iter::repeat_n(
+            token_id,
+            remaining.min(trace_block_size),
+        ));
+        if tokens.len() == input_length {
             break;
         }
     }
@@ -1071,15 +1075,13 @@ impl Trace {
                         turn_idx
                     );
                 }
-                if turn.hash_ids.len() * self.block_size < turn.input_length {
-                    bail!(
-                        "session {} turn {} input_length {} exceeds synthesized capacity {}",
-                        session.session_id,
-                        turn_idx,
-                        turn.input_length,
-                        turn.hash_ids.len() * self.block_size
-                    );
-                }
+                validate_synthesizable_prompt(turn.input_length, &turn.hash_ids, self.block_size)
+                    .with_context(|| {
+                    format!(
+                        "session {} turn {} has invalid prompt",
+                        session.session_id, turn_idx
+                    )
+                })?;
                 if !turn.delay_after_previous_ms.is_finite() || turn.delay_after_previous_ms < 0.0 {
                     bail!(
                         "session {} turn {} has invalid delay {}",

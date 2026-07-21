@@ -120,31 +120,32 @@ pub fn simulate_loaded_trace_with_router_mode_and_options(
     let trace = trace
         .normalize_session_starts()?
         .speed_up_timing(arrival_speedup_ratio)?;
-    if let Some(requests) = single_turn_trace_requests(TraceFileFormat::Dynamo, &trace)? {
-        return crate::replay::offline::simulate_trace(
+    trace.validate_for_trace_mode()?;
+    if trace.is_single_turn() {
+        crate::replay::offline::simulate_trace_workload_without_session_metadata(
             args,
             router_config,
             prefill_load_estimator,
-            requests,
+            trace,
             num_workers,
-            1.0,
             router_mode,
             record_per_request,
             max_sim_time_ms,
             sla,
-        );
+        )
+    } else {
+        crate::replay::offline::simulate_trace_workload(
+            args,
+            router_config,
+            prefill_load_estimator,
+            trace,
+            num_workers,
+            router_mode,
+            record_per_request,
+            max_sim_time_ms,
+            sla,
+        )
     }
-    crate::replay::offline::simulate_trace_workload(
-        args,
-        router_config,
-        prefill_load_estimator,
-        trace,
-        num_workers,
-        router_mode,
-        record_per_request,
-        max_sim_time_ms,
-        sla,
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -164,29 +165,30 @@ pub fn simulate_loaded_trace_disagg_with_router_mode_and_options(
     let trace = trace
         .normalize_session_starts()?
         .speed_up_timing(arrival_speedup_ratio)?;
-    if let Some(requests) = single_turn_trace_requests(TraceFileFormat::Dynamo, &trace)? {
-        return crate::replay::offline::simulate_trace_disagg(
+    trace.validate_for_trace_mode()?;
+    if trace.is_single_turn() {
+        crate::replay::offline::simulate_trace_workload_disagg_without_session_metadata(
             config,
             router_config,
             prefill_load_estimator,
-            requests,
-            1.0,
+            trace,
             router_mode,
             record_per_request,
             max_sim_time_ms,
             sla,
-        );
+        )
+    } else {
+        crate::replay::offline::simulate_trace_workload_disagg(
+            config,
+            router_config,
+            prefill_load_estimator,
+            trace,
+            router_mode,
+            record_per_request,
+            max_sim_time_ms,
+            sla,
+        )
     }
-    crate::replay::offline::simulate_trace_workload_disagg(
-        config,
-        router_config,
-        prefill_load_estimator,
-        trace,
-        router_mode,
-        record_per_request,
-        max_sim_time_ms,
-        sla,
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -204,17 +206,7 @@ pub fn simulate_loaded_trace_live_with_router_mode(
     let trace = trace
         .normalize_session_starts()?
         .speed_up_timing(arrival_speedup_ratio)?;
-    if let Some(requests) = single_turn_trace_requests(TraceFileFormat::Dynamo, &trace)? {
-        return online::simulate_trace_requests(
-            args,
-            router_config,
-            prefill_load_estimator,
-            requests,
-            num_workers,
-            1.0,
-            router_mode,
-        );
-    }
+    trace.validate_for_trace_mode()?;
     online::simulate_trace_workload(
         args,
         router_config,
@@ -1414,11 +1406,95 @@ pub fn simulate_concurrency_live_workload_with_router_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::protocols::{EngineType, SglangArgs};
+    use crate::common::protocols::{EngineType, SglangArgs, WorkerType};
     use crate::loadgen::{SessionTrace, TurnTrace};
     use std::io::Write;
     use tempfile::NamedTempFile;
     use uuid::Uuid;
+
+    fn replay_test_args() -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(128)
+            .max_num_batched_tokens(Some(64))
+            .max_num_seqs(Some(8))
+            .speedup_ratio(1000.0)
+            .build()
+            .unwrap()
+    }
+
+    fn disagg_test_config() -> OfflineDisaggReplayConfig {
+        OfflineDisaggReplayConfig {
+            prefill_args: MockEngineArgs {
+                worker_type: WorkerType::Prefill,
+                block_size: 4,
+                ..MockEngineArgs::default()
+            },
+            decode_args: MockEngineArgs {
+                worker_type: WorkerType::Decode,
+                block_size: 4,
+                ..MockEngineArgs::default()
+            },
+            num_prefill_workers: 1,
+            num_decode_workers: 1,
+        }
+    }
+
+    fn single_turn_dynamo_trace(first_arrival_timestamp_ms: Option<f64>) -> Trace {
+        Trace {
+            block_size: 4,
+            sessions: vec![SessionTrace {
+                session_id: "request_1".to_string(),
+                first_arrival_timestamp_ms,
+                turns: vec![TurnTrace {
+                    input_length: 4,
+                    max_output_tokens: 1,
+                    hash_ids: vec![1],
+                    delay_after_previous_ms: 0.0,
+                    ..Default::default()
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn loaded_dynamo_trace_preserves_request_metadata_contract() {
+        let report = simulate_loaded_trace_with_router_mode_and_options(
+            replay_test_args(),
+            None,
+            None,
+            single_turn_dynamo_trace(Some(0.0)),
+            2,
+            1.0,
+            ReplayRouterMode::RoundRobin,
+            true,
+            None,
+            SlaThresholds::default(),
+        )
+        .unwrap();
+
+        assert_eq!(report.per_request.len(), 1);
+        assert_eq!(report.per_request[0].session_id, None);
+        assert_eq!(report.per_request[0].turn_index, None);
+    }
+
+    #[test]
+    fn loaded_dynamo_disagg_trace_validates_timestamps() {
+        let error = simulate_loaded_trace_disagg_with_router_mode_and_options(
+            disagg_test_config(),
+            None,
+            None,
+            single_turn_dynamo_trace(None),
+            1.0,
+            ReplayRouterMode::RoundRobin,
+            false,
+            None,
+            SlaThresholds::default(),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("first_arrival_timestamp_ms"));
+    }
 
     #[test]
     fn one_worker_sglang_impossible_request_returns_dead_end_error() {
