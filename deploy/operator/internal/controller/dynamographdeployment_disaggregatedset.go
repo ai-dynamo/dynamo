@@ -103,7 +103,49 @@ func (r *DynamoGraphDeploymentReconciler) shouldUseDisaggregatedSet(dgd *nvidiac
 	if len(selection.componentToRole) < 2 {
 		return false, "DisaggregatedSet requires at least two eligible multinode worker roles"
 	}
+	if !r.RuntimeConfig.Gate.Enabled(features.LWS) {
+		for i := range dgd.Spec.Components {
+			component := &dgd.Spec.Components[i]
+			if component.GetNumberOfNodes() <= 1 {
+				continue
+			}
+			if _, selected := selection.componentToRole[component.ComponentName]; !selected {
+				return false, fmt.Sprintf("multinode component %q is not eligible for DisaggregatedSet and requires LeaderWorkerSet support", component.ComponentName)
+			}
+		}
+	}
 	return true, ""
+}
+
+// coalesceDisaggregatedSetRestartState treats all selected DS roles as one
+// restart unit. A DisaggregatedSet revision covers the complete role list, so
+// annotating only one selected role would still roll every role and a later
+// sequential step would otherwise create another whole-set revision.
+func coalesceDisaggregatedSetRestartState(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	restartState *dynamo.RestartState,
+) *dynamo.RestartState {
+	if restartState == nil || dynamo.IsParallelRestart(dgd) {
+		return restartState
+	}
+	selection, reason := selectDisaggregatedSetComponents(dgd)
+	if reason != "" {
+		return restartState
+	}
+	selectedRestarting := false
+	for componentName := range selection.componentToRole {
+		if restartState.ShouldAnnotateComponent(componentName) {
+			selectedRestarting = true
+			break
+		}
+	}
+	if !selectedRestarting {
+		return restartState
+	}
+	for componentName := range selection.componentToRole {
+		restartState.ComponentsToAnnotate[componentName] = true
+	}
+	return restartState
 }
 
 func selectDisaggregatedSetComponents(dgd *nvidiacomv1beta1.DynamoGraphDeployment) (disaggregatedSetSelection, string) {
@@ -294,6 +336,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDisaggregatedSetResources(
 	resources = append(resources, nonSelectedResources...)
 
 	if dsReady {
+		if err := r.deleteGrovePodCliqueSetOnDisaggregatedSetPath(ctx, dynamoDeployment); err != nil {
+			return ReconcileResult{}, err
+		}
 		if err := r.deleteOwnedSelectedDCDs(ctx, dynamoDeployment, selection); err != nil {
 			return ReconcileResult{}, err
 		}

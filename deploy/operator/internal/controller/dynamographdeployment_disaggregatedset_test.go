@@ -21,6 +21,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	disaggregatedsetv1 "sigs.k8s.io/lws/api/disaggregatedset/v1"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 	disaggregatedsetutils "sigs.k8s.io/lws/pkg/utils/disaggregatedset"
@@ -633,6 +634,68 @@ func TestShouldUseDisaggregatedSet(t *testing.T) {
 		require.True(t, use)
 		require.Empty(t, reason)
 	})
+
+	t.Run("non-selected multinode component requires LWS", func(t *testing.T) {
+		dgd := twoEligibleDGD()
+		dgd.Spec.Components = append(dgd.Spec.Components, nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+			ComponentName: "frontend",
+			ComponentType: nvidiacomv1beta1.ComponentTypeFrontend,
+			Multinode:     &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
+		})
+		runtimeConfig := newTestRuntimeConfig(true)
+		r := &DynamoGraphDeploymentReconciler{RuntimeConfig: runtimeConfig}
+
+		use, reason := r.shouldUseDisaggregatedSet(dgd)
+		require.False(t, use)
+		require.Contains(t, reason, "requires LeaderWorkerSet support")
+
+		runtimeConfig.Gate.LWS = true
+		use, reason = r.shouldUseDisaggregatedSet(dgd)
+		require.True(t, use)
+		require.Empty(t, reason)
+	})
+}
+
+func TestCoalesceDisaggregatedSetRestartState(t *testing.T) {
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "frontend", ComponentType: nvidiacomv1beta1.ComponentTypeFrontend},
+				{ComponentName: "prefill", ComponentType: nvidiacomv1beta1.ComponentTypePrefill, Multinode: &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}},
+				{ComponentName: "decode", ComponentType: nvidiacomv1beta1.ComponentTypeDecode, Multinode: &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}},
+			},
+		},
+	}
+
+	state := &dynamo.RestartState{Timestamp: "restart-1", ComponentsToAnnotate: map[string]bool{"frontend": true}}
+	require.Same(t, state, coalesceDisaggregatedSetRestartState(dgd, state))
+	require.Equal(t, map[string]bool{"frontend": true}, state.ComponentsToAnnotate)
+
+	state.ComponentsToAnnotate["prefill"] = true
+	require.Same(t, state, coalesceDisaggregatedSetRestartState(dgd, state))
+	require.True(t, state.ShouldAnnotateComponent("prefill"))
+	require.True(t, state.ShouldAnnotateComponent("decode"), "all DS roles must share one restart revision")
+}
+
+func TestWorkloadRoutingAnnotationsChanged(t *testing.T) {
+	oldDGD := &nvidiacomv1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+		consts.KubeAnnotationEnableGrove: consts.KubeLabelValueTrue,
+	}}}
+	newDGD := oldDGD.DeepCopy()
+	require.False(t, workloadRoutingAnnotationsChanged(event.UpdateEvent{ObjectOld: oldDGD, ObjectNew: newDGD}))
+
+	newDGD.Annotations[consts.KubeAnnotationEnableGrove] = consts.KubeLabelValueFalse
+	newDGD.Annotations[consts.KubeAnnotationEnableDisaggregatedSet] = consts.KubeLabelValueTrue
+	require.True(t, workloadRoutingAnnotationsChanged(event.UpdateEvent{ObjectOld: oldDGD, ObjectNew: newDGD}))
+}
+
+func TestDGDOwnedServiceEventPredicate(t *testing.T) {
+	p := dgdOwnedServiceEventPredicate()
+	service := &corev1.Service{}
+	require.False(t, p.Create(event.CreateEvent{Object: service}))
+	require.True(t, p.Update(event.UpdateEvent{ObjectOld: service, ObjectNew: service.DeepCopy()}))
+	require.True(t, p.Delete(event.DeleteEvent{Object: service}))
+	require.True(t, p.Generic(event.GenericEvent{Object: service}))
 }
 
 func newTestRuntimeConfig(enabled bool) *commoncontroller.RuntimeConfig {

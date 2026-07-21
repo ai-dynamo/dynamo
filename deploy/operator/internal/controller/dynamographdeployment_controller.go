@@ -410,6 +410,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 
 	restartStatus := r.computeRestartStatus(ctx, dynamoDeployment)
 	restartState := dynamo.DetermineRestartState(dynamoDeployment, restartStatus)
+	if useDisaggregatedSet {
+		restartState = coalesceDisaggregatedSetRestartState(dynamoDeployment, restartState)
+	}
 
 	result, err := r.reconcileWorkloadResources(
 		ctx,
@@ -539,6 +542,27 @@ func (r *DynamoGraphDeploymentReconciler) deleteDisaggregatedSetOnLegacyPath(ctx
 		return nil
 	}
 	return r.deleteDisaggregatedSetIfExists(ctx, dgd)
+}
+
+func (r *DynamoGraphDeploymentReconciler) deleteGrovePodCliqueSetOnDisaggregatedSetPath(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) error {
+	if !r.RuntimeConfig.Gate.Enabled(features.Grove) {
+		return nil
+	}
+	pcs := &grovev1alpha1.PodCliqueSet{}
+	key := types.NamespacedName{Name: dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components), Namespace: dgd.Namespace}
+	if err := r.Client.Get(ctx, key, pcs); err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to get stale PodCliqueSet %s: %w", key, err)
+	}
+	if !isControlledByBetaDGD(pcs, dgd) {
+		return fmt.Errorf("refusing to delete PodCliqueSet %s because it is not controlled by DynamoGraphDeployment %s/%s", key, dgd.Namespace, dgd.Name)
+	}
+	if err := r.Client.Delete(ctx, pcs); err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("failed to delete stale PodCliqueSet %s: %w", key, err)
+	}
+	return nil
 }
 
 func (r *DynamoGraphDeploymentReconciler) isGrovePathway(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
@@ -2825,11 +2849,38 @@ func (r *DynamoGraphDeploymentReconciler) FinalizeResource(ctx context.Context, 
 	return r.deleteAutoCheckpointsForDGD(ctx, dynamoDeployment)
 }
 
+func workloadRoutingAnnotationsChanged(update event.UpdateEvent) bool {
+	oldDGD, oldOK := update.ObjectOld.(*nvidiacomv1beta1.DynamoGraphDeployment)
+	newDGD, newOK := update.ObjectNew.(*nvidiacomv1beta1.DynamoGraphDeployment)
+	if !oldOK || !newOK {
+		return false
+	}
+	annotationValue := func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, key string) string {
+		return strings.ToLower(dgd.GetAnnotations()[key])
+	}
+	return annotationValue(oldDGD, consts.KubeAnnotationEnableDisaggregatedSet) != annotationValue(newDGD, consts.KubeAnnotationEnableDisaggregatedSet) ||
+		annotationValue(oldDGD, consts.KubeAnnotationEnableGrove) != annotationValue(newDGD, consts.KubeAnnotationEnableGrove)
+}
+
+func dgdOwnedServiceEventPredicate() predicate.Predicate {
+	return predicate.Funcs{
+		// DS-path Services are controlled directly by the DGD. Ignore creation
+		// because the current reconcile just created the desired object.
+		CreateFunc:  func(ce event.CreateEvent) bool { return false },
+		DeleteFunc:  func(de event.DeleteEvent) bool { return true },
+		UpdateFunc:  func(ue event.UpdateEvent) bool { return true },
+		GenericFunc: func(ge event.GenericEvent) bool { return true },
+	}
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	ctrlBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&nvidiacomv1beta1.DynamoGraphDeployment{}, builder.WithPredicates(
-			predicate.GenerationChangedPredicate{},
+			predicate.Or(
+				predicate.GenerationChangedPredicate{},
+				predicate.Funcs{UpdateFunc: workloadRoutingAnnotationsChanged},
+			),
 		)).
 		Named(consts.ResourceTypeDynamoGraphDeployment).
 		Watches(
@@ -2849,6 +2900,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
+		Owns(&corev1.Service{}, builder.WithPredicates(dgdOwnedServiceEventPredicate())).
 		Owns(&nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the adapter
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },

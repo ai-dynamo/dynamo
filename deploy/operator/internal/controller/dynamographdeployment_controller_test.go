@@ -78,6 +78,37 @@ func newDynamoGraphDeploymentControllerTestScheme(t testing.TB) *runtime.Scheme 
 	return s
 }
 
+func TestDeleteGrovePodCliqueSetOnDisaggregatedSetPath(t *testing.T) {
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default", UID: "dgd-uid"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+			{ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill},
+		}},
+	}
+	pcs := &grovev1alpha1.PodCliqueSet{ObjectMeta: metav1.ObjectMeta{
+		Name:      dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components),
+		Namespace: dgd.Namespace,
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: v1beta1.GroupVersion.String(),
+			Kind:       "DynamoGraphDeployment",
+			Name:       dgd.Name,
+			UID:        dgd.UID,
+			Controller: ptr.To(true),
+		}},
+	}}
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:        fake.NewClientBuilder().WithScheme(testScheme).WithObjects(dgd, pcs).Build(),
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Grove: true}},
+	}
+
+	require.NoError(t, reconciler.deleteGrovePodCliqueSetOnDisaggregatedSetPath(t.Context(), dgd))
+	err := reconciler.Get(t.Context(), client.ObjectKeyFromObject(pcs), &grovev1alpha1.PodCliqueSet{})
+	require.True(t, apierrors.IsNotFound(err))
+	// Deletion races and repeated reconciliation are idempotent.
+	require.NoError(t, reconciler.deleteGrovePodCliqueSetOnDisaggregatedSetPath(t.Context(), dgd))
+}
+
 func TestDynamoGraphDeploymentReconciler_preserveExistingDCDBackendFramework(t *testing.T) {
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
