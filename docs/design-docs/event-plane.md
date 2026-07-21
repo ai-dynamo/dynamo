@@ -54,6 +54,7 @@ python3 -m dynamo.vllm --event-plane zmq --model Qwen/Qwen3-0.6B
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `DYN_EVENT_PLANE` | Transport: `nats` or `zmq` | `zmq` (all backends) |
+| `DYN_EVENT_PLANE_HOST` | IPv4 address or interface advertised by direct ZMQ publishers; ignored by NATS and ZMQ broker mode | Auto-detected local IPv4 address |
 | `NATS_SERVER` | NATS server URL (NATS transport only) | `nats://localhost:4222` |
 
 When `DYN_EVENT_PLANE` is not set, the default is **zmq**. Set `DYN_EVENT_PLANE=nats`
@@ -89,10 +90,18 @@ When using ZMQ (`DYN_EVENT_PLANE=zmq`):
 - Subscribers automatically discover and connect to all active publishers.
 - When publishers come and go (e.g., workers scaling up/down), subscribers dynamically adjust their connections.
 
+To advertise an address on a specific network interface, such as InfiniBand, set
+`DYN_EVENT_PLANE_HOST` to an IPv4 address or interface name. Interface names resolve to
+the lowest usable IPv4 address. IPv6 literals and `0.0.0.0` are rejected because direct
+ZMQ publishers bind IPv4 listeners and discovery requires a dialable address. When unset,
+Dynamo advertises an auto-detected local IPv4 address. This setting only changes direct
+ZMQ publisher discovery endpoints; it does not apply to NATS or ZMQ broker mode.
+
 Example setup:
 
 ```bash
 export DYN_EVENT_PLANE=zmq
+export DYN_EVENT_PLANE_HOST=192.0.2.10
 
 # Start workers -- each binds a ZMQ socket, registers with discovery
 python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B \

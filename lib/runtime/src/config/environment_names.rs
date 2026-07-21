@@ -622,7 +622,8 @@ pub mod tcp_response_stream {
     /// If unset or 0, the OS assigns a free ephemeral port.
     pub const DYN_TCP_RESPONSE_STREAM_PORT: &str = "DYN_TCP_RESPONSE_STREAM_PORT";
 
-    /// Host/interface for the TCP response stream server.
+    /// Advertised IPv4 address or interface for the TCP response stream server.
+    /// IPv6 and unspecified addresses are rejected.
     /// If unset, the server auto-detects a routable local IP.
     pub const DYN_TCP_RESPONSE_STREAM_HOST: &str = "DYN_TCP_RESPONSE_STREAM_HOST";
 }
@@ -640,6 +641,11 @@ pub mod event_plane {
 
     /// Event plane codec selection: "json" or "msgpack".
     pub const DYN_EVENT_PLANE_CODEC: &str = "DYN_EVENT_PLANE_CODEC";
+
+    /// IPv4 address or interface advertised by direct ZMQ event publishers.
+    /// IPv6 and unspecified addresses are rejected.
+    /// If unset, the runtime auto-detects a local IPv4 address.
+    pub const DYN_EVENT_PLANE_HOST: &str = "DYN_EVENT_PLANE_HOST";
 
     /// Bounded capacity of the direct ZMQ event-subscriber's merged event channel.
     ///
@@ -875,6 +881,7 @@ mod tests {
             // Event Plane
             event_plane::DYN_EVENT_PLANE,
             event_plane::DYN_EVENT_PLANE_CODEC,
+            event_plane::DYN_EVENT_PLANE_HOST,
             event_plane::DYN_ZMQ_EVENT_SUBSCRIBER_CHANNEL_CAPACITY,
             // ZMQ Broker
             zmq_broker::DYN_ZMQ_BROKER_URL,
