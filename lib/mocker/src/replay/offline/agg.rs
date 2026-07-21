@@ -478,10 +478,12 @@ where
         );
         #[cfg(feature = "kvbm-offload")]
         {
-            return choose_next_timestamp(next, self.engine.earliest_offload_deadline());
+            choose_next_timestamp(next, self.engine.earliest_offload_deadline())
         }
         #[cfg(not(feature = "kvbm-offload"))]
-        next
+        {
+            next
+        }
     }
 
     /// Apply router-visible KV events at the phase chosen by the scheduler core.

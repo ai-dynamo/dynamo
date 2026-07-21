@@ -1660,10 +1660,12 @@ where
                 self.prefill_engine.earliest_offload_deadline(),
                 self.decode_engine.earliest_offload_deadline(),
             );
-            return choose_next_timestamp(next, next_offload);
+            choose_next_timestamp(next, next_offload)
         }
         #[cfg(not(feature = "kvbm-offload"))]
-        next
+        {
+            next
+        }
     }
 
     fn apply_prefill_observations(&mut self, events: Observation::Batch) -> Result<()> {
