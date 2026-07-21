@@ -126,13 +126,21 @@ NIXL telemetry is disabled by default. When enabled, NIXL metrics will be expose
 
 ### Create PodMonitors
 
-The Prometheus Operator uses PodMonitor resources to automatically discover and scrape metrics from pods. To enable this discovery, the Dynamo operator automatically creates PodMonitor resource and adds these labels to all pods:
+The Prometheus Operator uses PodMonitor resources to automatically discover and scrape metrics from pods. The Dynamo platform Helm chart creates PodMonitors when prometheus-operator CRDs are present, and the operator labels pods with:
 - `nvidia.com/metrics-enabled: "true"` - Enables metrics collection
-- `nvidia.com/dynamo-component-type: "frontend|worker"` - Identifies the component type
+- `nvidia.com/dynamo-component-type: "frontend|worker|decode|prefill|…"` - Identifies the component type
 
-<Note>
-You can opt-out specific deployments from metrics collection by adding this annotation to your DynamoGraphDeployment:
-</Note>
+| PodMonitor | Selects | Scrapes |
+|---|---|---|
+| `dynamo-frontend` | `component-type: frontend` | port `http` (`/metrics`) |
+| `dynamo-worker` | `worker` / `decode` / `prefill` | port `system` (worker metrics) and port `http` when present (frontend sidecar) |
+| `dynamo-planner` | `component-type: planner` | port `metrics` |
+
+In Gateway API / EPP deployments, each worker pod runs a frontend sidecar in `--router-mode direct` that exposes `dynamo_frontend_*` (including `dynamo_frontend_cached_tokens`) on port `http` (8000). The worker PodMonitor scrapes that named port when the sidecar is present; pods without an `http` container port are skipped for that endpoint.
+
+> [!NOTE]
+> You can opt out specific deployments from metrics collection by adding this annotation to your DynamoGraphDeployment:
+
 ```yaml
 apiVersion: nvidia.com/v1
 kind: DynamoGraphDeployment
