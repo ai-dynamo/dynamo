@@ -1,5 +1,5 @@
 ## Description: <br>
-Diagnose failed or unhealthy Dynamo deployments. Use when pods, model-cache jobs, PVCs, workers, frontend/router health, endpoints, or benchmark jobs fail; use dynamo-recipe-deployer or dynamo-router-starter before this for normal bring-up. <br>
+Diagnose failed or unhealthy Dynamo deployments. Use when pods, model-cache jobs, PVCs, workers, frontend/router health, endpoints, or benchmark jobs fail; use deploy-dynamo-recipe or dynamo-router-starter before this for normal bring-up. <br>
 
 This skill is ready for commercial/non-commercial use. <br>
 
