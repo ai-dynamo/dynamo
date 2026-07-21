@@ -631,28 +631,34 @@ impl Client {
         }
         let now = std::time::Instant::now();
         let mut fenced = self.fenced_instances.write().unwrap();
+        // Prune expired entries on this (rare) write path so the set stays
+        // bounded and the hot read path can stay lock-cheap.
+        fenced.retain(|_, fenced_at| now.duration_since(*fenced_at) < FENCE_TTL);
         for id in removed_instance_ids {
             fenced.insert(*id, now);
         }
     }
 
-    /// Snapshot of currently fenced workers, or `None` when empty (matching the
-    /// overloaded-set convention so selection can skip the check cheaply).
-    /// Entries older than [`FENCE_TTL`] are pruned here so the set stays bounded.
+    /// Snapshot of currently fenced workers, or `None` when none are live
+    /// (matching the overloaded-set convention so selection can skip the check
+    /// cheaply). Read-only: expired entries are filtered out of the snapshot but
+    /// pruning is left to [`fence_instances_removed`], so this stays on a read
+    /// lock — it is called on every selection while the fence set is non-empty.
     pub fn fenced_instance_ids(&self) -> Option<HashSet<u64>> {
-        {
-            let fenced = self.fenced_instances.read().unwrap();
-            if fenced.is_empty() {
-                return None;
-            }
+        let fenced = self.fenced_instances.read().unwrap();
+        if fenced.is_empty() {
+            return None;
         }
         let now = std::time::Instant::now();
-        let mut fenced = self.fenced_instances.write().unwrap();
-        fenced.retain(|_, fenced_at| now.duration_since(*fenced_at) < FENCE_TTL);
-        if fenced.is_empty() {
+        let live: HashSet<u64> = fenced
+            .iter()
+            .filter(|(_, fenced_at)| now.duration_since(**fenced_at) < FENCE_TTL)
+            .map(|(id, _)| *id)
+            .collect();
+        if live.is_empty() {
             None
         } else {
-            Some(fenced.keys().copied().collect())
+            Some(live)
         }
     }
 
