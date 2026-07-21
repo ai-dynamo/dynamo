@@ -15,7 +15,7 @@ on:
         required: false
         default: ''
       build_glm52_gms_snapshot:
-        description: 'Build the pinned GLM 5.2 GMS runtime, placeholder, and snapshot agent to ACR'
+        description: 'Build current Dynamo with historical vLLM GLM 5.2 GMS images to ACR'
         type: boolean
         required: true
         default: false
@@ -42,9 +42,77 @@ jobs:
           test "${source_sha}" = "${WORKFLOW_SOURCE_SHA}"
           echo "source_sha=${source_sha}" >> "${GITHUB_OUTPUT}"
 
-  glm52-gms-snapshot:
-    name: GLM 5.2 GMS Snapshot Images
+  vllm-base-sbom:
+    name: Capture exact historical vLLM baseline
     needs: init
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout immutable source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ needs.init.outputs.source_sha }}
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Verify source checkout
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "${{ needs.init.outputs.source_sha }}"
+      - name: Capture deterministic amd64 baseline
+        shell: bash
+        env:
+          BASE_IMAGE: vllm/vllm-openai@sha256:f2ac337893360e23462249c3897e1c92dc8ba8a1ebbc3dd15c4ac931e957438e
+          EXPECTED_INDEX_DIGEST: sha256:f2ac337893360e23462249c3897e1c92dc8ba8a1ebbc3dd15c4ac931e957438e
+          EXPECTED_AMD64_DIGEST: sha256:39e8d18a3b41e382f1955a3241326ec0fe61615fd51c7eef836fe606c0bfb887
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect --raw "${BASE_IMAGE}" > "${RUNNER_TEMP}/index.json"
+          actual_index="sha256:$(sha256sum "${RUNNER_TEMP}/index.json" | awk '{print $1}')"
+          actual_amd64="$(
+            jq -er '.manifests[]
+              | select(.platform.os == "linux" and .platform.architecture == "amd64")
+              | .digest' "${RUNNER_TEMP}/index.json"
+          )"
+          test "${actual_index}" = "${EXPECTED_INDEX_DIGEST}"
+          test "${actual_amd64}" = "${EXPECTED_AMD64_DIGEST}"
+          python3 -m venv "${RUNNER_TEMP}/sbom-venv"
+          cat > "${RUNNER_TEMP}/sbom-requirements.txt" <<'EOF'
+          PyYAML==6.0.3 \
+              --hash=sha256:ba1cc08a7ccde2d2ec775841541641e4548226580ab850948cbfda66a1befcdc
+          EOF
+          "${RUNNER_TEMP}/sbom-venv/bin/pip" install \
+            --only-binary=:all: \
+            --require-hashes \
+            --requirement "${RUNNER_TEMP}/sbom-requirements.txt"
+          curl --fail --location --silent --show-error \
+            --output "${RUNNER_TEMP}/syft.tar.gz" \
+            https://github.com/anchore/syft/releases/download/v1.46.0/syft_1.46.0_linux_amd64.tar.gz
+          echo "d654f678b709eb53c393d38519d5ed7d2e57205529404018614cfefa0fb2b5ca  ${RUNNER_TEMP}/syft.tar.gz" \
+            | sha256sum --check
+          mkdir -p "${RUNNER_TEMP}/bin" "${RUNNER_TEMP}/baseline"
+          tar -xzf "${RUNNER_TEMP}/syft.tar.gz" -C "${RUNNER_TEMP}/bin" syft
+          export PATH="${RUNNER_TEMP}/bin:${RUNNER_TEMP}/sbom-venv/bin:${PATH}"
+          printf '{"entries":[]}\n' > "${RUNNER_TEMP}/baseline-manifest.json"
+          python3 container/compliance/base_sboms/capture_baseline_sbom.py \
+            --from "${BASE_IMAGE}" \
+            --baseline "${BASE_IMAGE}" \
+            --platform linux/amd64 \
+            --corpus-dir "${RUNNER_TEMP}/baseline" \
+            --manifest "${RUNNER_TEMP}/baseline-manifest.json"
+          test -s "${RUNNER_TEMP}/baseline/vllm-openai@f2ac3378-amd64.cdx.json"
+      - name: Upload exact historical vLLM baseline
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: vllm-nightly-f2ac3378-amd64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/baseline/vllm-openai@f2ac3378-amd64.cdx.json
+          if-no-files-found: error
+          retention-days: 7
+
+  glm52-gms-snapshot:
+    name: Current Dynamo + Historical vLLM GLM 5.2 GMS Images
+    needs: [init, vllm-base-sbom]
     if: inputs.build_glm52_gms_snapshot
     runs-on: prod-builder-v3
     timeout-minutes: 180
@@ -54,8 +122,8 @@ jobs:
       CRIU_SHA: 3dd2420c16e54fb7cd08b3e511d3a8bfb03cd001
       CUDA_CHECKPOINT_SHA: 00d5cce84c628088d6caa203fc4af40c1538b6f7
       FLASHINFER_SHA: 8eccd0c1352165302840c0e19066bc42d36dbd7a
-      VLLM_SHA: af259f998ff7301504829d2551c746502afe2f0a
-      VLLM_BASE_IMAGE: vllm/vllm-openai@sha256:7f2bc168366c77fbd8329368f00310d208531c14ece6c2de31a6611ef99f6ec8
+      VLLM_SHA: c764a139c99a1c1e9ba18f2f210054017aab1a33
+      VLLM_BASE_IMAGE: vllm/vllm-openai@sha256:f2ac337893360e23462249c3897e1c92dc8ba8a1ebbc3dd15c4ac931e957438e
     steps:
       - name: Checkout immutable source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -67,6 +135,12 @@ jobs:
       - name: Verify source checkout
         shell: bash
         run: test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
+
+      - name: Download exact historical base SBOM
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: vllm-nightly-f2ac3378-amd64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: container/compliance/base_sboms
 
       - name: Initialize Dynamo builder
         uses: ./.github/actions/init-dynamo-builder
@@ -83,7 +157,7 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-      - name: Render vLLM runtime Dockerfile
+      - name: Render historical vLLM runtime Dockerfile
         shell: bash
         run: |
           python3 container/render.py \
@@ -93,7 +167,7 @@ jobs:
             --cuda-version 13.0 \
             --output-short-filename
 
-      - name: Build and push pinned vLLM runtime
+      - name: Build and push pinned historical vLLM runtime
         shell: bash
         run: |
           set -euo pipefail
@@ -111,12 +185,12 @@ jobs:
             --build-arg "FLASHINFER_GIT_URL=https://github.com/flashinfer-ai/flashinfer.git" \
             --build-arg "FLASHINFER_GIT_REF=${FLASHINFER_SHA}" \
             --build-arg "FLASHINFER_GIT_SHA=${FLASHINFER_SHA}" \
-            --build-arg "VLLM_GIT_URL=https://github.com/vllm-project/vllm.git" \
-            --build-arg "VLLM_GIT_REF=${VLLM_SHA}" \
+            --build-arg "VLLM_GIT_URL=https://github.com/galletas1712/vllm.git" \
+            --build-arg "VLLM_GIT_REF=schwinns/snapshot-gms-nightly-8e981630-fi0615-20260712" \
             --build-arg "VLLM_GIT_SHA=${VLLM_SHA}" \
             --build-arg "VLLM_INSTALL_MODE=python-overlay" \
             --build-arg "VLLM_RUNTIME_BASE_IMAGE=${VLLM_BASE_IMAGE}" \
-            --build-arg "BASELINE_SBOM_FILE=vllm-openai@7f2bc168" \
+            --build-arg "BASELINE_SBOM_FILE=vllm-openai@f2ac3378" \
             .
 
       - name: Build and push matching vLLM snapshot placeholder
@@ -175,7 +249,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "### Immutable GLM 5.2 GMS snapshot images" >> "${GITHUB_STEP_SUMMARY}"
+          echo "### Current Dynamo + historical vLLM GLM 5.2 GMS images" >> "${GITHUB_STEP_SUMMARY}"
           echo "" >> "${GITHUB_STEP_SUMMARY}"
           echo "| Image | Digest | Build metadata |" >> "${GITHUB_STEP_SUMMARY}"
           echo "|---|---|---|" >> "${GITHUB_STEP_SUMMARY}"
