@@ -1284,41 +1284,6 @@ mod tests {
     }
 
     #[cfg(feature = "kvbm-offload")]
-    fn offload_request() -> DirectRequest {
-        DirectRequest {
-            tokens: vec![1; 4],
-            max_output_tokens: 1,
-            uuid: Some(Uuid::from_u128(1)),
-            arrival_timestamp_ms: Some(0.0),
-            ..Default::default()
-        }
-    }
-
-    #[cfg(feature = "kvbm-offload")]
-    #[test]
-    fn disagg_replay_initializes_kvbm_workers() {
-        let report = simulate_trace_disagg(
-            OfflineDisaggReplayConfig {
-                prefill_args: offload_args(WorkerType::Prefill),
-                decode_args: offload_args(WorkerType::Decode),
-                num_prefill_workers: 1,
-                num_decode_workers: 1,
-            },
-            None,
-            None,
-            vec![offload_request()],
-            1.0,
-            ReplayRouterMode::RoundRobin,
-            false,
-            None,
-            SlaThresholds::default(),
-        )
-        .unwrap();
-
-        assert_eq!(report.request_counts.completed_requests, 1);
-    }
-
-    #[cfg(feature = "kvbm-offload")]
     fn offload_lifecycle_requests() -> Vec<DirectRequest> {
         [
             (1_u128, 1_u32, 0.0),

@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
-#[cfg(feature = "bench")]
+#[cfg(any(test, feature = "bench"))]
 use std::sync::Arc;
 
-#[cfg(feature = "bench")]
+#[cfg(any(test, feature = "bench"))]
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 
@@ -100,7 +100,7 @@ fn softmax_sample_entries(
 pub struct DefaultWorkerSelector {
     pub kv_router_config: KvRouterConfig,
     pub worker_type: &'static str,
-    #[cfg(feature = "bench")]
+    #[cfg(any(test, feature = "bench"))]
     deterministic_rng: Option<Arc<Mutex<fastrand::Rng>>>,
 }
 
@@ -117,12 +117,12 @@ impl DefaultWorkerSelector {
         Self {
             kv_router_config: kv_router_config.unwrap_or_default(),
             worker_type,
-            #[cfg(feature = "bench")]
+            #[cfg(any(test, feature = "bench"))]
             deterministic_rng: None,
         }
     }
 
-    #[cfg(feature = "bench")]
+    #[cfg(any(test, feature = "bench"))]
     pub fn new_seeded(
         kv_router_config: Option<KvRouterConfig>,
         worker_type: &'static str,
@@ -397,7 +397,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             }
         };
 
-        #[cfg(feature = "bench")]
+        #[cfg(any(test, feature = "bench"))]
         let deterministic_choice = self.deterministic_rng.as_ref().map(|rng| {
             let mut candidates = Vec::new();
             eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
@@ -476,9 +476,9 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 
             softmax_sample(&worker_logits, temperature)
         };
-        #[cfg(feature = "bench")]
+        #[cfg(any(test, feature = "bench"))]
         let (best_worker, best_logit) = deterministic_choice.unwrap_or_else(random_choice);
-        #[cfg(not(feature = "bench"))]
+        #[cfg(not(any(test, feature = "bench")))]
         let (best_worker, best_logit) = random_choice();
 
         let best_host_pinned_overlap_blocks = request
@@ -798,7 +798,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "bench")]
     #[test]
     fn seeded_selector_is_stable_for_ties_and_temperature_sampling() {
         use crate::test_utils::SimpleWorkerConfig;

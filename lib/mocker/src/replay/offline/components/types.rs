@@ -345,7 +345,17 @@ impl TrafficAccumulator {
 
 #[cfg(test)]
 mod tests {
+    use std::mem::size_of;
+
     use super::*;
+
+    #[test]
+    fn no_engine_events_and_batch_are_zero_sized() {
+        type Batch = <NoEngineEvents as ReplayEngineObservation>::Batch;
+
+        assert_eq!(size_of::<NoEngineEvents>(), 0);
+        assert_eq!(size_of::<Batch>(), 0);
+    }
 
     #[test]
     fn traffic_accumulator_drain_with_no_admissions_reports_zero_hit_rate() {
