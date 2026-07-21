@@ -58,7 +58,7 @@ git clone https://github.com/ai-dynamo/dynamo.git
 cd dynamo
 
 # Checkout the release branch matching your Dynamo platform version
-git checkout release/1.2.1
+git checkout release/1.3.0
 ```
 
 ### Set environment variables for GKE
