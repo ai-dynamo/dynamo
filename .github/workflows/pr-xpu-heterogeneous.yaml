@@ -62,6 +62,7 @@ jobs:
         id: pr-info
         env:
           GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || '' }}
         run: |
           if [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
             echo "has_xpu_label=true" >> "$GITHUB_OUTPUT"
@@ -70,10 +71,26 @@ jobs:
             exit 0
           fi
 
-          if [[ "${GITHUB_EVENT_NAME}" == "issue_comment" ]]; then
-            PR_NUMBER="${{ github.event.issue.number }}"
-          else
-            PR_NUMBER="${GITHUB_REF_NAME##*/}"
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            echo "has_xpu_label=true" >> "$GITHUB_OUTPUT"
+            echo "checkout_ref=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+            echo "Push to ${GITHUB_REF_NAME}; running XPU CI at ${GITHUB_SHA}"
+            exit 0
+          fi
+          
+          echo "ISSUE_NUMBER=${ISSUE_NUMBER}"
+          echo "$GITHUB_EVENT_PATH"
+          cat "$GITHUB_EVENT_PATH"
+
+          PR_NUMBER="${ISSUE_NUMBER}"
+          if [[ -z "${PR_NUMBER}" ]]; then
+            PR_NUMBER="$(jq -r '.issue.number // empty' "$GITHUB_EVENT_PATH")"
+            echo "PR_NUMBER=${PR_NUMBER}"
+          fi
+
+          if [[ -z "${PR_NUMBER}" ]]; then
+            echo "Could not resolve pull request number for ${GITHUB_EVENT_NAME}"
+            exit 1
           fi
 
           PR_JSON=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")
@@ -81,13 +98,8 @@ jobs:
           # Check for xpu label
           HAS_XPU=$(jq -r '[.labels[].name] | any(. == "xpu")' <<< "${PR_JSON}")
           echo "has_xpu_label=${HAS_XPU}" >> "$GITHUB_OUTPUT"
-          if [[ "${GITHUB_EVENT_NAME}" == "issue_comment" ]]; then
-            CHECKOUT_REF="refs/pull/${PR_NUMBER}/head"
-            CHECKOUT_SHA=$(jq -r '.head.sha' <<< "${PR_JSON}")
-          else
-            CHECKOUT_REF="${GITHUB_SHA}"
-            CHECKOUT_SHA="${GITHUB_SHA}"
-          fi
+          CHECKOUT_REF="refs/pull/${PR_NUMBER}/head"
+          CHECKOUT_SHA=$(jq -r '.head.sha' <<< "${PR_JSON}")
           echo "checkout_ref=${CHECKOUT_REF}" >> "$GITHUB_OUTPUT"
           if [[ "${HAS_XPU}" == "true" ]]; then
             echo "✅ PR #${PR_NUMBER} has 'xpu' label – running XPU CI at ${CHECKOUT_REF} (${CHECKOUT_SHA})"
@@ -265,7 +277,6 @@ jobs:
       nvidia_node: "nvidia_node"
       model: 'Qwen/Qwen3-0.6B'
       tensor_parallel: '1'
-      log_dir_name: "dynamo-heterog-logs-px-dn-${{ needs.build-xpu.outputs.short_sha }}"
 
   heterog-test-pn-dx:
     name: "Heterog: NVIDIA Prefill + XPU Decode"
@@ -291,7 +302,6 @@ jobs:
       nvidia_node: "nvidia_node"
       model: 'Qwen/Qwen3-0.6B'
       tensor_parallel: '1'
-      log_dir_name: "dynamo-heterog-logs-pn-dx-${{ needs.build-xpu.outputs.short_sha }}"
 
   # ============================================================================
   # STATUS CHECK

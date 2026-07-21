@@ -67,10 +67,6 @@ on:
         required: false
         type: string
         default: ''
-      log_dir_name:
-        description: 'Log directory name for artifacts'
-        required: true
-        type: string
 
 permissions:
   contents: read
@@ -82,7 +78,45 @@ jobs:
     env:
       NS: dynamo-system
     steps:
+      - name: Prepare local log directory
+        id: prepare-local-log-directory
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Sanitize test name to be a valid Kubernetes resource name (lowercase, alphanumeric, hyphens) once
+          SAFE_TEST_NAME=$(printf '%s' "${{ inputs.test_name }}" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9-' '-' | sed -E 's/^-+//; s/-+$//')
+          if [ -z "$SAFE_TEST_NAME" ]; then
+            SAFE_TEST_NAME="test"
+          fi
+
+          # Limit to 56 chars to leave room for suffixes in K8s resource names
+          SAFE_TEST_NAME="${SAFE_TEST_NAME:0:56}"
+          SAFE_TEST_NAME=$(printf '%s' "$SAFE_TEST_NAME" | sed -E 's/-+$//')
+          if [ -z "$SAFE_TEST_NAME" ]; then
+            SAFE_TEST_NAME="test"
+          fi
+          echo "SAFE_TEST_NAME=$SAFE_TEST_NAME" >> "$GITHUB_ENV"
+
+          LOG_ROOT="/workspace-logs/github-runner/aung-san-i-dynamo/${{ github.run_id }}-${{ github.run_attempt }}/$SAFE_TEST_NAME"
+          LOCAL_LOG_DIR="$LOG_ROOT/local"
+          UPLOAD_LOG_DIR="$LOG_ROOT/upload"
+          mkdir -p "$LOCAL_LOG_DIR" "$UPLOAD_LOG_DIR"
+
+          echo "LOG_ROOT=$LOG_ROOT" >> "$GITHUB_ENV"
+          echo "LOCAL_LOG_DIR=$LOCAL_LOG_DIR" >> "$GITHUB_ENV"
+          echo "UPLOAD_LOG_DIR=$UPLOAD_LOG_DIR" >> "$GITHUB_ENV"
+          echo "log_root=$LOG_ROOT" >> "$GITHUB_OUTPUT"
+          echo "upload_log_dir=$UPLOAD_LOG_DIR" >> "$GITHUB_OUTPUT"
+          echo "safe_test_name=$SAFE_TEST_NAME" >> "$GITHUB_OUTPUT"
+          echo "Prepared local log directory: $LOG_ROOT"
+
+          DEPLOY_LOG="$LOCAL_LOG_DIR/deploy-test.log"
+          echo "DEPLOY_LOG=$DEPLOY_LOG" >> "$GITHUB_ENV"
+
       - name: print-inputs
+        env:
+          INPUTS_JSON: ${{ toJson(inputs) }}
         run: |
           echo "Test Name: ${{ inputs.test_name }}"
           echo "Test YAML Path: ${{ inputs.test_yaml_path }}"
@@ -97,7 +131,10 @@ jobs:
           echo "NVIDIA Node: ${{ inputs.nvidia_node }}"
           echo "Model: ${{ inputs.model }}"
           echo "Tensor Parallel: ${{ inputs.tensor_parallel }}"
-          echo "Log Directory Name: ${{ inputs.log_dir_name }}"
+          echo "Log Directory Name: $LOG_ROOT"
+
+          echo "====== inputs ======"
+          echo "$INPUTS_JSON" | tee "$LOCAL_LOG_DIR/inputs.json"
           
       - name: Prepare checkout path
         shell: bash
@@ -114,22 +151,26 @@ jobs:
           path: repo
 
       - name: Prepare diagnostics helper
-        env:
-          LOG_DIR_NAME: ${{ inputs.log_dir_name }}
         run: |
           # Shared helper: snapshot pod logs (current + previous), describe, and
           # events to a local dir. Called at every failure point so logs are
           # captured before pods churn / events age out, and again at the end.
           # The quoted heredoc keeps $VARS literal -- they expand when the helper
-          # runs, reading TEST_NAME (from GITHUB_ENV) and LOG_DIR_NAME from env.
+          # runs, reading TEST_NAME and LOCAL_LOG_DIR from GITHUB_ENV.
           # Usage: dump-diagnostics.sh [subdir]
-          cat > "$RUNNER_TEMP/dump-diagnostics.sh" <<'SCRIPT'
+          cat > "$LOCAL_LOG_DIR/dump-diagnostics.sh" <<'SCRIPT'
           #!/usr/bin/env bash
           set -u
           SUFFIX="${1:-}"
-          DEST="$LOG_DIR_NAME"
-          [ -n "$SUFFIX" ] && DEST="$LOG_DIR_NAME/$SUFFIX"
+          DEST="$LOCAL_LOG_DIR"
+          [ -n "$SUFFIX" ] && DEST="$LOCAL_LOG_DIR/$SUFFIX"
           mkdir -p "$DEST"
+
+          # Dynamo's Rust tracing logger writes ANSI color codes (ESC[..m) to
+          # stdout; kubectl logs preserves them, leaving the saved .log files
+          # littered with ^[[2m/^[[0m escapes that are hard to read. Strip CSI
+          # sequences so the captured pod logs are plain text.
+          strip_ansi() { sed -r 's/\x1b\[[0-9;?]*[a-zA-Z]//g'; }
 
           if [ -z "${TEST_NAME:-}" ]; then
             echo "dump-diagnostics: TEST_NAME is empty, nothing to collect" | tee "$DEST/NO_TEST_NAME.txt"
@@ -148,13 +189,14 @@ jobs:
           BENCH=$(kubectl get pods -n "$NS" -l "job-name=$TEST_NAME-bench" -o name 2>/dev/null || true)
           for pod in $PODS $BENCH; do
             name=${pod##*/}
-            kubectl logs -n "$NS" "$pod" --all-containers=true            > "$DEST/$name.log"          2>&1 || true
-            kubectl logs -n "$NS" "$pod" --all-containers=true --previous > "$DEST/$name-previous.log" 2>/dev/null || true
+            kubectl logs -n "$NS" "$pod" --all-containers=true            2>&1        | strip_ansi > "$DEST/$name.log"          || true
+            kubectl logs -n "$NS" "$pod" --all-containers=true --previous 2>/dev/null | strip_ansi > "$DEST/$name-previous.log" || true
             kubectl describe -n "$NS" "$pod"                              > "$DEST/$name-describe.txt" 2>&1 || true
           done
           SCRIPT
-          chmod +x "$RUNNER_TEMP/dump-diagnostics.sh"
-          echo "Wrote diagnostics helper to $RUNNER_TEMP/dump-diagnostics.sh"
+          chmod +x "$LOCAL_LOG_DIR/dump-diagnostics.sh"
+          cp "$LOCAL_LOG_DIR/dump-diagnostics.sh" "$RUNNER_TEMP/dump-diagnostics.sh"
+          echo "Wrote diagnostics helper to $LOCAL_LOG_DIR/dump-diagnostics.sh"
 
       - name: Set resource templates and nodes
         id: set-templates
@@ -188,8 +230,16 @@ jobs:
           verify_node_label() {
             local role_name="$1"
             local label_value="$2"
+            local output_file="$LOCAL_LOG_DIR/verify-node-label-$role_name.txt"
 
-            kubectl get nodes -l "dynamo.intel.com/node=$label_value" --no-headers | grep -q . || {
+            kubectl get nodes -l "dynamo.intel.com/node=$label_value" --no-headers > "$output_file" 2>&1 || {
+              echo "ERROR: Failed to check node label dynamo.intel.com/node=$label_value for $role_name"
+              cat "$output_file"
+              exit 1
+            }
+
+            cat "$output_file"
+            grep -q . "$output_file" || {
               echo "ERROR: No node found with label dynamo.intel.com/node=$label_value for $role_name"
               exit 1
             }
@@ -200,9 +250,6 @@ jobs:
 
       - name: Deploy test
         env:
-          RUN_ID: ${{ github.run_id }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-          INPUT_TEST_NAME: ${{ inputs.test_name }}
           INPUT_TEST_YAML_PATH: ${{ inputs.test_yaml_path }}
           DOCKER_IMAGE_XPU: ${{ inputs.docker_image_xpu }}
           DOCKER_IMAGE_GPU: ${{ inputs.docker_image_gpu }}
@@ -214,13 +261,30 @@ jobs:
           TENSOR_PARALLEL: ${{ inputs.tensor_parallel }}
         run: |
           cd "$GITHUB_WORKSPACE/$REPO_NAME"
+          RENDERED_MANIFEST="$LOCAL_LOG_DIR/deploy-test-rendered.yaml"
+          APPLIED_MANIFEST="$LOCAL_LOG_DIR/deploy-test-applied.yaml"
+          exec > >(tee -a "$DEPLOY_LOG") 2>&1
 
           # Use run ID + attempt to create unique deployment names to avoid collisions between concurrent runs.
           # Keep only the last 6 chars of the run ID to stay short (CCL has a 63 char hostname limit).
-          RUN_ID_SHORT="${RUN_ID: -6}"
-          export TEST_NAME="r${RUN_ID_SHORT}a${RUN_ATTEMPT}-${INPUT_TEST_NAME}"
+          export TEST_NAME="$SAFE_TEST_NAME"
           echo "TEST_NAME=$TEST_NAME" >> "$GITHUB_ENV"
-          echo "Deploying with unique name: $TEST_NAME (run $RUN_ID attempt $RUN_ATTEMPT)"
+          echo "Deploying with unique name: $TEST_NAME (run $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT)"
+
+          cat <<EOF
+          Manual deploy replay:
+          cd "$GITHUB_WORKSPACE/$REPO_NAME"
+          export TEST_NAME="$TEST_NAME"
+          export DOCKER_IMAGE_XPU="$DOCKER_IMAGE_XPU"
+          export DOCKER_IMAGE_GPU="$DOCKER_IMAGE_GPU"
+          export XPU_RESOURCE_TEMPLATE="$XPU_RESOURCE_TEMPLATE"
+          export NVIDIA_RESOURCE_TEMPLATE="$NVIDIA_RESOURCE_TEMPLATE"
+          export XPU_NODE="$XPU_NODE"
+          export NVIDIA_NODE="$NVIDIA_NODE"
+          export MODEL="$MODEL"
+          export TENSOR_PARALLEL="$TENSOR_PARALLEL"
+          envsubst '\${TEST_NAME} \${DOCKER_IMAGE_XPU} \${DOCKER_IMAGE_GPU} \${XPU_RESOURCE_TEMPLATE} \${NVIDIA_RESOURCE_TEMPLATE} \${XPU_NODE} \${NVIDIA_NODE} \${MODEL} \${TENSOR_PARALLEL}' < "$INPUT_TEST_YAML_PATH" | yq 'select(.kind != "Job")' | kubectl apply -f - -n "$NS"
+          EOF
 
           # Delete any existing DynamoGraphDeployment from previous runs (shouldn't exist with unique names)
           kubectl delete job "$TEST_NAME-bench" -n "$NS" --ignore-not-found=true --wait=true
@@ -232,10 +296,12 @@ jobs:
           echo "  DOCKER_IMAGE_GPU=$DOCKER_IMAGE_GPU"
           echo "  XPU_RESOURCE_TEMPLATE=$XPU_RESOURCE_TEMPLATE (Node: $XPU_NODE)"
           echo "  NVIDIA_RESOURCE_TEMPLATE=$NVIDIA_RESOURCE_TEMPLATE (Node: $NVIDIA_NODE)"
+          echo "  Rendered manifest: $RENDERED_MANIFEST"
+          echo "  Applied manifest: $APPLIED_MANIFEST"
 
           # Apply DynamoGraphDeployment only, skip Job (will be created after service pods are Ready)
-          envsubst '${TEST_NAME} ${DOCKER_IMAGE_XPU} ${DOCKER_IMAGE_GPU} ${XPU_RESOURCE_TEMPLATE} ${NVIDIA_RESOURCE_TEMPLATE} ${XPU_NODE} ${NVIDIA_NODE} ${MODEL} ${TENSOR_PARALLEL}' < "$INPUT_TEST_YAML_PATH" | \
-            yq 'select(.kind != "Job")' | \
+          envsubst '${TEST_NAME} ${DOCKER_IMAGE_XPU} ${DOCKER_IMAGE_GPU} ${XPU_RESOURCE_TEMPLATE} ${NVIDIA_RESOURCE_TEMPLATE} ${XPU_NODE} ${NVIDIA_NODE} ${MODEL} ${TENSOR_PARALLEL}' < "$INPUT_TEST_YAML_PATH" | tee "$RENDERED_MANIFEST" | \
+            yq 'select(.kind != "Job")' | tee "$APPLIED_MANIFEST" | \
             kubectl apply -f - -n "$NS"
 
           echo ""
@@ -246,9 +312,10 @@ jobs:
         # Cap below GitHub's hard job limit so this step fails on its own terms
         # (running its diagnostics dump) instead of being force-cancelled.
         timeout-minutes: 250
-        env:
-          LOG_DIR_NAME: ${{ inputs.log_dir_name }}
         run: |
+          # redirects all output from the rest of that shell step to both console log and $DEPLOY_LOG
+          exec > >(tee -a "$DEPLOY_LOG") 2>&1
+
           echo "Waiting for pods to be created by DynamoGraphDeployment controller..."
           pod_count=0
           for i in {1..10}; do
@@ -326,9 +393,9 @@ jobs:
 
             # Exit on errors
             if [ "$has_error" = true ]; then
-              echo "ERROR: $error_msg"
-              kubectl get pods -n "$NS" -l nvidia.com/dynamo-graph-deployment-name="$TEST_NAME"
-              kubectl describe pods -n "$NS" -l nvidia.com/dynamo-graph-deployment-name="$TEST_NAME"
+              echo "ERROR: $error_msg"; echo ""
+              kubectl get pods -n "$NS" -l nvidia.com/dynamo-graph-deployment-name="$TEST_NAME"; echo ""
+              kubectl describe pods -n "$NS" -l nvidia.com/dynamo-graph-deployment-name="$TEST_NAME"; echo ""
               # Capture logs now -- a crash-looping/failed pod may be replaced before Collect logs runs
               "$RUNNER_TEMP/dump-diagnostics.sh" pod-error || true
               exit 1
@@ -368,7 +435,6 @@ jobs:
           NVIDIA_NODE: ${{ inputs.nvidia_node }}
           MODEL: ${{ inputs.model }}
           TENSOR_PARALLEL: ${{ inputs.tensor_parallel }}
-          LOG_DIR_NAME: ${{ inputs.log_dir_name }}
         run: |
           cd "$GITHUB_WORKSPACE/$REPO_NAME"
 
@@ -413,8 +479,6 @@ jobs:
 
       - name: Wait for curl test and benchmark completion
         timeout-minutes: 35
-        env:
-          LOG_DIR_NAME: ${{ inputs.log_dir_name }}
         run: |
           echo "Waiting for BenchmarkRunner pod to complete..."
           BENCHMARK_POD=$(kubectl get pods -n "$NS" -l job-name="$TEST_NAME-bench" -o name | head -n1)
@@ -440,6 +504,17 @@ jobs:
               LOGS=$(kubectl logs -n "$NS" "$BENCHMARK_POD" 2>&1)
               echo "$LOGS"
 
+              # A green pod phase is NOT proof the benchmark ran: `vllm bench
+              # serve` can raise a Python traceback (e.g. "Initial test run
+              # failed ... Error: Not Found" when the frontend 404s) while the
+              # container still exits 0 and the pod reports phase=Succeeded.
+              # Detect those crash markers explicitly and fail.
+              if echo "$LOGS" | grep -Eq 'Traceback \(most recent call last\)|Initial test run failed'; then
+                echo "ERROR: Benchmark run crashed (traceback / 'Initial test run failed' found in logs)"
+                "$RUNNER_TEMP/dump-diagnostics.sh" bench-crashed || true
+                exit 1
+              fi
+
               # Parse benchmark results
               SUCCESSFUL_REQUESTS=$(echo "$LOGS" | grep -oP 'Successful requests:\s+\K\d+' || echo "")
               FAILED_REQUESTS=$(echo "$LOGS" | grep -oP 'Failed requests:\s+\K\d+' || echo "")
@@ -451,13 +526,30 @@ jobs:
               echo "  Failed requests: ${FAILED_REQUESTS:-unknown}"
               echo "========================================="
 
+              # A valid run MUST report a results summary. If the "Successful
+              # requests:" line is absent, the benchmark produced no metrics --
+              # treat that as failure instead of silently passing (the previous
+              # logic only failed on FAILED_REQUESTS>0, so an empty summary from
+              # a crashed run slipped through as a pass).
+              if [ -z "$SUCCESSFUL_REQUESTS" ]; then
+                echo "ERROR: Benchmark did not report a results summary (no 'Successful requests:' line)"
+                "$RUNNER_TEMP/dump-diagnostics.sh" bench-no-results || true
+                exit 1
+              fi
+
               # Fail if there were any failed requests
               if [ -n "$FAILED_REQUESTS" ] && [ "$FAILED_REQUESTS" -gt 0 ]; then
                 echo "ERROR: Benchmark validation failed - $FAILED_REQUESTS failed requests detected"
                 exit 1
               fi
 
-              echo "✓ Benchmark validation passed"
+              # Fail if the run completed but served nothing
+              if [ "$SUCCESSFUL_REQUESTS" -eq 0 ]; then
+                echo "ERROR: Benchmark validation failed - 0 successful requests"
+                exit 1
+              fi
+
+              echo "✓ Benchmark validation passed ($SUCCESSFUL_REQUESTS successful requests)"
               exit 0
             elif [ "$phase" = "Failed" ] || [ "$phase" = "Error" ]; then
               echo "ERROR: Benchmark pod in phase: $phase"
@@ -476,16 +568,15 @@ jobs:
 
       - name: Collect logs
         if: always()
-        env:
-          LOG_DIR_NAME: ${{ inputs.log_dir_name }}
         run: |
-          # Final snapshot to the artifact root. Reuses the shared helper, which
+          # Final snapshot into LOCAL_LOG_DIR (runner-local; not uploaded -- only
+          # UPLOAD_LOG_DIR ships in the artifact). Reuses the shared helper, which
           # guards against an empty TEST_NAME and captures current + previous
           # logs, describe, and events. If an earlier step already failed it
           # wrote a subdir snapshot (e.g. pod-error/) that survives here.
           if [ ! -x "$RUNNER_TEMP/dump-diagnostics.sh" ]; then
             echo "WARNING: diagnostics helper missing; collecting nothing"
-            mkdir -p "$LOG_DIR_NAME"
+            mkdir -p "$LOCAL_LOG_DIR"
             exit 0
           fi
           "$RUNNER_TEMP/dump-diagnostics.sh" || true
@@ -494,13 +585,12 @@ jobs:
         if: always()
         env:
           INPUT_TEST_NAME: ${{ inputs.test_name }}
-          LOG_DIR_NAME: ${{ inputs.log_dir_name }}
         run: |
           echo "Generating performance summary JSON..."
 
           # Find benchmark pod log file
           BENCHMARK_LOG=""
-          for log in "$LOG_DIR_NAME"/*bench*.log; do
+          for log in "$LOCAL_LOG_DIR"/*bench*.log; do
             if [ -f "$log" ]; then
               BENCHMARK_LOG="$log"
               break
@@ -509,9 +599,14 @@ jobs:
 
           if [ -z "$BENCHMARK_LOG" ] || [ ! -f "$BENCHMARK_LOG" ]; then
             echo "⚠ Warning: Benchmark log not found, creating empty perf_summary.json"
-            echo '{"error": "Benchmark log not found"}' > "$LOG_DIR_NAME/perf_summary.json"
+            echo '{"error": "Benchmark log not found"}' > "$UPLOAD_LOG_DIR/perf_summary.json"
             exit 0
           fi
+
+          # dump-diagnostics.sh writes *bench*.log into LOCAL_LOG_DIR, but the
+          # Upload logs step only ships UPLOAD_LOG_DIR. Copy the raw benchmark log
+          # into the artifact so it travels alongside perf_summary.json.
+          cp "$BENCHMARK_LOG" "$UPLOAD_LOG_DIR/" || true
 
           echo "Parsing benchmark results from: $BENCHMARK_LOG"
 
@@ -594,17 +689,52 @@ jobs:
           EOF
 
           chmod +x /tmp/parse_perf.sh
-          /tmp/parse_perf.sh "$BENCHMARK_LOG" > "$LOG_DIR_NAME/perf_summary.json"
+          /tmp/parse_perf.sh "$BENCHMARK_LOG" > "$UPLOAD_LOG_DIR/perf_summary.json"
 
           echo "✓ Generated perf_summary.json:"
-          head -20 "$LOG_DIR_NAME/perf_summary.json"
+          head -20 "$UPLOAD_LOG_DIR/perf_summary.json"
+
+      - name: Stage failure diagnostics for upload
+        if: failure()
+        shell: bash
+        run: |
+          set -u
+          # On success the artifact ships only perf_summary.json + the bench log.
+          # On failure the pod diagnostics live solely in LOCAL_LOG_DIR (plus
+          # failure subdirs like pod-error/), so they never reach the downloadable
+          # artifact. Copy just those files -- pod *.log, *-previous.log, and
+          # *-describe.txt -- into UPLOAD_LOG_DIR, preserving the subdir layout,
+          # so a failed run is debuggable from the artifact alone.
+          # Guard against the vars being unset (e.g. the Prepare step failed
+          # before writing GITHUB_ENV) so set -u doesn't abort this failure hook.
+          local_dir="${LOCAL_LOG_DIR:-}"
+          upload_dir="${UPLOAD_LOG_DIR:-}"
+          if [ -z "$local_dir" ] || [ -z "$upload_dir" ]; then
+            echo "LOCAL_LOG_DIR/UPLOAD_LOG_DIR not set; nothing to stage"
+            exit 0
+          fi
+          if [ ! -d "$local_dir" ]; then
+            echo "LOCAL_LOG_DIR ($local_dir) missing; nothing to stage"
+            exit 0
+          fi
+          mkdir -p "$upload_dir"
+          cd "$local_dir" || exit 0
+          staged=0
+          while IFS= read -r -d '' f; do
+            dest="$upload_dir/$f"
+            mkdir -p "$(dirname "$dest")"
+            if cp "$f" "$dest"; then
+              staged=$((staged + 1))
+            fi
+          done < <(find . \( -name '*.log' -o -name '*-describe.txt' \) -type f -print0)
+          echo "Staged $staged failure-diagnostic file(s) into $upload_dir"
 
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.log_dir_name }}
-          path: ${{ inputs.log_dir_name }}/
+          name: ${{ steps.prepare-local-log-directory.outputs.safe_test_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.prepare-local-log-directory.outputs.upload_log_dir }}/
           retention-days: 7
           if-no-files-found: warn
 

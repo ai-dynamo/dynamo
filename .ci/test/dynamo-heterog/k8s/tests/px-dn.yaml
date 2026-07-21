@@ -457,11 +457,18 @@ spec:
                 --percentile-metrics ttft,tpot,itl,e2el \
                 --metric-percentiles 50,90,99 \
                 --ignore-eos
+              BENCH_RC=$?
 
               echo ""
               echo "========================================="
-              echo "Benchmark Complete"
+              echo "Benchmark Complete (exit code: $BENCH_RC)"
               echo "========================================="
+
+              # Propagate the benchmark's real exit status. Without this, the
+              # trailing echo returns 0, so a crashed `vllm bench serve` (e.g.
+              # "Initial test run failed" traceback) still exits the container 0
+              # and the Job (backoffLimit: 0) is reported phase=Succeeded.
+              exit "$BENCH_RC"
           env:
             - name: FRONTEND_PORT
               value: "8000"
