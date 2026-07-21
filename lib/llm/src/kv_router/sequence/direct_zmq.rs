@@ -10,6 +10,7 @@ use dynamo_kv_router::{
 };
 use dynamo_runtime::{
     component::Endpoint,
+    config::parse_bool_opt,
     discovery::EventTransportKind,
     transports::event_plane::{Codec, uses_direct_zmq},
 };
@@ -39,18 +40,20 @@ impl DirectZmqSequenceConfig {
     fn from_lookup(mut get_env: impl FnMut(&str) -> Option<OsString>) -> Self {
         let enabled = match get_env(DIRECT_ZMQ_ENV) {
             None => true,
-            Some(raw) => match raw.to_string_lossy().trim().to_ascii_lowercase().as_str() {
-                "0" | "false" => false,
-                "1" | "true" => true,
-                value => {
-                    tracing::warn!(
-                        env = DIRECT_ZMQ_ENV,
-                        %value,
-                        "invalid direct-ZMQ active-sequence setting; using enabled default"
-                    );
-                    true
+            Some(raw) => {
+                let value = raw.to_string_lossy();
+                match parse_bool_opt(&value) {
+                    Some(enabled) => enabled,
+                    None => {
+                        tracing::warn!(
+                            env = DIRECT_ZMQ_ENV,
+                            %value,
+                            "invalid direct-ZMQ active-sequence setting; using enabled default"
+                        );
+                        true
+                    }
                 }
-            },
+            }
         };
 
         let rcvhwm = match get_env(RCVHWM_ENV) {

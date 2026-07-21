@@ -777,11 +777,13 @@ mod tests {
 
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                let seen = last_sequences.lock().unwrap();
-                if seen.contains_key(&publisher_a_id) && seen.contains_key(&publisher_b_id) {
+                let both_seen = {
+                    let seen = last_sequences.lock().unwrap();
+                    seen.contains_key(&publisher_a_id) && seen.contains_key(&publisher_b_id)
+                };
+                if both_seen {
                     break;
                 }
-                drop(seen);
                 tokio::task::yield_now().await;
             }
         })
