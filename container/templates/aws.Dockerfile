@@ -82,21 +82,18 @@ RUN set -eux; \
     ln -s /usr/local/cuda/lib64/stubs/libcuda.so /tmp/cuda-stubs/libcuda.so.1; \
     core=/usr/local/lib/python3.12/dist-packages/.nixl_cu13.mesonpy.libs; \
     vendor=/usr/local/lib/python3.12/dist-packages/nixl_cu13.libs; \
+    plugin_libs="/tmp/cuda-stubs:/opt/amazon/efa/lib:${core}:${vendor}"; \
     for plugin in \
         "${core}/plugins/libplugin_LIBFABRIC.so" \
         "${vendor}/nixl/libplugin_LIBFABRIC.so"; do \
-        case "${plugin}" in \
-            "${core}"/*) plugin_root="${core}" ;; \
-            *) plugin_root="${vendor}" ;; \
-        esac; \
         env -u LD_PRELOAD \
-            LD_LIBRARY_PATH="/tmp/cuda-stubs:/opt/amazon/efa/lib:${plugin_root}" \
+            LD_LIBRARY_PATH="${plugin_libs}" \
             ldd "${plugin}" | tee /tmp/nixl-libfabric.ldd; \
-        ! grep -Fq "not found" /tmp/nixl-libfabric.ldd; \
+        if grep -Fq "not found" /tmp/nixl-libfabric.ldd; then exit 1; fi; \
         grep -F "libfabric.so.1 => /opt/amazon/efa/lib/libfabric.so.1" \
             /tmp/nixl-libfabric.ldd; \
         env -u LD_PRELOAD \
-            LD_LIBRARY_PATH="/tmp/cuda-stubs:/opt/amazon/efa/lib:${plugin_root}" \
+            LD_LIBRARY_PATH="${plugin_libs}" \
             PLUGIN="${plugin}" python3 -c \
                 'import ctypes, os; ctypes.CDLL(os.environ["PLUGIN"], mode=os.RTLD_NOW | os.RTLD_LOCAL)'; \
     done
