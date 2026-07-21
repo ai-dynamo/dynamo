@@ -992,6 +992,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     _benchmark_results: Optional[dict] = None
     _scale_ep_in_progress: bool = False
 
+    @property
+    def loaded_loras(self) -> dict[str, LoRAInfo]:
+        """Compatibility alias for LoRAState-backed adapter tracking."""
+        return self._lora_state.loaded_loras
+
+    @loaded_loras.setter
+    def loaded_loras(self, value: dict[str, LoRAInfo]) -> None:
+        self._lora_state.loaded_loras = value
+
     def __init__(
         self,
         runtime,
