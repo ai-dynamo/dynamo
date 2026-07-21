@@ -517,10 +517,13 @@ async fn reconcile_sources(
         if source.state.active_bindings() == Some(&bindings) {
             continue;
         }
+        if !matches!(&source.state, SourceState::Preconnected { .. }) {
+            continue;
+        }
         let SourceState::Preconnected { activate } =
             std::mem::replace(&mut source.state, SourceState::Fenced)
         else {
-            continue;
+            unreachable!("source state was checked above");
         };
         metrics.decrement_sources("preconnected");
         if activate.send(()).is_ok() {

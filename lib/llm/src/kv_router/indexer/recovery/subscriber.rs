@@ -294,6 +294,8 @@ pub(super) fn clear_mismatch_metric_on_cancellation(
     );
 }
 
+/// Dropping this handle cancels the KV event subscription.
+#[must_use = "dropping the handle cancels the KV event subscription"]
 pub(crate) struct KvEventSubscriptionHandle {
     cancel: CancellationToken,
     completion: Option<oneshot::Receiver<()>>,
