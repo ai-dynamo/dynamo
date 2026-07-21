@@ -47,6 +47,7 @@ class WorkerMode(Enum):
     PREFILL = "prefill"
     DECODE = "decode"
 
+
 pytestmark = [
     pytest.mark.fault_tolerance,
     pytest.mark.vllm,
