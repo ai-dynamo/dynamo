@@ -1534,6 +1534,43 @@ async fn drain_stream(
     }
 }
 
+/// One choice's accumulated stream output, keyed by `choice.index` in
+/// `demux_by_choice`. Tool calls stay keyed by tool index so fragments merge.
+#[derive(Default)]
+struct PerChoice {
+    reasoning: String,
+    content: String,
+    tool_calls: BTreeMap<u32, MergedToolCall>,
+}
+
+/// Demux collected output chunks by `choice.index`, merging each choice's
+/// reasoning/content/tool-call deltas in arrival order.
+fn demux_by_choice(
+    output_chunks: &[Annotated<NvCreateChatCompletionStreamResponse>],
+) -> BTreeMap<u32, PerChoice> {
+    let mut by_choice: BTreeMap<u32, PerChoice> = BTreeMap::new();
+    for output in output_chunks {
+        let Some(data) = output.data.as_ref() else {
+            continue;
+        };
+        for choice in &data.inner.choices {
+            let entry = by_choice.entry(choice.index).or_default();
+            if let Some(r) = &choice.delta.reasoning_content {
+                entry.reasoning.push_str(r);
+            }
+            if let Some(c) = &choice.delta.content {
+                entry.content.push_str(get_text(c));
+            }
+            if let Some(tcs) = &choice.delta.tool_calls {
+                for tc in tcs {
+                    entry.tool_calls.entry(tc.index).or_default().merge_from(tc);
+                }
+            }
+        }
+    }
+    by_choice
+}
+
 /// Assert the standard "tool call extracted, nothing leaks" success shape
 /// shared by every matrix row that expects a successful extraction.
 fn assert_clean_tool_call(
@@ -1692,32 +1729,7 @@ async fn postprocessor_parsing_stream_multi_choice_isolates_guided_bypass_decisi
     let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
         output_stream.collect().await;
 
-    #[derive(Default)]
-    struct PerChoice {
-        reasoning: String,
-        content: String,
-        tool_calls: BTreeMap<u32, MergedToolCall>,
-    }
-    let mut by_choice: BTreeMap<u32, PerChoice> = BTreeMap::new();
-    for output in &output_chunks {
-        let Some(data) = output.data.as_ref() else {
-            continue;
-        };
-        for choice in &data.inner.choices {
-            let entry = by_choice.entry(choice.index).or_default();
-            if let Some(r) = &choice.delta.reasoning_content {
-                entry.reasoning.push_str(r);
-            }
-            if let Some(c) = &choice.delta.content {
-                entry.content.push_str(get_text(c));
-            }
-            if let Some(tcs) = &choice.delta.tool_calls {
-                for tc in tcs {
-                    entry.tool_calls.entry(tc.index).or_default().merge_from(tc);
-                }
-            }
-        }
-    }
+    let by_choice = demux_by_choice(&output_chunks);
 
     let c0 = by_choice.get(&0).expect("choice 0 produced output");
     assert!(
@@ -1776,6 +1788,15 @@ mod interleave {
         BoundarySplit,
     }
 
+    /// Every schedule the lane exercises — shared by the lossless roundtrip
+    /// test and the isolation assertion so the two cannot drift apart.
+    pub const ALL_SCHEDULES: [Schedule; 4] = [
+        Schedule::RoundRobin,
+        Schedule::FirstByteOffset(1),
+        Schedule::FirstByteOffset(2),
+        Schedule::BoundarySplit,
+    ];
+
     /// Split `s` near the middle on a UTF-8 char boundary. Returns `("", s)`
     /// when the string is too short to split (single char / empty).
     fn split_mid(s: &str) -> (&str, &str) {
@@ -1786,7 +1807,7 @@ mod interleave {
         while mid < s.len() && !s.is_char_boundary(mid) {
             mid += 1;
         }
-        if mid == 0 || mid == s.len() {
+        if mid == s.len() {
             return ("", s);
         }
         s.split_at(mid)
@@ -1796,16 +1817,12 @@ mod interleave {
         let max_len = shapes.iter().map(|s| s.len()).max().unwrap_or(0);
         let mut chunks: Vec<Vec<(u32, String)>> = Vec::new();
         match schedule {
-            Schedule::RoundRobin => {
-                for t in 0..max_len {
-                    for (i, shape) in shapes.iter().enumerate() {
-                        if let Some(delta) = shape.get(t) {
-                            chunks.push(vec![(i as u32, (*delta).to_string())]);
-                        }
-                    }
-                }
-            }
-            Schedule::FirstByteOffset(offset) => {
+            // RoundRobin is FirstByteOffset(0): every choice starts at round 0.
+            Schedule::RoundRobin | Schedule::FirstByteOffset(_) => {
+                let offset = match schedule {
+                    Schedule::FirstByteOffset(o) => o,
+                    _ => 0,
+                };
                 // Emit (round, index, delta) events, then order by (round, index)
                 // so each choice's stream starts `index * offset` rounds late.
                 let mut events: Vec<(usize, u32, String)> = Vec::new();
@@ -1822,23 +1839,21 @@ mod interleave {
             }
             Schedule::BoundarySplit => {
                 for t in 0..max_len {
-                    if let Some(d0) = shapes.first().and_then(|s| s.get(t)) {
-                        let (h1, h2) = split_mid(d0);
-                        if !h1.is_empty() {
-                            chunks.push(vec![(0, h1.to_string())]);
+                    // Choice 0's delta halves bracket the other choices' deltas
+                    // of the same round (no halves when choice 0 is exhausted).
+                    let halves = shapes.first().and_then(|s| s.get(t)).map(|d| split_mid(d));
+                    if let Some((h1, _)) = halves
+                        && !h1.is_empty()
+                    {
+                        chunks.push(vec![(0, h1.to_string())]);
+                    }
+                    for (i, shape) in shapes.iter().enumerate().skip(1) {
+                        if let Some(delta) = shape.get(t) {
+                            chunks.push(vec![(i as u32, (*delta).to_string())]);
                         }
-                        for (i, shape) in shapes.iter().enumerate().skip(1) {
-                            if let Some(delta) = shape.get(t) {
-                                chunks.push(vec![(i as u32, (*delta).to_string())]);
-                            }
-                        }
+                    }
+                    if let Some((_, h2)) = halves {
                         chunks.push(vec![(0, h2.to_string())]);
-                    } else {
-                        for (i, shape) in shapes.iter().enumerate().skip(1) {
-                            if let Some(delta) = shape.get(t) {
-                                chunks.push(vec![(i as u32, (*delta).to_string())]);
-                            }
-                        }
                     }
                 }
             }
@@ -1863,7 +1878,7 @@ mod interleave {
 /// `choice.index` recovers each shape's concatenated content byte-exactly.
 #[test]
 fn interleave_schedules_are_lossless() {
-    use interleave::{Schedule, deinterleave, interleave};
+    use interleave::{ALL_SCHEDULES, deinterleave, interleave};
     let shapes = vec![
         vec!["Let me ch", "eck.", "</think>", "answer0"],
         vec!["Short", " reasoning</think>", "answer1"],
@@ -1874,12 +1889,7 @@ fn interleave_schedules_are_lossless() {
         .enumerate()
         .map(|(i, s)| (i as u32, s.concat()))
         .collect();
-    for schedule in [
-        Schedule::RoundRobin,
-        Schedule::FirstByteOffset(1),
-        Schedule::FirstByteOffset(2),
-        Schedule::BoundarySplit,
-    ] {
+    for schedule in ALL_SCHEDULES {
         let recovered = deinterleave(&interleave(&shapes, schedule));
         assert_eq!(
             recovered, expected,
@@ -1889,8 +1899,8 @@ fn interleave_schedules_are_lossless() {
 }
 
 /// Comparable projection of one choice's demuxed output: reasoning, content,
-/// and assembled tool calls (name + arguments per tool index). Finish reasons
-/// are compared as a set elsewhere; the meat is these three.
+/// and assembled tool calls (name + arguments per tool index). This lane
+/// intentionally does not assert finish reasons.
 #[derive(Default, PartialEq, Eq, Debug)]
 struct ChoiceOutput {
     reasoning: String,
@@ -1905,7 +1915,6 @@ async fn run_interleaved(
     preprocessor: &Arc<OpenAIPreprocessor>,
     request: &NvCreateChatCompletionRequest,
     chunks: &[Vec<(u32, String)>],
-    prompt_injected: bool,
 ) -> BTreeMap<u32, ChoiceOutput> {
     let mut indices: Vec<u32> = chunks
         .iter()
@@ -1925,38 +1934,12 @@ async fn run_interleaved(
 
     let input_stream = stream::iter(input.into_iter().map(Annotated::from_data));
     let output_stream = preprocessor
-        .postprocessor_parsing_stream(input_stream, request, prompt_injected, false)
+        .postprocessor_parsing_stream(input_stream, request, false, false)
         .expect("postprocessor_parsing_stream should build");
     let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
         output_stream.collect().await;
 
-    #[derive(Default)]
-    struct Acc {
-        reasoning: String,
-        content: String,
-        tool_calls: BTreeMap<u32, MergedToolCall>,
-    }
-    let mut by_choice: BTreeMap<u32, Acc> = BTreeMap::new();
-    for output in &output_chunks {
-        let Some(data) = output.data.as_ref() else {
-            continue;
-        };
-        for choice in &data.inner.choices {
-            let entry = by_choice.entry(choice.index).or_default();
-            if let Some(r) = &choice.delta.reasoning_content {
-                entry.reasoning.push_str(r);
-            }
-            if let Some(c) = &choice.delta.content {
-                entry.content.push_str(get_text(c));
-            }
-            if let Some(tcs) = &choice.delta.tool_calls {
-                for tc in tcs {
-                    entry.tool_calls.entry(tc.index).or_default().merge_from(tc);
-                }
-            }
-        }
-    }
-    by_choice
+    demux_by_choice(&output_chunks)
         .into_iter()
         .map(|(idx, acc)| {
             (
@@ -1980,10 +1963,9 @@ async fn solo_output(
     preprocessor: &Arc<OpenAIPreprocessor>,
     request: &NvCreateChatCompletionRequest,
     shape: &[&str],
-    prompt_injected: bool,
 ) -> ChoiceOutput {
     let chunks = interleave::interleave(&[shape.to_vec()], interleave::Schedule::RoundRobin);
-    let mut out = run_interleaved(preprocessor, request, &chunks, prompt_injected).await;
+    let mut out = run_interleaved(preprocessor, request, &chunks).await;
     out.remove(&0).unwrap_or_default()
 }
 
@@ -1994,12 +1976,10 @@ async fn assert_interleave_isolated(
     preprocessor: &Arc<OpenAIPreprocessor>,
     request: &NvCreateChatCompletionRequest,
     shapes: &[Vec<&str>],
-    prompt_injected: bool,
 ) {
-    use interleave::Schedule;
     let mut goldens: Vec<ChoiceOutput> = Vec::new();
     for shape in shapes {
-        goldens.push(solo_output(preprocessor, request, shape, prompt_injected).await);
+        goldens.push(solo_output(preprocessor, request, shape).await);
     }
     // Sanity: the shapes must actually diverge, or the lane proves nothing.
     if shapes.len() >= 2 {
@@ -2008,14 +1988,9 @@ async fn assert_interleave_isolated(
             "{label}: shapes do not diverge; interleave lane would prove nothing"
         );
     }
-    for schedule in [
-        Schedule::RoundRobin,
-        Schedule::FirstByteOffset(1),
-        Schedule::FirstByteOffset(2),
-        Schedule::BoundarySplit,
-    ] {
+    for schedule in interleave::ALL_SCHEDULES {
         let chunks = interleave::interleave(shapes, schedule);
-        let demuxed = run_interleaved(preprocessor, request, &chunks, prompt_injected).await;
+        let demuxed = run_interleaved(preprocessor, request, &chunks).await;
         for (i, golden) in goldens.iter().enumerate() {
             let got = demuxed
                 .get(&(i as u32))
@@ -2054,7 +2029,6 @@ async fn postprocessor_parsing_stream_interleave_isolates_tool_bypass_stage() {
         &preprocessor,
         &request,
         &[bare_json.clone(), reasoning_first.clone()],
-        false,
     )
     .await;
     assert_interleave_isolated(
@@ -2062,7 +2036,6 @@ async fn postprocessor_parsing_stream_interleave_isolates_tool_bypass_stage() {
         &preprocessor,
         &request,
         &[reasoning_first.clone(), reasoning_first2.clone()],
-        false,
     )
     .await;
     assert_interleave_isolated(
@@ -2070,7 +2043,6 @@ async fn postprocessor_parsing_stream_interleave_isolates_tool_bypass_stage() {
         &preprocessor,
         &request,
         &[bare_json.clone(), tag_split.clone()],
-        false,
     )
     .await;
     // k=3: prove the per-choice state map generalizes past two choices.
@@ -2079,7 +2051,6 @@ async fn postprocessor_parsing_stream_interleave_isolates_tool_bypass_stage() {
         &preprocessor,
         &request,
         &[bare_json, reasoning_first, reasoning_first2],
-        false,
     )
     .await;
 }
@@ -2110,7 +2081,6 @@ async fn postprocessor_parsing_stream_interleave_isolates_reasoning_split_stage(
         &preprocessor,
         &request,
         &[reason_then_answer_a.clone(), reason_then_answer_b.clone()],
-        false,
     )
     .await;
     assert_interleave_isolated(
@@ -2118,7 +2088,6 @@ async fn postprocessor_parsing_stream_interleave_isolates_reasoning_split_stage(
         &preprocessor,
         &request,
         &[reason_then_answer_a.clone(), reason_only.clone()],
-        false,
     )
     .await;
     assert_interleave_isolated(
@@ -2126,7 +2095,6 @@ async fn postprocessor_parsing_stream_interleave_isolates_reasoning_split_stage(
         &preprocessor,
         &request,
         &[reason_then_answer_a.clone(), tag_split],
-        false,
     )
     .await;
     // k=3 across the reasoning stage.
@@ -2135,7 +2103,6 @@ async fn postprocessor_parsing_stream_interleave_isolates_reasoning_split_stage(
         &preprocessor,
         &request,
         &[reason_then_answer_a, reason_then_answer_b, reason_only],
-        false,
     )
     .await;
 }
