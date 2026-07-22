@@ -153,8 +153,8 @@ func TestClusterDynamoComponentDeploymentManifests(t *testing.T) {
 				return SetupDynamoComponentDeployment(mgr, DynamoComponentDeploymentSetupOptions{SetupOptions: setupOptions})
 			})
 
-			t.Log("Match the complete generated manifest contract")
-			golden.MatchManifests(t, env.Client(), env.Namespace(), filepath.Join(scenarioDir, "output.yaml"))
+			t.Log("Wait for the complete generated manifest contract")
+			golden.EventuallyMatchManifests(t, env.Client(), env.Namespace(), filepath.Join(scenarioDir, "output.yaml"))
 		})
 	}
 }
@@ -190,8 +190,8 @@ func TestClusterDynamoGraphDeploymentManifests(t *testing.T) {
 				return SetupDynamoComponentDeployment(mgr, DynamoComponentDeploymentSetupOptions{SetupOptions: setupOptions})
 			})
 
-			t.Log("Match the complete generated manifest contract")
-			golden.MatchManifests(t, env.Client(), env.Namespace(), filepath.Join(scenarioDir, "output.yaml"))
+			t.Log("Wait for the complete generated manifest contract")
+			golden.EventuallyMatchManifests(t, env.Client(), env.Namespace(), filepath.Join(scenarioDir, "output.yaml"))
 		})
 	}
 }
@@ -317,8 +317,8 @@ func TestClusterDynamoGraphDeploymentRequestProfilesAndCreatesWorkloadManifests(
 		t.Fatal("DGDR has no selected profiling configuration")
 	}
 
-	t.Log("Match the generated DGD and its terminal Grove manifest")
-	golden.MatchManifests(t, env.Client(), env.Namespace(), filepath.Join(scenarioDir, "output.yaml"))
+	t.Log("Wait for the generated DGD and its terminal Grove manifest")
+	golden.EventuallyMatchManifests(t, env.Client(), env.Namespace(), filepath.Join(scenarioDir, "output.yaml"))
 }
 
 func clusterTestRestrictedConfig(namespace string) *configv1alpha1.OperatorConfiguration {

@@ -7,6 +7,7 @@
 package golden
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -17,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	dynamotesting "github.com/ai-dynamo/dynamo/deploy/operator/internal/testing"
+	"github.com/pmezard/go-difflib/difflib"
 	"go.yaml.in/yaml/v3"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -40,38 +43,42 @@ type comparison struct {
 	actual   map[schema.GroupVersionKind][]actualDocument
 }
 
-// MatchManifests waits until the objects in namespace exactly match the YAML
-// documents in expectedPath. A final mismatch writes expectedPath + ".new".
-func MatchManifests(t testing.TB, k8sClient client.Client, namespace, expectedPath string) {
+// EventuallyMatchManifests waits until the objects in namespace exactly match
+// the YAML documents in expectedPath. A final mismatch writes expectedPath + ".new".
+func EventuallyMatchManifests(t testing.TB, k8sClient client.Client, namespace, expectedPath string) {
 	t.Helper()
 	expected, err := readDocuments(expectedPath)
 	if err != nil {
 		t.Fatalf("read golden manifests %q: %v", expectedPath, err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), matchTimeout)
-	defer cancel()
 	var last comparison
 	var lastErr error
-	for {
-		candidate, candidateErr := compare(ctx, k8sClient, namespace, expected)
-		if candidateErr == nil {
+	matched := false
+	newPath := expectedPath + ".new"
+	t.Cleanup(func() {
+		if matched {
 			return
+		}
+		if err := writeAdapted(newPath, last); err != nil {
+			t.Errorf("golden manifests do not match: %v; write %q: %v", lastErr, newPath, err)
+			return
+		}
+		t.Logf("golden manifests do not match: %v; adapted manifests written to %q", lastErr, newPath)
+	})
+
+	dynamotesting.Eventually(t, func() (bool, string) {
+		candidate, candidateErr := compare(t.Context(), k8sClient, namespace, expected)
+		if candidateErr == nil {
+			matched = true
+			return true, "manifests match"
 		}
 		if actualDocumentCount(candidate) >= actualDocumentCount(last) {
 			last = candidate
 			lastErr = candidateErr
 		}
-		select {
-		case <-ctx.Done():
-			newPath := expectedPath + ".new"
-			if err := writeAdapted(newPath, last); err != nil {
-				t.Fatalf("golden manifests do not match: %v; write %q: %v", lastErr, newPath, err)
-			}
-			t.Fatalf("golden manifests do not match: %v; adapted manifests written to %q", lastErr, newPath)
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
+		return false, candidateErr.Error()
+	}, matchTimeout, 100*time.Millisecond, "golden manifests do not match; adapted manifests will be written to %q", newPath)
 }
 
 func actualDocumentCount(comparison comparison) int {
@@ -153,39 +160,141 @@ func compare(ctx context.Context, k8sClient client.Client, namespace string, exp
 		}
 		result.actual[gvk] = actual
 		want := groups[gvk]
-		if len(want) != len(actual) {
-			mismatches = append(mismatches, fmt.Sprintf("%s: found %d objects, want %d", gvk, len(actual), len(want)))
-		}
 		claimed := map[int]int{}
+		allExpectedMatched := true
 		for i, expectedDocument := range want {
 			var matches []int
-			var closest string
 			for j := range actual {
 				if err := matchNode(documentRoot(&expectedDocument.node), documentRoot(&actual[j].node), "$"); err == nil {
 					matches = append(matches, j)
-				} else if closest == "" {
-					closest = err.Error()
 				}
 			}
-			if len(matches) != 1 {
-				detail := ""
-				if len(matches) == 0 && closest != "" {
-					detail = ": " + closest
+			description := expectedDescription(expectedDocument, namespace)
+			if len(matches) == 0 {
+				allExpectedMatched = false
+				candidates := nameCandidates(&expectedDocument.node, actual)
+				if len(candidates) == 0 {
+					mismatches = append(mismatches, fmt.Sprintf("%s has not appeared", description))
+					continue
 				}
-				mismatches = append(mismatches, fmt.Sprintf("%s document %d matches %d objects, want exactly one%s", gvk, i+1, len(matches), detail))
+				candidate := actual[candidates[0]]
+				diff := documentDiff(&expectedDocument.node, &candidate.node)
+				if len(candidates) == 1 {
+					mismatches = append(mismatches, fmt.Sprintf("%s does not match:\n%s", description, diff))
+					continue
+				}
+				mismatches = append(mismatches, fmt.Sprintf(
+					"%s has %d name-matching candidates; %s does not match:\n%s",
+					description, len(candidates), actualDescription(candidate.object), diff,
+				))
+				continue
+			}
+			if len(matches) > 1 {
+				allExpectedMatched = false
+				names := make([]string, 0, len(matches))
+				for _, match := range matches {
+					names = append(names, actualDescription(actual[match].object))
+				}
+				mismatches = append(mismatches, fmt.Sprintf("%s matches %d objects, want exactly one: %s", description, len(matches), strings.Join(names, ", ")))
 				continue
 			}
 			if previous, found := claimed[matches[0]]; found {
-				mismatches = append(mismatches, fmt.Sprintf("%s documents %d and %d match the same object", gvk, previous+1, i+1))
+				allExpectedMatched = false
+				mismatches = append(mismatches, fmt.Sprintf(
+					"%s and document %d match the same object", description, previous+1,
+				))
 				continue
 			}
 			claimed[matches[0]] = i
+		}
+		if allExpectedMatched {
+			for i := range actual {
+				if _, found := claimed[i]; !found {
+					mismatches = append(mismatches, fmt.Sprintf("unexpected %s is present", actualDescription(actual[i].object)))
+				}
+			}
 		}
 	}
 	if len(mismatches) > 0 {
 		return result, errors.New(strings.Join(mismatches, "; "))
 	}
 	return result, nil
+}
+
+func expectedDescription(expected document, namespace string) string {
+	name := "<unknown>"
+	if nameNode := objectNameNode(documentRoot(&expected.node)); nameNode != nil && nameNode.Kind == yaml.ScalarNode {
+		name = nameNode.Value
+	}
+	return fmt.Sprintf("%s %s/%s", expected.gvk.Kind, namespace, name)
+}
+
+func actualDescription(actual unstructured.Unstructured) string {
+	return fmt.Sprintf("%s %s/%s", actual.GetKind(), actual.GetNamespace(), actual.GetName())
+}
+
+func nameCandidates(expected *yaml.Node, actual []actualDocument) []int {
+	expectedName := objectNameNode(documentRoot(expected))
+	if expectedName == nil {
+		candidates := make([]int, len(actual))
+		for i := range actual {
+			candidates[i] = i
+		}
+		return candidates
+	}
+	var candidates []int
+	for i := range actual {
+		actualName := objectNameNode(documentRoot(&actual[i].node))
+		if actualName != nil && matchNode(expectedName, actualName, "$.metadata.name") == nil {
+			candidates = append(candidates, i)
+		}
+	}
+	return candidates
+}
+
+func documentDiff(expected, actual *yaml.Node) string {
+	adapted := cloneNode(expected)
+	adaptedRoot := adaptNode(documentRoot(adapted), documentRoot(actual))
+	if adapted.Kind == yaml.DocumentNode {
+		adapted.Content[0] = adaptedRoot
+	} else {
+		adapted = adaptedRoot
+	}
+	expectedYAML, expectedErr := encodeDocument(expected)
+	actualYAML, actualErr := encodeDocument(adapted)
+	if expectedErr != nil || actualErr != nil {
+		if err := matchNode(documentRoot(expected), documentRoot(actual), "$"); err != nil {
+			return err.Error()
+		}
+		return "manifest differs"
+	}
+	diff, err := difflib.GetUnifiedDiffString(difflib.UnifiedDiff{
+		A:        difflib.SplitLines(expectedYAML),
+		B:        difflib.SplitLines(actualYAML),
+		FromFile: "expected",
+		ToFile:   "actual",
+		Context:  3,
+	})
+	if err != nil || diff == "" {
+		if matchErr := matchNode(documentRoot(expected), documentRoot(actual), "$"); matchErr != nil {
+			return matchErr.Error()
+		}
+		return "manifest differs"
+	}
+	return strings.TrimSpace(diff)
+}
+
+func encodeDocument(document *yaml.Node) (string, error) {
+	var output bytes.Buffer
+	encoder := yaml.NewEncoder(&output)
+	encoder.SetIndent(2)
+	if err := encoder.Encode(document); err != nil {
+		return "", err
+	}
+	if err := encoder.Close(); err != nil {
+		return "", err
+	}
+	return output.String(), nil
 }
 
 func listActual(ctx context.Context, k8sClient client.Client, namespace string, gvk schema.GroupVersionKind) ([]actualDocument, error) {

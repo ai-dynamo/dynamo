@@ -9,15 +9,15 @@ cluster.
 
 ```go
 golden.ApplyManifests(t, "testdata/dcd/deployment/input.yaml", env.Client(), env.Namespace())
-golden.MatchManifests(t, env.Client(), env.Namespace(), "testdata/dcd/deployment/output.yaml")
+golden.EventuallyMatchManifests(t, env.Client(), env.Namespace(), "testdata/dcd/deployment/output.yaml")
 ```
 
 Controller tests keep one directory per scenario. `input.yaml` contains the
 resource that triggers the controller flow, while `output.yaml` contains the
 complete expected manifest set for that scenario. The mismatch artifact is
 therefore written next to both as `output.yaml.new`. Controller test runners
-discover every scenario directory below their `dcd`, `dgd`, or `dgdr` group,
-so adding a directory automatically adds a test case.
+discover every scenario directory below the `dcd` and `dgd` groups. DGDR keeps
+its larger profiling flow in one dedicated test.
 
 `ApplyManifests` decodes every input document as unstructured data and creates
 it through the Kubernetes client, exercising native admission. The namespace
@@ -53,6 +53,11 @@ For mapping values, the existence directives use a one-key mapping such as
 values. Sequences match exactly and in order.
 
 ## Mismatch Output
+
+`EventuallyMatchManifests` uses the shared `testing.Eventually` polling helper.
+While waiting, it identifies a missing object as `Kind namespace/name`. Once a
+name-matching object exists, the reason includes a unified diff between the
+expected contract and the minimally adapted contract for that object.
 
 After the retry timeout, a mismatch writes `<expected>.new`. Existing YAML
 comments and unchanged directives are preserved throughout the document tree.
