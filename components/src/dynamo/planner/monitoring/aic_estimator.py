@@ -24,6 +24,7 @@ logger.addHandler(console_handler)
 
 
 def _try_import_aiconfigurator_core():
+    """Load the optional standalone AIC core SDK modules on demand."""
     # Lazy-import aiconfigurator-core because it is an optional dependency.
     import aiconfigurator_core.sdk.backends.factory
     import aiconfigurator_core.sdk.config
@@ -67,6 +68,7 @@ class AIConfiguratorPerfEstimator:
             )
         logger.info("aiconfigurator-core database loaded.")
 
+        self.backend_name = backend
         self.backend = aiconfigurator_core.sdk.backends.factory.get_backend(backend)
         self.hf_id = hf_id
 
@@ -76,7 +78,7 @@ class AIConfiguratorPerfEstimator:
         # NOTE: MOE models error out unless moe_tp_size and moe_ep_size are provided.
         model_config = aiconfigurator_core.sdk.config.ModelConfig(**model_config_kwargs)
         model = aiconfigurator_core.sdk.models.get_model(
-            self.hf_id, model_config, self.backend
+            self.hf_id, model_config, self.backend_name
         )
         return model
 

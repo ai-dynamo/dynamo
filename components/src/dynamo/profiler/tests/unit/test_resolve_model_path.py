@@ -298,8 +298,8 @@ class TestGenerateDgdKeepsServedModelName:
     def _task_config() -> MagicMock:
         tc = MagicMock()
         tc.total_gpus = 8
-        tc.backend_name = "trtllm"
-        tc.backend_version = None
+        tc.primary_backend_name = "trtllm"
+        tc.primary_backend_version = None
         return tc
 
     def _capture_generate(self, dgdr, cfg) -> MagicMock:

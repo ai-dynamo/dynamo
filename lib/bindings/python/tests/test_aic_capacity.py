@@ -56,6 +56,7 @@ def test_runtime_loader_does_not_import_upper_aiconfigurator(monkeypatch):
     real_import = builtins.__import__
 
     def reject_upper_package(name, *args, **kwargs):
+        """Reject accidental imports of the upper AIC distribution."""
         if name == "aiconfigurator" or name.startswith("aiconfigurator."):
             raise AssertionError(f"runtime imported upper package: {name}")
         return real_import(name, *args, **kwargs)
