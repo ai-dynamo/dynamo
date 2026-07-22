@@ -46,7 +46,7 @@ from .health_check import (
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
 from .multimodal_handlers import EncodeWorkerHandler
 from .publisher import StatLoggerFactory
-from .realtime_handler import RealtimeHandler, RealtimeTranscriptionHandler
+from .realtime import RealtimeHandler, RealtimeTranscriptionHandler
 
 logger = logging.getLogger(__name__)
 

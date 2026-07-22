@@ -43,27 +43,17 @@ import asyncio
 import base64
 import logging
 import uuid
-from typing import Any, AsyncGenerator, Callable, Optional, Sequence
+from typing import Any, AsyncGenerator, Optional, Sequence
 
 import numpy as np
 
 from dynamo._core import Context
 
-from .. import realtime_events
-from ..realtime_connection import RealtimeConnection, RealtimeTurn, drain_queue
+from ..realtime import events as realtime_events
+from ..realtime.connection import RealtimeConnection, RealtimeTurn, drain_queue
+from ..realtime.serving import StreamingInputFactory
 
 logger = logging.getLogger(__name__)
-
-# ``streaming_input_factory(audio_stream, input_stream) -> AsyncGenerator`` —
-# mirrors ``OpenAIServingRealtime.transcribe_realtime``: it consumes float32
-# audio chunks and an ``asyncio.Queue`` of context token ids, yielding engine
-# ``StreamingInput`` prompts.
-# The factory and engine are injected so the worker passes the real serving/AsyncOmni
-# while tests pass lightweight fakes.
-StreamingInputFactory = Callable[
-    [AsyncGenerator[np.ndarray, None], "asyncio.Queue[list[int]]"],
-    AsyncGenerator[Any, None],
-]
 
 
 class Turn(RealtimeTurn):

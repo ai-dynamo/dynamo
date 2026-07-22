@@ -18,8 +18,8 @@ import numpy as np
 
 from dynamo._core import Context
 
-from .realtime_connection import RealtimeConnection, RealtimeTurn
-from .realtime_events import (
+from .connection import RealtimeConnection, RealtimeTurn
+from .events import (
     input_audio_buffer_cleared_event,
     input_audio_buffer_committed_event,
     input_audio_transcription_completed_event,
@@ -28,6 +28,7 @@ from .realtime_events import (
     invalid_request_error_event,
     session_updated_event,
 )
+from .serving import StreamingInputFactory, build_realtime_serving
 
 logger = logging.getLogger(__name__)
 
@@ -36,10 +37,6 @@ MAX_AUDIO_CHUNK_BYTES = 4 * 1024 * 1024
 RESAMPLE_BLOCK_MILLISECONDS = 100
 MAX_UTTERANCE_SECONDS = 60
 
-StreamingInputFactory = Callable[
-    [AsyncGenerator[np.ndarray, None], "asyncio.Queue[list[int]]"],
-    AsyncGenerator[Any, None],
-]
 SamplingParamsFactory = Callable[[], Any]
 
 
@@ -215,21 +212,10 @@ class RealtimeTranscriptionHandler:
         model_name: str,
         model_path: str,
     ) -> "RealtimeTranscriptionHandler":
-        from vllm.entrypoints.openai.models.protocol import BaseModelPath
-        from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-        from vllm.entrypoints.speech_to_text.realtime.serving import (
-            OpenAIServingRealtime,
-        )
-
-        models = OpenAIServingModels(
+        serving = build_realtime_serving(
             engine_client=engine_client,
-            base_model_paths=[BaseModelPath(name=model_name, model_path=model_path)],
-            lora_modules=None,
-        )
-        serving = OpenAIServingRealtime(
-            engine_client=engine_client,
-            models=models,
-            request_logger=None,
+            model_name=model_name,
+            model_path=model_path,
         )
         speech_config = serving.model_cls.get_speech_to_text_config(
             serving.model_config, "transcribe"

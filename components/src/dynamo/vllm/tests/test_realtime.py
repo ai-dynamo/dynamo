@@ -8,7 +8,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from dynamo.vllm.realtime_handler import RealtimeHandler
+from dynamo.vllm.realtime import RealtimeHandler
 
 pytestmark = [
     pytest.mark.unit,
