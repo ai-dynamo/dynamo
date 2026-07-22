@@ -13,7 +13,7 @@ use std::sync::atomic::AtomicBool;
 
 use anyhow::{Result, anyhow};
 
-use dynamo_kv_router::config::kv_router_config_from_dynamo_env;
+use dynamo_kv_router::config::{KvRouterConfig, kv_router_config_from_dynamo_env};
 use dynamo_kv_router::protocols::RoutingConstraints;
 use dynamo_kv_router::services::selection::{
     PromptRequest, SelectAndReserveRequest as CoreSelectAndReserveRequest, SelectionError,
@@ -77,19 +77,34 @@ pub struct Selector {
     /// Cancels the peer-discovery watch on drop. The `SelectionService`'s own
     /// `Drop` tears down its core + replica-sync tasks.
     cancel: CancellationToken,
-    /// Last catalog we pushed into the service, keyed by `worker_id`. Lets
-    /// [`Selector::reconcile`] skip no-op upserts that would re-register
-    /// KV-event listeners.
-    current: Mutex<HashMap<u64, WorkerRegistration>>,
+    reconcile_state: Mutex<ReconcileState>,
     /// Peer-discovery readiness in replicated mode: `None` when replication is
     /// disabled (single replica, always ready), or `Some(flag)` that latches
     /// `true` once the initial peer-set sync completes. ANDed into EPP health.
     peer_ready: Option<Arc<AtomicBool>>,
 }
 
+/// Local bookkeeping for desired-state reconciliation.
+#[derive(Default)]
+struct ReconcileState {
+    /// Registrations confirmed schedulable by the service. Identical desired
+    /// entries can skip upsert without preventing `Incomplete` retries.
+    converged: HashMap<u64, WorkerRegistration>,
+    /// Every worker ID this reconciler may have introduced into the service,
+    /// including `Incomplete` and partially failed upserts. Stale detection must
+    /// cover this set rather than only the schedulable convergence cache.
+    tracked_worker_ids: HashSet<u64>,
+}
+
 impl Selector {
     pub async fn new(cfg: &EppStandaloneConfig) -> Result<Self> {
-        let kv_router_config = kv_router_config_from_dynamo_env();
+        Self::new_with_kv_router_config(cfg, kv_router_config_from_dynamo_env()).await
+    }
+
+    async fn new_with_kv_router_config(
+        cfg: &EppStandaloneConfig,
+        kv_router_config: KvRouterConfig,
+    ) -> Result<Self> {
         let cancel = CancellationToken::new();
 
         // If queueing is enabled, we need to validate that the max_num_batched_tokens is set.
@@ -165,7 +180,7 @@ impl Selector {
         Ok(Self {
             service,
             cancel,
-            current: Mutex::new(HashMap::new()),
+            reconcile_state: Mutex::new(ReconcileState::default()),
             peer_ready,
         })
     }
@@ -193,12 +208,28 @@ impl Selector {
         }
     }
 
-    pub async fn reconcile(&self, desired: &HashMap<u64, WorkerRegistration>) -> Result<()> {
-        let mut current = self.current.lock().await;
+    pub async fn reconcile(&self, registrations: &[WorkerRegistration]) -> Result<()> {
+        // Derive the bookkeeping key from the registration so callers cannot
+        // provide a map key that disagrees with the ID sent to SelectionService.
+        // Reject duplicates before mutating either local or service state.
+        let mut desired = HashMap::with_capacity(registrations.len());
+        for registration in registrations {
+            if desired
+                .insert(registration.worker_id, registration)
+                .is_some()
+            {
+                anyhow::bail!("duplicate worker_id {}", registration.worker_id);
+            }
+        }
+
+        let mut state = self.reconcile_state.lock().await;
 
         // Upsert new or changed workers.
-        for (worker_id, reg) in desired {
-            if current.get(worker_id) == Some(reg) {
+        for (&worker_id, &reg) in &desired {
+            // Track before calling the service so a partially applied upsert can
+            // still be deleted if the worker later leaves the desired snapshot.
+            state.tracked_worker_ids.insert(worker_id);
+            if state.converged.get(&worker_id) == Some(reg) {
                 continue;
             }
             let record = self
@@ -208,10 +239,11 @@ impl Selector {
                 .map_err(|e| anyhow!("upsert_worker failed: {e}"))?;
             // Only cache the registration once the core reports the worker Schedulable.
             if record.lifecycle == WorkerLifecycle::Schedulable {
-                current.insert(*worker_id, reg.clone());
+                state.converged.insert(worker_id, reg.clone());
             } else {
+                state.converged.remove(&worker_id);
                 tracing::warn!(
-                    worker_id = *worker_id,
+                    worker_id,
                     lifecycle = ?record.lifecycle,
                     reasons = ?record.not_schedulable_reasons,
                     "Worker upserted but not schedulable; leaving uncached to retry on the next reconcile"
@@ -219,9 +251,11 @@ impl Selector {
             }
         }
 
-        // Delete workers that are no longer desired.
-        let stale: Vec<u64> = current
-            .keys()
+        // Delete every worker this reconciler may have introduced that is no
+        // longer desired, including workers that never became schedulable.
+        let stale: Vec<u64> = state
+            .tracked_worker_ids
+            .iter()
             .copied()
             .filter(|id| !desired.contains_key(id))
             .collect();
@@ -231,7 +265,8 @@ impl Selector {
                 Ok(_) | Err(SelectionError::NotFound(_)) => {}
                 Err(e) => return Err(anyhow!("delete_worker failed: {e}")),
             }
-            current.remove(&worker_id);
+            state.tracked_worker_ids.remove(&worker_id);
+            state.converged.remove(&worker_id);
         }
 
         Ok(())
@@ -293,6 +328,46 @@ impl Drop for Selector {
 mod tests {
     use super::*;
 
+    fn model_policy_file() -> tempfile::NamedTempFile {
+        let policy_file = tempfile::NamedTempFile::new().expect("create policy file");
+        std::fs::write(
+            policy_file.path(),
+            r#"
+models:
+  queueing-model:
+    default_policy_family: standard
+    uncached_isl_buckets:
+      - min_tokens: 0
+        bucket: all
+    policy_classes:
+      - name: queued
+        policy_family: standard
+        cache_bucket: all
+        quantum: 1
+        prefill_busy_threshold: 1
+  threshold-free-model:
+    default_policy_family: standard
+    uncached_isl_buckets:
+      - min_tokens: 0
+        bucket: all
+    policy_classes:
+      - name: direct
+        policy_family: standard
+        cache_bucket: all
+        quantum: 1
+"#,
+        )
+        .expect("write policy file");
+        policy_file
+    }
+
+    fn router_config_with_policy(policy_file: &tempfile::NamedTempFile) -> KvRouterConfig {
+        KvRouterConfig {
+            router_policy_config: Some(policy_file.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        }
+    }
+
     /// Minimal single-replica config (no peer service, so no cluster access).
     /// `max_num_batched_tokens` is set so `Selector::new` never fails its
     /// fast-fail check regardless of the ambient router policy.
@@ -338,7 +413,7 @@ mod tests {
             .await
             .expect("selector should build");
 
-        let desired = HashMap::from([(1u64, incomplete_registration(1))]);
+        let desired = [incomplete_registration(1)];
         selector
             .reconcile(&desired)
             .await
@@ -348,7 +423,7 @@ mod tests {
         // reconciled — otherwise the identical next snapshot would skip the
         // re-upsert and the worker would stay silently unconverged.
         assert!(
-            selector.current.lock().await.is_empty(),
+            selector.reconcile_state.lock().await.converged.is_empty(),
             "Incomplete worker must not be cached as reconciled"
         );
         assert!(
@@ -363,8 +438,82 @@ mod tests {
             .await
             .expect("second reconcile should succeed");
         assert!(
-            selector.current.lock().await.is_empty(),
+            selector.reconcile_state.lock().await.converged.is_empty(),
             "Incomplete worker must still be uncached after a repeat reconcile"
         );
+    }
+
+    #[tokio::test]
+    async fn stale_incomplete_worker_is_deleted() {
+        let selector = Selector::new(&test_config())
+            .await
+            .expect("selector should build");
+
+        selector
+            .reconcile(&[incomplete_registration(1)])
+            .await
+            .expect("incomplete worker should be tracked");
+        selector
+            .reconcile(&[])
+            .await
+            .expect("stale incomplete worker should be deleted");
+
+        let worker = selector
+            .service
+            .list_workers(None, None)
+            .into_iter()
+            .find(|worker| worker.worker_id == 1)
+            .expect("SelectionService retains the terminal catalog record");
+        assert_eq!(worker.lifecycle, WorkerLifecycle::Unschedulable);
+        let state = selector.reconcile_state.lock().await;
+        assert!(state.tracked_worker_ids.is_empty());
+        assert!(state.converged.is_empty());
+    }
+
+    #[tokio::test]
+    async fn queueing_model_requires_max_num_batched_tokens_at_startup() {
+        let policy_file = model_policy_file();
+        let mut cfg = test_config();
+        cfg.model_name = "queueing-model".to_string();
+        cfg.max_num_batched_tokens = None;
+
+        let error =
+            Selector::new_with_kv_router_config(&cfg, router_config_with_policy(&policy_file))
+                .await
+                .err()
+                .expect("queueing model must reject missing capacity");
+        assert!(
+            error
+                .to_string()
+                .contains("DYN_EPP_MAX_NUM_BATCHED_TOKENS is required"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn threshold_free_model_allows_missing_max_num_batched_tokens_at_startup() {
+        let policy_file = model_policy_file();
+        let mut cfg = test_config();
+        cfg.model_name = "threshold-free-model".to_string();
+        cfg.max_num_batched_tokens = None;
+
+        Selector::new_with_kv_router_config(&cfg, router_config_with_policy(&policy_file))
+            .await
+            .expect("threshold-free model should allow missing capacity");
+    }
+
+    #[tokio::test]
+    async fn duplicate_worker_ids_are_rejected_before_reconciliation() {
+        let selector = Selector::new(&test_config())
+            .await
+            .expect("selector should build");
+        let duplicate = incomplete_registration(1);
+
+        let error = selector
+            .reconcile(&[duplicate.clone(), duplicate])
+            .await
+            .expect_err("duplicate IDs must be rejected");
+        assert!(error.to_string().contains("duplicate worker_id 1"));
+        assert!(selector.service.list_workers(None, None).is_empty());
     }
 }

@@ -53,6 +53,7 @@ validator = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }
+tempfile = { workspace = true }
 
 [package.metadata.cargo-machete]
 ignored = ["prost"]
