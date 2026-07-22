@@ -67,13 +67,6 @@ const (
 
 var clusterTestEnv *clusterenv.Env
 
-type clusterTestControllerChain string
-
-const (
-	clusterTestDCDChain clusterTestControllerChain = "dcd"
-	clusterTestDGDChain clusterTestControllerChain = "dgd"
-)
-
 func TestMain(m *testing.M) {
 	logf.SetLogger(logr.Discard())
 	operatorVersion, err := clusterTestOperatorVersion()
@@ -171,22 +164,26 @@ func newClusterTestScheme() *runtime.Scheme {
 }
 
 func TestClusterDynamoComponentDeploymentManifests(t *testing.T) {
-	clusterTestRunManifestScenarios(t, "testdata/dcd", clusterTestDCDChain)
+	clusterTestForEachScenario(t, "testdata/dcd", func(t *testing.T, scenarioDir string) {
+		clusterTestRunManifestScenario(t, scenarioDir, func(mgr ctrl.Manager, setupOptions SetupOptions) error {
+			return SetupDynamoComponentDeployment(mgr, DynamoComponentDeploymentSetupOptions{SetupOptions: setupOptions})
+		})
+	})
 }
 
 func TestClusterDynamoGraphDeploymentManifests(t *testing.T) {
-	clusterTestRunManifestScenarios(t, "testdata/dgd", clusterTestDGDChain)
+	clusterTestForEachScenario(t, "testdata/dgd", func(t *testing.T, scenarioDir string) {
+		clusterTestRunManifestScenario(t, scenarioDir, func(mgr ctrl.Manager, setupOptions SetupOptions) error {
+			if err := SetupDynamoGraphDeployment(mgr, DynamoGraphDeploymentSetupOptions{SetupOptions: setupOptions}); err != nil {
+				return err
+			}
+			return SetupDynamoComponentDeployment(mgr, DynamoComponentDeploymentSetupOptions{SetupOptions: setupOptions})
+		})
+	})
 }
 
 func TestClusterDynamoGraphDeploymentRequestProfilesAndCreatesWorkloadManifests(t *testing.T) {
 	clusterTestForEachScenario(t, "testdata/dgdr", clusterTestRunDynamoGraphDeploymentRequestScenario)
-}
-
-func clusterTestRunManifestScenarios(t *testing.T, root string, chain clusterTestControllerChain) {
-	t.Helper()
-	clusterTestForEachScenario(t, root, func(t *testing.T, scenarioDir string) {
-		clusterTestRunManifestScenario(t, scenarioDir, chain)
-	})
 }
 
 func clusterTestForEachScenario(t *testing.T, root string, run func(*testing.T, string)) {
@@ -206,7 +203,11 @@ func clusterTestForEachScenario(t *testing.T, root string, run func(*testing.T, 
 	}
 }
 
-func clusterTestRunManifestScenario(t *testing.T, scenarioDir string, chain clusterTestControllerChain) {
+func clusterTestRunManifestScenario(
+	t *testing.T,
+	scenarioDir string,
+	setupControllers func(ctrl.Manager, SetupOptions) error,
+) {
 	t.Helper()
 	env := clusterTestEnv.RunT(t)
 
@@ -216,11 +217,11 @@ func clusterTestRunManifestScenario(t *testing.T, scenarioDir string, chain clus
 	t.Log("Apply the scenario input manifests through Kubernetes admission")
 	golden.ApplyManifests(t, filepath.Join(scenarioDir, "input.yaml"), env.Client(), env.Namespace())
 
-	t.Log("Start the controller chain selected by the scenario group")
+	t.Log("Start the controllers for the scenario group")
 	operatorConfig := clusterTestRestrictedConfig(env.Namespace())
 	runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, LWS: true}}
 	env.StartManager(func(mgr ctrl.Manager) error {
-		return clusterTestSetupControllerChain(mgr, chain, operatorConfig, runtimeConfig)
+		return setupControllers(mgr, SetupOptions{Config: operatorConfig, RuntimeConfig: runtimeConfig})
 	})
 
 	t.Log("Match the complete generated manifest contract")
@@ -370,26 +371,6 @@ func clusterTestCreateProfilerRBAC(t *testing.T, k8sClient client.Client, namesp
 		if err := k8sClient.Create(t.Context(), object); err != nil {
 			t.Fatalf("create profiler RBAC object %T: %v", object, err)
 		}
-	}
-}
-
-func clusterTestSetupControllerChain(
-	mgr ctrl.Manager,
-	chain clusterTestControllerChain,
-	operatorConfig *configv1alpha1.OperatorConfiguration,
-	runtimeConfig *commoncontroller.RuntimeConfig,
-) error {
-	setupOptions := SetupOptions{Config: operatorConfig, RuntimeConfig: runtimeConfig}
-	switch chain {
-	case clusterTestDCDChain:
-		return SetupDynamoComponentDeployment(mgr, DynamoComponentDeploymentSetupOptions{SetupOptions: setupOptions})
-	case clusterTestDGDChain:
-		if err := SetupDynamoGraphDeployment(mgr, DynamoGraphDeploymentSetupOptions{SetupOptions: setupOptions}); err != nil {
-			return err
-		}
-		return SetupDynamoComponentDeployment(mgr, DynamoComponentDeploymentSetupOptions{SetupOptions: setupOptions})
-	default:
-		return fmt.Errorf("unknown cluster-test controller chain %q", chain)
 	}
 }
 

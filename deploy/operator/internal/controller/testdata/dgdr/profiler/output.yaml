@@ -88,7 +88,7 @@ spec:
     cliques:
       - annotations:
           nvidia.com/dynamo-discovery-backend: kubernetes
-          nvidia.com/dynamo-operator-origin-version: $pattern:1\.4\.0-alpha\.[0-9]+\+g[0-9a-f]+
+          nvidia.com/dynamo-operator-origin-version: $pattern:1\.4\..*
         labels:
           nvidia.com/dynamo-component: Frontend
           nvidia.com/dynamo-component-type: frontend
@@ -177,7 +177,7 @@ spec:
           roleName: frontend
       - annotations:
           nvidia.com/dynamo-discovery-backend: kubernetes
-          nvidia.com/dynamo-operator-origin-version: $pattern:1\.4\.0-alpha\.[0-9]+\+g[0-9a-f]+
+          nvidia.com/dynamo-operator-origin-version: $pattern:1\.4\..*
         labels:
           nvidia.com/dynamo-component: decode
           nvidia.com/dynamo-component-type: decode
@@ -299,7 +299,7 @@ spec:
           roleName: decode
       - annotations:
           nvidia.com/dynamo-discovery-backend: kubernetes
-          nvidia.com/dynamo-operator-origin-version: $pattern:1\.4\.0-alpha\.[0-9]+\+g[0-9a-f]+
+          nvidia.com/dynamo-operator-origin-version: $pattern:1\.4\..*
         labels:
           nvidia.com/dynamo-component: prefill
           nvidia.com/dynamo-component-type: prefill
