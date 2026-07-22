@@ -223,9 +223,11 @@ fn generate_mm_routing_info(
     let features = features
         .as_object()
         .ok_or("features must be a JSON object")?;
-    let mm_hashes = features
-        .get("mm_hashes")
-        .and_then(serde_json::Value::as_object)
+    let Some(mm_hashes) = features.get("mm_hashes") else {
+        return Ok(None);
+    };
+    let mm_hashes = mm_hashes
+        .as_object()
         .ok_or("features.mm_hashes must be a JSON object")?;
     let mm_placeholders = features
         .get("mm_placeholders")
@@ -1152,6 +1154,34 @@ mod tests {
         assert_eq!(expected_token_ids, serde_json::json!([1, 2]));
         assert_eq!(envelope, &expected_envelope);
         assert!(envelope.get("token_ids").is_none());
+    }
+
+    #[test]
+    fn unrelated_features_do_not_attempt_exact_multimodal_routing() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2, 3],
+            "sampling_params": {},
+            "features": {"future_feature": [1, 2, 3]}
+        }))
+        .expect("deserialize request");
+
+        assert!(matches!(generate_mm_routing_info(&request, 16), Ok(None)));
+    }
+
+    #[test]
+    fn malformed_present_mm_hashes_still_disable_exact_multimodal_routing() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2, 3],
+            "sampling_params": {},
+            "features": {"mm_hashes": ["not-an-object"]}
+        }))
+        .expect("deserialize request");
+
+        assert_eq!(
+            generate_mm_routing_info(&request, 16)
+                .expect_err("malformed present metadata must remain an error"),
+            "features.mm_hashes must be a JSON object"
+        );
     }
 
     #[test]
