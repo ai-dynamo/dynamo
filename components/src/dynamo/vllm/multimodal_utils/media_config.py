@@ -6,6 +6,7 @@
 import os
 from typing import Optional
 
+from dynamo.common.utils.media_decoder import build_frontend_image_decoder_options
 from dynamo.llm import MediaDecoder, MediaFetcher
 
 
@@ -17,7 +18,7 @@ def create_frontend_media_config(
         return None, None
 
     media_decoder = MediaDecoder()
-    media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
+    media_decoder.enable_image(build_frontend_image_decoder_options())
     # Video frontend decoding remains disabled until the Rust decoder is
     # supported in the same configurations as the image path.
 
