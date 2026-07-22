@@ -462,11 +462,11 @@ impl RadixCache {
         }
     }
 
-    /// Evict tokens from the cache by LRU order.
+    /// Evict tokens from the cache by LRU order, rounding partial leaves to full pages.
     /// Returns `(num_tokens_evicted, evicted_page_indices)`.
     pub fn evict(&mut self, num_tokens: usize) -> (usize, Vec<usize>) {
         let mut evicted = 0;
-        let mut evicted_indices = Vec::new();
+        let mut evicted_indices = Vec::with_capacity(num_tokens.min(self.evictable_size));
         while evicted < num_tokens {
             let victim = self
                 .evictable_leaves
@@ -477,6 +477,30 @@ impl RadixCache {
             let Some(victim_id) = victim else {
                 break;
             };
+
+            let victim_tokens = self.nodes[victim_id].key.len();
+            let remaining = num_tokens - evicted;
+            let eviction_len = remaining
+                .div_ceil(self.page_size)
+                .saturating_mul(self.page_size)
+                .min(victim_tokens);
+
+            // A compressed leaf may span pages. Preserve its indexed prefix when
+            // only the newest suffix pages are needed to satisfy this eviction.
+            if eviction_len < victim_tokens {
+                let split_pos = victim_tokens - eviction_len;
+                let (nodes, token_pool) = (&mut self.nodes, &mut self.token_pool);
+                let victim_node = &mut nodes[victim_id];
+                victim_node.key.truncate(split_pos);
+                let evicted_values = &victim_node.value[split_pos..];
+                token_pool.free(evicted_values);
+                evicted_indices.extend_from_slice(evicted_values);
+                victim_node.value.truncate(split_pos);
+
+                self.evictable_size -= eviction_len;
+                evicted += eviction_len;
+                continue;
+            }
 
             let victim_node = self
                 .nodes

@@ -1288,6 +1288,41 @@ mod tests {
         harness.shutdown();
     }
 
+    #[tokio::test]
+    async fn retained_tail_eviction_preserves_page_granular_prefix_reuse() {
+        let (buffer, sink) = capture_router_event_sink(ROUTER_TEST_WORKER_ID);
+        let harness = RouterIndexerHarness::new(4, ROUTER_TEST_WORKER_ID);
+        let mut mgr = SglangKvManager::new(8, 4, KvEventPublishers::new(Some(sink), None), 0);
+        let tokens = [1, 2, 3, 4, 5, 6, 7, 8];
+
+        let mut request = mgr.allocate_for_request(&tokens[..4]).unwrap();
+        mgr.extend_cached_prefix(&tokens[..4], &mut request.lease);
+        assert!(mgr.extend_allocation(&tokens, &mut request.lease));
+        mgr.extend_cached_prefix(&tokens, &mut request.lease);
+        mgr.finish(&tokens, request.lease);
+
+        let stored_events = buffer.drain();
+        let query_hashes = stored_hashes(&stored_events);
+        assert_eq!(query_hashes.len(), 2);
+        harness.apply_events(stored_events).await;
+        assert_eq!(harness.overlap_for_hashes(query_hashes.clone()).await, 2);
+        assert_eq!(mgr.cache().evictable_size, 8);
+        assert_eq!(mgr.cache().token_pool.available(), 0);
+
+        mgr.evict(4);
+        let eviction_events = buffer.drain();
+        assert_eq!(removed_event_count(&eviction_events), 1);
+        assert_eq!(removed_block_count(&eviction_events), 1);
+        harness.apply_events(eviction_events).await;
+
+        assert_eq!(mgr.cache().prefix_match_len(&tokens), 4);
+        assert_eq!(mgr.cache().evictable_size, 4);
+        assert_eq!(mgr.cache().protected_size, 0);
+        assert_eq!(mgr.cache().token_pool.available(), 4);
+        assert_eq!(harness.overlap_for_hashes(query_hashes).await, 1);
+        harness.shutdown();
+    }
+
     #[test]
     fn unfinished_duplicate_canonicalization_prevents_missing_parent() {
         let (buffer, sink) = capture_router_event_sink(ROUTER_TEST_WORKER_ID);
