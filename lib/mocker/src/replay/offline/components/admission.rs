@@ -92,12 +92,16 @@ impl AdmissionQueue {
             (ReplayMode::Trace, AdmissionSource::Workload(driver)) => Ok(driver
                 .pop_ready(now_ms, usize::MAX)
                 .into_iter()
-                .map(|ready| ReadyArrival {
-                    request: ready.request,
-                    arrival_time_ms: ready.scheduled_ready_at_ms,
-                    replay_hashes: ready.replay_hashes,
-                    session_id: Some(ready.session_id),
-                    turn_index: Some(ready.turn_index),
+                .map(|ready| {
+                    let session_id = ready.emit_session_metadata.then_some(ready.session_id);
+                    let turn_index = ready.emit_session_metadata.then_some(ready.turn_index);
+                    ReadyArrival {
+                        request: ready.request,
+                        arrival_time_ms: ready.scheduled_ready_at_ms,
+                        replay_hashes: ready.replay_hashes,
+                        session_id,
+                        turn_index,
+                    }
                 })
                 .collect()),
             (ReplayMode::Concurrency { max_in_flight }, AdmissionSource::Requests(pending)) => {
@@ -124,12 +128,16 @@ impl AdmissionQueue {
                 Ok(driver
                     .pop_ready(now_ms, usize::MAX)
                     .into_iter()
-                    .map(|ready| ReadyArrival {
-                        request: ready.request,
-                        arrival_time_ms: now_ms,
-                        replay_hashes: ready.replay_hashes,
-                        session_id: Some(ready.session_id),
-                        turn_index: Some(ready.turn_index),
+                    .map(|ready| {
+                        let session_id = ready.emit_session_metadata.then_some(ready.session_id);
+                        let turn_index = ready.emit_session_metadata.then_some(ready.turn_index);
+                        ReadyArrival {
+                            request: ready.request,
+                            arrival_time_ms: now_ms,
+                            replay_hashes: ready.replay_hashes,
+                            session_id,
+                            turn_index,
+                        }
                     })
                     .collect())
             }

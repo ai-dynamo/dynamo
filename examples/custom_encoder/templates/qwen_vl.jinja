@@ -1,0 +1,26 @@
+{#- Minimal chat template for a text-only LM that hosts a custom image encoder. -#}
+{#- Renders text content normally and emits one bare <|image_pad|> placeholder -#}
+{#- per image content part. The CustomEncoder replaces each placeholder token -#}
+{#- with the encoder's image embeddings before the prompt reaches the engine. -#}
+{#- The frontend rewrites each {"type":"image_url",...} part to a bare -#}
+{#- {"type":"image"} before this template runs, so match on type == 'image'. -#}
+{#- The assembler maps one placeholder token to one image tensor, so -#}
+{#- consecutive images need no separator. -#}
+{%- for message in messages %}
+    {{- '<|im_start|>' + message.role + '\n' }}
+    {%- if message.content is string %}
+        {{- message.content }}
+    {%- else %}
+        {%- for content in message.content %}
+            {%- if content.type == 'image' %}
+                {{- '<|image_pad|>' }}
+            {%- elif content.type == 'text' %}
+                {{- content.text }}
+            {%- endif %}
+        {%- endfor %}
+    {%- endif %}
+    {{- '<|im_end|>\n' }}
+{%- endfor %}
+{%- if add_generation_prompt %}
+    {{- '<|im_start|>assistant\n' }}
+{%- endif %}

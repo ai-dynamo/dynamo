@@ -29,7 +29,9 @@ Division of labour (author vs. Dynamo):
   it fails only that image, before any GPU work. **Off by default:** override
   ``preprocess`` *and* set ``preprocess_concurrency > 0`` together to enable this
   pool. With the defaults (identity passthrough, ``preprocess_concurrency = 0``)
-  there is no preprocess phase — raws go straight to ``forward_batch``.
+  there is no preprocess phase — ``preprocess`` is never called and raws go
+  straight to ``forward_batch``. A mismatch (overridden ``preprocess`` with
+  ``preprocess_concurrency`` left at ``0``) fails fast at startup.
 - ``forward_batch(items, target_bucket=None) -> list[torch.Tensor]`` — **actor
   thread, serialized.** ``items`` are a cost-bounded batch (summed ``cost`` within
   the budget). Fence (stream event + sync) and **copy outputs to CPU** before
@@ -118,10 +120,12 @@ class VisionEncoderBackend(ABC, Generic[RawT, ItemT]):
     #: until CUDA-graph batching is supported. ``None``/empty ⇒ eager.
     buckets: Optional[Sequence[int]] = None
 
-    #: Off-loop preprocess pool size Dynamo runs ``preprocess`` on. ``0`` (the
-    #: **default**) ⇒ **no preprocess phase**: raws go straight to ``forward_batch``
+    #: Off-loop preprocess pool size Dynamo runs ``preprocess`` on. Not just a
+    #: pool size — it gates the preprocess **phase**: ``0`` (the **default**) ⇒
+    #: ``preprocess`` is never called and raws go straight to ``forward_batch``
     #: (``raw`` is the item; do any prep there). Set ``> 0`` (with an overridden
-    #: ``preprocess``) to fetch / resize / patchify off the actor thread. Whether an
+    #: ``preprocess``) to fetch / resize / patchify off the actor thread; overriding
+    #: ``preprocess`` while leaving this at ``0`` fails fast at startup. Whether an
     #: encoder needs off-loop prep is a property of the encoder, so it lives here;
     #: the driver takes an optional override for tuning.
     preprocess_concurrency: int = 0
@@ -146,6 +150,8 @@ class VisionEncoderBackend(ABC, Generic[RawT, ItemT]):
         fetch + HF processing **and** set ``preprocess_concurrency > 0`` to run it
         on the pool — it must then be deterministic, thread-safe, and CUDA-free.
         Raise to reject a bad input — it fails only that image, before submit.
+        With ``preprocess_concurrency == 0`` this method is **never called**;
+        overriding it without raising the concurrency fails fast at startup.
         """
         return Preprocessed(item=raw)  # type: ignore[arg-type]  # ItemT == RawT
 

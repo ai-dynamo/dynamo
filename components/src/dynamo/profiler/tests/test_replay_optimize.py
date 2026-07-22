@@ -776,12 +776,13 @@ def test_disagg_optimizer_rejects_invalid_objective() -> None:
         )
 
 
-def test_router_spec_rejects_out_of_range_overlap_credits() -> None:
-    with pytest.raises(ValueError, match="prefill_load_scale"):
-        _agg_spec(overlap_credits=[0.0, 1.1])
+def test_router_spec_accepts_amplified_and_rejects_invalid_overlap_credits() -> None:
+    spec = _agg_spec(overlap_credits=[0.0, 1.1])
 
-    with pytest.raises(ValueError, match="overlapCredits must be between 0.0 and 1.0"):
-        _disagg_spec(overlap_credits=[-0.1, 1.0])
+    assert spec.router.effectiveOverlapCredits == (0.0, 1.1)
+    for invalid in [-0.1, float("nan"), float("inf")]:
+        with pytest.raises(ValueError, match="finite, non-negative"):
+            _disagg_spec(overlap_credits=[invalid, 1.0])
 
 
 def test_router_spec_rejects_invalid_prefill_load_scales() -> None:
@@ -1045,27 +1046,23 @@ def test_evaluate_agg_state_prefers_normalized_metrics_over_report_payload() -> 
     assert record["violation_penalty"] == 0.0
 
 
-def test_kv_router_config_rejects_out_of_range_overlap_credit() -> None:
-    config = KvRouterConfig(overlap_score_credit=1.0)
+def test_kv_router_config_validates_amplified_overlap_credit() -> None:
+    config = KvRouterConfig(overlap_score_credit=1.1)
 
-    with pytest.raises(ValueError, match="prefill_load_scale"):
-        KvRouterConfig(overlap_score_credit=1.1)
+    assert config.overlap_score_credit == 1.1
+    config.overlap_score_credit = 1.5
+    assert config.overlap_score_credit == 1.5
+    assert config.with_overrides(overlap_score_credit=2.0).overlap_score_credit == 2.0
 
-    with pytest.raises(
-        ValueError, match="overlap_score_credit must be between 0.0 and 1.0"
-    ):
-        config.overlap_score_credit = -1.0
+    for invalid in [-1.0, float("nan"), float("inf")]:
+        with pytest.raises(ValueError, match="finite, non-negative"):
+            KvRouterConfig(overlap_score_credit=invalid)
 
-    with pytest.raises(ValueError, match="prefill_load_scale"):
-        config.overlap_score_credit = 1.1
+        with pytest.raises(ValueError, match="finite, non-negative"):
+            config.overlap_score_credit = invalid
 
-    with pytest.raises(
-        ValueError, match="overlap_score_credit must be between 0.0 and 1.0"
-    ):
-        config.with_overrides(overlap_score_credit=-1.0)
-
-    with pytest.raises(ValueError, match="prefill_load_scale"):
-        config.with_overrides(overlap_score_credit=1.1)
+        with pytest.raises(ValueError, match="finite, non-negative"):
+            config.with_overrides(overlap_score_credit=invalid)
 
 
 def test_kv_router_config_preserves_positional_overlap_weight_alias() -> None:

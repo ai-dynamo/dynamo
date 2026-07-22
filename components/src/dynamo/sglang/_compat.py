@@ -66,7 +66,7 @@ ensure_sglang_top_level_exports()
 def ensure_sglang_tensor_image_size() -> None:
     """Allow SGLang's image-token resolver to handle decoded image tensors.
 
-    SGLang 0.5.13 and 0.5.14 assume every decoded image exposes the PIL
+    SGLang 0.5.13 through 0.5.15 assume every decoded image exposes the PIL
     ``height``/``width`` attributes. Its CUDA JPEG decoder instead returns a
     CHW tensor, causing multimodal requests to fall back to retokenization.
 
@@ -197,8 +197,8 @@ def _build_profile_request(body: dict[str, Any]) -> Any:
 async def start_profile_compat(tokenizer_manager: Any, body: dict[str, Any]) -> None:
     """Start profiling across SGLang's old and new control APIs.
 
-    SGLang 0.5.11 accepts profiling fields as keyword arguments. Newer builds
-    accept one ``ProfileReq`` object instead.
+    SGLang 0.5.14 accepts profiling fields as keyword arguments. SGLang 0.5.15
+    accepts one ``ProfileReq`` object instead.
     """
     start_profile = tokenizer_manager.start_profile
     signature_source = getattr(start_profile, "__func__", start_profile)

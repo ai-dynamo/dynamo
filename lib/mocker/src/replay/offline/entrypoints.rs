@@ -49,8 +49,10 @@ fn finish_with_replay_wall_time(
     collector.finish().with_wall_time_ms(wall_time_ms)
 }
 
-fn use_single_runtime(num_workers: usize, router_mode: ReplayRouterMode) -> bool {
-    num_workers == 1 && router_mode != ReplayRouterMode::KvRouter
+fn use_single_runtime(num_workers: usize, dp_size: u32, router_mode: ReplayRouterMode) -> bool {
+    // dp_size>1 needs one scheduler/KV pool per rank. They still share one
+    // discrete-event runtime, but require the rank-aware AggRuntime path.
+    num_workers == 1 && dp_size <= 1 && router_mode != ReplayRouterMode::KvRouter
 }
 
 /// Run the deterministic offline half of the live/offline handoff conformance
@@ -203,7 +205,7 @@ pub(crate) fn simulate_trace(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
-    if use_single_runtime(num_workers, router_mode) {
+    if use_single_runtime(num_workers, args.dp_size, router_mode) {
         simulate_trace_single(
             args,
             requests,
@@ -241,7 +243,7 @@ pub(crate) fn simulate_concurrency(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
-    if use_single_runtime(num_workers, router_mode) {
+    if use_single_runtime(num_workers, args.dp_size, router_mode) {
         simulate_concurrency_single(
             args,
             requests,
@@ -286,6 +288,34 @@ pub(crate) fn simulate_trace_workload(
         num_workers,
         router_mode,
         false,
+        true,
+        record_per_request,
+        max_sim_time_ms,
+        sla,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn simulate_trace_workload_without_session_metadata(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: Trace,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    simulate_trace_workload_with_delta_mode(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        num_workers,
+        router_mode,
+        false,
+        false,
         record_per_request,
         max_sim_time_ms,
         sla,
@@ -301,7 +331,7 @@ pub(crate) fn simulate_agentic_trace_workload(
     router_mode: ReplayRouterMode,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
-    if use_single_runtime(num_workers, router_mode) {
+    if use_single_runtime(num_workers, args.dp_size, router_mode) {
         simulate_agentic_trace_workload_single(args, trace, sla)
     } else {
         simulate_agentic_trace_workload_multi(
@@ -336,6 +366,7 @@ pub(crate) fn simulate_trace_workload_accumulating_deltas(
         num_workers,
         router_mode,
         true,
+        true,
         record_per_request,
         max_sim_time_ms,
         sla,
@@ -351,15 +382,17 @@ fn simulate_trace_workload_with_delta_mode(
     num_workers: usize,
     router_mode: ReplayRouterMode,
     accumulate_session_deltas: bool,
+    emit_session_metadata: bool,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
-    if use_single_runtime(num_workers, router_mode) {
+    if use_single_runtime(num_workers, args.dp_size, router_mode) {
         simulate_trace_workload_single(
             args,
             trace,
             accumulate_session_deltas,
+            emit_session_metadata,
             record_per_request,
             max_sim_time_ms,
             sla,
@@ -373,6 +406,7 @@ fn simulate_trace_workload_with_delta_mode(
             num_workers,
             router_mode,
             accumulate_session_deltas,
+            emit_session_metadata,
             record_per_request,
             max_sim_time_ms,
             sla,
@@ -450,7 +484,7 @@ fn simulate_concurrency_workload_with_delta_mode(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
-    if use_single_runtime(num_workers, router_mode) {
+    if use_single_runtime(num_workers, args.dp_size, router_mode) {
         simulate_concurrency_workload_single(
             args,
             trace,
@@ -544,8 +578,60 @@ pub(crate) fn simulate_trace_workload_disagg(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
+    simulate_trace_workload_disagg_with_session_metadata(
+        config,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        router_mode,
+        true,
+        record_per_request,
+        max_sim_time_ms,
+        sla,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn simulate_trace_workload_disagg_without_session_metadata(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: Trace,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    simulate_trace_workload_disagg_with_session_metadata(
+        config,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        router_mode,
+        false,
+        record_per_request,
+        max_sim_time_ms,
+        sla,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn simulate_trace_workload_disagg_with_session_metadata(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: Trace,
+    router_mode: ReplayRouterMode,
+    emit_session_metadata: bool,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
-    let driver = WorkloadDriver::new_trace(trace, config.prefill_args.block_size)?;
+    let mut driver = WorkloadDriver::new_trace(trace, config.prefill_args.block_size)?;
+    if !emit_session_metadata {
+        driver = driver.without_session_metadata();
+    }
     let (collector, _) = DisaggRuntime::new_workload(
         &config,
         router_config,
@@ -633,6 +719,7 @@ pub(crate) fn simulate_trace_workload_single(
     args: MockEngineArgs,
     trace: Trace,
     accumulate_session_deltas: bool,
+    emit_session_metadata: bool,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
@@ -640,11 +727,14 @@ pub(crate) fn simulate_trace_workload_single(
     let started_at = Instant::now();
     let args = args.normalized()?;
     let engine_block_size = args.block_size;
-    let driver = if accumulate_session_deltas {
+    let mut driver = if accumulate_session_deltas {
         trace.into_delta_accumulating_trace_driver_with_block_size(engine_block_size)?
     } else {
         trace.into_trace_driver_with_block_size(engine_block_size)?
     };
+    if !emit_session_metadata {
+        driver = driver.without_session_metadata();
+    }
     let collector = SingleRuntime::new_workload(args, driver, SingleReplayMode::Trace)
         .with_per_request_records(record_per_request)
         .with_max_sim_time_ms(max_sim_time_ms)
@@ -767,17 +857,21 @@ pub(crate) fn simulate_trace_workload_multi(
     num_workers: usize,
     router_mode: ReplayRouterMode,
     accumulate_session_deltas: bool,
+    emit_session_metadata: bool,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
-    let driver = if accumulate_session_deltas {
+    let mut driver = if accumulate_session_deltas {
         trace.into_delta_accumulating_trace_driver_with_block_size(args.block_size)?
     } else {
         trace.into_trace_driver_with_block_size(args.block_size)?
     };
+    if !emit_session_metadata {
+        driver = driver.without_session_metadata();
+    }
     let (collector, _) = AggRuntime::new_workload(
         &args,
         router_config,
@@ -1150,23 +1244,104 @@ pub(super) fn run_concurrency_workload_collect(
 mod tests {
     #[cfg(feature = "kvbm-offload")]
     use super::simulate_trace_disagg;
-    use super::{generate_trace_worker_artifacts, use_single_runtime};
-    use crate::common::protocols::MockEngineArgs;
+    use super::{generate_trace_worker_artifacts, simulate_trace, use_single_runtime};
+    use crate::common::perf_model::{AicCallback, PerfModel};
     #[cfg(feature = "kvbm-offload")]
-    use crate::common::protocols::{DirectRequest, WorkerType};
+    use crate::common::protocols::WorkerType;
+    use crate::common::protocols::{DirectRequest, MockEngineArgs};
     use crate::loadgen::{SessionTrace, Trace, TurnTrace};
-    use crate::replay::ReplayRouterMode;
     #[cfg(feature = "kvbm-offload")]
-    use crate::replay::{OfflineDisaggReplayConfig, SlaThresholds};
-    #[cfg(feature = "kvbm-offload")]
+    use crate::replay::OfflineDisaggReplayConfig;
+    use crate::replay::{ReplayRouterMode, SlaThresholds};
+    use std::sync::Arc;
     use uuid::Uuid;
 
     #[test]
     fn single_runtime_selection_excludes_kv_router() {
-        assert!(use_single_runtime(1, ReplayRouterMode::RoundRobin));
-        assert!(!use_single_runtime(1, ReplayRouterMode::KvRouter));
-        assert!(!use_single_runtime(2, ReplayRouterMode::RoundRobin));
-        assert!(!use_single_runtime(2, ReplayRouterMode::KvRouter));
+        assert!(use_single_runtime(1, 1, ReplayRouterMode::RoundRobin));
+        assert!(!use_single_runtime(1, 1, ReplayRouterMode::KvRouter));
+        assert!(!use_single_runtime(2, 1, ReplayRouterMode::RoundRobin));
+        assert!(!use_single_runtime(2, 1, ReplayRouterMode::KvRouter));
+        // dp_size>1 forces the multi (per-rank) path even with a single worker.
+        assert!(!use_single_runtime(1, 8, ReplayRouterMode::RoundRobin));
+    }
+
+    struct LengthLatency;
+
+    impl AicCallback for LengthLatency {
+        fn predict_prefill(&self, _batch_size: usize, effective_isl: usize, _prefix: usize) -> f64 {
+            effective_isl as f64
+        }
+
+        fn predict_decode(&self, _batch_size: usize, _isl: usize, _osl: usize) -> f64 {
+            1.0
+        }
+    }
+
+    fn rank_timing_args(dp_size: u32) -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(64)
+            .max_num_batched_tokens(Some(64))
+            .max_num_seqs(Some(1))
+            .enable_prefix_caching(false)
+            .speedup_ratio(1.0)
+            .dp_size(dp_size)
+            .perf_model(Arc::new(PerfModel::from_aic_callback(Arc::new(
+                LengthLatency,
+            ))))
+            .build()
+            .unwrap()
+    }
+
+    fn timed_request(uuid: u128, input_length: usize) -> DirectRequest {
+        DirectRequest {
+            tokens: vec![1; input_length],
+            max_output_tokens: 1,
+            uuid: Some(Uuid::from_u128(uuid)),
+            arrival_timestamp_ms: Some(0.0),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn attention_dp_trace_entrypoint_aligns_skewed_ranks_to_slowest_boundary() {
+        let report = simulate_trace(
+            rank_timing_args(2),
+            None,
+            None,
+            vec![timed_request(30, 4), timed_request(31, 8)],
+            1,
+            1.0,
+            ReplayRouterMode::RoundRobin,
+            true,
+            None,
+            SlaThresholds::default(),
+        )
+        .unwrap();
+
+        assert_eq!(report.request_counts.completed_requests, 2);
+        let mut records = report.per_request;
+        records.sort_by_key(|record| record.input_length);
+        assert_eq!(records[0].decode_worker_idx, Some(0));
+        assert_eq!(records[1].decode_worker_idx, Some(1));
+        assert_eq!(records[0].ttft_ms, Some(9.0));
+        assert_eq!(records[1].ttft_ms, Some(9.0));
+
+        let dp1 = simulate_trace(
+            rank_timing_args(1),
+            None,
+            None,
+            vec![timed_request(32, 4)],
+            1,
+            1.0,
+            ReplayRouterMode::RoundRobin,
+            true,
+            None,
+            SlaThresholds::default(),
+        )
+        .unwrap();
+        assert_eq!(dp1.per_request[0].ttft_ms, Some(5.0));
     }
 
     #[cfg(feature = "kvbm-offload")]

@@ -23,11 +23,13 @@ import httpx
 import torch
 from safetensors.torch import load as safetensors_load
 from safetensors.torch import load_file as safetensors_load_file
+from tensorrt_llm.inputs.utils import async_load_video
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
 from dynamo.common.http import HttpStatusError
 from dynamo.common.http.url_validator import UrlValidationError
 from dynamo.common.multimodal.image_loader import ImageLoader
+from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
@@ -80,6 +82,45 @@ class MultimodalRequestProcessor:
         self.image_loader = ImageLoader(
             enable_frontend_decoding=enable_frontend_decoding
         )
+
+        # Reuse the shared default so this preprocessor and the vLLM/SGLang
+        # backends agree on DYN_MM_VIDEO_NUM_FRAMES.
+        self.num_video_frames = max(1, VideoLoader.NUM_FRAMES_DEFAULT)
+
+        # Input processor used only to size an omitted max_tokens (see
+        # _expanded_prompt_len). Optional: unavailable for models without a
+        # registered processor, in which case max_tokens sizing is left to the engine.
+        self.input_processor = None
+        try:
+            from tensorrt_llm.inputs import create_input_processor
+
+            self.input_processor = create_input_processor(model_dir, self.tokenizer)
+        except Exception as e:
+            logging.warning("Input processor unavailable for max_tokens sizing: %s", e)
+
+    def _expanded_prompt_len(
+        self, token_ids: List[int], images: Optional[List[Any]]
+    ) -> Optional[int]:
+        """Post-expansion prompt length: text tokens plus per-image tokens, with
+        image placeholders in token_ids replaced by their expanded token counts.
+
+        Returns None when it cannot be computed, so callers fall back to the
+        engine default instead of an over/underestimate.
+        """
+        if not self.input_processor or not images or not token_ids:
+            return None
+        try:
+            mm_ids = self.input_processor.get_mm_token_ids()
+            mm_id_set = set(mm_ids.tolist()) if mm_ids is not None else set()
+            num_placeholders = sum(1 for t in token_ids if t in mm_id_set)
+            image_tokens = sum(
+                int(self.input_processor.get_num_tokens_per_image(image=img))
+                for img in images
+            )
+            return len(token_ids) - num_placeholders + image_tokens
+        except Exception as e:
+            logging.warning("Could not compute expanded prompt length: %s", e)
+            return None
 
     def is_url(self, path: str) -> bool:
         """Check if a path is a URL."""
@@ -378,7 +419,38 @@ class MultimodalRequestProcessor:
                         logging.error(f"Failed to load embeddings: {e}")
                         return None
 
-            # TODO: Add support for video_url, audio_url
+            # Video is forwarded as raw URLs ({"Url": ...}); reject local-file
+            # schemes for the same SSRF reason as the image path above.
+            video_items = multi_modal_data.get("video_url") or []
+            if not isinstance(video_items, list):
+                raise HttpStatusError(
+                    400, "Malformed video_url field: expected a list", str(video_items)
+                )
+            videos = []
+            for item in video_items:
+                url = item.get("Url") if isinstance(item, dict) else item
+                if not isinstance(url, str):
+                    raise HttpStatusError(
+                        400, f"Unsupported video item: {item!r}", str(item)
+                    )
+                if urlparse(url).scheme in ("", "file"):
+                    raise HttpStatusError(
+                        400, "Local file access is not allowed for video", url
+                    )
+                try:
+                    videos.append(await async_load_video(url, self.num_video_frames))
+                except (UrlValidationError, HttpStatusError):
+                    raise
+                except Exception as e:
+                    status = getattr(e, "status", None) or getattr(e, "code", None)
+                    raise HttpStatusError(
+                        status if isinstance(status, int) and status >= 400 else 400,
+                        f"Failed to load video ({url}): {e}",
+                        url,
+                    ) from e
+            if videos:
+                processed_mm_data["video"] = videos
+                logging.info("Loaded %d video(s)", len(videos))
 
             if loaded_embeddings:
                 # For TRT-LLM MM embeddings, the currently
@@ -403,6 +475,15 @@ class MultimodalRequestProcessor:
             logging.warning("No token_ids in request")
             return None
         processed_inputs["prompt_token_ids"] = token_ids
+
+        # Post-expansion prompt length, so an omitted max_tokens can be sized
+        # against the real context usage rather than the unexpanded placeholders.
+        mm_data = processed_inputs.get("multi_modal_data")
+        expanded_len = self._expanded_prompt_len(
+            token_ids, mm_data.get("image") if mm_data else None
+        )
+        if expanded_len is not None:
+            processed_inputs["expanded_prompt_len"] = expanded_len
 
         return processed_inputs
 

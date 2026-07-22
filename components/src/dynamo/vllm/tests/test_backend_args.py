@@ -8,6 +8,8 @@ Unit tests for vLLM backend arguments.
 need to add more tests to cover different code paths of DynamoVllmConfig.
 """
 
+import json
+
 import pytest
 
 from dynamo.vllm.backend_args import DisaggregationMode, DynamoVllmConfig
@@ -43,6 +45,60 @@ def create_config() -> DynamoVllmConfig:
     config.use_vllm_tokenizer = False
     config.frontend_decoding = False
     return config
+
+
+def write_benchmark_points(tmp_path):
+    path = tmp_path / "points.json"
+    points = {
+        "schema_version": 1,
+        "prefill": [
+            {
+                "total_prefill_tokens": 8,
+                "total_kv_read_tokens": 0,
+                "batch_size": 1,
+            }
+        ],
+        "decode": [{"total_kv_read_tokens": 32, "batch_size": 2}],
+    }
+    path.write_text(json.dumps(points), encoding="utf-8")
+    return path, points
+
+
+class TestExplicitBenchmarkPoints:
+    def test_file_is_loaded_before_workers_start(self, tmp_path):
+        path, points = write_benchmark_points(tmp_path)
+        config = create_config()
+        config.benchmark_mode = "agg"
+        config.benchmark_points_file = str(path)
+
+        config._load_explicit_benchmark_points()
+
+        assert config._benchmark_points is not None
+        assert config._benchmark_points.model_dump(mode="json") == points
+
+    def test_file_requires_benchmark_mode(self, tmp_path):
+        path, _ = write_benchmark_points(tmp_path)
+        config = create_config()
+        config.benchmark_points_file = str(path)
+
+        with pytest.raises(ValueError, match="requires --benchmark-mode"):
+            config._load_explicit_benchmark_points()
+
+    def test_file_overrides_grid_controls(self, tmp_path):
+        path, points = write_benchmark_points(tmp_path)
+        config = create_config()
+        config.benchmark_mode = "agg"
+        config.benchmark_points_file = str(path)
+        config.prefill_max_new_token_samples = 1
+        config.prefill_max_new_token_samples_explicit = True
+        config.benchmark_decode_length_granularity = 0
+
+        config._load_explicit_benchmark_points()
+        config._resolve_legacy_benchmark_sampling()
+        config._validate_benchmark_sampling()
+
+        assert config._benchmark_points is not None
+        assert config._benchmark_points.model_dump(mode="json") == points
 
 
 class TestResolveDisaggregationModeFromLegacyMultimodalFlags:
@@ -281,42 +337,3 @@ class TestValidateCustomEncoder:
         config.custom_encoder_class = None
         config.enable_multimodal = False
         config._validate_custom_encoder()
-
-
-class TestValidateBenchmarkConfig:
-    @pytest.mark.parametrize(
-        "axis",
-        [
-            "benchmark_prefill_kv_read_granularity",
-            "benchmark_prefill_batch_granularity",
-        ],
-    )
-    @pytest.mark.parametrize("value", [0, -1, 1025])
-    def test_rejects_out_of_range_grid_axis(self, axis, value):
-        config = create_config()
-        config.benchmark_mode = "prefill"
-        setattr(config, axis, value)
-
-        with pytest.raises(ValueError, match="must be between 1 and 1024"):
-            config._validate_benchmark_config()
-
-    def test_caps_prefill_cartesian_grid(self):
-        config = create_config()
-        config.benchmark_mode = "prefill"
-        config.benchmark_prefill_granularity = 16
-        config.benchmark_prefill_kv_read_granularity = 16
-        config.benchmark_prefill_batch_granularity = 16
-        config._validate_benchmark_config()
-
-        config.benchmark_prefill_batch_granularity = 17
-        with pytest.raises(ValueError, match="requests 4352 grid points"):
-            config._validate_benchmark_config()
-
-    def test_decode_mode_ignores_inactive_prefill_grid(self):
-        config = create_config()
-        config.benchmark_mode = "decode"
-        config.benchmark_prefill_granularity = 1024
-        config.benchmark_prefill_kv_read_granularity = 1024
-        config.benchmark_prefill_batch_granularity = 1024
-
-        config._validate_benchmark_config()

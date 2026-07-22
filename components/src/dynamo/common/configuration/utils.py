@@ -5,9 +5,30 @@
 
 import argparse
 import os
+import re
 from typing import Any, Callable, Optional, TypeVar, Union
 
 T = TypeVar("T")
+
+
+def split_served_model_names(served_model_name: Any) -> list[str]:
+    """Split a ``--served-model-name`` value into individual names.
+
+    Accepts a single string (whitespace- or comma-separated) or a
+    list/tuple of such strings, and returns a flat list of non-empty names
+    in order. The first is the primary served name; any remaining names are
+    aliases. Returns ``[]`` when nothing parses out.
+    """
+    if served_model_name is None:
+        return []
+    if isinstance(served_model_name, (list, tuple)):
+        raw_names = [str(name) for name in served_model_name]
+    else:
+        raw_names = [str(served_model_name)]
+    names: list[str] = []
+    for raw_name in raw_names:
+        names.extend(name for name in re.split(r"[\s,]+", raw_name.strip()) if name)
+    return names
 
 
 def env_or_default(

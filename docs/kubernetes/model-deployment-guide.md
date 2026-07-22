@@ -68,6 +68,7 @@ are reference material; you can read them as needed instead of going linearly.
 | A recipe matches your model/backend/hardware | Apply the recipe's model cache resources, then apply its `deploy.yaml`. | [Deploy a Tuned DGD from Recipes](#deploy-a-tuned-dgd-from-recipes) |
 | You want Dynamo to generate the deployment | Create a DGDR. Use `autoApply: true` to let the operator create the DGD, or `autoApply: false` to inspect the generated DGD YAML first. | [Use DGDR to Generate a DGD](#use-dgdr-to-generate-a-dgd) |
 | You already know the exact topology | Author or edit a DGD directly, then apply it with `kubectl`. | [Creating Deployments](deployment/create-deployment.md) |
+| You are deploying vLLM on Intel XPU | Use the XPU DRA templates and an XPU runtime image. | [Creating Deployments](deployment/create-deployment.md) |
 | You are preparing for production | Add model caching, choose backend/search strategy, and validate networking/planner needs. | [Production Details](#production-details) |
 
 ## Deploy a Tuned DGD from Recipes
@@ -430,7 +431,7 @@ backend explicitly in these cases:
 
 Each backend handles multinode inference differently:
 
-- **vLLM**: Uses Ray for multi-node TP/PP. Ray head runs on the leader, agents on workers.
+- **vLLM**: Uses PyTorch multiprocessing (mp) backend with distributed initialization flags for multi-node TP/PP. Each node runs its own vLLM process with synchronized training initialization.
 - **SGLang**: Uses `--dist-init-addr`, `--nnodes`, `--node-rank` flags for distributed setup.
 - **TRT-LLM**: MPI-based. The operator auto-generates SSH keypairs; the leader runs `mpirun`.
 

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+import os
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -22,7 +23,27 @@ if TYPE_CHECKING:
 
 MINIMUM_VLLM_VERSION = "0.17.0"
 
-logger = logging.getLogger(__name__)
+# This connector runs inside vLLM's spawned EngineCore process, where Dynamo's
+# logging bridge is unavailable. Use a vLLM child logger so
+# VLLM_LOGGING_LEVEL controls these diagnostics.
+logger = logging.getLogger("vllm.dynamo.multimodal_embedding_cache_connector")
+EMBEDDING_CACHE_HIT_LOG = "Dynamo multimodal embedding cache hit: identifier=%r"
+
+
+def _get_device(vllm_config: "VllmConfig") -> str:
+    device_config = getattr(vllm_config, "device_config", None)
+    for field_name in ("device", "device_type"):
+        device = getattr(device_config, field_name, None)
+        if isinstance(device, torch.device):
+            device = device.type
+        if isinstance(device, str) and device in ("cuda", "xpu"):
+            return device
+
+    target_device = os.environ.get("VLLM_TARGET_DEVICE")
+    if target_device in ("cuda", "xpu"):
+        return target_device
+
+    return "cuda"
 
 
 @dataclass
@@ -55,6 +76,7 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
                 _vllm_version,
             )
         super().__init__(vllm_config=vllm_config, role=role)
+        self._device = _get_device(vllm_config)
 
         transfer_config = vllm_config.ec_transfer_config
         if transfer_config is None:
@@ -127,6 +149,8 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         """
         if identifier in self._cache_order:
             self._cache_order.move_to_end(identifier)
+            # The UUID-specific E2E assertion relies on this diagnostic.
+            logger.debug(EMBEDDING_CACHE_HIT_LOG, identifier)
             return True
         return False
 
@@ -203,7 +227,7 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
                 continue
             if mm_hash in self._cpu_store:
                 encoder_cache[mm_hash] = self._cpu_store[mm_hash].to(
-                    "cuda", non_blocking=True
+                    self._device, non_blocking=True
                 )
             else:
                 logger.warning(

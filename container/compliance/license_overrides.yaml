@@ -308,6 +308,7 @@ overrides:
   # --- Misc dpkg packages with parser-miss UNKNOWN ---
   # Verified upstream license; parser couldn't extract from the copyright file shape.
   - { ecosystem: dpkg, name: openssl,           license: "Apache-2.0",       source: "OpenSSL 3.0+ relicensed to Apache-2.0; https://www.openssl.org/source/license-openssl-ssleay.txt" }
+  - { ecosystem: dpkg, name: libssl-dev,        license: "Apache-2.0",       source: "OpenSSL 3.0+ relicensed to Apache-2.0; https://www.openssl.org/source/license-openssl-ssleay.txt" }
   - { ecosystem: dpkg, name: libpcap0.8t64,     license: "BSD-3-Clause",     source: "tcpdump.org libpcap upstream — https://github.com/the-tcpdump-group/libpcap/blob/master/LICENSE" }
   - { ecosystem: dpkg, name: libpcap0.8-dev,    license: "BSD-3-Clause",     source: "tcpdump.org libpcap upstream — https://github.com/the-tcpdump-group/libpcap/blob/master/LICENSE" }
   - { ecosystem: dpkg, name: libpython3-stdlib, license: "PSF-2.0",          source: "CPython upstream — https://docs.python.org/3/license.html" }
@@ -1010,3 +1011,10 @@ overrides:
   - { ecosystem: dpkg, name: libdrm-radeon1,  license: "MIT", source: "X.Org libdrm (MIT); Radeon DRM component" }
   - { ecosystem: dpkg, name: libdrm2,         license: "MIT", source: "X.Org libdrm (MIT)" }
   - { ecosystem: dpkg, name: libdrm-common,   license: "MIT", source: "X.Org libdrm (MIT); common data" }
+
+  # --- Plotly Kaleido image-export stack (dynamo-planner; PyPI metadata has
+  #     empty license_expression + no classifiers, so the generator reports
+  #     UNKNOWN — resolved from upstream LICENSE) ---
+  - { ecosystem: python, name: kaleido,       license: "MIT", source: "Plotly Kaleido — https://github.com/plotly/kaleido/blob/main/LICENSE.txt (MIT)" }
+  - { ecosystem: python, name: choreographer, license: "MIT", source: "Plotly Choreographer — https://github.com/plotly/choreographer/blob/main/LICENSE.md (MIT)" }
+  - { ecosystem: python, name: logistro,      license: "MIT", source: "GeoPozo logistro — https://github.com/geopozo/logistro/blob/main/LICENSE (MIT)" }

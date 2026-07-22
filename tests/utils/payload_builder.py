@@ -11,6 +11,7 @@ from tests.utils.payloads import (
     CachedTokensChatPayload,
     ChatPayload,
     ChatPayloadWithLogprobs,
+    ClearKVBlocksPayload,
     CompletionPayload,
     CompletionPayloadWithLogprobs,
     ElasticEPScalePayload,
@@ -42,6 +43,17 @@ Aeloria holds a secret so profound that it has the potential to reshape the very
 will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. \
 Your Task: Character Background: Develop a detailed background for your character. Describe their motivations \
 for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends."""
+
+# Deliberately distinct from other cache-test prompts and long enough to span
+# multiple vLLM cache blocks.
+CLEAR_KV_BLOCKS_PROMPT = """This is the unified vLLM block-clearing verification prompt, identified by the unique \
+phrase cobalt-orchid-riverstone. Imagine a research station built beside a quiet polar observatory where engineers \
+catalog unusual signals from distant stars. Describe how the team prepares its instruments, checks redundant clocks, \
+records atmospheric conditions, and compares each observation with the previous night. Include the roles of the lead \
+astronomer, systems engineer, data archivist, and safety coordinator. Explain why repeatable procedures matter when a \
+faint signal could be caused by weather, hardware drift, software timing, or a genuine astronomical event. Then give a \
+brief account of the team's morning review, including how they preserve raw measurements, annotate anomalies, and plan \
+the next observation window. Keep the answer factual and concise while retaining the cobalt-orchid-riverstone marker."""
 
 
 def chat_payload_default(
@@ -138,6 +150,22 @@ def cached_tokens_chat_payload(
         or ["Aeloria", "Eldoria", "explorer", "ancient", "character", "background"],
         min_cached_tokens=min_cached_tokens,
         router_nvext_expectation=router_nvext_expectation,
+    )
+
+
+def clear_kv_blocks_payload(
+    max_tokens: int = 16,
+    timeout: int = 60,
+) -> ClearKVBlocksPayload:
+    """Create an admin-then-infer payload for unified vLLM cache clearing."""
+    return ClearKVBlocksPayload(
+        body={
+            "messages": [{"role": "user", "content": CLEAR_KV_BLOCKS_PROMPT}],
+            "max_tokens": max_tokens,
+            "temperature": 0.0,
+            "stream": False,
+        },
+        timeout=timeout,
     )
 
 

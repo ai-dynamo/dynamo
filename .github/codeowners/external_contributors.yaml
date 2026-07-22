@@ -1,0 +1,44 @@
+# External contributors -- individuals granted area-scoped code ownership.
+#
+# An external contributor who has earned ownership of an area is attached to
+# that area's LABEL here (not to a copy of its path globs). The generator then
+# appends their GitHub handle as a co-owner on every CODEOWNERS line that the
+# area's team owns -- base rules, path overrides, shared, and file-type rows --
+# so they inherit exactly the team's paths. Add a glob to the area in
+# areas.yaml and the contributor picks it up automatically; nothing is
+# duplicated here.
+#
+# Ownership is co-ownership: the area team stays on the line and the contributor
+# is appended, so under "any one approves" either can satisfy the review gate.
+#
+# This file is also the single source for CONTRIBUTORS.md. Do not hand-edit
+# CODEOWNERS or CONTRIBUTORS.md -- change this file and regenerate:
+#
+#   python .github/codeowners/emit_codeowners.py \
+#     --areas .github/codeowners/areas.yaml --repo . \
+#     --out CODEOWNERS
+#
+# Schema (per contributor):
+#   name:        display name (shown in CONTRIBUTORS.md)
+#   github:      GitHub username WITHOUT the leading '@' (e.g. octocat)
+#   level:       standing; one of (low -> high):
+#                  contributor | trusted_contributor | maintainer | core_maintainer
+#                (human spellings like "Core Maintainer" are accepted and normalized)
+#   affiliation: optional org/company (shown in CONTRIBUTORS.md)
+#   areas:       one or more area labels from areas.yaml (e.g. router, kv-memory)
+#
+# `level` is standing metadata (shown in CONTRIBUTORS.md); it does not change
+# CODEOWNERS routing. Co-ownership is granted by the `areas` a contributor is
+# attached to.
+#
+# Example (commented out -- no fictional owners land in CODEOWNERS):
+#
+# contributors:
+#   - name: Jane Doe
+#     github: janedoe
+#     level: maintainer
+#     affiliation: Example Org
+#     areas:
+#       - router
+
+contributors: []

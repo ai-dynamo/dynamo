@@ -20,6 +20,7 @@ from sglang.srt.server_args_config_parser import ConfigArgumentMerger
 from dynamo.common.config_dump import register_encoder
 from dynamo.common.configuration.groups import DynamoRuntimeConfig
 from dynamo.common.configuration.groups.runtime_args import DynamoRuntimeArgGroup
+from dynamo.common.configuration.utils import split_served_model_names
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.model_fetch import fetch_model
 from dynamo.common.snapshot.lifecycle import (
@@ -404,6 +405,10 @@ async def parse_args(
     # otherwise fall back to default endpoints
     namespace = dynamo_config.namespace
 
+    # Dynamo's parser consumes --enable-multimodal; forward it to SGLang.
+    if dynamo_config.enable_multimodal:
+        parsed_args.enable_multimodal = True
+
     # If --embedding-worker is set, also set SGLang's --is-embedding flag
     if dynamo_config.embedding_worker:
         parsed_args.is_embedding = True
@@ -473,7 +478,24 @@ async def parse_args(
             )
 
     model_path = parsed_args.model_path
-    # Name the model
+
+    # --served-model-name may pack several names (whitespace-/comma-separated);
+    # the first is the primary, the rest are aliases. Split BEFORE the
+    # model_path fallback so a model path containing whitespace doesn't produce
+    # spurious aliases.
+    served_names = split_served_model_names(parsed_args.served_model_name)
+    if served_names:
+        parsed_args.served_model_name = served_names[0]
+        dynamo_config.served_model_aliases = served_names[1:]
+        if served_names[1:]:
+            logging.info(
+                "Multi-name registration: primary=%r, aliases=%s",
+                served_names[0],
+                served_names[1:],
+            )
+
+    # Name the model — falls back to model_path only if neither
+    # --served-model-name nor an env var supplied one.
     if not parsed_args.served_model_name:
         parsed_args.served_model_name = model_path
     # Download the model if necessary using modelexpress.

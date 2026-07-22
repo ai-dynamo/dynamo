@@ -4,7 +4,7 @@
 use anyhow::Result;
 
 use dynamo_kv_router::protocols::{ActiveLoad, DpRank};
-use dynamo_runtime::component::{Component, Namespace};
+use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventPublisher;
 
@@ -54,26 +54,18 @@ impl WorkerMetricsPublisher {
             .map_err(|_| anyhow::anyhow!("metrics channel closed"))
     }
 
-    pub async fn create_endpoint(&self, component: Component) -> Result<()> {
-        let worker_id = component.drt().connection_id();
-        self.start_nats_metrics_publishing(component.namespace().clone(), worker_id);
+    pub async fn create_endpoint(&self, endpoint: Endpoint) -> Result<()> {
+        let worker_id = endpoint.drt().connection_id();
+        let event_publisher = EventPublisher::for_endpoint(&endpoint, KV_METRICS_SUBJECT).await?;
+        self.start_metrics_publishing(event_publisher, worker_id);
         Ok(())
     }
 
-    pub(super) fn start_nats_metrics_publishing(&self, namespace: Namespace, worker_id: u64) {
-        let nats_rx = self.rx.clone();
+    pub(super) fn start_metrics_publishing(&self, event_publisher: EventPublisher, worker_id: u64) {
+        let metrics_rx = self.rx.clone();
 
         tokio::spawn(async move {
-            let event_publisher =
-                match EventPublisher::for_namespace(&namespace, KV_METRICS_SUBJECT).await {
-                    Ok(publisher) => publisher,
-                    Err(e) => {
-                        tracing::error!("Failed to create metrics publisher: {}", e);
-                        return;
-                    }
-                };
-
-            let mut rx = nats_rx;
+            let mut rx = metrics_rx;
             let mut last_metrics: Option<WorkerMetrics> = None;
             let mut pending_publish: Option<WorkerMetrics> = None;
             let publish_timer = tokio::time::sleep(tokio::time::Duration::ZERO);
@@ -84,7 +76,7 @@ impl WorkerMetricsPublisher {
                     result = rx.changed() => {
                         if result.is_err() {
                             tracing::debug!(
-                                "Metrics publisher sender dropped, stopping NATS background task"
+                                "Metrics publisher sender dropped, stopping event-plane background task"
                             );
                             break;
                         }

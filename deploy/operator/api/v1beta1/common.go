@@ -564,6 +564,53 @@ const (
 	DGDStateFailed       DGDState = "failed"
 )
 
+// PlacementScoreState describes whether placement score is available and how
+// complete the reported score is for a graph deployment.
+//
+// Every backend must set this field after the first reconciliation:
+//   - Reported:    a score is available for every scored placement unit.
+//   - Partial:     a score is available for some but not all placement units.
+//   - Unsupported: the backend does not surface a placement score at all.
+//   - Unknown:     the backend supports scores but the current value is
+//     indeterminate (e.g. read failure, not yet populated by the
+//     scheduler). When set, PlacementStatus.Score must be cleared.
+//
+// +kubebuilder:validation:Enum=Reported;Partial;Unsupported;Unknown
+type PlacementScoreState string
+
+const (
+	PlacementScoreStateReported    PlacementScoreState = "Reported"
+	PlacementScoreStatePartial     PlacementScoreState = "Partial"
+	PlacementScoreStateUnsupported PlacementScoreState = "Unsupported"
+	PlacementScoreStateUnknown     PlacementScoreState = "Unknown"
+)
+
+// PlacementStatus groups DGD-level scheduler placement fields under a single
+// status object so future placement signals (e.g. scheduler contract version,
+// last-report timestamp, per-unit reports) can be added without a schema break.
+//
+// The score source is an open question in DEP #10064 (Grove mirror, typed Grove
+// scheduler API, or unstructured provider). Until a source is selected and
+// implemented, the DGD controller does not write this field; the schema and
+// conversion are landed here so downstream consumers can rely on the shape.
+type PlacementStatus struct {
+	// score is the DGD-level scheduler placement score aggregated from
+	// relevant scheduler placement units. Normalized to [0.0, 1.0] where higher
+	// is better and 1.0 represents the best possible placement. Aggregation
+	// uses the minimum across placement units so the value is a worst-placement
+	// signal for the graph. Scores are only comparable across DGDs that share
+	// the same scheduler scoring contract and version.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1
+	Score *float64 `json:"score,omitempty"`
+
+	// state indicates placement score reporting state. See PlacementScoreState
+	// for the semantics of each value.
+	// +optional
+	State PlacementScoreState `json:"state,omitempty"`
+}
+
 // RestartPhase enumerates phases of a graph-level restart.
 type RestartPhase string
 
@@ -676,4 +723,19 @@ type ComponentReplicaStatus struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	AvailableReplicas *int32 `json:"availableReplicas,omitempty"`
+
+	// scheduledReplicas is the number of replicas the backend scheduler has
+	// scheduled, expressed strictly in Dynamo component-replica units (not
+	// raw backend pod counts). It is a diagnostic aid for distinguishing
+	// capacity/scheduling shortfalls from runtime readiness.
+	//
+	// It is optional and omitted (nil) when the active backend cannot derive
+	// it reliably in component-replica units — for example before the backing
+	// resource's status has been observed, or for backends that do not report
+	// a scheduling count. A nil value therefore means "not reported", never
+	// "zero scheduled"; consumers must not treat absence as a scheduling
+	// failure.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	ScheduledReplicas *int32 `json:"scheduledReplicas,omitempty"`
 }
