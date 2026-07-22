@@ -73,7 +73,7 @@ spec:
               value: "/opt/models"
             # Workaround for vllm/vllm#35772: FlashInfer allreduce can hang during
             # CUDA graph capture with TP>1. Fixed in vllm/vllm#35793 (default changed
-            # to trtllm). The 1.0 container ships vLLM 0.16.0, so set explicitly.
+            # to trtllm). The 1.3.0 container ships vLLM 0.23.0, so set explicitly.
             - name: VLLM_FLASHINFER_ALLREDUCE_BACKEND
               value: "trtllm"
           command:

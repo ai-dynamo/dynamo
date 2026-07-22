@@ -48,7 +48,7 @@ spec:
           - name: intel-gpu-rdma-resource
             resourceClaimTemplateName: intel-xpu-rdma-template
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:1.3.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag
           workingDir: /workspace/examples/multimodal
           securityContext:
             runAsUser: 0
