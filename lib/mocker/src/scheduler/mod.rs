@@ -635,6 +635,11 @@ mod tests {
             core.receive(running_request);
             core.execute_hidden_pass(0.0);
             assert_eq!(request_metrics(&core).running_requests, 1);
+            let active_blocks_before_cancel = request_metrics(&core).active_decode_blocks;
+            assert!(
+                active_blocks_before_cancel > 0,
+                "{engine_type:?} running request should own KV blocks"
+            );
             assert_eq!(
                 core.apply_command(SchedulerCommand::CancelRequest {
                     request_id: running_id,
@@ -643,6 +648,14 @@ mod tests {
                 SchedulerCommandResult::Applied
             );
             assert_eq!(core.num_requests(), 0);
+            let active_blocks_after_cancel = request_metrics(&core).active_decode_blocks;
+            assert!(
+                active_blocks_after_cancel < active_blocks_before_cancel,
+                "{engine_type:?} cancellation should release request-owned KV blocks"
+            );
+            if engine_type == EngineType::Vllm {
+                assert_eq!(active_blocks_after_cancel, 0);
+            }
         }
     }
 
