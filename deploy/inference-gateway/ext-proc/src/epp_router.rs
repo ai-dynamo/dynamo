@@ -24,7 +24,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
-use dynamo_llm::protocols::common::extensions::{HEADER_TENANT_ID, request_cache_salt};
+use dynamo_llm::protocols::common::extensions::{
+    HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY, HEADER_TENANT_ID, request_cache_salt,
+    resolve_request_priority,
+};
 
 use crate::epp_standalone_config::EppStandaloneConfig;
 use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo};
@@ -100,17 +103,29 @@ impl EppRouter {
     }
 
     /// Tokenize a chat-completions request body for routing. Returns
-    /// `(token_ids, priority_jump, strict_priority, cache_salt)`, where
-    /// `cache_salt` is the body-derived KV cache namespace (`nvext.cache_salt`,
-    /// with a legacy top-level fallback) via Dynamo's public precedence rules.
+    /// `(token_ids, priority_jump, strict_priority, cache_salt)`.
+    ///
+    /// Priority uses header-over-body precedence via the shared
+    /// [`resolve_request_priority`], so the EPP and the frontend preprocessor
+    /// apply one policy: a valid `x-dynamo-request-priority` /
+    /// `x-dynamo-request-strict-priority` header (including zero or negative)
+    /// overrides the body `agent_hints`; malformed/missing headers fall back to
+    /// the body independently; `latency_sensitivity` applies only when no
+    /// priority exists. `cache_salt` is the body-derived KV cache namespace
+    /// (`nvext.cache_salt`, legacy top-level fallback) via Dynamo's precedence.
     async fn tokenize(
         &self,
         request_body: bytes::Bytes,
-    ) -> Result<(Vec<u32>, f64, u32, Option<String>), TokenizeError> {
+        priority_header: Option<String>,
+        strict_priority_header: Option<String>,
+    ) -> Result<(Vec<u32>, Option<f64>, Option<u32>, Option<String>), TokenizeError> {
         let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
             serde_json::from_slice(&request_body).map_err(TokenizeError::InvalidBody)?;
-        let priority_jump = extract_priority_jump(&request);
-        let strict_priority = extract_strict_priority(&request);
+        let resolved = resolve_request_priority(
+            request.nvext.as_ref().and_then(|n| n.agent_hints.as_ref()),
+            priority_header.as_deref(),
+            strict_priority_header.as_deref(),
+        );
         let cache_salt = request_cache_salt(&request).map(str::to_owned);
         // Moves the `Bytes` into reqwest (zero-copy) rather than copying.
         let token_ids = self
@@ -118,7 +133,12 @@ impl EppRouter {
             .render_chat(request_body)
             .await
             .map_err(TokenizeError::Render)?;
-        Ok((token_ids, priority_jump, strict_priority, cache_salt))
+        Ok((
+            token_ids,
+            resolved.priority_jump,
+            resolved.strict_priority,
+            cache_salt,
+        ))
     }
 
     /// Intersect `allowed` Ready worker IDs with an Envoy `candidate_subset`
@@ -156,15 +176,20 @@ fn endpoint_in_subset(endpoint: &str, candidates: &HashSet<&str>) -> bool {
     candidates.contains(endpoint) || candidates.contains(ip)
 }
 
+/// Case-insensitive lookup of the first non-empty, trimmed value for `name`.
+fn first_header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.trim())
+        .filter(|v| !v.is_empty())
+}
+
 /// Extract the `x-tenant-id` routing header (case-insensitive, non-empty). The
 /// Dynamo frontend maps this header onto `cache_salt`, taking precedence over
 /// any body value.
 fn tenant_id_header(headers: &[(String, String)]) -> Option<String> {
-    headers
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case(HEADER_TENANT_ID))
-        .map(|(_, v)| v.trim().to_string())
-        .filter(|v| !v.is_empty())
+    first_header(headers, HEADER_TENANT_ID).map(str::to_owned)
 }
 
 async fn wait_for_selector_ready(selector: &Selector) {
@@ -235,8 +260,15 @@ impl EndpointPicker for EppRouter {
             });
         }
 
+        // Raw priority headers (transport-neutral): the shared resolver applies
+        // header-over-body precedence, so header-supplied priority is honored
+        // here just as it is on the frontend preprocessor path.
+        let priority_header =
+            first_header(&req.headers, HEADER_REQUEST_PRIORITY).map(str::to_owned);
+        let strict_priority_header =
+            first_header(&req.headers, HEADER_REQUEST_STRICT_PRIORITY).map(str::to_owned);
         let (tokens, priority_jump, strict_priority, body_salt) = self
-            .tokenize(req.body.clone())
+            .tokenize(req.body.clone(), priority_header, strict_priority_header)
             .await
             .map_err(|e| e.into_pick_error(&req.request_id))?;
 
@@ -256,8 +288,10 @@ impl EndpointPicker for EppRouter {
             reservation_id: reservation_id.clone(),
             token_ids: tokens,
             allowed_worker_ids: Some(allowed),
-            priority_jump: (priority_jump > 0.0).then_some(priority_jump),
-            strict_priority: (strict_priority > 0).then_some(strict_priority),
+            // Effective (header-over-body) values; a well-formed header including
+            // zero or negative is honored, `None` only when unset everywhere.
+            priority_jump,
+            strict_priority,
             cache_salt,
         };
 
@@ -371,32 +405,6 @@ impl TokenizeError {
             }
         }
     }
-}
-
-fn extract_priority_jump(
-    request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
-) -> f64 {
-    request
-        .nvext
-        .as_ref()
-        .and_then(|n| n.agent_hints.as_ref())
-        .and_then(|h| {
-            h.priority
-                .map(|p| p.max(0) as f64)
-                .or(h.latency_sensitivity)
-        })
-        .unwrap_or(0.0)
-}
-
-fn extract_strict_priority(
-    request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
-) -> u32 {
-    request
-        .nvext
-        .as_ref()
-        .and_then(|n| n.agent_hints.as_ref())
-        .and_then(|h| h.strict_priority)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]
