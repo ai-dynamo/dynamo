@@ -26,6 +26,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	admissionv1 "k8s.io/api/admission/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -44,6 +45,7 @@ func TestDynamoComponentDeploymentV1Alpha1HandlerConvertsRequest(t *testing.T) {
 				ServiceName:            "worker",
 				ComponentType:          consts.ComponentTypeWorker,
 				RuntimeVersionOverride: "1.1.0",
+				ExtraPodSpec:           &nvidiacomv1alpha1.ExtraPodSpec{MainContainer: &corev1.Container{Image: "registry.example/runtime:1.1.0"}},
 			},
 		},
 	}
