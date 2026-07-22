@@ -50,6 +50,19 @@ const RECIPE_CSS = `
     --content-width: 1100px !important;
 }
 
+/* Product switcher: hide the FontAwesome "code" glyph (</>) placeholder.
+   This rule also lives in SiteStyles, but SiteStyles is injected from the
+   footer and is NOT in the server-rendered HTML (it only applies once the
+   footer hydrates client-side). On this long page that leaves the header
+   product switcher showing the </> placeholder above the fold. RecipeStyles
+   IS server-rendered, so re-declaring the rule here hides the placeholder
+   immediately on recipe/benchmark pages. Scoped to the code glyph via :has()
+   so the version selector keeps its own (Lucide "tag") icon. Same
+   compensate-for-client-only-SiteStyles pattern as the .dark re-bind above. */
+.fern-selection-item-icon:has(svg[icon="code"]) {
+    display: none !important;
+}
+
 /* Recipe catalog */
 .dynamo-recipe-selector {
     margin: 24px 0;
@@ -443,16 +456,24 @@ const RECIPE_CSS = `
     padding: 10px;
     border: 1px solid var(--border, var(--grayscale-a5));
     border-radius: 8px;
-    background: var(--nv-color-bg-default);
+    /* Literal fallbacks: the --nv-* palette lives in SiteStyles, which is
+       injected from the footer and therefore not applied until the footer
+       renders. Above the fold on this (long) page the card would otherwise
+       resolve to a transparent background, letting the empty-state message
+       painted behind the grid (.dynamo-model-grid::before) bleed through the
+       card text. The fallback keeps the tile opaque regardless of SiteStyles
+       load order. */
+    background: var(--nv-color-bg-default, #ffffff);
     color: var(--pst-color-text-base);
     text-decoration: none;
 }
 
 /* --nv-color-bg-default does not flip in the dark theme (stays #FFFFFF), so
    in dark mode the card would be a white tile with light text. Flip the
-   surface to match the other dark-aware components (chip, search box, etc.). */
+   surface to match the other dark-aware components (chip, search box, etc.).
+   Same fallback rationale as above (SiteStyles may not be loaded yet). */
 .dark .dynamo-model-card {
-    background: var(--nv-dark-grey-2);
+    background: var(--nv-dark-grey-2, #1a1a1a);
 }
 
 .dynamo-model-card:hover {
@@ -2211,7 +2232,10 @@ body:has(input[name="recipe-sku"][value="blackwell"]:checked):has(input[name="re
     position: absolute;
     top: 0;
     left: 0;
-    max-width: 230px;
+    /* Kept under the minimum grid-column width (minmax floor is 184px) so the
+       message stays fully behind the first card and never spills into the gap
+       beside it; the opaque card then covers it whenever any card is visible. */
+    max-width: 180px;
     padding: 12px 2px;
     font-size: 13.5px;
     line-height: 1.45;
