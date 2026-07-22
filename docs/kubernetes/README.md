@@ -53,7 +53,7 @@ kubectl create secret generic hf-token-secret \
   --from-literal=HF_TOKEN="$HF_TOKEN"
 ```
 
-### GPU Operator quick install
+### Accelerator resource setup
 
 <Tabs>
 <Tab title="CUDA">
@@ -93,7 +93,7 @@ The vLLM XPU templates expect a `gpu.intel.com` `DeviceClass`.
 
 ### Detailed installation
 
-The GPU Operator is the only prerequisite for a basic deployment. For additional features like RDMA, Prometheus, or multinode scheduling with Grove/KAI Scheduler, see the [Installation Guide](installation-guide.md).
+CUDA deployments require the GPU Operator. XPU deployments require the Intel resource drivers for Kubernetes and DRA. For additional features like RDMA, Prometheus, or multinode scheduling with Grove/KAI Scheduler, see the [Installation Guide](installation-guide.md).
 
 > [!TIP]
 > If your GPU SKU and cloud provider are supported, you can use [AICR](https://github.com/NVIDIA/aicr) for rapid installation of prerequisites and the Dynamo Helm chart.
@@ -263,7 +263,7 @@ docker push <registry>/vllm-runtime-xpu:<tag>
 Use the DRA-based vLLM XPU templates from the repository:
 
 ```bash
-cd <dynamo-source-root>/examples/backends/vllm/deploy/xpu
+cd <dynamo-source-root>/examples/backends/vllm/deploy/v1beta1/xpu
 ```
 
 Update the template image fields to use `<registry>/vllm-runtime-xpu:<tag>`, then apply one template:
@@ -326,7 +326,7 @@ kubectl delete dynamographdeployment qwen3-quickstart qwen3-direct \
 
 ## Next Steps
 
-- **[Installation Guide](installation-guide.md)** — Cloud provider setup, GPU Operator details, optional components (Grove, RDMA, model caching, Prometheus)
+- **[Installation Guide](installation-guide.md)** — Cloud provider setup, accelerator resource components, and optional components (Grove, RDMA, model caching, Prometheus)
 - **[Deployment Overview](model-deployment-guide.md)** — DGD, DCD, DGDR, recipes, strategy selection, and common pitfalls
 - **[DGDR Reference](dgdr.md)** — Spec reference, lifecycle phases, monitoring commands, and generated DGD behavior
 - **[Creating Deployments](deployment/create-deployment.md)** — Hand-craft a DGD spec for full control

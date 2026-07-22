@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Installation Guide
-subtitle: Installs the GPU Operator and Dynamo Platform Helm charts along with optional Grove, RDMA, and Prometheus add-ons.
+subtitle: Installs accelerator resource components and the Dynamo Platform with optional Grove, RDMA, and Prometheus add-ons.
 ---
 
 This guide walks you through installing everything needed to deploy models with Dynamo on Kubernetes. Follow the steps in order — each builds on the previous one.
@@ -58,7 +58,7 @@ helm version              # Should show v3.0+
 
 ## Overview
 
-Every Dynamo deployment requires two Helm charts: the **GPU Operator** (Step 1) and the **Dynamo Platform** (Step 2). Everything else is optional. Decide what optional components you need before starting so you can install them in Step 3.
+Every Dynamo deployment requires accelerator resource components (Step 1) and the **Dynamo Platform** (Step 2). CUDA uses the NVIDIA GPU Operator, while XPU uses Intel resource drivers with DRA. Everything else is optional. Decide what optional components you need before starting so you can install them in Step 3.
 
 | Optional Component | When you need it | Required for |
 |-----------|-----------------|--------------|
@@ -75,7 +75,7 @@ Every Dynamo deployment requires two Helm charts: the **GPU Operator** (Step 1) 
 
 **Shared storage** — Prevents each pod from downloading model weights independently. Without it, large models (>70B) take hours to download per pod, and many replicas will hit HuggingFace rate limits. Not enforced by the operator — this is an operational concern. See [Model Caching](model-caching.md) for the full walkthrough.
 
-## Step 1: Install the GPU Operator
+## Step 1: Install Accelerator Resource Components
 
 <Tabs>
 <Tab title="CUDA">
