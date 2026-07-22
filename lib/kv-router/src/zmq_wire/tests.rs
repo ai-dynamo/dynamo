@@ -126,6 +126,37 @@ fn test_deserialize_extra_keys_cache_namespace_fallback() {
 }
 
 #[test]
+fn test_deserialize_sglang_positional_lora_and_cache_namespace() {
+    let encoded = to_vec(&(
+        "BlockStored",
+        vec![BlockHashValue::Unsigned(11)],
+        Option::<BlockHashValue>::None,
+        vec![10_u32, 11],
+        2_usize,
+        Option::<u64>::None,
+        Some("GPU"),
+        Some("adapter-a"),
+        Some(vec![Some(vec!["dynamo-cache-salt:tenant-a".to_string()])]),
+    ))
+    .unwrap();
+
+    let event: RawKvEvent = from_slice(&encoded).unwrap();
+    let RawKvEvent::BlockStored {
+        lora_name,
+        cache_namespace,
+        block_mm_infos,
+        ..
+    } = event
+    else {
+        panic!("expected BlockStored");
+    };
+
+    assert_eq!(lora_name.as_deref(), Some("adapter-a"));
+    assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
+    assert!(block_mm_infos.is_none());
+}
+
+#[test]
 fn test_deserialize_hex_cache_namespace_is_not_multimodal() {
     let cache_namespace = "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210";
     let encoded = to_vec_named(&MapBlockStoredFixture {
