@@ -14,6 +14,7 @@ use tower::ServiceExt;
 use super::input::{MmRoutingInfoRequest, PromptRequest, TrackingHashInput};
 use super::server::create_router;
 use super::*;
+use crate::identity::RoutingPartitionRef;
 use crate::indexer::{LowerTierMatchDetails, MatchDetails, TieredMatchDetails};
 use crate::protocols::{
     BlockExtraInfo, BlockHashOptions, BlockMmObjectInfo, OverlapScores, StorageTier,
@@ -46,8 +47,7 @@ fn normalize_prompt(request: &PromptRequest) -> super::input::NormalizedPrompt {
             TrackingHashInput {
                 context: &context,
                 scope: TrackingHashScope {
-                    model_name: "model",
-                    routing_group: "default",
+                    partition: RoutingPartitionRef::new("model", "default"),
                     block_size: 4,
                 },
                 assume_kv_reuse: true,
@@ -214,8 +214,7 @@ fn keyed_prompt_tracking_leaves_indexer_hashes_public() {
             TrackingHashInput {
                 context: &context,
                 scope: TrackingHashScope {
-                    model_name: "model",
-                    routing_group: "default",
+                    partition: RoutingPartitionRef::new("model", "default"),
                     block_size: 4,
                 },
                 assume_kv_reuse: true,
@@ -253,8 +252,7 @@ fn disabled_kv_reuse_keeps_public_indexer_hashes_and_randomizes_tracking() {
                 TrackingHashInput {
                     context: &context,
                     scope: TrackingHashScope {
-                        model_name: "model",
-                        routing_group: "default",
+                        partition: RoutingPartitionRef::new("model", "default"),
                         block_size: 4,
                     },
                     assume_kv_reuse: false,
@@ -290,8 +288,7 @@ fn keyed_reservation_hashes_directly_from_tokens() {
     }))
     .unwrap();
     let scope = TrackingHashScope {
-        model_name: "model",
-        routing_group: "default",
+        partition: RoutingPartitionRef::new("model", "default"),
         block_size: 4,
     };
 
@@ -346,8 +343,7 @@ fn randomized_reservation_uses_canonical_complete_block_count() {
                 TrackingHashInput {
                     context: &context,
                     scope: TrackingHashScope {
-                        model_name: "model",
-                        routing_group: "default",
+                        partition: RoutingPartitionRef::new("model", "default"),
                         block_size: 4,
                     },
                     assume_kv_reuse: false,

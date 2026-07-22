@@ -1156,13 +1156,13 @@ fn random_sequence_hashes(num_blocks: usize) -> Vec<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::RoutingPartitionRef;
     use crate::protocols::{BlockExtraInfo, BlockMmObjectInfo, compute_seq_hash_for_block};
     use std::collections::HashMap;
 
     fn test_tracking_scope(block_size: u32) -> TrackingHashScope<'static> {
         TrackingHashScope {
-            model_name: "model",
-            routing_group: "default",
+            partition: RoutingPartitionRef::new("model", "default"),
             block_size,
         }
     }

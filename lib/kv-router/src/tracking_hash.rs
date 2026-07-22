@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::config::KvRouterConfig;
+use crate::identity::RoutingPartitionRef;
 use crate::protocols::{
     BlockHashOptions, LocalBlockHash, complete_block_count, compute_block_hash_for_seq,
     compute_block_hash_for_seq_with_seed, compute_seq_hash_for_block,
@@ -21,9 +22,6 @@ use crate::protocols::{
 
 const KEY_SIZE: usize = 32;
 const KEYED_XXH3_V1_DOMAIN: &[u8] = b"dynamo.router.tracking-hash/keyed-xxh3-v1\0";
-
-/// Default routing group used when a router request does not specify one.
-pub const DEFAULT_TRACKING_ROUTING_GROUP: &str = "default";
 
 /// Hash algorithm used only for router-derived active-sequence tracking state.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,8 +82,7 @@ pub(crate) fn validate_tracking_hash_options(
 /// same derived tracking identities.
 #[derive(Clone, Copy, Debug)]
 pub struct TrackingHashScope<'a> {
-    pub model_name: &'a str,
-    pub routing_group: &'a str,
+    pub partition: RoutingPartitionRef<'a>,
     pub block_size: u32,
 }
 
@@ -240,8 +237,8 @@ impl TrackingHashContext {
         let mut hasher = blake3::Hasher::new_keyed(key);
         hasher.update(KEYED_XXH3_V1_DOMAIN);
         frame_string(&mut hasher, 1, self.key_id.as_deref().unwrap_or_default());
-        frame_string(&mut hasher, 2, scope.model_name);
-        frame_string(&mut hasher, 3, scope.routing_group);
+        frame_string(&mut hasher, 2, scope.partition.model_name);
+        frame_string(&mut hasher, 3, scope.partition.routing_group);
         frame_fixed(&mut hasher, 4, &scope.block_size.to_le_bytes());
         frame_optional_string(&mut hasher, 5, normalize_optional(options.cache_namespace));
         frame_optional_string(&mut hasher, 6, normalize_optional(options.lora_name));
@@ -305,8 +302,7 @@ mod tests {
 
     fn scope<'a>(model_name: &'a str, routing_group: &'a str) -> TrackingHashScope<'a> {
         TrackingHashScope {
-            model_name,
-            routing_group,
+            partition: RoutingPartitionRef::new(model_name, routing_group),
             block_size: 4,
         }
     }
@@ -395,8 +391,7 @@ mod tests {
             base,
             first.compute_sequence_hashes(
                 TrackingHashScope {
-                    model_name: "model-a",
-                    routing_group: "group-a",
+                    partition: RoutingPartitionRef::new("model-a", "group-a"),
                     block_size: 3,
                 },
                 &tokens,

@@ -14,7 +14,9 @@ use dynamo_kv_router::protocols::{
     BlockHashOptions, OverlapScores, RouterEvent, RoutingConstraints, StorageTier, WorkerId,
 };
 use dynamo_kv_router::scheduling::TierOverlapBlocks;
-use dynamo_kv_router::{ConcurrentRadixTree, TrackingHashContext, TrackingHashScope};
+use dynamo_kv_router::{
+    ConcurrentRadixTree, RoutingPartitionRef, TrackingHashContext, TrackingHashScope,
+};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -235,8 +237,7 @@ impl KvReplayRouter {
         let token_seq = self.config.compute_seq_hashes_for_tracking_with_context(
             &self.tracking_hash,
             TrackingHashScope {
-                model_name: "replay",
-                routing_group: "default",
+                partition: RoutingPartitionRef::new("replay", "default"),
                 block_size: self.block_size,
             },
             &request.tokens,

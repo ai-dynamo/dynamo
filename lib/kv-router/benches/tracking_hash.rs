@@ -6,7 +6,9 @@ use std::io::Write;
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::protocols::{BlockHashOptions, compute_block_hash_for_seq};
-use dynamo_kv_router::{TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope};
+use dynamo_kv_router::{
+    RoutingPartitionRef, TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope,
+};
 use tempfile::NamedTempFile;
 
 const BENCHMARK_KEY: [u8; 32] = [0x5a; 32];
@@ -21,7 +23,11 @@ fn benchmark_blake3_sequence_hashes(
 ) -> Vec<u64> {
     let mut scope_hasher = blake3::Hasher::new_keyed(provider_key);
     scope_hasher.update(BLAKE3_SCOPE_DOMAIN);
-    for value in ["benchmark", scope.model_name, scope.routing_group] {
+    for value in [
+        "benchmark",
+        scope.partition.model_name,
+        scope.partition.routing_group,
+    ] {
         scope_hasher.update(&(value.len() as u64).to_le_bytes());
         scope_hasher.update(value.as_bytes());
     }
@@ -81,8 +87,7 @@ fn tracking_hash(c: &mut Criterion) {
     .unwrap();
     let block_size = 16;
     let scope = TrackingHashScope {
-        model_name: "benchmark-model",
-        routing_group: "default",
+        partition: RoutingPartitionRef::new("benchmark-model", "default"),
         block_size,
     };
 

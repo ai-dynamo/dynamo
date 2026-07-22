@@ -10,6 +10,7 @@ use parking_lot::RwLock;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
+use crate::identity::RoutingPartitionId;
 use crate::indexer::TieredMatchDetails;
 use crate::protocols::{
     ActiveSequenceEvent, LocalBlockHash, PrefillLoadHint, RoutingConstraints, WorkerId,
@@ -41,8 +42,8 @@ use super::pending::{PendingSelection, SelectionCache, SelectionCacheConfig};
 use super::types::{
     ModelLoadResponse, OverlapScoresRequest, OverlapScoresResponse, PotentialLoadsRequest,
     ReadyResponse, ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
-    SelectResponse, SelectionKey, SelectionWorkerConfig, WORKER_TYPE, WorkerCatalogRecord,
-    WorkerLifecycle, WorkerPatchRequest, WorkerRequest,
+    SelectResponse, SelectionWorkerConfig, WORKER_TYPE, WorkerCatalogRecord, WorkerLifecycle,
+    WorkerPatchRequest, WorkerRequest,
 };
 
 type SelectionScheduler = LocalScheduler<
@@ -53,7 +54,7 @@ type SelectionScheduler = LocalScheduler<
 >;
 
 struct SelectionEntry {
-    key: SelectionKey,
+    key: RoutingPartitionId,
     block_size: u32,
     is_eagle: bool,
     indexer: Indexer,
@@ -70,7 +71,7 @@ struct PreparedSelectionInputs {
 }
 
 struct SelectionOperation {
-    key: SelectionKey,
+    key: RoutingPartitionId,
     selection_id: Option<String>,
     prompt: PromptRequest,
     router_config_override: Option<RouterConfigOverride>,
@@ -87,7 +88,7 @@ struct SelectionOperation {
 /// Resolved inputs for booking a reservation, shared by the cached and explicit
 /// `create_reservation` paths.
 struct ReservationBooking {
-    key: SelectionKey,
+    key: RoutingPartitionId,
     selection_id: String,
     worker: WorkerWithDpRank,
     sequence_hashes: Vec<SequenceHash>,
@@ -110,7 +111,7 @@ pub struct SelectionServiceConfig {
 
 pub struct SelectionCore {
     catalog: WorkerCatalog,
-    entries: RwLock<HashMap<SelectionKey, Arc<SelectionEntry>>>,
+    entries: RwLock<HashMap<RoutingPartitionId, Arc<SelectionEntry>>>,
     indexer_registry: Arc<WorkerRegistry>,
     kv_router_config: crate::config::KvRouterConfig,
     cancel_token: CancellationToken,
@@ -249,24 +250,24 @@ impl SelectionCore {
     }
 
     pub(crate) fn dispatch_replica_event(&self, envelope: ScopedReplicaEvent) {
+        let (key, block_size, event) = envelope.into_parts();
         if self
             .replica_config
             .as_ref()
-            .is_some_and(|config| config.is_self_event(&envelope.event))
+            .is_some_and(|config| config.is_self_event(&event))
         {
             return;
         }
 
-        let key = SelectionKey::new(envelope.model_name, envelope.routing_group);
         let Some(entry) = self.entries.read().get(&key).cloned() else {
             tracing::trace!(%key, "Dropping replica event for unknown selector entry");
             return;
         };
-        if entry.block_size != envelope.block_size {
+        if entry.block_size != block_size {
             tracing::debug!(
                 %key,
                 expected_block_size = entry.block_size,
-                received_block_size = envelope.block_size,
+                received_block_size = block_size,
                 "Dropping selector replica event with mismatched block size"
             );
             return;
@@ -274,7 +275,7 @@ impl SelectionCore {
         let Some(replica_tx) = &entry.replica_tx else {
             return;
         };
-        match replica_tx.try_send(envelope.event) {
+        match replica_tx.try_send(event) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(event)) => {
                 tracing::trace!(
@@ -407,7 +408,7 @@ impl SelectionCore {
     fn mark_incomplete_after_reconcile_error(
         &self,
         worker_id: WorkerId,
-        key: SelectionKey,
+        key: RoutingPartitionId,
         error: SelectionError,
     ) -> Result<WorkerCatalogRecord, SelectionError> {
         let updated = self
@@ -466,12 +467,8 @@ impl SelectionCore {
         }
 
         let (workers_tx, workers_rx) = watch::channel(HashMap::new());
-        let scoped_replica_sync = setup_scoped_replica_sync(
-            self.replica_config.as_ref(),
-            &key.model_name,
-            &key.routing_group,
-            block_size,
-        );
+        let scoped_replica_sync =
+            setup_scoped_replica_sync(self.replica_config.as_ref(), &key, block_size);
         let slots = Arc::new(ActiveSequencesMultiWorker::new_with_replica_worker_policy(
             scoped_replica_sync.publisher,
             block_size as usize,
@@ -489,7 +486,7 @@ impl SelectionCore {
 
         let indexer = self
             .indexer_registry
-            .get_or_create_indexer(key.indexer_key(), block_size);
+            .get_or_create_indexer(key.clone(), block_size);
         let overlap_refresh = Arc::new(TieredOverlapRefresher::new(
             indexer.clone(),
             self.kv_router_config.clone(),
@@ -587,7 +584,7 @@ impl SelectionCore {
             return;
         }
 
-        let key = record.key().indexer_key();
+        let key = record.key();
         let indexer = self
             .indexer_registry
             .get_indexer(&key)
@@ -597,7 +594,7 @@ impl SelectionCore {
         }
     }
 
-    fn publish_scheduler_config(&self, key: &SelectionKey) -> Result<(), SelectionError> {
+    fn publish_scheduler_config(&self, key: &RoutingPartitionId) -> Result<(), SelectionError> {
         let Some(entry) = self.entries.read().get(key).cloned() else {
             return Ok(());
         };
@@ -607,7 +604,7 @@ impl SelectionCore {
         })
     }
 
-    fn ready_entry(&self, key: &SelectionKey) -> Result<Arc<SelectionEntry>, SelectionError> {
+    fn ready_entry(&self, key: &RoutingPartitionId) -> Result<Arc<SelectionEntry>, SelectionError> {
         if self.catalog.schedulable_count() == 0 {
             return Err(SelectionError::NotReady(
                 "no schedulable workers are available".to_string(),
@@ -638,7 +635,7 @@ impl SelectionCore {
     ) -> Result<SelectResponse, SelectionError> {
         self.schedule_selection(
             SelectionOperation {
-                key: SelectionKey::new(req.model_name, req.routing_group),
+                key: RoutingPartitionId::new(req.model_name, req.routing_group),
                 selection_id: req.selection_id,
                 prompt: req.prompt,
                 router_config_override: req.router_config_override,
@@ -673,7 +670,7 @@ impl SelectionCore {
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         self.schedule_selection(
             SelectionOperation {
-                key: SelectionKey::new(req.model_name, req.routing_group),
+                key: RoutingPartitionId::new(req.model_name, req.routing_group),
                 selection_id: Some(selection_id),
                 prompt: req.prompt,
                 router_config_override: req.router_config_override,
@@ -830,7 +827,7 @@ impl SelectionCore {
     ) -> Result<ReservationResponse, SelectionError> {
         self.ensure_running()?;
 
-        let key = SelectionKey::new(req.model_name.clone(), req.routing_group.clone());
+        let key = RoutingPartitionId::new(req.model_name.clone(), req.routing_group.clone());
 
         // Explicit form: book on the given worker under selection_id, discarding
         // any cached selection for the id so a later replay can't book stale state.
@@ -914,7 +911,7 @@ impl SelectionCore {
     fn schedulable_endpoint(
         &self,
         worker_id: WorkerId,
-        key: &SelectionKey,
+        key: &RoutingPartitionId,
     ) -> Result<String, SelectionError> {
         self.catalog
             .schedulable_endpoint(worker_id, key)
@@ -928,7 +925,7 @@ impl SelectionCore {
     /// Book a reservation from a self-contained request (explicit worker_id and prompt).
     async fn reserve_explicit(
         &self,
-        key: SelectionKey,
+        key: RoutingPartitionId,
         worker_id: WorkerId,
         req: ReservationRequest,
     ) -> Result<ReservationResponse, SelectionError> {
@@ -1112,7 +1109,7 @@ impl SelectionCore {
         &self,
         req: PotentialLoadsRequest,
     ) -> Result<Vec<PotentialLoad>, SelectionError> {
-        let key = SelectionKey::new(req.model_name.clone(), req.routing_group.clone());
+        let key = RoutingPartitionId::new(req.model_name.clone(), req.routing_group.clone());
         let entry = self.ready_entry(&key)?;
         let prepared = self
             .prepare_selection_inputs(
@@ -1139,7 +1136,7 @@ impl SelectionCore {
         &self,
         req: OverlapScoresRequest,
     ) -> Result<OverlapScoresResponse, SelectionError> {
-        let key = SelectionKey::new(req.model_name.clone(), req.routing_group.clone());
+        let key = RoutingPartitionId::new(req.model_name.clone(), req.routing_group.clone());
         let entry = self.ready_entry(&key)?;
         let block_hashes = req
             .prompt
@@ -1198,7 +1195,7 @@ impl SelectionCore {
         })
     }
 
-    fn schedulable_worker_ranks(&self, key: &SelectionKey) -> Vec<WorkerWithDpRank> {
+    fn schedulable_worker_ranks(&self, key: &RoutingPartitionId) -> Vec<WorkerWithDpRank> {
         let configs = self.catalog.scheduler_configs_for_key(key);
         let mut workers = Vec::new();
         for (worker_id, config) in configs {
@@ -1214,8 +1211,7 @@ impl SelectionCore {
 
 fn tracking_scope(entry: &SelectionEntry) -> TrackingHashScope<'_> {
     TrackingHashScope {
-        model_name: &entry.key.model_name,
-        routing_group: &entry.key.routing_group,
+        partition: entry.key.as_ref(),
         block_size: entry.block_size,
     }
 }
@@ -1561,7 +1557,7 @@ mod tests {
             request.max_num_batched_tokens = Some(8);
             core.upsert_worker(request).await.expect("worker upsert");
         }
-        let key = SelectionKey::new("model".to_string(), "default".to_string());
+        let key = RoutingPartitionId::new("model", "default");
         let entry = core.entries.read().get(&key).cloned().expect("entry");
         entry
             .indexer
