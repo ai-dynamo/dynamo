@@ -63,6 +63,7 @@ def test_engine_config_required_model_only():
     cfg = backend.EngineConfig(model="m1")
     assert cfg.model == "m1"
     assert cfg.served_model_name is None
+    assert cfg.model_aliases == []
     assert cfg.llm is None
 
 
@@ -70,6 +71,7 @@ def test_engine_config_full_kwargs_round_trip_through_getters():
     cfg = backend.EngineConfig(
         model="m2",
         served_model_name="m2-serving",
+        model_aliases=["m2-alias"],
         runtime_data={"sglang_worker_group_id": "group-a"},
         llm=backend.LlmRegistration(
             context_length=2048,
@@ -81,6 +83,7 @@ def test_engine_config_full_kwargs_round_trip_through_getters():
     )
     assert cfg.model == "m2"
     assert cfg.served_model_name == "m2-serving"
+    assert cfg.model_aliases == ["m2-alias"]
     assert cfg.runtime_data == {"sglang_worker_group_id": "group-a"}
     llm = cfg.llm
     assert llm.context_length == 2048

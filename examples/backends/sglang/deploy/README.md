@@ -29,6 +29,10 @@ High-performance deployment with separated prefill and decode workers.
 - `SGLangPrefillWorker`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
 - Communication via NIXL transfer backend (`--disaggregation-transfer-backend nixl`)
 
+### 4. **Shared OpenEngine Sidecar** (`v1beta1/openengine-*.yaml`)
+
+Runs the GPU SGLang server and the engine-neutral CPU `dynamo-openengine-sidecar` in the same pod. The aggregate and typed-bootstrap P/D examples use OpenEngine revision 3, direct ZMQ KV-event discovery, dynamic LoRA, and pod-IP bootstrap advertisement. P/D requires the documented ReadWriteMany LoRA PVC.
+
 ## CRD Structure
 
 All templates use the **DynamoGraphDeployment** CRD:

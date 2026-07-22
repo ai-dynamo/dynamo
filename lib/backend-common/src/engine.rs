@@ -148,15 +148,17 @@ pub struct LlmRegistration {
 ///
 /// `Worker` consumes this to build a `ModelDeploymentCard` and register the
 /// model with discovery. The neutral fields (`model`, `served_model_name`,
-/// `runtime_data`) apply to every modality; the token-pipeline metadata lives
-/// in the optional [`llm`](Self::llm) sub-record, which raw media engines
-/// leave `None`.
+/// `model_aliases`, `runtime_data`) apply to every modality; the token-pipeline
+/// metadata lives in the optional [`llm`](Self::llm) sub-record, which raw
+/// media engines leave `None`.
 #[derive(Clone, Debug, Default)]
 pub struct EngineConfig {
     /// Canonical model identifier (e.g. HF repo name).
     pub model: String,
     /// Public-facing model name advertised to clients. Defaults to `model`.
     pub served_model_name: Option<String>,
+    /// Additional public-facing model names accepted by the engine.
+    pub model_aliases: Vec<String>,
     /// Engine-specific metadata copied into `ModelRuntimeConfig.runtime_data`.
     pub runtime_data: HashMap<String, serde_json::Value>,
     /// Token-pipeline registration metadata (KV cache, DP, bootstrap).
@@ -498,6 +500,9 @@ pub enum KvEventSource {
         endpoint: String,
         topic: String,
         dp_rank: u32,
+        /// Model image-placeholder token ID used to normalize multimodal
+        /// engine events into Dynamo's canonical media-aware routing keys.
+        image_token_id: Option<u32>,
     },
     Push {
         on_ready: OnPublisherReady,

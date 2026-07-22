@@ -1290,11 +1290,21 @@ def dynamo_dynamic_ports(num_system_ports) -> Generator[ServicePorts, None, None
             num_system_ports, DynamoPortRange.NIXL.value
         )
         all_ports.extend(nixl_side_channel_ports)
+        engine_http_ports = allocate_ports(
+            num_system_ports, DynamoPortRange.PREFILL.value
+        )
+        all_ports.extend(engine_http_ports)
+        openengine_ports = allocate_ports(
+            num_system_ports, DynamoPortRange.ROUTER.value
+        )
+        all_ports.extend(openengine_ports)
         yield ServicePorts(
             frontend_port=frontend_port,
             system_ports=system_port_list,
             kv_event_port=kv_event_port,
             nixl_side_channel_ports=nixl_side_channel_ports,
+            engine_http_ports=engine_http_ports,
+            openengine_ports=openengine_ports,
         )
     finally:
         deallocate_ports(all_ports)

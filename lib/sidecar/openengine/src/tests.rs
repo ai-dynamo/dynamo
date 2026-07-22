@@ -5,10 +5,10 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, Ordering};
 
 use dynamo_backend_common::{GenerateContext, LLMEngine, PreprocessedRequest};
-use dynamo_llm::protocols::common::preprocessor::{MultimodalData, RoutingHints};
+use dynamo_llm::protocols::common::preprocessor::{BootstrapInfo, MultimodalData, RoutingHints};
 use parking_lot::Mutex;
 
 use crate::convert;
@@ -53,7 +53,9 @@ fn trt_handoff(
         "dp_rank": dp_rank,
         "attributes_struct": {
             "tensorrt_llm.disaggregated_params.v1": serde_json::to_string(&profile).unwrap()
-        }
+        },
+        "handoff_profile": "tensorrt_llm.disaggregated_params.v1",
+        "bootstrap": null,
     })
 }
 
@@ -119,7 +121,8 @@ fn multimodal_order_and_media_options_follow_original_messages() {
             {"type": "audio_url", "audio_url": {"url": "ignored"}},
             {"type": "image_url", "image_url": {"url": "ignored"}}
         ]}],
-        "formatted_prompt": "<audio><image>describe them"
+        "formatted_prompt": "<audio><image>describe them",
+        "mm_hashes": ["0123456789abcdef"]
     }));
     request.mm_processor_kwargs = Some(serde_json::json!({"num_frames": 8}));
 
@@ -136,6 +139,7 @@ fn multimodal_order_and_media_options_follow_original_messages() {
         converted.media[0].source,
         Some(pb::media_item::Source::DataUri(_))
     ));
+    assert_eq!(converted.media[1].uuid, "0123456789abcdef");
     assert!(matches!(
         converted.input,
         Some(pb::generate_request::Input::Prompt(ref prompt))
@@ -150,6 +154,10 @@ fn multimodal_order_and_media_options_follow_original_messages() {
     let options = convert::prost_struct_to_json(converted.media_options.as_ref().unwrap());
     assert_eq!(options["audio"]["num_frames"], 8);
     assert_eq!(options["image"]["num_frames"], 8);
+    request.extra_args.as_mut().unwrap()["messages"] = serde_json::json!([{
+        "content": [{"type": "audio_url", "audio_url": {"url": "ignored"}}]
+    }]);
+    assert!(convert::build_generate_request(&request, "r3", "served", false, true).is_err());
 }
 
 #[test]
@@ -214,11 +222,13 @@ fn trt_handoff_preserves_large_ids_and_binary_as_strings() {
 }
 
 #[test]
-fn malformed_or_generation_first_trt_handoffs_fail_closed() {
+fn opaque_handoff_profiles_preserve_engine_data_and_validate_the_envelope() {
     let mut missing_profile = trt_handoff(0, "42", None);
-    missing_profile["attributes_struct"] = serde_json::json!({});
+    missing_profile["handoff_profile"] = serde_json::json!("");
     assert!(convert::disagg_json_to_kv_session(&missing_profile).is_err());
 
+    // Engine-specific semantics remain opaque to the shared sidecar. The TRT
+    // server, rather than Dynamo, owns validation of this schedule field.
     let mut generation_first = trt_handoff(0, "42", None);
     let encoded = generation_first["attributes_struct"]["tensorrt_llm.disaggregated_params.v1"]
         .as_str()
@@ -227,41 +237,7 @@ fn malformed_or_generation_first_trt_handoffs_fail_closed() {
     profile["schedule_style"] = serde_json::json!("generation_first");
     generation_first["attributes_struct"]["tensorrt_llm.disaggregated_params.v1"] =
         serde_json::json!(serde_json::to_string(&profile).unwrap());
-    assert!(convert::disagg_json_to_kv_session(&generation_first).is_err());
-
-    let mut numeric_id = trt_handoff(0, "42", None);
-    let encoded = numeric_id["attributes_struct"]["tensorrt_llm.disaggregated_params.v1"]
-        .as_str()
-        .unwrap();
-    let mut profile: serde_json::Value = serde_json::from_str(encoded).unwrap();
-    profile["ctx_request_id"] = serde_json::json!(u64::MAX);
-    numeric_id["attributes_struct"]["tensorrt_llm.disaggregated_params.v1"] =
-        serde_json::json!(serde_json::to_string(&profile).unwrap());
-    assert!(convert::disagg_json_to_kv_session(&numeric_id).is_err());
-
-    let mut bad_base64 = trt_handoff(0, "42", None);
-    let encoded = bad_base64["attributes_struct"]["tensorrt_llm.disaggregated_params.v1"]
-        .as_str()
-        .unwrap();
-    let mut profile: serde_json::Value = serde_json::from_str(encoded).unwrap();
-    profile["opaque_state"] = serde_json::json!("not-base64");
-    bad_base64["attributes_struct"]["tensorrt_llm.disaggregated_params.v1"] =
-        serde_json::json!(serde_json::to_string(&profile).unwrap());
-    assert!(convert::disagg_json_to_kv_session(&bad_base64).is_err());
-
-    let mut unsupported_logits = trt_handoff(0, "42", None);
-    let encoded = unsupported_logits["attributes_struct"]["tensorrt_llm.disaggregated_params.v1"]
-        .as_str()
-        .unwrap();
-    let mut profile: serde_json::Value = serde_json::from_str(encoded).unwrap();
-    profile["first_gen_logits"] = serde_json::json!([0.5]);
-    unsupported_logits["attributes_struct"]["tensorrt_llm.disaggregated_params.v1"] =
-        serde_json::json!(serde_json::to_string(&profile).unwrap());
-    assert!(convert::disagg_json_to_kv_session(&unsupported_logits).is_err());
-
-    let mut incoherent_rank = trt_handoff(0, "42", None);
-    incoherent_rank["dp_rank"] = serde_json::json!(1);
-    assert!(convert::disagg_json_to_kv_session(&incoherent_rank).is_err());
+    assert!(convert::disagg_json_to_kv_session(&generation_first).is_ok());
 
     let mut bad_endpoint = trt_handoff(0, "42", None);
     bad_endpoint["endpoints"][0]["port"] = serde_json::json!(70000);
@@ -273,6 +249,23 @@ fn malformed_or_generation_first_trt_handoffs_fail_closed() {
         convert::disagg_json_to_kv_session(&empty_endpoints).is_ok(),
         "endpoint list is optional; entries are validated only when present"
     );
+
+    let bootstrap = serde_json::json!({
+        "session_id": "bootstrap-session",
+        "transfer_backend": "sglang",
+        "endpoints": [],
+        "dp_rank": 1,
+        "attributes_struct": null,
+        "handoff_profile": "sglang.bootstrap.v1",
+        "bootstrap": {
+            "endpoint": {"host": "127.0.0.1", "port": 3456, "protocol": "tcp"},
+            "room_id": "18446744073709551615"
+        }
+    });
+    let restored = convert::disagg_json_to_kv_session(&bootstrap).unwrap();
+    assert_eq!(restored.bootstrap.as_ref().unwrap().room_id, u64::MAX);
+    let roundtrip = convert::kv_session_to_disagg_json(restored);
+    assert_eq!(roundtrip["bootstrap"]["room_id"], u64::MAX.to_string());
 }
 
 #[test]
@@ -340,6 +333,9 @@ struct FakeState {
     loras: Mutex<HashMap<String, pb::LoraAdapter>>,
     subscriptions: Mutex<Vec<pb::SubscribeKvEventsRequest>>,
     discovery_delay_ms: AtomicU64,
+    kv_discovery_delay_ms: AtomicU64,
+    kv_sources: Mutex<Vec<pb::KvEventSource>>,
+    fail_unload: AtomicBool,
 }
 
 impl Default for FakeState {
@@ -366,6 +362,8 @@ impl Default for FakeState {
                     supports_abort_cleanup: Some(true),
                     supports_drain: Some(true),
                     schema_version: Some(1),
+                    handoff_profile: "tensorrt_llm.disaggregated_params.v1".into(),
+                    supports_client_bootstrap: Some(false),
                     ..Default::default()
                 }),
                 capacity: Some(pb::DeploymentCapacity {
@@ -380,6 +378,11 @@ impl Default for FakeState {
             model: Mutex::new(pb::ModelInfo {
                 model_id: "model".into(),
                 served_model_name: "model".into(),
+                served_model_aliases: vec!["model-alias".into()],
+                tokenizer: Some(pb::TokenizerInfo {
+                    source: "model".into(),
+                    mode: "auto".into(),
+                }),
                 supports_token_ids_input: Some(true),
                 supports_text_input: Some(true),
                 supports_lora: Some(true),
@@ -402,6 +405,7 @@ impl Default for FakeState {
                         pb::MediaSourceType::DataUri as i32,
                     ],
                     supports_per_request_media_options: Some(true),
+                    routing_image_token_id: Some(151655),
                 }),
                 ..Default::default()
             }),
@@ -418,6 +422,28 @@ impl Default for FakeState {
             loras: Mutex::new(HashMap::new()),
             subscriptions: Mutex::new(Vec::new()),
             discovery_delay_ms: AtomicU64::new(0),
+            kv_discovery_delay_ms: AtomicU64::new(0),
+            kv_sources: Mutex::new(vec![
+                pb::KvEventSource {
+                    transport: "zmq".into(),
+                    endpoint_addr: Some(pb::KvEndpoint {
+                        host: "127.0.0.1".into(),
+                        port: 5555,
+                        protocol: "tcp".into(),
+                    }),
+                    topic: "kv".into(),
+                    data_parallel_rank: Some(0),
+                    encoding: "msgpack".into(),
+                    ..Default::default()
+                },
+                pb::KvEventSource {
+                    transport: "grpc".into(),
+                    data_parallel_rank: Some(1),
+                    encoding: "protobuf".into(),
+                    ..Default::default()
+                },
+            ]),
+            fail_unload: AtomicBool::new(false),
         }
     }
 }
@@ -435,6 +461,14 @@ impl pb::inference_server::Inference for FakeOpenEngine {
     ) -> Result<tonic::Response<Self::GenerateStream>, tonic::Status> {
         let request = request.into_inner();
         let request_id = request.request_id.clone();
+        let requested_session = request.kv.as_ref().and_then(|kv| kv.session.clone());
+        let connector = self
+            .0
+            .engine
+            .lock()
+            .kv_connector
+            .clone()
+            .unwrap_or_default();
         self.0.requests.lock().push(request);
         let behavior = self.0.behavior.load(Ordering::SeqCst);
         if matches!(behavior, PREFILL | PREFILL_NO_USAGE | PREFILL_BAD_HANDOFF) {
@@ -462,14 +496,29 @@ impl pb::inference_server::Inference for FakeOpenEngine {
                             pb::PrefillReady {
                                 kv_session: Some(pb::KvSessionRef {
                                     session_id: request_id,
-                                    transfer_backend: "tensorrt_llm".into(),
+                                    transfer_backend: connector.transfer_backend,
                                     endpoints: vec![pb::KvEndpoint {
                                         host: "127.0.0.1".into(),
                                         port: 9000,
-                                        protocol: "tcp".into(),
+                                        protocol: connector
+                                            .supported_protocols
+                                            .first()
+                                            .cloned()
+                                            .unwrap_or_else(|| "tcp".into()),
                                     }],
                                     dp_rank: 0,
                                     attributes_struct: convert::json_to_prost_struct(&attributes),
+                                    handoff_profile: if behavior == PREFILL_BAD_HANDOFF {
+                                        "wrong.profile".into()
+                                    } else {
+                                        requested_session
+                                            .as_ref()
+                                            .map(|session| session.handoff_profile.clone())
+                                            .filter(|profile| !profile.is_empty())
+                                            .unwrap_or(connector.handoff_profile)
+                                    },
+                                    bootstrap: requested_session
+                                        .and_then(|session| session.bootstrap),
                                 }),
                             },
                         )),
@@ -708,6 +757,9 @@ impl pb::control_server::Control for FakeOpenEngine {
         &self,
         request: tonic::Request<pb::UnloadLoraRequest>,
     ) -> Result<tonic::Response<pb::UnloadLoraResponse>, tonic::Status> {
+        if self.0.fail_unload.load(Ordering::SeqCst) {
+            return Err(tonic::Status::unavailable("injected unload failure"));
+        }
         let adapter = self.0.loras.lock().remove(&request.into_inner().lora_name);
         Ok(tonic::Response::new(pb::UnloadLoraResponse { adapter }))
     }
@@ -739,25 +791,12 @@ impl pb::control_server::Control for FakeOpenEngine {
         &self,
         _: tonic::Request<pb::GetKvEventSourcesRequest>,
     ) -> Result<tonic::Response<pb::GetKvEventSourcesResponse>, tonic::Status> {
+        let delay_ms = self.0.kv_discovery_delay_ms.load(Ordering::SeqCst);
+        if delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        }
         Ok(tonic::Response::new(pb::GetKvEventSourcesResponse {
-            sources: vec![
-                pb::KvEventSource {
-                    transport: "zmq".into(),
-                    endpoint_addr: Some(pb::KvEndpoint {
-                        host: "127.0.0.1".into(),
-                        port: 5555,
-                        protocol: "tcp".into(),
-                    }),
-                    topic: "kv".into(),
-                    data_parallel_rank: Some(0),
-                    ..Default::default()
-                },
-                pb::KvEventSource {
-                    transport: "grpc".into(),
-                    data_parallel_rank: Some(1),
-                    ..Default::default()
-                },
-            ],
+            sources: self.0.kv_sources.lock().clone(),
         }))
     }
 
@@ -849,6 +888,8 @@ async fn build_sidecar(
             expected_engine,
             "--openengine-connections".to_string(),
             "1".to_string(),
+            "--connect-timeout-secs".to_string(),
+            "1".to_string(),
             "--health-poll-interval-secs".to_string(),
             "1".to_string(),
             "--health-deadline-secs".to_string(),
@@ -871,6 +912,22 @@ async fn fake_tonic_server_discovery_and_aggregate_stream() {
     assert_eq!(config.model_name, "model");
     let started = engine.start(1).await.unwrap();
     assert_eq!(started.model, "model");
+    assert_eq!(started.served_model_name.as_deref(), Some("model"));
+    assert_eq!(started.model_aliases, ["model-alias"]);
+    assert_eq!(
+        started
+            .runtime_data
+            .get("openengine_tokenizer_mode")
+            .and_then(serde_json::Value::as_str),
+        Some("auto")
+    );
+    assert_eq!(
+        started
+            .runtime_data
+            .get("openengine_routing_image_token_id")
+            .and_then(serde_json::Value::as_u64),
+        Some(151655)
+    );
     let outputs = engine
         .generate(
             request(),
@@ -1072,6 +1129,12 @@ async fn fake_tonic_rejects_schema_engine_and_role_mismatches() {
     state.engine.lock().schema_release = "main".into();
     assert!(build_sidecar(server.address, "tensorrt_llm").await.is_err());
     state.engine.lock().schema_release = crate::OPENENGINE_PROTO_COMMIT.into();
+    state.model.lock().tokenizer.as_mut().unwrap().mode = "slow".into();
+    assert!(build_sidecar(server.address, "tensorrt_llm").await.is_err());
+    state.model.lock().tokenizer.as_mut().unwrap().mode = "auto".into();
+    let tokenizer = state.model.lock().tokenizer.take();
+    assert!(build_sidecar(server.address, "tensorrt_llm").await.is_err());
+    state.model.lock().tokenizer = tokenizer;
     state.engine.lock().engine_role = pb::EngineRole::Unspecified as i32;
     assert!(build_sidecar(server.address, "tensorrt_llm").await.is_err());
     state.engine.lock().engine_role = pb::EngineRole::Aggregated as i32;
@@ -1137,6 +1200,91 @@ async fn fake_tonic_prefill_decode_preserves_media_options_and_handoff() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fake_tonic_forwards_typed_client_bootstrap_to_both_roles() {
+    use futures::StreamExt;
+
+    let state = Arc::new(FakeState::default());
+    {
+        let mut engine = state.engine.lock();
+        engine.engine_role = pb::EngineRole::Prefill as i32;
+        let connector = engine.kv_connector.as_mut().unwrap();
+        connector.transfer_backend = "sglang".into();
+        connector.handoff_profile = "sglang.bootstrap.v1".into();
+        connector.supports_client_bootstrap = Some(true);
+        connector.local_endpoints = vec![pb::KvEndpoint {
+            host: "127.0.0.1".into(),
+            port: 4321,
+            protocol: "tcp".into(),
+        }];
+    }
+    state.behavior.store(PREFILL, Ordering::SeqCst);
+    let server = FakeServer::start(state.clone()).await;
+    let bootstrap = BootstrapInfo {
+        bootstrap_host: "127.0.0.1".into(),
+        bootstrap_port: 4321,
+        bootstrap_room: u64::MAX,
+        handoff_id: None,
+    };
+    let mut prefill_request = request();
+    prefill_request.bootstrap_info = Some(bootstrap.clone());
+    prefill_request.routing = Some(RoutingHints {
+        prefill_dp_rank: Some(1),
+        ..Default::default()
+    });
+    let (prefill, _) = build_sidecar(server.address, "tensorrt_llm").await.unwrap();
+    let registration = prefill.start(1).await.unwrap();
+    let llm = registration.llm.unwrap();
+    assert_eq!(llm.bootstrap_host.as_deref(), Some("127.0.0.1"));
+    assert_eq!(llm.bootstrap_port, Some(4321));
+    let output = prefill
+        .generate(
+            prefill_request,
+            GenerateContext::new(dynamo_backend_common::testing::mock_context(), None),
+        )
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+    let handoff = output[0]
+        .as_ref()
+        .unwrap()
+        .disaggregated_params
+        .as_ref()
+        .unwrap();
+    assert_eq!(handoff["handoff_profile"], "sglang.bootstrap.v1");
+    assert_eq!(handoff["bootstrap"]["room_id"], u64::MAX.to_string());
+    prefill.cleanup().await.unwrap();
+
+    state.engine.lock().engine_role = pb::EngineRole::Decode as i32;
+    state.behavior.store(AGGREGATE, Ordering::SeqCst);
+    state.requests.lock().clear();
+    let mut decode_request = request();
+    decode_request.bootstrap_info = Some(bootstrap);
+    decode_request.routing = Some(RoutingHints {
+        dp_rank: Some(1),
+        ..Default::default()
+    });
+    let (decode, _) = build_sidecar(server.address, "tensorrt_llm").await.unwrap();
+    decode.start(2).await.unwrap();
+    let _ = decode
+        .generate(
+            decode_request,
+            GenerateContext::new(dynamo_backend_common::testing::mock_context(), None),
+        )
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+    let forwarded = state.requests.lock().last().cloned().unwrap();
+    let session = forwarded.kv.unwrap().session.unwrap();
+    assert_eq!(session.handoff_profile, "sglang.bootstrap.v1");
+    assert_eq!(session.dp_rank, 1);
+    assert_eq!(session.bootstrap.unwrap().room_id, u64::MAX);
+    decode.cleanup().await.unwrap();
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fake_tonic_prefill_rejects_missing_usage_and_malformed_server_handoff() {
     use futures::StreamExt;
 
@@ -1176,7 +1324,11 @@ async fn fake_tonic_health_load_kv_discovery_and_watch_failure() {
     assert_eq!(sources.len(), 2);
     assert!(matches!(
         sources[0],
-        dynamo_backend_common::KvEventSource::Zmq { dp_rank: 0, .. }
+        dynamo_backend_common::KvEventSource::Zmq {
+            dp_rank: 0,
+            image_token_id: Some(151655),
+            ..
+        }
     ));
     assert!(matches!(
         sources[1],
@@ -1223,6 +1375,47 @@ async fn fake_tonic_rejects_kv_source_rank_outside_discovered_parallelism() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fake_tonic_rejects_missing_kv_source_rank() {
+    let state = Arc::new(FakeState::default());
+    state
+        .kv_sources
+        .lock()
+        .retain(|source| source.data_parallel_rank == Some(0));
+    let server = FakeServer::start(state).await;
+    let (engine, _) = build_sidecar(server.address, "tensorrt_llm").await.unwrap();
+    engine.start(1).await.unwrap();
+    let error = engine
+        .kv_event_sources()
+        .await
+        .err()
+        .expect("missing KV source rank must fail discovery");
+    assert!(
+        error
+            .to_string()
+            .contains("omitted data-parallel ranks [1]")
+    );
+    engine.cleanup().await.unwrap();
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fake_tonic_kv_source_discovery_times_out() {
+    let state = Arc::new(FakeState::default());
+    state.kv_discovery_delay_ms.store(1_500, Ordering::SeqCst);
+    let server = FakeServer::start(state).await;
+    let (engine, _) = build_sidecar(server.address, "tensorrt_llm").await.unwrap();
+    engine.start(1).await.unwrap();
+    let error = engine
+        .kv_event_sources()
+        .await
+        .err()
+        .expect("KV source discovery must respect its deadline");
+    assert!(error.to_string().contains("GetKvEventSources timed out"));
+    engine.cleanup().await.unwrap();
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bootstrap_discovery_rpc_timeout_is_typed_and_bounded() {
     let state = Arc::new(FakeState::default());
     state.discovery_delay_ms.store(100, Ordering::SeqCst);
@@ -1242,6 +1435,7 @@ async fn bootstrap_discovery_rpc_timeout_is_typed_and_bounded() {
         &mut grpc_client,
         None,
         Some("tensorrt_llm"),
+        None,
         std::time::Duration::from_millis(20),
     )
     .await
@@ -1392,7 +1586,7 @@ async fn fake_tonic_lora_lifecycle_publishes_and_removes_model_cards() {
     use dynamo_runtime::{DistributedRuntime, Runtime};
 
     let state = Arc::new(FakeState::default());
-    let server = FakeServer::start(state).await;
+    let server = FakeServer::start(state.clone()).await;
     let (mut engine, _) = build_sidecar(server.address, "tensorrt_llm").await.unwrap();
     engine.enable_local_lora_for_test();
     engine.start(1).await.unwrap();
@@ -1442,6 +1636,8 @@ async fn fake_tonic_lora_lifecycle_publishes_and_removes_model_cards() {
         .await
         .unwrap();
     assert_eq!(first["status"], "ok");
+    assert_eq!(first["lora_name"], "adapter");
+    assert!(first["lora_id"].is_number());
     assert_eq!(engine.lora_card_count().await, 1);
     assert_eq!(
         engine.lora_card_display_name("adapter").await.as_deref(),
@@ -1456,7 +1652,20 @@ async fn fake_tonic_lora_lifecycle_publishes_and_removes_model_cards() {
         .engine_update("list_loras".into(), serde_json::Value::Null)
         .await
         .unwrap();
-    assert_eq!(listed["adapters"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["loras"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["count"], 1);
+    state.fail_unload.store(true, Ordering::SeqCst);
+    assert!(
+        engine
+            .engine_update(
+                "unload_lora".into(),
+                serde_json::json!({"lora_name": "adapter"}),
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(engine.lora_card_count().await, 1);
+    state.fail_unload.store(false, Ordering::SeqCst);
     engine
         .engine_update(
             "unload_lora".into(),

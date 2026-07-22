@@ -43,6 +43,11 @@ class ServicePorts:
     # Per-worker VLLM_NIXL_SIDE_CHANNEL_PORT values; unique per deployment so
     # parallel (xdist) deployments on one host don't collide.
     nixl_side_channel_ports: list[int] = field(default_factory=list)
+    # Engine-native HTTP listeners and sibling OpenEngine gRPC listeners.
+    # Kept separate from Dynamo system ports so sidecar deployments can run
+    # safely under xdist without fixed-port collisions.
+    engine_http_ports: list[int] = field(default_factory=list)
+    openengine_ports: list[int] = field(default_factory=list)
 
 
 def _load_port_registry() -> dict:

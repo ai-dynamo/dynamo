@@ -2668,7 +2668,6 @@ dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
- "base64 0.22.1",
  "clap",
  "dynamo-backend-common",
  "dynamo-kv-router",
@@ -6211,8 +6210,8 @@ dependencies = [
 
 [[package]]
 name = "openengine-proto"
-version = "0.2.0"
-source = "git+https://github.com/ai-dynamo/openengine.git?rev=df3a9be24a2a36a4ff7a6d4fef9f1d7480ae210d#df3a9be24a2a36a4ff7a6d4fef9f1d7480ae210d"
+version = "0.3.0"
+source = "git+https://github.com/ai-dynamo/openengine.git?rev=b0cf2a4826d246192dc65b055dab6d2b38d2d67e#b0cf2a4826d246192dc65b055dab6d2b38d2d67e"
 dependencies = [
  "prost 0.14.4",
  "prost-types 0.14.4",

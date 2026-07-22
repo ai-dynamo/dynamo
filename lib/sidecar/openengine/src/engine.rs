@@ -34,6 +34,7 @@ use crate::proto as pb;
 pub struct OpenEngineSidecar {
     endpoint: String,
     expected_engine: Option<String>,
+    expected_schema_release: Option<String>,
     requested_model: Option<String>,
     transport: TransportConfig,
     bootstrap: Discovery,
@@ -84,12 +85,12 @@ impl LoraDiscovery {
     }
 
     async fn detach(&self, name: &str) -> Result<(), DynamoError> {
-        self.models.lock().await.remove(name);
         LocalModel::detach_from_endpoint(&self.endpoint, Some(name))
             .await
             .map_err(|error| {
                 client::engine_shutdown(format!("unregister LoRA model card: {error}"))
             })?;
+        self.models.lock().await.remove(name);
         Ok(())
     }
 }
@@ -108,11 +109,17 @@ impl OpenEngineSidecar {
             &transport,
             args.model.as_deref(),
             args.expected_engine.as_deref(),
+            args.expected_schema_release.as_deref(),
         )?;
         validate_model(&bootstrap)?;
         let role = engine_role(&bootstrap)?;
         let disaggregation_mode = role_to_mode(role);
-        let model_name = bootstrap.model.model_id.clone();
+        let model_name = bootstrap
+            .model
+            .tokenizer
+            .as_ref()
+            .and_then(|tokenizer| nonempty(&tokenizer.source))
+            .unwrap_or_else(|| bootstrap.model.model_id.clone());
         let served_model_name = (!bootstrap.model.served_model_name.is_empty())
             .then(|| bootstrap.model.served_model_name.clone());
         let (fatal, _) = watch::channel(None);
@@ -144,6 +151,7 @@ impl OpenEngineSidecar {
             Self {
                 endpoint,
                 expected_engine: args.expected_engine,
+                expected_schema_release: args.expected_schema_release,
                 requested_model: Some(bootstrap.selected_model.clone()),
                 transport,
                 bootstrap,
@@ -240,6 +248,7 @@ impl LLMEngine for OpenEngineSidecar {
                 &mut control,
                 self.requested_model.as_deref(),
                 self.expected_engine.as_deref(),
+                self.expected_schema_release.as_deref(),
                 self.transport.deadline,
             ),
         )
@@ -301,9 +310,18 @@ impl LLMEngine for OpenEngineSidecar {
                 Ok(LLMEngineOutput::stop().with_usage(usage(prompt_tokens, 0)))
             })));
         }
-        if self.disaggregation_mode.is_decode() && request.prefill_result.is_none() {
+        let connector_uses_client_bootstrap = discovery
+            .engine
+            .kv_connector
+            .as_ref()
+            .and_then(|connector| connector.supports_client_bootstrap)
+            == Some(true);
+        if self.disaggregation_mode.is_decode()
+            && request.prefill_result.is_none()
+            && !(connector_uses_client_bootstrap && request.bootstrap_info.is_some())
+        {
             return Err(client::invalid_arg(
-                "decode worker requires a context-first prefill_result",
+                "decode worker requires a context-first prefill_result or advertised client bootstrap",
             ));
         }
         validate_request_capabilities(discovery, &request, self.disaggregation_mode)?;
@@ -317,14 +335,26 @@ impl LLMEngine for OpenEngineSidecar {
         } else {
             discovery.model.served_model_name.as_str()
         };
-        let grpc_message = convert::build_generate_request(
+        let mut grpc_message = convert::build_generate_request(
             &request,
             &request_id,
             remote_model,
             is_prefill,
             discovery.model.supports_text_input == Some(true),
         )?;
+        apply_client_bootstrap(
+            discovery,
+            &request,
+            &request_id,
+            self.disaggregation_mode,
+            &mut grpc_message,
+        )?;
         validate_decode_handoff(discovery, &grpc_message, self.disaggregation_mode)?;
+        let requested_bootstrap = grpc_message
+            .kv
+            .as_ref()
+            .and_then(|kv| kv.session.as_ref())
+            .and_then(|session| session.bootstrap.clone());
         let metadata = convert::generate_metadata(&request, ctx.metadata(), is_prefill)?;
         let mut grpc_request = tonic::Request::new(grpc_message);
         *grpc_request.metadata_mut() = metadata;
@@ -458,7 +488,11 @@ impl LLMEngine for OpenEngineSidecar {
                                         break;
                                     }
                                 };
-                                if let Err(error) = validate_prefill_handoff(&response_discovery, &validated_session) {
+                                if let Err(error) = validate_prefill_handoff(
+                                    &response_discovery,
+                                    &validated_session,
+                                    requested_bootstrap.as_ref(),
+                                ) {
                                     let _ = fatal.send(Some(error.message().to_string()));
                                     yield Err(error);
                                     break;
@@ -631,10 +665,18 @@ impl LLMEngine for OpenEngineSidecar {
         kv::discover_sources(
             pool.channel(),
             pool.control_client(),
-            advertised_dp_ranks(discovery)?,
-            self.cancel.clone(),
-            self.background_tasks.clone(),
-            self.fatal.clone(),
+            kv::SourceDiscovery {
+                expected_ranks: advertised_dp_ranks(discovery)?,
+                routing_image_token_id: discovery
+                    .model
+                    .multimodal_capabilities
+                    .as_ref()
+                    .and_then(|capabilities| capabilities.routing_image_token_id),
+                deadline: self.transport.connect_timeout,
+                cancel: self.cancel.clone(),
+                tasks: self.background_tasks.clone(),
+                fatal: self.fatal.clone(),
+            },
         )
         .await
     }
@@ -798,37 +840,41 @@ impl LLMEngine for OpenEngineSidecar {
             "unload_lora" => {
                 let name = required_string(&body, "lora_name")?;
                 let mut loaded = self.loaded_loras.lock().await;
-                if loaded.remove(name).is_none() {
+                let Some(adapter) = loaded.get(name).cloned() else {
                     return Err(client::invalid_arg(format!(
                         "LoRA adapter `{name}` is not loaded"
                     )));
-                }
-                drop(loaded);
-                let remote = grpc_client
+                };
+                let response = grpc_client
                     .unload_lora(pb::UnloadLoraRequest {
                         lora_name: name.to_string(),
                     })
-                    .await;
-                let detach = self
-                    .lora_discovery
-                    .get()
-                    .ok_or_else(|| {
-                        client::engine_shutdown("LoRA model-card discovery is not initialized")
-                    })?
-                    .detach(name)
-                    .await;
-                let response =
-                    remote.map_err(|status| client::status_to_dynamo("UnloadLora", status));
-                match (response, detach) {
-                    (Ok(response), Ok(())) => {
-                        Ok(lora_response(response.into_inner().adapter, None))
+                    .await
+                    .map_err(|status| client::status_to_dynamo("UnloadLora", status))?
+                    .into_inner();
+                let discovery = self.lora_discovery.get().ok_or_else(|| {
+                    client::engine_shutdown("LoRA model-card discovery is not initialized")
+                })?;
+                if let Err(detach) = discovery.detach(name).await {
+                    // Restore remote logical registration so a failed local
+                    // detach does not split local and engine state.
+                    match grpc_client
+                        .load_lora(pb::LoadLoraRequest {
+                            adapter: Some(adapter.clone()),
+                        })
+                        .await
+                    {
+                        Ok(_) => return Err(detach),
+                        Err(rollback) => {
+                            loaded.remove(name);
+                            return Err(client::engine_shutdown(format!(
+                                "local LoRA detach failed: {detach}; remote rollback also failed: {rollback}"
+                            )));
+                        }
                     }
-                    (Err(remote), Ok(())) => Err(remote),
-                    (Ok(_), Err(detach)) => Err(detach),
-                    (Err(remote), Err(detach)) => Err(client::engine_shutdown(format!(
-                        "remote LoRA unload failed: {remote}; local model-card detach also failed: {detach}"
-                    ))),
                 }
+                loaded.remove(name);
+                Ok(lora_response(response.adapter.or(Some(adapter)), None))
             }
             "list_loras" => {
                 let response = grpc_client
@@ -836,9 +882,11 @@ impl LLMEngine for OpenEngineSidecar {
                     .await
                     .map_err(|status| client::status_to_dynamo("ListLoras", status))?
                     .into_inner();
+                let count = response.adapters.len();
                 Ok(serde_json::json!({
                     "status": "ok",
-                    "adapters": response.adapters.into_iter().map(lora_json).collect::<Vec<_>>()
+                    "loras": response.adapters.into_iter().map(lora_json).collect::<Vec<_>>(),
+                    "count": count,
                 }))
             }
             _ => Ok(
@@ -983,6 +1031,7 @@ fn bootstrap_discover(
     transport: &TransportConfig,
     model: Option<&str>,
     expected_engine: Option<&str>,
+    expected_schema_release: Option<&str>,
 ) -> Result<Discovery, DynamoError> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -990,7 +1039,14 @@ fn bootstrap_discover(
         .map_err(|error| client::engine_shutdown(format!("bootstrap runtime: {error}")))?
         .block_on(async {
             let mut grpc_client = client::connect(endpoint, transport).await?;
-            client::discover(&mut grpc_client, model, expected_engine, transport.deadline).await
+            client::discover(
+                &mut grpc_client,
+                model,
+                expected_engine,
+                expected_schema_release,
+                transport.deadline,
+            )
+            .await
         })
 }
 
@@ -1040,6 +1096,27 @@ fn validate_model(discovery: &Discovery) -> Result<(), DynamoError> {
             "OpenEngine model must explicitly advertise token-id input required by the Dynamo worker pipeline",
         ));
     }
+    if discovery.engine.schema_revision >= 3 && discovery.model.tokenizer.is_none() {
+        return Err(client::invalid_arg(
+            "OpenEngine schema revision 3 requires tokenizer discovery",
+        ));
+    }
+    if let Some(tokenizer) = discovery.model.tokenizer.as_ref() {
+        if tokenizer.source.is_empty() {
+            return Err(client::invalid_arg(
+                "OpenEngine tokenizer discovery omitted its source",
+            ));
+        }
+        // Dynamo's Rust tokenizer reproduces the default/auto tokenizer.json
+        // path. Python slow tokenizers and implementation-specific modes can
+        // produce different IDs and must fail before worker registration.
+        if !matches!(tokenizer.mode.as_str(), "auto" | "default") {
+            return Err(client::invalid_arg(format!(
+                "OpenEngine tokenizer mode `{}` is not supported by Dynamo's local tokenizer pipeline",
+                tokenizer.mode
+            )));
+        }
+    }
     validate_role_connector(discovery)?;
     Ok(())
 }
@@ -1056,6 +1133,7 @@ fn validate_role_connector(discovery: &Discovery) -> Result<(), DynamoError> {
         || connector.supports_abort_cleanup != Some(true)
         || connector.supports_drain != Some(true)
         || connector.transfer_backend.is_empty()
+        || connector.handoff_profile.is_empty()
         || connector.supported_protocols.is_empty()
     {
         return Err(client::invalid_arg(
@@ -1071,6 +1149,113 @@ fn validate_role_connector(discovery: &Discovery) -> Result<(), DynamoError> {
         return Err(client::invalid_arg(
             "OpenEngine decode role does not advertise decode-pull KV support",
         ));
+    }
+    if role == pb::EngineRole::Prefill
+        && connector.supports_client_bootstrap == Some(true)
+        && client_bootstrap_endpoint(discovery).is_none()
+    {
+        return Err(client::invalid_arg(
+            "client-bootstrap prefill connector omitted a routable local endpoint",
+        ));
+    }
+    Ok(())
+}
+
+fn apply_client_bootstrap(
+    discovery: &Discovery,
+    request: &PreprocessedRequest,
+    request_id: &str,
+    mode: DisaggregationMode,
+    generated: &mut pb::GenerateRequest,
+) -> Result<(), DynamoError> {
+    let Some(info) = request.bootstrap_info.as_ref() else {
+        return Ok(());
+    };
+    let connector =
+        discovery.engine.kv_connector.as_ref().ok_or_else(|| {
+            client::invalid_arg("bootstrap request requires KV connector discovery")
+        })?;
+    if connector.supports_client_bootstrap != Some(true) {
+        return Err(client::invalid_arg(
+            "OpenEngine KV connector does not advertise client bootstrap",
+        ));
+    }
+    if !(mode.is_prefill() || mode.is_decode()) {
+        return Err(client::invalid_arg(
+            "client bootstrap is valid only for prefill/decode roles",
+        ));
+    }
+    if info.bootstrap_host.is_empty() || info.bootstrap_port == 0 {
+        return Err(client::invalid_arg(
+            "Dynamo bootstrap endpoint must have a non-empty host and nonzero port",
+        ));
+    }
+    let protocol = connector
+        .local_endpoints
+        .iter()
+        .map(|endpoint| endpoint.protocol.as_str())
+        .find(|protocol| {
+            !protocol.is_empty()
+                && connector
+                    .supported_protocols
+                    .iter()
+                    .any(|supported| supported == protocol)
+        })
+        .or_else(|| connector.supported_protocols.first().map(String::as_str))
+        .ok_or_else(|| client::invalid_arg("client-bootstrap connector omitted its protocol"))?;
+    let rank = if mode.is_prefill() {
+        request
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.prefill_dp_rank)
+    } else {
+        request.routing.as_ref().and_then(|routing| routing.dp_rank)
+    }
+    .unwrap_or_else(|| {
+        discovery
+            .engine
+            .parallelism
+            .as_ref()
+            .and_then(|parallelism| parallelism.data_parallel_start_rank)
+            .unwrap_or(0)
+    });
+    let bootstrap = pb::KvBootstrap {
+        endpoint: Some(pb::KvEndpoint {
+            host: info.bootstrap_host.clone(),
+            port: u32::from(info.bootstrap_port),
+            protocol: protocol.to_string(),
+        }),
+        room_id: info.bootstrap_room,
+    };
+    let kv = generated.kv.get_or_insert_with(pb::KvOptions::default);
+    match kv.session.as_mut() {
+        Some(session) => {
+            if session.handoff_profile != connector.handoff_profile {
+                return Err(client::invalid_arg(format!(
+                    "prefill handoff profile `{}` does not match connector profile `{}`",
+                    session.handoff_profile, connector.handoff_profile
+                )));
+            }
+            if let Some(existing) = session.bootstrap.as_ref()
+                && existing != &bootstrap
+            {
+                return Err(client::invalid_arg(
+                    "prefill handoff bootstrap conflicts with Dynamo routing bootstrap",
+                ));
+            }
+            session.bootstrap = Some(bootstrap);
+        }
+        None => {
+            kv.session = Some(pb::KvSessionRef {
+                session_id: request_id.to_string(),
+                transfer_backend: connector.transfer_backend.clone(),
+                endpoints: Vec::new(),
+                dp_rank: rank,
+                attributes_struct: None,
+                handoff_profile: connector.handoff_profile.clone(),
+                bootstrap: Some(bootstrap),
+            });
+        }
     }
     Ok(())
 }
@@ -1111,12 +1296,13 @@ fn validate_decode_handoff(
             )));
         }
     }
-    Ok(())
+    validate_session_profile_and_bootstrap(connector, session, None)
 }
 
 fn validate_prefill_handoff(
     discovery: &Discovery,
     session: &pb::KvSessionRef,
+    requested_bootstrap: Option<&pb::KvBootstrap>,
 ) -> Result<(), DynamoError> {
     let connector =
         discovery.engine.kv_connector.as_ref().ok_or_else(|| {
@@ -1145,6 +1331,52 @@ fn validate_prefill_handoff(
             "OpenEngine PrefillReady dp_rank {} is outside the advertised parallelism range",
             session.dp_rank
         )));
+    }
+    validate_session_profile_and_bootstrap(connector, session, requested_bootstrap)
+        .map_err(|error| client::engine_shutdown(error.to_string()))
+}
+
+fn validate_session_profile_and_bootstrap(
+    connector: &pb::KvConnectorInfo,
+    session: &pb::KvSessionRef,
+    requested_bootstrap: Option<&pb::KvBootstrap>,
+) -> Result<(), DynamoError> {
+    if session.handoff_profile != connector.handoff_profile {
+        return Err(client::invalid_arg(format!(
+            "KV handoff profile `{}` does not match connector profile `{}`",
+            session.handoff_profile, connector.handoff_profile
+        )));
+    }
+    if connector.supports_client_bootstrap == Some(true) {
+        let bootstrap = session.bootstrap.as_ref().ok_or_else(|| {
+            client::invalid_arg("client-bootstrap KV session omitted typed bootstrap")
+        })?;
+        let endpoint = bootstrap.endpoint.as_ref().ok_or_else(|| {
+            client::invalid_arg("client-bootstrap KV session omitted bootstrap endpoint")
+        })?;
+        if endpoint.host.is_empty()
+            || endpoint.port == 0
+            || endpoint.port > u32::from(u16::MAX)
+            || !connector
+                .supported_protocols
+                .iter()
+                .any(|protocol| protocol == &endpoint.protocol)
+        {
+            return Err(client::invalid_arg(
+                "client-bootstrap KV session has an invalid endpoint",
+            ));
+        }
+        if let Some(expected) = requested_bootstrap
+            && bootstrap != expected
+        {
+            return Err(client::invalid_arg(
+                "OpenEngine PrefillReady returned a different bootstrap session than requested",
+            ));
+        }
+    } else if session.bootstrap.is_some() {
+        return Err(client::invalid_arg(
+            "KV session supplied bootstrap for a connector that does not advertise it",
+        ));
     }
     Ok(())
 }
@@ -1201,7 +1433,7 @@ fn validate_request_capabilities(
         || sampling.length_penalty.is_some()
     {
         return Err(client::invalid_arg(
-            "OpenEngine revision 2 does not support best_of or beam-search semantics",
+            "OpenEngine does not support best_of or beam-search semantics",
         ));
     }
     if sampling.seed.is_some_and(|seed| seed < 0) {
@@ -1216,7 +1448,7 @@ fn validate_request_capabilities(
         || stopping.max_thinking_tokens.is_some()
     {
         return Err(client::invalid_arg(
-            "OpenEngine revision 2 cannot preserve visible stop-token or thinking-budget semantics",
+            "OpenEngine cannot preserve visible stop-token or thinking-budget semantics",
         ));
     }
     if output.skip_special_tokens == Some(false)
@@ -1224,7 +1456,7 @@ fn validate_request_capabilities(
         || output.return_tokens_as_token_ids == Some(true)
     {
         return Err(client::invalid_arg(
-            "OpenEngine revision 2 cannot preserve the requested output formatting semantics",
+            "OpenEngine cannot preserve the requested output formatting semantics",
         ));
     }
     if sampling.include_stop_str_in_output == Some(true)
@@ -1236,12 +1468,26 @@ fn validate_request_capabilities(
     }
     if request.require_reasoning {
         return Err(client::invalid_arg(
-            "OpenEngine revision 2 does not support require_reasoning",
+            "OpenEngine does not support require_reasoning",
         ));
     }
-    if request.bootstrap_info.is_some() {
+    let supports_client_bootstrap = discovery
+        .engine
+        .kv_connector
+        .as_ref()
+        .and_then(|connector| connector.supports_client_bootstrap)
+        == Some(true);
+    if mode.is_prefill() || mode.is_decode() {
+        if supports_client_bootstrap != request.bootstrap_info.is_some() {
+            return Err(client::invalid_arg(if supports_client_bootstrap {
+                "OpenEngine connector requires Dynamo client bootstrap"
+            } else {
+                "OpenEngine connector does not support Dynamo client bootstrap"
+            }));
+        }
+    } else if request.bootstrap_info.is_some() {
         return Err(client::invalid_arg(
-            "OpenEngine sidecar does not support Dynamo bootstrap handoffs",
+            "aggregated OpenEngine requests cannot carry Dynamo bootstrap",
         ));
     }
     if let Some(extra) = request.extra_args.as_ref() {
@@ -1252,12 +1498,31 @@ fn validate_request_capabilities(
             let is_supported = matches!(
                 key.as_str(),
                 "messages" | "bypass_prefix_cache" | "disable_prefix_cache"
-            ) || (key == "formatted_prompt"
+            ) || (key == "mm_hashes"
+                && value.as_array().is_some_and(|hashes| {
+                    !hashes.is_empty()
+                        && hashes.iter().all(|hash| {
+                            hash.as_str().is_some_and(|hash| {
+                                hash.len() == 16
+                                    && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                            })
+                        })
+                })
                 && request
                     .multi_modal_data
                     .as_ref()
-                    .is_some_and(|media| media.values().any(|items| !items.is_empty()))
-                && value.as_str().is_some_and(|prompt| !prompt.is_empty()));
+                    .and_then(|media| media.get("image_url"))
+                    .is_some_and(|images| {
+                        value
+                            .as_array()
+                            .is_some_and(|hashes| hashes.len() == images.len())
+                    }))
+                || (key == "formatted_prompt"
+                    && request
+                        .multi_modal_data
+                        .as_ref()
+                        .is_some_and(|media| media.values().any(|items| !items.is_empty()))
+                    && value.as_str().is_some_and(|prompt| !prompt.is_empty()));
             if !is_supported {
                 return Err(client::invalid_arg(format!(
                     "OpenEngine sidecar cannot preserve extra_args field `{key}`"
@@ -1469,9 +1734,22 @@ fn build_engine_config(discovery: &Discovery) -> EngineConfig {
     let model = &discovery.model;
     let parallelism = discovery.engine.parallelism.unwrap_or_default();
     let capacity = discovery.engine.capacity.as_ref();
+    let served_model_name =
+        nonempty(&model.served_model_name).unwrap_or_else(|| model.model_id.clone());
+    let mut aliases = model.served_model_aliases.clone();
+    if model.model_id != served_model_name {
+        aliases.push(model.model_id.clone());
+    }
+    aliases.retain(|alias| !alias.is_empty() && alias != &served_model_name);
+    aliases.sort();
+    aliases.dedup();
+    let connector = discovery.engine.kv_connector.as_ref();
+    let multimodal = model.multimodal_capabilities.as_ref();
+    let tokenizer = model.tokenizer.as_ref();
     EngineConfig {
         model: model.model_id.clone(),
-        served_model_name: nonempty(&model.served_model_name),
+        served_model_name: Some(served_model_name),
+        model_aliases: aliases,
         runtime_data: [
             (
                 "openengine_engine".to_string(),
@@ -1480,6 +1758,34 @@ fn build_engine_config(discovery: &Discovery) -> EngineConfig {
             (
                 "openengine_schema_release".to_string(),
                 serde_json::json!(discovery.engine.schema_release),
+            ),
+            (
+                "openengine_tokenizer_source".to_string(),
+                serde_json::json!(
+                    tokenizer
+                        .map(|value| value.source.as_str())
+                        .unwrap_or_default()
+                ),
+            ),
+            (
+                "openengine_tokenizer_mode".to_string(),
+                serde_json::json!(
+                    tokenizer
+                        .map(|value| value.mode.as_str())
+                        .unwrap_or_default()
+                ),
+            ),
+            (
+                "openengine_handoff_profile".to_string(),
+                serde_json::json!(
+                    connector
+                        .map(|value| value.handoff_profile.as_str())
+                        .unwrap_or_default()
+                ),
+            ),
+            (
+                "openengine_routing_image_token_id".to_string(),
+                serde_json::json!(multimodal.and_then(|value| value.routing_image_token_id)),
             ),
         ]
         .into_iter()
@@ -1492,10 +1798,31 @@ fn build_engine_config(discovery: &Discovery) -> EngineConfig {
             max_num_batched_tokens: capacity.and_then(|value| value.max_batched_tokens),
             data_parallel_size: parallelism.data_parallel_size,
             data_parallel_start_rank: parallelism.data_parallel_start_rank,
-            bootstrap_host: None,
-            bootstrap_port: None,
+            bootstrap_host: client_bootstrap_endpoint(discovery).map(|value| value.host.clone()),
+            bootstrap_port: client_bootstrap_endpoint(discovery)
+                .and_then(|value| u16::try_from(value.port).ok()),
         }),
     }
+}
+
+fn client_bootstrap_endpoint(discovery: &Discovery) -> Option<&pb::KvEndpoint> {
+    if engine_role(discovery).ok()? != pb::EngineRole::Prefill {
+        return None;
+    }
+    let connector = discovery.engine.kv_connector.as_ref()?;
+    if connector.supports_client_bootstrap != Some(true) {
+        return None;
+    }
+    connector.local_endpoints.iter().find(|endpoint| {
+        !endpoint.host.is_empty()
+            && endpoint.port > 0
+            && endpoint.port <= u32::from(u16::MAX)
+            && !endpoint.protocol.is_empty()
+            && connector
+                .supported_protocols
+                .iter()
+                .any(|protocol| protocol == &endpoint.protocol)
+    })
 }
 
 fn prompt_logprobs_from_openengine(tokens: Vec<pb::TokenInfo>) -> PromptLogprobs {
@@ -1616,9 +1943,12 @@ fn lora_response(
     value: Option<pb::LoraAdapter>,
     already_loaded: Option<bool>,
 ) -> serde_json::Value {
+    let adapter = value.map(lora_json).unwrap_or(serde_json::Value::Null);
     serde_json::json!({
         "status": "ok",
-        "adapter": value.map(lora_json),
+        "lora_id": adapter.get("lora_id").cloned(),
+        "lora_name": adapter.get("lora_name").cloned(),
+        "source_path": adapter.get("source_path").cloned(),
         "already_loaded": already_loaded,
     })
 }

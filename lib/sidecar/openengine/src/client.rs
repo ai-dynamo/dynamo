@@ -98,6 +98,7 @@ pub async fn discover(
     client: &mut Control,
     requested_model: Option<&str>,
     expected_engine: Option<&str>,
+    expected_schema_release: Option<&str>,
     deadline: Duration,
 ) -> Result<Discovery, DynamoError> {
     let deadline_at = Instant::now() + deadline;
@@ -110,7 +111,7 @@ pub async fn discover(
     .map_err(|status| status_to_dynamo("GetServerInfo", status))?
     .into_inner();
 
-    validate_schema(&engine)?;
+    validate_schema(&engine, expected_schema_release)?;
     if let Some(expected) = expected_engine
         && engine.engine_name != expected
     {
@@ -121,7 +122,7 @@ pub async fn discover(
     }
 
     let selected_model = select_model(&engine.supported_models, requested_model)?;
-    // Model enumeration is part of GetServerInfo in revision 2; there is no
+    // Model enumeration is part of GetServerInfo; there is no
     // separate ListModels RPC. Selection therefore shares GetServerInfo's
     // bounded deadline above.
     let model = timeout_discovery_rpc(
@@ -134,9 +135,9 @@ pub async fn discover(
     .await?
     .map_err(|status| status_to_dynamo("GetModelInfo", status))?
     .into_inner();
-    if model.model_id != selected_model {
+    if !model_matches_name(&model, &selected_model) {
         return Err(invalid_arg(format!(
-            "OpenEngine GetModelInfo returned model_id `{}` for selected model `{selected_model}`",
+            "OpenEngine GetModelInfo returned model identity `{}` for unrecognized selection `{selected_model}`",
             model.model_id
         )));
     }
@@ -174,13 +175,9 @@ where
 
 fn select_model(models: &[String], requested: Option<&str>) -> Result<String, DynamoError> {
     if let Some(requested) = requested {
-        if models.iter().any(|model| model == requested) {
-            return Ok(requested.to_string());
-        }
-        return Err(invalid_arg(format!(
-            "requested model `{requested}` is not advertised by OpenEngine (available: {})",
-            models.join(", ")
-        )));
+        // GetModelInfo resolves canonical IDs, served names, and aliases. The
+        // compact supported_models list cannot enumerate every alias.
+        return Ok(requested.to_string());
     }
     match models {
         [only] => Ok(only.clone()),
@@ -194,7 +191,16 @@ fn select_model(models: &[String], requested: Option<&str>) -> Result<String, Dy
     }
 }
 
-fn validate_schema(engine: &pb::ServerInfo) -> Result<(), DynamoError> {
+fn model_matches_name(model: &pb::ModelInfo, name: &str) -> bool {
+    model.model_id == name
+        || model.served_model_name == name
+        || model.served_model_aliases.iter().any(|alias| alias == name)
+}
+
+fn validate_schema(
+    engine: &pb::ServerInfo,
+    expected_schema_release: Option<&str>,
+) -> Result<(), DynamoError> {
     let client_revision = openengine_proto::SCHEMA_REVISION;
     if engine.schema_revision == 0 {
         return Err(invalid_arg("OpenEngine reported invalid schema revision 0"));
@@ -205,20 +211,32 @@ fn validate_schema(engine: &pb::ServerInfo) -> Result<(), DynamoError> {
             engine.minimum_client_revision
         )));
     }
-    if engine.schema_revision > client_revision {
+    if engine.schema_revision < openengine_proto::MINIMUM_CLIENT_REVISION {
         return Err(invalid_arg(format!(
-            "OpenEngine schema revision {} is newer than this sidecar's tested revision {client_revision}",
+            "OpenEngine schema revision {} is older than this sidecar's minimum compatible revision {}",
             engine.schema_revision,
+            openengine_proto::MINIMUM_CLIENT_REVISION,
         )));
     }
-    const COMPILED_OPENENGINE_COMMIT: &str = env!("OPENENGINE_PROTO_COMMIT");
-    if engine.schema_release != COMPILED_OPENENGINE_COMMIT {
+    if !is_commit_sha(&engine.schema_release) {
         return Err(invalid_arg(format!(
-            "OpenEngine schema_release `{}` does not match the sidecar's pinned contract commit `{COMPILED_OPENENGINE_COMMIT}`",
+            "OpenEngine schema_release `{}` is not an immutable 40-character Git commit",
+            engine.schema_release
+        )));
+    }
+    if let Some(expected) = expected_schema_release
+        && engine.schema_release != expected
+    {
+        return Err(invalid_arg(format!(
+            "OpenEngine schema_release `{}` does not match expected release `{expected}`",
             engine.schema_release
         )));
     }
     Ok(())
+}
+
+fn is_commit_sha(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn backend(kind: BackendError, message: impl Into<String>) -> DynamoError {
@@ -298,18 +316,25 @@ mod tests {
             schema_release: "unreleased".to_string(),
             ..Default::default()
         };
-        assert!(validate_schema(&engine).is_err());
+        assert!(validate_schema(&engine, None).is_err());
         engine.schema_release = String::new();
-        assert!(validate_schema(&engine).is_err());
+        assert!(validate_schema(&engine, None).is_err());
         engine.schema_release = "main".to_string();
-        assert!(validate_schema(&engine).is_err());
+        assert!(validate_schema(&engine, None).is_err());
         engine.schema_release = "7d6ac38".to_string();
-        assert!(validate_schema(&engine).is_err());
+        assert!(validate_schema(&engine, None).is_err());
         engine.schema_release = env!("OPENENGINE_PROTO_COMMIT").to_string();
-        assert!(validate_schema(&engine).is_ok());
+        assert!(validate_schema(&engine, None).is_ok());
+        engine.schema_revision = openengine_proto::SCHEMA_REVISION + 1;
+        assert!(
+            validate_schema(&engine, None).is_ok(),
+            "newer additive servers remain compatible when their minimum client revision allows this sidecar"
+        );
+        engine.schema_revision = openengine_proto::SCHEMA_REVISION;
         engine.schema_release = "0123456789abcdef0123456789abcdef01234567".to_string();
-        assert!(validate_schema(&engine).is_err());
+        assert!(validate_schema(&engine, None).is_ok());
+        assert!(validate_schema(&engine, Some(env!("OPENENGINE_PROTO_COMMIT"))).is_err());
         engine.schema_release = "v0.2.0".to_string();
-        assert!(validate_schema(&engine).is_err());
+        assert!(validate_schema(&engine, None).is_err());
     }
 }

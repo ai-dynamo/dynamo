@@ -259,6 +259,38 @@ fn build_media(request: &PreprocessedRequest) -> Result<Vec<pb::MediaItem>, Dyna
     let Some(map) = request.multi_modal_data.as_ref() else {
         return Ok(Vec::new());
     };
+    let mut image_uuids = request
+        .extra_args
+        .as_ref()
+        .and_then(|args| args.get("mm_hashes"))
+        .map(|hashes| {
+            hashes
+                .as_array()
+                .ok_or_else(|| client::invalid_arg("extra_args.mm_hashes must be an array"))?
+                .iter()
+                .map(|hash| {
+                    let hash = hash.as_str().ok_or_else(|| {
+                        client::invalid_arg("extra_args.mm_hashes entries must be strings")
+                    })?;
+                    if hash.len() != 16 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                        return Err(client::invalid_arg(
+                            "extra_args.mm_hashes entries must be canonical 16-character hexadecimal strings",
+                        ));
+                    }
+                    Ok(hash.to_ascii_lowercase())
+                })
+                .collect::<Result<VecDeque<_>, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let image_count = map.get("image_url").map_or(0, Vec::len);
+    if !image_uuids.is_empty() && image_uuids.len() != image_count {
+        return Err(client::invalid_arg(format!(
+            "extra_args.mm_hashes has {} entries for {image_count} images",
+            image_uuids.len()
+        )));
+    }
+
     let mut queues: HashMap<&str, VecDeque<&MultimodalData>> = map
         .iter()
         .filter_map(|(key, values)| {
@@ -266,6 +298,7 @@ fn build_media(request: &PreprocessedRequest) -> Result<Vec<pb::MediaItem>, Dyna
         })
         .collect();
     let mut order = Vec::new();
+    let mut represented = HashMap::<&str, usize>::new();
     if let Some(messages) = request
         .extra_args
         .as_ref()
@@ -278,18 +311,40 @@ fn build_media(request: &PreprocessedRequest) -> Result<Vec<pb::MediaItem>, Dyna
             .filter_map(serde_json::Value::as_array)
             .flatten()
         {
-            if let Some(key) = key_for_content_part(part)
-                && queues.get(key).is_some_and(|values| !values.is_empty())
-            {
+            if let Some(key) = key_for_content_part(part) {
+                let available = queues.get(key).map_or(0, VecDeque::len);
+                let used = represented.entry(key).or_default();
+                if *used >= available {
+                    return Err(client::invalid_arg(format!(
+                        "original messages contain more `{key}` items than multi_modal_data"
+                    )));
+                }
                 order.push(key);
+                *used += 1;
             }
         }
     }
-    // Older/pre-tokenized clients may not carry original messages. Retain a
-    // deterministic fallback and append any entries not represented there.
-    for key in ["image_url", "video_url", "audio_url"] {
-        let remaining = queues.get(key).map_or(0, VecDeque::len);
-        order.extend(std::iter::repeat_n(key, remaining));
+    let populated_modalities = queues
+        .iter()
+        .filter(|(_, values)| !values.is_empty())
+        .count();
+    if populated_modalities > 1 {
+        let missing = queues
+            .iter()
+            .any(|(key, values)| represented.get(key).copied().unwrap_or_default() != values.len());
+        if missing {
+            return Err(client::invalid_arg(
+                "mixed-modality media order is unavailable; preserve every original message content part",
+            ));
+        }
+    } else {
+        // A modality-keyed map loses only cross-modality order. For a single
+        // modality it is safe to append entries absent from legacy messages.
+        for key in ["image_url", "video_url", "audio_url"] {
+            let remaining = queues.get(key).map_or(0, VecDeque::len)
+                - represented.get(key).copied().unwrap_or_default();
+            order.extend(std::iter::repeat_n(key, remaining));
+        }
     }
 
     let mut result = Vec::with_capacity(order.len());
@@ -306,11 +361,17 @@ fn build_media(request: &PreprocessedRequest) -> Result<Vec<pb::MediaItem>, Dyna
                 ));
             }
         };
+        let modality = modality_for_key(key).expect("filtered modality");
+        let uuid = if modality == pb::Modality::Image {
+            image_uuids.pop_front().unwrap_or_default()
+        } else {
+            String::new()
+        };
         result.push(pb::MediaItem {
-            modality: modality_for_key(key).expect("filtered modality") as i32,
+            modality: modality as i32,
             source: Some(source),
             mime_type: String::new(),
-            uuid: String::new(),
+            uuid,
         });
     }
     Ok(result)
@@ -409,6 +470,18 @@ pub fn token_output(value: pb::TokenOutput) -> LLMEngineOutput {
 }
 
 pub fn kv_session_to_disagg_json(value: pb::KvSessionRef) -> serde_json::Value {
+    let bootstrap = value.bootstrap.map(|bootstrap| {
+        serde_json::json!({
+            "endpoint": bootstrap.endpoint.map(|endpoint| serde_json::json!({
+                "host": endpoint.host,
+                "port": endpoint.port,
+                "protocol": endpoint.protocol,
+            })),
+            // This value can exceed JavaScript's exact integer range. Keep the
+            // opaque Dynamo handoff lossless by carrying it as decimal text.
+            "room_id": bootstrap.room_id.to_string(),
+        })
+    });
     serde_json::json!({
         "session_id": value.session_id,
         "transfer_backend": value.transfer_backend,
@@ -419,13 +492,14 @@ pub fn kv_session_to_disagg_json(value: pb::KvSessionRef) -> serde_json::Value {
         })).collect::<Vec<_>>(),
         "dp_rank": value.dp_rank,
         "attributes_struct": value.attributes_struct.as_ref().map(prost_struct_to_json),
+        "handoff_profile": value.handoff_profile,
+        "bootstrap": bootstrap,
     })
 }
 
 pub fn disagg_json_to_kv_session(
     value: &serde_json::Value,
 ) -> Result<pb::KvSessionRef, DynamoError> {
-    const PROFILE: &str = "tensorrt_llm.disaggregated_params.v1";
     let object = value.as_object().ok_or_else(|| {
         client::invalid_arg("prefill_result.disaggregated_params must be an object")
     })?;
@@ -441,6 +515,7 @@ pub fn disagg_json_to_kv_session(
     };
     let session_id = required_string("session_id")?;
     let transfer_backend = required_string("transfer_backend")?;
+    let handoff_profile = required_string("handoff_profile")?;
     let dp_rank = object
         .get("dp_rank")
         .and_then(serde_json::Value::as_u64)
@@ -450,170 +525,89 @@ pub fn disagg_json_to_kv_session(
         .get("endpoints")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| client::invalid_arg("handoff `endpoints` must be an array"))?;
-    let mut endpoints = Vec::with_capacity(endpoints_value.len());
-    for endpoint in endpoints_value {
-        let host = endpoint
-            .get("host")
-            .and_then(serde_json::Value::as_str)
-            .filter(|value| !value.is_empty() && value.trim() == *value)
-            .ok_or_else(|| client::invalid_arg("handoff endpoint host must be non-empty"))?;
-        let port = endpoint
-            .get("port")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|value| u16::try_from(value).ok())
-            .filter(|value| *value > 0)
-            .ok_or_else(|| client::invalid_arg("handoff endpoint port must be in 1..=65535"))?;
-        let protocol = endpoint
-            .get("protocol")
-            .and_then(serde_json::Value::as_str)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| client::invalid_arg("handoff endpoint protocol must be non-empty"))?;
-        endpoints.push(pb::KvEndpoint {
-            host: host.to_owned(),
-            port: u32::from(port),
-            protocol: protocol.to_owned(),
-        });
-    }
-    let attributes = object
-        .get("attributes_struct")
-        .and_then(serde_json::Value::as_object)
-        .ok_or_else(|| client::invalid_arg("handoff `attributes_struct` must be an object"))?;
-    let encoded_profile = attributes
-        .get(PROFILE)
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            client::invalid_arg(format!("handoff is missing string profile `{PROFILE}`"))
-        })?;
-    validate_trt_handoff_profile(encoded_profile, dp_rank)?;
+    let endpoints = endpoints_value
+        .iter()
+        .map(|endpoint| endpoint_from_json(endpoint, "handoff endpoint"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let attributes_struct = match object.get("attributes_struct") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value @ serde_json::Value::Object(_)) => json_to_prost_struct(value),
+        Some(_) => {
+            return Err(client::invalid_arg(
+                "handoff `attributes_struct` must be an object or null",
+            ));
+        }
+    };
+    let bootstrap = match object.get("bootstrap") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => {
+            let bootstrap = value
+                .as_object()
+                .ok_or_else(|| client::invalid_arg("handoff `bootstrap` must be an object"))?;
+            let endpoint = bootstrap
+                .get("endpoint")
+                .ok_or_else(|| client::invalid_arg("handoff bootstrap omitted `endpoint`"))?;
+            let room_id = bootstrap
+                .get("room_id")
+                .and_then(|value| {
+                    value.as_u64().or_else(|| {
+                        value
+                            .as_str()
+                            .filter(|value| canonical_u64(value))
+                            .and_then(|value| value.parse().ok())
+                    })
+                })
+                .ok_or_else(|| {
+                    client::invalid_arg(
+                        "handoff bootstrap `room_id` must be a uint64 or canonical decimal string",
+                    )
+                })?;
+            Some(pb::KvBootstrap {
+                endpoint: Some(endpoint_from_json(endpoint, "handoff bootstrap endpoint")?),
+                room_id,
+            })
+        }
+    };
 
     Ok(pb::KvSessionRef {
         session_id,
         transfer_backend,
         endpoints,
         dp_rank,
-        attributes_struct: json_to_prost_struct(&serde_json::Value::Object(attributes.clone())),
+        attributes_struct,
+        handoff_profile,
+        bootstrap,
     })
 }
 
-fn validate_trt_handoff_profile(encoded: &str, session_dp_rank: u32) -> Result<(), DynamoError> {
-    let payload: serde_json::Value = serde_json::from_str(encoded)
-        .map_err(|error| client::invalid_arg(format!("invalid TRT-LLM handoff JSON: {error}")))?;
-    let payload = payload
+fn endpoint_from_json(
+    value: &serde_json::Value,
+    field: &str,
+) -> Result<pb::KvEndpoint, DynamoError> {
+    let endpoint = value
         .as_object()
-        .ok_or_else(|| client::invalid_arg("TRT-LLM handoff profile must be a JSON object"))?;
-    for key in [
-        "first_gen_tokens",
-        "first_gen_log_probs",
-        "ctx_request_id",
-        "disagg_request_id",
-        "ctx_dp_rank",
-        "ctx_info_endpoint",
-        "draft_tokens",
-        "ctx_usage",
-        "conversation_id",
-        "schedule_style",
-        "requires_decode_media",
-        "opaque_state",
-    ] {
-        if !payload.contains_key(key) {
-            return Err(client::invalid_arg(format!(
-                "TRT-LLM handoff profile is missing `{key}`"
-            )));
-        }
-    }
-    const PROFILE_KEYS: &[&str] = &[
-        "first_gen_tokens",
-        "first_gen_log_probs",
-        "ctx_request_id",
-        "disagg_request_id",
-        "ctx_dp_rank",
-        "ctx_info_endpoint",
-        "draft_tokens",
-        "ctx_usage",
-        "conversation_id",
-        "schedule_style",
-        "requires_decode_media",
-        "opaque_state",
-    ];
-    if let Some(unknown) = payload
-        .keys()
-        .find(|key| !PROFILE_KEYS.contains(&key.as_str()))
-    {
-        return Err(client::invalid_arg(format!(
-            "TRT-LLM handoff contains unsupported field `{unknown}`"
-        )));
-    }
-    if payload
-        .get("schedule_style")
+        .ok_or_else(|| client::invalid_arg(format!("{field} must be an object")))?;
+    let host = endpoint
+        .get("host")
         .and_then(serde_json::Value::as_str)
-        != Some("context_first")
-    {
-        return Err(client::invalid_arg(
-            "only context-first TRT-LLM handoffs are supported",
-        ));
-    }
-    for key in ["ctx_request_id", "disagg_request_id"] {
-        let value = &payload[key];
-        if !value.is_null() && !value.as_str().is_some_and(canonical_u64) {
-            return Err(client::invalid_arg(format!(
-                "TRT-LLM handoff `{key}` must be null or a decimal string"
-            )));
-        }
-    }
-    let ctx_dp_rank = payload["ctx_dp_rank"]
-        .as_u64()
-        .and_then(|value| u32::try_from(value).ok());
-    if !payload["ctx_dp_rank"].is_null() && ctx_dp_rank.is_none() {
-        return Err(client::invalid_arg(
-            "TRT-LLM handoff `ctx_dp_rank` must be null or uint32",
-        ));
-    }
-    if let Some(ctx_dp_rank) = ctx_dp_rank
-        && ctx_dp_rank != session_dp_rank
-    {
-        return Err(client::invalid_arg(
-            "TRT-LLM handoff ctx_dp_rank does not match KV session dp_rank",
-        ));
-    }
-    for key in ["first_gen_tokens", "first_gen_log_probs", "draft_tokens"] {
-        if !payload[key].is_null() && !payload[key].is_array() {
-            return Err(client::invalid_arg(format!(
-                "TRT-LLM handoff `{key}` must be null or an array"
-            )));
-        }
-    }
-    if !payload["ctx_usage"].is_null() && !payload["ctx_usage"].is_object() {
-        return Err(client::invalid_arg(
-            "TRT-LLM handoff `ctx_usage` must be null or an object",
-        ));
-    }
-    for key in ["ctx_info_endpoint", "conversation_id"] {
-        if !payload[key].is_null() && !payload[key].is_string() {
-            return Err(client::invalid_arg(format!(
-                "TRT-LLM handoff `{key}` must be null or a string"
-            )));
-        }
-    }
-    if !payload["requires_decode_media"].is_boolean() {
-        return Err(client::invalid_arg(
-            "TRT-LLM handoff `requires_decode_media` must be boolean",
-        ));
-    }
-    if !payload["opaque_state"].is_null() {
-        let encoded = payload["opaque_state"].as_str().ok_or_else(|| {
-            client::invalid_arg("TRT-LLM handoff `opaque_state` must be null or base64")
-        })?;
-        let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
-            .map_err(|_| {
-            client::invalid_arg("TRT-LLM handoff `opaque_state` must be canonical base64")
-        })?;
-        if base64::Engine::encode(&base64::engine::general_purpose::STANDARD, decoded) != encoded {
-            return Err(client::invalid_arg(
-                "TRT-LLM handoff `opaque_state` must be canonical base64",
-            ));
-        }
-    }
-    Ok(())
+        .filter(|value| !value.is_empty() && value.trim() == *value)
+        .ok_or_else(|| client::invalid_arg(format!("{field} host must be non-empty")))?;
+    let port = endpoint
+        .get("port")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u16::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .ok_or_else(|| client::invalid_arg(format!("{field} port must be in 1..=65535")))?;
+    let protocol = endpoint
+        .get("protocol")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| client::invalid_arg(format!("{field} protocol must be non-empty")))?;
+    Ok(pb::KvEndpoint {
+        host: host.to_owned(),
+        port: u32::from(port),
+        protocol: protocol.to_owned(),
+    })
 }
 
 fn canonical_u64(value: &str) -> bool {

@@ -4,6 +4,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
+use std::time::Duration;
 
 use dynamo_backend_common::{DynamoError, KvEventPublisher, KvEventSource};
 use dynamo_kv_router::protocols::{
@@ -20,23 +21,41 @@ use tonic::transport::Channel;
 use crate::client::{self, Control};
 use crate::proto as pb;
 
-pub async fn discover_sources(
+pub(crate) struct SourceDiscovery {
+    pub expected_ranks: HashSet<u32>,
+    pub routing_image_token_id: Option<u32>,
+    pub deadline: Duration,
+    pub cancel: CancellationToken,
+    pub tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    pub fatal: watch::Sender<Option<String>>,
+}
+
+pub(crate) async fn discover_sources(
     channel: Channel,
     mut client: Control,
-    expected_ranks: HashSet<u32>,
-    cancel: CancellationToken,
-    tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
-    fatal: watch::Sender<Option<String>>,
+    discovery: SourceDiscovery,
 ) -> Result<Vec<KvEventSource>, DynamoError> {
-    let response = client
-        .get_kv_event_sources(pb::GetKvEventSourcesRequest {
+    let SourceDiscovery {
+        expected_ranks,
+        routing_image_token_id,
+        deadline,
+        cancel,
+        tasks,
+        fatal,
+    } = discovery;
+    let response = tokio::time::timeout(
+        deadline,
+        client.get_kv_event_sources(pb::GetKvEventSourcesRequest {
             data_parallel_ranks: Vec::new(),
-        })
-        .await
-        .map_err(|status| client::status_to_dynamo("GetKvEventSources", status))?
-        .into_inner();
+        }),
+    )
+    .await
+    .map_err(|_| client::engine_shutdown("OpenEngine GetKvEventSources timed out"))?
+    .map_err(|status| client::status_to_dynamo("GetKvEventSources", status))?
+    .into_inner();
     let mut result = Vec::new();
     let mut seen_ranks = HashSet::new();
+    let mut usable_ranks = HashSet::new();
     for source in response.sources {
         let rank = source.data_parallel_rank.ok_or_else(|| {
             client::invalid_arg("OpenEngine KV event source omitted data_parallel_rank")
@@ -53,21 +72,44 @@ pub async fn discover_sources(
         }
         match source.transport.as_str() {
             "zmq" => {
+                if source.encoding != "msgpack" {
+                    return Err(client::invalid_arg(format!(
+                        "ZMQ KV source for rank {rank} uses unsupported encoding `{}`",
+                        source.encoding
+                    )));
+                }
                 let Some(endpoint) = source.endpoint_addr else {
                     return Err(client::invalid_arg("ZMQ KV source omitted endpoint_addr"));
                 };
+                if endpoint.host.is_empty()
+                    || matches!(endpoint.host.as_str(), "*" | "0.0.0.0" | "::" | "[::]")
+                    || endpoint.port == 0
+                    || endpoint.port > u32::from(u16::MAX)
+                {
+                    return Err(client::invalid_arg(format!(
+                        "ZMQ KV source for rank {rank} omitted a connectable endpoint"
+                    )));
+                }
                 let protocol = if endpoint.protocol.is_empty() {
                     "tcp"
                 } else {
                     endpoint.protocol.as_str()
                 };
                 result.push(KvEventSource::Zmq {
-                    endpoint: format!("{protocol}://{}:{}", endpoint.host, endpoint.port),
+                    endpoint: format_zmq_endpoint(protocol, &endpoint.host, endpoint.port),
                     topic: source.topic,
                     dp_rank: rank,
+                    image_token_id: routing_image_token_id,
                 });
+                usable_ranks.insert(rank);
             }
             "grpc" => {
+                if source.encoding != "protobuf" {
+                    return Err(client::invalid_arg(format!(
+                        "gRPC KV source for rank {rank} uses unsupported encoding `{}`",
+                        source.encoding
+                    )));
+                }
                 let channel = channel.clone();
                 let cancel = cancel.clone();
                 let tasks = tasks.clone();
@@ -81,13 +123,35 @@ pub async fn discover_sources(
                         Ok(())
                     }),
                 });
+                usable_ranks.insert(rank);
             }
             unsupported => {
                 tracing::warn!(unsupported, rank, "ignoring unsupported KV event transport")
             }
         }
     }
+    // An empty source list means KV events are disabled. Once the server
+    // advertises any source, every advertised DP rank must have a transport
+    // this sidecar can actually consume.
+    if !seen_ranks.is_empty() && usable_ranks != expected_ranks {
+        let mut missing = expected_ranks
+            .difference(&usable_ranks)
+            .copied()
+            .collect::<Vec<_>>();
+        missing.sort_unstable();
+        return Err(client::invalid_arg(format!(
+            "OpenEngine KV event discovery omitted data-parallel ranks {missing:?}"
+        )));
+    }
     Ok(result)
+}
+
+fn format_zmq_endpoint(protocol: &str, host: &str, port: u32) -> String {
+    if host.contains(':') && !(host.starts_with('[') && host.ends_with(']')) {
+        format!("{protocol}://[{host}]:{port}")
+    } else {
+        format!("{protocol}://{host}:{port}")
+    }
 }
 
 async fn subscribe_loop(
@@ -143,18 +207,8 @@ async fn subscribe_loop(
                     if batch.events.is_empty() {
                         continue;
                     }
-                    if batch.events.len() != 1 {
-                        let message = format!(
-                            "OpenEngine KV batch {} for rank {rank} contained {} events; revision-2 TRT contract requires at most one",
-                            batch.sequence_number,
-                            batch.events.len()
-                        );
-                        let _ = fatal.send(Some(message));
-                        return;
-                    }
-                    let event = batch.events.into_iter().next().expect("checked one event");
-                    let event = match convert_event(event, rank, batch.sequence_number, &warnings) {
-                        Ok(event) => event,
+                    let events = match convert_batch_events(batch.events, rank, &warnings) {
+                        Ok(events) => events,
                         Err(message) => {
                             let message = format!(
                                 "invalid OpenEngine KV batch {} for rank {rank}: {message}",
@@ -164,11 +218,15 @@ async fn subscribe_loop(
                             return;
                         }
                     };
-                    if let Some(event) = event
-                        && let Err(error) = publisher.publish(event)
-                    {
-                        tracing::debug!(%error, rank, "Dynamo KV publisher closed");
-                        return;
+                    for mut event in events {
+                        // OpenEngine sequences batches, while Dynamo sequences
+                        // individual normalized events. Assign a local monotonic
+                        // ID so every event in a valid repeated batch is retained.
+                        event.event_id = publisher.next_event_id();
+                        if let Err(error) = publisher.publish(event) {
+                            tracing::debug!(%error, rank, "Dynamo KV publisher closed");
+                            return;
+                        }
                     }
                 }
                 Some(pb::subscribe_kv_events_response::Event::Error(error)) => {
@@ -203,10 +261,21 @@ async fn subscribe_loop(
     }
 }
 
+fn convert_batch_events(
+    events: Vec<pb::KvEvent>,
+    rank: u32,
+    warnings: &Arc<AtomicU32>,
+) -> Result<Vec<KvCacheEvent>, String> {
+    events
+        .into_iter()
+        .filter_map(|event| convert_event(event, rank, 0, warnings).transpose())
+        .collect()
+}
+
 fn subscription_request(rank: u32) -> pb::SubscribeKvEventsRequest {
     pb::SubscribeKvEventsRequest {
         data_parallel_ranks: vec![rank],
-        // Revision 2 does not advertise snapshot/replay capability. Request
+        // OpenEngine does not advertise snapshot/replay capability. Request
         // only the live stream until discovery can negotiate it.
         include_snapshot: false,
         start_sequence_number: 0,
@@ -462,6 +531,32 @@ mod tests {
         assert_eq!(request.data_parallel_ranks, vec![3]);
         assert!(!request.include_snapshot);
         assert_eq!(request.start_sequence_number, 0);
+    }
+
+    #[test]
+    fn repeated_events_in_one_batch_are_all_retained() {
+        let warnings = Arc::new(AtomicU32::new(0));
+        let cleared = || pb::KvEvent {
+            event: Some(pb::kv_event::Event::AllBlocksCleared(
+                pb::AllBlocksCleared {},
+            )),
+            ..Default::default()
+        };
+        let events = convert_batch_events(vec![cleared(), cleared()], 3, &warnings).unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|event| event.dp_rank == 3));
+    }
+
+    #[test]
+    fn brackets_ipv6_zmq_hosts() {
+        assert_eq!(
+            format_zmq_endpoint("tcp", "2001:db8::1", 5557),
+            "tcp://[2001:db8::1]:5557"
+        );
+        assert_eq!(
+            format_zmq_endpoint("tcp", "127.0.0.1", 5557),
+            "tcp://127.0.0.1:5557"
+        );
     }
 
     #[test]

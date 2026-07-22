@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-const OPENENGINE_COMMIT: &str = "df3a9be24a2a36a4ff7a6d4fef9f1d7480ae210d";
+const OPENENGINE_COMMIT: &str = "b0cf2a4826d246192dc65b055dab6d2b38d2d67e";
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");

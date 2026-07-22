@@ -24,15 +24,15 @@ trap dynamo_exit_trap EXIT
 MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-0.6B}
 HTTP_PORT=${DYN_HTTP_PORT:-${FRONTEND_PORT:-8000}}
 export DYN_HTTP_PORT="$HTTP_PORT"
-TRTLLM_HTTP_PORT=${TRTLLM_HTTP_PORT:-8001}
-OPENENGINE_PORT=${OPENENGINE_PORT:-50051}
+TRTLLM_HTTP_PORT=${TRTLLM_HTTP_PORT:-${DYN_ENGINE_HTTP_PORT:-8001}}
+OPENENGINE_PORT=${OPENENGINE_PORT:-${DYN_OPENENGINE_PORT:-50051}}
 SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081}
 export DYNAMO_HOME=${DYNAMO_HOME:-"$(readlink -f "$SCRIPT_DIR/../../../..")"}
 TRTLLM_CONFIG=${TRTLLM_CONFIG:-$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3/agg.yaml}
 OPENENGINE_LAUNCH_MODE=${OPENENGINE_LAUNCH_MODE:-text}
 export DYN_LORA_ENABLED=${DYN_LORA_ENABLED:-false}
 export DYN_LORA_PATH=${DYN_LORA_PATH:-/tmp/dynamo_loras}
-readonly OPENENGINE_SCHEMA_RELEASE=df3a9be24a2a36a4ff7a6d4fef9f1d7480ae210d
+readonly OPENENGINE_SCHEMA_RELEASE=b0cf2a4826d246192dc65b055dab6d2b38d2d67e
 export OPENENGINE_SCHEMA_RELEASE
 
 warn_trtllm_serve_profile_overrides "$TRTLLM_CONFIG"
@@ -51,6 +51,7 @@ trtllm-serve "$MODEL_PATH" \
   --openengine-port "$OPENENGINE_PORT" &
 DYN_SYSTEM_PORT="$SYSTEM_PORT" dynamo-openengine-sidecar \
   --openengine-endpoint "http://127.0.0.1:$OPENENGINE_PORT" \
-  --expected-engine tensorrt_llm &
+  --expected-engine tensorrt_llm \
+  --expected-schema-release "$OPENENGINE_SCHEMA_RELEASE" &
 
 wait_any_exit

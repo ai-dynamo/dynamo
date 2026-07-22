@@ -13,7 +13,7 @@ description = "Engine-neutral Dynamo backend for out-of-process OpenEngine serve
 build = "build.rs"
 
 [package.metadata.openengine]
-commit = "df3a9be24a2a36a4ff7a6d4fef9f1d7480ae210d"
+commit = "b0cf2a4826d246192dc65b055dab6d2b38d2d67e"
 
 [[bin]]
 name = "dynamo-openengine-sidecar"
@@ -22,15 +22,14 @@ path = "src/main.rs"
 [dependencies]
 dynamo-backend-common = { workspace = true }
 dynamo-kv-router = { workspace = true }
-dynamo-llm = { workspace = true }
+dynamo-llm = { workspace = true, features = ["mm-routing"] }
 dynamo-protocols = { workspace = true }
 dynamo-runtime = { workspace = true }
-openengine-proto = { version = "0.2.0", git = "https://github.com/ai-dynamo/openengine.git", rev = "df3a9be24a2a36a4ff7a6d4fef9f1d7480ae210d" }
+openengine-proto = { version = "0.3.0", git = "https://github.com/ai-dynamo/openengine.git", rev = "b0cf2a4826d246192dc65b055dab6d2b38d2d67e" }
 
 anyhow = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
-base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
 parking_lot = { workspace = true }

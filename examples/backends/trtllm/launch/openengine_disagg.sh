@@ -24,10 +24,10 @@ trap dynamo_exit_trap EXIT
 MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-0.6B}
 HTTP_PORT=${DYN_HTTP_PORT:-${FRONTEND_PORT:-8000}}
 export DYN_HTTP_PORT="$HTTP_PORT"
-PREFILL_HTTP_PORT=${PREFILL_HTTP_PORT:-8001}
-DECODE_HTTP_PORT=${DECODE_HTTP_PORT:-8002}
-PREFILL_PORT=${PREFILL_PORT:-50051}
-DECODE_PORT=${DECODE_PORT:-50052}
+PREFILL_HTTP_PORT=${PREFILL_HTTP_PORT:-${DYN_ENGINE_HTTP_PORT1:-8001}}
+DECODE_HTTP_PORT=${DECODE_HTTP_PORT:-${DYN_ENGINE_HTTP_PORT2:-8002}}
+PREFILL_PORT=${PREFILL_PORT:-${DYN_OPENENGINE_PORT1:-50051}}
+DECODE_PORT=${DECODE_PORT:-${DYN_OPENENGINE_PORT2:-50052}}
 PREFILL_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081}
 DECODE_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082}
 export DYNAMO_HOME=${DYNAMO_HOME:-"$(readlink -f "$SCRIPT_DIR/../../../..")"}
@@ -36,7 +36,7 @@ DECODE_CONFIG=${DECODE_CONFIG:-$DYNAMO_HOME/examples/backends/trtllm/engine_conf
 OPENENGINE_LAUNCH_MODE=${OPENENGINE_LAUNCH_MODE:-text}
 export DYN_LORA_ENABLED=${DYN_LORA_ENABLED:-true}
 export DYN_LORA_PATH=${DYN_LORA_PATH:-/tmp/dynamo_loras}
-readonly OPENENGINE_SCHEMA_RELEASE=df3a9be24a2a36a4ff7a6d4fef9f1d7480ae210d
+readonly OPENENGINE_SCHEMA_RELEASE=b0cf2a4826d246192dc65b055dab6d2b38d2d67e
 export OPENENGINE_SCHEMA_RELEASE
 
 warn_trtllm_serve_profile_overrides "$PREFILL_CONFIG and $DECODE_CONFIG"
@@ -66,9 +66,11 @@ CUDA_VISIBLE_DEVICES=${DECODE_CUDA_VISIBLE_DEVICES:-1} \
 
 DYN_SYSTEM_PORT="$PREFILL_SYSTEM_PORT" dynamo-openengine-sidecar \
   --openengine-endpoint "http://127.0.0.1:$PREFILL_PORT" \
-  --expected-engine tensorrt_llm &
+  --expected-engine tensorrt_llm \
+  --expected-schema-release "$OPENENGINE_SCHEMA_RELEASE" &
 DYN_SYSTEM_PORT="$DECODE_SYSTEM_PORT" dynamo-openengine-sidecar \
   --openengine-endpoint "http://127.0.0.1:$DECODE_PORT" \
-  --expected-engine tensorrt_llm &
+  --expected-engine tensorrt_llm \
+  --expected-schema-release "$OPENENGINE_SCHEMA_RELEASE" &
 
 wait_any_exit

@@ -18,6 +18,10 @@ pub struct Args {
     #[arg(long, env = "OPENENGINE_EXPECTED_ENGINE")]
     pub expected_engine: Option<String>,
 
+    /// Optional immutable OpenEngine contract commit assertion.
+    #[arg(long, env = "OPENENGINE_EXPECTED_SCHEMA_RELEASE")]
+    pub expected_schema_release: Option<String>,
+
     /// Model to select when the OpenEngine server advertises more than one model.
     #[arg(long, env = "OPENENGINE_MODEL")]
     pub model: Option<String>,

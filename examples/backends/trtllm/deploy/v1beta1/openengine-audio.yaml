@@ -50,6 +50,8 @@ spec:
           - http://127.0.0.1:50051
           - --expected-engine
           - tensorrt_llm
+          - --expected-schema-release
+          - b0cf2a4826d246192dc65b055dab6d2b38d2d67e
           command: [dynamo-openengine-sidecar]
           env:
           - name: DYN_NAMESPACE
@@ -67,6 +69,10 @@ spec:
             requests:
               cpu: "1"
               memory: 2Gi
+          volumeMounts:
+          - mountPath: /models/phi-4-multimodal-instruct
+            name: phi4-model
+            readOnly: true
         - args:
           - /models/phi-4-multimodal-instruct
           - --backend
@@ -86,7 +92,7 @@ spec:
           - name: HF_HOME
             value: /model-cache
           - name: OPENENGINE_SCHEMA_RELEASE
-            value: df3a9be24a2a36a4ff7a6d4fef9f1d7480ae210d
+            value: b0cf2a4826d246192dc65b055dab6d2b38d2d67e
           image: my-registry/tensorrtllm-openengine:my-tag
           name: engine
           resources:

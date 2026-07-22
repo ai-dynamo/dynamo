@@ -688,7 +688,12 @@ impl OpenAIPreprocessor {
                     // explicit field and falls back to the spec value, so it's
                     // the single id used both for the engagement gate and the
                     // routing-fill below.
-                    let img_tok = routing_tokens.chat_placeholder_token_id;
+                    let img_tok = runtime_config
+                        .runtime_data
+                        .get("openengine_routing_image_token_id")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|value| crate::protocols::TokenIdType::try_from(value).ok())
+                        .or(routing_tokens.chat_placeholder_token_id);
                     let bos_tok_string = routing_tokens.bos_token_string;
 
                     match (counter.is_some(), img_tok.is_some()) {

@@ -1,35 +1,18 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-# Prerequisite: create a PVC named `trtllm-openengine-lora-cache` in the
-# deployment namespace. The CPU sidecar downloads adapters into the claim and
-# the GPU engine consumes the exact same path.
 
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: trtllm-openengine-lora
+  name: vllm-openengine-agg
 spec:
-  backendFramework: trtllm
+  backendFramework: vllm
   components:
   - name: Frontend
     podTemplate:
       spec:
         containers:
-        - args:
-          - python3 -m dynamo.frontend --router-mode round-robin --http-port 8000
+        - args: [python3 -m dynamo.frontend --router-mode kv --http-port 8000]
           command: [/bin/sh, -c]
           env:
           - name: DYN_NAMESPACE
@@ -46,7 +29,9 @@ spec:
           - --openengine-endpoint
           - http://127.0.0.1:50051
           - --expected-engine
-          - tensorrt_llm
+          - vllm
+          - --expected-schema-release
+          - b0cf2a4826d246192dc65b055dab6d2b38d2d67e
           command: [dynamo-openengine-sidecar]
           env:
           - name: DYN_NAMESPACE
@@ -57,6 +42,8 @@ spec:
             value: "true"
           - name: DYN_LORA_PATH
             value: /lora-cache
+          - name: HF_HOME
+            value: /model-cache
           image: my-registry/dynamo-openengine-sidecar:my-tag
           name: main
           resources:
@@ -69,27 +56,32 @@ spec:
           volumeMounts:
           - mountPath: /lora-cache
             name: lora-cache
+          - mountPath: /model-cache
+            name: model-cache
         - args:
           - Qwen/Qwen3-0.6B
-          - --backend
-          - pytorch
           - --host
           - 127.0.0.1
           - --port
           - "8001"
-          - --config
-          - /workspace/examples/backends/trtllm/engine_configs/qwen3/lora.yaml
           - --openengine-host
           - 127.0.0.1
           - --openengine-port
           - "50051"
-          command: [trtllm-serve]
+          - --enable-lora
+          - --max-loras
+          - "4"
+          - --kv-events-config
+          - '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://127.0.0.1:5557","topic":"kv-events"}'
+          command: [vllm, serve]
           env:
           - name: HF_HOME
             value: /model-cache
+          - name: VLLM_USE_RUST_FRONTEND
+            value: "1"
           - name: OPENENGINE_SCHEMA_RELEASE
             value: b0cf2a4826d246192dc65b055dab6d2b38d2d67e
-          image: my-registry/tensorrtllm-openengine:my-tag
+          image: my-registry/vllm-openengine:my-tag
           name: engine
           resources:
             limits:
@@ -102,9 +94,8 @@ spec:
           - mountPath: /model-cache
             name: model-cache
         volumes:
-        - name: lora-cache
-          persistentVolumeClaim:
-            claimName: trtllm-openengine-lora-cache
+        - emptyDir: {}
+          name: lora-cache
         - emptyDir: {}
           name: model-cache
     replicas: 1
