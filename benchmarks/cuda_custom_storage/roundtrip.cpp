@@ -197,7 +197,8 @@ ExpectProcessState(pid_t pid, CUprocessState expected, std::string_view stage)
 WatchdogExpired(int)
 {
   static constexpr char message[] = "cuda-custom-storage-roundtrip: 120s watchdog expired\n";
-  (void)write(STDERR_FILENO, message, sizeof(message) - 1);
+  const ssize_t ignored = write(STDERR_FILENO, message, sizeof(message) - 1);
+  (void)ignored;
   const pid_t child = static_cast<pid_t>(g_owned_child_pid);
   if (child > 0) {
     (void)kill(child, SIGKILL);
@@ -724,6 +725,7 @@ CheckpointProcess(
   Artifact artifact{
       .application_ptr = application_ptr,
       .application_bytes = application_bytes,
+      .extents = {},
   };
   TransferMetrics transfer;
   artifact.extents.reserve(info->deviceCount);
