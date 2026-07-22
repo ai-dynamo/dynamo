@@ -53,6 +53,8 @@ navigation:
             path: reference/feature-matrix.md
           - page: Release Artifacts
             path: reference/release-artifacts.md
+          - page: Model Early Access Builds
+            path: reference/model-early-access-builds.md
           - page: Examples
             path: getting-started/examples.md
           - page: Glossary

@@ -109,28 +109,46 @@ fn validate_dynamo_trace_block_size(expected: Option<usize>, embedded: usize) ->
     Ok(())
 }
 
-fn synthesize_trace_tokens(
+pub(super) fn validate_synthesizable_prompt(
+    input_length: usize,
+    hash_ids: &[u64],
+    trace_block_size: usize,
+) -> Result<()> {
+    if trace_block_size == 0 {
+        bail!("trace_block_size must be greater than 0");
+    }
+    let synthesizable_capacity = hash_ids
+        .len()
+        .checked_mul(trace_block_size)
+        .context("synthesized prompt capacity overflow")?;
+    let required_hash_ids = input_length.div_ceil(trace_block_size);
+    if hash_ids.len() < required_hash_ids {
+        bail!(
+            "input_length {} exceeds synthesized capacity {}",
+            input_length,
+            synthesizable_capacity
+        );
+    }
+
+    Ok(())
+}
+
+pub(super) fn synthesize_trace_tokens(
     input_length: usize,
     hash_ids: &[u64],
     trace_block_size: usize,
 ) -> Result<Vec<u32>> {
-    if trace_block_size == 0 {
-        bail!("trace_block_size must be greater than 0");
-    }
-    if hash_ids.len() * trace_block_size < input_length {
-        bail!(
-            "input_length {} exceeds synthesized capacity {}",
-            input_length,
-            hash_ids.len() * trace_block_size
-        );
-    }
+    validate_synthesizable_prompt(input_length, hash_ids, trace_block_size)?;
 
     let mut tokens = Vec::with_capacity(input_length);
     for &hash_id in hash_ids {
         let token_id = hash_id as u32;
-        tokens.extend((0..trace_block_size).map(|_| token_id));
-        if tokens.len() >= input_length {
-            tokens.truncate(input_length);
+        let remaining = input_length - tokens.len();
+        tokens.extend(std::iter::repeat_n(
+            token_id,
+            remaining.min(trace_block_size),
+        ));
+        if tokens.len() == input_length {
             break;
         }
     }
@@ -1057,15 +1075,13 @@ impl Trace {
                         turn_idx
                     );
                 }
-                if turn.hash_ids.len() * self.block_size < turn.input_length {
-                    bail!(
-                        "session {} turn {} input_length {} exceeds synthesized capacity {}",
-                        session.session_id,
-                        turn_idx,
-                        turn.input_length,
-                        turn.hash_ids.len() * self.block_size
-                    );
-                }
+                validate_synthesizable_prompt(turn.input_length, &turn.hash_ids, self.block_size)
+                    .with_context(|| {
+                    format!(
+                        "session {} turn {} has invalid prompt",
+                        session.session_id, turn_idx
+                    )
+                })?;
                 if !turn.delay_after_previous_ms.is_finite() || turn.delay_after_previous_ms < 0.0 {
                     bail!(
                         "session {} turn {} has invalid delay {}",
