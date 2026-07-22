@@ -720,7 +720,10 @@ metadata:
 spec:
   services:
     Frontend:
-      replicas: 1`
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: registry.example/runtime:1.1.0`
 
 			outputConfigMapName := getOutputConfigMapName(dgdr)
 			cm := &corev1.ConfigMap{
@@ -948,7 +951,10 @@ metadata:
 spec:
   services:
     Frontend:
-      replicas: 1`
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: registry.example/runtime:1.1.0`
 
 			// expectedDGDName is the name the operator should assign: DGDR name + "-dgd",
 			// not the static "vllm-agg" that the profiler emitted.
@@ -1082,7 +1088,10 @@ metadata:
 spec:
   services:
     Frontend:
-      replicas: 1`
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: registry.example/runtime:1.1.0`
 
 			outputConfigMapName := getOutputConfigMapName(dgdr)
 			outputCM := &corev1.ConfigMap{
@@ -1196,6 +1205,9 @@ spec:
 						ComponentName: "worker",
 						ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
 						Replicas:      ptr.To[int32](1),
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}},
+						}},
 					}},
 				},
 			}
@@ -1259,6 +1271,9 @@ spec:
 						ComponentName: "worker",
 						ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
 						Replicas:      ptr.To[int32](1),
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}},
+						}},
 					}},
 				},
 			}
@@ -2510,6 +2525,9 @@ spec:
 						ComponentName: "worker",
 						ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
 						Replicas:      ptr.To[int32](1),
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}},
+						}},
 					}},
 				},
 			}
@@ -2661,7 +2679,10 @@ metadata:
 spec:
   services:
     Frontend:
-      replicas: 1`
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: registry.example/runtime:1.1.0`
 
 			cm := &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
@@ -2756,7 +2777,10 @@ metadata:
 spec:
   services:
     Frontend:
-      replicas: 1`
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: registry.example/runtime:1.1.0`
 
 			// expectedDGDName is derived from the DGDR name, not from the profiler's output.
 			expectedDGDName := dgdrName + "-dgd"
@@ -2924,8 +2948,14 @@ spec:
   services:
     Frontend:
       replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: registry.example/runtime:1.1.0
     VllmWorker:
-      replicas: 2`
+      replicas: 2
+      extraPodSpec:
+        mainContainer:
+          image: registry.example/runtime:1.1.0`
 
 			cm := &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
@@ -3801,6 +3831,9 @@ var _ = Describe("DGDR Image Pull Error Detection", func() {
 						ComponentName: "worker",
 						ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
 						Replicas:      ptr.To[int32](1),
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}},
+						}},
 					}},
 				},
 			}
