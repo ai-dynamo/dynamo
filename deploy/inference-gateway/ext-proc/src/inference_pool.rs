@@ -1,20 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Read-only watcher for the GAIE `InferencePool` this EPP backs.
+//! Read-only watcher for the GAIE `inference.networking.k8s.io/v1` `InferencePool`
+//! (not `v1alpha2`).
 //!
-//! In standalone mode the `InferencePool` is the single source of truth for
-//! which pods are candidate backends: the gateway routes to it, and the EPP
-//! reads its `spec.selector` and target port to discover the same pods. This
-//! watcher only ever *reads* the pool — it never writes status or manages the
-//! object, so it coexists with the gateway provider's controller (which owns the
-//! pool lifecycle) without conflict.
+//! Returns a [`PoolState`] containing the pool's `match_labels` and `target_port`.
 //!
-//! The pool is watched as a dynamic object (no compiled CRD type), but the
-//! contract is explicitly `inference.networking.k8s.io/v1`: the selector is read
-//! from `spec.selector.matchLabels` and the target port from
-//! `spec.targetPorts[].number`. Legacy `v1alpha2` pools use a different GVK and a
-//! flat `spec.selector` map, so they never reach this watch or parser.
+//! Currently supports only pools with at least one match label and exactly one
+//! target port. Additional configurations may be supported in the future, for
+//! example to enable data-parallel-aware routing.
 
 use std::collections::BTreeMap;
 
@@ -31,9 +25,9 @@ const INFERENCE_POOL_KIND: &str = "InferencePool";
 /// The slice of `InferencePool` spec the EPP needs to discover pods.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PoolState {
-    /// `spec.selector.matchLabels` — the pod label selector (equality only).
+    /// The pod label selector from InferencePool spec
     pub match_labels: BTreeMap<String, String>,
-    /// The OpenAI HTTP target port resolved from the pool.
+    /// The OpenAI HTTP target port resolved from the pool
     pub target_port: u16,
 }
 
@@ -91,28 +85,22 @@ pub async fn spawn_pool_watch(
 }
 
 /// Derive the [`PoolState`] from the observed pool object and publish it **only
-/// when it changes**. Absence or an unparseable spec both publish `None`, so a
-/// deleted or malformed pool always clears stale discovery state.
-///
-/// The `InferencePool` also receives status- and metadata-only updates
-/// (conditions, `resourceVersion`, `managedFields`) plus re-delivery on every
-/// watch relist, none of which touch `spec.selector` or the target port.
-/// `PodDiscovery` treats every `pool_rx` change as a full O(pods) rebuild, so
-/// `send_if_modified` suppresses those no-op wakes — discovery is disturbed only
-/// on a real presence, selector, or target-port change.
+/// when it changes**. Non-existent or invalid spec both publish `None`, so a
+/// deleted or invalid pool always clears stale discovery state.
 fn publish_pool_state(
     obj: Option<DynamicObject>,
     name: &str,
     tx: &watch::Sender<Option<PoolState>>,
 ) {
     let (state, clear_reason) = match &obj {
-        None => (None, Some("absent".to_string())),
+        None => (None, Some("does not exist".to_string())),
         Some(o) => match parse_pool_state(&o.data) {
             Ok(s) => (Some(s), None),
             Err(reason) => (None, Some(reason)),
         },
     };
 
+    // Only send a notification if the match labels or target port has changed.
     tx.send_if_modified(|current| {
         if *current == state {
             return false;
@@ -127,7 +115,7 @@ fn publish_pool_state(
             None => tracing::warn!(
                 pool = %name,
                 reason = clear_reason.as_deref().unwrap_or("unknown"),
-                "InferencePool unusable; clearing discovery state"
+                "InferencePool is invalid, clearing discovery state"
             ),
         }
         *current = state;
@@ -135,8 +123,7 @@ fn publish_pool_state(
     });
 }
 
-/// Extract a [`PoolState`] from an `InferencePool` `spec`, or a message naming
-/// why it is unusable. Pure function — unit-testable without a cluster.
+/// Extract a [`PoolState`] from an `InferencePool` `spec`, or a message naming why it is invalid.
 fn parse_pool_state(data: &serde_json::Value) -> std::result::Result<PoolState, String> {
     let spec = data
         .get("spec")
@@ -151,18 +138,13 @@ fn parse_pool_state(data: &serde_json::Value) -> std::result::Result<PoolState, 
         .iter()
         .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
         .collect();
-    // An empty selector would match every pod in the namespace; refuse it.
+
     if match_labels.is_empty() {
         return Err(
-            "spec.selector.matchLabels is empty (would select every pod in the namespace)"
-                .to_string(),
+            "spec.selector.matchLabels is empty, needs at least one match label".to_string(),
         );
     }
 
-    // v1 `spec.targetPorts[].number`; exactly one is required. Multi-port pools
-    // (e.g. for DP-aware routing) aren't in scope yet: a worker is keyed by
-    // `hash_pod_name` → a single endpoint, so multiple ports would collide.
-    // Reject rather than silently pick the first.
     let target_ports = spec
         .get("targetPorts")
         .and_then(|tp| tp.as_array())

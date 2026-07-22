@@ -1,18 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Pod discovery for standalone router mode, driven by the `InferencePool`.
+//! Discovers inference workers from pods selected by the standalone EPP's
+//! [`InferencePool`](crate::inference_pool).
 //!
-//! The pod label selector and HTTP target port come from the GAIE
-//! [`InferencePool`](crate::inference_pool) this EPP backs — the same object the
-//! gateway routes to — so EPP and gateway can never disagree about pool
-//! membership.
-//!
-//! Pods are `Ready`-filtered (and excluded once terminating), so in-flight
-//! rollouts and crash-looping pods receive no traffic.
-//!
-//! `worker_id = hash_pod_name(pod_name)`, so the IDs produced here line up with
-//! whatever consumes them (the topology adapter and selector catalog).
+//! Maintains an index of `Ready`, non-terminating pods using the pool's match
+//! labels and target port. Workers are keyed by `hash_pod_name(pod_name)` for
+//! selector registration and endpoint resolution.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
@@ -42,11 +36,6 @@ pub struct RawWorker {
     pub kv_events_endpoint: String,
     /// Optional ZMQ REQ endpoint for live-stream gap replay.
     pub replay_endpoint: Option<String>,
-    /// Routing identity fed to the selector's `stable_routing_id`. Currently the
-    /// pod name, so it is NOT yet restart-stable: a Deployment pod restart yields
-    /// a new name and a new identity. A truly stable source (StatefulSet ordinal
-    /// or a pod label) is a follow-up.
-    pub stable_routing_id: String,
 }
 
 /// One indexed worker: the materialized [`RawWorker`] for selector registration
@@ -70,12 +59,7 @@ impl WorkerEntry {
 /// Derived catalog of the `Ready`, pool-selected workers, keyed by `worker_id`.
 type WorkerIndex = HashMap<u64, WorkerEntry>;
 
-/// View over the `Ready` raw inference engine pods selected by the EPP's
-/// `InferencePool`. Reads never touch the Kubernetes API; they take a brief read
-/// lock on a derived [`WorkerIndex`] that a single background task maintains
-/// **incrementally** — each pod `Apply`/`Delete` is an O(1) upsert/remove, and
-/// the whole index is recomputed only on the initial LIST, a watch relist, or a
-/// pool-selector change.
+/// Provides an index of `Ready` workers selected by the EPP's `InferencePool`.
 #[derive(Clone)]
 pub struct PodDiscovery {
     index: Arc<RwLock<WorkerIndex>>,
@@ -109,9 +93,6 @@ impl PodDiscovery {
         let writer = reflector::store::Writer::default();
         let store = writer.as_reader();
         let ready = Arc::new(AtomicBool::new(false));
-        // `default_backoff()` lets the watcher own retry/backoff (exponential +
-        // jitter, capped) on watch errors; the error arm below just logs, so
-        // persistent failures (e.g. RBAC, API-server hiccup) don't hot-loop.
         let reflect = reflector::reflector(
             writer,
             watcher(pods, watcher::Config::default()).default_backoff(),
@@ -122,7 +103,6 @@ impl PodDiscovery {
         let kv_event_port = cfg.kv_event_port;
         let replay_port = cfg.replay_port;
 
-        // Derived worker index, maintained incrementally by the task below.
         let index: Arc<RwLock<WorkerIndex>> = Arc::new(RwLock::new(WorkerIndex::new()));
 
         tracing::info!(
@@ -132,10 +112,6 @@ impl PodDiscovery {
             "Starting namespace pod reflector for standalone mode"
         );
 
-        // A single task owns both wake sources so index mutations are serialized:
-        // a pod Apply/Delete mutates exactly one entry (O(1)); a full recompute
-        // runs only when the store is known consistent (InitDone, which also drops
-        // pods that vanished during a relist gap) or the pool selector changes.
         let index_task = index.clone();
         let ready_task = ready.clone();
         tokio::spawn(async move {
@@ -165,10 +141,7 @@ impl PodDiscovery {
                             Delta::Stop
                         }
                         // During a relist the reflector emits Init + one InitApply
-                        // per pod + InitDone. The per-object relist events only
-                        // prime the buffered store (the live store still holds the
-                        // pre-relist set until InitDone); mark the relist and act
-                        // once at InitDone with a single recompute.
+                        // per pod + InitDone.
                         Some(Ok(watcher::Event::Init | watcher::Event::InitApply(_))) => {
                             relisting = true;
                             Delta::Skip
@@ -190,15 +163,10 @@ impl PodDiscovery {
                             tracing::warn!("InferencePool watch ended");
                             Delta::Stop
                         } else if defer_pool_rebuild(relisting, pool_rx.borrow().is_some()) {
-                            // A relist is buffering pods and the live store is still
-                            // the pre-relist set. Defer this non-clearing selector/
-                            // port edit to InitDone, which rebuilds from the completed
-                            // pod list + latest PoolState. (A pool deletion/invalid
-                            // spec is not deferred and clears immediately below.)
+                            // Wait for the relist to complete and InitDone to be emitted.
+                            // To then rebuild the index from the completed pod list + latest PoolState.
                             Delta::Skip
                         } else {
-                            // A selector/target-port edit re-classifies every pod;
-                            // a None pool clears discovery.
                             Delta::Rebuild
                         }
                     }
@@ -224,16 +192,12 @@ impl PodDiscovery {
                     Delta::Remove(pod) => remove_pod(&index_task, &pod),
                 }
 
-                // Live readiness: true only once the pod cache has synced AND the
-                // pool is resolved; drops back to false if the pool later
-                // disappears, and recovers once both are healthy again.
+                // Readiness based on initial pods being synced and the pool being resolved.
                 ready_task.store(pod_synced && pool_rx.borrow().is_some(), Ordering::Release);
                 generation = generation.wrapping_add(1);
                 let _ = changes_tx.send(generation);
             }
-            // Either watch stream ended: the producer is gone and can no longer
-            // refresh discovery. Stop advertising readiness AND drop the index so
-            // reads can't hand out endpoints for workers we can no longer track.
+            // Watch stream has ended, so stop advertising readiness and clear the index.
             ready_task.store(false, Ordering::Release);
             index_task.write().unwrap().clear();
         });
@@ -247,9 +211,7 @@ impl PodDiscovery {
         ))
     }
 
-    /// All currently `Ready` workers selected by the pool, normalized for
-    /// selector registration. Empty until the `InferencePool` has resolved.
-    /// Reads the cached index; no per-call filtering or API access.
+    // Return all currently `Ready` workers selected by the pool.
     pub fn ready_workers(&self) -> Vec<RawWorker> {
         self.index
             .read()
@@ -259,15 +221,12 @@ impl PodDiscovery {
             .collect()
     }
 
-    /// Worker IDs of all currently `Ready`, pool-selected workers. Reads the
-    /// cached index, so it stays consistent with [`Self::resolve_endpoint`].
+    // Return the IDs of all currently `Ready`, pool-selected workers.
     pub fn ready_worker_ids(&self) -> HashSet<u64> {
         self.index.read().unwrap().keys().copied().collect()
     }
 
-    /// Resolve a `worker_id` to its current `ip:port` HTTP endpoint, if the pod
-    /// is still `Ready` and pool-selected. On the request hot path: an O(1)
-    /// lookup into the cached index.
+    // Resolve a `worker_id` to its current `ip:port` HTTP endpoint.
     pub fn resolve_endpoint(&self, worker_id: u64) -> Option<String> {
         self.index
             .read()
@@ -280,11 +239,6 @@ impl PodDiscovery {
     /// under a **single** read lock and **without cloning** any endpoint (`pred`
     /// borrows it). Used on the subset-routing path so membership testing doesn't
     /// allocate a throwaway `String` per candidate. Unknown workers are dropped.
-    ///
-    /// `pred` runs while the index read lock is held, so it must not re-enter
-    /// `PodDiscovery` (`resolve_endpoint`, `ready_workers`, another read, …):
-    /// `std::sync::RwLock` read locks are not guaranteed re-entrant and a nested
-    /// acquire can deadlock.
     pub fn filter_workers_by_endpoint(
         &self,
         worker_ids: &HashSet<u64>,
@@ -302,16 +256,12 @@ impl PodDiscovery {
             .collect()
     }
 
-    /// Subscribe to change notifications (a generation counter) bumped on pod or
-    /// pool changes, so a reconciler can re-sync.
     pub fn subscribe_changes(&self) -> watch::Receiver<u64> {
         self.changes.clone()
     }
 }
 
 /// Return `true` iff the pod is `Ready` and not terminating.
-/// A pod with a deletion timestamp is excluded even if it still
-/// reports `Ready=True`, so draining pods stop receiving traffic promptly.
 fn pod_is_ready(pod: &Pod) -> bool {
     if pod.metadata.deletion_timestamp.is_some() {
         return false;
@@ -350,20 +300,15 @@ fn pod_worker_id(pod: &Pod) -> Option<u64> {
     pod.metadata.name.as_deref().map(hash_pod_name)
 }
 
-/// Whether a pool change observed *during a relist* should be deferred to
-/// `InitDone` rather than rebuilt now. While relisting, the reflector's live
-/// store is still the pre-relist Pod set, so a non-clearing (selector/port) edit
-/// (`pool_present`) would rebuild from stale pods — defer it; `InitDone` rebuilds
-/// from the completed pod list + latest `PoolState`. A pool deletion/invalid spec
-/// (`!pool_present`) is never deferred: clearing stale discovery is always safe.
+/// Whether a pool update should wait for an in-progress pod relist to complete.
+/// Pool removal is never deferred.
 fn defer_pool_rebuild(relisting: bool, pool_present: bool) -> bool {
     relisting && pool_present
 }
 
 /// Apply a single pod delta to the index: upsert the worker if it is `Ready` and
 /// pool-selected, otherwise drop any existing entry (a pod that went NotReady,
-/// terminating, or unselected). O(1). A `None` pool means nothing is routable, so
-/// the entry is dropped; the following pool resolution triggers a full rebuild.
+/// terminating, or unselected). 
 fn upsert_pod(
     index: &RwLock<WorkerIndex>,
     pod: &Pod,
@@ -398,7 +343,7 @@ fn remove_pod(index: &RwLock<WorkerIndex>, pod: &Pod) {
 /// Recompute the whole index from the current pod store and pool selector.
 /// Empty until the `InferencePool` has resolved. Used only for the initial LIST,
 /// watch relists (which may have dropped pods without a `Delete`), and
-/// pool-selector changes (which re-classify every pod). O(pods), infrequent.
+/// pool-selector changes (which re-classify every pod).
 fn rebuild_index(
     store: &kube::runtime::reflector::Store<Pod>,
     pool: Option<&PoolState>,
@@ -430,11 +375,6 @@ fn raw_worker_from_pod(
     }
     let pod_name = pod.metadata.name.as_deref()?;
     let pod_ip = pod.status.as_ref()?.pod_ip.as_deref()?;
-    // A Pod IP is always an IP literal (never a hostname). Parse it so each
-    // host/port pair is rendered via `SocketAddr`, which brackets IPv6 as
-    // `[fd00::10]:8000`; a bare IPv6 literal (`fd00::10:8000`) is ambiguous, as
-    // the trailing group can't be told apart from the port. IPv4 is unchanged.
-    // An empty or malformed IP fails to parse and skips the pod.
     let ip: IpAddr = pod_ip.parse().ok()?;
 
     Some(RawWorker {
@@ -444,7 +384,6 @@ fn raw_worker_from_pod(
         http_endpoint: format!("http://{}", SocketAddr::new(ip, pool.target_port)),
         kv_events_endpoint: format!("tcp://{}", SocketAddr::new(ip, kv_event_port)),
         replay_endpoint: replay_port.map(|p| format!("tcp://{}", SocketAddr::new(ip, p))),
-        stable_routing_id: pod_name.to_string(),
     })
 }
 
@@ -848,7 +787,6 @@ mod tests {
             http_endpoint: format!("http://{endpoint}"),
             kv_events_endpoint: format!("tcp://{endpoint}"),
             replay_endpoint: None,
-            stable_routing_id: name,
         }
     }
 
