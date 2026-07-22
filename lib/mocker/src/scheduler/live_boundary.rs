@@ -662,7 +662,15 @@ pub(crate) async fn receive_until_live_schedulable<C: LiveBoundaryCore>(
         }
     }
 
-    while let Ok(cancellation) = cancellation_rx.try_recv() {
+    // Bound this turn to the work queued on entry so continuously refilled
+    // control lanes cannot postpone the next scheduler pass indefinitely.
+    let cancellation_count = cancellation_rx.len();
+    let command_count = command_rx.len();
+    let request_count = request_rx.len();
+    for _ in 0..cancellation_count {
+        let Ok(cancellation) = cancellation_rx.try_recv() else {
+            break;
+        };
         let _ = publisher
             .apply_cancellation(
                 core,
@@ -672,12 +680,18 @@ pub(crate) async fn receive_until_live_schedulable<C: LiveBoundaryCore>(
             )
             .await;
     }
-    while let Ok(command) = command_rx.try_recv() {
+    for _ in 0..command_count {
+        let Ok(command) = command_rx.try_recv() else {
+            break;
+        };
         publisher
             .apply_command(core, command, true, scheduler_elapsed_ms(scheduler_start))
             .await;
     }
-    while let Ok(request) = request_rx.try_recv() {
+    for _ in 0..request_count {
+        let Ok(request) = request_rx.try_recv() else {
+            break;
+        };
         core.receive_live_request(request);
     }
 
@@ -769,7 +783,14 @@ pub(crate) async fn apply_live_post_pass_controls<C: LiveBoundaryCore>(
     scheduler_start: &Instant,
 ) -> bool {
     let mut made_progress = false;
-    while let Ok(cancellation) = cancellation_rx.try_recv() {
+    // Deferred commands are scheduler-owned and finite. Snapshot external
+    // lanes so producers cannot keep this boundary draining forever.
+    let cancellation_count = cancellation_rx.len();
+    let command_count = command_rx.len();
+    for _ in 0..cancellation_count {
+        let Ok(cancellation) = cancellation_rx.try_recv() else {
+            break;
+        };
         made_progress = true;
         let _ = publisher
             .apply_cancellation(
@@ -786,7 +807,10 @@ pub(crate) async fn apply_live_post_pass_controls<C: LiveBoundaryCore>(
             .apply_command(core, command, true, scheduler_elapsed_ms(scheduler_start))
             .await;
     }
-    while let Ok(command) = command_rx.try_recv() {
+    for _ in 0..command_count {
+        let Ok(command) = command_rx.try_recv() else {
+            break;
+        };
         made_progress = true;
         publisher
             .apply_command(core, command, true, scheduler_elapsed_ms(scheduler_start))

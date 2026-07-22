@@ -434,8 +434,9 @@ pub struct SchedulerCommandEnvelope {
 /// Output channel used by a live scheduler.
 ///
 /// Existing replay callers use the unbounded variant. Network-facing adapters
-/// use the bounded variant to cap scheduler-to-dispatcher accumulation; each
-/// request route separately caps buffering at its declared output length.
+/// use the bounded variant to cap scheduler-to-dispatcher accumulation. The
+/// live adapter also uses fixed-capacity request streams and cancels consumers
+/// that cannot keep up.
 #[derive(Clone)]
 pub(crate) enum SchedulerOutputSender {
     Unbounded(mpsc::UnboundedSender<Vec<OutputSignal>>),
