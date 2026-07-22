@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Disaggregated + Planner deployment for Intel XPU.
-# WARNING: Requires 4+ GPU devices (2 prefill + 2 decode).
-# On a 3-GPU node, reduce replicas to 1 prefill + 2 decode (3 GPUs total).
+# Requires 3 GPU devices: 1 prefill replica and 2 decode replicas.
+# Increasing the replica count requires additional GPU capacity.
 
 apiVersion: v1
 kind: ConfigMap
@@ -66,7 +66,7 @@ spec:
             - dynamo.planner
           args:
             - --config
-            - '{"environment": "kubernetes", "backend": "sglang", "throughput_adjustment_interval": 60, "profile_results_dir": "/workspace/profiling_results", "prefill_engine_num_gpu": 1, "decode_engine_num_gpu": 2}'
+            - '{"environment": "kubernetes", "backend": "sglang", "throughput_adjustment_interval": 60, "profile_results_dir": "/workspace/profiling_results", "prefill_engine_num_gpu": 1, "decode_engine_num_gpu": 1}'
           volumeMounts:
             - name: planner-profile-data-xpu
               mountPath: /workspace/profiling_results
