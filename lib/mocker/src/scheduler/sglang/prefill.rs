@@ -136,6 +136,7 @@ pub(super) fn get_new_batch_prefill(
             oom = true;
             break;
         };
+        let tokens_computed = chunk_end.saturating_sub(alloc.prefix_len);
 
         if let Some(node) = prev_node {
             kv_manager.free_request(node);
@@ -158,7 +159,7 @@ pub(super) fn get_new_batch_prefill(
         });
         prefill_fpm.push(PrefillFpmItem {
             prompt_len: req.prompt_len(),
-            tokens_computed: chunk_tokens,
+            tokens_computed,
             prefix_tokens: alloc.prefix_len,
         });
 

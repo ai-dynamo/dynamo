@@ -2203,6 +2203,49 @@ mod forward_pass_metrics {
     }
 
     #[test]
+    fn fully_cached_zero_output_request_is_not_forward_pass_work() {
+        let mut core = SglangCore::new(fpm_args());
+        let tokens = (0..8).collect::<Vec<_>>();
+        let mut collector = crate::replay::TraceCollector::default();
+
+        core.receive(DirectRequest {
+            tokens: tokens.clone(),
+            max_output_tokens: 0,
+            uuid: Some(Uuid::from_u128(90_004)),
+            ..Default::default()
+        });
+        let seed_pass = core.execute_pass(&mut collector, 0.0);
+        assert_eq!(seed_pass.completed_requests, 1);
+
+        let uuid = core.receive(DirectRequest {
+            tokens,
+            max_output_tokens: 0,
+            uuid: Some(Uuid::from_u128(90_005)),
+            ..Default::default()
+        });
+        let pass = core.execute_pass(&mut collector, seed_pass.end_ms);
+
+        assert_eq!(pass.completed_requests, 1);
+        assert_eq!(pass.mocker_metrics.sglang_cache_hit_tokens, 8);
+        assert_eq!(pass.mocker_metrics.sglang_cache_total_tokens, 8);
+        let fpm = pass.fpm.as_ref().unwrap();
+        assert_eq!(fpm.num_prefill_requests, 0);
+        assert_eq!(fpm.sum_prefill_tokens, 0);
+        assert_eq!(fpm.num_decode_requests, 0);
+        assert_eq!(fpm.sum_decode_kv_tokens, 0);
+        assert!(matches!(
+            pass.output_signals.as_slice(),
+            [OutputSignal {
+                uuid: signal_uuid,
+                token_id: None,
+                completed: true,
+                rejected: false,
+                ..
+            }] if *signal_uuid == uuid
+        ));
+    }
+
+    #[test]
     fn test_fpm_empty_pass_is_zeroed() {
         let mut core = SglangCore::new(fpm_args());
 

@@ -197,7 +197,7 @@ impl SglangKvManager {
         first_new_token: usize,
     ) -> NodeId {
         let block_size = self.cache.page_size();
-        let complete_len = token_ids.len().min(kv_indices.len()) / block_size * block_size;
+        let complete_len = token_ids.len() / block_size * block_size;
         assert!(
             first_new_token.is_multiple_of(block_size)
                 && first_new_token <= complete_len
@@ -1134,6 +1134,24 @@ mod tests {
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             mgr.cache_unfinished_req(&tokens, &mut alloc.kv_indices, alloc.last_node, 2)
+        }));
+
+        assert!(result.is_err());
+        assert_eq!(sink.event_count(), events_before);
+    }
+
+    #[test]
+    fn cache_unfinished_rejects_short_indices_before_publishing() {
+        let sink = Arc::new(MockSink::new());
+        let mut mgr =
+            SglangKvManager::new(8, 4, KvEventPublishers::new(Some(sink.clone()), None), 0);
+        let tokens = [1, 2, 3, 4, 5, 6, 7, 8];
+        let mut alloc = mgr.allocate_for_request(&tokens).unwrap();
+        alloc.kv_indices.truncate(4);
+        let events_before = sink.event_count();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            mgr.cache_unfinished_req(&tokens, &mut alloc.kv_indices, alloc.last_node, 0)
         }));
 
         assert!(result.is_err());

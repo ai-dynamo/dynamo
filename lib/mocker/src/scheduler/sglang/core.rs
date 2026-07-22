@@ -704,13 +704,16 @@ impl SglangCore {
                     .map(|reservation| reservation.request.prompt_len() as u64),
             );
         let fpm = build_fpm_snapshot(
-            prefill_fpm.iter().map(|p| {
-                (
-                    p.prompt_len as u64,
-                    p.prefix_tokens as u64,
-                    p.tokens_computed as u64,
-                )
-            }),
+            prefill_fpm
+                .iter()
+                .filter(|p| p.tokens_computed > 0)
+                .map(|p| {
+                    (
+                        p.prompt_len as u64,
+                        p.prefix_tokens as u64,
+                        p.tokens_computed as u64,
+                    )
+                }),
             scheduled_decode_lens.into_iter(),
             queued_prefills,
             ordinary_queued_decodes.chain(preactivation_decodes),
