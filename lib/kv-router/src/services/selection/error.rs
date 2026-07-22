@@ -64,11 +64,26 @@ fn scheduler_error_status(error: &KvSchedulerError) -> StatusCode {
         KvSchedulerError::NoEndpoints
         | KvSchedulerError::SubscriberShutdown
         | KvSchedulerError::InitFailed(_) => StatusCode::SERVICE_UNAVAILABLE,
+        KvSchedulerError::SelectionFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
         KvSchedulerError::AllEligibleWorkersOverloaded
         | KvSchedulerError::PinnedWorkerOverloaded { .. } => StatusCode::TOO_MANY_REQUESTS,
         KvSchedulerError::QueueRejected(_) => StatusCode::SERVICE_UNAVAILABLE,
         KvSchedulerError::PinnedWorkerNotAllowed { .. } => StatusCode::BAD_REQUEST,
         KvSchedulerError::BookingFailed(_) => StatusCode::CONFLICT,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selector_contract_failures_are_internal_errors() {
+        let error = KvSchedulerError::SelectionFailed("invalid target".to_string());
+        assert_eq!(
+            scheduler_error_status(&error),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }
 

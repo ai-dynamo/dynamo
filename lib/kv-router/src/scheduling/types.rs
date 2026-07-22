@@ -58,6 +58,9 @@ pub enum KvSchedulerError {
 
     #[error("failed to initialize event publisher: {0}")]
     InitFailed(String),
+
+    #[error("worker selection failed: {0}")]
+    SelectionFailed(String),
 }
 
 impl KvSchedulerError {
