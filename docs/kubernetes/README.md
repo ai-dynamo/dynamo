@@ -263,7 +263,7 @@ docker push <registry>/vllm-runtime-xpu:<tag>
 Use the DRA-based vLLM XPU templates from the repository:
 
 ```bash
-cd <dynamo-source-root>/examples/backends/vllm/deploy
+cd <dynamo-source-root>/examples/backends/vllm/deploy/xpu
 ```
 
 Update the template image fields to use `<registry>/vllm-runtime-xpu:<tag>`, then apply one template:

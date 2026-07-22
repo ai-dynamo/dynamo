@@ -87,9 +87,9 @@ For example, when using the `vLLM` backend:
 </Tab>
 <Tab title="XPU">
 
-- **Aggregated vLLM**: Use [`agg_xpu_dra.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_xpu_dra.yaml) when one vLLM worker handles prefill and decode on XPU.
+- **Aggregated vLLM**: Use [`agg_xpu_dra.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/xpu/agg_xpu_dra.yaml) when one vLLM worker handles prefill and decode on XPU.
 
-- **Disaggregated vLLM**: Use [`disagg_xpu_dra.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/disagg_xpu_dra.yaml) when separate prefill and decode workers share KV data on XPU.
+- **Disaggregated vLLM**: Use [`disagg_xpu_dra.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/xpu/disagg_xpu_dra.yaml) when separate prefill and decode workers share KV data on XPU.
 
 These templates require Kubernetes DRA and a `gpu.intel.com` `DeviceClass`.
 
