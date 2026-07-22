@@ -244,6 +244,7 @@ impl Selector {
             selection_id: req.selection_id,
             prompt: PromptRequest {
                 token_ids: Some(req.token_ids),
+                ..Default::default()
             },
             router_config_override: None,
             expected_output_tokens: None,
