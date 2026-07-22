@@ -57,7 +57,7 @@ from dynamo.llm import (
 from dynamo.runtime import DistributedRuntime
 from dynamo.trtllm.args import Config
 from dynamo.trtllm.constants import DisaggregationMode, Modality
-from dynamo.trtllm.engine import Backend, get_llm_engine
+from dynamo.trtllm.engine import Backend, TensorRTLLMEngine, get_llm_engine
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import DYNAMO_COMPONENT_REGISTRY, get_publisher
@@ -131,6 +131,36 @@ def _sync_config_from_engine_args(config: Config, engine_args: dict) -> None:
     for field_name in ("max_seq_len", "max_num_tokens", "max_batch_size"):
         if field_name in engine_args:
             setattr(config, field_name, engine_args[field_name])
+
+
+def _populate_kv_cache_capacity(
+    runtime_config: ModelRuntimeConfig,
+    engine: TensorRTLLMEngine,
+    fallback_block_size: int,
+) -> int:
+    """Publish engine KV capacity and return its effective block size."""
+    capacity = engine.get_kv_cache_capacity()
+    if not capacity:
+        logging.warning(
+            "TRT-LLM did not report KV-cache capacity; Planner KV-rate scaling "
+            "will remain unavailable"
+        )
+        return fallback_block_size
+
+    total_kv_blocks = capacity["maxNumBlocks"]
+    kv_cache_block_size = capacity["tokensPerBlock"]
+    if total_kv_blocks <= 0 or kv_cache_block_size <= 0:
+        raise ValueError(f"Invalid TRT-LLM KV-cache capacity: {capacity}")
+
+    runtime_config.total_kv_blocks = total_kv_blocks
+    logging.info(
+        "TRT-LLM KV-cache capacity: total_kv_blocks=%d, "
+        "kv_cache_block_size=%d, max_kv_tokens=%d",
+        total_kv_blocks,
+        kv_cache_block_size,
+        total_kv_blocks * kv_cache_block_size,
+    )
+    return kv_cache_block_size
 
 
 def _register_memory_routes(runtime, handler) -> None:
@@ -527,15 +557,15 @@ async def init_llm_worker(
         if shutdown_endpoints is not None:
             shutdown_endpoints[:] = [endpoint]
 
-        # should ideally call get_engine_runtime_config
-        # this is because we don't have a good way to
-        # get total_kv_blocks from the engine yet without calling get_stats_async
-        # This causes an issue because get_stats_async doesn't work when no requests are sent to the engine
-        # So for now, we just set the parsers from the config
-        # TODO: fix this once we have a better way to get total_kv_blocks
         runtime_config = ModelRuntimeConfig()
         runtime_config.kv_state_endpoint = config.kv_state_endpoint
         runtime_config.context_length = config.max_seq_len
+
+        kv_cache_block_size = config.kv_block_size
+        if config.disaggregation_mode != DisaggregationMode.ENCODE:
+            kv_cache_block_size = _populate_kv_cache_capacity(
+                runtime_config, engine, kv_cache_block_size
+            )
 
         # Set values from config that are available immediately
         # Note: We populate max_num_seqs and max_num_batched_tokens from config
@@ -590,11 +620,6 @@ async def init_llm_worker(
             f"Set runtime config max_num_batched_tokens: {runtime_config.max_num_batched_tokens}"
         )
         logging.info(f"Set runtime config data_parallel_size: {attention_dp_size}")
-
-        # The get_engine_runtime_config function exists but is not called here due to:
-        # 1. get_stats_async requires active requests to work properly
-        # 2. We need runtime config during registration, before any requests are made
-        # 3. total_kv_blocks would ideally come from engine stats but is not critical for basic operation
 
         # Initialize TensorRT-LLM MetricsCollector and register with global REGISTRY
         # This enables exposing TRT-LLM's native Prometheus metrics (request latency, TTFT, TPOT, etc.)
@@ -673,7 +698,7 @@ async def init_llm_worker(
             connector=connector,
             runtime=runtime,  # Pass runtime for graceful shutdown
             metrics_collector=metrics_collector,
-            kv_block_size=config.kv_block_size,
+            kv_block_size=kv_cache_block_size,
             shutdown_event=shutdown_event,
             encoder_cache_capacity_gb=config.multimodal_embedding_cache_capacity_gb,
             additional_metrics=additional_metrics,
@@ -731,7 +756,7 @@ async def init_llm_worker(
             endpoint,
             config.model,
             config.served_model_name,
-            kv_cache_block_size=config.kv_block_size,
+            kv_cache_block_size=kv_cache_block_size,
             runtime_config=runtime_config,
             custom_template_path=config.custom_jinja_template,
             media_decoder=media_decoder,
@@ -768,7 +793,7 @@ async def init_llm_worker(
                 # Use the connect endpoint directly (already provided by get_consolidator_endpoints)
                 consolidator_publisher = KvEventPublisher(
                     endpoint=endpoint,
-                    kv_block_size=config.kv_block_size,
+                    kv_block_size=kv_cache_block_size,
                     zmq_endpoint=consolidator_output_connect_endpoint,
                     zmq_topic="",
                     enable_local_indexer=config.enable_local_indexer,
@@ -783,7 +808,7 @@ async def init_llm_worker(
                 endpoint,
                 engine,
                 int(endpoint.connection_id()),
-                config.kv_block_size,
+                kv_cache_block_size,
                 metrics_labels,
                 component_gauges=component_gauges,
                 additional_metrics=additional_metrics,

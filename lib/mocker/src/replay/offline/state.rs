@@ -150,7 +150,7 @@ impl DisaggRequestState {
 
     pub(crate) fn build_prefill_request(&self) -> Result<DirectRequest> {
         let mut request = self.original_request()?.clone();
-        request.max_output_tokens = 1;
+        request.max_output_tokens = request.max_output_tokens.min(1);
         Ok(request)
     }
 
