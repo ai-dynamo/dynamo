@@ -63,6 +63,7 @@ python -m dynamo.frontend &
 export OTEL_SERVICE_NAME=dynamo-worker-vllm
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
     python -m dynamo.vllm --model "$MODEL" --enforce-eager \
-    # --block-size $BLOCK_SIZE \
+    --block-size "${BLOCK_SIZE:-64}" \
+
     --otlp-traces-endpoint="$OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" \
     "${EXTRA_ARGS[@]}"
