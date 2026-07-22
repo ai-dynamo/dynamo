@@ -427,12 +427,13 @@ pub struct RouterConfig {
     /// Threshold for active prefill tokens as fraction of max_num_batched_tokens
     active_prefill_tokens_threshold_frac: Option<f64>,
     session_affinity_ttl_secs: Option<u64>,
+    session_affinity_grouping: Option<dynamo_llm::session_affinity::SessionAffinityGrouping>,
 }
 
 #[pymethods]
 impl RouterConfig {
     #[new]
-    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None))]
+    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None, session_affinity_grouping=None))]
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
@@ -441,6 +442,7 @@ impl RouterConfig {
         active_prefill_tokens_threshold_frac: Option<f64>,
         enforce_disagg: bool,
         session_affinity_ttl_secs: Option<u64>,
+        session_affinity_grouping: Option<&str>,
     ) -> PyResult<Self> {
         if enforce_disagg {
             static WARN_ONCE: std::sync::Once = std::sync::Once::new();
@@ -455,6 +457,15 @@ impl RouterConfig {
                 "session_affinity_ttl_secs must be between 1 and 31536000",
             ));
         }
+        if session_affinity_grouping.is_some() && session_affinity_ttl_secs.is_none() {
+            return Err(PyValueError::new_err(
+                "session_affinity_grouping requires session_affinity_ttl_secs",
+            ));
+        }
+        let session_affinity_grouping = session_affinity_grouping
+            .map(str::parse)
+            .transpose()
+            .map_err(PyValueError::new_err)?;
         RsLoadThresholdConfig {
             active_decode_blocks_threshold,
             active_prefill_tokens_threshold,
@@ -469,6 +480,7 @@ impl RouterConfig {
             active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac,
             session_affinity_ttl_secs,
+            session_affinity_grouping,
         })
     }
 }
@@ -485,6 +497,7 @@ impl From<RouterConfig> for RsRouterConfig {
             },
             enforce_disagg: false,
             session_affinity_ttl_secs: rc.session_affinity_ttl_secs,
+            session_affinity_grouping: rc.session_affinity_grouping,
         }
     }
 }

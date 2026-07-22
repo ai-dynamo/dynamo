@@ -141,6 +141,7 @@ pub struct PrefillRouter {
     cancel_token: CancellationToken,
     router_mode: RouterMode,
     session_affinity_ttl: Option<std::time::Duration>,
+    session_affinity_grouping: Option<crate::session_affinity::SessionAffinityGrouping>,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     /// Model name (used for logging / lifecycle messages).
     model_name: String,
@@ -561,6 +562,7 @@ mod tests {
         PrefillRouter::disabled(
             Arc::new(crate::discovery::ModelManager::new()),
             RouterMode::RoundRobin,
+            None,
             None,
         )
     }

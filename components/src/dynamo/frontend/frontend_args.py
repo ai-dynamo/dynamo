@@ -118,6 +118,14 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
                 "--router-session-affinity-ttl-secs must be between 1 and "
                 f"{_MAX_SESSION_AFFINITY_TTL_SECS}"
             )
+        if (
+            self.session_affinity_grouping is not None
+            and self.session_affinity_ttl_secs is None
+        ):
+            raise ValueError(
+                "--router-session-affinity-grouping requires "
+                "--router-session-affinity-ttl-secs"
+            )
         if self.tokenizer_backend not in self._VALID_TOKENIZER_BACKENDS:
             raise ValueError(
                 f"--tokenizer: invalid value '{self.tokenizer_backend}' "

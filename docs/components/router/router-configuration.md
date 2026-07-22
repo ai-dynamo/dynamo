@@ -125,6 +125,19 @@ error, or cancellation, the idle timer restarts. A missing bound worker or a
 non-cancellation selection, setup, dispatch, or target-validation failure invalidates
 the binding.
 
+**Experimental.** Set `--router-session-affinity-grouping parent` (or
+`DYN_ROUTER_SESSION_AFFINITY_GROUPING=parent`) to prefer the immediate parent's
+worker and data-parallel rank when placing an unbound child session for the first
+time. Use `root` to prefer the root session's binding for every descendant. This
+option requires `--router-session-affinity-ttl-secs`.
+
+Parent-aware placement is a soft initialization preference, not a group pin. An
+explicit worker target takes precedence for an unbound child; after binding, normal
+affinity target validation applies. If the preferred target is unavailable or rejected
+by the normal load and eligibility checks, the router falls back to ordinary selection
+and binds the child there. Later child requests use that child's own binding even if
+the parent moves.
+
 The configured value is the idle timeout. It is independent of
 `--router-ttl-secs` and `--router-predicted-ttl-secs`. Omit the session-affinity
 option to keep affinity disabled.
@@ -133,7 +146,8 @@ When session affinity is enabled, routers synchronize affinity bindings through 
 Runtime event plane. The origin publishes a binding after successful dispatch so
 concurrent requests can observe it, then publishes it again when the request lease
 ends so peer idle timers restart when the request becomes idle. The extra event
-fanout is an intentional tradeoff.
+fanout is an intentional tradeoff. Root grouping also carries the derived lineage
+root with these best-effort updates.
 
 Synchronization is advisory. Each replica owns its local idle TTL and uses the
 first live binding it observes. A matching update refreshes that local deadline,

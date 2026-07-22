@@ -25,7 +25,8 @@ use crate::{
         timing::{RequestPhase, RoutingData},
     },
     session_affinity::{
-        AffinityAcquire, AffinityCoordinator, AffinityTarget, affinity_id, explicit_target,
+        AffinityAcquire, AffinityCoordinator, AffinityTarget, SessionAffinityGrouping, affinity_id,
+        explicit_target,
     },
 };
 
@@ -115,9 +116,10 @@ impl KvPushRouter {
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         chooser: Arc<KvRouter>,
         session_affinity_ttl: Option<Duration>,
+        session_affinity_grouping: Option<SessionAffinityGrouping>,
     ) -> Result<Self, Error> {
         let affinity = session_affinity_ttl
-            .map(AffinityCoordinator::new)
+            .map(|ttl| AffinityCoordinator::new_with_grouping(ttl, session_affinity_grouping))
             .transpose()?;
 
         Ok(Self::new_with_coordinator(inner, chooser, affinity))
@@ -196,8 +198,13 @@ impl KvPushRouter {
             ));
         };
         let explicit = explicit_target(request, phase)?;
+        let parent_session_id = request
+            .agent_context
+            .as_ref()
+            .and_then(|context| context.parent_session_id.as_deref());
         if is_query_only {
-            let target = affinity.query_target(&session_id, explicit)?;
+            let target =
+                affinity.query_target_with_lineage(&session_id, parent_session_id, explicit)?;
             let worker = target.and_then(affinity_worker);
             return Ok((
                 self.select_request(request, phase, true, worker).await?,
@@ -207,7 +214,12 @@ impl KvPushRouter {
 
         let request_context = request.context();
         let operation = affinity
-            .acquire_with_context(&session_id, explicit, request_context.as_ref())
+            .acquire_with_lineage(
+                &session_id,
+                parent_session_id,
+                explicit,
+                request_context.as_ref(),
+            )
             .await?;
         let worker = operation.target().and_then(affinity_worker);
         match self.select_request(request, phase, false, worker).await {
@@ -686,7 +698,9 @@ mod tests {
     use super::*;
     use crate::{
         local_model::runtime_config::ModelRuntimeConfig,
-        protocols::common::extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+        protocols::common::extensions::{
+            AgentContext, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
+        },
     };
 
     fn request() -> PreprocessedRequest {
@@ -912,7 +926,10 @@ mod tests {
         runtime.shutdown();
     }
 
-    async fn router(session_affinity_ttl: Option<Duration>) -> (KvPushRouter, Runtime) {
+    async fn router_with_grouping(
+        session_affinity_ttl: Option<Duration>,
+        session_affinity_grouping: Option<SessionAffinityGrouping>,
+    ) -> (KvPushRouter, Runtime) {
         let runtime = Runtime::from_current().unwrap();
         let distributed =
             DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
@@ -953,8 +970,18 @@ mod tests {
         let inner = PushRouter::from_client(client, RouterMode::KV)
             .await
             .unwrap();
-        let router = KvPushRouter::new(inner, Arc::new(chooser), session_affinity_ttl).unwrap();
+        let router = KvPushRouter::new(
+            inner,
+            Arc::new(chooser),
+            session_affinity_ttl,
+            session_affinity_grouping,
+        )
+        .unwrap();
         (router, runtime)
+    }
+
+    async fn router(session_affinity_ttl: Option<Duration>) -> (KvPushRouter, Runtime) {
+        router_with_grouping(session_affinity_ttl, None).await
     }
 
     async fn track_request(
@@ -977,6 +1004,58 @@ mod tests {
     async fn session_affinity_disabled_does_not_create_coordinator() {
         let (router, runtime) = router(None).await;
         assert!(router.affinity.is_none());
+
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn parent_affinity_falls_back_when_the_parent_target_is_ineligible() {
+        let (router, runtime) = router_with_grouping(
+            Some(Duration::from_secs(10)),
+            Some(SessionAffinityGrouping::Parent),
+        )
+        .await;
+        let affinity = router.affinity.as_ref().unwrap();
+        let parent_id = SessionAffinityId::new("parent");
+        let AffinityAcquire::Initialize(parent) = affinity.acquire(&parent_id, None).await.unwrap()
+        else {
+            panic!("parent must initialize");
+        };
+        drop(
+            parent
+                .commit(AffinityTarget {
+                    worker_id: 99,
+                    dp_rank: Some(0),
+                })
+                .unwrap(),
+        );
+
+        let child_id = SessionAffinityId::new("child");
+        let mut content = request();
+        content.agent_context = Some(AgentContext {
+            session_id: child_id.as_str().to_string(),
+            parent_session_id: Some(parent_id.as_str().to_string()),
+            session_final: None,
+            kv_hints: None,
+        });
+        let mut child = Context::new(content);
+        child.insert(SESSION_AFFINITY_CONTEXT_KEY, child_id);
+
+        let (selection, operation) = router
+            .select_with_affinity(&child, RequestPhase::Aggregated, false)
+            .await
+            .unwrap();
+        assert_eq!(selection.instance_id, 7);
+        assert_eq!(operation.as_ref().unwrap().target(), None);
+        operation.unwrap().invalidate();
+        assert_eq!(
+            affinity.query_target(&parent_id, None).unwrap(),
+            Some(AffinityTarget {
+                worker_id: 99,
+                dp_rank: Some(0),
+            })
+        );
 
         drop(router);
         runtime.shutdown();

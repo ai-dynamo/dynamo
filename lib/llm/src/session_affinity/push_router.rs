@@ -9,7 +9,7 @@ use dynamo_runtime::pipeline::{
 };
 
 use super::{
-    AffinityCoordinator, AffinityTarget, LlmResponse,
+    AffinityCoordinator, AffinityTarget, LlmResponse, SessionAffinityGrouping,
     coordinator::{affinity_id, invalid_argument},
     explicit_target,
 };
@@ -30,9 +30,12 @@ impl SessionAffinityPushRouter {
     pub fn new(
         inner: PushRouter<PreprocessedRequest, LlmResponse>,
         ttl: Option<Duration>,
+        grouping: Option<SessionAffinityGrouping>,
         direct: bool,
     ) -> Result<Self, Error> {
-        let affinity = ttl.map(AffinityCoordinator::new).transpose()?;
+        let affinity = ttl
+            .map(|ttl| AffinityCoordinator::new_with_grouping(ttl, grouping))
+            .transpose()?;
         Ok(Self::new_with_coordinator(inner, affinity, direct))
     }
 
@@ -105,6 +108,7 @@ impl SessionAffinityPushRouter {
     async fn acquire_routable(
         &self,
         session_id: &crate::protocols::common::extensions::SessionAffinityId,
+        parent_session_id: Option<&str>,
         explicit: Option<AffinityTarget>,
         request_context: &dyn AsyncEngineContext,
     ) -> Result<super::AffinityAcquire, Error> {
@@ -113,7 +117,7 @@ impl SessionAffinityPushRouter {
             .as_ref()
             .expect("affinity acquisition requires an enabled coordinator");
         let operation = affinity
-            .acquire_with_context(session_id, explicit, request_context)
+            .acquire_with_lineage(session_id, parent_session_id, explicit, request_context)
             .await?;
         let Some(target) = operation.target() else {
             return Ok(operation);
@@ -187,6 +191,10 @@ impl SessionAffinityPushRouter {
             explicit_target(&request, RequestPhase::Prefill)?,
             RequestPhase::Prefill,
         )?;
+        let parent_session_id = request
+            .agent_context
+            .as_ref()
+            .and_then(|context| context.parent_session_id.as_deref());
         let Some(session_id) = session_id else {
             let Some(target) = explicit else {
                 return Err(invalid_argument(
@@ -203,8 +211,7 @@ impl SessionAffinityPushRouter {
                 .affinity
                 .as_ref()
                 .expect("affinity query requires an enabled coordinator")
-                .query_target(&session_id, explicit)?
-                .or(explicit);
+                .query_target_with_lineage(&session_id, parent_session_id, explicit)?;
             return self
                 .select_and_dispatch_exact_target(request, selected, prepare)
                 .await;
@@ -212,7 +219,12 @@ impl SessionAffinityPushRouter {
 
         let request_context = request.context();
         let operation = self
-            .acquire_routable(&session_id, explicit, request_context.as_ref())
+            .acquire_routable(
+                &session_id,
+                parent_session_id,
+                explicit,
+                request_context.as_ref(),
+            )
             .await?;
         let selected = operation.target().or(explicit);
         let rank = selected.and_then(|target| target.dp_rank);
@@ -275,6 +287,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LlmResponse>, Error>
             return Ok(stream);
         }
         let explicit = self.direct_target(explicit_target(&request, phase)?, phase)?;
+        let parent_session_id = request
+            .agent_context
+            .as_ref()
+            .and_then(|context| context.parent_session_id.as_deref());
         let Some(session_id) = session_id else {
             let Some(target) = explicit else {
                 return Err(invalid_argument(format!(
@@ -302,8 +318,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LlmResponse>, Error>
                 .affinity
                 .as_ref()
                 .expect("affinity query requires an enabled coordinator")
-                .query_target(&session_id, explicit)?
-                .or(explicit);
+                .query_target_with_lineage(&session_id, parent_session_id, explicit)?;
             let rank = target.and_then(|target| target.dp_rank);
             let ((tracker, target), stream) = self
                 .inner
@@ -330,7 +345,12 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LlmResponse>, Error>
 
         let request_context = request.context();
         let operation = self
-            .acquire_routable(&session_id, explicit, request_context.as_ref())
+            .acquire_routable(
+                &session_id,
+                parent_session_id,
+                explicit,
+                request_context.as_ref(),
+            )
             .await?;
         let selected = operation.target().or(explicit);
         let rank = selected.and_then(|target| target.dp_rank);
@@ -459,7 +479,7 @@ mod tests {
         let inner = PushRouter::from_client(client, RouterMode::RoundRobin)
             .await
             .unwrap();
-        let router = SessionAffinityPushRouter::new(inner, None, false).unwrap();
+        let router = SessionAffinityPushRouter::new(inner, None, None, false).unwrap();
 
         assert!(router.affinity.is_none());
 
@@ -497,7 +517,8 @@ mod tests {
             let worker_id = client.wait_for_instances().await.unwrap()[0].id();
             let inner = PushRouter::from_client(client, mode).await.unwrap();
             let router =
-                SessionAffinityPushRouter::new(inner, None, mode.is_direct_routing()).unwrap();
+                SessionAffinityPushRouter::new(inner, None, None, mode.is_direct_routing())
+                    .unwrap();
             let tracker = Arc::new(RequestTracker::new());
             let mut content = request(mode.is_direct_routing().then_some(worker_id), false);
             content.tracker = Some(tracker.clone());
@@ -552,6 +573,7 @@ mod tests {
             let router = SessionAffinityPushRouter::new(
                 inner,
                 Some(Duration::from_secs(10)),
+                None,
                 mode.is_direct_routing(),
             )
             .unwrap();
@@ -594,7 +616,8 @@ mod tests {
             .await
             .unwrap();
         let router =
-            SessionAffinityPushRouter::new(inner, Some(Duration::from_secs(10)), false).unwrap();
+            SessionAffinityPushRouter::new(inner, Some(Duration::from_secs(10)), None, false)
+                .unwrap();
         assert!(router.generate(affinity_request(None, true)).await.is_err());
         assert_eq!(affinity(&router).entry_count(), 0);
         assert!(
@@ -614,7 +637,8 @@ mod tests {
             .await
             .unwrap();
         let router =
-            SessionAffinityPushRouter::new(inner, Some(Duration::from_secs(10)), true).unwrap();
+            SessionAffinityPushRouter::new(inner, Some(Duration::from_secs(10)), None, true)
+                .unwrap();
         let error = router
             .generate(affinity_request(None, false))
             .await
@@ -668,7 +692,7 @@ mod tests {
 
         for (mode, direct) in [(RouterMode::Direct, true), (RouterMode::RoundRobin, false)] {
             let inner = PushRouter::from_client(client.clone(), mode).await.unwrap();
-            let router = SessionAffinityPushRouter::new(inner, None, direct).unwrap();
+            let router = SessionAffinityPushRouter::new(inner, None, None, direct).unwrap();
             let mut content = request(None, false);
             content.routing_mut().prefill_worker_id = Some(worker_id);
             content.routing_mut().prefill_dp_rank = Some(0);
@@ -712,7 +736,8 @@ mod tests {
             .await
             .unwrap();
         let router =
-            SessionAffinityPushRouter::new(inner, Some(Duration::from_secs(10)), false).unwrap();
+            SessionAffinityPushRouter::new(inner, Some(Duration::from_secs(10)), None, false)
+                .unwrap();
         let session_id = SessionAffinityId::new("adapter-session");
         let AffinityAcquire::Initialize(initializer) =
             affinity(&router).acquire(&session_id, None).await.unwrap()

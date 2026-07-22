@@ -12,8 +12,8 @@ use dynamo_runtime::{
 use futures::{StreamExt, stream};
 
 use super::{
-    AffinityAcquire, AffinityCoordinator, AffinityTarget, LlmResponse, affinity_id,
-    coordinator::ReplicaApplyOutcome, explicit_target,
+    AffinityAcquire, AffinityCoordinator, AffinityTarget, LlmResponse, SessionAffinityGrouping,
+    affinity_id, coordinator::ReplicaApplyOutcome, explicit_target,
 };
 use crate::{
     preprocessor::PreprocessedRequest,
@@ -159,6 +159,59 @@ async fn session_affinity_initialization_is_atomic() {
     assert_eq!(second_target, target(7, Some(0)));
     drop(first_lease);
     drop(second_lease);
+}
+
+#[tokio::test(start_paused = true)]
+async fn child_affinity_uses_configured_parent_or_root_only_for_initial_placement() {
+    for (grouping, expected) in [
+        (SessionAffinityGrouping::Parent, target(8, Some(1))),
+        (SessionAffinityGrouping::Root, target(7, Some(0))),
+    ] {
+        let coordinator =
+            AffinityCoordinator::new_with_grouping(Duration::from_secs(10), Some(grouping))
+                .unwrap();
+        let context = Controller::default();
+        let root_id = SessionAffinityId::new("root");
+        let parent_id = SessionAffinityId::new("parent");
+        let child_id = SessionAffinityId::new("child");
+
+        let AffinityAcquire::Initialize(root) = coordinator.acquire(&root_id, None).await.unwrap()
+        else {
+            panic!("root must initialize");
+        };
+        drop(root.commit(target(7, Some(0))).unwrap());
+
+        let AffinityAcquire::Initialize(parent) = coordinator
+            .acquire_with_lineage(
+                &parent_id,
+                Some(root_id.as_str()),
+                Some(target(8, Some(1))),
+                &context,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("parent must initialize");
+        };
+        drop(parent.commit(target(8, Some(1))).unwrap());
+
+        let child = coordinator
+            .acquire_with_lineage(&child_id, Some(parent_id.as_str()), None, &context)
+            .await
+            .unwrap();
+        assert_eq!(child.target(), Some(expected));
+        let AffinityAcquire::Initialize(child) = child else {
+            panic!("child must initialize");
+        };
+        let fallback = target(9, Some(2));
+        drop(child.commit(fallback).unwrap());
+
+        let child = coordinator
+            .acquire_with_lineage(&child_id, Some(parent_id.as_str()), None, &context)
+            .await
+            .unwrap();
+        assert_eq!(child.target(), Some(fallback));
+    }
 }
 
 #[tokio::test(start_paused = true)]

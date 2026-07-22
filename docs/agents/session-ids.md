@@ -7,7 +7,7 @@ subtitle: Identify agent sessions from supported coding agents and custom client
 
 A session ID is the stable identifier Dynamo uses for one agent reasoning/tool chain. A root agent, planner, researcher subagent, or OpenCode subtask can each have its own session. Every LLM request in that chain should carry the same `session_id`; child sessions can also carry a `parent_session_id` so traces and replay tools can rebuild the tree. Some academic papers also call this a `program_id`.
 
-Session identity is passive metadata. Sending `X-Dynamo-Session-ID` does not enable sticky sessions or change request placement. Tracing records the identity when `DYN_REQUEST_TRACE` is enabled, and a session-aware routing policy can consume it only when that policy is configured separately.
+Session identity is passive metadata. Sending `X-Dynamo-Session-ID` does not enable sticky sessions or change request placement. Tracing records the identity when `DYN_REQUEST_TRACE` is enabled, and a session-aware routing policy can consume it only when that policy is configured separately. For example, the router's experimental [parent-aware session affinity](../components/router/router-configuration.md#session-affinity) can use `parent_session_id` to seed a child's first placement.
 
 ## Session ID Inputs
 
