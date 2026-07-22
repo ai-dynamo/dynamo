@@ -490,6 +490,33 @@ mod tests {
     }
 
     #[test]
+    fn request_cancellation_releases_offline_in_flight_slot() {
+        let mut worker = worker(EngineType::Vllm, WorkerType::Aggregated, 8);
+        let request_id = Uuid::from_u128(850);
+        worker.receive_request(request(request_id.as_u128(), 8));
+        assert_eq!(worker.in_flight(), 1);
+
+        assert_eq!(
+            worker
+                .apply_command(SchedulerCommand::CancelRequest { request_id })
+                .unwrap()
+                .result,
+            SchedulerCommandResult::Applied
+        );
+        assert_eq!(worker.in_flight(), 0);
+        assert!(worker.is_drained());
+
+        assert_eq!(
+            worker
+                .apply_command(SchedulerCommand::CancelRequest { request_id })
+                .unwrap()
+                .result,
+            SchedulerCommandResult::Noop
+        );
+        assert_eq!(worker.in_flight(), 0);
+    }
+
+    #[test]
     fn ranked_worker_preserves_router_worker_and_dp_rank_identity() {
         for engine_type in [EngineType::Vllm, EngineType::Sglang] {
             let mut builder = MockEngineArgs::builder()

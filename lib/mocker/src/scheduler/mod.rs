@@ -15,7 +15,7 @@ use crate::common::protocols::{DirectRequest, FpmPublisher, KvEventPublishers, O
 use dynamo_kv_router::protocols::RouterEvent;
 pub(crate) use kv_event_sink::{CapturedRouterEventBuffer, capture_router_event_sink};
 pub(crate) use live_boundary::{
-    LiveBoundaryCore, LivePassExecution, LiveSchedulerState, RequestResidency, spawn_live_scheduler,
+    LiveBoundaryCore, LivePassExecution, LiveSchedulerState, spawn_live_scheduler,
 };
 pub(crate) use source_holds::{
     ActiveHandoffRequests, DestinationHolds, PendingDestinations, RemovedSource, SourceCompletion,
@@ -466,6 +466,10 @@ pub trait SchedulerHandle: Send + Sync {
     fn command_sender(&self) -> mpsc::Sender<SchedulerCommandEnvelope>;
 
     /// Bounded cancellation channel observed even while a modeled pass is running.
+    ///
+    /// Cancellation removes scheduler state and can suppress pending output immediately. During a
+    /// modeled pass, published running/waiting metrics refresh at the next pass boundary; exact
+    /// mid-pass metrics would require incremental per-request residency accounting.
     fn cancellation_sender(&self) -> mpsc::Sender<SchedulerCancellationEnvelope>;
 
     /// Take the single lifecycle-event stream owned by this DP-rank scheduler.
@@ -592,10 +596,10 @@ mod tests {
         }
     }
 
-    fn request_residency(core: &EngineCore, request_id: Uuid) -> Option<RequestResidency> {
+    fn request_metrics(core: &EngineCore) -> MockerMetrics {
         match core {
-            EngineCore::Vllm(core) => core.request_residency(request_id),
-            EngineCore::Sglang(core) => core.request_residency(request_id),
+            EngineCore::Vllm(core) => core.mocker_metrics(),
+            EngineCore::Sglang(core) => core.mocker_metrics(),
         }
     }
 
@@ -608,10 +612,7 @@ mod tests {
             let mut core = core(engine_type, WorkerType::Aggregated, 16);
             let waiting_id = Uuid::from_u128(20_000 + case as u128);
             core.receive(request(waiting_id, (0..4).collect()));
-            assert_eq!(
-                request_residency(&core, waiting_id),
-                Some(RequestResidency::Waiting)
-            );
+            assert_eq!(request_metrics(&core).waiting_requests, 1);
             assert_eq!(
                 core.apply_command(SchedulerCommand::CancelRequest {
                     request_id: waiting_id,
@@ -626,16 +627,14 @@ mod tests {
                 .unwrap(),
                 SchedulerCommandResult::Noop
             );
+            assert_eq!(core.num_requests(), 0);
 
             let running_id = Uuid::from_u128(20_100 + case as u128);
             let mut running_request = request(running_id, (100..108).collect());
             running_request.max_output_tokens = 32;
             core.receive(running_request);
             core.execute_hidden_pass(0.0);
-            assert_eq!(
-                request_residency(&core, running_id),
-                Some(RequestResidency::Running)
-            );
+            assert_eq!(request_metrics(&core).running_requests, 1);
             assert_eq!(
                 core.apply_command(SchedulerCommand::CancelRequest {
                     request_id: running_id,
@@ -643,7 +642,6 @@ mod tests {
                 .unwrap(),
                 SchedulerCommandResult::Applied
             );
-            assert_eq!(request_residency(&core, running_id), None);
             assert_eq!(core.num_requests(), 0);
         }
     }

@@ -25,9 +25,9 @@ use super::request::SglangRequest;
 use crate::scheduler::{
     ActiveHandoffRequests, AdmissionInvariant, AdmissionStage, CapturedRouterEventBuffer,
     DestinationHolds, EnginePassResult, MockerMetrics, PendingDestinations, RemovedSource,
-    RequestResidency, RouterEventVisibility, SchedulerCommand, SchedulerCommandEffects,
-    SchedulerCommandResult, SchedulerLifecycleEvent, SourceCompletion, SourceHolds,
-    accept_length_sample, build_fpm_snapshot, capture_router_event_sink,
+    RouterEventVisibility, SchedulerCommand, SchedulerCommandEffects, SchedulerCommandResult,
+    SchedulerLifecycleEvent, SourceCompletion, SourceHolds, accept_length_sample,
+    build_fpm_snapshot, capture_router_event_sink,
 };
 
 pub(crate) struct SglangCore {
@@ -511,38 +511,6 @@ impl SglangCore {
 
     pub(crate) fn mocker_metrics(&self) -> MockerMetrics {
         self.mocker_metrics_with_cache(0, 0)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn request_residency(&self, request_id: Uuid) -> Option<RequestResidency> {
-        if self
-            .running
-            .iter()
-            .any(|request| request.uuid == request_id)
-        {
-            Some(RequestResidency::Running)
-        } else if self
-            .waiting
-            .iter()
-            .chain(self.prebuilt_ready.iter())
-            .any(|request| request.uuid == request_id)
-        {
-            Some(RequestResidency::Waiting)
-        } else {
-            None
-        }
-    }
-
-    pub(crate) fn visit_request_residencies(
-        &self,
-        visitor: &mut dyn FnMut(Uuid, RequestResidency),
-    ) {
-        for request in &self.running {
-            visitor(request.uuid, RequestResidency::Running);
-        }
-        for request in self.waiting.iter().chain(self.prebuilt_ready.iter()) {
-            visitor(request.uuid, RequestResidency::Waiting);
-        }
     }
 
     fn mocker_metrics_with_cache(

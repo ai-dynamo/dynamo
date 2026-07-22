@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -24,12 +24,6 @@ use crate::scheduler::{
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RequestResidency {
-    Running,
-    Waiting,
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PublishedEffect {
@@ -64,8 +58,6 @@ pub(crate) trait LiveBoundaryCore {
     fn live_metrics(&self) -> MockerMetrics;
 
     fn pass_boundary_metrics(&self, pass_metrics: MockerMetrics) -> MockerMetrics;
-
-    fn visit_live_request_residencies(&self, visitor: &mut dyn FnMut(Uuid, RequestResidency));
 
     fn live_internal_deadline_ms(&self) -> Option<f64> {
         None
@@ -307,7 +299,6 @@ pub(crate) struct LiveEffectsPublisher {
     kv_event_publishers: KvEventPublishers,
     fpm_publisher: FpmPublisher,
     captured_kv_events: DeferredKvPublishBuffer,
-    visible_residencies: Mutex<HashMap<Uuid, RequestResidency>>,
     #[cfg(test)]
     publication_log: Option<std::sync::Arc<std::sync::Mutex<Vec<PublishedEffect>>>>,
 }
@@ -641,7 +632,6 @@ impl LiveEffectsPublisher {
             kv_event_publishers,
             fpm_publisher,
             captured_kv_events,
-            visible_residencies: Mutex::new(HashMap::new()),
             #[cfg(test)]
             publication_log: None,
         }
@@ -654,11 +644,6 @@ impl LiveEffectsPublisher {
     ) -> Self {
         self.publication_log = Some(log);
         self
-    }
-
-    #[cfg(test)]
-    fn published_metrics(&self) -> MockerMetrics {
-        self.metrics_tx.borrow().clone()
     }
 
     pub(crate) fn capture_pass(&self, pass: EnginePassResult) -> PendingLivePass {
@@ -731,7 +716,6 @@ impl LiveEffectsPublisher {
         // disappeared. Those cleanup events belong to this same boundary.
         self.publish_router_effects(self.captured_kv_events.drain(), None);
         self.publish_lifecycle(pending.pass.lifecycle_events).await;
-        self.refresh_visible_residencies(core);
         let metrics = core.pass_boundary_metrics(pending.pass.mocker_metrics);
         self.record(PublishedEffect::Metrics);
         let _ = self.metrics_tx.send(metrics);
@@ -772,10 +756,6 @@ impl LiveEffectsPublisher {
         now_ms: f64,
     ) -> Option<SchedulerCommandResult> {
         let SchedulerCommandEnvelope { command, reply } = envelope;
-        let cancellation_id = match &command {
-            SchedulerCommand::CancelRequest { request_id } => Some(*request_id),
-            _ => None,
-        };
         let result = core.apply_live_command(command, allow_destination_admission, now_ms);
         match result {
             Ok(mut effects) => {
@@ -791,33 +771,10 @@ impl LiveEffectsPublisher {
                 }
                 self.record(PublishedEffect::Ack);
                 let _ = reply.send(Ok(effects));
-                let cancelled_residency = if command_result == SchedulerCommandResult::Applied {
-                    cancellation_id.and_then(|request_id| {
-                        self.visible_residencies.lock().unwrap().remove(&request_id)
-                    })
-                } else {
-                    None
-                };
                 if allow_destination_admission {
                     self.publish_lifecycle(lifecycle_events).await;
-                    self.refresh_visible_residencies(core);
                     self.record(PublishedEffect::Metrics);
                     let _ = self.metrics_tx.send(core.live_metrics());
-                } else if let Some(residency) = cancelled_residency {
-                    // The core has already executed the pending pass. Update
-                    // only the queue where this request lived at the last
-                    // published boundary; aggregate post-pass metrics cannot
-                    // identify which visible request was cancelled.
-                    let mut published = self.metrics_tx.borrow().clone();
-                    let visible_count = match residency {
-                        RequestResidency::Running => &mut published.running_requests,
-                        RequestResidency::Waiting => &mut published.waiting_requests,
-                    };
-                    if *visible_count > 0 {
-                        *visible_count -= 1;
-                        self.record(PublishedEffect::Metrics);
-                        self.metrics_tx.send_replace(published);
-                    }
                 }
                 Some(command_result)
             }
@@ -827,14 +784,6 @@ impl LiveEffectsPublisher {
                 None
             }
         }
-    }
-
-    fn refresh_visible_residencies<C: LiveBoundaryCore>(&self, core: &C) {
-        let mut visible_residencies = self.visible_residencies.lock().unwrap();
-        visible_residencies.clear();
-        core.visit_live_request_residencies(&mut |request_id, residency| {
-            visible_residencies.insert(request_id, residency);
-        });
     }
 
     pub(crate) async fn retry_destinations<C: LiveBoundaryCore>(

@@ -15,7 +15,7 @@ use crate::common::protocols::{
     DirectRequest, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
 };
 use crate::scheduler::{
-    AdmissionEvent, LiveBoundaryCore, LivePassExecution, LiveSchedulerState, RequestResidency,
+    AdmissionEvent, LiveBoundaryCore, LivePassExecution, LiveSchedulerState,
     SchedulerCancellationEnvelope, SchedulerCommand, SchedulerCommandEffects,
     SchedulerCommandEnvelope, SchedulerHandle, SchedulerLifecycleEvent, spawn_live_scheduler,
 };
@@ -207,13 +207,6 @@ impl LiveBoundaryCore for VllmCore {
 
     fn pass_boundary_metrics(&self, _pass_metrics: MockerMetrics) -> MockerMetrics {
         self.mocker_metrics()
-    }
-
-    fn visit_live_request_residencies(
-        &self,
-        visitor: &mut dyn FnMut(uuid::Uuid, RequestResidency),
-    ) {
-        self.visit_request_residencies(visitor);
     }
 
     fn live_internal_deadline_ms(&self) -> Option<f64> {
