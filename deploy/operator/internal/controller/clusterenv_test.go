@@ -126,64 +126,74 @@ func newClusterTestScheme() *runtime.Scheme {
 }
 
 func TestClusterDynamoComponentDeploymentManifests(t *testing.T) {
-	clusterTestForEachScenario(t, "testdata/dcd", func(t *testing.T, scenarioDir string) {
-		clusterTestRunManifestScenario(t, scenarioDir, func(mgr ctrl.Manager, setupOptions SetupOptions) error {
-			return SetupDynamoComponentDeployment(mgr, DynamoComponentDeploymentSetupOptions{SetupOptions: setupOptions})
-		})
-	})
-}
-
-func TestClusterDynamoGraphDeploymentManifests(t *testing.T) {
-	clusterTestForEachScenario(t, "testdata/dgd", func(t *testing.T, scenarioDir string) {
-		clusterTestRunManifestScenario(t, scenarioDir, func(mgr ctrl.Manager, setupOptions SetupOptions) error {
-			if err := SetupDynamoGraphDeployment(mgr, DynamoGraphDeploymentSetupOptions{SetupOptions: setupOptions}); err != nil {
-				return err
-			}
-			return SetupDynamoComponentDeployment(mgr, DynamoComponentDeploymentSetupOptions{SetupOptions: setupOptions})
-		})
-	})
-}
-
-func clusterTestForEachScenario(t *testing.T, root string, run func(*testing.T, string)) {
-	t.Helper()
-	inputs, err := filepath.Glob(filepath.Join(root, "*", "input.yaml"))
+	inputs, err := filepath.Glob(filepath.Join("testdata/dcd", "*", "input.yaml"))
 	if err != nil {
-		t.Fatalf("find cluster-test scenarios under %q: %v", root, err)
+		t.Fatalf("find DCD cluster-test scenarios: %v", err)
 	}
 	if len(inputs) == 0 {
-		t.Fatalf("no cluster-test scenarios found under %q", root)
+		t.Fatal("no DCD cluster-test scenarios found")
 	}
 	for _, input := range inputs {
 		scenarioDir := filepath.Dir(input)
 		t.Run(filepath.Base(scenarioDir), func(t *testing.T) {
-			run(t, scenarioDir)
+			t.Log("Create an isolated namespace in the explicitly unlocked cluster")
+			env := clusterTestEnv.RunT(t)
+
+			t.Log("Block Pods and ReplicaSets from actuating terminal workload manifests")
+			env.BlockWorkloads()
+
+			t.Log("Apply the scenario input manifests through Kubernetes admission")
+			golden.ApplyManifests(t, filepath.Join(scenarioDir, "input.yaml"), env.Client(), env.Namespace())
+
+			t.Log("Start the DynamoComponentDeployment controller")
+			operatorConfig := clusterTestRestrictedConfig(env.Namespace())
+			runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, LWS: true}}
+			env.StartManager(func(mgr ctrl.Manager) error {
+				setupOptions := SetupOptions{Config: operatorConfig, RuntimeConfig: runtimeConfig}
+				return SetupDynamoComponentDeployment(mgr, DynamoComponentDeploymentSetupOptions{SetupOptions: setupOptions})
+			})
+
+			t.Log("Match the complete generated manifest contract")
+			golden.MatchManifests(t, env.Client(), env.Namespace(), filepath.Join(scenarioDir, "output.yaml"))
 		})
 	}
 }
 
-func clusterTestRunManifestScenario(
-	t *testing.T,
-	scenarioDir string,
-	setupControllers func(ctrl.Manager, SetupOptions) error,
-) {
-	t.Helper()
-	env := clusterTestEnv.RunT(t)
+func TestClusterDynamoGraphDeploymentManifests(t *testing.T) {
+	inputs, err := filepath.Glob(filepath.Join("testdata/dgd", "*", "input.yaml"))
+	if err != nil {
+		t.Fatalf("find DGD cluster-test scenarios: %v", err)
+	}
+	if len(inputs) == 0 {
+		t.Fatal("no DGD cluster-test scenarios found")
+	}
+	for _, input := range inputs {
+		scenarioDir := filepath.Dir(input)
+		t.Run(filepath.Base(scenarioDir), func(t *testing.T) {
+			t.Log("Create an isolated namespace in the explicitly unlocked cluster")
+			env := clusterTestEnv.RunT(t)
 
-	t.Log("Block Pods and ReplicaSets from actuating terminal workload manifests")
-	env.BlockWorkloads()
+			t.Log("Block Pods and ReplicaSets from actuating terminal workload manifests")
+			env.BlockWorkloads()
 
-	t.Log("Apply the scenario input manifests through Kubernetes admission")
-	golden.ApplyManifests(t, filepath.Join(scenarioDir, "input.yaml"), env.Client(), env.Namespace())
+			t.Log("Apply the scenario input manifests through Kubernetes admission")
+			golden.ApplyManifests(t, filepath.Join(scenarioDir, "input.yaml"), env.Client(), env.Namespace())
 
-	t.Log("Start the controllers for the scenario group")
-	operatorConfig := clusterTestRestrictedConfig(env.Namespace())
-	runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, LWS: true}}
-	env.StartManager(func(mgr ctrl.Manager) error {
-		return setupControllers(mgr, SetupOptions{Config: operatorConfig, RuntimeConfig: runtimeConfig})
-	})
+			t.Log("Start the DynamoGraphDeployment and DynamoComponentDeployment controllers")
+			operatorConfig := clusterTestRestrictedConfig(env.Namespace())
+			runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, LWS: true}}
+			env.StartManager(func(mgr ctrl.Manager) error {
+				setupOptions := SetupOptions{Config: operatorConfig, RuntimeConfig: runtimeConfig}
+				if err := SetupDynamoGraphDeployment(mgr, DynamoGraphDeploymentSetupOptions{SetupOptions: setupOptions}); err != nil {
+					return err
+				}
+				return SetupDynamoComponentDeployment(mgr, DynamoComponentDeploymentSetupOptions{SetupOptions: setupOptions})
+			})
 
-	t.Log("Match the complete generated manifest contract")
-	golden.MatchManifests(t, env.Client(), env.Namespace(), filepath.Join(scenarioDir, "output.yaml"))
+			t.Log("Match the complete generated manifest contract")
+			golden.MatchManifests(t, env.Client(), env.Namespace(), filepath.Join(scenarioDir, "output.yaml"))
+		})
+	}
 }
 
 func TestClusterDynamoGraphDeploymentRequestProfilesAndCreatesWorkloadManifests(t *testing.T) {
