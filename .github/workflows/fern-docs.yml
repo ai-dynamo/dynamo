@@ -257,10 +257,10 @@ jobs:
           # FERN_TOKEN (otherwise the CLI 403s fetching the private theme and the
           # local preview renders blank). See https://github.com/ai-dynamo/dynamo/issues/10073
           #
-          # PR previews skip the theme when FERN_TOKEN cannot fetch the private
-          # org theme. Dynamo site chrome (header, sidebar, footer, landing) is
-          # delivered via fern/components/SiteStyles.tsx in CustomFooter, not
-          # docs.yml `css:`, so prod can inject global-theme without losing styling.
+          # PR previews skip the theme: applying it masks the project `css:`
+          # stylesheet in hosted builds, so previews of any fern/main.css change
+          # render unstyled. The repo main.css already carries the NVIDIA
+          # branding rules, so unthemed previews stay visually faithful.
           if [ "${{ steps.ctx.outputs.is_main }}" = "true" ]; then
             yq -i '.global-theme = "nvidia"' docs.yml
           else
