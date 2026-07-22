@@ -12,8 +12,8 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    GetWorkersRequest, KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError,
-    LowerTierIndexer, ThreadPoolIndexer, WorkerKvQueryResponse,
+    GetWorkersRequest, KvEventSender, KvIndexer, KvIndexerInterface, KvIndexerMetrics,
+    KvRouterError, LowerTierIndexer, ThreadPoolIndexer, WorkerKvQueryResponse,
 };
 use crate::protocols::*;
 
@@ -207,7 +207,10 @@ pub struct LocalKvIndexer {
     indexer: KvIndexer,
     /// Lazily-created exact lower-tier indexes partitioned by storage tier.
     lower_tier_indexers: Arc<Mutex<HashMap<StorageTier, Arc<ThreadPoolIndexer<LowerTierIndexer>>>>>,
-    /// Circular buffer of recent events
+    /// Circular buffer of recent events.
+    ///
+    /// NOTE: One `LocalKvIndexer` belongs to one rank publisher, so its sequence and any latest
+    /// `Cleared` event are rank-local. Do not merge independent rank streams into this buffer.
     pub(super) event_buffer: Mutex<VecDeque<RouterEvent>>,
     /// Coordinates single-flight tree dumps and the cached recovery snapshot.
     /// This stays separate from `event_buffer` so dump wait/build state can be
@@ -265,8 +268,8 @@ impl LocalKvIndexer {
     ///
     /// - `Events`: Buffered events with original IDs through the current buffered tail,
     ///   plus the buffered `last_event_id`. If the buffered suffix contains one or more
-    ///   `Cleared` events, events before the last clear may be omitted because the clear
-    ///   is a worker-wide recovery barrier.
+    ///   `Cleared` events, events before the last clear may be omitted because this local indexer
+    ///   and recovery history belong to one rank publisher.
     /// - `TreeDump`: Full tree dump with synthetic IDs and the worker's latest real event ID (when range is too old or unspecified)
     /// - `TooNew`: Error when requested range is newer than available data
     /// - `InvalidRange`: Error when end_id < start_id
@@ -473,9 +476,9 @@ impl LocalKvIndexer {
                             tracing::warn!("Recovery cache build task failed: {error}");
                             self.recovery_cache.clear_build_if_current(generation).await;
                             notify.notify_waiters();
-                            return WorkerKvQueryResponse::TreeDump {
-                                events: Vec::new(),
+                            return WorkerKvQueryResponse::TreeDumpFailed {
                                 last_event_id,
+                                message: format!("recovery dump task failed: {error}"),
                             };
                         }
                     }
@@ -604,9 +607,9 @@ impl LocalKvIndexer {
             Err(error) => {
                 tracing::warn!("Failed to build recovery dump: {error}");
                 FreshDumpOutput {
-                    response: WorkerKvQueryResponse::TreeDump {
-                        events: Vec::new(),
+                    response: WorkerKvQueryResponse::TreeDumpFailed {
                         last_event_id,
+                        message: error.to_string(),
                     },
                     snapshot: None,
                 }
@@ -626,7 +629,7 @@ impl LocalKvIndexer {
 
     // Delegation methods to underlying KvIndexer
     /// Get a sender for `RouterEvent`s.
-    pub fn event_sender(&self) -> mpsc::Sender<RouterEvent> {
+    pub fn event_sender(&self) -> KvEventSender {
         self.indexer.event_sender()
     }
 
@@ -957,7 +960,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cleared_event_clears_all_lower_tier_dp_ranks_for_worker() {
+    async fn cleared_event_only_clears_target_rank_across_lower_tiers() {
         let indexer = LocalKvIndexer::new(
             CancellationToken::new(),
             4,
@@ -1010,7 +1013,7 @@ mod tests {
         );
         assert_eq!(
             lower_tier_hits(&indexer, StorageTier::HostPinned, 11, 1, 2000, 22),
-            0
+            1
         );
     }
 }

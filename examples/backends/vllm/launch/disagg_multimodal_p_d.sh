@@ -15,8 +15,7 @@ SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
-pick_worker_module dynamo.vllm dynamo.vllm.unified_main "$@"
-set -- "${REMAINING_ARGS[@]}"
+WORKER_MODULE="dynamo.vllm"
 
 # Default values
 MODEL_NAME="Qwen/Qwen3-VL-2B-Instruct"
@@ -42,7 +41,6 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --model <model_name>   Specify the VLM model (default: $MODEL_NAME)"
             echo "  --single-gpu           Pack both workers on 1 GPU (for small models)"
-            echo "  --unified              Use the unified vLLM backend"
             echo "  -h, --help             Show this help message"
             exit 0
             ;;

@@ -10,7 +10,9 @@ use tokio::sync::oneshot;
 use dynamo_kv_router::{PrefillLoadEstimator, config::KvRouterConfig};
 use dynamo_runtime::{
     component::{Client, Endpoint},
+    discovery::DiscoveryQuery,
     pipeline::{PushRouter, RouterMode},
+    prelude::DistributedRuntimeProvider,
     protocols::annotated::Annotated,
 };
 
@@ -18,10 +20,12 @@ use super::{InnerPrefillRouter, PrefillLifecycleState, PrefillRouter};
 use crate::{
     discovery::ModelManager,
     kv_router::KvPushRouter,
+    model_card::ModelDeploymentCard,
     protocols::common::{
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
         timing::WORKER_TYPE_PREFILL,
     },
+    session_affinity::create_affinity_coordinator,
 };
 
 impl PrefillRouter {
@@ -132,6 +136,28 @@ impl PrefillRouter {
             .await?;
 
         let inner_router = if self.router_mode.is_kv_routing() {
+            let endpoint_id = endpoint.id();
+            let discovered_cards = endpoint
+                .component()
+                .drt()
+                .discovery()
+                .list(DiscoveryQuery::EndpointModels {
+                    namespace: endpoint_id.namespace,
+                    component: endpoint_id.component,
+                    endpoint: endpoint_id.name,
+                })
+                .await;
+            let is_eagle = match discovered_cards {
+                Ok(instances) => instances
+                    .into_iter()
+                    .find_map(|instance| instance.deserialize_model::<ModelDeploymentCard>().ok())
+                    .map_or(self.is_eagle, |card| card.runtime_config.enable_eagle),
+                Err(error) => {
+                    tracing::warn!(%error, "Failed to read prefill model card; using configured EAGLE mode");
+                    self.is_eagle
+                }
+            };
+
             // Create KV chooser using the endpoint (this is a prefill router)
             let kv_chooser = model_manager
                 .kv_chooser_for(
@@ -141,13 +167,15 @@ impl PrefillRouter {
                     prefill_load_estimator,
                     WORKER_TYPE_PREFILL,
                     Some(self.model_name.clone()),
-                    self.is_eagle,
+                    is_eagle,
                 )
                 .await?;
 
             // Extract client from kv_chooser to ensure shared state
             let client = kv_chooser.client().clone();
             Self::attach_prefill_client(worker_monitor, &client);
+            let affinity =
+                create_affinity_coordinator(self.session_affinity_ttl, client.clone()).await?;
 
             // Build the PushRouter for prefill with KV mode using the shared client
             let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
@@ -158,15 +186,17 @@ impl PrefillRouter {
             .await?;
 
             // Wrap it in KvPushRouter
-            InnerPrefillRouter::KvRouter(Arc::new(KvPushRouter::new(
+            InnerPrefillRouter::KvRouter(Arc::new(KvPushRouter::new_with_coordinator(
                 push_router,
                 kv_chooser,
-                self.session_affinity_ttl,
-            )?))
+                affinity,
+            )))
         } else {
             // Create client for simple router
             let client = endpoint.client().await?;
             Self::attach_prefill_client(worker_monitor, &client);
+            let affinity =
+                create_affinity_coordinator(self.session_affinity_ttl, client.clone()).await?;
 
             // Create simple push router with the frontend's router mode
             // Note: Per-worker metrics (active_prefill_tokens, active_decode_blocks) are only
@@ -179,11 +209,11 @@ impl PrefillRouter {
             .await?;
 
             InnerPrefillRouter::SimpleRouter(Arc::new(
-                crate::session_affinity::SessionAffinityPushRouter::new(
+                crate::session_affinity::SessionAffinityPushRouter::new_with_coordinator(
                     push_router,
-                    self.session_affinity_ttl,
+                    affinity,
                     self.router_mode.is_direct_routing(),
-                )?,
+                ),
             ))
         };
 

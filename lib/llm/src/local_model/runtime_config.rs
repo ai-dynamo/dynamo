@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use validator::{Validate, ValidationError};
 
 use dynamo_kv_router::protocols::KvTransferEnforcement;
+use dynamo_runtime::protocols::EndpointId;
 
 /// Re-export from parsers crate so that `ModelRuntimeConfig` can use it
 /// directly without type duplication.
@@ -170,6 +171,14 @@ pub struct ModelRuntimeConfig {
     #[serde(default = "default_local_indexer")]
     pub enable_local_indexer: bool,
 
+    /// Endpoint whose event sources describe this worker's KV state.
+    ///
+    /// When unset, consumers use the worker's serving endpoint. This keeps existing
+    /// deployments wire-compatible while allowing KV-state ownership and request serving
+    /// to be discovered independently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_state_endpoint: Option<EndpointId>,
+
     /// Mapping of engine-specific runtime configs
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub runtime_data: HashMap<String, serde_json::Value>,
@@ -267,6 +276,7 @@ impl Default for ModelRuntimeConfig {
             data_parallel_start_rank: default_data_parallel_start_rank(),
             data_parallel_size: default_data_parallel_size(),
             enable_local_indexer: true,
+            kv_state_endpoint: None,
             runtime_data: HashMap::new(),
             disaggregated_endpoint: None,
             enable_eagle: false,
@@ -453,6 +463,14 @@ impl ModelRuntimeConfig {
             .unwrap_or_else(TokenizerBackend::from_env_or_default)
     }
 
+    /// Resolve the KV-state endpoint, preserving the serving endpoint as the compatibility
+    /// default for workers that do not advertise an explicit mapping.
+    pub fn effective_kv_state_endpoint(&self, serving_endpoint: &EndpointId) -> EndpointId {
+        self.kv_state_endpoint
+            .clone()
+            .unwrap_or_else(|| serving_endpoint.clone())
+    }
+
     pub fn set_tokenizer_backend(
         &mut self,
         tokenizer_backend: Option<TokenizerBackend>,
@@ -574,6 +592,36 @@ mod tests {
         assert!(!none_json.contains("max_gpu_lora_count"));
         let from_legacy: ModelRuntimeConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(from_legacy.max_gpu_lora_count, None);
+    }
+
+    #[test]
+    fn kv_state_endpoint_roundtrips_and_defaults_to_serving_endpoint() {
+        let serving_endpoint = EndpointId::from("ns.worker.generate");
+        let kv_state_endpoint = EndpointId::from("ns.kv.events");
+        let cfg = ModelRuntimeConfig {
+            kv_state_endpoint: Some(kv_state_endpoint.clone()),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&cfg).unwrap();
+        let parsed: ModelRuntimeConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.kv_state_endpoint, Some(kv_state_endpoint.clone()));
+        assert_eq!(
+            parsed.effective_kv_state_endpoint(&serving_endpoint),
+            kv_state_endpoint
+        );
+
+        let legacy: ModelRuntimeConfig = serde_json::from_str("{}").unwrap();
+        assert!(legacy.kv_state_endpoint.is_none());
+        assert_eq!(
+            legacy.effective_kv_state_endpoint(&serving_endpoint),
+            serving_endpoint
+        );
+        assert!(
+            !serde_json::to_string(&legacy)
+                .unwrap()
+                .contains("kv_state_endpoint")
+        );
     }
 
     #[test]

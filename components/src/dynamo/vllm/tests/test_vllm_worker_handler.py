@@ -747,7 +747,7 @@ class TestDecodeWorkerMultimodalBranching:
             disaggregation_mode="DECODE",
         )
         handler._build_prompt_from_request = MagicMock(
-            return_value=(None, None, {"status": "error", "message": "test stop"})
+            return_value=(None, {"status": "error", "message": "test stop"})
         )
         request = {
             "token_ids": [1, 2, 3],
@@ -780,7 +780,7 @@ class TestDecodeWorkerMultimodalBranching:
         # Return an error from _build_prompt_from_request so _generate_token_mode
         # yields it and returns early — no need to mock the engine.
         handler._build_prompt_from_request = MagicMock(
-            return_value=(None, None, {"status": "error", "message": "test stop"})
+            return_value=(None, {"status": "error", "message": "test stop"})
         )
 
         request = {
@@ -809,7 +809,7 @@ class TestDecodeWorkerMultimodalBranching:
     ):
         handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
 
-        prompt, _, error = handler._build_prompt_from_request(
+        prompt, error = handler._build_prompt_from_request(
             {"token_ids": [1, 2, 3]},
             "request-prompt",
             multi_modal_data=None,
@@ -840,7 +840,7 @@ async def test_prefill_delegates_mode_policy_to_shared_processor():
     )
     handler._multimodal_request_processor = processor
     handler._build_prompt_from_request = MagicMock(
-        return_value=(None, None, {"status": "error", "message": "stop"})
+        return_value=(None, {"status": "error", "message": "stop"})
     )
     context = MagicMock()
 
@@ -1133,9 +1133,7 @@ class TestDeferredAbort:
         handler.input_param_manager = MagicMock()
         handler.input_param_manager.get_input_param.return_value = [1, 2, 3]
         handler._resolve_lora_request = MagicMock(return_value=None)
-        handler._build_prompt_from_request = MagicMock(
-            return_value=(MagicMock(), None, None)
-        )
+        handler._build_prompt_from_request = MagicMock(return_value=(MagicMock(), None))
 
         # Capture the guard created inside the handler and wrap close() so
         # the test can assert that the handler awaited it.

@@ -950,9 +950,9 @@ class SglangStreamingPostProcessor:
             tool_call_parser_name
         )
         self._fast_plain_text = tool_call_parser is None and reasoning_parser is None
-        # Preserve special tokens when a tool call parser is active so
-        # delimiter tokens (e.g. <|tool_call|>) remain visible to the parser.
-        self._skip_special_tokens = tool_call_parser is None
+        # Preserve special tokens when a parser is active so tool-call and
+        # reasoning delimiters remain visible during incremental decoding.
+        self._skip_special_tokens = self._fast_plain_text
         self._is_json_array_parser = isinstance(tool_call_parser, JsonArrayParser)
         # Required/named guided output may be either bare JSON or
         # reasoning followed by JSON. Delay only the ambiguous bracket-leading

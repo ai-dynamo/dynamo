@@ -19,8 +19,7 @@ print_launch_banner "Launching Disaggregated + KVBM + KV Routing (4 GPUs)" "$MOD
 
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python -m dynamo.frontend \
-    --router-mode kv \
-    --router-reset-states &
+    --router-mode kv &
 
 # two decode workers (without KVBM)
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag

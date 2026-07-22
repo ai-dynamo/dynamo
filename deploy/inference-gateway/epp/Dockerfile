@@ -117,11 +117,13 @@ ARG BUILD_REF
 
 WORKDIR /workspace
 
-# Install build dependencies for CGO
+# Install build dependencies for CGO + git (needed by cyclonedx-gomod's
+# `git describe` version detection — see the SBOM stage below).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
     libc-dev \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy go mod files first for better caching (from default context = epp/)
@@ -143,6 +145,67 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
               -X sigs.k8s.io/gateway-api-inference-extension/version.GitCommit=${COMMIT_SHA}" \
     -o epp ./cmd/epp
 
+# Compliance: emit a CycloneDX SBOM for EPP's Go module set so the frontend
+# build (which COPYs /epp from this image) can consume it in its licenses
+# stage. EPP itself is not customer-facing — the SBOM lives here purely as
+# a build artifact for frontend's compliance pipeline. cyclonedx-gomod is
+# pinned to keep the SBOM tool itself reproducible. app mode is build-constraint
+# aware, so we pin CGO_ENABLED/GOOS/GOARCH to match the go build above and
+# produce a deterministic amd64-basis SBOM; EPP's Go module set doesn't vary by
+# GOARCH (linux only), so this one export is authoritative for all frontend arches.
+#
+# cyclonedx-gomod app runs `git describe` to determine the module's version.
+# The COPY of the build context doesn't bring .git/ (BuildKit excludes it),
+# so the tool fails with "no git repository found". Init a throwaway repo with
+# a single tagged commit so `git describe` succeeds. BUILD_REF is the dynamo
+# commit SHA the rest of this Dockerfile already stamps into the binary;
+# reusing it keeps the SBOM's module version consistent with the binary.
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
+    --mount=type=cache,target=/root/.cache/go-build,sharing=shared \
+    git init -q . && \
+    git -c user.email=ci@example -c user.name=ci add -A && \
+    git -c user.email=ci@example -c user.name=ci commit -q --allow-empty -m "sbom build" && \
+    git tag "v0.0.0-${BUILD_REF:-dev}" && \
+    GOBIN=/usr/local/bin go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.7.0 && \
+    CGO_ENABLED=1 GOOS=linux GOARCH=amd64 cyclonedx-gomod app -licenses -json \
+        -main ./cmd/epp \
+        -output /sbom-go.cdx.json \
+        .
+
+# Compliance: harvest each Go module's real LICENSE files from the module cache
+# (populated by `go mod download`) so the frontend's go NOTICES generator can
+# inline upstream license text instead of canonical SPDX fallback. Preserve the
+# cache's escaped "<module-path>@<version>/" layout — generators/go.py escapes
+# the module name the same way to look it up. Best-effort + non-fatal.
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
+    mkdir -p /sbom-go-licenses && cd /go/pkg/mod && \
+    find . -path ./cache -prune -o -type f \
+        \( -iname 'LICENSE*' -o -iname 'LICENCE*' -o -iname 'COPYING*' \
+           -o -iname 'NOTICE*' -o -iname 'UNLICENSE*' \) -print | \
+    while IFS= read -r lf; do \
+        rel="${lf#./}"; dest="/sbom-go-licenses/$(dirname "$rel")"; \
+        mkdir -p "$dest" && cp "$lf" "$dest/" 2>/dev/null || true; \
+    done; \
+    echo "go license harvest: $(find /sbom-go-licenses -type f 2>/dev/null | wc -l) files"; \
+    true
+
+# =============================================================================
+# Stage 2b: SBOM export (compliance)
+# =============================================================================
+# A scratch stage carrying ONLY the Go compliance SBOM + harvested license texts.
+# The frontend build's licenses stage consumes these from the build CONTEXT
+# (extracted to the workspace by the CI EPP-build step via `make sbom-export`),
+# NOT by COPYing from the pushed EPP image. The pushed image can lose these files
+# when the BuildKit cache is refreshed between the build and the compliance-extract
+# step (the runtime layer gets served from a stale local cache); exporting to the
+# host right after the EPP build, while the cache is warm, is reliable.
+#
+# Kept BEFORE the runtime stage so the default (no --target) build still produces
+# the runtime EPP image; `make sbom-export` targets this stage explicitly.
+FROM scratch AS sbom-export
+COPY --from=go-builder /sbom-go.cdx.json /sbom-go.cdx.json
+COPY --from=go-builder /sbom-go-licenses /sbom-go-licenses
+
 # =============================================================================
 # Stage 3: Runtime
 # =============================================================================
@@ -156,6 +219,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /
 
 COPY --from=go-builder /workspace/epp .
+
+# EPP is not shipped to customers. These compliance artifacts are retained in the
+# image for self-description, but the frontend build no longer COPYs them from
+# here (that was fragile — a refreshed BuildKit cache could push a runtime layer
+# missing them). The frontend reads them from the build context, populated by the
+# `sbom-export` stage above via `make sbom-export` in the CI EPP-build step.
+COPY --from=go-builder /sbom-go.cdx.json /sbom-go.cdx.json
+COPY --from=go-builder /sbom-go-licenses /sbom-go-licenses
 
 # Note: EPP config is mounted via Kubernetes ConfigMap at runtime
 # See helm/dynamo-gaie/templates/epp-configmap.yaml

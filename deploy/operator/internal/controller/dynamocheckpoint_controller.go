@@ -46,8 +46,11 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
+
+const checkpointDisabledMessage = "checkpoint functionality is disabled in the operator configuration"
 
 var errCheckpointCleanupPending = errors.New("checkpoint cleanup pending")
 
@@ -220,6 +223,14 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
+	if !r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
+		if ckpt.Status.Message == checkpointDisabledMessage {
+			return ctrl.Result{}, nil
+		}
+		ckpt.Status.Message = checkpointDisabledMessage
+		r.Recorder.Event(ckpt, corev1.EventTypeWarning, "CheckpointDisabled", checkpointDisabledMessage)
+		return ctrl.Result{}, r.Status().Update(ctx, ckpt)
+	}
 	if err := checkpoint.ValidateGMSSnapshotGate("spec.gpuMemoryService", true, ckpt.Spec.GPUMemoryService, r.RuntimeConfig.Gate); err != nil {
 		return r.failPendingCheckpoint(ctx, ckpt, "GMSSnapshotDisabled", err)
 	}
@@ -339,6 +350,14 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		// not the source pod has appeared (k8s sets JobFailed/DeadlineExceeded on unschedulable Jobs).
 		if failed, message := checkpointJobFailed(job); failed {
 			return r.failCreating(ctx, ckpt, "JobFailed", message)
+		}
+		if !r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
+			if ckpt.Status.Message == checkpointDisabledMessage {
+				return ctrl.Result{}, nil
+			}
+			ckpt.Status.Message = checkpointDisabledMessage
+			r.Recorder.Event(ckpt, corev1.EventTypeWarning, "CheckpointDisabled", checkpointDisabledMessage)
+			return ctrl.Result{}, r.Status().Update(ctx, ckpt)
 		}
 
 		pod, perr := r.findSourcePod(ctx, job)

@@ -528,12 +528,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "Mark this as a decode worker which does not publish KV events (default: False)",
     )
     parser.add_argument(
-        "--durable-kv-events",
-        action="store_true",
-        default=os.environ.get("DYN_DURABLE_KV_EVENTS", "false").lower() == "true",
-        help="[Deprecated] Enable durable KV events using NATS JetStream. This option will be removed in a future release. The event-plane subscriber (local_indexer mode) is now the recommended path.",
-    )
-    parser.add_argument(
         "--zmq-kv-events-ports",
         type=str,
         default=None,
