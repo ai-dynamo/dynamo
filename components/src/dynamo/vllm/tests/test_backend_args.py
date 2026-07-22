@@ -302,6 +302,24 @@ class TestRealtimeWorkerExclusivity:
         with pytest.raises(ValueError, match="enable-lora"):
             config._validate_realtime_worker_exclusivity()
 
+    @pytest.mark.parametrize(
+        "attribute, value, option",
+        [
+            ("custom_encoder_class", "my_pkg.MyEncoder", "custom-encoder-class"),
+            ("gms_shadow_mode", True, "gms-shadow-mode"),
+            ("enable_rl", True, "enable-rl"),
+            ("headless", True, "headless"),
+        ],
+    )
+    def test_unsupported_worker_options_rejected(self, attribute, value, option):
+        config = create_config()
+        config.realtime = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        setattr(config, attribute, value)
+
+        with pytest.raises(ValueError, match=option):
+            config._validate_realtime_worker_exclusivity()
+
 
 class TestValidateCustomEncoder:
     """--custom-encoder-class is an in-process, aggregated-only multimodal

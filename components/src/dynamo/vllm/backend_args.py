@@ -872,6 +872,14 @@ class DynamoVllmConfig(ConfigBase):
             )
         if self.embedding_worker:
             raise ValueError("--realtime cannot be combined with --embedding-worker.")
+        for enabled, option in (
+            (bool(self.custom_encoder_class), "--custom-encoder-class"),
+            (self.gms_shadow_mode, "--gms-shadow-mode"),
+            (self.enable_rl, "--enable-rl"),
+            (self.headless, "--headless"),
+        ):
+            if enabled:
+                raise ValueError(f"--realtime cannot be combined with {option}.")
         if self._count_multimodal_roles() > 0 or self.enable_multimodal:
             raise ValueError(
                 "--realtime cannot be combined with multimodal worker flags."
