@@ -4,14 +4,13 @@
 """Power actuation is DGD-owned: read/resolve, never mutate.
 
 The planner reads per-GPU caps from the DGD worker podTemplate annotations and
-projects a power budget. It does NOT patch Pods. These tests pin both halves of
-that contract:
-
-* the read/resolve path — ``KubernetesConnector.get_component_power_configs``
-  resolves per-role ``ComponentPowerConfig`` from a DGD dict (disagg + agg) and
-  propagates the typed parser errors; and
-* the no-mutation guarantee — the connector, the Kubernetes API client, and the
-  planner base expose no Pod-write / power-sweep surface at all.
+projects a power budget. It does NOT patch Pods. These tests pin the
+read/resolve path — ``KubernetesConnector.get_component_power_configs``
+resolves per-role ``ComponentPowerConfig`` from a DGD dict (disagg + agg) and
+propagates the typed parser errors. The no-mutation guarantee is enforced by
+the mocked Kubernetes behavioral gate in
+``tests/integration/test_power_no_mutation.py`` (assert CoreV1 is never
+instantiated / never patched), not by brittle ``hasattr`` blacklists.
 """
 
 import os
@@ -19,10 +18,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from dynamo.planner.config.defaults import SubComponentType
-from dynamo.planner.connectors.clients.kubernetes_api import KubernetesAPI
 from dynamo.planner.connectors.kubernetes import KubernetesConnector
-from dynamo.planner.core.base import NativePlannerBase
 from dynamo.planner.errors import (
     PowerAnnotationInvalidError,
     PowerAnnotationMissingError,
@@ -140,57 +136,9 @@ class TestGetComponentPowerConfigs:
 
 
 # ---------------------------------------------------------------------------
-# No-mutation contract — the write surface must not exist anywhere.
+# Read surface still exists (write-surface behavioral gate is integration).
 # ---------------------------------------------------------------------------
 
 
-class TestNoPodMutationSurface:
-    @pytest.mark.parametrize(
-        "attr",
-        [
-            "patch_pod_annotation",
-            "remove_pod_annotation",
-            "list_pods_by_label",
-        ],
-    )
-    def test_kubernetes_api_has_no_pod_write_methods(self, attr):
-        assert not hasattr(KubernetesAPI, attr), (
-            f"KubernetesAPI.{attr} must not exist: the planner never writes Pod "
-            "annotations under the DGD-owned power model."
-        )
-
-    @pytest.mark.parametrize(
-        "attr",
-        [
-            "get_component_pods",
-            "list_frontend_pods",
-            "post_busy_threshold",
-            "get_replica_gpu_counts_for_power_projection",
-        ],
-    )
-    def test_connector_has_no_pod_listing_or_patch_methods(self, attr):
-        assert not hasattr(KubernetesConnector, attr), (
-            f"KubernetesConnector.{attr} must not exist: superseded Pod-sweep / "
-            "admission scaffolding was removed with the DGD-owned power rework."
-        )
-
-    @pytest.mark.parametrize(
-        "attr",
-        [
-            "_apply_power_annotations",
-            "_run_power_annotation_sweep",
-            "_run_power_annotation_removal",
-            "_should_sweep_power_annotations",
-            "_resolve_power_projection_gpu_counts",
-        ],
-    )
-    def test_planner_base_has_no_power_sweep_methods(self, attr):
-        assert not hasattr(NativePlannerBase, attr), (
-            f"NativePlannerBase.{attr} must not exist: the planner reads caps "
-            "from the DGD and never sweeps/patches Pods."
-        )
-
-    def test_connector_still_exposes_the_read_method(self, connector):
-        # The one supported power surface is read-only.
-        assert callable(connector.get_component_power_configs)
-        assert SubComponentType.PREFILL  # sanity import touch
+def test_connector_exposes_read_only_power_configs(connector):
+    assert callable(connector.get_component_power_configs)

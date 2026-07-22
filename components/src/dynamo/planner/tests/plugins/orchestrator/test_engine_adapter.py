@@ -374,14 +374,73 @@ def test_project_scale_to_budget_preserves_single_component_target_mask():
         min_gpu_budget=-1,
     )
     adapter = OrchestratorEngineAdapter(cfg, _disagg_caps())
+    # Prefill alone already consumes 6 GPUs of a 4-GPU ceiling, so a decode
+    # scale-up must be suppressed (held at ready) rather than jointly shrunk
+    # then discarded — which would leave the settled total over budget.
     wc = WorkerCounts(ready_num_prefill=6, ready_num_decode=1)
     outcome = _apply_outcome([ComponentTarget(sub_component_type="decode", replicas=4)])
 
-    dec = adapter._project_scale_to(outcome, wc)
+    assert adapter._project_scale_to(outcome, wc) is None
 
-    assert dec is not None
-    assert dec.num_prefill is None
-    assert dec.num_decode == 2
+
+def test_project_scale_to_partial_gpu_proposal_charges_fixed_peer():
+    """Merged (P=5, D=10 echo) at ready (2,10), 1 GPU each, max=12.
+
+    Decode is masked to None before budgeting; the GPU clamp must charge
+    decode at 10 and size only prefill into the residual 2 GPUs → emit
+    prefill=2 (no-op after ready mask) / decode=None, never assume decode
+    will shrink to 8 and then discard that shrink.
+    """
+    cfg = PlannerConfig(
+        mode="disagg",
+        enable_load_scaling=True,
+        enable_throughput_scaling=True,
+        optimization_target="sla",
+        served_model_name="test",
+        max_gpu_budget=12,
+        min_gpu_budget=-1,
+    )
+    adapter = OrchestratorEngineAdapter(cfg, _disagg_caps())
+    wc = WorkerCounts(
+        ready_num_prefill=2,
+        ready_num_decode=10,
+        expected_num_prefill=2,
+        expected_num_decode=10,
+    )
+    outcome = _apply_outcome(
+        [
+            ComponentTarget(sub_component_type="prefill", replicas=5),
+            ComponentTarget(sub_component_type="decode", replicas=10),
+        ]
+    )
+    # Residual after charging decode=10 is 2 GPUs → prefill held at ready 2
+    # (proposed 5 suppressed) → full ready-echo → None decision.
+    assert adapter._project_scale_to(outcome, wc) is None
+
+
+def test_apply_gpu_final_budget_partial_proposal_fits_residual_ceiling():
+    """With headroom on the fixed peer, only the proposed role is clamped."""
+    cfg = PlannerConfig(
+        mode="disagg",
+        enable_load_scaling=True,
+        enable_throughput_scaling=True,
+        optimization_target="sla",
+        served_model_name="test",
+        max_gpu_budget=12,
+        min_gpu_budget=-1,
+    )
+    adapter = OrchestratorEngineAdapter(cfg, _disagg_caps())
+    wc = WorkerCounts(
+        ready_num_prefill=2,
+        ready_num_decode=6,
+        expected_num_prefill=2,
+        expected_num_decode=6,
+    )
+    # Decode fixed at 6; residual max for prefill = 6 → proposed 10 clamps to 6.
+    new_p, new_d = adapter._apply_gpu_final_budget(10, None, wc)
+    assert new_d is None
+    assert new_p == 6
+    assert (new_p or 0) + 6 <= 12
 
 
 def test_project_scale_to_does_not_apply_budget_on_baseline_only_noop():
