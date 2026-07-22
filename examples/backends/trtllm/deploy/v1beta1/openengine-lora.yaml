@@ -88,7 +88,7 @@ spec:
           - name: HF_HOME
             value: /model-cache
           - name: OPENENGINE_SCHEMA_RELEASE
-            value: f1a7189311770f8aa1f0dd787561df809847595d
+            value: df3a9be24a2a36a4ff7a6d4fef9f1d7480ae210d
           image: my-registry/tensorrtllm-openengine:my-tag
           name: engine
           resources:

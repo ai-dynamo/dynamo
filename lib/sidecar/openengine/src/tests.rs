@@ -602,27 +602,6 @@ impl pb::inference_server::Inference for FakeOpenEngine {
             responses,
         ))))
     }
-
-    async fn embed(
-        &self,
-        _: tonic::Request<pb::EmbedRequest>,
-    ) -> Result<tonic::Response<pb::EmbedResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("embed"))
-    }
-
-    async fn classify(
-        &self,
-        _: tonic::Request<pb::ClassifyRequest>,
-    ) -> Result<tonic::Response<pb::ClassifyResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("classify"))
-    }
-
-    async fn score(
-        &self,
-        _: tonic::Request<pb::ScoreRequest>,
-    ) -> Result<tonic::Response<pb::ScoreResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("score"))
-    }
 }
 
 #[tonic::async_trait]
@@ -807,15 +786,6 @@ impl pb::control_server::Control for FakeOpenEngine {
                 })
             },
         ))))
-    }
-
-    type SubscribeRuntimeEventsStream = GrpcStream<pb::SubscribeRuntimeEventsResponse>;
-
-    async fn subscribe_runtime_events(
-        &self,
-        _: tonic::Request<pb::SubscribeRuntimeEventsRequest>,
-    ) -> Result<tonic::Response<Self::SubscribeRuntimeEventsStream>, tonic::Status> {
-        Err(tonic::Status::unimplemented("runtime events"))
     }
 }
 

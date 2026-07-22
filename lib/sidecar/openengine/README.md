@@ -1,7 +1,7 @@
 # Dynamo OpenEngine sidecar
 
 This crate consumes generated `openengine-proto` 0.2.0 bindings from immutable
-OpenEngine commit `f1a7189311770f8aa1f0dd787561df809847595d`.
+OpenEngine commit `df3a9be24a2a36a4ff7a6d4fef9f1d7480ae210d`.
 
 `Cargo.toml` uses the pinned Git dependency so clean CI and release builds do
 not depend on a sibling checkout. To develop against a local OpenEngine
