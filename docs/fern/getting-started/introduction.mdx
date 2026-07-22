@@ -6,73 +6,88 @@ sidebar-title: Introduction
 subtitle: Install, deploy, and operate Dynamo on Kubernetes
 ---
 
-Use this page as a map of the Kubernetes user guide. Start with the quickstart, then follow the sections that match your cluster and deployment needs.
-
 > [!NOTE]
 > This page covers the **Kubernetes** path. To run Dynamo directly on a workstation or virtual machine without Kubernetes, see the [Local CLI User Guide](../cli/introduction.mdx).
 
-## Getting Started
+## Jump Right In
 
 <CardGroup cols={2}>
   <Card title="Quickstart" icon="regular cubes" href="../kubernetes/README.md">
     Install Dynamo and serve a model on a Kubernetes cluster.
   </Card>
-  <Card title="Compatibility" icon="regular table-list" href="../reference/compatibility.mdx">
-    Check supported platforms, backends, features, and dependencies.
+  <Card title="Model Deployment Overview" icon="regular circle-info" href="kubernetes-deployment.md">
+    Choose a deployment workflow and learn the core Kubernetes resources.
+  </Card>
+  <Card title="Deploy with DGD" icon="regular cloud-arrow-up" href="../kubernetes/dgd-guide.md">
+    Define and apply a DynamoGraphDeployment for direct control.
+  </Card>
+  <Card title="Auto Deploy with DGDR" icon="regular wand-magic-sparkles" href="../kubernetes/dgdr-guide.md">
+    Generate a deployment from model and workload requirements.
   </Card>
 </CardGroup>
 
-## Installation
-
-Install the Dynamo platform and prepare networking, storage, and observability for your cluster.
-
-<CardGroup cols={2}>
-  <Card title="Install Dynamo" icon="regular gears" href="../kubernetes/installation-guide.md">
-    Install the operator, custom resource definitions, and platform services.
-  </Card>
-  <Card title="Multinode Orchestration" icon="regular diagram-project" href="../kubernetes/multinode-installation.md">
-    Configure Grove or LeaderWorkerSet for workloads that span nodes.
-  </Card>
-  <Card title="Observability" icon="regular chart-line" href="../observability/README.md">
-    Set up the monitoring stack for a Kubernetes deployment.
-  </Card>
-</CardGroup>
-
-### RDMA Setup
-
-<CardGroup cols={3}>
-  <Card title="RDMA Overview" icon="regular network-wired" href="../kubernetes/cloud-providers/rdma-setup.md">
-    Prepare high-speed networking for distributed serving.
-  </Card>
-  <Card title="InfiniBand on Azure" icon="regular cloud" href="../kubernetes/cloud-providers/aks/rdma-infiniband.md">
-    Configure InfiniBand for Azure Kubernetes Service.
-  </Card>
-  <Card title="EFA on AWS" icon="regular cloud" href="../kubernetes/cloud-providers/eks/efa.md">
-    Configure Elastic Fabric Adapter for Amazon EKS.
-  </Card>
-</CardGroup>
-
-### Model Storage
-
-<CardGroup cols={2}>
-  <Card title="Model Storage Overview" icon="regular hard-drive" href="../kubernetes/cloud-providers/model-storage-overview.md">
-    Choose a storage approach for model weights.
-  </Card>
-  <Card title="AKS Storage" icon="regular database" href="../kubernetes/cloud-providers/aks/storage.md">
-    Compare storage options for Azure Kubernetes Service.
-  </Card>
-  <Card title="Azure Lustre CSI Driver" icon="regular database" href="../kubernetes/cloud-providers/aks/azure-lustre-csi.md">
-    Mount Azure Managed Lustre with the Container Storage Interface driver.
-  </Card>
-  <Card title="EFS" icon="regular database" href="../kubernetes/cloud-providers/eks/efs.md">
-    Use Amazon Elastic File System for shared model storage.
-  </Card>
-</CardGroup>
-
-### Managed Kubernetes
+## Browse the Kubernetes Guide
 
 <AccordionGroup>
-  <Accordion title="Amazon Web Services">
+  <Accordion title="Getting Started">
+    <CardGroup cols={2}>
+      <Card title="Quickstart" icon="regular cubes" href="../kubernetes/README.md">
+        Install Dynamo and serve a model on a Kubernetes cluster.
+      </Card>
+      <Card title="Compatibility" icon="regular table-list" href="../reference/compatibility.mdx">
+        Check supported platforms, backends, features, and dependencies.
+      </Card>
+    </CardGroup>
+  </Accordion>
+
+  <Accordion title="Installation">
+    Install the Dynamo platform and prepare networking, storage, and observability for your cluster.
+
+    <CardGroup cols={2}>
+      <Card title="Install Dynamo" icon="regular gears" href="../kubernetes/installation-guide.md">
+        Install the operator, custom resource definitions, and platform services.
+      </Card>
+      <Card title="Multinode Orchestration" icon="regular diagram-project" href="../kubernetes/multinode-installation.md">
+        Configure Grove or LeaderWorkerSet for workloads that span nodes.
+      </Card>
+      <Card title="Observability" icon="regular chart-line" href="../observability/README.md">
+        Set up the monitoring stack for a Kubernetes deployment.
+      </Card>
+    </CardGroup>
+
+    **RDMA setup**
+
+    <CardGroup cols={3}>
+      <Card title="RDMA Overview" icon="regular network-wired" href="../kubernetes/cloud-providers/rdma-setup.md">
+        Prepare high-speed networking for distributed serving.
+      </Card>
+      <Card title="InfiniBand on Azure" icon="regular cloud" href="../kubernetes/cloud-providers/aks/rdma-infiniband.md">
+        Configure InfiniBand for Azure Kubernetes Service.
+      </Card>
+      <Card title="EFA on AWS" icon="regular cloud" href="../kubernetes/cloud-providers/eks/efa.md">
+        Configure Elastic Fabric Adapter for Amazon EKS.
+      </Card>
+    </CardGroup>
+
+    **Model storage**
+
+    <CardGroup cols={2}>
+      <Card title="Model Storage Overview" icon="regular hard-drive" href="../kubernetes/cloud-providers/model-storage-overview.md">
+        Choose a storage approach for model weights.
+      </Card>
+      <Card title="AKS Storage" icon="regular database" href="../kubernetes/cloud-providers/aks/storage.md">
+        Compare storage options for Azure Kubernetes Service.
+      </Card>
+      <Card title="Azure Lustre CSI Driver" icon="regular database" href="../kubernetes/cloud-providers/aks/azure-lustre-csi.md">
+        Mount Azure Managed Lustre with the Container Storage Interface driver.
+      </Card>
+      <Card title="EFS" icon="regular database" href="../kubernetes/cloud-providers/eks/efs.md">
+        Use Amazon Elastic File System for shared model storage.
+      </Card>
+    </CardGroup>
+
+    **Managed Kubernetes**
+
     <CardGroup cols={2}>
       <Card title="EKS Setup" icon="regular cubes" href="../kubernetes/cloud-providers/eks/eks.md">
         Prepare an Amazon EKS cluster for Dynamo.
@@ -80,104 +95,96 @@ Install the Dynamo platform and prepare networking, storage, and observability f
       <Card title="ECS" icon="regular box" href="../kubernetes/cloud-providers/ecs/ecs.md">
         Deploy Dynamo with Amazon Elastic Container Service.
       </Card>
-    </CardGroup>
-  </Accordion>
-  <Accordion title="Microsoft Azure">
-    <CardGroup cols={2}>
       <Card title="AKS Setup" icon="regular cubes" href="../kubernetes/cloud-providers/aks/aks.md">
         Prepare an Azure Kubernetes Service cluster for Dynamo.
       </Card>
       <Card title="Spot VMs" icon="regular bolt" href="../kubernetes/cloud-providers/aks/spot-vms.md">
         Use interruptible capacity for suitable workloads.
       </Card>
-    </CardGroup>
-  </Accordion>
-  <Accordion title="Google Cloud">
-    <CardGroup cols={2}>
       <Card title="GKE Setup" icon="regular cubes" href="../kubernetes/cloud-providers/gke/gke.md">
         Prepare a Google Kubernetes Engine cluster for Dynamo.
       </Card>
     </CardGroup>
   </Accordion>
+
+  <Accordion title="Model Deployment" defaultOpen={true}>
+    Create and tune Kubernetes deployments for different models and serving patterns.
+
+    <CardGroup cols={2}>
+      <Card title="Model Deployment Introduction" icon="regular circle-info" href="kubernetes-deployment.md">
+        Choose a deployment workflow and learn the core Kubernetes resources.
+      </Card>
+      <Card title="Deploy with DGD" icon="regular cloud-arrow-up" href="../kubernetes/dgd-guide.md">
+        Define and apply a DynamoGraphDeployment.
+      </Card>
+      <Card title="KV-Aware Routing" icon="regular route" href="../kubernetes/dgd-kv-routing.md">
+        Route requests according to cached prompt prefixes.
+      </Card>
+      <Card title="Disaggregated Serving" icon="regular arrows-split-up-and-left" href="../features/disaggregated-serving/README.md">
+        Scale prefill and decode workers independently.
+      </Card>
+      <Card title="Size with AIConfigurator" icon="regular ruler-combined" href="../kubernetes/dgd-aiconfigurator.md">
+        Select parallelism and replica settings for a workload.
+      </Card>
+      <Card title="Multinode Deployments" icon="regular network-wired" href="../kubernetes/deployment/multinode-deployment.md">
+        Deploy a model across multiple Kubernetes nodes.
+      </Card>
+      <Card title="Model Caching" icon="regular database" href="../kubernetes/model-caching.md">
+        Reduce model-loading time across pods.
+      </Card>
+      <Card title="KV Cache Offloading" icon="regular layer-group" href="../kubernetes/dgd-kv-offloading.md">
+        Extend KV cache capacity beyond GPU memory.
+      </Card>
+    </CardGroup>
+
+    **Auto deploy with DGDR**
+
+    <CardGroup cols={3}>
+      <Card title="DGDR Walkthrough" icon="regular wand-magic-sparkles" href="../kubernetes/dgdr-guide.md">
+        Generate a deployment from model and workload requirements.
+      </Card>
+      <Card title="Dynamo Profiler" icon="regular gauge-high" href="../kubernetes/dgdr-profiler.md">
+        Profile candidate configurations on your hardware.
+      </Card>
+      <Card title="Dynamo Planner" icon="regular sliders" href="../kubernetes/dgdr-planner.md">
+        Select and adjust deployment configurations.
+      </Card>
+    </CardGroup>
+  </Accordion>
+
+  <Accordion title="Operations">
+    Observe, size, benchmark, and simulate Kubernetes deployments.
+
+    <CardGroup cols={3}>
+      <Card title="Observability" icon="regular chart-line" href="../kubernetes/observability/metrics.md">
+        Collect metrics from the operator and serving components.
+      </Card>
+      <Card title="Sizing with AIConfigurator" icon="regular ruler-combined" href="../tools/aic.md">
+        Estimate deployment resources from workload targets.
+      </Card>
+      <Card title="Benchmarking with AIPerf" icon="regular stopwatch" href="../tools/aiperf.md">
+        Measure throughput and latency under load.
+      </Card>
+    </CardGroup>
+
+    **Inference simulation with DynoSim**
+
+    <CardGroup cols={2}>
+      <Card title="DynoSim Overview" icon="regular circle-info" href="../dynosim/README.md">
+        Learn the simulation workflow and components.
+      </Card>
+      <Card title="Live Simulation with Mocker" icon="regular server" href="../dynosim/mocker.md">
+        Exercise a live frontend with simulated workers.
+      </Card>
+      <Card title="Simulation Runs" icon="regular play" href="../dynosim/runs.md">
+        Run repeatable inference simulations.
+      </Card>
+      <Card title="Simulation Sweeps" icon="regular magnifying-glass-chart" href="../dynosim/sweeps.md">
+        Compare configurations across a parameter sweep.
+      </Card>
+      <Card title="Planner Simulation Benchmarking" icon="regular gauge" href="../dynosim/planner-benchmarking.md">
+        Evaluate planner decisions with simulated workloads.
+      </Card>
+    </CardGroup>
+  </Accordion>
 </AccordionGroup>
-
-## Model Deployment
-
-Create and tune Kubernetes deployments for different models and serving patterns.
-
-<CardGroup cols={2}>
-  <Card title="Model Deployment Introduction" icon="regular circle-info" href="kubernetes-deployment.md">
-    Choose a deployment workflow and learn the core Kubernetes resources.
-  </Card>
-  <Card title="Deploy with DGD" icon="regular cloud-arrow-up" href="../kubernetes/dgd-guide.md">
-    Define and apply a DynamoGraphDeployment.
-  </Card>
-  <Card title="KV-Aware Routing" icon="regular route" href="../kubernetes/dgd-kv-routing.md">
-    Route requests according to cached prompt prefixes.
-  </Card>
-  <Card title="Disaggregated Serving" icon="regular arrows-split-up-and-left" href="../features/disaggregated-serving/README.md">
-    Scale prefill and decode workers independently.
-  </Card>
-  <Card title="Size with AIConfigurator" icon="regular ruler-combined" href="../kubernetes/dgd-aiconfigurator.md">
-    Select parallelism and replica settings for a workload.
-  </Card>
-  <Card title="Multinode Deployments" icon="regular network-wired" href="../kubernetes/deployment/multinode-deployment.md">
-    Deploy a model across multiple Kubernetes nodes.
-  </Card>
-  <Card title="Model Caching" icon="regular database" href="../kubernetes/model-caching.md">
-    Reduce model-loading time across pods.
-  </Card>
-  <Card title="KV Cache Offloading" icon="regular layer-group" href="../kubernetes/dgd-kv-offloading.md">
-    Extend KV cache capacity beyond GPU memory.
-  </Card>
-</CardGroup>
-
-### Auto Deploy with DGDR
-
-<CardGroup cols={3}>
-  <Card title="DGDR Walkthrough" icon="regular wand-magic-sparkles" href="../kubernetes/dgdr-guide.md">
-    Generate a deployment from model and workload requirements.
-  </Card>
-  <Card title="Dynamo Profiler" icon="regular gauge-high" href="../kubernetes/dgdr-profiler.md">
-    Profile candidate configurations on your hardware.
-  </Card>
-  <Card title="Dynamo Planner" icon="regular sliders" href="../kubernetes/dgdr-planner.md">
-    Select and adjust deployment configurations.
-  </Card>
-</CardGroup>
-
-## Operations
-
-Observe, size, benchmark, and simulate Kubernetes deployments.
-
-<CardGroup cols={3}>
-  <Card title="Observability" icon="regular chart-line" href="../kubernetes/observability/metrics.md">
-    Collect metrics from the operator and serving components.
-  </Card>
-  <Card title="Sizing with AIConfigurator" icon="regular ruler-combined" href="../tools/aic.md">
-    Estimate deployment resources from workload targets.
-  </Card>
-  <Card title="Benchmarking with AIPerf" icon="regular stopwatch" href="../tools/aiperf.md">
-    Measure throughput and latency under load.
-  </Card>
-</CardGroup>
-
-### Inference Simulation with DynoSim
-
-<CardGroup cols={2}>
-  <Card title="DynoSim Overview" icon="regular circle-info" href="../dynosim/README.md">
-    Learn the simulation workflow and components.
-  </Card>
-  <Card title="Live Simulation with Mocker" icon="regular server" href="../dynosim/mocker.md">
-    Exercise a live frontend with simulated workers.
-  </Card>
-  <Card title="Simulation Runs" icon="regular play" href="../dynosim/runs.md">
-    Run repeatable inference simulations.
-  </Card>
-  <Card title="Simulation Sweeps" icon="regular magnifying-glass-chart" href="../dynosim/sweeps.md">
-    Compare configurations across a parameter sweep.
-  </Card>
-  <Card title="Planner Simulation Benchmarking" icon="regular gauge" href="../dynosim/planner-benchmarking.md">
-    Evaluate planner decisions with simulated workloads.
-  </Card>
-</CardGroup>

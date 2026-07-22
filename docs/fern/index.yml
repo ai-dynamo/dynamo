@@ -33,7 +33,7 @@ tabs:
     skip-slug: true
   recipes:
     display-name: Recipes
-    icon: flask
+    icon: file-code
   developer-guide:
     display-name: Developer Guide
     icon: code
@@ -70,6 +70,8 @@ navigation:
             icon: download
             collapsed: open-by-default
             contents:
+            - page: Get Dynamo
+              path: getting-started/get-dynamo.mdx
             - page: Install Dynamo
               path: kubernetes/installation-guide.md
             - page: Multinode Orchestration
@@ -191,6 +193,8 @@ navigation:
             icon: download
             collapsed: open-by-default
             contents:
+              - page: Get Dynamo
+                path: getting-started/get-dynamo.mdx
               - page: Install Dynamo
                 path: getting-started/local-installation.mdx
               - page: Building from Source
@@ -338,40 +342,66 @@ navigation:
 
   - tab: recipes
     layout:
-      # ==================== Recipes ====================
-      - page: Browse All Recipes
-        path: recipes/README.mdx
-        slug: browse
-      - page: Kimi-K2.6
-        path: recipes/kimi-k2-6.mdx
-        slug: kimi-k2-6
-      - page: Nemotron 3 Ultra
-        path: recipes/nemotron-3-ultra.mdx
-        slug: nemotron-3-ultra
-      - page: Nemotron 3 Super
-        path: recipes/nemotron-3-super.mdx
-        slug: nemotron-3-super
-      - page: GLM-5 NVFP4
-        path: recipes/glm-5-nvfp4.mdx
-        slug: glm-5-nvfp4
-      - page: DeepSeek V3.2 NVFP4
-        path: recipes/deepseek-v3-2-nvfp4.mdx
-        slug: deepseek-v3-2-nvfp4
-      - page: GPT-OSS-120B
-        path: recipes/gpt-oss-120b.mdx
-        slug: gpt-oss-120b
-      - page: Qwen3-32B
-        path: recipes/qwen3-32b.mdx
-        slug: qwen3-32b
-      - page: Qwen3-235B-A22B FP8
-        path: recipes/qwen3-235b-a22b-fp8.mdx
-        slug: qwen3-235b-a22b-fp8
-      - page: Qwen3-32B FP8
-        path: recipes/qwen3-32b-fp8.mdx
-        slug: qwen3-32b-fp8
-      - page: Llama-3.3-70B FP8
-        path: recipes/llama-3-3-70b.mdx
-        slug: llama-3-3-70b
+      # ==================== Model Recipes ====================
+      - section: Model Recipes
+        icon: file-code
+        skip-slug: true
+        contents:
+          - page: Overview
+            path: recipes/README.mdx
+            slug: browse
+          - page: Kimi-K2.6
+            path: recipes/kimi-k2-6.mdx
+            slug: kimi-k2-6
+          - page: Nemotron 3 Ultra
+            path: recipes/nemotron-3-ultra.mdx
+            slug: nemotron-3-ultra
+          - page: Nemotron 3 Super
+            path: recipes/nemotron-3-super.mdx
+            slug: nemotron-3-super
+          - page: GLM-5 NVFP4
+            path: recipes/glm-5-nvfp4.mdx
+            slug: glm-5-nvfp4
+          - page: DeepSeek V3.2 NVFP4
+            path: recipes/deepseek-v3-2-nvfp4.mdx
+            slug: deepseek-v3-2-nvfp4
+          - page: GPT-OSS-120B
+            path: recipes/gpt-oss-120b.mdx
+            slug: gpt-oss-120b
+          - page: Qwen3-32B
+            path: recipes/qwen3-32b.mdx
+            slug: qwen3-32b
+          - page: Qwen3-235B-A22B FP8
+            path: recipes/qwen3-235b-a22b-fp8.mdx
+            slug: qwen3-235b-a22b-fp8
+          - page: Qwen3-32B FP8
+            path: recipes/qwen3-32b-fp8.mdx
+            slug: qwen3-32b-fp8
+          - page: Llama-3.3-70B FP8
+            path: recipes/llama-3-3-70b.mdx
+            slug: llama-3-3-70b
+
+      # ==================== Kubernetes Templates ====================
+      - section: Kubernetes Templates
+        icon: fa-brands fa-kubernetes
+        contents:
+          - page: vLLM
+            path: templates/vllm.mdx
+          - page: TensorRT-LLM
+            path: templates/trtllm.mdx
+          - page: SGLang
+            path: templates/sglang.mdx
+
+      # ==================== CLI Templates ====================
+      - section: CLI Templates
+        icon: rectangle-terminal
+        contents:
+          - page: vLLM
+            path: backends/vllm/vllm-examples.mdx
+          - page: TensorRT-LLM
+            path: backends/trtllm/trtllm-examples.mdx
+          - page: SGLang
+            path: backends/sglang/sglang-examples.mdx
 
       # ==================== Feature Benchmarks ====================
       # Evidence pages behind the recipes: controlled A/B benchmarks whose
@@ -690,56 +720,43 @@ navigation:
                 path: features/speculative-decoding/speculative-decoding-vllm.md
 
   - tab: reference
-    layout:
-
-      # ==================== Reference Info ====================
-      - section: Reference Info
+    variants:
+      # ==================== General variant ====================
+      - title: General
         icon: circle-info
-        contents:
+        slug: reference
+        layout:
           - page: Release Artifacts
             path: reference/release-artifacts.mdx
           - page: Glossary
             path: reference/glossary.md
 
-      # ==================== Deployment Templates ====================
-      - section: Deployment Templates
-        icon: file-code
-        contents:
-          - page: vLLM
-            path: templates/vllm.mdx
-          - page: TensorRT-LLM
-            path: templates/trtllm.mdx
-          - page: SGLang
-            path: templates/sglang.mdx
-
-      # ==================== Local Deployment Examples ====================
-      - section: Local Deployment Examples
-        icon: rectangle-terminal
-        contents:
-          - page: vLLM
-            path: backends/vllm/vllm-examples.mdx
-          - page: TensorRT-LLM
-            path: backends/trtllm/trtllm-examples.mdx
-          - page: SGLang
-            path: backends/sglang/sglang-examples.mdx
-
-      # ==================== CRD References ====================
-      - section: CRD References
-        icon: book
-        contents:
-          - page: DynamoGraphDeployment (DGD)
+      # ==================== Kubernetes API variant ====================
+      - title: Kubernetes API
+        icon: fa-brands fa-kubernetes
+        slug: kubernetes-api
+        layout:
+          - page: DynamoGraphDeployment
             path: kubernetes/dgd-reference.mdx
-          - page: DynamoGraphDeploymentRequest (DGDR)
+          - page: DynamoGraphDeploymentRequest
             path: kubernetes/dgdr-reference.mdx
-          - page: DynamoComponentDeployment (DCD)
+          - page: DynamoComponentDeployment
             path: kubernetes/dcd-reference.mdx
           - page: Full API Reference
             path: kubernetes/api-reference-fern.mdx
 
-      # ==================== Component Configuration ====================
-      - section: Component Configuration
+          # Accessible by direct URL but not shown in the sidebar.
+          - section: Additional Resources
+            hidden: true
+            contents:
+              - page: API Reference (K8s)
+                path: kubernetes/api-reference.md
+
+      # ==================== Components variant ====================
+      - title: Components
         icon: sliders
-        contents:
+        slug: components
+        layout:
           - page: Runtime Configuration
             path: reference/runtime-config-reference.mdx
           - page: Frontend Configuration
@@ -757,10 +774,11 @@ navigation:
           - page: Global Router Configuration
             path: components/router/global-router-config-reference.mdx
 
-      # ==================== Backend Configuration ====================
-      - section: Backend Configuration
+      # ==================== Backends variant ====================
+      - title: Backends
         icon: server
-        contents:
+        slug: backends
+        layout:
           - page: vLLM Configuration
             path: backends/vllm/vllm-config-reference.mdx
           - page: vLLM-Omni Configuration
@@ -770,10 +788,11 @@ navigation:
           - page: TensorRT-LLM Configuration
             path: backends/trtllm/trtllm-config-reference.mdx
 
-      # ==================== Observability ====================
-      - section: Observability
+      # ==================== Observability variant ====================
+      - title: Observability
         icon: gauge
-        contents:
+        slug: observability
+        layout:
           - page: Local Stack
             path: reference/observability/local-stack.mdx
           - page: Health Checks
@@ -791,10 +810,11 @@ navigation:
           - page: Local Resource Monitor (Local)
             path: reference/observability/local-resource-monitor.mdx
 
-      # ==================== NIXL Connect API ====================
-      - section: NIXL Connect API
+      # ==================== NIXL Connect variant ====================
+      - title: NIXL Connect
         icon: right-left
-        contents:
+        slug: nixl-connect
+        layout:
           - page: Overview
             path: api/nixl-connect/README.mdx
           - page: Connector
@@ -817,12 +837,3 @@ navigation:
             path: api/nixl-connect/operation-status.mdx
           - page: RDMA Metadata
             path: api/nixl-connect/rdma-metadata.mdx
-
-      # ==================== Hidden Pages (Reference) ====================
-      # Accessible via direct URL but not shown in the main navigation.
-      - section: Additional Resources
-        hidden: true
-        contents:
-          # -- Kubernetes (hidden sub-pages) --
-          - page: API Reference (K8s)
-            path: kubernetes/api-reference.md

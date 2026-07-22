@@ -284,9 +284,9 @@ footer: ./components/CustomFooter.tsx
 
 layout:
   searchbar-placement: header
-  page-width: 1376px
-  sidebar-width: 248px
-  content-width: 812px
+  page-width: full # Formerly 1376 px
+  sidebar-width: 272px
+  content-width: 912px # Formerly 812 px
   tabs-placement: header
   hide-feedback: true
 
@@ -326,6 +326,7 @@ logo:
   light: ./assets/NVIDIA_light.svg
   height: 20
   href: /dynamo/home
+  right-text: Dynamo
 
 favicon: ./assets/NVIDIA_symbol.svg
 

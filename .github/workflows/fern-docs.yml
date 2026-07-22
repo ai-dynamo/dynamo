@@ -45,6 +45,9 @@ on:
     tags:
       # Match only clean semver tags: vX.Y.Z
       - 'v[0-9]+.[0-9]+.[0-9]+'
+  schedule:
+    # Refresh the Home page from the public Google Calendar.
+    - cron: '0 */6 * * *'
   workflow_dispatch:
     inputs:
       tag:
@@ -61,7 +64,7 @@ jobs:
   changed-files:
     runs-on: ubuntu-latest
     # Skip for tag pushes - version release doesn't need changed-files check
-    if: github.ref_type != 'tag'
+    if: github.ref_type != 'tag' && github.event_name != 'schedule'
     outputs:
       docs: ${{ steps.changes.outputs.docs }}
     steps:
@@ -84,8 +87,9 @@ jobs:
     name: Preview or publish docs
     needs: changed-files
     if: |
+      always() &&
       github.ref_type != 'tag' &&
-      (needs.changed-files.outputs.docs == 'true' || github.event_name == 'workflow_dispatch') &&
+      (github.event_name == 'schedule' || needs.changed-files.outputs.docs == 'true' || github.event_name == 'workflow_dispatch') &&
       (github.event.inputs.tag == '' || github.event.inputs.tag == null)
     runs-on: ubuntu-latest
     steps:
@@ -111,6 +115,22 @@ jobs:
           path: docs-checkout
           fetch-depth: 1
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: '22'
+
+      - name: Fetch community events from Google Calendar
+        run: |
+          npm install --prefix source-checkout --no-save --no-package-lock node-ical@0.20.0
+          node source-checkout/.github/scripts/generate-events.js
+
+      - name: Generate Get Dynamo selector data
+        run: |
+          git -C source-checkout fetch --unshallow --tags 2>/dev/null || git -C source-checkout fetch --tags
+          python3 -m pip install --quiet pyyaml
+          python3 source-checkout/.github/scripts/build_install_selector.py
       - name: Sync dev content from main
         run: |
           # Sync content directories from docs/fern/ to fern/pages-dev/ on docs-website
@@ -266,12 +286,6 @@ jobs:
             echo "Changes detected:"
             git status --short
           fi
-
-      - name: Setup Node.js
-        if: steps.changes.outputs.has_changes == 'true'
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
 
       - name: Install Fern CLI
         if: steps.changes.outputs.has_changes == 'true'

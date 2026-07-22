@@ -135,6 +135,14 @@ html.dark,
 
 /* Product and version selector styling */
 
+/* Fern simulates emphasis on active navigation labels with a text stroke.
+   NVIDIA Sans renders that stroke as a doubled glyph, so use font weight instead. */
+#fern-header [data-radix-collection-item][data-state="active"] > span,
+.fern-sidebar-link[data-state="active"] .fern-sidebar-link-title-inner {
+    -webkit-text-stroke: 0 !important;
+    font-weight: 600;
+}
+
 /* Fern's toggle product switcher provides the pill-shaped top-level navigation. */
 .fern-product-selector {
     border-radius: var(--rounded);
@@ -162,10 +170,10 @@ html.dark,
     order: 4;
 }
 
-/* User Guide deployment environment selector
+/* Tab variant selector
 
-   Fern tab variants only expose a dropdown. custom.js replaces the User Guide
-   dropdown with this vertical, always-visible, version-aware selector. */
+   Fern tab variants only expose a dropdown. custom.js replaces configured
+   variant dropdowns with this vertical, always-visible, version-aware selector. */
 #fern-sidebar .fern-variant-selector {
     position: absolute !important;
     width: 1px !important;
@@ -176,13 +184,13 @@ html.dark,
     pointer-events: none !important;
 }
 
-/* Reserve the final selector height while custom.js attaches. This prevents
-   Fern's dropdown from flashing and keeps the sidebar from shifting. */
+/* Reserve space while custom.js attaches. This prevents Fern's dropdown from
+   flashing during initial navigation. */
 #fern-sidebar
     .relative:has(> .fern-variant-selector):not(:has(> .dynamo-variant-selector))::before {
     display: block;
     width: auto;
-    height: 116px;
+    height: 84px;
     margin: 0 0.75rem 0.75rem;
     border-radius: 10px;
     background: linear-gradient(
@@ -206,13 +214,16 @@ html.dark,
 }
 
 .dynamo-variant-selector {
+    --dynamo-variant-row-height: 38px;
+    --dynamo-variant-row-gap: 2px;
+    --dynamo-variant-active-index: 0;
     position: relative;
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: var(--dynamo-variant-row-gap);
     width: auto;
     margin: 0 0.75rem 0.75rem;
-    padding: 4px;
+    padding: 3px;
     border: 0 !important;
     border-radius: 10px;
     outline: 0 !important;
@@ -225,19 +236,20 @@ html.dark,
 .dynamo-variant-selector::before {
     position: absolute;
     z-index: 0;
-    top: 4px;
-    right: 4px;
-    left: 4px;
-    height: 50px;
+    top: 3px;
+    right: 3px;
+    left: 3px;
+    height: var(--dynamo-variant-row-height);
     border-radius: 6px;
     background: var(--background);
     content: "";
-    transform: translateY(0);
+    transform: translateY(
+        calc(
+            var(--dynamo-variant-active-index) *
+                (var(--dynamo-variant-row-height) + var(--dynamo-variant-row-gap))
+        )
+    );
     transition: transform 140ms ease;
-}
-
-.dynamo-variant-selector[data-active-variant="cli"]::before {
-    transform: translateY(54px);
 }
 
 .dynamo-variant-selector-option {
@@ -245,15 +257,15 @@ html.dark,
     z-index: 1;
     display: flex;
     min-width: 0;
-    height: 50px;
+    height: var(--dynamo-variant-row-height);
     align-items: center;
-    gap: 0.65rem;
-    padding: 0.4rem 0.65rem;
+    gap: 0.5rem;
+    padding: 0.25rem 0.55rem;
     border-radius: 6px;
     color: var(--grayscale-11);
-    font-size: 0.875rem;
+    font-size: 0.8125rem;
     font-weight: 600;
-    line-height: 1;
+    line-height: 1.25;
     text-decoration: none !important;
     transition: background-color 140ms ease, color 140ms ease;
 }
@@ -286,8 +298,8 @@ html.dark,
 
 .dynamo-variant-selector-icon {
     display: flex;
-    width: 30px;
-    height: 30px;
+    width: 24px;
+    height: 24px;
     flex: 0 0 auto;
     align-items: center;
     justify-content: center;
@@ -295,8 +307,8 @@ html.dark,
 }
 
 .dynamo-variant-selector-icon svg {
-    width: 20px;
-    height: 20px;
+    width: 16px;
+    height: 16px;
     fill: currentColor;
 }
 
@@ -318,6 +330,7 @@ html.dark,
 }
 
 .fern-version-selector {
+    margin-inline-start: 0.5rem;
     transform: none;
 }
 
@@ -358,15 +371,13 @@ html.dark,
     padding-left: 0.25rem !important;
 }
 /* Top-level section headings (e.g. Getting Started, Installation, Model
-   Deployment, Operations) in the User Guide's tab *variants* (Kubernetes /
-   Local CLI). Moving that tab to `variants:` nests these one level deeper, so
-   Fern renders each as a level-1 group whose title looks lighter than the
-   pre-variant fixed headers. Bump the weight to match. Scoped via
-   `#fern-sidebar:has(.fern-variant-selector)` so it ONLY affects variant tabs
-   (the variant switcher lives in that sidebar) and leaves every other tab's
-   sidebar untouched. Chevron and click behaviour are intentionally left alone
-   so the sections stay collapsible/expandable across tab switches. */
-#fern-sidebar:has(.fern-variant-selector) .fern-sidebar-link.fern-sidebar-level-1 .fern-sidebar-link-title {
+   Deployment, Operations) in the User Guide's Kubernetes and Local CLI
+   variants should match the pre-variant fixed headers. Scope the heavier
+   weight to the User Guide selector so ungrouped Reference pages stay at the
+   normal sidebar weight. */
+#fern-sidebar:has(.dynamo-variant-selector[data-selector-configuration="user-guide"])
+    .fern-sidebar-link.fern-sidebar-level-1
+    .fern-sidebar-link-title {
     font-weight: 600 !important;
 }
 .fern-sidebar-group{
@@ -405,16 +416,21 @@ animation-range: 0 50px;
 .fern-header-navbar-links > button{
     background-color: transparent !important;
 }
-.fern-header-logo-container > div > div > a > img{
-    padding-right: 0.5rem;
+.fern-header-logo-container > div > div > a > img {
+    padding-right: 0;
 }
-.fern-header-logo-container .font-heading{
-    font-size: 16px !important;
-    font-weight: bold !important;
+
+/* Echo the hero wordmark with a compact semibold product name, without the
+   divider bars used by the previous header treatment. */
+.fern-header-logo-container .font-heading {
+    margin: 0 0 0 0.75rem !important;
+    padding: 0 !important;
+    border: 0 !important;
     color: var(--grayscale-a12) !important;
-    border-inline: 1px solid var(--border, var(--grayscale-a5));
-    padding: 15px 1rem;
-    margin: -20px 0.5rem;
+    font-size: 20px !important;
+    font-weight: 600 !important;
+    line-height: 1 !important;
+    letter-spacing: -0.035em;
 }
 @media (max-width: 1024px) {
     .fern-header-logo-container .font-heading{
@@ -2062,6 +2078,13 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   text-decoration: none !important;
 }
 
+.dynamo-calendar__chrome a svg {
+  width: 0.72rem;
+  height: 0.72rem;
+  flex: 0 0 auto;
+  fill: currentColor;
+}
+
 .dynamo-calendar__chrome a:hover,
 .dynamo-calendar__chrome a:focus-visible {
   border-color: rgba(143, 209, 32, 0.7);
@@ -2352,8 +2375,7 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   margin: 0;
 }
 
-/* The site wordmark's "Documentation" label comes from logo.right-text. The label is removed in docs.yml;
-   this makes Fern's version selector feel like a compact product-channel pill. */
+/* Keep the version selector visually compact beside the Dynamo wordmark. */
 .fern-version-selector .version-dropdown-trigger {
   display: flex;
   min-width: 4.5rem;
@@ -2543,8 +2565,9 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
     font-size: 0;
   }
 
-  .dynamo-calendar__chrome a span {
-    font-size: 0.75rem;
+  .dynamo-calendar__chrome a svg {
+    width: 0.75rem;
+    height: 0.75rem;
   }
 
   .dynamo-calendar__body {

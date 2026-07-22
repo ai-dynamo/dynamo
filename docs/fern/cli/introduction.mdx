@@ -1,0 +1,87 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Local CLI User Guide
+sidebar-title: Introduction
+subtitle: Install, deploy, and operate Dynamo without Kubernetes
+---
+
+> [!NOTE]
+> This page covers the **local CLI** path. For operator-managed deployments on a Kubernetes cluster, see the [Kubernetes User Guide](../getting-started/introduction.mdx).
+
+## Jump Right In
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="regular laptop-code" href="../getting-started/quickstart.mdx">
+    Start the frontend and a model worker on one machine.
+  </Card>
+  <Card title="Model Deployment Overview" icon="regular circle-info" href="overview.mdx">
+    Serve a model with a frontend and worker, then explore larger deployment patterns.
+  </Card>
+</CardGroup>
+
+## Browse the Local CLI Guide
+
+<AccordionGroup>
+  <Accordion title="Getting Started">
+    <CardGroup cols={2}>
+      <Card title="Quickstart" icon="regular laptop-code" href="../getting-started/quickstart.mdx">
+        Start the frontend and a model worker on one machine.
+      </Card>
+    </CardGroup>
+  </Accordion>
+
+  <Accordion title="Installation">
+    Install Dynamo and prepare the local services used by the frontend and workers.
+
+    <CardGroup cols={2}>
+      <Card title="Install Dynamo" icon="regular download" href="../getting-started/local-installation.mdx">
+        Install from a container or Python package.
+      </Card>
+      <Card title="Building from Source" icon="regular hammer" href="building-from-source.md">
+        Build the Dynamo runtime and Python packages from source.
+      </Card>
+      <Card title="Minikube Setup" icon="regular box" href="../kubernetes/deployment/minikube.md">
+        Use a local Kubernetes cluster when you need to test Kubernetes resources.
+      </Card>
+      <Card title="Observability Setup" icon="regular chart-line" href="observability.mdx">
+        Configure local metrics and telemetry dependencies.
+      </Card>
+    </CardGroup>
+  </Accordion>
+
+  <Accordion title="Model Deployment" defaultOpen={true}>
+    Start with an aggregated deployment, then add routing, disaggregation, multiple nodes, or KV cache offloading as needed.
+
+    <CardGroup cols={2}>
+      <Card title="Model Deployment Introduction" icon="regular circle-info" href="overview.mdx">
+        Serve a model with a frontend and worker on one machine.
+      </Card>
+      <Card title="KV-Aware Routing" icon="regular route" href="kv-routing.mdx">
+        Route requests according to cached prompt prefixes.
+      </Card>
+      <Card title="Disaggregated Serving" icon="regular arrows-split-up-and-left" href="disaggregated-serving.mdx">
+        Run prefill and decode as separate workers.
+      </Card>
+      <Card title="Multi-Node Deployment" icon="regular network-wired" href="multinode-deployment.mdx">
+        Run a CLI deployment across multiple machines.
+      </Card>
+      <Card title="KV Cache Offloading" icon="regular layer-group" href="kv-cache-offloading.mdx">
+        Extend KV cache capacity beyond GPU memory.
+      </Card>
+    </CardGroup>
+  </Accordion>
+
+  <Accordion title="Operations">
+    Monitor the local deployment and expose health endpoints for automation.
+
+    <CardGroup cols={2}>
+      <Card title="Observability" icon="regular chart-line" href="../observability/local-observability.mdx">
+        Collect local metrics, logs, and traces.
+      </Card>
+      <Card title="Health Checks" icon="regular heart-pulse" href="../observability/health-checks.mdx">
+        Check frontend and worker health.
+      </Card>
+    </CardGroup>
+  </Accordion>
+</AccordionGroup>
