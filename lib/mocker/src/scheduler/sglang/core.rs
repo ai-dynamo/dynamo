@@ -459,10 +459,12 @@ impl SglangCore {
             return false;
         };
         let capacity_improved = !request.kv_indices.is_empty() || request.last_node.is_some();
-        self.kv_manager
-            .free_indices(&request.kv_indices[request.cached_tokens..]);
         if let Some(last_node) = request.last_node.take() {
-            self.kv_manager.free_request(last_node);
+            let cached_sequence = request.sequence_prefix(request.cached_tokens);
+            self.kv_manager
+                .free_aborted_request(&cached_sequence, &request.kv_indices, last_node);
+        } else {
+            self.kv_manager.free_indices(&request.kv_indices);
         }
         self.source_holds.remove_request(request_id);
         self.active_destination_handoffs.remove_request(request_id);

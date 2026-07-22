@@ -177,7 +177,7 @@ impl SglangKvManager {
     ) {
         self.publish_stored_event(token_ids, kv_indices, first_new_token);
         self.cache.insert(token_ids, kv_indices);
-        self.release_unretained_finished_indices(token_ids, kv_indices);
+        self.release_unretained_cached_indices(token_ids, kv_indices);
         self.cache.dec_lock_ref(last_node);
     }
 
@@ -322,6 +322,19 @@ impl SglangKvManager {
         self.cache.dec_lock_ref(last_node);
     }
 
+    /// Release an aborted request's owned slots and unlock its cached path.
+    pub(crate) fn free_aborted_request(
+        &mut self,
+        cached_token_ids: &[u64],
+        kv_indices: &[usize],
+        last_node: NodeId,
+    ) {
+        let cached_tokens = cached_token_ids.len();
+        self.release_unretained_cached_indices(cached_token_ids, &kv_indices[..cached_tokens]);
+        self.free_indices(&kv_indices[cached_tokens..]);
+        self.free_request(last_node);
+    }
+
     /// Return request-owned token slots to the free pool and publish matching
     /// removal events for any slots that were previously advertised to the router.
     pub fn free_indices(&mut self, indices: &[usize]) {
@@ -361,7 +374,7 @@ impl SglangKvManager {
         indices
     }
 
-    fn release_unretained_finished_indices(&mut self, token_ids: &[u64], kv_indices: &[usize]) {
+    fn release_unretained_cached_indices(&mut self, token_ids: &[u64], kv_indices: &[usize]) {
         let block_size = self.cache.page_size();
         let complete_len = token_ids.len().min(kv_indices.len()) / block_size * block_size;
         if complete_len == 0 {
@@ -371,7 +384,7 @@ impl SglangKvManager {
         let (matched_len, last_node) = self.cache.match_prefix(&token_ids[..complete_len]);
         debug_assert_eq!(
             matched_len, complete_len,
-            "completed SGLang sequence should be fully cached after insert"
+            "SGLang sequence should be fully cached after insert"
         );
         if matched_len < complete_len {
             return;

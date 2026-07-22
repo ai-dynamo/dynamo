@@ -963,6 +963,70 @@ mod core_behavior {
     use super::*;
 
     #[test]
+    fn cancellation_releases_noncanonical_cached_prefix_indices() {
+        let mut core = SglangCore::new(test_args(32, 4, 32));
+        let prompt = (0..8).collect::<Vec<u32>>();
+        let output = (100..108).collect::<Vec<u32>>();
+        let request = |uuid| DirectRequest {
+            tokens: prompt.clone(),
+            max_output_tokens: output.len(),
+            output_token_ids: Some(output.clone()),
+            uuid: Some(uuid),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+            ..Default::default()
+        };
+
+        core.receive(request(Uuid::from_u128(1)));
+        let mut now_ms = 0.0;
+        for _ in 0..32 {
+            if core.is_empty() {
+                break;
+            }
+            now_ms = core.execute_pass_internal(None, now_ms).end_ms;
+        }
+        assert!(core.is_empty(), "seed request should complete");
+
+        let total_tokens = core.kv_manager.cache().total_tokens();
+        assert_eq!(
+            core.kv_manager.cache().available_tokens() + core.kv_manager.cache().evictable_size,
+            total_tokens
+        );
+
+        let cancelled_id = Uuid::from_u128(2);
+        core.receive(request(cancelled_id));
+        for _ in 0..32 {
+            if core
+                .running
+                .iter()
+                .any(|request| request.cached_tokens > prompt.len())
+            {
+                break;
+            }
+            now_ms = core.execute_pass_internal(None, now_ms).end_ms;
+        }
+        assert!(
+            core.running
+                .iter()
+                .any(|request| request.cached_tokens > prompt.len()),
+            "second request should materialize a cached output prefix"
+        );
+
+        assert_eq!(
+            core.apply_command(SchedulerCommand::CancelRequest {
+                request_id: cancelled_id,
+            })
+            .unwrap(),
+            SchedulerCommandResult::Applied
+        );
+        assert_eq!(
+            core.kv_manager.cache().available_tokens() + core.kv_manager.cache().evictable_size,
+            total_tokens,
+            "cancellation should leave every KV slot available or evictable"
+        );
+    }
+
+    #[test]
     fn test_planned_output_tokens_are_emitted_exactly() {
         let mut core = SglangCore::new(test_args(100, 4, 8));
         let uuid = Uuid::from_u128(0xB0B);
