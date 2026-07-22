@@ -145,6 +145,10 @@ impl PodDiscovery {
             // The pod cache is "synced" once the reflector's initial LIST lands
             // (InitDone); readiness stays gated on this AND pool presence below.
             let mut pod_synced = false;
+            // True from `Init` until `InitDone`: a (re)list is buffering objects and
+            // the live store still holds the pre-relist Pod set, so a pool edit must
+            // not rebuild from it — defer to `InitDone` instead.
+            let mut relisting = false;
 
             enum Delta {
                 Upsert(Pod),
@@ -162,10 +166,15 @@ impl PodDiscovery {
                         }
                         // During a relist the reflector emits Init + one InitApply
                         // per pod + InitDone. The per-object relist events only
-                        // prime the store; act once at InitDone with a single
-                        // recompute (Errors don't change the store).
-                        Some(Ok(watcher::Event::Init | watcher::Event::InitApply(_))) => Delta::Skip,
+                        // prime the buffered store (the live store still holds the
+                        // pre-relist set until InitDone); mark the relist and act
+                        // once at InitDone with a single recompute.
+                        Some(Ok(watcher::Event::Init | watcher::Event::InitApply(_))) => {
+                            relisting = true;
+                            Delta::Skip
+                        }
                         Some(Ok(watcher::Event::InitDone)) => {
+                            relisting = false;
                             pod_synced = true;
                             Delta::Rebuild
                         }
@@ -180,8 +189,16 @@ impl PodDiscovery {
                         if changed.is_err() {
                             tracing::warn!("InferencePool watch ended");
                             Delta::Stop
+                        } else if defer_pool_rebuild(relisting, pool_rx.borrow().is_some()) {
+                            // A relist is buffering pods and the live store is still
+                            // the pre-relist set. Defer this non-clearing selector/
+                            // port edit to InitDone, which rebuilds from the completed
+                            // pod list + latest PoolState. (A pool deletion/invalid
+                            // spec is not deferred and clears immediately below.)
+                            Delta::Skip
                         } else {
-                            // A selector/target-port edit re-classifies every pod.
+                            // A selector/target-port edit re-classifies every pod;
+                            // a None pool clears discovery.
                             Delta::Rebuild
                         }
                     }
@@ -331,6 +348,16 @@ fn strip_scheme(endpoint: &str) -> &str {
 /// Stable index key for a pod (its `worker_id`). `None` for an unnamed pod.
 fn pod_worker_id(pod: &Pod) -> Option<u64> {
     pod.metadata.name.as_deref().map(hash_pod_name)
+}
+
+/// Whether a pool change observed *during a relist* should be deferred to
+/// `InitDone` rather than rebuilt now. While relisting, the reflector's live
+/// store is still the pre-relist Pod set, so a non-clearing (selector/port) edit
+/// (`pool_present`) would rebuild from stale pods — defer it; `InitDone` rebuilds
+/// from the completed pod list + latest `PoolState`. A pool deletion/invalid spec
+/// (`!pool_present`) is never deferred: clearing stale discovery is always safe.
+fn defer_pool_rebuild(relisting: bool, pool_present: bool) -> bool {
+    relisting && pool_present
 }
 
 /// Apply a single pod delta to the index: upsert the worker if it is `Ready` and
@@ -690,6 +717,18 @@ mod tests {
 
         upsert_pod(&index, &ready, None, 5557, None);
         assert!(!index.read().unwrap().contains_key(&id));
+    }
+
+    #[test]
+    fn pool_edit_during_relist_defers_but_deletion_clears() {
+        // Steady state (not relisting): every pool change rebuilds immediately.
+        assert!(!defer_pool_rebuild(false, true));
+        assert!(!defer_pool_rebuild(false, false));
+        // Mid-relist: a selector/port edit (pool still present) is deferred to
+        // InitDone so it never rebuilds from the stale pre-relist store...
+        assert!(defer_pool_rebuild(true, true));
+        // ...but a pool deletion/invalid spec still clears discovery immediately.
+        assert!(!defer_pool_rebuild(true, false));
     }
 
     #[test]
