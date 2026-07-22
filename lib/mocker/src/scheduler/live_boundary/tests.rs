@@ -11,10 +11,11 @@ use uuid::Uuid;
 
 struct FakeCore {
     publishers: KvEventPublishers,
+    command_result: SchedulerCommandResult,
     command_effects: bool,
     midpass_kv_effects: bool,
     execute_count: usize,
-    cancel_after_execute: Option<(usize, CancellationToken)>,
+    live_pass_limit: Option<usize>,
 }
 
 impl FakeCore {
@@ -34,24 +35,21 @@ impl FakeCore {
 
 impl LiveBoundaryCore for FakeCore {
     fn live_is_empty(&self) -> bool {
-        self.cancel_after_execute.is_none()
+        self.live_pass_limit.is_none()
     }
 
     fn receive_live_request(&mut self, _request: DirectRequest) {}
 
     fn execute_live_pass(&mut self, _scheduler_start: &Instant) -> LivePassExecution {
-        let (cancel_after, cancel_token) = self
-            .cancel_after_execute
+        let live_pass_limit = self
+            .live_pass_limit
             .as_ref()
             .expect("boundary-only fake does not execute live passes");
         self.execute_count += 1;
         assert!(
-            self.execute_count <= *cancel_after,
-            "scheduler did not observe shutdown between productive zero-duration passes"
+            self.execute_count <= *live_pass_limit,
+            "scheduler did not yield to externally triggered shutdown"
         );
-        if self.execute_count == *cancel_after {
-            cancel_token.cancel();
-        }
         let mut pass = pass();
         pass.admissions.clear();
         pass.lifecycle_events.clear();
@@ -68,7 +66,7 @@ impl LiveBoundaryCore for FakeCore {
         _allow_destination_admission: bool,
         _now_ms: f64,
     ) -> anyhow::Result<SchedulerCommandEffects> {
-        let mut effects = SchedulerCommandEffects::new(SchedulerCommandResult::Applied);
+        let mut effects = SchedulerCommandEffects::new(self.command_result);
         if self.command_effects || self.midpass_kv_effects {
             self.publish_kv(2);
         }
@@ -151,15 +149,96 @@ fn publisher(
     .with_publication_log(log)
 }
 
+async fn cancel_pending_pass(
+    command_result: SchedulerCommandResult,
+    discard_pending_output: bool,
+) -> (SchedulerCommandResult, PendingLivePass) {
+    let request_id = Uuid::from_u128(1);
+    let (captured, buffering_publishers) = capture_deferred_kv_publish_sink(false, false);
+    let mut core = FakeCore {
+        publishers: buffering_publishers,
+        command_result,
+        command_effects: false,
+        midpass_kv_effects: false,
+        execute_count: 0,
+        live_pass_limit: None,
+    };
+    let (output_tx, _output_rx) = mpsc::unbounded_channel();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let publisher = publisher(output_tx, captured, log);
+    let mut pending = publisher.capture_pass(pass());
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+    let (cancellation_tx, mut cancellation_rx) = mpsc::channel(1);
+    let (reply, reply_rx) = tokio::sync::oneshot::channel();
+    cancellation_tx
+        .send(SchedulerCancellationEnvelope {
+            request_id,
+            discard_pending_output,
+            reply,
+        })
+        .await
+        .unwrap();
+
+    let result = {
+        let cancel_token = CancellationToken::new();
+        let scheduler_start = Instant::now();
+        let mut deferred_commands = VecDeque::new();
+        let boundary = wait_for_live_pass_boundary(
+            &mut core,
+            &mut command_rx,
+            &mut cancellation_rx,
+            &mut deferred_commands,
+            &mut pending,
+            &publisher,
+            &scheduler_start,
+            &cancel_token,
+            Instant::now() + Duration::from_secs(5),
+            false,
+        );
+        tokio::pin!(boundary);
+        let result = tokio::select! {
+            reply = reply_rx => reply.unwrap().unwrap().result,
+            boundary_result = &mut boundary => {
+                panic!("pass boundary completed before cancellation was acknowledged: {boundary_result}")
+            }
+        };
+        cancel_token.cancel();
+        assert!(!boundary.await);
+        result
+    };
+    (result, pending)
+}
+
+#[tokio::test]
+async fn midpass_cancellation_is_observed_without_controls_and_suppresses_pending_output() {
+    let (result, pending) = cancel_pending_pass(SchedulerCommandResult::Applied, false).await;
+
+    assert_eq!(result, SchedulerCommandResult::Applied);
+    assert!(pending.pass.output_signals.is_empty());
+    assert_eq!(pending.pass.completed_requests, 0);
+    assert_eq!(pending.pass.accept_length_output_tokens, 0);
+}
+
+#[tokio::test]
+async fn explicit_discard_suppresses_pending_output_after_noop_cancellation() {
+    let (result, pending) = cancel_pending_pass(SchedulerCommandResult::Noop, true).await;
+
+    assert_eq!(result, SchedulerCommandResult::Noop);
+    assert!(pending.pass.output_signals.is_empty());
+    assert_eq!(pending.pass.completed_requests, 0);
+    assert_eq!(pending.pass.accept_length_output_tokens, 0);
+}
+
 #[tokio::test]
 async fn pass_effects_publish_once_in_boundary_order_and_isolate_midpass_ack() {
     let (captured, buffering_publishers) = capture_deferred_kv_publish_sink(true, false);
     let mut core = FakeCore {
         publishers: buffering_publishers,
+        command_result: SchedulerCommandResult::Applied,
         command_effects: false,
         midpass_kv_effects: false,
         execute_count: 0,
-        cancel_after_execute: None,
+        live_pass_limit: None,
     };
     core.publish_kv(1);
     let (output_tx, output_rx) = mpsc::unbounded_channel();
@@ -214,10 +293,11 @@ async fn controlled_pass_start_router_effects_precede_midpass_ack_without_duplic
     let (captured, buffering_publishers) = capture_deferred_kv_publish_sink(true, false);
     let mut core = FakeCore {
         publishers: buffering_publishers,
+        command_result: SchedulerCommandResult::Applied,
         command_effects: false,
         midpass_kv_effects: true,
         execute_count: 0,
-        cancel_after_execute: None,
+        live_pass_limit: None,
     };
     core.publish_kv(1);
     let (output_tx, _output_rx) = mpsc::unbounded_channel();
@@ -277,10 +357,11 @@ async fn command_effects_publish_kv_before_ack_then_lifecycle_and_metrics() {
     let (captured, buffering_publishers) = capture_deferred_kv_publish_sink(true, false);
     let mut core = FakeCore {
         publishers: buffering_publishers,
+        command_result: SchedulerCommandResult::Applied,
         command_effects: true,
         midpass_kv_effects: false,
         execute_count: 0,
-        cancel_after_execute: None,
+        live_pass_limit: None,
     };
     let (output_tx, _output_rx) = mpsc::unbounded_channel();
     let log = Arc::new(Mutex::new(Vec::new()));
@@ -316,33 +397,41 @@ async fn command_effects_publish_kv_before_ack_then_lifecycle_and_metrics() {
     );
 }
 
-// Regression: a productive zero-duration core could spin forever without
-// observing shutdown because it never entered a cancellation-aware wait.
-#[tokio::test]
-async fn shutdown_stops_a_nonempty_zero_duration_progress_loop() {
+// Regression: a productive zero-duration core could monopolize a current-thread
+// runtime, preventing an external task from triggering shutdown.
+#[tokio::test(flavor = "current_thread")]
+async fn external_shutdown_stops_a_nonempty_zero_duration_progress_loop() {
     let cancel_token = CancellationToken::new();
     let (captured, buffering_publishers) = capture_deferred_kv_publish_sink(false, false);
     let mut core = FakeCore {
         publishers: buffering_publishers,
+        command_result: SchedulerCommandResult::Applied,
         command_effects: false,
         midpass_kv_effects: false,
         execute_count: 0,
-        cancel_after_execute: Some((3, cancel_token.clone())),
+        live_pass_limit: Some(10_000),
     };
     let (output_tx, _output_rx) = mpsc::unbounded_channel();
     let publisher = publisher(output_tx, captured, Arc::new(Mutex::new(Vec::new())));
     let (_request_tx, request_rx) = mpsc::unbounded_channel();
     let (_command_tx, command_rx) = mpsc::channel(1);
+    let (_cancellation_tx, cancellation_rx) = mpsc::channel(1);
+    let external_cancel_token = cancel_token.clone();
+    let cancel_task = tokio::spawn(async move {
+        external_cancel_token.cancel();
+    });
 
     run_live_scheduler(
         &mut core,
         request_rx,
         command_rx,
+        cancellation_rx,
         publisher,
         cancel_token,
         false,
     )
     .await;
 
-    assert_eq!(core.execute_count, 3);
+    cancel_task.await.unwrap();
+    assert!(core.execute_count > 0);
 }

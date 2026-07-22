@@ -15,9 +15,9 @@ use crate::common::protocols::{
     DirectRequest, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
 };
 use crate::scheduler::{
-    AdmissionEvent, LiveBoundaryCore, LivePassExecution, LiveSchedulerState, SchedulerCommand,
-    SchedulerCommandEffects, SchedulerCommandEnvelope, SchedulerHandle, SchedulerLifecycleEvent,
-    spawn_live_scheduler,
+    AdmissionEvent, LiveBoundaryCore, LivePassExecution, LiveSchedulerState,
+    SchedulerCancellationEnvelope, SchedulerCommand, SchedulerCommandEffects,
+    SchedulerCommandEnvelope, SchedulerHandle, SchedulerLifecycleEvent, spawn_live_scheduler,
 };
 
 use super::core::VllmCore;
@@ -157,6 +157,10 @@ impl SchedulerHandle for Scheduler {
 
     fn command_sender(&self) -> mpsc::Sender<SchedulerCommandEnvelope> {
         self.inner.command_sender()
+    }
+
+    fn cancellation_sender(&self) -> mpsc::Sender<SchedulerCancellationEnvelope> {
+        self.inner.cancellation_sender()
     }
 
     fn take_lifecycle_receiver(&mut self) -> Option<mpsc::Receiver<SchedulerLifecycleEvent>> {

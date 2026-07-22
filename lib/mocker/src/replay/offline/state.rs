@@ -307,6 +307,7 @@ impl OfflineWorkerState {
         enum Accounting {
             Submit,
             ReserveDestination,
+            CancelRequest,
             CancelSource,
             CancelDestination,
             None,
@@ -317,6 +318,7 @@ impl OfflineWorkerState {
                 Accounting::Submit
             }
             SchedulerCommand::ReserveDestination { .. } => Accounting::ReserveDestination,
+            SchedulerCommand::CancelRequest { .. } => Accounting::CancelRequest,
             SchedulerCommand::CancelSource { .. } => Accounting::CancelSource,
             SchedulerCommand::CancelDestination { .. } => Accounting::CancelDestination,
             SchedulerCommand::ReleaseSource { .. }
@@ -332,6 +334,9 @@ impl OfflineWorkerState {
                 SchedulerCommandResult::DestinationAccepted { .. },
             ) => self.increment_in_flight(),
             (Accounting::CancelDestination, SchedulerCommandResult::Applied) => {
+                self.decrement_in_flight(1)
+            }
+            (Accounting::CancelRequest, SchedulerCommandResult::Applied) => {
                 self.decrement_in_flight(1)
             }
             (Accounting::CancelSource, SchedulerCommandResult::Applied) => {
@@ -482,6 +487,33 @@ mod tests {
             max_output_tokens: 2,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn request_cancellation_releases_offline_in_flight_slot() {
+        let mut worker = worker(EngineType::Vllm, WorkerType::Aggregated, 8);
+        let request_id = Uuid::from_u128(850);
+        worker.receive_request(request(request_id.as_u128(), 8));
+        assert_eq!(worker.in_flight(), 1);
+
+        assert_eq!(
+            worker
+                .apply_command(SchedulerCommand::CancelRequest { request_id })
+                .unwrap()
+                .result,
+            SchedulerCommandResult::Applied
+        );
+        assert_eq!(worker.in_flight(), 0);
+        assert!(worker.is_drained());
+
+        assert_eq!(
+            worker
+                .apply_command(SchedulerCommand::CancelRequest { request_id })
+                .unwrap()
+                .result,
+            SchedulerCommandResult::Noop
+        );
+        assert_eq!(worker.in_flight(), 0);
     }
 
     #[test]
