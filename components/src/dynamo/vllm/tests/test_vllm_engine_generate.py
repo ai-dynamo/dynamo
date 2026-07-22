@@ -7,6 +7,9 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+
+pytest.importorskip("vllm")
+
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 
 from dynamo.vllm.handlers import (
@@ -113,6 +116,10 @@ def test_pd_prompt_logprobs_are_composed_from_prefill():
     legacy_params = SamplingParams(prompt_logprobs=1)
     assert _use_prefill_prompt_logprobs(legacy_params, disaggregated, False) is None
     assert legacy_params.prompt_logprobs == 1
+
+    missing_params = SamplingParams(prompt_logprobs=1)
+    assert _use_prefill_prompt_logprobs(missing_params, {}, True) is None
+    assert missing_params.prompt_logprobs is None
 
 
 def test_text_prompt_preserves_exact_tokens_and_cache_salt():

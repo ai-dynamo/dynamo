@@ -48,6 +48,8 @@ pub async fn connect(uri: &str, cfg: &TransportConfig) -> Result<Channel, Dynamo
 }
 
 async fn connect_channel(uri: &str, cfg: &TransportConfig) -> Result<Channel, DynamoError> {
+    let endpoint = Endpoint::from_shared(uri.to_string())
+        .map_err(|error| invalid_arg(format!("invalid endpoint `{uri}`: {error}")))?;
     let deadline = Instant::now() + cfg.deadline;
     let mut last_err;
     loop {
@@ -58,7 +60,7 @@ async fn connect_channel(uri: &str, cfg: &TransportConfig) -> Result<Channel, Dy
                 cfg.deadline
             )));
         }
-        match try_connect_once(uri, cfg, remaining.min(cfg.connect_timeout)).await {
+        match try_connect_once(endpoint.clone(), cfg, remaining.min(cfg.connect_timeout)).await {
             Ok(client) => return Ok(client),
             Err(e) => {
                 last_err = e;
@@ -82,12 +84,11 @@ async fn connect_channel(uri: &str, cfg: &TransportConfig) -> Result<Channel, Dy
 }
 
 async fn try_connect_once(
-    uri: &str,
+    endpoint: Endpoint,
     cfg: &TransportConfig,
     connect_timeout: std::time::Duration,
 ) -> Result<Channel, String> {
-    let endpoint = Endpoint::from_shared(uri.to_string())
-        .map_err(|e| format!("invalid endpoint `{uri}`: {e}"))?
+    let endpoint = endpoint
         .connect_timeout(connect_timeout)
         .timeout(cfg.connect_timeout);
     let channel = endpoint.connect().await.map_err(|e| e.to_string())?;

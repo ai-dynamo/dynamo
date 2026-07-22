@@ -188,7 +188,7 @@ async fn unary_control_calls_have_a_response_deadline() {
     let engine = VllmSidecarEngine::new(
         handle.endpoint.clone(),
         TransportConfig {
-            connect_timeout: Duration::from_millis(50),
+            deadline: Duration::from_millis(50),
             ..test_transport()
         },
         DisaggregationMode::Aggregated,

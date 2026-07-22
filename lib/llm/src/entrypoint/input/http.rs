@@ -58,6 +58,7 @@ pub async fn run(
     http_service_builder = http_service_builder
         .metrics_config(local_model.metrics_config().clone())
         .frontend_api_config(local_model.frontend_api_config().clone())
+        .enable_engine_apis(local_model.engine_apis_enabled())
         .session_affinity_header_key(
             local_model
                 .router_config()

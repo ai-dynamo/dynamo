@@ -183,7 +183,7 @@ pub(crate) fn build_engine_config(discovery: &Discovery, mode: DisaggregationMod
                 .then_some(server.max_batched_tokens),
             data_parallel_size: (parallelism.managed_data_parallel_size != 0)
                 .then_some(parallelism.managed_data_parallel_size),
-            data_parallel_start_rank: (parallelism.data_parallel_start_rank != 0)
+            data_parallel_start_rank: (parallelism.data_parallel_size != 0)
                 .then_some(parallelism.data_parallel_start_rank),
             supports_lora: model.supports_lora,
             max_loras: model.supports_lora.then_some(server.max_loras),

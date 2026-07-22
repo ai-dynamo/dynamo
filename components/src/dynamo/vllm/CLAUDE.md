@@ -31,10 +31,9 @@ contract, and the **zero-duplication-across-engines** constraint.
 | GPU | same process | separate process/container |
 
 The sidecar exists to decouple Dynamo's container/runtime from vLLM's and to
-let users keep the native vLLM serve UX. It is **not** a replacement for the
-in-process path — do not delete or refactor `VllmLLMEngine` when working on the
-sidecar. Because the sidecar is a standalone Rust crate, work on it does not
-touch this Python component at all.
+let users keep the native vLLM serve UX. It remains separate from the
+in-process `VllmLLMEngine` path, although protocol and registration changes can
+require coordinated updates across the Rust sidecar and Python components.
 
 ## In-process engine (`VllmLLMEngine`) — method map
 

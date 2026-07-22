@@ -134,20 +134,28 @@ impl VllmSidecarEngine {
             .map(Pool::control_client)
             .ok_or_else(|| client::engine_shutdown("load_lora called before start"))?;
         let requested = adapter.clone();
-        let response = client
-            .load_lora(pb::LoadLoraRequest {
+        let response = tokio::time::timeout(
+            self.transport.deadline,
+            client.load_lora(pb::LoadLoraRequest {
                 adapter: Some(pb::LoraAdapter {
                     lora_id: adapter.id,
                     lora_name: adapter.name,
                     source_path: adapter.path,
                 }),
                 load_inplace,
-            })
-            .await
-            .map_err(|status| client::status_to_dynamo("LoadLora", status))?
-            .into_inner()
-            .adapter
-            .ok_or_else(|| client::engine_shutdown("LoadLora returned no adapter"))?;
+            }),
+        )
+        .await
+        .map_err(|_| {
+            client::status_to_dynamo(
+                "LoadLora",
+                tonic::Status::cancelled("RPC deadline exceeded"),
+            )
+        })?
+        .map_err(|status| client::status_to_dynamo("LoadLora", status))?
+        .into_inner()
+        .adapter
+        .ok_or_else(|| client::engine_shutdown("LoadLora returned no adapter"))?;
         let loaded = lora_from_proto(response)?;
         if loaded != requested {
             return Err(client::engine_shutdown(
@@ -555,15 +563,23 @@ impl LLMEngine for VllmSidecarEngine {
             .get()
             .map(Pool::control_client)
             .ok_or_else(|| client::engine_shutdown("unload_lora called before start"))?;
-        let response = client
-            .unload_lora(pb::UnloadLoraRequest {
+        let response = tokio::time::timeout(
+            self.transport.deadline,
+            client.unload_lora(pb::UnloadLoraRequest {
                 lora_name: name.to_string(),
-            })
-            .await
-            .map_err(|status| client::status_to_dynamo("UnloadLora", status))?
-            .into_inner()
-            .adapter
-            .ok_or_else(|| client::engine_shutdown("UnloadLora returned no adapter"))?;
+            }),
+        )
+        .await
+        .map_err(|_| {
+            client::status_to_dynamo(
+                "UnloadLora",
+                tonic::Status::cancelled("RPC deadline exceeded"),
+            )
+        })?
+        .map_err(|status| client::status_to_dynamo("UnloadLora", status))?
+        .into_inner()
+        .adapter
+        .ok_or_else(|| client::engine_shutdown("UnloadLora returned no adapter"))?;
         let adapter = lora_from_proto(response)?;
         if adapter.name != name {
             return Err(client::engine_shutdown(
@@ -579,11 +595,19 @@ impl LLMEngine for VllmSidecarEngine {
             .get()
             .map(Pool::control_client)
             .ok_or_else(|| client::engine_shutdown("list_loras called before start"))?;
-        let response = client
-            .list_loras(pb::ListLorasRequest {})
-            .await
-            .map_err(|status| client::status_to_dynamo("ListLoras", status))?
-            .into_inner();
+        let response = tokio::time::timeout(
+            self.transport.deadline,
+            client.list_loras(pb::ListLorasRequest {}),
+        )
+        .await
+        .map_err(|_| {
+            client::status_to_dynamo(
+                "ListLoras",
+                tonic::Status::cancelled("RPC deadline exceeded"),
+            )
+        })?
+        .map_err(|status| client::status_to_dynamo("ListLoras", status))?
+        .into_inner();
         let mut names = std::collections::HashSet::new();
         let mut ids = std::collections::HashSet::new();
         let mut paths = std::collections::HashSet::new();

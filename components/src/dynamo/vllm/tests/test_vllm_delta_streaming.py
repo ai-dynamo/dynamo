@@ -473,4 +473,13 @@ async def test_unified_native_generate_preserves_logprobs_priority_and_cache_sal
     assert call_kwargs["priority"] == -7
     assert chunks[0]["log_probs"] == [-0.7]
     assert [item["token_id"] for item in chunks[0]["top_logprobs"][0]] == [7, 8]
-    assert "prompt_logprobs" in chunks[-1]["engine_data"]
+    assert chunks[-1]["engine_data"]["prompt_logprobs"] == [
+        None,
+        {
+            "11": {
+                "logprob": -0.2,
+                "rank": 1,
+                "decoded_token": "x",
+            }
+        },
+    ]

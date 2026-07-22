@@ -68,6 +68,7 @@ pub struct LocalModelBuilder {
     http_metrics_port: Option<u16>,
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
+    enable_engine_apis: bool,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     migration_limit: u32,
@@ -93,6 +94,7 @@ impl Default for LocalModelBuilder {
             http_metrics_port: None,
             metrics_config: Default::default(),
             frontend_api_config: Default::default(),
+            enable_engine_apis: false,
             tls_cert_path: Default::default(),
             tls_key_path: Default::default(),
             model_path: Default::default(),
@@ -181,6 +183,11 @@ impl LocalModelBuilder {
 
     pub fn frontend_api_config(&mut self, frontend_api_config: FrontendApiConfig) -> &mut Self {
         self.frontend_api_config = frontend_api_config;
+        self
+    }
+
+    pub fn enable_engine_apis(&mut self, enabled: bool) -> &mut Self {
+        self.enable_engine_apis = enabled;
         self
     }
 
@@ -359,6 +366,7 @@ impl LocalModelBuilder {
                 http_metrics_port: self.http_metrics_port,
                 metrics_config: self.metrics_config.clone(),
                 frontend_api_config: self.frontend_api_config.clone(),
+                enable_engine_apis: self.enable_engine_apis,
                 tls_cert_path: self.tls_cert_path.take(),
                 tls_key_path: self.tls_key_path.take(),
                 router_config: self.router_config.take().unwrap_or_default(),
@@ -415,6 +423,7 @@ impl LocalModelBuilder {
             http_metrics_port: self.http_metrics_port,
             metrics_config: self.metrics_config.clone(),
             frontend_api_config: self.frontend_api_config.clone(),
+            enable_engine_apis: self.enable_engine_apis,
             tls_cert_path: self.tls_cert_path.take(),
             tls_key_path: self.tls_key_path.take(),
             router_config: self.router_config.take().unwrap_or_default(),
@@ -439,6 +448,7 @@ pub struct LocalModel {
     http_metrics_port: Option<u16>,
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
+    enable_engine_apis: bool,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     router_config: RouterConfig,
@@ -510,6 +520,10 @@ impl LocalModel {
 
     pub fn frontend_api_config(&self) -> &FrontendApiConfig {
         &self.frontend_api_config
+    }
+
+    pub fn engine_apis_enabled(&self) -> bool {
+        self.enable_engine_apis
     }
 
     pub fn enable_anthropic_api(&self) -> bool {

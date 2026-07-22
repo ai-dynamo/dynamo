@@ -50,7 +50,6 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 MIN_INITIAL_WORKERS_ENV = "DYN_ROUTER_MIN_INITIAL_WORKERS"
-VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV = "DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE"
 
 
 def setup_engine_factory(
@@ -180,9 +179,6 @@ async def async_main():
     # wrong metrics endpoint.
     os.environ.pop("DYN_SYSTEM_PORT", None)
     config, vllm_flags, sglang_flags = parse_args()
-    os.environ[VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV] = (
-        "1" if config.enable_engine_apis else "0"
-    )
     dump_config(config.dump_config_to, config)
     max_seq_info = (
         f", max_seq_len: {config.migration_max_seq_len}"
@@ -261,6 +257,7 @@ async def async_main():
         "enable_streaming_tool_dispatch": config.enable_streaming_tool_dispatch,
         "enable_streaming_reasoning_dispatch": config.enable_streaming_reasoning_dispatch,
         "tokenizer_backend": config.tokenizer_backend,
+        "enable_engine_apis": config.enable_engine_apis,
     }
     if config.migration_max_seq_len is not None:
         kwargs["migration_max_seq_len"] = config.migration_max_seq_len
@@ -281,9 +278,9 @@ async def async_main():
         kwargs["http_metrics_port"] = config.grpc_metrics_port
 
     if config.chat_processor == "vllm":
-        assert (
-            vllm_flags is not None
-        ), "vllm_flags is required when chat processor is vllm"
+        assert vllm_flags is not None, (
+            "vllm_flags is required when chat processor is vllm"
+        )
         chat_engine_factory = setup_engine_factory(
             config, vllm_flags
         ).chat_engine_factory

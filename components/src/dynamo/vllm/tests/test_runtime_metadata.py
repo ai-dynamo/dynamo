@@ -77,6 +77,7 @@ def test_spec_decode_runtime_data_ignores_invalid_nextn(speculative_config):
 def test_generate_capability_is_published_only_by_generative_workers():
     assert should_publish_generate_capability(ModelType.Chat, WorkerType.Aggregated)
     assert should_publish_generate_capability(ModelType.Chat, WorkerType.Decode)
+    assert not should_publish_generate_capability(ModelType.Chat, WorkerType.Encode)
     assert not should_publish_generate_capability(ModelType.Prefill, WorkerType.Prefill)
     assert not should_publish_generate_capability(
         ModelType.Embedding, WorkerType.Aggregated

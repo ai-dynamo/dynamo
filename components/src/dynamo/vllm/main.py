@@ -78,7 +78,10 @@ MX_LOAD_FORMATS = {"modelexpress", "mx"}
 def should_publish_generate_capability(
     model_type: ModelType, worker_type: WorkerType
 ) -> bool:
-    return worker_type != WorkerType.Prefill and model_type != ModelType.Embedding
+    return (
+        worker_type in (WorkerType.Aggregated, WorkerType.Decode)
+        and model_type != ModelType.Embedding
+    )
 
 
 def uses_modelexpress_load_format(config: Config) -> bool:
@@ -556,9 +559,9 @@ def setup_vllm_engine(
         bench = config._benchmark_additional_config
         if fpm_worker_id and bench["output_path"] == "/tmp/benchmark_results.json":
             short_id = fpm_worker_id[-8:]
-            os.environ[
-                ENV_FPM_BENCHMARK_OUTPUT_PATH
-            ] = f"/tmp/benchmark_results_{short_id}.json"
+            os.environ[ENV_FPM_BENCHMARK_OUTPUT_PATH] = (
+                f"/tmp/benchmark_results_{short_id}.json"
+            )
         vllm_config.additional_config["benchmark"] = bench
         logger.info("Benchmark config injected into additional_config")
 

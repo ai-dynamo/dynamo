@@ -157,7 +157,9 @@ pub(crate) fn validate_generate_response_with_routed_start(
             if reason == pb::finish_info::FinishReason::NotFinished {
                 return Err(client::protocol_error("finish reason is not terminal"));
             }
-            if is_prefill {
+            if is_prefill && reason == pb::finish_info::FinishReason::Aborted {
+                events.push(GenerateEvent::Finished(reason));
+            } else if is_prefill {
                 let params = finish
                     .kv_transfer_params
                     .as_ref()
@@ -333,7 +335,20 @@ fn json_to_prost_value(value: &serde_json::Value) -> prost_types::Value {
     let kind = match value {
         serde_json::Value::Null => Kind::NullValue(prost_types::NullValue::NullValue as i32),
         serde_json::Value::Bool(value) => Kind::BoolValue(*value),
-        serde_json::Value::Number(value) => Kind::NumberValue(value.as_f64().unwrap_or(0.0)),
+        serde_json::Value::Number(value) => {
+            const MAX_EXACT_INTEGER: u64 = 1_u64 << 53;
+            if value
+                .as_u64()
+                .is_some_and(|integer| integer > MAX_EXACT_INTEGER)
+                || value
+                    .as_i64()
+                    .is_some_and(|integer| integer < -(MAX_EXACT_INTEGER as i64))
+            {
+                Kind::StringValue(value.to_string())
+            } else {
+                Kind::NumberValue(value.as_f64().unwrap_or(0.0))
+            }
+        }
         serde_json::Value::String(value) => Kind::StringValue(value.clone()),
         serde_json::Value::Array(values) => Kind::ListValue(prost_types::ListValue {
             values: values.iter().map(json_to_prost_value).collect(),
@@ -374,10 +389,11 @@ fn prost_value_to_json(value: &prost_types::Value) -> serde_json::Value {
 }
 
 fn number_to_json(value: f64) -> serde_json::Value {
+    const MAX_EXACT_INTEGER: f64 = (1_u64 << 53) as f64;
     if value.is_finite()
         && value.fract() == 0.0
-        && value >= i64::MIN as f64
-        && value <= i64::MAX as f64
+        && value >= -MAX_EXACT_INTEGER
+        && value <= MAX_EXACT_INTEGER
     {
         serde_json::Value::Number((value as i64).into())
     } else {

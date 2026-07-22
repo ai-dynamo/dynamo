@@ -175,6 +175,40 @@ fn disagg_json_round_trips_through_protobuf_struct() {
 }
 
 #[test]
+fn disagg_json_preserves_large_integer_identifiers_as_strings() {
+    let original = serde_json::json!({"request_id": 9_007_199_254_740_993_u64});
+    let encoded = json_to_prost_struct(&original).unwrap();
+
+    assert_eq!(
+        prost_struct_to_json(&encoded),
+        serde_json::json!({"request_id": "9007199254740993"})
+    );
+}
+
+#[test]
+fn aborted_prefill_is_not_reported_as_ready() {
+    let response = pb::GenerateResponse {
+        outputs: Some(pb::SequenceOutput {
+            finish_info: Some(pb::FinishInfo {
+                finish_reason: pb::finish_info::FinishReason::Aborted as i32,
+                kv_transfer_params: json_to_prost_struct(&serde_json::json!({"rank": 0})),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let validated = validate_generate_response(response, true).unwrap();
+    assert!(matches!(
+        validated.events.as_slice(),
+        [GenerateEvent::Finished(
+            pb::finish_info::FinishReason::Aborted
+        )]
+    ));
+}
+
+#[test]
 fn generate_response_validation_fails_closed() {
     let invalid = [
         validate_generate_response(pb::GenerateResponse::default(), false),

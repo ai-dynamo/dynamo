@@ -464,11 +464,13 @@ def _use_prefill_prompt_logprobs(
     tokens.
     """
     prompt_logprobs = disaggregated_params.get("prompt_logprobs")
-    if not engine_generate or prompt_logprobs is None:
+    if not engine_generate:
+        return None
+    sampling_params.prompt_logprobs = None
+    if prompt_logprobs is None:
         return None
     if not isinstance(prompt_logprobs, list):
         raise ValueError("prefill prompt_logprobs must be a list")
-    sampling_params.prompt_logprobs = None
     return prompt_logprobs
 
 
@@ -2750,9 +2752,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 for output in res.outputs:
                     output_idx = getattr(output, "index", 0) or 0
                     token_ids = list(output.token_ids or [])
-                    total_output_tokens_by_index[
-                        output_idx
-                    ] = total_output_tokens_by_index.get(output_idx, 0) + len(token_ids)
+                    total_output_tokens_by_index[output_idx] = (
+                        total_output_tokens_by_index.get(output_idx, 0) + len(token_ids)
+                    )
                     finish_reason = getattr(output, "finish_reason", None)
                     stop_reason = getattr(output, "stop_reason", None)
                     if not token_ids and not finish_reason and not stop_reason:
@@ -2792,12 +2794,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
                     if finish_reason:
                         out["finish_reason"] = normalize_finish_reason(finish_reason)
-                        out[
-                            "completion_usage"
-                        ] = BaseWorkerHandler._build_completion_usage(
-                            request_output=res,
-                            embedding_sequence_length=embedding_sequence_length,
-                            completion_token_counts=total_output_tokens_by_index,
+                        out["completion_usage"] = (
+                            BaseWorkerHandler._build_completion_usage(
+                                request_output=res,
+                                embedding_sequence_length=embedding_sequence_length,
+                                completion_token_counts=total_output_tokens_by_index,
+                            )
                         )
                         if engine_generate:
                             metadata: Dict[str, Any] = {}
@@ -3124,10 +3126,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         if kv_params is not None:
             if sampling_params.extra_args is None:
                 sampling_params.extra_args = {}
-            sampling_params.extra_args[
-                "kv_transfer_params"
-            ] = _merge_kv_transfer_params(
-                sampling_params.extra_args.get("kv_transfer_params"), kv_params
+            sampling_params.extra_args["kv_transfer_params"] = (
+                _merge_kv_transfer_params(
+                    sampling_params.extra_args.get("kv_transfer_params"), kv_params
+                )
             )
             logger.debug(
                 f"Using disaggregated params from prefill for request {request_id}"
@@ -3207,9 +3209,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         if abort_guard is not None:
                             abort_guard.signal_first_token()
                         if prefill_result is not None and "completion_usage" in tok:
-                            tok["completion_usage"][
-                                "prompt_tokens_details"
-                            ] = prefill_prompt_tokens_details
+                            tok["completion_usage"]["prompt_tokens_details"] = (
+                                prefill_prompt_tokens_details
+                            )
 
                         if want_engine_data:
                             _accumulate_engine_data(
@@ -3265,14 +3267,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # the unsafe pre-first-token window, and the admin abort_request route can
         # reach this request via self._deferred_aborts.
         is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
-        async with _deferred_abort_guard(
-            self.engine_client,
-            request_id,
-            is_decode_only,
-            self._deferred_aborts,
-            self._shutdown_on_engine_dead,
-        ) as abort_guard, self._abort_monitor(
-            context, request_id, abort_guard=abort_guard
+        async with (
+            _deferred_abort_guard(
+                self.engine_client,
+                request_id,
+                is_decode_only,
+                self._deferred_aborts,
+                self._shutdown_on_engine_dead,
+            ) as abort_guard,
+            self._abort_monitor(context, request_id, abort_guard=abort_guard),
         ):
             try:
                 gen = self.engine_client.generate(
@@ -3567,9 +3570,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         if embedding_params is not None:
             disaggregated_params["embedding_params"] = embedding_params
         if expanded_prompt_token_ids is not None:
-            disaggregated_params[
-                "expanded_prompt_token_ids"
-            ] = expanded_prompt_token_ids
+            disaggregated_params["expanded_prompt_token_ids"] = (
+                expanded_prompt_token_ids
+            )
         if prompt_logprobs is not None:
             disaggregated_params["prompt_logprobs"] = prompt_logprobs
 

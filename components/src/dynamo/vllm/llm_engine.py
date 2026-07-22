@@ -289,9 +289,9 @@ class VllmLLMEngine(LLMEngine):
             )
 
         if not config.served_model_name:
-            config.served_model_name = (
-                config.engine_args.served_model_name
-            ) = config.model
+            config.served_model_name = config.engine_args.served_model_name = (
+                config.model
+            )
 
         configure_rl_logprobs_mode(config)
 
@@ -467,6 +467,7 @@ class VllmLLMEngine(LLMEngine):
         # (--kv-transfer-config). Dispatch only sets connector hints and
         # forwards the prefill→decode handoff payload.
         prefill_prompt_tokens_details = None
+        prefill_prompt_logprobs = None
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
             if sampling_params.extra_args is None:
                 sampling_params.extra_args = {}
@@ -495,6 +496,12 @@ class VllmLLMEngine(LLMEngine):
             # falls through to the kv_params ValueError below instead of raising
             # AttributeError on None.get(...).
             disaggregated_params = prefill_result.get("disaggregated_params") or {}
+            prefill_prompt_logprobs = disaggregated_params.get("prompt_logprobs")
+            if is_native_generate:
+                sampling_params.prompt_logprobs = None
+            if prefill_prompt_logprobs is not None:
+                if not isinstance(prefill_prompt_logprobs, list):
+                    raise ValueError("prefill prompt_logprobs must be a list")
             kv_params = disaggregated_params.get("kv_transfer_params")
             if kv_params is None:
                 raise ValueError(
@@ -566,7 +573,7 @@ class VllmLLMEngine(LLMEngine):
             )
 
         total_output_tokens_by_index: dict[int, int] = {}
-        prompt_logprobs_payload: Optional[list] = None
+        prompt_logprobs_payload: Optional[list] = prefill_prompt_logprobs
         async for res in gen:
             if (
                 requested_prompt_logprobs_count is not None
@@ -592,9 +599,9 @@ class VllmLLMEngine(LLMEngine):
             for output in res.outputs:
                 output_idx = getattr(output, "index", 0) or 0
                 token_ids = list(output.token_ids or [])
-                total_output_tokens_by_index[
-                    output_idx
-                ] = total_output_tokens_by_index.get(output_idx, 0) + len(token_ids)
+                total_output_tokens_by_index[output_idx] = (
+                    total_output_tokens_by_index.get(output_idx, 0) + len(token_ids)
+                )
                 finish_reason = getattr(output, "finish_reason", None)
                 if not token_ids and not finish_reason:
                     continue
@@ -671,6 +678,8 @@ class VllmLLMEngine(LLMEngine):
                         )
                         if embedding_params is not None:
                             handoff_params["embedding_params"] = embedding_params
+                        if prompt_logprobs_payload is not None:
+                            handoff_params["prompt_logprobs"] = prompt_logprobs_payload
                         if handoff_params:
                             out["disaggregated_params"] = handoff_params
 

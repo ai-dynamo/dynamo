@@ -130,6 +130,8 @@ impl LlmRegistration {
         max_num_batched_tokens = None,
         data_parallel_size = None,
         data_parallel_start_rank = None,
+        supports_lora = false,
+        max_loras = None,
         bootstrap_host = None,
         bootstrap_port = None,
     ))]
@@ -142,6 +144,8 @@ impl LlmRegistration {
         max_num_batched_tokens: Option<u64>,
         data_parallel_size: Option<u32>,
         data_parallel_start_rank: Option<u32>,
+        supports_lora: bool,
+        max_loras: Option<u32>,
         bootstrap_host: Option<String>,
         bootstrap_port: Option<u16>,
     ) -> Self {
@@ -154,8 +158,8 @@ impl LlmRegistration {
                 max_num_batched_tokens,
                 data_parallel_size,
                 data_parallel_start_rank,
-                supports_lora: false,
-                max_loras: None,
+                supports_lora,
+                max_loras,
                 bootstrap_host,
                 bootstrap_port,
             },
@@ -189,6 +193,14 @@ impl LlmRegistration {
     #[getter]
     fn data_parallel_start_rank(&self) -> Option<u32> {
         self.inner.data_parallel_start_rank
+    }
+    #[getter]
+    fn supports_lora(&self) -> bool {
+        self.inner.supports_lora
+    }
+    #[getter]
+    fn max_loras(&self) -> Option<u32> {
+        self.inner.max_loras
     }
     #[getter]
     fn bootstrap_host(&self) -> Option<&str> {
@@ -818,8 +830,8 @@ impl PyEngineCore {
                     max_num_batched_tokens: opt_attr::<u64>(&v, "max_num_batched_tokens")?,
                     data_parallel_size: opt_attr::<u32>(&v, "data_parallel_size")?,
                     data_parallel_start_rank: opt_attr::<u32>(&v, "data_parallel_start_rank")?,
-                    supports_lora: false,
-                    max_loras: None,
+                    supports_lora: opt_attr::<bool>(&v, "supports_lora")?.unwrap_or(false),
+                    max_loras: opt_attr::<u32>(&v, "max_loras")?,
                     bootstrap_host: opt_attr::<String>(&v, "bootstrap_host")?,
                     bootstrap_port: opt_attr::<u16>(&v, "bootstrap_port")?,
                 }),

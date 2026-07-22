@@ -884,29 +884,42 @@ impl Worker {
             })?;
         tracing::debug!("model registered with discovery");
 
-        self.register_engine_controls(&endpoint).await?;
-        self.register_engine_updates(&endpoint).await?;
+        let post_attach_result: Result<(), DynamoError> = async {
+            self.register_engine_controls(&endpoint).await?;
+            self.register_engine_updates(&endpoint).await?;
 
-        if should_register_lora_updates(
-            engine_config,
-            dynamo_runtime::config::env_is_truthy("DYN_LORA_ENABLED"),
-        ) {
-            let EngineKind::Llm(engine) = &self.engine else {
-                return Err(err(
-                    ErrorType::Backend(BackendError::InvalidArgument),
-                    "raw engines cannot advertise LoRA support",
-                ));
-            };
-            let controller = crate::lora::LoraController::new(
-                engine.clone(),
-                endpoint.clone(),
-                local_model.clone(),
-                model_type,
-                Some(worker_type),
-                needs,
-            )
-            .await?;
-            crate::lora::register_updates(&endpoint, controller);
+            if should_register_lora_updates(
+                engine_config,
+                dynamo_runtime::config::env_is_truthy("DYN_LORA_ENABLED"),
+            ) {
+                let EngineKind::Llm(engine) = &self.engine else {
+                    return Err(err(
+                        ErrorType::Backend(BackendError::InvalidArgument),
+                        "raw engines cannot advertise LoRA support",
+                    ));
+                };
+                let controller = crate::lora::LoraController::new(
+                    engine.clone(),
+                    endpoint.clone(),
+                    local_model.clone(),
+                    model_type,
+                    Some(worker_type),
+                    needs,
+                )
+                .await?;
+                crate::lora::register_updates(&endpoint, controller);
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = post_attach_result {
+            if let Err(unregister_error) = endpoint.unregister_endpoint_instance().await {
+                tracing::warn!(
+                    error = %unregister_error,
+                    "failed to unregister endpoint after post-attach initialization failure"
+                );
+            }
+            return Err(error);
         }
 
         let served = resolve_served_name(&self.config, engine_config)

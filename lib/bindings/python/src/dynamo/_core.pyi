@@ -3055,6 +3055,7 @@ class EntrypointArgs:
         enable_streaming_tool_dispatch: Optional[bool] = None,
         enable_streaming_reasoning_dispatch: Optional[bool] = None,
         tokenizer_backend: Optional[str] = None,
+        enable_engine_apis: bool = False,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -3241,6 +3242,8 @@ class backend:
             max_num_batched_tokens: Optional[int] = None,
             data_parallel_size: Optional[int] = None,
             data_parallel_start_rank: Optional[int] = None,
+            supports_lora: bool = False,
+            max_loras: Optional[int] = None,
             bootstrap_host: Optional[str] = None,
             bootstrap_port: Optional[int] = None,
         ) -> None: ...
@@ -3258,6 +3261,10 @@ class backend:
         def data_parallel_size(self) -> Optional[int]: ...
         @property
         def data_parallel_start_rank(self) -> Optional[int]: ...
+        @property
+        def supports_lora(self) -> bool: ...
+        @property
+        def max_loras(self) -> Optional[int]: ...
         @property
         def bootstrap_host(self) -> Optional[str]: ...
         @property
