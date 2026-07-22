@@ -720,14 +720,68 @@ mod tests {
     }
 
     #[test]
-    fn pool_edit_during_relist_defers_but_deletion_clears() {
-        // Steady state (not relisting): every pool change rebuilds immediately.
-        assert!(!defer_pool_rebuild(false, true));
-        assert!(!defer_pool_rebuild(false, false));
-        // Mid-relist: a selector/port edit (pool still present) is deferred to
-        // InitDone so it never rebuilds from the stale pre-relist store...
+    fn pool_edit_during_relist_rebuilds_at_init_done_from_completed_store() {
+        use kube::runtime::watcher;
+
+        let vllm_0 = pod(
+            "vllm-0",
+            Some("10.0.0.1"),
+            Some(true),
+            &[("app", "vllm-qwen")],
+        );
+        let vllm_1 = pod(
+            "vllm-1",
+            Some("10.0.0.2"),
+            Some(true),
+            &[("app", "vllm-qwen")],
+        );
+        let mut writer = kube::runtime::reflector::store::Writer::<Pod>::default();
+        let store = writer.as_reader();
+
+        // Initial LIST has both pods, and the index uses the original Pool port.
+        writer.apply_watcher_event(&watcher::Event::Init);
+        writer.apply_watcher_event(&watcher::Event::InitApply(vllm_0.clone()));
+        writer.apply_watcher_event(&watcher::Event::InitApply(vllm_1.clone()));
+        writer.apply_watcher_event(&watcher::Event::InitDone);
+        let index = RwLock::new(WorkerIndex::new());
+        rebuild_index(&store, Some(&pool()), 5557, None, &index);
+        assert_eq!(index.read().unwrap().len(), 2);
+
+        // During the next LIST, vllm-1 has disappeared. The reflector buffers
+        // vllm-0, but its live Store still exposes the prior two-pod snapshot.
+        writer.apply_watcher_event(&watcher::Event::Init);
+        writer.apply_watcher_event(&watcher::Event::InitApply(vllm_0.clone()));
+        assert_eq!(store.state().len(), 2);
+
+        // A live Pool port edit must not rebuild from that stale Store. The
+        // existing index remains the prior coherent snapshot until InitDone.
+        let mut updated_pool = pool();
+        updated_pool.target_port = 9000;
         assert!(defer_pool_rebuild(true, true));
-        // ...but a pool deletion/invalid spec still clears discovery immediately.
+        assert_eq!(
+            index
+                .read()
+                .unwrap()
+                .get(&hash_pod_name("vllm-0"))
+                .map(|entry| entry.endpoint.as_str()),
+            Some("10.0.0.1:8000")
+        );
+
+        // InitDone makes the staged list live. Its single rebuild uses both the
+        // completed one-pod Store and the latest PoolState.
+        writer.apply_watcher_event(&watcher::Event::InitDone);
+        rebuild_index(&store, Some(&updated_pool), 5557, None, &index);
+        let index = index.read().unwrap();
+        assert_eq!(index.len(), 1);
+        assert_eq!(
+            index
+                .get(&hash_pod_name("vllm-0"))
+                .map(|entry| entry.endpoint.as_str()),
+            Some("10.0.0.1:9000")
+        );
+        assert!(!index.contains_key(&hash_pod_name("vllm-1")));
+
+        // Pool deletion/invalidity remains an immediate clear, even mid-relist.
         assert!(!defer_pool_rebuild(true, false));
     }
 
