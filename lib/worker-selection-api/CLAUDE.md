@@ -48,6 +48,42 @@ Worker columns contain only currently eligible workers. Every present column has
 | `DEFAULT_KV_OVERLAP` | `default_kv_overlaps()` | Weighted and decay-adjusted KV-overlap credit used by the default cost, in blocks |
 | `DEFAULT_DECODE_LOAD` | `default_decode_loads()` | Projected decode load used by the default cost, in blocks |
 
+### Minimal Plugin
+
+```rust
+use dynamo_worker_selection_api::{
+    RouterRole, Selection, SelectionInput, WorkerInputs, WorkerSelectorPlugin,
+    export_worker_selector_plugin,
+};
+
+struct LeastDecodeLoad;
+
+impl WorkerSelectorPlugin for LeastDecodeLoad {
+    fn from_config(_config: &[u8], _role: RouterRole) -> Result<Self, String> {
+        Ok(Self)
+    }
+
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::DEFAULT_DECODE_LOAD
+    }
+
+    fn select(&mut self, input: SelectionInput<'_>) -> Result<Selection, String> {
+        let loads = input
+            .default_decode_loads()
+            .ok_or("DEFAULT_DECODE_LOAD was not requested")?;
+
+        loads
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, load)| *load)
+            .map(|(index, _)| Selection::Worker(index))
+            .ok_or_else(|| "no eligible workers".to_string())
+    }
+}
+
+export_worker_selector_plugin!(LeastDecodeLoad);
+```
+
 ### Execution Constraints
 
 - `select()` runs synchronously on the scheduler actor's request hot path. Keep it bounded and non-blocking; do not perform network or filesystem I/O.
