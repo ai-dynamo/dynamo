@@ -7,6 +7,8 @@
 //! implementations that wire the runtime-agnostic business logic (in `dynamo_kv_router`)
 //! to the configured event transport and Prometheus metrics.
 
+mod direct_zmq;
+
 pub use dynamo_kv_router::multi_worker_sequence::{
     ActiveSequencesMultiWorker, SequenceError, SequencePublisher, SequenceRequest,
     SequenceSubscriber,
@@ -317,8 +319,8 @@ pub async fn create_multi_worker_sequences(
     worker_type: &'static str,
     cancellation_token: CancellationToken,
 ) -> Result<Arc<ActiveSequencesMulti>> {
+    let transport_kind = endpoint.drt().default_event_transport_kind();
     let event_publisher = if replica_sync {
-        let transport_kind = endpoint.drt().default_event_transport_kind();
         let event_publisher = EventPublisher::for_endpoint_with_transport(
             &endpoint,
             ACTIVE_SEQUENCES_SUBJECT,
@@ -374,8 +376,19 @@ pub async fn create_multi_worker_sequences(
     let arc = Arc::new(multi_worker);
 
     if replica_sync {
-        let subscriber = RuntimeSequenceSubscriber::for_endpoint(&endpoint).await?;
-        arc.start_replica_sync(subscriber, cancellation_token.child_token());
+        let direct_config = direct_zmq::DirectZmqSequenceConfig::from_env();
+        if direct_config.should_use_direct(transport_kind) {
+            let _direct_zmq_task = direct_zmq::start(
+                endpoint,
+                arc.clone(),
+                direct_config.rcvhwm,
+                cancellation_token.child_token(),
+            )
+            .await?;
+        } else {
+            let subscriber = RuntimeSequenceSubscriber::for_endpoint(&endpoint).await?;
+            arc.start_replica_sync(subscriber, cancellation_token.child_token());
+        }
     }
 
     arc.start_periodic_force_expiry_across_all_workers(cancellation_token.child_token());

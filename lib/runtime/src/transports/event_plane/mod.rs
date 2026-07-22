@@ -16,7 +16,10 @@ pub use dynamic_subscriber::DynamicSubscriber;
 pub use frame::{FRAME_HEADER_SIZE, FRAME_VERSION, Frame, FrameError, FrameHeader};
 pub use traits::{EventEnvelope, EventStream, TypedEventStream};
 pub use transport::{EventTransportRx, EventTransportTx, WireStream};
-pub use zmq_transport::{ZmqPubTransport, ZmqSubTransport};
+pub use zmq_transport::{
+    ValidatedEnvelope, ValidatedZmqSource, ValidatedZmqSourceError, ZmqPubTransport,
+    ZmqSubTransport,
+};
 
 // Re-export transport kind from discovery for convenience
 pub use crate::discovery::{EventScope, EventTransportKind};
