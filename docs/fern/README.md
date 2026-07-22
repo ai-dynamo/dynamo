@@ -154,7 +154,7 @@ This is the main Fern site configuration. Key sections:
 | Section | Purpose |
 |---|---|
 | `instances` | Deployment targets — staging URL and custom production domain |
-| `products` | Defines the product ("Dynamo") and its version list |
+| `products` | Defines the Home, Docs, Blog, and Community top-level navigation |
 | `navbar-links` | GitHub repo link in the navigation bar |
 | `footer` | Points to `CustomFooter.tsx` React component |
 | `layout` | Page width, sidebar width, searchbar placement, etc. |
@@ -164,15 +164,20 @@ This is the main Fern site configuration. Key sections:
 | `js` | Adobe Analytics script injection |
 | `css` | Custom `main.css` stylesheet |
 
-**Important:** On `main`, `docs.yml` only lists the `dev` version. On
+The product selector uses Fern's `toggle` theme to render Home, Docs, Blog, and
+Community as a pill-shaped top-level navigation. Home, Blog, and Community each
+use an unversioned config under `products/`; only Docs has navigation tabs and a
+version selector.
+
+**Important:** On `main`, the Docs product only lists the `dev` version. On
 `docs-website`, it contains the **full versions array** (dev + all releases).
-The sync workflow preserves the versions array from `docs-website` when copying
-`docs.yml` from `main`.
+The sync workflow preserves the Docs product's release-managed path and versions
+when copying `docs.yml` from `main`.
 
 ### `docs/index.yml`
 
-Defines the navigation tree — the sidebar structure of the docs site. Each
-entry maps a page title to a markdown file path:
+Defines the tab and sidebar structure within the Docs product. Each entry maps a
+page title to a Markdown file path:
 
 ```yaml
 navigation:
@@ -223,12 +228,12 @@ publishing. It runs three jobs depending on the trigger:
 2. Copies content from `main`'s `docs/` → `docs-website`'s `fern/pages/`
 3. Copies `docs/index.yml` → `fern/versions/dev.yml` and transforms paths
    for the docs-website layout using `yq`
-4. Syncs assets from `docs/assets/` and Digest posts from `docs/digest/`
+4. Syncs assets, Digest posts, the Home page, and `products/*.yml`
 5. Copies Fern config files from `fern/` → docs-website's `fern/`
    (`fern.config.json`, `components/`, `main.css`, `convert_callouts.py`)
 6. Runs `convert_callouts.py` to transform GitHub-style callouts to Fern format
-7. Updates `docs.yml` from `main` **while preserving the versions array** from
-   `docs-website` (uses `yq` to save/restore the versions list)
+7. Updates `docs.yml` from `main` while preserving the Docs product's
+   release-managed path and versions from `docs-website`
 8. Commits and pushes to `docs-website`
 9. Publishes to Fern via `fern generate --docs`
 

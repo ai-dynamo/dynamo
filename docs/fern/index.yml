@@ -14,15 +14,11 @@
 # limitations under the License.
 
 # Navigation structure for Dynamo docs
-# Tab-based navigation: Home, User Guide, Use Cases, Well-Lit Paths, Recipes, Developer Guide, Reference, Blog, Community.
-# Each content tab sets skip-slug: true so page URLs derive from the file path and stay
-# independent of which tab a page lives in. The recipes tab keeps its recipes/ URL prefix.
+# Documentation tabs: User Guide, Features, Walkthroughs, Recipes, Developer Guide, and Reference.
+# Home, Blog, and Community are separate products configured in docs.yml. Each documentation
+# tab sets skip-slug: true so page URLs stay independent of the tab that contains them.
 
 tabs:
-  home:
-    display-name: Home
-    icon: house
-    skip-slug: true
   user-guide:
     display-name: User Guide
     icon: book-open
@@ -46,21 +42,8 @@ tabs:
     display-name: Reference
     icon: book
     skip-slug: true
-  blog:
-    display-name: Blog
-    icon: newspaper
-    skip-slug: true
-  community:
-    display-name: Community
-    icon: users
-    skip-slug: true
 
 navigation:
-  - tab: home
-    layout:
-      - page: Welcome
-        path: ./welcome.mdx
-
   - tab: user-guide
     variants:
       # ==================== Kubernetes Deployment variant ====================
@@ -841,81 +824,3 @@ navigation:
           # -- Kubernetes (hidden sub-pages) --
           - page: API Reference (K8s)
             path: kubernetes/api-reference.md
-
-  - tab: blog
-    layout:
-      # ==================== Blog ====================
-      - section: Blog
-        icon: newspaper
-        path: digest/index.mdx
-        slug: digest
-        contents:
-          - page: "Flash Indexer: Inter-Galactic KV Routing"
-            path: digest/flash-indexer/flash-indexer.md
-            slug: flash-indexer
-          - page: "Full-Stack Optimizations for Agentic Inference"
-            path: digest/agentic-inference/agentic-inference.md
-            slug: agentic-inference
-          - page: "Multi-Turn Agentic Harnesses"
-            path: digest/agentic-inference/agentic-harnesses.md
-            slug: agentic-harnesses
-          - page: "DynoSim: Simulating the Pareto Frontier"
-            path: digest/dynosim/dynosim-pareto-frontier.md
-            slug: dynosim-pareto-frontier
-          - page: "NVIDIA Dynamo Snapshot: Fast Startup for Inference Workloads on Kubernetes"
-            path: digest/snapshot/dynamo-snapshot-fast-startup.md
-            slug: dynamo-snapshot-fast-startup
-          - page: "Dynamo Day 0 support for TokenSpeed"
-            path: digest/tokenspeed/tokenspeed-day-0.md
-            slug: tokenspeed-day-0
-
-  - tab: community
-    layout:
-      # ==================== Developer's Guide ====================
-      - section: Contributing
-        icon: code-pull-request
-        path: community/README.md
-        contents:
-          - page: Contributing to Dynamo
-            path: contribution-guide.md
-          - page: Documentation Style Guide
-            path: documentation-style-guide.md
-          - page: Docs Website
-            path: README.md
-
-      # ==================== Hidden Pages (Developer Guide) ====================
-      - section: Additional Resources
-        hidden: true
-        contents:
-          # -- Development --
-          - page: Runtime Guide
-            path: development/runtime-guide.md
-          - page: Jail Stream
-            path: development/jail-stream.md
-          # -- Templates --
-          - section: Templates
-            contents:
-              - page: Overview
-                path: templates/README.md
-              - page: Backend Guide
-                path: templates/backend-guide.md
-              - page: Backend README
-                path: templates/backend-readme.md
-              - page: Component Design
-                path: templates/component-design.md
-              - page: Component Examples
-                path: templates/component-examples.md
-              - page: Component Guide
-                path: templates/component-guide.md
-              - page: Component README
-                path: templates/component-readme.md
-              - page: Feature Backend
-                path: templates/feature-backend.md
-              - page: Feature README
-                path: templates/feature-readme.md
-              - page: In-Code README
-                path: templates/incode-readme.md
-              - page: Infrastructure README
-                path: templates/infrastructure-readme.md
-              - page: Integration README
-                path: templates/integration-readme.md

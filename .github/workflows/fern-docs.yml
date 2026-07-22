@@ -23,7 +23,7 @@
 #    - Triggers on trusted pushes to main or pull-request/N when docs-site files change
 #    - On main: commits and pushes to docs-website, then publishes via `fern generate --docs`
 #    - On gated PR branches: generates a preview URL via `fern generate --docs --preview` and comments on PR
-#    - Preserves versioned documentation (products[0]) from docs-website's docs.yml
+#    - Preserves the Docs product's release-managed versions from docs-website's docs.yml
 #
 # 2. VERSION RELEASE (tags): Creates versioned documentation snapshot
 #    - Triggers on new version tags (vX.Y.Z format)
@@ -126,6 +126,7 @@ jobs:
             --exclude='docs.yml' \
             --exclude='components' \
             --exclude='main.css' \
+            --exclude='products' \
             --exclude='welcome.mdx' \
             --exclude='convert_callouts.py' \
             --exclude='.gitignore' \
@@ -163,6 +164,16 @@ jobs:
             cp -r source-checkout/docs/fern/components docs-checkout/fern/components
           fi
 
+          # Sync product navigation configs and the standalone Home page.
+          rm -rf docs-checkout/fern/products
+          cp -r source-checkout/docs/fern/products docs-checkout/fern/products
+          cp source-checkout/docs/fern/welcome.mdx docs-checkout/fern/welcome.mdx
+
+          # Community pages move under pages-dev on docs-website. Home and Blog
+          # continue to reference root-level welcome.mdx and digest/, respectively.
+          yq -i '(.. | select(has("path")).path) |= sub("^../", "../pages-dev/")' \
+            docs-checkout/fern/products/community.yml
+
           # Sync digest/ directory
           if [ -d source-checkout/docs/fern/digest ]; then
             echo "Syncing digest/ to docs-website branch..."
@@ -198,11 +209,13 @@ jobs:
         run: |
           cd docs-checkout/fern
 
-          # Save the full products[0] block from docs-website (versions, path, etc.)
-          yq '.products[0]' docs.yml > /tmp/preserved_product.yml
+          # Preserve the Docs product's release-managed path and versions. The
+          # Dynamo fallback handles the first sync from the pre-product layout.
+          yq '[.products[] | select(.display-name == "Docs" or .display-name == "Dynamo")][0] | {"path": .path, "versions": .versions}' \
+            docs.yml > /tmp/preserved_docs_product.yml
 
-          echo "Preserved products[0] block:"
-          cat /tmp/preserved_product.yml
+          echo "Preserved Docs product release state:"
+          cat /tmp/preserved_docs_product.yml
 
           # Copy docs.yml from source to get config updates (redirects, layout, etc.)
           cp ../../source-checkout/docs/fern/docs.yml docs.yml
@@ -212,8 +225,9 @@ jobs:
           # for older source layouts.
           sed -i 's|\.\./docs/assets/|./assets/|g' docs.yml
 
-          # Restore the preserved products[0] block
-          yq -i '.products[0] = load("/tmp/preserved_product.yml")' docs.yml
+          # Restore release-managed fields without overwriting the source product
+          # order, labels, slugs, or the Home/Blog/Community products.
+          yq -i '( .products[] | select(.display-name == "Docs") ) *= load("/tmp/preserved_docs_product.yml")' docs.yml
 
           # Inject the private NVIDIA global theme for production builds only.
           # It is intentionally absent from the source repo's docs.yml so that
@@ -462,17 +476,23 @@ jobs:
           echo "Updating $DOCS_FILE to include $TAG..."
 
           # Check if version already in docs.yml
-          if yq ".products[0].versions[] | select(.display-name == \"$TAG\")" "$DOCS_FILE" | grep -q .; then
+          DOCS_IDX=$(yq '.products | to_entries | map(select(.value.display-name == "Docs")) | .[0].key' "$DOCS_FILE")
+          if [ "$DOCS_IDX" = "null" ]; then
+            echo "::error::Docs product not found in $DOCS_FILE"
+            exit 1
+          fi
+
+          if yq ".products[$DOCS_IDX].versions[] | select(.display-name == \"$TAG\")" "$DOCS_FILE" | grep -q .; then
             echo "Version $TAG already in docs.yml, skipping update"
             exit 0
           fi
 
           # Find the index of the "dev" entry and insert new version right after it
-          DEV_IDX=$(yq '.products[0].versions | to_entries | map(select(.value.display-name == "dev")) | .[0].key' "$DOCS_FILE")
+          DEV_IDX=$(yq ".products[$DOCS_IDX].versions | to_entries | map(select(.value.display-name == \"dev\")) | .[0].key" "$DOCS_FILE")
           INSERT_IDX=$((DEV_IDX + 1))
 
           yq -i "
-            .products[0].versions |= (
+            .products[$DOCS_IDX].versions |= (
               .[:$INSERT_IDX] +
               [{\"display-name\": \"$TAG\", \"path\": \"./versions/$TAG.yml\", \"slug\": \"$TAG\", \"availability\": \"stable\"}] +
               .[$INSERT_IDX:]
@@ -480,14 +500,14 @@ jobs:
           " "$DOCS_FILE"
 
           # Update the top-level entry to point to the new version
-          yq -i ".products[0].path = \"./versions/$TAG.yml\"" "$DOCS_FILE"
+          yq -i ".products[$DOCS_IDX].path = \"./versions/$TAG.yml\"" "$DOCS_FILE"
 
           # Update the "Latest" entry to point to the new version
-          yq -i ".products[0].versions[0].path = \"./versions/$TAG.yml\"" "$DOCS_FILE"
-          yq -i ".products[0].versions[0].display-name = \"Latest ($TAG)\"" "$DOCS_FILE"
+          yq -i ".products[$DOCS_IDX].versions[0].path = \"./versions/$TAG.yml\"" "$DOCS_FILE"
+          yq -i ".products[$DOCS_IDX].versions[0].display-name = \"Latest ($TAG)\"" "$DOCS_FILE"
 
-          echo "Updated docs.yml products/versions section:"
-          yq '.products[0].versions' "$DOCS_FILE"
+          echo "Updated Docs product versions:"
+          yq ".products[$DOCS_IDX].versions" "$DOCS_FILE"
 
       - name: Commit and push changes
         run: |

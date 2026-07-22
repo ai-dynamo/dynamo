@@ -133,58 +133,53 @@ html.dark,
     --pst-color-accent: var(--nv-color-green);
 }
 
-/* Product and verion selector styling */
+/* Product and version selector styling */
 
+/* Fern's toggle product switcher provides the pill-shaped top-level navigation. */
 .fern-product-selector {
-  border-radius: 8px;
-  pointer-events: none !important;
-  padding-right: 2px;
+    border-radius: var(--rounded);
 }
 
-.product-dropdown-trigger svg{
-    display: none !important;
+/* Docs stays first in docs.yml to preserve the unprefixed versioned URLs.
+   Reorder only the selector presentation so the global Home link appears first. */
+.fern-product-selector[data-testid="product-toggle"] > :nth-child(1),
+.fern-product-selector-radio-group > :nth-child(1) {
+    order: 2;
 }
 
-.fern-product-selector .product-dropdown-trigger p{
-    font-weight: bold !important;
-}
-.fern-product-selector-radio-group {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 8px;
-    max-width: 1000px;
+.fern-product-selector[data-testid="product-toggle"] > :nth-child(2),
+.fern-product-selector-radio-group > :nth-child(2) {
+    order: 1;
 }
 
-@media (max-width: 768px) {
-    .fern-product-selector-radio-group {
-        grid-template-columns: repeat(2, 1fr);
-    }
+.fern-product-selector[data-testid="product-toggle"] > :nth-child(3),
+.fern-product-selector-radio-group > :nth-child(3) {
+    order: 3;
 }
+
+.fern-product-selector[data-testid="product-toggle"] > :nth-child(4),
+.fern-product-selector-radio-group > :nth-child(4) {
+    order: 4;
+}
+
 .fern-version-selector {
     transform: none;
 }
 
-.fern-version-selector .version-dropdown-trigger{
+.fern-version-selector .version-dropdown-trigger {
     outline: 1px solid var(--border, var(--grayscale-a5)) !important;
     border-radius: 5px;
     transition: box-shadow 0.3s ease, outline 0.3s ease;
 }
-.product-dropdown-trigger{
-    padding-left: 0px !important;
-}
 
-.product-dropdown-trigger, .version-dropdown-trigger{
+.version-dropdown-trigger {
     background-color: transparent !important;
 }
-.product-dropdown-trigger svg:hover{
-    stroke: var(--nv-color-green) !important;
-}
-.version-dropdown-trigger:hover{
+
+.version-dropdown-trigger:hover {
     box-shadow: 0 0 0 1px var(--nv-color-green) !important;
 }
-.version-dropdown-trigger svg:hover{
-    stroke: var(--nv-color-green) !important;
-}
+
 /* Sidebar styling */
 #fern-sidebar {
     border-right: 1px solid var(--border, var(--grayscale-a5)) !important;

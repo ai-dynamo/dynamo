@@ -25,13 +25,24 @@ agents:
   page-directive: "For clean Markdown content of this page, append .md to this URL. For the complete documentation index, see https://docs.nvidia.com/dynamo/llms.txt. For full content including API reference and SDK examples, see https://docs.nvidia.com/dynamo/llms-full.txt."
 
 
+# Keep Docs first internally so Fern retains /dynamo as the versioned Docs root.
+# main.css presents Home first in the visible product switcher.
 products:
-  - display-name: Dynamo
+  - display-name: Docs
     slug: /
     path: ./index.yml
     versions:
       - display-name: dev
         path: ./index.yml
+  - display-name: Home
+    slug: home
+    path: ./products/home.yml
+  - display-name: Blog
+    slug: blog
+    path: ./products/blog.yml
+  - display-name: Community
+    slug: connect
+    path: ./products/community.yml
 
 redirects:
   - source: "/dynamo/index.html"
@@ -234,29 +245,33 @@ redirects:
     destination: "/dynamo/dev/design-docs/fault-tolerance-testing"
   - source: "/dynamo/fault-tolerance/testing"
     destination: "/dynamo/dev/design-docs/fault-tolerance-testing"
-  # Digest moved from /blog to /digest
+  # Blog is a top-level product rather than a versioned Docs tab.
+  - source: "/dynamo/dev/digest/:slug*"
+    destination: "/dynamo/blog/:slug*"
+  - source: "/dynamo/dev/digest"
+    destination: "/dynamo/blog"
   - source: "/dynamo/dev/blog/:slug*"
-    destination: "/dynamo/dev/digest/:slug*"
+    destination: "/dynamo/blog/:slug*"
   - source: "/dynamo/dev/blog"
-    destination: "/dynamo/dev/digest"
+    destination: "/dynamo/blog"
   - source: "/dynamo/latest/blog/:slug*"
-    destination: "/dynamo/dev/digest/:slug*"
+    destination: "/dynamo/blog/:slug*"
   - source: "/dynamo/latest/blog"
-    destination: "/dynamo/dev/digest"
-  - source: "/dynamo/blog/:slug*"
-    destination: "/dynamo/dev/digest/:slug*"
-  - source: "/dynamo/blog"
-    destination: "/dynamo/dev/digest"
-  # Tab split: docs tab divided into Home / User Guide / Reference / Blog tabs.
-  # Compatibility and blog changed section (and thus URL); everything else kept its URL.
-  # Introduction was later moved from the Home tab back into User Guide > Getting Started,
-  # so its redirect points the old Home-tab URL at the Getting Started page.
+    destination: "/dynamo/blog"
+  # Community is also global; use /connect to avoid colliding with the
+  # /community route retained by frozen Latest and pinned Docs versions.
+  - source: "/dynamo/dev/community/:slug*"
+    destination: "/dynamo/connect/:slug*"
+  - source: "/dynamo/dev/community"
+    destination: "/dynamo/connect"
+  # Historical redirects from the earlier single-product tab layout.
+  # Introduction moved from Home into User Guide > Getting Started.
   - source: "/dynamo/dev/introduction"
     destination: "/dynamo/dev/getting-started/introduction"
   - source: "/dynamo/dev/getting-started/compatibility"
     destination: "/dynamo/dev/reference/compatibility"
   - source: "/dynamo/dev/getting-started/blog"
-    destination: "/dynamo/dev/digest"
+    destination: "/dynamo/blog"
   - source: "/dynamo/dev/additional-resources/kv-router-a-b-testing"
     destination: "/dynamo/dev/benchmarks/kv-router-ab-testing"
 
@@ -304,12 +319,13 @@ typography:
 theme:
   page-actions: toolbar
   footer-nav: minimal
+  product-switcher: toggle
 
 logo:
   dark: ./assets/NVIDIA_dark.svg
   light: ./assets/NVIDIA_light.svg
   height: 20
-  href: /dynamo/getting-started
+  href: /dynamo/home
 
 favicon: ./assets/NVIDIA_symbol.svg
 
