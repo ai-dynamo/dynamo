@@ -89,7 +89,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from itertools import count
 from typing import TYPE_CHECKING, cast
@@ -112,6 +112,7 @@ from dynamo.common.forward_pass_metrics import (
     encode,
 )
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.vllm import gc_policy as _fpm_gc_policy
 from dynamo.vllm.benchmark_points import (
     BENCHMARK_MODES,
     BenchmarkMode,
@@ -163,6 +164,9 @@ class _BenchPhase(enum.Enum):
     PREFILL_SWEEP = "prefill_sweep"
     DECODE_SWEEP = "decode_sweep"
     DONE = "done"
+
+
+EAGER_WARMUP_REASON = "eager_warmup"
 
 
 @dataclass
@@ -1620,6 +1624,7 @@ class InstrumentedScheduler(AsyncScheduler):
 
     def _bench_init(self, vllm_config: "VllmConfig") -> None:
         """Parse benchmark config and initialise state machine."""
+        _fpm_gc_policy.start_gc_policy()
         bench_cfg = vllm_config.additional_config.get("benchmark")
         if not bench_cfg:
             self._bench_active = False
@@ -1828,6 +1833,38 @@ class InstrumentedScheduler(AsyncScheduler):
 
     # -- Grid generation ------------------------------------------------
 
+    def _bench_eager_warmup_points(self) -> list[BenchmarkPoint]:
+        """One discarded replica per eager shape, executed before the sweep.
+
+        Captured shapes are executed during cudagraph capture at startup, so
+        their one-time per-shape costs (first kernel launch and selection,
+        allocator pool growth) are paid before any measurement. Eager shapes
+        (no capture available) get no such implicit warmup: their first
+        execution pays a ~1s one-off (measured 1126ms vs 147ms warm on
+        decode batch 513) and a single-sample sweep books that cost as the
+        point's latency. Prepending one replica per eager shape - deduped by
+        the shape driver: token count for prefill, batch size for decode -
+        puts eager and captured points on the same footing. Replicas run
+        through the normal injection/lockstep/validation path on every rank
+        (grids stay identical by construction) and are dropped at save time.
+        """
+        seen: set[tuple[str, int]] = set()
+        replicas: list[BenchmarkPoint] = []
+        for point in self._bench_grid:
+            if point.expected_capture_size is not None:
+                continue
+            key = (
+                point.point_type,
+                point.total_prefill_tokens
+                if point.point_type == "prefill"
+                else point.batch_size,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            replicas.append(replace(point, sample_reasons=[EAGER_WARMUP_REASON]))
+        return replicas
+
     def _bench_build_grid(self) -> None:
         """Generate the sweep grid once scheduler limits are known."""
         if self._bench_grid_built:
@@ -1850,9 +1887,29 @@ class InstrumentedScheduler(AsyncScheduler):
                 if len(self._bench_grid) == points_before:
                     self._bench_missing_phases.append("decode")
                     logger.warning("Benchmark decode phase generated no points")
-        self._bench_expected_points = len(self._bench_grid)
-        for benchmark_id, point in enumerate(self._bench_grid, start=1):
-            point.benchmark_id = benchmark_id
+        warmup_points = self._bench_eager_warmup_points()
+        if warmup_points:
+            self._bench_grid.extendleft(reversed(warmup_points))
+            logger.info(
+                "Benchmark grid: prepending %d eager-shape warmup point(s); "
+                "their results are discarded",
+                len(warmup_points),
+            )
+        self._bench_expected_points = len(self._bench_grid) - len(warmup_points)
+        # Published results must carry contiguous benchmark IDs starting at 1
+        # (the native-artifact contract), so real points are numbered first;
+        # discarded warmup replicas take IDs after the real range. counter_id
+        # stamping uses point.benchmark_id directly, so execution order and
+        # ID order are independent.
+        real_id = 0
+        warmup_id = self._bench_expected_points
+        for point in self._bench_grid:
+            if EAGER_WARMUP_REASON in point.sample_reasons:
+                warmup_id += 1
+                point.benchmark_id = warmup_id
+            else:
+                real_id += 1
+                point.benchmark_id = real_id
         grid_payload = json.dumps(
             [asdict(point) for point in self._bench_grid],
             sort_keys=True,
@@ -3240,6 +3297,17 @@ class InstrumentedScheduler(AsyncScheduler):
                     reason,
                 )
                 self._bench_skip_point(point, reason)
+                self._bench_current_point = None
+                self._bench_current_fpms = []
+                self._bench_point_deadline = 0.0
+                if group_result.stop_requested:
+                    self._bench_request_timeout_stop(point)
+                return
+
+            if EAGER_WARMUP_REASON in point.sample_reasons:
+                logger.debug(
+                    "Discarding eager-shape warmup result: %s", point
+                )
                 self._bench_current_point = None
                 self._bench_current_fpms = []
                 self._bench_point_deadline = 0.0

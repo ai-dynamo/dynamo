@@ -351,6 +351,17 @@ def update_engine_config_with_dynamo(
                 "scheduler_cls"
             ] = "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
             logger.info("Benchmark mode: auto-enabling InstrumentedScheduler")
+        if os.environ.get("DYN_FPM_GC_POLICY"):
+            existing_ext = getattr(engine_config, "worker_extension_cls", None)
+            if not existing_ext:
+                from dynamo.vllm.gc_policy import WORKER_EXTENSION_CLS
+
+                defaults["worker_extension_cls"] = WORKER_EXTENSION_CLS
+                logger.info(
+                    "Benchmark mode: DYN_FPM_GC_POLICY set, injecting "
+                    "worker_extension_cls=%s",
+                    WORKER_EXTENSION_CLS,
+                )
         elif existing_cls is not None and "InstrumentedScheduler" not in str(
             existing_cls
         ):
