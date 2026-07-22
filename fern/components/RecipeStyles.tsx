@@ -37,17 +37,25 @@ const RECIPE_CSS = `
     --pst-color-surface: #1a1a1a !important;
 }
 
-/* Wider content column on recipe/benchmark pages.
-   These pages set hide-toc: true, so the right-hand TOC rail is empty, yet
-   Fern still caps prose at the site-wide --content-width (812px, defined on
-   :root), wasting the freed horizontal space and cramping the model-card grid
-   and target-picker tables. Re-declare the variable here; because this
-   stylesheet only loads on recipe/benchmark pages, the wider column is scoped
-   to them while every other page keeps 812px. Held under --page-width (1376px)
-   minus --sidebar-width (248px) so content never overflows the layout.
-   !important wins over the :root default regardless of style-tag order. */
+/* Wider layout on recipe/benchmark pages.
+   These pages set hide-toc: true, so the right-hand TOC rail is empty. Two
+   site-wide layout caps otherwise waste the freed horizontal space:
+     1. --page-width (1376px) is the max width of the whole sidebar+content
+        block. On a window wider than that (e.g. ~1770px) Fern centers the
+        block and leaves ~200px of dead margin on EACH side -- most visible as
+        the empty strip under the full-width header on the left.
+     2. --content-width (812px) caps the content column, cramping the
+        model-card grid and target-picker tables.
+   Raise both here. Because this stylesheet only loads on recipe/benchmark
+   pages, the wider layout is scoped to them; every other page keeps 1376/812.
+   Both vars are declared on :root by Fern, so a :root !important override wins
+   regardless of style-tag order. --content-width behaves as a MAX (the layout
+   caps it at the available width), so the larger value fills wide screens and
+   still shrinks safely on narrow ones; 1600px doubles as a sane readability
+   cap on very wide monitors. */
 :root {
-    --content-width: 1100px !important;
+    --page-width: 1920px !important;
+    --content-width: 1600px !important;
 }
 
 /* Product switcher: hide the FontAwesome "code" glyph (</>) placeholder.
