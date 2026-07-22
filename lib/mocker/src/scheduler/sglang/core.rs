@@ -623,6 +623,7 @@ impl SglangCore {
         let scheduled_decode_lens: Vec<u64> = self
             .running
             .iter()
+            .filter(|req| req.remaining_output_tokens() > 0)
             .map(|req| req.current_sequence_len() as u64)
             .collect();
 

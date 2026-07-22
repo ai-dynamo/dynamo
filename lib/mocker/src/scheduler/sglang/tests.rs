@@ -99,6 +99,9 @@ fn zero_output_request_completes_after_prefill() {
 
     assert!(core.is_empty());
     assert_eq!(pass.completed_requests, 1);
+    let fpm = pass.fpm.as_ref().unwrap();
+    assert_eq!(fpm.num_decode_requests, 0);
+    assert_eq!(fpm.sum_decode_kv_tokens, 0);
     assert!(matches!(
         pass.output_signals.as_slice(),
         [OutputSignal {

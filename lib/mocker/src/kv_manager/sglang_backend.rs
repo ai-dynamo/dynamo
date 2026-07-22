@@ -418,34 +418,28 @@ impl SglangKvManager {
         debug_assert!(complete_len <= kv_indices.len());
         debug_assert!(first_new_token <= complete_len);
 
+        if !first_new_token.is_multiple_of(block_size)
+            || !complete_len.is_multiple_of(block_size)
+            || complete_len > kv_indices.len()
+            || first_new_token > complete_len
+            || !self.radix_path_covers(last_node, first_new_token, complete_len)
+        {
+            tracing::error!(
+                first_new_token,
+                complete_len,
+                kv_indices = kv_indices.len(),
+                "invalid SGLang canonicalization range or radix path"
+            );
+            return;
+        }
+
         let mut unretained_indices = Vec::new();
         let mut current = last_node;
         let mut path_end = complete_len;
 
         while path_end > first_new_token {
-            debug_assert_ne!(current, self.cache.root());
-            if current == self.cache.root() {
-                tracing::error!(
-                    path_end,
-                    first_new_token,
-                    complete_len,
-                    "SGLang radix path ended before the materialized prefix"
-                );
-                break;
-            }
-
             let node = self.cache.node(current);
             let node_len = node.value.len();
-            debug_assert!(node_len <= path_end);
-            if node_len > path_end {
-                tracing::error!(
-                    node_len,
-                    path_end,
-                    complete_len,
-                    "SGLang radix node exceeds the materialized prefix"
-                );
-                break;
-            }
             let path_start = path_end - node_len;
             let reconcile_start = path_start.max(first_new_token);
 
@@ -465,6 +459,26 @@ impl SglangKvManager {
         }
 
         self.free_indices(&unretained_indices);
+    }
+
+    fn radix_path_covers(
+        &self,
+        mut current: NodeId,
+        first_new_token: usize,
+        mut path_end: usize,
+    ) -> bool {
+        while path_end > first_new_token {
+            if current == self.cache.root() {
+                return false;
+            }
+            let node = self.cache.node(current);
+            if node.value.len() > path_end {
+                return false;
+            }
+            path_end -= node.value.len();
+            current = node.parent.unwrap_or_else(|| self.cache.root());
+        }
+        true
     }
 
     /// Evict tokens from the cache, publish BlockRemoved events, and log a trace.
@@ -1095,6 +1109,19 @@ mod tests {
 
         mgr.free_indices(&extended.kv_indices[extended.prefix_len..]);
         mgr.free_request(extended.last_node);
+    }
+
+    #[test]
+    fn invalid_canonical_path_does_not_partially_rewrite_or_free_indices() {
+        let mut mgr = SglangKvManager::new(8, 4, KvEventPublishers::default(), 0);
+        let mut indices = mgr.cache_mut().token_pool.allocate(4).unwrap();
+        let original = indices.clone();
+        let root = mgr.cache().root();
+
+        mgr.canonicalize_unfinished_indices(&mut indices, root, 0, 4);
+
+        assert_eq!(indices, original);
+        assert_eq!(mgr.cache().token_pool.available(), 4);
     }
 
     #[test]

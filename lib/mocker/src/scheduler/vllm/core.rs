@@ -109,6 +109,7 @@ struct ScheduledWork {
     total_tokens: usize,
     prompt_tokens: usize,
     prefix_tokens: usize,
+    terminal_after_schedule: bool,
     /// Full prompt length, captured at schedule time for FPM variance calculation.
     prompt_len: usize,
     /// Total sequence length (prompt + generated) at schedule time, used for
@@ -1676,9 +1677,10 @@ impl VllmCore {
             ))
         });
 
-        let scheduled_decodes = scheduled
-            .values()
-            .filter_map(|work| (work.prompt_tokens == 0).then_some(work.sequence_len as u64));
+        let scheduled_decodes = scheduled.values().filter_map(|work| {
+            (work.prompt_tokens == 0 && !work.terminal_after_schedule)
+                .then_some(work.sequence_len as u64)
+        });
 
         let queued_prefills = self.state.waiting.iter().filter_map(|uuid| {
             let request = self.state.requests.get(uuid)?;
@@ -1881,12 +1883,16 @@ impl VllmCore {
             .get(&uuid)
             .map(|r| r.sequence.len())
             .unwrap_or(0);
+        let terminal_after_schedule = self.state.requests.get(&uuid).is_some_and(|request| {
+            policy::generation_complete(&request.sequence, self.args.max_model_len)
+        });
         scheduled.insert(
             uuid,
             ScheduledWork {
                 total_tokens: tokens_used,
                 prompt_tokens,
                 prefix_tokens: prompt_before,
+                terminal_after_schedule,
                 prompt_len,
                 sequence_len,
             },

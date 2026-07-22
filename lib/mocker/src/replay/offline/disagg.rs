@@ -1371,6 +1371,7 @@ impl DisaggRuntime {
     /// Process one prefill output signal, including router updates and decode handoff scheduling.
     fn process_prefill_signal(&mut self, signal: OutputSignal) -> Result<()> {
         if !signal.rejected
+            && signal.token_id.is_some()
             && let Some(capture) = self.conformance_capture.as_mut()
         {
             capture.source_output_tokens += 1;

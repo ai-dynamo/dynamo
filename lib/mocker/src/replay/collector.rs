@@ -483,6 +483,12 @@ impl SlaThresholds {
         }
         true
     }
+
+    fn is_good_without_tokens(&self, e2e_ms: f64) -> bool {
+        self.ttft_ms.is_none()
+            && self.itl_ms.is_none()
+            && self.e2e_ms.is_some_and(|bound| e2e_ms <= bound)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -852,18 +858,10 @@ impl TraceCollector {
             if stats.first_admit_ms.is_none() {
                 continue;
             }
-            let terminal_time_ms = match stats.terminal_status {
-                Some(ReplayTerminalStatus::Completed) => {
-                    stats.terminal_time_ms.or_else(|| stats.last_token_ms())
-                }
-                None => stats.last_token_ms(),
-                Some(
-                    ReplayTerminalStatus::Rejected
-                    | ReplayTerminalStatus::Canceled
-                    | ReplayTerminalStatus::Failed,
-                ) => None,
-            };
-            let Some(terminal_time_ms) = terminal_time_ms else {
+            if stats.terminal_status != Some(ReplayTerminalStatus::Completed) {
+                continue;
+            }
+            let Some(terminal_time_ms) = stats.terminal_time_ms else {
                 continue;
             };
 
@@ -878,6 +876,10 @@ impl TraceCollector {
             let (Some(first_token_ms), Some(last_token_ms)) =
                 (stats.first_token_ms(), stats.last_token_ms())
             else {
+                let e2e_ms = (terminal_time_ms - stats.arrival_time_ms).max(0.0);
+                if sla.is_set() && sla.is_good_without_tokens(e2e_ms) {
+                    goodput_requests += 1;
+                }
                 continue;
             };
 
@@ -1229,6 +1231,50 @@ mod tests {
         assert_eq!(report.latency.e2e.mean_ms, 0.0);
     }
 
+    #[test]
+    fn token_before_simulation_cap_does_not_count_as_completion() {
+        let mut collector = TraceCollector::default();
+        let uuid = Uuid::from_u128(100);
+        collector.on_arrival(uuid, 0.0, 32, 4);
+        collector.on_admit(uuid, 5.0, 0);
+        collector.on_token(uuid, 25.0);
+
+        let report = collector.finish();
+
+        assert_eq!(report.request_counts.completed_requests, 0);
+        assert_eq!(report.request_counts.total_input_tokens, 0);
+        assert_eq!(report.request_counts.total_output_tokens, 0);
+        assert_eq!(report.throughput.duration_ms, 0.0);
+    }
+
+    #[test]
+    fn zero_output_goodput_requires_e2e_only_sla() {
+        let collect = |sla| {
+            let mut collector = TraceCollector::default();
+            collector.set_sla_thresholds(sla);
+            let uuid = Uuid::from_u128(101);
+            collector.on_arrival(uuid, 0.0, 32, 0);
+            collector.on_admit(uuid, 5.0, 0);
+            collector.on_terminal(uuid, 100.0, ReplayTerminalStatus::Completed);
+            collector.finish().goodput.unwrap().completed_requests
+        };
+
+        assert_eq!(
+            collect(SlaThresholds {
+                e2e_ms: Some(100.0),
+                ..Default::default()
+            }),
+            1
+        );
+        assert_eq!(
+            collect(SlaThresholds {
+                ttft_ms: Some(1_000.0),
+                ..Default::default()
+            }),
+            0
+        );
+    }
+
     /// With per-request capture on, a standard disagg-style request lifecycle
     /// (arrival → admit → prefill_assigned → decode_assigned → tokens) yields
     /// exactly one record with all fields populated correctly.
@@ -1323,6 +1369,7 @@ mod tests {
         collector.on_decode_assigned(uuid, 0);
         collector.on_token(uuid, 50.0);
         collector.on_token(uuid, 60.0);
+        collector.on_terminal(uuid, 60.0, ReplayTerminalStatus::Completed);
 
         assert!(collector.requests[&uuid].detail.is_none());
 
@@ -1348,6 +1395,8 @@ mod tests {
         for &t in token_times_ms {
             collector.on_token(uuid, t);
         }
+        let terminal_time_ms = token_times_ms.last().copied().unwrap_or(arrival_ms);
+        collector.on_terminal(uuid, terminal_time_ms, ReplayTerminalStatus::Completed);
     }
 
     /// Goodput classifies a request "good" using aiperf's average ITL,
@@ -1558,6 +1607,7 @@ mod tests {
         collector.on_admit(uuid, 1.0, 0);
         collector.on_admit(uuid, 2.0, 80);
         collector.on_token(uuid, 3.0);
+        collector.on_terminal(uuid, 3.0, ReplayTerminalStatus::Completed);
 
         let report = collector.finish();
 
