@@ -51,6 +51,24 @@ The aggregate wait in `runtime.shutdown()` is bounded by
 (15 minutes). If endpoint draining exceeds this timeout, Dynamo logs the
 remaining graceful endpoint count and proceeds with runtime teardown.
 
+### Fast Failover Exit
+
+GMS failover deployments can opt into a shorter process-exit path with
+`DYN_GMS_FAILOVER_FAST_EXIT_ON_SIGTERM=1`. In that mode, the worker attempts to
+unregister its endpoints and then exits immediately so the kernel releases
+process-owned failover locks. The unregister attempt is bounded by
+`DYN_GMS_FAILOVER_UNREGISTER_TIMEOUT_SECS` (default 5 seconds).
+
+This mode is disabled by default. When it is disabled, endpoint unregister is
+not subject to the failover timeout and the normal grace, drain, cleanup, and
+runtime shutdown sequence is unchanged. Enable it only for a deployment whose
+replacement worker is fenced by a process-owned failover lock.
+
+| Environment variable | Default | Meaning |
+|---|---:|---|
+| `DYN_GMS_FAILOVER_FAST_EXIT_ON_SIGTERM` | `0` | Enable the failover-only exit path. |
+| `DYN_GMS_FAILOVER_UNREGISTER_TIMEOUT_SECS` | `5` | Maximum discovery unregister wait before failover exit. |
+
 ## Endpoint Draining
 
 After the grace period, `runtime.shutdown()` invalidates endpoints so no new requests are accepted. The behavior for in-flight requests depends on the `graceful_shutdown` parameter when serving the endpoint.
