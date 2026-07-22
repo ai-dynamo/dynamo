@@ -6,8 +6,6 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from kubernetes.client import ApiException
-
 from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
@@ -23,7 +21,7 @@ from dynamo.planner.environment.metrics_provider.interface import (
     TrafficMetricsProvider,
 )
 from dynamo.planner.environment.state import ComponentState, DeploymentState
-from dynamo.planner.errors import DeploymentValidationError, PlannerError
+from dynamo.planner.errors import DeploymentValidationError
 from dynamo.planner.monitoring.dgd_services import ComponentPowerConfig
 from dynamo.planner.monitoring.traffic_metrics import Metrics
 
@@ -171,7 +169,25 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         self._refresh_worker_info()
         self._refresh_gpu_counts()
         self._refresh_power_configs(is_initialization=is_initialization)
-        await self._refresh_replica_counts()
+        try:
+            await self._refresh_replica_counts()
+        except Exception as exc:
+            # Replica counts are a separate DGD GET. A transport / apiserver
+            # failure here must not undo the power conservative path above or
+            # terminate the tick loop — keep last-good counts and, when power
+            # awareness is on, latch scale-up suppression. Init still fails
+            # closed: startup cannot proceed without known inventory.
+            if is_initialization:
+                raise
+            logger.warning(
+                "Replica count refresh failed (%s); keeping last-good counts",
+                exc,
+            )
+            if self.config.enable_power_awareness:
+                self._mark_power_scale_up_blocked(
+                    f"replica count refresh failed ({exc}); keeping last-good "
+                    "inventory and suppressing scale-up"
+                )
         self._refresh_model_name()
 
     def _refresh_worker_info(self) -> None:
@@ -229,16 +245,27 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
                 require_prefill=self.require_prefill,
                 require_decode=self.require_decode,
             )
-        except (DeploymentValidationError, ApiException) as exc:
-            # A transient apiserver error (timeout / 5xx) must not terminate the
-            # whole refresh — that would skip the power-config conservative path
-            # below. Fall back to last observed / configured GPU counts; a
-            # genuinely missing value still fails closed via the errors check.
+        except Exception as exc:
+            # Transient apiserver / transport errors must not terminate the
+            # whole refresh — that would skip the power-config conservative
+            # path below. Catch broadly (not only ApiException): urllib3
+            # timeouts and connection errors often escape the typed wrapper.
+            # Fall back to last observed / configured GPU counts; a genuinely
+            # missing value still fails closed via the errors check. Stale
+            # GPU topology can under-enforce max_gpu_budget when caps change
+            # while total watts stay flat, so latch scale-up suppression when
+            # power awareness is on.
             logger.warning(
-                "Could not read GPU counts from deployment (%s), "
+                "Could not read GPU counts from deployment (%s: %s), "
                 "falling back to last observed or configured values",
+                type(exc).__name__,
                 exc,
             )
+            if self.config.enable_power_awareness:
+                self._mark_power_scale_up_blocked(
+                    f"GPU count refresh failed ({exc}); keeping last-good "
+                    "topology and suppressing scale-up"
+                )
             prefill_gpus = state.prefill.num_gpus
             decode_gpus = state.decode.num_gpus
 
@@ -292,15 +319,12 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
                 prefill_component_name=prefill_name,
                 decode_component_name=decode_name,
             )
-        except (
-            DeploymentValidationError,
-            PlannerError,
-            ValueError,
-            ApiException,
-        ) as exc:
-            # Transient apiserver errors (ApiException) and malformed/missing
-            # caps both land here. Startup fails closed; runtime keeps the
-            # last-good caps and blocks scale-up rather than terminating refresh.
+        except Exception as exc:
+            # Transient apiserver / transport errors and malformed/missing caps
+            # both land here. Startup fails closed; runtime keeps the last-good
+            # caps and blocks scale-up rather than terminating refresh. Catch
+            # broadly so urllib3 timeouts that are not wrapped as ApiException
+            # still take the conservative path.
             if is_initialization:
                 raise DeploymentValidationError(
                     [f"Failed to resolve DGD-owned power caps at startup: {exc}"]

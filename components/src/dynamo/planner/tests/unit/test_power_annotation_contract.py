@@ -7,7 +7,7 @@ keys must be byte-identical.
 The two constants are intentionally duplicated rather than shared as a package
 import: the Power Agent image copies three standalone files and does not install
 the ``dynamo`` Python package, so a runtime dependency only to share one string
-is not justified (see power-budget-architecture-rework.md §1.1). This test is
+is not justified. This test is
 the safety net that keeps them in sync.
 """
 

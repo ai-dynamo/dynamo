@@ -10,7 +10,7 @@ latches the deployment-scoped scale-up block). Also covers the
 ``deployment_state_changed`` power comparisons and the restart-adoption path.
 """
 
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from kubernetes.client import ApiException
@@ -208,6 +208,63 @@ def test_restart_adopts_current_cap_not_stale_max():
     state = fresh_env.deployment_state()
     assert state.prefill.power_watts_per_replica == 500  # adopted, not max'd
     assert state.power_scale_up_blocked is False
+
+
+@pytest.mark.asyncio
+async def test_runtime_refresh_keeps_last_good_when_replica_get_fails():
+    """Full ``refresh()`` must not abort the tick when replica counts fail.
+
+    Power caps resolve first; a later transport error on
+    ``get_actual_worker_counts`` keeps last-good inventory and latches
+    scale-up suppression instead of raising out of the planner loop.
+    """
+    controller = _controller(700, 1200)
+    controller.get_gpu_counts = Mock(return_value=(2, 4))
+    controller.get_model_name = Mock(return_value="m")
+    controller.get_actual_worker_counts = AsyncMock(
+        side_effect=ConnectionError("apiserver unreachable")
+    )
+    env = _env(controller)
+    # Seed last-good replica counts as if a prior successful refresh ran.
+    state = env.deployment_state()
+    state.prefill.replicas.active = 2
+    state.prefill.replicas.expected = 2
+    state.decode.replicas.active = 2
+    state.decode.replicas.expected = 2
+    env._refresh_power_configs(is_initialization=True)
+    assert state.power_scale_up_blocked is False
+
+    await env.refresh()
+
+    state = env.deployment_state()
+    assert state.prefill.replicas.active == 2  # last-good retained
+    assert state.decode.replicas.active == 2
+    assert state.power_scale_up_blocked is True
+    assert "replica count refresh failed" in state.power_scale_up_blocked_reason
+
+
+@pytest.mark.asyncio
+async def test_runtime_refresh_survives_non_api_exception_on_gpu_counts():
+    """urllib3-style transport errors (not ApiException) must still fall back."""
+    controller = _controller(700, 1200)
+    controller.get_gpu_counts = Mock(side_effect=TimeoutError("read timed out"))
+    controller.get_actual_worker_counts = AsyncMock(return_value=(2, 2, True))
+    controller.get_model_name = Mock(return_value="m")
+    env = _env(controller)
+    state = env.deployment_state()
+    state.prefill.num_gpus = 2
+    state.decode.num_gpus = 4
+    env._refresh_power_configs(is_initialization=True)
+    assert state.power_scale_up_blocked is False
+
+    await env.refresh()
+
+    state = env.deployment_state()
+    assert state.prefill.num_gpus == 2
+    assert state.decode.num_gpus == 4
+    assert state.prefill.power_watts_per_replica == 700
+    assert state.power_scale_up_blocked is True
+    assert "GPU count refresh failed" in state.power_scale_up_blocked_reason
 
 
 # ---------------------------------------------------------------------------

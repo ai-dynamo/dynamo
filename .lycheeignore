@@ -28,7 +28,3 @@
 
 # NGC intermittently returns 503 for this version-filtered page from GitHub runners.
 ^https://catalog\.ngc\.nvidia\.com/orgs/nvidia/teams/ai-dynamo/containers/dynamo-frontend\?version=1\.2\.1$
-
-# This example is introduced by the same PR as its docs link, so the main-branch
-# URL returns 404 until merge.
-^https://github\.com/ai-dynamo/dynamo/tree/main/examples/power-aware-budget$

@@ -45,7 +45,7 @@ GPU_RESOURCE_KEY = "nvidia.com/gpu"
 # renders it onto every worker Pod at create time; the Power Agent DaemonSet
 # reads the *live Pod* annotation and applies the NVML/DCGM cap. The Planner
 # only *reads* this value from the DGD to project a power budget — it never
-# writes it onto Pods (see power-budget-architecture-rework.md). The Power Agent
+# writes it onto Pods. The Power Agent
 # keeps its own copy of this literal (deploy/power-agent/power_agent.py); the
 # two are asserted identical by a contract test rather than shared as a package
 # import, because the agent image does not install the ``dynamo`` package.
