@@ -131,40 +131,11 @@ def assert_core_wheel_metadata(wheelhouse: Path, target_arch: str | None) -> Non
 
     ai_meta = wheel_metadata(ai_dynamo)
     runtime_meta = wheel_metadata(runtime)
-    direct_references = [
-        requirement
-        for requirement in ai_meta.get("Requires-Dist", [])
-        if " @ " in requirement or "git+" in requirement
-    ]
-    if direct_references:
-        raise AssertionError(
-            f"{ai_dynamo.name} contains direct dependency references: "
-            f"{direct_references}"
-        )
     requires = "\n".join(ai_meta.get("Requires-Dist", []))
     runtime_version = runtime_meta["Version"]
     if f"ai-dynamo-runtime=={runtime_version}" not in requires.replace(" ", ""):
         raise AssertionError(
             f"{ai_dynamo.name} does not pin local runtime version {runtime_version}"
-        )
-
-    requirement_names = {
-        canonical_name(re.split(r"[ ;(<>=@\[]", requirement, maxsplit=1)[0])
-        for requirement in ai_meta.get("Requires-Dist", [])
-    }
-    if "aiconfigurator" in requirement_names:
-        raise AssertionError(
-            f"{ai_dynamo.name} must not depend on the upper aiconfigurator wheel"
-        )
-
-    with zipfile.ZipFile(ai_dynamo) as archive:
-        profiler_members = [
-            member for member in archive.namelist() if "/profiler/" in member
-        ]
-    if profiler_members:
-        raise AssertionError(
-            f"{ai_dynamo.name} must not contain dynamo.profiler; "
-            "ship it in ai-dynamo-profiler"
         )
 
     for wheel in (ai_dynamo, runtime):

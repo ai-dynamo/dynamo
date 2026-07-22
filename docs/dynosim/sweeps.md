@@ -81,42 +81,31 @@ The example uses AIC-backed timing by default:
 - AIC enumerates dense TP candidates
 - AIC-backed engine timing is used for candidate configs
 
-Install the matching AIC upper and core packages, plus the Dynamo profiler. Until
-both split AIC packages are available from the release index, install them from
-the same AIC source checkout:
+Install `aiconfigurator` into the project environment:
 
 ```bash
-AICONFIGURATOR_DIR=/path/to/aiconfigurator
-git -C "$AICONFIGURATOR_DIR" lfs pull
-uv pip install --python .venv/bin/python \
-  "$AICONFIGURATOR_DIR/aic-core" \
-  "$AICONFIGURATOR_DIR" \
-  --editable components/profiler
+uv pip install --python .venv/bin/python aiconfigurator
 ```
 
-If an existing install fails to load usable perf data, materialize Git LFS data
-and reinstall both AIC packages from that same checkout:
+If a regular install fails to load usable perf data, reinstall from a source checkout that has real systems data materialized:
 
 ```bash
-git -C "$AICONFIGURATOR_DIR" lfs pull
-uv pip install --python .venv/bin/python --force-reinstall \
-  "$AICONFIGURATOR_DIR/aic-core" \
-  "$AICONFIGURATOR_DIR"
+uv pip install --python .venv/bin/python --force-reinstall /path/to/aiconfigurator
 ```
 
 If DynoSim sweep setup fails with AIC errors about missing perf databases or parse failures such as `KeyError: 'gemm_dtype'`, inspect the installed files under:
 
 ```text
-.venv/lib/python*/site-packages/aiconfigurator_core/systems/data/...
+.venv/lib/python*/site-packages/aiconfigurator/systems/data/...
 ```
 
-If those files begin with `version https://git-lfs.github.com/spec/v1`, you have Git LFS pointer stubs instead of real perf tables. Install both AIC packages from a checkout or wheelhouse that includes the real LFS materialized payloads in `systems/`.
+If those files begin with `version https://git-lfs.github.com/spec/v1`, you have Git LFS pointer stubs instead of real perf tables. Install `aiconfigurator` from a checkout or wheel that includes the real LFS materialized payloads in `systems/`.
 
 When running directly from a source checkout, expose the in-repo Python components
 and runtime bindings:
 
 ```bash
-export PYTHONPATH=components/profiler/src:components/src:lib/bindings/python/src
+export PYTHONPATH=components/src:lib/bindings/python/src
 ```
 
 If the sweep uses multiple worker processes, prefer a real script file over a heredoc. On macOS, `ProcessPoolExecutor` child workers need a stable module path, and the driver module must guard its entry behind `if __name__ == "__main__":`.
@@ -132,7 +121,7 @@ export DYN_LOG='info,dynamo_kv_router::scheduling::selector=warn'
 The canonical starting point is the checked-in driver script:
 
 ```bash
-.venv/bin/python components/profiler/src/dynamo/profiler/utils/replay_optimize/example.py \
+.venv/bin/python components/src/dynamo/profiler/utils/replay_optimize/example.py \
   --max-parallel-evals 4
 ```
 
@@ -176,7 +165,7 @@ Only add those when the experiment is specifically about scheduler limits.
 To run against a Mooncake-style trace instead of the synthetic workload:
 
 ```bash
-.venv/bin/python components/profiler/src/dynamo/profiler/utils/replay_optimize/example.py \
+.venv/bin/python components/src/dynamo/profiler/utils/replay_optimize/example.py \
   --trace-file /path/to/mooncake_trace.jsonl \
   --arrival-speedup-ratio 1.0 \
   --max-parallel-evals 4
@@ -193,7 +182,7 @@ curl -sL \
 Then run:
 
 ```bash
-.venv/bin/python components/profiler/src/dynamo/profiler/utils/replay_optimize/example.py \
+.venv/bin/python components/src/dynamo/profiler/utils/replay_optimize/example.py \
   --trace-file /tmp/toolagent_trace.jsonl \
   --arrival-speedup-ratio 1.0 \
   --max-parallel-evals 4

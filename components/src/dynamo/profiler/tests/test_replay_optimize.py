@@ -38,7 +38,6 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.parallel,
-    pytest.mark.planner,
 ]
 
 _AIC_MODEL = "Qwen/Qwen3-32B"
