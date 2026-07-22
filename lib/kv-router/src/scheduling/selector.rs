@@ -30,7 +30,8 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
 /// Target-only worker selection logic.
 ///
 /// The scheduler resolves pinned requests before invoking this trait. Dynamo validates the
-/// returned target and derives the accounting snapshot before booking it.
+/// returned target and derives the accounting snapshot before booking it. Return `Ok(None)` when
+/// no target is selected and `Err` only when the strategy itself fails.
 pub trait TargetWorkerSelector<C: WorkerConfigLike> {
     fn select_worker(
         &self,
@@ -38,7 +39,7 @@ pub trait TargetWorkerSelector<C: WorkerConfigLike> {
         request: &SchedulingRequest,
         eligibility: RoutingEligibility<'_>,
         block_size: u32,
-    ) -> Result<WorkerWithDpRank, KvSchedulerError>;
+    ) -> Result<Option<WorkerWithDpRank>, String>;
 }
 
 /// A target-only selector wrapped with Dynamo-owned validation and accounting.
@@ -87,7 +88,8 @@ where
             .0
             .select_worker(workers, request, eligibility, block_size)
         {
-            Err(KvSchedulerError::NoEndpoints)
+            Ok(Some(worker)) => worker,
+            Ok(None)
                 if !eligibility.has_eligible_worker(
                     workers
                         .iter()
@@ -96,7 +98,12 @@ where
             {
                 return Err(eligibility.no_eligible_worker_error(workers));
             }
-            result => result?,
+            Ok(None) => return Err(KvSchedulerError::NoEndpoints),
+            Err(error) => {
+                return Err(KvSchedulerError::InitFailed(format!(
+                    "worker selector failed: {error}"
+                )));
+            }
         };
         eligibility
             .validate_worker_rank(workers, worker)
@@ -597,8 +604,8 @@ mod tests {
             _request: &SchedulingRequest,
             _eligibility: RoutingEligibility<'_>,
             _block_size: u32,
-        ) -> Result<WorkerWithDpRank, KvSchedulerError> {
-            Ok(self.0)
+        ) -> Result<Option<WorkerWithDpRank>, String> {
+            Ok(Some(self.0))
         }
     }
 
@@ -611,8 +618,22 @@ mod tests {
             _request: &SchedulingRequest,
             _eligibility: RoutingEligibility<'_>,
             _block_size: u32,
-        ) -> Result<WorkerWithDpRank, KvSchedulerError> {
-            Err(KvSchedulerError::NoEndpoints)
+        ) -> Result<Option<WorkerWithDpRank>, String> {
+            Ok(None)
+        }
+    }
+
+    struct FailedSelection;
+
+    impl<C: WorkerConfigLike> TargetWorkerSelector<C> for FailedSelection {
+        fn select_worker(
+            &self,
+            _workers: &HashMap<WorkerId, C>,
+            _request: &SchedulingRequest,
+            _eligibility: RoutingEligibility<'_>,
+            _block_size: u32,
+        ) -> Result<Option<WorkerWithDpRank>, String> {
+            Err("test failure".to_string())
         }
     }
 
@@ -900,10 +921,17 @@ mod tests {
 
         let workers = HashMap::from([
             (0, SimpleWorkerConfig::default()),
-            (1, SimpleWorkerConfig::default()),
+            (
+                1,
+                SimpleWorkerConfig {
+                    data_parallel_start_rank: 2,
+                    data_parallel_size: 2,
+                    ..Default::default()
+                },
+            ),
         ]);
         let pinned = WorkerWithDpRank::from_worker_id(0);
-        let mut request = base_request(16);
+        let mut request = base_request(17);
         request.pinned_worker = Some(pinned);
 
         let result = ValidatedWorkerSelector::new(NoSelection)
@@ -912,6 +940,23 @@ mod tests {
         assert_eq!(result.worker, pinned);
 
         request.pinned_worker = None;
+        let selected = WorkerWithDpRank::new(1, 3);
+        request
+            .overlap
+            .effective_overlap_blocks
+            .extend([(WorkerWithDpRank::new(1, 2), 1.0), (selected, 3.5)]);
+        request
+            .overlap
+            .effective_cached_tokens
+            .extend([(WorkerWithDpRank::new(1, 2), 16), (selected, 56)]);
+        let result = ValidatedWorkerSelector::new(FixedSelection(selected))
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .expect("valid unpinned target should be accepted");
+        assert_eq!(result.worker, selected);
+        assert_eq!(result.required_blocks, 2);
+        assert_eq!(result.effective_overlap_blocks, 3.5);
+        assert_eq!(result.cached_tokens, 56);
+
         let invalid = WorkerWithDpRank::from_worker_id(99);
         let result = ValidatedWorkerSelector::new(FixedSelection(invalid)).select_worker(
             &workers,
@@ -946,6 +991,18 @@ mod tests {
         assert!(matches!(
             result,
             Err(KvSchedulerError::AllEligibleWorkersOverloaded)
+        ));
+
+        let result = ValidatedWorkerSelector::new(FailedSelection).select_worker(
+            &workers,
+            &request,
+            request.eligibility(),
+            16,
+        );
+        assert!(matches!(
+            result,
+            Err(KvSchedulerError::InitFailed(message))
+                if message == "worker selector failed: test failure"
         ));
     }
 
