@@ -107,7 +107,7 @@ spec:
             # XPU-specific environment variables for disaggregated KV transfer
             # Note: Do not set ZE_AFFINITY_MASK when using DRA - let DRA allocate GPUs automatically
             - name: UCX_TLS
-              value: "ze_copy,tcp,cma,sysv,posix,self"
+              value: "ze_ipc,ze_copy,tcp,cma,sysv,posix,self"
             - name: UCX_LOG_LEVEL
               value: "info"
           workingDir: /workspace/examples/backends/sglang
@@ -172,7 +172,7 @@ spec:
             # XPU-specific environment variables for disaggregated KV transfer
             # Note: Do not set ZE_AFFINITY_MASK when using DRA - let DRA allocate GPUs automatically
             - name: UCX_TLS
-              value: "ze_copy,tcp,cma,sysv,posix,self"
+              value: "ze_ipc,ze_copy,tcp,cma,sysv,posix,self"
             - name: UCX_LOG_LEVEL
               value: "info"
           workingDir: /workspace/examples/backends/sglang
