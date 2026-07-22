@@ -4,6 +4,7 @@
 import asyncio
 import gc
 import logging
+import os
 import uuid
 from collections.abc import Callable
 
@@ -23,9 +24,11 @@ from .worker_factory import EngineSetupResult
 
 logger = logging.getLogger(__name__)
 
-_WARMUP_INPUT_IDS = (1, 2, 3)
+_WARMUP_INPUT_IDS = tuple(range(1, 21))
 _WARMUP_PREFIX = "dynamo-snapshot-warmup-"
 _WARMUP_TIMEOUT_SEC = 600.0
+_PRE_CAPTURE_DIAGNOSTIC_ENV = "VLLM_GMS_DIAGNOSTIC_PRE_CAPTURE_SPARSE_INDEXER"
+_PRE_CAPTURE_DIAGNOSTIC_RPC = "set_gms_pre_capture_diagnostic_enabled"
 
 
 async def warmup_engine(engine_setup: EngineSetupResult) -> None:
@@ -71,37 +74,62 @@ async def warmup_engine(engine_setup: EngineSetupResult) -> None:
         if not final_output.outputs or not final_output.outputs[0].token_ids:
             raise RuntimeError("vLLM snapshot warmup generated no tokens")
 
+    diagnostic_enabled = os.getenv(_PRE_CAPTURE_DIAGNOSTIC_ENV) == "1"
+    if diagnostic_enabled:
+        await engine.collective_rpc(
+            _PRE_CAPTURE_DIAGNOSTIC_RPC,
+            kwargs={"enabled": True},
+        )
+
     logger.info("vLLM snapshot warmup starting")
+    warmup_error: BaseException | None = None
     try:
-        results = await asyncio.wait_for(
-            asyncio.gather(
-                *(
-                    consume_generation(rank, request_id, cache_salt)
-                    for rank, (request_id, cache_salt) in enumerate(
-                        zip(request_ids, cache_salts)
-                    )
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(
+                    *(
+                        consume_generation(rank, request_id, cache_salt)
+                        for rank, (request_id, cache_salt) in enumerate(
+                            zip(request_ids, cache_salts)
+                        )
+                    ),
+                    return_exceptions=True,
                 ),
+                timeout=_WARMUP_TIMEOUT_SEC,
+            )
+        except asyncio.TimeoutError:
+            # Cancellation before vLLM add_request() returns cannot self-abort.
+            abort_results = await asyncio.gather(
+                *(engine.abort(request_id) for request_id in request_ids),
                 return_exceptions=True,
-            ),
-            timeout=_WARMUP_TIMEOUT_SEC,
-        )
-    except asyncio.TimeoutError:
-        # Cancellation before vLLM add_request() returns cannot self-abort.
-        abort_results = await asyncio.gather(
-            *(engine.abort(request_id) for request_id in request_ids),
-            return_exceptions=True,
-        )
-        for request_id, abort_error in zip(request_ids, abort_results):
-            if isinstance(abort_error, BaseException):
-                logger.error(
-                    "Failed to abort timed-out vLLM snapshot warmup request %s: %s",
-                    request_id,
-                    abort_error,
-                )
+            )
+            for request_id, abort_error in zip(request_ids, abort_results):
+                if isinstance(abort_error, BaseException):
+                    logger.error(
+                        "Failed to abort timed-out vLLM snapshot warmup request %s: %s",
+                        request_id,
+                        abort_error,
+                    )
+            raise
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+    except BaseException as error:
+        warmup_error = error
         raise
-    for result in results:
-        if isinstance(result, BaseException):
-            raise result
+    finally:
+        if diagnostic_enabled:
+            try:
+                await engine.collective_rpc(
+                    _PRE_CAPTURE_DIAGNOSTIC_RPC,
+                    kwargs={"enabled": False},
+                )
+            except BaseException:
+                if warmup_error is None:
+                    raise
+                logger.exception(
+                    "Failed to disable pre-capture diagnostics after warmup failure"
+                )
     logger.info("vLLM snapshot warmup complete")
 
 

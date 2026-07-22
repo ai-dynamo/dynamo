@@ -9,13 +9,13 @@ readonly EXPECTED_BASE_DIGEST=sha256:7f2bc168366c77fbd8329368f00310d208531c14ece
 readonly EXPECTED_AMD64_DIGEST=sha256:99e7dd3cf74c489af0615671f3fdbde182de2930f1195a0ee39e914e38033a88
 readonly EXPECTED_BASELINE_SBOM=vllm-openai@7f2bc168
 readonly EXPECTED_VLLM_URL=https://github.com/galletas1712/vllm.git
-readonly EXPECTED_VLLM_REF=schwinns/gms-sparse-indexer-sync-diagnostic-20260721
-readonly EXPECTED_VLLM_HEAD=9ddf85272a3bb86890dc4c0520eb9afef1d58882
-readonly EXPECTED_VLLM_HEAD_TREE=12e780c91b80de8678c91c5f688dfc803ec1e0f7
+readonly EXPECTED_VLLM_REF=schwinns/gms-pre-capture-sparse-gather-diagnostic-20260722
+readonly EXPECTED_VLLM_HEAD=4e9e29f0d22a53feac0bef00efa7d525b0004b12
+readonly EXPECTED_VLLM_HEAD_TREE=451fac8764323e20eb4c6028b731e22602ee4f69
 readonly EXPECTED_MERGE_BASE=c4f5cd60dae386d106c9b8a12dbab24e2e9dda0b
-readonly EXPECTED_COMPOSED_TREE=adb768862d2f9caafa5f1130c3ff656249fe382f
+readonly EXPECTED_COMPOSED_TREE=6357cb62e08a7593506832e78a1546340a66ea74
 readonly EXPECTED_PARALLEL_STATE_BLOB=5d3587fa48d7e4b659f3ae68cc174d5d3335a9a6
-readonly EXPECTED_SPARSE_INDEXER_BLOB=af51ec92e414ac4ebcaa85d667654e395593cc38
+readonly EXPECTED_SPARSE_INDEXER_BLOB=2c365ef4083f84e7c8be5c092a100f540f5e6b7f
 readonly SPARSE_INDEXER_PATH=vllm/model_executor/layers/sparse_attn_indexer.py
 readonly EXPECTED_FLASHINFER_URL=https://github.com/flashinfer-ai/flashinfer.git
 readonly EXPECTED_FLASHINFER_REF=8eccd0c1352165302840c0e19066bc42d36dbd7a
@@ -103,7 +103,7 @@ validate_and_compose_vllm() {
     require_exact "vLLM PR commit count" \
         "$(git -C "${source}" rev-list --count \
             "${EXPECTED_MERGE_BASE}..${EXPECTED_VLLM_HEAD}")" \
-        9
+        10
 
     git -C "${source}" checkout --quiet --detach "${EXPECTED_BASE_COMMIT}"
     if ! git -C "${source}" \
@@ -273,7 +273,7 @@ vllm_source_sha=${EXPECTED_VLLM_HEAD}
 vllm_source_tree=${EXPECTED_VLLM_HEAD_TREE}
 vllm_merge_base=${EXPECTED_MERGE_BASE}
 vllm_composed_tree=${EXPECTED_COMPOSED_TREE}
-vllm_pr_commits=9
+vllm_pr_commits=10
 vllm_overlay_files=${#OVERLAY_PATHS[@]}
 vllm_parallel_state_blob=${EXPECTED_PARALLEL_STATE_BLOB}
 vllm_sparse_indexer_blob=${EXPECTED_SPARSE_INDEXER_BLOB}

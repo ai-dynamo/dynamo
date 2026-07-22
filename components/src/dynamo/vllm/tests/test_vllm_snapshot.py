@@ -94,7 +94,7 @@ async def test_prepare_snapshot_consumes_all_dp_warmups_before_readiness(
     assert len(set(identifiers)) == 4
     for call in calls:
         prompt, sampling_params, _ = call.args
-        assert prompt["prompt_token_ids"] == [1, 2, 3]
+        assert prompt["prompt_token_ids"] == list(range(1, 21))
         assert (
             sampling_params.max_tokens,
             sampling_params.temperature,
@@ -151,6 +151,65 @@ async def test_warmup_rank_failure_waits_for_peers_and_prevents_readiness(
         await _prepare(engine)
 
     assert completed_ranks == {1}
+    snapshot_enabled.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_warmup_scopes_pre_capture_diagnostic_to_generation(
+    monkeypatch,
+    snapshot_enabled,
+):
+    events = []
+
+    async def generate(*args, **kwargs):
+        events.append("generate")
+        yield _output()
+
+    async def collective_rpc(method, *, kwargs):
+        events.append((method, kwargs["enabled"]))
+
+    engine = SimpleNamespace(
+        generate=Mock(side_effect=generate),
+        collective_rpc=AsyncMock(side_effect=collective_rpc),
+    )
+    monkeypatch.setenv(snapshot_mod._PRE_CAPTURE_DIAGNOSTIC_ENV, "1")
+    snapshot_enabled.return_value.wait_for_restore = AsyncMock(
+        side_effect=lambda: events.append("ready") or True
+    )
+
+    await _prepare(engine)
+
+    assert events == [
+        (snapshot_mod._PRE_CAPTURE_DIAGNOSTIC_RPC, True),
+        "generate",
+        "generate",
+        (snapshot_mod._PRE_CAPTURE_DIAGNOSTIC_RPC, False),
+        "ready",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_warmup_disables_pre_capture_diagnostic_after_failure(
+    monkeypatch,
+    snapshot_enabled,
+):
+    async def generate(*args, **kwargs):
+        raise RuntimeError("generation failed")
+        yield
+
+    engine = SimpleNamespace(
+        generate=Mock(side_effect=generate),
+        collective_rpc=AsyncMock(),
+    )
+    monkeypatch.setenv(snapshot_mod._PRE_CAPTURE_DIAGNOSTIC_ENV, "1")
+
+    with pytest.raises(RuntimeError, match="generation failed"):
+        await _prepare(engine)
+
+    assert [
+        call.kwargs["kwargs"]["enabled"]
+        for call in engine.collective_rpc.await_args_list
+    ] == [True, False]
     snapshot_enabled.assert_not_called()
 
 

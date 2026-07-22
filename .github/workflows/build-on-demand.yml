@@ -54,8 +54,8 @@ jobs:
       CRIU_SHA: 3dd2420c16e54fb7cd08b3e511d3a8bfb03cd001
       CUDA_CHECKPOINT_SHA: 00d5cce84c628088d6caa203fc4af40c1538b6f7
       FLASHINFER_SHA: 8eccd0c1352165302840c0e19066bc42d36dbd7a
-      VLLM_SHA: 9ddf85272a3bb86890dc4c0520eb9afef1d58882
-      VLLM_REF: schwinns/gms-sparse-indexer-sync-diagnostic-20260721
+      VLLM_SHA: 4e9e29f0d22a53feac0bef00efa7d525b0004b12
+      VLLM_REF: schwinns/gms-pre-capture-sparse-gather-diagnostic-20260722
       VLLM_BASE_IMAGE: vllm/vllm-openai@sha256:7f2bc168366c77fbd8329368f00310d208531c14ece6c2de31a6611ef99f6ec8
     steps:
       - name: Checkout immutable source

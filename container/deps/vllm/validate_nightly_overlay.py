@@ -19,13 +19,13 @@ EXPECTED_BASE_DIGEST = (
     "sha256:7f2bc168366c77fbd8329368f00310d208531c14ece6c2de31a6611ef99f6ec8"
 )
 EXPECTED_VLLM_URL = "https://github.com/galletas1712/vllm.git"
-EXPECTED_VLLM_REF = "schwinns/gms-sparse-indexer-sync-diagnostic-20260721"
-EXPECTED_VLLM_HEAD = "9ddf85272a3bb86890dc4c0520eb9afef1d58882"
-EXPECTED_VLLM_HEAD_TREE = "12e780c91b80de8678c91c5f688dfc803ec1e0f7"
+EXPECTED_VLLM_REF = "schwinns/gms-pre-capture-sparse-gather-diagnostic-20260722"
+EXPECTED_VLLM_HEAD = "4e9e29f0d22a53feac0bef00efa7d525b0004b12"
+EXPECTED_VLLM_HEAD_TREE = "451fac8764323e20eb4c6028b731e22602ee4f69"
 EXPECTED_MERGE_BASE = "c4f5cd60dae386d106c9b8a12dbab24e2e9dda0b"
-EXPECTED_COMPOSED_TREE = "adb768862d2f9caafa5f1130c3ff656249fe382f"
+EXPECTED_COMPOSED_TREE = "6357cb62e08a7593506832e78a1546340a66ea74"
 EXPECTED_PARALLEL_STATE_BLOB = "5d3587fa48d7e4b659f3ae68cc174d5d3335a9a6"
-EXPECTED_SPARSE_INDEXER_BLOB = "af51ec92e414ac4ebcaa85d667654e395593cc38"
+EXPECTED_SPARSE_INDEXER_BLOB = "2c365ef4083f84e7c8be5c092a100f540f5e6b7f"
 EXPECTED_FLASHINFER_URL = "https://github.com/flashinfer-ai/flashinfer.git"
 EXPECTED_FLASHINFER_REF = "8eccd0c1352165302840c0e19066bc42d36dbd7a"
 EXPECTED_FLASHINFER_SHA = "8eccd0c1352165302840c0e19066bc42d36dbd7a"
@@ -270,7 +270,7 @@ def validate() -> None:
         "vllm_source_tree": EXPECTED_VLLM_HEAD_TREE,
         "vllm_merge_base": EXPECTED_MERGE_BASE,
         "vllm_composed_tree": EXPECTED_COMPOSED_TREE,
-        "vllm_pr_commits": "9",
+        "vllm_pr_commits": "10",
         "vllm_overlay_files": str(len(OVERLAY_PATHS)),
         "vllm_parallel_state_blob": EXPECTED_PARALLEL_STATE_BLOB,
         "vllm_sparse_indexer_blob": EXPECTED_SPARSE_INDEXER_BLOB,
