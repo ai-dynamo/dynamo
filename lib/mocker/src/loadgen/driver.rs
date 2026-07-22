@@ -10,6 +10,7 @@ use rand::rngs::StdRng;
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
+use super::trace::{synthesize_trace_tokens, validate_synthesizable_prompt};
 use super::types::{AgenticTrace, ReadyTurn, ReplayRequestHashes, Trace};
 use super::{SYNTHETIC_OUTPUT_SEED, planned_output_token_ids};
 use crate::common::protocols::DirectRequest;
@@ -65,17 +66,65 @@ struct SessionRuntime {
 }
 
 #[derive(Debug)]
+enum PromptTokens {
+    // Full-prompt traces stay in their compact on-disk representation until
+    // dispatch. Delta-cumulative traces remain eager because later turns append
+    // generated output to already-materialized session history.
+    Deferred {
+        input_length: usize,
+        hash_ids: Vec<u64>,
+    },
+    Materialized(Vec<u32>),
+}
+
+impl PromptTokens {
+    fn deferred(input_length: usize, hash_ids: Vec<u64>, trace_block_size: usize) -> Result<Self> {
+        validate_synthesizable_prompt(input_length, &hash_ids, trace_block_size)?;
+        Ok(Self::Deferred {
+            input_length,
+            hash_ids,
+        })
+    }
+
+    fn input_length(&self) -> usize {
+        match self {
+            Self::Deferred { input_length, .. } => *input_length,
+            Self::Materialized(tokens) => tokens.len(),
+        }
+    }
+
+    fn materialize(&self, trace_block_size: usize) -> Vec<u32> {
+        match self {
+            Self::Deferred {
+                input_length,
+                hash_ids,
+            } => synthesize_trace_tokens(*input_length, hash_ids, trace_block_size)
+                .expect("deferred prompt was validated when the workload driver was built"),
+            Self::Materialized(tokens) => tokens.clone(),
+        }
+    }
+
+    fn materialized(&self) -> &[u32] {
+        match self {
+            Self::Deferred { .. } => {
+                unreachable!("delta-cumulative prompts are materialized during driver setup")
+            }
+            Self::Materialized(tokens) => tokens,
+        }
+    }
+}
+
+#[derive(Debug)]
 struct TurnRuntime {
     request_id: Option<String>,
     replay_key: Option<String>,
-    tokens: Vec<u32>,
+    prompt_tokens: PromptTokens,
     max_output_tokens: usize,
     output_token_ids: Option<Vec<u32>>,
     delay_after_previous_ms: f64,
     priority: i32,
     strict_priority: u32,
     policy_class: Option<String>,
-    replay_hashes: Option<ReplayRequestHashes>,
     #[cfg(any(test, feature = "replay-bench"))]
     deterministic_request_id: Option<Uuid>,
 }
@@ -244,6 +293,8 @@ impl AgenticState {
 pub struct WorkloadDriver {
     policy: SchedulingPolicy,
     prompt_mode: PromptMode,
+    emit_session_metadata: bool,
+    trace_block_size: usize,
     engine_block_size: u32,
     include_replay_hashes: bool,
     sessions: Vec<SessionRuntime>,
@@ -376,7 +427,7 @@ impl WorkloadDriver {
         let mut sessions = Vec::with_capacity(trace.turns.len());
         let mut output_rng = StdRng::seed_from_u64(SYNTHETIC_OUTPUT_SEED);
 
-        for (session_index, turn) in trace.turns.into_iter().enumerate() {
+        for (session_index, mut turn) in trace.turns.into_iter().enumerate() {
             for dependency in &turn.wait_for {
                 dependents
                     .entry(dependency.clone())
@@ -386,9 +437,11 @@ impl WorkloadDriver {
             remaining_dependencies.push(turn.wait_for.len());
             ready_after_ms.push(0.0);
 
-            let tokens = turn.synthesize_tokens(trace_block_size)?;
-            let replay_hashes = include_replay_hashes
-                .then(|| ReplayRequestHashes::from_tokens(&tokens, engine_block_size_u32));
+            let prompt_tokens = PromptTokens::deferred(
+                turn.input_length,
+                std::mem::take(&mut turn.hash_ids),
+                trace_block_size,
+            )?;
             let output_token_ids = Some(planned_output_token_ids(
                 turn.output_token_ids,
                 turn.max_output_tokens,
@@ -404,14 +457,13 @@ impl WorkloadDriver {
                 turns: vec![TurnRuntime {
                     request_id: Some(turn.request_id),
                     replay_key: turn.replay_key,
-                    tokens,
+                    prompt_tokens,
                     max_output_tokens: turn.max_output_tokens,
                     output_token_ids,
                     delay_after_previous_ms: turn.delay_after_dependencies_ms,
                     priority: turn.priority,
                     strict_priority: turn.strict_priority,
                     policy_class: turn.policy_class,
-                    replay_hashes,
                     #[cfg(feature = "replay-bench")]
                     deterministic_request_id: Some(Uuid::from_u128(session_index as u128 + 1)),
                     #[cfg(all(test, not(feature = "replay-bench")))]
@@ -443,6 +495,8 @@ impl WorkloadDriver {
                 dependents,
             }),
             prompt_mode: PromptMode::Full,
+            emit_session_metadata: true,
+            trace_block_size,
             engine_block_size: engine_block_size_u32,
             include_replay_hashes,
             sessions,
@@ -480,12 +534,17 @@ impl WorkloadDriver {
                 let turns = session
                     .turns
                     .into_iter()
-                    .map(|turn| -> Result<TurnRuntime> {
-                        let tokens = turn.synthesize_tokens(trace_block_size)?;
-                        let replay_hashes =
-                            (include_replay_hashes && prompt_mode == PromptMode::Full).then(|| {
-                                ReplayRequestHashes::from_tokens(&tokens, engine_block_size_u32)
-                            });
+                    .map(|mut turn| -> Result<TurnRuntime> {
+                        let prompt_tokens = match prompt_mode {
+                            PromptMode::Full => PromptTokens::deferred(
+                                turn.input_length,
+                                std::mem::take(&mut turn.hash_ids),
+                                trace_block_size,
+                            )?,
+                            PromptMode::DeltaCumulative => PromptTokens::Materialized(
+                                turn.synthesize_tokens(trace_block_size)?,
+                            ),
+                        };
                         let output_token_ids = Some(planned_output_token_ids(
                             turn.output_token_ids,
                             turn.max_output_tokens,
@@ -501,7 +560,7 @@ impl WorkloadDriver {
                         };
                         Ok(TurnRuntime {
                             request_id: None,
-                            tokens,
+                            prompt_tokens,
                             replay_key: turn.replay_key,
                             max_output_tokens: turn.max_output_tokens,
                             output_token_ids,
@@ -509,7 +568,6 @@ impl WorkloadDriver {
                             priority: turn.priority,
                             strict_priority: turn.strict_priority,
                             policy_class: turn.policy_class,
-                            replay_hashes,
                             #[cfg(feature = "replay-bench")]
                             deterministic_request_id,
                             #[cfg(all(test, not(feature = "replay-bench")))]
@@ -521,7 +579,7 @@ impl WorkloadDriver {
                     turns
                         .iter()
                         .map(|turn| {
-                            turn.tokens.len()
+                            turn.prompt_tokens.input_length()
                                 + turn
                                     .output_token_ids
                                     .as_ref()
@@ -557,6 +615,8 @@ impl WorkloadDriver {
         let mut driver = Self {
             policy,
             prompt_mode,
+            emit_session_metadata: true,
+            trace_block_size,
             engine_block_size: engine_block_size_u32,
             include_replay_hashes,
             sessions,
@@ -595,6 +655,11 @@ impl WorkloadDriver {
         }
 
         Uuid::new_v4()
+    }
+
+    pub(crate) fn without_session_metadata(mut self) -> Self {
+        self.emit_session_metadata = false;
+        self
     }
 
     /// Failure-path companion: release a cap slot and terminate the owning session.
@@ -653,16 +718,17 @@ impl WorkloadDriver {
             let turn = &session.turns[turn_index];
             let arrival_timestamp_ms = self.policy.arrival_timestamp_ms(scheduled_ready_at_ms);
             let (request_tokens, replay_hashes) = match self.prompt_mode {
-                PromptMode::Full => (
-                    turn.tokens.clone(),
-                    if self.include_replay_hashes {
-                        turn.replay_hashes.clone()
-                    } else {
-                        None
-                    },
-                ),
+                PromptMode::Full => {
+                    let request_tokens = turn.prompt_tokens.materialize(self.trace_block_size);
+                    let replay_hashes = self.include_replay_hashes.then(|| {
+                        ReplayRequestHashes::from_tokens(&request_tokens, self.engine_block_size)
+                    });
+                    (request_tokens, replay_hashes)
+                }
                 PromptMode::DeltaCumulative => {
-                    session.cumulative_tokens.extend_from_slice(&turn.tokens);
+                    session
+                        .cumulative_tokens
+                        .extend_from_slice(turn.prompt_tokens.materialized());
                     let request_tokens = session.cumulative_tokens.clone();
                     let replay_hashes = self.include_replay_hashes.then(|| {
                         ReplayRequestHashes::from_tokens(&request_tokens, self.engine_block_size)
@@ -698,6 +764,7 @@ impl WorkloadDriver {
                 replay_key: turn.replay_key.clone(),
                 scheduled_ready_at_ms,
                 replay_hashes,
+                emit_session_metadata: self.emit_session_metadata,
                 request,
             });
         }
@@ -961,9 +1028,6 @@ mod tests {
         let mut without_hashes =
             WorkloadDriver::new_trace_without_replay_hashes(trace, 2, false).unwrap();
 
-        assert!(with_hashes.sessions[0].turns[0].replay_hashes.is_some());
-        assert!(without_hashes.sessions[0].turns[0].replay_hashes.is_none());
-
         let with_hashes = with_hashes.pop_ready(0.0, 1).pop().unwrap();
         let without_hashes = without_hashes.pop_ready(0.0, 1).pop().unwrap();
 
@@ -1031,6 +1095,60 @@ mod tests {
             }],
         });
         trace
+    }
+
+    #[test]
+    fn full_prompts_remain_deferred_until_dispatch() {
+        let mut driver = WorkloadDriver::new_trace(two_session_trace(), 1).unwrap();
+
+        assert!(driver.sessions.iter().all(|session| {
+            session
+                .turns
+                .iter()
+                .all(|turn| matches!(turn.prompt_tokens, PromptTokens::Deferred { .. }))
+        }));
+
+        let ready = driver.pop_ready(0.0, 1);
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].request.tokens, vec![1, 2]);
+        assert!(ready[0].replay_hashes.is_some());
+    }
+
+    #[test]
+    fn delta_cumulative_prompts_remain_materialized_during_setup() {
+        let driver =
+            WorkloadDriver::new_concurrency_accumulating_deltas(two_session_trace(), 1, 1).unwrap();
+
+        assert!(driver.sessions.iter().all(|session| {
+            session
+                .turns
+                .iter()
+                .all(|turn| matches!(turn.prompt_tokens, PromptTokens::Materialized(_)))
+        }));
+    }
+
+    #[test]
+    fn deferred_prompt_validation_preserves_setup_errors() {
+        let trace = Trace {
+            block_size: 4,
+            sessions: vec![SessionTrace {
+                session_id: "invalid".into(),
+                first_arrival_timestamp_ms: Some(0.0),
+                turns: vec![TurnTrace {
+                    input_length: 5,
+                    max_output_tokens: 1,
+                    hash_ids: vec![1],
+                    ..Default::default()
+                }],
+            }],
+        };
+
+        let error = WorkloadDriver::new_trace(trace, 4).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("input_length 5 exceeds synthesized capacity 4")
+        );
     }
 
     #[test]

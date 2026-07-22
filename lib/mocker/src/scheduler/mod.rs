@@ -13,10 +13,10 @@ pub mod vllm;
 pub use crate::common::protocols::ForwardPassSnapshot;
 use crate::common::protocols::{DirectRequest, FpmPublisher, KvEventPublishers, OutputSignal};
 use dynamo_kv_router::protocols::RouterEvent;
-pub(crate) use kv_event_sink::{
-    CapturedRouterEventBuffer, capture_deferred_kv_publish_sink, capture_router_event_sink,
+pub(crate) use kv_event_sink::{CapturedRouterEventBuffer, capture_router_event_sink};
+pub(crate) use live_boundary::{
+    LiveBoundaryCore, LivePassExecution, LiveSchedulerState, spawn_live_scheduler,
 };
-pub(crate) use live_boundary::{LiveBoundaryCore, LiveEffectsPublisher};
 pub(crate) use source_holds::{
     ActiveHandoffRequests, DestinationHolds, PendingDestinations, RemovedSource, SourceCompletion,
     SourceHolds,

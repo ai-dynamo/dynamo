@@ -1172,7 +1172,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 mod tests {
     use std::collections::{HashMap, VecDeque};
     use std::future::{self, Future};
-    use std::sync::Mutex;
+    use std::sync::{Condvar, Mutex, mpsc as std_mpsc};
     use std::time::Duration;
 
     use rustc_hash::FxHashMap;
@@ -1472,6 +1472,48 @@ mod tests {
 
         fn observe_worker_removed(&self, worker: &WorkerWithDpRank, _worker_type: &str) {
             self.state.removed.lock().unwrap().push(*worker);
+        }
+    }
+
+    struct BlockingPublisher {
+        blocked_worker_id: u64,
+        entered: std_mpsc::Sender<()>,
+        release: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl SequencePublisher for BlockingPublisher {
+        fn publish_event(
+            &self,
+            _event: &ActiveSequenceEvent,
+        ) -> impl Future<Output = anyhow::Result<()>> + Send {
+            future::ready(Ok(()))
+        }
+
+        fn publish_load(&self, _load: ActiveLoad) {}
+
+        fn publish_load_batch(&self, loads: Vec<ActiveLoad>) {
+            if !loads
+                .iter()
+                .any(|load| load.worker_id == self.blocked_worker_id)
+            {
+                return;
+            }
+
+            self.entered.send(()).unwrap();
+            let (released, ready) = &*self.release;
+            let mut released = released.lock().unwrap();
+            while !*released {
+                released = ready.wait(released).unwrap();
+            }
+        }
+
+        fn observe_load(
+            &self,
+            _worker: &WorkerWithDpRank,
+            _worker_type: &str,
+            _blocks: usize,
+            _tokens: usize,
+        ) {
         }
     }
 
@@ -2152,6 +2194,105 @@ mod tests {
         assert_eq!(
             sequences.active_request_counts().get(&worker).copied(),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn replica_batch_apply_uses_one_deferred_effect_flush() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let (sequences, publisher) =
+            make_recording_sequences(HashMap::from([(1_u64, (0_u32, 1_u32))]));
+
+        sequences.apply_replica_batch(vec![
+            replica_add("req-1", worker, vec![1, 2, 3]),
+            replica_add("req-2", worker, vec![4, 5, 6]),
+            replica_mark("req-2", worker),
+            replica_free("req-1", worker),
+        ]);
+
+        let batches = publisher.load_batches();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), 1);
+        assert_eq!(batches[0][0].active_decode_blocks, Some(3));
+        assert_eq!(batches[0][0].active_prefill_tokens, Some(0));
+        assert_eq!(sequences.remote_state_update_count(), 1);
+        assert_eq!(sequences.prompt_registry.cleanup_attempts(), 1);
+        assert_eq!(
+            sequences.request_index.worker_for(&"req-2".to_string()),
+            Some(worker)
+        );
+        assert_eq!(
+            sequences.request_index.worker_for(&"req-1".to_string()),
+            None
+        );
+    }
+
+    #[test]
+    fn replica_batches_apply_concurrently_to_independent_workers() {
+        let worker_a = WorkerWithDpRank::new(1, 0);
+        let worker_b = WorkerWithDpRank::new(2, 0);
+        let (entered_tx, entered_rx) = std_mpsc::channel();
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let sequences = Arc::new(ActiveSequencesMultiWorker::new(
+            BlockingPublisher {
+                blocked_worker_id: worker_a.worker_id,
+                entered: entered_tx,
+                release: Arc::clone(&release),
+            },
+            4,
+            HashMap::from([(1, (0, 1)), (2, (0, 1))]),
+            true,
+            0,
+            "test",
+        ));
+
+        let source_a = {
+            let sequences = Arc::clone(&sequences);
+            std::thread::spawn(move || {
+                sequences.apply_replica_batch(vec![replica_add(
+                    "source-a",
+                    worker_a,
+                    vec![1, 2, 3],
+                )]);
+            })
+        };
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("source A should block inside tracker batch flush");
+
+        let (source_b_done_tx, source_b_done_rx) = std_mpsc::channel();
+        let source_b = {
+            let sequences = Arc::clone(&sequences);
+            std::thread::spawn(move || {
+                sequences.apply_replica_batch(vec![replica_add(
+                    "source-b",
+                    worker_b,
+                    vec![4, 5, 6],
+                )]);
+                source_b_done_tx.send(()).unwrap();
+            })
+        };
+        let source_b_completed = source_b_done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .is_ok();
+
+        let (released, ready) = &*release;
+        *released.lock().unwrap() = true;
+        ready.notify_all();
+        source_a.join().unwrap();
+        source_b.join().unwrap();
+
+        assert!(
+            source_b_completed,
+            "source B should apply while source A remains blocked"
+        );
+        assert_eq!(
+            sequences.request_index.worker_for(&"source-a".to_string()),
+            Some(worker_a)
+        );
+        assert_eq!(
+            sequences.request_index.worker_for(&"source-b".to_string()),
+            Some(worker_b)
         );
     }
 
