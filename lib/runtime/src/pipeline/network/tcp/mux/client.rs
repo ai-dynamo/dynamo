@@ -4,7 +4,7 @@
 //! Worker-side persistent multiplexed TCP response connection pool.
 
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     sync::{
         Arc, Weak,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -48,24 +48,32 @@ struct WriterCommand {
     _writer_permit: Option<OwnedSemaphorePermit>,
     _queued_byte_permit: Option<OwnedSemaphorePermit>,
     priority_enqueued_at: Option<Instant>,
-    enqueued_at: Instant,
+    enqueued_at: Option<Instant>,
 }
 
 impl WriterCommand {
     fn new(frame: MuxFrame, written: Option<oneshot::Sender<Result<(), String>>>) -> Self {
+        Self::new_with_metrics(frame, written, per_frame_metrics_enabled())
+    }
+
+    fn new_with_metrics(
+        frame: MuxFrame,
+        written: Option<oneshot::Sender<Result<(), String>>>,
+        metrics_enabled: bool,
+    ) -> Self {
         Self {
             frame,
             written,
             _writer_permit: None,
             _queued_byte_permit: None,
             priority_enqueued_at: None,
-            enqueued_at: Instant::now(),
+            enqueued_at: metrics_enabled.then(Instant::now),
         }
     }
 
     fn priority(frame: MuxFrame, written: Option<oneshot::Sender<Result<(), String>>>) -> Self {
         let mut command = Self::new(frame, written);
-        command.priority_enqueued_at = Some(Instant::now());
+        command.priority_enqueued_at = per_frame_metrics_enabled().then(Instant::now);
         command
     }
 
@@ -88,7 +96,7 @@ impl WriterCommand {
 
 #[inline]
 fn per_frame_metrics_enabled() -> bool {
-    true
+    super::response_packet_metrics_enabled()
 }
 
 #[derive(Clone, Copy)]
@@ -124,18 +132,13 @@ impl PoolConfig {
     }
 }
 
-#[derive(Default)]
-struct StreamWriterState {
-    pending: VecDeque<WriterCommand>,
-    scheduled: bool,
-}
-
 struct WorkerStreamState {
     context: Arc<dyn AsyncEngineContext>,
+    cancellation_counter: Option<prometheus::IntCounter>,
+    cancellation_recorded: AtomicBool,
     credits: Arc<Semaphore>,
     max_credits: usize,
     writer_slots: Arc<Semaphore>,
-    writer: Mutex<StreamWriterState>,
     closed: AtomicBool,
     close_token: CancellationToken,
 }
@@ -143,7 +146,40 @@ struct WorkerStreamState {
 type ScheduledStream = (Uuid, Arc<WorkerStreamState>);
 type BlockedData = (WriterCommand, Option<ScheduledStream>, Instant);
 
+struct StreamIngress {
+    stream_id: Uuid,
+    state: Arc<WorkerStreamState>,
+    command: WriterCommand,
+}
+
+struct WriterStreamQueue {
+    state: Arc<WorkerStreamState>,
+    pending: VecDeque<WriterCommand>,
+    scheduled: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IngressPoll {
+    Ingested,
+    Empty,
+    Disconnected,
+}
+
+#[derive(Default)]
+struct WriterScheduler {
+    streams: HashMap<Uuid, WriterStreamQueue>,
+    ready: VecDeque<Uuid>,
+}
+
 impl WorkerStreamState {
+    fn record_cancellation(&self) {
+        if !self.cancellation_recorded.swap(true, Ordering::AcqRel)
+            && let Some(counter) = &self.cancellation_counter
+        {
+            counter.inc();
+        }
+    }
+
     fn replenish_credits(&self, credits: usize) -> usize {
         if self.closed.load(Ordering::Acquire) || self.credits.is_closed() {
             return 0;
@@ -157,11 +193,175 @@ impl WorkerStreamState {
     }
 }
 
+impl WriterScheduler {
+    fn account_removed(connection: &MuxConnection, command: &WriterCommand) {
+        connection.queued_frames.fetch_sub(1, Ordering::AcqRel);
+        let encoded_len = command.frame.encoded_len();
+        connection
+            .queued_bytes
+            .fetch_sub(encoded_len, Ordering::AcqRel);
+        if per_frame_metrics_enabled() {
+            response_mux::QUEUED_BYTES
+                .with_label_values(&["worker"])
+                .sub(encoded_len as i64);
+        }
+    }
+
+    fn fail_commands(
+        connection: &MuxConnection,
+        commands: impl IntoIterator<Item = WriterCommand>,
+        reason: &str,
+    ) {
+        for command in commands {
+            Self::account_removed(connection, &command);
+            command.fail(reason);
+        }
+    }
+
+    fn ingest(&mut self, connection: &MuxConnection, ingress: StreamIngress) {
+        let StreamIngress {
+            stream_id,
+            state,
+            command,
+        } = ingress;
+        if state.closed.load(Ordering::Acquire) {
+            Self::account_removed(connection, &command);
+            command.fail("response mux stream is closed");
+            return;
+        }
+
+        let queue = self
+            .streams
+            .entry(stream_id)
+            .or_insert_with(|| WriterStreamQueue {
+                state,
+                pending: VecDeque::new(),
+                scheduled: false,
+            });
+        queue.pending.push_back(command);
+        if per_frame_metrics_enabled() {
+            response_mux::STREAM_WRITER_QUEUE_OCCUPANCY.observe(queue.pending.len() as f64);
+        }
+        if !queue.scheduled {
+            queue.scheduled = true;
+            self.ready.push_back(stream_id);
+            if per_frame_metrics_enabled() {
+                response_mux::READY_STREAMS
+                    .with_label_values(&["worker"])
+                    .inc();
+            }
+        }
+    }
+
+    fn ingest_one(
+        &mut self,
+        connection: &MuxConnection,
+        stream_rx: &mut mpsc::Receiver<StreamIngress>,
+    ) -> IngressPoll {
+        match stream_rx.try_recv() {
+            Ok(ingress) => {
+                self.ingest(connection, ingress);
+                IngressPoll::Ingested
+            }
+            Err(mpsc::error::TryRecvError::Empty) => IngressPoll::Empty,
+            Err(mpsc::error::TryRecvError::Disconnected) => IngressPoll::Disconnected,
+        }
+    }
+
+    fn pop_ready(
+        &mut self,
+        connection: &MuxConnection,
+    ) -> Option<(WriterCommand, ScheduledStream)> {
+        while let Some(stream_id) = self.ready.pop_front() {
+            let Some(queue) = self.streams.get_mut(&stream_id) else {
+                continue;
+            };
+            if queue.state.closed.load(Ordering::Acquire) {
+                let pending = queue.pending.drain(..).collect::<Vec<_>>();
+                if queue.scheduled {
+                    queue.scheduled = false;
+                    if per_frame_metrics_enabled() {
+                        response_mux::READY_STREAMS
+                            .with_label_values(&["worker"])
+                            .dec();
+                    }
+                }
+                Self::fail_commands(connection, pending, "response mux stream is closed");
+                continue;
+            }
+            if let Some(command) = queue.pending.pop_front() {
+                Self::account_removed(connection, &command);
+                return Some((command, (stream_id, queue.state.clone())));
+            }
+            if queue.scheduled {
+                queue.scheduled = false;
+                if per_frame_metrics_enabled() {
+                    response_mux::READY_STREAMS
+                        .with_label_values(&["worker"])
+                        .dec();
+                }
+            }
+        }
+        None
+    }
+
+    fn pop_same_stream(
+        &mut self,
+        connection: &MuxConnection,
+        stream_id: Uuid,
+    ) -> Option<WriterCommand> {
+        let queue = self.streams.get_mut(&stream_id)?;
+        if queue.state.closed.load(Ordering::Acquire) {
+            let pending = queue.pending.drain(..).collect::<Vec<_>>();
+            Self::fail_commands(connection, pending, "response mux stream is closed");
+            return None;
+        }
+        let command = queue.pending.pop_front()?;
+        Self::account_removed(connection, &command);
+        Some(command)
+    }
+
+    fn reschedule(&mut self, connection: &MuxConnection, stream_id: Uuid) {
+        if per_frame_metrics_enabled() {
+            response_mux::ROUND_ROBIN_TURNS_TOTAL.inc();
+        }
+        let Some(queue) = self.streams.get_mut(&stream_id) else {
+            return;
+        };
+        if queue.state.closed.load(Ordering::Acquire) {
+            let pending = queue.pending.drain(..).collect::<Vec<_>>();
+            Self::fail_commands(connection, pending, "response mux stream is closed");
+        }
+        if !queue.state.closed.load(Ordering::Acquire) && !queue.pending.is_empty() {
+            self.ready.push_back(stream_id);
+        } else if queue.scheduled {
+            queue.scheduled = false;
+            if per_frame_metrics_enabled() {
+                response_mux::READY_STREAMS
+                    .with_label_values(&["worker"])
+                    .dec();
+            }
+        }
+    }
+
+    fn fail_all(&mut self, connection: &MuxConnection, reason: &str) {
+        for (_, mut queue) in self.streams.drain() {
+            if queue.scheduled && per_frame_metrics_enabled() {
+                response_mux::READY_STREAMS
+                    .with_label_values(&["worker"])
+                    .dec();
+            }
+            Self::fail_commands(connection, queue.pending.drain(..), reason);
+        }
+        self.ready.clear();
+    }
+}
+
 struct MuxConnection {
     id: u64,
     cancel: CancellationToken,
     priority_tx: mpsc::Sender<WriterCommand>,
-    ready_tx: mpsc::UnboundedSender<Uuid>,
+    stream_tx: mpsc::Sender<StreamIngress>,
     streams: DashMap<Uuid, Arc<WorkerStreamState>>,
     healthy: AtomicBool,
     active_streams: AtomicUsize,
@@ -219,17 +419,17 @@ impl MuxConnection {
         if ack.kind != MuxFrameKind::ConnectionAck || ack.connection_ack_offset()? != 0 {
             anyhow::bail!("frontend returned invalid response mux connection ack");
         }
-        let read_half = handshake_reader.into_inner();
+        let mux_reader = handshake_reader.map_decoder(|_| MuxCodec::default());
         let write_half = handshake_writer.into_inner();
 
         let (priority_tx, priority_rx) = mpsc::channel(config.writer_queue);
-        let (ready_tx, ready_rx) = mpsc::unbounded_channel();
+        let (stream_tx, stream_rx) = mpsc::channel(config.writer_queue);
         let cancel = cancel.child_token();
         let connection = Arc::new(Self {
             id,
             cancel: cancel.clone(),
             priority_tx,
-            ready_tx,
+            stream_tx,
             streams: DashMap::new(),
             healthy: AtomicBool::new(true),
             active_streams: AtomicUsize::new(0),
@@ -256,12 +456,12 @@ impl MuxConnection {
             Arc::downgrade(&connection),
             write_half,
             priority_rx,
-            ready_rx,
+            stream_rx,
             cancel.clone(),
         ));
         tokio::spawn(Self::reader_task(
             Arc::downgrade(&connection),
-            FramedRead::new(read_half, MuxCodec::default()),
+            mux_reader,
             cancel,
             packet_baseline,
         ));
@@ -336,34 +536,10 @@ impl MuxConnection {
         if state.closed.swap(true, Ordering::AcqRel) {
             return;
         }
+        tracing::trace!(reason, "closing response mux stream state");
         state.credits.close();
         state.writer_slots.close();
         state.close_token.cancel();
-        let (pending, was_scheduled) = {
-            let mut writer = state.writer.lock();
-            let pending = writer.pending.drain(..).collect::<Vec<_>>();
-            let was_scheduled = writer.scheduled;
-            writer.scheduled = false;
-            (pending, was_scheduled)
-        };
-        self.queued_frames
-            .fetch_sub(pending.len(), Ordering::AcqRel);
-        let pending_bytes = pending
-            .iter()
-            .map(|command| command.frame.encoded_len())
-            .sum::<usize>();
-        self.queued_bytes.fetch_sub(pending_bytes, Ordering::AcqRel);
-        response_mux::QUEUED_BYTES
-            .with_label_values(&["worker"])
-            .sub(pending_bytes as i64);
-        if was_scheduled {
-            response_mux::READY_STREAMS
-                .with_label_values(&["worker"])
-                .dec();
-        }
-        for command in pending {
-            command.fail(reason);
-        }
     }
 
     fn remove_stream(&self, stream_id: Uuid, reason: &str, kill_context: bool) -> bool {
@@ -427,10 +603,10 @@ impl MuxConnection {
         }
     }
 
-    fn enqueue_stream_command(
+    async fn enqueue_stream_command(
         &self,
         stream_id: Uuid,
-        state: &WorkerStreamState,
+        state: Arc<WorkerStreamState>,
         command: WriterCommand,
     ) -> Result<()> {
         if !self.is_healthy() || state.closed.load(Ordering::Acquire) {
@@ -440,69 +616,42 @@ impl MuxConnection {
 
         let encoded_len = command.frame.encoded_len();
         self.queued_bytes.fetch_add(encoded_len, Ordering::AcqRel);
-        response_mux::QUEUED_BYTES
-            .with_label_values(&["worker"])
-            .add(encoded_len as i64);
-
-        let mut writer = state.writer.lock();
-        if state.closed.load(Ordering::Acquire) {
-            self.queued_bytes.fetch_sub(encoded_len, Ordering::AcqRel);
+        if per_frame_metrics_enabled() {
             response_mux::QUEUED_BYTES
                 .with_label_values(&["worker"])
-                .sub(encoded_len as i64);
-            command.fail("response mux stream is closed");
-            anyhow::bail!("response mux stream is closed");
+                .add(encoded_len as i64);
         }
-        writer.pending.push_back(command);
+
         self.queued_frames.fetch_add(1, Ordering::AcqRel);
-        if per_frame_metrics_enabled() {
-            response_mux::STREAM_WRITER_QUEUE_OCCUPANCY.observe(writer.pending.len() as f64);
-        }
-        if !writer.scheduled {
-            writer.scheduled = true;
-            response_mux::READY_STREAMS
-                .with_label_values(&["worker"])
-                .inc();
-            if self.ready_tx.send(stream_id).is_err() {
-                writer.scheduled = false;
-                response_mux::READY_STREAMS
-                    .with_label_values(&["worker"])
-                    .dec();
+        match self
+            .stream_tx
+            .send(StreamIngress {
+                stream_id,
+                state,
+                command,
+            })
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(err) => {
                 self.queued_frames.fetch_sub(1, Ordering::AcqRel);
-                if let Some(command) = writer.pending.pop_back() {
-                    self.queued_bytes.fetch_sub(encoded_len, Ordering::AcqRel);
+                self.queued_bytes.fetch_sub(encoded_len, Ordering::AcqRel);
+                if per_frame_metrics_enabled() {
                     response_mux::QUEUED_BYTES
                         .with_label_values(&["worker"])
                         .sub(encoded_len as i64);
-                    command.fail("response mux fair writer stopped");
                 }
-                anyhow::bail!("response mux fair writer stopped");
+                err.0.command.fail("response mux fair writer stopped");
+                anyhow::bail!("response mux fair writer stopped")
             }
         }
-        Ok(())
-    }
-
-    fn reschedule_stream(&self, stream_id: Uuid, state: &Arc<WorkerStreamState>) -> Result<()> {
-        response_mux::ROUND_ROBIN_TURNS_TOTAL.inc();
-        let mut writer = state.writer.lock();
-        if !state.closed.load(Ordering::Acquire) && !writer.pending.is_empty() {
-            self.ready_tx
-                .send(stream_id)
-                .map_err(|_| anyhow!("response mux fair writer stopped"))?;
-        } else if writer.scheduled {
-            writer.scheduled = false;
-            response_mux::READY_STREAMS
-                .with_label_values(&["worker"])
-                .dec();
-        }
-        Ok(())
     }
 
     async fn writer_task(
         weak: Weak<Self>,
         mut write_half: tokio::net::tcp::OwnedWriteHalf,
         mut priority_rx: mpsc::Receiver<WriterCommand>,
-        mut ready_rx: mpsc::UnboundedReceiver<Uuid>,
+        mut stream_rx: mpsc::Receiver<StreamIngress>,
         cancel: CancellationToken,
     ) {
         let mut write_buf = TcpWriteBuffer::new();
@@ -516,8 +665,11 @@ impl MuxConnection {
         let metrics_enabled = per_frame_metrics_enabled();
         let mut reported_queue_depth = 0_i64;
         let mut blocked_data: Option<BlockedData> = None;
+        let mut scheduler = WriterScheduler::default();
+        let mut stream_input_open = true;
+
         let result: Result<()> = async {
-            loop {
+            'writer: loop {
                 let connection = weak
                     .upgrade()
                     .ok_or_else(|| anyhow!("response mux connection dropped"))?;
@@ -537,53 +689,58 @@ impl MuxConnection {
                     if blocked_command.frame.kind != MuxFrameKind::Data {
                         (blocked_command, blocked_stream, None)
                     } else {
-                    enum BlockedNext {
-                        Priority(WriterCommand),
-                        Credit(OwnedSemaphorePermit),
-                        StreamClosed,
-                    }
-                    let blocked_close = blocked_stream
-                        .as_ref()
-                        .expect("Data commands are always stream-scheduled")
-                        .1
-                        .close_token
-                        .clone();
-                    let credits = connection.connection_credits.clone();
-                    let next = tokio::select! {
-                        biased;
-                        _ = cancel.cancelled() => return Ok(()),
-                        _ = blocked_close.cancelled() => BlockedNext::StreamClosed,
-                        Some(command) = priority_rx.recv() => BlockedNext::Priority(command),
-                        permit = credits.acquire_many_owned(
-                            blocked_command
-                                .frame
-                                .encoded_len()
-                                .min(connection.max_connection_credits) as u32
-                        ) => BlockedNext::Credit(
-                            permit.map_err(|_| anyhow!(
-                                "response mux connection closed while writer awaited credits"
-                            ))?
-                        ),
-                    };
-                    match next {
-                        BlockedNext::Priority(command) => {
-                            connection.queued_frames.fetch_sub(1, Ordering::AcqRel);
-                            blocked_data = Some((blocked_command, blocked_stream, blocked_since));
-                            (command, None, None)
+                        enum BlockedNext {
+                            Priority(WriterCommand),
+                            Credit(OwnedSemaphorePermit),
+                            StreamClosed,
                         }
-                        BlockedNext::Credit(permit) => {
-                            if metrics_enabled {
-                                response_mux::CONNECTION_FLOW_CONTROL_STALL_SECONDS
-                                    .observe(blocked_since.elapsed().as_secs_f64());
+                        let blocked_close = blocked_stream
+                            .as_ref()
+                            .expect("Data commands are always stream-scheduled")
+                            .1
+                            .close_token
+                            .clone();
+                        let credits = connection.connection_credits.clone();
+                        let next = tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => return Ok(()),
+                            _ = blocked_close.cancelled() => BlockedNext::StreamClosed,
+                            Some(command) = priority_rx.recv() => BlockedNext::Priority(command),
+                            permit = credits.acquire_many_owned(
+                                blocked_command
+                                    .frame
+                                    .encoded_len()
+                                    .min(connection.max_connection_credits) as u32
+                            ) => BlockedNext::Credit(
+                                permit.map_err(|_| anyhow!(
+                                    "response mux connection closed while writer awaited credits"
+                                ))?
+                            ),
+                        };
+                        match next {
+                            BlockedNext::Priority(command) => {
+                                connection.queued_frames.fetch_sub(1, Ordering::AcqRel);
+                                blocked_data =
+                                    Some((blocked_command, blocked_stream, blocked_since));
+                                (command, None, None)
                             }
-                            (blocked_command, blocked_stream, Some(permit))
+                            BlockedNext::Credit(permit) => {
+                                if metrics_enabled {
+                                    response_mux::CONNECTION_FLOW_CONTROL_STALL_SECONDS
+                                        .observe(blocked_since.elapsed().as_secs_f64());
+                                }
+                                (blocked_command, blocked_stream, Some(permit))
+                            }
+                            BlockedNext::StreamClosed => {
+                                if let Some((stream_id, _)) = blocked_stream {
+                                    scheduler.reschedule(&connection, stream_id);
+                                }
+                                blocked_command.fail(
+                                    "response mux stream closed while writer awaited credits",
+                                );
+                                continue 'writer;
+                            }
                         }
-                        BlockedNext::StreamClosed => {
-                            blocked_command
-                                .fail("response mux stream closed while writer awaited credits");
-                            continue;
-                        }
-                    }
                     }
                 } else {
                     let (command, scheduled_stream) = loop {
@@ -591,55 +748,45 @@ impl MuxConnection {
                             connection.queued_frames.fetch_sub(1, Ordering::AcqRel);
                             break (command, None);
                         }
+                        if let Some((command, scheduled_stream)) = scheduler.pop_ready(&connection)
+                        {
+                            break (command, Some(scheduled_stream));
+                        }
+                        match scheduler.ingest_one(&connection, &mut stream_rx) {
+                            IngressPoll::Ingested => continue,
+                            IngressPoll::Empty => {}
+                            IngressPoll::Disconnected => {
+                                stream_input_open = false;
+                            }
+                        }
 
                         enum Next {
-                            Priority(WriterCommand),
-                            Stream(Uuid),
+                            Priority(Option<WriterCommand>),
+                            Ingress(Option<StreamIngress>),
                         }
                         let next = tokio::select! {
                             biased;
                             _ = cancel.cancelled() => return Ok(()),
-                            command = priority_rx.recv() => command.map(Next::Priority),
-                            stream_id = ready_rx.recv() => stream_id.map(Next::Stream),
-                        };
-                        let Some(next) = next else {
-                            return Ok(());
+                            command = priority_rx.recv() => Next::Priority(command),
+                            ingress = stream_rx.recv(), if stream_input_open => {
+                                Next::Ingress(ingress)
+                            }
+                            else => return Ok(()),
                         };
                         match next {
-                            Next::Priority(command) => {
+                            Next::Priority(Some(command)) => {
                                 connection.queued_frames.fetch_sub(1, Ordering::AcqRel);
                                 break (command, None);
                             }
-                            Next::Stream(stream_id) => {
-                                let Some(state) = connection
-                                    .streams
-                                    .get(&stream_id)
-                                    .map(|entry| entry.value().clone())
-                                else {
-                                    continue;
-                                };
-                                let command = state.writer.lock().pending.pop_front();
-                                if let Some(command) = command {
-                                    connection.queued_frames.fetch_sub(1, Ordering::AcqRel);
-                                    let encoded_len = command.frame.encoded_len();
-                                    connection
-                                        .queued_bytes
-                                        .fetch_sub(encoded_len, Ordering::AcqRel);
-                                    response_mux::QUEUED_BYTES
-                                        .with_label_values(&["worker"])
-                                        .sub(encoded_len as i64);
-                                    break (command, Some((stream_id, state)));
-                                }
-                                let mut writer = state.writer.lock();
-                                if writer.scheduled {
-                                    writer.scheduled = false;
-                                    response_mux::READY_STREAMS
-                                        .with_label_values(&["worker"])
-                                        .dec();
-                                }
+                            Next::Priority(None) if !stream_input_open => return Ok(()),
+                            Next::Priority(None) => {}
+                            Next::Ingress(Some(ingress)) => {
+                                scheduler.ingest(&connection, ingress);
                             }
+                            Next::Ingress(None) => stream_input_open = false,
                         }
                     };
+
                     if command.frame.kind == MuxFrameKind::Data {
                         let required = command
                             .frame
@@ -653,8 +800,9 @@ impl MuxConnection {
                         {
                             Ok(permit) => (command, scheduled_stream, Some(permit)),
                             Err(tokio::sync::TryAcquireError::NoPermits) => {
+                                debug_assert!(blocked_data.is_none());
                                 blocked_data = Some((command, scheduled_stream, Instant::now()));
-                                continue;
+                                continue 'writer;
                             }
                             Err(tokio::sync::TryAcquireError::Closed) => {
                                 return Err(anyhow!(
@@ -672,8 +820,9 @@ impl MuxConnection {
                 let mut batch = vec![(command, connection_permit)];
                 let mut batch_bytes = batch[0].0.frame.encoded_len();
                 let mut force_flush = !first_is_data;
+                let mut held_for_next_turn = false;
+
                 if let Some((stream_id, state)) = scheduled_stream {
-                    let mut held_for_next_turn = false;
                     for _ in 1..super::RESPONSE_MUX_SCHEDULER_QUANTUM {
                         if force_flush
                             || batch.len() >= connection.batch_max_frames
@@ -681,19 +830,14 @@ impl MuxConnection {
                         {
                             break;
                         }
-                        let Some(next) = state.writer.lock().pending.pop_front() else {
+                        let Some(next) = scheduler.pop_same_stream(&connection, stream_id) else {
                             break;
                         };
-                        connection.queued_frames.fetch_sub(1, Ordering::AcqRel);
                         let encoded_len = next.frame.encoded_len();
-                        connection
-                            .queued_bytes
-                            .fetch_sub(encoded_len, Ordering::AcqRel);
-                        response_mux::QUEUED_BYTES
-                            .with_label_values(&["worker"])
-                            .sub(encoded_len as i64);
                         if batch_bytes.saturating_add(encoded_len) > connection.batch_max_bytes {
-                            blocked_data = Some((next, Some((stream_id, state.clone())), Instant::now()));
+                            debug_assert!(blocked_data.is_none());
+                            blocked_data =
+                                Some((next, Some((stream_id, state.clone())), Instant::now()));
                             held_for_next_turn = true;
                             break;
                         }
@@ -707,6 +851,7 @@ impl MuxConnection {
                             {
                                 Ok(permit) => Some(permit),
                                 Err(tokio::sync::TryAcquireError::NoPermits) => {
+                                    debug_assert!(blocked_data.is_none());
                                     blocked_data = Some((
                                         next,
                                         Some((stream_id, state.clone())),
@@ -729,13 +874,15 @@ impl MuxConnection {
                         batch.push((next, permit));
                     }
                     if !held_for_next_turn {
-                        connection.reschedule_stream(stream_id, &state)?;
+                        scheduler.reschedule(&connection, stream_id);
                     }
                 }
-                let deadline = batching_started + connection.batch_interval;
 
+                let deadline = batching_started + connection.batch_interval;
                 while first_is_data
                     && !force_flush
+                    && !held_for_next_turn
+                    && blocked_data.is_none()
                     && batch.len() < connection.batch_max_frames
                     && batch_bytes < connection.batch_max_bytes
                 {
@@ -746,56 +893,61 @@ impl MuxConnection {
                         break;
                     }
 
-                    let next_stream = match ready_rx.try_recv() {
-                        Ok(stream_id) => Some(stream_id),
-                        Err(mpsc::error::TryRecvError::Disconnected) => return Ok(()),
-                        Err(mpsc::error::TryRecvError::Empty)
-                            if connection.batch_interval.is_zero() =>
-                        {
-                            None
-                        }
-                        Err(mpsc::error::TryRecvError::Empty) => {
-                            tokio::select! {
-                                biased;
-                                _ = cancel.cancelled() => return Ok(()),
-                                Some(priority) = priority_rx.recv() => {
-                                    connection.queued_frames.fetch_sub(1, Ordering::AcqRel);
-                                    batch_bytes = batch_bytes.saturating_add(priority.frame.encoded_len());
-                                    batch.push((priority, None));
-                                    break;
-                                }
-                                stream_id = ready_rx.recv() => stream_id,
-                                _ = tokio::time::sleep_until(deadline.into()) => None,
+                    let mut scheduled = scheduler.pop_ready(&connection);
+                    if scheduled.is_none() && stream_input_open {
+                        match scheduler.ingest_one(&connection, &mut stream_rx) {
+                            IngressPoll::Ingested => continue,
+                            IngressPoll::Empty => {}
+                            IngressPoll::Disconnected => {
+                                stream_input_open = false;
                             }
                         }
-                    };
-                    let Some(stream_id) = next_stream else {
+                    }
+                    if scheduled.is_none() && !connection.batch_interval.is_zero() {
+                        enum BatchNext {
+                            Priority(WriterCommand),
+                            Ingress(Option<StreamIngress>),
+                            Deadline,
+                        }
+                        let next = tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => return Ok(()),
+                            Some(priority) = priority_rx.recv() => {
+                                BatchNext::Priority(priority)
+                            }
+                            ingress = stream_rx.recv(), if stream_input_open => {
+                                BatchNext::Ingress(ingress)
+                            }
+                            _ = tokio::time::sleep_until(deadline.into()) => {
+                                BatchNext::Deadline
+                            }
+                        };
+                        match next {
+                            BatchNext::Priority(priority) => {
+                                connection.queued_frames.fetch_sub(1, Ordering::AcqRel);
+                                batch_bytes =
+                                    batch_bytes.saturating_add(priority.frame.encoded_len());
+                                batch.push((priority, None));
+                                break;
+                            }
+                            BatchNext::Ingress(Some(ingress)) => {
+                                scheduler.ingest(&connection, ingress);
+                                continue;
+                            }
+                            BatchNext::Ingress(None) => {
+                                stream_input_open = false;
+                                continue;
+                            }
+                            BatchNext::Deadline => {}
+                        }
+                        scheduled = scheduler.pop_ready(&connection);
+                    }
+                    let Some((next, (stream_id, state))) = scheduled else {
                         break;
                     };
-                    let Some(state) = connection
-                        .streams
-                        .get(&stream_id)
-                        .map(|entry| entry.value().clone())
-                    else {
-                        continue;
-                    };
-                    let Some(next) = state.writer.lock().pending.pop_front() else {
-                        connection.reschedule_stream(stream_id, &state)?;
-                        continue;
-                    };
-                    connection.queued_frames.fetch_sub(1, Ordering::AcqRel);
                     let encoded_len = next.frame.encoded_len();
-                    connection
-                        .queued_bytes
-                        .fetch_sub(encoded_len, Ordering::AcqRel);
-                    response_mux::QUEUED_BYTES
-                        .with_label_values(&["worker"])
-                        .sub(encoded_len as i64);
-                    if !batch.is_empty()
-                        && (batch.len() + 1 > connection.batch_max_frames
-                            || batch_bytes.saturating_add(encoded_len)
-                                > connection.batch_max_bytes)
-                    {
+                    if batch_bytes.saturating_add(encoded_len) > connection.batch_max_bytes {
+                        debug_assert!(blocked_data.is_none());
                         blocked_data = Some((next, Some((stream_id, state)), Instant::now()));
                         break;
                     }
@@ -808,12 +960,15 @@ impl MuxConnection {
                         {
                             Ok(permit) => Some(permit),
                             Err(tokio::sync::TryAcquireError::NoPermits) => {
+                                debug_assert!(blocked_data.is_none());
                                 blocked_data =
                                     Some((next, Some((stream_id, state)), Instant::now()));
                                 break;
                             }
                             Err(tokio::sync::TryAcquireError::Closed) => {
-                                return Err(anyhow!("response mux connection credit window closed"));
+                                return Err(anyhow!(
+                                    "response mux connection credit window closed"
+                                ));
                             }
                         }
                     } else {
@@ -822,7 +977,7 @@ impl MuxConnection {
                     let urgent = next.frame.kind != MuxFrameKind::Data;
                     batch_bytes = batch_bytes.saturating_add(encoded_len);
                     batch.push((next, permit));
-                    connection.reschedule_stream(stream_id, &state)?;
+                    scheduler.reschedule(&connection, stream_id);
                     if urgent {
                         break;
                     }
@@ -842,18 +997,21 @@ impl MuxConnection {
                 connection
                     .sent_data_bytes
                     .fetch_add(data_bytes, Ordering::AcqRel);
-                let mut write_calls = 0_u64;
-                let write_result: Result<()> = async {
-                    let (_, calls) = write_buf.write_all_counted(&mut write_half).await?;
-                    write_calls = calls;
-                    Ok(())
-                }
-                .await;
+                let write_result = write_buf.write_all_counted(&mut write_half).await;
+                let write_calls = write_result
+                    .as_ref()
+                    .map(|(_, calls)| *calls)
+                    .unwrap_or_default();
+                let write_result: Result<()> =
+                    write_result.map(|_| ()).map_err(anyhow::Error::from);
+
                 for (command, permit) in &mut batch {
                     if metrics_enabled {
-                        response_mux::QUEUE_RESIDENCE_SECONDS
-                            .with_label_values(&["worker"])
-                            .observe(command.enqueued_at.elapsed().as_secs_f64());
+                        if let Some(enqueued_at) = command.enqueued_at {
+                            response_mux::QUEUE_RESIDENCE_SECONDS
+                                .with_label_values(&["worker"])
+                                .observe(enqueued_at.elapsed().as_secs_f64());
+                        }
                         if let Some(enqueued_at) = command.priority_enqueued_at {
                             response_mux::PRIORITY_QUEUE_RESIDENCE_SECONDS
                                 .observe(enqueued_at.elapsed().as_secs_f64());
@@ -872,6 +1030,9 @@ impl MuxConnection {
                         permit.forget();
                     }
                 }
+                response_mux::WRITE_CALLS_TOTAL
+                    .with_label_values(&["worker"])
+                    .inc_by(write_calls);
                 write_result?;
                 if metrics_enabled {
                     frames_per_write.observe(batch.len() as f64);
@@ -881,18 +1042,26 @@ impl MuxConnection {
                     response_mux::BATCH_WAIT_SECONDS
                         .with_label_values(&["worker"])
                         .observe(observed_batch_wait.as_secs_f64());
-                    response_mux::WRITE_CALLS_TOTAL
-                        .with_label_values(&["worker"])
-                        .inc_by(write_calls);
                 }
             }
         }
         .await;
+
         if metrics_enabled {
             queue_depth.sub(reported_queue_depth);
         }
-
         if let Some(connection) = weak.upgrade() {
+            if let Some((command, _, _)) = blocked_data.take() {
+                command.fail("response mux writer stopped");
+            }
+            while let Ok(ingress) = stream_rx.try_recv() {
+                scheduler.ingest(&connection, ingress);
+            }
+            scheduler.fail_all(&connection, "response mux writer stopped");
+            while let Ok(command) = priority_rx.try_recv() {
+                connection.queued_frames.fetch_sub(1, Ordering::AcqRel);
+                command.fail("response mux priority writer stopped");
+            }
             connection.fail(
                 &result
                     .err()
@@ -983,8 +1152,12 @@ impl MuxConnection {
                             window_updates.inc();
                         }
                     }
-                    MuxFrameKind::Stop => state.context.stop(),
+                    MuxFrameKind::Stop => {
+                        state.record_cancellation();
+                        state.context.stop();
+                    }
                     MuxFrameKind::Kill | MuxFrameKind::Reset => {
+                        state.record_cancellation();
                         drop(state);
                         connection.remove_stream(
                             frame.stream_id,
@@ -1039,9 +1212,27 @@ struct HostPool {
     next_connection_id: AtomicU64,
     warming: AtomicBool,
     maintenance_started: AtomicBool,
-    last_used: parking_lot::Mutex<Instant>,
+    lifecycle: Mutex<HostLifecycle>,
     cancel: CancellationToken,
     config: PoolConfig,
+}
+
+struct HostLifecycle {
+    last_used: Instant,
+    retiring: bool,
+    openers: usize,
+}
+
+struct HostOpenGuard {
+    host: Arc<HostPool>,
+}
+
+impl Drop for HostOpenGuard {
+    fn drop(&mut self) {
+        let mut lifecycle = self.host.lifecycle.lock();
+        lifecycle.openers = lifecycle.openers.saturating_sub(1);
+        lifecycle.last_used = Instant::now();
+    }
 }
 
 impl HostPool {
@@ -1061,7 +1252,11 @@ impl HostPool {
             next_connection_id: AtomicU64::new(1),
             warming: AtomicBool::new(false),
             maintenance_started: AtomicBool::new(false),
-            last_used: parking_lot::Mutex::new(Instant::now()),
+            lifecycle: Mutex::new(HostLifecycle {
+                last_used: Instant::now(),
+                retiring: false,
+                openers: 0,
+            }),
             cancel,
             config,
         })
@@ -1160,14 +1355,24 @@ impl HostPool {
         });
     }
 
-    async fn connection(self: &Arc<Self>) -> Result<Arc<MuxConnection>> {
-        *self.last_used.lock() = Instant::now();
+    async fn connection(self: &Arc<Self>) -> Result<Option<(Arc<MuxConnection>, HostOpenGuard)>> {
+        let opener = {
+            let mut lifecycle = self.lifecycle.lock();
+            if lifecycle.retiring {
+                return Ok(None);
+            }
+            lifecycle.openers += 1;
+            lifecycle.last_used = Instant::now();
+            HostOpenGuard { host: self.clone() }
+        };
         let mut healthy = self.healthy_connections();
         if healthy.is_empty() {
             healthy.push(self.ensure_first().await?);
         }
         self.start_maintenance();
-        self.warm();
+        if healthy.len() < self.config.pool_size {
+            self.warm();
+        }
         let index = healthy
             .iter()
             .enumerate()
@@ -1179,21 +1384,29 @@ impl HostPool {
             })
             .map(|(index, _)| index)
             .expect("healthy response mux connection list is non-empty");
-        Ok(healthy.swap_remove(index))
+        Ok(Some((healthy.swap_remove(index), opener)))
     }
 
-    fn is_idle(&self) -> bool {
-        self.healthy_connections()
-            .iter()
-            .all(|connection| connection.active_streams.load(Ordering::Acquire) == 0)
-            && self.last_used.lock().elapsed() >= self.config.idle_ttl
+    fn try_retire(&self) -> bool {
+        let mut lifecycle = self.lifecycle.lock();
+        if lifecycle.retiring
+            || lifecycle.openers != 0
+            || lifecycle.last_used.elapsed() < self.config.idle_ttl
+            || !self
+                .healthy_connections()
+                .iter()
+                .all(|connection| connection.active_streams.load(Ordering::Acquire) == 0)
+        {
+            return false;
+        }
+        lifecycle.retiring = true;
+        true
     }
 }
 
 pub struct ResponseMuxClientPool {
     hosts: DashMap<HostKey, Arc<HostPool>>,
     cancel: CancellationToken,
-    enabled: bool,
     config: PoolConfig,
 }
 
@@ -1212,7 +1425,6 @@ impl ResponseMuxClientPool {
         let pool = Arc::new(Self {
             hosts: DashMap::new(),
             cancel,
-            enabled: runtime_config.enabled,
             config: PoolConfig::from_runtime(runtime_config),
         });
         Self::start_cleanup(&pool);
@@ -1232,7 +1444,6 @@ impl ResponseMuxClientPool {
         let pool = Arc::new(Self {
             hosts: DashMap::new(),
             cancel,
-            enabled: true,
             config: PoolConfig {
                 pool_size: pool_size.max(1),
                 writer_queue: writer_queue.max(1),
@@ -1264,11 +1475,11 @@ impl ResponseMuxClientPool {
                     break;
                 }
                 pool.hosts.retain(|_, host| {
-                    let retain = !host.is_idle();
-                    if !retain {
+                    let retiring = host.try_retire();
+                    if retiring {
                         host.cancel.cancel();
                     }
-                    retain
+                    !retiring
                 });
             }
         });
@@ -1278,10 +1489,8 @@ impl ResponseMuxClientPool {
         self: &Arc<Self>,
         context: Arc<dyn AsyncEngineContext>,
         info: ConnectionInfo,
+        cancellation_counter: Option<prometheus::IntCounter>,
     ) -> Result<StreamSender> {
-        if !self.enabled {
-            anyhow::bail!("response mux connection info received while mux mode is disabled");
-        }
         let info = ResponseMuxConnectionInfo::try_from(info)
             .context("tcp-response-mux-connection-info-error")?;
         if info.version != RESPONSE_MUX_VERSION {
@@ -1304,26 +1513,34 @@ impl ResponseMuxClientPool {
             frontend_server_id: info.frontend_server_id,
             version: info.version,
         };
-        let host = self
-            .hosts
-            .entry(host_key)
-            .or_insert_with(|| {
-                HostPool::new(
-                    info.address.clone(),
-                    info.frontend_server_id,
-                    info.version,
-                    self.cancel.child_token(),
-                    self.config,
-                )
-            })
-            .clone();
-        let connection = host.connection().await?;
+        let (connection, _opener) = loop {
+            let host = self
+                .hosts
+                .entry(host_key.clone())
+                .or_insert_with(|| {
+                    HostPool::new(
+                        info.address.clone(),
+                        info.frontend_server_id,
+                        info.version,
+                        self.cancel.child_token(),
+                        self.config,
+                    )
+                })
+                .clone();
+            if let Some(connection) = host.connection().await? {
+                break connection;
+            }
+            self.hosts
+                .remove_if(&host_key, |_, candidate| Arc::ptr_eq(candidate, &host));
+            host.cancel.cancel();
+        };
         let state = Arc::new(WorkerStreamState {
             context,
+            cancellation_counter,
+            cancellation_recorded: AtomicBool::new(false),
             credits: Arc::new(Semaphore::new(self.config.initial_window)),
             max_credits: self.config.initial_window,
             writer_slots: Arc::new(Semaphore::new(self.config.stream_writer_queue)),
-            writer: Mutex::new(StreamWriterState::default()),
             closed: AtomicBool::new(false),
             close_token: CancellationToken::new(),
         });
@@ -1404,14 +1621,14 @@ impl MuxResponseStreamSender {
         match slots.try_acquire_owned() {
             Ok(permit) => Ok(permit),
             Err(tokio::sync::TryAcquireError::NoPermits) => {
-                let wait_start = Instant::now();
+                let wait_start = per_frame_metrics_enabled().then(Instant::now);
                 let permit = state
                     .writer_slots
                     .clone()
                     .acquire_owned()
                     .await
                     .map_err(|_| anyhow!("response mux stream closed during writer admission"))?;
-                if per_frame_metrics_enabled() {
+                if let Some(wait_start) = wait_start {
                     response_mux::WRITER_ADMISSION_STALL_SECONDS
                         .observe(wait_start.elapsed().as_secs_f64());
                 }
@@ -1451,7 +1668,7 @@ impl MuxResponseStreamSender {
         {
             Ok(permit) => permit,
             Err(tokio::sync::TryAcquireError::NoPermits) => {
-                let wait_start = Instant::now();
+                let wait_start = per_frame_metrics_enabled().then(Instant::now);
                 let slots = connection.queued_byte_slots.clone();
                 let permit = tokio::select! {
                     _ = state.close_token.cancelled() => {
@@ -1461,21 +1678,25 @@ impl MuxResponseStreamSender {
                         anyhow!("response mux connection closed during byte-queue admission")
                     })?,
                 };
-                response_mux::QUEUED_BYTE_ADMISSION_STALL_SECONDS
-                    .observe(wait_start.elapsed().as_secs_f64());
+                if let Some(wait_start) = wait_start {
+                    response_mux::QUEUED_BYTE_ADMISSION_STALL_SECONDS
+                        .observe(wait_start.elapsed().as_secs_f64());
+                }
                 permit
             }
             Err(tokio::sync::TryAcquireError::Closed) => {
                 anyhow::bail!("response mux connection closed during byte-queue admission")
             }
         };
-        connection.enqueue_stream_command(
-            self.stream_id,
-            state,
-            WriterCommand::new(frame, written)
-                .with_writer_permit(writer_permit)
-                .with_queued_byte_permit(queued_byte_permit),
-        )
+        connection
+            .enqueue_stream_command(
+                self.stream_id,
+                state.clone(),
+                WriterCommand::new(frame, written)
+                    .with_writer_permit(writer_permit)
+                    .with_queued_byte_permit(queued_byte_permit),
+            )
+            .await
     }
 
     async fn enqueue_priority_and_wait(&self, frame: MuxFrame) -> Result<()> {
@@ -1503,7 +1724,7 @@ impl MultiplexedStreamSender for MuxResponseStreamSender {
         let permit = match self.state.credits.clone().try_acquire_many_owned(required) {
             Ok(permit) => permit,
             Err(tokio::sync::TryAcquireError::NoPermits) => {
-                let wait_start = Instant::now();
+                let wait_start = per_frame_metrics_enabled().then(Instant::now);
                 let permit = self
                     .state
                     .credits
@@ -1511,7 +1732,7 @@ impl MultiplexedStreamSender for MuxResponseStreamSender {
                     .acquire_many_owned(required)
                     .await
                     .map_err(|_| anyhow!("response mux stream closed while waiting for credits"))?;
-                if per_frame_metrics_enabled() {
+                if let Some(wait_start) = wait_start {
                     response_mux::FLOW_CONTROL_STALL_SECONDS
                         .observe(wait_start.elapsed().as_secs_f64());
                 }
@@ -1607,10 +1828,11 @@ mod tests {
         let context = Context::new(());
         Arc::new(WorkerStreamState {
             context: context.context(),
+            cancellation_counter: None,
+            cancellation_recorded: AtomicBool::new(false),
             credits: Arc::new(Semaphore::new(initial_credits)),
             max_credits: TEST_STREAM_WINDOW,
             writer_slots: Arc::new(Semaphore::new(writer_slots)),
-            writer: Mutex::new(StreamWriterState::default()),
             closed: AtomicBool::new(false),
             close_token: CancellationToken::new(),
         })
@@ -1648,16 +1870,87 @@ mod tests {
     }
 
     #[test]
+    fn detailed_metric_timestamps_are_opt_in() {
+        let stream_id = Uuid::new_v4();
+        let disabled = WriterCommand::new_with_metrics(
+            MuxFrame::empty(MuxFrameKind::End, stream_id),
+            None,
+            false,
+        );
+        let enabled = WriterCommand::new_with_metrics(
+            MuxFrame::empty(MuxFrameKind::End, stream_id),
+            None,
+            true,
+        );
+
+        assert!(disabled.enqueued_at.is_none());
+        assert!(enabled.enqueued_at.is_some());
+    }
+
+    #[test]
+    fn ingress_admission_stops_after_one_frame_when_a_stream_becomes_ready() {
+        let stream_id = Uuid::new_v4();
+        let state = worker_stream_state(TEST_STREAM_WINDOW, RESPONSE_MUX_STREAM_WRITER_QUEUE);
+        let (priority_tx, _priority_rx) = mpsc::channel(1);
+        let (stream_tx, mut stream_rx) = mpsc::channel(4);
+        let connection = MuxConnection {
+            id: 1,
+            cancel: CancellationToken::new(),
+            priority_tx,
+            stream_tx: stream_tx.clone(),
+            streams: DashMap::new(),
+            healthy: AtomicBool::new(true),
+            active_streams: AtomicUsize::new(1),
+            queued_frames: AtomicUsize::new(2),
+            queued_bytes: AtomicUsize::new(0),
+            max_queued_bytes: TEST_CONNECTION_WINDOW,
+            queued_byte_slots: Arc::new(Semaphore::new(TEST_CONNECTION_WINDOW)),
+            connection_credits: Arc::new(Semaphore::new(TEST_CONNECTION_WINDOW)),
+            max_connection_credits: TEST_CONNECTION_WINDOW,
+            sent_data_bytes: AtomicU64::new(0),
+            acknowledged_data_bytes: AtomicU64::new(0),
+            batch_interval: Duration::ZERO,
+            batch_max_bytes: 65_536,
+            batch_max_frames: 64,
+        };
+        for payload in [b"first".as_slice(), b"second".as_slice()] {
+            stream_tx
+                .try_send(StreamIngress {
+                    stream_id,
+                    state: state.clone(),
+                    command: WriterCommand::new(
+                        MuxFrame::new(
+                            MuxFrameKind::Data,
+                            stream_id,
+                            bytes::Bytes::copy_from_slice(payload),
+                        ),
+                        None,
+                    ),
+                })
+                .unwrap();
+        }
+
+        let mut scheduler = WriterScheduler::default();
+        assert_eq!(
+            scheduler.ingest_one(&connection, &mut stream_rx),
+            IngressPoll::Ingested
+        );
+        assert_eq!(stream_rx.len(), 1);
+        assert_eq!(scheduler.ready.len(), 1);
+        assert_eq!(scheduler.streams[&stream_id].pending.len(), 1);
+    }
+
+    #[test]
     fn cumulative_connection_ack_replenishes_credits_without_exceeding_the_window() {
         let (priority_tx, _priority_rx) = mpsc::channel(1);
-        let (ready_tx, _ready_rx) = mpsc::unbounded_channel();
+        let (stream_tx, _stream_rx) = mpsc::channel(1);
         let remaining = 16;
         let consumed = TEST_CONNECTION_WINDOW - remaining;
         let connection = MuxConnection {
             id: 1,
             cancel: CancellationToken::new(),
             priority_tx,
-            ready_tx,
+            stream_tx,
             streams: DashMap::new(),
             healthy: AtomicBool::new(true),
             active_streams: AtomicUsize::new(0),
@@ -1711,24 +2004,18 @@ mod tests {
     #[tokio::test]
     async fn closing_a_stream_wakes_credit_and_writer_admission_waiters() {
         let state = worker_stream_state(0, 0);
-        let (written_tx, written_rx) = oneshot::channel();
-        state.writer.lock().pending.push_back(WriterCommand::new(
-            MuxFrame::empty(MuxFrameKind::End, Uuid::new_v4()),
-            Some(written_tx),
-        ));
-
         let (priority_tx, _priority_rx) = mpsc::channel(1);
-        let (ready_tx, _ready_rx) = mpsc::unbounded_channel();
+        let (stream_tx, _stream_rx) = mpsc::channel(1);
         let connection = MuxConnection {
             id: 1,
             cancel: CancellationToken::new(),
             priority_tx,
-            ready_tx,
+            stream_tx,
             streams: DashMap::new(),
             healthy: AtomicBool::new(true),
             active_streams: AtomicUsize::new(0),
-            queued_frames: AtomicUsize::new(1),
-            queued_bytes: AtomicUsize::new(super::super::MUX_HEADER_LEN),
+            queued_frames: AtomicUsize::new(0),
+            queued_bytes: AtomicUsize::new(0),
             max_queued_bytes: TEST_CONNECTION_WINDOW,
             queued_byte_slots: Arc::new(Semaphore::new(TEST_CONNECTION_WINDOW)),
             connection_credits: Arc::new(Semaphore::new(TEST_CONNECTION_WINDOW)),
@@ -1754,8 +2041,6 @@ mod tests {
 
         assert!(credit_waiter.await.unwrap().is_err());
         assert!(writer_waiter.await.unwrap().is_err());
-        assert_eq!(connection.queued_frames.load(Ordering::Acquire), 0);
-        assert_eq!(written_rx.await.unwrap().unwrap_err(), "test stream closed");
         assert_eq!(state.replenish_credits(1_024), 0);
         assert_eq!(state.credits.available_permits(), 0);
     }
@@ -1772,36 +2057,20 @@ mod tests {
         let stream_id = Uuid::new_v4();
         let (end_written_tx, end_written_rx) = oneshot::channel();
         let state = worker_stream_state(TEST_STREAM_WINDOW, RESPONSE_MUX_STREAM_WRITER_QUEUE);
-        {
-            let mut writer = state.writer.lock();
-            writer.pending.push_back(WriterCommand::new(
-                MuxFrame::new(
-                    MuxFrameKind::Data,
-                    stream_id,
-                    bytes::Bytes::from(vec![b'x'; 40]),
-                ),
-                None,
-            ));
-            writer.pending.push_back(WriterCommand::new(
-                MuxFrame::empty(MuxFrameKind::End, stream_id),
-                Some(end_written_tx),
-            ));
-            writer.scheduled = true;
-        }
 
         let (priority_tx, priority_rx) = mpsc::channel(1);
-        let (ready_tx, ready_rx) = mpsc::unbounded_channel();
+        let (stream_tx, stream_rx) = mpsc::channel(8);
         let cancel = CancellationToken::new();
         let connection = Arc::new(MuxConnection {
             id: 1,
             cancel: cancel.clone(),
             priority_tx,
-            ready_tx: ready_tx.clone(),
+            stream_tx,
             streams: DashMap::new(),
             healthy: AtomicBool::new(true),
             active_streams: AtomicUsize::new(1),
-            queued_frames: AtomicUsize::new(2),
-            queued_bytes: AtomicUsize::new(88),
+            queued_frames: AtomicUsize::new(0),
+            queued_bytes: AtomicUsize::new(0),
             max_queued_bytes: TEST_CONNECTION_WINDOW,
             queued_byte_slots: Arc::new(Semaphore::new(TEST_CONNECTION_WINDOW)),
             connection_credits: Arc::new(Semaphore::new(64)),
@@ -1812,16 +2081,41 @@ mod tests {
             batch_max_bytes: 64,
             batch_max_frames: 64,
         });
-        connection.streams.insert(stream_id, state);
-        ready_tx.send(stream_id).unwrap();
+        connection.streams.insert(stream_id, state.clone());
 
         let writer_task = tokio::spawn(MuxConnection::writer_task(
             Arc::downgrade(&connection),
             write_half,
             priority_rx,
-            ready_rx,
+            stream_rx,
             cancel,
         ));
+        connection
+            .enqueue_stream_command(
+                stream_id,
+                state.clone(),
+                WriterCommand::new(
+                    MuxFrame::new(
+                        MuxFrameKind::Data,
+                        stream_id,
+                        bytes::Bytes::from(vec![b'x'; 40]),
+                    ),
+                    None,
+                ),
+            )
+            .await
+            .unwrap();
+        connection
+            .enqueue_stream_command(
+                stream_id,
+                state,
+                WriterCommand::new(
+                    MuxFrame::empty(MuxFrameKind::End, stream_id),
+                    Some(end_written_tx),
+                ),
+            )
+            .await
+            .unwrap();
         let reader_task = tokio::spawn(async move {
             let mut reader = FramedRead::new(server_read, MuxCodec::default());
             let data = reader.next().await.unwrap().unwrap();
@@ -1841,11 +2135,206 @@ mod tests {
         writer_task.abort();
     }
 
+    #[tokio::test]
+    async fn parked_frame_is_not_overwritten_by_another_ready_stream() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = TcpStream::connect(address).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let (_, write_half) = client.into_split();
+        let (server_read, _) = server.into_split();
+
+        let stream_a = Uuid::new_v4();
+        let stream_b = Uuid::new_v4();
+        let state_a = worker_stream_state(TEST_STREAM_WINDOW, RESPONSE_MUX_STREAM_WRITER_QUEUE);
+        let state_b = worker_stream_state(TEST_STREAM_WINDOW, RESPONSE_MUX_STREAM_WRITER_QUEUE);
+        let (priority_tx, priority_rx) = mpsc::channel(1);
+        let (stream_tx, stream_rx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let connection = Arc::new(MuxConnection {
+            id: 1,
+            cancel: cancel.clone(),
+            priority_tx,
+            stream_tx,
+            streams: DashMap::new(),
+            healthy: AtomicBool::new(true),
+            active_streams: AtomicUsize::new(2),
+            queued_frames: AtomicUsize::new(0),
+            queued_bytes: AtomicUsize::new(0),
+            max_queued_bytes: TEST_CONNECTION_WINDOW,
+            queued_byte_slots: Arc::new(Semaphore::new(TEST_CONNECTION_WINDOW)),
+            connection_credits: Arc::new(Semaphore::new(TEST_CONNECTION_WINDOW)),
+            max_connection_credits: TEST_CONNECTION_WINDOW,
+            sent_data_bytes: AtomicU64::new(0),
+            acknowledged_data_bytes: AtomicU64::new(0),
+            batch_interval: Duration::ZERO,
+            batch_max_bytes: 64,
+            batch_max_frames: 64,
+        });
+        connection.streams.insert(stream_a, state_a.clone());
+        connection.streams.insert(stream_b, state_b.clone());
+
+        for (state, frame) in [
+            (
+                state_a.clone(),
+                MuxFrame::new(
+                    MuxFrameKind::Data,
+                    stream_a,
+                    bytes::Bytes::from_static(b"a-small"),
+                ),
+            ),
+            (
+                state_a,
+                MuxFrame::new(
+                    MuxFrameKind::Data,
+                    stream_a,
+                    bytes::Bytes::from(vec![b'A'; 40]),
+                ),
+            ),
+            (
+                state_b,
+                MuxFrame::new(
+                    MuxFrameKind::Data,
+                    stream_b,
+                    bytes::Bytes::from_static(b"b-ready"),
+                ),
+            ),
+        ] {
+            connection
+                .enqueue_stream_command(frame.stream_id, state, WriterCommand::new(frame, None))
+                .await
+                .unwrap();
+        }
+
+        let writer_task = tokio::spawn(MuxConnection::writer_task(
+            Arc::downgrade(&connection),
+            write_half,
+            priority_rx,
+            stream_rx,
+            cancel,
+        ));
+        let mut reader = FramedRead::new(server_read, MuxCodec::default());
+        let first = reader.next().await.unwrap().unwrap();
+        let second = reader.next().await.unwrap().unwrap();
+        let third = reader.next().await.unwrap().unwrap();
+
+        assert_eq!(first.payload, bytes::Bytes::from_static(b"a-small"));
+        assert_eq!(second.payload, bytes::Bytes::from(vec![b'A'; 40]));
+        assert_eq!(third.payload, bytes::Bytes::from_static(b"b-ready"));
+        writer_task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn one_ms_batch_interval_flushes_on_expiry() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = TcpStream::connect(address).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let (_, write_half) = client.into_split();
+        let (server_read, _) = server.into_split();
+
+        let stream_id = Uuid::new_v4();
+        let state = worker_stream_state(TEST_STREAM_WINDOW, RESPONSE_MUX_STREAM_WRITER_QUEUE);
+        let (priority_tx, priority_rx) = mpsc::channel(1);
+        let (stream_tx, stream_rx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let connection = Arc::new(MuxConnection {
+            id: 1,
+            cancel: cancel.clone(),
+            priority_tx,
+            stream_tx,
+            streams: DashMap::new(),
+            healthy: AtomicBool::new(true),
+            active_streams: AtomicUsize::new(1),
+            queued_frames: AtomicUsize::new(0),
+            queued_bytes: AtomicUsize::new(0),
+            max_queued_bytes: TEST_CONNECTION_WINDOW,
+            queued_byte_slots: Arc::new(Semaphore::new(TEST_CONNECTION_WINDOW)),
+            connection_credits: Arc::new(Semaphore::new(TEST_CONNECTION_WINDOW)),
+            max_connection_credits: TEST_CONNECTION_WINDOW,
+            sent_data_bytes: AtomicU64::new(0),
+            acknowledged_data_bytes: AtomicU64::new(0),
+            batch_interval: Duration::from_millis(1),
+            batch_max_bytes: 65_536,
+            batch_max_frames: 64,
+        });
+        connection.streams.insert(stream_id, state.clone());
+        connection
+            .enqueue_stream_command(
+                stream_id,
+                state,
+                WriterCommand::new(
+                    MuxFrame::new(
+                        MuxFrameKind::Data,
+                        stream_id,
+                        bytes::Bytes::from_static(b"batched"),
+                    ),
+                    None,
+                ),
+            )
+            .await
+            .unwrap();
+
+        let writer_task = tokio::spawn(MuxConnection::writer_task(
+            Arc::downgrade(&connection),
+            write_half,
+            priority_rx,
+            stream_rx,
+            cancel,
+        ));
+        let (received_tx, mut received_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let mut reader = FramedRead::new(server_read, MuxCodec::default());
+            let _ = received_tx.send(reader.next().await.unwrap().unwrap());
+        });
+
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        assert!(matches!(
+            received_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        tokio::time::advance(Duration::from_micros(999)).await;
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            received_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        tokio::time::advance(Duration::from_micros(1)).await;
+        assert_eq!(
+            received_rx.await.unwrap().payload,
+            bytes::Bytes::from_static(b"batched")
+        );
+        writer_task.abort();
+    }
+
+    #[test]
+    fn idle_cleanup_cannot_retire_a_host_with_an_opener() {
+        let mut config = PoolConfig::from_runtime(integration_config());
+        config.idle_ttl = Duration::ZERO;
+        let host = HostPool::new(
+            "127.0.0.1:1".to_string(),
+            Uuid::new_v4(),
+            RESPONSE_MUX_VERSION,
+            CancellationToken::new(),
+            config,
+        );
+        let opener = {
+            let mut lifecycle = host.lifecycle.lock();
+            lifecycle.openers += 1;
+            HostOpenGuard { host: host.clone() }
+        };
+
+        assert!(!host.try_retire());
+        drop(opener);
+        assert!(host.try_retire());
+    }
+
     fn integration_config() -> ResponseMuxConfig {
         ResponseMuxConfig {
-            enabled: true,
             packet_metrics: false,
-            batch_interval: Duration::from_millis(5),
+            batch_interval: Duration::from_millis(1),
             batch_max_bytes: 65_536,
             batch_max_frames: 64,
             stream_window_bytes: 262_144,
@@ -1881,7 +2370,7 @@ mod tests {
             .unwrap()
             .stream_id;
         let mut sender = pool
-            .create_response_stream(context.context(), info)
+            .create_response_stream(context.context(), info, None)
             .await
             .unwrap();
         sender.send_prologue(None).await.unwrap();
@@ -1908,33 +2397,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disabled_worker_rejects_mux_connection_info() {
-        let mut config = integration_config();
-        config.enabled = false;
+    async fn legacy_response_connection_info_is_rejected() {
+        use crate::pipeline::network::tcp::{StreamType, TcpStreamConnectionInfo};
+
+        let config = integration_config();
         let cancel = CancellationToken::new();
         let pool = ResponseMuxClientPool::new(cancel.clone(), config);
         let context = Context::new(());
-        let info = ResponseMuxConnectionInfo {
+        let info = TcpStreamConnectionInfo {
             address: "127.0.0.1:1".to_string(),
-            frontend_server_id: Uuid::new_v4(),
-            stream_id: Uuid::new_v4(),
             context: context.context().id().to_string(),
-            version: RESPONSE_MUX_VERSION,
+            subject: Uuid::new_v4().to_string(),
+            stream_type: StreamType::Response,
         };
 
         let error = pool
-            .create_response_stream(context.context(), info.into())
+            .create_response_stream(context.context(), info.into(), None)
             .await
             .err()
-            .expect("disabled mux mode must reject mux connection info");
-        assert!(error.to_string().contains("mux mode is disabled"));
+            .expect("legacy response connection info must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("tcp-response-mux-connection-info-error")
+        );
         cancel.cancel();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stream_credit_stall_does_not_block_another_stream() {
         let config = ResponseMuxConfig {
-            enabled: true,
             packet_metrics: false,
             batch_interval: Duration::ZERO,
             batch_max_bytes: 65_536,
@@ -1992,6 +2484,35 @@ mod tests {
         sender_a.finish().await.unwrap();
         assert_eq!(receiver_a.recv().await.unwrap(), full_window_payload);
         assert!(receiver_a.recv().await.is_none());
+        cancel.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn frontend_receiver_drop_removes_the_worker_stream() {
+        let config = integration_config();
+        let server = crate::pipeline::network::tcp::server::TcpStreamServer::new_mux_for_test(
+            crate::pipeline::network::tcp::server::ServerOptions::default(),
+            config,
+        )
+        .await
+        .unwrap();
+        let address = mux_address(server.clone()).await;
+        let cancel = CancellationToken::new();
+        let pool = ResponseMuxClientPool::new(cancel.clone(), config);
+        let (stream_id, context, sender, receiver) = open_mux_stream(server, pool.clone()).await;
+
+        drop(receiver);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !context.context().is_killed()
+                || pool.stream_connection_id(&address, stream_id).is_some()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("frontend receiver drop did not remove the worker stream");
+
+        assert!(sender.finish().await.is_err());
         cancel.cancel();
     }
 
@@ -2105,7 +2626,7 @@ mod tests {
                 .unwrap();
             let (info, provider) = pending.into_parts();
             let mut sender = pool
-                .create_response_stream(context.context(), info)
+                .create_response_stream(context.context(), info, None)
                 .await
                 .unwrap();
             sender.send_prologue(None).await.unwrap();

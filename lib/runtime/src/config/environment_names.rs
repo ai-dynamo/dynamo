@@ -626,9 +626,6 @@ pub mod tcp_response_stream {
     /// If unset, the server auto-detects a routable local IP.
     pub const DYN_TCP_RESPONSE_STREAM_HOST: &str = "DYN_TCP_RESPONSE_STREAM_HOST";
 
-    /// Enables the coordinated multiplexed TCP response transport.
-    pub const DYN_TCP_RESPONSE_MUX: &str = "DYN_TCP_RESPONSE_MUX";
-
     /// Maximum time response data may wait for cross-stream batching.
     pub const DYN_TCP_RESPONSE_BATCH_INTERVAL_MS: &str = "DYN_TCP_RESPONSE_BATCH_INTERVAL_MS";
 
@@ -894,7 +891,6 @@ mod tests {
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,
-            tcp_response_stream::DYN_TCP_RESPONSE_MUX,
             tcp_response_stream::DYN_TCP_RESPONSE_BATCH_INTERVAL_MS,
             tcp_response_stream::DYN_TCP_RESPONSE_BATCH_MAX_BYTES,
             tcp_response_stream::DYN_TCP_RESPONSE_BATCH_MAX_FRAMES,

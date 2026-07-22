@@ -595,27 +595,22 @@ where
             WORK_HANDLER_NETWORK_TRANSIT_SECONDS.observe(transit_ns as f64 / 1_000_000_000.0);
         }
 
-        tracing::trace!("creating tcp response stream");
-        let mut publisher =
-            if response_connection_info.transport == tcp::TCP_RESPONSE_MUX_TRANSPORT {
-                self.response_mux_client
-                    .get()
-                    .ok_or_else(|| {
-                        PipelineError::Generic(
-                            "response mux client was not initialized for endpoint ingress"
-                                .to_string(),
-                        )
-                    })?
-                    .create_response_stream(request.context(), response_connection_info)
-                    .await
-            } else {
-                tcp::client::TcpClient::create_response_stream(
-                    request.context(),
-                    response_connection_info,
-                    self.metrics().map(|m| m.cancellation_total.clone()),
+        tracing::trace!("creating multiplexed TCP response stream");
+        let response_context = request.context();
+        let mut publisher = self
+            .response_mux_client
+            .get()
+            .ok_or_else(|| {
+                PipelineError::Generic(
+                    "response mux client was not initialized for endpoint ingress".to_string(),
                 )
-                .await
-            }
+            })?
+            .create_response_stream(
+                response_context.clone(),
+                response_connection_info,
+                self.metrics().map(|m| m.cancellation_total.clone()),
+            )
+            .await
             .map_err(|e| {
                 if let Some(m) = self.metrics() {
                     m.error_counter
@@ -673,9 +668,15 @@ where
 
         self.pump_response_stream(stream, &publisher, payload_codec)
             .await;
-        publisher.finish().await.map_err(|err| {
-            PipelineError::Generic(format!("Failed to finish response stream: {err}"))
-        })?;
+        if let Err(err) = publisher.finish().await {
+            if response_context.is_killed() || response_context.is_stopped() {
+                tracing::debug!(%err, "response stream closed by frontend cancellation");
+            } else {
+                return Err(PipelineError::Generic(format!(
+                    "Failed to finish response stream: {err}"
+                )));
+            }
+        }
 
         // Ensure the metrics guard is not dropped until the end of the function.
         // Drop fires "request completed" log via RAII.

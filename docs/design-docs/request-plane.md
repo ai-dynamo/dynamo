@@ -99,6 +99,23 @@ Additional TCP-specific environment variables:
 - `DYN_TCP_CONNECT_TIMEOUT`: Connect timeout for TCP client (default: 3 seconds)
 - `DYN_TCP_CHANNEL_BUFFER`: Request channel buffer size for TCP client (default: 100)
 
+#### TCP Response Multiplexing
+
+The TCP response path always uses the versioned `tcp_response_mux_v1` protocol. Each worker process maintains four persistent response connections to each frontend it communicates with, and logical responses share those connections. For example, eight worker processes paired with one frontend maintain 32 physical response connections after warmup. Request streams remain on their existing dedicated sockets.
+
+Data frames are batched for up to 1 ms by default to reduce small TCP writes and per-packet operating system overhead. Set `DYN_TCP_RESPONSE_BATCH_INTERVAL_MS=0` for opportunistic batching without an intentional delay. Values above 100 ms or malformed values prevent runtime initialization.
+
+The response mux supports the following tuning variables:
+
+- `DYN_TCP_RESPONSE_BATCH_INTERVAL_MS`: Maximum data batching delay in milliseconds (default: `1`, maximum: `100`)
+- `DYN_TCP_RESPONSE_BATCH_MAX_BYTES`: Maximum encoded bytes per batch (default: `65536`)
+- `DYN_TCP_RESPONSE_BATCH_MAX_FRAMES`: Maximum frames per batch (default: `64`)
+- `DYN_TCP_RESPONSE_STREAM_WINDOW_BYTES`: Initial per-stream flow-control window (default: `262144`)
+- `DYN_TCP_RESPONSE_CONNECTION_WINDOW_BYTES`: Initial per-connection flow-control window (default: `262144`)
+- `DYN_TCP_RESPONSE_PACKET_METRICS`: Enable detailed per-frame timing and Linux TCP segment diagnostics (`0` or `1`, default: `0`)
+
+Response mux versions do not fall back to the former dedicated response protocol. Upgrade frontends and workers together so both sides support `tcp_response_mux_v1`; mixed versions reject the response connection during its handshake.
+
 ### Using NATS
 
 NATS provides a brokered request plane and can also carry KV events and router replica synchronization over NATS Core.

@@ -30,7 +30,7 @@ pub const RESPONSE_MUX_STREAM_WRITER_QUEUE: usize = 8;
 pub const RESPONSE_MUX_IDLE_TTL_SECS: u64 = 300;
 pub const RESPONSE_MUX_CONNECT_TIMEOUT_SECS: u64 = 5;
 
-pub const RESPONSE_MUX_DEFAULT_BATCH_INTERVAL_MS: u64 = 5;
+pub const RESPONSE_MUX_DEFAULT_BATCH_INTERVAL_MS: u64 = 1;
 pub const RESPONSE_MUX_MAX_BATCH_INTERVAL_MS: u64 = 100;
 pub const RESPONSE_MUX_DEFAULT_BATCH_MAX_BYTES: usize = 65_536;
 pub const RESPONSE_MUX_DEFAULT_BATCH_MAX_FRAMES: usize = 64;
@@ -42,7 +42,6 @@ pub const RESPONSE_MUX_SCHEDULER_QUANTUM: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResponseMuxConfig {
-    pub enabled: bool,
     pub packet_metrics: bool,
     pub batch_interval: Duration,
     pub batch_max_bytes: usize,
@@ -77,7 +76,6 @@ impl ResponseMuxConfig {
             Some("1") | Some("true") => Ok(true),
             Some(value) => anyhow::bail!("invalid {name}={value:?}; expected 0, 1, false, or true"),
         };
-        let enabled = parse_bool(env::DYN_TCP_RESPONSE_MUX, read(env::DYN_TCP_RESPONSE_MUX))?;
         let packet_metrics = parse_bool(
             env::DYN_TCP_RESPONSE_PACKET_METRICS,
             read(env::DYN_TCP_RESPONSE_PACKET_METRICS),
@@ -146,7 +144,6 @@ impl ResponseMuxConfig {
             }
         }
         Ok(Self {
-            enabled,
             packet_metrics,
             batch_interval: Duration::from_millis(interval_ms),
             batch_max_bytes,
@@ -184,8 +181,6 @@ pub const MUX_HEADER_LEN: usize = 24;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ConnectionHandshake {
-    /// Dedicated per-request upstream -> downstream request stream.
-    RequestStream { subject: String },
     /// Persistent connection carrying many downstream -> upstream responses.
     ResponseMux {
         version: u8,
@@ -658,11 +653,10 @@ mod tests {
     }
 
     #[test]
-    fn response_mux_config_defaults_to_disabled_and_five_ms() {
+    fn response_mux_config_defaults_to_one_ms() {
         let config = config(&[]).unwrap();
-        assert!(!config.enabled);
         assert!(!config.packet_metrics);
-        assert_eq!(config.batch_interval, Duration::from_millis(5));
+        assert_eq!(config.batch_interval, Duration::from_millis(1));
         assert_eq!(config.batch_max_bytes, 65_536);
         assert_eq!(config.batch_max_frames, 64);
         assert_eq!(config.stream_window_bytes, 262_144);
@@ -673,14 +667,12 @@ mod tests {
     fn response_mux_config_accepts_zero_delay_and_valid_overrides() {
         use crate::config::environment_names::tcp_response_stream as env;
         let config = config(&[
-            (env::DYN_TCP_RESPONSE_MUX, "1"),
             (env::DYN_TCP_RESPONSE_PACKET_METRICS, "true"),
             (env::DYN_TCP_RESPONSE_BATCH_INTERVAL_MS, "0"),
             (env::DYN_TCP_RESPONSE_BATCH_MAX_BYTES, "8192"),
             (env::DYN_TCP_RESPONSE_BATCH_MAX_FRAMES, "8"),
         ])
         .unwrap();
-        assert!(config.enabled);
         assert!(config.packet_metrics);
         assert_eq!(config.batch_interval, Duration::ZERO);
         assert_eq!(config.batch_max_bytes, 8192);

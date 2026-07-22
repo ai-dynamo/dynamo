@@ -94,9 +94,8 @@ impl ServerOptions {
     }
 }
 
-/// A [`TcpStreamServer`] is a TCP service that listens on a port for incoming response connections.
-/// A Response connection is a connection that is established by a client with the intention of sending
-/// specific data back to the server.
+/// A [`TcpStreamServer`] accepts dedicated request streams and persistent
+/// multiplexed response connections.
 pub struct TcpStreamServer {
     local_ip: String,
     local_port: u16,
@@ -104,7 +103,7 @@ pub struct TcpStreamServer {
     mux_config: ResponseMuxConfig,
     state: Arc<Mutex<State>>,
     response_pending: Arc<DashMap<uuid::Uuid, RequestedMuxRecvConnection>>,
-    response_active: Arc<DashMap<uuid::Uuid, ActiveMuxResponseStream>>,
+    response_active: Arc<DashMap<uuid::Uuid, ActiveMuxResponseControl>>,
 }
 
 // pub struct TcpStreamReceiver {
@@ -122,14 +121,6 @@ struct RequestedSendConnection {
     send_buffer_count: usize,
 }
 
-struct RequestedRecvConnection {
-    context: Arc<dyn AsyncEngineContext>,
-    connection: oneshot::Sender<Result<StreamReceiver, String>>,
-    /// Capacity of the per-stream mpsc buffer between the socket task and the
-    /// engine consumer; carried from the registration [`StreamOptions`].
-    send_buffer_count: usize,
-}
-
 struct RequestedMuxRecvConnection {
     context: Arc<dyn AsyncEngineContext>,
     connection: Mutex<Option<oneshot::Sender<Result<StreamReceiver, String>>>>,
@@ -137,16 +128,21 @@ struct RequestedMuxRecvConnection {
     registered_at: Instant,
 }
 
-struct ActiveMuxResponseStream {
+struct ActiveMuxResponseControl {
     connection_id: uuid::Uuid,
     context: Arc<dyn AsyncEngineContext>,
-    response_tx: mpsc::Sender<StreamRxItem>,
     control_tx: mpsc::Sender<MuxFrame>,
+    close_tx: mpsc::Sender<uuid::Uuid>,
     control_failed: CancellationToken,
 }
 
+struct ActiveMuxResponseStream {
+    context: Arc<dyn AsyncEngineContext>,
+    response_tx: mpsc::Sender<StreamRxItem>,
+}
+
 struct ResponseMuxSocket {
-    read_half: tokio::io::ReadHalf<tokio::net::TcpStream>,
+    reader: FramedRead<tokio::io::ReadHalf<tokio::net::TcpStream>, MuxCodec>,
     write_half: tokio::io::WriteHalf<tokio::net::TcpStream>,
     packet_socket: Option<std::os::fd::OwnedFd>,
 }
@@ -162,8 +158,8 @@ impl Drop for ActiveMuxResponseStream {
 /// Build the per-stream data-plane mpsc channel that bridges the socket task
 /// and the engine producer/consumer. The capacity is driven by the
 /// registration options ([`StreamOptions::send_buffer_count`]) rather than a
-/// hard-coded constant; both `process_request_stream` and
-/// `process_response_stream` size their channel through this helper. See #10293.
+/// hard-coded constant; both the dedicated request path and response-mux
+/// mailboxes use this helper. See #10293.
 fn data_plane_channel<T>(send_buffer_count: usize) -> (mpsc::Sender<T>, mpsc::Receiver<T>) {
     // `tokio::sync::mpsc::channel` panics on a capacity of 0. Now that the value
     // is caller-configurable via `StreamOptions::send_buffer_count`, clamp to at
@@ -191,14 +187,13 @@ fn data_plane_channel<T>(send_buffer_count: usize) -> (mpsc::Sender<T>, mpsc::Re
 #[derive(Default)]
 struct State {
     tx_subjects: HashMap<String, RequestedSendConnection>,
-    rx_subjects: HashMap<String, RequestedRecvConnection>,
     /// subject UUID -> EndpointInstanceId. Full 4-field key isolates services
     /// that share an endpoint name across namespaces/components.
     subject_instance: HashMap<String, EndpointInstanceId>,
     /// EndpointInstanceId -> tagged subject UUIDs, for batch cancellation on
     /// removal. The `StreamType` tag tells `cancel_instance_streams` which
-    /// of `rx_subjects` / `tx_subjects` holds the registration so both halves
-    /// of a bidirectional session get dropped together.
+    /// of the response mux registry / `tx_subjects` holds the registration so
+    /// both halves of a bidirectional session get dropped together.
     instance_subjects: HashMap<EndpointInstanceId, HashSet<(StreamType, String)>>,
     /// Tombstones (instance -> insertion time) close the
     /// `cancel_instance_streams` vs `associate_instance` race; entries expire
@@ -347,7 +342,6 @@ impl TcpStreamServer {
                 instance_id = id.instance_id,
                 "Cancelling subject immediately: instance already removed (tombstoned)"
             );
-            state.rx_subjects.remove(recv_subject);
             if let Ok(stream_id) = uuid::Uuid::parse_str(recv_subject) {
                 self.cancel_mux_response_stream(stream_id, MuxFrameKind::Kill);
             }
@@ -374,7 +368,6 @@ impl TcpStreamServer {
     /// `oneshot::Sender` so the waiting receiver resolves with `RecvError`.
     pub async fn cancel_recv_stream(&self, subject: &str) {
         let mut state = self.state.lock();
-        state.rx_subjects.remove(subject);
         if let Ok(stream_id) = uuid::Uuid::parse_str(subject) {
             self.cancel_mux_response_stream(stream_id, MuxFrameKind::Kill);
         }
@@ -423,7 +416,6 @@ impl TcpStreamServer {
         for (kind, subject) in &subjects {
             match kind {
                 StreamType::Response => {
-                    state.rx_subjects.remove(subject);
                     if let Ok(stream_id) = uuid::Uuid::parse_str(subject) {
                         self.cancel_mux_response_stream(stream_id, MuxFrameKind::Kill);
                     }
@@ -452,6 +444,7 @@ impl TcpStreamServer {
                 .control_tx
                 .try_send(MuxFrame::empty(kind, stream_id))
                 .is_err()
+                || active.close_tx.try_send(stream_id).is_err()
             {
                 active.control_failed.cancel();
             }
@@ -465,7 +458,7 @@ impl TcpStreamServer {
         server_id: uuid::Uuid,
         mux_config: ResponseMuxConfig,
         response_pending: Arc<DashMap<uuid::Uuid, RequestedMuxRecvConnection>>,
-        response_active: Arc<DashMap<uuid::Uuid, ActiveMuxResponseStream>>,
+        response_active: Arc<DashMap<uuid::Uuid, ActiveMuxResponseControl>>,
     ) -> Result<u16> {
         let addr = format!("{}:{}", local_ip, local_port);
         let state_clone = state.clone();
@@ -493,10 +486,6 @@ impl TcpStreamServer {
         self.state.lock().tx_subjects.insert(subject, connection);
     }
 
-    fn insert_response_stream(&self, subject: String, connection: RequestedRecvConnection) {
-        self.state.lock().rx_subjects.insert(subject, connection);
-    }
-
     fn take_request_stream(state: &Mutex<State>, subject: &str) -> Option<RequestedSendConnection> {
         let mut state = state.lock();
         let connection = state.tx_subjects.remove(subject);
@@ -504,23 +493,6 @@ impl TcpStreamServer {
             && let Some(subjects) = state.instance_subjects.get_mut(&key)
         {
             subjects.remove(&(StreamType::Request, subject.to_string()));
-            if subjects.is_empty() {
-                state.instance_subjects.remove(&key);
-            }
-        }
-        connection
-    }
-
-    fn take_response_stream(
-        state: &Mutex<State>,
-        subject: &str,
-    ) -> Option<RequestedRecvConnection> {
-        let mut state = state.lock();
-        let connection = state.rx_subjects.remove(subject);
-        if let Some(key) = state.subject_instance.remove(subject)
-            && let Some(subjects) = state.instance_subjects.get_mut(&key)
-        {
-            subjects.remove(&(StreamType::Response, subject.to_string()));
             if subjects.is_empty() {
                 state.instance_subjects.remove(&key);
             }
@@ -609,94 +581,56 @@ impl ResponseService for TcpStreamServer {
             let (pending_recver_tx, pending_recver_rx) = oneshot::channel();
             let receiver_id = uuid::Uuid::new_v4();
             let receiver_subject = receiver_id.to_string();
-            let registry_subject = receiver_subject.clone();
-
-            if self.mux_config.enabled {
-                self.response_pending.insert(
-                    receiver_id,
-                    RequestedMuxRecvConnection {
-                        context: options.context.clone(),
-                        connection: Mutex::new(Some(pending_recver_tx)),
-                        send_buffer_count: options.send_buffer_count,
-                        registered_at: Instant::now(),
-                    },
-                );
-
-                let cleanup_id = receiver_id;
-                let cleanup_subject = receiver_subject;
-                let cleanup_state = self.state.clone();
-                let cleanup_pending = self.response_pending.clone();
-                let cleanup_active = self.response_active.clone();
-                let registered_stream = RegisteredStream::new(
-                    ResponseMuxConnectionInfo {
-                        address: address.clone(),
-                        frontend_server_id: self.server_id,
-                        stream_id: receiver_id,
-                        context: options.context.id().to_string(),
-                        version: RESPONSE_MUX_VERSION,
-                    }
-                    .into(),
-                    pending_recver_rx,
-                )
-                .with_cleanup(move || {
-                    cleanup_pending.remove(&cleanup_id);
-                    if let Some((_, active)) = cleanup_active.remove(&cleanup_id) {
-                        active.context.kill();
-                        if active
-                            .control_tx
-                            .try_send(MuxFrame::empty(MuxFrameKind::Kill, cleanup_id))
-                            .is_err()
-                        {
-                            active.control_failed.cancel();
-                        }
-                    }
-                    let mut state = cleanup_state.lock();
-                    if let Some(key) = state.subject_instance.remove(&cleanup_subject)
-                        && let Some(subjects) = state.instance_subjects.get_mut(&key)
-                    {
-                        subjects.remove(&(StreamType::Response, cleanup_subject.clone()));
-                        if subjects.is_empty() {
-                            state.instance_subjects.remove(&key);
-                        }
-                    }
-                });
-                Some(registered_stream)
-            } else {
-                let connection_info = RequestedRecvConnection {
+            self.response_pending.insert(
+                receiver_id,
+                RequestedMuxRecvConnection {
                     context: options.context.clone(),
-                    connection: pending_recver_tx,
+                    connection: Mutex::new(Some(pending_recver_tx)),
                     send_buffer_count: options.send_buffer_count,
-                };
+                    registered_at: Instant::now(),
+                },
+            );
 
-                let cleanup_subject = receiver_subject.clone();
-                let cleanup_state = self.state.clone();
-                let registered_stream = RegisteredStream::new(
-                    TcpStreamConnectionInfo {
-                        address: address.clone(),
-                        subject: receiver_subject,
-                        context: options.context.id().to_string(),
-                        stream_type: StreamType::Response,
-                    }
-                    .into(),
-                    pending_recver_rx,
-                )
-                .with_cleanup(move || {
-                    let mut state = cleanup_state.lock();
-                    state.rx_subjects.remove(&cleanup_subject);
-                    if let Some(key) = state.subject_instance.remove(&cleanup_subject)
-                        && let Some(subjects) = state.instance_subjects.get_mut(&key)
+            let cleanup_id = receiver_id;
+            let cleanup_subject = receiver_subject;
+            let cleanup_state = self.state.clone();
+            let cleanup_pending = self.response_pending.clone();
+            let cleanup_active = self.response_active.clone();
+            let registered_stream = RegisteredStream::new(
+                ResponseMuxConnectionInfo {
+                    address: address.clone(),
+                    frontend_server_id: self.server_id,
+                    stream_id: receiver_id,
+                    context: options.context.id().to_string(),
+                    version: RESPONSE_MUX_VERSION,
+                }
+                .into(),
+                pending_recver_rx,
+            )
+            .with_cleanup(move || {
+                cleanup_pending.remove(&cleanup_id);
+                if let Some((_, active)) = cleanup_active.remove(&cleanup_id) {
+                    active.context.kill();
+                    if active
+                        .control_tx
+                        .try_send(MuxFrame::empty(MuxFrameKind::Kill, cleanup_id))
+                        .is_err()
+                        || active.close_tx.try_send(cleanup_id).is_err()
                     {
-                        subjects.remove(&(StreamType::Response, cleanup_subject.clone()));
-                        if subjects.is_empty() {
-                            state.instance_subjects.remove(&key);
-                        }
+                        active.control_failed.cancel();
                     }
-                });
-
-                self.insert_response_stream(registry_subject, connection_info);
-
-                Some(registered_stream)
-            }
+                }
+                let mut state = cleanup_state.lock();
+                if let Some(key) = state.subject_instance.remove(&cleanup_subject)
+                    && let Some(subjects) = state.instance_subjects.get_mut(&key)
+                {
+                    subjects.remove(&(StreamType::Response, cleanup_subject.clone()));
+                    if subjects.is_empty() {
+                        state.instance_subjects.remove(&key);
+                    }
+                }
+            });
+            Some(registered_stream)
         } else {
             None
         };
@@ -720,7 +654,7 @@ async fn tcp_listener(
     server_id: uuid::Uuid,
     mux_config: ResponseMuxConfig,
     response_pending: Arc<DashMap<uuid::Uuid, RequestedMuxRecvConnection>>,
-    response_active: Arc<DashMap<uuid::Uuid, ActiveMuxResponseStream>>,
+    response_active: Arc<DashMap<uuid::Uuid, ActiveMuxResponseControl>>,
     read_tx: tokio::sync::oneshot::Sender<Result<u16>>,
 ) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&addr)
@@ -794,7 +728,7 @@ async fn tcp_listener(
         server_id: uuid::Uuid,
         mux_config: ResponseMuxConfig,
         response_pending: Arc<DashMap<uuid::Uuid, RequestedMuxRecvConnection>>,
-        response_active: Arc<DashMap<uuid::Uuid, ActiveMuxResponseStream>>,
+        response_active: Arc<DashMap<uuid::Uuid, ActiveMuxResponseControl>>,
     ) {
         let result = process_stream(
             stream,
@@ -823,9 +757,10 @@ async fn tcp_listener(
         server_id: uuid::Uuid,
         mux_config: ResponseMuxConfig,
         response_pending: Arc<DashMap<uuid::Uuid, RequestedMuxRecvConnection>>,
-        response_active: Arc<DashMap<uuid::Uuid, ActiveMuxResponseStream>>,
+        response_active: Arc<DashMap<uuid::Uuid, ActiveMuxResponseControl>>,
     ) -> Result<()> {
-        let packet_socket = (mux_config.enabled && mux_config.packet_metrics)
+        let packet_socket = mux_config
+            .packet_metrics
             .then(|| stream.as_fd().try_clone_to_owned().ok())
             .flatten();
         // split the socket in to a reader and writer
@@ -857,9 +792,6 @@ async fn tcp_listener(
             connection_id,
         }) = serde_json::from_slice::<ConnectionHandshake>(header)
         {
-            if !mux_config.enabled {
-                anyhow::bail!("response mux handshake received while mux mode is disabled");
-            }
             if version != RESPONSE_MUX_VERSION {
                 anyhow::bail!(
                     "unsupported response mux version {version}; expected {RESPONSE_MUX_VERSION}"
@@ -884,7 +816,7 @@ async fn tcp_listener(
                 response_pending,
                 response_active,
                 ResponseMuxSocket {
-                    read_half: framed_reader.into_inner(),
+                    reader: framed_reader.map_decoder(|_| MuxCodec::default()),
                     write_half: framed_writer.into_inner(),
                     packet_socket,
                 },
@@ -901,10 +833,10 @@ async fn tcp_listener(
             StreamType::Request => {
                 process_request_stream(handshake.subject, state, framed_reader, framed_writer).await
             }
-            StreamType::Response => {
-                process_response_stream(handshake.subject, state, framed_reader, framed_writer)
-                    .await
-            }
+            StreamType::Response => anyhow::bail!(
+                "legacy dedicated TCP response streams are no longer supported; expected {}",
+                super::TCP_RESPONSE_MUX_TRANSPORT
+            ),
         }
     }
 
@@ -913,17 +845,17 @@ async fn tcp_listener(
         mux_config: ResponseMuxConfig,
         state: Arc<Mutex<State>>,
         response_pending: Arc<DashMap<uuid::Uuid, RequestedMuxRecvConnection>>,
-        response_active: Arc<DashMap<uuid::Uuid, ActiveMuxResponseStream>>,
+        response_active: Arc<DashMap<uuid::Uuid, ActiveMuxResponseControl>>,
         socket: ResponseMuxSocket,
     ) -> Result<()> {
         let ResponseMuxSocket {
-            read_half,
+            mut reader,
             write_half,
             packet_socket,
         } = socket;
-        let mut reader = FramedRead::new(read_half, MuxCodec::default());
         let mut writer = FramedWrite::new(write_half, MuxCodec::default());
         let (control_tx, mut control_rx) = mpsc::channel::<MuxFrame>(RESPONSE_MUX_WRITER_QUEUE);
+        let (close_tx, mut close_rx) = mpsc::channel::<uuid::Uuid>(RESPONSE_MUX_WRITER_QUEUE);
         let control_failed = CancellationToken::new();
         let mut reported_data_segments = packet_socket
             .as_ref()
@@ -937,6 +869,7 @@ async fn tcp_listener(
             .inc();
 
         let writer_failed = control_failed.clone();
+        let detailed_metrics = mux_config.packet_metrics;
         let writer_task = tokio::spawn(async move {
             let frame_counters =
                 crate::metrics::response_mux::FrameCounters::for_direction("frontend_to_worker");
@@ -944,7 +877,9 @@ async fn tcp_listener(
                 .with_label_values(&["frontend"])
                 .clone();
             while let Some(frame) = control_rx.recv().await {
-                frame_counters.inc(frame.kind.metric_label());
+                if detailed_metrics {
+                    frame_counters.inc(frame.kind.metric_label());
+                }
                 if let Err(err) = writer.send(frame).await {
                     writer_failed.cancel();
                     return Err(err.into());
@@ -964,12 +899,27 @@ async fn tcp_listener(
         packet_tick.tick().await;
         let frame_counters =
             crate::metrics::response_mux::FrameCounters::for_direction("worker_to_frontend");
+        // Data routing is connection-local so the per-frame path does not take
+        // a shard lock in the global lifecycle registry.
+        let mut active_streams = HashMap::<uuid::Uuid, ActiveMuxResponseStream>::new();
 
         let result: Result<()> = async {
             loop {
                 let message = tokio::select! {
                     _ = control_failed.cancelled() => {
                         anyhow::bail!("frontend response mux control writer failed")
+                    }
+                    Some(stream_id) = close_rx.recv() => {
+                        active_streams.remove(&stream_id);
+                        response_pending.remove(&stream_id);
+                        if response_active
+                            .get(&stream_id)
+                            .is_some_and(|active| active.connection_id == connection_id)
+                        {
+                            response_active.remove(&stream_id);
+                        }
+                        remove_response_association(&state, stream_id);
+                        continue;
                     }
                     _ = packet_tick.tick(), if reported_data_segments.is_some() => {
                         if let Some(current) = packet_socket
@@ -999,7 +949,9 @@ async fn tcp_listener(
                     },
                 };
                 let frame = message;
-                frame_counters.inc(frame.kind.metric_label());
+                if mux_config.packet_metrics {
+                    frame_counters.inc(frame.kind.metric_label());
+                }
                 let stream_id = frame.stream_id;
 
                 match frame.kind {
@@ -1017,9 +969,28 @@ async fn tcp_listener(
                             continue;
                         };
                         let prologue: ResponseStreamPrologue =
-                            serde_json::from_slice(&frame.payload).map_err(|err| {
-                                error!("invalid response mux prologue for {stream_id}: {err}")
-                            })?;
+                            match serde_json::from_slice(&frame.payload) {
+                                Ok(prologue) => prologue,
+                                Err(err) => {
+                                    let reason = format!(
+                                        "invalid response mux prologue for {stream_id}: {err}"
+                                    );
+                                    if let Some(connection) = pending.connection.lock().take() {
+                                        let _ = connection.send(Err(reason));
+                                    }
+                                    crate::metrics::response_mux::RESETS_TOTAL
+                                        .with_label_values(&["frontend", "invalid_prologue"])
+                                        .inc();
+                                    if control_tx
+                                        .try_send(MuxFrame::empty(MuxFrameKind::Reset, stream_id))
+                                        .is_err()
+                                    {
+                                        control_failed.cancel();
+                                    }
+                                    remove_response_association(&state, stream_id);
+                                    continue;
+                                }
+                            };
                         let Some(connection) = pending.connection.lock().take() else {
                             if control_tx
                                 .try_send(MuxFrame::empty(MuxFrameKind::Reset, stream_id))
@@ -1047,6 +1018,7 @@ async fn tcp_listener(
                         let active_for_close = response_active.clone();
                         let control_for_window = control_tx.clone();
                         let control_for_close = control_tx.clone();
+                        let close_for_receiver = close_tx.clone();
                         let failed_for_window = control_failed.clone();
                         let failed_for_close = control_failed.clone();
                         let state_for_close = state.clone();
@@ -1087,6 +1059,7 @@ async fn tcp_listener(
                                         if control_for_close
                                             .try_send(MuxFrame::empty(MuxFrameKind::Kill, stream_id))
                                             .is_err()
+                                            || close_for_receiver.try_send(stream_id).is_err()
                                         {
                                             failed_for_close.cancel();
                                         }
@@ -1098,12 +1071,19 @@ async fn tcp_listener(
                         };
                         response_active.insert(
                             stream_id,
-                            ActiveMuxResponseStream {
+                            ActiveMuxResponseControl {
                                 connection_id,
+                                context: context.clone(),
+                                control_tx: control_tx.clone(),
+                                close_tx: close_tx.clone(),
+                                control_failed: control_failed.clone(),
+                            },
+                        );
+                        active_streams.insert(
+                            stream_id,
+                            ActiveMuxResponseStream {
                                 context,
                                 response_tx,
-                                control_tx: control_tx.clone(),
-                                control_failed: control_failed.clone(),
                             },
                         );
                         crate::metrics::response_mux::ACTIVE_STREAMS
@@ -1114,6 +1094,7 @@ async fn tcp_listener(
                             .is_err()
                         {
                             response_active.remove(&stream_id);
+                            active_streams.remove(&stream_id);
                             if control_tx
                                 .try_send(MuxFrame::empty(MuxFrameKind::Kill, stream_id))
                                 .is_err()
@@ -1137,8 +1118,8 @@ async fn tcp_listener(
                                 control_failed.cancel();
                             }
                         }
-                        let delivery_failure = match response_active.get(&stream_id) {
-                            Some(active) if active.connection_id == connection_id => match active
+                        let delivery_failure = match active_streams.get(&stream_id) {
+                            Some(active) => match active
                                 .response_tx
                                 .try_send(StreamRxItem::multiplexed(frame.payload, encoded_len))
                             {
@@ -1155,6 +1136,7 @@ async fn tcp_listener(
                                 .with_label_values(&["frontend", reason])
                                 .inc();
                             response_active.remove(&stream_id);
+                            active_streams.remove(&stream_id);
                             response_pending.remove(&stream_id);
                             if control_tx
                                 .try_send(MuxFrame::empty(MuxFrameKind::Reset, stream_id))
@@ -1166,10 +1148,7 @@ async fn tcp_listener(
                         }
                     }
                     MuxFrameKind::End => {
-                        if response_active
-                            .get(&stream_id)
-                            .is_some_and(|active| active.connection_id == connection_id)
-                        {
+                        if active_streams.remove(&stream_id).is_some() {
                             response_active.remove(&stream_id);
                             remove_response_association(&state, stream_id);
                         } else {
@@ -1183,12 +1162,8 @@ async fn tcp_listener(
                     }
                     MuxFrameKind::Reset => {
                         response_pending.remove(&stream_id);
-                        if response_active
-                            .get(&stream_id)
-                            .is_some_and(|active| active.connection_id == connection_id)
-                        {
-                            response_active.remove(&stream_id);
-                        }
+                        active_streams.remove(&stream_id);
+                        response_active.remove(&stream_id);
                         remove_response_association(&state, stream_id);
                     }
                     MuxFrameKind::Stop
@@ -1217,15 +1192,17 @@ async fn tcp_listener(
                 .inc_by(current.saturating_sub(previous));
         }
 
-        let affected: Vec<uuid::Uuid> = response_active
-            .iter()
-            .filter(|entry| entry.connection_id == connection_id)
-            .map(|entry| *entry.key())
-            .collect();
+        let affected: Vec<uuid::Uuid> = active_streams.keys().copied().collect();
         crate::metrics::response_mux::CONNECTION_LOST_STREAMS_TOTAL.inc_by(affected.len() as u64);
         for stream_id in affected {
-            if let Some((_, active)) = response_active.remove(&stream_id) {
+            if let Some(active) = active_streams.remove(&stream_id) {
                 active.context.kill();
+            }
+            if response_active
+                .get(&stream_id)
+                .is_some_and(|active| active.connection_id == connection_id)
+            {
+                response_active.remove(&stream_id);
             }
             remove_response_association(&state, stream_id);
         }
@@ -1251,8 +1228,8 @@ async fn tcp_listener(
         }
     }
 
-    /// Symmetric to [`process_response_stream`] for the upstream→downstream
-    /// data direction: deliver the [`StreamSender`] half registered by the
+    /// For the upstream→downstream data direction, deliver the [`StreamSender`]
+    /// half registered by the
     /// upstream to whoever awaits it, then pump every frame the upstream pushes
     /// into the now-connected TCP socket.
     ///
@@ -1285,7 +1262,7 @@ async fn tcp_listener(
 
         // Buffer size is driven by the registration options
         // ([`StreamOptions::send_buffer_count`]) rather than hard-coded; the
-        // same applies to `process_response_stream`. See #10293.
+        // same applies to response-mux mailboxes. See #10293.
         let (request_tx, request_rx) = data_plane_channel(send_buffer_count);
 
         if connection
@@ -1377,269 +1354,6 @@ async fn tcp_listener(
             tracing::trace!(?err, "request-stream socket shutdown failed");
         }
     }
-
-    async fn process_response_stream(
-        subject: String,
-        state: Arc<Mutex<State>>,
-        mut reader: FramedRead<tokio::io::ReadHalf<tokio::net::TcpStream>, TwoPartCodec>,
-        writer: FramedWrite<tokio::io::WriteHalf<tokio::net::TcpStream>, TwoPartCodec>,
-    ) -> Result<()> {
-        let response_stream = TcpStreamServer::take_response_stream(&state, &subject).ok_or_else(|| {
-            error!("Subject not found: {}; upstream publisher specified a subject unknown to the downsteam subscriber", subject)
-        })?;
-
-        // unwrap response_stream
-        let RequestedRecvConnection {
-            context,
-            connection,
-            send_buffer_count,
-        } = response_stream;
-
-        // the [`Prologue`]
-        // there must be a second control message it indicate the other segment's generate method was successful
-        let prologue = reader
-            .next()
-            .await
-            .ok_or(error!("Connection closed without a ControlMessge"))??;
-
-        // deserialize prologue
-        let prologue = match prologue.into_message_type() {
-            TwoPartMessageType::HeaderOnly(header) => {
-                let prologue: ResponseStreamPrologue = serde_json::from_slice(&header)
-                    .map_err(|e| error!("Failed to deserialize ControlMessage: {}", e))?;
-                prologue
-            }
-            _ => {
-                // Worker sent a non-HeaderOnly frame in the prologue slot
-                // (protocol violation, version skew, corruption). Notify the
-                // requester so the generate call chain fails cleanly, then
-                // return Err so the connection task ends without panicking.
-                let msg = "malformed prologue: expected HeaderOnly ControlMessage";
-                let _ = connection.send(Err(msg.to_string()));
-                return Err(error!(msg));
-            }
-        };
-
-        // await the control message of GTG or Error, if error, then connection.send(Err(String)), which should fail the
-        // generate call chain
-        //
-        // note: this second control message might be delayed, but the expensive part of setting up the connection
-        // is both complete and ready for data flow; awaiting here is not a performance hit or problem and it allows
-        // us to trace the initial setup time vs the time to prologue
-        if let Some(error) = &prologue.error {
-            let _ = connection.send(Err(error.clone()));
-            return Err(error!("Received error prologue: {}", error));
-        }
-
-        // Buffer size is driven by the registration options
-        // ([`StreamOptions::send_buffer_count`]) rather than hard-coded; the
-        // same applies to `process_request_stream`. See #10293.
-        let (response_tx, response_rx) = data_plane_channel(send_buffer_count);
-
-        if connection
-            .send(Ok(crate::pipeline::network::StreamReceiver::dedicated(
-                response_rx,
-            )))
-            .is_err()
-        {
-            return Err(error!(
-                "The requester of the stream has been dropped before the connection was established"
-            ));
-        }
-
-        let (control_tx, control_rx) = mpsc::channel::<ControlMessage>(1);
-
-        // sender task
-        // issues control messages to the sender and when finished shuts down the socket
-        // this should be the last task to finish and must
-        let send_task = tokio::spawn(network_send_handler(writer, control_rx));
-
-        // forward task
-        let recv_task = tokio::spawn(network_receive_handler(
-            reader,
-            response_tx,
-            control_tx,
-            context.clone(),
-        ));
-
-        // check the results of each of the tasks
-        let (monitor_result, forward_result) = tokio::join!(send_task, recv_task);
-
-        monitor_result?;
-        forward_result?;
-
-        Ok(())
-    }
-
-    async fn network_receive_handler(
-        mut framed_reader: FramedRead<tokio::io::ReadHalf<tokio::net::TcpStream>, TwoPartCodec>,
-        response_tx: mpsc::Sender<crate::pipeline::network::StreamRxItem>,
-        control_tx: mpsc::Sender<ControlMessage>,
-        context: Arc<dyn AsyncEngineContext>,
-    ) {
-        // These futures stay pending across frames. Constructing them inside the loop clones
-        // watch receivers and registers/drops notifications for every streamed token.
-        let response_closed = response_tx.closed();
-        let killed = context.killed();
-        let stopped = context.stopped();
-        tokio::pin!(response_closed, killed, stopped);
-
-        // loop over reading the tcp stream and checking if the writer is closed
-        let mut can_stop = true;
-        loop {
-            tokio::select! {
-                biased;
-
-                _ = &mut response_closed => {
-                    tracing::trace!("response channel closed before the client finished writing data");
-                    let _ = control_tx.send(ControlMessage::Kill).await;
-                    break;
-                }
-
-                _ = &mut killed => {
-                    tracing::trace!("context kill signal received; shutting down");
-                    let _ = control_tx.send(ControlMessage::Kill).await;
-                    break;
-                }
-
-                _ = &mut stopped, if can_stop => {
-                    tracing::trace!("context stop signal received; shutting down");
-                    // `stopped` is now complete; keep this branch disabled because polling
-                    // the same completed async future again would panic.
-                    can_stop = false;
-                    let _ = control_tx.send(ControlMessage::Stop).await;
-                }
-
-                msg = framed_reader.next() => {
-                    match msg {
-                        Some(Ok(msg)) => {
-                            let (header, data) = msg.into_parts();
-
-                            // received a control message
-                            if !header.is_empty() {
-                                match process_control_message(header) {
-                                    Ok(ControlAction::Continue) => {}
-                                    Ok(ControlAction::Shutdown) => {
-                                        if !data.is_empty() {
-                                            // Sentinel-with-data is a protocol
-                                            // violation; kill this stream, don't
-                                            // assert!() the process down.
-                                            tracing::warn!(
-                                                data_len = data.len(),
-                                                "client sent Sentinel with data (protocol violation); killing stream"
-                                            );
-                                            let _ = control_tx.send(ControlMessage::Kill).await;
-                                            break;
-                                        }
-                                        tracing::trace!("received sentinel message; shutting down");
-                                        break;
-                                    }
-                                    Err(e) => {
-                                        // Malformed control message — kill only
-                                        // this stream.
-                                        tracing::warn!(err = ?e, "malformed control message, closing connection");
-                                        let _ = control_tx.send(ControlMessage::Kill).await;
-                                        break;
-                                    }
-                                }
-                            }
-
-                            if !data.is_empty()
-                                && let Err(err) = response_tx
-                                    .send(crate::pipeline::network::StreamRxItem::dedicated(data))
-                                    .await
-                                {
-                                    tracing::debug!(?err, "forwarding body/data to response channel failed");
-                                    let _ = control_tx.send(ControlMessage::Kill).await;
-                                    break;
-                                };
-                        }
-                        Some(Err(e)) => {
-                            // TCP RST or decode error from worker — kill only
-                            // this stream.
-                            tracing::warn!(err = ?e, "tcp stream read error from worker, closing connection");
-                            let _ = control_tx.send(ControlMessage::Kill).await;
-                            break;
-                        }
-                        None => {
-                            // this is allowed but we try to avoid it
-                            // the logic is that the client will tell us when its is done and the server
-                            // will close the connection naturally when the sentinel message is received
-                            // the client closing early represents a transport error outside the control of the
-                            // transport library
-                            tracing::trace!("tcp stream was closed by client");
-                            break;
-                        }
-                    }
-                }
-
-            }
-        }
-    }
-
-    async fn network_send_handler(
-        socket_tx: FramedWrite<tokio::io::WriteHalf<tokio::net::TcpStream>, TwoPartCodec>,
-        control_rx: mpsc::Receiver<ControlMessage>,
-    ) {
-        let mut socket_tx = socket_tx;
-        let mut control_rx = control_rx;
-
-        while let Some(control_msg) = control_rx.recv().await {
-            // Sentinel is a worker→frontend message; receiving one here means
-            // a producer is buggy. Skip rather than asserting — a stream-level
-            // bug must not panic the worker.
-            if matches!(control_msg, ControlMessage::Sentinel) {
-                tracing::warn!("received sentinel on send-side control channel; dropping");
-                continue;
-            }
-            let bytes = match serde_json::to_vec(&control_msg) {
-                Ok(b) => b,
-                Err(e) => {
-                    // Closed enum of small variants; serialization shouldn't
-                    // fail. If it ever does, log and skip rather than panic.
-                    tracing::warn!(err = ?e, ?control_msg, "failed to serialize control message");
-                    continue;
-                }
-            };
-            let message = TwoPartMessage::from_header(bytes.into());
-            match socket_tx.send(message).await {
-                Ok(_) => tracing::debug!(?control_msg, "issued control message"),
-                Err(e) => {
-                    tracing::debug!(err = ?e, ?control_msg, "failed to send control message")
-                }
-            }
-        }
-
-        let mut inner = socket_tx.into_inner();
-        if let Err(e) = inner.flush().await {
-            tracing::debug!("failed to flush socket: {e}");
-        }
-        if let Err(e) = inner.shutdown().await {
-            tracing::debug!("failed to shutdown socket: {e}");
-        }
-    }
-}
-
-enum ControlAction {
-    Continue,
-    Shutdown,
-}
-
-fn process_control_message(message: Bytes) -> Result<ControlAction> {
-    match serde_json::from_slice::<ControlMessage>(&message)? {
-        ControlMessage::Sentinel => {
-            // the client issued a sentinel message
-            // it has finished writing data and is now awaiting the server to close the connection
-            tracing::trace!("sentinel received; shutting down");
-            Ok(ControlAction::Shutdown)
-        }
-        ControlMessage::Kill | ControlMessage::Stop => {
-            // Worker→frontend control direction only carries Sentinel. Kill/Stop
-            // here is a protocol violation; the caller turns this Err into a
-            // stream-local Kill rather than a process-fatal event.
-            anyhow::bail!("unexpected control message on response stream");
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1648,8 +1362,7 @@ mod tests {
     use crate::engine::AsyncEngineContextProvider;
     use crate::pipeline::Context;
     use crate::pipeline::network::DEFAULT_SEND_BUFFER_COUNT;
-    use crate::pipeline::network::tcp::client::TcpClient;
-    use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
+    use tokio::io::AsyncWriteExt;
     use tokio::net::TcpStream;
 
     // Mock resolver that always fails to simulate the fallback scenario
@@ -1698,8 +1411,8 @@ mod tests {
             .connection_info
             .clone();
 
-        let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
-        let socket_addr = tcp_info.address.parse::<std::net::SocketAddr>().unwrap();
+        let mux_info: ResponseMuxConnectionInfo = connection_info.try_into().unwrap();
+        let socket_addr = mux_info.address.parse::<std::net::SocketAddr>().unwrap();
 
         // Should have a valid port assigned
         assert!(
@@ -1709,13 +1422,13 @@ mod tests {
 
         println!(
             "Server created successfully with address: {}",
-            tcp_info.address
+            mux_info.address
         );
     }
 
     /// The data-plane channel helper sizes the mpsc buffer from
-    /// `send_buffer_count` — this is the value `process_request_stream` /
-    /// `process_response_stream` feed it. `max_capacity()` reflects the
+    /// `send_buffer_count` — this is the value the request stream and response
+    /// mux mailbox paths feed it. `max_capacity()` reflects the
     /// channel's configured buffer, so a custom value and the default both
     /// reach the channel. Guards against regressing back to a hard-coded 64.
     #[test]
@@ -1732,9 +1445,8 @@ mod tests {
     }
 
     /// `register` must thread `StreamOptions::send_buffer_count` through to the
-    /// stored `RequestedSendConnection` / `RequestedRecvConnection` (the
-    /// registration structs `process_*_stream` later destructure to size the
-    /// channel). Verified here against the real registration path.
+    /// stored request and response registration records. Verified here against
+    /// the real registration path.
     #[tokio::test]
     async fn register_threads_send_buffer_count_into_connection_structs() {
         let server = TcpStreamServer::new(ServerOptions::default())
@@ -1753,14 +1465,21 @@ mod tests {
 
         let state = server.state.lock();
         assert_eq!(state.tx_subjects.len(), 1, "one request stream registered");
-        assert_eq!(state.rx_subjects.len(), 1, "one response stream registered");
+        assert_eq!(
+            server.response_pending.len(),
+            1,
+            "one response stream registered"
+        );
         assert!(
             state.tx_subjects.values().all(|c| c.send_buffer_count == 7),
             "send_buffer_count must reach RequestedSendConnection"
         );
         assert!(
-            state.rx_subjects.values().all(|c| c.send_buffer_count == 7),
-            "send_buffer_count must reach RequestedRecvConnection"
+            server
+                .response_pending
+                .iter()
+                .all(|entry| entry.send_buffer_count == 7),
+            "send_buffer_count must reach the response mux registration"
         );
     }
 
@@ -1797,8 +1516,8 @@ mod tests {
             .connection_info
             .clone();
 
-        let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
-        let socket_addr = tcp_info.address.parse::<std::net::SocketAddr>().unwrap();
+        let mux_info: ResponseMuxConnectionInfo = connection_info.try_into().unwrap();
+        let socket_addr = mux_info.address.parse::<std::net::SocketAddr>().unwrap();
 
         // With the failing resolver, fallback should ALWAYS be used
         let ip = socket_addr.ip();
@@ -1849,8 +1568,8 @@ mod tests {
         let pending = server.register(options).await;
         let recv_stream = pending.recv_stream.unwrap();
         let (conn_info, provider) = recv_stream.into_parts();
-        let tcp_info: TcpStreamConnectionInfo = conn_info.try_into().unwrap();
-        (tcp_info.subject, provider)
+        let mux_info: ResponseMuxConnectionInfo = conn_info.try_into().unwrap();
+        (mux_info.stream_id.to_string(), provider)
     }
 
     /// Convenience constructor so tests don't repeat the struct literal.
@@ -1892,11 +1611,11 @@ mod tests {
         let (send_info, send_provider) = send_stream.into_parts();
         let (recv_info, recv_provider) = recv_stream.into_parts();
         let send_tcp_info: TcpStreamConnectionInfo = send_info.try_into().unwrap();
-        let recv_tcp_info: TcpStreamConnectionInfo = recv_info.try_into().unwrap();
+        let recv_mux_info: ResponseMuxConnectionInfo = recv_info.try_into().unwrap();
         (
             send_tcp_info.subject,
             send_provider,
-            recv_tcp_info.subject,
+            recv_mux_info.stream_id.to_string(),
             recv_provider,
         )
     }
@@ -2045,16 +1764,12 @@ mod tests {
         let pending = server.register(options).await;
         let recv_stream = pending.recv_stream.unwrap();
 
-        // Get the subject before dropping
-        let tcp_info: TcpStreamConnectionInfo =
+        // Get the stream ID before dropping.
+        let mux_info: ResponseMuxConnectionInfo =
             recv_stream.connection_info.clone().try_into().unwrap();
-        let subject = tcp_info.subject.clone();
+        let stream_id = mux_info.stream_id;
 
-        // Verify it's in rx_subjects
-        {
-            let state = server.state.lock();
-            assert!(state.rx_subjects.contains_key(&subject));
-        }
+        assert!(server.response_pending.contains_key(&stream_id));
 
         // Drop the RegisteredStream -- RAII cleanup should fire
         drop(recv_stream);
@@ -2062,14 +1777,10 @@ mod tests {
         // Give the spawned cleanup task a moment to run
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        // Verify it's been removed from rx_subjects
-        {
-            let state = server.state.lock();
-            assert!(
-                !state.rx_subjects.contains_key(&subject),
-                "RAII cleanup should have removed the rx_subjects entry"
-            );
-        }
+        assert!(
+            !server.response_pending.contains_key(&stream_id),
+            "RAII cleanup should have removed the pending mux entry"
+        );
     }
 
     #[tokio::test]
@@ -2087,9 +1798,9 @@ mod tests {
         let pending = server.register(options).await;
         let recv_stream = pending.recv_stream.unwrap();
 
-        let tcp_info: TcpStreamConnectionInfo =
+        let mux_info: ResponseMuxConnectionInfo =
             recv_stream.connection_info.clone().try_into().unwrap();
-        let subject = tcp_info.subject.clone();
+        let stream_id = mux_info.stream_id;
 
         // Call into_parts to disarm the cleanup
         let (_conn_info, _provider) = recv_stream.into_parts();
@@ -2097,14 +1808,10 @@ mod tests {
         // Give any potential cleanup a moment to run
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        // The entry should still be in rx_subjects (cleanup was disarmed)
-        {
-            let state = server.state.lock();
-            assert!(
-                state.rx_subjects.contains_key(&subject),
-                "into_parts() should disarm the RAII cleanup"
-            );
-        }
+        assert!(
+            server.response_pending.contains_key(&stream_id),
+            "into_parts() should disarm the RAII cleanup"
+        );
     }
 
     #[tokio::test]
@@ -2374,257 +2081,132 @@ mod tests {
         assert_eq!(server.cancel_instance_streams(&id_b).await, 1);
     }
 
-    type TestFramedRead = FramedRead<ReadHalf<TcpStream>, TwoPartCodec>;
-    type TestFramedWrite = FramedWrite<WriteHalf<TcpStream>, TwoPartCodec>;
-    type TestResponseStream = (TestFramedRead, TestFramedWrite, StreamReceiver);
-
-    /// Stand up a TcpStreamServer, register a response stream, connect a
-    /// client, drive the handshake + prologue, and return the client-side
-    /// framed reader/writer along with the receiver.
-    async fn open_registered_response_stream() -> TestResponseStream {
-        let options = ServerOptions::builder().port(0).build().unwrap();
-        let server = TcpStreamServer::new_with_resolver(options, FailingIpResolver)
-            .await
-            .unwrap();
+    async fn register_mux_response(
+        server: &TcpStreamServer,
+    ) -> (
+        ResponseMuxConnectionInfo,
+        tokio::sync::oneshot::Receiver<Result<StreamReceiver, String>>,
+    ) {
         let context = Context::new(());
-        let stream_options = StreamOptions::builder()
-            .context(context.context())
-            .enable_request_stream(false)
-            .enable_response_stream(true)
-            .build()
-            .unwrap();
-        let pending_connection = server.register(stream_options).await;
-        let registered_stream = pending_connection.recv_stream.unwrap();
-        let (connection_info, stream_provider) = registered_stream.into_parts();
-        let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
-
-        let stream = TcpStream::connect(&tcp_info.address).await.unwrap();
-        let (read_half, write_half) = tokio::io::split(stream);
-        let framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
-        let mut framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
-
-        let handshake = CallHomeHandshake {
-            subject: tcp_info.subject,
-            stream_type: StreamType::Response,
-        };
-        framed_writer
-            .send(TwoPartMessage::from_header(
-                serde_json::to_vec(&handshake).unwrap().into(),
-            ))
-            .await
-            .unwrap();
-        framed_writer
-            .send(TwoPartMessage::from_header(
-                serde_json::to_vec(&ResponseStreamPrologue { error: None })
-                    .unwrap()
-                    .into(),
-            ))
-            .await
-            .unwrap();
-
-        // SAFETY (test-only): healthy localhost handshake always resolves all
-        // three layers; a panic here means the harness is broken.
-        let receiver = tokio::time::timeout(std::time::Duration::from_secs(1), stream_provider)
-            .await
-            .expect("server should establish response stream within timeout")
-            .expect("stream provider should not be dropped")
-            .expect("response stream should be accepted");
-
-        (framed_reader, framed_writer, receiver)
-    }
-
-    async fn recv_control_message(framed_reader: &mut TestFramedRead) -> ControlMessage {
-        // SAFETY (test-only): a misbehaving server in any of these layers is
-        // exactly the harness failure we want surfaced as a test panic.
-        let message = tokio::time::timeout(std::time::Duration::from_secs(1), framed_reader.next())
-            .await
-            .expect("server should send a control message within timeout")
-            .expect("server should not close before sending control")
-            .expect("control message should decode");
-        let (header, data) = message.optional_parts();
-        assert!(data.is_none(), "control message should not contain data");
-        serde_json::from_slice(header.expect("control header missing").as_ref()).unwrap()
-    }
-
-    /// Sending an unexpected control message (Stop or Kill from the data
-    /// direction) is a protocol violation. The server's
-    /// network_receive_handler must reply with ControlMessage::Kill on
-    /// that stream alone, not panic.
-    #[tokio::test]
-    async fn test_tcp_stream_server_sends_kill_on_unexpected_control_message() {
-        let (mut framed_reader, mut framed_writer, _receiver) =
-            open_registered_response_stream().await;
-
-        framed_writer
-            .send(TwoPartMessage::from_header(
-                serde_json::to_vec(&ControlMessage::Stop).unwrap().into(),
-            ))
-            .await
-            .unwrap();
-
-        assert_eq!(
-            recv_control_message(&mut framed_reader).await,
-            ControlMessage::Kill,
-            "unexpected control message should kill only this stream"
-        );
-    }
-
-    /// A framing/decode error from the worker side is unrecoverable for
-    /// this stream but must not panic the worker. Server should send Kill
-    /// and tear down only this connection.
-    #[tokio::test]
-    async fn test_tcp_stream_server_sends_kill_on_read_error() {
-        let (mut framed_reader, framed_writer, _receiver) = open_registered_response_stream().await;
-
-        let mut raw_writer = framed_writer.into_inner();
-        raw_writer.write_all(&[0u8; 8]).await.unwrap();
-        raw_writer.shutdown().await.unwrap();
-
-        assert_eq!(
-            recv_control_message(&mut framed_reader).await,
-            ControlMessage::Kill,
-            "framing read error should kill only this stream"
-        );
-    }
-
-    /// Sentinel is supposed to be header-only. A misbehaving client that
-    /// attaches a data payload must not panic the worker via assert!().
-    #[tokio::test]
-    async fn test_tcp_stream_server_sends_kill_on_sentinel_with_data() {
-        let (mut framed_reader, mut framed_writer, _receiver) =
-            open_registered_response_stream().await;
-
-        let header = serde_json::to_vec(&ControlMessage::Sentinel)
-            .unwrap()
-            .into();
-        framed_writer
-            .send(TwoPartMessage::from_parts(
-                header,
-                Bytes::from_static(b"unexpected payload"),
-            ))
-            .await
-            .unwrap();
-
-        assert_eq!(
-            recv_control_message(&mut framed_reader).await,
-            ControlMessage::Kill,
-            "Sentinel with data should kill only this stream"
-        );
-    }
-
-    /// The prologue must be a HeaderOnly frame. A non-HeaderOnly prologue
-    /// (data-only or mixed) must surface as Err to the requester rather
-    /// than panic the worker.
-    #[tokio::test]
-    async fn test_tcp_stream_server_returns_error_on_invalid_prologue() {
-        let options = ServerOptions::builder().port(0).build().unwrap();
-        let server = TcpStreamServer::new_with_resolver(options, FailingIpResolver)
-            .await
-            .unwrap();
-        let context = Context::new(());
-        let stream_options = StreamOptions::builder()
-            .context(context.context())
-            .enable_request_stream(false)
-            .enable_response_stream(true)
-            .build()
-            .unwrap();
-        let pending_connection = server.register(stream_options).await;
-        let registered_stream = pending_connection.recv_stream.unwrap();
-        let (connection_info, stream_provider) = registered_stream.into_parts();
-        let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
-
-        let stream = TcpStream::connect(&tcp_info.address).await.unwrap();
-        let (_read_half, write_half) = tokio::io::split(stream);
-        let mut framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
-
-        let handshake = CallHomeHandshake {
-            subject: tcp_info.subject,
-            stream_type: StreamType::Response,
-        };
-        framed_writer
-            .send(TwoPartMessage::from_header(
-                serde_json::to_vec(&handshake).unwrap().into(),
-            ))
-            .await
-            .unwrap();
-
-        // Send a data-only frame in the prologue slot.
-        framed_writer
-            .send(TwoPartMessage::from_data(Bytes::from_static(
-                b"not a prologue",
-            )))
-            .await
-            .unwrap();
-
-        let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), stream_provider)
-            .await
-            .expect("stream provider should resolve quickly")
-            .expect("stream provider channel should not be dropped");
-        // StreamReceiver doesn't impl Debug, so we can't use `.expect_err`.
-        match outcome {
-            Err(err) => assert!(
-                err.contains("malformed prologue"),
-                "expected malformed-prologue error, got: {err}"
-            ),
-            Ok(_) => panic!("invalid prologue should produce an error, but got Ok"),
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn test_concurrent_response_registration_and_call_home() {
-        const STREAMS: usize = 128;
-
-        let result = time::timeout(Duration::from_secs(20), async {
-            let server = test_server().await;
-            let mut pending_streams = Vec::with_capacity(STREAMS);
-            let mut client_tasks = Vec::with_capacity(STREAMS);
-
-            for idx in 0..STREAMS {
-                let context = Context::new(());
-                let options = StreamOptions::builder()
+        let pending = server
+            .register(
+                StreamOptions::builder()
                     .context(context.context())
                     .enable_request_stream(false)
                     .enable_response_stream(true)
                     .build()
-                    .unwrap();
+                    .unwrap(),
+            )
+            .await
+            .recv_stream
+            .unwrap();
+        let (info, provider) = pending.into_parts();
+        (info.try_into().unwrap(), provider)
+    }
 
-                let pending = server.register(options).await;
-                let registered_stream = pending.recv_stream.unwrap();
-                let (connection_info, stream_provider) = registered_stream.into_parts();
-                let client_context =
-                    Context::with_id_and_metadata((), context.id().to_string(), Default::default());
-                let payload = Bytes::from(format!("payload-{idx}"));
+    #[tokio::test]
+    async fn pipelined_mux_handshake_preserves_data_and_isolates_malformed_prologue() {
+        use bytes::BytesMut;
+        use tokio_util::codec::Encoder;
 
-                pending_streams.push((idx, payload.clone(), stream_provider));
-                client_tasks.push(tokio::spawn(async move {
-                    let mut sender = TcpClient::create_response_stream(
-                        client_context.context(),
-                        connection_info,
-                        None,
-                    )
-                    .await
-                    .unwrap();
-                    sender.send_prologue(None).await.unwrap();
-                    sender.send(payload).await.unwrap();
-                }));
-            }
+        let server = test_server().await;
+        let (bad_info, bad_provider) = register_mux_response(&server).await;
+        let (good_info, good_provider) = register_mux_response(&server).await;
+        assert_eq!(bad_info.address, good_info.address);
+        assert_eq!(bad_info.frontend_server_id, good_info.frontend_server_id);
 
-            for task in client_tasks {
-                task.await.unwrap();
-            }
+        let mut socket = TcpStream::connect(&bad_info.address).await.unwrap();
+        let handshake = ConnectionHandshake::ResponseMux {
+            version: RESPONSE_MUX_VERSION,
+            frontend_server_id: bad_info.frontend_server_id,
+            connection_id: uuid::Uuid::new_v4(),
+        };
+        let mut wire = BytesMut::new();
+        TwoPartCodec::default()
+            .encode(
+                TwoPartMessage::from_header(serde_json::to_vec(&handshake).unwrap().into()),
+                &mut wire,
+            )
+            .unwrap();
+        let mut mux_codec = MuxCodec::default();
+        mux_codec
+            .encode(
+                MuxFrame::new(
+                    MuxFrameKind::Prologue,
+                    bad_info.stream_id,
+                    Bytes::from_static(b"{"),
+                ),
+                &mut wire,
+            )
+            .unwrap();
+        mux_codec
+            .encode(
+                MuxFrame::new(
+                    MuxFrameKind::Prologue,
+                    good_info.stream_id,
+                    serde_json::to_vec(&ResponseStreamPrologue { error: None })
+                        .unwrap()
+                        .into(),
+                ),
+                &mut wire,
+            )
+            .unwrap();
+        mux_codec
+            .encode(
+                MuxFrame::new(
+                    MuxFrameKind::Data,
+                    good_info.stream_id,
+                    Bytes::from_static(b"preserved"),
+                ),
+                &mut wire,
+            )
+            .unwrap();
+        mux_codec
+            .encode(
+                MuxFrame::empty(MuxFrameKind::End, good_info.stream_id),
+                &mut wire,
+            )
+            .unwrap();
 
-            for (idx, expected, stream_provider) in pending_streams {
-                let mut stream = stream_provider.await.unwrap().unwrap();
-                let actual = stream.recv().await.unwrap();
-                assert_eq!(actual, expected, "payload mismatch for stream {idx}");
-            }
-        })
-        .await;
-
-        assert!(
-            result.is_ok(),
-            "concurrent response registration and call-home timed out"
+        // A single write makes handshake and mux frames available to the
+        // handshake decoder together, exercising decoder-buffer preservation.
+        socket.write_all(&wire).await.unwrap();
+        let mut reader = FramedRead::new(socket, TwoPartCodec::default());
+        let ack = tokio::time::timeout(Duration::from_secs(1), reader.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            MuxFrame::try_from_two_part(ack).unwrap(),
+            MuxFrame::connection_ack(0)
         );
+        let mut reader = reader.map_decoder(|_| MuxCodec::default());
+
+        let bad = tokio::time::timeout(Duration::from_secs(1), bad_provider)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            bad.err()
+                .is_some_and(|error| error.contains("invalid response mux prologue"))
+        );
+
+        let mut good = tokio::time::timeout(Duration::from_secs(1), good_provider)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(good.recv().await.unwrap(), Bytes::from_static(b"preserved"));
+        assert!(good.recv().await.is_none());
+
+        let reset = tokio::time::timeout(Duration::from_secs(1), reader.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(reset.kind, MuxFrameKind::Reset);
+        assert_eq!(reset.stream_id, bad_info.stream_id);
     }
 
     // ==================== request_stream_send_handler integration tests ====================

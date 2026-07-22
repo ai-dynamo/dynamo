@@ -3,7 +3,9 @@
 
 //! Bounded-cardinality metrics for the multiplexed TCP response transport.
 
-use once_cell::sync::{Lazy, OnceCell};
+use std::sync::{Mutex, RwLock, Weak};
+
+use once_cell::sync::Lazy;
 use prometheus::{
     Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGaugeVec, Opts,
 };
@@ -347,101 +349,145 @@ pub static CONNECTION_LOST_STREAMS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     .expect("response mux connection-lost stream counter")
 });
 
-static REGISTERED: OnceCell<()> = OnceCell::new();
+static REGISTERED: Lazy<Mutex<Vec<Weak<RwLock<prometheus::Registry>>>>> =
+    Lazy::new(|| Mutex::new(Vec::new()));
 
 pub fn ensure_registered(registry: &MetricsRegistry) {
-    let _ = REGISTERED.get_or_init(|| {
-        registry.add_metric_or_warn(
-            Box::new(ACTIVE_CONNECTIONS.clone()),
-            "response_mux_active_connections",
-        );
-        registry.add_metric_or_warn(
-            Box::new(CONNECTIONS_TOTAL.clone()),
-            "response_mux_connections_total",
-        );
-        registry.add_metric_or_warn(
-            Box::new(ACTIVE_STREAMS.clone()),
-            "response_mux_active_streams",
-        );
-        registry.add_metric_or_warn(
-            Box::new(SETUP_SECONDS.clone()),
-            "response_mux_setup_seconds",
-        );
-        registry.add_metric_or_warn(Box::new(FRAMES_TOTAL.clone()), "response_mux_frames_total");
-        registry.add_metric_or_warn(
-            Box::new(WRITER_QUEUE_DEPTH.clone()),
-            "response_mux_writer_queue_depth",
-        );
-        registry.add_metric_or_warn(Box::new(QUEUED_BYTES.clone()), "response_mux_queued_bytes");
-        registry.add_metric_or_warn(
-            Box::new(FRAMES_PER_WRITE.clone()),
-            "response_mux_frames_per_write",
-        );
-        registry.add_metric_or_warn(Box::new(BATCH_BYTES.clone()), "response_mux_batch_bytes");
-        registry.add_metric_or_warn(
-            Box::new(BATCH_WAIT_SECONDS.clone()),
-            "response_mux_batch_wait_seconds",
-        );
-        registry.add_metric_or_warn(
-            Box::new(CONFIGURED_BATCH_INTERVAL_MS.clone()),
-            "response_mux_configured_batch_interval_ms",
-        );
-        registry.add_metric_or_warn(
-            Box::new(WRITE_CALLS_TOTAL.clone()),
-            "response_mux_write_calls_total",
-        );
-        registry.add_metric_or_warn(
-            Box::new(DATA_SEGMENTS_TOTAL.clone()),
-            "response_data_segments_total",
-        );
-        registry.add_metric_or_warn(
-            Box::new(QUEUE_RESIDENCE_SECONDS.clone()),
-            "response_mux_queue_residence_seconds",
-        );
-        registry.add_metric_or_warn(Box::new(RESETS_TOTAL.clone()), "response_mux_resets_total");
-        registry.add_metric_or_warn(
-            Box::new(RECONNECTS_TOTAL.clone()),
-            "response_mux_reconnects_total",
-        );
-        registry.add_metric_or_warn(
-            Box::new(FLOW_CONTROL_STALL_SECONDS.clone()),
-            "response_mux_flow_control_stall_seconds",
-        );
-        registry.add_metric_or_warn(
-            Box::new(CONNECTION_FLOW_CONTROL_STALL_SECONDS.clone()),
-            "response_mux_connection_flow_control_stall_seconds",
-        );
-        registry.add_metric_or_warn(
-            Box::new(WRITER_ADMISSION_STALL_SECONDS.clone()),
-            "response_mux_writer_admission_stall_seconds",
-        );
-        registry.add_metric_or_warn(
-            Box::new(QUEUED_BYTE_ADMISSION_STALL_SECONDS.clone()),
-            "response_mux_queued_byte_admission_stall_seconds",
-        );
-        registry.add_metric_or_warn(
-            Box::new(STREAM_WRITER_QUEUE_OCCUPANCY.clone()),
-            "response_mux_stream_writer_queue_occupancy",
-        );
-        registry.add_metric_or_warn(
-            Box::new(READY_STREAMS.clone()),
-            "response_mux_ready_streams",
-        );
-        registry.add_metric_or_warn(
-            Box::new(PRIORITY_QUEUE_RESIDENCE_SECONDS.clone()),
-            "response_mux_priority_queue_residence_seconds",
-        );
-        registry.add_metric_or_warn(
-            Box::new(ROUND_ROBIN_TURNS_TOTAL.clone()),
-            "response_mux_round_robin_turns_total",
-        );
-        registry.add_metric_or_warn(
-            Box::new(WINDOW_UPDATES_TOTAL.clone()),
-            "response_mux_window_updates_total",
-        );
-        registry.add_metric_or_warn(
-            Box::new(CONNECTION_LOST_STREAMS_TOTAL.clone()),
-            "response_mux_connection_lost_streams_total",
-        );
-    });
+    {
+        let mut registered = REGISTERED.lock().expect("response mux registry lock");
+        registered.retain(|candidate| candidate.strong_count() > 0);
+        let identity = std::sync::Arc::downgrade(&registry.prometheus_registry);
+        if registered
+            .iter()
+            .any(|candidate| Weak::ptr_eq(candidate, &identity))
+        {
+            return;
+        }
+        registered.push(identity);
+    }
+
+    registry.add_metric_or_warn(
+        Box::new(ACTIVE_CONNECTIONS.clone()),
+        "response_mux_active_connections",
+    );
+    registry.add_metric_or_warn(
+        Box::new(CONNECTIONS_TOTAL.clone()),
+        "response_mux_connections_total",
+    );
+    registry.add_metric_or_warn(
+        Box::new(ACTIVE_STREAMS.clone()),
+        "response_mux_active_streams",
+    );
+    registry.add_metric_or_warn(
+        Box::new(SETUP_SECONDS.clone()),
+        "response_mux_setup_seconds",
+    );
+    registry.add_metric_or_warn(Box::new(FRAMES_TOTAL.clone()), "response_mux_frames_total");
+    registry.add_metric_or_warn(
+        Box::new(WRITER_QUEUE_DEPTH.clone()),
+        "response_mux_writer_queue_depth",
+    );
+    registry.add_metric_or_warn(Box::new(QUEUED_BYTES.clone()), "response_mux_queued_bytes");
+    registry.add_metric_or_warn(
+        Box::new(FRAMES_PER_WRITE.clone()),
+        "response_mux_frames_per_write",
+    );
+    registry.add_metric_or_warn(Box::new(BATCH_BYTES.clone()), "response_mux_batch_bytes");
+    registry.add_metric_or_warn(
+        Box::new(BATCH_WAIT_SECONDS.clone()),
+        "response_mux_batch_wait_seconds",
+    );
+    registry.add_metric_or_warn(
+        Box::new(CONFIGURED_BATCH_INTERVAL_MS.clone()),
+        "response_mux_configured_batch_interval_ms",
+    );
+    registry.add_metric_or_warn(
+        Box::new(WRITE_CALLS_TOTAL.clone()),
+        "response_mux_write_calls_total",
+    );
+    registry.add_metric_or_warn(
+        Box::new(DATA_SEGMENTS_TOTAL.clone()),
+        "response_data_segments_total",
+    );
+    registry.add_metric_or_warn(
+        Box::new(QUEUE_RESIDENCE_SECONDS.clone()),
+        "response_mux_queue_residence_seconds",
+    );
+    registry.add_metric_or_warn(Box::new(RESETS_TOTAL.clone()), "response_mux_resets_total");
+    registry.add_metric_or_warn(
+        Box::new(RECONNECTS_TOTAL.clone()),
+        "response_mux_reconnects_total",
+    );
+    registry.add_metric_or_warn(
+        Box::new(FLOW_CONTROL_STALL_SECONDS.clone()),
+        "response_mux_flow_control_stall_seconds",
+    );
+    registry.add_metric_or_warn(
+        Box::new(CONNECTION_FLOW_CONTROL_STALL_SECONDS.clone()),
+        "response_mux_connection_flow_control_stall_seconds",
+    );
+    registry.add_metric_or_warn(
+        Box::new(WRITER_ADMISSION_STALL_SECONDS.clone()),
+        "response_mux_writer_admission_stall_seconds",
+    );
+    registry.add_metric_or_warn(
+        Box::new(QUEUED_BYTE_ADMISSION_STALL_SECONDS.clone()),
+        "response_mux_queued_byte_admission_stall_seconds",
+    );
+    registry.add_metric_or_warn(
+        Box::new(STREAM_WRITER_QUEUE_OCCUPANCY.clone()),
+        "response_mux_stream_writer_queue_occupancy",
+    );
+    registry.add_metric_or_warn(
+        Box::new(READY_STREAMS.clone()),
+        "response_mux_ready_streams",
+    );
+    registry.add_metric_or_warn(
+        Box::new(PRIORITY_QUEUE_RESIDENCE_SECONDS.clone()),
+        "response_mux_priority_queue_residence_seconds",
+    );
+    registry.add_metric_or_warn(
+        Box::new(ROUND_ROBIN_TURNS_TOTAL.clone()),
+        "response_mux_round_robin_turns_total",
+    );
+    registry.add_metric_or_warn(
+        Box::new(WINDOW_UPDATES_TOTAL.clone()),
+        "response_mux_window_updates_total",
+    );
+    registry.add_metric_or_warn(
+        Box::new(CONNECTION_LOST_STREAMS_TOTAL.clone()),
+        "response_mux_connection_lost_streams_total",
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn contains_response_mux_metrics(registry: &MetricsRegistry) -> bool {
+        registry
+            .prometheus_registry
+            .read()
+            .expect("metrics registry read lock")
+            .gather()
+            .iter()
+            .any(|family| family.name() == "dynamo_tcp_response_mux_active_connections")
+    }
+
+    #[test]
+    fn registration_is_deduplicated_by_registry_identity() {
+        let first = MetricsRegistry::new();
+        let first_clone = first.clone();
+        let second = MetricsRegistry::new();
+        ACTIVE_CONNECTIONS
+            .with_label_values(&["registry_test"])
+            .set(0);
+
+        ensure_registered(&first);
+        ensure_registered(&first_clone);
+        ensure_registered(&second);
+
+        assert!(contains_response_mux_metrics(&first));
+        assert!(contains_response_mux_metrics(&second));
+    }
 }
