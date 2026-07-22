@@ -109,7 +109,7 @@ fn publish_pool_state(
         None => (None, Some("absent".to_string())),
         Some(o) => match parse_pool_state(&o.data) {
             Ok(s) => (Some(s), None),
-            Err(e) => (None, Some(e.to_string())),
+            Err(reason) => (None, Some(reason)),
         },
     };
 
@@ -135,44 +135,28 @@ fn publish_pool_state(
     });
 }
 
-/// Why an observed `InferencePool` spec can't be used for discovery. Each
-/// variant names a specific rejection so the watcher can log *why* the pool was
-/// cleared instead of one catch-all warning.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-enum PoolSpecError {
-    #[error("spec is missing")]
-    MissingSpec,
-    #[error("spec.selector.matchLabels is missing or not a string map")]
-    MissingSelector,
-    #[error("spec.selector.matchLabels is empty (would select every pod in the namespace)")]
-    EmptySelector,
-    #[error("spec.targetPorts is missing or not an array")]
-    MissingTargetPorts,
-    #[error("expected exactly one targetPort, found {found}")]
-    NotExactlyOneTargetPort { found: usize },
-    #[error("targetPorts[0].number is missing or not an integer")]
-    MissingTargetPortNumber,
-    #[error("targetPort {0} is outside the valid 1-65535 range")]
-    TargetPortOutOfRange(u64),
-}
-
-/// Extract a [`PoolState`] from an `InferencePool` `spec`, or a [`PoolSpecError`]
-/// naming why it is unusable. Pure function — unit-testable without a cluster.
-fn parse_pool_state(data: &serde_json::Value) -> Result<PoolState, PoolSpecError> {
-    let spec = data.get("spec").ok_or(PoolSpecError::MissingSpec)?;
+/// Extract a [`PoolState`] from an `InferencePool` `spec`, or a message naming
+/// why it is unusable. Pure function — unit-testable without a cluster.
+fn parse_pool_state(data: &serde_json::Value) -> std::result::Result<PoolState, String> {
+    let spec = data
+        .get("spec")
+        .ok_or_else(|| "spec is missing".to_string())?;
 
     let labels_obj = spec
         .get("selector")
         .and_then(|s| s.get("matchLabels"))
         .and_then(|m| m.as_object())
-        .ok_or(PoolSpecError::MissingSelector)?;
+        .ok_or_else(|| "spec.selector.matchLabels is missing or not a string map".to_string())?;
     let match_labels: BTreeMap<String, String> = labels_obj
         .iter()
         .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
         .collect();
     // An empty selector would match every pod in the namespace; refuse it.
     if match_labels.is_empty() {
-        return Err(PoolSpecError::EmptySelector);
+        return Err(
+            "spec.selector.matchLabels is empty (would select every pod in the namespace)"
+                .to_string(),
+        );
     }
 
     // v1 `spec.targetPorts[].number`; exactly one is required. Multi-port pools
@@ -182,19 +166,24 @@ fn parse_pool_state(data: &serde_json::Value) -> Result<PoolState, PoolSpecError
     let target_ports = spec
         .get("targetPorts")
         .and_then(|tp| tp.as_array())
-        .ok_or(PoolSpecError::MissingTargetPorts)?;
+        .ok_or_else(|| "spec.targetPorts is missing or not an array".to_string())?;
     if target_ports.len() != 1 {
-        return Err(PoolSpecError::NotExactlyOneTargetPort {
-            found: target_ports.len(),
-        });
+        return Err(format!(
+            "expected exactly one targetPort, found {}",
+            target_ports.len()
+        ));
     }
     let target_port_u64 = target_ports[0]
         .get("number")
         .and_then(|n| n.as_u64())
-        .ok_or(PoolSpecError::MissingTargetPortNumber)?;
+        .ok_or_else(|| "targetPorts[0].number is missing or not an integer".to_string())?;
     let target_port = match u16::try_from(target_port_u64) {
         Ok(p) if p != 0 => p,
-        _ => return Err(PoolSpecError::TargetPortOutOfRange(target_port_u64)),
+        _ => {
+            return Err(format!(
+                "targetPort {target_port_u64} is outside the valid 1-65535 range"
+            ));
+        }
     };
 
     Ok(PoolState {
@@ -313,10 +302,7 @@ mod tests {
 
     #[test]
     fn missing_spec_is_rejected() {
-        assert_eq!(
-            parse_pool_state(&json!({})),
-            Err(PoolSpecError::MissingSpec)
-        );
+        assert_eq!(parse_pool_state(&json!({})).unwrap_err(), "spec is missing");
     }
 
     #[test]
@@ -329,8 +315,8 @@ mod tests {
             }
         });
         assert_eq!(
-            parse_pool_state(&data),
-            Err(PoolSpecError::MissingTargetPorts)
+            parse_pool_state(&data).unwrap_err(),
+            "spec.targetPorts is missing or not an array"
         );
     }
 
@@ -339,7 +325,10 @@ mod tests {
         let data = json!({
             "spec": {"selector": {"matchLabels": {}}, "targetPorts": [{"number": 8000}]}
         });
-        assert_eq!(parse_pool_state(&data), Err(PoolSpecError::EmptySelector));
+        assert_eq!(
+            parse_pool_state(&data).unwrap_err(),
+            "spec.selector.matchLabels is empty (would select every pod in the namespace)"
+        );
     }
 
     #[test]
@@ -347,7 +336,10 @@ mod tests {
         let data = json!({
             "spec": {"targetPorts": [{"number": 8000}]}
         });
-        assert_eq!(parse_pool_state(&data), Err(PoolSpecError::MissingSelector));
+        assert_eq!(
+            parse_pool_state(&data).unwrap_err(),
+            "spec.selector.matchLabels is missing or not a string map"
+        );
     }
 
     #[test]
@@ -356,8 +348,8 @@ mod tests {
             "spec": {"selector": {"matchLabels": {"app": "x"}}}
         });
         assert_eq!(
-            parse_pool_state(&data),
-            Err(PoolSpecError::MissingTargetPorts)
+            parse_pool_state(&data).unwrap_err(),
+            "spec.targetPorts is missing or not an array"
         );
     }
 
@@ -372,8 +364,8 @@ mod tests {
             }
         });
         assert_eq!(
-            parse_pool_state(&data),
-            Err(PoolSpecError::NotExactlyOneTargetPort { found: 2 })
+            parse_pool_state(&data).unwrap_err(),
+            "expected exactly one targetPort, found 2"
         );
     }
 
@@ -386,8 +378,8 @@ mod tests {
             }
         });
         assert_eq!(
-            parse_pool_state(&data),
-            Err(PoolSpecError::NotExactlyOneTargetPort { found: 0 })
+            parse_pool_state(&data).unwrap_err(),
+            "expected exactly one targetPort, found 0"
         );
     }
 
@@ -400,8 +392,8 @@ mod tests {
             }
         });
         assert_eq!(
-            parse_pool_state(&data),
-            Err(PoolSpecError::MissingTargetPortNumber)
+            parse_pool_state(&data).unwrap_err(),
+            "targetPorts[0].number is missing or not an integer"
         );
     }
 
@@ -415,8 +407,8 @@ mod tests {
                 }
             });
             assert_eq!(
-                parse_pool_state(&data),
-                Err(PoolSpecError::TargetPortOutOfRange(port))
+                parse_pool_state(&data).unwrap_err(),
+                format!("targetPort {port} is outside the valid 1-65535 range")
             );
         }
     }
