@@ -812,19 +812,9 @@ where
     where
         F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
     {
-        // When fault detection is disabled, check the raw discovery list
-        // (not filtered by report_instance_down) so transient failures
-        // don't poison the instance for subsequent retries.
-        let found = {
-            if self.fault_detection_enabled {
-                let routing_instances = self.client.routing_instances();
-                routing_instances.routable_ids().contains(&instance_id)
-            } else {
-                self.client.instance_ids().contains(&instance_id)
-            }
-        };
-
-        if !found {
+        // Direct dispatch honors the caller-selected worker while it remains in discovery.
+        // Local inhibition only filters worker selection owned by this router.
+        if !self.client.instance_ids().contains(&instance_id) {
             return Err(DynamoError::builder()
                 .error_type(ErrorType::CannotConnect)
                 .message(format!(
@@ -2486,6 +2476,70 @@ mod tests {
         assert!(
             permit.is_none(),
             "full cache hits bypass occupancy charging"
+        );
+
+        rt.shutdown();
+    }
+
+    /// Direct dispatch honors an upstream-selected worker even after local inhibition.
+    #[tokio::test]
+    async fn direct_dispatch_ignores_local_inhibition() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_direct_bypasses_inhibition".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instance_id = client.wait_for_instances().await.unwrap()[0].id();
+
+        // KV routing selects upstream and dispatches through PushRouter::direct.
+        let router = PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::KV)
+            .await
+            .unwrap();
+
+        client.report_instance_down(instance_id);
+        assert!(
+            !client.instance_ids_avail().contains(&instance_id),
+            "precondition: worker should be locally inhibited"
+        );
+
+        let result = router
+            .direct_within_prepared(
+                SingleIn::new(42),
+                instance_id,
+                None,
+                |_, selected_instance_id| {
+                    assert_eq!(selected_instance_id, instance_id);
+                    Err::<(), _>(anyhow::anyhow!("direct prepare sentinel"))
+                },
+            )
+            .await;
+        let error = match result {
+            Ok(_) => panic!("direct dispatch should reach request preparation"),
+            Err(error) => error,
+        };
+        assert_eq!(error.to_string(), "direct prepare sentinel");
+
+        let missing_instance_id = instance_id.wrapping_add(1);
+        let result = router
+            .direct_within_prepared(SingleIn::new(42), missing_instance_id, None, |_, _| {
+                Ok::<(), anyhow::Error>(())
+            })
+            .await;
+        let error = match result {
+            Ok(_) => panic!("direct dispatch should reject a worker absent from discovery"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("instance_id={missing_instance_id} not found")),
+            "unexpected missing-worker error: {error}"
         );
 
         rt.shutdown();
