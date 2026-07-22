@@ -142,7 +142,7 @@ Dynamo container images include CUDA toolkit libraries. The host machine must ha
 
 Patch versions (e.g., v0.8.1.post1, v0.7.0.post1) have the same CUDA support as their base version.
 
-Experimental `v1.1.0-dev.*` images follow the same CUDA matrix as `v1.0.2`. The `v1.2.0-deepseek-v4-dev.3` vLLM container is CUDA 13.0 multi-arch; the SGLang containers split by arch (CUDA 12.9 on `amd64`, CUDA 13.0 on `arm64`).
+Early access `v1.1.0-dev.*` images follow the same CUDA matrix as `v1.0.2`. The `v1.2.0-deepseek-v4-dev.3` vLLM container is CUDA 13.0 multi-arch; the SGLang containers split by arch (CUDA 12.9 on `amd64`, CUDA 13.0 on `arm64`).
 
 Experimental CUDA 13 images are not published for all versions. Check [Release Artifacts](release-artifacts.md) for availability.
 

@@ -1,5 +1,5 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Model Early Access Builds
 subtitle: Per-model early access container builds shipped ahead of stable releases
@@ -27,7 +27,7 @@ Pull any image below with:
 docker pull nvcr.io/nvidia/ai-dynamo/<runtime>:<tag>
 ```
 
-## v1.4.0 line
+## v1.4.0 release
 
 | Model | Tag | Runtime | Shipped | Recipe | GA path |
 |-------|-----|---------|---------|--------|---------|
@@ -39,7 +39,7 @@ docker pull nvcr.io/nvidia/ai-dynamo/<runtime>:<tag>
 - **NGC Image:** `sglang-runtime:1.4.0-inkling-dev.1`
 - **GA path:** Dev-only — first build on the v1.4.0 line; targets the next stable release.
 
-## v1.3.0 line
+## v1.3.0 release
 
 | Model | Tag | Runtime | Shipped | Recipe | GA path |
 |-------|-----|---------|---------|--------|---------|
@@ -80,7 +80,7 @@ docker pull nvcr.io/nvidia/ai-dynamo/<runtime>:<tag>
 - **NGC Image:** `vllm-runtime:1.3.0-nemotron-ultra-dev.1`
 - **Backends:** vLLM `v0.22.0` with six container patches
 - **Upstream status:**
-  - vLLM [#40932](https://github.com/vllm-project/vllm/pull/40932) (Qwen3-VL deepstack boundary fix) — upstream, in vLLM `v0.23.0` ✓
+  - vLLM [#40932](https://github.com/vllm-project/vllm/pull/40932) (Qwen3-VL deepstack boundary fix) — upstream, first released in vLLM `v0.22.0`; in `v0.23.0` ✓
   - vLLM [#42554](https://github.com/vllm-project/vllm/pull/42554) (Mamba prefix-cache PD runtime) — upstream, in vLLM `v0.23.0` ✓
   - Four Ultra-specific patches (hybrid Mamba/attention hash-block KV events, MTP DS conv-state layout, SSM NIXL tail transfer, DS-tail copy i64 offsets) — **not upstreamed**; no vLLM PRs opened
 - **GA path:** **Dev-only** — the four un-upstreamed patches are not in the vLLM `v0.23.0` that v1.3.0 ships. Requires two pinned runtime flags: `VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel` and `--no-enable-flashinfer-autotune`.
@@ -93,7 +93,7 @@ docker pull nvcr.io/nvidia/ai-dynamo/<runtime>:<tag>
 - **Backends:** vLLM `v0.22.0` with two container patches
 - **Upstream status:**
   - vLLM [#40984](https://github.com/vllm-project/vllm/pull/40984) (emit KV-cache metadata) — merged 2026-05-12, first released in vLLM `v0.22.0`; in `v0.23.0` ✓
-  - vLLM [#40932](https://github.com/vllm-project/vllm/pull/40932) (Qwen3-VL deepstack boundary fix) — upstream, in vLLM `v0.23.0` ✓
+  - vLLM [#40932](https://github.com/vllm-project/vllm/pull/40932) (Qwen3-VL deepstack boundary fix) — upstream, first released in vLLM `v0.22.0`; in `v0.23.0` ✓
 - **GA path:** **Promoted** — both patches are in the vLLM `v0.23.0` that v1.3.0 ships; the recipe runs on the stock `vllm-runtime:1.3.0`.
 
 ### v1.3.0-kimi-k2.6-dev.1
@@ -101,7 +101,7 @@ docker pull nvcr.io/nvidia/ai-dynamo/<runtime>:<tag>
 - **Branch:** [release/1.3.0-kimi-k2.6-dev.1](https://github.com/ai-dynamo/dynamo/tree/release/1.3.0-kimi-k2.6-dev.1)
 - **GitHub Tag:** [v1.3.0-kimi-k2.6-dev.1](https://github.com/ai-dynamo/dynamo/releases/tag/v1.3.0-kimi-k2.6-dev.1)
 - **NGC Image:** `vllm-runtime:1.3.0-kimi-k2.6-dev.1`
-- **Upstream status:** the build's only container patch, vLLM [#40932](https://github.com/vllm-project/vllm/pull/40932) (Qwen3-VL deepstack boundary fix), is upstream and in vLLM `v0.23.0` ✓; the K2.6 recipes themselves merged to `main` via Dynamo [#10187](https://github.com/ai-dynamo/dynamo/pull/10187).
+- **Upstream status:** the build's only container patch, vLLM [#40932](https://github.com/vllm-project/vllm/pull/40932) (Qwen3-VL deepstack boundary fix), is upstream and first released in vLLM `v0.22.0`; in `v0.23.0` ✓; the K2.6 recipes themselves merged to `main` via Dynamo [#10187](https://github.com/ai-dynamo/dynamo/pull/10187).
 - **GA path:** **Promoted** — the recipes run on the stock `vllm-runtime:1.3.0`.
 
 ### v1.3.0-cosmos3-dev.1
@@ -115,13 +115,15 @@ docker pull nvcr.io/nvidia/ai-dynamo/<runtime>:<tag>
   - Dynamo [#10132](https://github.com/ai-dynamo/dynamo/pull/10132) (Cosmos3 support in the vLLM-Omni backend) — **open, not merged**
 - **GA path:** **Dev-only** — without #10132 the v1.3.0 containers cannot run Cosmos3, even though the vLLM-Omni side is released. Launch scripts and docs live on the build branch: [docs/backends/vllm/cosmos3.md](https://github.com/ai-dynamo/dynamo/blob/release/1.3.0-cosmos3-dev.1/docs/backends/vllm/cosmos3.md), [examples/backends/vllm/launch](https://github.com/ai-dynamo/dynamo/tree/release/1.3.0-cosmos3-dev.1/examples/backends/vllm/launch).
 
-## v1.2.0 line
+## v1.2.0 release
 
 | Model | Tag | Runtime | Shipped | Recipe | GA path |
 |-------|-----|---------|---------|--------|---------|
 | DeepSeek-V4 preview | `1.2.0-deepseek-v4-dev.3` | vllm + sglang | May 9, 2026 | superseded | Superseded — recipe in v1.3.0 |
 | DeepSeek-V4 preview | `1.2.0-deepseek-v4-dev.2` | vllm + sglang | May 1, 2026 | superseded | Superseded — recipe in v1.3.0 |
 | DeepSeek-V4 preview | `1.2.0-sglang-deepseek-v4-dev.1` | sglang | Apr 25, 2026 | superseded | Superseded — recipe in v1.3.0 |
+
+> The **Tag** column shows the GitHub release tag. Unlike the single-image builds above, these previews publish per-arch/CUDA container tags (for example `vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.3`) — see each build's **Container Images** table below for the pullable tags.
 
 ### v1.2.0-deepseek-v4-dev.3
 

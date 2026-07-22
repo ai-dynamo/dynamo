@@ -179,7 +179,7 @@ For a complete list of known issues, refer to the release notes for each version
 
 Each bullet is a **delta** to what ships on NGC / Helm / PyPI / crates.io: net-new crates, removed Helm charts, or image lines that **split** or **appear** on the registry. See the inventory tables above for full matrices.
 
-Stable releases first (newest first). **Early access git tags** (`v*-dev.*`) are summarized below; per-tag images and wheels for platform previews are spelled out in [Early Access Artifacts](#early-access-artifacts), and model-specific builds in [Model Early Access Builds](model-early-access-builds.md).
+Grouped by release line, newest first; within each line the stable release precedes its early access tags. **Early access git tags** (`v*-dev.*`) are summarized below; per-tag images and wheels for platform previews are spelled out in [Early Access Artifacts](#early-access-artifacts), and model-specific builds in [Model Early Access Builds](model-early-access-builds.md).
 
 For backend version pins, see the version-pins table above and the [GitHub Releases](#github-releases) table below.
 
@@ -793,6 +793,8 @@ On crates.io, **`dynamo-protocols`** lists **`1.1.0`** as its first installable 
 | `kvbm-logical@1.2.0` | `v1.82` | Initial |
 
 ---
+
+<a id="pre-release-artifacts"></a>
 
 ## Early Access Artifacts
 
