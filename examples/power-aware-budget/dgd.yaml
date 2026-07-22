@@ -1,0 +1,61 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# DGD-owned per-GPU power caps + budget-aware scaling (hand-authored contract).
+#
+# The per-GPU cap for each worker role is authored on that component's
+# podTemplate annotation `dynamo.nvidia.com/gpu-power-limit` (watts). The
+# operator stamps it onto every worker Pod at create time (including replicas
+# added by a scale-up); the Power Agent DaemonSet reads the live Pod annotation
+# and applies the NVML/DCGM cap. The Planner only READS these caps from the DGD
+# and combines them with `total_gpu_power_limit` (in the mounted PlannerConfig)
+# to project a power budget and clamp scale-up. The Planner never patches Pods.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: power-aware-example
+spec:
+  components:
+    - name: Planner
+      type: planner
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              args:
+                - --config
+                - /workspace/planner_config/planner_config.json
+              # The mounted PlannerConfig enables power awareness and sets the
+              # deployment-wide budget (see planner_config.json in this dir):
+              #   enable_power_awareness: true
+              #   total_gpu_power_limit: 5200
+
+    - name: VllmPrefillWorker
+      type: prefill
+      replicas: 2
+      podTemplate:
+        metadata:
+          annotations:
+            # 2 GPUs/replica × 350 W = 700 W per prefill replica.
+            dynamo.nvidia.com/gpu-power-limit: "350"
+        spec:
+          containers:
+            - name: main
+              resources:
+                limits:
+                  nvidia.com/gpu: "2"
+
+    - name: VllmDecodeWorker
+      type: decode
+      replicas: 2
+      podTemplate:
+        metadata:
+          annotations:
+            # 4 GPUs/replica × 300 W = 1200 W per decode replica.
+            dynamo.nvidia.com/gpu-power-limit: "300"
+        spec:
+          containers:
+            - name: main
+              resources:
+                limits:
+                  nvidia.com/gpu: "4"

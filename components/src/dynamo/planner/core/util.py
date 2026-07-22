@@ -49,4 +49,29 @@ def deployment_state_changed(
         return True
     if check_decode and old_state.decode.num_gpus != new_state.decode.num_gpus:
         return True
+    # Power watts feed the budget clamp and projection gauges via capabilities,
+    # so a changed per-replica draw must trigger an update_capabilities() pass.
+    if (
+        check_prefill
+        and old_state.prefill.power_watts_per_replica
+        != new_state.prefill.power_watts_per_replica
+    ):
+        return True
+    if (
+        check_decode
+        and old_state.decode.power_watts_per_replica
+        != new_state.decode.power_watts_per_replica
+    ):
+        return True
+    # Deployment-scoped scale-up block: a malformed refresh can flip this while
+    # leaving the last-good watts unchanged, so compare it explicitly — else the
+    # blocked transition would skip update_capabilities() and never reach the
+    # final budget boundary or the diagnostic gauge.
+    if old_state.power_scale_up_blocked != new_state.power_scale_up_blocked:
+        return True
+    if (
+        old_state.power_scale_up_blocked_reason
+        != new_state.power_scale_up_blocked_reason
+    ):
+        return True
     return False

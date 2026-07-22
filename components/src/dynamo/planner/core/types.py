@@ -205,6 +205,10 @@ class EngineCapabilities:
     max_kv_tokens: Optional[int] = None
     kv_cache_block_size: Optional[int] = None
     speculative_nextn: Optional[int] = None
+    # DGD-resolved per-replica power draw (watts) for this stage: the per-GPU
+    # cap × the replica-wide GPU total. None when power awareness is off or the
+    # cap has not been resolved. The final budget clamp reads this.
+    power_watts_per_replica: Optional[int] = None
 
 
 @dataclass
@@ -220,3 +224,9 @@ class WorkerCapabilities:
 
     prefill: Optional[EngineCapabilities] = None
     decode: Optional[EngineCapabilities] = None
+    # Deployment-scoped power scale-up suppression, projected from
+    # ``DeploymentState``. When True the final budget clamp holds each
+    # component at its current count (scale-down still allowed) and the
+    # planner emits the restart-required diagnostic.
+    power_scale_up_blocked: bool = False
+    power_scale_up_blocked_reason: str = ""

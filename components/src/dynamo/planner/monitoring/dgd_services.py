@@ -15,13 +15,19 @@
 
 import logging
 import shlex
+from dataclasses import dataclass
 from typing import Optional
 
 from pydantic import BaseModel
 
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.planner.config.defaults import SubComponentType
-from dynamo.planner.errors import DuplicateSubComponentError, SubComponentNotFoundError
+from dynamo.planner.errors import (
+    DuplicateSubComponentError,
+    PowerAnnotationInvalidError,
+    PowerAnnotationMissingError,
+    SubComponentNotFoundError,
+)
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
@@ -31,6 +37,19 @@ MAIN_CONTAINER_NAME = "main"
 V1BETA1_COMPONENT_TYPES = {"prefill", "decode"}
 V1BETA1_GENERIC_WORKER_COMPONENT_TYPE = "worker"
 GPU_RESOURCE_KEY = "nvidia.com/gpu"
+
+# Per-GPU power-limit annotation key (watts, positive integer).
+#
+# Ownership: this value is *authored* on the DGD worker component
+# ``podTemplate.metadata.annotations`` by a human or the profiler. The operator
+# renders it onto every worker Pod at create time; the Power Agent DaemonSet
+# reads the *live Pod* annotation and applies the NVML/DCGM cap. The Planner
+# only *reads* this value from the DGD to project a power budget — it never
+# writes it onto Pods (see power-budget-architecture-rework.md). The Power Agent
+# keeps its own copy of this literal (deploy/power-agent/power_agent.py); the
+# two are asserted identical by a contract test rather than shared as a package
+# import, because the agent image does not install the ``dynamo`` package.
+POWER_ANNOTATION_KEY = "dynamo.nvidia.com/gpu-power-limit"
 
 
 def break_arguments(args: list[str] | None) -> list[str]:
@@ -174,12 +193,84 @@ class Service(BaseModel):
             )
 
         try:
-            return int(gpu_str)
+            gpu_count = int(gpu_str)
         except (ValueError, TypeError) as err:
             raise ValueError(
                 f"Invalid GPU count '{gpu_str}' for component '{self.name}'. "
-                f"GPU count must be an integer."
+                f"GPU count must be a positive integer."
             ) from err
+        # A zero/negative GPU count is nonsensical and, for power projection,
+        # would make watts_per_replica zero — silently disabling enforcement for
+        # this role. Reject it so the deployment fails loudly instead.
+        if gpu_count <= 0:
+            raise ValueError(
+                f"Invalid GPU count '{gpu_str}' for component '{self.name}'. "
+                f"GPU count must be a positive integer."
+            )
+        return gpu_count
+
+    def get_node_count(self) -> int:
+        """Return multinode.nodeCount from the component spec, defaulting to 1.
+
+        The operator CRD defines total GPUs as nodeCount × per-pod GPU request.
+        Single-node components either omit the field or set it to 1.
+
+        Raises:
+            ValueError: nodeCount is present but not a positive integer (a
+                zero/negative value would zero out watts_per_replica and
+                silently disable power enforcement for the role).
+        """
+        raw = self.service.get("multinode", {}).get("nodeCount", 1)
+        try:
+            node_count = int(raw)
+        except (ValueError, TypeError) as err:
+            raise ValueError(
+                f"Invalid multinode.nodeCount '{raw}' for component "
+                f"'{self.name}'. nodeCount must be a positive integer."
+            ) from err
+        if node_count <= 0:
+            raise ValueError(
+                f"Invalid multinode.nodeCount '{raw}' for component "
+                f"'{self.name}'. nodeCount must be a positive integer."
+            )
+        return node_count
+
+    def get_total_gpu_count(self) -> int:
+        """Return total GPUs consumed by one replica: get_gpu_count() × get_node_count().
+
+        For single-node components this equals get_gpu_count(). For multinode
+        components the operator allocates nodeCount pods per replica each
+        carrying the same per-pod GPU request, so power projection must
+        multiply both factors.
+        """
+        return self.get_gpu_count() * self.get_node_count()
+
+    def get_gpu_power_limit_watts(self) -> int:
+        """Return ``dynamo.nvidia.com/gpu-power-limit`` from podTemplate annotations.
+
+        The per-GPU cap is read from the worker component's
+        ``podTemplate.metadata.annotations``. This is the *desired* static cap
+        the operator stamps onto Pods and the Power Agent enforces; the Planner
+        only reads it for power projection.
+
+        Raises:
+            PowerAnnotationMissingError: annotation key is absent.
+            PowerAnnotationInvalidError: value is empty, non-integer, or <= 0.
+        """
+        annotations = (
+            self.service.get("podTemplate", {}).get("metadata", {}).get("annotations")
+            or {}
+        )
+        raw = annotations.get(POWER_ANNOTATION_KEY)
+        if raw is None:
+            raise PowerAnnotationMissingError(self.name)
+        try:
+            watts = int(str(raw).strip())
+        except (ValueError, TypeError):
+            raise PowerAnnotationInvalidError(self.name, str(raw))
+        if watts <= 0:
+            raise PowerAnnotationInvalidError(self.name, str(raw))
+        return watts
 
 
 def get_component_from_type_or_name(
@@ -215,8 +306,99 @@ def get_component_from_type_or_name(
         if not _can_use_explicit_component_name(component, component_type):
             raise SubComponentNotFoundError(component_type.value)
         matching_components.append((component_name, component))
+    elif not matching_components and component_type == SubComponentType.DECODE:
+        generic_workers = [
+            (curr_name, curr_component)
+            for curr_name, curr_component in components.items()
+            if get_component_type(curr_component)
+            == V1BETA1_GENERIC_WORKER_COMPONENT_TYPE
+        ]
+        if len(generic_workers) == 1:
+            matching_components.append(generic_workers[0])
+        elif len(generic_workers) > 1:
+            component_names = [name for name, _ in generic_workers]
+            raise DuplicateSubComponentError(component_type.value, component_names)
+        else:
+            raise SubComponentNotFoundError(component_type.value)
     elif not matching_components:
         raise SubComponentNotFoundError(component_type.value)
 
     name, component = matching_components[0]
     return Service(name=name, service=component)
+
+
+@dataclass(frozen=True)
+class ComponentPowerConfig:
+    """Resolved per-role power facts for one worker component.
+
+    Built by :func:`resolve_component_power_configs` from the DGD-owned per-GPU
+    annotation and the component's per-replica GPU total. ``watts_per_replica``
+    is the value the power-budget projection and clamp consume.
+    """
+
+    component_name: str
+    role: str  # prefill | decode | worker
+    gpu_power_limit_watts: int
+    gpus_per_replica: int  # Service.get_total_gpu_count() (nodeCount × per-pod GPUs)
+
+    @property
+    def watts_per_replica(self) -> int:
+        return self.gpu_power_limit_watts * self.gpus_per_replica
+
+
+def _resolve_one_power_config(
+    deployment: dict,
+    sub_component_type: SubComponentType,
+    component_name: Optional[str],
+) -> ComponentPowerConfig:
+    """Resolve a single role's power config, or raise a typed error.
+
+    Role/name resolution reuses ``get_component_from_type_or_name`` so disagg
+    (typed ``prefill``/``decode``) and agg (generic ``type: worker``) resolve
+    the same way GPU-count and model-name lookups already do.
+    """
+    service = get_component_from_type_or_name(
+        deployment, sub_component_type, component_name=component_name
+    )
+    watts = service.get_gpu_power_limit_watts()
+    gpus_per_replica = service.get_total_gpu_count()
+    role = get_component_type(service.service) or sub_component_type.value
+    return ComponentPowerConfig(
+        component_name=service.name,
+        role=role,
+        gpu_power_limit_watts=watts,
+        gpus_per_replica=gpus_per_replica,
+    )
+
+
+def resolve_component_power_configs(
+    deployment: dict,
+    *,
+    require_prefill: bool,
+    require_decode: bool,
+    prefill_name: Optional[str] = None,
+    decode_name: Optional[str] = None,
+) -> tuple[Optional[ComponentPowerConfig], Optional[ComponentPowerConfig]]:
+    """Resolve (prefill, decode) power configs from a DGD dict.
+
+    Returns ``None`` for a role that is not required. Aggregate mode follows
+    existing Planner semantics — ``require_prefill=False, require_decode=True``
+    — and resolves the unique generic ``type: worker`` component as the decode
+    slot; it does not manufacture a prefill config for that single worker.
+
+    Raises the typed parser errors (``SubComponentNotFoundError``,
+    ``DuplicateSubComponentError``, ``PowerAnnotationMissingError``,
+    ``PowerAnnotationInvalidError``, or ``ValueError`` for a bad GPU count) so
+    the caller can decide startup-fail vs runtime-conservative handling.
+    """
+    prefill_config = None
+    decode_config = None
+    if require_prefill:
+        prefill_config = _resolve_one_power_config(
+            deployment, SubComponentType.PREFILL, prefill_name
+        )
+    if require_decode:
+        decode_config = _resolve_one_power_config(
+            deployment, SubComponentType.DECODE, decode_name
+        )
+    return prefill_config, decode_config

@@ -102,6 +102,21 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     # Advisory mode: compute and log decisions without executing scaling
     advisory = False
 
+    # Power-aware scaling (disabled by default for backward compat).
+    #
+    # Per-GPU caps are DGD-owned: authored on each worker component's
+    # ``podTemplate.metadata.annotations`` (``dynamo.nvidia.com/gpu-power-limit``),
+    # stamped onto Pods by the operator, and enforced by the Power Agent. The
+    # planner only reads them. It does NOT own or write per-GPU caps, so no
+    # per-GPU / safe-default / sweep-interval fields live here — the planner
+    # config carries only the deployment-wide budget.
+    #
+    # ``total_gpu_power_limit`` is required when ``enable_power_awareness=True``
+    # (validator enforces). Default None — not a placeholder integer — so the
+    # type itself signals "operator must set".
+    enable_power_awareness: bool = False
+    total_gpu_power_limit: Optional[int] = None
+
 
 class SubComponentType(str, Enum):
     PREFILL = "prefill"

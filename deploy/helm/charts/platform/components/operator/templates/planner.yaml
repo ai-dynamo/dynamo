@@ -48,6 +48,9 @@ rules:
 - apiGroups: ["nvidia.com"]
   resources: ["dynamoworkermetadatas"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# No pod permissions: per-GPU power caps are DGD-owned (authored on the worker
+# podTemplate annotation, applied by the operator, enforced by the Power Agent),
+# so the planner only reads them from the DGD CR and never patches Pods.
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -86,4 +89,6 @@ rules:
 - apiGroups: ["nvidia.com"]
   resources: ["dynamoworkermetadatas"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# No pod permissions — see the namespace-restricted Role above: per-GPU power
+# caps are DGD-owned and the planner only reads them from the DGD CR.
 {{- end }}
