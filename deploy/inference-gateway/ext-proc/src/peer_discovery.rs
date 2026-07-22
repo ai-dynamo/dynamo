@@ -514,4 +514,87 @@ mod tests {
             .to_string();
         assert!(error.contains(REPLICA_AGG_PORT_NAME));
     }
+
+    fn free_tcp_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    /// Build a reflector `Store<EndpointSlice>` from a fixed slice set (no
+    /// cluster), so `reconcile_once` can be driven over scripted transitions.
+    fn store_from_slices(slices: Vec<EndpointSlice>) -> Store {
+        use kube::runtime::watcher;
+        let mut writer = kube::runtime::reflector::store::Writer::<EndpointSlice>::default();
+        let store = writer.as_reader();
+        writer.apply_watcher_event(&watcher::Event::Init);
+        for (i, mut slice) in slices.into_iter().enumerate() {
+            // The reflector keys by name; give each slice a distinct one.
+            slice.metadata.name = Some(format!("epp-peers-{i}"));
+            writer.apply_watcher_event(&watcher::Event::InitApply(slice));
+        }
+        writer.apply_watcher_event(&watcher::Event::InitDone);
+        store
+    }
+
+    /// End-to-end at the reconcile boundary: a sibling that enters termination
+    /// while still `serving` is draining in-flight ext-proc streams and will emit
+    /// final `PrefillComplete`/`Free` events over replica sync. `reconcile_once`
+    /// must therefore keep it *registered* on the `SelectionService` (so those
+    /// events still arrive and release its load — see kv-router's
+    /// `selector_replica_sync_propagates_request_lifecycle` for the release path)
+    /// and only deregister it once it stops serving. This covers the reconcile
+    /// wiring that consumes `peer_ips`, which the predicate tests above do not.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reconcile_retains_draining_peer_until_it_stops_serving() {
+        use dynamo_kv_router::config::kv_router_config_from_dynamo_env;
+        use dynamo_kv_router::services::selection::SelectionServiceBuilder;
+
+        // A real replica-sync-enabled service. `register_replica_peer` is a lazy
+        // ZMQ connect, so no live sibling is needed — we assert only the peer set
+        // that reconcile maintains via `list_replica_peers`.
+        let service = Arc::new(
+            SelectionServiceBuilder::new(kv_router_config_from_dynamo_env())
+                .indexer_threads(1)
+                .replica_sync(free_tcp_port(), Vec::new())
+                .build()
+                .await
+                .expect("build replica-sync selection service"),
+        );
+
+        let self_ip = "10.0.0.1";
+        let peer = "10.0.0.2";
+        let sync_port = 9092; // dial port; only used to format the peer endpoint
+        let peer_endpoint = format!("tcp://{}", authority(peer, sync_port));
+        let mut known = BTreeSet::new();
+
+        // 1) Sibling serving normally -> registered.
+        let store = store_from_slices(vec![slice_with_serving(peer, false, true)]);
+        reconcile_once(&service, &store, sync_port, self_ip, &mut known).await;
+        assert!(
+            service.list_replica_peers().contains(&peer_endpoint),
+            "a live sibling must be registered"
+        );
+
+        // 2) Sibling enters termination but is still serving -> RETAINED, so its
+        //    final PrefillComplete/Free events can still be delivered.
+        let store = store_from_slices(vec![slice_with_serving(peer, true, true)]);
+        reconcile_once(&service, &store, sync_port, self_ip, &mut known).await;
+        assert!(
+            service.list_replica_peers().contains(&peer_endpoint),
+            "a draining (terminating+serving) sibling must stay registered"
+        );
+
+        // 3) Sibling stops serving -> truly done, deregistered.
+        let store = store_from_slices(vec![slice_with_serving(peer, true, false)]);
+        reconcile_once(&service, &store, sync_port, self_ip, &mut known).await;
+        assert!(
+            !service.list_replica_peers().contains(&peer_endpoint),
+            "a sibling that stopped serving must be deregistered"
+        );
+
+        service.shutdown().await;
+    }
 }
