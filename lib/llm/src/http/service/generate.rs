@@ -205,6 +205,37 @@ impl<'a> VllmTitoEnvelope<'a> {
     }
 }
 
+type MmPlaceholderRange = (usize, usize, u64, Option<Vec<bool>>);
+
+#[inline]
+fn intersecting_mm_ranges<'a>(
+    ranges: &'a [MmPlaceholderRange],
+    block_start: usize,
+    block_end: usize,
+    first_intersecting: &mut usize,
+    mut on_examined: impl FnMut(),
+) -> &'a [MmPlaceholderRange] {
+    while *first_intersecting < ranges.len() {
+        on_examined();
+        if ranges[*first_intersecting].1 > block_start {
+            break;
+        }
+        *first_intersecting += 1;
+    }
+
+    let start = *first_intersecting;
+    let mut end = start;
+    while end < ranges.len() {
+        on_examined();
+        if ranges[end].0 >= block_end {
+            break;
+        }
+        end += 1;
+    }
+
+    &ranges[start..end]
+}
+
 /// Build the routing-only token sequence used by vLLM KV events for multimodal
 /// prompts. The caller-provided `features` object remains opaque to execution;
 /// this projection reads only the hashes and placeholder ranges required to
@@ -261,7 +292,7 @@ fn generate_mm_routing_info(
         return Err("image hashes and placeholders must have equal lengths");
     }
 
-    let mut ranges = Vec::with_capacity(hashes.len());
+    let mut ranges: Vec<MmPlaceholderRange> = Vec::with_capacity(hashes.len());
     for (hash, placeholder) in hashes.iter().zip(placeholders) {
         let hash = hash
             .as_str()
@@ -343,17 +374,22 @@ fn generate_mm_routing_info(
     // that this run-order mapping still produces the request-side identity.
     // If it does not, retain correctness by using ordinary token routing.
     let block_size = kv_cache_block_size as usize;
+    let mut first_intersecting = 0;
     for block_start in (0..request.token_ids.len()).step_by(block_size) {
         let block_end = (block_start + block_size).min(request.token_ids.len());
         let mut worker_objects = Vec::new();
         let mut expected_by_position = vec![None; block_end - block_start];
 
-        for (offset, end, hash, is_embed) in &ranges {
+        let block_ranges = intersecting_mm_ranges(
+            &ranges,
+            block_start,
+            block_end,
+            &mut first_intersecting,
+            || {},
+        );
+        for (offset, end, hash, is_embed) in block_ranges {
             let intersection_start = (*offset).max(block_start);
             let intersection_end = (*end).min(block_end);
-            if intersection_start >= intersection_end {
-                continue;
-            }
             worker_objects.push(*hash);
             for global_position in intersection_start..intersection_end {
                 let should_embed = is_embed
@@ -1182,6 +1218,38 @@ mod tests {
                 .expect_err("malformed present metadata must remain an error"),
             "features.mm_hashes must be a JSON object"
         );
+    }
+
+    #[test]
+    fn block_range_sweep_is_linear_in_sparse_placeholder_count() {
+        let token_count = 16_384_usize;
+        let block_size = 16_usize;
+        let ranges = (0..token_count)
+            .step_by(2)
+            .map(|offset| (offset, offset + 1, offset as u64, None))
+            .collect::<Vec<_>>();
+        let block_count = token_count.div_ceil(block_size);
+        let mut first_intersecting = 0;
+        let mut visited = 0;
+        let mut examined = 0;
+
+        for block_start in (0..token_count).step_by(block_size) {
+            let block_end = (block_start + block_size).min(token_count);
+            let before = examined;
+            let block_ranges = intersecting_mm_ranges(
+                &ranges,
+                block_start,
+                block_end,
+                &mut first_intersecting,
+                || examined += 1,
+            );
+            visited += block_ranges.len();
+            assert!(examined > before);
+        }
+
+        assert!(visited < ranges.len() + block_count);
+        assert!(examined <= 2 * (ranges.len() + block_count));
+        assert_eq!(first_intersecting, ranges.len() - block_size / 2);
     }
 
     #[test]
