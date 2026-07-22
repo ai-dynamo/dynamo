@@ -38,12 +38,28 @@ const RECIPE_CSS = `
 }
 
 /* Layout: recipe/benchmark pages intentionally inherit Fern's default
-   --page-width (1376px) and --content-width (812px) -- NO override here -- so
-   the sidebar position and the right-hand gap line up exactly with the
-   Documentation tab. These pages set hide-toc: true, so that right gap is
-   simply the (empty) TOC rail. Do NOT re-add a width override: raising
-   --page-width shifts the sidebar out of alignment with the Docs tab, and
-   raising --content-width removes the right gap by filling edge-to-edge. */
+   --page-width (1376px) and --content-width (812px) -- NO width override
+   here -- so the content column matches the Documentation tab. Do NOT raise
+   --page-width (shifts the sidebar out of alignment) or --content-width
+   (fills edge-to-edge, removing the right gap).
+
+   One alignment fix IS needed. The browse pages set hide-toc: true, which
+   removes the right-hand table-of-contents <aside>. Fern's content wrapper
+   (.fern-layout-guide) is margin-inline:auto, so with the TOC gone it CENTERS
+   in the freed width -- splitting the space into two equal gaps and pushing
+   the content ~180px to the right of the sidebar. Documentation-tab pages
+   don't show this because their TOC holds that right-hand space.
+
+   Left-align the guide on TOC-less pages so it sits right after the sidebar
+   and the entire freed width becomes the (intended) right gap -- matching the
+   Docs tab. Scoped via :has() to a fern-main with NO <aside> after the content
+   wrapper (i.e. hide-toc pages only: the sidebar <aside> is before it, the TOC
+   <aside> -- when present -- is after it). Individual recipe pages keep their
+   TOC and are untouched. Pure CSS + server-rendered, so no layout flash. */
+main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-guide {
+    margin-inline-start: 0 !important;
+    margin-inline-end: auto !important;
+}
 
 /* Product switcher: hide the FontAwesome "code" glyph (</>) placeholder.
    This rule also lives in SiteStyles, but SiteStyles is injected from the
