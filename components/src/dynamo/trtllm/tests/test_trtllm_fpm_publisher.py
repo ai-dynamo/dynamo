@@ -311,6 +311,7 @@ def _build_publisher_stub(monkeypatch, *, attention_dp_size: int, fpm_enabled: b
     pub.enable_local_indexer = False
     pub.metrics_collector = None
     pub.kv_state_endpoint = None
+    pub.image_token_id = None
     pub.attention_dp_size = attention_dp_size
     pub.fpm_enabled = fpm_enabled
     pub.processing_initial_created_events = True
