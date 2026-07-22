@@ -202,9 +202,11 @@ class DynamoVllmArgGroup(ArgGroup):
             env_var="DYN_VLLM_CLASSIFY_WORKER",
             default=False,
             help="Run as a sequence-classification worker (cross-encoder / "
-            "NLI / sentiment), registering the model as ModelType.Classify so "
-            "the frontend mounts POST /classify. Engine must be started with "
-            "vLLM's --runner pooling. Like --embedding-worker, skips KV-events, "
+            "NLI / sentiment), registering the model as ModelType.Classify | "
+            "ModelType.Pooling so the frontend mounts POST /classify and "
+            "POST /pooling (matching native vLLM, which exposes both for "
+            "pooling-runner models). Engine must be started with vLLM's "
+            "--runner pooling. Like --embedding-worker, skips KV-events, "
             "KV router registration, and InstrumentedScheduler injection.",
         )
 

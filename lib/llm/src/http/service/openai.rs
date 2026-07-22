@@ -62,6 +62,7 @@ use crate::protocols::openai::{
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
     images::{NvCreateImageRequest, NvImagesResponse},
+    pooling::{NvCreatePoolingRequest, NvCreatePoolingResponse},
     responses::{NvCreateResponse, NvResponse, ResponseParams, chat_completion_to_response},
     videos::{NvCreateVideoRequest, NvVideosResponse},
 };
@@ -1333,6 +1334,124 @@ async fn classify(
             );
             let err_response =
                 ErrorMessage::internal_server_error("Failed to fold classification stream");
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
+
+    inflight.mark_ok();
+    Ok(Json(response).into_response())
+}
+
+fn pooling_bad_request(message: String) -> ErrorResponse {
+    let code = StatusCode::BAD_REQUEST;
+    (
+        code,
+        Json(ErrorMessage {
+            message,
+            error_type: map_error_code_to_error_type(code),
+            code: code.as_u16(),
+            details: None,
+        }),
+    )
+}
+
+#[tracing::instrument(skip_all)]
+async fn pooling(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    Json(mut request): Json<NvCreatePoolingRequest>,
+) -> Result<Response, ErrorResponse> {
+    // return a 503 if the service or model is not ready
+    check_ready(&state)?;
+    check_model_serving_ready(&state, &request.model)?;
+
+    if !state.nvext_enabled() {
+        warn_nvext_disabled("pooling", request.nvext.is_some(), &headers);
+        request.nvext = None;
+    }
+
+    // Cheap request validation mirroring vLLM's `/pooling` server: reject
+    // unsupported `dimensions` and unknown encodings here with a 400 instead
+    // of a worker-side failure.
+    if request.dimensions.is_some() {
+        return Err(pooling_bad_request(
+            "dimensions is currently not supported".to_string(),
+        ));
+    }
+    if request.encoding_format != "float" && request.encoding_format != "base64" {
+        return Err(pooling_bad_request(format!(
+            "Invalid 'encoding_format' value {:?}; expected 'float' or 'base64'",
+            request.encoding_format
+        )));
+    }
+
+    // Resolve alias → primary served name before wrapping the request, so
+    // engine routing, metrics, and the response model all use the canonical
+    // primary (mirrors `embeddings` / `completions_single`).
+    let canonical = state.manager().resolve_canonical_name(&request.model);
+    if canonical != request.model {
+        request.model = canonical;
+    }
+    let request_id = get_or_create_request_id(&headers);
+    let request = context_from_headers(request, request_id, &headers)?;
+    let request_id = request.id().to_string();
+
+    // Pooling, like embeddings, is a single (non-streaming) response.
+    let streaming = false;
+
+    let model = &request.model;
+    let metric_model = state.manager().metric_model_for(model).to_string();
+
+    // Create inflight_guard early to ensure all errors are counted
+    let mut inflight = state.metrics_clone().create_inflight_guard(
+        &metric_model,
+        Endpoint::Pooling,
+        streaming,
+        &request_id,
+    );
+
+    // Create http_queue_guard early - tracks time waiting to be processed
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
+
+    let engine = state.manager().get_pooling_engine(model).map_err(|e| {
+        let err_response = ErrorMessage::from_model_error(&e);
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
+
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(&metric_model);
+    let model_name = model.to_string();
+
+    // issue the generate call on the engine
+    let stream = engine.generate(request).await.map_err(|e| {
+        if super::metrics::request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model_name, super::metrics::Endpoint::Pooling);
+        }
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate pooling output");
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
+
+    // Process stream to collect metrics and drop http_queue_guard on first token
+    let mut http_queue_guard = Some(http_queue_guard);
+    let stream = stream.inspect(move |response| {
+        process_response_and_observe_metrics(
+            response,
+            &mut response_collector,
+            &mut http_queue_guard,
+        );
+    });
+
+    // Fold the (single-response) stream into one pooling response.
+    let response = NvCreatePoolingResponse::from_annotated_stream(stream)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to fold pooling stream for {}: {:?}", request_id, e);
+            let err_response = ErrorMessage::internal_server_error("Failed to fold pooling stream");
             inflight.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
@@ -2926,6 +3045,23 @@ pub fn classify_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(classify))
+        .layer(middleware::from_fn(smart_json_error_middleware))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+        .with_state(state);
+    (vec![doc], router)
+}
+
+/// Create an Axum [`Router`] for the `/pooling` endpoint (raw pooler output
+/// from pooling-runner models). If no path is provided, the default path is
+/// `/pooling`.
+pub fn pooling_router(
+    state: Arc<service_v2::State>,
+    path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    let path = path.unwrap_or("/pooling".to_string());
+    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let router = Router::new()
+        .route(&path, post(pooling))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);

@@ -1615,12 +1615,27 @@ class ModelType:
     Realtime: ModelType
     # Sequence-classification / cross-encoder pooling models served on /classify.
     Classify: ModelType
+    # Raw pooler output served on /pooling (token embeddings, logits, rewards).
+    # Usually combined with Classify or Embedding: ModelType.Classify | ModelType.Pooling.
+    Pooling: ModelType
 
     def __or__(self, other: ModelType) -> ModelType:
         ...
 
     def supports_chat(self) -> bool:
         """Return True if this model type supports chat."""
+        ...
+
+    def supports_embedding(self) -> bool:
+        """Return True if this model type supports /v1/embeddings."""
+        ...
+
+    def supports_classify(self) -> bool:
+        """Return True if this model type supports /classify."""
+        ...
+
+    def supports_pooling(self) -> bool:
+        """Return True if this model type supports /pooling."""
         ...
 
 class RouterMode:

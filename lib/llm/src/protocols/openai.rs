@@ -22,6 +22,7 @@ pub mod embeddings;
 pub mod generate;
 pub mod images;
 pub mod models;
+pub mod pooling;
 pub mod responses;
 pub mod stream_aggregator;
 pub mod tools;

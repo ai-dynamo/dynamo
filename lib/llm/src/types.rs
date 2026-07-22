@@ -92,6 +92,20 @@ pub mod openai {
             ServerStreamingEngine<NvCreateClassifyRequest, Annotated<NvCreateClassifyResponse>>;
     }
 
+    pub mod pooling {
+        use super::*;
+
+        pub use protocols::openai::pooling::{NvCreatePoolingRequest, NvCreatePoolingResponse};
+
+        /// A [`UnaryEngine`] implementation for the `/pooling` API
+        pub type OpenAIPoolingUnaryEngine =
+            UnaryEngine<NvCreatePoolingRequest, NvCreatePoolingResponse>;
+
+        /// A [`ServerStreamingEngine`] implementation for the `/pooling` API
+        pub type OpenAIPoolingStreamingEngine =
+            ServerStreamingEngine<NvCreatePoolingRequest, Annotated<NvCreatePoolingResponse>>;
+    }
+
     pub mod images {
         use super::*;
 

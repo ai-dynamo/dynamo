@@ -1854,3 +1854,221 @@ class TestRLAdminRouteHardening:
         await guard.abort()
         assert len(escalated) == 1
         assert isinstance(escalated[0], EngineDeadError)
+
+
+class TestPoolingOutputToNested:
+    """Unit tests for the shape-preserving ``/pooling`` output converter.
+
+    Unlike ``_pooling_output_to_list`` (used by ``/v1/embeddings``, which
+    flattens), ``/pooling`` must keep the pooler's structure: token-level
+    tasks return an ``(n_tokens, n_cols)`` matrix per input.
+    """
+
+    def test_1d_tensor_stays_flat(self):
+        out = mod._pooling_output_to_nested(torch.tensor([0.1, 0.2, 0.3]))
+        assert out == pytest.approx([0.1, 0.2, 0.3])
+
+    def test_2d_tensor_keeps_rows(self):
+        out = mod._pooling_output_to_nested(torch.tensor([[1.0, 2.0], [3.0, 4.0]]))
+        assert out == [[1.0, 2.0], [3.0, 4.0]]
+
+    def test_nested_list_passthrough(self):
+        out = mod._pooling_output_to_nested([[1, 2], [3, 4]])
+        assert out == [[1.0, 2.0], [3.0, 4.0]]
+
+    def test_unsupported_type_rejected(self):
+        with pytest.raises(TypeError, match="Unsupported PoolingOutput.data"):
+            mod._pooling_output_to_nested("not-a-tensor")
+
+
+class TestClassifyPoolingWorkerHandler:
+    """Tests for ``ClassifyWorkerHandler``: the /classify response shape and
+    the wire-level dispatch to ``_generate_pooling`` on the presence of
+    ``encoding_format`` (always serialized by the Rust NvCreatePoolingRequest,
+    never present in the classify wire request).
+    """
+
+    def _make_handler(self, id2label=None) -> "mod.ClassifyWorkerHandler":
+        model_config = SimpleNamespace(
+            hf_config=SimpleNamespace(id2label=id2label or {})
+        )
+        with patch.object(mod, "VllmEngineMonitor"):
+            handler = mod.ClassifyWorkerHandler(
+                runtime=MagicMock(),
+                engine=MagicMock(),
+                config=MagicMock(served_model_name="test-model"),
+                model_config=model_config,
+                shutdown_event=None,
+            )
+        handler.engine_client = MagicMock()
+        handler.engine_client.abort = AsyncMock()
+        return handler
+
+    def _make_context(self) -> MagicMock:
+        context = MagicMock()
+        context.id.return_value = "test-req"
+        context.async_killed_or_stopped.return_value = (
+            asyncio.get_event_loop().create_future()
+        )
+        return context
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_classify_request_yields_labels_and_probs(self):
+        handler = self._make_handler(
+            id2label={0: "contradiction", 1: "entailment", 2: "neutral"}
+        )
+        context = self._make_context()
+        captured: dict = {}
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            captured["task"] = pooling_params.task
+            output = MagicMock()
+            output.outputs.data = torch.tensor([0.1, 0.7, 0.2])
+            output.prompt_token_ids = [1, 2, 3, 4]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+
+        request = {"input": "premise entails hypothesis", "model": "test-model"}
+        responses = [r async for r in handler.generate(request, context)]
+
+        assert len(responses) == 1
+        response = responses[0]
+        assert captured["task"] == "classify"
+        assert response["object"] == "list"
+        assert response["id"].startswith("classify-")
+        assert len(response["data"]) == 1
+        item = response["data"][0]
+        assert item["index"] == 0
+        assert item["label"] == "entailment"
+        assert item["probs"] == pytest.approx([0.1, 0.7, 0.2])
+        assert item["num_classes"] == 3
+        assert response["usage"] == {"prompt_tokens": 4, "total_tokens": 4}
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_pooling_request_dispatches_on_encoding_format(self):
+        """A wire request carrying ``encoding_format`` must run the /pooling
+        path: task passthrough (None -> engine default), per-item ``object:
+        "pooling"``, and shape-preserving float output."""
+        handler = self._make_handler()
+        context = self._make_context()
+        captured: dict = {}
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            captured["task"] = pooling_params.task
+            output = MagicMock()
+            # Token-level task output: (n_tokens, n_cols).
+            output.outputs.data = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+            output.prompt_token_ids = [1, 2]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+
+        request = {
+            "input": "some text",
+            "model": "test-model",
+            "encoding_format": "float",
+        }
+        responses = [r async for r in handler.generate(request, context)]
+
+        assert len(responses) == 1
+        response = responses[0]
+        assert captured["task"] is None  # engine resolves the default
+        assert response["id"].startswith("pool-")
+        item = response["data"][0]
+        assert item["object"] == "pooling"
+        assert item["data"] == [[1.0, 2.0], [3.0, 4.0]]
+        assert response["usage"] == {
+            "prompt_tokens": 2,
+            "total_tokens": 2,
+            "completion_tokens": 0,
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_pooling_task_and_activation_forwarded(self):
+        handler = self._make_handler()
+        context = self._make_context()
+        captured: dict = {}
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            captured["task"] = pooling_params.task
+            captured["use_activation"] = pooling_params.use_activation
+            output = MagicMock()
+            output.outputs.data = torch.tensor([0.5, 0.5])
+            output.prompt_token_ids = [1]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+
+        request = {
+            "input": "text",
+            "model": "test-model",
+            "encoding_format": "float",
+            "task": "classify",
+            "use_activation": False,
+        }
+        [response] = [r async for r in handler.generate(request, context)]
+        assert captured["task"] == "classify"
+        assert captured["use_activation"] is False
+        assert response["data"][0]["data"] == pytest.approx([0.5, 0.5])
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_pooling_base64_flattens_and_encodes(self):
+        handler = self._make_handler()
+        context = self._make_context()
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            output = MagicMock()
+            output.outputs.data = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+            output.prompt_token_ids = [1, 2]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+
+        request = {
+            "input": "text",
+            "model": "test-model",
+            "encoding_format": "base64",
+        }
+        [response] = [r async for r in handler.generate(request, context)]
+        expected = mod._encode_floats_to_base64([1.0, 2.0, 3.0, 4.0])
+        assert response["data"][0]["data"] == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_pooling_dimensions_rejected(self):
+        handler = self._make_handler()
+        context = self._make_context()
+        request = {
+            "input": "text",
+            "model": "test-model",
+            "encoding_format": "float",
+            "dimensions": 128,
+        }
+        with pytest.raises(ValueError, match="dimensions is currently not supported"):
+            async for _ in handler.generate(request, context):
+                pass
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_classify_label_none_without_id2label(self):
+        handler = self._make_handler(id2label={})
+        context = self._make_context()
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            output = MagicMock()
+            output.outputs.data = torch.tensor([0.9, 0.1])
+            output.prompt_token_ids = [1]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+
+        request = {"input": ["a", "b"], "model": "test-model"}
+        [response] = [r async for r in handler.generate(request, context)]
+        assert len(response["data"]) == 2
+        assert response["data"][0]["label"] is None
+        assert response["data"][1]["label"] is None

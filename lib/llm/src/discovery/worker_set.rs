@@ -22,7 +22,8 @@ use crate::{
             chat_completions::OpenAIChatCompletionsStreamingEngine,
             classify::OpenAIClassifyStreamingEngine, completions::OpenAICompletionsStreamingEngine,
             embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
-            images::OpenAIImagesStreamingEngine, videos::OpenAIVideosStreamingEngine,
+            images::OpenAIImagesStreamingEngine, pooling::OpenAIPoolingStreamingEngine,
+            videos::OpenAIVideosStreamingEngine,
         },
     },
 };
@@ -47,6 +48,7 @@ pub struct WorkerSet {
     pub(crate) completions_engine: Option<OpenAICompletionsStreamingEngine>,
     pub(crate) embeddings_engine: Option<OpenAIEmbeddingsStreamingEngine>,
     pub(crate) classify_engine: Option<OpenAIClassifyStreamingEngine>,
+    pub(crate) pooling_engine: Option<OpenAIPoolingStreamingEngine>,
     pub(crate) images_engine: Option<OpenAIImagesStreamingEngine>,
     pub(crate) videos_engine: Option<OpenAIVideosStreamingEngine>,
     pub(crate) audios_engine: Option<OpenAIAudiosStreamingEngine>,
@@ -84,6 +86,7 @@ impl WorkerSet {
             completions_engine: None,
             embeddings_engine: None,
             classify_engine: None,
+            pooling_engine: None,
             images_engine: None,
             videos_engine: None,
             audios_engine: None,
@@ -134,6 +137,10 @@ impl WorkerSet {
         self.classify_engine.is_some()
     }
 
+    pub fn has_pooling_engine(&self) -> bool {
+        self.pooling_engine.is_some()
+    }
+
     pub fn has_images_engine(&self) -> bool {
         self.images_engine.is_some()
     }
@@ -172,6 +179,7 @@ impl WorkerSet {
             || self.has_completions_engine()
             || self.has_embeddings_engine()
             || self.has_classify_engine()
+            || self.has_pooling_engine()
             || self.has_images_engine()
             || self.has_tensor_engine()
             || self.has_videos_engine()
@@ -250,6 +258,7 @@ mod tests {
     };
     use crate::types::openai::embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse};
     use crate::types::openai::images::{NvCreateImageRequest, NvImagesResponse};
+    use crate::types::openai::pooling::{NvCreatePoolingRequest, NvCreatePoolingResponse};
     use crate::types::openai::videos::{NvCreateVideoRequest, NvVideosResponse};
     use async_trait::async_trait;
     use dynamo_runtime::engine::AsyncEngine;
@@ -302,6 +311,7 @@ mod tests {
         assert!(!ws.has_completions_engine());
         assert!(!ws.has_embeddings_engine());
         assert!(!ws.has_classify_engine());
+        assert!(!ws.has_pooling_engine());
         assert!(!ws.has_images_engine());
         assert!(!ws.has_videos_engine());
         assert!(!ws.has_audios_engine());
@@ -355,6 +365,12 @@ mod tests {
             has_classify_engine,
             StubEngine::<NvCreateClassifyRequest, NvCreateClassifyResponse>::new(),
             "classify"
+        );
+        check!(
+            pooling_engine,
+            has_pooling_engine,
+            StubEngine::<NvCreatePoolingRequest, NvCreatePoolingResponse>::new(),
+            "pooling"
         );
         check!(
             images_engine,

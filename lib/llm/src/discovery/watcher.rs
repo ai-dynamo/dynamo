@@ -54,6 +54,7 @@ use crate::{
             completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
             embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
             images::{NvCreateImageRequest, NvImagesResponse},
+            pooling::{NvCreatePoolingRequest, NvCreatePoolingResponse},
             videos::{NvCreateVideoRequest, NvVideosResponse},
         },
         tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
@@ -264,6 +265,7 @@ const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::TensorBased,
     ModelType::Realtime,
     ModelType::Classify,
+    ModelType::Pooling,
 ];
 
 /// Returns true if no models in the manager support the given model type.
@@ -286,6 +288,8 @@ fn is_model_type_list_empty(manager: &ModelManager, model_type: ModelType) -> bo
         manager.list_realtime_models().is_empty()
     } else if model_type == ModelType::Classify {
         manager.list_classify_models().is_empty()
+    } else if model_type == ModelType::Pooling {
+        manager.list_pooling_models().is_empty()
     } else {
         true
     }
@@ -1843,28 +1847,50 @@ impl ModelWatcher {
                     card.name()
                 );
             }
-        } else if card.model_input == ModelInput::Text && card.model_type.supports_embedding() {
-            // Case: Text + Embeddings
-            let push_router = PushRouter::<
-                NvCreateEmbeddingRequest,
-                Annotated<NvCreateEmbeddingResponse>,
-            >::from_client_with_monitor(
-                client, router_config.router_mode, None
-            )
-            .await?;
-            worker_set.embeddings_engine = Some(Arc::new(push_router));
-        } else if card.model_input == ModelInput::Text && card.model_type.supports_classify() {
-            // Case: Text + Classify (sequence-classification / cross-encoder pooling).
-            // Like Text + Embeddings, the worker tokenizes in-backend, so no
-            // frontend preprocessor pipeline is needed — just a router.
-            let push_router = PushRouter::<
-                NvCreateClassifyRequest,
-                Annotated<NvCreateClassifyResponse>,
-            >::from_client_with_monitor(
-                client, router_config.router_mode, None
-            )
-            .await?;
-            worker_set.classify_engine = Some(Arc::new(push_router));
+        } else if card.model_input == ModelInput::Text
+            && (card.model_type.supports_embedding()
+                || card.model_type.supports_classify()
+                || card.model_type.supports_pooling())
+        {
+            // Case: Text + pooling family (Embeddings / Classify / Pooling).
+            // The worker tokenizes in-backend, so no frontend preprocessor
+            // pipeline is needed — just a router per surface. These are
+            // additive, not exclusive: a pooling-runner model can expose
+            // several pooling surfaces at once (native vLLM mounts
+            // /v1/embeddings, /classify and /pooling together), and all
+            // engines push to the same worker endpoint.
+            if card.model_type.supports_embedding() {
+                let push_router = PushRouter::<
+                    NvCreateEmbeddingRequest,
+                    Annotated<NvCreateEmbeddingResponse>,
+                >::from_client_with_monitor(
+                    client.clone(), router_config.router_mode, None
+                )
+                .await?;
+                worker_set.embeddings_engine = Some(Arc::new(push_router));
+            }
+
+            if card.model_type.supports_classify() {
+                let push_router = PushRouter::<
+                    NvCreateClassifyRequest,
+                    Annotated<NvCreateClassifyResponse>,
+                >::from_client_with_monitor(
+                    client.clone(), router_config.router_mode, None
+                )
+                .await?;
+                worker_set.classify_engine = Some(Arc::new(push_router));
+            }
+
+            if card.model_type.supports_pooling() {
+                let push_router = PushRouter::<
+                    NvCreatePoolingRequest,
+                    Annotated<NvCreatePoolingResponse>,
+                >::from_client_with_monitor(
+                    client.clone(), router_config.router_mode, None
+                )
+                .await?;
+                worker_set.pooling_engine = Some(Arc::new(push_router));
+            }
         }
         // Case: Text + (Images, Audio, Videos)
         // Must come before the plain Text+Chat / Text+Completions branches because
