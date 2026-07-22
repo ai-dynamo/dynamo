@@ -639,7 +639,7 @@ overrides:
 The profiling job also runs an `output-copier` sidecar that relays profiler status and
 writes results to the output ConfigMap. By default it uses `bitnami/kubectl:latest`.
 In air-gapped or private-registry clusters, override the sidecar image via
-`overrides.profilingJob` (the image must include `kubectl` and a POSIX shell):
+`overrides.profilingJob`:
 
 ```yaml
 overrides:
@@ -650,6 +650,13 @@ overrides:
         - name: output-copier
           image: internal-registry/kubectl:1.29
 ```
+
+The replacement image must include `kubectl` and a shell at `/bin/sh` that supports
+`set -o pipefail` (for example bash; a dash-only `/bin/sh` is not sufficient), plus the
+utilities used by the sidecar script: `grep`, `awk`, `tr`, `sed`, `date`, `cat`, and
+`sleep`. For `output-copier`, only `image` and `resources` are merged; other fields
+(`env`, `envFrom`, `volumeMounts`, `securityContext`, `command`/`args`) are ignored so
+controller-owned mounts such as `profiling-output` at `/data` stay intact.
 
 **ConfigMaps:**
 - `dgdr-output-<name>`: Generated DGD configuration

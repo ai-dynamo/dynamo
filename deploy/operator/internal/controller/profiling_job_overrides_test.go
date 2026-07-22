@@ -1002,6 +1002,98 @@ func TestApplyProfilingJobOverrides_OutputCopierDoesNotOverrideProfiler(t *testi
 	}
 }
 
+func TestApplyProfilingJobOverrides_OutputCopierOnlyImageAndResources(t *testing.T) {
+	job := baseJob()
+	job.Spec.Template.Spec.Containers[1].Command = []string{"/bin/sh", "-c"}
+	job.Spec.Template.Spec.Containers[1].Args = []string{"echo sidecar-script"}
+	job.Spec.Template.Spec.Containers[1].Env = []corev1.EnvVar{{
+		Name:  "SIDECAR_MODE",
+		Value: "default",
+	}}
+	job.Spec.Template.Spec.Containers[1].VolumeMounts = []corev1.VolumeMount{{
+		Name:      VolumeNameProfilingOutput,
+		MountPath: ProfilingOutputPath,
+		ReadOnly:  true,
+	}}
+	job.Spec.Template.Spec.Containers[1].SecurityContext = &corev1.SecurityContext{
+		RunAsNonRoot: ptr.To(true),
+	}
+
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  ContainerNameOutputCopier,
+						Image: "internal-registry/kubectl:1.29",
+						Env: []corev1.EnvVar{{
+							Name:  "SIDECAR_MODE",
+							Value: "custom",
+						}},
+						EnvFrom: []corev1.EnvFromSource{{
+							ConfigMapRef: &corev1.ConfigMapEnvSource{
+								LocalObjectReference: corev1.LocalObjectReference{Name: "sidecar-env"},
+							},
+						}},
+						VolumeMounts: []corev1.VolumeMount{
+							{
+								Name:      VolumeNameProfilingOutput,
+								MountPath: "/elsewhere",
+							},
+							{
+								Name:      "extra-logs",
+								MountPath: "/var/log/sidecar",
+							},
+						},
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+						},
+						SecurityContext: &corev1.SecurityContext{
+							RunAsNonRoot: ptr.To(false),
+						},
+						Command: []string{"/bin/bash"},
+						Args:    []string{"-c", "echo overridden"},
+					},
+				},
+			},
+		},
+	})
+
+	sidecar := findContainer(job.Spec.Template.Spec.Containers, ContainerNameOutputCopier)
+	if sidecar == nil {
+		t.Fatal("output-copier container not found")
+	}
+	if sidecar.Image != "internal-registry/kubectl:1.29" {
+		t.Errorf("expected output-copier image override, got %s", sidecar.Image)
+	}
+	if sidecar.Resources.Limits.Cpu().Cmp(resource.MustParse("500m")) != 0 {
+		t.Errorf("expected output-copier CPU limit override, got %v", sidecar.Resources.Limits)
+	}
+	mode := findEnv(sidecar.Env, "SIDECAR_MODE")
+	if mode == nil || mode.Value != "default" {
+		t.Errorf("output-copier env overrides should be ignored, got %+v", mode)
+	}
+	if len(sidecar.EnvFrom) != 0 {
+		t.Errorf("output-copier EnvFrom overrides should be ignored, got %v", sidecar.EnvFrom)
+	}
+	if len(sidecar.VolumeMounts) != 1 {
+		t.Fatalf("expected controller-owned volume mounts only, got %v", sidecar.VolumeMounts)
+	}
+	mount := sidecar.VolumeMounts[0]
+	if mount.Name != VolumeNameProfilingOutput || mount.MountPath != ProfilingOutputPath || !mount.ReadOnly {
+		t.Errorf("controller-owned profiling-output mount was changed: %+v", mount)
+	}
+	if sidecar.SecurityContext == nil || sidecar.SecurityContext.RunAsNonRoot == nil || !*sidecar.SecurityContext.RunAsNonRoot {
+		t.Errorf("output-copier securityContext overrides should be ignored, got %+v", sidecar.SecurityContext)
+	}
+	if len(sidecar.Command) != 2 || sidecar.Command[0] != "/bin/sh" {
+		t.Errorf("output-copier command was unexpectedly overwritten: %v", sidecar.Command)
+	}
+	if len(sidecar.Args) != 1 || sidecar.Args[0] != "echo sidecar-script" {
+		t.Errorf("output-copier args were unexpectedly overwritten: %v", sidecar.Args)
+	}
+}
+
 func TestApplyProfilingJobOverrides_NamedProfilerAndOutputCopierOverrides(t *testing.T) {
 	job := baseJob()
 	job.Spec.Template.Spec.Containers[1].Command = []string{"/bin/sh", "-c"}
