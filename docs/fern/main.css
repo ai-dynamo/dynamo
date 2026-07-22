@@ -161,7 +161,7 @@ html.dark,
     }
 }
 .fern-version-selector {
-    transform: translateY(-1px);
+    transform: none;
 }
 
 .fern-version-selector .version-dropdown-trigger{
@@ -1286,15 +1286,17 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   align-items: center;
   min-height: 4.3rem;
   padding: 0.65rem 0.75rem;
-  border: 1px solid rgba(127, 127, 127, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.58);
   border-radius: 18px;
-  background: rgba(250, 250, 250, 0.82);
+  background:
+    radial-gradient(circle at 14% 0%, rgba(255, 255, 255, 0.74), transparent 45%),
+    linear-gradient(145deg, rgba(250, 250, 250, 0.72), rgba(231, 235, 226, 0.62));
   color: var(--grayscale-a12) !important;
   box-shadow:
-    0 14px 34px rgba(0, 0, 0, 0.11),
-    inset 0 1px 0 rgba(255, 255, 255, 0.75);
+    0 18px 46px rgba(28, 38, 18, 0.14),
+    inset 0 1px 0 rgba(255, 255, 255, 0.88);
   text-decoration: none !important;
-  backdrop-filter: blur(18px) saturate(1.25);
+  backdrop-filter: blur(24px) saturate(1.4);
   transition:
     transform 160ms ease,
     border-color 160ms ease,
@@ -1302,10 +1304,13 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
 }
 
 .dark .dynamo-welcome__notification {
-  background: rgba(24, 24, 24, 0.82);
+  border-color: rgba(255, 255, 255, 0.12);
+  background:
+    radial-gradient(circle at 14% 0%, rgba(255, 255, 255, 0.12), transparent 45%),
+    linear-gradient(145deg, rgba(35, 38, 31, 0.78), rgba(14, 16, 12, 0.7));
   box-shadow:
-    0 14px 34px rgba(0, 0, 0, 0.4),
-    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    0 18px 46px rgba(0, 0, 0, 0.42),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12);
 }
 
 .dynamo-welcome__notification:hover,
@@ -1327,34 +1332,56 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   place-items: center;
   border-radius: 11px;
   color: white;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28);
+  box-shadow:
+    0 5px 14px rgba(0, 0, 0, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.3);
 }
 
 .dynamo-welcome__notification--slack .dynamo-welcome__notification-icon {
-  background: linear-gradient(145deg, #611f69, #3f0e40);
+  background: #4a154b;
 }
 
 .dynamo-welcome__notification--wechat .dynamo-welcome__notification-icon {
-  background: linear-gradient(145deg, #20cf55, #08a83a);
+  background: #07c160;
 }
 
 .dynamo-welcome__notification--calendar .dynamo-welcome__notification-icon {
-  background: linear-gradient(145deg, #ff5b57, #d92f2b);
+  background: #ff3b30;
 }
 
 .dynamo-welcome__notification-icon svg {
-  width: 1.45rem;
-  height: 1.45rem;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.7;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+  width: 1.42rem;
+  height: 1.42rem;
+  fill: currentColor;
 }
 
-.dynamo-welcome__notification-icon .slack-icon {
-  fill: currentColor;
-  stroke: none;
+.dynamo-welcome__calendar-app {
+  display: grid;
+  width: 1.55rem;
+  height: 1.65rem;
+  grid-template-rows: 0.55rem 1fr;
+  overflow: hidden;
+  border-radius: 5px;
+  background: white;
+  color: #171717;
+  text-align: center;
+}
+
+.dynamo-welcome__calendar-app > span {
+  display: grid;
+  place-items: center;
+  background: #ff3b30;
+  color: white;
+  font-size: 0.38rem;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+}
+
+.dynamo-welcome__calendar-app strong {
+  display: grid;
+  place-items: center;
+  font-size: 0.72rem;
+  line-height: 1;
 }
 
 .dynamo-welcome__notification-copy {
@@ -1815,19 +1842,386 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   background: linear-gradient(90deg, var(--grayscale-a5), #76b900);
 }
 
+/* macOS-style public community calendar preview. */
+.dynamo-calendar {
+  width: min(100%, 1040px);
+  margin: 8rem auto 5rem;
+  overflow: hidden;
+  border: 1px solid rgba(127, 127, 127, 0.2);
+  border-radius: 28px;
+  background:
+    radial-gradient(circle at 12% 0%, rgba(255, 255, 255, 0.82), transparent 34%),
+    linear-gradient(145deg, rgba(247, 249, 244, 0.84), rgba(226, 232, 220, 0.72));
+  box-shadow:
+    0 32px 90px rgba(24, 39, 10, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(28px) saturate(1.35);
+}
+
+.dark .dynamo-calendar {
+  border-color: rgba(255, 255, 255, 0.12);
+  background:
+    radial-gradient(circle at 12% 0%, rgba(255, 255, 255, 0.1), transparent 34%),
+    linear-gradient(145deg, rgba(28, 32, 24, 0.88), rgba(8, 10, 7, 0.84));
+  box-shadow:
+    0 32px 90px rgba(0, 0, 0, 0.48),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+
+.dynamo-calendar__chrome {
+  position: relative;
+  display: flex;
+  height: 3.35rem;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0 1rem;
+  background: #24243d;
+  color: #d9d9e5;
+}
+
+.dynamo-calendar__chrome > span {
+  width: 0.72rem;
+  height: 0.72rem;
+  border-radius: 50%;
+  background: #ff5f57;
+}
+
+.dynamo-calendar__chrome > span:nth-child(2) { background: #febc2e; }
+.dynamo-calendar__chrome > span:nth-child(3) { background: #28c840; }
+
+.dynamo-calendar__chrome p {
+  position: absolute;
+  left: 50%;
+  margin: 0;
+  color: #e7e7ef;
+  font-size: 0.78rem;
+  font-weight: 650;
+  transform: translateX(-50%);
+}
+
+.dynamo-calendar__chrome a {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin-left: auto;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  color: #e7e7ef !important;
+  font-size: 0.7rem;
+  text-decoration: none !important;
+}
+
+.dynamo-calendar__chrome a:hover,
+.dynamo-calendar__chrome a:focus-visible {
+  border-color: rgba(143, 209, 32, 0.7);
+  background: rgba(118, 185, 0, 0.18);
+}
+
+.dynamo-calendar__body {
+  display: grid;
+  grid-template-columns: 270px minmax(0, 1fr);
+  min-height: 560px;
+}
+
+.dynamo-calendar__sidebar {
+  padding: 2rem 1.5rem;
+  border-right: 1px solid rgba(127, 127, 127, 0.18);
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.dark .dynamo-calendar__sidebar {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.dynamo-calendar__month-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 1.2rem;
+}
+
+.dynamo-calendar__month-heading strong {
+  font-size: 1.1rem;
+}
+
+.dynamo-calendar__month-heading span {
+  color: var(--grayscale-a9);
+  font-size: 0.8rem;
+}
+
+.dynamo-calendar__weekdays,
+.dynamo-calendar__month-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 0.32rem;
+  text-align: center;
+}
+
+.dynamo-calendar__weekdays {
+  margin-bottom: 0.35rem;
+  color: var(--grayscale-a9);
+  font-size: 0.66rem;
+  font-weight: 700;
+}
+
+.dynamo-calendar__month-grid > span {
+  display: grid;
+  aspect-ratio: 1;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--grayscale-a11);
+  font-size: 0.75rem;
+}
+
+.dynamo-calendar__month-grid > .is-selected {
+  background: #ff3b30;
+  color: white;
+  font-weight: 750;
+  box-shadow: 0 5px 14px rgba(255, 59, 48, 0.28);
+}
+
+.dynamo-calendar__source {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin-top: 2rem;
+  color: var(--grayscale-a10);
+  font-size: 0.76rem;
+}
+
+.dynamo-calendar__source-dot {
+  width: 0.68rem;
+  height: 0.68rem;
+  border-radius: 50%;
+  background: #76b900;
+  box-shadow: 0 0 0 4px rgba(118, 185, 0, 0.12);
+}
+
+.dynamo-calendar__agenda {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  padding: clamp(2rem, 5vw, 3.5rem);
+}
+
+.dynamo-calendar__intro {
+  margin-bottom: 2.2rem;
+}
+
+.dynamo-calendar__intro > p {
+  margin: 0 0 0.6rem;
+  color: #579000;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.dark .dynamo-calendar__intro > p {
+  color: #8fd120;
+}
+
+.dynamo-calendar__intro h2 {
+  margin: 0 0 0.7rem;
+  font-size: clamp(2.3rem, 5vw, 4.4rem);
+  line-height: 0.96;
+  letter-spacing: -0.055em;
+}
+
+.dynamo-calendar__intro > span {
+  color: var(--grayscale-a10);
+  font-size: 0.92rem;
+}
+
+.dynamo-calendar__events {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.dynamo-calendar__event {
+  display: grid;
+  grid-template-columns: 3.4rem minmax(0, 1fr) 2.25rem;
+  gap: 1rem;
+  align-items: center;
+  margin: 0;
+  padding: 1rem;
+  border: 1px solid rgba(127, 127, 127, 0.18);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.46);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.66);
+}
+
+.dark .dynamo-calendar__event {
+  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.045);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.dynamo-calendar__event-date {
+  display: flex;
+  min-height: 3.7rem;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  background: #ff3b30;
+  color: white;
+  box-shadow: 0 8px 20px rgba(255, 59, 48, 0.24);
+}
+
+.dynamo-calendar__event-date span {
+  font-size: 0.62rem;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.dynamo-calendar__event-date strong {
+  font-size: 1.35rem;
+  line-height: 1.05;
+}
+
+.dynamo-calendar__event-copy {
+  min-width: 0;
+}
+
+.dynamo-calendar__event-copy > p {
+  margin: 0 0 0.2rem;
+  color: var(--grayscale-a9);
+  font-size: 0.67rem;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.dynamo-calendar__event-copy h3 {
+  margin: 0 0 0.45rem;
+  font-size: 1.05rem;
+  line-height: 1.25;
+}
+
+.dynamo-calendar__event-copy h3 a {
+  color: inherit !important;
+  text-decoration: none !important;
+}
+
+.dynamo-calendar__event-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  color: var(--grayscale-a10);
+  font-size: 0.74rem;
+}
+
+.dynamo-calendar__event-meta > span,
+.dynamo-calendar__location {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.dynamo-calendar__location {
+  color: inherit !important;
+  text-decoration: none !important;
+}
+
+.dynamo-calendar__event-action {
+  display: grid;
+  width: 2.25rem;
+  height: 2.25rem;
+  place-items: center;
+  border: 1px solid rgba(127, 127, 127, 0.22);
+  border-radius: 50%;
+  color: var(--grayscale-a11) !important;
+  text-decoration: none !important;
+}
+
+.dynamo-calendar__event-action:hover,
+.dynamo-calendar__event-action:focus-visible {
+  border-color: #76b900;
+  background: rgba(118, 185, 0, 0.12);
+  color: #579000 !important;
+}
+
+.dynamo-calendar__past {
+  margin-top: auto;
+  padding-top: 1.5rem;
+  color: var(--grayscale-a10);
+  font-size: 0.78rem;
+}
+
+.dynamo-calendar__past summary {
+  cursor: pointer;
+  font-weight: 650;
+}
+
+.dynamo-calendar__past > div {
+  display: grid;
+  gap: 0.6rem;
+  padding-top: 0.8rem;
+}
+
+.dynamo-calendar__past a {
+  display: grid;
+  grid-template-columns: 9rem 1fr;
+  gap: 1rem;
+  color: var(--grayscale-a11) !important;
+  text-decoration: none !important;
+}
+
+.dynamo-calendar__past a span {
+  color: var(--grayscale-a9);
+}
+
+.dynamo-calendar__empty {
+  display: grid;
+  min-height: 180px;
+  place-items: center;
+  align-content: center;
+  gap: 0.7rem;
+  border: 1px dashed var(--grayscale-a5);
+  border-radius: 16px;
+  color: var(--grayscale-a10);
+  text-align: center;
+}
+
+.dynamo-calendar__empty-icon {
+  display: grid;
+  width: 2.8rem;
+  height: 2.8rem;
+  place-items: center;
+  border-radius: 10px;
+  background: #ff3b30;
+  color: white;
+  font-size: 0.7rem;
+  font-weight: 800;
+}
+
+.dynamo-calendar__empty p {
+  margin: 0;
+}
+
 /* The site wordmark's "Documentation" label comes from logo.right-text. The label is removed in docs.yml;
    this makes Fern's version selector feel like a compact product-channel pill. */
 .fern-version-selector .version-dropdown-trigger {
-  min-width: 4.25rem;
+  display: flex;
+  min-width: 4.5rem;
+  height: 2.5rem;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  padding-inline: 0.85rem !important;
   border: 1px solid rgba(118, 185, 0, 0.35);
+  outline: none !important;
   border-radius: 999px;
   background: rgba(118, 185, 0, 0.08);
   color: var(--grayscale-a12);
-  font-family: RobotoMono, ui-monospace, monospace;
-  font-size: 0.78rem;
-  font-weight: 650;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
+  font-family: inherit;
+  font-size: 0.82rem;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0;
   transition:
     background 150ms ease,
     border-color 150ms ease,
@@ -1982,6 +2376,59 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
 
   .dynamo-story-stack span:nth-child(n) {
     margin-inline: 0;
+  }
+}
+
+@media (max-width: 760px) {
+  .dynamo-calendar {
+    margin-top: 5rem;
+    border-radius: 20px;
+  }
+
+  .dynamo-calendar__chrome p {
+    display: none;
+  }
+
+  .dynamo-calendar__chrome a {
+    font-size: 0;
+  }
+
+  .dynamo-calendar__chrome a span {
+    font-size: 0.75rem;
+  }
+
+  .dynamo-calendar__body {
+    display: block;
+  }
+
+  .dynamo-calendar__sidebar {
+    border-right: 0;
+    border-bottom: 1px solid rgba(127, 127, 127, 0.18);
+  }
+
+  .dynamo-calendar__agenda {
+    padding: 2rem 1.25rem;
+  }
+
+  .dynamo-calendar__intro h2 {
+    font-size: 3rem;
+  }
+
+  .dynamo-calendar__event {
+    grid-template-columns: 3.2rem minmax(0, 1fr);
+  }
+
+  .dynamo-calendar__event-action {
+    display: none;
+  }
+
+  .dynamo-calendar__past a {
+    display: block;
+  }
+
+  .dynamo-calendar__past a span {
+    display: block;
+    margin-bottom: 0.15rem;
   }
 }
 

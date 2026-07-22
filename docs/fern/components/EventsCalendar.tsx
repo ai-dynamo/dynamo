@@ -2,115 +2,204 @@
  * SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * EventsCalendar — Dynamo community events, split into upcoming (cards) and past
- * (a collapsed native <details> accordion).
+ * EventsCalendar — macOS-inspired preview of the public Dynamo calendar.
  *
- * Fully static and self-contained: it reads the build-time data module
- * events.generated.ts (produced hourly by .github/scripts/generate-events.js from
- * the public Google Calendar) and renders it with inline styles. No hooks, no
- * browser APIs, no external CSS — safe to render on the server, and the accordion
- * is plain HTML so it needs no client JavaScript.
- *
- * Styling uses translucent neutral borders (rgba grays) and inherits the page's
- * text color, so it reads correctly in both light and dark themes. NVIDIA green
- * (#76b900) is the single accent and is legible on both.
+ * The event data is generated hourly from the public Google Calendar by
+ * .github/scripts/generate-events.js. This component stays server-rendered and
+ * uses CSS classes from main.css so it works without client JavaScript.
  */
 
-import { UPCOMING_EVENTS, PAST_EVENTS, type DynamoEvent } from "./events.generated";
+import {
+  UPCOMING_EVENTS,
+  PAST_EVENTS,
+  type DynamoEvent,
+} from "./events.generated";
 
-const ACCENT = "#76b900";
-const BORDER = "1px solid rgba(128,128,128,0.25)";
-const MUTED = "rgba(128,128,128,1)";
+const CALENDAR_URL =
+  "https://calendar.google.com/calendar/u/0/r?cid=Y19jMjQ0OGQyZWZiMDllYWMyZGRlZTFmMzQ1MjQxMjQxMzViZDNmNDU1NDg2ODc2OTA1OTEwNWUxOGUxYjk3ZThmQGdyb3VwLmNhbGVuZGFyLmdvb2dsZS5jb20";
 
-function LocationLine({ event }: { event: DynamoEvent }) {
+const MONTHS = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
+
+const MONTH_INDEX = Object.fromEntries(
+  MONTHS.map((month, index) => [month.slice(0, 3), index]),
+);
+
+function buildMonthDays(year: number, month: number) {
+  const leadingBlanks = new Date(Date.UTC(year, month, 1)).getUTCDay();
+  const dayCount = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+  return [
+    ...Array.from({ length: leadingBlanks }, () => null),
+    ...Array.from({ length: dayCount }, (_, index) => index + 1),
+  ];
+}
+
+function EventLocation({ event }: { event: DynamoEvent }) {
   if (!event.location) return null;
-  return (
-    <div style={{ fontSize: "12px", color: MUTED, display: "flex", alignItems: "center", gap: "5px" }}>
-      <span aria-hidden>📍</span>
-      {event.locationUrl ? (
-        <a href={event.locationUrl} target="_blank" rel="noreferrer" style={{ color: ACCENT, textDecoration: "none" }}>
-          {event.location}
-        </a>
-      ) : (
-        <span>{event.location}</span>
-      )}
-    </div>
+
+  return event.locationUrl ? (
+    <a
+      className="dynamo-calendar__location"
+      href={event.locationUrl}
+      target="_blank"
+      rel="noreferrer"
+    >
+      {event.location}
+    </a>
+  ) : (
+    <span className="dynamo-calendar__location">{event.location}</span>
   );
 }
 
-function UpcomingCard({ event }: { event: DynamoEvent }) {
+function UpcomingEvent({ event }: { event: DynamoEvent }) {
   return (
-    <div style={{ border: BORDER, borderRadius: "12px", padding: "14px 16px", display: "flex", gap: "12px" }}>
-      <div
-        style={{
-          flex: "none",
-          width: "54px",
-          textAlign: "center",
-          borderRight: BORDER,
-          paddingRight: "12px",
-        }}
-      >
-        <div style={{ fontSize: "11px", fontWeight: 600, color: ACCENT, textTransform: "uppercase", letterSpacing: "0.04em" }}>
-          {event.month}
-        </div>
-        <div style={{ fontSize: "20px", fontWeight: 600, lineHeight: 1.1 }}>{event.day}</div>
-        <div style={{ fontSize: "11px", color: MUTED }}>{event.year}</div>
+    <article className="dynamo-calendar__event">
+      <div className="dynamo-calendar__event-date" aria-hidden="true">
+        <span>{event.month}</span>
+        <strong>{event.day}</strong>
       </div>
-      <div>
-        <div style={{ fontSize: "14px", fontWeight: 600, marginBottom: "3px" }}>
-          <a href={event.addUrl} target="_blank" rel="noreferrer" style={{ color: "inherit", textDecoration: "none" }}>
+      <div className="dynamo-calendar__event-copy">
+        <p>Upcoming event</p>
+        <h3>
+          <a href={event.addUrl} target="_blank" rel="noreferrer">
             {event.title}
           </a>
+        </h3>
+        <div className="dynamo-calendar__event-meta">
+          <span>{event.dateLabel}</span>
+          <EventLocation event={event} />
         </div>
-        <LocationLine event={event} />
       </div>
-    </div>
-  );
-}
-
-function PastRow({ event }: { event: DynamoEvent }) {
-  return (
-    <div style={{ display: "flex", alignItems: "baseline", gap: "12px", padding: "8px 0", borderBottom: BORDER, fontSize: "13px" }}>
-      <span style={{ flex: "none", width: "120px", color: MUTED, fontVariantNumeric: "tabular-nums" }}>{event.dateLabel}</span>
-      <a href={event.addUrl} target="_blank" rel="noreferrer" style={{ color: "inherit", textDecoration: "none" }}>
-        {event.title}
+      <a
+        className="dynamo-calendar__event-action"
+        href={event.addUrl}
+        target="_blank"
+        rel="noreferrer"
+        aria-label={`Add ${event.title} to Google Calendar`}
+      >
+        <span aria-hidden="true">+</span>
       </a>
-      {event.location && <span style={{ marginLeft: "auto", color: MUTED, fontSize: "12px" }}>{event.location}</span>}
-    </div>
+    </article>
   );
 }
 
 export function EventsCalendar() {
-  const hasUpcoming = UPCOMING_EVENTS.length > 0;
-  const hasPast = PAST_EVENTS.length > 0;
+  const focusEvent = UPCOMING_EVENTS[0] ?? PAST_EVENTS[0];
+  const year = Number(focusEvent?.year ?? new Date().getUTCFullYear());
+  const month = MONTH_INDEX[focusEvent?.month ?? "Jan"] ?? 0;
+  const selectedDay = Number(focusEvent?.day ?? 1);
+  const days = buildMonthDays(year, month);
 
   return (
-    <div style={{ margin: "0.5rem 0 1rem" }}>
-      <div style={{ fontSize: "12px", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.03em", color: MUTED, margin: "0 0 0.6rem" }}>
-        Upcoming
+    <section
+      className="dynamo-calendar"
+      aria-labelledby="dynamo-calendar-title"
+    >
+      <div className="dynamo-calendar__chrome">
+        <span />
+        <span />
+        <span />
+        <p>Community Calendar</p>
+        <a href={CALENDAR_URL} target="_blank" rel="noreferrer">
+          Open Google Calendar
+          <span aria-hidden="true">↗</span>
+        </a>
       </div>
-      {hasUpcoming ? (
-        <div style={{ display: "grid", gap: "12px", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))" }}>
-          {UPCOMING_EVENTS.map((e) => (
-            <UpcomingCard key={`${e.start}-${e.title}`} event={e} />
-          ))}
-        </div>
-      ) : (
-        <div style={{ fontSize: "13px", color: MUTED }}>No upcoming events right now — check back soon.</div>
-      )}
 
-      {hasPast && (
-        <details style={{ border: BORDER, borderRadius: "12px", marginTop: "1rem", overflow: "hidden" }}>
-          <summary style={{ cursor: "pointer", padding: "12px 16px", fontSize: "14px", fontWeight: 600, listStyle: "none" }}>
-            Past events
-          </summary>
-          <div style={{ padding: "0 16px 10px" }}>
-            {PAST_EVENTS.map((e) => (
-              <PastRow key={`${e.start}-${e.title}`} event={e} />
+      <div className="dynamo-calendar__body">
+        <aside
+          className="dynamo-calendar__sidebar"
+          aria-label="Calendar month preview"
+        >
+          <div className="dynamo-calendar__month-heading">
+            <strong>{MONTHS[month]}</strong>
+            <span>{year}</span>
+          </div>
+          <div className="dynamo-calendar__weekdays" aria-hidden="true">
+            {["S", "M", "T", "W", "T", "F", "S"].map((day, index) => (
+              <span key={`${day}-${index}`}>{day}</span>
             ))}
           </div>
-        </details>
-      )}
-    </div>
+          <div className="dynamo-calendar__month-grid">
+            {days.map((day, index) =>
+              day === null ? (
+                <span key={`blank-${index}`} />
+              ) : (
+                <span
+                  key={day}
+                  className={day === selectedDay ? "is-selected" : undefined}
+                >
+                  {day}
+                </span>
+              ),
+            )}
+          </div>
+          <div className="dynamo-calendar__source">
+            <span className="dynamo-calendar__source-dot" />
+            Dynamo community
+          </div>
+        </aside>
+
+        <div className="dynamo-calendar__agenda">
+          <div className="dynamo-calendar__intro">
+            <p>Meetups, talks, and community meetings</p>
+            <h2 id="dynamo-calendar-title">Community events</h2>
+            <span>Previewed from the public Dynamo Google Calendar.</span>
+          </div>
+
+          <div className="dynamo-calendar__events">
+            {UPCOMING_EVENTS.length > 0 ? (
+              UPCOMING_EVENTS.slice(0, 4).map((event) => (
+                <UpcomingEvent
+                  key={`${event.start}-${event.title}`}
+                  event={event}
+                />
+              ))
+            ) : (
+              <div className="dynamo-calendar__empty">
+                <div className="dynamo-calendar__empty-icon" aria-hidden="true">
+                  CAL
+                </div>
+                <p>No upcoming events are scheduled.</p>
+                <a href={CALENDAR_URL} target="_blank" rel="noreferrer">
+                  Check the public calendar
+                </a>
+              </div>
+            )}
+          </div>
+
+          {PAST_EVENTS.length > 0 && (
+            <details className="dynamo-calendar__past">
+              <summary>Recent events</summary>
+              <div>
+                {PAST_EVENTS.slice(0, 5).map((event) => (
+                  <a
+                    key={`${event.start}-${event.title}`}
+                    href={event.addUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    <span>{event.dateLabel}</span>
+                    {event.title}
+                  </a>
+                ))}
+              </div>
+            </details>
+          )}
+        </div>
+      </div>
+    </section>
   );
 }
