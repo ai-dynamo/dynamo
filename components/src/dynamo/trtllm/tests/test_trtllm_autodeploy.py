@@ -55,6 +55,19 @@ class TestTensorRTLLMEngine:
 
         mocked_cls.assert_called_once()
 
+    def test_get_kv_cache_capacity_delegates_to_llm(self):
+        capacity = {
+            "maxNumBlocks": 123,
+            "tokensPerBlock": 64,
+            "maxNumTokens": 7872,
+        }
+        engine = TensorRTLLMEngine(engine_args={})
+        engine._llm = mock.Mock()
+        engine._llm.get_kv_cache_capacity.return_value = capacity
+
+        assert engine.get_kv_cache_capacity() == capacity
+        engine._llm.get_kv_cache_capacity.assert_called_once_with()
+
     @pytest.mark.parametrize(
         "engine_args, is_forbidden",
         [
