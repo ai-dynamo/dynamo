@@ -206,7 +206,7 @@ def test_estimate_num_gpu_blocks_reports_unavailable_estimator(monkeypatch):
 
     with pytest.raises(
         AicMemoryEstimatorUnavailableError,
-        match=r"aiconfigurator\.sdk\.memory is required",
+        match=r"aiconfigurator_core\.sdk\.memory is required",
     ):
         estimate_num_gpu_blocks(
             backend_name="vllm",
@@ -219,7 +219,7 @@ def test_estimate_num_gpu_blocks_reports_unavailable_estimator(monkeypatch):
 
 
 def test_estimate_num_gpu_blocks_propagates_transitive_import_error(monkeypatch):
-    missing_dependency = ModuleNotFoundError(name="aiconfigurator_core")
+    missing_dependency = ModuleNotFoundError(name="transitive_dependency")
 
     def broken_memory_module(_module_name):
         raise missing_dependency
