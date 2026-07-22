@@ -8,8 +8,13 @@ cluster.
 ## API
 
 ```go
-golden.MatchManifests(t, env.Client(), env.Namespace(), "testdata/deployment.yaml")
+golden.MatchManifests(t, env.Client(), env.Namespace(), "testdata/dcd-deployment/output.yaml")
 ```
+
+Controller tests keep one directory per scenario. `input.yaml` contains the
+resource that triggers the controller flow, while `output.yaml` contains the
+complete expected manifest set for that scenario. The mismatch artifact is
+therefore written next to both as `output.yaml.new`.
 
 Every YAML document contributes one expected object. Documents may have
 different kinds. For each GroupVersionKind in the file, the actual namespaced

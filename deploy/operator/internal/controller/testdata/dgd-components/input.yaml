@@ -1,0 +1,25 @@
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: component-manifests
+  annotations:
+    nvidia.com/enable-grove: "false"
+spec:
+  backendFramework: vllm
+  components:
+    - name: frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: registry.example/dynamo-frontend:test
+    - name: decode
+      type: decode
+      replicas: 2
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: registry.example/dynamo-worker:test

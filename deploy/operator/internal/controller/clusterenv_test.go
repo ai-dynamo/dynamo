@@ -9,6 +9,7 @@ package controller
 
 import (
 	"os"
+	"testing"
 	"time"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -39,9 +40,11 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	lwsscheme "sigs.k8s.io/lws/client-go/clientset/versioned/scheme"
+	"sigs.k8s.io/yaml"
 	vcbatchv1alpha1 "volcano.sh/apis/pkg/apis/batch/v1alpha1"
 	volcanov1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 )
@@ -110,4 +113,16 @@ func newClusterTestScheme() *runtime.Scheme {
 	utilruntime.Must(volcanov1beta1.AddToScheme(scheme))
 	utilruntime.Must(vcbatchv1alpha1.AddToScheme(scheme))
 	return scheme
+}
+
+func clusterTestReadInput(t testing.TB, namespace, path string, object client.Object) {
+	t.Helper()
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read cluster-test input %q: %v", path, err)
+	}
+	if err := yaml.UnmarshalStrict(contents, object); err != nil {
+		t.Fatalf("decode cluster-test input %q: %v", path, err)
+	}
+	object.SetNamespace(namespace)
 }

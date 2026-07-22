@@ -15,8 +15,6 @@ import (
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/golden"
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
@@ -46,38 +44,14 @@ func TestClusterDynamoGraphDeploymentCreatesComponentAndDeploymentManifests(t *t
 	})
 
 	t.Log("Create a non-Grove graph with independently named frontend and decode components")
-	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "component-manifests",
-			Namespace: env.Namespace(),
-			Annotations: map[string]string{
-				"nvidia.com/enable-grove": "false",
-			},
-		},
-		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
-			BackendFramework: "vllm",
-			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
-				{
-					ComponentName: "frontend",
-					ComponentType: nvidiacomv1beta1.ComponentTypeFrontend,
-					Replicas:      ptr.To[int32](1),
-					PodTemplate:   clusterTestPodTemplate("registry.example/dynamo-frontend:test"),
-				},
-				{
-					ComponentName: "decode",
-					ComponentType: nvidiacomv1beta1.ComponentTypeDecode,
-					Replicas:      ptr.To[int32](2),
-					PodTemplate:   clusterTestPodTemplate("registry.example/dynamo-worker:test"),
-				},
-			},
-		},
-	}
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
+	clusterTestReadInput(t, env.Namespace(), "testdata/dgd-components/input.yaml", dgd)
 	if err := env.Client().Create(t.Context(), dgd); err != nil {
 		t.Fatalf("create DGD: %v", err)
 	}
 
 	t.Log("Match the DCDs and their terminal Deployments in one complete manifest contract")
-	golden.MatchManifests(t, env.Client(), env.Namespace(), "testdata/dynamographdeployment-components.yaml")
+	golden.MatchManifests(t, env.Client(), env.Namespace(), "testdata/dgd-components/output.yaml")
 }
 
 func TestClusterDynamoGraphDeploymentCreatesGroveManifest(t *testing.T) {
@@ -96,31 +70,14 @@ func TestClusterDynamoGraphDeploymentCreatesGroveManifest(t *testing.T) {
 	})
 
 	t.Log("Create a Grove graph containing single-node and multinode components")
-	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "grove-manifest", Namespace: env.Namespace()},
-		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
-			BackendFramework: "vllm",
-			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
-				{
-					ComponentName: "frontend",
-					ComponentType: nvidiacomv1beta1.ComponentTypeFrontend,
-					PodTemplate:   clusterTestPodTemplate("registry.example/dynamo-frontend:test"),
-				},
-				{
-					ComponentName: "decode",
-					ComponentType: nvidiacomv1beta1.ComponentTypeDecode,
-					Multinode:     &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
-					PodTemplate:   clusterTestPodTemplate("registry.example/dynamo-worker:test"),
-				},
-			},
-		},
-	}
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
+	clusterTestReadInput(t, env.Namespace(), "testdata/dgd-grove/input.yaml", dgd)
 	if err := env.Client().Create(t.Context(), dgd); err != nil {
 		t.Fatalf("create Grove DGD: %v", err)
 	}
 
 	t.Log("Match the complete PodCliqueSet produced without running Grove controllers")
-	golden.MatchManifests(t, env.Client(), env.Namespace(), "testdata/dynamographdeployment-grove.yaml")
+	golden.MatchManifests(t, env.Client(), env.Namespace(), "testdata/dgd-grove/output.yaml")
 }
 
 func clusterTestRestrictedConfig(namespace string) *configv1alpha1.OperatorConfiguration {
@@ -129,16 +86,4 @@ func clusterTestRestrictedConfig(namespace string) *configv1alpha1.OperatorConfi
 	config.Namespace.Restricted = namespace
 	config.GPU.DiscoveryEnabled = ptr.To(false)
 	return config
-}
-
-func clusterTestPodTemplate(image string) *corev1.PodTemplateSpec {
-	return &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
-		Name: nvidiacomv1beta1.MainContainerName, Image: image,
-	}}}}
-}
-
-func clusterTestLWSPodTemplate(image string) *corev1.PodTemplateSpec {
-	template := clusterTestPodTemplate(image)
-	template.Spec.Containers[0].Args = []string{"--model", "test/model"}
-	return template
 }

@@ -86,35 +86,9 @@ func TestClusterDynamoGraphDeploymentRequestProfilesAndCreatesWorkloadManifests(
 	})
 
 	t.Log("Create a rapid DGDR that runs AIConfigurator with simulated GPU performance data")
-	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
-		ObjectMeta: metav1.ObjectMeta{Name: "aic-profiler", Namespace: env.Namespace()},
-		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-			Model:          "Qwen/Qwen3-0.6B",
-			Backend:        nvidiacomv1beta1.BackendTypeVllm,
-			Image:          profilerImage,
-			SearchStrategy: nvidiacomv1beta1.SearchStrategyRapid,
-			AutoApply:      ptr.To(true),
-			Hardware: &nvidiacomv1beta1.HardwareSpec{
-				GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
-				VRAMMB:         ptr.To(81920.0),
-				NumGPUsPerNode: ptr.To[int32](8),
-				TotalGPUs:      ptr.To[int32](8),
-				Interconnect:   "nvlink",
-				RDMA:           ptr.To(false),
-			},
-			Workload: &nvidiacomv1beta1.WorkloadSpec{
-				ISL: ptr.To[int32](4000),
-				OSL: ptr.To[int32](1000),
-			},
-			SLA: &nvidiacomv1beta1.SLASpec{
-				TTFT: ptr.To(2000.0),
-				ITL:  ptr.To(30.0),
-			},
-			Features: &nvidiacomv1beta1.FeaturesSpec{
-				Mocker: &nvidiacomv1beta1.MockerSpec{Enabled: true},
-			},
-		},
-	}
+	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}
+	clusterTestReadInput(t, env.Namespace(), "testdata/dgdr-profiler/input.yaml", dgdr)
+	dgdr.Spec.Image = profilerImage
 	if err := env.Client().Create(ctx, dgdr); err != nil {
 		t.Fatalf("create DGDR: %v", err)
 	}
@@ -167,7 +141,7 @@ func TestClusterDynamoGraphDeploymentRequestProfilesAndCreatesWorkloadManifests(
 	}
 
 	t.Log("Match the generated DGD and its terminal Grove manifest")
-	golden.MatchManifests(t, env.Client(), env.Namespace(), "testdata/dynamographdeploymentrequest-manifests.yaml")
+	golden.MatchManifests(t, env.Client(), env.Namespace(), "testdata/dgdr-profiler/output.yaml")
 }
 
 func clusterTestRequiredEnv(t *testing.T, name string) string {
