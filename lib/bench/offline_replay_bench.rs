@@ -254,6 +254,7 @@ struct Args {
     timings_jsonl: Option<PathBuf>,
 
     /// Emit one canonical full replay report per iteration for parity checks.
+    /// Requires building with the `replay-bench` Cargo feature.
     #[arg(long)]
     canonical_reports_jsonl: Option<PathBuf>,
 
@@ -371,6 +372,10 @@ fn main() -> Result<()> {
     }
 
     let args = Args::parse();
+    anyhow::ensure!(
+        args.canonical_reports_jsonl.is_none() || cfg!(feature = "replay-bench"),
+        "--canonical-reports-jsonl requires building with --features replay-bench"
+    );
     let engine_args = build_engine_args(&args)?;
     let trace = Trace::from_mooncake(&args.trace_file, args.trace_block_size)?;
     anyhow::ensure!(args.iterations > 0, "iterations must be greater than 0");
