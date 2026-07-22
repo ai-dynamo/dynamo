@@ -55,6 +55,8 @@ navigation:
             path: reference/release-artifacts.md
           - page: Nightly Release Info
             path: reference/nightly-release-info.md
+          - page: Model Early Access Builds
+            path: reference/model-early-access-builds.md
           - page: Examples
             path: getting-started/examples.md
           - page: Glossary
@@ -425,6 +427,8 @@ navigation:
                 path: components/frontend/frontend-guide.md
               - page: Configuration Reference
                 path: components/frontend/configuration.md
+              - page: Python Route Extensions
+                path: components/frontend/python-route-extensions.md
               - page: Tokenizer
                 path: components/frontend/Tokenizer.md
           - section: Router
@@ -639,6 +643,9 @@ navigation:
       - page: Browse All Recipes
         path: recipes/README.mdx
         slug: browse
+      - page: GLM-5.2
+        path: recipes/glm-5-2.mdx
+        slug: glm-5-2
       - page: Inkling NVFP4
         path: recipes/inkling.mdx
         slug: inkling

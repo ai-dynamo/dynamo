@@ -80,7 +80,7 @@ daemonset:
   # Container image
   image:
     repository: nvcr.io/nvidia/ai-dynamo/snapshot-agent
-    tag: 1.2.1
+    tag: 1.3.0
     pullPolicy: Always
 
   # Snapshot agent and nsrestore log level (trace, debug, info, warn, error)

@@ -272,8 +272,9 @@ class GMSWorker(Worker):
             # Client-local scratch only — no GMS server session at init.
             # wake_up will connect RW and allocate fresh server backing.
             get_or_create_scratch_manager(socket, device, tag="kv_cache")
-            with gms_use_mem_pool("kv_cache", torch.device(f"cuda:{device}")):
-                self.model_runner.initialize_kv_cache(kv_cache_config)
+            # The scratch pool is scoped to the KV tensors by
+            # patch_kv_cache_pool_scope(), not the whole initialize_kv_cache.
+            self.model_runner.initialize_kv_cache(kv_cache_config)
         elif self.vllm_config.model_config.enable_sleep_mode:
             get_or_create_gms_client_memory_manager(
                 socket,

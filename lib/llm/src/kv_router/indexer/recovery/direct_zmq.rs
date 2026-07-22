@@ -17,8 +17,7 @@ use dynamo_runtime::{
     },
     protocols::EndpointId,
     traits::DistributedRuntimeProvider,
-    transports::event_plane::zmq_transport::ZmqWireStream,
-    transports::event_plane::{Codec, EventScope, ZmqSubTransport},
+    transports::event_plane::{Codec, EventScope, ValidatedZmqSource, ValidatedZmqSourceError},
 };
 use futures::StreamExt;
 use tokio::{
@@ -645,7 +644,11 @@ async fn run_source(
     loop {
         let stream = tokio::select! {
             _ = cancel.cancelled() => return,
-            stream = ZmqSubTransport::connect_single_consumer(&endpoint, KV_EVENT_SUBJECT) => stream,
+            stream = ValidatedZmqSource::connect_default(
+                &endpoint,
+                KV_EVENT_SUBJECT,
+                publisher_id,
+            ) => stream,
         };
         let mut stream = match stream {
             Ok(stream) => stream,
@@ -715,7 +718,7 @@ async fn run_source(
 
 async fn consume_connection(
     publisher_id: u64,
-    stream: &mut ZmqWireStream,
+    stream: &mut ValidatedZmqSource,
     client: &Arc<WorkerQueryClient<IndexerRecoveryTarget>>,
     metrics: &KvZmqIngressMetrics,
 ) {
@@ -725,39 +728,23 @@ async fn consume_connection(
         let Some(result) = result else {
             return;
         };
-        let message = match result {
-            Ok(message) => message,
-            Err(error) => {
+        let envelope = match result {
+            Ok(envelope) => envelope,
+            Err(ValidatedZmqSourceError::Receive(error)) => {
                 tracing::warn!(%error, publisher_id, "Direct-ZMQ KV source stream failed");
                 return;
             }
-        };
-
-        let envelope = match codec.decode_envelope(&message.payload) {
-            Ok(envelope) => envelope,
-            Err(error) => {
+            Err(ValidatedZmqSourceError::EnvelopeDecode(error)) => {
                 tracing::warn!(%error, publisher_id, "Failed to decode direct-ZMQ KV envelope");
                 metrics.increment_lifecycle("envelope_decode_error");
                 continue;
             }
+            Err(error @ ValidatedZmqSourceError::IdentityMismatch { .. }) => {
+                tracing::warn!(%error, publisher_id, "Dropping direct-ZMQ KV envelope with inconsistent attribution");
+                metrics.increment_lifecycle("identity_mismatch");
+                continue;
+            }
         };
-        if envelope.publisher_id != publisher_id
-            || envelope.publisher_id != message.publisher_id
-            || envelope.sequence != message.sequence
-            || envelope.topic != KV_EVENT_SUBJECT
-        {
-            tracing::warn!(
-                publisher_id,
-                frame_publisher_id = message.publisher_id,
-                frame_sequence = message.sequence,
-                envelope_publisher_id = envelope.publisher_id,
-                envelope_sequence = envelope.sequence,
-                envelope_topic = %envelope.topic,
-                "Dropping direct-ZMQ KV envelope with inconsistent attribution"
-            );
-            metrics.increment_lifecycle("identity_mismatch");
-            continue;
-        }
         let events = match codec.decode_payload::<Vec<RouterEvent>>(&envelope.payload) {
             Ok(events) => events,
             Err(error) => {

@@ -2421,8 +2421,79 @@ async def make_engine(distributed_runtime: DistributedRuntime, args: EntrypointA
     """Make an engine matching the args"""
     ...
 
-async def run_input(runtime: DistributedRuntime, input: str, engine_config: EngineConfig) -> None:
-    """Start an engine, connect it to an input, and run until stopped."""
+class FrontendExtensionContext:
+    """Read-only, live view of frontend state passed to extension route handlers.
+
+    Handlers receive this and answer from current state. The surface is
+    intentionally narrow (typed read-only accessors only); it does not expose
+    the internal service state.
+    """
+
+    def is_ready(self) -> bool:
+        """Whether the HTTP service has finished startup and is ready to serve."""
+        ...
+
+    def is_cancelled(self) -> bool:
+        """Whether the frontend is shutting down (draining)."""
+        ...
+
+    def has_any_ready_model(self) -> bool:
+        """Whether at least one model is registered and ready to serve."""
+        ...
+
+    def is_model_ready_to_serve(self, model: str) -> bool:
+        """Whether the named model is registered and ready to serve."""
+        ...
+
+    def model_display_names(self) -> list[str]:
+        """Sorted display names of all registered models."""
+        ...
+
+    def serving_ready_display_names(self) -> list[str]:
+        """Sorted display names of models ready to serve."""
+        ...
+
+class FrontendRoute:
+    """A trusted extension route served on the Dynamo HTTP frontend.
+
+    Currently restricted to static-path ``GET`` routes. ``handler`` is a
+    synchronous callable that receives a ``FrontendExtensionContext`` and
+    returns a JSON-serializable body (implies HTTP 200) or a ``FrontendResponse``
+    to set the status code. Async handlers and path parameters are rejected at
+    construction.
+    """
+
+    def __init__(
+        self,
+        method: str,
+        path: str,
+        handler: Callable[[FrontendExtensionContext], object],
+    ) -> None: ...
+    @property
+    def method(self) -> str: ...
+    @property
+    def path(self) -> str: ...
+
+class FrontendResponse:
+    """Explicit status-code override returned by a ``FrontendRoute`` handler.
+
+    Return this to set a non-200 status (e.g. ``FrontendResponse(503, body)``);
+    return a plain JSON-serializable value for the default 200.
+    """
+
+    def __init__(self, status_code: int, body: object) -> None: ...
+
+async def run_input(
+    distributed_runtime: DistributedRuntime,
+    input: str,
+    engine_config: EngineConfig,
+    frontend_route_extensions: Optional[Sequence[FrontendRoute]] = None,
+) -> None:
+    """Start an engine, connect it to an input, and run until stopped.
+
+    ``frontend_route_extensions`` supplies additional HTTP routes to the
+    frontend (HTTP input only); see ``FrontendRoute``.
+    """
     ...
 
 def run_mocker_trace_replay(
