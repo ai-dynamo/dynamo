@@ -34,6 +34,15 @@ pub struct Args {
     #[arg(long, env = "VLLM_HTTP_ENDPOINT")]
     pub admin_endpoint: Option<String>,
 
+    /// Model identity published through `/v1/rl/workers`.
+    ///
+    /// Defaults to vLLM's engine model ID, which preserves a trainer-facing
+    /// base identity when the served name is a private routing alias. Set this
+    /// to an engine-advertised served name or alias when vLLM is loaded from a
+    /// local snapshot path but RL clients use a canonical model name.
+    #[arg(long, env = "DYN_RL_DISCOVERY_MODEL_NAME")]
+    pub rl_discovery_model_name: Option<String>,
+
     /// Dynamo topology role. vLLM deliberately does not expose deployment
     /// topology in its native protocol, so the sidecar owns this routing
     /// configuration explicitly.

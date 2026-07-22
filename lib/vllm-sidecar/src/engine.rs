@@ -190,11 +190,12 @@ impl VllmSidecarEngine {
             let parallelism = discovery.server.parallelism.as_ref().ok_or_else(|| {
                 client::invalid_arg("vLLM server did not report parallelism for RL discovery")
             })?;
-            Some(RlWorkerMetadata {
+            Some(rl_worker_metadata(
                 admin_base_url,
-                world_size: inference_world_size(parallelism)?,
-                model: discovery.model.model_id.clone(),
-            })
+                inference_world_size(parallelism)?,
+                &discovery.model,
+                args.rl_discovery_model_name.as_deref(),
+            )?)
         } else {
             None
         };
@@ -206,6 +207,8 @@ impl VllmSidecarEngine {
             %endpoint,
             role = ?disaggregation_mode,
             model = %discovery.model.model_id,
+            served_model = %discovery.model.served_model_name,
+            rl_model = ?rl_metadata.as_ref().map(|metadata| metadata.model.as_str()),
             "vllm sidecar bootstrapped engine discovery"
         );
 
@@ -282,6 +285,39 @@ impl VllmSidecarEngine {
             .await;
         }
     }
+}
+
+pub(crate) fn rl_worker_metadata(
+    admin_base_url: String,
+    world_size: u32,
+    model: &pb::ModelInfo,
+    rl_discovery_model_name: Option<&str>,
+) -> Result<RlWorkerMetadata, DynamoError> {
+    let model_name = match rl_discovery_model_name.map(str::trim) {
+        None => model.model_id.as_str(),
+        Some("") => {
+            return Err(client::invalid_arg(
+                "--rl-discovery-model-name / DYN_RL_DISCOVERY_MODEL_NAME must not be empty",
+            ));
+        }
+        Some(name)
+            if name == model.model_id
+                || name == model.served_model_name
+                || model.served_model_aliases.iter().any(|alias| alias == name) =>
+        {
+            name
+        }
+        Some(name) => {
+            return Err(client::invalid_arg(format!(
+                "RL model name `{name}` is not an engine-advertised model identity or alias"
+            )));
+        }
+    };
+    Ok(RlWorkerMetadata {
+        admin_base_url,
+        world_size,
+        model: model_name.to_string(),
+    })
 }
 
 #[async_trait]
