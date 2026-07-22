@@ -27,7 +27,12 @@ pub trait Decoder: Clone + Send + 'static {
         // light clone (only config params)
         let decoder = self.clone();
         // compute heavy -> rayon
-        let result = tokio_rayon::spawn(move || decoder.decode(data)).await?;
+        let result = tokio_rayon::spawn(move || {
+            let mut decoded = decoder.decode(data)?;
+            decoded.compute_content_hash();
+            Ok::<_, anyhow::Error>(decoded)
+        })
+        .await?;
         Ok(result)
     }
 }

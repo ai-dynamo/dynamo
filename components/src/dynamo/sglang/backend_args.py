@@ -150,8 +150,8 @@ class DynamoSGLangArgGroup(ArgGroup):
             help="Enable RL training support. Registers the call_tokenizer_manager engine route for generic tokenizer_manager passthrough.",
         )
 
-        # Topology constraint: rejecting --frontend-decoding combined with the
-        # EPD multimodal flags happens in DynamoSGLangConfig.validate() below.
+        # Topology constraints for --frontend-decoding are enforced in
+        # DynamoSGLangConfig.validate() below.
         add_frontend_decoding_arg(g, env_prefix="SGL")
 
         add_argument(
@@ -231,15 +231,11 @@ class DynamoSGLangConfig(ConfigBase):
 
     def validate_multimodal_topology(self) -> None:
         if self.frontend_decoding and (
-            self.multimodal_encode_worker
-            or self.multimodal_worker
-            or self.dedicated_mm_encoder
+            self.multimodal_worker or self.dedicated_mm_encoder
         ):
             raise ValueError(
-                "--frontend-decoding is incompatible with the EPD multimodal topology "
-                "(--dedicated-mm-encoder / --multimodal-encode-worker / "
-                "--multimodal-worker). The encode worker needs URLs to run "
-                "MMEncoder, while --frontend-decoding ships pre-decoded pixels. "
-                "Use --frontend-decoding on a native worker that does not use "
-                "the dedicated encode-worker topology instead."
+                "--frontend-decoding is not supported on internal EPD workers "
+                "(--dedicated-mm-encoder / --multimodal-worker). In an EPD "
+                "deployment, pass the flag only to the frontend-facing worker "
+                "using --disaggregation-mode=encode."
             )

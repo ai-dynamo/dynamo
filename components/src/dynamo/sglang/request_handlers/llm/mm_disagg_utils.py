@@ -87,12 +87,14 @@ def extract_media_urls(
         return None
 
     items = mm_data.get(media_key)
-    if not items:
+    if items is None:
         return None
     if not isinstance(items, list):
         raise ValueError(
             f"{media_key} must be a list of URL items, got {type(items).__name__}"
         )
+    if not items:
+        return None
 
     urls: list[str] = []
     for item in items:
@@ -100,11 +102,13 @@ def extract_media_urls(
             urls.append(item)
             continue
         if isinstance(item, dict):
-            url = item.get("Url")
-            if isinstance(url, str):
-                urls.append(url)
+            variants = [key for key in ("Url", "Decoded") if key in item]
+            if len(variants) != 1:
+                raise ValueError(f"Unsupported {media_key} item: {item!r}")
+            if variants[0] == "Url" and isinstance(item["Url"], str):
+                urls.append(item["Url"])
                 continue
-            if "Decoded" in item:
+            if variants[0] == "Decoded":
                 raise ValueError(
                     f"Frontend-decoded media is not supported for disaggregated "
                     f"{media_key}; use URL-based inputs."

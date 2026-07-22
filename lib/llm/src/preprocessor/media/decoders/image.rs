@@ -180,6 +180,17 @@ mod tests {
         assert_eq!(decoded.tensor_info.dtype, DataType::UINT8);
     }
 
+    #[tokio::test]
+    async fn test_async_image_decode_precomputes_content_hash() {
+        let decoder = ImageDecoder::default();
+        let image_bytes = create_test_image(4, 4, 3, image::ImageFormat::Png);
+        let encoded_data = create_encoded_media_data(image_bytes);
+
+        let decoded = decoder.decode_async(encoded_data).await.unwrap();
+
+        assert!(decoded.content_hash.is_some());
+    }
+
     #[rstest]
     #[case(Some(100), None, 50, 50, ImageFormat::Png, true, "width ok")]
     #[case(Some(50), None, 100, 50, ImageFormat::Jpeg, false, "width too large")]
