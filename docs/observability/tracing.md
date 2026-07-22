@@ -32,9 +32,11 @@ This guide covers single GPU demo setup using Docker Compose. For Kubernetes dep
 
 Start the observability stack (Prometheus, Grafana, Tempo, exporters). See [Observability Getting Started](README.md#getting-started-quickly) for instructions.
 
-### 2. Start Dynamo Components (Single GPU)
+### 2. Start Dynamo Components
+For a simple single-device deployment, run the aggregated tracing launch script. 
 
-For a simple single-GPU deployment, run the aggregated tracing launch script. This script enables tracing, sets per-component service names, and starts a frontend with a single vLLM worker:
+#### 2.1 Single GPU
+For a simple single-GPU deployment, this script enables tracing, sets per-component service names, and starts a frontend with a single vLLM worker:
 
 ```bash
 cd examples/backends/vllm/launch
@@ -49,6 +51,21 @@ export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://tempo:4317
 ```
 
 This runs a single aggregated worker on one GPU, providing a simpler setup for testing tracing.
+
+#### 2.2 Single XPU
+The following commands are for a single-XPU deployment:
+
+```bash
+cd examples/backends/vllm/launch/xpu
+./agg_tracing_xpu.sh
+```
+
+To override the Tempo endpoint (default `http://localhost:4317`):
+
+```bash
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://tempo:4317
+./agg_tracing_xpu.sh
+```
 
 ### Alternative: Disaggregated Deployment (2 GPUs)
 

@@ -51,10 +51,16 @@ export HF_TOKEN=$HUGGING_FACE_HUB_TOKEN
 ```
 
 ### Run Speculative Decoding
-
+GPU:
 ```bash
 cd examples/backends/vllm
 bash launch/agg_spec_decoding.sh
+```
+
+XPU:
+```bash
+cd examples/backends/vllm/launch/xpu/
+bash agg_spec_decoding_xpu.sh
 ```
 
 ### Test the Deployment
