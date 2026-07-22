@@ -913,6 +913,51 @@ mod tests {
     }
 
     #[test]
+    fn retained_tail_split_releases_leases_before_eviction() {
+        let (buffer, sink) = capture_router_event_sink(ROUTER_TEST_WORKER_ID);
+        let mut mgr = SglangKvManager::new(16, 4, KvEventPublishers::new(Some(sink), None), 0);
+        let mut indexer = RadixTree::new();
+
+        let first_tokens = [1, 2, 3, 4, 5, 6, 7, 8];
+        let mut first = mgr.allocate_for_request(&first_tokens[..4]).unwrap();
+        mgr.extend_cached_prefix(&first_tokens[..4], &mut first.lease);
+        let retained_tail = first.lease.last_node();
+        assert!(mgr.extend_allocation(&first_tokens, &mut first.lease));
+        mgr.extend_cached_prefix(&first_tokens, &mut first.lease);
+
+        assert_eq!(first.lease.last_node(), retained_tail);
+        assert_eq!(mgr.cache().num_nodes(), 2);
+        for event in buffer.drain() {
+            indexer.apply_event(event).unwrap();
+        }
+
+        let second_tokens = [1, 2, 3, 4, 9, 10, 11, 12];
+        let mut second = mgr.allocate_for_request(&second_tokens).unwrap();
+        assert_eq!(second.prefix_len, 4);
+        assert_eq!(first.lease.last_node(), retained_tail);
+        assert_eq!(mgr.cache().num_nodes(), 3);
+        mgr.extend_cached_prefix(&second_tokens, &mut second.lease);
+        assert_eq!(mgr.cache().num_nodes(), 4);
+        for event in buffer.drain() {
+            indexer.apply_event(event).unwrap();
+        }
+
+        mgr.finish(&first_tokens, first.lease);
+        assert!(mgr.retract(second.lease));
+        assert_eq!(mgr.cache().protected_size, 0);
+        assert_eq!(mgr.cache().evictable_size, 12);
+
+        mgr.evict(12);
+        for event in buffer.drain() {
+            indexer.apply_event(event).unwrap();
+        }
+        assert_eq!(mgr.cache().token_pool.available(), 16);
+        assert_eq!(mgr.cache().protected_size, 0);
+        assert_eq!(mgr.cache().evictable_size, 0);
+        assert_eq!(mgr.cache().num_nodes(), 1);
+    }
+
+    #[test]
     fn test_allocate_cache_miss() {
         let mut mgr = SglangKvManager::new(100, 1, KvEventPublishers::default(), 0);
 
@@ -1215,12 +1260,7 @@ mod tests {
 
         let seed_tokens = [1, 2, 3, 4];
         let seed = mgr.allocate_for_request(&seed_tokens).unwrap();
-        mgr.cache_finished_req(
-            &seed_tokens,
-            &seed.lease.kv_indices,
-            seed.lease.last_node(),
-            seed.prefix_len,
-        );
+        mgr.finish(&seed_tokens, seed.lease);
         for event in buffer.drain() {
             indexer.apply_event(event).unwrap();
         }
@@ -1231,31 +1271,20 @@ mod tests {
         let shared_tokens = [1, 2, 3, 4, 5, 6, 7, 8];
         let mut first = mgr.allocate_for_request(&shared_tokens).unwrap();
         let mut duplicate = mgr.allocate_for_request(&shared_tokens).unwrap();
-        let duplicate_suffix = duplicate.lease.kv_indices[seed_tokens.len()..].to_vec();
+        let duplicate_suffix = duplicate.lease.indices()[seed_tokens.len()..].to_vec();
         assert_ne!(
-            first.lease.kv_indices[seed_tokens.len()..],
-            duplicate.lease.kv_indices[seed_tokens.len()..]
+            first.lease.indices()[seed_tokens.len()..],
+            duplicate.lease.indices()[seed_tokens.len()..]
         );
         for event in buffer.drain() {
             indexer.apply_event(event).unwrap();
         }
 
-        let first_previous_last = first.lease.last_node();
-        let first_last = mgr.cache_unfinished_req(
-            &shared_tokens,
-            &mut first.lease.kv_indices,
-            first_previous_last,
-            first.prefix_len,
-        );
-        let duplicate_previous_last = duplicate.lease.last_node();
-        let duplicate_last = mgr.cache_unfinished_req(
-            &shared_tokens,
-            &mut duplicate.lease.kv_indices,
-            duplicate_previous_last,
-            duplicate.prefix_len,
-        );
+        mgr.extend_cached_prefix(&shared_tokens, &mut first.lease);
+        mgr.extend_cached_prefix(&shared_tokens, &mut duplicate.lease);
         assert_eq!(
-            duplicate.lease.kv_indices, first.lease.kv_indices,
+            duplicate.lease.indices(),
+            first.lease.indices(),
             "the active duplicate must switch to radix-owned canonical pages"
         );
         assert_eq!(
@@ -1266,7 +1295,7 @@ mod tests {
         assert!(
             duplicate_suffix
                 .iter()
-                .all(|idx| !duplicate.lease.kv_indices.contains(idx)),
+                .all(|idx| !duplicate.lease.indices().contains(idx)),
             "no duplicate physical slot may remain attached to the active request"
         );
         for event in buffer.drain() {
@@ -1275,13 +1304,8 @@ mod tests {
 
         // Mirror retracting the duplicate after its full prefix was cached,
         // then finish and evict the canonical request.
-        mgr.free_request(duplicate_last);
-        mgr.cache_finished_req(
-            &shared_tokens,
-            &first.lease.kv_indices,
-            first_last,
-            shared_tokens.len(),
-        );
+        assert!(mgr.retract(duplicate.lease));
+        mgr.finish(&shared_tokens, first.lease);
         mgr.evict(seed_tokens.len());
         mgr.evict(seed_tokens.len());
         for event in buffer.drain() {
@@ -1292,12 +1316,7 @@ mod tests {
         // duplicated block. A leaked duplicate publisher refcount would
         // suppress re-storing block 2 and emit block 3 with a missing parent.
         let restored = mgr.allocate_for_request(&seed_tokens).unwrap();
-        mgr.cache_finished_req(
-            &seed_tokens,
-            &restored.lease.kv_indices,
-            restored.lease.last_node(),
-            restored.prefix_len,
-        );
+        mgr.finish(&seed_tokens, restored.lease);
         for event in buffer.drain() {
             indexer.apply_event(event).unwrap();
         }
@@ -1323,8 +1342,7 @@ mod tests {
             indexer.apply_event(event).unwrap();
         }
 
-        mgr.free_indices(&extended.lease.kv_indices[extended.prefix_len..]);
-        mgr.free_request(extended.lease.last_node());
+        assert!(mgr.abort(extended.lease));
     }
 
     #[test]
