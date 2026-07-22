@@ -768,11 +768,10 @@ class WorkerFactory:
             create_failover_metrics,
         )
 
-        persist_dir = (
-            os.path.dirname(
+        persist_dir = os.path.dirname(
+            os.path.abspath(
                 os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
             )
-            or "/shared"
         )
         failover_metrics = create_failover_metrics(
             endpoint=generate_endpoint,
