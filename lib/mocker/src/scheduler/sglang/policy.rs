@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 
-use crate::cache::radix_cache::RadixCache;
 use crate::kv_manager::SglangKvManager;
+use rustc_hash::FxHashSet;
 
 use super::config::{
     IN_BATCH_PREFIX_CACHING_CHECK_THRESHOLD, IN_BATCH_PREFIX_CACHING_DEPRIORITIZE_THRESHOLD,
@@ -25,30 +25,19 @@ pub(super) fn apply_schedule_policy(
             }
 
             let page_size = config.block_size.max(1);
-            let total_tokens = waiting
-                .iter()
-                .map(SglangRequest::current_sequence_len)
-                .sum::<usize>()
-                .max(page_size);
-            let mut waiting_queue_cache = RadixCache::new(total_tokens, page_size);
-            let mut temporary_deprioritized = HashSet::new();
+            let duplicate_prefix_len =
+                IN_BATCH_PREFIX_CACHING_DEPRIORITIZE_THRESHOLD.div_ceil(page_size) * page_size;
+            let mut waiting_prefixes = FxHashSet::default();
             let mut scored = Vec::with_capacity(waiting.len());
 
             for req in waiting.drain(..) {
                 let sequence = req.sequence_tokens();
                 let prefix_len = kv_manager.cache().prefix_match_len(&sequence);
+                let deprioritized = prefix_len <= IN_BATCH_PREFIX_CACHING_CHECK_THRESHOLD
+                    && sequence.len() >= duplicate_prefix_len
+                    && !waiting_prefixes.insert(sequence[..duplicate_prefix_len].to_vec());
 
-                if prefix_len <= IN_BATCH_PREFIX_CACHING_CHECK_THRESHOLD {
-                    let in_batch_prefix = waiting_queue_cache.prefix_match_len(&sequence);
-                    if in_batch_prefix >= IN_BATCH_PREFIX_CACHING_DEPRIORITIZE_THRESHOLD {
-                        temporary_deprioritized.insert(req.uuid);
-                    } else if !sequence.is_empty() {
-                        let values: Vec<usize> = (0..sequence.len()).collect();
-                        waiting_queue_cache.insert(&sequence, &values);
-                    }
-                }
-
-                scored.push((prefix_len, temporary_deprioritized.contains(&req.uuid), req));
+                scored.push((prefix_len, deprioritized, req));
             }
 
             scored.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)));
