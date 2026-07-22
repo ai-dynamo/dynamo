@@ -426,3 +426,104 @@ def test_project_scale_to_masks_ready_echo_during_rollout_scale_down():
     assert decision is not None
     assert decision.num_prefill is None
     assert decision.num_decode == 2
+
+
+def test_project_scale_to_partial_prefill_proposal_does_not_scale_decode():
+    """Stable merged ``(prefill=5, decode=2)`` at ready ``(2, 2)`` under the
+    5000 W example budget must clamp only prefill and leave decode unemitted.
+
+    ``type_aware_merge`` fills the omitted decode role with its ready baseline,
+    so without restoring the proposal mask before the power clamp both roles
+    look adjustable and ``_shrink_pair`` can return decode=1 — a cross-role
+    scale-down ``DisaggPlanner`` would apply.
+    """
+    caps = WorkerCapabilities(
+        prefill=EngineCapabilities(num_gpu=2, power_watts_per_replica=700),
+        decode=EngineCapabilities(num_gpu=4, power_watts_per_replica=1200),
+        power_scale_up_blocked=False,
+    )
+    adapter = _bare_adapter(_mode_config("disagg", total_gpu_power_limit=5000), caps)
+    wc = WorkerCounts(
+        ready_num_prefill=2,
+        ready_num_decode=2,
+        expected_num_prefill=2,
+        expected_num_decode=2,
+    )
+    outcome = SimpleNamespace(
+        execute_action="apply",
+        final_proposal=SimpleNamespace(
+            targets=[
+                SimpleNamespace(sub_component_type="prefill", replicas=5),
+                # baseline echo of ready decode — not a genuine proposal
+                SimpleNamespace(sub_component_type="decode", replicas=2),
+            ]
+        ),
+    )
+    decision = adapter._project_scale_to(outcome, wc)
+    assert decision is not None
+    # 3*700 + 2*1200 = 4500 <= 5000; decode stays None (charged, not adjusted).
+    assert decision.num_prefill == 3
+    assert decision.num_decode is None
+
+
+def test_project_scale_to_partial_decode_proposal_does_not_scale_prefill():
+    """Mirror of the prefill-only case: merged ``(prefill=2, decode=5)`` must
+    not emit a prefill target."""
+    caps = WorkerCapabilities(
+        prefill=EngineCapabilities(num_gpu=2, power_watts_per_replica=700),
+        decode=EngineCapabilities(num_gpu=4, power_watts_per_replica=1200),
+        power_scale_up_blocked=False,
+    )
+    adapter = _bare_adapter(_mode_config("disagg", total_gpu_power_limit=5000), caps)
+    wc = WorkerCounts(
+        ready_num_prefill=2,
+        ready_num_decode=2,
+        expected_num_prefill=2,
+        expected_num_decode=2,
+    )
+    outcome = SimpleNamespace(
+        execute_action="apply",
+        final_proposal=SimpleNamespace(
+            targets=[
+                SimpleNamespace(sub_component_type="prefill", replicas=2),
+                SimpleNamespace(sub_component_type="decode", replicas=5),
+            ]
+        ),
+    )
+    decision = adapter._project_scale_to(outcome, wc)
+    assert decision is not None
+    # 2*700 + 3*1200 = 5000; prefill stays None.
+    assert decision.num_prefill is None
+    assert decision.num_decode == 3
+
+
+def test_project_scale_to_partial_scale_down_does_not_mutate_unproposed_role():
+    """An over-budget one-role scale-down must not drag the baseline-echoed
+    role through ``_shrink_pair``."""
+    caps = WorkerCapabilities(
+        prefill=EngineCapabilities(num_gpu=2, power_watts_per_replica=700),
+        decode=EngineCapabilities(num_gpu=4, power_watts_per_replica=1200),
+        power_scale_up_blocked=False,
+    )
+    adapter = _bare_adapter(_mode_config("disagg", total_gpu_power_limit=5000), caps)
+    # Current 4P+4D = 7600 W already over the 5000 W budget.
+    wc = WorkerCounts(
+        ready_num_prefill=4,
+        ready_num_decode=4,
+        expected_num_prefill=4,
+        expected_num_decode=4,
+    )
+    outcome = SimpleNamespace(
+        execute_action="apply",
+        final_proposal=SimpleNamespace(
+            targets=[
+                SimpleNamespace(sub_component_type="prefill", replicas=2),
+                SimpleNamespace(sub_component_type="decode", replicas=4),
+            ]
+        ),
+    )
+    decision = adapter._project_scale_to(outcome, wc)
+    assert decision is not None
+    assert decision.num_prefill == 2
+    # Decode was only a ready echo — must not be emitted / scaled down.
+    assert decision.num_decode is None

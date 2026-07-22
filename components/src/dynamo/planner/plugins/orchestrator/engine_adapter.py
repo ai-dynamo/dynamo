@@ -78,7 +78,6 @@ from dynamo.planner.core.types import (
     PlannerEffects,
     ScalingDecision,
     ScheduledTick,
-    TickDiagnostics,
     TickInput,
     TrafficObservation,
     WorkerCapabilities,
@@ -625,6 +624,11 @@ class OrchestratorEngineAdapter:
         diagnostics.execute_action = outcome.execute_action
         diagnostics.short_circuit_reason = outcome.short_circuit_reason
         diagnostics.audit_events = list(outcome.audit_events)
+        diagnostics.power_scale_up_blocked_reason = (
+            self._capabilities.power_scale_up_blocked_reason
+            if self._capabilities.power_scale_up_blocked
+            else ""
+        )
 
         return PlannerEffects(
             scale_to=scale_to,
@@ -644,130 +648,6 @@ class OrchestratorEngineAdapter:
             ObserveStageRequest(scheduled_tick=scheduled_tick, now_s=now_s)
         )
         return response.tick_input
-
-    def _project_load_diagnostics(self, diagnostics: TickDiagnostics) -> None:
-        """Read ``BuiltinLoadPropose._last_load_diagnostics`` and write
-        to ``diagnostics.load_decision_reason*`` + ``estimated_*_ms``.
-
-        Mirrors the builtin planner diagnostic surface:
-        - mode=agg → aggregate ``load_decision_reason``
-        - mode=disagg → per-component ``load_decision_reason_prefill`` /
-          ``_decode`` (and also the aggregate, set to whichever side
-          has a stronger signal; see ``_aggregate_disagg_load_reason``)
-        - mode=prefill/decode → aggregate reason from the single side
-        """
-        propose = self._builtins.get("load_propose")
-        if propose is None:
-            return
-        d = getattr(propose, "_last_load_diagnostics", None)
-        if d is None:
-            return
-
-        mode = self._config.mode
-        if mode == "agg":
-            diagnostics.load_decision_reason = d.get("agg")
-        elif mode == "disagg":
-            diagnostics.load_decision_reason_prefill = d.get("prefill")
-            diagnostics.load_decision_reason_decode = d.get("decode")
-            # Aggregate: prefer scale_up > scale_down > no_change >
-            # <skip reason>. Lets a single dashboard widget show "what
-            # did the load path do" without dropping into the per-
-            # component detail.
-            diagnostics.load_decision_reason = self._aggregate_disagg_load_reason(
-                d.get("prefill"), d.get("decode")
-            )
-        elif mode in ("prefill", "decode"):
-            diagnostics.load_decision_reason = d.get(mode)
-
-        diagnostics.estimated_ttft_ms = d.get("estimated_ttft_ms")
-        diagnostics.estimated_itl_ms = d.get("estimated_itl_ms")
-
-    def _project_throughput_diagnostics(self, diagnostics: TickDiagnostics) -> None:
-        """Read ``BuiltinThroughputPropose._last_throughput_diagnostics``
-        and write to ``diagnostics.throughput_decision_reason*``.
-
-        Symmetric with ``_project_load_diagnostics``: throughput proposal
-        records per-component reasons and this helper projects them onto
-        the public ``TickDiagnostics`` fields.
-
-        Mode mapping:
-        - mode=agg → aggregate ``throughput_decision_reason``
-        - mode=disagg → per-component
-          ``throughput_decision_reason_prefill``/``_decode`` plus the
-          aggregate (precedence via ``_aggregate_disagg_throughput_reason``)
-        - mode=prefill/decode → aggregate from the single side
-        """
-        propose = self._builtins.get("throughput_propose")
-        if propose is None:
-            return
-        d = getattr(propose, "_last_throughput_diagnostics", None)
-        if d is None:
-            return
-
-        mode = self._config.mode
-        if mode == "agg":
-            diagnostics.throughput_decision_reason = d.get("agg")
-        elif mode == "disagg":
-            diagnostics.throughput_decision_reason_prefill = d.get("prefill")
-            diagnostics.throughput_decision_reason_decode = d.get("decode")
-            diagnostics.throughput_decision_reason = (
-                self._aggregate_disagg_throughput_reason(
-                    d.get("prefill"), d.get("decode")
-                )
-            )
-        elif mode in ("prefill", "decode"):
-            diagnostics.throughput_decision_reason = d.get(mode)
-
-    @staticmethod
-    def _aggregate_disagg_load_reason(
-        prefill_reason: Optional[str], decode_reason: Optional[str]
-    ) -> Optional[str]:
-        """Collapse two per-component reasons to a single aggregate
-        string. Precedence keeps "a side scaled"
-        wins over "both stable", "stable with data" wins over "no
-        data"."""
-        priority = [
-            "scale_up",
-            "scale_down_capped_by_throughput",
-            "scale_down",
-            "no_change",
-            "insufficient_data",
-            "worker_count_mismatch",
-            "scaling_in_progress",
-            "no_fpm_data",
-            "disabled",
-        ]
-        pairs = [r for r in (prefill_reason, decode_reason) if r is not None]
-        if not pairs:
-            return None
-        for p in priority:
-            if p in pairs:
-                return p
-        return pairs[0]
-
-    @staticmethod
-    def _aggregate_disagg_throughput_reason(
-        prefill_reason: Optional[str], decode_reason: Optional[str]
-    ) -> Optional[str]:
-        """Collapse two per-component throughput reasons. Vocabulary
-        differs from load reasons (no scale_up/down enums on this
-        side); ranking keeps "stronger action wins":
-        ``scale`` > ``set_lower_bound`` > skip reasons."""
-        priority = [
-            "scale",
-            "set_lower_bound",
-            "model_not_ready",
-            "no_traffic_data",
-            "predict_failed",
-            "disabled",
-        ]
-        pairs = [r for r in (prefill_reason, decode_reason) if r is not None]
-        if not pairs:
-            return None
-        for p in priority:
-            if p in pairs:
-                return p
-        return pairs[0]
 
     async def shutdown(self) -> None:
         # Stop the gateway BEFORE unregistering plugins so no new
@@ -1032,7 +912,15 @@ class OrchestratorEngineAdapter:
 
     def _project_scale_to(self, outcome, worker_counts: WorkerCounts):
         """Project the pipeline outcome onto ``PlannerEffects.scale_to``
-        with planner "no change -> None" detection."""
+        with planner "no change -> None" detection.
+
+        ``type_aware_merge`` fills omitted roles from the ready-count baseline,
+        so a one-role proposal arrives as ``(changed, ready_echo)``. Collapsing
+        ready-equal targets to ``None`` *before* the final GPU/power budget
+        restores the proposal mask: the unchanged role is still charged at its
+        current count, but is not adjustable — otherwise the joint clamp can
+        emit a cross-role scale-down that ``DisaggPlanner`` would apply.
+        """
         if outcome.execute_action != "apply" or outcome.final_proposal is None:
             return None
 
@@ -1049,6 +937,14 @@ class OrchestratorEngineAdapter:
         d_unchanged = (num_d is None) or (num_d == current_d)
         if p_unchanged and d_unchanged:
             return None
+
+        # Restore the proposal mask before the final budget boundary (see
+        # docstring). Ready-equal echoes are charged via ``current_*`` inside
+        # the clamps, never returned as adjustable targets.
+        if num_p is not None and num_p == current_p:
+            num_p = None
+        if num_d is not None and num_d == current_d:
+            num_d = None
 
         num_p, num_d = self._apply_final_budget(num_p, num_d, worker_counts)
 
