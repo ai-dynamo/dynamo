@@ -1,0 +1,41 @@
+apiVersion: nvidia.com/v1beta1
+kind: DynamoComponentDeployment
+metadata:
+    $strict: false
+    name: $glob:component-manifests-decode-*
+spec:
+    backendFramework: vllm
+    name: decode
+    podTemplate:
+        metadata:
+            annotations:
+                nvidia.com/dynamo-operator-origin-version: 1.0.0
+            labels:
+                nvidia.com/dynamo-worker-hash: $pattern:[0-9a-f]{8}
+        spec:
+            containers:
+                - image: registry.example/dynamo-worker:test
+                  name: main
+    replicas: 2
+    type: decode
+status: $notexists
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoComponentDeployment
+metadata:
+    $strict: false
+    name: component-manifests-frontend
+spec:
+    backendFramework: vllm
+    name: frontend
+    podTemplate:
+        metadata:
+            annotations:
+                nvidia.com/dynamo-operator-origin-version: 1.0.0
+        spec:
+            containers:
+                - image: registry.example/dynamo-frontend:test
+                  name: main
+    replicas: 1
+    type: frontend
+status: $notexists

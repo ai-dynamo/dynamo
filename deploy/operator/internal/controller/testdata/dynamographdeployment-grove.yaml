@@ -1,0 +1,309 @@
+apiVersion: grove.io/v1alpha1
+kind: PodCliqueSet
+metadata:
+    $strict: false
+    name: grove-manifest
+spec:
+    replicas: 1
+    template:
+        cliqueStartupType: CliqueStartupTypeAnyOrder
+        cliques:
+            - annotations:
+                nvidia.com/dynamo-discovery-backend: kubernetes
+                nvidia.com/dynamo-operator-origin-version: 1.0.0
+              labels:
+                nvidia.com/dynamo-component: frontend
+                nvidia.com/dynamo-component-type: frontend
+                nvidia.com/dynamo-discovery-backend: kubernetes
+                nvidia.com/dynamo-discovery-enabled: "true"
+                nvidia.com/dynamo-graph-deployment-name: grove-manifest
+                nvidia.com/dynamo-namespace: $pattern:clusterenv-.*-grove-manifest
+                nvidia.com/metrics-enabled: "true"
+                nvidia.com/selector: grove-manifest-frontend
+              name: frontend
+              spec:
+                minAvailable: 1
+                podSpec:
+                    containers:
+                        - args:
+                            - -m
+                            - dynamo.frontend
+                          command:
+                            - python3
+                          env:
+                            - name: DYNAMO_PORT
+                              value: "8000"
+                            - name: DYN_COMPONENT
+                              value: frontend
+                            - name: DYN_DISCOVERY_BACKEND
+                              value: kubernetes
+                            - name: DYN_HTTP_PORT
+                              value: "8000"
+                            - name: DYN_NAMESPACE
+                              value: $pattern:clusterenv-.*-grove-manifest
+                            - name: DYN_NAMESPACE_PREFIX
+                              value: $pattern:clusterenv-.*-grove-manifest
+                            - name: DYN_PARENT_DGD_K8S_NAME
+                              value: grove-manifest
+                            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+                              value: $pattern:clusterenv-.*
+                            - name: POD_NAME
+                              valueFrom:
+                                fieldRef:
+                                    fieldPath: metadata.name
+                            - name: POD_NAMESPACE
+                              valueFrom:
+                                fieldRef:
+                                    fieldPath: metadata.namespace
+                            - name: POD_UID
+                              valueFrom:
+                                fieldRef:
+                                    fieldPath: metadata.uid
+                          image: registry.example/dynamo-frontend:test
+                          livenessProbe:
+                            failureThreshold: 3
+                            httpGet:
+                                path: /live
+                                port: http
+                            initialDelaySeconds: 15
+                            periodSeconds: 10
+                            timeoutSeconds: 1
+                          name: main
+                          ports:
+                            - containerPort: 8000
+                              name: http
+                              protocol: TCP
+                          readinessProbe:
+                            failureThreshold: 3
+                            httpGet:
+                                path: /health
+                                port: http
+                            initialDelaySeconds: 10
+                            periodSeconds: 10
+                            timeoutSeconds: 3
+                          resources: {}
+                          volumeMounts:
+                            - mountPath: /dev/shm
+                              name: shared-memory
+                    restartPolicy: Always
+                    securityContext:
+                        fsGroup: 1000
+                    serviceAccountName: grove-manifest-k8s-service-discovery
+                    terminationGracePeriodSeconds: 60
+                    volumes:
+                        - emptyDir:
+                            medium: Memory
+                            sizeLimit: 8Gi
+                          name: shared-memory
+                replicas: 1
+                roleName: frontend
+            - annotations:
+                nvidia.com/dynamo-discovery-backend: kubernetes
+                nvidia.com/dynamo-operator-origin-version: 1.0.0
+              labels:
+                nvidia.com/dynamo-component: decode
+                nvidia.com/dynamo-component-type: decode
+                nvidia.com/dynamo-discovery-backend: kubernetes
+                nvidia.com/dynamo-discovery-enabled: "true"
+                nvidia.com/dynamo-graph-deployment-name: grove-manifest
+                nvidia.com/dynamo-namespace: $pattern:clusterenv-.*-grove-manifest
+                nvidia.com/dynamo-sub-component-type: decode
+                nvidia.com/metrics-enabled: "true"
+                nvidia.com/selector: grove-manifest-decode
+              name: decode-ldr
+              spec:
+                minAvailable: 1
+                podSpec:
+                    containers:
+                        - command:
+                            - /bin/sh
+                            - -c
+                          env:
+                            - name: DYN_COMPONENT
+                              value: decode
+                            - name: DYN_DISCOVERY_BACKEND
+                              value: kubernetes
+                            - name: DYN_FORWARDPASS_METRIC_PORT
+                              value: "20380"
+                            - name: DYN_HEALTH_CHECK_ENABLED
+                              value: "false"
+                            - name: DYN_NAMESPACE
+                              value: $pattern:clusterenv-.*-grove-manifest
+                            - name: DYN_PARENT_DGD_K8S_NAME
+                              value: grove-manifest
+                            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+                              value: $pattern:clusterenv-.*
+                            - name: DYN_SYSTEM_ENABLED
+                              value: "true"
+                            - name: DYN_SYSTEM_PORT
+                              value: "9090"
+                            - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+                              value: '["generate"]'
+                            - name: NIXL_TELEMETRY_ENABLE
+                              value: "n"
+                            - name: NIXL_TELEMETRY_EXPORTER
+                              value: prometheus
+                            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+                              value: "19090"
+                            - name: POD_NAME
+                              valueFrom:
+                                fieldRef:
+                                    fieldPath: metadata.name
+                            - name: POD_NAMESPACE
+                              valueFrom:
+                                fieldRef:
+                                    fieldPath: metadata.namespace
+                            - name: POD_UID
+                              valueFrom:
+                                fieldRef:
+                                    fieldPath: metadata.uid
+                            - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+                              valueFrom:
+                                fieldRef:
+                                    fieldPath: status.podIP
+                          image: registry.example/dynamo-worker:test
+                          livenessProbe:
+                            failureThreshold: 1
+                            httpGet:
+                                path: /live
+                                port: system
+                            periodSeconds: 5
+                            timeoutSeconds: 4
+                          name: main
+                          ports:
+                            - containerPort: 9090
+                              name: system
+                              protocol: TCP
+                            - containerPort: 19090
+                              name: nixl
+                              protocol: TCP
+                          readinessProbe:
+                            failureThreshold: 3
+                            httpGet:
+                                path: /health
+                                port: system
+                            periodSeconds: 10
+                            timeoutSeconds: 4
+                          resources: {}
+                          startupProbe:
+                            failureThreshold: 720
+                            httpGet:
+                                path: /live
+                                port: system
+                            periodSeconds: 10
+                            timeoutSeconds: 5
+                          volumeMounts:
+                            - mountPath: /dev/shm
+                              name: shared-memory
+                    restartPolicy: Always
+                    securityContext:
+                        fsGroup: 1000
+                    serviceAccountName: grove-manifest-k8s-service-discovery
+                    terminationGracePeriodSeconds: 60
+                    volumes:
+                        - emptyDir:
+                            medium: Memory
+                            sizeLimit: 8Gi
+                          name: shared-memory
+                replicas: 1
+                roleName: decode-ldr
+            - annotations:
+                nvidia.com/dynamo-discovery-backend: kubernetes
+                nvidia.com/dynamo-operator-origin-version: 1.0.0
+              labels:
+                nvidia.com/dynamo-component: decode
+                nvidia.com/dynamo-component-type: decode
+                nvidia.com/dynamo-discovery-backend: kubernetes
+                nvidia.com/dynamo-discovery-enabled: "true"
+                nvidia.com/dynamo-graph-deployment-name: grove-manifest
+                nvidia.com/dynamo-namespace: $pattern:clusterenv-.*-grove-manifest
+                nvidia.com/dynamo-sub-component-type: decode
+                nvidia.com/metrics-enabled: "true"
+                nvidia.com/selector: grove-manifest-decode
+              name: decode-wkr
+              spec:
+                minAvailable: 1
+                podSpec:
+                    containers:
+                        - command:
+                            - /bin/sh
+                            - -c
+                          env:
+                            - name: DYN_COMPONENT
+                              value: decode
+                            - name: DYN_DISCOVERY_BACKEND
+                              value: kubernetes
+                            - name: DYN_FORWARDPASS_METRIC_PORT
+                              value: "20380"
+                            - name: DYN_HEALTH_CHECK_ENABLED
+                              value: "false"
+                            - name: DYN_NAMESPACE
+                              value: $pattern:clusterenv-.*-grove-manifest
+                            - name: DYN_PARENT_DGD_K8S_NAME
+                              value: grove-manifest
+                            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+                              value: $pattern:clusterenv-.*
+                            - name: DYN_SYSTEM_ENABLED
+                              value: "true"
+                            - name: DYN_SYSTEM_PORT
+                              value: "9090"
+                            - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+                              value: '["generate"]'
+                            - name: NIXL_TELEMETRY_ENABLE
+                              value: "n"
+                            - name: NIXL_TELEMETRY_EXPORTER
+                              value: prometheus
+                            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+                              value: "19090"
+                            - name: POD_NAME
+                              valueFrom:
+                                fieldRef:
+                                    fieldPath: metadata.name
+                            - name: POD_NAMESPACE
+                              valueFrom:
+                                fieldRef:
+                                    fieldPath: metadata.namespace
+                            - name: POD_UID
+                              valueFrom:
+                                fieldRef:
+                                    fieldPath: metadata.uid
+                            - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+                              valueFrom:
+                                fieldRef:
+                                    fieldPath: status.podIP
+                          image: registry.example/dynamo-worker:test
+                          name: main
+                          ports:
+                            - containerPort: 9090
+                              name: system
+                              protocol: TCP
+                            - containerPort: 19090
+                              name: nixl
+                              protocol: TCP
+                          resources: {}
+                          volumeMounts:
+                            - mountPath: /dev/shm
+                              name: shared-memory
+                    restartPolicy: Always
+                    securityContext:
+                        fsGroup: 1000
+                    serviceAccountName: grove-manifest-k8s-service-discovery
+                    terminationGracePeriodSeconds: 60
+                    volumes:
+                        - emptyDir:
+                            medium: Memory
+                            sizeLimit: 8Gi
+                          name: shared-memory
+                replicas: 1
+                roleName: decode-wkr
+        headlessServiceConfig:
+            publishNotReadyAddresses: true
+        podCliqueScalingGroups:
+            - cliqueNames:
+                - decode-ldr
+                - decode-wkr
+              minAvailable: 1
+              name: decode
+              replicas: 1
+        terminationDelay: 15m0s
+status: $notexists

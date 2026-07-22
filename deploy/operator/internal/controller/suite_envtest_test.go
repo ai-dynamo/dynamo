@@ -46,7 +46,13 @@ func setupProductionWebhooks(mgr ctrl.Manager, opts operatorenv.WebhookSetupOpti
 }
 
 func TestMain(m *testing.M) {
-	os.Exit(sharedEnv.RunM(m))
+	os.Exit(runClusterTestEnv(testRunnerFunc(func() int { return sharedEnv.RunM(m) })))
+}
+
+type testRunnerFunc func() int
+
+func (f testRunnerFunc) Run() int {
+	return f()
 }
 
 func TestControllers(t *testing.T) {
