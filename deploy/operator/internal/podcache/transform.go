@@ -104,7 +104,7 @@ func projectContainers(in []corev1.Container) []corev1.Container {
 }
 
 func projectTopologyVolumes(in []corev1.Volume) []corev1.Volume {
-	var out []corev1.Volume
+	out := make([]corev1.Volume, 0, len(in))
 	for i := range in {
 		if in[i].DownwardAPI == nil {
 			continue
@@ -156,7 +156,7 @@ func projectStatus(in corev1.PodStatus) corev1.PodStatus {
 }
 
 func projectReadyConditions(in []corev1.PodCondition) []corev1.PodCondition {
-	var out []corev1.PodCondition
+	out := make([]corev1.PodCondition, 0, len(in))
 	for i := range in {
 		if in[i].Type != corev1.PodReady {
 			continue
