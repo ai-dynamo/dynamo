@@ -321,6 +321,7 @@ const MULTI_OUTPUT: u8 = 3;
 const PROMPT_LOGPROBS: u8 = 4;
 const PREFILL_NO_USAGE: u8 = 5;
 const PREFILL_BAD_HANDOFF: u8 = 6;
+const DELAYED_DRAIN_COMPLETE: u8 = 7;
 
 struct FakeState {
     engine: Mutex<pb::ServerInfo>,
@@ -708,7 +709,7 @@ impl pb::control_server::Control for FakeOpenEngine {
 
     async fn drain(
         &self,
-        _: tonic::Request<pb::DrainRequest>,
+        request: tonic::Request<pb::DrainRequest>,
     ) -> Result<tonic::Response<Self::DrainStream>, tonic::Status> {
         if self.0.behavior.load(Ordering::SeqCst) == PENDING {
             return Ok(tonic::Response::new(Box::pin(async_stream::try_stream! {
@@ -717,6 +718,22 @@ impl pb::control_server::Control for FakeOpenEngine {
                     ..Default::default()
                 };
                 std::future::pending::<()>().await;
+            })));
+        }
+        if self.0.behavior.load(Ordering::SeqCst) == DELAYED_DRAIN_COMPLETE {
+            let deadline_ms = request.into_inner().deadline_ms.unwrap_or_default();
+            return Ok(tonic::Response::new(Box::pin(async_stream::try_stream! {
+                yield pb::DrainResponse {
+                    event: Some(pb::drain_response::Event::State(pb::DrainState::Started as i32)),
+                    ..Default::default()
+                };
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    u64::from(deadline_ms) + 100,
+                )).await;
+                yield pb::DrainResponse {
+                    event: Some(pb::drain_response::Event::State(pb::DrainState::Complete as i32)),
+                    ..Default::default()
+                };
             })));
         }
         Ok(tonic::Response::new(Box::pin(futures::stream::once(
@@ -1461,6 +1478,25 @@ async fn fake_tonic_blackholed_drain_stream_times_out() {
         .await
         .expect("sidecar drain must have its own timeout");
     assert!(result.is_err());
+    engine.cleanup().await.unwrap();
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fake_tonic_drain_accepts_terminal_cleanup_after_remote_deadline() {
+    let state = Arc::new(FakeState::default());
+    state
+        .behavior
+        .store(DELAYED_DRAIN_COMPLETE, Ordering::SeqCst);
+    let server = FakeServer::start(state).await;
+    let (engine, _) = build_sidecar(server.address, "tensorrt_llm").await.unwrap();
+    engine.start(1).await.unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), engine.drain())
+        .await
+        .expect("cleanup completed inside the configured total drain budget")
+        .expect("Drain reached terminal COMPLETE");
+
     engine.cleanup().await.unwrap();
     server.stop().await;
 }

@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
@@ -30,6 +31,8 @@ use crate::client::{self, Discovery, Pool};
 use crate::convert;
 use crate::kv;
 use crate::proto as pb;
+
+const DRAIN_ABORT_CLEANUP_GRACE: Duration = Duration::from_secs(5);
 
 pub struct OpenEngineSidecar {
     endpoint: String,
@@ -712,12 +715,11 @@ impl LLMEngine for OpenEngineSidecar {
         let Some(pool) = self.pool.get() else {
             return Ok(());
         };
-        let deadline = Instant::now() + self.transport.drain_timeout;
-        let deadline_ms = self
-            .transport
-            .drain_timeout
-            .as_millis()
-            .min(u32::MAX as u128) as u32;
+        let client_timeout = self.transport.drain_timeout;
+        let deadline = Instant::now() + client_timeout;
+        let cleanup_grace = DRAIN_ABORT_CLEANUP_GRACE.min(client_timeout / 2);
+        let remote_timeout = self.transport.drain_timeout.saturating_sub(cleanup_grace);
+        let deadline_ms = remote_timeout.as_millis().min(u32::MAX as u128) as u32;
         let mut stream = tokio::time::timeout(
             self.transport.drain_timeout,
             pool.control_client().drain(pb::DrainRequest {

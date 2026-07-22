@@ -219,9 +219,9 @@ async fn subscribe_loop(
                         }
                     };
                     for mut event in events {
-                        // OpenEngine sequences batches, while Dynamo sequences
-                        // individual normalized events. Assign a local monotonic
-                        // ID so every event in a valid repeated batch is retained.
+                        // Batch continuity is verified above. Dynamo requires a
+                        // distinct ID for every normalized event, so expand each
+                        // lossless producer batch into local consecutive IDs.
                         event.event_id = publisher.next_event_id();
                         if let Err(error) = publisher.publish(event) {
                             tracing::debug!(%error, rank, "Dynamo KV publisher closed");
@@ -375,8 +375,8 @@ fn convert_event(
         pb::kv_event::Event::AllBlocksCleared(_) => KvCacheEventData::Cleared,
     };
     Ok(Some(KvCacheEvent {
-        // Keep the producer sequence intact so queue drops remain visible to
-        // Dynamo's indexer rather than being hidden by a local counter.
+        // The caller assigns a distinct local ID after validating the producer
+        // batch sequence. A batch may contain more than one normalized event.
         event_id: sequence_number,
         data,
         dp_rank: rank,
@@ -384,7 +384,11 @@ fn convert_event(
 }
 
 fn accept_sequence(last: &mut Option<u64>, current: u64) -> bool {
-    if last.is_some_and(|last| current <= last) {
+    let accepted = match *last {
+        None => true,
+        Some(previous) => previous.checked_add(1) == Some(current),
+    };
+    if !accepted {
         return false;
     }
     *last = Some(current);
@@ -496,7 +500,7 @@ mod tests {
     }
 
     #[test]
-    fn preserves_gaps_and_rejects_non_monotonic_sequences() {
+    fn preserves_batch_ids_and_rejects_sequence_gaps() {
         let warnings = Arc::new(AtomicU32::new(0));
         let cleared = || pb::KvEvent {
             event: Some(pb::kv_event::Event::AllBlocksCleared(
@@ -520,9 +524,9 @@ mod tests {
         );
         let mut last = None;
         assert!(accept_sequence(&mut last, 7));
-        assert!(accept_sequence(&mut last, 11));
-        assert!(!accept_sequence(&mut last, 11));
+        assert!(accept_sequence(&mut last, 8));
         assert!(!accept_sequence(&mut last, 10));
+        assert!(!accept_sequence(&mut last, 8));
     }
 
     #[test]
