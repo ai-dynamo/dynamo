@@ -24,10 +24,7 @@ from tests.serve.multimodal_profiles.sglang import (
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
 from tests.utils.multimodal import make_image_payload_b64, make_multimodal_configs
-from tests.utils.otel import (
-    get_span_attribute,
-    wait_for_engine_generate_roles,
-)
+from tests.utils.otel import get_span_attribute, wait_for_engine_generate_roles
 from tests.utils.payload_builder import (
     anthropic_messages_payload_default,
     anthropic_messages_stream_payload_default,
@@ -883,7 +880,7 @@ _DISAGGREGATED_OTEL_CONFIG = SGLangConfig(
     name="disaggregated_otel",
     directory=sglang_dir,
     script_name="disagg.sh",
-    script_args=["--enable-otel", "--unified"],
+    script_args=["--enable-otel"],
     marks=[],  # applied on the dedicated test below
     model="Qwen/Qwen3-0.6B",
     request_payloads=[chat_payload_default(repeat_count=1)],
@@ -928,7 +925,6 @@ def _assert_disaggregated_engine_generate_spans_exported(collector) -> None:
 @pytest.mark.requested_sglang_kv_tokens(2048)
 @pytest.mark.timeout(470)
 @pytest.mark.nightly
-@pytest.mark.unified
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
 def test_disaggregated_otel_exports_worker_graph_spans(
     request,
