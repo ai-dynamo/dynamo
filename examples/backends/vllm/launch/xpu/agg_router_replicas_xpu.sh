@@ -17,7 +17,7 @@ source "$SCRIPT_DIR/../../../../common/launch_utils.sh"
 
 HTTP_PORT_R1="${DYN_HTTP_PORT_R1:-8000}"
 HTTP_PORT_R2="${DYN_HTTP_PORT_R2:-8001}"
-print_launch_banner --no-curl "Launching Aggregated + KV Routing + Replicas (2 GPUs)" "$MODEL" "$HTTP_PORT_R1" \
+print_launch_banner --no-curl "Launching Aggregated + KV Routing + Replicas (2 XPUs)" "$MODEL" "$HTTP_PORT_R1" \
     "Frontend R2: http://localhost:$HTTP_PORT_R2"
 
 # run two routers (different HTTP + system ports)
