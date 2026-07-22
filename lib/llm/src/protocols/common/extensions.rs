@@ -337,8 +337,8 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
     let strict_priority_header = headers
         .get(HEADER_REQUEST_STRICT_PRIORITY)
         .and_then(|v| v.to_str().ok());
-    // Parsed only to drive the "any routing header present?" gate below; the
-    // header-over-body merge itself is delegated to `resolve_request_priority`.
+    // Parsed only for the "header present?" gate below; the merge is delegated to
+    // `resolve_request_priority`.
     let priority = priority_header.and_then(|s| s.trim().parse::<i32>().ok());
     let strict_priority = strict_priority_header.and_then(|s| s.trim().parse::<u32>().ok());
     let tenant_id = headers
@@ -373,8 +373,7 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         ext.prefill_dp_rank = Some(rank);
     }
     if priority.is_some() || strict_priority.is_some() {
-        // Bake the effective header-over-body priority into the body so downstream
-        // body-only readers observe the same value the EPP resolves at read time.
+        // Bake the effective header-over-body priority into the body.
         let resolved = resolve_request_priority(
             ext.agent_hints.as_ref(),
             priority_header,
@@ -390,26 +389,18 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
     Some(ext)
 }
 
-/// Effective request priority resolved from body `agent_hints` and raw header
-/// values. Transport-neutral: the caller extracts the raw header strings — from
-/// an `http::HeaderMap` (frontend/preprocessor) or Envoy `ext_proc` headers
-/// (EPP) — and passes them in, so one policy serves every entry point.
-///
-/// Precedence, applied to each field independently:
-/// - a well-formed header value — including `0` or a negative `priority` —
-///   overrides the body;
-/// - a missing or malformed header falls back to the body value;
-/// - `latency_sensitivity` (deprecated) contributes only through
-///   [`ResolvedPriority::priority_jump`], and only when no `priority` exists from
-///   either the header or the body.
+/// Priority resolved with header-over-body precedence, per field: a well-formed
+/// header (incl. `0`/negative) wins; a missing/malformed one falls back to the
+/// body; `latency_sensitivity` feeds only `priority_jump`, only when no priority
+/// exists. Transport-neutral — the caller passes header strings from an
+/// `http::HeaderMap` or Envoy `ext_proc` headers, so one policy serves both.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct ResolvedPriority {
-    /// Effective unified priority (`x-dynamo-request-priority` over body).
+    /// Effective `x-dynamo-request-priority`.
     pub priority: Option<i32>,
-    /// Effective strict pending-queue tier (`x-dynamo-request-strict-priority`).
+    /// Effective `x-dynamo-request-strict-priority` (queue tier).
     pub strict_priority: Option<u32>,
-    /// Scheduler priority-jump weight: the effective `priority` as `f64`, else the
-    /// deprecated `latency_sensitivity`, else `None` when unset everywhere.
+    /// `priority` as `f64`, else deprecated `latency_sensitivity`, else `None`.
     pub priority_jump: Option<f64>,
 }
 
