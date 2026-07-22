@@ -250,6 +250,20 @@ With operator-managed GAIE, NATS Core backs live routing-state delivery. After a
 rebuilds prefix state from worker-local indexers and then consumes subsequent updates through the
 Dynamo event plane.
 
+### Request Priority Headers
+
+Callers can set per-request routing priority with headers. The EPP resolves them with
+header-over-body precedence: a valid header overrides the request body's `nvext.agent_hints`, while
+a missing or malformed header falls back to the body value (each field independently).
+
+| Header | Value | Effect |
+|---|---|---|
+| `x-dynamo-request-priority` | Integer (zero or negative allowed) | Unified routing priority; overrides `nvext.agent_hints.priority`. |
+| `x-dynamo-request-strict-priority` | Unsigned integer | Strict pending-queue priority tier; overrides `nvext.agent_hints.strict_priority`. |
+
+The same resolution applies on the Dynamo frontend path, so a request carries the same effective
+priority regardless of which entry point handles it.
+
 ## Compatibility and Defaults
 
 The quickstart pins the Gateway API layer so manual setup is repeatable. Keep the Dynamo platform,

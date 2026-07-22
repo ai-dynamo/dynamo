@@ -331,15 +331,16 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         .and_then(|s| s.parse::<u32>().ok());
     let prefill_dp_rank = prefill_dp_rank.filter(|rank| *rank != UNSET_DP_RANK_SENTINEL);
 
-    let priority = headers
+    let priority_header = headers
         .get(HEADER_REQUEST_PRIORITY)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<i32>().ok());
-
-    let strict_priority = headers
+        .and_then(|v| v.to_str().ok());
+    let strict_priority_header = headers
         .get(HEADER_REQUEST_STRICT_PRIORITY)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u32>().ok());
+        .and_then(|v| v.to_str().ok());
+    // Parsed only to drive the "any routing header present?" gate below; the
+    // header-over-body merge itself is delegated to `resolve_request_priority`.
+    let priority = priority_header.and_then(|s| s.trim().parse::<i32>().ok());
+    let strict_priority = strict_priority_header.and_then(|s| s.trim().parse::<u32>().ok());
     let tenant_id = headers
         .get(HEADER_TENANT_ID)
         .and_then(|v| v.to_str().ok())
@@ -372,18 +373,67 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         ext.prefill_dp_rank = Some(rank);
     }
     if priority.is_some() || strict_priority.is_some() {
+        // Bake the effective header-over-body priority into the body so downstream
+        // body-only readers observe the same value the EPP resolves at read time.
+        let resolved = resolve_request_priority(
+            ext.agent_hints.as_ref(),
+            priority_header,
+            strict_priority_header,
+        );
         let hints = ext.agent_hints.get_or_insert_with(AgentHints::default);
-        if let Some(priority) = priority {
-            hints.priority = Some(priority);
-        }
-        if let Some(strict_priority) = strict_priority {
-            hints.strict_priority = Some(strict_priority);
-        }
+        hints.priority = resolved.priority;
+        hints.strict_priority = resolved.strict_priority;
     }
     if let Some(salt) = tenant_id {
         ext.cache_salt = Some(salt);
     }
     Some(ext)
+}
+
+/// Effective request priority resolved from body `agent_hints` and raw header
+/// values. Transport-neutral: the caller extracts the raw header strings — from
+/// an `http::HeaderMap` (frontend/preprocessor) or Envoy `ext_proc` headers
+/// (EPP) — and passes them in, so one policy serves every entry point.
+///
+/// Precedence, applied to each field independently:
+/// - a well-formed header value — including `0` or a negative `priority` —
+///   overrides the body;
+/// - a missing or malformed header falls back to the body value;
+/// - `latency_sensitivity` (deprecated) contributes only through
+///   [`ResolvedPriority::priority_jump`], and only when no `priority` exists from
+///   either the header or the body.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ResolvedPriority {
+    /// Effective unified priority (`x-dynamo-request-priority` over body).
+    pub priority: Option<i32>,
+    /// Effective strict pending-queue tier (`x-dynamo-request-strict-priority`).
+    pub strict_priority: Option<u32>,
+    /// Scheduler priority-jump weight: the effective `priority` as `f64`, else the
+    /// deprecated `latency_sensitivity`, else `None` when unset everywhere.
+    pub priority_jump: Option<f64>,
+}
+
+/// Resolve request priority from body hints and already-looked-up raw header
+/// values. See [`ResolvedPriority`] for the precedence contract.
+pub fn resolve_request_priority(
+    hints: Option<&AgentHints>,
+    priority_header: Option<&str>,
+    strict_priority_header: Option<&str>,
+) -> ResolvedPriority {
+    let priority = priority_header
+        .and_then(|h| h.trim().parse::<i32>().ok())
+        .or_else(|| hints.and_then(|h| h.priority));
+    let strict_priority = strict_priority_header
+        .and_then(|h| h.trim().parse::<u32>().ok())
+        .or_else(|| hints.and_then(|h| h.strict_priority));
+    let priority_jump = priority
+        .map(|p| p as f64)
+        .or_else(|| hints.and_then(|h| h.latency_sensitivity));
+    ResolvedPriority {
+        priority,
+        strict_priority,
+        priority_jump,
+    }
 }
 
 pub trait NvExtProvider {
@@ -880,6 +930,60 @@ mod tests {
         assert_eq!(hints.priority, Some(-3));
         assert_eq!(hints.strict_priority, Some(2));
         assert_eq!(hints.osl, Some(99));
+    }
+
+    #[test]
+    fn resolve_request_priority_header_over_body_with_independent_fallback() {
+        let hints = AgentHints {
+            priority: Some(5),
+            strict_priority: Some(2),
+            latency_sensitivity: Some(1.5),
+            ..Default::default()
+        };
+
+        // Valid headers (including negative) override the body, per field.
+        let r = resolve_request_priority(Some(&hints), Some("-3"), Some("7"));
+        assert_eq!(r.priority, Some(-3));
+        assert_eq!(r.strict_priority, Some(7));
+        assert_eq!(r.priority_jump, Some(-3.0));
+
+        // Zero is a valid override, not "absent"; the other field falls back.
+        let r = resolve_request_priority(Some(&hints), Some("0"), None);
+        assert_eq!(r.priority, Some(0));
+        assert_eq!(r.priority_jump, Some(0.0));
+        assert_eq!(r.strict_priority, Some(2));
+
+        // Malformed/missing headers fall back to the body, independently.
+        let r = resolve_request_priority(Some(&hints), Some("abc"), None);
+        assert_eq!(r.priority, Some(5));
+        assert_eq!(r.strict_priority, Some(2));
+        assert_eq!(r.priority_jump, Some(5.0));
+
+        // `latency_sensitivity` drives `priority_jump` only when no priority exists.
+        let ls_only = AgentHints {
+            latency_sensitivity: Some(2.5),
+            ..Default::default()
+        };
+        let r = resolve_request_priority(Some(&ls_only), None, None);
+        assert_eq!(r.priority, None);
+        assert_eq!(r.priority_jump, Some(2.5));
+
+        // A real priority beats the deprecated `latency_sensitivity`.
+        let both = AgentHints {
+            priority: Some(4),
+            latency_sensitivity: Some(9.0),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_request_priority(Some(&both), None, None).priority_jump,
+            Some(4.0)
+        );
+
+        // Nothing set anywhere.
+        assert_eq!(
+            resolve_request_priority(None, None, None),
+            ResolvedPriority::default()
+        );
     }
 
     #[test]
