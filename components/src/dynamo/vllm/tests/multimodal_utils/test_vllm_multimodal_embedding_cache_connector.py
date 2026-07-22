@@ -27,6 +27,7 @@ def _make_vllm_config(capacity_gb: float = 1.0) -> MagicMock:
     }
     config.model_config.get_hidden_size.return_value = 4096
     config.model_config.dtype = torch.float16
+    config.parallel_config.data_parallel_rank = 0
     return config
 
 
@@ -207,7 +208,7 @@ class TestSchedulerSideLRU:
 class TestSchedulerMetrics:
     """Prometheus metrics emitted by the scheduler-role connector."""
 
-    LABELS = {"model": "test-model", "dynamo_component": "backend"}
+    LABELS = {"model": "test-model", "dynamo_component": "backend", "dp_rank": "0"}
 
     def _make_connector(
         self, capacity_gb: float = 1.0, role=None
@@ -228,6 +229,32 @@ class TestSchedulerMetrics:
     def test_worker_role_has_no_metrics(self):
         conn = self._make_connector(role=mod.ECConnectorRole.WORKER)
         assert conn._metrics is None
+
+    def test_dp_rank_label_partitions_series(self):
+        from dynamo.common.utils.prometheus import EmbeddingCacheMetrics as ECM
+
+        config = _make_vllm_config()
+        config.parallel_config.data_parallel_rank = 3
+        config.ec_transfer_config.ec_connector_extra_config.update(
+            {"model_name": "test-model", "component": "backend"}
+        )
+        with patch.object(mod.ECConnectorBase, "__init__", return_value=None):
+            conn = mod.DynamoMultimodalEmbeddingCacheConnector(
+                vllm_config=config,
+                role=mod.ECConnectorRole.SCHEDULER,
+            )
+
+        rank3_labels = {**self.LABELS, "dp_rank": "3"}
+        assert (
+            conn._metrics.registry.get_sample_value(
+                ECM.MISSES_TOTAL.value, rank3_labels
+            )
+            == 0.0
+        )
+        assert (
+            conn._metrics.registry.get_sample_value(ECM.MISSES_TOTAL.value, self.LABELS)
+            is None
+        )
 
     def test_series_present_before_activity(self):
         from dynamo.common.utils.prometheus import EmbeddingCacheMetrics as ECM

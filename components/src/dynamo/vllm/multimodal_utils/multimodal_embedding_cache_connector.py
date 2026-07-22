@@ -71,7 +71,7 @@ class _SchedulerCacheMetrics:
     """
 
     def __init__(
-        self, model_name: str, component_name: str, capacity_bytes: int
+        self, model_name: str, component_name: str, capacity_bytes: int, dp_rank: int
     ) -> None:
         # Deferred imports: prometheus_client must be imported after
         # PROMETHEUS_MULTIPROC_DIR is set (inherited from the parent process).
@@ -82,10 +82,16 @@ class _SchedulerCacheMetrics:
 
         self._capacity_bytes = capacity_bytes
         self.registry = CollectorRegistry()
-        labelnames = [labels.MODEL, labels.COMPONENT]
+        # dp_rank partitions series per data-parallel EngineCore (each rank has
+        # its own scheduler-side cache), so gauges never collide across ranks
+        # and "mostrecent" only arbitrates between a dead pre-restart pid and
+        # its live replacement within one rank. Same pattern as the kvstats
+        # gauges in LLMBackendMetrics.
+        labelnames = [labels.MODEL, labels.COMPONENT, labels.DP_RANK]
         labelvalues = {
             labels.MODEL: model_name,
             labels.COMPONENT: component_name,
+            labels.DP_RANK: str(dp_rank),
         }
 
         def _counter(name: str, doc: str):
@@ -199,6 +205,7 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
                 model_name=extra_config.get("model_name", ""),
                 component_name=extra_config.get("component", ""),
                 capacity_bytes=self._capacity_bytes,
+                dp_rank=getattr(vllm_config.parallel_config, "data_parallel_rank", 0),
             )
             if role == ECConnectorRole.SCHEDULER
             else None
