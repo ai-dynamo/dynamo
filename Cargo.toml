@@ -177,6 +177,8 @@ tonic-build = { version = "0.13.1" }
 kube = { version = "2.0.1", default-features = false, features = ["client", "rustls-tls", "aws-lc-rs", "runtime"] }
 k8s-openapi = { version = "0.26.0", features = ["v1_32"] }
 rcgen = { version = "0.13" }
+quinn = { version = "0.11.9", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+sha2 = { version = "0.10" }
 tokio-rustls = { version = "0.26" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = { version = "2" }

@@ -12,16 +12,17 @@ pub mod codec;
 pub mod egress;
 pub mod ingress;
 pub mod manager;
+pub mod quic_response;
 pub mod tcp;
 
 use crate::SystemHealth;
+use crate::traits::DistributedRuntimeProvider;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
 use codec::{TwoPartCodec, TwoPartMessage, TwoPartMessageType};
-use derive_builder::Builder;
 use futures::StreamExt;
 // io::Cursor, TryStreamExt
 use super::{AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, ResponseStream};
@@ -174,17 +175,6 @@ pub enum ControlMessage {
     Sentinel,
 }
 
-/// This is the first message in a `ResponseStream`. This is not a message that gets process
-/// by the general pipeline, but is a control message that is awaited before the
-/// [`AsyncEngine::generate`] method is allowed to return.
-///
-/// If an error is present, the [`AsyncEngine::generate`] method will return the error instead
-/// of returning the `ResponseStream`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ResponseStreamPrologue {
-    error: Option<String>,
-}
-
 pub type StreamProvider<T> = tokio::sync::oneshot::Receiver<Result<T, String>>;
 
 /// Owning `Drop` here (rather than on `RegisteredStream`) lets `into_parts()`
@@ -244,31 +234,6 @@ impl<T> RegisteredStream<T> {
         cleanup.0.take();
         (connection_info, stream_provider)
     }
-}
-
-/// After registering a stream, the [`PendingConnections`] object is returned to the caller. This
-/// object can be used to await the connection to be established.
-pub struct PendingConnections {
-    pub send_stream: Option<RegisteredStream<StreamSender>>,
-    pub recv_stream: Option<RegisteredStream<StreamReceiver>>,
-}
-
-impl PendingConnections {
-    pub fn into_parts(
-        self,
-    ) -> (
-        Option<RegisteredStream<StreamSender>>,
-        Option<RegisteredStream<StreamReceiver>>,
-    ) {
-        (self.send_stream, self.recv_stream)
-    }
-}
-
-/// A [`ResponseService`] implements a services in which a context a specific subject with will
-/// be associated with a stream of responses.
-#[async_trait::async_trait]
-pub trait ResponseService {
-    async fn register(&self, options: StreamOptions) -> PendingConnections;
 }
 
 #[cfg(test)]
@@ -333,71 +298,14 @@ mod registered_stream_tests {
     }
 }
 
-// #[derive(Debug, Clone, Serialize, Deserialize)]
-// struct Handshake {
-//     request_id: String,
-//     worker_id: Option<String>,
-//     error: Option<String>,
-// }
-
-// impl Handshake {
-//     pub fn validate(&self) -> Result<(), String> {
-//         if let Some(e) = &self.error {
-//             return Err(e.clone());
-//         }
-//         Ok(())
-//     }
-// }
-
-// this probably needs to be come a ResponseStreamSender
-// since the prologue in this scenario sender telling the receiver
-// that all is good and it's ready to send
-//
-// in the RequestStreamSender, the prologue would be coming from the
-// receiver, so the sender would have to await the prologue which if
-// was not an error, would indicate the RequestStreamReceiver is read
-// to receive data.
+/// Frontend-side sender for the optional TCP request callback.
 pub struct StreamSender {
     tx: tokio::sync::mpsc::Sender<TwoPartMessage>,
-    prologue: Option<ResponseStreamPrologue>,
 }
 
 impl StreamSender {
     pub async fn send(&self, data: Bytes) -> Result<()> {
         Ok(self.tx.send(TwoPartMessage::from_data(data)).await?)
-    }
-
-    pub async fn send_control(&self, control: ControlMessage) -> Result<()> {
-        let bytes = serde_json::to_vec(&control)?;
-        Ok(self
-            .tx
-            .send(TwoPartMessage::from_header(bytes.into()))
-            .await?)
-    }
-
-    #[allow(clippy::needless_update)]
-    pub async fn send_prologue(&mut self, error: Option<String>) -> Result<(), String> {
-        // leaving the original logic in place for now
-        // error overrides the dissolved prologue, but the only field on `ResponseStreamPrologue` is `error`
-        // so the second argument can never be used, and the value of error passed by the caller would always be used
-        if let Some(_prologue) = self.prologue.take() {
-            // let prologue = ResponseStreamPrologue { error, ..prologue };
-            let prologue = ResponseStreamPrologue { error };
-            let header_bytes: Bytes = match serde_json::to_vec(&prologue) {
-                Ok(b) => b.into(),
-                Err(err) => {
-                    tracing::error!(%err, "send_prologue: ResponseStreamPrologue did not serialize to a JSON array");
-                    return Err("Invalid prologue".to_string());
-                }
-            };
-            self.tx
-                .send(TwoPartMessage::from_header(header_bytes))
-                .await
-                .map_err(|e| e.to_string())?;
-        } else {
-            panic!("Prologue already sent; or not set; logic error");
-        }
-        Ok(())
     }
 }
 
@@ -425,44 +333,6 @@ pub struct ConnectionInfo {
 /// hard-coded mpsc channel capacity used by the TCP transport.
 pub const DEFAULT_SEND_BUFFER_COUNT: usize = 64;
 
-/// When registering a new TransportStream on the server, the caller specifies if the
-/// stream is a sender, receiver or both.
-///
-/// Senders and Receivers are with share a Context, but result in separate tcp socket
-/// connections to the server. Internally, we may use bcast channels to coordinate the
-/// internal control messages between the sender and receiver socket connections.
-#[derive(Clone, Builder)]
-pub struct StreamOptions {
-    /// Context
-    pub context: Arc<dyn AsyncEngineContext>,
-
-    /// Register with the server that this connection will have a server-side Sender
-    /// that can be picked up by the Request/Forward pipeline. The downstream side
-    /// dials in via [`crate::pipeline::network::tcp::client::TcpClient::create_request_stream`]
-    /// to receive the frames the server pushes.
-    pub enable_request_stream: bool,
-
-    /// Register with the server that this connection will have a server-side Receiver
-    /// that can be picked up by the Response/Reverse pipeline
-    pub enable_response_stream: bool,
-
-    /// The number of frames buffered between the data-plane socket task and the
-    /// engine consumer/producer before backpressure kicks in. Drives the mpsc
-    /// channel capacity for the per-stream buffer in the TCP transport.
-    #[builder(default = "DEFAULT_SEND_BUFFER_COUNT")]
-    pub send_buffer_count: usize,
-
-    /// The number of messages to buffer before blocking
-    #[builder(default = "8")]
-    pub recv_buffer_count: usize,
-}
-
-impl StreamOptions {
-    pub fn builder() -> StreamOptionsBuilder {
-        StreamOptionsBuilder::default()
-    }
-}
-
 pub struct Egress<Req: PipelineIO, Resp: PipelineIO> {
     transport_engine: Arc<dyn AsyncTransportEngine<Req, Resp>>,
 }
@@ -470,11 +340,9 @@ pub struct Egress<Req: PipelineIO, Resp: PipelineIO> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_SEND_BUFFER_COUNT, NetworkStreamWrapper, RequestControlMessage,
-        RequestPlanePayloadCodec, RequestType, ResponseType, StreamOptions,
+        NetworkStreamWrapper, RequestControlMessage, RequestPlanePayloadCodec, RequestType,
+        ResponseType,
     };
-    use crate::engine::AsyncEngineContextProvider;
-    use crate::pipeline::Context;
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -482,34 +350,6 @@ mod tests {
         id: u64,
         text: String,
         tokens: Vec<u32>,
-    }
-
-    #[test]
-    fn stream_options_send_buffer_count_defaults_to_64() {
-        let context = Context::new(());
-        let options = StreamOptions::builder()
-            .context(context.context())
-            .enable_request_stream(true)
-            .enable_response_stream(true)
-            .build()
-            .expect("stream options should build");
-
-        assert_eq!(DEFAULT_SEND_BUFFER_COUNT, 64);
-        assert_eq!(options.send_buffer_count, DEFAULT_SEND_BUFFER_COUNT);
-    }
-
-    #[test]
-    fn stream_options_send_buffer_count_overrides_default() {
-        let context = Context::new(());
-        let options = StreamOptions::builder()
-            .context(context.context())
-            .enable_request_stream(true)
-            .enable_response_stream(true)
-            .send_buffer_count(128)
-            .build()
-            .expect("stream options should build");
-
-        assert_eq!(options.send_buffer_count, 128);
     }
 
     #[test]
@@ -734,6 +574,7 @@ pub struct Ingress<Req: PipelineIO, Resp: PipelineIO, Adapter = SerdeIngressPayl
     metrics: OnceLock<Arc<WorkHandlerMetrics>>,
     /// Endpoint-specific notifier for health check timer resets
     endpoint_health_check_notifier: OnceLock<Arc<tokio::sync::Notify>>,
+    quic_response_client_pool: OnceLock<Arc<quic_response::QuicResponseClientPool>>,
     payload_adapter: Arc<Adapter>,
 }
 
@@ -770,6 +611,7 @@ where
             segment: OnceLock::new(),
             metrics: OnceLock::new(),
             endpoint_health_check_notifier: OnceLock::new(),
+            quic_response_client_pool: OnceLock::new(),
             payload_adapter: Arc::new(payload_adapter),
         })
     }
@@ -778,6 +620,15 @@ where
         self.segment
             .set(segment)
             .map_err(|_| anyhow::anyhow!("Segment already set"))
+    }
+
+    pub(crate) fn set_quic_response_client_pool(
+        &self,
+        pool: Arc<quic_response::QuicResponseClientPool>,
+    ) -> Result<()> {
+        self.quic_response_client_pool
+            .set(pool)
+            .map_err(|_| anyhow::anyhow!("QUIC response client pool already set"))
     }
 
     pub fn add_metrics(
@@ -799,6 +650,9 @@ where
         crate::metrics::work_handler_pool::ensure_work_handler_pool_metrics_registered(
             endpoint.get_metrics_registry(),
         );
+
+        let response_pool = endpoint.drt().quic_response_client_pool()?;
+        let _ = self.quic_response_client_pool.set(response_pool);
 
         self.metrics
             .set(Arc::new(metrics))
