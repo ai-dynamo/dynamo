@@ -24,6 +24,7 @@ from dynamo.vllm.handlers import (
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
@@ -133,6 +134,15 @@ def test_routed_experts_use_vllm_base64_numpy_encoding():
     assert encoded is not None
     decoded = np.load(io.BytesIO(base64.b64decode(encoded)))
     np.testing.assert_array_equal(decoded, expected)
+
+
+def test_routed_expert_serialization_failure_is_not_silently_dropped():
+    class UnserializableRoutedExperts:
+        def __reduce__(self):
+            raise TypeError("cannot serialize routed experts")
+
+    with pytest.raises(TypeError, match="cannot serialize routed experts"):
+        serialize_routed_experts(UnserializableRoutedExperts())
 
 
 def test_pd_prompt_logprobs_are_composed_from_prefill():
