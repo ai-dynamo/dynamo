@@ -96,6 +96,22 @@ func TestWorkloadBlockQuotaLeavesWorkloadManifestsWritable(t *testing.T) {
 	}
 }
 
+func TestReplicaSetBlockQuotaAllowsJobPods(t *testing.T) {
+	t.Log("Build the quota used while a Job-backed controller test is running")
+	quota := replicaSetBlockQuota("test-namespace")
+
+	t.Log("Block only ReplicaSets so the profiler Job can still create its Pod")
+	if len(quota.Spec.Hard) != 1 {
+		t.Fatalf("quota has %d hard limits, want 1", len(quota.Spec.Hard))
+	}
+	if _, found := quota.Spec.Hard[corev1.ResourcePods]; found {
+		t.Fatal("replica-set-only quota also limits Pods")
+	}
+	if quantity, found := quota.Spec.Hard["count/replicasets.apps"]; !found || !quantity.IsZero() {
+		t.Fatalf("ReplicaSet quota = %s, found=%t, want 0", quantity.String(), found)
+	}
+}
+
 func TestQuotaInitializedRequiresEveryHardLimit(t *testing.T) {
 	expected := workloadBlockQuota("test-namespace").Spec.Hard
 	quota := &corev1.ResourceQuota{}

@@ -18,6 +18,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/golden"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -35,12 +36,15 @@ const (
 	clusterTestOperatorImageEnv = "DYNAMO_CLUSTERTEST_OPERATOR_IMAGE"
 )
 
-func TestClusterDynamoGraphDeploymentRequestProfilesAndCreatesDGD(t *testing.T) {
+func TestClusterDynamoGraphDeploymentRequestProfilesAndCreatesWorkloadManifests(t *testing.T) {
 	ctx := t.Context()
 	profilerImage := clusterTestRequiredEnv(t, clusterTestProfilerImageEnv)
 	operatorImage := clusterTestRequiredEnv(t, clusterTestOperatorImageEnv)
 	t.Log("Create an isolated namespace in the explicitly unlocked cluster")
 	env := clusterTestEnv.RunT(t)
+
+	t.Log("Block ReplicaSets while allowing the profiler Job Pod to run")
+	env.BlockReplicaSets()
 
 	t.Log("Install the namespace-local identity and permissions used by the profiling Job")
 	clusterTestCreateProfilerRBAC(t, ctx, env.Client(), env.Namespace())
@@ -51,20 +55,33 @@ func TestClusterDynamoGraphDeploymentRequestProfilesAndCreatesDGD(t *testing.T) 
 		t.Fatalf("create profiler token secret: %v", err)
 	}
 
-	t.Log("Start only the production DGDR reconciler")
+	t.Log("Create the scale client and start the production DGDR-to-DGD controller chain with Grove enabled")
 	operatorConfig := &configv1alpha1.OperatorConfiguration{}
 	configv1alpha1.SetDefaultsOperatorConfiguration(operatorConfig)
 	operatorConfig.Namespace.Restricted = env.Namespace()
 	operatorConfig.GPU.DiscoveryEnabled = ptr.To(false)
-	runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{}}
+	runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, LWS: true}}
+	scaleClient, err := env.ScaleClient()
+	if err != nil {
+		t.Fatalf("create scale client: %v", err)
+	}
 	env.StartManager(func(mgr ctrl.Manager) error {
-		return SetupDynamoGraphDeploymentRequest(mgr, DynamoGraphDeploymentRequestSetupOptions{
+		if err := SetupDynamoGraphDeploymentRequest(mgr, DynamoGraphDeploymentRequestSetupOptions{
 			SetupOptions: SetupOptions{
 				Config:        operatorConfig,
 				RuntimeConfig: runtimeConfig,
 			},
 			OperatorImage:           operatorImage,
 			OperatorImagePullPolicy: corev1.PullIfNotPresent,
+		}); err != nil {
+			return err
+		}
+		return SetupDynamoGraphDeployment(mgr, DynamoGraphDeploymentSetupOptions{
+			SetupOptions: SetupOptions{
+				Config:        operatorConfig,
+				RuntimeConfig: runtimeConfig,
+			},
+			ScaleClient: scaleClient,
 		})
 	})
 
@@ -148,6 +165,9 @@ func TestClusterDynamoGraphDeploymentRequestProfilesAndCreatesDGD(t *testing.T) 
 	if completedDGDR.Status.ProfilingResults == nil || completedDGDR.Status.ProfilingResults.SelectedConfig == nil {
 		t.Fatal("DGDR has no selected profiling configuration")
 	}
+
+	t.Log("Match the generated DGD and its terminal Grove manifest")
+	golden.MatchManifests(t, env.Client(), env.Namespace(), "testdata/dynamographdeploymentrequest-manifests.yaml")
 }
 
 func clusterTestRequiredEnv(t *testing.T, name string) string {

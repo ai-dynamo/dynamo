@@ -86,13 +86,14 @@ to review. Tests install the LWS, Grove, and Volcano PodGroup CRDs but do not ru
 their controllers.
 
 `BlockWorkloads` creates a namespace-scoped `ResourceQuota` with zero allowances
-for ReplicaSets and Pods, then waits for the quota controller to publish its
-status.
+for ReplicaSets and Pods. `BlockReplicaSets` blocks only ReplicaSets so a
+Job-backed test can still run its Pods. Both wait for the quota controller to
+publish the active limits before returning.
 
 This lets the Dynamo controller store Deployments with their real replica
 counts, LeaderWorkerSets, and Grove resources while preventing downstream
 actuation. Tests that intentionally run Jobs or Pods, such as the DGDR profiler
-test, do not call `BlockWorkloads`.
+test, use `BlockReplicaSets` instead.
 
 ## External Setup
 

@@ -23,8 +23,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/discovery/cached/memory"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/restmapper"
+	"k8s.io/client-go/scale"
 	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -217,11 +221,38 @@ func (e *TestEnv) RESTConfig() *rest.Config {
 	return rest.CopyConfig(e.rt.config)
 }
 
+// ScaleClient returns a scale client configured for the selected cluster.
+func (e *TestEnv) ScaleClient() (scale.ScalesGetter, error) {
+	kubeClient, err := kubernetes.NewForConfig(e.rt.config)
+	if err != nil {
+		return nil, err
+	}
+	cachedDiscovery := memory.NewMemCacheClient(kubeClient.Discovery())
+	restMapper := restmapper.NewDeferredDiscoveryRESTMapper(cachedDiscovery)
+	return scale.NewForConfig(
+		e.rt.config,
+		restMapper,
+		dynamic.LegacyAPIPathResolverFunc,
+		scale.NewDiscoveryScaleKindResolver(cachedDiscovery),
+	)
+}
+
 // BlockWorkloads prevents controllers from creating ReplicaSets and Pods in
 // the test namespace without changing the workload manifests under test.
 func (e *TestEnv) BlockWorkloads() {
 	e.tb.Helper()
-	quota := workloadBlockQuota(e.namespace)
+	e.blockQuota(workloadBlockQuota(e.namespace))
+}
+
+// BlockReplicaSets prevents Deployments from being actuated while allowing
+// Job-backed tests to run Pods in the test namespace.
+func (e *TestEnv) BlockReplicaSets() {
+	e.tb.Helper()
+	e.blockQuota(replicaSetBlockQuota(e.namespace))
+}
+
+func (e *TestEnv) blockQuota(quota *corev1.ResourceQuota) {
+	e.tb.Helper()
 	if err := e.rt.client.Create(context.Background(), quota); err != nil && !apierrors.IsAlreadyExists(err) {
 		e.tb.Fatalf("create cluster-test workload quota: %v", err)
 	}
@@ -239,14 +270,19 @@ func (e *TestEnv) BlockWorkloads() {
 	}
 }
 
-func workloadBlockQuota(namespace string) *corev1.ResourceQuota {
+func replicaSetBlockQuota(namespace string) *corev1.ResourceQuota {
 	return &corev1.ResourceQuota{
 		ObjectMeta: metav1.ObjectMeta{Name: workloadBlockQuotaName, Namespace: namespace},
 		Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{
 			corev1.ResourceName("count/replicasets.apps"): resource.MustParse("0"),
-			corev1.ResourcePods:                           resource.MustParse("0"),
 		}},
 	}
+}
+
+func workloadBlockQuota(namespace string) *corev1.ResourceQuota {
+	quota := replicaSetBlockQuota(namespace)
+	quota.Spec.Hard[corev1.ResourcePods] = resource.MustParse("0")
+	return quota
 }
 
 func quotaInitialized(quota *corev1.ResourceQuota, expected corev1.ResourceList) bool {
