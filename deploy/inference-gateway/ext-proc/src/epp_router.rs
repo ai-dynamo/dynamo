@@ -7,8 +7,7 @@
 //! no Dynamo `DistributedRuntime`, no etcd/NATS, and no embedded KV router.
 //! Instead it composes:
 //!
-//! - a [`VllmRenderClient`] configured by `DYN_EPP_TOKENIZER_SERVICE_URL`
-//!   (tokenization for routing only),
+//! - a [`VllmRenderClient`] tokenization,
 //! - a [`PodDiscovery`] that discovers Ready raw vLLM pods from Kubernetes,
 //! - a [`TopologyAdapter`] that registers those pods into the selector, and
 //! - a [`Selector`] (in-process, runtime-free selection service) that picks a
@@ -16,7 +15,7 @@
 //!
 //! On each request it tokenizes the prompt, asks the selection service for a
 //! worker constrained to the currently-Ready pods, and tells Envoy where to send
-//! the request via routing headers. Aggregated serving only.
+//! the request via routing headers.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -74,8 +73,7 @@ impl EppRouter {
         let adapter =
             TopologyAdapter::spawn(reflector.as_ref().clone(), selector.clone(), defaults);
 
-        // Best-effort, bounded wait for the selector to admit a Ready worker;
-        // per-pick checks still apply, so startup never blocks past the bound.
+        // Best-effort, bounded wait for the selector to admit a Ready worker
         wait_for_selector_ready(selector.as_ref()).await;
 
         Ok(Self {
@@ -198,10 +196,16 @@ impl EndpointPicker for EppRouter {
             return Err(PickError::NoEndpoints);
         }
 
-        // Only the subset-hint path needs an explicit id set. On the ordinary
-        // path we pass `None` and let the selector schedule over its own catalog
-        // (the stale-selection guard below still validates the chosen worker), so
-        // no O(worker-count) set is built per request.
+        // Ordinary path: pass `None` so the SelectionService schedules over its
+        // own catalog ("selector owns eligibility") — no O(worker-count) id set is
+        // built per request. We accept that the catalog lags the reflector by ~ms
+        // after a pod event: the system already tolerates far larger staleness
+        // (pod readiness), and the post-select `resolve_endpoint` guard still
+        // refuses to route to a worker the reflector can no longer resolve. The
+        // freshness-preserving alternative (re-assert the ready set every request)
+        // would need an `Arc`-shared set threaded through the core to stay O(1) —
+        // not worth the complexity. Only a subset hint (info the selector lacks)
+        // needs an explicit id set, built lazily below.
         let allowed: Option<HashSet<u64>> = if req.candidate_subset.is_empty() {
             None
         } else {
@@ -235,8 +239,6 @@ impl EndpointPicker for EppRouter {
                     .resolve_any_endpoint()
                     .ok_or(PickError::NoEndpoints)?,
             };
-            // Routing comes from the destination mutation; aggregated raw-vLLM
-            // workers read no `x-dynamo-*` headers, so none are emitted.
             return Ok(PickResult {
                 endpoint,
                 ..Default::default()
@@ -310,7 +312,7 @@ impl EndpointPicker for EppRouter {
         // lifecycle callbacks now own the free — disarm the guard.
         reservation_guard.disarm();
 
-        // Routing comes from the destination mutation; aggregated raw-vLLM workers
+        // Routing comes from the destination mutation; aggregated raw workers
         // read no `x-dynamo-*` headers. (Disaggregated will add its own contract.)
         Ok(PickResult {
             endpoint,
