@@ -128,12 +128,18 @@ class TestSchedulerSideLRU:
 
     def test_has_cache_item_miss_then_hit(self):
         conn = self._make_connector()
-        assert not conn.has_cache_item("hash_a")
+        opaque_uuid = "catalog/image:v2"
+        assert not conn.has_cache_item(opaque_uuid)
 
-        request = self._make_request([("hash_a", 100)])
+        request = self._make_request([(opaque_uuid, 100)])
         conn.update_state_after_alloc(request, 0)
 
-        assert conn.has_cache_item("hash_a")
+        with patch.object(mod.logger, "debug") as log_debug:
+            assert conn.has_cache_item(opaque_uuid)
+        log_debug.assert_called_once_with(
+            "Dynamo multimodal embedding cache hit: identifier=%r",
+            opaque_uuid,
+        )
 
     def test_update_state_plans_save(self):
         conn = self._make_connector()

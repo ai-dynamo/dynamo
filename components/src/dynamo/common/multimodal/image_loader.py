@@ -8,7 +8,7 @@ import logging
 import os
 from collections import OrderedDict
 from io import BytesIO
-from typing import Any, Dict, Final, List
+from typing import Any, Coroutine, Dict, Final, List
 from urllib.parse import urlparse
 
 from PIL import Image
@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 # Constants for multimodal data variants
 URL_VARIANT_KEY: Final = "Url"
 DECODED_VARIANT_KEY: Final = "Decoded"
+UUID_ONLY_VARIANT_KEY: Final = "UuidOnly"
 
 
 def _create_nixl_connector() -> Any:
@@ -267,12 +268,14 @@ class ImageLoader:
             Exception: If any image fails to load for any other reason
             ValueError: If enable_frontend_decoding=True but nixl_connector is None
         """
-        image_futures = []
+        image_futures: list[Coroutine[Any, Any, Image.Image]] = []
+        slot_to_future_idx: list[int | None] = []
 
-        for item in image_mm_items:
+        for idx, item in enumerate(image_mm_items):
             if isinstance(item, dict) and URL_VARIANT_KEY in item:
                 # URL path: download and decode in Python backend
                 url = item[URL_VARIANT_KEY]
+                slot_to_future_idx.append(len(image_futures))
                 image_futures.append(self.load_image(url))
                 logger.debug(f"Preparing to load image from URL: {url[:80]}...")
             elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
@@ -280,6 +283,7 @@ class ImageLoader:
                     metadata = item[DECODED_VARIANT_KEY]
                     if self._nixl_connector is None:
                         raise RuntimeError("NIXL connector is not initialized")
+                    slot_to_future_idx.append(len(image_futures))
                     image_futures.append(self._read_and_convert_nixl_image(metadata))
                 else:
                     logger.error(
@@ -287,15 +291,34 @@ class ImageLoader:
                         "Set enable_frontend_decoding=True to enable NIXL RDMA image transfer."
                     )
                     raise ValueError("Could not load decoded media from frontend")
+            elif isinstance(item, dict) and UUID_ONLY_VARIANT_KEY in item:
+                slot_to_future_idx.append(None)
+            else:
+                raise ValueError(
+                    f"Invalid image multimodal item at index {idx}. "
+                    "Expected dict with 'Url', 'Decoded', or 'UuidOnly' key."
+                )
 
         # Process images in parallel
         results = await asyncio.gather(*image_futures, return_exceptions=True)
-        loaded_images = []
+        loaded_images: list[Image.Image | None] = []
         collective_exceptions = ""
         status_error: HttpStatusError | None = None
         url_error: UrlValidationError | None = None
-        for media_item, result in zip(image_mm_items, results):
-            if isinstance(result, Exception):
+        for media_item, future_idx in zip(
+            image_mm_items, slot_to_future_idx, strict=True
+        ):
+            if future_idx is None:
+                loaded_images.append(None)
+                continue
+            result = results[future_idx]
+            if isinstance(result, BaseException):
+                # asyncio.gather(..., return_exceptions=True) may return a
+                # cancellation (a BaseException, but not an Exception). Keep
+                # cancellation semantics instead of folding it into a batch
+                # image-loading error.
+                if not isinstance(result, Exception):
+                    raise result
                 source = media_item.get(URL_VARIANT_KEY, "decoded")
                 logger.error(f"Failed to load image from {source[:80]}...: {result}")
                 collective_exceptions += (

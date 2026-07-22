@@ -9,6 +9,7 @@ from dynamo._core import Context
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
+from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.encode_helper import EncodeHelper
 from dynamo.trtllm.multimodal.embedding_fetcher import fetch_embeddings_from_encoder
@@ -69,6 +70,9 @@ class EncodeHandler(HandlerBase):
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncGenerator[dict, None]:
+        reject_unsupported_multimodal_uuids(
+            request.get("multi_modal_uuids"), backend="TensorRT-LLM"
+        )
         logging.debug(f"New Request ID: {context.id()}")
         if self.multimodal_processor is None:
             logging.error("encode handler: no multimodal_processor configured")
@@ -136,6 +140,9 @@ class PrefillHandler(HandlerBase):
         Prefill worker: process prompt and return disaggregated_params.
         Frontend routes to decode workers automatically.
         """
+        reject_unsupported_multimodal_uuids(
+            request.get("multi_modal_uuids"), backend="TensorRT-LLM"
+        )
         logging.debug(f"Prefill Request ID: {context.id()}")
         request_token_ids = request.get("token_ids")
         logging.debug(
@@ -220,6 +227,9 @@ class DecodeHandler(HandlerBase):
         Decode worker: generate tokens using disaggregated_params from prefill.
         If disaggregated_params is present, prefill was done. Otherwise generate normally.
         """
+        reject_unsupported_multimodal_uuids(
+            request.get("multi_modal_uuids"), backend="TensorRT-LLM"
+        )
         logging.debug(f"Decode Request ID: {context.id()}")
 
         disaggregated_params = request.get("disaggregated_params")

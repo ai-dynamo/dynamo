@@ -190,6 +190,46 @@ def _inject_routing_metadata(
         target["mm_routing_info"] = mm_routing_info
 
 
+async def _build_engine_inputs(
+    renderer: Any,
+    engine_prompt: dict[str, Any],
+    prompt_token_ids: list[int],
+    *,
+    cache_salt: str | None,
+    mm_processor_kwargs: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Convert a rendered chat prompt into the EngineInput vLLM expects."""
+    prompt_inputs = {**engine_prompt, "prompt_token_ids": prompt_token_ids}
+    if cache_salt is not None:
+        prompt_inputs["cache_salt"] = cache_salt
+    if mm_processor_kwargs is not None:
+        prompt_inputs["mm_processor_kwargs"] = mm_processor_kwargs
+
+    return await renderer.process_for_engine_async(prompt_inputs, time.time())
+
+
+def _normalize_vllm_image_parts(messages: list[Any]) -> None:
+    """Normalize image parts before vLLM validates and renders them."""
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "image_url":
+                continue
+            image_url = part.get("image_url")
+            if not isinstance(image_url, dict):
+                continue
+            if image_url.get("detail") is None:
+                image_url["detail"] = "auto"
+            # Older Dynamo clients nested a UUID inside image_url. Lift it into
+            # vLLM's canonical content-part field before the vLLM parser sees it.
+            if part.get("uuid") is None and image_url.get("uuid") is not None:
+                part["uuid"] = image_url["uuid"]
+
+
 class VllmProcessor:
     def __init__(
         self,
@@ -261,10 +301,15 @@ class VllmProcessor:
 
         rng_routing = _nvtx.start_range("mm_frontend:build_routing_info", color="cyan")
         if vllm_preproc.mm_features:
-            mm_routing_info = build_mm_routing_info_from_features(
-                vllm_preproc.mm_features,
-                prompt_token_ids=list(vllm_preproc.prompt_token_ids),
-            )
+            # A user-provided UUID is an opaque cache identity, not necessarily a
+            # hexadecimal content hash. Keep these requests on text-prefix routing;
+            # the feature metadata is still forwarded for backend cache reuse and
+            # optional tensor transfer.
+            if not dynamo_preproc.get("multi_modal_uuids"):
+                mm_routing_info = build_mm_routing_info_from_features(
+                    vllm_preproc.mm_features,
+                    prompt_token_ids=list(vllm_preproc.prompt_token_ids),
+                )
             (
                 mm_hashes_list,
                 mm_placeholders_list,
@@ -386,22 +431,12 @@ class VllmProcessor:
     ) -> AsyncGenerator[dict[str, Any], None]:
         request_id = random_uuid()
 
-        # vLLM's Pydantic model requires image_url.detail to be 'auto'/'low'/'high'.
-        # The Rust HTTP layer accepts None/missing, so normalize before validation.
         messages = request.get("messages") or []
-        for msg in messages:
-            if not isinstance(msg, dict):
-                continue
-            content = msg.get("content")
-            if not isinstance(content, list):
-                continue
-            for part in content:
-                if not isinstance(part, dict):
-                    continue
-                if part.get("type") == "image_url":
-                    img_url = part.get("image_url")
-                    if isinstance(img_url, dict) and img_url.get("detail") is None:
-                        img_url["detail"] = "auto"
+        _normalize_vllm_image_parts(messages)
+        # Validate cache-UUID modality support before vLLM downloads or
+        # processes media. Dynamo currently exposes vLLM cache UUIDs for
+        # images only.
+        mm_data, mm_uuids = extract_mm_urls(messages)
 
         # Images are fetched by vLLM's renderer via DynamoMediaConnector,
         # which wraps our ImageLoader (LRU cache + in-flight dedup).
@@ -476,22 +511,20 @@ class VllmProcessor:
                 "Logprobs requested but not supported in distributed inference mode"
             )
 
-        # The renderer's process_for_engine() always returns a fully processed
-        # EngineInput (TokenInputs or MultiModalInputs) with a "type" key.
-        # Pass it directly to process_inputs() — no need to rebuild a
-        # TokensPrompt, and this avoids the deprecation warning.
-        prompt_inputs = engine_prompt
-        if request_for_sampling.cache_salt is not None:
-            prompt_inputs["cache_salt"] = request_for_sampling.cache_salt
-        if request_for_sampling.mm_processor_kwargs is not None:
-            prompt_inputs[
-                "mm_processor_kwargs"
-            ] = request_for_sampling.mm_processor_kwargs
-
         with _nvtx.annotate("mm_frontend:process_inputs", color="orange"):
+            # render_messages_async returns a raw prompt. Convert it to a typed
+            # EngineInput before process_inputs so vLLM preserves MM UUIDs and
+            # does not run its multimodal processor a second time.
+            engine_inputs = await _build_engine_inputs(
+                self.input_processor.renderer,
+                engine_prompt,
+                tokens,
+                cache_salt=request_for_sampling.cache_salt,
+                mm_processor_kwargs=request_for_sampling.mm_processor_kwargs,
+            )
             vllm_preproc: EngineCoreRequest = self.input_processor.process_inputs(
                 request_id,
-                prompt_inputs,
+                engine_inputs,
                 sampling_params,
                 GENERATION_TASKS,  # vLLM 0.17.0: required supported_tasks arg
             )
@@ -547,6 +580,12 @@ class VllmProcessor:
         if reasoning_parser_kwargs is not None:
             dynamo_preproc["reasoning_parser_kwargs"] = reasoning_parser_kwargs
 
+        # Parse user cache identities before building routing metadata. Opaque
+        # UUIDs deliberately suppress multimodal exact routing while retaining
+        # vLLM's feature metadata for backend cache reuse and tensor transfer.
+        if mm_uuids:
+            dynamo_preproc["multi_modal_uuids"] = mm_uuids
+
         # Extract MM routing metadata and prepare transfer.
         cleanup_items: list = []
         try:
@@ -568,7 +607,6 @@ class VllmProcessor:
             )
             all_transferred = nixl_transferred and n_with_data == n_features
             if not all_transferred:
-                mm_data = extract_mm_urls(request.get("messages") or [])
                 if mm_data:
                     dynamo_preproc["multi_modal_data"] = mm_data
 
@@ -674,7 +712,8 @@ class VllmProcessor:
         # content-part counts here too (else frontend metrics report zero media).
         input_tokens = len(tokens)
         cumulative_output_tokens = 0
-        _mm_counts = extract_mm_urls(request.get("messages") or []) or {}
+        _mm_counts, _ = extract_mm_urls(request.get("messages") or [])
+        _mm_counts = _mm_counts or {}
         image_count = len(_mm_counts.get("image_url", []))
         video_count = len(_mm_counts.get("video_url", []))
         audio_count = len(_mm_counts.get("audio_url", []))

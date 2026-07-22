@@ -8,6 +8,7 @@ MM Router Handler - Routes requests to best TRT-LLM worker based on KV cache ove
 import logging
 from typing import Any, AsyncGenerator
 
+from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
 from dynamo.llm import KvRouter
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -68,6 +69,10 @@ class MMRouterHandler:
         Yields:
             Response chunks from the downstream TRT-LLM worker via KvRouter
         """
+        reject_unsupported_multimodal_uuids(
+            request.get("multi_modal_uuids"), backend="TensorRT-LLM"
+        )
+
         # Extract messages from extra_args (set by Frontend preprocessor)
         messages = request.get("extra_args", {}).get("messages", [])
         image_urls = extract_image_urls(messages)

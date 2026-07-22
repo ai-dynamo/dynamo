@@ -253,6 +253,7 @@ fn convert_image_detail_str(detail: &impl serde::Serialize) -> ChatImageDetail {
 }
 
 /// Convert a slice of InputContent to ChatCompletionRequestUserMessageContent.
+#[allow(deprecated)]
 fn convert_input_content_to_user_content(
     content: &[InputContent],
 ) -> Result<ChatCompletionRequestUserMessageContent, anyhow::Error> {
@@ -289,11 +290,12 @@ fn convert_input_content_to_user_content(
                     .map_err(|e| anyhow::anyhow!("Invalid image URL '{}': {}", url_str, e))?;
                 chat_parts.push(ChatCompletionRequestUserMessageContentPart::ImageUrl(
                     ChatCompletionRequestMessageContentPartImage {
-                        image_url: ImageUrl {
+                        image_url: Some(ImageUrl {
                             url,
                             detail: Some(convert_image_detail_str(&img.detail)),
                             uuid: None,
-                        },
+                        }),
+                        uuid: None,
                     },
                 ));
             }
