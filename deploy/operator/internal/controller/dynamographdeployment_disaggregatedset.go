@@ -148,6 +148,17 @@ func coalesceDisaggregatedSetRestartState(
 	return restartState
 }
 
+func (r *DynamoGraphDeploymentReconciler) coalesceDisaggregatedSetRestartStateForPath(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	useDisaggregatedSet bool,
+	restartState *dynamo.RestartState,
+) *dynamo.RestartState {
+	if !useDisaggregatedSet || r.isGrovePathway(dgd) {
+		return restartState
+	}
+	return coalesceDisaggregatedSetRestartState(dgd, restartState)
+}
+
 func selectDisaggregatedSetComponents(dgd *nvidiacomv1beta1.DynamoGraphDeployment) (disaggregatedSetSelection, string) {
 	selection := disaggregatedSetSelection{
 		componentToRole: make(map[string]string),
@@ -264,12 +275,25 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDisaggregatedSetResources(
 	if err != nil {
 		return ReconcileResult{}, fmt.Errorf("failed to build rolling update context: %w", err)
 	}
+	selection, reason := selectDisaggregatedSetComponents(dynamoDeployment)
+	if reason != "" {
+		return ReconcileResult{}, fmt.Errorf("failed to select DisaggregatedSet roles: %s", reason)
+	}
 
 	existingRestartAnnotations, err := r.getExistingRestartAnnotationsDCD(ctx, dynamoDeployment)
 	if err != nil {
 		logger.Error(err, "failed to get existing restart annotations")
 		return ReconcileResult{}, fmt.Errorf("failed to get existing restart annotations: %w", err)
 	}
+	existingDSRestartAnnotations, err := r.getExistingRestartAnnotationsDisaggregatedSet(ctx, dynamoDeployment, selection)
+	if err != nil {
+		logger.Error(err, "failed to get existing DisaggregatedSet restart annotations")
+		return ReconcileResult{}, fmt.Errorf("failed to get existing DisaggregatedSet restart annotations: %w", err)
+	}
+	// Selected DCDs are deleted after cutover, so the current DS role templates
+	// become the source of truth for their restart annotations. Preserve those
+	// values until the sequential restart reaches the DS restart unit.
+	maps.Copy(existingRestartAnnotations, existingDSRestartAnnotations)
 
 	dynamoComponentsDeployments, err := dynamo.GenerateDynamoComponentsDeployments(
 		dynamoDeployment,
@@ -281,10 +305,6 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDisaggregatedSetResources(
 		return ReconcileResult{}, fmt.Errorf("failed to generate DynamoComponentDeployments for DisaggregatedSet path: %w", err)
 	}
 
-	selection, reason := selectDisaggregatedSetComponents(dynamoDeployment)
-	if reason != "" {
-		return ReconcileResult{}, fmt.Errorf("failed to select DisaggregatedSet roles: %s", reason)
-	}
 	checkpointGated, err := applyDisaggregatedSetCheckpointStartupPolicies(dynamoComponentsDeployments, checkpointInfos, selection)
 	if err != nil {
 		return ReconcileResult{}, err
@@ -351,6 +371,64 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDisaggregatedSetResources(
 		}
 	}
 	return result, nil
+}
+
+func (r *DynamoGraphDeploymentReconciler) getExistingRestartAnnotationsDisaggregatedSet(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	selection disaggregatedSetSelection,
+) (map[string]string, error) {
+	ds := newDisaggregatedSetObject()
+	key := types.NamespacedName{Name: disaggregatedSetName(dgd), Namespace: dgd.Namespace}
+	if err := r.Get(ctx, key, ds); err != nil {
+		if apierrors.IsNotFound(err) {
+			return map[string]string{}, nil
+		}
+		return nil, fmt.Errorf("failed to get DisaggregatedSet %s: %w", key, err)
+	}
+	return restartAnnotationsFromDisaggregatedSet(ds, selection)
+}
+
+func restartAnnotationsFromDisaggregatedSet(
+	ds *unstructured.Unstructured,
+	selection disaggregatedSetSelection,
+) (map[string]string, error) {
+	restartAnnotations := make(map[string]string)
+	if ds == nil {
+		return restartAnnotations, nil
+	}
+	spec, found, err := unstructured.NestedMap(ds.Object, "spec")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read DisaggregatedSet spec: %w", err)
+	}
+	if !found {
+		return restartAnnotations, nil
+	}
+	typedSpec := disaggregatedsetv1.DisaggregatedSetSpec{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(spec, &typedSpec); err != nil {
+		return nil, fmt.Errorf("failed to decode DisaggregatedSet spec: %w", err)
+	}
+	roleToComponent := make(map[string]string, len(selection.componentToRole))
+	for componentName, roleName := range selection.componentToRole {
+		roleToComponent[roleName] = componentName
+	}
+	for i := range typedSpec.Roles {
+		role := &typedSpec.Roles[i]
+		componentName, selected := roleToComponent[role.Name]
+		if !selected {
+			continue
+		}
+		if role.Spec.LeaderWorkerTemplate.LeaderTemplate != nil {
+			if timestamp := role.Spec.LeaderWorkerTemplate.LeaderTemplate.Annotations[consts.RestartAnnotation]; timestamp != "" {
+				restartAnnotations[componentName] = timestamp
+				continue
+			}
+		}
+		if timestamp := role.Spec.LeaderWorkerTemplate.WorkerTemplate.Annotations[consts.RestartAnnotation]; timestamp != "" {
+			restartAnnotations[componentName] = timestamp
+		}
+	}
+	return restartAnnotations, nil
 }
 
 func applyDisaggregatedSetCheckpointStartupPolicies(

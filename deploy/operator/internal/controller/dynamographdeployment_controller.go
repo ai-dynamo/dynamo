@@ -410,9 +410,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 
 	restartStatus := r.computeRestartStatus(ctx, dynamoDeployment)
 	restartState := dynamo.DetermineRestartState(dynamoDeployment, restartStatus)
-	if useDisaggregatedSet {
-		restartState = coalesceDisaggregatedSetRestartState(dynamoDeployment, restartState)
-	}
+	restartState = r.coalesceDisaggregatedSetRestartStateForPath(dynamoDeployment, useDisaggregatedSet, restartState)
 
 	result, err := r.reconcileWorkloadResources(
 		ctx,

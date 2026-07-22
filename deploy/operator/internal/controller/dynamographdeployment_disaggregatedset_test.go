@@ -677,6 +677,97 @@ func TestCoalesceDisaggregatedSetRestartState(t *testing.T) {
 	require.True(t, state.ShouldAnnotateComponent("decode"), "all DS roles must share one restart revision")
 }
 
+func TestDisaggregatedSetRestartCoalescingRespectsGrovePrecedence(t *testing.T) {
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+			consts.KubeAnnotationEnableDisaggregatedSet: consts.KubeLabelValueTrue,
+		}},
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "prefill", ComponentType: nvidiacomv1beta1.ComponentTypePrefill, Multinode: &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}},
+				{ComponentName: "decode", ComponentType: nvidiacomv1beta1.ComponentTypeDecode, Multinode: &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}},
+			},
+		},
+	}
+	reconciler := &DynamoGraphDeploymentReconciler{RuntimeConfig: &commoncontroller.RuntimeConfig{
+		Gate: features.Gates{Grove: true, DisaggregatedSet: true},
+	}}
+
+	groveState := &dynamo.RestartState{Timestamp: "restart-1", ComponentsToAnnotate: map[string]bool{"prefill": true}}
+	require.Same(t, groveState, reconciler.coalesceDisaggregatedSetRestartStateForPath(dgd, true, groveState))
+	require.False(t, groveState.ShouldAnnotateComponent("decode"), "Grove precedence must retain sequential role restarts")
+
+	dgd.Annotations[consts.KubeAnnotationEnableGrove] = consts.KubeLabelValueFalse
+	dsState := &dynamo.RestartState{Timestamp: "restart-1", ComponentsToAnnotate: map[string]bool{"prefill": true}}
+	require.Same(t, dsState, reconciler.coalesceDisaggregatedSetRestartStateForPath(dgd, true, dsState))
+	require.True(t, dsState.ShouldAnnotateComponent("decode"), "the active DS path must restart selected roles as one unit")
+}
+
+func TestDisaggregatedSetRestartAnnotationsSurviveConsecutiveRequests(t *testing.T) {
+	dgd := newDSHappyPathDGD()
+	dgd.Spec.BackendFramework = string(dynamo.BackendFrameworkVLLM)
+	dgd.Spec.Components = append([]nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
+		ComponentName: "frontend",
+		ComponentType: nvidiacomv1beta1.ComponentTypeFrontend,
+		PodTemplate:   dsTestPodTemplate(),
+	}}, dgd.Spec.Components...)
+	selection, reason := selectDisaggregatedSetComponents(dgd)
+	require.Empty(t, reason)
+
+	restartOneAnnotations := map[string]string{
+		"prefill": "restart-1",
+		"decode":  "restart-1",
+	}
+	ds := newDisaggregatedSetObject()
+	typedSpec := disaggregatedsetv1.DisaggregatedSetSpec{}
+	for componentName, roleName := range selection.componentToRole {
+		timestamp := restartOneAnnotations[componentName]
+		typedSpec.Roles = append(typedSpec.Roles, disaggregatedsetv1.DisaggregatedRoleSpec{
+			Name: roleName,
+			LeaderWorkerSetTemplateSpec: leaderworkersetv1.LeaderWorkerSetTemplateSpec{
+				Spec: leaderworkersetv1.LeaderWorkerSetSpec{
+					LeaderWorkerTemplate: leaderworkersetv1.LeaderWorkerTemplate{
+						LeaderTemplate: &corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{consts.RestartAnnotation: timestamp}}},
+						WorkerTemplate: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{consts.RestartAnnotation: timestamp}}},
+					},
+				},
+			},
+		})
+	}
+	spec, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&typedSpec)
+	require.NoError(t, err)
+	ds.Object["spec"] = spec
+	ds.SetName(disaggregatedSetName(dgd))
+	ds.SetNamespace(dgd.Namespace)
+
+	scheme := runtime.NewScheme()
+	scheme.AddKnownTypeWithName(disaggregatedSetGVK, &unstructured.Unstructured{})
+	reconciler := &DynamoGraphDeploymentReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(ds).Build()}
+	existingAnnotations, err := reconciler.getExistingRestartAnnotationsDisaggregatedSet(t.Context(), dgd, selection)
+	require.NoError(t, err)
+	require.Equal(t, restartOneAnnotations, existingAnnotations)
+
+	// A second sequential request starts with the non-DS frontend. Until the
+	// restart reaches a selected role, the desired DS must retain restart-1.
+	restartTwoFrontend := &dynamo.RestartState{Timestamp: "restart-2", ComponentsToAnnotate: map[string]bool{"frontend": true}}
+	dcds, err := dynamo.GenerateDynamoComponentsDeployments(dgd, restartTwoFrontend, existingAnnotations, dynamo.RollingUpdateContext{})
+	require.NoError(t, err)
+	require.Equal(t, "restart-2", dynamo.GetPodTemplateAnnotations(&dcds["frontend"].Spec.DynamoComponentDeploymentSharedSpec)[consts.RestartAnnotation])
+	for componentName := range selection.componentToRole {
+		require.Equal(t, "restart-1", dynamo.GetPodTemplateAnnotations(&dcds[componentName].Spec.DynamoComponentDeploymentSharedSpec)[consts.RestartAnnotation])
+	}
+
+	// Once the first DS role is selected, coalescing produces exactly one new
+	// whole-set revision with restart-2 on every selected role.
+	restartTwoDS := &dynamo.RestartState{Timestamp: "restart-2", ComponentsToAnnotate: map[string]bool{"prefill": true}}
+	coalesceDisaggregatedSetRestartState(dgd, restartTwoDS)
+	dcds, err = dynamo.GenerateDynamoComponentsDeployments(dgd, restartTwoDS, existingAnnotations, dynamo.RollingUpdateContext{})
+	require.NoError(t, err)
+	for componentName := range selection.componentToRole {
+		require.Equal(t, "restart-2", dynamo.GetPodTemplateAnnotations(&dcds[componentName].Spec.DynamoComponentDeploymentSharedSpec)[consts.RestartAnnotation])
+	}
+}
+
 func TestWorkloadRoutingAnnotationsChanged(t *testing.T) {
 	oldDGD := &nvidiacomv1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
 		consts.KubeAnnotationEnableGrove: consts.KubeLabelValueTrue,
