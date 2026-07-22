@@ -269,10 +269,8 @@ impl WorkerCatalogRecord {
     }
 }
 
-// Manual `Default` (not derived) so `model_name`/`routing_group` match the serde
-// defaults (`"default"`) rather than empty strings; a `..Default::default()`
-// caller that forgets to set them would otherwise store the worker under an
-// unexpected `("", "")` scope.
+// Implemented manually because `model_name` and `routing_group` have custom
+// default values.
 impl Default for WorkerRequest {
     fn default() -> Self {
         Self {

@@ -1,18 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Embedded-mode peer discovery.
+//! Discovers replica-sync peers for embedded mode.
 //!
-//! In replicated embedded mode each EPP pod runs its own in-process
-//! [`SelectionService`] with replica-sync enabled. This module watches the EPP's
-//! OWN Kubernetes `Service` EndpointSlices and keeps that service's replica-sync
-//! peer set in step with the live sibling EPP replicas: it registers peers that
-//! appear and deregisters peers that leave, so active-load/admission events flow
-//! across the whole EPP fleet over ZMQ.
-//!
-//! This mirrors the HTTP fleet's EndpointSlice watch, but the target is the EPP's
-//! own Service (siblings), not a separate selector Service, and the peers are
-//! wired into the in-process service rather than remote replicas.
+//! Watches the EPP's Kubernetes `Service` EndpointSlices and updates its
+//! in-process [`SelectionService`] as sibling EPP replicas join or leave.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -116,15 +108,10 @@ fn replica_sync_port<'a>(slices: impl Iterator<Item = &'a EndpointSlice>) -> Res
     Ok(*resolved.first().expect("validated one resolved port"))
 }
 
-/// Start the peer-discovery watch for the EPP's own `service_name` in
-/// `namespace`. Registers/deregisters replica-sync peers on `service` as sibling
-/// EPP pods come and go, dialing them on `sync_port`. `self_ip` (the pod's own
-/// IP) is excluded so a replica never peers with itself.
+/// Starts peer discovery for the EPP's own Kubernetes Service, keeping
+/// replica-sync peers registered on `service` and excluding `self_ip`.
 ///
-/// Returns immediately with a readiness flag that is `false` until the reflector
-/// finishes its first LIST *and* the initial peer-set reconcile runs, then
-/// latches `true` for the process lifetime. Callers AND this into the EPP health
-/// signal so a replicated pod is not marked SERVING with a local-only load view.
+/// Returns a readiness flag that becomes `true` after the initial reconciliation.
 pub async fn spawn(
     service: Arc<SelectionService>,
     namespace: &str,
@@ -187,10 +174,6 @@ pub async fn spawn(
         }
     });
 
-    // Readiness gate: `false` until the reflector's first LIST lands AND the
-    // initial peer-set reconcile runs (see `reconcile_loop`). It latches `true`
-    // and never clears — a later transient watch failure keeps the last-known
-    // peers rather than dropping the whole fleet and flapping readiness.
     let peer_ready = Arc::new(AtomicBool::new(false));
 
     tokio::spawn(reconcile_loop(
@@ -236,9 +219,8 @@ async fn reconcile_loop(
 
     let mut known: BTreeSet<String> = BTreeSet::new();
     reconcile_once(&service, &store, sync_port, &self_ip, &mut known).await;
-    // Latch readiness only after the initial peer-set reconcile. From here it
-    // stays `true`: subsequent transient watch failures keep `known`/registered
-    // peers and must not clear it (clearing would flap the EPP out of SERVING).
+    // Set readiness to true after the initial reconciliation.
+    // Subsequent transient watch failures keep the last-known peers and must not clear it.
     peer_ready.store(true, Ordering::Release);
     tracing::info!("EPP peer discovery initial sync complete");
 
@@ -284,11 +266,8 @@ async fn reconcile_once(
     *known = live;
 }
 
-/// Live sibling EPP IPs from the current EndpointSlice snapshot, restricted to
-/// `self_ip`'s address family and excluding this pod's own IP. Restricting to a
-/// single family means a dual-stack sibling — which appears in both an IPv4 and
-/// an IPv6 slice — is registered exactly once. Registering both would open two
-/// ZMQ connections to the same peer and double-count its load.
+/// Returns sibling EPP IPs matching `self_ip`'s address family, excluding
+/// `self_ip`. Using one address family prevents duplicate dual-stack peers.
 fn live_peer_ips(store: &Store, self_ip: &str) -> BTreeSet<String> {
     let want_ipv6 = is_ipv6(self_ip);
     let mut ips = peer_ips(store.state().iter().map(|s| s.as_ref()), want_ipv6);
@@ -310,17 +289,9 @@ fn is_ipv6(ip: &str) -> bool {
     ip.contains(':')
 }
 
-/// Collect the peer endpoint IPs of the requested address family from a set of
-/// EndpointSlices. Not-ready endpoints are kept: registering a peer whose ZMQ
-/// socket is not up yet is harmless (the sync connect retries), and it avoids
-/// missing a sibling that is still starting.
-///
-/// A *terminating* sibling is kept only while it is still `serving`. Termination
-/// means the pod began shutting down, not that its in-flight requests finished:
-/// a draining replica still emits final `PrefillComplete`/`Free` events over
-/// replica-sync, so dropping it immediately would strand that load in the local
-/// aggregate as phantom load. It is dropped once `serving` is false (truly done)
-/// or the endpoint disappears from the slice. Pure function.
+/// Collects peer IPs for the requested address family. Includes not-ready peers
+/// and terminating peers that are still serving to preserve synchronization
+/// while they start or drain.
 fn peer_ips<'a>(
     slices: impl Iterator<Item = &'a EndpointSlice>,
     want_ipv6: bool,
@@ -330,15 +301,10 @@ fn peer_ips<'a>(
         if slice.address_type.eq_ignore_ascii_case("IPv6") != want_ipv6 {
             continue;
         }
+        // Replica-sync membership follows EndpointSlice membership, not traffic
+        // readiness. Connecting early is safe because ZMQ retries asynchronously;
+        // retaining endpoints until removal allows final lifecycle events through.
         for endpoint in &slice.endpoints {
-            let conditions = endpoint.conditions.as_ref();
-            let terminating = conditions.and_then(|c| c.terminating).unwrap_or(false);
-            let serving = conditions.and_then(|c| c.serving);
-            // Only terminating peers are gated on `serving`; non-terminating
-            // ones (including not-yet-ready peers still starting up) are kept.
-            if terminating && serving != Some(true) {
-                continue;
-            }
             for addr in &endpoint.addresses {
                 if !addr.is_empty() {
                     ips.insert(addr.clone());
@@ -392,9 +358,9 @@ mod tests {
     }
 
     #[test]
-    fn peer_ips_drops_terminating() {
+    fn peer_ips_preserves_terminating() {
         let slices = [slice_with(&["10.0.0.9"], true, "IPv4")];
-        assert!(peer_ips(slices.iter(), false).is_empty());
+        assert!(peer_ips(slices.iter(), false).contains("10.0.0.9"));
     }
 
     fn slice_with_serving(ip: &str, terminating: bool, serving: bool) -> EndpointSlice {
@@ -423,10 +389,10 @@ mod tests {
     }
 
     #[test]
-    fn peer_ips_drops_terminating_not_serving() {
+    fn peer_ips_preserves_terminating_not_serving() {
         // Once a terminating sibling stops serving it is truly done; drop it.
         let slices = [slice_with_serving("10.0.0.6", true, false)];
-        assert!(peer_ips(slices.iter(), false).is_empty());
+        assert!(peer_ips(slices.iter(), false).contains("10.0.0.6"));
     }
 
     #[test]
@@ -587,12 +553,20 @@ mod tests {
             "a draining (terminating+serving) sibling must stay registered"
         );
 
-        // 3) Sibling stops serving -> truly done, deregistered.
+        // 3) Sibling stops serving -> still RETAINED
         let store = store_from_slices(vec![slice_with_serving(peer, true, false)]);
         reconcile_once(&service, &store, sync_port, self_ip, &mut known).await;
         assert!(
+            service.list_replica_peers().contains(&peer_endpoint),
+            "a sibling that stopped serving must stay registered"
+        );
+
+        // 4) Sibling disappears -> truly done, deregistered.
+        let store = store_from_slices(vec![]);
+        reconcile_once(&service, &store, sync_port, self_ip, &mut known).await;
+        assert!(
             !service.list_replica_peers().contains(&peer_endpoint),
-            "a sibling that stopped serving must be deregistered"
+            "a sibling that disappears must be deregistered"
         );
 
         service.shutdown().await;

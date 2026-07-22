@@ -973,16 +973,6 @@ impl KvRouterConfig {
         self.router_predicted_ttl_secs.is_some()
     }
 
-    /// Whether the effective scheduling policy for `model_name` enables queueing.
-    /// This is the invariant that makes `max_num_batched_tokens` mandatory on
-    /// every worker (a queue threshold is a fraction of that capacity), so both
-    /// discovery-time validation and per-worker reconciliation gate on it.
-    ///
-    /// Resolves the actual per-model [`PolicyProfile`](super::policy_config::PolicyProfile)
-    /// rather than inspecting raw config: a policy config whose classes set no
-    /// threshold correctly reports `false`, and `router_queue_threshold` only
-    /// counts when it feeds the resolved (synthetic or fallback) class. Fallible
-    /// because the policy config is parsed on first resolve.
     pub fn queueing_enabled(
         &self,
         model_name: Option<&str>,
@@ -1615,16 +1605,13 @@ models:
 
     #[test]
     fn queueing_enabled_reflects_synthetic_threshold() {
-        // With no policy config the synthetic profile enables queueing iff a queue
-        // threshold is set. (The policy-config path — including a threshold-free
-        // policy resolving to `false` — is covered end-to-end by the selection
-        // service's `threshold_free_policy_does_not_require_max_num_batched_tokens`
-        // reconcile test.)
+        // With default config, queueing is disabled.
         assert!(!KvRouterConfig::default().queueing_enabled(None).unwrap());
         let with_threshold = KvRouterConfig {
             router_queue_threshold: Some(0.5),
             ..Default::default()
         };
+        // With a threshold set, queueing is enabled
         assert!(with_threshold.queueing_enabled(None).unwrap());
     }
 }
