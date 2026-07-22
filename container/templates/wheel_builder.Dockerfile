@@ -501,6 +501,8 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 
 FROM wheel_builder_base AS aic_core_wheel_builder
 
+COPY container/compliance /opt/compliance
+
 ARG AICONFIGURATOR_CORE_REF
 RUN --mount=type=cache,id=aic-core-cargo-registry,target=/root/.cargo/registry,sharing=shared \
     --mount=type=cache,id=aic-core-cargo-git,target=/root/.cargo/git,sharing=shared \
@@ -515,6 +517,31 @@ RUN --mount=type=cache,id=aic-core-cargo-registry,target=/root/.cargo/registry,s
     git lfs fsck && \
     source ${VIRTUAL_ENV}/bin/activate && \
     uv build --wheel --out-dir /opt/aiconfigurator/dist aic-core
+
+# The AIC core wheel is built from a separate Cargo registry cache, so harvest
+# its crate license files here and embed human-readable NOTICES alongside the
+# wheel's maturin-generated SBOM before copying it into the Dynamo wheelhouse.
+RUN --mount=type=cache,id=aic-core-cargo-registry,target=/root/.cargo/registry,sharing=shared \
+    for src in "${CARGO_HOME}/registry/src" /root/.cargo/registry/src; do \
+        [ -d "$src" ] || continue; \
+        find "$src" -mindepth 2 -maxdepth 2 -type d | while IFS= read -r crate; do \
+            dest="/opt/aiconfigurator/rust-licenses/$(basename "$crate")"; \
+            for lf in "$crate"/LICENSE* "$crate"/LICENCE* "$crate"/COPYING* "$crate"/NOTICE* "$crate"/UNLICENSE*; do \
+                [ -e "$lf" ] || continue; \
+                mkdir -p "$dest" && cp "$lf" "$dest/" 2>/dev/null || true; \
+            done; \
+        done; \
+    done; \
+    true
+
+RUN set -u; injected=0; \
+    for whl in /opt/aiconfigurator/dist/aiconfigurator_core*.whl; do \
+        [ -e "$whl" ] || continue; \
+        PYTHONPATH=/opt ${VIRTUAL_ENV}/bin/python3 -m compliance.bundle_wheel_notices \
+            --wheel "$whl" --licenses-dir /opt/aiconfigurator/rust-licenses -v \
+            && injected=$((injected+1)) || echo "::warning::wheel NOTICES bundling failed for $whl (SBOM retained)"; \
+    done; \
+    echo "wheel NOTICES bundled into $injected aiconfigurator-core wheel(s)"
 {% endif %}
 
 

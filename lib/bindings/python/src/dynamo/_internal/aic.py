@@ -419,8 +419,8 @@ def estimate_num_gpu_blocks(
     """Estimate rank-local KV cache blocks for mocker/replay AIC configs.
 
     Delegates the budget math to aiconfigurator-core's unified
-    ``sdk.memory.estimate_num_gpu_blocks`` (the single source of truth as of
-    AIC memory estimator instead of recomputing it here. The result is
+    ``sdk.memory.estimate_num_gpu_blocks`` (the single source of truth for the
+    AIC memory estimator) instead of recomputing it here. The result is
     per rank (per single GPU): AIC's memory model is already sharded for the
     configured TP/DP shape, so the caller must not multiply it by TP or DP.
 

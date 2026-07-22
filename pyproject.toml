@@ -81,9 +81,9 @@ sglang = [
 ]
 
 mocker = [
-    # Runtime modeling only needs the standalone core. Until the split core is
-    # released, install it from the exact AIC revision linked into the runtime.
-    "aiconfigurator-core @ git+https://github.com/ai-dynamo/aiconfigurator.git@989dd6e9cbedcbd26d353da984af451b6b64fd3f#subdirectory=aic-core",
+    # Published wheel metadata must remain index-resolvable. Container builds
+    # provide the source-pinned wheel through their wheelhouse.
+    "aiconfigurator-core==0.10.0",
 ]
 
 [project.entry-points.pytest11]
@@ -124,9 +124,6 @@ path = "hatch_build.py"
 packages = [
     "components/src/dynamo",
 ]
-
-[tool.hatch.metadata]
-allow-direct-references = true
 
 [tool.codespell]
 # note: pre-commit passes explicit lists of files here, which this skip file list doesn't override -
