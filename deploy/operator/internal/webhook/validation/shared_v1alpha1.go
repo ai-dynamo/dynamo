@@ -144,18 +144,17 @@ func runtimeVersionOverrideErrorV1Alpha1(
 	fldPath *field.Path,
 ) *field.Error {
 	overridePath := fldPath.Child("runtimeVersionOverride")
-	if spec.RuntimeVersionOverride != "" {
-		if _, err := runtimeversion.Parse(spec.RuntimeVersionOverride); err != nil {
-			return field.Invalid(overridePath, spec.RuntimeVersionOverride, err.Error())
-		}
-		return nil
-	}
-
 	image := ""
 	if spec.ExtraPodSpec != nil && spec.ExtraPodSpec.MainContainer != nil {
 		image = spec.ExtraPodSpec.MainContainer.Image
 	}
 	if image == "" {
+		return field.Required(fldPath.Child("extraPodSpec", "mainContainer", "image"), "is required")
+	}
+	if spec.RuntimeVersionOverride != "" {
+		if _, err := runtimeversion.Parse(spec.RuntimeVersionOverride); err != nil {
+			return field.Invalid(overridePath, spec.RuntimeVersionOverride, err.Error())
+		}
 		return nil
 	}
 	if _, err := runtimeversion.ParseImageVersion(image); err != nil {
