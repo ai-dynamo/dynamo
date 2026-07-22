@@ -194,7 +194,7 @@ func TestValidateDynamoComponentDeploymentSharedSpecFieldPaths(t *testing.T) {
 				Annotations: map[string]string{consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid"},
 			},
 			Spec: corev1.PodSpec{
-				Containers:     []corev1.Container{{Name: consts.MainContainerName}, {Name: "sidecar"}},
+				Containers:     []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}, {Name: "sidecar"}},
 				InitContainers: []corev1.Container{{Name: "init"}},
 			},
 		},
@@ -231,13 +231,14 @@ func TestValidateDynamoComponentDeploymentSharedSpecFrontendSidecar(t *testing.T
 		errs := validation.validateDynamoComponentDeploymentSharedSpec(spec, componentPath, true, true)
 		assertFieldPaths(t, errs, []string{
 			"spec.components[0].podTemplate.spec.containers",
+			"spec.components[0].podTemplate.spec.containers",
 		})
 	})
 
 	t.Run("rejects empty name", func(t *testing.T) {
 		name := ""
 		spec := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
-			PodTemplate:            &corev1.PodTemplateSpec{},
+			PodTemplate:            &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}}}},
 			FrontendSidecar:        &name,
 			RuntimeVersionOverride: "1.1.0",
 		}
@@ -251,7 +252,7 @@ func TestValidateDynamoComponentDeploymentSharedSpecFrontendSidecar(t *testing.T
 		name := "frontend"
 		spec := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 			PodTemplate: &corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: name, Image: "frontend:latest"}}},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}, {Name: name, Image: "frontend:latest"}}},
 			},
 			FrontendSidecar:        &name,
 			RuntimeVersionOverride: "1.1.0",
@@ -297,10 +298,10 @@ func TestValidateDynamoComponentDeploymentSharedSpecV1alpha1FrontendSidecarField
 		Image: "frontend:latest",
 		Envs:  []corev1.EnvVar{{Name: "TOKEN", Value: "do-not-leak-this-value"}},
 	}
-	spec := &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{RuntimeVersionOverride: "1.1.0", FrontendSidecar: frontendSidecar}
+	spec := &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{RuntimeVersionOverride: "1.1.0", FrontendSidecar: frontendSidecar, ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{MainContainer: &corev1.Container{Image: "registry.example/runtime:1.1.0"}}}
 	errs := validation.validateDynamoComponentDeploymentSharedSpecV1alpha1(spec, fldPath, "dynamo")
 	assertFieldPaths(t, errs, nil)
-	spec.ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{PodSpec: &corev1.PodSpec{}}
+	spec.ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{MainContainer: &corev1.Container{Image: "registry.example/runtime:1.1.0"}, PodSpec: &corev1.PodSpec{}}
 	errs = validation.validateDynamoComponentDeploymentSharedSpecV1alpha1(spec, fldPath, "dynamo")
 	assertFieldPaths(t, errs, nil)
 	spec.ExtraPodSpec.PodSpec.Containers = []corev1.Container{{Name: consts.FrontendSidecarContainerName}}
@@ -347,6 +348,7 @@ func TestValidateDynamoComponentDeploymentSharedSpecV1alpha1WarningsAndErrors(t 
 	spec := &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		DynamoNamespace:        &legacyNamespace,
 		RuntimeVersionOverride: "1.1.0",
+		ExtraPodSpec:           &nvidiacomv1alpha1.ExtraPodSpec{MainContainer: &corev1.Container{Image: "registry.example/runtime:1.1.0"}},
 		Annotations: map[string]string{
 			consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid",
 		},

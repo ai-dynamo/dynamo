@@ -71,7 +71,14 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "v1beta1 main image is required",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
-				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate = nil
+			}),
+			wantWebhookErrs: []string{"spec.podTemplate.spec.containers: Required value: is required"},
+		},
+		{
+			name: "v1alpha1 main image is required",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.ExtraPodSpec = nil
 			}),
 			wantWebhookErrs: []string{"spec.podTemplate.spec.containers: Required value: is required"},
 		},
@@ -163,7 +170,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 			wantWebhookErrs: []string{
 				`spec.sharedMemorySize: Invalid value: "-1Gi": must be non-negative`,
-				"spec.podTemplate.spec.containers: Required value: is required when frontendSidecar is set",
+				`spec.frontendSidecar: Invalid value: "frontend": must match a podTemplate.spec.containers name`,
 				"spec.experimental.gpuMemoryService: Forbidden: GPU memory service is only supported for worker, prefill, or decode components",
 				"spec.experimental.gpuMemoryService: Forbidden: GPU memory service requires podTemplate.spec.containers[main].resources.limits.nvidia.com/gpu >= 1",
 			},
@@ -1071,12 +1078,16 @@ func alphaDCDForAdmission(
 				ServiceName:            "worker",
 				RuntimeVersionOverride: "1.1.0",
 				ComponentType:          consts.ComponentTypeWorker,
+				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{Image: "registry.example/runtime:1.1.0"},
+				},
 			},
 		},
 	}
 	if mutate != nil {
 		mutate(dcd)
 	}
+	ensureAlphaDCDMainImage(dcd)
 	return dcd
 }
 
@@ -1084,7 +1095,11 @@ func alphaDCDWithSharedSpec(
 	spec nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
 ) *nvidiacomv1alpha1.DynamoComponentDeployment {
 	return alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+		defaultExtraPodSpec := dcd.Spec.ExtraPodSpec
 		dcd.Spec.DynamoComponentDeploymentSharedSpec = spec
+		if dcd.Spec.ExtraPodSpec == nil {
+			dcd.Spec.ExtraPodSpec = defaultExtraPodSpec
+		}
 		if dcd.Spec.RuntimeVersionOverride == "" {
 			dcd.Spec.RuntimeVersionOverride = "1.1.0"
 		}
@@ -1106,11 +1121,33 @@ func betaDCDForAdmission(
 				ComponentName:          "worker",
 				RuntimeVersionOverride: "1.1.0",
 				ComponentType:          nvidiacomv1beta1.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}},
+				}},
 			},
 		},
 	}
 	if mutate != nil {
 		mutate(dcd)
 	}
+	ensureBetaDCDMainImage(dcd)
 	return dcd
+}
+
+func ensureAlphaDCDMainImage(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+	if dcd.Spec.ExtraPodSpec != nil && dcd.Spec.ExtraPodSpec.MainContainer == nil {
+		dcd.Spec.ExtraPodSpec.MainContainer = &corev1.Container{Image: "registry.example/runtime:1.1.0"}
+	}
+}
+
+func ensureBetaDCDMainImage(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+	if dcd.Spec.PodTemplate == nil {
+		return
+	}
+	for i := range dcd.Spec.PodTemplate.Spec.Containers {
+		container := &dcd.Spec.PodTemplate.Spec.Containers[i]
+		if container.Name == consts.MainContainerName && container.Image == "" {
+			container.Image = "registry.example/runtime:1.1.0"
+		}
+	}
 }

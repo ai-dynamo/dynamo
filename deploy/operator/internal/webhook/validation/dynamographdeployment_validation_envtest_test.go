@@ -1714,6 +1714,7 @@ func betaDGDForAdmission(
 	if mutate != nil {
 		mutate(dgd)
 	}
+	ensureBetaDGDMainImages(dgd)
 	return dgd
 }
 
@@ -1728,6 +1729,7 @@ func alphaDGDForAdmission(
 	if mutate != nil {
 		mutate(dgd)
 	}
+	ensureAlphaDGDMainImages(dgd)
 	return dgd
 }
 
@@ -1739,6 +1741,39 @@ func alphaDGDForAdmissionWithServiceNames(names ...string) *nvidiacomv1alpha1.Dy
 			dgd.Spec.Services[name] = service.DeepCopy()
 		}
 	})
+}
+
+func ensureBetaDGDMainImages(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+	for i := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[i]
+		if component.PodTemplate == nil {
+			component.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}}}}
+			continue
+		}
+		for j := range component.PodTemplate.Spec.Containers {
+			container := &component.PodTemplate.Spec.Containers[j]
+			if container.Name == consts.MainContainerName && container.Image == "" {
+				container.Image = "registry.example/runtime:1.1.0"
+			}
+		}
+	}
+}
+
+func ensureAlphaDGDMainImages(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+	for _, component := range dgd.Spec.Services {
+		if component == nil {
+			continue
+		}
+		if component.ExtraPodSpec == nil {
+			component.ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{MainContainer: &corev1.Container{Image: "registry.example/runtime:1.1.0"}}
+			continue
+		}
+		if component.ExtraPodSpec.MainContainer == nil {
+			component.ExtraPodSpec.MainContainer = &corev1.Container{Image: "registry.example/runtime:1.1.0"}
+		} else if component.ExtraPodSpec.MainContainer.Image == "" {
+			component.ExtraPodSpec.MainContainer.Image = "registry.example/runtime:1.1.0"
+		}
+	}
 }
 
 func dgdAdmissionWithLabel(t *testing.T, deployment runtime.Object) runtime.Object {
@@ -1797,12 +1832,18 @@ func newBetaDGDForValidation() *nvidiacomv1beta1.DynamoGraphDeployment {
 					ComponentType:          nvidiacomv1beta1.ComponentTypeFrontend,
 					RuntimeVersionOverride: "1.1.0",
 					Replicas:               k8sptr.To(int32(1)),
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}},
+					}},
 				},
 				{
 					ComponentName:          "worker",
 					ComponentType:          nvidiacomv1beta1.ComponentTypeWorker,
 					RuntimeVersionOverride: "1.1.0",
 					Replicas:               k8sptr.To(int32(2)),
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}},
+					}},
 				},
 			},
 		},
@@ -1822,6 +1863,9 @@ func newAlphaDGDForCompatibilityValidation() *nvidiacomv1alpha1.DynamoGraphDeplo
 					ComponentType:          consts.ComponentTypeWorker,
 					RuntimeVersionOverride: "1.1.0",
 					Replicas:               k8sptr.To(int32(1)),
+					ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+						MainContainer: &corev1.Container{Image: "registry.example/runtime:1.1.0"},
+					},
 				},
 			},
 		},
@@ -1833,6 +1877,7 @@ func betaDGDWithSpec(
 ) *nvidiacomv1beta1.DynamoGraphDeployment {
 	dgd := newBetaDGDForValidation()
 	mutate(&dgd.Spec)
+	ensureBetaDGDMainImages(dgd)
 	return dgd
 }
 
