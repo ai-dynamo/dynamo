@@ -13,6 +13,7 @@ export DYN_REQUEST_PLANE=tcp
 
 # Default values
 MODEL_NAME="llava-hf/llava-1.5-7b-hf"
+FRONTEND_DECODING=false
 
 # --single-gpu: Packs all 3 workers (encode, prefill, decode) onto a single GPU.
 # This is intended for functional testing with small models (e.g. 2B) where CI
@@ -49,6 +50,10 @@ while [[ $# -gt 0 ]]; do
             TWO_GPU=true
             shift
             ;;
+        --frontend-decoding)
+            FRONTEND_DECODING=true
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo ""
@@ -59,6 +64,7 @@ while [[ $# -gt 0 ]]; do
             echo "                                LLaVA 1.5 7B, Qwen2.5-VL, and Phi3V models have predefined templates"
             echo "  --single-gpu                  Pack all 3 workers on 1 GPU (for small models, e.g. 2B)"
             echo "  --two-gpu                     Pack 3 workers on 2 GPUs (encode+prefill on GPU 0, decode on GPU 1)"
+            echo "  --frontend-decoding           Decode images in the Rust frontend and transfer pixels to the encode worker via NIXL"
             echo "  -h, --help                    Show this help message"
             echo ""
             echo "Examples:"
@@ -166,6 +172,12 @@ if [[ "$SINGLE_GPU" == "true" || "$TWO_GPU" == "true" ]]; then
     # and gpu_utils.sh builds args.
     : "${_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES:=$((2 * 1024 * 1024 * 1024))}"
     PD_EXTRA_ARGS="--max-model-len 4096 --limit-mm-per-prompt {\"image\":3,\"video\":3,\"audio\":0}"
+fi
+
+# Frontend decoding participates in every E/P/D stage: Decode advertises the
+# media decoder, Prefill forwards decoded descriptors, and Encode reads pixels.
+if [[ "$FRONTEND_DECODING" == "true" ]]; then
+    EXTRA_ARGS="$EXTRA_ARGS --frontend-decoding"
 fi
 
 PD_GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)

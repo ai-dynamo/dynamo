@@ -185,7 +185,16 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 timeout_s=300,
                 single_gpu=True,
                 requested_vllm_kv_cache_bytes=1_714_881_000,
-                tests=[MmCase(payload=make_image_payload(["green"]))],
+                tests=[
+                    MmCase(payload=make_image_payload(["green"])),
+                    # Rust frontend decode -> NIXL RGB transfer -> Encode ->
+                    # Prefill embedding handoff -> Decode generation.
+                    MmCase(
+                        suffix="b64_frontend_decoding",
+                        payload=make_image_payload_b64(["green"]),
+                        extra_script_args=["--frontend-decoding"],
+                    ),
+                ],
             ),
             "epd_video": TopologyConfig(
                 marks=[pytest.mark.post_merge],
