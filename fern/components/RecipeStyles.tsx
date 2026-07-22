@@ -37,26 +37,13 @@ const RECIPE_CSS = `
     --pst-color-surface: #1a1a1a !important;
 }
 
-/* Wider layout on recipe/benchmark pages.
-   These pages set hide-toc: true, so the right-hand TOC rail is empty. Two
-   site-wide layout caps otherwise waste the freed horizontal space:
-     1. --page-width (1376px) is the max width of the whole sidebar+content
-        block. On a window wider than that (e.g. ~1770px) Fern centers the
-        block and leaves ~200px of dead margin on EACH side -- most visible as
-        the empty strip under the full-width header on the left.
-     2. --content-width (812px) caps the content column, cramping the
-        model-card grid and target-picker tables.
-   Raise both here. Because this stylesheet only loads on recipe/benchmark
-   pages, the wider layout is scoped to them; every other page keeps 1376/812.
-   Both vars are declared on :root by Fern, so a :root !important override wins
-   regardless of style-tag order. --content-width behaves as a MAX (the layout
-   caps it at the available width), so the larger value fills wide screens and
-   still shrinks safely on narrow ones; 1600px doubles as a sane readability
-   cap on very wide monitors. */
-:root {
-    --page-width: 1920px !important;
-    --content-width: 1600px !important;
-}
+/* Layout: recipe/benchmark pages intentionally inherit Fern's default
+   --page-width (1376px) and --content-width (812px) -- NO override here -- so
+   the sidebar position and the right-hand gap line up exactly with the
+   Documentation tab. These pages set hide-toc: true, so that right gap is
+   simply the (empty) TOC rail. Do NOT re-add a width override: raising
+   --page-width shifts the sidebar out of alignment with the Docs tab, and
+   raising --content-width removes the right gap by filling edge-to-edge. */
 
 /* Product switcher: hide the FontAwesome "code" glyph (</>) placeholder.
    This rule also lives in SiteStyles, but SiteStyles is injected from the
