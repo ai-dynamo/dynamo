@@ -205,7 +205,13 @@ async fn run_replica_singleton_publisher<P: SingletonEventPublisher>(
                 None => break,
             },
         };
-        if let Err(error) = publisher.publish_event(&event).await {
+        // Replica sync is best-effort, so cancellation drops an in-flight publish rather than
+        // delaying shutdown on transport backpressure.
+        let publish_result = tokio::select! {
+            _ = cancellation_token.cancelled() => break,
+            result = publisher.publish_event(&event) => result,
+        };
+        if let Err(error) = publish_result {
             tracing::error!(
                 request_id = %event.request_id,
                 worker = ?event.worker,
@@ -670,6 +676,13 @@ mod tests {
 
         assert_eq!(attempted, ["add", "mark", "free"]);
         assert_eq!(max_active.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        event_tx.send(add_event("blocked")).await.unwrap();
+        let blocked = tokio::time::timeout(std::time::Duration::from_secs(1), attempted_rx.recv())
+            .await
+            .expect("blocked AddRequest publish should start")
+            .expect("attempt channel should remain open");
+        assert_eq!(blocked, "add");
 
         cancellation_token.cancel();
         tokio::time::timeout(std::time::Duration::from_secs(1), task)

@@ -94,6 +94,9 @@ fn active_request_expiry_duration_from_lookup(
 /// lifecycle callers never await transport I/O, and publish successful enqueues in FIFO order.
 pub trait SequencePublisher: Send + Sync {
     /// Enqueue a replica-sync event for publication to peer routers.
+    ///
+    /// Queue-backed implementations must preserve [`SequencePublishQueueError`] as the error
+    /// source for admission failures so callers can classify queue saturation and closure.
     fn enqueue_event(&self, event: ActiveSequenceEvent) -> anyhow::Result<()>;
 
     /// Fire-and-forget publish of an [`ActiveLoad`] metric payload.
@@ -541,6 +544,9 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
         // TODO: Publish explicit prompt-load decay timestamps with these events so peer routers
         // can mirror the same oldest-prefill anchor instead of approximating from receive time.
+        // FIFO begins at this enqueue boundary. Local mutation completes first, so overlapping
+        // lifecycle calls can enqueue in a different order from their local mutations; replica
+        // sync is best-effort and peer expiry reconciles stale state.
         let request_id = event.request_id.clone();
         let worker = event.worker;
         if let Err(error) = self.publisher.enqueue_event(event) {
