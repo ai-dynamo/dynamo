@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator, Awaitable, Callable
-from typing import Any, Generic, TypeVar, cast
+from typing import Any, Generic, TypeVar
 
 from dynamo._core import Context
 
@@ -42,7 +42,7 @@ class RealtimeConnection(Generic[TurnT]):
         self._run_turn = run_turn
         self._engine_slots = asyncio.Semaphore(max_concurrent_turns)
         self._turn_capacity = asyncio.Semaphore(max_concurrent_turns + max_queued_turns)
-        self._out_stream: asyncio.Queue[dict | RealtimeTurn | None] = asyncio.Queue()
+        self._out_stream: asyncio.Queue[dict | TurnT | None] = asyncio.Queue()
         self._active_turn: TurnT | None = None
         self._turns: list[TurnT] = []
 
@@ -137,7 +137,7 @@ class RealtimeConnection(Generic[TurnT]):
                     await pump_task
                     break
                 if isinstance(item, RealtimeTurn):
-                    turn = cast(TurnT, item)
+                    turn = item
                     while (event := await turn.events.get()) is not None:
                         yield event
                     if turn.task is not None:
