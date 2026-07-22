@@ -3,10 +3,14 @@
 
 """Adapt vLLM's token-in/token-out request envelope for Dynamo workers."""
 
+import base64
+import io
+import logging
 from functools import lru_cache
 from typing import Any
 
 import msgspec
+import numpy as np
 import torch
 from vllm.inputs import TokensPrompt, mm_input
 from vllm.multimodal.inputs import (
@@ -20,6 +24,22 @@ from .constants import DYNAMO_CACHE_SALT_PREFIX
 
 GENERATE_CAPABILITY = "vllm_inference_v1_generate"
 EXACT_MM_ROUTING_CAPABILITY = "vllm_exact_mm_routing"
+logger = logging.getLogger(__name__)
+
+
+def serialize_routed_experts(routed_experts: Any) -> str | None:
+    """Encode routed experts using vLLM's base64-of-NumPy wire format."""
+    if routed_experts is None:
+        return None
+    try:
+        buffer = io.BytesIO()
+        np.save(buffer, routed_experts)
+        return base64.b64encode(buffer.getvalue()).decode("ascii")
+    except Exception:
+        logger.warning(
+            "Unable to encode routed_experts for generate API", exc_info=True
+        )
+        return None
 
 
 @lru_cache(maxsize=1)
