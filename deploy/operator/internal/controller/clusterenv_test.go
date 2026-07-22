@@ -10,10 +10,7 @@ package controller
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -27,6 +24,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/golden"
 	grovemock "github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/mocks/grove"
 	lwsmock "github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/mocks/lws"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/operatorchart"
 	webhooksetup "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/setup"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/go-logr/logr"
@@ -59,12 +57,6 @@ import (
 	volcanov1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 )
 
-const (
-	clusterTestPreviousReleaseTag = "v1.3.0"
-	clusterTestNextVersion        = "1.4.0"
-	clusterTestProfilerImageEnv   = "DYNAMO_CLUSTERTEST_PROFILER_IMAGE"
-)
-
 var clusterTestEnv *clusterenv.Env
 
 func TestMain(m *testing.M) {
@@ -74,11 +66,6 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "derive cluster-test operator version: %v\n", err)
 		os.Exit(1)
 	}
-	clusterTestEnv = newClusterTestEnv(operatorVersion)
-	os.Exit(clusterTestEnv.RunM(m))
-}
-
-func newClusterTestEnv(operatorVersion string) *clusterenv.Env {
 	operatorConfig := &configv1alpha1.OperatorConfiguration{}
 	configv1alpha1.SetDefaultsOperatorConfiguration(operatorConfig)
 	operatorConfig.GPU.DiscoveryEnabled = ptr.To(false)
@@ -88,7 +75,7 @@ func newClusterTestEnv(operatorVersion string) *clusterenv.Env {
 	additionalAdmission.Mutating = append(additionalAdmission.Mutating, groveAdmission.Mutating...)
 	additionalAdmission.Validating = append(additionalAdmission.Validating, groveAdmission.Validating...)
 
-	return clusterenv.New(clusterenv.Options{
+	clusterTestEnv = clusterenv.New(clusterenv.Options{
 		Scheme:                 newClusterTestScheme(),
 		AdditionalAdmission:    additionalAdmission,
 		WebhookProxyImage:      os.Getenv("DYNAMO_CLUSTERTEST_WEBHOOK_PROXY_IMAGE"),
@@ -109,32 +96,7 @@ func newClusterTestEnv(operatorVersion string) *clusterenv.Env {
 			return grovemock.Setup(mgr)
 		},
 	})
-}
-
-func clusterTestOperatorVersion() (string, error) {
-	mergeBase, err := exec.Command("git", "merge-base", "HEAD", clusterTestPreviousReleaseTag).Output()
-	if err != nil {
-		return "", fmt.Errorf("find merge base with %s: %w", clusterTestPreviousReleaseTag, err)
-	}
-	distanceOutput, err := exec.Command(
-		"git", "rev-list", "--count", strings.TrimSpace(string(mergeBase))+"..HEAD",
-	).Output()
-	if err != nil {
-		return "", fmt.Errorf("count commits since %s: %w", clusterTestPreviousReleaseTag, err)
-	}
-	distance, err := strconv.ParseUint(strings.TrimSpace(string(distanceOutput)), 10, 64)
-	if err != nil {
-		return "", fmt.Errorf("parse commit distance %q: %w", strings.TrimSpace(string(distanceOutput)), err)
-	}
-	hashOutput, err := exec.Command("git", "rev-parse", "--short=12", "HEAD").Output()
-	if err != nil {
-		return "", fmt.Errorf("resolve current commit: %w", err)
-	}
-	hash := strings.TrimSpace(string(hashOutput))
-	if hash == "" {
-		return "", fmt.Errorf("git rev-parse returned an empty commit hash")
-	}
-	return fmt.Sprintf("%s-alpha.%d+g%s", clusterTestNextVersion, distance, hash), nil
+	os.Exit(clusterTestEnv.RunM(m))
 }
 
 func newClusterTestScheme() *runtime.Scheme {
@@ -182,10 +144,6 @@ func TestClusterDynamoGraphDeploymentManifests(t *testing.T) {
 	})
 }
 
-func TestClusterDynamoGraphDeploymentRequestProfilesAndCreatesWorkloadManifests(t *testing.T) {
-	clusterTestForEachScenario(t, "testdata/dgdr", clusterTestRunDynamoGraphDeploymentRequestScenario)
-}
-
 func clusterTestForEachScenario(t *testing.T, root string, run func(*testing.T, string)) {
 	t.Helper()
 	inputs, err := filepath.Glob(filepath.Join(root, "*", "input.yaml"))
@@ -228,10 +186,10 @@ func clusterTestRunManifestScenario(
 	golden.MatchManifests(t, env.Client(), env.Namespace(), filepath.Join(scenarioDir, "output.yaml"))
 }
 
-func clusterTestRunDynamoGraphDeploymentRequestScenario(t *testing.T, scenarioDir string) {
-	t.Helper()
+func TestClusterDynamoGraphDeploymentRequestProfilesAndCreatesWorkloadManifests(t *testing.T) {
+	scenarioDir := filepath.Join("testdata", "dgdr", "profiler")
 	ctx := t.Context()
-	profilerImage := clusterenv.RequireEnv(t, clusterTestProfilerImageEnv)
+	profilerImage := clusterenv.RequireEnv(t, "DYNAMO_CLUSTERTEST_PROFILER_IMAGE")
 
 	t.Log("Create an isolated namespace in the explicitly unlocked cluster")
 	env := clusterTestEnv.RunT(t)
@@ -239,8 +197,22 @@ func clusterTestRunDynamoGraphDeploymentRequestScenario(t *testing.T, scenarioDi
 	t.Log("Block ReplicaSets while allowing the profiler Job Pod to run")
 	env.BlockReplicaSets()
 
-	t.Log("Install the namespace-local identity and permissions used by the profiling Job")
-	clusterTestCreateProfilerRBAC(t, env.Client(), env.Namespace())
+	t.Log("Install the profiling Job identity and permissions rendered from the production Helm chart")
+	rbacObjects, err := operatorchart.Render("templates/profiling-job-rbac.yaml", operatorchart.Options{
+		ReleaseName: "clustertest",
+		Namespace:   env.Namespace(),
+		Values: map[string]any{
+			"namespaceRestriction": map[string]any{"enabled": true},
+		},
+	})
+	if err != nil {
+		t.Fatalf("render profiling Job RBAC: %v", err)
+	}
+	for i := range rbacObjects {
+		if err := env.Client().Create(ctx, &rbacObjects[i]); err != nil {
+			t.Fatalf("create profiling Job RBAC object %s %q: %v", rbacObjects[i].GetKind(), rbacObjects[i].GetName(), err)
+		}
+	}
 	if err := env.Client().Create(ctx, &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "hf-token-secret", Namespace: env.Namespace()},
 		StringData: map[string]string{"HF_TOKEN": ""},
@@ -337,41 +309,6 @@ func clusterTestRunDynamoGraphDeploymentRequestScenario(t *testing.T, scenarioDi
 
 	t.Log("Match the generated DGD and its terminal Grove manifest")
 	golden.MatchManifests(t, env.Client(), env.Namespace(), filepath.Join(scenarioDir, "output.yaml"))
-}
-
-func clusterTestCreateProfilerRBAC(t *testing.T, k8sClient client.Client, namespace string) {
-	t.Helper()
-	objects := []client.Object{
-		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: ServiceAccountProfilingJob, Namespace: namespace}},
-		&rbacv1.Role{
-			ObjectMeta: metav1.ObjectMeta{Name: ServiceAccountProfilingJob, Namespace: namespace},
-			Rules: []rbacv1.PolicyRule{
-				{APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"create", "get", "update", "patch", "delete"}},
-				{APIGroups: []string{nvidiacomv1beta1.GroupVersion.Group}, Resources: []string{"dynamographdeploymentrequests"}, Verbs: []string{"get"}},
-				{APIGroups: []string{nvidiacomv1beta1.GroupVersion.Group}, Resources: []string{"dynamographdeployments"}, Verbs: []string{"get", "create", "delete", "list", "watch"}},
-				{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get", "list", "create", "delete"}},
-				{APIGroups: []string{""}, Resources: []string{"pods/log"}, Verbs: []string{"get"}},
-			},
-		},
-		&rbacv1.RoleBinding{
-			ObjectMeta: metav1.ObjectMeta{Name: ServiceAccountProfilingJob, Namespace: namespace},
-			RoleRef: rbacv1.RoleRef{
-				APIGroup: rbacv1.GroupName,
-				Kind:     "Role",
-				Name:     ServiceAccountProfilingJob,
-			},
-			Subjects: []rbacv1.Subject{{
-				Kind:      "ServiceAccount",
-				Name:      ServiceAccountProfilingJob,
-				Namespace: namespace,
-			}},
-		},
-	}
-	for _, object := range objects {
-		if err := k8sClient.Create(t.Context(), object); err != nil {
-			t.Fatalf("create profiler RBAC object %T: %v", object, err)
-		}
-	}
 }
 
 func clusterTestRestrictedConfig(namespace string) *configv1alpha1.OperatorConfiguration {
