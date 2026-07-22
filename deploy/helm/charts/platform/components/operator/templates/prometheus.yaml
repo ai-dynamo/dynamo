@@ -75,6 +75,22 @@ spec:
       sourceLabels:
       - __meta_kubernetes_pod_label_nvidia_com_dynamo_component_type
       targetLabel: dynamo_component_type
+  # Frontend sidecar (GAIE/EPP direct-routing): scrapes dynamo_frontend_* on
+  # container port "http" (8000). Pods without that named port are dropped by
+  # the Prometheus Operator keep rule, so plain workers are unaffected.
+  - interval: 5s
+    path: /metrics
+    port: http
+    honorLabels: true
+    relabelings:
+    - action: replace
+      sourceLabels:
+      - __meta_kubernetes_pod_label_nvidia_com_dynamo_namespace
+      targetLabel: dynamo_namespace
+    - action: replace
+      sourceLabels:
+      - __meta_kubernetes_pod_label_nvidia_com_dynamo_component_type
+      targetLabel: dynamo_component_type
 {{- if .Values.dynamo.metrics.podMonitors.nixlTelemetry }}
   - interval: 5s
     path: /metrics
