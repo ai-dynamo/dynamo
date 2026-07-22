@@ -22,7 +22,7 @@ Hardware-specific deployment templates for Intel XPU GPUs using Kubernetes Dynam
 1. **Kubernetes v1.34+** with DRA API v1 enabled
 2. **Intel GPU DRA Driver** installed with DeviceClass `gpu.intel.com`
 3. **Custom XPU runtime image** (build from source with `--device xpu`)
-4. **HuggingFace token secret**: `kubectl create secret generic hf-token-secret --from-literal=token=<your-token>`
+4. **Hugging Face token secret**: `kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=<your-token>`
 
 ## Key Differences from NVIDIA Templates
 
