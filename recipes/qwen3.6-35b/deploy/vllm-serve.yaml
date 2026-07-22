@@ -1,0 +1,151 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# vllm serve baseline — no Dynamo components. Mounts the namespace's
+# `shared-model-cache` PVC (RWX, e.g. FSx Lustre) at HF_HOME so the HF
+# Hub cache is shared across all configs in the namespace, AND at a
+# subPath for the per-model vllm compilation cache.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qwen36-vllm-serve
+  labels:
+    app.kubernetes.io/name: qwen3.6-35b
+    app.kubernetes.io/component: vllm-serve
+    app.kubernetes.io/managed-by: dynamo-recipe
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: qwen3.6-35b
+    app.kubernetes.io/component: vllm-serve
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qwen36-vllm-serve
+  labels:
+    app.kubernetes.io/name: qwen3.6-35b
+    app.kubernetes.io/component: vllm-serve
+    app.kubernetes.io/managed-by: dynamo-recipe
+spec:
+  replicas: 1
+  # First-time bootstrap = image pull (~3 min) + model load from FSx (~4 min)
+  # + torch.compile (~1 min) + cudagraph capture for 102 sizes (~5 min) ≈ 13
+  # min. K8s default of 600s declares the rollout failed at 10 min even
+  # though the pod is healthy and still booting. Bump to 30 min.
+  progressDeadlineSeconds: 1800
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: qwen3.6-35b
+      app.kubernetes.io/component: vllm-serve
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: qwen3.6-35b
+        app.kubernetes.io/component: vllm-serve
+        app.kubernetes.io/managed-by: dynamo-recipe
+    spec:
+      restartPolicy: Always
+      # Hostname pin + image come from hw/${HW}.env (sibling to this
+      # recipe's vllm-serve/ dir). All three configs (vllm-serve,
+      # dynamo-fd, dynamo-fd-ec) share that file so they land on the
+      # same node and benchmark on identical hardware. envsubst in
+      # run-benchmark.sh resolves these placeholders at apply time.
+      nodeSelector: ${HW_NODE_SELECTOR}
+      tolerations: ${HW_TOLERATIONS}
+      securityContext:
+        runAsUser: 0
+      containers:
+        - name: vllm
+          image: ${VLLM_IMAGE}
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+              ulimit -l unlimited
+              exec vllm serve "${MODEL_NAME}" \
+                --host 0.0.0.0 \
+                --port 8000 \
+                --tensor-parallel-size 1 \
+                --gpu-memory-utilization 0.85 \
+                --max-model-len 32768 \
+                --mm-processor-cache-gb 30 \
+                --enable-prefix-caching \
+                --enable-auto-tool-choice \
+                --tool-call-parser qwen3_coder \
+                --reasoning-parser qwen3 \
+                --no-enable-log-requests
+          env:
+            - name: MODEL_NAME
+              value: "Qwen/Qwen3.6-35B-A3B-FP8"
+            - name: HF_HOME
+              value: /home/dynamo/.cache/huggingface
+            - name: VLLM_CACHE_ROOT
+              value: /home/dynamo/.cache/vllm
+            - name: HF_HUB_OFFLINE
+              value: "1"
+          # Qwen3.6-35B-A3B-FP8 is a public model — vllm serve doesn't
+          # need an HF token to load it. Plus HF_HUB_OFFLINE=1 above
+          # short-circuits any hub lookups at runtime. Uncomment when
+          # swapping in a gated model.
+          # envFrom:
+          #   - secretRef:
+          #       name: hf-token-secret
+          #       optional: true
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /v1/models
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 60
+          resources:
+            requests:
+              cpu: "8"
+              memory: 64Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "16"
+              memory: 128Gi
+              nvidia.com/gpu: "1"
+          securityContext:
+            capabilities:
+              add:
+                - IPC_LOCK
+                - SYS_RESOURCE
+          volumeMounts:
+            - name: shared-model-cache
+              mountPath: /home/dynamo/.cache/huggingface
+              # No subPath — share the HF cache root with the namespace
+              # so already-downloaded models (Qwen3-30B-A3B, etc.) are
+              # available, and our Qwen3.6 download appears under the
+              # standard `hub/models--Qwen--Qwen3.6-...` layout.
+            - name: shared-model-cache
+              mountPath: /home/dynamo/.cache/vllm
+              subPath: qwen36-bench/vllm-cache
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 40Gi

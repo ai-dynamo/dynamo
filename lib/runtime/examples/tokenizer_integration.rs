@@ -225,6 +225,8 @@ async fn main() -> Result<()> {
         .init();
 
     // Set compute pool configuration via environment
+    // SAFETY: This example sets the process environment before it creates the
+    // worker/runtime that reads DYN_COMPUTE_THREADS.
     unsafe {
         std::env::set_var("DYN_COMPUTE_THREADS", "4");
     }

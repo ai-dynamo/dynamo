@@ -57,7 +57,13 @@ build_vllm_gpu_mem_args() {
 # ---------------------------------------------------------------------------
 build_sglang_gpu_mem_args() {
     if [[ -n "${_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS:-}" ]]; then
-        echo "--max-total-tokens ${_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS}"
+        # --mem-fraction-static 0.9: SGLang sizes the KV cache pool using this
+        # fraction of pre-model-load memory BEFORE applying --max-total-tokens.
+        # The default (~0.65) can request more pool memory than is available on
+        # smaller GPUs (e.g. L4 24 GiB) even when the token cap would fit.
+        # Setting 0.9 maximises the pool headroom; the token cap controls the
+        # actual allocation.
+        echo "--max-total-tokens ${_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS} --mem-fraction-static 0.9"
         return 0
     fi
 
@@ -177,7 +183,7 @@ _gpu_utils_self_test() {
     echo "=== sglang: token cap env ==="
     result=$(_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS=1024 \
         build_sglang_gpu_mem_args)
-    _assert "token cap" "--max-total-tokens 1024" "$result"
+    _assert "token cap" "--max-total-tokens 1024 --mem-fraction-static 0.9" "$result"
 
     echo ""
     echo "=== sglang: no override = empty ==="

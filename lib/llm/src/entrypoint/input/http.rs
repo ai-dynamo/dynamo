@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::{
@@ -9,6 +10,7 @@ use crate::{
     engines::StreamingEngineAdapter,
     entrypoint::{ChatEngineFactoryCallback, EngineConfig, RouterConfig, input::common},
     http::service::service_v2::{self, HttpService},
+    local_model::runtime_config::TokenizerBackend,
     namespace::NamespaceFilter,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
@@ -53,6 +55,9 @@ pub async fn run(
         http_service_builder.cancel_token(Some(distributed_runtime.primary_token()));
     http_service_builder =
         http_service_builder.with_request_template(engine_config.local_model().request_template());
+    http_service_builder = http_service_builder
+        .metrics_config(local_model.metrics_config().clone())
+        .frontend_api_config(local_model.frontend_api_config().clone());
     // Inject the DRT's metrics registry so that component-scoped metrics
     // (e.g. KvIndexerMetrics) are exposed (default port 8000 if not overridden).
     http_service_builder =
@@ -62,6 +67,8 @@ pub async fn run(
     // with the instance_id as the router_id label.
     http_service_builder =
         http_service_builder.drt_discovery(Some(distributed_runtime.discovery()));
+    http_service_builder =
+        http_service_builder.runtime(Some(Arc::new(distributed_runtime.clone())));
 
     let http_service = match engine_config {
         EngineConfig::Dynamic {
@@ -83,6 +90,8 @@ pub async fn run(
                 model.namespace(),
                 model.namespace_prefix(),
             );
+            let local_model_path =
+                (!model.path().as_os_str().is_empty()).then(|| model.path().to_path_buf());
             run_watcher(
                 distributed_runtime.clone(),
                 http_service.state().manager_clone(),
@@ -94,6 +103,8 @@ pub async fn run(
                 http_service.state().metrics_clone(),
                 chat_engine_factory.clone(),
                 prefill_load_estimator.clone(),
+                local_model_path,
+                model.runtime_config().tokenizer_backend,
             )
             .await?;
             http_service
@@ -173,7 +184,17 @@ async fn run_watcher(
     metrics: Arc<crate::http::service::metrics::Metrics>,
     chat_engine_factory: Option<ChatEngineFactoryCallback>,
     prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
+    local_model_path: Option<PathBuf>,
+    tokenizer_backend: Option<TokenizerBackend>,
 ) -> anyhow::Result<()> {
+    // Start the LoRA allocation controller when LoRA serving is enabled. The
+    // controller itself is additionally gated on the allocation config
+    // (DYN_LORA_ALLOCATION_ENABLED) inside `start_lora_controller`.
+    if crate::lora::lora_serving_enabled() {
+        let cancel_token = runtime.primary_token();
+        let _controller_handle = model_manager.start_lora_controller(cancel_token);
+    }
+
     let mut watch_obj = ModelWatcher::new(
         runtime.clone(),
         model_manager,
@@ -184,6 +205,8 @@ async fn run_watcher(
         prefill_load_estimator,
         metrics.clone(),
     );
+    watch_obj.set_local_model_path(local_model_path);
+    watch_obj.set_tokenizer_backend(tokenizer_backend);
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
     let discovery_stream = discovery
@@ -223,13 +246,19 @@ fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) {
     match model_type {
         ModelUpdate::Added(card) => {
             // Handle all supported endpoint types, not just the first one
-            for endpoint_type in card.model_type.as_endpoint_types() {
+            for endpoint_type in card
+                .model_type
+                .as_endpoint_types_with_anthropic(service.anthropic_api_enabled())
+            {
                 service.enable_model_endpoint(endpoint_type, true);
             }
         }
         ModelUpdate::Removed(card) => {
             // Handle all supported endpoint types, not just the first one
-            for endpoint_type in card.model_type.as_endpoint_types() {
+            for endpoint_type in card
+                .model_type
+                .as_endpoint_types_with_anthropic(service.anthropic_api_enabled())
+            {
                 service.enable_model_endpoint(endpoint_type, false);
             }
         }

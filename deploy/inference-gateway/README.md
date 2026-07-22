@@ -5,4 +5,4 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 Integrate Dynamo with the Gateway API Inference Extension for intelligent KV-aware request routing at the gateway layer.
 
-See [Inference Gateway documentation](../../docs/kubernetes/inference-gateway.md) for full setup instructions, configuration options, and deployment examples.
+See [Gateway API Inference Extension documentation](../../docs/kubernetes/gateway-api/README.mdx) for setup instructions, configuration options, and deployment examples.

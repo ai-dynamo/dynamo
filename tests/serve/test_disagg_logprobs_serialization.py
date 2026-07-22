@@ -49,6 +49,7 @@ def _to_asdict_format(logprob_dicts):
 
 @pytest.mark.pre_merge
 @pytest.mark.trtllm
+@pytest.mark.core
 @pytest.mark.gpu_0
 @pytest.mark.unit
 class TestDisaggLogprobsSerializationRoundtrip:

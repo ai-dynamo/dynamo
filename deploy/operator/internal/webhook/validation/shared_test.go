@@ -19,6 +19,7 @@ package validation
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -32,10 +33,13 @@ func ptr(s string) *string {
 	return &s
 }
 
-func TestSharedSpecValidator_Validate(t *testing.T) {
+func TestSharedSpecValidatorV1Alpha1_Validate(t *testing.T) {
 	var (
 		negativeReplicas = int32(-1)
 		validReplicas    = int32(3)
+		workerGPU        = &nvidiacomv1alpha1.Resources{
+			Limits: &nvidiacomv1alpha1.ResourceItem{GPU: "1"},
+		}
 	)
 
 	tests := []struct {
@@ -45,6 +49,7 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 		calculatedNamespace string
 		wantErr             bool
 		errMsg              string
+		errContains         string
 	}{
 		{
 			name: "valid spec with all fields",
@@ -252,6 +257,161 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 			errMsg:              `spec.services[decode].annotations[nvidia.com/vllm-distributed-executor-backend] has invalid value "invalid": must be "mp" or "ray"`,
 		},
 		{
+			name: "checkpoint without gpuMemoryService is accepted",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
+					Enabled: true,
+					Identity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
+						Model:            "model",
+						BackendFramework: "vllm",
+					},
+				},
+			},
+			fieldPath:           "spec.services[worker]",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             false,
+		},
+		{
+			name: "disabled checkpoint with gpuMemoryService is accepted",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
+					Enabled: false,
+				},
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				},
+			},
+			fieldPath:           "spec.services[worker]",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             false,
+		},
+		{
+			name: "gpuMemoryService.extraClientContainers with enabled=true is accepted",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled:               true,
+					Mode:                  nvidiacomv1alpha1.GMSModeIntraPod,
+					ExtraClientContainers: []string{"gms-loader"},
+				},
+			},
+			fieldPath:           "spec.services[worker]",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             false,
+		},
+		{
+			name: "checkpoint targetContainerName must be a Kubernetes container name",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
+					Enabled:             true,
+					TargetContainerName: "Bad_Name",
+					Identity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
+						Model:            "model",
+						BackendFramework: "vllm",
+					},
+				},
+			},
+			fieldPath:           "spec.services[worker]",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             true,
+			errContains:         "checkpoint.targetContainerName",
+		},
+		{
+			name: "gpuMemoryService.extraClientContainers entries must be Kubernetes container names",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled:               true,
+					Mode:                  nvidiacomv1alpha1.GMSModeIntraPod,
+					ExtraClientContainers: []string{"Bad_Name"},
+				},
+			},
+			fieldPath:           "spec.services[worker]",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             true,
+			errContains:         "gpuMemoryService.extraClientContainers[0]",
+		},
+		{
+			name: "checkpoint job with checkpointRef is rejected",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
+					Enabled:       true,
+					CheckpointRef: ptr("existing-checkpoint"),
+					Job:           &nvidiacomv1alpha1.ServiceCheckpointJobConfig{},
+				},
+			},
+			fieldPath:           "spec.services[worker]",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             true,
+			errMsg:              "spec.services[worker].checkpoint.job cannot be set when checkpointRef is specified",
+		},
+		{
+			name: "deprecated checkpoint mode with checkpointRef is valid",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
+					Enabled:       true,
+					Mode:          nvidiacomv1alpha1.CheckpointModeManual,
+					CheckpointRef: ptr("existing-checkpoint"),
+				},
+			},
+			fieldPath:           "spec.services[worker]",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             false,
+		},
+		{
+			name: "checkpoint job GMS clients require gpuMemoryService",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
+					Enabled: true,
+					Identity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
+						Model:            "model",
+						BackendFramework: "vllm",
+					},
+					Job: &nvidiacomv1alpha1.ServiceCheckpointJobConfig{
+						GMSClientContainers: []string{"gms-saver"},
+					},
+				},
+			},
+			fieldPath:           "spec.services[worker]",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             true,
+			errMsg:              "spec.services[worker].checkpoint.job.gmsClientContainers requires gpuMemoryService to be enabled",
+		},
+		{
+			name: "checkpoint job GMS client names must be Kubernetes container names",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				},
+				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
+					Enabled: true,
+					Identity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
+						Model:            "model",
+						BackendFramework: "vllm",
+					},
+					Job: &nvidiacomv1alpha1.ServiceCheckpointJobConfig{
+						GMSClientContainers: []string{"Bad_Name"},
+					},
+				},
+			},
+			fieldPath:           "spec.services[worker]",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             true,
+			errContains:         "checkpoint.job.gmsClientContainers[0]",
+		},
+		{
 			name: "frontendSidecar with no extraPodSpec containers is valid",
 			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				FrontendSidecar: &nvidiacomv1alpha1.FrontendSidecarSpec{
@@ -303,22 +463,25 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			validator := NewSharedSpecValidator(tt.spec, tt.fieldPath, tt.calculatedNamespace)
+			validator := NewSharedSpecValidatorV1Alpha1(tt.spec, tt.fieldPath, tt.calculatedNamespace, false)
 			_, err := validator.Validate(context.Background())
 
 			if (err != nil) != tt.wantErr {
-				t.Errorf("SharedSpecValidator.Validate() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("SharedSpecValidatorV1Alpha1.Validate() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 
-			if tt.wantErr && err.Error() != tt.errMsg {
-				t.Errorf("SharedSpecValidator.Validate() error message = %v, want %v", err.Error(), tt.errMsg)
+			if tt.wantErr && tt.errMsg != "" && err.Error() != tt.errMsg {
+				t.Errorf("SharedSpecValidatorV1Alpha1.Validate() error message = %v, want %v", err.Error(), tt.errMsg)
+			}
+			if tt.wantErr && tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+				t.Errorf("SharedSpecValidatorV1Alpha1.Validate() error message = %v, want substring %v", err.Error(), tt.errContains)
 			}
 		})
 	}
 }
 
-func TestSharedSpecValidator_Validate_Warnings(t *testing.T) {
+func TestSharedSpecValidatorV1Alpha1_Validate_Warnings(t *testing.T) {
 	validReplicas := int32(3)
 
 	tests := []struct {
@@ -368,16 +531,16 @@ func TestSharedSpecValidator_Validate_Warnings(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			validator := NewSharedSpecValidator(tt.spec, tt.fieldPath, tt.calculatedNamespace)
+			validator := NewSharedSpecValidatorV1Alpha1(tt.spec, tt.fieldPath, tt.calculatedNamespace, false)
 			warnings, err := validator.Validate(context.Background())
 
 			if err != nil {
-				t.Errorf("SharedSpecValidator.Validate() unexpected error = %v", err)
+				t.Errorf("SharedSpecValidatorV1Alpha1.Validate() unexpected error = %v", err)
 				return
 			}
 
 			if len(warnings) != tt.wantWarnings {
-				t.Errorf("SharedSpecValidator.Validate() warnings count = %d, want %d", len(warnings), tt.wantWarnings)
+				t.Errorf("SharedSpecValidatorV1Alpha1.Validate() warnings count = %d, want %d", len(warnings), tt.wantWarnings)
 			}
 
 			if tt.wantWarningContains != "" && len(warnings) > 0 {
@@ -389,8 +552,197 @@ func TestSharedSpecValidator_Validate_Warnings(t *testing.T) {
 					}
 				}
 				if !found {
-					t.Errorf("SharedSpecValidator.Validate() warnings = %v, want warning containing %q", warnings, tt.wantWarningContains)
+					t.Errorf("SharedSpecValidatorV1Alpha1.Validate() warnings = %v, want warning containing %q", warnings, tt.wantWarningContains)
 				}
+			}
+		})
+	}
+}
+
+// TestSharedSpecValidatorV1Alpha1_Failover_ModeConstraints covers the layout/failover
+// symmetry invariants enforced by validateFailover / validateGPUMemoryService:
+//
+//  1. gpuMemoryService declares the layout (intra-pod sidecar vs. inter-pod
+//     weight-server pod). Both modes are valid on their own (standalone GMS
+//     with no failover), and both may be paired with failover of a matching
+//     mode.
+//  2. failover.mode=intraPod requires gpuMemoryService.enabled=true and a
+//     matching (or unset) gpuMemoryService.mode.
+//  3. failover.mode=interPod requires gpuMemoryService.enabled=true AND
+//     gpuMemoryService.mode=interPod — the symmetric counterpart of (2).
+//  4. intraPod failover with numShadows != 1 is rejected (intraPod is a
+//     fixed 1 primary + 1 shadow layout).
+//  5. When failover.enabled=false, sub-fields (mode, numShadows) are dormant
+//     configuration and are intentionally NOT validated — the render path
+//     ignores them and users may stage a config before enabling failover.
+func TestSharedSpecValidatorV1Alpha1_Failover_ModeConstraints(t *testing.T) {
+	workerGPU := &nvidiacomv1alpha1.Resources{
+		Limits: &nvidiacomv1alpha1.ResourceItem{GPU: "1"},
+	}
+
+	tests := []struct {
+		name      string
+		spec      *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
+		wantErr   bool
+		errSubstr string
+	}{
+		{
+			name: "standalone inter-pod GMS (no failover) is accepted",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeInterPod,
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "sidecar gpuMemoryService mode=intraPod is accepted",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "sidecar gpuMemoryService mode unset is accepted",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "inter-pod failover requires gpuMemoryService.enabled",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				Failover: &nvidiacomv1alpha1.FailoverSpec{
+					Enabled:    true,
+					Mode:       nvidiacomv1alpha1.GMSModeInterPod,
+					NumShadows: 1,
+				},
+			},
+			wantErr:   true,
+			errSubstr: "gpuMemoryService.enabled=true",
+		},
+		{
+			name: "inter-pod failover requires gpuMemoryService.mode=interPod",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				},
+				Failover: &nvidiacomv1alpha1.FailoverSpec{
+					Enabled:    true,
+					Mode:       nvidiacomv1alpha1.GMSModeInterPod,
+					NumShadows: 1,
+				},
+			},
+			wantErr:   true,
+			errSubstr: "requires gpuMemoryService.mode",
+		},
+		{
+			name: "inter-pod failover with matching gpuMemoryService.mode=interPod is accepted",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeInterPod,
+				},
+				Failover: &nvidiacomv1alpha1.FailoverSpec{
+					Enabled:    true,
+					Mode:       nvidiacomv1alpha1.GMSModeInterPod,
+					NumShadows: 1,
+				},
+			},
+			wantErr: false,
+		},
+		{
+			// numShadows is dormant configuration when failover.enabled=false
+			// and GetNumShadows returns 0; validateFailover deliberately does
+			// not constrain sub-fields on a disabled feature so users can
+			// stage a config before flipping enabled=true.
+			name: "numShadows with failover.enabled=false is accepted (dormant config)",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeInterPod,
+				},
+				Failover: &nvidiacomv1alpha1.FailoverSpec{
+					Enabled:    false,
+					NumShadows: 2,
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "intraPod failover with numShadows=2 is rejected",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				},
+				Failover: &nvidiacomv1alpha1.FailoverSpec{
+					Enabled:    true,
+					Mode:       nvidiacomv1alpha1.GMSModeIntraPod,
+					NumShadows: 2,
+				},
+			},
+			wantErr:   true,
+			errSubstr: "numShadows",
+		},
+		{
+			name: "intraPod failover with numShadows=1 is accepted",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				},
+				Failover: &nvidiacomv1alpha1.FailoverSpec{
+					Enabled:    true,
+					Mode:       nvidiacomv1alpha1.GMSModeIntraPod,
+					NumShadows: 1,
+				},
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := NewSharedSpecValidatorV1Alpha1(tt.spec, "spec", "default-my-dgd", false)
+			_, err := v.Validate(context.Background())
+
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				if tt.errSubstr != "" && !contains(err.Error(), tt.errSubstr) {
+					t.Errorf("error %q does not contain %q", err.Error(), tt.errSubstr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
 			}
 		})
 	}

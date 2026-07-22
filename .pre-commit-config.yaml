@@ -13,7 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-exclude: ^(src/grpc_generated|.*\.patch$|.*/connect/.*\.py)
+default_install_hook_types: [pre-commit, commit-msg]
+exclude: ^(src/grpc_generated|.*\.patch$|.*/connect/.*\.py|components/src/dynamo/planner/plugins/proto/v1/plugin_pb2(_grpc)?\.pyi?$)
 repos:
 - repo: https://github.com/timothycrosley/isort
   rev: 5.12.0
@@ -64,7 +65,8 @@ repos:
   - id: mixed-line-ending
   - id: requirements-txt-fixer
   - id: trailing-whitespace
-    exclude: lib/llm/tests/data/deepseek-v3.2/.*\.txt$
+    # spdx_licenses/ holds verbatim upstream license texts — never reformat them.
+    exclude: (lib/llm/tests/data/deepseek-v3.2/.*\.txt$|^container/compliance/spdx_licenses/.*)
 
 # Fast linting
 - repo: https://github.com/astral-sh/ruff-pre-commit
@@ -85,8 +87,15 @@ repos:
       pass_filenames: false
       additional_dependencies:
         - pytest
+        - pytest-asyncio
         - tomli
         - pydantic
         - filelock
         - pyyaml
         - prometheus_client>=0.23.1
+        - openai
+    - id: DCO check
+      name: Checks the commit message for a developer certificate of origin signature
+      entry: python3 scripts/dco_check.py
+      language: python
+      stages: [commit-msg]

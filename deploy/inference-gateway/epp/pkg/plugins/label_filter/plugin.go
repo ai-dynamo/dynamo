@@ -21,9 +21,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/plugins"
-	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/scheduling/framework"
-	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/scheduling/types"
+	plugins "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
+	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling"
 )
 
 const (
@@ -31,16 +30,9 @@ const (
 )
 
 // compile-time type assertion
-var _ framework.Filter = &LabelFilter{}
+var _ schedtypes.Filter = &LabelFilter{}
 
 // LabelFilterConfig holds the configuration for the LabelFilter plugin.
-// Matches the deployment manifest schema:
-//
-//	parameters:
-//	  label: "nvidia.com/dynamo-sub-component-type"
-//	  validValues:
-//	    - "prefill"
-//	  allowsNoLabel: false
 type LabelFilterConfig struct {
 	Label         string   `json:"label"`
 	ValidValues   []string `json:"validValues"`
@@ -65,7 +57,6 @@ func LabelFilterFactory(name string, rawParameters json.RawMessage, _ plugins.Ha
 }
 
 func NewLabelFilter(label string, validValues []string, allowsNoLabel bool) *LabelFilter {
-	// Build a set for O(1) lookups
 	valuesSet := make(map[string]struct{}, len(validValues))
 	for _, v := range validValues {
 		valuesSet[v] = struct{}{}
@@ -94,23 +85,22 @@ func (f *LabelFilter) WithName(name string) *LabelFilter {
 	return f
 }
 
-// Filter returns only the pods whose label matches one of the configured valid values.
-// Pods without the label are kept only if allowsNoLabel is true.
-func (f *LabelFilter) Filter(_ context.Context, _ *types.CycleState, _ *types.LLMRequest, pods []types.Pod) []types.Pod {
-	filtered := make([]types.Pod, 0, len(pods))
-	for _, pod := range pods {
-		if pod == nil || pod.GetPod() == nil {
+// Filter returns only the endpoints whose label matches one of the configured valid values.
+func (f *LabelFilter) Filter(_ context.Context, _ *schedtypes.CycleState, _ *schedtypes.InferenceRequest, endpoints []schedtypes.Endpoint) []schedtypes.Endpoint {
+	filtered := make([]schedtypes.Endpoint, 0, len(endpoints))
+	for _, ep := range endpoints {
+		if ep == nil || ep.GetMetadata() == nil {
 			continue
 		}
-		labelValue, hasLabel := pod.GetPod().Labels[f.label]
+		labelValue, hasLabel := ep.GetMetadata().Labels[f.label]
 		if !hasLabel {
 			if f.allowsNoLabel {
-				filtered = append(filtered, pod)
+				filtered = append(filtered, ep)
 			}
 			continue
 		}
 		if _, ok := f.validValues[labelValue]; ok {
-			filtered = append(filtered, pod)
+			filtered = append(filtered, ep)
 		}
 	}
 	return filtered

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Prometheus
+subtitle: vLLM exposes request, latency, scheduler, and disaggregation metrics through Dynamo's Prometheus /metrics endpoint.
 ---
 
 ## Overview
@@ -92,37 +93,37 @@ For the complete and authoritative list of all vLLM metrics, see the [official v
 
 ## LMCache Metrics
 
-When LMCache is enabled, LMCache metrics (prefixed with `lmcache:`) are automatically exposed via Dynamo's `/metrics` endpoint alongside vLLM and Dynamo metrics.
+The `lmcache server` runs as an out-of-process sidecar and exposes its metrics (prefixed `lmcache_mp_`) on its own HTTP admin port (default `:8080/metrics`). vLLM and Dynamo metrics remain on Dynamo's `:8081/metrics`.
 
 To try it out, use the LMCache launch script:
 
 ```bash
 cd $DYNAMO_HOME/examples/backends/vllm
-bash launch/agg_lmcache.sh
+bash launch/agg_lmcache_mp.sh
 ```
 
 Send a request and view LMCache metrics:
 
 ```bash
-curl -s localhost:8081/metrics | grep "^lmcache:"
+curl -s localhost:8080/metrics | grep '^lmcache_mp_'
 ```
 
 ### Troubleshooting
 
-Troubleshooting LMCache-related metrics and logs (including `PrometheusLogger instance already created with different metadata` and `PROMETHEUS_MULTIPROC_DIR` warnings) is documented in:
+Troubleshooting LMCache-related metrics and logs is documented in:
 
 - [LMCache Integration Guide](../../integrations/lmcache-integration.md#troubleshooting)
 
 **For complete LMCache configuration and metric details**, see:
 - [LMCache Integration Guide](../../integrations/lmcache-integration.md) - Setup and configuration
-- [LMCache Observability Documentation](https://docs.lmcache.ai/production/observability/vllm_endpoint.html) - Complete metrics reference
+- [LMCache Observability Documentation](https://docs.lmcache.ai/mp/observability.html) - Complete metrics reference
 
 ## Implementation Details
 
 - vLLM v1 uses multiprocess metrics collection via `prometheus_client.multiprocess`
 - `PROMETHEUS_MULTIPROC_DIR`: (optional). By default, Dynamo automatically manages this environment variable, setting it to a temporary directory where multiprocess metrics are stored as memory-mapped files. Each worker process writes its metrics to separate files in this directory, which are aggregated when `/metrics` is scraped. Users only need to set this explicitly where complete control over the metrics directory is required.
 - Dynamo uses `MultiProcessCollector` to aggregate metrics from all worker processes
-- Metrics are filtered by the `vllm:` and `lmcache:` prefixes before being exposed (when LMCache is enabled)
+- Metrics on Dynamo's `:8081/metrics` are filtered to `vllm:*` and `dynamo_*` series. `lmcache_mp_*` series are served by the `lmcache server` process on its own `:8080/metrics`.
 - The integration uses Dynamo's `register_engine_metrics_callback()` function with the global `REGISTRY`
 - Metrics appear after vLLM engine initialization completes
 - vLLM v1 metrics are different from v0 - see the [official documentation](https://docs.vllm.ai/en/stable/design/metrics.html) for migration details

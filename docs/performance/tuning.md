@@ -78,6 +78,36 @@ Setting a lower memory fraction leaves more headroom for other CUDA allocations 
 > In vLLM, when `--kv-cache-memory-bytes` is set to an explicit value (not None), it **overrides and ignores** `--gpu-memory-utilization` for KV cache sizing ([vLLM CacheConfig docs](https://docs.vllm.ai/en/stable/api/vllm/config/cache/)). This is exactly why we use `--kv-cache-memory-bytes` for parallel-safe allocation: it provides a deterministic, absolute KV cache cap that is immune to profiling races.
 
 
+## Host Memory Allocator (jemalloc)
+
+The sections above tune GPU memory. This section covers *host* (CPU) memory, which is allocated by the C library's `malloc` implementation and matters most for the **frontend**.
+Under high load the default glibc allocator's lock can become a point of contention on the per-request allocation/free path, capping frontend throughput.
+[jemalloc](https://github.com/jemalloc/jemalloc) reduces this contention with per-arena locks and thread-local caches.
+
+Because the benefit and the best settings depend heavily on the workload, it should be mindfully tuned — jemalloc is installed in the container (`libjemalloc2`) but **opt-in per process**, not enabled by default.
+
+### Enabling jemalloc
+
+Preload the library for the frontend by setting `LD_PRELOAD` (in a Kubernetes deployment, set it in the frontend container `env` rather than in the image):
+
+```bash
+export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
+```
+
+> [!Note]
+> The path is architecture-dependent. On arm64 it is `/usr/lib/aarch64-linux-gnu/libjemalloc.so.2`. If unsure, locate it with `dpkg -L libjemalloc2 | grep 'libjemalloc.so'`.
+
+### Tuning jemalloc
+
+jemalloc is configured at runtime through the `MALLOC_CONF` environment variable. A reasonable empirical starting point for the frontend:
+
+```bash
+export MALLOC_CONF="narenas:32,tcache:true,lg_tcache_max:15,dirty_decay_ms:5000,muzzy_decay_ms:5000"
+```
+
+These values are empirical and should be fine-tuned per use case — validate with your own workload using AIPerf (see [Engine Configuration and Tuning](#engine-configuration-and-tuning)). See the [jemalloc tuning documentation](https://github.com/jemalloc/jemalloc/blob/dev/TUNING.md) for the full set of options.
+
+
 ## Disaggregated Router
 
 Disaggregated router decides whether to prefill a request in the remote prefill engine or locally in the decode engine using chunked prefill.

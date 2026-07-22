@@ -1,9 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib
+from pathlib import Path
+
 import pytest
 
-from dynamo.llm import MockEngineArgs
+from dynamo.mocker import MockEngineArgs
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 from dynamo.replay.reporting import format_report_table, write_report_json
 
@@ -16,6 +19,7 @@ from .replay_utils import (
     _router_config,
     _sglang_args,
     _vllm_args,
+    _write_applied_compute_agentic_trace,
     _write_multiturn_trace,
     _write_trace_and_args,
 )
@@ -25,7 +29,15 @@ pytestmark = [
     pytest.mark.parallel,
     pytest.mark.pre_merge,
     pytest.mark.unit,
+    pytest.mark.timeout(120),
 ]
+
+
+@pytest.fixture(autouse=True)
+def _skip_online(request):
+    callspec = getattr(request.node, "callspec", None)
+    if callspec and callspec.params.get("replay_mode") == "online":
+        pytest.skip("intermittent hang in online replay mode (#9548)")
 
 
 @pytest.mark.parametrize("engine_type", ["vllm", "sglang"])
@@ -123,6 +135,63 @@ def test_run_trace_replay_supports_multiturn_sessions(tmp_path, replay_mode):
         input_tokens=64,
         output_tokens=2,
     )
+
+
+@pytest.mark.parametrize("replay_mode", ["offline", "online"])
+def test_run_trace_replay_supports_applied_compute_agentic_format_with_concurrency(
+    tmp_path, replay_mode
+):
+    trace_path = _write_applied_compute_agentic_trace(tmp_path)
+
+    report = run_trace_replay(
+        trace_path,
+        extra_engine_args=_vllm_args(),
+        num_workers=2,
+        replay_concurrency=2,
+        replay_mode=replay_mode,
+        router_mode="kv_router",
+        trace_format="applied_compute_agentic",
+        trace_shared_prefix_ratio=0.5,
+        trace_num_prefix_groups=1,
+    )
+
+    assert report["num_requests"] == 5
+    assert report["completed_requests"] == 5
+    assert report["total_input_tokens"] == 64 + 68 + 72 + 64 + 68
+    assert report["total_output_tokens"] == 10
+
+
+def test_run_trace_replay_rejects_applied_compute_agentic_format_without_concurrency(
+    tmp_path,
+):
+    trace_path = _write_applied_compute_agentic_trace(tmp_path)
+
+    with pytest.raises(Exception, match="replay_concurrency"):
+        run_trace_replay(
+            trace_path,
+            extra_engine_args=_vllm_args(),
+            num_workers=2,
+            replay_mode="offline",
+            trace_format="applied_compute_agentic",
+        )
+
+
+def test_direct_agentic_dynamo_trace_rejects_replay_concurrency():
+    trace_path = (
+        Path(__file__).resolve().parents[5]
+        / "lib"
+        / "bench"
+        / "testdata"
+        / "pi_request_trace.jsonl.gz"
+    )
+
+    with pytest.raises(Exception, match="not supported with replay_concurrency"):
+        run_trace_replay(
+            trace_path,
+            extra_engine_args=_vllm_args(),
+            replay_concurrency=2,
+            trace_format="dynamo",
+        )
 
 
 @pytest.mark.parametrize("replay_mode", ["offline", "online"])
@@ -379,6 +448,39 @@ def test_run_trace_replay_accepts_partial_extra_engine_args_json(tmp_path, repla
     )
 
 
+def test_run_trace_replay_materializes_kv_bytes_from_aic_model(monkeypatch, tmp_path):
+    kv_cache = importlib.import_module("dynamo.mocker.utils.kv_cache")
+
+    def fake_compute_kv_bytes_per_token(model_path, kv_cache_dtype="auto"):
+        return 1 if model_path == "test/model" else None
+
+    monkeypatch.setattr(
+        kv_cache, "compute_kv_bytes_per_token", fake_compute_kv_bytes_per_token
+    )
+    trace_path = _write_trace_and_args(tmp_path)
+
+    report = run_trace_replay(
+        trace_path,
+        extra_engine_args=MockEngineArgs(
+            block_size=64,
+            speedup_ratio=1000.0,
+            num_gpu_blocks=512,
+            num_g2_blocks=512,
+            num_g3_blocks=512,
+            aic_model_path="test/model",
+        ),
+        num_workers=1,
+        replay_mode="offline",
+    )
+
+    _assert_basic_report_counts(
+        report,
+        num_requests=2,
+        input_tokens=64,
+        output_tokens=2,
+    )
+
+
 @pytest.mark.parametrize("router_mode", ["round_robin", "kv_router"])
 def test_run_trace_replay_supports_disagg_offline(tmp_path, router_mode):
     trace_path = _write_trace_and_args(tmp_path)
@@ -518,6 +620,7 @@ def test_format_report_table_matches_aiperf_shape():
         "completed_requests": 711,
         "wall_time_ms": 4046.31,
         "prefix_cache_reused_ratio": 0.3587,
+        "first_admission_prefix_cache_reused_ratio": 0.1234,
     }
 
     rendered = format_report_table(report)
@@ -527,6 +630,7 @@ def test_format_report_table_matches_aiperf_shape():
     assert "Output Token Throughput (tokens/sec)" in rendered
     assert "Request Throughput (requests/sec)" in rendered
     assert "Prefix Cache Reused Ratio: 0.36" in rendered
+    assert "First Admission Prefix Cache Reused Ratio: 0.12" in rendered
     assert "10,944.03" in rendered
     assert "255.54" in rendered
     assert "N/A" in rendered

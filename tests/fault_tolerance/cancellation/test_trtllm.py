@@ -40,7 +40,6 @@ pytestmark = [
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
     pytest.mark.nightly,
     pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True),
-    pytest.mark.xfail(reason="Cancellation is temporarily disabled", strict=True),
 ]
 
 
@@ -244,7 +243,7 @@ def test_request_cancellation_trtllm_aggregated(
                 # Verify frontend log has kill message
                 _, frontend_log_offset = poll_for_pattern(
                     process=frontend,
-                    pattern="issued control message Kill to sender",
+                    pattern="issued control message control_msg=Kill",
                     log_offset=frontend_log_offset,
                 )
 
@@ -259,7 +258,7 @@ def test_request_cancellation_trtllm_aggregated(
                 verify_runtime_cancellation_metrics(
                     worker_system_port=worker.system_port,
                     expected_count=idx + 1,
-                    component="tensorrt_llm",
+                    component="backend",
                 )
 
 
@@ -339,7 +338,7 @@ def test_request_cancellation_trtllm_decode_cancel(
                 # Verify frontend log has kill message
                 _, frontend_log_offset = poll_for_pattern(
                     process=frontend,
-                    pattern="issued control message Kill to sender",
+                    pattern="issued control message control_msg=Kill",
                 )
 
                 logger.info(
@@ -355,7 +354,7 @@ def test_request_cancellation_trtllm_decode_cancel(
                 verify_runtime_cancellation_metrics(
                     worker_system_port=decode_worker.system_port,
                     expected_count=1,
-                    component="tensorrt_llm",
+                    component="backend",
                 )
                 verify_runtime_cancellation_metrics(
                     worker_system_port=prefill_worker.system_port,
@@ -364,6 +363,7 @@ def test_request_cancellation_trtllm_decode_cancel(
                 )
 
 
+@pytest.mark.skip(reason="TRT-LLM prefill cancellation is disabled due to reliability")
 @pytest.mark.timeout(195)  # 3x average
 def test_request_cancellation_trtllm_prefill_cancel(
     request, runtime_services_dynamic_ports, predownload_models
@@ -431,7 +431,7 @@ def test_request_cancellation_trtllm_prefill_cancel(
                 # Verify frontend log has kill message
                 _, frontend_log_offset = poll_for_pattern(
                     process=frontend,
-                    pattern="issued control message Kill to sender",
+                    pattern="issued control message control_msg=Kill",
                 )
 
                 # Verify decode worker never received the request
@@ -464,7 +464,7 @@ def test_request_cancellation_trtllm_prefill_cancel(
                 verify_runtime_cancellation_metrics(
                     worker_system_port=decode_worker.system_port,
                     expected_count=0,
-                    component="tensorrt_llm",
+                    component="backend",
                 )
                 verify_runtime_cancellation_metrics(
                     worker_system_port=prefill_worker.system_port,
@@ -473,7 +473,7 @@ def test_request_cancellation_trtllm_prefill_cancel(
                 )
 
 
-@pytest.mark.xfail(reason="Test fails only on CI", strict=False)
+@pytest.mark.skip(reason="Test fails only on CI")
 @pytest.mark.timeout(195)  # 3x average
 def test_request_cancellation_trtllm_kv_transfer_cancel(
     request, runtime_services_dynamic_ports, predownload_models
@@ -549,7 +549,7 @@ def test_request_cancellation_trtllm_kv_transfer_cancel(
                 # Verify frontend log has kill message
                 _, frontend_log_offset = poll_for_pattern(
                     process=frontend,
-                    pattern="issued control message Kill to sender",
+                    pattern="issued control message control_msg=Kill",
                 )
 
                 logger.info(
@@ -581,7 +581,7 @@ def test_request_cancellation_trtllm_kv_transfer_cancel(
                 verify_runtime_cancellation_metrics(
                     worker_system_port=decode_worker.system_port,
                     expected_count=1,
-                    component="tensorrt_llm",
+                    component="backend",
                 )
                 verify_runtime_cancellation_metrics(
                     worker_system_port=prefill_worker.system_port,

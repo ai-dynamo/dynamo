@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Case 5b: AIC unsupported model, rapid, with planner + throughput scaling
-# This should FAIL with a ValueError because throughput-based planner
-# requires AIC support.
+# This should pass validation; planner can fall back to observed-FPM regression
+# when native AIC estimates are unavailable.
 model: "Qwen/Qwen2.5-0.5B"
 backend: vllm
 image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:latest"

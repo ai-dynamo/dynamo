@@ -32,7 +32,7 @@ The disaggregated approach optimizes for both low-latency (maximizing tokens per
 Ensure that the `etcd` and `nats` services are running with the following command:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up
+docker compose -f dev/docker-compose.yml up
 ```
 
 ## Instructions
@@ -52,7 +52,7 @@ huggingface-cli download openai/gpt-oss-120b --exclude "original/*" --exclude "m
 
 Set the container image:
 ```bash
-export DYNAMO_CONTAINER_IMAGE=nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+export DYNAMO_CONTAINER_IMAGE=nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
 ```
 
 Launch the Dynamo TensorRT-LLM container with the necessary configurations:
@@ -185,7 +185,7 @@ Make sure that both of the endpoints are available before sending an inference r
 ```
 {
   "endpoints": [
-    "dyn://dynamo.tensorrt_llm.generate",
+    "dyn://dynamo.backend.generate",
     "dyn://dynamo.prefill.generate"
   ],
   "status": "healthy"

@@ -1,11 +1,12 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Contribution Guide
 subtitle: How to contribute to Dynamo
 max-toc-depth: 3
 ---
 
-# Contribution Guide
+[简体中文](./contribution-guide.zh-CN.md)
 
 Dynamo is an open-source distributed inference platform, built by a growing community of contributors. The project is licensed under [Apache 2.0](https://github.com/ai-dynamo/dynamo/blob/main/LICENSE) and welcomes contributions of all sizes -- from typo fixes to major features. Community contributions have shaped core areas of Dynamo including backend integrations, documentation, deployment tooling, and performance improvements.
 
@@ -14,8 +15,12 @@ With 200+ external contributors, 220+ merged community PRs, and new contributors
 Join the community:
 
 - [CNCF Slack (`#ai-dynamo`)](https://communityinviter.com/apps/cloud-native/cncf) -- join CNCF Slack and find us in `#ai-dynamo`
-- [Discord](https://discord.gg/nvidia-dynamo)
+- [Discord](https://discord.gg/D92uqZRjCZ)
 - [GitHub Discussions](https://github.com/ai-dynamo/dynamo/discussions)
+- [Design Proposals](https://github.com/ai-dynamo/enhancements) -- RFCs for major features
+- [Office Hours](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X) -- biweekly calls
+- [Community Meetings](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view) ([Youtube](https://www.youtube.com/@ai-dynamo-community)) -- Weekly (Wed 10:30 AM PT) development community meetings
+- [Dynamo Day Recordings](https://nvevents.nvidia.com/dynamoday) -- deep dives from production users
 
 ## TL;DR
 
@@ -62,7 +67,7 @@ Ready to write code? See the [Contribution Workflow](#contribution-workflow) sec
 
 Not all contributions are code. You can also:
 
-- Answer questions on Discord or CNCF Slack
+- Answer questions on [Discord](https://discord.gg/D92uqZRjCZ) or in the `#ai-dynamo` channel on [CNCF Slack](https://communityinviter.com/apps/cloud-native/cncf)
 - Review pull requests
 - Share how you're using Dynamo -- blog posts, talks, or social media
 - Star the [repository](https://github.com/ai-dynamo/dynamo)
@@ -144,10 +149,10 @@ source .venv/bin/activate
 #### 4. Install Build Tools
 
 ```bash
-uv pip install pip maturin
+uv pip install pip 'maturin[patchelf]'
 ```
 
-[Maturin](https://github.com/PyO3/maturin) is the Rust-Python bindings build tool.
+[Maturin](https://github.com/PyO3/maturin) is the Rust-Python bindings build tool. The `patchelf` extra lets maturin patch native extension library paths during the build.
 
 #### 5. Build the Rust Bindings
 
@@ -383,7 +388,7 @@ Dynamo requires all contributions to be signed off with the [Developer Certifica
 Each commit must include a sign-off line:
 
 ```text
-Signed-off-by: Jane Smith &lt;jane.smith@email.com&gt;
+Signed-off-by: Jane Smith <jane.smith@email.com>
 ```
 
 Add this automatically with the `-s` flag:
@@ -420,8 +425,12 @@ If you discover a security vulnerability, please follow the instructions in our 
 ## Getting Help
 
 - **CNCF Slack**: [Join CNCF Slack](https://communityinviter.com/apps/cloud-native/cncf) and find us in `#ai-dynamo`
-- **Discord**: [Join our community](https://discord.gg/nvidia-dynamo)
+- **Discord**: [Join our community](https://discord.gg/D92uqZRjCZ)
 - **Discussions**: [GitHub Discussions](https://github.com/ai-dynamo/dynamo/discussions)
+- **Design Proposals**: [RFCs for major features](https://github.com/ai-dynamo/enhancements)
+- **Office Hours**: [Biweekly calls](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X)
+- **Community Meetings**: [Weekly (Wed 10:30 AM PT) development community meetings](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view) ([Youtube](https://www.youtube.com/@ai-dynamo-community))
+- **Dynamo Day Recordings**: [Deep dives from production users](https://nvevents.nvidia.com/dynamoday)
 - **Documentation**: [docs.nvidia.com/dynamo](https://docs.nvidia.com/dynamo/)
 
 Thank you for contributing to Dynamo!

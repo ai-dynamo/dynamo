@@ -401,6 +401,103 @@ func TestApplyProfilingJobOverrides_AutomountServiceAccountToken(t *testing.T) {
 	}
 }
 
+func TestEnsureOutputCopierKubeAPIAccess_AutomountServiceAccountTokenFalse(t *testing.T) {
+	job := baseJob()
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				AutomountServiceAccountToken: ptr.To(false),
+			},
+		},
+	})
+	ensureOutputCopierKubeAPIAccess(job)
+
+	spec := job.Spec.Template.Spec
+	tokenVolume := findVolume(spec.Volumes, VolumeNameOutputCopierKubeAPIAccess)
+	if tokenVolume == nil {
+		t.Fatal("expected output-copier kube API access volume")
+	}
+	if tokenVolume.Projected == nil {
+		t.Fatal("expected output-copier kube API access volume to be projected")
+	}
+	if len(tokenVolume.Projected.Sources) != 3 {
+		t.Fatalf("expected service account token, root CA, and namespace projections, got %d", len(tokenVolume.Projected.Sources))
+	}
+	if tokenVolume.Projected.Sources[0].ServiceAccountToken == nil {
+		t.Error("expected service account token projection")
+	}
+	if tokenVolume.Projected.Sources[1].ConfigMap == nil || tokenVolume.Projected.Sources[1].ConfigMap.Name != ConfigMapNameKubeRootCA {
+		t.Error("expected kube root CA ConfigMap projection")
+	}
+	if tokenVolume.Projected.Sources[2].DownwardAPI == nil {
+		t.Error("expected namespace DownwardAPI projection")
+	}
+
+	profiler := findContainer(spec.Containers, ContainerNameProfiler)
+	if profiler == nil {
+		t.Fatal("expected profiler container")
+	}
+	if findOutputCopierKubeAPIAccessMount(profiler.VolumeMounts) != nil {
+		t.Error("profiler should not mount output-copier kube API access token")
+	}
+
+	sidecar := findContainer(spec.Containers, ContainerNameOutputCopier)
+	if sidecar == nil {
+		t.Fatal("expected output-copier container")
+	}
+	sidecarMount := findOutputCopierKubeAPIAccessMount(sidecar.VolumeMounts)
+	if sidecarMount == nil {
+		t.Fatal("expected output-copier kube API access token mount")
+	}
+	if sidecarMount.MountPath != ServiceAccountTokenPath || !sidecarMount.ReadOnly {
+		t.Errorf("unexpected sidecar token mount: %+v", *sidecarMount)
+	}
+}
+
+func TestEnsureOutputCopierKubeAPIAccess_ProtectsTokenVolumeFromOverrides(t *testing.T) {
+	job := baseJob()
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				AutomountServiceAccountToken: ptr.To(false),
+				Volumes: []corev1.Volume{{
+					Name:         VolumeNameOutputCopierKubeAPIAccess,
+					VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+				}},
+				Containers: []corev1.Container{{
+					VolumeMounts: []corev1.VolumeMount{{
+						Name:      VolumeNameOutputCopierKubeAPIAccess,
+						MountPath: "/unexpected-token",
+					}},
+				}},
+			},
+		},
+	})
+	ensureOutputCopierKubeAPIAccess(job)
+
+	spec := job.Spec.Template.Spec
+	tokenVolume := findVolume(spec.Volumes, VolumeNameOutputCopierKubeAPIAccess)
+	if tokenVolume == nil || tokenVolume.Projected == nil {
+		t.Fatalf("expected protected volume to be restored as projected volume, got %+v", tokenVolume)
+	}
+
+	profiler := findContainer(spec.Containers, ContainerNameProfiler)
+	if profiler == nil {
+		t.Fatal("expected profiler container")
+	}
+	if findOutputCopierKubeAPIAccessMount(profiler.VolumeMounts) != nil {
+		t.Error("profiler should not retain a mount for the protected output-copier token volume")
+	}
+
+	sidecar := findContainer(spec.Containers, ContainerNameOutputCopier)
+	if sidecar == nil {
+		t.Fatal("expected output-copier container")
+	}
+	if mount := findOutputCopierKubeAPIAccessMount(sidecar.VolumeMounts); mount == nil || mount.MountPath != ServiceAccountTokenPath {
+		t.Errorf("expected output-copier to mount protected token volume at %s, got %+v", ServiceAccountTokenPath, mount)
+	}
+}
+
 func TestApplyProfilingJobOverrides_VolumesDedup(t *testing.T) {
 	job := baseJob()
 	applyProfilingJobOverrides(job, &batchv1.JobSpec{
@@ -828,4 +925,31 @@ func TestMergeNamedSlice_PreservesOrder(t *testing.T) {
 	if result[1].Value != "override" {
 		t.Errorf("A not overridden: %s", result[1].Value)
 	}
+}
+
+func findContainer(containers []corev1.Container, name string) *corev1.Container {
+	for i := range containers {
+		if containers[i].Name == name {
+			return &containers[i]
+		}
+	}
+	return nil
+}
+
+func findVolume(volumes []corev1.Volume, name string) *corev1.Volume {
+	for i := range volumes {
+		if volumes[i].Name == name {
+			return &volumes[i]
+		}
+	}
+	return nil
+}
+
+func findOutputCopierKubeAPIAccessMount(mounts []corev1.VolumeMount) *corev1.VolumeMount {
+	for i := range mounts {
+		if mounts[i].Name == VolumeNameOutputCopierKubeAPIAccess {
+			return &mounts[i]
+		}
+	}
+	return nil
 }

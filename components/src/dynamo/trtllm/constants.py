@@ -10,7 +10,10 @@ from enum import Enum
 
 
 class DisaggregationMode(Enum):
-    """Disaggregation mode for LLM workers."""
+    """Disaggregation mode for LLM workers.
+
+    TODO: unify with `dynamo.common.constants.DisaggregationMode`.
+    """
 
     AGGREGATED = "prefill_and_decode"
     PREFILL = "prefill"
@@ -25,12 +28,13 @@ class Modality(Enum):
     - TEXT: Text-only LLM (generates text tokens)
     - MULTIMODAL: Vision-language LLM (understands images, generates text)
     - VIDEO_DIFFUSION: Video generation from text (generates video files)
+    - IMAGE_DIFFUSION: Image generation from text (generates image files)
     """
 
     TEXT = "text"
     MULTIMODAL = "multimodal"
     VIDEO_DIFFUSION = "video_diffusion"
-    # TODO: Add IMAGE_DIFFUSION support in follow-up PR
+    IMAGE_DIFFUSION = "image_diffusion"
 
     @classmethod
     def is_diffusion(cls, modality: "Modality") -> bool:
@@ -42,7 +46,7 @@ class Modality(Enum):
         Returns:
             True if the modality is VIDEO_DIFFUSION.
         """
-        return modality == cls.VIDEO_DIFFUSION
+        return modality in (cls.VIDEO_DIFFUSION, cls.IMAGE_DIFFUSION)
 
     @classmethod
     def is_llm(cls, modality: "Modality") -> bool:

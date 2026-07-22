@@ -47,6 +47,8 @@ WORKDIR=/workspace
 NETWORK=host
 USER=
 GROUP_ADD_STRING=
+DEVICE=cuda
+DEVICE_FLAGS=
 
 get_options() {
     while :; do
@@ -103,6 +105,17 @@ get_options() {
             else
                 missing_requirement "$1"
             fi
+            ;;
+        --device)
+            if [ "$2" ]; then
+                DEVICE=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --device=*)
+            DEVICE="${1#--device=}"
             ;;
         --runtime)
             if [ "$2" ]; then
@@ -318,6 +331,27 @@ get_options() {
             RUNTIME=""
     fi
 
+    # --device selects accelerator backend. cuda (default) keeps existing behaviour.
+    # xpu wires Intel GPU access (/dev/dri + host render group) and disables the NVIDIA runtime.
+    DEVICE_FLAGS=""
+    case "${DEVICE,,}" in
+        cuda|"")
+            ;;
+        xpu)
+            GPUS="none"
+            GPU_STRING=""
+            RUNTIME=""
+            DEVICE_FLAGS="--device /dev/dri"
+            RENDER_GID="$(getent group render 2>/dev/null | awk -F: '{print $3}')"
+            if [ -n "${RENDER_GID}" ]; then
+                DEVICE_FLAGS+=" --group-add ${RENDER_GID}"
+            fi
+            ;;
+        *)
+            error 'ERROR: Unknown --device value (expected cuda|xpu): ' "$DEVICE"
+            ;;
+    esac
+
     if [[ ${USER} == "" ]]; then
         USER_STRING=""
     else
@@ -348,6 +382,7 @@ show_help() {
     echo "  [--dry-run print docker commands without running]"
     echo "  [--hf-home|--hf-cache directory to volume mount as the hf home, default is NONE unless mounting workspace]"
     echo "  [--gpus gpus to enable, default is 'all', 'none' disables gpu support]"
+    echo "  [--device accelerator backend: 'cuda' (default) or 'xpu' (Intel GPU via /dev/dri + render group)]"
     echo "  [--use-nixl-gds add volume mounts and capabilities needed for NVIDIA GPUDirect Storage]"
     echo "  [--network network mode for container, default is 'host']"
     echo "           Options: 'host' (default), 'bridge', 'none', 'container:name'"
@@ -385,6 +420,7 @@ fi
 
 ${RUN_PREFIX} docker run \
     ${GPU_STRING} \
+    ${DEVICE_FLAGS} \
     ${INTERACTIVE} \
     ${RM_STRING} \
     --network "$NETWORK" \

@@ -17,18 +17,13 @@ while [[ $# -gt 0 ]]; do
             REQUEST_PLANE="tcp"
             shift
             ;;
-        --http)
-            REQUEST_PLANE="http"
-            shift
-            ;;
         --nats)
             REQUEST_PLANE="nats"
             shift
             ;;
         -h|--help)
-            echo "Usage: $0 [--tcp|--http|--nats]"
+            echo "Usage: $0 [--tcp|--nats]"
             echo "  --tcp   Use TCP request plane (default)"
-            echo "  --http  Use HTTP/2 request plane"
             echo "  --nats  Use NATS request plane"
             exit 0
             ;;

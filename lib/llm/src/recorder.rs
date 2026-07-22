@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::{Mutex, mpsc};
+use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
 /// Record entry that will be serialized to JSONL
@@ -19,6 +20,30 @@ where
 {
     timestamp: u64,
     event: T,
+}
+
+/// Options for the generic JSONL recorder.
+#[derive(Debug, Clone)]
+pub struct RecorderOptions {
+    pub max_lines_per_file: Option<usize>,
+    pub max_count: Option<usize>,
+    pub max_time: Option<f64>,
+    pub buffer_bytes: usize,
+    pub flush_interval: Option<Duration>,
+    pub append: bool,
+}
+
+impl Default for RecorderOptions {
+    fn default() -> Self {
+        Self {
+            max_lines_per_file: None,
+            max_count: None,
+            max_time: None,
+            buffer_bytes: 32768,
+            flush_interval: None,
+            append: false,
+        }
+    }
 }
 
 /// A generic recorder for events that streams directly to a JSONL file
@@ -61,6 +86,24 @@ where
         max_count: Option<usize>,
         max_time: Option<f64>,
     ) -> io::Result<Self> {
+        Self::new_with_options(
+            token,
+            output_path,
+            RecorderOptions {
+                max_lines_per_file,
+                max_count,
+                max_time,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    pub async fn new_with_options<P: AsRef<Path>>(
+        token: CancellationToken,
+        output_path: P,
+        options: RecorderOptions,
+    ) -> io::Result<Self> {
         let (event_tx, mut event_rx) = mpsc::channel::<T>(2048);
         let event_count = Arc::new(Mutex::new(0));
         let event_count_clone = event_count.clone();
@@ -76,26 +119,33 @@ where
             fs::create_dir_all(parent).await?;
         }
 
-        // Create the file for writing
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&output_path)
-            .await?;
+        let mut open_options = OpenOptions::new();
+        open_options.create(true).write(true);
+        if options.append {
+            open_options.append(true);
+        } else {
+            open_options.truncate(true);
+        }
+        let file = open_options.open(&output_path).await?;
 
         let file_path = output_path.as_ref().to_path_buf();
 
         // Spawn a task to receive events and write them to the file
         tokio::spawn(async move {
             let start_time = start_time;
-            let mut writer = BufWriter::with_capacity(32768, file);
+            let mut writer = BufWriter::with_capacity(options.buffer_bytes.max(1), file);
             let mut line_count = 0;
             let mut file_index = 0;
             let base_path = file_path.clone();
+            let flush_interval = options
+                .flush_interval
+                .filter(|duration| !duration.is_zero());
+            let mut flush_tick =
+                tokio::time::interval(flush_interval.unwrap_or(Duration::from_secs(1)));
+            flush_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
             // Set up max time deadline if specified
-            let max_time_deadline = max_time.map(|secs| {
+            let max_time_deadline = options.max_time.map(|secs| {
                 let duration = Duration::from_secs_f64(secs);
                 start_time + duration
             });
@@ -127,6 +177,12 @@ where
                         return;
                     }
 
+                    _ = flush_tick.tick(), if flush_interval.is_some() => {
+                        if let Err(e) = writer.flush().await {
+                            tracing::error!("Failed to flush on interval: {}", e);
+                        }
+                    }
+
                     Some(event) = event_rx.recv() => {
                         // Update first_event_time if this is the first event
                         {
@@ -139,7 +195,6 @@ where
                         // Calculate elapsed time in milliseconds
                         let elapsed_ms = start_time.elapsed().as_millis() as u64;
 
-                        // Create the record entry
                         let entry = RecordEntry {
                             timestamp: elapsed_ms,
                             event,
@@ -170,7 +225,7 @@ where
                         line_count += 1;
 
                         // Check if we need to rotate to a new file
-                        if let Some(max_lines) = max_lines_per_file
+                        if let Some(max_lines) = options.max_lines_per_file
                             && line_count >= max_lines {
                                 // Flush the current file
                                 if let Err(e) = writer.flush().await {
@@ -190,7 +245,7 @@ where
                                     .await
                                 {
                                     Ok(new_file) => {
-                                        writer = BufWriter::with_capacity(32768, new_file);
+                                        writer = BufWriter::with_capacity(options.buffer_bytes.max(1), new_file);
                                         line_count = 0;
                                         tracing::info!("Rotated to new file: {}", new_path.display());
                                     },
@@ -206,7 +261,7 @@ where
                         *count += 1;
 
                         // Check if we've reached the maximum count
-                        if let Some(max) = max_count
+                        if let Some(max) = options.max_count
                             && *count >= max {
                                 tracing::info!("Recorder reached max event count ({}), shutting down", max);
                                 // Flush buffer before shutting down

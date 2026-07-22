@@ -24,7 +24,7 @@ First, initialize a Docker container using the vLLM backend. See the [vLLM Quick
 
 ```bash
 # Launch infrastructure services
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
 
 # Build the container
 ./container/build.sh --framework VLLM

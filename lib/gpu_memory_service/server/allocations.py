@@ -20,6 +20,7 @@ from gpu_memory_service.common.cuda_utils import (
     cumem_export_to_shareable_handle,
     cumem_get_allocation_granularity,
     cumem_release,
+    device_memory_info,
 )
 
 logger = logging.getLogger(__name__)
@@ -49,7 +50,7 @@ class GMSAllocationManager:
         device: int = 0,
         *,
         allocation_retry_interval: float = 0.5,
-        allocation_retry_timeout: Optional[float] = None,
+        allocation_retry_timeout: Optional[float] = 60.0,
     ):
         if allocation_retry_interval <= 0:
             raise ValueError(
@@ -124,10 +125,27 @@ class GMSAllocationManager:
                         f"tag={tag}, waited_sec={waited:.3f}"
                     )
 
+            # Visibility while retrying. Logged every iteration with elapsed
+            # time + free GPU memory, so a stuck retry loop is observable
+            # rather than silent.
+            free_b, total_b = -1, -1
+            try:
+                free_b, total_b = device_memory_info(self._device)
+            except Exception:
+                logger.debug(
+                    "NVML memory info failed for device %d",
+                    self._device,
+                    exc_info=True,
+                )
+            elapsed = time.monotonic() - started_at
             logger.warning(
-                "cuMemCreate OOM for aligned_size=%d bytes, tag=%s; retrying in %.3fs",
+                "cuMemCreate OOM for aligned_size=%d bytes, tag=%s, "
+                "elapsed=%.2fs free=%d total=%d; retrying in %.3fs",
                 aligned_size,
                 tag,
+                elapsed,
+                free_b,
+                total_b,
                 self._allocation_retry_interval,
             )
             await asyncio.sleep(self._allocation_retry_interval)

@@ -260,7 +260,7 @@ mod concurrent_create_tests {
 
     #[test]
     fn test_concurrent_etcd_create_race_condition() {
-        let rt = Runtime::from_settings().unwrap();
+        let rt = Runtime::single_threaded().unwrap();
         let rt_clone = rt.clone();
 
         rt_clone.primary().block_on(async move {

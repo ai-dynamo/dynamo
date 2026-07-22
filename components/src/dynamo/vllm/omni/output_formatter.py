@@ -106,7 +106,11 @@ class DiffusionFormatter:
 
         if request_type == RequestType.VIDEO_GENERATION:
             return await self._encode_video(
-                images, request_id, fps=ctx.get("fps", self._default_fps)
+                images,
+                request_id,
+                fps=ctx.get("fps", self._default_fps),
+                response_format=ctx.get("response_format"),
+                output_format=ctx.get("output_format"),
             )
         return await self._encode_image(
             images,
@@ -116,20 +120,46 @@ class DiffusionFormatter:
         )
 
     async def _encode_video(
-        self, images: list, request_id: str, fps: int
+        self,
+        images: list,
+        request_id: str,
+        fps: int,
+        response_format: Optional[str] = None,
+        output_format: Optional[str] = None,
     ) -> Dict[str, Any] | None:
+        output_format = output_format or "mp4"
+        response_format = response_format or "url"
+        if response_format not in ("url", "b64_json"):
+            raise ValueError(
+                f"Unsupported response_format: {response_format!r}; expected 'url' or 'b64_json'"
+            )
+        if output_format != "mp4":
+            raise ValueError(
+                f"Unsupported output_format: {output_format!r}; only 'mp4' is supported"
+            )
         try:
             start_time = time.time()
             frame_list = normalize_video_frames(images)
-            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=True) as tmp:
+            with tempfile.NamedTemporaryFile(
+                suffix=f".{output_format}", delete=True
+            ) as tmp:
                 await asyncio.to_thread(export_to_video, frame_list, tmp.name, fps)
                 video_bytes = tmp.read()
-            video_url = await upload_to_fs(
-                self._media_fs,
-                f"videos/{request_id}.mp4",
-                video_bytes,
-                self._media_http_url,
-            )
+
+            if response_format == "b64_json":
+                video_data = VideoData(
+                    output_format=output_format,
+                    b64_json=base64.b64encode(video_bytes).decode("utf-8"),
+                )
+            else:
+                video_url = await upload_to_fs(
+                    self._media_fs,
+                    f"videos/{request_id}.{output_format}",
+                    video_bytes,
+                    self._media_http_url,
+                )
+                video_data = VideoData(output_format=output_format, url=video_url)
+
             return NvVideosResponse(
                 id=request_id,
                 object="video",
@@ -137,7 +167,7 @@ class DiffusionFormatter:
                 status="completed",
                 progress=100,
                 created=int(time.time()),
-                data=[VideoData(url=video_url)],
+                data=[video_data],
                 inference_time_s=time.time() - start_time,
             ).model_dump()
         except Exception as e:
@@ -255,17 +285,14 @@ class AudioFormatter:
             return self._error_response(request_id, "No audio generated")
 
         response_format = ctx.get("response_format")
+        output_format = ctx.get("output_format")
         speed = ctx.get("speed", 1.0)
 
         try:
             start_time = time.time()
             audio_np, sample_rate = self._extract_audio_tensor(mm_output)
 
-            encode_fmt = (
-                "wav"
-                if response_format in (None, "url", "b64_json")
-                else response_format
-            )
+            encode_fmt = "wav" if output_format is None else output_format
             assert encode_fmt is not None
             audio_bytes, media_type = await asyncio.to_thread(
                 self._encode_audio, audio_np, sample_rate, encode_fmt, speed
@@ -288,10 +315,11 @@ class AudioFormatter:
                     audio_bytes,
                     self._media_http_url,
                 )
-                audio_data_obj = self._AudioData(url=url)
+                audio_data_obj = self._AudioData(output_format=encode_fmt, url=url)
             else:
                 audio_data_obj = self._AudioData(
-                    b64_json=base64.b64encode(audio_bytes).decode()
+                    output_format=encode_fmt,
+                    b64_json=base64.b64encode(audio_bytes).decode(),
                 )
 
             return NvAudioSpeechResponse(

@@ -37,22 +37,93 @@ def _get_workspace_dir() -> str:
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-class ServiceSpec:
-    """Wrapper around a single service in the deployment spec."""
+# Supported DynamoGraphDeployment CRD schemas. v1alpha1 uses ``spec.services``
+# (a dict of service name -> ServiceSpec); v1beta1 uses ``spec.components``
+# (a list of components with podTemplate.spec.containers).
+SCHEMA_V1ALPHA1 = "v1alpha1"
+SCHEMA_V1BETA1 = "v1beta1"
 
-    def __init__(self, service_name: str, service_spec: dict):
+
+class ServiceSpec:
+    """Wrapper around a single service/component in the deployment spec.
+
+    Supports both v1alpha1 (``spec.services[<name>]``) and v1beta1
+    (``spec.components[*]``) schemas. Accessors dispatch on ``schema`` so
+    callers see a uniform interface regardless of the underlying CRD version.
+    """
+
+    # Default sidecar container name used when ``frontendSidecar`` references a
+    # container by name in v1beta1. Matches the convention used by the
+    # examples and recipes that ship with dynamo.
+    _DEFAULT_SIDECAR_NAME = "sidecar-frontend"
+
+    def __init__(
+        self,
+        service_name: str,
+        service_spec: dict,
+        schema: str = SCHEMA_V1ALPHA1,
+    ):
         self._name = service_name
         self._spec = service_spec
+        self._schema = schema
 
     @property
     def name(self) -> str:
         """The service name (read-only)"""
         return self._name
 
+    @property
+    def schema(self) -> str:
+        """CRD schema this ServiceSpec is bound to."""
+        return self._schema
+
+    # ----- v1beta1 container helpers -----
+    def _containers_list(self, create: bool = False) -> Optional[list]:
+        """Return the v1beta1 ``podTemplate.spec.containers`` list, or None."""
+        if self._schema != SCHEMA_V1BETA1:
+            return None
+        if create:
+            return (
+                self._spec.setdefault("podTemplate", {})
+                .setdefault("spec", {})
+                .setdefault("containers", [])
+            )
+        return self._spec.get("podTemplate", {}).get("spec", {}).get("containers")
+
+    def _find_container(
+        self, container_name: str, create: bool = False
+    ) -> Optional[dict]:
+        """Find a container by name in v1beta1; optionally create if missing."""
+        containers = self._containers_list(create=create)
+        if containers is None:
+            return None
+        for c in containers:
+            if c.get("name") == container_name:
+                return c
+        if create:
+            new_c: dict[str, Any] = {"name": container_name}
+            containers.append(new_c)
+            return new_c
+        return None
+
+    def _main_container(self, create: bool = False) -> Optional[dict]:
+        return self._find_container("main", create=create)
+
+    def _sidecar_container_name(self) -> str:
+        # v1beta1 components reference the sidecar container by name via the
+        # ``frontendSidecar`` field; default to the canonical name otherwise.
+        return self._spec.get("frontendSidecar") or self._DEFAULT_SIDECAR_NAME
+
+    def _sidecar_container(self, create: bool = False) -> Optional[dict]:
+        return self._find_container(self._sidecar_container_name(), create=create)
+
     # ----- Image -----
     @property
     def image(self) -> Optional[str]:
         """Container image for the service"""
+        if self._schema == SCHEMA_V1BETA1:
+            container = self._main_container()
+            return container.get("image") if container else None
         try:
             return self._spec["extraPodSpec"]["mainContainer"]["image"]
         except KeyError:
@@ -60,6 +131,11 @@ class ServiceSpec:
 
     @image.setter
     def image(self, value: str):
+        if self._schema == SCHEMA_V1BETA1:
+            container = self._main_container(create=True)
+            assert container is not None
+            container["image"] = value
+            return
         if "extraPodSpec" not in self._spec:
             self._spec["extraPodSpec"] = {"mainContainer": {}}
         if "mainContainer" not in self._spec["extraPodSpec"]:
@@ -69,6 +145,9 @@ class ServiceSpec:
     @property
     def frontend_sidecar_image(self) -> Optional[str]:
         """Container image for the frontendSidecar (if present)."""
+        if self._schema == SCHEMA_V1BETA1:
+            container = self._sidecar_container()
+            return container.get("image") if container else None
         try:
             return self._spec["frontendSidecar"]["image"]
         except KeyError:
@@ -76,29 +155,87 @@ class ServiceSpec:
 
     @frontend_sidecar_image.setter
     def frontend_sidecar_image(self, value: str):
+        if self._schema == SCHEMA_V1BETA1:
+            container = self._sidecar_container(create=True)
+            assert container is not None
+            container["image"] = value
+            return
         if "frontendSidecar" not in self._spec:
             self._spec["frontendSidecar"] = {}
         self._spec["frontendSidecar"]["image"] = value
 
     @property
     def envs(self) -> list[dict[str, str]]:
-        """Environment variables for the service"""
+        """Environment variables for the service.
+
+        v1alpha1 stores envs at the service level (``spec.envs``); v1beta1
+        stores them per-container under ``podTemplate.spec.containers[main].env``.
+        """
+        if self._schema == SCHEMA_V1BETA1:
+            container = self._main_container()
+            if container is None:
+                return []
+            return container.get("env", [])
         return self._spec.get("envs", [])
 
     @envs.setter
     def envs(self, value: list[dict[str, str]]):
+        if self._schema == SCHEMA_V1BETA1:
+            container = self._main_container(create=True)
+            assert container is not None
+            container["env"] = value
+            return
         self._spec["envs"] = value
 
-    def _get_args(self) -> list[str]:
-        """Return the container args list, normalising scalar strings to a list in-place.
+    def _get_main_container_for_args(self, create: bool = False) -> Optional[dict]:
+        """Locate the main container dict for argv access in either schema."""
+        if self._schema == SCHEMA_V1BETA1:
+            return self._main_container(create=create)
+        if "extraPodSpec" not in self._spec:
+            if not create:
+                return None
+            self._spec["extraPodSpec"] = {"mainContainer": {}}
+        if "mainContainer" not in self._spec["extraPodSpec"]:
+            if not create:
+                return None
+            self._spec["extraPodSpec"]["mainContainer"] = {}
+        return self._spec["extraPodSpec"]["mainContainer"]
 
-        Always returns the same list object that is stored in the spec, so
-        in-place mutations (append / index assignment) are reflected immediately
-        without an explicit writeback.
+    @staticmethod
+    def _is_shell_style(container: dict) -> bool:
+        """Detect ``command: [..., "-c"]`` + ``args: ["<shell-string>"]``.
+
+        v1beta1 manifests frequently invoke workers via a shell so that
+        ``$VAR`` references in the args expand at pod start. Mutating those
+        args naively (e.g. shlex-splitting and writing back as argv tokens)
+        breaks the shell's contract — ``sh -c`` takes exactly one command
+        string; everything after it becomes ``$0``/``$1``/…, so the rest of
+        the flags would be silently dropped at runtime.
         """
-        try:
-            container = self._spec["extraPodSpec"]["mainContainer"]
-        except KeyError:
+        cmd = container.get("command")
+        if not isinstance(cmd, list) or len(cmd) < 2 or cmd[-1] != "-c":
+            return False
+        args = container.get("args", [])
+        return (
+            isinstance(args, list)
+            and len(args) == 1
+            and isinstance(args[0], str)
+            and " " in args[0]
+        )
+
+    def _get_args(self) -> list[str]:
+        """Return parsed argv tokens for the main container.
+
+        - Argv-style args (already a list of tokens, or a single-string scalar
+          that's whitespace-separable) return the **live** list stored in the
+          spec, so in-place mutations propagate immediately.
+        - Shell-style args (``command: [/bin/sh, -c]`` + a single args string)
+          return a **detached** parsed copy. Callers that mutate must persist
+          changes via :meth:`_set_args` so the shell command remains a single
+          ``args[0]`` string when the manifest is serialised back.
+        """
+        container = self._get_main_container_for_args(create=True)
+        if container is None:
             return []
         if "args" not in container:
             container["args"] = []
@@ -106,7 +243,52 @@ class ServiceSpec:
         if isinstance(args, str):
             args = args.split()
             container["args"] = args
+            return args
+        if self._is_shell_style(container):
+            import shlex
+
+            return shlex.split(args[0]) if args[0].strip() else []
         return args
+
+    # Bare-safe characters for re-joining shell-style argv tokens. Includes ``$``
+    # so that ``$MODEL_PATH``-style references survive the round-trip without
+    # being single-quoted (which would suppress runtime expansion under
+    # ``/bin/sh -c``). Compare with ``shlex.quote`` which is purely literal.
+    _SHELL_BARE_SAFE = re.compile(r"^[A-Za-z0-9_./:=,@%+\-$]+$")
+
+    @classmethod
+    def _shell_quote_preserving_vars(cls, tok: str) -> str:
+        """Quote ``tok`` for inclusion in a shell command while preserving
+        ``$VAR`` expansion when the variable name uses safe characters.
+
+        Tokens that are entirely composed of safe characters (alnum, ``-_./
+        :=,@%+`` and ``$``) are left bare; everything else is wrapped in
+        single quotes (with embedded single quotes escaped via the standard
+        ``'\\''`` trick) to preserve literal contents.
+        """
+        if not tok:
+            return "''"
+        if cls._SHELL_BARE_SAFE.match(tok):
+            return tok
+        return "'" + tok.replace("'", "'\\''") + "'"
+
+    def _set_args(self, tokens: list[str]) -> None:
+        """Write argv ``tokens`` back into the main container.
+
+        For shell-style invocations the tokens are re-joined into a single
+        shell-quoted string and stored as ``args[0]`` so the original
+        ``/bin/sh -c`` contract is preserved. ``$VAR`` references are left
+        bare so the shell still expands them at pod start.
+        """
+        container = self._get_main_container_for_args(create=True)
+        if container is None:
+            return
+        if self._is_shell_style(container):
+            container["args"] = [
+                " ".join(self._shell_quote_preserving_vars(t) for t in tokens)
+            ]
+        else:
+            container["args"] = list(tokens)
 
     # ----- Replicas -----
     @property
@@ -134,11 +316,23 @@ class ServiceSpec:
             if arg in ["--model", "--model-path"]:
                 if i + 1 < len(args) and not args[i + 1].startswith("-"):
                     args[i + 1] = value
+                self._set_args(args)
                 return
 
     # ----- GPUs -----
+    # v1alpha1 stores GPU limits at ``spec.resources.limits.gpu``; v1beta1
+    # stores them per-container at
+    # ``podTemplate.spec.containers[main].resources.limits["nvidia.com/gpu"]``.
     @property
     def gpus(self) -> int:
+        if self._schema == SCHEMA_V1BETA1:
+            container = self._main_container()
+            if container is None:
+                return 0
+            try:
+                return int(container["resources"]["limits"]["nvidia.com/gpu"])
+            except KeyError:
+                return 0
         try:
             return int(self._spec["resources"]["limits"]["gpu"])
         except KeyError:
@@ -146,11 +340,21 @@ class ServiceSpec:
 
     @gpus.setter
     def gpus(self, value: int):
-        if "resources" not in self._spec:
-            self._spec["resources"] = {}
-        if "limits" not in self._spec["resources"]:
-            self._spec["resources"]["limits"] = {}
-        self._spec["resources"]["limits"]["gpu"] = str(value)
+        # Kubernetes requires ``requests == limits`` for extended resources
+        # like ``nvidia.com/gpu``; the GAIE fixture and other v1beta1
+        # manifests declare both fields explicitly. Update them in lockstep
+        # so callers like ``set_tensor_parallel`` can't produce a spec the
+        # operator (or kube-scheduler) will reject.
+        if self._schema == SCHEMA_V1BETA1:
+            container = self._main_container(create=True)
+            assert container is not None
+            resources = container.setdefault("resources", {})
+            resources.setdefault("limits", {})["nvidia.com/gpu"] = str(value)
+            resources.setdefault("requests", {})["nvidia.com/gpu"] = str(value)
+            return
+        resources = self._spec.setdefault("resources", {})
+        resources.setdefault("limits", {})["gpu"] = str(value)
+        resources.setdefault("requests", {})["gpu"] = str(value)
 
     @property
     def tensor_parallel_size(self) -> int:
@@ -172,9 +376,11 @@ class ServiceSpec:
                     args[i + 1] = str(value)
                 else:
                     args.append(str(value))
+                self._set_args(args)
                 self.gpus = value
                 return
         args.extend(["--tensor-parallel-size", str(value)])
+        self._set_args(args)
         self.gpus = value
 
 
@@ -188,6 +394,41 @@ class DeploymentSpec:
         self._endpoint = endpoint
         self._port = port
         self._system_port = system_port
+        self._schema = self._detect_schema()
+
+    def _detect_schema(self) -> str:
+        """Detect whether the loaded manifest is v1alpha1 (services dict) or
+        v1beta1 (components list).
+
+        We trust ``apiVersion`` first and fall back to inspecting ``spec`` so
+        manifests without an explicit version still work.
+        """
+        api_version = self._deployment_spec.get("apiVersion", "")
+        if api_version.endswith("/v1beta1"):
+            return SCHEMA_V1BETA1
+        if api_version.endswith("/v1alpha1"):
+            return SCHEMA_V1ALPHA1
+        spec = self._deployment_spec.get("spec", {})
+        if isinstance(spec.get("components"), list):
+            return SCHEMA_V1BETA1
+        return SCHEMA_V1ALPHA1
+
+    @property
+    def schema(self) -> str:
+        """CRD schema of the loaded manifest (``v1alpha1`` or ``v1beta1``)."""
+        return self._schema
+
+    @property
+    def api_version(self) -> str:
+        """CRD version string suitable for CustomObjectsApi calls."""
+        return self._schema
+
+    def _component_by_name(self, service_name: str) -> dict:
+        """Look up a v1beta1 component dict by its ``name`` field."""
+        for comp in self._deployment_spec["spec"].get("components", []):
+            if comp.get("name") == service_name:
+                return comp
+        raise KeyError(service_name)
 
     @property
     def name(self) -> str:
@@ -344,15 +585,29 @@ class DeploymentSpec:
     @property
     def services(self) -> list[ServiceSpec]:
         """List of ServiceSpec objects"""
+        if self._schema == SCHEMA_V1BETA1:
+            return [
+                ServiceSpec(comp["name"], comp, schema=self._schema)
+                for comp in self._deployment_spec["spec"].get("components", [])
+                if "name" in comp
+            ]
         return [
-            ServiceSpec(svc, spec)
+            ServiceSpec(svc, spec, schema=self._schema)
             for svc, spec in self._deployment_spec["spec"]["services"].items()
         ]
 
     def __getitem__(self, service_name: str) -> ServiceSpec:
         """Allow dict-like access: d['Frontend']"""
+        if self._schema == SCHEMA_V1BETA1:
+            return ServiceSpec(
+                service_name,
+                self._component_by_name(service_name),
+                schema=self._schema,
+            )
         return ServiceSpec(
-            service_name, self._deployment_spec["spec"]["services"][service_name]
+            service_name,
+            self._deployment_spec["spec"]["services"][service_name],
+            schema=self._schema,
         )
 
     def spec(self):
@@ -368,26 +623,13 @@ class DeploymentSpec:
             arg_value: Argument value (e.g., "1024")
         """
         service = self.get_service(service_name)
-        service_spec = service._spec
+        # _get_args() returns parsed argv tokens. The list it returns may be
+        # the live spec list (argv-style args) OR a detached parsed copy
+        # (shell-style ``command: [/bin/sh, -c]``); always persist via
+        # ``_set_args`` so the latter case is re-joined into a single string
+        # rather than written back as argv tokens (which the shell would drop).
+        args_list = service._get_args()
 
-        # Ensure args list exists
-        if "extraPodSpec" not in service_spec:
-            service_spec["extraPodSpec"] = {"mainContainer": {}}
-        if "mainContainer" not in service_spec["extraPodSpec"]:
-            service_spec["extraPodSpec"]["mainContainer"] = {}
-        if "args" not in service_spec["extraPodSpec"]["mainContainer"]:
-            service_spec["extraPodSpec"]["mainContainer"]["args"] = []
-
-        args_list = service_spec["extraPodSpec"]["mainContainer"]["args"]
-
-        # Convert to list if needed (sometimes it's a single string)
-        if isinstance(args_list, str):
-            import shlex
-
-            args_list = shlex.split(args_list)
-            service_spec["extraPodSpec"]["mainContainer"]["args"] = args_list
-
-        # Find existing argument
         arg_index = None
         for i, arg in enumerate(args_list):
             if arg == arg_name:
@@ -395,28 +637,37 @@ class DeploymentSpec:
                 break
 
         if arg_index is not None:
-            # Argument found, check if it has a value
             if arg_index + 1 < len(args_list) and not args_list[
                 arg_index + 1
             ].startswith("-"):
-                # Has a value, replace it
                 args_list[arg_index + 1] = arg_value
             else:
-                # No value after the argument, insert the value
                 args_list.insert(arg_index + 1, arg_value)
         else:
-            # Add new argument
             args_list.extend([arg_name, arg_value])
+
+        service._set_args(args_list)
 
     def get_service(self, service_name: str) -> ServiceSpec:
         """
         Get a specific service from the deployment spec
         """
+        if self._schema == SCHEMA_V1BETA1:
+            try:
+                comp = self._component_by_name(service_name)
+            except KeyError:
+                raise ValueError(
+                    f"Service '{service_name}' not found in deployment spec"
+                )
+            return ServiceSpec(service_name, comp, schema=self._schema)
+
         if service_name not in self._deployment_spec["spec"]["services"]:
             raise ValueError(f"Service '{service_name}' not found in deployment spec")
 
         return ServiceSpec(
-            service_name, self._deployment_spec["spec"]["services"][service_name]
+            service_name,
+            self._deployment_spec["spec"]["services"][service_name],
+            schema=self._schema,
         )
 
     def set_service_replicas(self, service_name: str, replicas: int):
@@ -520,6 +771,11 @@ class ManagedDeployment:
     _deployment_name: str = field(default="")
     _apps_v1: Optional[Any] = None
     _active_port_forwards: List[Any] = field(default_factory=list)
+    # Per ``pod_name/container_name`` -> highest restart count for which we
+    # have already dumped the previous-instance log inline during the wait
+    # loop. Used by ``_dump_in_flight_restart_logs`` to avoid re-spamming
+    # the same crash log every poll while CrashLoopBackOff is still active.
+    _logged_restart_counts: dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self):
         self._deployment_name = self.deployment_spec.name
@@ -651,7 +907,7 @@ class ManagedDeployment:
                 assert self._custom_api is not None, "Kubernetes API not initialized"
                 status = await self._custom_api.get_namespaced_custom_object(  # type: ignore[awaitable-is-not-coroutine]
                     group="nvidia.com",
-                    version="v1alpha1",
+                    version=self.deployment_spec.api_version,
                     namespace=self.namespace,
                     plural="dynamographdeployments",
                     name=self._deployment_name,
@@ -689,6 +945,22 @@ class ManagedDeployment:
                     )
                     return True
                 else:
+                    # Surface the previous-instance log tail for any DGD
+                    # container that restarted while we are still waiting
+                    # for Ready. Dedup'd per (pod, container, restart_count)
+                    # so we emit each crash exactly once. Runs every poll
+                    # (not just on log_interval) so we catch the first
+                    # CrashLoopBackOff event as soon as kubelet reports it,
+                    # without waiting up to 60s to learn that prefill is
+                    # cycling.
+                    in_flight = await self._dump_in_flight_restart_logs()
+                    if in_flight:
+                        self._logger.warning(
+                            "Detected in-flight container restarts (deployment not yet Ready):"
+                        )
+                        for line in in_flight:
+                            self._logger.warning(f"  {line}")
+
                     if attempt % log_interval == 0:
                         self._logger.info(f"Current deployment state: {current_state}")
                         self._logger.info(f"Current conditions: {conditions}")
@@ -802,6 +1074,130 @@ class ManagedDeployment:
             self._logger.debug(f"Failed to collect pod status details: {e}")
             return []
 
+    async def _dump_in_flight_restart_logs(
+        self, prev_log_tail_lines: int = 80
+    ) -> List[str]:
+        """Surface the previous-instance log tail for any DGD container that
+        has restarted *while we are still waiting for Ready*.
+
+        This is the diagnostic that converts a "deployment timed out, no idea
+        why" CI failure into a self-diagnosing one when a worker is in
+        CrashLoopBackOff during startup.
+        Each container is reported at most once per restart_count value via
+        ``_logged_restart_counts``: the next time the same container restarts
+        (count increments), we dump the new previous-instance log. Restarts
+        that have already been reported are skipped, so the wait loop does
+        not re-spam the same crash log on every poll.
+
+        Returns the list of human-readable warnings (one entry per newly
+        observed restart) so callers can log them with proper formatting.
+        """
+        try:
+            assert self._core_api is not None, "Kubernetes API not initialized"
+            label = f"nvidia.com/dynamo-graph-deployment-name={self._deployment_name}"
+            pods = await self._core_api.list_namespaced_pod(
+                self.namespace, label_selector=label
+            )
+            warnings: List[str] = []
+            for pod in pods.items:
+                pod_name = pod.metadata.name if pod.metadata else "?"
+                statuses = (pod.status.container_statuses if pod.status else None) or []
+                for cs in statuses:
+                    after = cs.restart_count or 0
+                    if after <= 0:
+                        continue
+                    key = f"{pod_name}/{cs.name}"
+                    already = self._logged_restart_counts.get(key, 0)
+                    if after <= already:
+                        # We've already dumped the previous-instance log
+                        # for this exact restart count; nothing new.
+                        continue
+
+                    last_reason = ""
+                    last_exit: Optional[int] = None
+                    if cs.last_state and cs.last_state.terminated:
+                        last_reason = cs.last_state.terminated.reason or ""
+                        last_exit = cs.last_state.terminated.exit_code
+
+                    warning = (
+                        f"{key}: in-flight restart count {after} "
+                        f"(last seen {already}) while waiting for Ready"
+                    )
+                    if last_reason:
+                        warning += f" lastReason={last_reason}"
+                    if last_exit is not None:
+                        warning += f" lastExitCode={last_exit}"
+
+                    prev_log = await self._fetch_previous_container_log(
+                        pod_name, cs.name, tail_lines=prev_log_tail_lines
+                    )
+                    if prev_log:
+                        warning += (
+                            f"\n      --- last {prev_log_tail_lines} lines of "
+                            f"previous {cs.name} log ({pod_name}) ---\n"
+                        )
+                        for line in prev_log.splitlines():
+                            warning += f"      {line}\n"
+                        warning += f"      --- end of previous {cs.name} log ---"
+                    else:
+                        warning += (
+                            f"\n      (previous log unavailable for "
+                            f"{cs.name} on {pod_name})"
+                        )
+                    warnings.append(warning)
+                    # Mark this restart_count as reported so we don't re-emit
+                    # the same log on the next poll. We update only after we
+                    # have produced the warning so a transient API failure
+                    # does not silently consume the event.
+                    self._logged_restart_counts[key] = after
+            return warnings
+        except exceptions.ApiException as e:
+            # API access can fail mid-poll (vCluster syncer hiccup, transient
+            # connection reset). Best-effort diagnostic: skip this round and
+            # let the next poll retry. Bugs in our own field access (e.g.
+            # ``cs.last_state.terminated`` on an unexpected status shape)
+            # propagate to the wait loop's "Unexpected exception" handler so
+            # they don't get silently swallowed.
+            self._logger.debug(f"Failed to check in-flight restart counts: {e}")
+            return []
+
+    async def _fetch_previous_container_log(
+        self,
+        pod_name: str,
+        container: str,
+        tail_lines: int = 100,
+    ) -> Optional[str]:
+        """Fetch the previous (pre-restart) instance log for a container.
+
+        Returns the tail of the log as a single string, or None if no previous
+        instance exists or the API call fails. This is the artifact that
+        normally lives in ``<pod>.<container>.previous.log`` on disk; we
+        surface it inline so failed CI runs are self-diagnosing without
+        needing an artifact download.
+        """
+        try:
+            assert self._core_api is not None, "Kubernetes API not initialized"
+            log = await self._core_api.read_namespaced_pod_log(
+                name=pod_name,
+                namespace=self.namespace,
+                container=container,
+                previous=True,
+                tail_lines=tail_lines,
+            )
+            return log if isinstance(log, str) else str(log)
+        except exceptions.ApiException as e:
+            # 400 "previous terminated container … not found" is the common
+            # case when restart_count > 0 but the previous instance log was
+            # rotated. 404 means the pod is gone (cleanup race). Anything
+            # else (e.g. an AttributeError in our own formatting) is a real
+            # bug -- let it bubble to the wait loop's outer handler instead
+            # of silently returning None.
+            self._logger.debug(
+                f"No previous log for {pod_name}/{container} "
+                f"(status={e.status}, reason={e.reason})"
+            )
+            return None
+
     async def _get_pod_events(self) -> List[str]:
         """Fetch warning events for pods in this deployment's namespace."""
         try:
@@ -851,7 +1247,7 @@ class ManagedDeployment:
             assert self._custom_api is not None, "Kubernetes API not initialized"
             await self._custom_api.create_namespaced_custom_object(
                 group="nvidia.com",
-                version="v1alpha1",
+                version=self.deployment_spec.api_version,
                 namespace=self.namespace,
                 plural="dynamographdeployments",
                 body=self.deployment_spec.spec(),
@@ -878,21 +1274,34 @@ class ManagedDeployment:
                 "service_names cannot be empty for trigger_rolling_upgrade"
             )
 
-        patch_body: dict[str, Any] = {"spec": {"services": {}}}
-
+        # Apply env-var edits to the in-memory spec first; then build a
+        # schema-appropriate merge patch. JSON merge-patch replaces lists
+        # wholesale, so for v1beta1 we send the full components list.
         for service_name in service_names:
             self.deployment_spec.set_service_env_var(
                 service_name, "TEST_ROLLING_UPDATE_TRIGGER", secrets.token_hex(8)
             )
 
-            updated_envs = self.deployment_spec.get_service_env_vars(service_name)
-            patch_body["spec"]["services"][service_name] = {"envs": updated_envs}
+        patch_body: dict[str, Any]
+        if self.deployment_spec.api_version == SCHEMA_V1BETA1:
+            patch_body = {
+                "spec": {
+                    "components": self.deployment_spec.spec()["spec"].get(
+                        "components", []
+                    )
+                }
+            }
+        else:
+            patch_body = {"spec": {"services": {}}}
+            for service_name in service_names:
+                updated_envs = self.deployment_spec.get_service_env_vars(service_name)
+                patch_body["spec"]["services"][service_name] = {"envs": updated_envs}
 
         try:
             assert self._custom_api is not None, "Kubernetes API not initialized"
             await self._custom_api.patch_namespaced_custom_object(
                 group="nvidia.com",
-                version="v1alpha1",
+                version=self.deployment_spec.api_version,
                 namespace=self.namespace,
                 plural="dynamographdeployments",
                 name=self._deployment_name,
@@ -973,19 +1382,62 @@ class ManagedDeployment:
                 f.write(pod.to_yaml())
         except Exception as e:
             self._logger.error(e)
+
+        # Resolve the container list from the pod manifest. Multi-container pods
+        # (e.g. workers with a frontendSidecar, or pods running under vCluster
+        # with the rewrite-hosts init container) reject ``pod.logs()`` calls
+        # that omit ``container=`` with a "container name must be specified"
+        # so we have to be more detailed here. Iterate every container and write one
+        # log file per container.
+        container_names: List[str] = []
         try:
-            with open(os.path.join(directory, f"{pod.name}{suffix}.log"), "w") as f:
-                f.write("\n".join(pod.logs()))
+            spec = pod.raw.get("spec", {}) if hasattr(pod, "raw") else {}
+            for c in spec.get("initContainers", []) or []:
+                if c.get("name"):
+                    container_names.append(c["name"])
+            for c in spec.get("containers", []) or []:
+                if c.get("name"):
+                    container_names.append(c["name"])
         except Exception as e:
-            self._logger.error(e)
-        try:
-            previous_logs = pod.logs(previous=True)
-            with open(
-                os.path.join(directory, f"{pod.name}{suffix}.previous.log"), "w"
-            ) as f:
-                f.write("\n".join(previous_logs))
-        except Exception as e:
-            self._logger.debug(e)
+            self._logger.debug(f"Failed to resolve containers for {pod.name}: {e}")
+
+        if not container_names:
+            container_names = [""]
+
+        for container in container_names:
+            file_suffix = f".{container}" if container else ""
+            try:
+                logs = pod.logs(container=container) if container else pod.logs()
+                with open(
+                    os.path.join(directory, f"{pod.name}{file_suffix}{suffix}.log"),
+                    "w",
+                ) as f:
+                    f.write("\n".join(logs))
+            except Exception as e:
+                self._logger.error(
+                    f"Failed to fetch logs for {pod.name} container={container or '<default>'}: {e}"
+                )
+            try:
+                previous_logs = (
+                    pod.logs(container=container, previous=True)
+                    if container
+                    else pod.logs(previous=True)
+                )
+                with open(
+                    os.path.join(
+                        directory,
+                        f"{pod.name}{file_suffix}{suffix}.previous.log",
+                    ),
+                    "w",
+                ) as f:
+                    f.write("\n".join(previous_logs))
+            except Exception as e:
+                # Previous-instance logs are absent unless the container has
+                # restarted. Common case is "no previous terminated container"
+                # -- log at debug so we don't spam the test output.
+                self._logger.debug(
+                    f"No previous logs for {pod.name} container={container or '<default>'}: {e}"
+                )
 
         self._get_pod_metrics(pod, service_name, suffix)
 
@@ -1044,7 +1496,7 @@ class ManagedDeployment:
             if self._deployment_name and self._custom_api is not None:
                 await self._custom_api.delete_namespaced_custom_object(
                     group="nvidia.com",
-                    version="v1alpha1",
+                    version=self.deployment_spec.api_version,
                     namespace=self.namespace,
                     plural="dynamographdeployments",
                     name=self._deployment_name,

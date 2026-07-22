@@ -15,6 +15,7 @@ from dynamo._core import Client as Client
 from dynamo._core import Context as Context
 from dynamo._core import DistributedRuntime as DistributedRuntime
 from dynamo._core import Endpoint as Endpoint
+from dynamo._core import PyAsyncRequestStream as PyAsyncRequestStream
 
 
 def dynamo_worker(enable_nats: Optional[bool] = None):

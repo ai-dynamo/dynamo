@@ -1,0 +1,2811 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# License-policy file for Python / Go / dpkg / native ecosystems.
+# Rust uses cargo-deny's deny.toml at the repo root (same allow list,
+# enforced via `cargo deny check licenses`). This file is consumed by
+# container/compliance/policy/validate.py.
+#
+# Policy semantics (mirrors cargo-deny):
+#   - allow: SPDX IDs that are always permitted.
+#   - deny:  SPDX IDs that are always rejected.
+#   - unknown: how to treat licenses we couldn't resolve to an SPDX ID.
+#               "deny" makes UNKNOWN a build failure (recommended).
+#   - copyleft: how to treat the copyleft category (LGPL / MPL / etc).
+#               "deny" by default; allow specific copyleft IDs via the allow list.
+#   - exceptions: per-package opt-ins for licenses that would otherwise be denied.
+#
+# SPDX expressions in the input data may be compound:
+#   "MIT OR Apache-2.0"           → allowed if EITHER token is allowed
+#   "MIT AND Apache-2.0"          → allowed only if BOTH are allowed
+#   "Apache-2.0 WITH LLVM-exception" → treated as Apache-2.0 plus the exception
+# validate.py handles these.
+
+[licenses]
+
+# Permissive licenses we ship with no special handling.
+# The Rust /deny.toml is a subset of this — Python/Go/dpkg legitimately need
+# more SPDX IDs because the Linux distribution surface area is broader than
+# the Rust crate ecosystem (creative-commons doc/data licenses, NVIDIA
+# proprietary refs, older variants of permissive licenses, etc.).
+allow = [
+  # --- Core permissive ---
+  "0BSD",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-2-Clause-Patent",
+  "BSD-3-Clause",
+  "BSD-4-Clause",
+  "BSD-Source-Code",    # permissive BSD variant; cyclonedx-gomod's
+                        # go-license-detector frequently picks this for
+                        # golang.org/x/* (actual upstream is BSD-3-Clause,
+                        # which is allowed regardless).
+  "BSL-1.0",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "libtiff",            # Sam Leffler/SGI permissive (the libtiff license); used by libtiff6
+  "MIT",
+  "MIT-0",
+  "MIT-CMU",            # variant of MIT used by Pillow + a few others
+  "MPL-2.0",
+  "NCSA",
+  "OpenSSL",
+  "PSF-2.0",
+  "Python-2.0",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "Unlicense",
+  "WTFPL",
+  "Zlib",
+
+  # --- Permissive but less obvious ---
+  "Artistic-1.0",       # historic Perl
+  "Artistic-2.0",       # current Perl + a few CPAN-shaped projects
+  "CC-BY-3.0",          # documentation/data only (jq, libuv, etc.)
+  "CC-BY-4.0",
+  "CC-BY-SA-3.0",       # documentation/data only — share-alike applies to docs only
+  "CC-BY-SA-4.0",
+  "CNRI-Python",        # `regex` and a few historic Python pkgs
+  "FSFUL",              # Free Software Foundation Unlimited (libksba)
+  "FSFULLR",            # Free Software Foundation Unlimited (libtool, etc.)
+  "Info-ZIP",           # `unzip` package upstream license
+
+  # --- LGPL family ---
+  # LGPL is permissive for our use because we link against these libraries
+  # dynamically (LGPL's linking exception). Listed for every version we may
+  # encounter in a Debian/Ubuntu base image.
+  # NOTE: LGPL-2.x is ALSO in the deny list below, which the validator checks
+  # first — so deny currently wins and an LGPL package passes only via a
+  # per-package [[exceptions]] entry. This overlap is intentional defense-in-
+  # depth (force explicit per-package copyleft review) but is a known
+  # contradiction; reconcile (drop from one list) pending OSRB sign-off.
+  "LGPL-2.0-only",
+  "LGPL-2.0-or-later",
+  "LGPL-2.1-only",
+  "LGPL-2.1-or-later",
+  "LGPL-3.0",
+  "LGPL-3.0-only",
+  "LGPL-3.0-or-later",
+
+  # --- NVIDIA-proprietary references ---
+  # Internal NVIDIA EULAs covering CUDA, cuDNN, NCCL, Nsight, mlnx-dpdk, etc.
+  # These are our own product and licensed for our distribution paths.
+  "LicenseRef-NVIDIA-Proprietary",
+  "LicenseRef-NVIDIA-SOFTWARE-LICENSE",
+  "LicenseRef-NVIDIA-Software-License-Agreement",
+
+  # --- Additional permissive licenses surfaced by syft scans ---
+  # Each of these is a permissive license that shows up in Ubuntu base
+  # packages or upstream framework images. Adding them globally avoids
+  # writing the same per-package exception 50 times.
+  "AFL-2.0",            # Academic Free License (gir1.2-girepository)
+  "AFL-2.1",            # Academic Free License (dbus, libdbus-1-3)
+  "BSD-1-Clause",       # libx11
+  "BSD-4-Clause-UC",    # curl (legacy UC-Berkeley clause)
+  "Beerware",           # libbsd0, libczmq4 — well-known permissive joke license
+  "Bitstream-Vera",     # fonts-dejavu — permissive font license
+  "CPL-1.0",            # Common Public License — ibverbs-providers (RDMA family)
+  "FSFAP",              # FSF All Permissive (libappstream5, gir1.2-glib)
+  "GFDL-1.2-only",      # wget (docs only — mere aggregation)
+  "GFDL-1.3-only",      # libc6/glibc (docs only — mere aggregation)
+  "GPL-1.0-only",       # historical-only references (liberror-perl, libssl3t64)
+  "GPL-1.0-or-later",   # historical-only references
+  "HPND",               # libx11 — Historical Permission Notice and Disclaimer
+  "HPND-sell-variant",  # fontconfig, libxft2, libxrender1 — HPND with sell clause
+  "ICU",                # tzdata, IBM/Unicode ICU permissive license
+  "Jam",                # Boost build-tool license (permissive)
+  "OFL-1.1",            # SIL Open Font License — fonts-mathjax
+  "OLDAP-2.8",          # OpenLDAP — curl bundles for ldap support
+  "TCL",                # Tcl/Tk Foundation license — blt, libtcl, libtk
+  "X11",                # curl — historic permissive X11/MIT license
+  "bzip2-1.0.6",        # bzip2 1.0.6+ permissive license
+  "curl",               # curl's own permissive license
+
+  # --- LicenseRef-* permissive variants seen in Ubuntu DEP-5 ---
+  # Each is an explicit upstream-named permissive license; syft surfaces
+  # them as LicenseRef-* because they're not in the SPDX standard list.
+  "LicenseRef-Matplotlib",            # Matplotlib's BSD-style license (matplotlib wheel)
+  "LicenseRef-public-domain",         # libbsd0, tzdata, dirmngr — explicit PD
+  "LicenseRef-permissive",            # libyaml, libucx0 — explicit "permissive"
+  "LicenseRef-FSF-Free",              # libucx0 — FSF-Free marker
+  "LicenseRef-FSF-unlimited-permission",  # dbus, dirmngr
+  "LicenseRef-autoconf-archive-permissive",
+  "LicenseRef-g10-permissive",        # GnuPG g10 macros — permissive
+  "LicenseRef-Tcl-BSDish",            # dbus — Tcl-derived BSD-ish
+  "LicenseRef-ad-hoc",                # media-types — explicitly freely usable
+  "LicenseRef-solar-public-domain",   # libllvm17 — public domain attribution
+  "LicenseRef-Khronos",               # libamdhip64 — Khronos permissive license
+  "LicenseRef-Lucent",                # libre2 — Lucent's permissive license
+  "LicenseRef-Chromium",              # libpsl — Chromium-derived BSD-3
+  "LicenseRef-Intel-ISSL",            # Intel Simplified Software License — oneCCL binary wheels
+  "LicenseRef-gnulib",                # libpsl — gnulib permissive
+  "LicenseRef-NRL-2-clause",          # libnorm — NRL BSD-2-clause variant
+  "LicenseRef-NRL-3-clause",          # libnorm
+  "LicenseRef-ISC-Original",          # libbsd0 — original ISC text
+  "LicenseRef-BSD-3-clause-generic",  # dbus
+  "LicenseRef-Google-3-BSD",          # libucx0 — Google BSD-3 variant
+  "LicenseRef-BSD-3-google",          # libre2 — same
+  "LicenseRef-BSD-3-snowball",        # libstemmer
+  "LicenseRef-BSD-2-clause-author",   # libbsd0
+  "LicenseRef-BSD-2-clause-verbatim", # libbsd0
+  "LicenseRef-BSD-3-clause-John-Birrell",   # libbsd0
+  "LicenseRef-BSD-3-clause-Regents",  # libbsd0 — UC Regents
+  "LicenseRef-BSD-3-clause-author",   # libbsd0
+  "LicenseRef-BSD-5-clause-Peter-Wemm",     # libbsd0 (BSD-3 + 2 add-on clauses)
+  "LicenseRef-BSD-tcp-wrappers",      # libpam0g (tcp_wrappers, Wietse Venema BSD-style)
+  "LicenseRef-public-domain-s-s-d",   # dpkg (start-stop-daemon explicit PD declaration)
+  "LicenseRef-GFDL",                  # binutils group (GFDL on docs; binary is GPL — mere aggregation)
+
+  # --- LicenseRef-* MIT/X11 variants used in Ubuntu DEP-5 ---
+  "LicenseRef-MIT-1",   # tk8.6-blt2.5, libxml2 (Ubuntu DEP-5 calls these "MIT-N")
+  "LicenseRef-MIT-2",
+  "LicenseRef-MIT-3",
+  "LicenseRef-MIT-4",
+  "LicenseRef-MIT-5",
+  "LicenseRef-MIT-6",
+  "LicenseRef-MIT-X11",               # liberror-perl, python3-pyparsing
+  "LicenseRef-ellis-and-grant",       # python3-pyparsing
+  "LicenseRef-salvolainen",           # python3-pyparsing
+
+  # --- Boost-bundled vendor BSD variants ---
+  # libboost-* packages bundle libraries whose authors used vendor-tagged
+  # BSD-3-Clause variants. Each is permissive; all attribution covered.
+  "LicenseRef-Caramel",
+  "LicenseRef-CrystalClear",
+  "LicenseRef-HP",
+  "LicenseRef-Kempf",
+  "LicenseRef-NIST",
+  "LicenseRef-OldBoost1",
+  "LicenseRef-OldBoost2",
+  "LicenseRef-OldBoost3",
+  "LicenseRef-SGI",
+  "LicenseRef-Spencer",
+  "LicenseRef-BSD3_DEShaw",           # underscore form (pre-sanitizer)
+  "LicenseRef-BSD3_Google",
+  "LicenseRef-BSD3-DEShaw",           # hyphen form (post-sanitizer; SPDX LicenseRef grammar)
+  "LicenseRef-BSD3-Google",
+  "LicenseRef-BSD-2",                 # python3-pip-whl, python3-httplib2 — Ubuntu DEP-5 token
+  "LicenseRef-BSD-3",                 # python3-pip-whl, python3-httplib2 — Ubuntu DEP-5 token
+  "LicenseRef-BSD-MIT",               # rdma-core, ibverbs-providers — dual-licensed permissive
+  "LicenseRef-BSLA",                  # util-linux — Berkeley Software License-style permissive
+  "LicenseRef-Permissive",            # python3-apt — capital-P variant of the lowercase entry
+
+  # --- Sglang cuda12.9 v0.5.10.post1-runtime (May-2026 rebuild) additions ---
+  # All permissive variants surfaced by syft DEP-5 parsing of Ubuntu base
+  # copyright files. Each is well-named as PD/permissive/BSD-derivative.
+  "LicenseRef-RFC-Reference",         # gnupg/dirmngr — RFC text references
+  "LicenseRef-TinySCHEME",            # gnupg — TinyScheme MIT-like
+  "LicenseRef-GFL",                   # fonts-mathjax/libjs-mathjax — Generic Font License
+  "LicenseRef-Kuchling-PD",           # gir1.2-girepository, libgirepository — Andrew Kuchling PD
+  "LicenseRef-Plumb-PD",              # same — Plumb public domain
+  "LicenseRef-Iconv-PD",              # libglib — iconv PD
+  "LicenseRef-Janik-permissive",      # libglib — Janik permissive
+  "LicenseRef-Mingw-PD",              # libglib — Mingw PD
+  "LicenseRef-cmph",                  # libglib — cmph hash library
+  "LicenseRef-old-glib-tests",        # libglib — historical test files
+  "LicenseRef-EDL-1.0",               # git — Eclipse Distribution License
+  "LicenseRef-dlmalloc",              # git — dlmalloc public domain
+  "LicenseRef-mingw-runtime",         # git — mingw runtime
+  "LicenseRef-SIL-1.1",               # libappstream5 — SIL Open Font License variant
+  "LicenseRef-GFDL-NIV-1.3",          # libdw, libelf — GFDL no-invariant
+  "LicenseRef-BSL",                   # libevent — Boost Software License variant
+  "LicenseRef-FSFULLR-No-Warranty",   # libevent — FSFULLR variant
+  "LicenseRef-MIT-SMC",               # libfreetype6 — SMC MIT
+  "LicenseRef-OpenGroup-MIT",         # libfreetype6 — Open Group MIT
+  "LicenseRef-GPL-3+-and-LGPL-3+",    # libmunge — dual-license construct (pre-sanitizer)
+  "LicenseRef-GPL-3-and-LGPL-3",      # libmunge — same, post-sanitizer form
+  "LicenseRef-all-permissive",        # libnghttp2 — explicit "all permissive"
+  "LicenseRef-BSD-like-with-advertising-clause",  # libpng16
+  "LicenseRef-BSD-3-Clause-Intel",    # libpsm2 — Intel BSD-3 variant
+  "LicenseRef-BSD-3-Clause-TT",       # libpsm2 — TrueType BSD-3 variant
+  "LicenseRef-BSD-3-Clause-zlib",     # libpsm2 — zlib-style BSD-3
+  "LicenseRef-BSD-4-Clause-UC",       # libpsm2 — UC Berkeley BSD-4
+  "LicenseRef-other-MetroLink",       # libxnvctrl0 — MetroLink-XFree variants
+  "LicenseRef-other-Metrolink",       # case-variant of the above
+  "LicenseRef-other-XFree",           # libxnvctrl0
+  "LicenseRef-BSD-3-Clause-Google",   # libprotobuf32, libprotoc32 — Google BSD-3
+  "LicenseRef-GPLWithACException",    # libprotobuf32 — GPL with Autoconf-style exception (LLM linking exception family)
+  "LicenseRef-LGPL-2.1-OpenSSL",      # libssh-4 — LGPL+OpenSSL exception (post-sanitization name)
+
+  # --- Real SPDX licenses surfaced by syft, all permissive ---
+  "MPL-1.1",                          # gir1.2-glib / libglib / python3-httplib2 — older Mozilla
+  "FTL",                              # libfreetype6 — FreeType Project License
+  "MIT-Modern-Variant",               # libfreetype6 — modern MIT phrasing
+  "Libpng",                           # libpng16 — libpng's own permissive license
+]
+
+# Hard denies: never ship these regardless of any other consideration.
+# Strong copyleft (would force our Apache-2.0 work to relicense if linked).
+deny = [
+  "AGPL-1.0-only",
+  "AGPL-1.0-or-later",
+  "AGPL-3.0",
+  "AGPL-3.0-only",
+  "AGPL-3.0-or-later",
+  "CDDL-1.0",
+  "CDDL-1.1",
+  "EPL-1.0",
+  "EPL-2.0",
+  "EUPL-1.1",
+  "EUPL-1.2",
+  "GPL-2.0",
+  "GPL-2.0-only",
+  "GPL-2.0-or-later",
+  "GPL-3.0",
+  "GPL-3.0-only",
+  "GPL-3.0-or-later",
+  # NOTE: LGPL-2.x is also in the allow list above. deny is checked before
+  # allow, so these win by default — an LGPL package passes only via a
+  # per-package [[exceptions]] entry (see the dpkg LGPL exceptions below). Kept
+  # as intentional defense-in-depth; reconcile with the allow list pending OSRB.
+  "LGPL-2.0-only",
+  "LGPL-2.0-or-later",
+  "LGPL-2.1-only",
+  "LGPL-2.1-or-later",
+  "SSPL-1.0",
+]
+
+# Build fails on any package whose license we couldn't resolve.
+# Forces the right action: add an entry to license_overrides.yaml,
+# or fix the upstream metadata, or take an exception below.
+unknown = "deny"
+
+# How aggressive to be about the broader copyleft category for
+# licenses that aren't in either allow or deny above.
+# Practical effect: if a future SPDX ID we haven't classified shows
+# up and looks copyleft-shaped, treat it as deny rather than UNKNOWN.
+copyleft = "deny"
+
+# Exceptions: per-package opt-ins for licenses that would otherwise
+# fail policy. Keep these rare and well-justified — every entry is
+# legal review surface area on every audit.
+#
+# Schema:
+#   type: ecosystem ("python" | "dpkg" | "go" | "native")
+#   name: package name
+#   version: optional; omit to apply to all versions
+#   allow: SPDX IDs that are additionally permitted FOR THIS PACKAGE
+#   reason: required, short prose explaining why
+#
+# [[exceptions]]
+# type = "python"
+# name = "example-pkg"
+# version = "1.2.3"
+# allow = ["GPL-2.0-only"]
+# reason = "Pure-Python library, isolated import surface; legal-approved 2026-XX-XX"
+# --- Auto-generated dpkg [[exceptions]] for Ubuntu base packages -------------
+# Each entry: version omitted -> applies to all versions of that package.
+# allow list: the GPL/LGPL token(s) that package's audited license expression
+# contains. If the actual license adds tokens beyond these, the build breaks.
+
+[[exceptions]]
+type = "dpkg"
+name = "login"
+allow = ["GPL-1.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "passwd"
+allow = ["GPL-1.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libperl5.38t64"
+allow = ["GPL-1.0-or-later", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "perl"
+allow = ["GPL-1.0-or-later", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "perl-base"
+allow = ["GPL-1.0-or-later", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "perl-modules-5.38"
+allow = ["GPL-1.0-or-later", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "base-passwd"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "bzip2"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "cpp"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "cpp-aarch64-linux-gnu"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "g++"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "g++-aarch64-linux-gnu"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "gcc"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "gcc-aarch64-linux-gnu"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "hostname"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libbz2-1.0"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libgpm2"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libgssapi-krb5-2"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libk5crypto3"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libkrb5-3"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libkrb5support0"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libnl-3-200"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libnl-3-dev"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libnl-route-3-200"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libnl-route-3-dev"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpython3.12-dev"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpython3.12-minimal"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpython3.12-stdlib"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpython3.12t64"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "librtmp1"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libselinux1"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "linux-libc-dev"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "netbase"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "python3.12"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "python3.12-dev"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "python3.12-minimal"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "python3.12-venv"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "unminimize"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "apt"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "apt-utils"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libapt-pkg6.0t64"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "pinentry-curses"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpmi2-0-dev"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpmi2-0t64"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libslurm40t64"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpam-modules"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later", "LGPL-2.0-only", "LGPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpam-modules-bin"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later", "LGPL-2.0-only", "LGPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpam-runtime"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later", "LGPL-2.0-only", "LGPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpam0g"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later", "LGPL-2.0-only", "LGPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "bsdutils"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libblkid1"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libmount1"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libsmartcols1"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libuuid1"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "mount"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "util-linux"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libhogweed6t64"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "LGPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libnettle8t64"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "LGPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "git"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "git-man"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "liblzma5"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libsepol2"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "xz-utils"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "e2fsprogs"
+allow = ["GPL-2.0-only", "LGPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libcom-err2"
+allow = ["GPL-2.0-only", "LGPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libext2fs2t64"
+allow = ["GPL-2.0-only", "LGPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libss2"
+allow = ["GPL-2.0-only", "LGPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "logsave"
+allow = ["GPL-2.0-only", "LGPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libaudit-common"
+allow = ["GPL-2.0-only", "LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libaudit1"
+allow = ["GPL-2.0-only", "LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libsemanage-common"
+allow = ["GPL-2.0-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libsemanage2"
+allow = ["GPL-2.0-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "adduser"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "base-files"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "binutils"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "binutils-aarch64-linux-gnu"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "binutils-common"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "build-essential"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "ca-certificates"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "clang"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "cpp-13"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "cpp-13-aarch64-linux-gnu"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "dash"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "debianutils"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "dpkg"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "dpkg-dev"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "g++-13"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "g++-13-aarch64-linux-gnu"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "gcc-13"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "gcc-13-aarch64-linux-gnu"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "gcc-13-base"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "gcc-14-base"
+allow = ["GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "init-system-helpers"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libasan8"
+allow = ["GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libatomic1"
+allow = ["GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libbinutils"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libcc1-0"
+allow = ["GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libclang-dev"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libctf-nobfd0"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libctf0"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libdebconfclient0"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libdpkg-perl"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libgcc-13-dev"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libgcc-s1"
+allow = ["GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libgomp1"
+allow = ["GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libgprofng0"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libhwasan0"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libitm1"
+allow = ["GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libldap2"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "liblsan0"
+allow = ["GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libnuma-dev"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libnuma1"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libobjc-13-dev"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libobjc4"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libonig5"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpkgconf3"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libsframe1"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libsodium23"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libsqlite3-0"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libstdc++-13-dev"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libstdc++6"
+allow = ["GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libtcmalloc-minimal4t64"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libtsan2"
+allow = ["GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libubsan1"
+allow = ["GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "lto-disabled-list"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "numactl"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "patch"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "pkg-config"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "pkgconf"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "pkgconf-bin"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "sensible-utils"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "ubuntu-keyring"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libreadline8t64"
+allow = ["GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "readline-common"
+allow = ["GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libcap-ng0"
+allow = ["GPL-2.0-or-later", "GPL-3.0-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "bash"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libgdbm-compat4t64"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libgdbm6t64"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libgmp10"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libidn2-0"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libunistring5"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "findutils"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "diffutils"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "dirmngr"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "gnupg"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "gnupg-utils"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "gpg"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "gpg-agent"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "gpgconf"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "gpgsm"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "gpgv"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "keyboxd"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libassuan0"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libffi8"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "tar"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libacl1"
+allow = ["GPL-2.0-or-later", "LGPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libattr1"
+allow = ["GPL-2.0-or-later", "LGPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libkeyutils1"
+allow = ["GPL-2.0-or-later", "LGPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libglib2.0-0t64"
+allow = ["GPL-2.0-or-later", "LGPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libsystemd0"
+allow = ["GPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libudev1"
+allow = ["GPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libhwloc15"
+allow = ["GPL-3.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libicu74"
+allow = ["GPL-3.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libksba8"
+allow = ["GPL-3.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "wget"
+allow = ["GPL-3.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libsasl2-2"
+allow = ["GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libsasl2-modules-db"
+allow = ["GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "coreutils"
+allow = ["GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "grep"
+allow = ["GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "gzip"
+allow = ["GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libjsoncpp25"
+allow = ["GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "make"
+allow = ["GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "nano"
+allow = ["GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "sed"
+allow = ["GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libc-bin"
+allow = ["LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libc-dev-bin"
+allow = ["LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libc6"
+allow = ["LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libc6-dev"
+allow = ["LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libseccomp2"
+allow = ["LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libssh-4"
+allow = ["LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libgcrypt20"
+allow = ["LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libgnutls30t64"
+allow = ["LGPL-2.1-or-later", "GPL-3.0-only", "GPL-3.0-or-later", "LGPL-3.0-only", "LGPL-3.0-or-later",
+         "LicenseRef-GPLv3", "LicenseRef-LGPLv2.1", "LicenseRef-LGPLv3-or-GPLv2"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libisl23"
+allow = ["LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libnpth0t64"
+allow = ["LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libp11-kit0"
+allow = ["LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libproc2-0"
+allow = ["LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libtasn1-6"
+allow = ["LGPL-2.1-only", "LGPL-2.1-or-later", "LGPL-3.0-or-later", "GPL-3.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "patchelf"
+allow = ["LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "procps"
+allow = ["LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "python3-pip-whl"
+allow = ["LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "sysvinit-utils"
+allow = ["LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "media-types"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component (resolved via license_overrides.yaml)"
+
+# --- Additional dpkg [[exceptions]] for snapshot-agent / cuda-dl-base 25.11 ----
+# These are standard Ubuntu / Debian base packages installed by the
+# snapshot-agent runtime stage (or already present in cuda-dl-base 25.11).
+# Same "mere aggregation" rationale as the Ubuntu exceptions above —
+# version-unpinned per user policy: keep GPL/copyleft denied by default,
+# allow per-package when verified.
+
+[[exceptions]]
+type = "dpkg"
+name = "libnetfilter-conntrack3"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libnfnetlink0"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libnftables1"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libnftnl11"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpci3"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "pciutils"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libquadmath0"
+allow = ["GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "GCC runtime library with GCC-Runtime-Library-Exception (mere aggregation)"
+
+[[exceptions]]
+type = "dpkg"
+name = "libxtables12"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component (iptables/netfilter)"
+
+[[exceptions]]
+type = "dpkg"
+name = "sgml-base"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "usb.ids"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; data-only system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "uuid-runtime"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component (util-linux family)"
+
+[[exceptions]]
+type = "dpkg"
+name = "xml-core"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+# --- Toolchain + base packages picked up by cuda-dl-base 25.11 ---
+
+[[exceptions]]
+type = "dpkg"
+name = "binutils-x86-64-linux-gnu"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-3.0-or-later"]
+reason = "Mere aggregation; build toolchain"
+
+[[exceptions]]
+type = "dpkg"
+name = "cpp-13-x86-64-linux-gnu"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; build toolchain (GCC runtime exception applies)"
+
+[[exceptions]]
+type = "dpkg"
+name = "cpp-x86-64-linux-gnu"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; build toolchain"
+
+[[exceptions]]
+type = "dpkg"
+name = "g++-13-x86-64-linux-gnu"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; build toolchain (GCC runtime exception applies)"
+
+[[exceptions]]
+type = "dpkg"
+name = "g++-x86-64-linux-gnu"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; build toolchain"
+
+[[exceptions]]
+type = "dpkg"
+name = "gcc-13-x86-64-linux-gnu"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; build toolchain (GCC runtime exception applies)"
+
+[[exceptions]]
+type = "dpkg"
+name = "gcc-x86-64-linux-gnu"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; build toolchain"
+
+[[exceptions]]
+type = "dpkg"
+name = "hwdata"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; data-only system component (PCI/USB IDs)"
+
+[[exceptions]]
+type = "dpkg"
+name = "iproute2"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "iptables"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component (netfilter)"
+
+[[exceptions]]
+type = "dpkg"
+name = "libdbus-1-3"
+allow = ["GPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component (D-Bus library is dual-licensed AFL/GPL; LGPL bindings)"
+
+[[exceptions]]
+type = "dpkg"
+name = "libdbus-1-dev"
+allow = ["GPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component (D-Bus dev headers)"
+
+[[exceptions]]
+type = "dpkg"
+name = "libelf1t64"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component (elfutils library)"
+
+[[exceptions]]
+type = "dpkg"
+name = "libip4tc2"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component (iptables/netfilter)"
+
+[[exceptions]]
+type = "dpkg"
+name = "libip6tc2"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component (iptables/netfilter)"
+
+[[exceptions]]
+type = "dpkg"
+name = "libkmod2"
+allow = ["GPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component (kernel module loader)"
+
+[[exceptions]]
+type = "dpkg"
+name = "libmnl0"
+allow = ["GPL-2.0-or-later", "LGPL-2.1-only"]
+reason = "Mere aggregation; system component (netfilter messaging library)"
+
+
+# --- Sglang cuda12.9 — additional dpkg [[exceptions]] -----------------------
+# All standard Ubuntu base / system components, dynamically linked against
+# our Apache-2.0 work — mere aggregation. Version-unpinned per stated policy.
+
+[[exceptions]]
+type = "dpkg"
+name = "bsdutils"
+allow = ["GPL-3.0-only", "LGPL-2.0-only", "LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "curl"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "dbus"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "LGPL-2.1-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "dbus-bin"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "LGPL-2.1-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "dbus-daemon"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "LGPL-2.1-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "dbus-session-bus-common"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "LGPL-2.1-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "dbus-system-bus-common"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "LGPL-2.1-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "dirmngr"
+allow = ["GPL-2.0-only", "GPL-3.0-only", "LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "fonts-dejavu-core"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "fonts-dejavu-mono"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "fonts-mathjax"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "gir1.2-girepository-2.0"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.0-only", "LGPL-2.0-or-later", "LGPL-2.1-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "gir1.2-glib-2.0"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "LGPL-2.0-only", "LGPL-2.0-or-later", "LGPL-2.1-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "gir1.2-packagekitglib-1.0"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "LGPL-2.1-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "git"
+allow = ["GPL-3.0-or-later", "LGPL-2.0-only", "LGPL-2.0-or-later", "LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "git-man"
+allow = ["GPL-3.0-or-later", "LGPL-2.0-only", "LGPL-2.0-or-later", "LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "gnupg"
+allow = ["GPL-2.0-only", "GPL-3.0-only", "LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "gnupg-utils"
+allow = ["GPL-2.0-only", "GPL-3.0-only", "LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "gnupg2"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later", "LGPL-2.1-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "gpg"
+allow = ["GPL-2.0-only", "GPL-3.0-only", "LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "gpg-agent"
+allow = ["GPL-2.0-only", "GPL-3.0-only", "LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "gpgconf"
+allow = ["GPL-2.0-only", "GPL-3.0-only", "LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "gpgsm"
+allow = ["GPL-2.0-only", "GPL-3.0-only", "LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "gpgv"
+allow = ["GPL-2.0-only", "GPL-3.0-only", "LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "ibverbs-providers"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "idle-python3.12"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "infiniband-diags"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "iso-codes"
+allow = ["LGPL-2.1-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "keyboxd"
+allow = ["GPL-2.0-only", "GPL-3.0-only", "LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libapparmor1"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "LGPL-2.1-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libappstream5"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "LGPL-2.1-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libblkid1"
+allow = ["GPL-3.0-only", "LGPL-2.0-only", "LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libc-bin"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libc-dev-bin"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libc6"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libc6-dev"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libcap2-bin"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libcares2"
+allow = ["GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libcryptsetup12"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later", "LGPL-2.1-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libcurl3t64-gnutls"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libcurl4t64"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libdbus-1-3"
+allow = ["GPL-2.0-only", "LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libdevmapper1.02.1"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "LGPL-2.0-only", "LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libdw1t64"
+allow = ["GPL-2.0-only", "GPL-3.0-only", "GPL-3.0-or-later", "LGPL-2.1-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libelf1t64"
+allow = ["GPL-2.0-only", "GPL-3.0-only", "LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libevent-core-2.1-7t64"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libevent-pthreads-2.1-7t64"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libfabric1"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libfdisk1"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later", "LGPL-2.0-only", "LGPL-2.0-or-later", "LGPL-2.1-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libfreetype6"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libgirepository-1.0-1"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.0-only", "LGPL-2.0-or-later", "LGPL-2.1-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libglib2.0-0t64"
+allow = ["GPL-2.0-only", "LGPL-2.0-only", "LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libglib2.0-bin"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "LGPL-2.0-only", "LGPL-2.0-or-later", "LGPL-2.1-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libglib2.0-data"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "LGPL-2.0-only", "LGPL-2.0-or-later", "LGPL-2.1-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libgrpc++1.51t64"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libgrpc29t64"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libgstreamer1.0-0"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libhwloc-plugins"
+allow = ["GPL-3.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libibmad5"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libibnetdisc5t64"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libibumad3"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libibverbs1"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libjs-mathjax"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libkeyutils1"
+allow = ["GPL-2.0-only", "LGPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libkmod2"
+allow = ["GPL-2.0-only", "LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libmount1"
+allow = ["GPL-3.0-only", "LGPL-2.0-only", "LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libmunge2"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "LGPL-2.1-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libnghttp2-14"
+allow = ["GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libnl-3-200"
+allow = ["LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libnl-route-3-200"
+allow = ["LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libnuma1"
+allow = ["GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libopenmpi3t64"
+allow = ["LGPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpackagekit-glib2-18"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "LGPL-2.1-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpam-systemd"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "LGPL-2.1-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpci3"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpciaccess0"
+allow = ["GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpgm-5.3-0t64"
+allow = ["LGPL-2.0-only", "LGPL-2.0-or-later", "LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpmix2t64"
+allow = ["GPL-2.0-only", "LGPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpng16-16t64"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpolkit-agent-1-0"
+allow = ["LGPL-2.0-only", "LGPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpolkit-gobject-1-0"
+allow = ["LGPL-2.0-only", "LGPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpsm-infinipath1"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpsm2-2"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpython3.12-testsuite"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "librdmacm1t64"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "librtmp1"
+allow = ["LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libsmartcols1"
+allow = ["GPL-3.0-only", "LGPL-2.0-only", "LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libsodium23"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libsystemd-shared"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "LGPL-2.1-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libsystemd0"
+allow = ["GPL-2.0-only", "LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libudev1"
+allow = ["GPL-2.0-only", "LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libunwind8"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libuuid1"
+allow = ["GPL-3.0-only", "LGPL-2.0-only", "LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libxmlb2"
+allow = ["LGPL-2.1-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libxnvctrl0"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libzmq5"
+allow = ["LGPL-2.0-only", "LGPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "locales"
+allow = ["GPL-2.0-only", "LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "mount"
+allow = ["GPL-3.0-only", "LGPL-2.0-only", "LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "net-tools"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "packagekit"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "LGPL-2.1-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "pci.ids"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "perftest"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "polkitd"
+allow = ["LGPL-2.0-only", "LGPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "python-apt-common"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "python3-apt"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "python3-dbus"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "python3-gi"
+allow = ["LGPL-2.0-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "python3-httplib2"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later", "LGPL-2.1-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "python3-pip-whl"
+allow = ["LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "python3-software-properties"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "python3.12-full"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "rdma-core"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "sgml-base"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "software-properties-common"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "systemd"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "LGPL-2.1-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "systemd-dev"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "LGPL-2.1-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "systemd-sysv"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "LGPL-2.1-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "udev"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "LGPL-2.1-only", "LGPL-2.1-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "util-linux"
+allow = ["GPL-3.0-only", "LGPL-2.0-only", "LGPL-2.1-only"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "x11-common"
+allow = ["GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "xml-core"
+allow = ["GPL-2.0-only"]
+reason = "Mere aggregation; system component"
+
+# --- Python [[exceptions]] for system / data-only packages ---
+
+[[exceptions]]
+type = "python"
+name = "python-apt"
+allow = ["GPL-3.0-or-later"]
+reason = "System Python bindings for apt; mere aggregation"
+
+[[exceptions]]
+type = "python"
+name = "pycountry"
+allow = ["LGPL-2.1-only"]
+reason = "Data-only ISO country/currency tables; LGPL applies to data files; mere aggregation"
+
+[[exceptions]]
+type = "python"
+name = "termplotlib"
+allow = ["GPL-3.0-or-later"]
+reason = "Developer/diagnostic utility only; confirmed with sglang owner as not invoked from our serving path. Mere aggregation — no GPL code is linked, imported, or executed during normal runtime."
+
+# --- Sglang's added Boost & X11 vendor variants ---
+# These packages reference a long tail of permissive LicenseRef-* tokens
+# that come bundled inside libboost-* / libbsd0 / libstemmer0d. All are
+# permissive BSD/MIT-style variants (added to the global allow list);
+# this exception block exists to be discoverable for legal-review.
+
+[[exceptions]]
+type = "dpkg"
+name = "blt"
+allow = ["LicenseRef-MIT-1", "LicenseRef-MIT-2", "LicenseRef-MIT-3", "LicenseRef-MIT-4", "LicenseRef-MIT-5", "LicenseRef-MIT-6", "TCL"]
+reason = "Tk Boost-Lite; permissive MIT-X11 variants"
+
+[[exceptions]]
+type = "dpkg"
+name = "tk8.6-blt2.5"
+allow = ["LicenseRef-MIT-1", "LicenseRef-MIT-2", "LicenseRef-MIT-3", "LicenseRef-MIT-4", "LicenseRef-MIT-5", "LicenseRef-MIT-6", "TCL"]
+reason = "Tk Boost-Lite; permissive MIT-X11 variants"
+
+[[exceptions]]
+type = "dpkg"
+name = "libprotobuf32t64"
+allow = ["GPL-2.0-only", "GPL-3.0-only"]
+reason = "libprotobuf source code is Apache-2.0; bundled test fixtures + autoconf macros are GPL — mere aggregation, no GPL code in our runtime path"
+
+[[exceptions]]
+type = "dpkg"
+name = "libprotoc32t64"
+allow = ["GPL-2.0-only", "GPL-3.0-only"]
+reason = "Protobuf compiler; same dual-licensing posture as libprotobuf32t64"
+
+# --- planner image (python:3.12-slim = Debian 13) dpkg additions ---
+# These are core Debian system packages from the bookworm-based slim image.
+# DEP-5 multi-license SPDX expressions include GPL clauses for build scripts
+# / documentation; the shipped binaries are MIT/BSD. Mere aggregation.
+
+[[exceptions]]
+type = "dpkg"
+name = "debian-archive-keyring"
+allow = ["GPL-2.0-or-later"]
+reason = "Debian archive keyring data files; mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "libapt-pkg7.0"
+allow = ["GPL-2.0-or-later"]
+reason = "Debian apt library; multi-licensed BSD+MIT+GPL — mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "liblastlog2-2"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "shadow utils data lib; multi-licensed BSD/MIT/CC0/GPL/LGPL — mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "login"
+allow = ["GPL-2.0-only", "GPL-3.0-or-later", "LGPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "shadow utils login CLI; mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "login.defs"
+allow = ["GPL-2.0-or-later"]
+reason = "shadow utils config; mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libnghttp3-9"
+allow = ["GPL-3.0-or-later"]
+reason = "nghttp3 (HTTP/3); MIT for shipped binary, GPL-3 clause is for build-time aux files — mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "libngtcp2-16"
+allow = ["GPL-3.0-or-later"]
+reason = "ngtcp2 (QUIC); MIT for shipped binary, GPL-3 for build-time aux — mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "libngtcp2-crypto-gnutls8"
+allow = ["GPL-3.0-or-later"]
+reason = "ngtcp2 GnuTLS crypto backend; MIT for shipped binary, GPL-3 for build-time aux — mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "sqv"
+allow = ["LGPL-2.0-only"]
+reason = "Sequoia-PGP simple signature verifier; standalone CLI tool invoked as a separate process by apt for keyring verification — mere aggregation, not linked into our binaries"
+
+# --- vllm-dev / trtllm-dev / sglang-dev image additions (MIT Kerberos, ICU) ---
+# Dev-target images install -dev packages that include build-time helpers
+# under GPL while the library binaries themselves are MIT/BSD. Mere
+# aggregation; system components.
+
+[[exceptions]]
+type = "dpkg"
+name = "comerr-dev"
+allow = ["GPL-2.0-only", "LGPL-2.0-only"]
+reason = "MIT Kerberos com_err library; binary is MIT/BSD/ISC/Apache, GPL/LGPL clauses are build aux — mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "icu-devtools"
+allow = ["GPL-3.0-only"]
+reason = "ICU dev tools (CLI invoked at build time); binary is MIT (ICU), GPL-3 clause is for build-time aux — mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "libicu-dev"
+allow = ["GPL-3.0-only"]
+reason = "ICU library headers; binary is MIT (ICU), GPL-3 clause is for build-time aux — mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "krb5-multidev"
+allow = ["GPL-2.0-only"]
+reason = "MIT Kerberos developer files; binary is MIT — mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "libgssrpc4t64"
+allow = ["GPL-2.0-only"]
+reason = "MIT Kerberos GSS-RPC library; binary is MIT — mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "libkadm5clnt-mit12"
+allow = ["GPL-2.0-only"]
+reason = "MIT Kerberos kadm5 client; binary is MIT — mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "libkadm5srv-mit12"
+allow = ["GPL-2.0-only"]
+reason = "MIT Kerberos kadm5 server; binary is MIT — mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "libkdb5-10t64"
+allow = ["GPL-2.0-only"]
+reason = "MIT Kerberos KDB; binary is MIT — mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "libkrb5-dev"
+allow = ["GPL-2.0-only"]
+reason = "MIT Kerberos developer headers; binary is MIT — mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpgm-dev"
+allow = ["LGPL-2.0-or-later", "LGPL-2.1-only"]
+reason = "OpenPGM dev (used by ZeroMQ); shipped binary is BSD-3/ISC, LGPL clauses are for build-time aux — mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "libsodium-dev"
+allow = ["GPL-2.0-or-later"]
+reason = "libsodium developer headers; shipped binary is BSD-2/CC0/ISC/MIT, GPL clause for build aux — mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "python3-pip"
+allow = ["LGPL-2.1-or-later"]
+reason = "pip itself is MIT; bundled vendored deps include LGPL packages used only at install time — mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "ucf"
+allow = ["GPL-2.0-only"]
+reason = "Update Configuration File framework; Debian system component invoked as a separate process during package configuration — mere aggregation"
+
+# --- Rust [[exceptions]] ---
+
+[[exceptions]]
+type = "rust"
+name = "inferno"
+allow = ["CDDL-1.0"]
+reason = "Transitive dev-only dependency via criterion (benchmark framework). criterion is in [dev-dependencies] of sgl-model-gateway and is not linked into the shipped gateway binary. cargo-cyclonedx surfaces it in the SBOM regardless; this exception covers attribution without claiming the CDDL-1.0 code is in the runtime."
+
+# --- Native [[exceptions]] for from-source components ---
+
+[[exceptions]]
+type = "native"
+name = "ffmpeg"
+allow = ["LGPL-2.1-or-later"]
+reason = "FFmpeg built with --disable-gpl (LGPL-2.1-or-later, no GPL components); the shared libs are dynamically linked and the ffmpeg CLI is invoked as a separate process, not statically linked into Dynamo's Apache-2.0 code. Replaces the purged GPL apt ffmpeg from the upstream framework base."
+
+[[exceptions]]
+type = "dpkg"
+name = "libgfortran5"
+allow = ["GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "GNU toolchain - GPL with the GCC Runtime Library Exception (GCC-exception-3.1): runtime libs leave compiled output unencumbered, compilers are mere aggregation (not linked into our Apache-2.0 work); Ubuntu source available via OSRB archive. Required for torch.compile/inductor runtime JIT."
+
+[[exceptions]]
+type = "dpkg"
+name = "libasound2-data"
+allow = ["LGPL-2.1-only"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libasound2t64"
+allow = ["LGPL-2.1-only"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libasyncns0"
+allow = ["LGPL-2.1-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libcairo-gobject2"
+allow = ["LGPL-2.1-only"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libcairo2"
+allow = ["LGPL-2.1-only"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libdatrie1"
+allow = ["GPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libfftw3-double3"
+allow = ["GPL-2.0-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libflac12t64"
+allow = ["GPL-2.0-or-later", "LGPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libfribidi0"
+allow = ["LGPL-2.1-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libgdk-pixbuf-2.0-0"
+allow = ["GPL-2.0-or-later", "LGPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libgdk-pixbuf2.0-common"
+allow = ["GPL-2.0-or-later", "LGPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libgl1"
+allow = ["GPL-3.0-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libglvnd0"
+allow = ["GPL-3.0-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libglx0"
+allow = ["GPL-3.0-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libharfbuzz0b"
+allow = ["GPL-3.0-or-later", "LGPL-2.1-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libjbig0"
+allow = ["GPL-2.0-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libjpeg8"
+allow = ["LGPL-2.1-only"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "liblcms2-2"
+allow = ["GPL-2.0-or-later", "GPL-3.0-only"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libmpg123-0t64"
+allow = ["LGPL-2.1-only"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libopenal-data"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.0-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libopenal1"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.0-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libpango-1.0-0"
+allow = ["LGPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libpangocairo-1.0-0"
+allow = ["LGPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libpangoft2-1.0-0"
+allow = ["LGPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "librsvg2-2"
+allow = ["LGPL-2.0-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libsamplerate0"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libsensors-config"
+allow = ["LGPL-2.1-only"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libsensors5"
+allow = ["LGPL-2.1-only"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libslang2"
+allow = ["GPL-2.0-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libssh-gcrypt-4"
+allow = ["LGPL-2.1-only"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libthai-data"
+allow = ["GPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libthai0"
+allow = ["GPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libusb-1.0-0"
+allow = ["LGPL-2.1-only"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libva-drm2"
+allow = ["GPL-2.0-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libva-x11-2"
+allow = ["GPL-2.0-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libva2"
+allow = ["GPL-2.0-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "shared-mime-info"
+allow = ["GPL-2.0-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "sudo"
+allow = ["GPL-2.0-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+

@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from dynamo.common.engine_monitor import EngineHealthMonitorConfig
 from dynamo.vllm.engine_monitor import VllmEngineMonitor
 
 pytestmark = [
@@ -34,6 +35,11 @@ def _make_monitor(engine, shutdown_event=None):
     monitor.runtime = MagicMock()
     monitor.engine_client = engine
     monitor.shutdown_event = shutdown_event
+    monitor.health_config = EngineHealthMonitorConfig(
+        interval=0.01,
+        check_timeout=0.01,
+        shutdown_timeout=0.01,
+    )
     monitor._monitor_task = asyncio.get_event_loop().create_future()
     monitor._stats_task = asyncio.get_event_loop().create_future()
     return monitor
@@ -175,3 +181,15 @@ async def test_periodic_log_stats_malformed_interval(mock_engine):
         await asyncio.wait_for(task, timeout=2.0)
 
     # Task ran without error (used 10s fallback, didn't crash)
+
+
+@pytest.mark.asyncio
+async def test_run_health_check_times_out(mock_engine):
+    async def blocked_health_check():
+        await asyncio.sleep(1.0)
+
+    mock_engine.check_health = blocked_health_check
+    monitor = _make_monitor(mock_engine)
+
+    with pytest.raises(asyncio.TimeoutError):
+        await monitor._run_health_check()

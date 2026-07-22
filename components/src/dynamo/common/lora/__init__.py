@@ -5,6 +5,13 @@
 LoRA management infrastructure
 """
 
-from .manager import LoRAManager, LoRASourceProtocol
+from .manager import LoRAInfo, LoRAManager, LoRASourceProtocol, get_lora_manager
+from .once import OnceLock
 
-__all__ = ["LoRAManager", "LoRASourceProtocol"]
+__all__ = [
+    "LoRAInfo",
+    "LoRAManager",
+    "LoRASourceProtocol",
+    "OnceLock",
+    "get_lora_manager",
+]

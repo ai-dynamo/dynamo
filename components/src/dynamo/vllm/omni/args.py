@@ -6,8 +6,11 @@
 import argparse
 import dataclasses
 import logging
+import os
 from typing import Optional
 
+import huggingface_hub
+from vllm.transformers_utils.repo_utils import get_model_path
 from vllm_omni.engine.arg_utils import OmniEngineArgs
 
 try:
@@ -315,6 +318,17 @@ class OmniArgGroup(ArgGroup):
                 "Requires --stage-configs-path. Mutually exclusive with --stage-id."
             ),
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--realtime",
+            env_var="DYN_OMNI_REALTIME",
+            default=False,
+            help=(
+                "Serve a ModelType.Realtime bidirectional endpoint (OpenAI "
+                "Realtime API) backed by vLLM-Omni streaming generation, instead "
+                "of the unary multimodal endpoint."
+            ),
+        )
 
 
 class OmniConfig(DynamoRuntimeConfig):
@@ -346,6 +360,9 @@ class OmniConfig(DynamoRuntimeConfig):
     # Disaggregated stage worker fields
     stage_id: Optional[int] = None
     omni_router: bool = False
+
+    # Realtime (bidirectional) serving mode
+    realtime: bool = False
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace) -> "OmniConfig":
@@ -387,6 +404,10 @@ class OmniConfig(DynamoRuntimeConfig):
             raise ValueError("--stage-id must be >= 0")
         if self.stage_id is not None and self.omni_router:
             raise ValueError("--stage-id and --omni-router are mutually exclusive")
+        if self.realtime and (self.stage_id is not None or self.omni_router):
+            raise ValueError(
+                "--realtime cannot be combined with --stage-id or --omni-router"
+            )
 
 
 def parse_omni_args() -> OmniConfig:
@@ -422,6 +443,31 @@ def parse_omni_args() -> OmniConfig:
 
     vllm_args = vllm_parser.parse_args(unknown)
     config.model = vllm_args.model
+
+    # Resolve repo id to local snapshot path under HF_HUB_OFFLINE so
+    # vllm-omni diffusion workers don't hit transformers v5's offline
+    # LocalEntryNotFoundError (vLLM's EngineArgs does the same rewrite).
+    if (
+        huggingface_hub.constants.HF_HUB_OFFLINE
+        and config.model
+        and not os.path.exists(config.model)
+    ):
+        model_id = config.model
+        config.model = get_model_path(
+            config.model, getattr(vllm_args, "revision", None)
+        )
+        if model_id != config.model:
+            # Preserve the original repo id as the user-facing model name
+            # so /v1/models still advertises "Wan-AI/..." not the snapshot path.
+            if getattr(config, "served_model_name", None) is None:
+                config.served_model_name = model_id
+            logger.info(
+                "HF_HUB_OFFLINE is True; replaced omni model_id [%s] "
+                "with model_path [%s] so vllm-omni diffusion workers "
+                "see a local snapshot.",
+                model_id,
+                config.model,
+            )
 
     engine_args = OmniEngineArgs.from_cli_args(vllm_args)
 

@@ -22,7 +22,7 @@ RUN apt clean && apt-get update -y && \
 
 # Install sccache into the base image so downstream stages can COPY it
 # instead of downloading from GitHub (avoids 502 errors under parallel builds)
-ARG SCCACHE_VERSION=v0.14.0
+ARG SCCACHE_VERSION
 RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
     wget --tries=3 --waitretry=5 \
         "https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${ARCH_ALT}-unknown-linux-musl.tar.gz" && \

@@ -1,0 +1,111 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: qwen3-235b-a22b-fp8
+title: Qwen3-235B-A22B FP8
+page: recipes/qwen3-235b-a22b-fp8.mdx
+provider: qwen
+model:
+  name: Qwen3-235B-A22B (MoE, ~22B active)
+  hf_id: Qwen/Qwen3-235B-A22B-FP8
+  precision: FP8
+status: validated
+targets:
+- id: trtllm-agg-hopper
+  recommended: false
+  hardware:
+    gpu: H100/H200
+    count: 16
+  runtime:
+    framework: trtllm
+  topology: aggregated
+  techniques:
+  - expert-parallel
+  - kv-aware-routing
+  - chunked-prefill
+  - moe-backend-cutlass
+  workload:
+    type: static-generation
+    traffic: 4K ISL / 200 OSL synthetic, concurrency 32, 320 requests
+  deploy:
+    asset: recipes/qwen3-235b-a22b-fp8/trtllm/agg/hopper/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/qwen3-235b-a22b-fp8/trtllm/agg/hopper/perf.yaml
+  expected_performance:
+    available: false
+- id: trtllm-agg-blackwell
+  recommended: true
+  hardware:
+    gpu: B100/B200
+    count: 16
+  runtime:
+    framework: trtllm
+  topology: aggregated
+  techniques:
+  - expert-parallel
+  - kv-aware-routing
+  - chunked-prefill
+  - moe-backend-deepgemm
+  workload:
+    type: static-generation
+    traffic: 4K ISL / 200 OSL synthetic, concurrency 32, 320 requests
+  deploy:
+    asset: recipes/qwen3-235b-a22b-fp8/trtllm/agg/blackwell/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/qwen3-235b-a22b-fp8/trtllm/agg/blackwell/perf.yaml
+  expected_performance:
+    available: false
+- id: trtllm-disagg-hopper
+  recommended: false
+  hardware:
+    gpu: H100/H200
+    count: 16
+  runtime:
+    framework: trtllm
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - expert-parallel
+  - kv-aware-routing
+  - moe-backend-cutlass
+  workload:
+    type: static-generation
+    traffic: 4K ISL / 200 OSL synthetic, concurrency 32, 320 requests
+  deploy:
+    asset: recipes/qwen3-235b-a22b-fp8/trtllm/disagg/hopper/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/qwen3-235b-a22b-fp8/trtllm/disagg/hopper/perf.yaml
+  expected_performance:
+    available: false
+- id: trtllm-disagg-blackwell
+  recommended: false
+  hardware:
+    gpu: B100/B200
+    count: 16
+  runtime:
+    framework: trtllm
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - expert-parallel
+  - kv-aware-routing
+  - moe-backend-deepgemm
+  workload:
+    type: static-generation
+    traffic: 4K ISL / 200 OSL synthetic, concurrency 32, 320 requests
+  deploy:
+    asset: recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/perf.yaml
+  expected_performance:
+    available: false
+related_benchmarks: []
+maintainer: null
+gaps:
+- No expected performance numbers in source (perf.yamls exist, no published results); section omitted
+- No related feature benchmark page exists
+- maintainer unknown

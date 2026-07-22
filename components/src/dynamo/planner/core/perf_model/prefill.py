@@ -13,7 +13,11 @@ from typing import Optional
 import numpy as np
 
 from dynamo.common.forward_pass_metrics import ForwardPassMetrics
-from dynamo.planner.core.perf_model.base import _BaseRegressionModel, _MovingAverage
+from dynamo.planner.core.perf_model.base import (
+    _BaseRegressionModel,
+    _clamp_kv_hit_rate,
+    _MovingAverage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +47,13 @@ class PrefillRegressionModel(_BaseRegressionModel):
 
     def _update_moving_averages(self, fpm: ForwardPassMetrics) -> None:
         sched = fpm.scheduled_requests
+        # TODO: This is scheduled prefill tokens per FPM request, not true
+        # frontend request ISL. Prefer request-level ISL once it is available
+        # at admission time.
         if sched.num_prefill_requests > 0:
             self._avg_isl.add(sched.sum_prefill_tokens / sched.num_prefill_requests)
+        else:
+            self._avg_isl.add(0.0)
         self._avg_num_prefill.add(float(sched.num_prefill_requests))
 
     @property
@@ -58,15 +67,23 @@ class PrefillRegressionModel(_BaseRegressionModel):
         self,
         queued_prefill_tokens: int,
         max_num_batched_tokens: int,
+        kv_hit_rate: Optional[float] = None,
     ) -> Optional[float]:
         """Simulate prefill scheduling to estimate TTFT for the next request.
+
+        ``kv_hit_rate`` (0.0-1.0) discounts the aggregate work ahead --
+        both the queue backlog and the hypothetical next request's ISL --
+        because a new arrival will benefit from the same prefix-cache hit
+        rate as the current workload. The regression features themselves
+        (per-iter chunk sizes) remain unchanged, so no double-counting.
 
         Returns estimated TTFT in seconds, or None if the model is not ready.
         """
         if not self._ensure_fitted() or max_num_batched_tokens <= 0:
             return None
 
-        total_tokens = queued_prefill_tokens + self._avg_isl.value
+        scale = 1.0 - _clamp_kv_hit_rate(kv_hit_rate)
+        total_tokens = (queued_prefill_tokens + self._avg_isl.value) * scale
         if total_tokens <= 0:
             return 0.0
 

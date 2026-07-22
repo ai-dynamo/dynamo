@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Multinode Deployments
+subtitle: Scales Dynamo inference across multiple GPU nodes with Grove and KAI-Scheduler for large-model tensor parallelism.
 ---
 
 This guide explains how to deploy Dynamo workloads across multiple nodes. Multinode deployments enable you to scale compute-intensive LLM workloads across multiple physical machines, maximizing GPU utilization and supporting larger models.
@@ -65,7 +66,7 @@ KAI-Scheduler is optional but recommended for advanced scheduling capabilities.
 LWS is a simple multinode deployment mechanism that allows you to deploy a workload across multiple nodes.
 
 - **LWS**: [LWS Installation](https://github.com/kubernetes-sigs/lws#installation)
-- **Volcano**: [Volcano Installation](https://volcano.sh/en/docs/installation/)
+- **Volcano**: [Volcano Installation](https://github.com/volcano-sh/volcano#quick-start-guide)
 
 Volcano is a Kubernetes native scheduler optimized for AI workloads at scale. It is used in conjunction with LWS to provide gang scheduling support.
 

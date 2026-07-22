@@ -54,6 +54,7 @@ type ModelSource struct {
 	// Supported formats:
 	// - S3: s3://bucket/path/to/model
 	// - HuggingFace: hf://org/model@revision_sha
+	// - Local filesystem: file:///path/to/model
 	// +kubebuilder:validation:Required
 	URI string `json:"uri"`
 }

@@ -1,13 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""vLLM-specific patches for GPU Memory Service integration.
+"""vLLM monkey-patches applied at GMSWorker import.
 
-This module contains vLLM-specific patches that are applied when the GMSWorker
-module is imported:
-- MemorySnapshot.measure patch (adjusts free memory for read mode)
+Patches:
+  - MemorySnapshot.measure: adds GMS-committed bytes to free_memory in RO mode.
+  - request_memory: bypasses the free>=requested check during deferred-KV init.
+  - NixlConnector.register_kv_caches: defers registration during the scratch
+    phase and stashes the dict for replay at wake.
 
-Note: The torch.cuda.empty_cache patch is in integrations/common/patches.py
+The torch.cuda.empty_cache patch lives in integrations/common/patches.py.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ import logging
 
 from gpu_memory_service.client.torch.allocator import get_gms_client_memory_manager
 from gpu_memory_service.common.locks import GrantedLockType
-from gpu_memory_service.integrations.vllm.utils import is_shadow_mode
+from gpu_memory_service.common.utils import is_scratch_kv_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +114,13 @@ def patch_request_memory() -> None:
 
 
 def patch_register_kv_caches() -> None:
-    """Skip NixlConnector.register_kv_caches when kv_caches is empty."""
+    """Defer NixlConnector.register_kv_caches while KV backing is scratch-aliased.
+
+    Registering NIXL MRs over scratch would pin a soon-stale page into the NIC;
+    sleep tears down scratch and wake remaps real backing at the same VAs.
+    Stash the dict during the scratch phase and let GMSWorker.wake_up replay
+    it after remap.
+    """
     global _register_kv_caches_patched
 
     if _register_kv_caches_patched:
@@ -129,8 +137,33 @@ def patch_register_kv_caches() -> None:
     original_register = NixlConnector.register_kv_caches
 
     def patched_register_kv_caches(self, kv_caches):
-        if not kv_caches:
-            logger.info("[GMS Patch] Skipping KV cache registration (empty kv_caches)")
+        from gpu_memory_service.client.torch.allocator import (
+            get_gms_client_memory_manager,
+            is_scratch,
+        )
+
+        # Fail closed on lookup errors: falling through to original_register
+        # would pin an MR onto a scratch page that sleep is about to free,
+        # exactly the bug this patch exists to prevent.
+        try:
+            kv_mgr = get_gms_client_memory_manager("kv_cache")
+            has_deferred = kv_mgr is not None and is_scratch(kv_mgr)
+        except (LookupError, AttributeError, RuntimeError) as exc:
+            logger.warning(
+                "[GMS Patch] Cannot determine deferred-KV state — "
+                "raising to avoid pinning a stale scratch MR: %s",
+                exc,
+                exc_info=True,
+            )
+            raise
+
+        if has_deferred:
+            self._scratch_kv_pending = kv_caches
+            logger.info(
+                "[GMS Patch] Deferring NIXL KV cache registration "
+                "(stashed %d layers for wake replay)",
+                len(kv_caches),
+            )
             return
         return original_register(self, kv_caches)
 
@@ -144,11 +177,11 @@ def patch_register_kv_caches() -> None:
 # =============================================================================
 
 
-def apply_shadow_mode_patches() -> None:
-    """Apply shadow mode monkey-patches. No-ops if not in shadow mode."""
-    if not is_shadow_mode():
+def apply_scratch_kv_patches() -> None:
+    """Apply scratch-KV monkey-patches. No-ops when scratch KV is disabled."""
+    if not is_scratch_kv_enabled():
         return
 
     patch_request_memory()
     patch_register_kv_caches()
-    logger.info("[GMS Patch] Shadow mode patches applied")
+    logger.info("[GMS Patch] applied")

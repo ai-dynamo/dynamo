@@ -22,7 +22,9 @@ use super::state::{
     LiveReplayMode, LiveRuntimeStats, SharedLiveRuntimeStats, WorkloadDispatchState, now_ms,
     record_arrival,
 };
-use super::task::{RequestTaskContext, run_request_task, wait_for_workload_progress};
+use super::task::{
+    InFlightGuard, RequestTaskContext, run_request_task, wait_for_workload_progress,
+};
 
 pub(super) struct LiveRuntime {
     pending: std::collections::VecDeque<DirectRequest>,
@@ -56,7 +58,7 @@ impl LiveRuntime {
             router_config,
             prefill_load_estimator,
             num_workers,
-        ));
+        )?);
         let mut schedulers = Vec::with_capacity(num_workers);
         let mut senders = Vec::with_capacity(num_workers);
 
@@ -140,7 +142,11 @@ impl LiveRuntime {
                         .await
                         .map_err(|_| anyhow!("online replay concurrency semaphore closed"))?;
                     record_arrival(&arrival_tx, &request, now_ms(start))?;
-                    tasks.spawn(run_request_task(task_ctx.clone(), request, Some(permit)));
+                    let task_ctx = task_ctx.clone();
+                    tasks.spawn(async move {
+                        let _permit = permit;
+                        run_request_task(task_ctx, request, None).await
+                    });
                 }
             }
         }
@@ -189,6 +195,9 @@ impl LiveRuntime {
             )
             .await
         });
+        // The driver arrives already capped (concurrency drivers are capped at
+        // construction); `cap_enabled` only gates the in-flight guard / arrival stamping.
+        let cap_enabled = matches!(self.mode, LiveReplayMode::Concurrency { .. });
         let workload = Arc::new(WorkloadDispatchState {
             driver: std::sync::Mutex::new(driver),
             wakeup: Notify::new(),
@@ -202,51 +211,33 @@ impl LiveRuntime {
             stats: Arc::clone(&stats),
             workload: Some(Arc::clone(&workload)),
         };
-        let semaphore = match self.mode {
-            LiveReplayMode::Trace => None,
-            LiveReplayMode::Concurrency { max_in_flight } => {
-                Some(Arc::new(Semaphore::new(max_in_flight)))
-            }
-        };
+
+        tracing::debug!(
+            total_turns,
+            num_workers = self.senders.len(),
+            "replay_diag: workload loop starting"
+        );
 
         loop {
             let now = now_ms(start);
-            let dispatch_limit = match &semaphore {
-                Some(semaphore) => semaphore.available_permits(),
-                None => usize::MAX,
-            };
-
-            if dispatch_limit > 0 {
-                let ready_turns = workload
-                    .driver
-                    .lock()
-                    .unwrap()
-                    .pop_ready(now, dispatch_limit);
-                if !ready_turns.is_empty() {
-                    for ready_turn in ready_turns {
-                        let permit = match &semaphore {
-                            Some(semaphore) => {
-                                Some(semaphore.clone().try_acquire_owned().map_err(|_| {
-                                    anyhow!(
-                                        "online replay concurrency semaphore unexpectedly closed"
-                                    )
-                                })?)
-                            }
-                            None => None,
-                        };
-                        let arrival_at_ms = match self.mode {
-                            LiveReplayMode::Trace => ready_turn.scheduled_ready_at_ms,
-                            LiveReplayMode::Concurrency { .. } => now_ms(start),
-                        };
-                        record_arrival(&arrival_tx, &ready_turn.request, arrival_at_ms)?;
-                        tasks.spawn(run_request_task(
-                            task_ctx.clone(),
-                            ready_turn.request,
-                            permit,
-                        ));
-                    }
-                    continue;
+            let ready_turns = workload.driver.lock().unwrap().pop_ready(now, usize::MAX);
+            if !ready_turns.is_empty() {
+                for ready_turn in ready_turns {
+                    let guard = cap_enabled.then(|| {
+                        InFlightGuard::new(Arc::clone(&workload), ready_turn.request_uuid)
+                    });
+                    let arrival_at_ms = match self.mode {
+                        LiveReplayMode::Trace => ready_turn.scheduled_ready_at_ms,
+                        LiveReplayMode::Concurrency { .. } => now_ms(start),
+                    };
+                    record_arrival(&arrival_tx, &ready_turn.request, arrival_at_ms)?;
+                    tasks.spawn(run_request_task(
+                        task_ctx.clone(),
+                        ready_turn.request,
+                        guard,
+                    ));
                 }
+                continue;
             }
 
             let wake = workload.wakeup.notified();
@@ -256,17 +247,14 @@ impl LiveRuntime {
                 (driver.is_drained(), driver.next_ready_time_ms())
             };
             if is_drained {
+                tracing::debug!(
+                    tasks_remaining = tasks.len(),
+                    "replay_diag: workload drained, waiting for tasks"
+                );
                 break;
             }
 
-            wait_for_workload_progress(
-                self.mode,
-                semaphore.as_deref(),
-                next_ready_ms,
-                start,
-                wake.as_mut(),
-            )
-            .await;
+            wait_for_workload_progress(next_ready_ms, start, wake.as_mut()).await;
         }
 
         while let Some(result) = tasks.join_next().await {
@@ -277,9 +265,11 @@ impl LiveRuntime {
         self.cancel_token.cancel();
         self.schedulers.clear();
 
+        tracing::debug!("replay_diag: shutdown awaiting demux");
         let report = demux_task
             .await
             .map_err(|e| anyhow!("online replay demux task failed: {e}"))?;
+        tracing::debug!("replay_diag: shutdown awaiting router");
         router.shutdown().await?;
         Ok((report, stats.snapshot()))
     }

@@ -31,7 +31,7 @@ from sglang.srt.openai_api.adapter import v1_chat_generate_request
 from sglang.srt.openai_api.protocol import ChatCompletionRequest
 from sglang.srt.server_args import ServerArgs
 
-from dynamo.llm import ModelInput, ModelType, register_model
+from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
@@ -105,7 +105,11 @@ async def init(runtime: DistributedRuntime, config: Config):
         f"{config.namespace}.{config.component}.{config.endpoint}"
     )
     await register_model(
-        ModelInput.Text, ModelType.Chat | ModelType.Completions, endpoint, config.model
+        ModelInput.Text,
+        ModelType.Chat | ModelType.Completions,
+        endpoint,
+        config.model,
+        worker_type=WorkerType.Aggregated,
     )
 
     server_args = ServerArgs(model_path=config.model)

@@ -1,0 +1,4 @@
+{
+  "architectures": ["FakeForCausalLM"],
+  "model_type": "fake"
+}

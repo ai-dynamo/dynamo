@@ -21,7 +21,7 @@ ARG DEVICE
 # with --chown=dynamo:0 --chmod=775), so no re-copy needed here.
 ENV RUSTUP_HOME=/home/${USERNAME}/.rustup
 ENV CARGO_HOME=/home/${USERNAME}/.cargo
-ENV PATH=/usr/local/cargo/bin:/usr/local/bin:${CARGO_HOME}/bin:${PATH}
+ENV PATH=${VIRTUAL_ENV}/bin:/usr/local/cargo/bin:/usr/local/bin:${CARGO_HOME}/bin:${PATH}
 
 # https://code.visualstudio.com/remote/advancedcontainers/add-nonroot-user
 # Configure user with sudo access for Dev Container workflows
@@ -41,6 +41,14 @@ RUN mkdir -p /etc/sudoers.d \
     && (getent group $USERNAME > /dev/null 2>&1 && groupmod -g $USER_GID $USERNAME || groupadd -g $USER_GID $USERNAME) \
     && usermod -u $USER_UID -g $USER_GID -G 0 $USERNAME \
     && chown $USERNAME:$USER_GID /home/$USERNAME \
+    # Ensure user-writable XDG dirs. Upstream base images (e.g. vLLM CPU/XPU) may pre-create
+    # /home/dynamo/.local as root:root, which breaks `python3 -c 'site.getusersitepackages()'`
+    # and other user-site installs after we switch to the non-root user below.
+    # These dirs are small (a few KB), so a shallow chown is acceptable and does NOT
+    # violate the "no recursive chown on large mounts" rule.
+    && mkdir -p /home/$USERNAME/.local/lib /home/$USERNAME/.local/bin /home/$USERNAME/.local/share \
+    && chown -R $USERNAME:$USER_GID /home/$USERNAME/.local \
+    && [ ! -e /home/$USERNAME/.gitconfig ] || chown $USERNAME:$USER_GID /home/$USERNAME/.gitconfig \
     && chsh -s /bin/bash $USERNAME
 
 # Set workspace directory variable
@@ -54,7 +62,7 @@ ENV WORKSPACE_DIR=${WORKSPACE_DIR}
 ENV HOME=/home/$USERNAME
 ENV DYNAMO_HOME=${WORKSPACE_DIR}
 ENV CARGO_TARGET_DIR=${WORKSPACE_DIR}/target
-ENV PATH=${CARGO_HOME}/bin:$PATH
+ENV PATH=${VIRTUAL_ENV}/bin:${CARGO_HOME}/bin:$PATH
 
 # Switch to dynamo user (dev stage has umask 002, so files should already be group-writable)
 USER $USERNAME
@@ -78,8 +86,14 @@ RUN mkdir -p /home/$USERNAME/.cache/ \
     && chmod g+w /home/$USERNAME/.cache/ \
     && chmod g+w /home/$USERNAME/.cache/pre-commit
 
-{% if device == "xpu" %}
+{% if device == "xpu" or device == "cpu" %}
 SHELL ["bash", "-c"]
+CMD ["bash", "-c", "source /home/$USERNAME/.bashrc && exec bash"]
+{% elif framework == "vllm" %}
+# The upstream vllm/vllm-openai images do not ship the generic NVIDIA
+# entrypoint path used by some CUDA bases. Keep local-dev aligned with the
+# vLLM runtime template, which resets ENTRYPOINT for arbitrary commands.
+ENTRYPOINT []
 CMD ["bash", "-c", "source /home/$USERNAME/.bashrc && exec bash"]
 {% else %}
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]

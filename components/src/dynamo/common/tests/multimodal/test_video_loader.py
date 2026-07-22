@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 import dynamo.common.multimodal.video_loader as video_loader_module
+from dynamo.common.http.url_validator import UrlValidationPolicy
 from dynamo.common.multimodal.video_loader import VideoLoader
 
 pytestmark = [
@@ -16,25 +17,24 @@ pytestmark = [
 ]
 
 
-def test_normalize_video_url_converts_local_paths(tmp_path):
-    video_path = tmp_path / "sample.webm"
-    video_path.write_bytes(b"video")
+@pytest.mark.asyncio
+async def test_load_video_rejects_http_by_default():
+    """Wiring smoke: VideoLoader plumbs ``url_policy`` to the validator.
 
-    assert (
-        VideoLoader._normalize_video_url(str(video_path))
-        == video_path.resolve().as_uri()
-    )
+    Validator behavior is covered in ``test_url_validator.py``;
+    per-hop SSRF revalidation in ``http/test_http_backends.py``.
+    """
+    loader = VideoLoader(url_policy=UrlValidationPolicy())
 
-
-def test_normalize_video_url_preserves_data_urls():
-    data_url = "data:video/webm;base64,Zm9v"
-
-    assert VideoLoader._normalize_video_url(data_url) == data_url
+    with pytest.raises(ValueError, match="not allowed"):
+        await loader.load_video("http://example.com/x.mp4")
 
 
 @pytest.mark.asyncio
 async def test_load_video_uses_vllm_media_connector():
     loader = VideoLoader()
+    # data: scheme is in the default allowlist regardless of env flags.
+    loader._url_policy = UrlValidationPolicy()
     frames = np.arange(24, dtype=np.uint8).reshape(1, 2, 4, 3)[:, :, ::-1, :]
     metadata = {"fps": 4.0, "frames_indices": [0], "total_num_frames": 1}
     loader._load_video_with_vllm = AsyncMock(  # type: ignore[method-assign]

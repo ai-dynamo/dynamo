@@ -29,11 +29,13 @@ This document provides a comprehensive guide for multimodal inference using vLLM
 
 The main multimodal vLLM launchers in this repo are:
 
-| Pattern                     | Launch Script               | Best For                                                                            |
-| --------------------------- | --------------------------- | ----------------------------------------------------------------------------------- |
-| Aggregated                  | `agg_multimodal.sh`         | Simplest image/video serving from a single multimodal worker                        |
-| E/PD (Encode + PD)          | `disagg_multimodal_e_pd.sh` | Simple example of separating encoder, good for testing embedding-cache workflows    |
-| E/P/D (Full Disaggregation) | `disagg_multimodal_epd.sh`  | Disaggregated image/video serving with separate encode, prefill, and decode workers |
+| Pattern                     | Device     | Launch Script                      | Best For                                                                                            |
+| --------------------------- | ---------- | ---------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Aggregated                  | cuda       | `agg_multimodal.sh`                | Simplest image/video serving from a single multimodal worker on CUDA devices                        |
+| Aggregated                  | xpu        | `xpu/agg_multimodal_xpu.sh`        | Simplest image/video serving from a single multimodal worker on XPU devices                         |
+| E/PD (Encode + PD)          | cuda       | `disagg_multimodal_e_pd.sh`        | Simple example of separating encoder, good for testing embedding-cache workflows                    |
+| E/P/D (Full Disaggregation) | cuda       | `disagg_multimodal_epd.sh`         | Disaggregated image/video serving with separate encode, prefill, and decode workers on CUDA devices |
+
 
 ## Image/Video Serving
 
@@ -45,7 +47,12 @@ Use the single-worker aggregated launcher for the simplest image/video setup:
 
 ```bash
 cd $DYNAMO_HOME/examples/backends/vllm
+
+# GPU deployment
 bash launch/agg_multimodal.sh --model Qwen/Qwen3-VL-2B-Instruct
+
+# XPU deployment
+bash launch/xpu/agg_multimodal_xpu.sh --model Qwen/Qwen3-VL-2B-Instruct
 ```
 
 **Image request:**
@@ -155,7 +162,13 @@ Use the same aggregated multimodal launcher with an audio-capable model:
 ```bash
 pip install 'vllm[audio]'  # installs librosa and other audio dependencies
 cd $DYNAMO_HOME/examples/backends/vllm
+
+# GPU deployment
 bash launch/agg_multimodal.sh --model Qwen/Qwen3-Omni-30B-A3B-Instruct
+
+# XPU deployment
+DYN_CHAT_PROCESSOR=vllm \
+  bash launch/xpu/agg_multimodal_xpu.sh --model Qwen/Qwen3-Omni-30B-A3B-Instruct
 ```
 
 ```mermaid

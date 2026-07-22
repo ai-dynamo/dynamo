@@ -13,4 +13,4 @@
 
   Verify with:
 
-    /workspace/deploy/sanity_check.py
+    /workspace/dev/sanity_check.py

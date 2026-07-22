@@ -1,0 +1,127 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: kimi-k2-6
+title: Kimi-K2.6
+page: recipes/kimi-k2-6.mdx
+provider: moonshot
+model:
+  name: Kimi-K2.6
+  hf_id: moonshotai/Kimi-K2.6
+  precision: NVFP4 + FP8 KV (B200) / native INT4 (H200)
+status: validated
+targets:
+- id: agg-b200-chat
+  recommended: true
+  hardware:
+    gpu: B200
+    count: 4
+  runtime:
+    framework: vLLM 0.21.0
+  topology: aggregated
+  techniques:
+  - kv-routing
+  - eagle3-mla-spec-dec
+  - lmcache-cpu-offload
+  - flashinfer-trtllm-moe
+  - tokenspeed-mla-attention
+  - nccl-symmetric-allreduce
+  workload:
+    type: chat
+    traffic: Mooncake chat trace 8k_1k_70kv, 70% KV reuse
+    sla: 50 user output tok/s
+  deploy:
+    asset: recipes/kimi-k2.6/vllm/agg-b200-chat/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/kimi-k2.6/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 49.86 tok/s/user, 107.8 tok/s/GPU at c=48 (15% trace subset, 4 replicas)
+- id: agg-h200-chat
+  recommended: false
+  hardware:
+    gpu: H200
+    count: 8
+  runtime:
+    framework: vLLM 0.21.0
+  topology: aggregated
+  techniques:
+  - kv-routing
+  - eagle3-mla-spec-dec
+  - lmcache-cpu-offload
+  - marlin-moe
+  - flash-attn-mla
+  workload:
+    type: chat
+    traffic: Mooncake chat trace 8k_1k_70kv, 70% KV reuse
+    sla: 50 user output tok/s
+  deploy:
+    asset: recipes/kimi-k2.6/vllm/agg-h200-chat/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/kimi-k2.6/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 54.86 tok/s/user, 38.7 tok/s/GPU at c=32 (15% subset)
+- id: agg-b200-agentic
+  recommended: false
+  hardware:
+    gpu: B200
+    count: 4
+  runtime:
+    framework: vLLM 0.21.0
+  topology: aggregated
+  techniques:
+  - kv-routing
+  - eagle3-mla-spec-dec
+  - lmcache-cpu-offload
+  - flashinfer-trtllm-moe
+  - tokenspeed-mla-attention
+  workload:
+    type: agentic
+    traffic: Mooncake agentic trace 64k_400_90kv, 64K median ISL, 90% KV reuse
+    sla: 50 user output tok/s
+  deploy:
+    asset: recipes/kimi-k2.6/vllm/agg-b200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/kimi-k2.6/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 55.50 tok/s/user, 166.5 tok/s/GPU at c=64 (15% subset)
+- id: agg-h200-agentic
+  recommended: false
+  hardware:
+    gpu: H200
+    count: 8
+  runtime:
+    framework: vLLM 0.21.0
+  topology: aggregated
+  techniques:
+  - kv-routing
+  - eagle3-mla-spec-dec
+  - lmcache-cpu-offload
+  - marlin-moe
+  - flash-attn-mla
+  workload:
+    type: agentic
+    traffic: Mooncake agentic trace 64k_400_90kv, 64K median ISL, 90% KV reuse
+    sla: 50 user output tok/s
+  deploy:
+    asset: recipes/kimi-k2.6/vllm/agg-h200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/kimi-k2.6/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 56.06 tok/s/user, 66.5 tok/s/GPU at c=48 (15% subset)
+related_benchmarks: []
+maintainer: null
+gaps:
+- no feature benchmark page exists for kimi-k2.6 (traces + KV-routing/offload claims in README would support one)
+- performance results are from 15% trace subsets only
+- 'source inconsistency: README chat optimization target says median ISL 1K but chat trace filename is 8k_1k_70kv'
+- 'source inconsistency: README claims H200 MARLIN MoE + FLASH_ATTN_MLA but deploy.yaml sets engine defaults'
+- perf.yaml runs single concurrency; sweeps need manual worker restarts
+- maintainer unknown

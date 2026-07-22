@@ -1,0 +1,201 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Shared aiperf benchmark Job template — one file, both configs (agg / disagg).
+# run-benchmark.sh exports per-config knobs via envsubst:
+#   ${BENCH_NAME}     — Job + label name (qwen3-vl-32b-fp8-agg-perf / ...-disagg-perf)
+#   ${BENCH_ENDPOINT} — Service:port the bench hits (e.g. qwen3-vl-32b-fp8-vllm-agg-frontend:8000)
+#
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${BENCH_NAME}
+spec:
+  backoffLimit: 1
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: ${BENCH_NAME}
+    spec:
+      restartPolicy: Never
+      containers:
+      - command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          apt-get update && apt-get install -y curl jq procps git && apt-get clean
+
+          pip install aiperf==0.10.0
+          echo "aiperf installation completed"
+
+          export COLUMNS=200
+          EPOCH=$(date +%s)
+
+          # ── Wait for model to be ready ──────────────────────────────────────
+          wait_for_model_ready() {
+            local timeout=600
+            local start=$(date +%s)
+            echo "Waiting for model '$TARGET_MODEL' at http://$ENDPOINT/v1/models (timeout: ${timeout}s)..."
+            while ! curl -s "http://$ENDPOINT/v1/models" \
+                | jq -e --arg model "$TARGET_MODEL" '.data[]? | select(.id == $model)' >/dev/null 2>&1; do
+              if [ $(( $(date +%s) - start )) -ge $timeout ]; then
+                echo "ERROR: Timed out waiting for model '$TARGET_MODEL' after ${timeout}s"
+                exit 1
+              fi
+              echo "[$(date '+%H:%M:%S')] Not ready, retrying in 5s..."
+              sleep 5
+            done
+            echo "Model '$TARGET_MODEL' is ready"
+            curl -s "http://$ENDPOINT/v1/models" | jq .
+          }
+
+          # ── Core benchmark function ─────────────────────────────────────────
+          # Args: <request_rate_qps> <concurrency> <request_count>
+          run_perf() {
+            local qps=$1
+            local concurrency=$2
+            local req_count=$3
+            local key="qps_${qps}_isl_128_osl_256_con_${concurrency}_req_${req_count}"
+            local ARTIFACT_DIR="${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}/${key}"
+            mkdir -p "$ARTIFACT_DIR"
+            echo "-------------------------------------------------------------"
+            echo "Running: QPS=$qps  ISL=128  OSL=256  Concurrency=$concurrency  Requests=$req_count  images=20  res=854x480"
+            echo "ARTIFACT_DIR: $ARTIFACT_DIR"
+
+            aiperf profile \
+              --artifact-dir "$ARTIFACT_DIR" \
+              --model "$TARGET_MODEL" \
+              --tokenizer "$TOKENIZER_PATH" \
+              --tokenizer-trust-remote-code \
+              --endpoint-type chat \
+              --streaming \
+              --url "http://$ENDPOINT" \
+              --synthetic-input-tokens-mean 128 \
+              --synthetic-input-tokens-stddev 0 \
+              --output-tokens-mean 256 \
+              --output-tokens-stddev 0 \
+              --image-width-mean 854 \
+              --image-width-stddev 0 \
+              --image-height-mean 480 \
+              --image-height-stddev 0 \
+              --image-batch-size 20 \
+              --request-rate "$qps" \
+              --request-count "$req_count" \
+              --num-dataset-entries "$req_count" \
+              --concurrency "$concurrency" \
+              --request-timeout-seconds 600 \
+              --random-seed 0 \
+              --extra-inputs ignore_eos:true \
+              --extra-inputs min_tokens:256 \
+              --extra-inputs max_tokens:256 \
+              --use-server-token-count \
+              --ui simple \
+              2>&1 | tee "${ARTIFACT_DIR}/aiperf_qps${qps}_con${concurrency}.txt"
+
+            echo "Done: $key"
+            ls -la "$ARTIFACT_DIR"
+          }
+
+          # ── Main execution ──────────────────────────────────────────────────
+          wait_for_model_ready
+
+          RUN_DIR="${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}"
+          mkdir -p "$RUN_DIR"
+
+          cat > "$RUN_DIR/input_config.json" <<EOF
+          {
+            "model": "$TARGET_MODEL",
+            "endpoint": "$ENDPOINT",
+            "endpoint_type": "chat",
+            "isl": 128,
+            "osl": 256,
+            "images_per_request": 20,
+            "image_resolution": "480x854",
+            "qps_group": [0.1, 0.25, 0.5, 0.75, 1, 1.25],
+            "num_prompts_group": [32, 64, 128, 256, 256, 256],
+            "concurrency": "0.1->32, 0.25->64, rest->128",
+            "tokenizer": "$TOKENIZER_PATH"
+          }
+          EOF
+
+          # ── QPS / num-prompts / Concurrency grouped sweep ───────────────────
+          QPS_GROUP="0.1 0.25 0.5 0.75 1 1.25"
+          PROMPTS_GROUP="32 64 128 256 256 256"
+
+          # Convert to indexed arrays
+          i=0
+          for qps in $QPS_GROUP; do
+            i=$((i+1))
+            eval "QPS_$i=$qps"
+          done
+          total=$i
+
+          i=0
+          for np in $PROMPTS_GROUP; do
+            i=$((i+1))
+            eval "NP_$i=$np"
+          done
+
+          echo "==============================================================="
+          echo "Running grouped sweep: $total configurations"
+          echo "QPS:          $QPS_GROUP"
+          echo "Num prompts:  $PROMPTS_GROUP"
+          echo "ISL=128, OSL=256 (fixed)"
+          echo "Concurrency:  32(qps=0.1), 64(qps=0.25), 128(rest)"
+          echo "==============================================================="
+
+          i=1
+          while [ $i -le $total ]; do
+            eval "qps=\$QPS_$i"
+            eval "req_count=\$NP_$i"
+
+            # Set concurrency based on QPS
+            case "$qps" in
+              0.1)  concurrency=32 ;;
+              0.25) concurrency=64 ;;
+              *)    concurrency=128 ;;
+            esac
+
+            run_perf "$qps" "$concurrency" "$req_count"
+            i=$((i+1))
+          done
+
+          echo ""
+          echo "All grouped sweep runs complete."
+          echo "Results in: $RUN_DIR"
+        env:
+        - name: TARGET_MODEL
+          value: Qwen/Qwen3-VL-32B-Instruct-FP8
+        - name: TOKENIZER_PATH
+          value: /root/.cache/huggingface/Qwen/Qwen3-VL-32B-Instruct-FP8
+        - name: ENDPOINT
+          value: ${BENCH_ENDPOINT}
+        - name: AIPERF_HTTP_CONNECTION_LIMIT
+          value: "200"
+        - name: JOB_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.labels['job-name']
+        - name: ROOT_ARTIFACT_DIR
+          value: /root/.cache/huggingface/perf
+        - name: HF_HOME
+          value: /root/.cache/huggingface
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        image: python:3.12-slim
+        imagePullPolicy: IfNotPresent
+        name: perf
+        volumeMounts:
+        - name: model-cache
+          mountPath: /root/.cache/huggingface
+        workingDir: /workspace
+      imagePullSecrets:
+      - name: nvcrimagepullsecret
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: model-cache

@@ -53,52 +53,52 @@ Given the following functions, please respond with a JSON for a function call wi
 Respond in the format {"name": function name, "parameters": dictionary of argument name and its value}.Do not use variables.
 
 {
+    "type": "function",
     "function": {
-        "description": "Get the current temperature for a specific location",
         "name": "get_current_temperature",
+        "description": "Get the current temperature for a specific location",
         "parameters": {
+            "type": "object",
             "properties": {
                 "location": {
-                    "description": "The city and state, e.g., San Francisco, CA",
-                    "type": "string"
+                    "type": "string",
+                    "description": "The city and state, e.g., San Francisco, CA"
                 },
                 "unit": {
-                    "description": "The temperature unit to use. Infer this from the user\u0027s location.",
+                    "type": "string",
                     "enum": [
                         "Celsius",
                         "Fahrenheit"
                     ],
-                    "type": "string"
+                    "description": "The temperature unit to use. Infer this from the user's location."
                 }
             },
             "required": [
                 "location",
                 "unit"
-            ],
-            "type": "object"
+            ]
         }
-    },
-    "type": "function"
+    }
 }
 
 {
+    "type": "function",
     "function": {
-        "description": "Get the probability of rain for a specific location",
         "name": "get_rain_probability",
+        "description": "Get the probability of rain for a specific location",
         "parameters": {
+            "type": "object",
             "properties": {
                 "location": {
-                    "description": "The city and state, e.g., San Francisco, CA",
-                    "type": "string"
+                    "type": "string",
+                    "description": "The city and state, e.g., San Francisco, CA"
                 }
             },
             "required": [
                 "location"
-            ],
-            "type": "object"
+            ]
         }
-    },
-    "type": "function"
+    }
 }
 
 What is deep learning?<|eot_id|><|start_header_id|>assistant<|end_header_id|>

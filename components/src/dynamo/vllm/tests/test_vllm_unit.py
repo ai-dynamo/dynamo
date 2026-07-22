@@ -3,6 +3,7 @@
 
 """Unit tests for vLLM backend components."""
 
+import asyncio
 import json
 import re
 import socket
@@ -19,9 +20,11 @@ from dynamo.vllm.args import (
     _is_routable,
     _uses_dynamo_connector,
     _uses_nixl_connector,
+    configure_rl_logprobs_mode,
     ensure_side_channel_host,
     get_host_ip,
     parse_args,
+    update_engine_config_with_dynamo,
 )
 from dynamo.vllm.constants import DisaggregationMode
 from dynamo.vllm.tests.conftest import make_cli_args_fixture
@@ -37,9 +40,13 @@ JINJA_TEMPLATE_PATH = str(
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.core,
     # gpu_1 not gpu_0: vLLM DeviceConfig(device='auto') fails on CPU-only arm64
     # runners with "Failed to infer device type" even for mock tests.
     pytest.mark.gpu_1,
+    pytest.mark.xpu_1,
+    pytest.mark.profiled_vram_gib(0),
+    pytest.mark.timeout(180),  # 0-GiB unit tests, floor 180s
     pytest.mark.pre_merge,
 ]
 
@@ -88,75 +95,6 @@ def test_custom_jinja_template_env_var_expansion(monkeypatch, mock_vllm_cli):
         f"Expected custom_jinja_template value to be {JINJA_TEMPLATE_PATH}, "
         f"got {config.custom_jinja_template}"
     )
-
-
-@pytest.mark.parametrize("load_format", ["mx-source", "mx-target"])
-def test_model_express_url_from_cli_arg(mock_vllm_cli, load_format):
-    """Test that --model-express-url is stored when load format is mx-source/mx-target."""
-    mock_vllm_cli(
-        "--model",
-        "Qwen/Qwen3-0.6B",
-        "--load-format",
-        load_format,
-        "--model-express-url",
-        "http://mx-server:8080",
-    )
-    config = parse_args()
-    assert config.model_express_url == "http://mx-server:8080"
-
-
-@pytest.mark.parametrize("load_format", ["mx-source", "mx-target"])
-def test_model_express_url_from_env_var(monkeypatch, mock_vllm_cli, load_format):
-    """Test that MODEL_EXPRESS_URL env var is used as fallback."""
-    monkeypatch.setenv("MODEL_EXPRESS_URL", "http://env-mx:9090")
-    mock_vllm_cli(
-        "--model",
-        "Qwen/Qwen3-0.6B",
-        "--load-format",
-        load_format,
-    )
-    config = parse_args()
-    assert config.model_express_url == "http://env-mx:9090"
-
-
-@pytest.mark.parametrize("load_format", ["mx-source", "mx-target"])
-def test_model_express_url_cli_overrides_env(monkeypatch, mock_vllm_cli, load_format):
-    """Test that --model-express-url takes precedence over MODEL_EXPRESS_URL."""
-    monkeypatch.setenv("MODEL_EXPRESS_URL", "http://env-mx:9090")
-    mock_vllm_cli(
-        "--model",
-        "Qwen/Qwen3-0.6B",
-        "--load-format",
-        load_format,
-        "--model-express-url",
-        "http://cli-mx:8080",
-    )
-    config = parse_args()
-    assert config.model_express_url == "http://cli-mx:8080"
-
-
-@pytest.mark.parametrize("load_format", ["mx-source", "mx-target"])
-def test_model_express_url_missing_raises(monkeypatch, mock_vllm_cli, load_format):
-    """Test that missing server URL raises ValueError for mx load formats."""
-    monkeypatch.delenv("MODEL_EXPRESS_URL", raising=False)
-    mock_vllm_cli(
-        "--model",
-        "Qwen/Qwen3-0.6B",
-        "--load-format",
-        load_format,
-    )
-    with pytest.raises(
-        ValueError,
-        match=re.escape(f"--load-format={load_format}"),
-    ):
-        parse_args()
-
-
-def test_model_express_url_none_for_default_load_format(mock_vllm_cli):
-    """Test that model_express_url is None when load format is not mx-*."""
-    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
-    config = parse_args()
-    assert config.model_express_url is None
 
 
 # --endpoint flag tests
@@ -240,6 +178,32 @@ def test_env_var_dyn_connector_raises_error(monkeypatch, mock_vllm_cli):
         parse_args()
 
 
+def test_model_express_url_is_accepted_for_compatibility(mock_vllm_cli):
+    """Test that legacy ModelExpress manifests still parse."""
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--model-express-url",
+        "http://model-express:8080",
+    )
+
+    config = parse_args()
+
+    assert config.model_express_url == "http://model-express:8080"
+
+
+def test_model_express_url_env_is_accepted_for_compatibility(
+    monkeypatch, mock_vllm_cli
+):
+    """Test that legacy MODEL_EXPRESS_URL still maps to config."""
+    monkeypatch.setenv("MODEL_EXPRESS_URL", "http://model-express:8080")
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
+
+    config = parse_args()
+
+    assert config.model_express_url == "http://model-express:8080"
+
+
 def test_prefill_worker_without_kv_transfer_config_raises(mock_vllm_cli):
     """Test that --disaggregation-mode prefill without --kv-transfer-config raises ValueError."""
     mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--disaggregation-mode", "prefill")
@@ -291,6 +255,7 @@ def test_uses_nixl_connector_direct_and_nested():
     assert _uses_nixl_connector(_make_engine_cfg("NixlConnector")) is True
     assert _uses_nixl_connector(_make_engine_cfg("PdConnector", _PD_KVBM_NIXL)) is True
     assert _uses_nixl_connector(_make_engine_cfg("LMCacheConnectorV1")) is False
+    assert _uses_nixl_connector(_make_engine_cfg("LMCacheMPConnector")) is False
     assert _uses_nixl_connector(_make_engine_cfg("FlexKVConnectorV1")) is False
     assert _uses_nixl_connector(_make_engine_cfg()) is False
 
@@ -326,6 +291,299 @@ def test_headless_namespace_has_required_fields(mock_vllm_cli):
     # Core engine fields must survive the round-trip
     assert hasattr(ns, "model")
     assert hasattr(ns, "tensor_parallel_size")
+
+
+def test_rl_logprobs_force_converts_raw_mode():
+    config = SimpleNamespace(
+        enable_rl=True,
+        engine_args=SimpleNamespace(logprobs_mode="raw_logprobs"),
+    )
+
+    configure_rl_logprobs_mode(config)
+
+    assert config.engine_args.logprobs_mode == "processed_logprobs"
+
+
+def test_rl_logprobs_keeps_processed_mode():
+    config = SimpleNamespace(
+        enable_rl=True,
+        engine_args=SimpleNamespace(logprobs_mode="processed_logprobs"),
+    )
+
+    configure_rl_logprobs_mode(config)
+
+    assert config.engine_args.logprobs_mode == "processed_logprobs"
+
+
+def test_rl_logprobs_rejects_logits_modes():
+    config = SimpleNamespace(
+        enable_rl=True,
+        engine_args=SimpleNamespace(logprobs_mode="raw_logits"),
+    )
+
+    with pytest.raises(ValueError, match="processed_logprobs"):
+        configure_rl_logprobs_mode(config)
+
+
+def test_parse_args_does_not_track_logprobs_mode_presence(mock_vllm_cli):
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
+    config = parse_args()
+    assert not hasattr(config, "logprobs_mode_explicitly_set")
+
+
+def test_unified_from_args_applies_rl_logprobs_default(monkeypatch):
+    from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
+    from dynamo.vllm import llm_engine
+
+    config = SimpleNamespace(
+        enable_rl=True,
+        engine_args=SimpleNamespace(
+            logprobs_mode="raw_logprobs",
+            served_model_name=["Qwen/Qwen3-0.6B"],
+        ),
+        served_model_name="Qwen/Qwen3-0.6B",
+        model="Qwen/Qwen3-0.6B",
+        disaggregation_mode=CommonDisaggregationMode.AGGREGATED,
+        component="backend",
+        dyn_tool_call_parser=None,
+        dyn_reasoning_parser=None,
+    )
+    worker_config = object()
+
+    monkeypatch.setattr(llm_engine, "parse_args", lambda argv: config)
+    monkeypatch.setattr(
+        llm_engine.WorkerConfig,
+        "from_runtime_config",
+        lambda *args, **kwargs: worker_config,
+    )
+
+    async def run_from_args():
+        return await llm_engine.VllmLLMEngine.from_args(["--enable-rl"])
+
+    engine, result_worker_config = asyncio.run(run_from_args())
+
+    assert config.engine_args.logprobs_mode == "processed_logprobs"
+    assert engine.enable_rl is True
+    assert result_worker_config is worker_config
+
+
+def test_unified_generate_passes_enable_rl_to_sampling_params(monkeypatch):
+    from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
+    from dynamo.vllm import llm_engine
+
+    captured: dict[str, bool] = {}
+
+    def fake_build_sampling_params(
+        request, default_sampling_params, model_max_len=None, *, enable_rl=False
+    ):
+        captured["enable_rl"] = enable_rl
+        return SimpleNamespace(extra_args=None)
+
+    async def empty_generation():
+        if False:
+            yield None
+
+    def fake_generate(*args, **kwargs):
+        return empty_generation()
+
+    engine = llm_engine.VllmLLMEngine(
+        SimpleNamespace(),
+        CommonDisaggregationMode.AGGREGATED,
+        served_model_name="test-model",
+        component="backend",
+        enable_rl=True,
+    )
+    engine.engine_client = SimpleNamespace(generate=fake_generate)
+    engine._default_sampling_params = {}
+    engine._model_max_len = 4096
+
+    monkeypatch.setattr(llm_engine, "build_sampling_params", fake_build_sampling_params)
+
+    async def run_generate():
+        context = SimpleNamespace(id=lambda: "req", trace_headers=lambda: None)
+        async for _ in engine.generate({"token_ids": [1, 2, 3]}, context):
+            pass
+
+    asyncio.run(run_generate())
+
+    assert captured["enable_rl"] is True
+
+
+@pytest.mark.asyncio
+async def test_unified_start_returns_normalized_served_model_name(monkeypatch):
+    """Return the Dynamo-normalized served model name from EngineConfig."""
+    from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
+    from dynamo.vllm import llm_engine
+
+    served_model_name = "Qwen/Qwen3-0.6B"
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(num_gpu_blocks=8),
+        model_config=SimpleNamespace(
+            max_model_len=4096, get_diff_sampling_param=lambda: {}
+        ),
+        scheduler_config=SimpleNamespace(
+            max_num_seqs=2,
+            max_num_batched_tokens=8192,
+        ),
+    )
+    engine_args = SimpleNamespace(
+        model=served_model_name,
+        served_model_name=[served_model_name],
+        create_model_config=lambda: SimpleNamespace(get_diff_sampling_param=lambda: {}),
+        create_engine_config=lambda usage_context: vllm_config,
+    )
+    engine_client = SimpleNamespace(vllm_config=vllm_config, shutdown=lambda: None)
+
+    monkeypatch.setattr(
+        llm_engine.AsyncLLM,
+        "from_vllm_config",
+        lambda **kwargs: engine_client,
+    )
+    monkeypatch.setattr(llm_engine, "get_dp_range_for_worker", lambda config: (0, 1))
+    monkeypatch.setattr(llm_engine, "per_rank_kv_blocks", lambda blocks, size: blocks)
+    monkeypatch.setattr(
+        llm_engine,
+        "configure_kv_event_block_size",
+        lambda client, config: asyncio.sleep(0),
+    )
+    monkeypatch.setattr(
+        llm_engine, "get_configured_kv_event_block_size", lambda config: 16
+    )
+    monkeypatch.setattr(
+        llm_engine.VllmLLMEngine,
+        "logits_processor_spec",
+        lambda self: asyncio.sleep(0),
+    )
+    monkeypatch.setattr(
+        llm_engine, "VllmEnginePauseController", lambda client: object()
+    )
+
+    engine = llm_engine.VllmLLMEngine(
+        engine_args,
+        CommonDisaggregationMode.AGGREGATED,
+        served_model_name=served_model_name,
+        component="backend",
+    )
+
+    config = await engine.start(worker_id=0)
+    await engine.cleanup()
+
+    assert engine_args.served_model_name == [served_model_name]
+    assert config.served_model_name == served_model_name
+
+
+def test_should_prefetch_model_for_default_load_format():
+    from dynamo.vllm.main import should_prefetch_model
+
+    config = SimpleNamespace(
+        model="Qwen/Qwen3-0.6B",
+        engine_args=SimpleNamespace(load_format="auto"),
+    )
+
+    assert should_prefetch_model(config) is True
+
+
+@pytest.mark.parametrize("load_format", ["modelexpress", "mx"])
+def test_should_not_prefetch_model_for_modelexpress_load_formats(load_format):
+    from dynamo.vllm.main import (
+        should_prefetch_model,
+        should_register_model_ignore_weights,
+        uses_modelexpress_load_format,
+    )
+
+    config = SimpleNamespace(
+        model="Qwen/Qwen3-0.6B",
+        engine_args=SimpleNamespace(load_format=load_format),
+    )
+
+    assert uses_modelexpress_load_format(config) is True
+    assert should_prefetch_model(config) is False
+    assert should_register_model_ignore_weights(config) is True
+
+
+def test_should_not_prefetch_existing_local_model(tmp_path):
+    from dynamo.vllm.main import should_prefetch_model
+
+    config = SimpleNamespace(
+        model=str(tmp_path),
+        engine_args=SimpleNamespace(load_format="auto"),
+    )
+
+    assert should_prefetch_model(config) is False
+
+
+def test_should_register_model_fetch_weights_for_default_load_format():
+    from dynamo.vllm.main import should_register_model_ignore_weights
+
+    config = SimpleNamespace(
+        model="Qwen/Qwen3-0.6B",
+        engine_args=SimpleNamespace(load_format="auto"),
+    )
+
+    assert should_register_model_ignore_weights(config) is False
+
+
+def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
+    from dynamo.vllm import main as vllm_main
+
+    class FakeModelConfig:
+        def get_diff_sampling_param(self):
+            return {"temperature": 0.7}
+
+    vllm_config = SimpleNamespace(
+        additional_config={},
+        cache_config=SimpleNamespace(block_size=None),
+        model_config=FakeModelConfig(),
+    )
+
+    class FakeEngineArgs:
+        enable_log_requests = False
+        enable_lora = False
+        disable_log_stats = True
+        load_format = "modelexpress"
+
+        def create_model_config(self):
+            raise AssertionError("setup_vllm_engine must not create ModelConfig twice")
+
+        def create_engine_config(self, usage_context):
+            return vllm_config
+
+    engine_client = SimpleNamespace(vllm_config=vllm_config)
+
+    class FakeAsyncLLM:
+        @staticmethod
+        def from_vllm_config(**_kwargs):
+            return engine_client
+
+    class FakeMetrics:
+        def __init__(self, **_kwargs):
+            pass
+
+        def set_model_load_time(self, _load_time):
+            pass
+
+    monkeypatch.setattr(vllm_main, "setup_multiprocess_prometheus", lambda: None)
+    monkeypatch.setattr(vllm_main, "LLMBackendMetrics", FakeMetrics)
+    monkeypatch.setattr(vllm_main, "_uses_dynamo_connector", lambda _args: False)
+    monkeypatch.setattr(vllm_main, "AsyncLLM", FakeAsyncLLM)
+    monkeypatch.setattr(
+        vllm_main,
+        "get_engine_cache_info",
+        lambda _engine: {"block_size": 16},
+    )
+
+    config = SimpleNamespace(
+        component="backend",
+        engine_args=FakeEngineArgs(),
+        gms_shadow_mode=False,
+        multimodal_embedding_cache_capacity_gb=0,
+        route_to_encoder=False,
+        served_model_name="Qwen/Qwen3-0.6B",
+    )
+
+    _, _, default_sampling_params, _, _ = vllm_main.setup_vllm_engine(config)
+
+    assert default_sampling_params == {"temperature": 0.7}
 
 
 # --disaggregation-mode tests
@@ -723,3 +981,250 @@ class TestBenchmarkGrid:
         total_kv = 100 * 16
         for ctx_len, bs in points:
             assert ctx_len <= total_kv
+
+
+@pytest.mark.asyncio
+async def test_health_check_decode_opts_out_with_warning():
+    # mock.patch the module logger directly: dynamo's logging setup
+    # turns off propagation on per-module loggers, so pytest's caplog
+    # (which attaches at root) doesn't see these warnings.
+    from dynamo.vllm.llm_engine import VllmLLMEngine
+
+    engine = VllmLLMEngine(
+        engine_args=None,
+        disaggregation_mode=DisaggregationMode.DECODE,
+        served_model_name="test",
+        component="backend",
+    )
+    with patch("dynamo.vllm.llm_engine.logger") as mock_logger:
+        payload = await engine.health_check_payload()
+
+    assert payload is None
+    assert mock_logger.warning.call_count == 1
+    msg = mock_logger.warning.call_args.args[0]
+    assert "DECODE worker: health-check canary disabled" in msg
+
+
+@pytest.mark.asyncio
+async def test_health_check_aggregated_returns_canary():
+    from dynamo.common.backend.health_check import HEALTH_CHECK_KEY
+    from dynamo.vllm.llm_engine import VllmLLMEngine
+
+    engine = VllmLLMEngine(
+        engine_args=None,
+        disaggregation_mode=DisaggregationMode.AGGREGATED,
+        served_model_name="test",
+        component="backend",
+    )
+    payload = await engine.health_check_payload()
+
+    assert payload is not None
+    assert payload[HEALTH_CHECK_KEY] is True
+    assert payload["token_ids"]
+
+
+def test_build_sampling_params_maps_max_thinking_tokens():
+    from dynamo.vllm.handlers import build_sampling_params
+
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {},
+        "stop_conditions": {"max_thinking_tokens": 1024},
+        "output_options": {},
+    }
+    sp = build_sampling_params(request, default_sampling_params={})
+    assert sp.thinking_token_budget == 1024
+
+
+def test_build_sampling_params_caps_omitted_max_tokens_to_generation_default():
+    from dynamo.vllm.handlers import build_sampling_params
+
+    model_max_len = 100
+    defaults = {"max_tokens": 32}
+
+    def make(stop_conditions):
+        return {
+            "token_ids": [1, 2, 3],
+            "sampling_options": {},
+            "stop_conditions": stop_conditions,
+            "output_options": {},
+        }
+
+    remaining = model_max_len - 3
+
+    # omitted max_tokens → capped to configured default
+    sp = build_sampling_params(make({}), defaults, model_max_len)
+    assert sp.max_tokens == 32
+
+    # explicit max_tokens == remaining context → treated as explicit, not capped
+    sp = build_sampling_params(make({"max_tokens": remaining}), defaults, model_max_len)
+    assert sp.max_tokens == remaining
+
+    sp = build_sampling_params(make({"max_tokens": 10}), defaults, model_max_len)
+    assert sp.max_tokens == 10
+
+    sp = build_sampling_params(make({"max_tokens": 64}), defaults, model_max_len)
+    assert sp.max_tokens == 64
+
+    sp = build_sampling_params(make({}), {}, model_max_len)
+    assert sp.max_tokens == remaining
+
+
+def _make_dynamo_config(**overrides):
+    """Build a minimal fake DynamoConfig for update_engine_config_with_dynamo tests."""
+    defaults = {
+        "disaggregation_mode": DisaggregationMode.AGGREGATED,
+        "use_kv_events": False,
+        "enable_local_indexer": True,
+        "benchmark_mode": None,
+    }
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+def _make_engine_config_with_runner(runner="auto", **overrides):
+    """Build a fake engine config with runner and other fields used by defaults loop."""
+    defaults = {
+        "runner": runner,
+        "enable_prefix_caching": True,
+        "block_size": 16,
+        "skip_tokenizer_init": True,
+        "enable_log_requests": True,
+        "disable_log_stats": True,
+        "kv_events_config": None,
+        "kv_transfer_config": None,
+    }
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+class TestRunnerPreservation:
+    """update_engine_config_with_dynamo must not overwrite a user-set --runner."""
+
+    def test_runner_auto_is_preserved(self):
+        """When user passes --runner auto (also the vLLM default),
+        Dynamo must leave it alone so vLLM's own auto-detection runs."""
+        dynamo_cfg = _make_dynamo_config()
+        engine_cfg = _make_engine_config_with_runner(runner="auto")
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.runner == "auto"
+
+    def test_runner_pooling_preserved(self):
+        """When user passes --runner pooling (for embedding models),
+        Dynamo must NOT overwrite it."""
+        dynamo_cfg = _make_dynamo_config()
+        engine_cfg = _make_engine_config_with_runner(runner="pooling")
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.runner == "pooling"
+
+    def test_runner_generate_explicit_preserved(self):
+        """When user explicitly passes --runner generate, it should still be 'generate'."""
+        dynamo_cfg = _make_dynamo_config()
+        engine_cfg = _make_engine_config_with_runner(runner="generate")
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.runner == "generate"
+
+    def test_runner_draft_preserved(self):
+        """When user passes --runner draft, Dynamo must NOT overwrite it."""
+        dynamo_cfg = _make_dynamo_config()
+        engine_cfg = _make_engine_config_with_runner(runner="draft")
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.runner == "draft"
+
+    def test_no_runner_attr_skipped_gracefully(self):
+        """If engine_config lacks a 'runner' attr (older vLLM), no error is raised."""
+        dynamo_cfg = _make_dynamo_config()
+        engine_cfg = _make_engine_config_with_runner()
+        del engine_cfg.runner  # simulate older vLLM without runner
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert not hasattr(engine_cfg, "runner")
+
+
+class TestEmbeddingWorkerFlag:
+    """Parsing + validation for --embedding-worker."""
+
+    def test_default_false(self, mock_vllm_cli):
+        """Without --embedding-worker, the flag is False."""
+        mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
+        config = parse_args()
+        assert config.embedding_worker is False
+
+    def test_flag_sets_true(self, mock_vllm_cli):
+        """--embedding-worker on its own with default agg mode parses cleanly."""
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--embedding-worker",
+            "--runner",
+            "pooling",
+        )
+        config = parse_args()
+        assert config.embedding_worker is True
+
+    def test_rejects_prefill_disagg(self, mock_vllm_cli):
+        """--embedding-worker combined with --disaggregation-mode prefill is rejected."""
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--embedding-worker",
+            "--runner",
+            "pooling",
+            "--disaggregation-mode",
+            "prefill",
+            "--kv-transfer-config",
+            '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+        )
+        with pytest.raises(ValueError, match="--embedding-worker is only valid"):
+            parse_args()
+
+    def test_rejects_decode_disagg(self, mock_vllm_cli):
+        """--embedding-worker combined with --disaggregation-mode decode is rejected."""
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--embedding-worker",
+            "--runner",
+            "pooling",
+            "--disaggregation-mode",
+            "decode",
+        )
+        with pytest.raises(ValueError, match="--embedding-worker is only valid"):
+            parse_args()
+
+    def test_rejects_multimodal_combo(self, mock_vllm_cli):
+        """--embedding-worker combined with multimodal flags is rejected."""
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--embedding-worker",
+            "--runner",
+            "pooling",
+            "--enable-multimodal",
+        )
+        with pytest.raises(
+            ValueError, match="--embedding-worker cannot be combined with multimodal"
+        ):
+            parse_args()
+
+
+def test_build_sampling_params_openai_maps_max_thinking_tokens():
+    from dynamo.vllm.handlers import build_sampling_params_openai
+
+    request = {
+        "model": "test-model",
+        "prompt": "Solve: 1+1.",
+        "max_tokens": 32,
+        "nvext": {"max_thinking_tokens": 1024},
+    }
+    sp = build_sampling_params_openai(request, default_sampling_params={})
+    assert sp.thinking_token_budget == 1024

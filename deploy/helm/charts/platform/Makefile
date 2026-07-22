@@ -20,6 +20,8 @@ $(LOCALBIN):
 HELM_DOCS_VERSION ?= 1.14.2
 HELM_DOCS ?= $(LOCALBIN)/helm-docs-$(HELM_DOCS_VERSION)
 
+HELM_UNITTEST_VERSION ?= 0.7.2
+
 ##@ General
 
 .PHONY: help
@@ -55,3 +57,22 @@ generate-helm-docs: helm-docs-install ## Generate README.md from values.yaml and
 helm-docs-clean: ## Remove generated helm documentation
 	@rm -f README.md
 	@echo "Cleaned generated README.md"
+
+##@ Helm Testing
+
+.PHONY: helm-unittest-install
+helm-unittest-install: ## Install helm-unittest plugin if not present
+	@helm plugin list | grep -q unittest || \
+		helm plugin install https://github.com/helm-unittest/helm-unittest --version $(HELM_UNITTEST_VERSION)
+
+.PHONY: charts-prep
+charts-prep: ## Package operator subchart for local testing
+	@helm package components/operator -d charts/ 2>/dev/null
+
+.PHONY: test
+test: helm-unittest-install charts-prep ## Run helm-unittest chart tests
+	@helm unittest .
+
+.PHONY: lint
+lint: charts-prep ## Run helm lint
+	@helm lint .

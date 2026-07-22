@@ -1,0 +1,158 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Hand-curated overlay for from-source components we build inside our
+# Dockerfiles. These don't show up via dpkg-query (apt didn't install
+# them), aren't Python wheels / Rust crates / Go modules, so the per-
+# ecosystem generators miss them. This file makes them visible in
+# /legal/native/NOTICES-Native.txt.
+#
+# Consumed by container/compliance/generators/native.py:
+#   python3 -m compliance.generators \
+#       --ecosystem ...,native \
+#       --native-yaml /opt/compliance/native_packages.yaml \
+#       --native-image <component-name> \
+#       --output-dir /legal
+#
+# `images` is the filter key. Each runtime/agent image's licenses stage
+# passes its own component name via --native-image so the generator
+# only emits the components that actually ship in that image.
+#
+# Schema per entry:
+#   name:              human-readable component name
+#   version:           upstream version / ref shipped
+#   license:           SPDX expression
+#   source:            upstream URL (repo or tarball location)
+#   license_text_path: (optional) path inside the licenses-stage
+#                      filesystem where the full LICENSE text lives,
+#                      so the generator can inline it under each
+#                      NOTICES section
+#   images:            list of image names this component ships in;
+#                      --native-image must match one of these
+#                      ("snapshot-agent" today; ucx/libfabric/etc.
+#                      added when framework runtimes wire native in)
+
+packages:
+  # --- EFA (Elastic Fabric Adapter) components ---
+  # Installed by container/templates/aws.Dockerfile via the AWS-published
+  # `efa_installer.sh` (efa_version 1.47.0). The installer drops binaries
+  # directly without registering with apt, so dpkg/python/rust/go
+  # generators can't see them. This YAML overlay attributes them.
+  #
+  # Image filter:
+  #   - vllm-runtime-efa: baseline (nvcr.io/nvidia/cuda:X.Y-runtime) has
+  #     no libfabric, so EFA legitimately adds both libs.
+  #   - trtllm-runtime-efa: baseline (cuda-dl-base) already ships
+  #     libfabric-aws@2.1.0amzn5.0, but the EFA installer may install a
+  #     different version; explicit attribution closes the version-skew
+  #     gap defensively.
+  #   - (sglang-runtime-efa intentionally omitted: sglang's upstream
+  #     image already ships libfabric1@1.17.0-3build2; the make_efa
+  #     build is redundant and appears to be dead config.)
+  - name: libfabric
+    # AWS fork: shipped by EFA installer 1.47.0 as libfabric1-aws_2.4.0amzn1.0
+    # (Ubuntu 24.04 DEB). The `amzn1.0` suffix indicates an AWS patch set on
+    # top of upstream libfabric 2.4.0; preserved here for OSRB traceability.
+    version: 2.4.0amzn1.0
+    license: BSD-2-Clause
+    source: https://github.com/ofiwg/libfabric
+    images:
+      - vllm-runtime-efa
+      - trtllm-runtime-efa
+
+  - name: aws-ofi-nccl
+    # Shipped by EFA installer 1.47.0 as libnccl-ofi_1.18.0-1 (Ubuntu 24.04 DEB).
+    version: 1.18.0
+    license: Apache-2.0
+    source: https://github.com/aws/aws-ofi-nccl
+    images:
+      - vllm-runtime-efa
+      - trtllm-runtime-efa
+
+  # --- From-source binaries built in wheel_builder / dynamo_base and copied
+  # into the runtime images (no apt/pip/cargo metadata, so the python/rust/dpkg
+  # generators miss them). Image filters are best-effort by build config; the
+  # <framework>-compliance-audit job (syft scan of the pushed image) is the
+  # authoritative completeness check and will surface any miss or over-list.
+  # NOTE: NIXL ships as the `nixl` Python wheel (attributed by the python
+  # generator), so it is intentionally NOT duplicated here.
+
+  # LGPL media stack — built --disable-gpl in wheel_builder (h264_nvenc + libvpx)
+  # and copied into vllm/sglang runtime (container/templates/vllm_runtime.Dockerfile
+  # + sglang_runtime.Dockerfile). Replaces the purged GPL apt ffmpeg.
+  - name: ffmpeg
+    version: "8.1"
+    license: LGPL-2.1-or-later
+    source: https://ffmpeg.org/
+    images:
+      - vllm-runtime
+      - vllm-runtime-efa
+      - sglang-runtime
+      - sglang-runtime-efa
+
+  - name: libvpx
+    # VP8/VP9 codec library, ffmpeg's only non-NVIDIA encoder dependency.
+    version: v1.14.1
+    license: BSD-3-Clause
+    source: https://chromium.googlesource.com/webm/libvpx
+    images:
+      - vllm-runtime
+      - vllm-runtime-efa
+      - sglang-runtime
+      - sglang-runtime-efa
+
+  # UCX — Unified Communication X, built from source in wheel_builder and used by
+  # the NIXL transport. Installed to /usr/local (no dpkg metadata).
+  - name: UCX
+    version: v1.20.x
+    license: BSD-3-Clause
+    source: https://github.com/openucx/ucx
+    images:
+      - vllm-runtime
+      - vllm-runtime-efa
+      - sglang-runtime
+      - sglang-runtime-efa
+      - trtllm-runtime
+      - trtllm-runtime-efa
+
+  # gdrcopy — GPUDirect RDMA copy library, built from source in wheel_builder for
+  # CUDA images and installed outside apt.
+  - name: gdrcopy
+    version: v2.5.2
+    license: MIT
+    source: https://github.com/NVIDIA/gdrcopy
+    images:
+      - vllm-runtime
+      - vllm-runtime-efa
+      - trtllm-runtime
+      - trtllm-runtime-efa
+
+  # etcd — coordination store, downloaded as a release binary in dynamo_base and
+  # placed at /usr/local/bin (no apt metadata).
+  - name: etcd
+    version: v3.5.30
+    license: Apache-2.0
+    source: https://github.com/etcd-io/etcd
+    images:
+      - vllm-runtime
+      - vllm-runtime-efa
+      - sglang-runtime
+      - sglang-runtime-efa
+      - trtllm-runtime
+      - trtllm-runtime-efa
+      - dynamo-planner
+
+  # nats-server — messaging server, downloaded as a .deb in dynamo_base (dpkg -i
+  # may not survive into the final runtime layer attribution reliably).
+  - name: nats-server
+    version: v2.10.28
+    license: Apache-2.0
+    source: https://github.com/nats-io/nats-server
+    images:
+      - vllm-runtime
+      - vllm-runtime-efa
+      - sglang-runtime
+      - sglang-runtime-efa
+      - trtllm-runtime
+      - trtllm-runtime-efa
+      - dynamo-planner

@@ -18,7 +18,7 @@ use validator::Validate;
 // pub use aggregator::DeltaAggregator;
 
 // [gluo TODO] nvext is LLM specific, we really only use the annotation field
-pub use super::openai::nvext::{NvExt, NvExtProvider};
+pub use super::common::extensions::{NvExt, NvExtProvider};
 
 #[derive(Debug, Serialize, Clone, Eq, PartialEq, Deserialize)]
 pub enum DataType {

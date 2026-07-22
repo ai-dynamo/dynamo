@@ -3,10 +3,9 @@ package dynamo
 import (
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -21,18 +20,14 @@ type TRTLLMBackend struct {
 // For single-node deployments it is a no-op. For multinode, it mounts the SSH
 // keypair secret and injects the appropriate SSH setup and launch commands for
 // leader (mpirun) and worker (sshd) roles.
-func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
-	// Check for volumeMounts with useAsCompilationCache=true
-	for _, volumeMount := range component.VolumeMounts {
-		if volumeMount.UseAsCompilationCache {
-			logger := log.Log.WithName("trtllm-backend")
-			logger.Info("Compilation cache configured for TensorRT-LLM but not yet fully supported",
-				"backend", "trtllm",
-				"status", "partial-support",
-				"use-as-compilation-cache", true,
-				"env-vars-set", false,
-				"next-steps", "upstream TensorRT-LLM changes needed")
-		}
+func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+	if component.CompilationCache != nil {
+		logger := log.Log.WithName("trtllm-backend")
+		logger.Info("Compilation cache configured for TensorRT-LLM but not yet fully supported",
+			"backend", "trtllm",
+			"status", "partial-support",
+			"env-vars-set", false,
+			"next-steps", "upstream TensorRT-LLM changes needed")
 	}
 
 	// For single node, nothing to do
@@ -80,7 +75,7 @@ func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNod
 
 // UpdatePodSpec injects the SSH keypair volume into the pod spec for TRT-LLM
 // multinode deployments so that leader and worker containers can mount it.
-func (b *TRTLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+func (b *TRTLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
 	// Add SSH keypair volume for TRTLLM multinode deployments
 	if numberOfNodes > 1 {
 		sshVolume := corev1.Volume{
@@ -107,7 +102,7 @@ func (b *TRTLLMBackend) addSSHVolumeMount(container *corev1.Container) {
 }
 
 // setupLeaderContainer configures the leader node with SSH setup and mpirun command
-func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, numberOfNodes int32, serviceName string, component *v1alpha1.DynamoComponentDeploymentSharedSpec, multinodeDeployer MultinodeDeployer) {
+func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, numberOfNodes int32, serviceName string, component *v1beta1.DynamoComponentDeploymentSharedSpec, multinodeDeployer MultinodeDeployer) {
 	// Generate the list of all hostnames
 	hostNamesList := b.hostNamesList(numberOfNodes, serviceName, multinodeDeployer)
 	allHostnames := strings.Join(hostNamesList, ",")
@@ -149,8 +144,12 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 		fmt.Sprintf("printf 'Host *\\nIdentityFile '$HOME'/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort %d\\n' > $HOME/.ssh/config", commonconsts.MpiRunSshPort),
 	}
 
-	// Calculate total number of GPUs across all nodes
-	gpusPerNode := getGPUsPerNode(component.Resources)
+	// Calculate total number of GPUs across all nodes. In the normal pod
+	// generation path container.Resources has already been merged from the
+	// component podTemplate; keep the component fallback for direct backend
+	// callers and focused unit tests.
+	resources := resourceRequirementsWithFallback(container.Resources, GetMainContainerResources(component))
+	gpusPerNode := getGPUsPerNode(&resources)
 	totalGPUs := numberOfNodes * gpusPerNode
 
 	// Build mpirun command with explicit SSH configuration and environment variables
@@ -233,18 +232,11 @@ func (b *TRTLLMBackend) hostNamesList(numberOfNodes int32, serviceName string, m
 }
 
 // getGPUsPerNode extracts the number of GPUs per node from resources
-func getGPUsPerNode(resources *v1alpha1.Resources) int32 {
-	if resources != nil && resources.Requests != nil && resources.Requests.GPU != "" {
-		if gpus, err := strconv.ParseInt(resources.Requests.GPU, 10, 32); err == nil {
-			return int32(gpus)
-		}
+func getGPUsPerNode(resources *corev1.ResourceRequirements) int32 {
+	if resources == nil {
+		return 0
 	}
-	if resources != nil && resources.Limits != nil && resources.Limits.GPU != "" {
-		if gpus, err := strconv.ParseInt(resources.Limits.GPU, 10, 32); err == nil {
-			return int32(gpus)
-		}
-	}
-	return 0 // Default to 0 GPUs if not specified
+	return int32(getGPUQuantity(resources))
 }
 
 // getCommonTRTLLMEnvVars returns a map of common environment variables for TRTLLM deployments

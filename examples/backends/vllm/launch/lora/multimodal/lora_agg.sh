@@ -14,7 +14,9 @@
 #   ./lora_agg.sh -- --enforce-eager                          # Pass extra args to vLLM
 
 set -euo pipefail
-trap 'echo "Cleaning up..."; kill 0' EXIT
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../../../common/launch_utils.sh"
+trap dynamo_exit_trap EXIT
 
 # ── Configuration ────────────────────────────────────────────────────────
 
@@ -150,5 +152,4 @@ DYN_SYSTEM_PORT="$SYSTEM_PORT" \
         "${MODEL_SPECIFIC_ARGS[@]}" \
         "${EXTRA_ARGS[@]}" &
 
-# Wait for all background processes
-wait
+wait_any_exit

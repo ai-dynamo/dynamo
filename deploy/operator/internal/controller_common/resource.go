@@ -26,12 +26,11 @@ import (
 	"sort"
 	"strconv"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -182,20 +181,24 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 				"lastAppliedGeneration", getAnnotation(oldResource, NvidiaAnnotationGenerationKey))
 		}
 
-		// Generate and log diff before updating
-		diff, diffErr := generateSpecDiff(oldResource, resource)
-		if diffErr != nil {
-			logs.V(1).Info(fmt.Sprintf("Failed to generate diff for %s: %v", resourceType, diffErr))
-		} else if diff != "" {
-			logs.Info(fmt.Sprintf("%s spec changes detected", resourceType), "diff", diff)
-		}
+		if changeResult.SpecNeedsUpdate {
+			// Generate and log diff before updating
+			diff, diffErr := generateSpecDiff(oldResource, resource)
+			if diffErr != nil {
+				logs.V(1).Info(fmt.Sprintf("Failed to generate diff for %s: %v", resourceType, diffErr))
+			} else if diff != "" {
+				logs.Info(fmt.Sprintf("%s spec changes detected", resourceType), "diff", diff)
+			}
 
-		// Update the spec of the current object with the desired spec
-		err = CopySpec(resource, oldResource)
-		if err != nil {
-			logs.Error(err, fmt.Sprintf("Failed to copy spec for %s.", resourceType))
-			r.GetRecorder().Eventf(oldResource, corev1.EventTypeWarning, fmt.Sprintf("CopySpec%s", resourceType), "Failed to copy spec for %s %s: %s", resourceType, resourceNamespace, err)
-			return
+			// Update the spec of the current object with the desired spec
+			err = CopySpec(resource, oldResource)
+			if err != nil {
+				logs.Error(err, fmt.Sprintf("Failed to copy spec for %s.", resourceType))
+				r.GetRecorder().Eventf(oldResource, corev1.EventTypeWarning, fmt.Sprintf("CopySpec%s", resourceType), "Failed to copy spec for %s %s: %s", resourceType, resourceNamespace, err)
+				return
+			}
+		} else {
+			logs.Info(fmt.Sprintf("%s spec is equivalent. Updating bookkeeping annotations only.", resourceType))
 		}
 
 		updateAnnotations(oldResource, *changeResult.NewHash, changeResult.NewGeneration)
@@ -305,6 +308,10 @@ type SpecChangeResult struct {
 	NewGeneration int64
 	// NeedsUpdate indicates whether the resource needs to be updated
 	NeedsUpdate bool
+	// SpecNeedsUpdate indicates whether the desired spec/content must be copied.
+	// When false with NeedsUpdate=true, only operator bookkeeping annotations need
+	// repair and the resource spec should be left untouched.
+	SpecNeedsUpdate bool
 	// ManualChangeDetected indicates whether a manual change was detected
 	ManualChangeDetected bool
 }
@@ -320,70 +327,94 @@ func GetSpecChangeResult(current client.Object, desired client.Object) (SpecChan
 	if err != nil {
 		return SpecChangeResult{}, err
 	}
+	currentMatchesDesired, err := specContentEqualPreserveListOrder(current, desired)
+	if err != nil {
+		return SpecChangeResult{}, err
+	}
 
 	lastAppliedHash := getAnnotation(current, NvidiaAnnotationHashKey)
 	lastAppliedGenStr := getAnnotation(current, NvidiaAnnotationGenerationKey)
 	currentGen := current.GetGeneration()
+	annotationOnlyChange := func() SpecChangeResult {
+		return SpecChangeResult{
+			NewHash:       &desiredHash,
+			NewGeneration: currentGen,
+			NeedsUpdate:   true,
+		}
+	}
+	specChange := func(manual bool) SpecChangeResult {
+		return SpecChangeResult{
+			NewHash:              &desiredHash,
+			NewGeneration:        currentGen + 1,
+			NeedsUpdate:          true,
+			SpecNeedsUpdate:      true,
+			ManualChangeDetected: manual,
+		}
+	}
 
 	// Case 1: Hash annotation missing (external create or pre-upgrade resource)
 	// Note: This is not first-time CREATE (handled separately in SyncResource with generation=1).
-	// This handles existing resources without our annotations - we're about to update them,
-	// so NewGeneration = currentGen + 1 is correct.
+	// If the live spec already matches the desired spec, only backfill the operator
+	// bookkeeping annotations. This avoids rewriting API-server-defaulted fields
+	// during upgrades.
 	if lastAppliedHash == "" {
-		return SpecChangeResult{
-			NewHash:       &desiredHash,
-			NewGeneration: currentGen + 1,
-			NeedsUpdate:   true,
-		}, nil
+		if currentMatchesDesired {
+			return annotationOnlyChange(), nil
+		}
+		return specChange(false), nil
 	}
 
 	// Case 2: Hash different (spec changed)
 	if desiredHash != lastAppliedHash {
-		return SpecChangeResult{
-			NewHash:       &desiredHash,
-			NewGeneration: currentGen + 1,
-			NeedsUpdate:   true,
-		}, nil
+		if currentMatchesDesired {
+			return annotationOnlyChange(), nil
+		}
+		return specChange(false), nil
 	}
 
 	// Case 3: Hash same, but generation annotation missing (upgrade scenario)
-	// Do a full update to ensure spec is exactly what we want - there could have been
-	// manual edits before we added generation tracking. The cost is one extra Update
-	// per resource during upgrade, but on next reconcile generations will match.
 	if lastAppliedGenStr == "" {
-		return SpecChangeResult{
-			NewHash:       &desiredHash,
-			NewGeneration: currentGen + 1,
-			NeedsUpdate:   true,
-		}, nil
+		if currentMatchesDesired {
+			return annotationOnlyChange(), nil
+		}
+		return specChange(false), nil
 	}
 
 	// Case 4: Both annotations exist, check for manual changes
 	lastAppliedGen, err := strconv.ParseInt(lastAppliedGenStr, 10, 64)
 	if err != nil {
 		// Corrupted annotation, force update to fix
-		return SpecChangeResult{
-			NewHash:       &desiredHash,
-			NewGeneration: currentGen + 1,
-			NeedsUpdate:   true,
-		}, nil
+		if currentMatchesDesired {
+			return annotationOnlyChange(), nil
+		}
+		return specChange(false), nil
 	}
 
 	// Detect manual changes: if current generation > last applied generation,
 	// someone else modified the resource after our last update
 	if currentGen > 0 && currentGen > lastAppliedGen {
-		return SpecChangeResult{
-			NewHash:              &desiredHash,
-			NewGeneration:        currentGen + 1,
-			NeedsUpdate:          true,
-			ManualChangeDetected: true,
-		}, nil
+		if currentMatchesDesired {
+			return annotationOnlyChange(), nil
+		}
+		return specChange(true), nil
 	}
 
 	// No update needed
 	return SpecChangeResult{
 		NeedsUpdate: false,
 	}, nil
+}
+
+func specContentEqualPreserveListOrder(current, desired client.Object) (bool, error) {
+	currentSpec, err := getSpec(current)
+	if err != nil {
+		return false, err
+	}
+	desiredSpec, err := getSpec(desired)
+	if err != nil {
+		return false, err
+	}
+	return equality.Semantic.DeepEqual(currentSpec, desiredSpec), nil
 }
 
 // getAnnotation safely retrieves an annotation value from an object
@@ -522,117 +553,6 @@ func firstKey(m map[string]interface{}) string {
 	return keys[0]
 }
 
-func GetResourcesConfig(resources *v1alpha1.Resources) (*corev1.ResourceRequirements, error) {
-
-	if resources == nil {
-		return nil, nil
-	}
-
-	currentResources := &corev1.ResourceRequirements{}
-
-	if resources.Limits != nil {
-		if resources.Limits.CPU != "" {
-			q, err := resource.ParseQuantity(resources.Limits.CPU)
-			if err != nil {
-				return nil, fmt.Errorf("parse limits cpu quantity: %w", err)
-			}
-			if currentResources.Limits == nil {
-				currentResources.Limits = make(corev1.ResourceList)
-			}
-			currentResources.Limits[corev1.ResourceCPU] = q
-		}
-		if resources.Limits.Memory != "" {
-			q, err := resource.ParseQuantity(resources.Limits.Memory)
-			if err != nil {
-				return nil, fmt.Errorf("parse limits memory quantity: %w", err)
-			}
-			if currentResources.Limits == nil {
-				currentResources.Limits = make(corev1.ResourceList)
-			}
-			currentResources.Limits[corev1.ResourceMemory] = q
-		}
-		if resources.Limits.GPU != "" {
-			q, err := resource.ParseQuantity(resources.Limits.GPU)
-			if err != nil {
-				return nil, fmt.Errorf("parse limits gpu quantity: %w", err)
-			}
-			if currentResources.Limits == nil {
-				currentResources.Limits = make(corev1.ResourceList)
-			}
-			currentResources.Limits[getGPUResourceName(resources.Limits)] = q
-		}
-		for k, v := range resources.Limits.Custom {
-			q, err := resource.ParseQuantity(v)
-			if err != nil {
-				return nil, fmt.Errorf("parse limits %s quantity: %w", k, err)
-			}
-			if currentResources.Limits == nil {
-				currentResources.Limits = make(corev1.ResourceList)
-			}
-			currentResources.Limits[corev1.ResourceName(k)] = q
-		}
-	}
-	if resources.Requests != nil {
-		if resources.Requests.CPU != "" {
-			q, err := resource.ParseQuantity(resources.Requests.CPU)
-			if err != nil {
-				return nil, fmt.Errorf("parse requests cpu quantity: %w", err)
-			}
-			if currentResources.Requests == nil {
-				currentResources.Requests = make(corev1.ResourceList)
-			}
-			currentResources.Requests[corev1.ResourceCPU] = q
-		}
-		if resources.Requests.Memory != "" {
-			q, err := resource.ParseQuantity(resources.Requests.Memory)
-			if err != nil {
-				return nil, fmt.Errorf("parse requests memory quantity: %w", err)
-			}
-			if currentResources.Requests == nil {
-				currentResources.Requests = make(corev1.ResourceList)
-			}
-			currentResources.Requests[corev1.ResourceMemory] = q
-		}
-		if resources.Requests.GPU != "" {
-			q, err := resource.ParseQuantity(resources.Requests.GPU)
-			if err != nil {
-				return nil, fmt.Errorf("parse requests gpu quantity: %w", err)
-			}
-			if currentResources.Requests == nil {
-				currentResources.Requests = make(corev1.ResourceList)
-			}
-			currentResources.Requests[getGPUResourceName(resources.Requests)] = q
-		}
-		for k, v := range resources.Requests.Custom {
-			q, err := resource.ParseQuantity(v)
-			if err != nil {
-				return nil, fmt.Errorf("parse requests %s quantity: %w", k, err)
-			}
-			if currentResources.Requests == nil {
-				currentResources.Requests = make(corev1.ResourceList)
-			}
-			currentResources.Requests[corev1.ResourceName(k)] = q
-		}
-	}
-	if resources.Claims != nil {
-		if currentResources.Claims == nil {
-			currentResources.Claims = make([]corev1.ResourceClaim, 0)
-		}
-		currentResources.Claims = append(currentResources.Claims, resources.Claims...)
-	}
-	return currentResources, nil
-}
-
-func getGPUResourceName(resourceItem *v1alpha1.ResourceItem) corev1.ResourceName {
-	if resourceItem == nil {
-		return corev1.ResourceName(consts.KubeResourceGPUNvidia)
-	}
-	if resourceItem.GPUType != "" {
-		return corev1.ResourceName(resourceItem.GPUType)
-	}
-	return corev1.ResourceName(consts.KubeResourceGPUNvidia)
-}
-
 // AppendUniqueImagePullSecrets appends secrets to existing, skipping any that already exist by name.
 func AppendUniqueImagePullSecrets(existing, additional []corev1.LocalObjectReference) []corev1.LocalObjectReference {
 	if len(additional) == 0 {
@@ -652,10 +572,10 @@ func AppendUniqueImagePullSecrets(existing, additional []corev1.LocalObjectRefer
 }
 
 type Resource struct {
-	object          client.Object
-	isReady         bool
-	readyReason     string
-	serviceStatuses map[string]v1alpha1.ServiceReplicaStatus
+	object            client.Object
+	isReady           bool
+	readyReason       string
+	componentStatuses map[string]v1beta1.ComponentReplicaStatus
 }
 
 func NewResource[T client.Object](resource T, isReady func() (bool, string)) (*Resource, error) {
@@ -672,18 +592,18 @@ func NewResource[T client.Object](resource T, isReady func() (bool, string)) (*R
 	}, nil
 }
 
-func NewResourceWithServiceStatuses[T client.Object](resource T, isReadyAndServiceStatuses func() (bool, string, map[string]v1alpha1.ServiceReplicaStatus)) (*Resource, error) {
+func NewResourceWithComponentStatuses[T client.Object](resource T, isReadyAndComponentStatuses func() (bool, string, map[string]v1beta1.ComponentReplicaStatus)) (*Resource, error) {
 	v := reflect.ValueOf(resource)
 	// handles untype nil and typed nil
 	if !v.IsValid() || v.IsNil() {
 		return nil, fmt.Errorf("resource is nil")
 	}
-	ready, reason, serviceStatuses := isReadyAndServiceStatuses()
+	ready, reason, componentStatuses := isReadyAndComponentStatuses()
 	return &Resource{
-		object:          resource,
-		isReady:         ready,
-		readyReason:     reason,
-		serviceStatuses: serviceStatuses,
+		object:            resource,
+		isReady:           ready,
+		readyReason:       reason,
+		componentStatuses: componentStatuses,
 	}, nil
 }
 
@@ -695,6 +615,6 @@ func (r *Resource) GetName() string {
 	return r.object.GetName()
 }
 
-func (r *Resource) GetServiceStatuses() map[string]v1alpha1.ServiceReplicaStatus {
-	return r.serviceStatuses
+func (r *Resource) GetComponentStatuses() map[string]v1beta1.ComponentReplicaStatus {
+	return r.componentStatuses
 }

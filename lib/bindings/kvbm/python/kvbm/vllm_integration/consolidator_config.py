@@ -9,23 +9,17 @@ import logging
 import os
 from typing import Optional, Tuple
 
+from kvbm.utils import get_consolidator_mode, is_truthy
 from vllm.distributed.kv_events import ZmqEventPublisher
 
+__all__ = [
+    "get_consolidator_endpoints",
+    "get_consolidator_mode",
+    "is_truthy",
+    "should_enable_consolidator",
+]
+
 logger = logging.getLogger(__name__)
-
-
-def is_truthy(val: str) -> bool:
-    """
-    Check if a string represents a truthy value.
-    Truthy values: "1", "true", "on", "yes" (case-insensitive)
-
-    Args:
-        val: The string value to check
-
-    Returns:
-        True if the value is truthy, False otherwise
-    """
-    return val.lower() in ("1", "true", "on", "yes")
 
 
 def should_enable_consolidator(vllm_config) -> bool:

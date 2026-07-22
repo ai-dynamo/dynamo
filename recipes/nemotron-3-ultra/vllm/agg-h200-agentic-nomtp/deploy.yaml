@@ -1,0 +1,252 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: ultra-agg-h200-agentic-nomtp
+  labels:
+    app.kubernetes.io/name: ultra-agg-h200-agentic-nomtp
+    app.kubernetes.io/part-of: nemotron-ultra
+    nemotron-ultra.nvidia.com/backend: vllm
+    nemotron-ultra.nvidia.com/topology: agg1-tp8-nomtp
+    nemotron-ultra.nvidia.com/workload: agentic
+spec:
+  backendFramework: vllm
+  env:
+    - name: HF_HOME
+      value: /opt/models
+    - name: HF_HUB_CACHE
+      value: /opt/models/hub
+    - name: HF_HUB_OFFLINE
+      value: "1"
+    - name: TRANSFORMERS_OFFLINE
+      value: "1"
+    - name: SERVED_MODEL_NAME
+      value: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+    - name: MODEL_PATH
+      value: /opt/models/patched/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+    - name: LOG_DIR
+      value: /artifacts/logs
+    - name: HOME
+      value: /tmp
+    - name: HF_MODULES_CACHE
+      value: /tmp/hf_modules
+    - name: XDG_CACHE_HOME
+      value: /tmp/cache
+    - name: TORCH_EXTENSIONS_DIR
+      value: /tmp/torch_extensions
+    - name: TRITON_CACHE_DIR
+      value: /tmp/triton
+    - name: VLLM_CACHE_ROOT
+      value: /tmp/vllm
+    - name: PYTHONHASHSEED
+      value: "0"
+    - name: VLLM_LOGGING_LEVEL
+      value: INFO
+    - name: VLLM_WORKER_MULTIPROC_METHOD
+      value: spawn
+    - name: VLLM_ALLREDUCE_USE_SYMM_MEM
+      value: "0"
+    - name: VLLM_DISABLED_KERNELS
+      value: FlashInferFP8ScaledMMLinearKernel
+    - name: VLLM_SSM_CONV_STATE_LAYOUT
+      value: DS
+    - name: VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE
+      value: "1"
+    - name: DYN_VLLM_APPEND_PREFILL_OUTPUT_TOKENS
+      value: "0"
+    - name: NCCL_IB_DISABLE
+      value: "1"
+    - name: NCCL_CUMEM_ENABLE
+      value: "1"
+    - name: NCCL_NVLS_ENABLE
+      value: "1"
+    - name: DYN_LOG
+      value: info,dynamo_kv_router=debug,dynamo_llm::kv_router=debug
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            nemotron-ultra.nvidia.com/role: frontend
+            nemotron-ultra.nvidia.com/workload: agentic
+        spec:
+          imagePullSecrets:
+            - name: nvcr-secret
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-nemotron-ultra-dev.1
+              imagePullPolicy: IfNotPresent
+              command:
+                - /bin/bash
+                - -lc
+              args:
+                - |
+                  set -Eeuo pipefail
+                  mkdir -p "${LOG_DIR:-/tmp/nemotron-ultra}/status"
+                  frontend_args=(
+                    --router-mode kv
+                    --router-kv-events
+                    --kv-cache-block-size 64
+                    --router-reset-states
+                    --http-host 0.0.0.0
+                    --http-port 8000
+                  )
+                  printf '%q ' python3 -m dynamo.frontend "${frontend_args[@]}" >"${LOG_DIR:-/tmp/nemotron-ultra}/status/vllm_frontend_command.txt"
+                  printf '\n' >>"${LOG_DIR:-/tmp/nemotron-ultra}/status/vllm_frontend_command.txt"
+                  exec python3 -m dynamo.frontend "${frontend_args[@]}"
+              ports:
+                - name: http
+                  containerPort: 8000
+              startupProbe:
+                httpGet:
+                  path: /health
+                  port: http
+                periodSeconds: 10
+                timeoutSeconds: 10
+                failureThreshold: 360
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: http
+                periodSeconds: 10
+                timeoutSeconds: 3
+                failureThreshold: 3
+              volumeMounts:
+                - name: shared-model-cache
+                  mountPath: /opt/models
+                  readOnly: true
+                - name: artifact-root
+                  mountPath: /artifacts
+                - name: runtime-tmp
+                  mountPath: /tmp
+          volumes:
+            - name: shared-model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache
+            - name: artifact-root
+              emptyDir: {}
+            - name: runtime-tmp
+              emptyDir: {}
+    - name: VllmWorker
+      type: worker
+      replicas: 1
+      sharedMemorySize: 64Gi
+      podTemplate:
+        metadata:
+          labels:
+            nemotron-ultra.nvidia.com/role: aggregate-worker
+            nemotron-ultra.nvidia.com/workload: agentic
+        spec:
+          imagePullSecrets:
+            - name: nvcr-secret
+          runtimeClassName: nvidia
+          nodeSelector:
+            nvidia.com/gpu.product: NVIDIA-H200
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-nemotron-ultra-dev.1
+              imagePullPolicy: IfNotPresent
+              workingDir: /workspace
+              command:
+                - /bin/bash
+                - -lc
+              args:
+                - |
+                  set -Eeuo pipefail
+                  test -r "${MODEL_PATH}/config.json" || { echo "MODEL_PREFLIGHT_FAIL class=model_config_missing path=${MODEL_PATH}/config.json"; exit 42; }
+                  test -r "${MODEL_PATH}/ultra_v3_reasoning_parser.py" || { echo "MODEL_PREFLIGHT_FAIL class=reasoning_parser_missing path=${MODEL_PATH}/ultra_v3_reasoning_parser.py"; exit 43; }
+                  echo "PRESTART_GPU_GUARD_BEGIN role=agg workload=agentic ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                  nvidia-smi -L
+                  nvidia-smi --query-gpu=index,uuid,memory.total,memory.used,memory.free,utilization.gpu --format=csv,noheader,nounits
+                  visible_count="$(nvidia-smi -L | grep -c '^GPU ')"
+                  if [ "${visible_count}" -ne 8 ]; then
+                    echo "PRESTART_GPU_GUARD_FAIL class=prestart_gpu_visibility_count_mismatch role=agg workload=agentic visible_count=${visible_count}"
+                    exit 96
+                  fi
+                  mem_rows="$(nvidia-smi --query-gpu=index,uuid,memory.used,utilization.gpu --format=csv,noheader,nounits)"
+                  echo "${mem_rows}"
+                  dirty_count="$(printf '%s\n' "${mem_rows}" | awk -F',' '{gsub(/ /,"",$3); if (($3+0)>1024) c++} END{print c+0}')"
+                  if [ "${dirty_count}" -ne 0 ]; then
+                    echo "PRESTART_GPU_GUARD_FAIL class=prestart_gpu_memory_dirty role=agg workload=agentic dirty_count=${dirty_count}"
+                    exit 97
+                  fi
+                  compute_apps="$(nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory --format=csv,noheader,nounits || true)"
+                  if [ -n "${compute_apps}" ]; then
+                    printf '%s\n' "${compute_apps}"
+                    echo "PRESTART_GPU_GUARD_FAIL class=prestart_gpu_compute_apps_visible role=agg workload=agentic"
+                    exit 98
+                  fi
+                  echo "PRESTART_GPU_GUARD_PASS role=agg workload=agentic"
+                  ulimit -l unlimited
+                  exec python3 -m dynamo.vllm \
+                    --model "${MODEL_PATH}" \
+                    --served-model-name "${SERVED_MODEL_NAME}" \
+                    --tensor-parallel-size 8 \
+                    --trust-remote-code \
+                    --max-model-len 262144 \
+                    --max-num-seqs 32 \
+                    --max-num-batched-tokens 32768 \
+                    --gpu-memory-utilization 0.85 \
+                    --no-enable-flashinfer-autotune \
+                    --block-size 64 \
+                    --enable-expert-parallel \
+                    --mamba-cache-mode align \
+                    --enable-prefix-caching \
+                    --dyn-tool-call-parser qwen3_coder \
+                    --dyn-reasoning-parser nemotron3 \
+                    --reasoning-parser-plugin "${MODEL_PATH}/ultra_v3_reasoning_parser.py" \
+                    --reasoning-parser nemotron_v3 \
+                    --no-disable-hybrid-kv-cache-manager
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              resources:
+                requests:
+                  nvidia.com/gpu: "8"
+                  memory: 750Gi
+                  ephemeral-storage: 20Gi
+                limits:
+                  nvidia.com/gpu: "8"
+              securityContext:
+                capabilities:
+                  add:
+                    - IPC_LOCK
+                    - SYS_RESOURCE
+                runAsUser: 0
+                runAsGroup: 0
+              startupProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 20
+                failureThreshold: 30
+              volumeMounts:
+                - name: shared-model-cache
+                  mountPath: /opt/models
+                  readOnly: true
+                - name: artifact-root
+                  mountPath: /artifacts
+                - name: runtime-tmp
+                  mountPath: /tmp
+                - name: flashinfer-cubins
+                  mountPath: /usr/local/lib/python3.12/dist-packages/flashinfer_cubin/cubins/flashinfer
+          volumes:
+            - name: shared-model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache
+            - name: artifact-root
+              emptyDir: {}
+            - name: runtime-tmp
+              emptyDir: {}
+            - name: flashinfer-cubins
+              emptyDir:
+                medium: Memory

@@ -6,10 +6,16 @@ Minimal Python wrapper around Rust LoRA core with extension points for custom so
 """
 
 import asyncio
+import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Protocol
 
+from dynamo.common.lora.once import OnceLock
+from dynamo.common.utils.env import env_bool
 from dynamo.llm import LoRADownloader
+
+logger = logging.getLogger(__name__)
 
 
 class LoRASourceProtocol(Protocol):
@@ -112,3 +118,39 @@ class LoRAManager:
     def _uri_to_cache_key(self, uri: str) -> str:
         """Convert URI to cache key. Delegates to Rust for consistency."""
         return LoRADownloader.uri_to_cache_key(uri)
+
+
+@dataclass(frozen=True)
+class LoRAInfo:
+    """Metadata for a loaded LoRA adapter."""
+
+    id: int
+    path: str
+
+
+_lora_manager: OnceLock[LoRAManager] = OnceLock()
+
+
+def _lora_enabled() -> bool:
+    """Return True when DYN_LORA_ENABLED is set to a truthy value."""
+    return env_bool("DYN_LORA_ENABLED")
+
+
+def _init_lora_manager() -> LoRAManager:
+    manager = LoRAManager()
+    logger.info("LoRAManager initialized successfully")
+    return manager
+
+
+def get_lora_manager() -> Optional[LoRAManager]:
+    """Return the LoRAManager singleton, or None when DYN_LORA_ENABLED is unset.
+
+    Initializes on first call. Initialization errors propagate to the caller —
+    OnceLock does not cache failures, so subsequent calls will retry.
+    """
+    existing = _lora_manager.get()
+    if existing is not None:
+        return existing
+    if not _lora_enabled():
+        return None
+    return _lora_manager.get_or_init(_init_lora_manager)

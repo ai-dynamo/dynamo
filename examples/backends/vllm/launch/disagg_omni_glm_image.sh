@@ -7,6 +7,7 @@
 # Stage 1: DiT (GPU 1) — diffusion denoising + VAE decode → image
 # Router: orchestrates the 2-stage pipeline, formats response
 set -e
+
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
@@ -16,7 +17,7 @@ MODEL="${MODEL:-zai-org/GLM-Image}"
 
 # Resolve vllm-omni's built-in GLM-Image stage config
 if [ -z "$STAGE_CONFIG" ]; then
-    STAGE_CONFIG="$(python -c "import vllm_omni, os; print(os.path.join(os.path.dirname(vllm_omni.__file__), 'model_executor/stage_configs/glm_image.yaml'))" 2>/dev/null | tail -1)"
+    STAGE_CONFIG="$(python -c "import vllm_omni, os; print(os.path.join(os.path.dirname(vllm_omni.__file__), 'deploy/glm_image.yaml'))" 2>/dev/null | tail -1)"
 fi
 
 EXTRA_ARGS=()
@@ -35,6 +36,7 @@ if [ -z "${DYN_NAMESPACE:-}" ]; then
     export DYN_NAMESPACE="dynamo-omni-glm-$(date +%s)"
 fi
 echo "Namespace:   ${DYN_NAMESPACE}"
+echo "Stage config: ${STAGE_CONFIG}"
 print_launch_banner --no-curl "Disaggregated GLM-Image (2-stage, 2 GPUs)" "$MODEL" "$HTTP_PORT"
 print_curl_footer <<CURL
 curl -s http://localhost:${HTTP_PORT}/v1/images/generations \\

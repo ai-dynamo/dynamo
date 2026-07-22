@@ -6,7 +6,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.16.4
+    controller-gen.kubebuilder.io/version: v0.17.3
     helm.sh/resource-policy: keep
   name: dynamomodels.nvidia.com
 spec:
@@ -90,6 +90,7 @@ spec:
                         Supported formats:
                         - S3: s3://bucket/path/to/model
                         - HuggingFace: hf://org/model@revision_sha
+                        - Local filesystem: file:///path/to/model
                       type: string
                   required:
                     - uri

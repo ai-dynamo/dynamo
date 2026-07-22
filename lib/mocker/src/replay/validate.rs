@@ -4,7 +4,7 @@
 use anyhow::{Result, bail};
 
 use super::{OfflineDisaggReplayConfig, ReplayArgsMode, ReplayRouterMode};
-use crate::common::protocols::{MockEngineArgs, WorkerType};
+use crate::common::protocols::{EngineType, MockEngineArgs, WorkerType};
 
 pub fn validate_replay_args_mode(
     aggregated_args: Option<&MockEngineArgs>,
@@ -113,6 +113,18 @@ pub(super) fn validate_online_concurrency_args(
 }
 
 fn validate_disagg_args(config: &OfflineDisaggReplayConfig, mode: &str) -> Result<()> {
+    if config.prefill_args.engine_type == EngineType::Trtllm
+        || config.decode_args.engine_type == EngineType::Trtllm
+    {
+        bail!("{mode} disaggregation does not support TRT-LLM");
+    }
+    if config.prefill_args.engine_type != config.decode_args.engine_type {
+        bail!(
+            "{mode} disaggregation requires matching prefill/decode engine_type, got {:?} and {:?}",
+            config.prefill_args.engine_type,
+            config.decode_args.engine_type,
+        );
+    }
     if config.num_prefill_workers == 0 {
         bail!("{mode} requires num_prefill_workers >= 1");
     }
@@ -170,4 +182,54 @@ pub(super) fn validate_offline_disagg_concurrency_args(
         bail!("concurrency replay requires max_in_flight >= 1");
     }
     validate_disagg_args(config, "concurrency replay")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(engine_type: EngineType, worker_type: WorkerType) -> MockEngineArgs {
+        MockEngineArgs {
+            engine_type,
+            worker_type,
+            block_size: 64,
+            ..MockEngineArgs::default()
+        }
+    }
+
+    fn config(
+        prefill_engine_type: EngineType,
+        decode_engine_type: EngineType,
+    ) -> OfflineDisaggReplayConfig {
+        OfflineDisaggReplayConfig {
+            prefill_args: args(prefill_engine_type, WorkerType::Prefill),
+            decode_args: args(decode_engine_type, WorkerType::Decode),
+            num_prefill_workers: 1,
+            num_decode_workers: 1,
+        }
+    }
+
+    #[test]
+    fn disagg_rejects_trtllm_on_either_side() {
+        for config in [
+            config(EngineType::Trtllm, EngineType::Vllm),
+            config(EngineType::Vllm, EngineType::Trtllm),
+        ] {
+            let error = validate_offline_disagg_replay_args(&config, ReplayRouterMode::RoundRobin)
+                .unwrap_err();
+            assert!(error.to_string().contains("does not support TRT-LLM"));
+        }
+    }
+
+    #[test]
+    fn disagg_rejects_mixed_supported_backends() {
+        for config in [
+            config(EngineType::Vllm, EngineType::Sglang),
+            config(EngineType::Sglang, EngineType::Vllm),
+        ] {
+            let error = validate_offline_disagg_replay_args(&config, ReplayRouterMode::RoundRobin)
+                .unwrap_err();
+            assert!(error.to_string().contains("matching prefill/decode"));
+        }
+    }
 }

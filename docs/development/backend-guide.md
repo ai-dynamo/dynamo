@@ -6,7 +6,20 @@ sidebar-title: Writing Python Workers
 subtitle: Create custom Python workers and engines for Dynamo
 ---
 
-# Writing Python Workers in Dynamo
+> **Lower-level Python worker path.** This guide documents the
+> `@dynamo_worker()` + `register_model()` + `endpoint.serve_endpoint()`
+> entry point. For new engines, prefer Dynamo's
+> [unified backend path](unified-backends.md) for Python or Rust — it puts the
+> framework in charge of lifecycle, signal handling, cancellation
+> monitoring, and model registration, and ships plumbing for Prometheus
+> metrics, KV event publishing, KV-aware routing, OpenTelemetry
+> tracing, health-check canaries, guided decoding, and custom Jinja
+> chat templates. Stay on this path for workloads that depend on
+> multimodal, LoRA, logprob extraction, engine routes (pause/resume,
+> profiling, weight updates), text-in-text-out, snapshot/CRIU, or
+> diffusion — features the unified backend does not yet cover. See
+> the [unified-path feature gaps](unified-backends.md#python-feature-gaps)
+> for the current matrix.
 
 This guide explains how to create your own Python worker in Dynamo.
 
@@ -67,8 +80,8 @@ The `model_input` can be:
 - ModelInput.Text. Your engine expects raw text input and handles its own tokenization and pre-processing.
 
 The `model_type` can be:
-- ModelType.Chat. Your `generate` method receives a `request` and must return a response dict of type [OpenAI Chat Completion](https://platform.openai.com/docs/api-reference/chat).
-- ModelType.Completions. Your `generate` method receives a `request` and must return a response dict of the older [Completions](https://platform.openai.com/docs/api-reference/completions).
+- ModelType.Chat. Your `generate` method receives a `request` and must return a response dict of type [OpenAI Chat Completion](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create).
+- ModelType.Completions. Your `generate` method receives a `request` and must return a response dict of the older [Completions](https://developers.openai.com/api/reference/resources/completions/methods/create).
 
 `register_model` can also take the following kwargs:
 - `model_name`: The name to call the model. Your incoming HTTP requests model name must match this. Defaults to the hugging face repo name or the folder name.

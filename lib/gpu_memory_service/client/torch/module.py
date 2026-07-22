@@ -120,13 +120,17 @@ def _resolve_module_attr(
 def register_module_tensors(
     gms_client_memory_manager: "GMSClientMemoryManager",
     model: torch.nn.Module,
-) -> None:
+) -> set[str]:
     """Register all model tensors into the GMS metadata store.
 
     Args:
         gms_client_memory_manager: GMS client memory manager in write mode.
         model: PyTorch model to register.
+
+    Returns:
+        Allocation IDs referenced by registered tensors.
     """
+    referenced_allocation_ids: set[str] = set()
     for name, tensor, tensor_type in _iter_module_tensors(model):
         ptr = int(tensor.data_ptr())
 
@@ -141,6 +145,7 @@ def register_module_tensors(
                     offset_bytes=offset,
                     value=meta.to_bytes(),
                 )
+                referenced_allocation_ids.add(mapping.allocation_id)
                 break
         else:
             # No mapping matched - tensor pointer not in any GMS allocation
@@ -151,6 +156,7 @@ def register_module_tensors(
             logger.debug(
                 "[GMS] Skipping %s %r - not in GMS allocations", tensor_type, name
             )
+    return referenced_allocation_ids
 
 
 def materialize_module_from_gms(

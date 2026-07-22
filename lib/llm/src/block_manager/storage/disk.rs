@@ -197,16 +197,21 @@ impl DiskOpenStrategy for MkostempDirectIo {
 /// - `"open-direct"`: Pass O_DIRECT to mkostemp at file open time (required for filesystems
 ///   like IBM Storage Scale where fcntl-based O_DIRECT is ignored).
 fn disk_open_strategy_from_env() -> Result<Box<dyn DiskOpenStrategy>, StorageError> {
-    match std::env::var(DISK_ALLOCATOR_TYPE_KEY).as_deref() {
-        Ok("default") | Err(_) => {
+    let value = std::env::var(DISK_ALLOCATOR_TYPE_KEY).ok();
+    disk_open_strategy(value.as_deref())
+}
+
+fn disk_open_strategy(value: Option<&str>) -> Result<Box<dyn DiskOpenStrategy>, StorageError> {
+    match value {
+        Some("default") | None => {
             tracing::info!("Using default fcntl disk open strategy");
             Ok(Box::new(DefaultDirectIo))
         }
-        Ok("open-direct") => {
+        Some("open-direct") => {
             tracing::info!("Using open-direct disk open strategy (O_DIRECT via mkostemp)");
             Ok(Box::new(MkostempDirectIo))
         }
-        Ok(unknown) => Err(StorageError::AllocationFailed(format!(
+        Some(unknown) => Err(StorageError::AllocationFailed(format!(
             "Unknown {}={:?}. Supported values: \"default\", \"open-direct\"",
             DISK_ALLOCATOR_TYPE_KEY, unknown
         ))),
@@ -744,109 +749,93 @@ mod tests {
     #[test]
     #[ignore]
     fn test_zerofill_with_o_direct() {
-        unsafe {
-            std::env::set_var(DISK_ZEROFILL_FALLBACK_KEY, "1");
-        }
+        temp_env::with_var(DISK_ZEROFILL_FALLBACK_KEY, Some("1"), || {
+            // Test various sizes including non-page-aligned sizes that would fail with
+            // unaligned buffers on Lustre
+            let test_cases = vec![
+                ("Small non-aligned", 1234),
+                ("One page", PAGE_SIZE),
+                ("Just over one page", PAGE_SIZE + 1),
+                ("Multi-page non-aligned", 3 * PAGE_SIZE + 567),
+                ("Large 10MB", 10 * 1024 * 1024),
+            ];
 
-        // Test various sizes including non-page-aligned sizes that would fail with
-        // unaligned buffers on Lustre
-        let test_cases = vec![
-            ("Small non-aligned", 1234),
-            ("One page", PAGE_SIZE),
-            ("Just over one page", PAGE_SIZE + 1),
-            ("Multi-page non-aligned", 3 * PAGE_SIZE + 567),
-            ("Large 10MB", 10 * 1024 * 1024),
-        ];
+            for (name, size) in test_cases {
+                eprintln!("Testing: {} ({} bytes)", name, size);
 
-        for (name, size) in test_cases {
-            eprintln!("Testing: {} ({} bytes)", name, size);
+                let strategy = DefaultDirectIo;
+                let storage = DiskStorage::new(size, &strategy).unwrap_or_else(|e| {
+                    panic!("Failed to allocate {} bytes ({}): {:?}", size, name, e)
+                });
 
-            let strategy = DefaultDirectIo;
-            let storage = DiskStorage::new(size, &strategy).unwrap_or_else(|e| {
-                panic!("Failed to allocate {} bytes ({}): {:?}", size, name, e)
-            });
+                // Verify the file is actually the correct size
+                assert_eq!(storage.size(), size, "Size mismatch for {}", name);
 
-            // Verify the file is actually the correct size
-            assert_eq!(storage.size(), size, "Size mismatch for {}", name);
+                // Verify we can read from the file (tests that data was actually written)
+                let fd = storage.fd() as RawFd;
+                let mut buf = vec![0u8; std::cmp::min(size, 4096)];
 
-            // Verify we can read from the file (tests that data was actually written)
-            let fd = storage.fd() as RawFd;
-            let mut buf = vec![0u8; std::cmp::min(size, 4096)];
+                let bytes_read = nix::sys::uio::pread(fd, &mut buf, 0)
+                    .unwrap_or_else(|e| panic!("Failed to read back data for {}: {:?}", name, e));
 
-            let bytes_read = nix::sys::uio::pread(fd, &mut buf, 0)
-                .unwrap_or_else(|e| panic!("Failed to read back data for {}: {:?}", name, e));
+                assert!(bytes_read > 0, "No data read back for {}", name);
+                assert!(
+                    buf.iter().all(|&b| b == 0),
+                    "File should be zero-filled for {}",
+                    name
+                );
 
-            assert!(bytes_read > 0, "No data read back for {}", name);
-            assert!(
-                buf.iter().all(|&b| b == 0),
-                "File should be zero-filled for {}",
-                name
-            );
-
-            eprintln!("{} passed", name);
-        }
-
-        unsafe {
-            std::env::remove_var(DISK_ZEROFILL_FALLBACK_KEY);
-        }
+                eprintln!("{} passed", name);
+            }
+        });
     }
 
     /// Test that O_DIRECT can be disabled and allocation still works.
     #[test]
     #[ignore]
     fn test_disable_o_direct() {
-        unsafe {
-            std::env::set_var(DISK_DISABLE_O_DIRECT_KEY, "1");
-            std::env::set_var(DISK_ZEROFILL_FALLBACK_KEY, "1");
-        }
+        temp_env::with_vars(
+            [
+                (DISK_DISABLE_O_DIRECT_KEY, Some("1")),
+                (DISK_ZEROFILL_FALLBACK_KEY, Some("1")),
+            ],
+            || {
+                let size = 1024 * 1024;
+                let strategy = DefaultDirectIo;
+                let storage = DiskStorage::new(size, &strategy)
+                    .expect("Failed to allocate with O_DIRECT disabled");
 
-        let size = 1024 * 1024;
-        let strategy = DefaultDirectIo;
-        let storage =
-            DiskStorage::new(size, &strategy).expect("Failed to allocate with O_DIRECT disabled");
-
-        assert_eq!(storage.size(), size);
-
-        unsafe {
-            std::env::remove_var(DISK_DISABLE_O_DIRECT_KEY);
-            std::env::remove_var(DISK_ZEROFILL_FALLBACK_KEY);
-        }
+                assert_eq!(storage.size(), size);
+            },
+        );
     }
 
     /// Test that disk_open_strategy_from_env returns DefaultDirectIo by default.
     #[test]
     fn test_strategy_from_env_default() {
-        temp_env::with_var_unset(DISK_ALLOCATOR_TYPE_KEY, || {
-            let strategy = disk_open_strategy_from_env().expect("default strategy should succeed");
-            assert_eq!(strategy.name(), "default");
-        });
+        let strategy = disk_open_strategy(None).expect("default strategy should succeed");
+        assert_eq!(strategy.name(), "default");
     }
 
     /// Test that disk_open_strategy_from_env returns DefaultDirectIo for explicit "default".
     #[test]
     fn test_strategy_from_env_fcntl() {
-        temp_env::with_var(DISK_ALLOCATOR_TYPE_KEY, Some("default"), || {
-            let strategy = disk_open_strategy_from_env().expect("fcntl strategy should succeed");
-            assert_eq!(strategy.name(), "default");
-        });
+        let strategy = disk_open_strategy(Some("default")).expect("fcntl strategy should succeed");
+        assert_eq!(strategy.name(), "default");
     }
 
     /// Test that disk_open_strategy_from_env returns MkostempDirectIo for "open-direct".
     #[test]
     fn test_strategy_from_env_open_direct() {
-        temp_env::with_var(DISK_ALLOCATOR_TYPE_KEY, Some("open-direct"), || {
-            let strategy =
-                disk_open_strategy_from_env().expect("open-direct strategy should succeed");
-            assert_eq!(strategy.name(), "open-direct");
-        });
+        let strategy =
+            disk_open_strategy(Some("open-direct")).expect("open-direct strategy should succeed");
+        assert_eq!(strategy.name(), "open-direct");
     }
 
     /// Test that disk_open_strategy_from_env rejects unknown values.
     #[test]
     fn test_strategy_from_env_unknown() {
-        temp_env::with_var(DISK_ALLOCATOR_TYPE_KEY, Some("not-a-real-backend"), || {
-            let result = disk_open_strategy_from_env();
-            assert!(result.is_err(), "unknown strategy should fail");
-        });
+        let result = disk_open_strategy(Some("not-a-real-backend"));
+        assert!(result.is_err(), "unknown strategy should fail");
     }
 }

@@ -145,25 +145,20 @@ def validate_dgdr_dynamo_features(
     # Planner
     if is_planner_enabled(dgdr):
         planner_cfg = dgdr.features.planner
-        # throughput scaling requires in-depth profiling data
-        if planner_cfg.enable_throughput_scaling:
-            planner_sweep_mode = planner_cfg.pre_deployment_sweeping_mode
-            if (
-                planner_sweep_mode is None
-                or planner_sweep_mode == PlannerPreDeploymentSweepMode.None_
-            ):
-                raise ValueError(
-                    "pre_deployment_sweeping_mode in PlannerConfig cannot be 'none' when enable_throughput_scaling is enabled. "
-                    "Throughput-based scaling requires pre-deployment sweeping to generate engine performance data."
-                )
-            elif (
-                planner_sweep_mode == PlannerPreDeploymentSweepMode.Rapid
-                and not aic_supported
-            ):
-                raise ValueError(
-                    f"AIC does not support {dgdr.model} on {dgdr.hardware.gpuSku.lower()} and {dgdr.backend}. "
-                    "pre_deployment_sweeping_mode in PlannerConfig can only be 'thorough' when AIC does not support the model/hardware/backend combination. "
-                )
+        if (
+            planner_cfg.enable_throughput_scaling
+            and planner_cfg.pre_deployment_sweeping_mode
+            == PlannerPreDeploymentSweepMode.Rapid
+            and not aic_supported
+        ):
+            logger.warning(
+                "AIC does not support %s on %s and %s; planner will use the "
+                "Rust perf shim fallback regression when native AIC estimates "
+                "are unavailable.",
+                dgdr.model,
+                dgdr.hardware.gpuSku.lower(),
+                dgdr.backend,
+            )
 
     # Mocker requires pre-deployment sweeping
     if dgdr.features.mocker and dgdr.features.mocker.enabled and dgdr.features.planner:

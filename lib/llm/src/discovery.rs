@@ -5,13 +5,16 @@ mod model;
 pub use model::Model;
 
 mod model_manager;
-pub use model_manager::{ModelManager, ModelManagerError};
+pub use model_manager::{ModelManager, ModelManagerError, UNKNOWN_METRIC_MODEL};
 
 mod worker_set;
 pub use worker_set::WorkerSet;
 
 pub(crate) mod runtime_configs;
 pub use runtime_configs::{RuntimeConfigWatch, runtime_config_watch};
+
+mod endpoint_card;
+pub use endpoint_card::wait_for_endpoint_model_card;
 
 mod watcher;
 pub use watcher::{ModelUpdate, ModelWatcher};

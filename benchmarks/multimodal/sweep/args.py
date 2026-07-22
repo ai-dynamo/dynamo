@@ -59,10 +59,14 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="Override output sequence length.",
     )
     parser.add_argument(
-        "--request-count",
+        "--conversation-num",
         type=int,
         default=None,
-        help="Override request count per sweep value.",
+        help=(
+            "Override number of conversations (sessions) per sweep value. "
+            "If unset, derived from the input JSONL's unique session_id count "
+            "(flat JSONLs count each row as a 1-turn conversation)."
+        ),
     )
     parser.add_argument(
         "--skip-plots",

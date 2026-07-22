@@ -321,7 +321,11 @@ where
                         .expect("failed to deserialize request");
 
                     // extend request with context
-                    let request = Context::<T>::with_id(request, req.id.clone());
+                    let request = Context::<T>::with_id_and_metadata(
+                        request,
+                        req.id.clone(),
+                        Default::default(),
+                    );
 
                     // create the response stream
                     let response = segment.generate(request).await;

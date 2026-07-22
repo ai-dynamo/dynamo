@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Extra-engine-args for the decode side of disaggregated TRT-LLM in router
+# e2e tests. Only the transceiver backend is required here; the overlap
+# scheduler can stay on for decode workers.
+cache_transceiver_config:
+  backend: DEFAULT

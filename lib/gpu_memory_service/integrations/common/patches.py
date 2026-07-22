@@ -32,11 +32,12 @@ def patch_empty_cache() -> None:
     _original_empty_cache = torch.cuda.empty_cache
 
     def safe_empty_cache() -> None:
+        managers = get_gms_client_memory_managers()
         # Allow empty_cache when all managers are unmapped (sleep/checkpoint)
         # or when there are no active VMM mappings with live handles.
         has_live_mappings = any(
             any(m.handle != 0 for m in manager.mappings.values())
-            for manager in get_gms_client_memory_managers()
+            for manager in managers
         )
         if has_live_mappings:
             logger.debug(

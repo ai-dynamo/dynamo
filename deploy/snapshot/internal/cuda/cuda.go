@@ -174,6 +174,8 @@ func FilterProcesses(ctx context.Context, allPIDs []int, log logr.Logger) []int 
 // When a source UUID exists in the target set, it maps to itself (identity mapping) to avoid
 // unnecessary cross-GPU restore on same-node restores where kubelet returns GPUs in different order.
 // Remaining unmatched source UUIDs are paired with remaining unmatched target UUIDs positionally.
+// If all mappings are identity mappings, it returns an empty string so same-GPU restores use the
+// default CUDA restore path instead of forcing the GPU migration path.
 func BuildDeviceMap(sourceUUIDs, targetUUIDs []string, log logr.Logger) (string, error) {
 	if len(sourceUUIDs) != len(targetUUIDs) {
 		return "", fmt.Errorf("GPU count mismatch: source has %d, target has %d", len(sourceUUIDs), len(targetUUIDs))
@@ -211,6 +213,17 @@ func BuildDeviceMap(sourceUUIDs, targetUUIDs []string, log logr.Logger) (string,
 			mapping[src] = remainingTargets[idx]
 			idx++
 		}
+	}
+
+	allIdentity := true
+	for _, src := range sourceUUIDs {
+		if mapping[src] != src {
+			allIdentity = false
+			break
+		}
+	}
+	if allIdentity {
+		return "", nil
 	}
 
 	pairs := make([]string, len(sourceUUIDs))

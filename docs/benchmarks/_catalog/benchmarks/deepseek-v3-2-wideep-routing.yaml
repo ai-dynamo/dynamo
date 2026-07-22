@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: deepseek-v3-2-wideep-routing
+title: DeepSeek V3.2 WideEP Routing A/B
+page: benchmarks/deepseek-v3-2-wideep-routing.mdx
+claim: Disaggregated KV-aware routing + WideEP (2P+2D DEP8) improves latency/goodput vs aggregated round-robin (4x DEP8)
+  on a 44%-KV-reuse long-context coding trace
+subtype: ab-test
+features:
+- kv-router
+- disaggregated-serving
+- wideep
+model:
+  name: DeepSeek-V3.2 NVFP4
+  hf_id: nvidia/DeepSeek-V3.2-NVFP4
+hardware:
+  gpu: GB200
+  count: 32
+traffic: 'Mooncake-derived synthetic coding trace: 10,000 reqs, 39,186 avg ISL (max 109,459), 344 avg OSL, 44.1% block-level
+  KV hit, fixed-schedule, goodput TTFT 20s / ITL 50ms'
+arms:
+- role: treatment
+  name: Disaggregated KV router + WideEP
+  deploy: recipes/deepseek-v32-fp4/trtllm/disagg-kv-router/deploy.yaml
+  perf: recipes/deepseek-v32-fp4/trtllm/disagg-kv-router/perf.yaml
+- role: baseline
+  name: Aggregated round-robin
+  deploy: recipes/deepseek-v32-fp4/trtllm/agg-round-robin/deploy.yaml
+  perf: recipes/deepseek-v32-fp4/trtllm/agg-round-robin/perf.yaml
+results:
+  available: false
+  summary: Source has a results video + dataset statistics but no arm-vs-arm numeric table
+related_recipes:
+- deepseek-v3-2-nvfp4
+maintainer: null
+gaps:
+- no numeric arm-vs-arm results in source (video only) — Results omitted
+- maintainer unknown

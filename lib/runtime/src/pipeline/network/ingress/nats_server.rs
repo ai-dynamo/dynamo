@@ -5,7 +5,7 @@
 //!
 //! Provides a multiplexed NATS server that handles multiple endpoints on a single
 //! NATS service group. This replaces the per-endpoint PushEndpoint pattern with
-//! a unified multiplexed approach consistent with HTTP and TCP servers.
+//! a unified multiplexed approach consistent with TCP server.
 
 use super::*;
 use crate::SystemHealth;

@@ -1,11 +1,12 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Building from Source
 sidebar-title: Building from Source
 description: Build Dynamo from source for development and contributions
 ---
 
-# Building from Source
+[简体中文](./building-from-source.zh-CN.md)
 
 Build Dynamo from source when you want to contribute code, test features on the development branch, or customize the build. If you just want to run Dynamo, the [Local Installation](local-installation.md) guide is faster.
 
@@ -56,10 +57,10 @@ source .venv/bin/activate
 ## 4. Install Build Tools
 
 ```bash
-uv pip install pip maturin
+uv pip install pip 'maturin[patchelf]'
 ```
 
-[Maturin](https://github.com/PyO3/maturin) is the Rust-Python bindings build tool.
+[Maturin](https://github.com/PyO3/maturin) is the Rust-Python bindings build tool. The `patchelf` extra lets maturin patch native extension library paths during the build.
 
 ## 5. Build the Rust Bindings
 

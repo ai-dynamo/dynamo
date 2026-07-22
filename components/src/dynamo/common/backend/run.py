@@ -15,16 +15,20 @@ Each backend's ``unified_main.py`` calls :func:`run` with its
 
 import uvloop
 
-from .engine import LLMEngine
+from .engine import BaseEngine
 from .worker import Worker
 
 
-async def _start(engine_cls: type[LLMEngine], argv: list[str] | None = None):
+async def _start(engine_cls: type[BaseEngine], argv: list[str] | None = None):
     engine, worker_config = await engine_cls.from_args(argv)
     w = Worker(engine, worker_config)
     await w.run()
 
 
-def run(engine_cls: type[LLMEngine], argv: list[str] | None = None):
-    """Entry point for per-backend unified_main.py files."""
+def run(engine_cls: type[BaseEngine], argv: list[str] | None = None):
+    """Entry point for per-backend unified_main.py files.
+
+    ``engine_cls`` may be an :class:`LLMEngine` or a :class:`DiffusionEngine`
+    subclass; both share the ``from_args -> (engine, WorkerConfig)`` contract.
+    """
     uvloop.run(_start(engine_cls, argv))

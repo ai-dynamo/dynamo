@@ -1,0 +1,10 @@
+{
+  "request_id": "deepseek-v4-no-tool-test",
+  "expected_output": {"normal_content": "Hi! I'm here to help — what would you like to work on today?", "reasoning_content": "User greeted me politely. A short friendly reply is appropriate; no tools needed.", "tool_calls": []},
+  "input_stream": [
+    {"data":{"id":"chatcmpl-deepseek-v4-no-tool","choices":[{"index":0,"delta":{"content":"<think>User greeted me politely. A short friendly reply is appropriate; no tools needed.</think>","role":"assistant","reasoning_content":"User greeted me politely. A short friendly reply is appropriate; no tools needed."}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-no-tool","choices":[{"index":0,"delta":{"content":"Hi! I'm here to help — ","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-no-tool","choices":[{"index":0,"delta":{"content":"what would you like to work on today?","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-no-tool","choices":[{"index":0,"delta":{"content":null,"role":"assistant"},"finish_reason":"stop"}]}}
+  ]
+}

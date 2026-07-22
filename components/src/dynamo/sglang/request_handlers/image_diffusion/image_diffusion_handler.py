@@ -16,7 +16,6 @@ from PIL import Image
 from dynamo._core import Context
 from dynamo.common.protocols.image_protocol import ImageNvExt
 from dynamo.common.storage import upload_to_fs
-from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import CreateImageRequest, ImageData, ImagesResponse
 from dynamo.sglang.publisher import DynamoSglangPublisher
@@ -85,10 +84,17 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         Yields:
             Response dict with generated images (OpenAI-compatible format).
         """
-        logger.info(f"Image diffusion request: {request}")
+        prompt = request.get("prompt")
+        logger.info(
+            "Image diffusion request: prompt_len=%s has_n=%s has_input_reference=%s has_nvext=%s",
+            len(prompt) if isinstance(prompt, str) else None,
+            "n" in request,
+            request.get("input_reference") is not None,
+            "nvext" in request,
+        )
 
         # Get trace header for distributed tracing (for logging/observability)
-        trace_header = build_trace_headers(context) if self.enable_trace else None
+        trace_header = context.trace_headers() if self.enable_trace else None
         if trace_header:
             logger.debug(f"Image diffusion request with trace: {trace_header}")
 

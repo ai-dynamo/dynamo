@@ -30,6 +30,8 @@ def mock_handler():
 
     handler = MockHandler()
     handler.model_config = Mock(enable_prompt_embeds=True)
+    handler.model_config.dtype = torch.float32
+    handler.model_config.get_hidden_size.return_value = 4096
     handler._decode_prompt_embeds = BaseWorkerHandler._decode_prompt_embeds.__get__(  # type: ignore
         handler
     )
@@ -59,6 +61,7 @@ class TestPromptEmbedsDecode:
         """Test decoding embeddings with various shapes and dtypes."""
         embeddings = torch.randn(*shape, dtype=dtype)
         embeddings_base64 = encode_tensor_to_base64(embeddings)
+        mock_handler.model_config.get_hidden_size.return_value = shape[1]
 
         result = mock_handler._decode_prompt_embeds(embeddings_base64)
 
@@ -130,12 +133,13 @@ class TestEmbeddingsDataFormats:
     @pytest.mark.parametrize("size", [128, 384, 768, 1024, 2048, 4096])
     def test_various_embedding_sizes(self, mock_handler, size):
         """Test decoding embeddings of various sizes."""
-        embeddings = torch.randn(size, dtype=torch.float32)
+        embeddings = torch.randn(1, size, dtype=torch.float32)
         embeddings_base64 = encode_tensor_to_base64(embeddings)
+        mock_handler.model_config.get_hidden_size.return_value = size
 
         result = mock_handler._decode_prompt_embeds(embeddings_base64)
 
-        assert result.shape == (size,), f"Failed for size {size}"
+        assert result.shape == (1, size), f"Failed for size {size}"
         torch.testing.assert_close(result, embeddings, rtol=1e-5, atol=1e-5)
 
     @pytest.mark.parametrize(
@@ -151,8 +155,9 @@ class TestEmbeddingsDataFormats:
     )
     def test_embedding_value_ranges_preserved(self, mock_handler, values):
         """Test that various value ranges are preserved with float32 precision."""
-        embeddings = torch.tensor(values, dtype=torch.float32)
+        embeddings = torch.tensor([values], dtype=torch.float32)
         embeddings_base64 = encode_tensor_to_base64(embeddings)
+        mock_handler.model_config.get_hidden_size.return_value = len(values)
 
         result = mock_handler._decode_prompt_embeds(embeddings_base64)
 

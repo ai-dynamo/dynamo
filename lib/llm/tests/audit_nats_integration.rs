@@ -155,7 +155,9 @@ mod tests {
                 setup_test_stream(&client, &stream_name, TEST_SUBJECT).await;
 
                 bus::init(100);
-                sink::spawn_workers_from_env().await.unwrap();
+                sink::spawn_workers_from_env(tokio_util::sync::CancellationToken::new())
+                    .await
+                    .unwrap();
                 time::sleep(Duration::from_millis(100)).await;
 
                 // Emit audit record
@@ -210,7 +212,9 @@ mod tests {
                 setup_test_stream(&client, &stream_name, TEST_SUBJECT).await;
 
                 bus::init(100);
-                sink::spawn_workers_from_env().await.unwrap();
+                sink::spawn_workers_from_env(tokio_util::sync::CancellationToken::new())
+                    .await
+                    .unwrap();
                 time::sleep(Duration::from_millis(100)).await;
 
                 // Request with store=true (should be audited)

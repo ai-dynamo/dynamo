@@ -36,14 +36,59 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && \
     ./efa_installer.sh -y --skip-kmod --skip-limit-conf --no-verify && \
     rm -rf /tmp/efa && \
-    rm -rf /opt/amazon/aws-ofi-nccl && \
+    rm -rf /opt/amazon/aws-ofi-nccl /etc/ld.so.conf.d/aws-ofi-nccl.conf && \
     ldconfig
 
 ENV EFA_VERSION="${EFA_VERSION}"
 
+ARG NIXL_LIBFABRIC_REF
+
+# Copy the wheel_builder-built libfabric and register it with the dynamic linker
+# ONLY if the EFA-bundled libfabric is older than NIXL_LIBFABRIC_REF.
+# When a future EFA installer ships libfabric >= the version we build, the
+# version comparison evaluates to false and this becomes a no-op automatically.
+RUN --mount=from=wheel_builder,source=/usr/local/libfabric,target=/tmp/libfabric_build \
+    EFA_PC=$(find /opt/amazon/efa -path '*/pkgconfig/libfabric.pc' 2>/dev/null | head -n1) && \
+    EFA_LIBFABRIC_RAW=$(cat "$EFA_PC" 2>/dev/null | grep '^Version:' | awk '{print $2}') && \
+    EFA_LIBFABRIC_VER=$(echo "$EFA_LIBFABRIC_RAW" | grep -oE '^[0-9]+\.[0-9]+(\.[0-9]+)?') && \
+    REF_VER=$(echo "${NIXL_LIBFABRIC_REF}" | sed 's/^v//') && \
+    if [ -n "$EFA_LIBFABRIC_VER" ] && [ -n "$REF_VER" ] && \
+       [ "$(printf '%s\n' "$EFA_LIBFABRIC_VER" "$REF_VER" | sort -V | head -n1)" = "$EFA_LIBFABRIC_VER" ] && \
+       [ "$EFA_LIBFABRIC_VER" != "$REF_VER" ]; then \
+        rm -rf /opt/amazon/efa && \
+        cp -Pfr /tmp/libfabric_build /opt/amazon/efa && \
+        sed -i 's|^prefix=.*|prefix=/opt/amazon/efa|' /opt/amazon/efa/lib/pkgconfig/libfabric.pc && \
+        echo "/opt/amazon/efa/lib" > /etc/ld.so.conf.d/000_efa.conf && \
+        rm -f /etc/ld.so.conf.d/efa.conf && \
+        ldconfig && \
+        echo "[aws] libfabric overlay: ${REF_VER} (overwrites EFA stock ${EFA_LIBFABRIC_RAW})"; \
+    else \
+        echo "[aws] libfabric overlay: skipped (EFA stock ${EFA_LIBFABRIC_RAW:-unknown} >= ${REF_VER})"; \
+    fi
+
+{% if framework == "trtllm" %}
+# After the upstream mesonpy refactor, libplugin_LIBFABRIC.so lands under the
+# Dynamo venv while the rest of the NIXL plugin set (GDS/UCX/POSIX) remains at
+# the canonical arch-specific location. Copy LIBFABRIC alongside the others so
+# NIXL_PLUGIN_DIR resolves every backend from a single directory, and expose a
+# stable arch-agnostic alias at /opt/nvidia/nvda_nixl/plugins.
+#
+# Also clear LD_PRELOAD (the upstream trtllm_runtime stage's ai-dynamo/nixl#1668
+# workaround force-loads TRT-LLM's bundled NIXL 0.9.0; that conflicts with the
+# Dynamo-built NIXL 0.10.1 plugins). LIBFABRIC goes through libfabric directly
+# (not UCX), so it is unaffected by the UCX 1.20.0 hang that LD_PRELOAD works
+# around — and LIBFABRIC is the recommended backend for EFA.
+RUN --mount=from=wheel_builder,source=/opt/nvidia/nvda_nixl,target=/tmp/nvda_nixl \
+    rm -rf /opt/nvidia/nvda_nixl && \
+    cp -Pfr /tmp/nvda_nixl /opt/nvidia/nvda_nixl && \
+    export LD_PRELOAD=/opt/nvidia/nvda_nixl/lib64/libnixl.so && \
+    export NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins && \
+    ldconfig
+
+ENV LD_PRELOAD=/opt/nvidia/nvda_nixl/lib64/libnixl.so
+ENV NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins
+{% endif %}
+
 {% if target == "runtime" %}
 USER dynamo
 {% endif %}
-
-ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
-CMD []

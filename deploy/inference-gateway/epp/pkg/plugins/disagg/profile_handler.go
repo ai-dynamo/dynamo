@@ -21,37 +21,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"strings"
 
 	log "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/plugins"
-	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/scheduling/framework"
-	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/scheduling/types"
-	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
+	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
+	plugins "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
+	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling"
 )
-
-func getEnvBoolOrDefault(key string, defaultVal bool) bool {
-	val, ok := os.LookupEnv(key)
-	if !ok {
-		return defaultVal
-	}
-	switch strings.ToLower(val) {
-	case "true", "1", "yes":
-		return true
-	case "false", "0", "no":
-		return false
-	default:
-		return defaultVal
-	}
-}
 
 const (
 	DisaggProfileHandlerType = "disagg-profile-handler"
 )
 
 // compile-time type assertion
-var _ framework.ProfileHandler = &DisaggProfileHandler{}
+var _ schedtypes.ProfileHandler = &DisaggProfileHandler{}
 
 // DisaggProfileHandlerConfig holds the configuration for the DisaggProfileHandler.
 type DisaggProfileHandlerConfig struct{}
@@ -77,41 +59,6 @@ func NewDisaggProfileHandler(enforceDisagg bool) *DisaggProfileHandler {
 }
 
 // DisaggProfileHandler is a ProfileHandler that orchestrates prefill/decode disaggregated serving.
-//
-// # Disaggregated mode detection
-//
-// In Dynamo's native architecture, disaggregated mode is determined by whether prefill workers
-// actually exist at runtime (the is_disaggregated flag in the Rust KV router). However, the
-// GAIE EPP framework determines profile availability at configuration time, not at runtime.
-// To bridge this gap, DisaggProfileHandler uses the EPP profile mechanism as a proxy:
-// it checks whether a "prefill" scheduling profile is registered in the config. If prefill
-// workers are configured but none are actually running, the prefill profile's label-filter
-// will find zero pods, causing the profile to fail — and the handler gracefully degrades
-// to aggregated mode (see below).
-//
-// # Scheduling flow
-//
-// On each scheduling cycle it:
-//  1. Checks whether a "prefill" profile is registered in the config.
-//  2. Writes PrefillEnabledState into CycleState so scorer plugins can read it.
-//  3. If a prefill profile exists: runs the "prefill" profile first, then the "decode" profile.
-//     The "decode" profile is the primary (the pod the request is ultimately sent to).
-//  4. If no prefill profile exists: runs only the "decode" profile (pure aggregated mode).
-//
-// # Graceful degradation
-//
-// When a prefill profile is configured but no prefill workers are available at runtime,
-// the handler degrades gracefully to aggregated mode on a per-request basis:
-//
-//  1. Pick (iteration 1): prefill profile exists → writes PrefillEnabled=true → runs prefill profile.
-//  2. Prefill profile runs: label-filter finds 0 prefill pods → profile fails → result is nil.
-//  3. Pick (iteration 2): sees prefill result is nil → overwrites PrefillEnabled=false → runs decode profile.
-//  4. Decode scorer runs: reads PrefillEnabled=false → passes isDisaggregated=false to the Rust
-//     decode router → full KV cache overlap scoring is used (overlap_score_weight=1.0).
-//
-// This means the same YAML config works transparently for both aggregated and disaggregated
-// deployments. If prefill workers come up later, subsequent requests automatically use
-// disaggregated routing. If they go down, requests fall back to aggregated mode.
 type DisaggProfileHandler struct {
 	typedName     plugins.TypedName
 	enforceDisagg bool
@@ -129,23 +76,11 @@ func (h *DisaggProfileHandler) WithName(name string) *DisaggProfileHandler {
 }
 
 // Pick selects which profiles to run in the current iteration.
-//
-// Iteration 1 (no results yet):
-//   - Writes PrefillEnabledState into CycleState.
-//   - If a "prefill" profile exists → returns it alone (run prefill first).
-//   - Otherwise → returns the "decode" profile.
-//
-// Iteration 2 (prefill result exists, decode not yet):
-//   - Returns the "decode" profile.
-//
-// Iteration 3+ (all results collected):
-//   - Returns empty map to stop the loop.
-func (h *DisaggProfileHandler) Pick(ctx context.Context, cycleState *schedtypes.CycleState, _ *schedtypes.LLMRequest,
-	profiles map[string]*framework.SchedulerProfile, profileResults map[string]*schedtypes.ProfileRunResult) map[string]*framework.SchedulerProfile {
+func (h *DisaggProfileHandler) Pick(ctx context.Context, cycleState *schedtypes.CycleState, _ *schedtypes.InferenceRequest,
+	profiles map[string]schedtypes.SchedulerProfile, profileResults map[string]*schedtypes.ProfileRunResult) map[string]schedtypes.SchedulerProfile {
 
 	logger := log.FromContext(ctx).V(logutil.VERBOSE)
 
-	// First call: determine if prefill is enabled and write state.
 	if len(profileResults) == 0 {
 		_, prefillExists := profiles[PrefillProfileName]
 		state := &PrefillEnabledState{Enabled: prefillExists}
@@ -153,64 +88,49 @@ func (h *DisaggProfileHandler) Pick(ctx context.Context, cycleState *schedtypes.
 		logger.Info("DisaggProfileHandler: prefill enabled state determined", "prefillEnabled", prefillExists)
 
 		if prefillExists {
-			// Run prefill profile first.
-			return map[string]*framework.SchedulerProfile{
+			return map[string]schedtypes.SchedulerProfile{
 				PrefillProfileName: profiles[PrefillProfileName],
 			}
 		}
-		// No prefill profile — run decode only.
 		if decodeProfile, ok := profiles[DecodeProfileName]; ok {
-			return map[string]*framework.SchedulerProfile{
+			return map[string]schedtypes.SchedulerProfile{
 				DecodeProfileName: decodeProfile,
 			}
 		}
-		// Fallback: return all profiles.
 		return profiles
 	}
 
-	// Second call: prefill has run, now run decode.
 	if prefillResult, prefillDone := profileResults[PrefillProfileName]; prefillDone {
 		if _, decodeDone := profileResults[DecodeProfileName]; !decodeDone {
 			if prefillResult == nil {
 				if h.enforceDisagg {
-					// enforce_disagg=true: do not fall back to aggregated mode.
-					// Stop the scheduling loop — ProcessResults will reject the request.
 					logger.Info("DisaggProfileHandler: prefill profile failed and enforce_disagg=true, rejecting request")
-					return map[string]*framework.SchedulerProfile{}
+					return map[string]schedtypes.SchedulerProfile{}
 				}
-				// enforce_disagg=false: fall back to aggregated decode.
 				logger.Info("DisaggProfileHandler: prefill profile failed (no workers?), falling back to aggregated decode")
 				cycleState.Write(PrefillEnabledStateKey, &PrefillEnabledState{Enabled: false})
 			}
 
 			if decodeProfile, ok := profiles[DecodeProfileName]; ok {
-				return map[string]*framework.SchedulerProfile{
+				return map[string]schedtypes.SchedulerProfile{
 					DecodeProfileName: decodeProfile,
 				}
 			}
 		}
 	}
 
-	// All profiles have been executed.
-	return map[string]*framework.SchedulerProfile{}
+	return map[string]schedtypes.SchedulerProfile{}
 }
 
 // ProcessResults aggregates the profile run results and designates the primary profile.
-// The "decode" profile is always the primary (the pod that handles the request).
-func (h *DisaggProfileHandler) ProcessResults(_ context.Context, _ *schedtypes.CycleState, req *schedtypes.LLMRequest,
+func (h *DisaggProfileHandler) ProcessResults(_ context.Context, _ *schedtypes.CycleState, req *schedtypes.InferenceRequest,
 	profileResults map[string]*schedtypes.ProfileRunResult) (*schedtypes.SchedulingResult, error) {
 
-	// When enforce_disagg=true and the prefill worker ID header was not set
-	// (prefill router not activated or scorer failed), reject the request
-	// at the EPP level instead of forwarding it to the sidecar without
-	// routing headers.
 	if h.enforceDisagg && (req.Headers == nil || req.Headers[PrefillWorkerIDHeader] == "") {
-		// Only enforce if a prefill profile was configured and ran.
 		if _, prefillRan := profileResults[PrefillProfileName]; prefillRan {
 			return nil, errors.New(
 				"disaggregated mode enforced (DYN_ENFORCE_DISAGG=true) but prefill workers " +
-					"are not available; request rejected. Either wait for prefill workers " +
-					"to register or set DYN_ENFORCE_DISAGG=false to allow aggregated fallback")
+					"are not available; request rejected")
 		}
 	}
 
@@ -218,10 +138,8 @@ func (h *DisaggProfileHandler) ProcessResults(_ context.Context, _ *schedtypes.C
 		return nil, errors.New("disagg profile handler received no profile results")
 	}
 
-	// Determine primary profile name.
 	primaryProfile := DecodeProfileName
 	if _, ok := profileResults[DecodeProfileName]; !ok {
-		// If there's no decode result, pick whichever profile ran.
 		for name := range profileResults {
 			primaryProfile = name
 			break
@@ -232,8 +150,7 @@ func (h *DisaggProfileHandler) ProcessResults(_ context.Context, _ *schedtypes.C
 		if h.enforceDisagg {
 			return nil, errors.New(
 				"disaggregated mode enforced (DYN_ENFORCE_DISAGG=true) but prefill workers " +
-					"are not available; request rejected. Either wait for prefill workers " +
-					"to register or set DYN_ENFORCE_DISAGG=false to allow aggregated fallback")
+					"are not available; request rejected")
 		}
 		return nil, fmt.Errorf("primary profile '%s' failed to produce a result", primaryProfile)
 	}

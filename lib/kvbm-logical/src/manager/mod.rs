@@ -1,19 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Block lifecycle orchestration across reset, active, and inactive pools.
+//! Block lifecycle orchestration over the unified [`BlockStore`].
 //!
-//! [`BlockManager`] is the top-level owner of the three pool tiers and the
-//! block registry. It exposes allocation, registration, matching, and scanning
-//! operations while keeping all pool transitions behind a single API surface.
-//!
-//! Construction uses a builder pattern — see [`BlockManagerConfigBuilder`].
-//!
-//! # Re-exported configuration types
-//!
-//! - [`FrequencyTrackingCapacity`] — TinyLFU tracker sizing
-//! - [`InactiveBackendConfig`] — inactive pool backend selection
-//! - [`BlockManagerBuilderError`] / [`BlockManagerResetError`] — error types
+//! [`BlockManager`] owns a single [`BlockStore`] and the [`BlockRegistry`].
+//! All pool transitions go through the store's single mutex; the manager
+//! adds the registry coordination, allocation eviction policy, and metrics.
 
 mod builder;
 
@@ -22,101 +14,71 @@ mod tests;
 
 pub use builder::{
     BlockManagerBuilderError, BlockManagerConfigBuilder, BlockManagerResetError,
-    FrequencyTrackingCapacity, InactiveBackendConfig,
+    FrequencyTrackingCapacity, InactiveBackendConfig, LineageEviction,
 };
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use parking_lot::Mutex;
-
-use crate::blocks::{BlockMetadata, CompleteBlock, ImmutableBlock, MutableBlock, UpgradeFn};
+use crate::blocks::{BlockMetadata, CompleteBlock, ImmutableBlock, MutableBlock};
 use crate::metrics::BlockPoolMetrics;
-use crate::pools::{ActivePool, BlockDuplicationPolicy, InactivePool, ResetPool, SequenceHash};
+use crate::pools::{BlockDuplicationPolicy, BlockStore, SequenceHash};
 use crate::registry::BlockRegistry;
 
-/// Manages the full block lifecycle across three pool tiers:
-/// reset (free), active (in-use), and inactive (cached, evictable).
-///
-/// Thread-safe: allocation is serialised via an internal [`Mutex`]; individual
-/// pools use their own internal locking.
+/// Manages the full block lifecycle over the unified [`BlockStore`].
 ///
 /// Construct via [`BlockManager::builder()`].
 pub struct BlockManager<T: BlockMetadata> {
-    reset_pool: ResetPool<T>,
-    active_pool: ActivePool<T>,
-    inactive_pool: InactivePool<T>,
-    block_registry: BlockRegistry,
-    duplication_policy: BlockDuplicationPolicy,
-    upgrade_fn: UpgradeFn<T>,
-    allocate_mutex: Mutex<()>,
-    total_blocks: usize,
-    block_size: usize,
-    metrics: Arc<BlockPoolMetrics>,
+    pub(crate) store: Arc<BlockStore<T>>,
+    pub(crate) block_registry: BlockRegistry,
+    pub(crate) duplication_policy: BlockDuplicationPolicy,
+    pub(crate) total_blocks: usize,
+    pub(crate) block_size: usize,
+    pub(crate) metrics: Arc<BlockPoolMetrics>,
 }
 
-impl<T: BlockMetadata> BlockManager<T> {
-    /// Create a new builder for BlockManager.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let tracker = FrequencyTrackingCapacity::Medium.create_tracker();
-    /// let registry = BlockRegistry::builder().frequency_tracker(tracker).build();
-    ///
-    /// let manager = BlockManager::builder()
-    ///     .block_count(1000)
-    ///     .registry(registry)
-    ///     .with_multi_lru_backend()
-    ///     .build()?;
-    /// ```
+impl<T: BlockMetadata + Sync> BlockManager<T> {
+    /// Create a new builder for `BlockManager`.
     pub fn builder() -> BlockManagerConfigBuilder<T> {
         BlockManagerConfigBuilder::default()
     }
 
+    /// Stable, process-unique identifier for this manager's underlying
+    /// [`BlockStore`](crate::pools::BlockStore). See [`crate::ManagerId`].
+    /// Cheap (one field load via the store).
+    ///
+    /// Together with a [`BlockId`](crate::BlockId) this names a specific
+    /// physical pool slot — the disambiguating runtime address that
+    /// downstream consumers need after the policy parameter `T` has been
+    /// type-erased through [`crate::LifecyclePinRef`].
+    pub fn id(&self) -> crate::ManagerId {
+        self.store.id()
+    }
+
     /// Allocate `count` mutable blocks, drawing first from the reset pool
-    /// then evicting from the inactive pool if needed.
+    /// and then evicting from the inactive pool if needed.
     ///
     /// Returns `None` if fewer than `count` blocks are available across both pools.
     pub fn allocate_blocks(&self, count: usize) -> Option<Vec<MutableBlock<T>>> {
-        let _guard = self.allocate_mutex.lock();
-        let from_reset = self.reset_pool.allocate_blocks(count);
-        let from_reset_count = from_reset.len();
-        let mut blocks = from_reset;
+        self.allocate_blocks_with_evictions(count)
+            .map(|(blocks, _evicted)| blocks)
+    }
 
-        let remaining_needed = count - blocks.len();
-        match self.inactive_pool.allocate_blocks(remaining_needed) {
-            Some(remaining) => {
-                let eviction_count = remaining.len() as u64;
-                blocks.extend(remaining);
-
-                self.metrics.inc_allocations(blocks.len() as u64);
-                self.metrics
-                    .inc_allocations_from_reset(from_reset_count as u64);
-                self.metrics.inc_evictions(eviction_count);
-
-                Some(blocks)
-            }
-            None => None,
-        }
+    /// Like [`allocate_blocks`](Self::allocate_blocks) but also reports the
+    /// [`SequenceHash`] of each block evicted from the inactive pool.
+    pub fn allocate_blocks_with_evictions(
+        &self,
+        count: usize,
+    ) -> Option<(Vec<MutableBlock<T>>, Vec<SequenceHash>)> {
+        self.store.allocate_atomic(count)
     }
 
     /// Drain the inactive pool, returning all blocks to the reset pool.
-    ///
-    /// 1. Acquires the inactive pool lock and allocates all blocks.
-    /// 2. Releases the lock.
-    /// 3. Drops the allocated blocks (RAII returns them to reset).
-    /// 4. Verifies the reset pool contains the expected total.
-    ///
-    /// Returns an error under contention when blocks are in active use.
     pub fn reset_inactive_pool(&self) -> Result<(), BlockManagerResetError> {
-        // 1. Allocate all blocks from inactive pool (acquires lock internally)
-        let blocks = self.inactive_pool.allocate_all_blocks();
-
-        // 2. Drop blocks - RAII returns them to reset pool
+        let blocks = self.store.drain_inactive_to_mutable();
         drop(blocks);
 
-        // 3. Verify block count (may fail under contention - that's OK)
-        let reset_count = self.reset_pool.len();
+        let reset_count = self.store.reset_len();
         if reset_count != self.total_blocks {
             return Err(BlockManagerResetError::BlockCountMismatch {
                 expected: self.total_blocks,
@@ -127,87 +89,138 @@ impl<T: BlockMetadata> BlockManager<T> {
         Ok(())
     }
 
-    /// Register a batch of completed blocks, returning immutable handles.
+    /// Register a batch of completed blocks.
     pub fn register_blocks(&self, blocks: Vec<CompleteBlock<T>>) -> Vec<ImmutableBlock<T>> {
-        blocks
+        if blocks.is_empty() {
+            return Vec::new();
+        }
+
+        let handles = self
+            .block_registry
+            .register_sequence_hashes(blocks.iter().map(CompleteBlock::sequence_hash));
+        let batch_size = blocks.len();
+        let registered =
+            self.store
+                .register_completed_blocks(blocks, handles, self.duplication_policy);
+        // The offline settlement bridge observes this counter as a
+        // publication watermark, so publish only after every store transition
+        // and presence marker in the batch is complete.
+        self.metrics
+            .inc_registrations_by(u64::try_from(batch_size).unwrap_or(u64::MAX));
+        registered
             .into_iter()
-            .map(|block| self.register_block(block))
+            .map(ImmutableBlock::from_inner)
             .collect()
     }
 
     /// Register a single completed block and return an immutable handle.
-    ///
-    /// Deduplication is governed by the configured [`BlockDuplicationPolicy`].
     pub fn register_block(&self, block: CompleteBlock<T>) -> ImmutableBlock<T> {
-        self.metrics.inc_registrations();
         let handle = self
             .block_registry
             .register_sequence_hash(block.sequence_hash());
-        let registered_block = handle.register_block(
-            block,
-            self.duplication_policy,
-            &self.inactive_pool,
-            Some(self.metrics.as_ref()),
-        );
-        ImmutableBlock::new(
-            registered_block,
-            self.upgrade_fn.clone(),
-            Some(self.metrics.clone()),
-        )
+        let inner = handle.register_block(block, self.duplication_policy, &self.store);
+        self.metrics.inc_registrations();
+        ImmutableBlock::from_inner(inner)
     }
 
-    /// Linear prefix match: walks `seq_hash` left-to-right, stopping on first miss.
+    /// Linear prefix match: walks `seq_hash` left-to-right, stopping on
+    /// the first hash that hits neither the active nor the inactive pool.
     ///
-    /// Checks the active pool first, then the inactive pool for remaining hashes.
+    /// The whole active-or-inactive prefix is resolved under a **single**
+    /// store-mutex acquisition via [`BlockStore::match_prefix_locked_batch`]
+    /// — no per-hash registry radix-tree lookup, no per-hash store lock.
+    /// Frequency-tracker touches are batched and applied *after* the store
+    /// lock is released: every returned block is touched exactly once
+    /// (including inactive resurrections).
     pub fn match_blocks(&self, seq_hash: &[SequenceHash]) -> Vec<ImmutableBlock<T>> {
         self.metrics
             .inc_match_hashes_requested(seq_hash.len() as u64);
 
-        tracing::debug!(
-            num_hashes = seq_hash.len(),
-            inactive_pool_len = self.inactive_pool.len(),
-            "match_blocks called"
-        );
-
-        // First try to match against active blocks
-        let mut matched: Vec<ImmutableBlock<T>> = Vec::with_capacity(seq_hash.len());
-        matched.extend(
-            self.active_pool
-                .find_matches(seq_hash, true)
-                .into_iter()
-                .map(|block| {
-                    ImmutableBlock::new(block, self.upgrade_fn.clone(), Some(self.metrics.clone()))
-                }),
-        );
-
-        let active_matched = matched.len();
-        tracing::debug!(active_matched, "Matched from active pool");
-
-        // If we didn't match all hashes, try inactive blocks for the remaining ones
-        let remaining_hashes = &seq_hash[matched.len()..];
-        if !remaining_hashes.is_empty() {
-            let inactive_found: Vec<_> = self.inactive_pool.find_blocks(remaining_hashes, true);
-            let inactive_matched = inactive_found.len();
-            tracing::debug!(
-                remaining_to_check = remaining_hashes.len(),
-                inactive_matched,
-                "Matched from inactive pool"
-            );
-            matched.extend(inactive_found.into_iter().map(|block| {
-                ImmutableBlock::new(block, self.upgrade_fn.clone(), Some(self.metrics.clone()))
-            }));
+        if seq_hash.is_empty() {
+            self.metrics.inc_match_blocks_returned(0);
+            return Vec::new();
         }
 
-        self.metrics.inc_match_blocks_returned(matched.len() as u64);
+        // ONE store-lock acquisition for the whole active+inactive prefix.
+        let inners = self.store.match_prefix_locked_batch(seq_hash);
 
-        tracing::debug!(total_matched = matched.len(), "match_blocks result");
+        // Frequency-tracker touches, batched, AFTER the store lock is
+        // released. Touches every returned hit exactly once — including
+        // inactive resurrections, which the old `find_inactive_primaries`
+        // path never touched.
+        if self.block_registry.has_frequency_tracking() {
+            for inner in &inners {
+                self.block_registry.touch(inner.sequence_hash());
+            }
+        }
+
+        let matched: Vec<ImmutableBlock<T>> =
+            inners.into_iter().map(ImmutableBlock::from_inner).collect();
+
+        self.metrics.inc_match_blocks_returned(matched.len() as u64);
+        tracing::debug!(
+            num_hashes = seq_hash.len(),
+            total_matched = matched.len(),
+            "match_blocks result"
+        );
         tracing::trace!(matched = ?matched, "matched blocks");
         matched
     }
 
-    /// Scatter-gather scan: finds all blocks matching any hash, without stopping on misses.
+    /// Scattered batch match: resolves every input hash against the active or
+    /// inactive pool without stopping at a miss.
     ///
-    /// Returns a map of found hashes to immutable handles.
+    /// The returned vector is aligned with `seq_hash`: each hit is `Some`,
+    /// each miss is `None`, and input order and duplicates are preserved. The
+    /// complete batch is resolved under one store-mutex acquisition. Frequency
+    /// tracking is applied after releasing that lock, exactly once per hit
+    /// (including repeated hashes and inactive resurrections).
+    ///
+    /// This operation contributes to the existing match metrics. Requested
+    /// and returned values are counted as occurrences, so repeated input
+    /// hashes and their repeated hits are counted repeatedly.
+    pub fn match_blocks_scattered(
+        &self,
+        seq_hash: &[SequenceHash],
+    ) -> Vec<Option<ImmutableBlock<T>>> {
+        self.metrics
+            .inc_match_hashes_requested(seq_hash.len() as u64);
+
+        if seq_hash.is_empty() {
+            self.metrics.inc_match_blocks_returned(0);
+            return Vec::new();
+        }
+
+        // ONE store-lock acquisition for all active+inactive probes, including
+        // misses and repeated hashes.
+        let inners = self.store.match_scattered_locked_batch(seq_hash);
+
+        // Keep TinyLFU work outside the store critical section. A duplicate
+        // input is a duplicate access, so each returned occurrence is touched.
+        if self.block_registry.has_frequency_tracking() {
+            for inner in inners.iter().flatten() {
+                self.block_registry.touch(inner.sequence_hash());
+            }
+        }
+
+        let hit_count = inners.iter().filter(|inner| inner.is_some()).count();
+        let matched = inners
+            .into_iter()
+            .map(|inner| inner.map(ImmutableBlock::from_inner))
+            .collect();
+
+        self.metrics.inc_match_blocks_returned(hit_count as u64);
+        tracing::debug!(
+            num_hashes = seq_hash.len(),
+            total_matched = hit_count,
+            "match_blocks_scattered result"
+        );
+        matched
+    }
+
+    /// Scatter-gather scan: finds all blocks matching any hash, without
+    /// stopping on misses. Requested hashes are counted as input occurrences,
+    /// while returned blocks are counted as distinct hashes in the result map.
     pub fn scan_matches(
         &self,
         seq_hashes: &[SequenceHash],
@@ -218,30 +231,21 @@ impl<T: BlockMetadata> BlockManager<T> {
 
         let mut result = HashMap::new();
 
-        // 1. Check active pool for all hashes (read-only, no touch needed)
-        let active_found = self.active_pool.scan_matches(seq_hashes);
-        for (hash, block) in active_found {
-            result.insert(
-                hash,
-                ImmutableBlock::new(block, self.upgrade_fn.clone(), Some(self.metrics.clone())),
-            );
+        let active_found = self.scan_active_matches(seq_hashes, touch);
+        for (hash, inner) in active_found {
+            result.insert(hash, ImmutableBlock::from_inner(inner));
         }
 
-        // 2. Build remaining hashes set
         let remaining: Vec<SequenceHash> = seq_hashes
             .iter()
             .filter(|h| !result.contains_key(h))
             .copied()
             .collect();
 
-        // 3. Scan inactive pool for remaining (acquires blocks, may touch)
         if !remaining.is_empty() {
-            let inactive_found = self.inactive_pool.scan_blocks(&remaining, touch);
-            for (hash, block) in inactive_found {
-                result.insert(
-                    hash,
-                    ImmutableBlock::new(block, self.upgrade_fn.clone(), Some(self.metrics.clone())),
-                );
+            let inactive_found = self.store.scan_inactive_primaries(&remaining, touch);
+            for (hash, inner) in inactive_found {
+                result.insert(hash, ImmutableBlock::from_inner(inner));
             }
         }
 
@@ -250,14 +254,39 @@ impl<T: BlockMetadata> BlockManager<T> {
         result
     }
 
+    /// Scan-style active lookup by sequence hash via the registry's
+    /// stored Weak references — does not stop on miss.
+    fn scan_active_matches(
+        &self,
+        hashes: &[SequenceHash],
+        touch: bool,
+    ) -> Vec<(SequenceHash, Arc<crate::blocks::ImmutableBlockInner<T>>)> {
+        hashes
+            .iter()
+            .filter_map(|hash| {
+                self.block_registry
+                    .match_sequence_hash(*hash, touch)
+                    .and_then(|handle| {
+                        handle
+                            .try_get_inner::<T>(&self.store, touch)
+                            .map(|inner| (*hash, inner))
+                    })
+            })
+            .collect()
+    }
+
     /// Total number of blocks managed (constant after construction).
     pub fn total_blocks(&self) -> usize {
         self.total_blocks
     }
 
     /// Blocks available for allocation (reset + inactive pools).
+    ///
+    /// Reads both pool sizes under a single store-lock acquisition so the
+    /// returned value is a coherent snapshot, never an over- or under-count
+    /// produced by a concurrent reset↔inactive transition.
     pub fn available_blocks(&self) -> usize {
-        self.reset_pool.len() + self.inactive_pool.len()
+        self.store.available_len()
     }
 
     /// Tokens per block (constant after construction).
@@ -278,5 +307,13 @@ impl<T: BlockMetadata> BlockManager<T> {
     /// Reference to the block pool metrics.
     pub fn metrics(&self) -> &Arc<BlockPoolMetrics> {
         &self.metrics
+    }
+
+    /// Test-only accessor for the underlying [`BlockStore`]. Used to
+    /// reach test hooks like `BlockStore::pause_release_primary` from
+    /// race-window tests.
+    #[cfg(test)]
+    pub(crate) fn store_for_test(&self) -> &Arc<BlockStore<T>> {
+        &self.store
     }
 }

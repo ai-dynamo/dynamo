@@ -22,7 +22,7 @@ use dynamo_llm::block_manager::{
         locality::Logical,
     },
     connector::{protocol::RequestType, *},
-    kv_consolidator::EventSource,
+    kv_consolidator::{EventSource, KvEventConsolidationMode},
 };
 use dynamo_llm::tokens::{SaltHash, TokenBlockSequence, Tokens};
 use dynamo_runtime::config::environment_names::kvbm as env_kvbm;
@@ -34,6 +34,24 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
 type VllmLocality = Logical<DistributedLeaderWorkerResources>;
+
+fn parse_consolidator_mode(mode: Option<String>) -> KvEventConsolidationMode {
+    let Some(mode) = mode else {
+        return KvEventConsolidationMode::Dedup;
+    };
+
+    match mode.parse() {
+        Ok(mode) => mode,
+        Err(error) => {
+            tracing::warn!(
+                "Invalid KV event consolidator mode {:?}: {}. Falling back to dedup.",
+                mode,
+                error
+            );
+            KvEventConsolidationMode::Dedup
+        }
+    }
+}
 
 impl From<SlotError> for PyErr {
     fn from(err: SlotError) -> Self {
@@ -74,6 +92,12 @@ pub trait Leader: Send + Sync + std::fmt::Debug {
 
     fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> anyhow::Result<()>;
 
+    /// Reset KVBM-managed prefix cache state.
+    ///
+    /// Returns `Ok(false)` when KVBM rejects the reset so vLLM can propagate
+    /// connector reset failure through its `reset_cache` boolean contract.
+    fn reset_cache(&mut self) -> anyhow::Result<bool>;
+
     fn slot_manager(&self) -> &ConnectorSlotManager<String>;
 }
 
@@ -94,6 +118,7 @@ impl KvConnectorLeader {
         leader_py: PyKvbmLeader,
         consolidator_vllm_endpoint: Option<String>,
         consolidator_output_endpoint: Option<String>,
+        consolidator_mode: Option<String>,
     ) -> Self {
         tracing::info!(
             "KvConnectorLeader initialized with worker_id: {}",
@@ -118,6 +143,7 @@ impl KvConnectorLeader {
             // Capture consolidator endpoints for the async block
             let consolidator_vllm_ep = consolidator_vllm_endpoint.clone();
             let consolidator_output_ep = consolidator_output_endpoint.clone();
+            let consolidator_mode = parse_consolidator_mode(consolidator_mode.clone());
 
             handle.spawn(async move {
                 let ready = leader.wait_worker_sync_ready().await;
@@ -148,6 +174,7 @@ impl KvConnectorLeader {
                         vllm_ep,
                         Some(output_ep),
                         EventSource::Vllm,
+                        consolidator_mode,
                     );
                 }
 
@@ -435,6 +462,7 @@ impl Leader for KvConnectorLeader {
                 new_req.num_computed_tokens,
                 scheduled_tokens,
                 None,
+                None,
             )?;
 
             let pending_ops_opt = slot.take_pending_operations();
@@ -505,6 +533,7 @@ impl Leader for KvConnectorLeader {
                 &cached_req.new_block_ids,
                 cached_req.num_computed_tokens,
                 scheduled_tokens,
+                None,
                 None,
             )?;
 
@@ -611,6 +640,20 @@ impl Leader for KvConnectorLeader {
 
         Ok(())
     }
+
+    fn reset_cache(&mut self) -> anyhow::Result<bool> {
+        match self.slot_manager().reset_prefix_cache() {
+            Ok(()) => {
+                self.inflight_requests.clear();
+                self.onboarding_slots.clear();
+                Ok(true)
+            }
+            Err(error) => {
+                tracing::warn!("failed to reset KVBM connector prefix cache: {error:?}");
+                Ok(false)
+            }
+        }
+    }
 }
 
 #[pyclass]
@@ -621,7 +664,7 @@ pub struct PyKvConnectorLeader {
 #[pymethods]
 impl PyKvConnectorLeader {
     #[new]
-    #[pyo3(signature = (worker_id, drt, page_size, leader, consolidator_vllm_endpoint=None, consolidator_output_endpoint=None))]
+    #[pyo3(signature = (worker_id, drt, page_size, leader, consolidator_vllm_endpoint=None, consolidator_output_endpoint=None, consolidator_mode=None))]
     pub fn new(
         worker_id: String,
         drt: Option<PyObject>,
@@ -629,6 +672,7 @@ impl PyKvConnectorLeader {
         leader: PyKvbmLeader,
         consolidator_vllm_endpoint: Option<String>,
         consolidator_output_endpoint: Option<String>,
+        consolidator_mode: Option<String>,
     ) -> PyResult<Self> {
         let _ = &drt; // drt is currently un-used in leader
 
@@ -646,6 +690,7 @@ impl PyKvConnectorLeader {
                 leader,
                 consolidator_vllm_endpoint,
                 consolidator_output_endpoint,
+                consolidator_mode,
             ))
         } else {
             Box::new(KvConnectorLeader::new(
@@ -654,6 +699,7 @@ impl PyKvConnectorLeader {
                 leader,
                 consolidator_vllm_endpoint,
                 consolidator_output_endpoint,
+                consolidator_mode,
             ))
         };
         Ok(Self { connector_leader })
@@ -700,6 +746,11 @@ impl PyKvConnectorLeader {
     fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> PyResult<()> {
         self.connector_leader
             .create_slot(request, tokens)
+            .map_err(to_pyerr)
+    }
+
+    fn reset_cache(&mut self, py: Python<'_>) -> PyResult<bool> {
+        py.allow_threads(|| self.connector_leader.reset_cache())
             .map_err(to_pyerr)
     }
 }

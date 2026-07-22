@@ -624,7 +624,7 @@ def create_gradio_interface(
 
             > 📝 **Note:** The dotted red line in the prefill and decode charts are default TTFT and ITL SLAs if not specified.
 
-            > ⚠️ **Warning:** The TTFT values here represent the ideal case when requests arrive uniformly, minimizing queueing. Real-world TTFT may be higher than profiling results. To mitigate the issue, planner uses [correction factors](https://github.com/ai-dynamo/dynamo/blob/main/docs/design-docs/planner-design.md#step-2-correction-factor-calculation) to adjust dynamically at runtime.
+            > ⚠️ **Warning:** The TTFT values here represent bootstrap profiling estimates. Real-world TTFT may be higher when request arrivals are bursty or worker queues build up. The runtime planner can refine the perf model with live FPM observations and use load-based scaling to react to these gaps.
 
             > 💡 **Tip:** Use the GPU cost checkbox and input in the charts section to convert GPU hours to cost.
             """

@@ -16,6 +16,14 @@
 # cargo-deny plugin for linting dependencies
 # https://github.com/EmbarkStudios/cargo-deny/blob/main/deny.template.toml
 
+[graph]
+# Dynamo CI targets Linux; avoid checking target-specific dependencies for
+# unsupported platforms such as Windows.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+
 [licenses]
 confidence-threshold = 0.93
 allow = [
@@ -63,4 +71,3 @@ deny = [
     { name = "native-tls" },
     { name = "openssl-sys" },
 ]
-

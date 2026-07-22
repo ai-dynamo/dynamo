@@ -108,7 +108,12 @@ html:not([data-theme]),html[data-theme=light] {
 }
 
 /* Dark theme */
-html[data-theme=dark] {
+html[data-theme=dark],
+html.dark,
+.dark {
+    --nv-color-text: #eeeeee;
+    --nv-color-bg-default: #111111;
+    --nv-color-bg-alt: #1a1a1a;
     --pst-color-background: #111;
     --pst-color-on-background: #000;
     --pst-color-shadow: #000;
@@ -808,67 +813,3 @@ svg.card-icon{
     text-decoration-style: underline !important;
 }
 
-/* Mobile Styles */
-@media (max-width: 768px) {
-    .hero-section {
-        padding: 2rem 1.5rem;
-    }
-
-    .hero-title-section {
-        margin-bottom: 2rem;
-    }
-
-    .hero-heading {
-        font-size: 32px;
-    }
-
-    .hero-subtitle {
-        font-size: 16px;
-    }
-
-    .hero-content-grid {
-        grid-template-columns: 1fr;
-        gap: 2rem;
-    }
-
-    .hero-column-title {
-        font-size: 20px;
-    }
-
-    .hero-column-subtitle {
-        font-size: 14px;
-    }
-
-    .hero-card-content {
-        flex-direction: column;
-        align-items: flex-start;
-    }
-
-    .hero-card-button-wrapper {
-        align-self: flex-start;
-    }
-
-    .hero-column .card-icon,
-    .hero-column .card-icon svg,
-    .hero-column .card-icon i {
-        font-size: 40px !important;
-        width: 40px !important;
-        height: 40px !important;
-    }
-
-    .hero-column .fern-card-title {
-        font-size: 14px;
-    }
-
-    .hero-column .fern-card p {
-        font-size: 11px;
-    }
-
-    .body-section {
-        padding: 2rem 1.5rem;
-    }
-
-    .fern-selection-item-icon.use-icon {
-        display: none !important;
-    }
-}

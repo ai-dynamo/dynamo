@@ -76,18 +76,20 @@ type SourcePodManifest struct {
 	SourceNode   string `yaml:"sourceNode"`
 	PodName      string `yaml:"podName"`
 	PodNamespace string `yaml:"podNamespace"`
+	PodIP        string `yaml:"podIP,omitempty"`
 
 	// StdioFDs holds readlink targets for FDs 0, 1, 2 (e.g. "pipe:[12345]").
 	StdioFDs []string `yaml:"stdioFDs,omitempty"`
 }
 
-func NewSourcePodManifest(containerID string, pid int, sourceNode, podName, podNamespace string, stdioFDs []string) SourcePodManifest {
+func NewSourcePodManifest(containerID string, pid int, sourceNode, podName, podNamespace, podIP string, stdioFDs []string) SourcePodManifest {
 	return SourcePodManifest{
 		ContainerID:  containerID,
 		PID:          pid,
 		SourceNode:   sourceNode,
 		PodName:      podName,
 		PodNamespace: podNamespace,
+		PodIP:        podIP,
 		StdioFDs:     append([]string(nil), stdioFDs...),
 	}
 }

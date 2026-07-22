@@ -1,0 +1,74 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# configmap that contains the custom trtllm configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-config
+data:
+  agg.yaml: |
+    tensor_parallel_size: 1
+    moe_expert_parallel_size: 1
+    enable_attention_dp: false
+    max_num_tokens: 8192
+    max_batch_size: 16
+    trust_remote_code: true
+    backend: pytorch
+    enable_chunked_prefill: true
+    disable_overlap_scheduler: true
+    kv_cache_config:
+      free_gpu_memory_fraction: 0.95
+    cuda_graph_config:
+      max_batch_size: 16
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: trtllm-agg
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          name: main
+    replicas: 1
+    type: frontend
+  - name: TRTLLMWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --served-model-name
+          - Qwen/Qwen3-0.6B
+          - --extra-engine-args
+          - ./examples/backends/trtllm/engine_configs/qwen3/agg.yaml
+          command:
+          - python3
+          - -m
+          - dynamo.trtllm
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          # Mount the ConfigMap key as the engine args file without masking /workspace.
+          volumeMounts:
+          - mountPath: /workspace/examples/backends/trtllm/engine_configs/qwen3/agg.yaml
+            name: nvidia-config
+            readOnly: true
+            subPath: agg.yaml
+          workingDir: /workspace/examples/backends/trtllm
+        # Declare the ConfigMap as a pod volume.
+        volumes:
+        - configMap:
+            name: nvidia-config
+          name: nvidia-config
+    replicas: 1
+    type: worker

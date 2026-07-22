@@ -61,4 +61,20 @@ Examples:
         help="Maximum total GPUs across all managed pools. Requests that would exceed this limit are rejected. 0 means no GPU scaling is allowed. -1 (default) disables enforcement entirely.",
     )
 
+    parser.add_argument(
+        "--min-total-gpus",
+        type=int,
+        default=-1,
+        dest="min_total_gpus",
+        help="Minimum total GPUs across all managed pools. Scale-down requests that would drop below this floor are denied unless a pending scale-up on another pool can be paired with them. -1 (default) disables the floor.",
+    )
+
+    parser.add_argument(
+        "--intent-cache-ttl-seconds",
+        type=float,
+        default=360.0,
+        dest="intent_cache_ttl_seconds",
+        help="Cached scale-intent from a pool is considered fresh for this many seconds (default: 360). This should be at least 2x the local planner's slowest tick interval so opposite-direction intents can overlap. Default throughput-based scaling ticks every 180s, so 360 covers two ticks.",
+    )
+
     return parser

@@ -57,17 +57,18 @@ Dynamo must be installed. No external services are required for local developmen
 First, start the backend service:
 ```bash
 cd examples/custom_backend/hello_world
-DYN_DISCOVERY_BACKEND=file python hello_world.py
+DYN_DISCOVERY_BACKEND=file DYN_EVENT_PLANE=zmq python hello_world.py
 ```
 
 Second, in a separate terminal, run the client:
 ```bash
 cd examples/custom_backend/hello_world
-DYN_DISCOVERY_BACKEND=file python client.py
+DYN_DISCOVERY_BACKEND=file DYN_EVENT_PLANE=zmq python client.py
 ```
 
-> **Note**: Setting `DYN_DISCOVERY_BACKEND=file` uses file-based discovery instead of etcd.
-> Both the backend and client must use the same discovery backend to discover each other.
+> **Note**: Setting `DYN_DISCOVERY_BACKEND=file` uses file-based discovery instead of etcd,
+> and `DYN_EVENT_PLANE=zmq` uses ZMQ instead of NATS for the event plane.
+> Both the backend and client must use the same settings to discover each other.
 
 The client will connect to the backend service and print the streaming results.
 

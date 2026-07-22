@@ -1,0 +1,136 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: trtllm-disagg-planner
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - -m
+          - dynamo.frontend
+          - --http-port
+          - "8000"
+          - --kv-cache-block-size
+          - "128"
+          - --router-mode
+          - kv
+          - --router-kv-overlap-score-credit
+          - "0.0"
+          - --router-temperature
+          - "0.0"
+          - --no-kv-events
+          command:
+          - python3
+          image: my-registry/tensorrtllm-runtime:my-tag
+          name: main
+          workingDir: /workspace/examples/backends/trtllm
+    replicas: 1
+    type: frontend
+  - name: Planner
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - -m
+          - dynamo.planner
+          - --config
+          - '{"environment": "kubernetes", "backend": "trtllm", "optimization_target": "sla",
+            "enable_throughput_scaling": true, "enable_load_scaling": true, "pre_deployment_sweeping_mode":
+            "none", "throughput_adjustment_interval_seconds": 60, "load_adjustment_interval_seconds": 5}'
+          command:
+          - python3
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          # Planner image selection:
+          #   Dynamo >= 1.1.0: use the dedicated planner image
+          #     <registry>/dynamo-planner:<version>
+          #     (backend runtime images no longer ship planner runtime deps
+          #     such as kubernetes_asyncio, pmdarima, prophet, aiconfigurator).
+          #   Dynamo <  1.1.0: use the backend runtime image
+          #     <registry>/tensorrtllm-runtime:<version>.
+          image: my-registry/dynamo-planner:my-tag
+          name: main
+          ports:
+          - containerPort: 9085
+            name: metrics
+    replicas: 1
+    type: planner
+  - name: decode
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - -m
+          - dynamo.trtllm
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --served-model-name
+          - Qwen/Qwen3-0.6B
+          - --extra-engine-args
+          - ./examples/backends/trtllm/engine_configs/qwen3/decode.yaml
+          - --disaggregation-mode
+          - decode
+          command:
+          - python3
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: my-registry/tensorrtllm-runtime:my-tag
+          livenessProbe:
+            failureThreshold: 1
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 5
+            timeoutSeconds: 30
+          name: main
+          readinessProbe:
+            failureThreshold: 60
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 30
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          workingDir: /workspace/
+        terminationGracePeriodSeconds: 600
+    replicas: 1
+    type: decode
+  - name: prefill
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - -m
+          - dynamo.trtllm
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --served-model-name
+          - Qwen/Qwen3-0.6B
+          - --extra-engine-args
+          - ./examples/backends/trtllm/engine_configs/qwen3/prefill.yaml
+          - --disaggregation-mode
+          - prefill
+          command:
+          - python3
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: my-registry/tensorrtllm-runtime:my-tag
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          workingDir: /workspace/
+        terminationGracePeriodSeconds: 600
+    replicas: 1
+    type: prefill

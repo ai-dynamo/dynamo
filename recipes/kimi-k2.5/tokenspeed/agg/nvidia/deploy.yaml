@@ -1,0 +1,290 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Aggregated TokenSpeed serving for nvidia/Kimi-K2.5-NVFP4.
+#
+# Note: this recipe expects the Dynamo+TokenSpeed image to be built locally
+# from the sibling Dockerfile and pushed to a registry your cluster can pull
+# from, since NVIDIA does not currently publish a
+# `nvcr.io/nvidia/ai-dynamo/tokenspeed-runtime` image. See ./README.md for
+# the build/push/deploy flow.
+#
+# TODO: Change to DynamoGraphDeployment once supported. The Dynamo Operator
+# currently only accepts `backendFramework` values `vllm`, `sglang`, `trtllm`
+# (see deploy/operator/api/v1beta1/common.go). Until tokenspeed is added to
+# that enum, this recipe wires the four processes the operator would otherwise
+# generate (etcd discovery + nats event-plane + frontend HTTP router + worker
+# engine) as plain Deployments and Services. The Service names mirror the
+# operator-generated naming so port-forward instructions stay stable across
+# the migration.
+#
+# Why a self-contained etcd sidecar instead of `--discovery-backend kubernetes`:
+# the K8s-native discovery client requires operator-stamped scaffolding
+# (downward-API env, the `dynamoworkermetadatas.nvidia.com` CRD, RBAC for
+# DynamoWorkerMetadata + EndpointSlices, labeled worker Service/EndpointSlice).
+# Replicating that scaffolding by hand defeats the "no operator required"
+# stance of this recipe, so we keep etcd here and let the eventual DGD
+# migration delegate all of it to the operator.
+
+# ---------------------------------------------------------------------------
+# 1. etcd — discovery backend
+# ---------------------------------------------------------------------------
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kimi-k25-tokenspeed-etcd
+  labels:
+    app: kimi-k25-tokenspeed
+    component: etcd
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kimi-k25-tokenspeed
+      component: etcd
+  template:
+    metadata:
+      labels:
+        app: kimi-k25-tokenspeed
+        component: etcd
+    spec:
+      containers:
+        - name: etcd
+          image: gcr.io/etcd-development/etcd:v3.6.7
+          command:
+            - /usr/local/bin/etcd
+          args:
+            - --data-dir=/var/run/etcd/data
+            - --listen-client-urls=http://0.0.0.0:2379
+            - --advertise-client-urls=http://0.0.0.0:2379
+          ports:
+            - containerPort: 2379
+              name: client
+          volumeMounts:
+            - name: data
+              mountPath: /var/run/etcd
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kimi-k25-tokenspeed-etcd
+spec:
+  selector:
+    app: kimi-k25-tokenspeed
+    component: etcd
+  ports:
+    - port: 2379
+      targetPort: 2379
+      name: client
+# ---------------------------------------------------------------------------
+# 2. nats — event-plane (with JetStream)
+# ---------------------------------------------------------------------------
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kimi-k25-tokenspeed-nats
+  labels:
+    app: kimi-k25-tokenspeed
+    component: nats
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kimi-k25-tokenspeed
+      component: nats
+  template:
+    metadata:
+      labels:
+        app: kimi-k25-tokenspeed
+        component: nats
+    spec:
+      containers:
+        - name: nats
+          image: nats:2.12.4
+          args:
+            - "-js"
+            - "-a"
+            - "0.0.0.0"
+            - "-p"
+            - "4222"
+          ports:
+            - containerPort: 4222
+              name: client
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kimi-k25-tokenspeed-nats
+spec:
+  selector:
+    app: kimi-k25-tokenspeed
+    component: nats
+  ports:
+    - port: 4222
+      targetPort: 4222
+      name: client
+# ---------------------------------------------------------------------------
+# 3. Frontend — HTTP router (KV-aware)
+# ---------------------------------------------------------------------------
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kimi-k25-tokenspeed-frontend
+  labels:
+    app: kimi-k25-tokenspeed
+    component: frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kimi-k25-tokenspeed
+      component: frontend
+  template:
+    metadata:
+      labels:
+        app: kimi-k25-tokenspeed
+        component: frontend
+    spec:
+      imagePullSecrets:
+        - name: nvcrimagepullsecret
+      containers:
+        - name: frontend
+          # Replace with your locally-built dev/runtime image (see ./Dockerfile).
+          image: <your-registry>/dynamo-tokenspeed:dev
+          workingDir: /workspace/dynamo
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - python3 -m dynamo.frontend --router-mode kv --http-port 8000
+          env:
+            - name: ETCD_ENDPOINTS
+              value: http://kimi-k25-tokenspeed-etcd:2379
+            - name: NATS_SERVER
+              value: nats://kimi-k25-tokenspeed-nats:4222
+            - name: HF_HOME
+              value: /opt/models
+          ports:
+            - containerPort: 8000
+              name: http
+          volumeMounts:
+            - name: model-cache
+              mountPath: /opt/models
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kimi-k25-tokenspeed-agg-frontend
+spec:
+  selector:
+    app: kimi-k25-tokenspeed
+    component: frontend
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+# ---------------------------------------------------------------------------
+# 4. Worker — TokenSpeed engine
+# ---------------------------------------------------------------------------
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kimi-k25-tokenspeed-worker
+  labels:
+    app: kimi-k25-tokenspeed
+    component: worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kimi-k25-tokenspeed
+      component: worker
+  template:
+    metadata:
+      labels:
+        app: kimi-k25-tokenspeed
+        component: worker
+    spec:
+      imagePullSecrets:
+        - name: nvcrimagepullsecret
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nvidia.com/gpu.present
+                    operator: In
+                    values:
+                      - "true"
+      containers:
+        - name: worker
+          # Replace with your locally-built dev/runtime image (see ./Dockerfile).
+          image: <your-registry>/dynamo-tokenspeed:dev
+          workingDir: /workspace/dynamo
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              python3 -m dynamo.tokenspeed \
+                --discovery-backend etcd \
+                --request-plane tcp \
+                --event-plane nats \
+                --dyn-reasoning-parser kimi_k25 \
+                --dyn-tool-call-parser kimi_k2 \
+                --model "${MODEL_PATH}" \
+                --served-model-name "${SERVED_MODEL_NAME}" \
+                --trust-remote-code \
+                --max-model-len 262144 \
+                --kv-cache-dtype fp8 \
+                --quantization nvfp4 \
+                --tensor-parallel-size 4 \
+                --enable-expert-parallel \
+                --chunked-prefill-size 8192 \
+                --max-num-seqs 256 \
+                --attention-backend trtllm_mla \
+                --moe-backend flashinfer_trtllm \
+                --gpu-memory-utilization 0.80
+          envFrom:
+            - secretRef:
+                name: hf-token-secret
+          env:
+            - name: ETCD_ENDPOINTS
+              value: http://kimi-k25-tokenspeed-etcd:2379
+            - name: NATS_SERVER
+              value: nats://kimi-k25-tokenspeed-nats:4222
+            - name: MODEL_PATH
+              value: nvidia/Kimi-K2.5-NVFP4
+            - name: SERVED_MODEL_NAME
+              value: kimi-k2.5
+            - name: HF_HOME
+              value: /opt/models
+          resources:
+            limits:
+              nvidia.com/gpu: "4"
+            requests:
+              nvidia.com/gpu: "4"
+          volumeMounts:
+            - name: model-cache
+              mountPath: /opt/models
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 80Gi

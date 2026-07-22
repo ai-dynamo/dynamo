@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: kimi-k2-5-feature-stack
+title: Kimi-K2.5 Feature-Stack Benchmark
+page: benchmarks/kimi-k2-5-feature-stack.mdx
+claim: Composing disaggregation + Eagle3 + KV routing + KV offload yields ~130 tok/s/user and ~5,400 tok/s/GPU, ~3x the
+  per-GPU throughput of agg round-robin
+subtype: feature-stack
+features:
+- disaggregated-serving
+- eagle3
+- kv-router
+- kv-offload
+model:
+  name: Kimi-K2.5 NVFP4
+  hf_id: nvidia/Kimi-K2.5-NVFP4
+hardware:
+  gpu: GB200
+  count: 24
+traffic: Mooncake-style agentic coding trace (~200k ctx, multi-turn), 1-hour replay, goodput TTFT 5s / ITL 10ms
+arms:
+- role: winner
+  name: Disagg + Eagle3 + KV router + offload
+  deploy: recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router/deploy.yaml
+  perf: recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router/perf.yaml
+- role: treatment
+  name: Agg + Eagle3 + KV router
+  deploy: recipes/kimi-k2.5/trtllm/agg-eagle-kv-router/deploy.yaml
+  perf: recipes/kimi-k2.5/trtllm/agg-eagle-kv-router/perf.yaml
+- role: treatment
+  name: Agg + Eagle3 + round-robin
+  deploy: recipes/kimi-k2.5/trtllm/agg-eagle-round-robin/deploy.yaml
+  perf: recipes/kimi-k2.5/trtllm/agg-eagle-round-robin/perf.yaml
+- role: baseline
+  name: Agg + round-robin (no spec dec)
+  deploy: recipes/kimi-k2.5/trtllm/agg-round-robin/deploy.yaml
+  perf: recipes/kimi-k2.5/trtllm/agg-round-robin/perf.yaml
+results:
+  available: true
+  summary: ~130 tok/s/user / ~5,400 tok/s/GPU (winner) vs ~105 / ~1,700 (baseline); full 4-arm table verified against README
+related_recipes: []
+maintainer: null
+gaps:
+- result numbers approximate (~) in source; Pareto plot only as embedded image
+- deploy.yaml image tag placeholder (tensorrtllm-runtime:my-tag)
+- maintainer unknown
+promotion_candidate:
+  deferred_recipe_id: kimi-k2-5
+  note: winning arm is a recipe-promotion candidate; held back in R1, see deferred_recipes in recipes.yaml

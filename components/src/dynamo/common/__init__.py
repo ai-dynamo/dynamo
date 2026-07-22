@@ -9,10 +9,12 @@ Dynamo backends and components.
 
 Main submodules:
     - config_dump: Configuration dumping and system diagnostics utilities
+    - snapshot: Snapshot/restore lifecycle helpers
     - utils: Common utilities including environment and prometheus helpers
 """
 
-from dynamo.common import config_dump, constants, utils
+from importlib import import_module
+from types import ModuleType
 
 try:
     from ._version import __version__
@@ -24,4 +26,12 @@ except Exception:
     except Exception:
         __version__ = "0.0.0+unknown"
 
-__all__ = ["__version__", "config_dump", "constants", "utils"]
+__all__ = ["__version__", "config_dump", "constants", "snapshot", "utils"]
+
+
+def __getattr__(name: str) -> ModuleType:
+    if name in {"config_dump", "constants", "snapshot", "utils"}:
+        module = import_module(f"{__name__}.{name}")
+        globals()[name] = module
+        return module
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

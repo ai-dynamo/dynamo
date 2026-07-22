@@ -5,10 +5,27 @@
 
 import json
 import random
+import uuid as _uuid
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
+
+
+def compute_image_uuid(ref: str) -> str:
+    """Stable UUID for an image reference (path or URL).
+
+    Used as the `uuid` field on chat-completion `image_url` content parts —
+    a vLLM extension to the OpenAI-compat schema (see vLLM's
+    `multi_modal_uuids` / `mm_processor_cache`). Same `ref` → same UUID
+    across runs, so the server's processor cache survives benchmark
+    restarts.
+
+    Returns a hyphenated UUID string. Dynamo's chat parser enforces strict
+    UUID format at the wire boundary, so this MUST be a valid UUID — we
+    use UUIDv5 in the OID namespace for determinism.
+    """
+    return str(_uuid.uuid5(_uuid.NAMESPACE_OID, ref))
 
 
 def generate_image_pool_base64(

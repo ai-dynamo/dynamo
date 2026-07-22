@@ -92,6 +92,7 @@ def test_kvbm_imports_vllm():
 # TRT-LLM-specific tests - run in TRT-LLM job (TRT-LLM auto-enables KVBM)
 @pytest.mark.post_merge
 @pytest.mark.trtllm
+@pytest.mark.kvbm
 @pytest.mark.unit
 @pytest.mark.gpu_0
 def test_kvbm_wheel_exists_trtllm():
@@ -101,6 +102,7 @@ def test_kvbm_wheel_exists_trtllm():
 
 @pytest.mark.post_merge
 @pytest.mark.trtllm
+@pytest.mark.kvbm
 @pytest.mark.unit
 @pytest.mark.gpu_0
 def test_kvbm_imports_trtllm():

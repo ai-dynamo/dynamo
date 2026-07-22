@@ -1,0 +1,75 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+default_policy_family: standard
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: cached
+  - min_tokens: 3072
+    bucket: uncached
+policy_classes:
+  - name: cached
+    policy_family: standard
+    cache_bucket: cached
+    queue_policy: wspt
+    quantum: 2048
+    request_queue_limit_per_worker: 1024
+    cached_token_queue_limit_per_worker: 2097152
+  - name: uncached
+    policy_family: standard
+    cache_bucket: uncached
+    queue_policy: fcfs
+    quantum: 512
+    request_queue_limit_per_worker: 512
+    raw_isl_token_queue_limit_per_worker: 1048576
+  - name: latency_cached
+    policy_family: latency
+    cache_bucket: cached
+    queue_policy: wspt
+    quantum: 4096
+    request_queue_limit_per_worker: 256
+  - name: latency_uncached
+    policy_family: latency
+    cache_bucket: uncached
+    queue_policy: wspt
+    quantum: 1024
+    request_queue_limit_per_worker: 128
+    raw_isl_token_queue_limit_per_worker: 524288
+  - name: custom_priority
+    queue_policy: wspt
+    quantum: 4096
+    request_queue_limit_per_worker: 128
+
+models:
+  example/large-model:
+    default_policy_family: latency
+    uncached_isl_buckets:
+      - min_tokens: 0
+        bucket: cached
+      - min_tokens: 4096
+        bucket: uncached
+    policy_classes:
+      - name: latency_cached
+        policy_family: latency
+        cache_bucket: cached
+        queue_policy: wspt
+        quantum: 4096
+        request_queue_limit_per_worker: 256
+      - name: latency_uncached
+        policy_family: latency
+        cache_bucket: uncached
+        queue_policy: wspt
+        quantum: 1024
+        request_queue_limit_per_worker: 128
+      - name: batch_cached
+        policy_family: batch
+        cache_bucket: cached
+        queue_policy: fcfs
+        quantum: 2048
+        cached_token_queue_limit_per_worker: 1048576
+      - name: batch_uncached
+        policy_family: batch
+        cache_bucket: uncached
+        queue_policy: fcfs
+        quantum: 1024
+        raw_isl_token_queue_limit_per_worker: 524288

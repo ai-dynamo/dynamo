@@ -17,8 +17,10 @@ and related routing components.
 The main TRT-LLM recipe entrypoints are:
 
 - [DeepSeek-R1 WideEP on GB200](../../../../recipes/deepseek-r1/trtllm/disagg/wide_ep/gb200/deploy.yaml)
-- [Qwen3-235B-A22B-FP8 aggregated](../../../../recipes/qwen3-235b-a22b-fp8/trtllm/agg/deploy.yaml)
-- [Qwen3-235B-A22B-FP8 disaggregated](../../../../recipes/qwen3-235b-a22b-fp8/trtllm/disagg/deploy.yaml)
+- [Qwen3-235B-A22B-FP8 aggregated, Hopper](../../../../recipes/qwen3-235b-a22b-fp8/trtllm/agg/hopper/deploy.yaml)
+- [Qwen3-235B-A22B-FP8 aggregated, Blackwell](../../../../recipes/qwen3-235b-a22b-fp8/trtllm/agg/blackwell/deploy.yaml)
+- [Qwen3-235B-A22B-FP8 disaggregated, Hopper](../../../../recipes/qwen3-235b-a22b-fp8/trtllm/disagg/hopper/deploy.yaml)
+- [Qwen3-235B-A22B-FP8 disaggregated, Blackwell](../../../../recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy.yaml)
 - [Qwen3-32B-FP8 aggregated](../../../../recipes/qwen3-32b-fp8/trtllm/agg/deploy.yaml)
 - [Qwen3-32B-FP8 disaggregated](../../../../recipes/qwen3-32b-fp8/trtllm/disagg/deploy.yaml)
 - [GPT-OSS-120B aggregated](../../../../recipes/gpt-oss-120b/trtllm/agg/deploy.yaml)

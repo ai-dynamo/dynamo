@@ -89,7 +89,7 @@ func TestShellQuoteForBashC_InLeaderCommand(t *testing.T) {
 		},
 	}
 
-	backend.setupLeaderContainer(container, 2, "dec", component, &GroveMultinodeDeployer{})
+	backend.setupLeaderContainer(container, 2, "dec", betaComponent(t, component), &GroveMultinodeDeployer{})
 
 	if len(container.Args) != 1 {
 		t.Fatalf("expected 1 arg, got %d", len(container.Args))
@@ -215,7 +215,7 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 				{Name: mpiRunSecretName, MountPath: "/ssh-pk", ReadOnly: true},
 			},
 			expectedCommand: []string{"/bin/sh", "-c"},
-			expectedArgs:    []string{"mkdir -p $HOME/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key $HOME/.ssh/id_rsa && cp /ssh-pk/private.key.pub $HOME/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub $HOME/.ssh/authorized_keys && chmod 600 $HOME/.ssh/id_rsa $HOME/.ssh/authorized_keys && chmod 644 $HOME/.ssh/id_rsa.pub && printf 'Host *\\nIdentityFile '$HOME'/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > $HOME/.ssh/config && TIMEOUT=300; START_TIME=$(date +%s); for worker in $(echo \"$LWS_LEADER_ADDRESS\" | sed 's/\\./-1\\./'); do echo \"Waiting for DNS: $worker\"; until getent hosts $worker >/dev/null 2>&1; do CURRENT_TIME=$(date +%s); if [ $((CURRENT_TIME - START_TIME)) -gt $TIMEOUT ]; then echo \"ERROR: Timeout waiting for DNS: $worker\"; exit 1; fi; echo \"DNS not ready for $worker, retrying...\"; sleep 2; done; echo \"✓ DNS resolved: $worker\"; done; echo \"All workers DNS ready\" && mpirun $([ \"$(id -u)\" = \"0\" ] && echo --allow-run-as-root) --oversubscribe -n 2 -H $LWS_LEADER_ADDRESS,$(echo \"$LWS_LEADER_ADDRESS\" | sed 's/\\./-1\\./') --mca pml ob1 --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i $HOME/.ssh/id_rsa\" -x CUDA_VISIBLE_DEVICES -x HF_DATASETS_CACHE -x HF_ENDPOINT -x HF_HOME -x HF_TOKEN -x HOME -x HUGGING_FACE_HUB_TOKEN -x LD_LIBRARY_PATH -x MODEL_PATH -x NCCL_DEBUG -x NCCL_IB_DISABLE -x NCCL_P2P_DISABLE -x OMPI_MCA_orte_keep_fqdn_hostnames -x PATH -x PYTHONPATH -x TENSORRT_LLM_CACHE_DIR -x TOKENIZERS_PARALLELISM -x TRANSFORMERS_CACHE -x TRTLLM_USE_UCX_KVCACHE -x USER bash -c 'trtllm-llmapi-launch python3 --model test'"},
+			expectedArgs:    []string{"mkdir -p $HOME/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key $HOME/.ssh/id_rsa && cp /ssh-pk/private.key.pub $HOME/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub $HOME/.ssh/authorized_keys && chmod 600 $HOME/.ssh/id_rsa $HOME/.ssh/authorized_keys && chmod 644 $HOME/.ssh/id_rsa.pub && printf 'Host *\\nIdentityFile '$HOME'/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > $HOME/.ssh/config && TIMEOUT=300; START_TIME=$(date +%s); for worker in $(echo \"$LWS_LEADER_ADDRESS\" | sed 's/\\./-1\\./'); do echo \"Waiting for DNS: $worker\"; until getent hosts $worker >/dev/null 2>&1; do CURRENT_TIME=$(date +%s); if [ $((CURRENT_TIME - START_TIME)) -gt $TIMEOUT ]; then echo \"ERROR: Timeout waiting for DNS: $worker\"; exit 1; fi; echo \"DNS not ready for $worker, retrying...\"; sleep 2; done; echo \"✓ DNS resolved: $worker\"; done; echo \"All workers DNS ready\" && mpirun $([ \"$(id -u)\" = \"0\" ] && echo --allow-run-as-root) --oversubscribe -n 2 -H $(LWS_LEADER_ADDRESS),$(echo \"$LWS_LEADER_ADDRESS\" | sed 's/\\./-1\\./') --mca pml ob1 --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i $HOME/.ssh/id_rsa\" -x CUDA_VISIBLE_DEVICES -x HF_DATASETS_CACHE -x HF_ENDPOINT -x HF_HOME -x HF_TOKEN -x HOME -x HUGGING_FACE_HUB_TOKEN -x LD_LIBRARY_PATH -x MODEL_PATH -x NCCL_DEBUG -x NCCL_IB_DISABLE -x NCCL_P2P_DISABLE -x OMPI_MCA_orte_keep_fqdn_hostnames -x PATH -x PYTHONPATH -x TENSORRT_LLM_CACHE_DIR -x TOKENIZERS_PARALLELISM -x TRANSFORMERS_CACHE -x TRTLLM_USE_UCX_KVCACHE -x USER bash -c 'trtllm-llmapi-launch python3 --model test'"},
 			expectedEnv: []corev1.EnvVar{
 				{Name: "OMPI_MCA_orte_keep_fqdn_hostnames", Value: "1"},
 			},
@@ -238,7 +238,7 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 				StartupProbe:   &corev1.Probe{},
 			}
 
-			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, tt.component, "test-service", tt.multinodeDeployer)
+			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, betaComponent(t, tt.component), "test-service", tt.multinodeDeployer)
 
 			validateVolumeMounts(t, container, tt.expectedVolumeMounts)
 			validateCommand(t, container, tt.expectedCommand)
@@ -448,7 +448,7 @@ func TestTRTLLMBackend_UpdatePodSpec(t *testing.T) {
 			component := &v1alpha1.DynamoComponentDeploymentSharedSpec{}
 
 			// Call UpdatePodSpec
-			backend.UpdatePodSpec(podSpec, tt.numberOfNodes, tt.role, component, "test-service", tt.multinodeDeployer)
+			backend.UpdatePodSpec(podSpec, tt.numberOfNodes, tt.role, betaComponent(t, component), "test-service", tt.multinodeDeployer)
 
 			// Check volume count
 			if len(podSpec.Volumes) != tt.expectedVolumeCount {
@@ -512,7 +512,7 @@ func TestTRTLLMBackend_hostNamesList(t *testing.T) {
 			multinodeDeployer: &LWSMultinodeDeployer{},
 			serviceName:       "test-service",
 			expectedContains: []string{
-				"$LWS_LEADER_ADDRESS",
+				"$(LWS_LEADER_ADDRESS)",
 				"$(echo \"$LWS_LEADER_ADDRESS\" | sed 's/\\./-1\\./')",
 			},
 		},
@@ -535,7 +535,7 @@ func TestTRTLLMBackend_hostNamesList(t *testing.T) {
 			multinodeDeployer: &LWSMultinodeDeployer{},
 			serviceName:       "worker",
 			expectedContains: []string{
-				"$LWS_LEADER_ADDRESS",
+				"$(LWS_LEADER_ADDRESS)",
 				"$(echo \"$LWS_LEADER_ADDRESS\" | sed 's/\\./-1\\./')",
 				"$(echo \"$LWS_LEADER_ADDRESS\" | sed 's/\\./-2\\./')",
 				"$(echo \"$LWS_LEADER_ADDRESS\" | sed 's/\\./-3\\./')",
@@ -652,7 +652,7 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 			component:         &v1alpha1.DynamoComponentDeploymentSharedSpec{},
 			initialArgs:       []string{},
 			initialCommand:    []string{"python", "-m", "worker"},
-			expected:          "mkdir -p $HOME/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key $HOME/.ssh/id_rsa && cp /ssh-pk/private.key.pub $HOME/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub $HOME/.ssh/authorized_keys && chmod 600 $HOME/.ssh/id_rsa $HOME/.ssh/authorized_keys && chmod 644 $HOME/.ssh/id_rsa.pub && printf 'Host *\\nIdentityFile '$HOME'/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > $HOME/.ssh/config && TIMEOUT=300; START_TIME=$(date +%s); for worker in $(echo \"$LWS_LEADER_ADDRESS\" | sed 's/\\./-1\\./'); do echo \"Waiting for DNS: $worker\"; until getent hosts $worker >/dev/null 2>&1; do CURRENT_TIME=$(date +%s); if [ $((CURRENT_TIME - START_TIME)) -gt $TIMEOUT ]; then echo \"ERROR: Timeout waiting for DNS: $worker\"; exit 1; fi; echo \"DNS not ready for $worker, retrying...\"; sleep 2; done; echo \"✓ DNS resolved: $worker\"; done; echo \"All workers DNS ready\" && mpirun $([ \"$(id -u)\" = \"0\" ] && echo --allow-run-as-root) --oversubscribe -n 0 -H $LWS_LEADER_ADDRESS,$(echo \"$LWS_LEADER_ADDRESS\" | sed 's/\\./-1\\./') --mca pml ob1 --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i $HOME/.ssh/id_rsa\" -x CUDA_VISIBLE_DEVICES -x HF_DATASETS_CACHE -x HF_ENDPOINT -x HF_HOME -x HF_TOKEN -x HOME -x HUGGING_FACE_HUB_TOKEN -x LD_LIBRARY_PATH -x MODEL_PATH -x NCCL_DEBUG -x NCCL_IB_DISABLE -x NCCL_P2P_DISABLE -x PATH -x PYTHONPATH -x TENSORRT_LLM_CACHE_DIR -x TOKENIZERS_PARALLELISM -x TRANSFORMERS_CACHE -x TRTLLM_USE_UCX_KVCACHE -x USER bash -c 'trtllm-llmapi-launch python -m worker'",
+			expected:          "mkdir -p $HOME/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key $HOME/.ssh/id_rsa && cp /ssh-pk/private.key.pub $HOME/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub $HOME/.ssh/authorized_keys && chmod 600 $HOME/.ssh/id_rsa $HOME/.ssh/authorized_keys && chmod 644 $HOME/.ssh/id_rsa.pub && printf 'Host *\\nIdentityFile '$HOME'/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > $HOME/.ssh/config && TIMEOUT=300; START_TIME=$(date +%s); for worker in $(echo \"$LWS_LEADER_ADDRESS\" | sed 's/\\./-1\\./'); do echo \"Waiting for DNS: $worker\"; until getent hosts $worker >/dev/null 2>&1; do CURRENT_TIME=$(date +%s); if [ $((CURRENT_TIME - START_TIME)) -gt $TIMEOUT ]; then echo \"ERROR: Timeout waiting for DNS: $worker\"; exit 1; fi; echo \"DNS not ready for $worker, retrying...\"; sleep 2; done; echo \"✓ DNS resolved: $worker\"; done; echo \"All workers DNS ready\" && mpirun $([ \"$(id -u)\" = \"0\" ] && echo --allow-run-as-root) --oversubscribe -n 0 -H $(LWS_LEADER_ADDRESS),$(echo \"$LWS_LEADER_ADDRESS\" | sed 's/\\./-1\\./') --mca pml ob1 --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i $HOME/.ssh/id_rsa\" -x CUDA_VISIBLE_DEVICES -x HF_DATASETS_CACHE -x HF_ENDPOINT -x HF_HOME -x HF_TOKEN -x HOME -x HUGGING_FACE_HUB_TOKEN -x LD_LIBRARY_PATH -x MODEL_PATH -x NCCL_DEBUG -x NCCL_IB_DISABLE -x NCCL_P2P_DISABLE -x PATH -x PYTHONPATH -x TENSORRT_LLM_CACHE_DIR -x TOKENIZERS_PARALLELISM -x TRANSFORMERS_CACHE -x TRTLLM_USE_UCX_KVCACHE -x USER bash -c 'trtllm-llmapi-launch python -m worker'",
 		},
 		{
 			name:              "Leader with both command and args (shell command - args take precedence)",
@@ -769,7 +769,7 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 				}
 			}
 
-			backend.setupLeaderContainer(container, tt.numberOfNodes, tt.serviceName, tt.component, tt.multinodeDeployer)
+			backend.setupLeaderContainer(container, tt.numberOfNodes, tt.serviceName, betaComponent(t, tt.component), tt.multinodeDeployer)
 
 			// Check that command is set correctly
 			expectedCommand := []string{"/bin/sh", "-c"}
@@ -920,7 +920,7 @@ func TestTRTLLMBackend_getGPUsPerNode(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := getGPUsPerNode(tt.resources)
+			result := getGPUsPerNode(betaResourceRequirements(t, tt.resources))
 			if result != tt.expected {
 				t.Errorf("getGPUsPerNode() = %d, want %d", result, tt.expected)
 			}
@@ -1005,7 +1005,7 @@ func TestTRTLLMBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 			originalEnvCount := len(container.Env)
 
 			// Call UpdateContainer (single node to avoid multinode logic)
-			backend.UpdateContainer(container, 1, RoleMain, tt.component, "test-service", &GroveMultinodeDeployer{})
+			backend.UpdateContainer(container, 1, RoleMain, betaComponent(t, tt.component), "test-service", &GroveMultinodeDeployer{})
 
 			if tt.expectNoEnvVarChanges {
 				// Check that no new environment variables were added

@@ -58,7 +58,12 @@ from fastvideo.configs.pipelines.base import PipelineConfig
 from fastvideo.platforms.interface import AttentionBackendEnum
 from pydantic import BaseModel, Field
 
-from dynamo.llm import ModelInput, ModelType, register_llm  # type: ignore[attr-defined]
+from dynamo.llm import (  # type: ignore[attr-defined]
+    ModelInput,
+    ModelType,
+    WorkerType,
+    register_llm,
+)
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint
 
 logger = logging.getLogger(__name__)
@@ -396,6 +401,7 @@ async def _register_model(endpoint, model_name: str) -> None:
             endpoint,
             model_name,
             model_name,
+            worker_type=WorkerType.Aggregated,
         )
         logger.info("Successfully registered model: %s", model_name)
     except Exception as e:

@@ -43,6 +43,7 @@ class WorkerInfo:
     max_num_seqs: Optional[int] = None
     max_num_batched_tokens: Optional[int] = None
     context_length: Optional[int] = None
+    speculative_nextn: Optional[int] = None
 
     @property
     def max_kv_tokens(self) -> Optional[int]:
@@ -64,6 +65,8 @@ class WorkerInfo:
             parts.append(f"max_num_batched_tokens={self.max_num_batched_tokens}")
         if self.context_length is not None:
             parts.append(f"context_length={self.context_length}")
+        if self.speculative_nextn is not None:
+            parts.append(f"speculative_nextn={self.speculative_nextn}")
         return ", ".join(parts)
 
 
@@ -174,8 +177,7 @@ def resolve_worker_info(
             logger.info(f"Using model name from config: {model_name}")
         else:
             raise ValueError(
-                "Could not determine model name. "
-                "Please set model_name in the config."
+                "Could not determine model name. Please set model_name in the config."
             )
 
     prefill_info.model_name = model_name

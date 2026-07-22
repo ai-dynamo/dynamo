@@ -27,12 +27,13 @@ from sweep_k8s.kubectl import (
     wait_pod,
 )
 
-# Tokenizer backend name mapping for DGD env vars
+# Tokenizer name mapping for DGD env vars (DYN_TOKENIZER accepts
+# "default" or "fastokens")
 TOKENIZER_BACKEND_MAP = {
     "hf": "default",
     "default": "default",
-    "fast": "fast",
-    "fastokens": "fast",
+    "fast": "fastokens",
+    "fastokens": "fastokens",
 }
 
 
@@ -165,7 +166,7 @@ def dgd_switch_backend(
 ) -> None:
     """Switch tokenizer backend on a DynamoGraphDeployment.
 
-    Patches the DGD spec to set DYN_TOKENIZER_BACKEND; the Grove operator
+    Patches the DGD spec to set DYN_TOKENIZER; the Grove operator
     recreates the frontend pod automatically.
     """
     mapped_backend = TOKENIZER_BACKEND_MAP.get(backend, backend)
@@ -173,7 +174,7 @@ def dgd_switch_backend(
         f"\n--- Switching DGD tokenizer backend -> {mapped_backend} (dgd={dgd_name}) ---"
     )
 
-    # Find the index of DYN_TOKENIZER_BACKEND in the Frontend env array
+    # Find the index of DYN_TOKENIZER in the Frontend env array
     try:
         dgd_json = get_json("dgd", dgd_name, namespace)
         env_list = (
@@ -186,7 +187,7 @@ def dgd_switch_backend(
         )
         idx = None
         for i, env_var in enumerate(env_list):
-            if env_var.get("name") == "DYN_TOKENIZER_BACKEND":
+            if env_var.get("name") == "DYN_TOKENIZER":
                 idx = i
                 break
     except Exception:
@@ -221,7 +222,7 @@ def dgd_switch_backend(
                 {
                     "op": "add",
                     "path": "/spec/services/Frontend/extraPodSpec/mainContainer/env/-",
-                    "value": {"name": "DYN_TOKENIZER_BACKEND", "value": mapped_backend},
+                    "value": {"name": "DYN_TOKENIZER", "value": mapped_backend},
                 }
             ],
         )

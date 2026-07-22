@@ -83,6 +83,7 @@ pub(super) fn load_trace_requests(
         requests.push(DirectRequest {
             tokens,
             max_output_tokens: output_length,
+            output_token_ids: None,
             uuid: Some(Uuid::new_v4()),
             dp_rank: 0,
             arrival_timestamp_ms,

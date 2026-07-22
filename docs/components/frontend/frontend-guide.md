@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Frontend Guide
+subtitle: Configures the KServe gRPC frontend, including supported endpoints, gRPC tuning, and registering OpenAI or tensor-based backends.
 ---
 
 This guide covers the KServe gRPC frontend configuration and integration for the Dynamo Frontend.

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Metrics Developer Guide
+subtitle: Reference for creating counters, gauges, and histograms with Dynamo's metrics API, surfaced on the local /metrics endpoint.
 ---
 
 This guide explains how to create and use custom metrics in Dynamo components using the Dynamo metrics API.

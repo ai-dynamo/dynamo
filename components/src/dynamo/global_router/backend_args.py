@@ -7,7 +7,7 @@ from typing import Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
-from dynamo.common.configuration.utils import add_argument
+from dynamo.common.configuration.utils import add_argument, env_or_default
 
 
 class DynamoGlobalRouterArgGroup(ArgGroup):
@@ -48,17 +48,23 @@ class DynamoGlobalRouterArgGroup(ArgGroup):
         )
         add_argument(
             g,
-            flag_name="--default-ttft-target",
-            env_var="DYN_GLOBAL_ROUTER_DEFAULT_TTFT_TARGET",
-            default=None,
+            flag_name="--default-ttft-target-ms",
+            obsolete_flag="--default-ttft-target",
+            env_var="DYN_GLOBAL_ROUTER_DEFAULT_TTFT_TARGET_MS",
+            default=env_or_default(
+                "DYN_GLOBAL_ROUTER_DEFAULT_TTFT_TARGET", None, value_type=float
+            ),
             help="Default TTFT target (ms) for prefill pool selection when SLA not present in request.",
             arg_type=float,
         )
         add_argument(
             g,
-            flag_name="--default-itl-target",
-            env_var="DYN_GLOBAL_ROUTER_DEFAULT_ITL_TARGET",
-            default=None,
+            flag_name="--default-itl-target-ms",
+            obsolete_flag="--default-itl-target",
+            env_var="DYN_GLOBAL_ROUTER_DEFAULT_ITL_TARGET_MS",
+            default=env_or_default(
+                "DYN_GLOBAL_ROUTER_DEFAULT_ITL_TARGET", None, value_type=float
+            ),
             help="Default ITL target (ms) for decode pool selection when SLA not present in request.",
             arg_type=float,
         )
@@ -71,8 +77,8 @@ class DynamoGlobalRouterConfig(ConfigBase):
     model_name: Optional[str] = None
     namespace: str
     component_name: str
-    default_ttft_target: Optional[float] = None
-    default_itl_target: Optional[float] = None
+    default_ttft_target_ms: Optional[float] = None
+    default_itl_target_ms: Optional[float] = None
 
     def validate(self) -> None:
         """Require config_path and model_name to be set via CLI or env."""

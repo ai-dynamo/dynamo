@@ -1,0 +1,88 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Llama-3.3-70B Topology Benchmark"
+subtitle: "How do aggregated, single-node disaggregated, and multi-node disaggregated vLLM topologies compare when normalized by GPU?"
+---
+
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
+Three vLLM topologies — aggregated, single-node disaggregated, and multi-node disaggregated — intentionally use different GPU counts (4, 8, and 16x H100/H200), so concurrency is scaled at 16 per GPU and results should be read as total throughput **and** TPS/GPU together — more GPUs trivially raise total throughput, so TPS/GPU is the apples-to-apples lens. All three topologies are also deployable recipe targets, so this benchmark doubles as a sizing guide.
+
+<div className="dynamo-target-picker static">
+<p className="dynamo-target-picker-title">Benchmark setup</p>
+<div className="dynamo-target-picker-summary">
+<span><b>Model</b> RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic</span>
+<span><b>GPUs</b> 4 / 8 / 16x H100/H200 (varies by configuration)</span>
+<span><b>Runtime</b> vLLM</span>
+<span><b>Workload</b> Synthetic 8192 ISL / 1024 OSL, 16 concurrency per GPU, request count = 10x concurrency</span>
+<span><b>Metrics</b> Output TPS and TPS/GPU, plus TTFT and ITL</span>
+<span><b>Held constant</b> Model, vLLM runtime, H100/H200 hardware family, ISL=8192, OSL=1024 (stddev 0, forced via min/max tokens), and 16 concurrency per GPU</span>
+</div>
+</div>
+
+## Compared Configurations
+
+<div className="dynamo-variant-table-wrap">
+<table className="dynamo-variant-table">
+<thead><tr><th>Role</th><th>Configuration</th><th>Deploy</th><th>Benchmark</th></tr></thead>
+<tbody><tr>
+<td><em className="role baseline">Baseline</em></td>
+<td><strong>vLLM aggregated</strong><span>4x H100/H200, single node, TP4 — concurrency 64</span></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/llama-3-70b/vllm/agg/deploy.yaml">deploy.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/llama-3-70b/vllm/agg/perf.yaml">perf.yaml</a></td>
+</tr><tr>
+<td><em className="role treatment">Comparison</em></td>
+<td><strong>vLLM disaggregated single-node</strong><span>8x H100/H200, P/D separation on one node — concurrency 128</span></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/llama-3-70b/vllm/disagg-single-node/deploy.yaml">deploy.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/llama-3-70b/vllm/disagg-single-node/perf.yaml">perf.yaml</a></td>
+</tr><tr>
+<td><em className="role treatment">Comparison</em></td>
+<td><strong>vLLM disaggregated multi-node</strong><span>16x H100/H200, 2 nodes x 8 GPUs — concurrency 256</span></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/llama-3-70b/vllm/disagg-multi-node/deploy.yaml">deploy.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/llama-3-70b/vllm/disagg-multi-node/perf.yaml">perf.yaml</a></td>
+</tr></tbody>
+</table>
+</div>
+
+## Reproduce
+
+Each configuration's `perf.yaml` computes total concurrency as 16 x GPU count and wraps an AIPerf run like the following — the checked-in `perf.yaml` is authoritative (it also sets `--random-seed`, `ignore_eos`, the tokenizer, and dataset-entry flags):
+
+```bash
+aiperf profile --model RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic \
+  --endpoint-type chat --endpoint /v1/chat/completions \
+  --url http://<frontend>:8000 --streaming \
+  --synthetic-input-tokens-mean 8192 --synthetic-input-tokens-stddev 0 \
+  --output-tokens-mean 1024 --output-tokens-stddev 0 \
+  --extra-inputs max_tokens:1024 --extra-inputs min_tokens:1024 \
+  --concurrency <16*gpu_count> --request-count <10*concurrency> \
+  --warmup-request-count <concurrency>
+```
+
+The frontend services are `llama3-70b-agg-frontend`, `llama3-70b-disagg-sn-frontend`, and `llama3-70b-disagg-mn-frontend`. Deploy one configuration at a time:
+
+```bash
+export NAMESPACE=your-namespace
+
+# One-time prep: storage + model download (update storageClassName in model-cache.yaml first)
+kubectl apply -f recipes/llama-3-70b/model-cache/ -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=3600s
+
+# Pick one configuration from the table above, deploy it, wait for readiness, then apply its perf.yaml.
+kubectl apply -f recipes/llama-3-70b/vllm/<configuration>/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/llama-3-70b/vllm/<configuration>/perf.yaml -n ${NAMESPACE}
+```
+
+## Notes
+
+- The source does not publish result numbers; run all three configurations on your hardware and compare total output TPS alongside TPS/GPU, since GPU counts differ per configuration.
+- The model uses FP8 dynamic quantization applied at runtime; the download takes roughly 15-30 minutes.
+- The `agg` and `disagg-single-node` configurations also ship optional GAIE (Gateway API Inference Extension) manifests under their `gaie/` subfolders.
+- Source: [recipes/llama-3-70b](https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b)
+
+## Related Recipe
+
+All three configurations are deployable targets on the [Llama-3.3-70B](../recipes/llama-3-3-70b.mdx) recipe page — none is a benchmark-only control.

@@ -13,31 +13,27 @@ from tests.utils.port_utils import allocate_port, deallocate_port
 
 # Shared constants for multimodal testing
 IMAGE_SERVER_PORT = allocate_port(8765)
-MULTIMODAL_IMG_PATH = os.path.join(
-    WORKSPACE_DIR, "lib/llm/tests/data/media/llm-optimize-deploy-graphic.png"
-)
 MULTIMODAL_IMG_URL = f"http://localhost:{IMAGE_SERVER_PORT}/llm-graphic.png"
+MULTIMODAL_VIDEO_PATH = os.path.join(
+    WORKSPACE_DIR, "lib/llm/tests/data/media/240p_10.mp4"
+)
 
 
-# Git LFS pointer files start with "version "; serve a real PNG when the asset is not pulled.
 def get_multimodal_test_image_bytes() -> bytes:
-    """Return valid PNG bytes for /llm-graphic.png (file or minimal fallback)."""
-    if os.path.isfile(MULTIMODAL_IMG_PATH):
-        with open(MULTIMODAL_IMG_PATH, "rb") as f:
-            data = f.read()
-        if not data.startswith(b"version "):
-            # GitHub path
-            return data
-
-    # Local path where we cannot retrieve the above .png file
+    """Return a deterministic PNG with an obvious green square."""
 
     # Lazy import so conftest loads in environments that don't have Pillow (e.g. pre-commit).
-    from PIL import Image
+    from PIL import Image, ImageDraw
 
     buf = BytesIO()
-    # TODO: differerent models / tests may expect different colors. Need to reconcicle
-    # code to support all cases locally if needed.
-    Image.new("RGB", (2, 2), color="green").save(buf, format="PNG")
+    # Keep this synthetic so CI never depends on Git LFS media. The white
+    # background plus large centered square gives VLMs a stronger signal than
+    # an edge-to-edge flat color.
+    img = Image.new("RGB", (512, 512), color="white")
+    draw = ImageDraw.Draw(img)
+    draw.rectangle((96, 96, 416, 416), fill=(0, 180, 0), outline=(0, 90, 0), width=8)
+    draw.text((214, 444), "GREEN", fill=(0, 90, 0))
+    img.save(buf, format="PNG")
     return buf.getvalue()
 
 
@@ -53,25 +49,58 @@ def image_server(httpserver: HTTPServer):
     Provide an HTTP server that serves test images for multimodal inference.
 
     This function-scoped fixture configures pytest-httpserver to serve
-    the LLM optimization diagram image. It's designed for testing multimodal
+    a deterministic synthetic image. It's designed for testing multimodal
     inference capabilities where models need to fetch images via HTTP.
 
     Currently serves:
-        - /llm-graphic.png - LLM diagram image for multimodal tests
-          (or a minimal PNG if the file is a Git LFS pointer / not pulled)
+        - /llm-graphic.png - synthetic green-square PNG used by multimodal serve tests
+
+    The handler honors `Range: bytes=A-B` and returns 206 Partial Content.
+    The MM-routing dim-fetch path (`fetch_image_dims_uncached`) strictly
+    requires 206 on Range probes so it never accidentally downloads a
+    full image into memory; a bare `respond_with_data` would return 200
+    and silently disable MM routing in the test.
 
     Usage:
         def test_multimodal(image_server):
             # Use MULTIMODAL_IMG_URL from this module
             # ... use url in your test payload
     """
+    from werkzeug.wrappers import Request, Response
+
     image_data = get_multimodal_test_image_bytes()
 
-    # Configure server endpoint
-    httpserver.expect_request("/llm-graphic.png").respond_with_data(
-        image_data,
-        content_type="image/png",
-    )
+    def _handler(request: Request) -> Response:
+        range_hdr = request.headers.get("Range", "")
+        if range_hdr.startswith("bytes="):
+            spec = range_hdr[len("bytes=") :]
+            lo_s, _, hi_s = spec.partition("-")
+            try:
+                lo = int(lo_s) if lo_s else 0
+                hi = int(hi_s) if hi_s else len(image_data) - 1
+            except ValueError:
+                return Response(status=416)
+            hi = min(hi, len(image_data) - 1)
+            lo = max(lo, 0)
+            if lo > hi:
+                return Response(status=416)
+            chunk = image_data[lo : hi + 1]
+            resp = Response(chunk, status=206, content_type="image/png")
+            resp.headers["Content-Range"] = f"bytes {lo}-{hi}/{len(image_data)}"
+            resp.headers["Accept-Ranges"] = "bytes"
+            return resp
+        return Response(image_data, status=200, content_type="image/png")
+
+    httpserver.expect_request("/llm-graphic.png").respond_with_handler(_handler)
+
+    # Serve video file for multimodal video tests (guard against LFS pointers)
+    if os.path.isfile(MULTIMODAL_VIDEO_PATH):
+        with open(MULTIMODAL_VIDEO_PATH, "rb") as vf:
+            video_data = vf.read()
+        if not video_data.startswith(b"version "):
+            httpserver.expect_request("/240p_10.mp4").respond_with_data(
+                video_data, content_type="video/mp4"
+            )
 
     return httpserver
 

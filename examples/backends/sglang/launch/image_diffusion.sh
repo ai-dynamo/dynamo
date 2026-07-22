@@ -15,7 +15,7 @@ source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 MODEL_PATH="black-forest-labs/FLUX.1-dev"
 FS_URL="file:///tmp/dynamo_media"
 HTTP_URL=""
-HTTP_PORT="${HTTP_PORT:-8000}"
+HTTP_PORT="${DYN_HTTP_PORT:-${HTTP_PORT:-8000}}"
 
 # Parse command line arguments
 EXTRA_ARGS=()

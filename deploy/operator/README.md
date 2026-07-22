@@ -22,7 +22,7 @@ Built with [Kubebuilder](https://book.kubebuilder.io/), it follows Kubernetes be
 
 ### Pre-requisites
 
-- [Go](https://go.dev/doc/install) >= 1.25
+- [Go](https://go.dev/doc/install) >= 1.26.3
 - [Kubebuilder](https://book.kubebuilder.io/quick-start.html)
 
 ### Build
@@ -41,7 +41,7 @@ The following tools must be installed and available in your `PATH` before runnin
 
 | Tool | Version | Purpose | Install |
 |------|---------|---------|---------|
-| [Go](https://go.dev/doc/install) | ≥ 1.25 | Compiles the manager binary locally | [go.dev/doc/install](https://go.dev/doc/install) |
+| [Go](https://go.dev/doc/install) | ≥ 1.26.3 | Compiles the manager binary locally | [go.dev/doc/install](https://go.dev/doc/install) |
 | [Tilt](https://docs.tilt.dev/install.html) | latest | Live-reload dev loop orchestrator | [docs.tilt.dev/install](https://docs.tilt.dev/install.html) |
 | [Helm](https://helm.sh/docs/intro/install/) | v3 | Renders the platform Helm chart | [helm.sh/docs/intro/install](https://helm.sh/docs/intro/install/) |
 | [kubectl](https://kubernetes.io/docs/tasks/tools/) | ≥ 1.29 | Applies CRDs and creates the namespace | [kubernetes.io/docs/tasks/tools](https://kubernetes.io/docs/tasks/tools/) |

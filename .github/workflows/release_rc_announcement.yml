@@ -19,7 +19,7 @@ permissions:
 jobs:
   announce-rc:
     name: Announce RC to Slack
-    runs-on: prod-builder-amd-v1
+    runs-on: ubuntu-slim
     if: vars.ANNOUNCE_RC == 'true'
     steps:
       - name: Send Slack announcement

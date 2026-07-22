@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "kvbm-consolidator"
+version = "1.2.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kvbm-logical = { workspace = true }
+dynamo-tokens = { workspace = true }
+dynamo-kv-hashing = { workspace = true }
+dynamo-kv-router = { workspace = true }
+
+anyhow = { workspace = true }
+futures = { workspace = true }
+rmp-serde = { workspace = true }
+serde = { workspace = true }
+tmq = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true, features = ["sync"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[features]
+testing = []
+
+[dev-dependencies]
+insta = { version = "1", features = ["yaml", "redactions"] }
+portpicker = "0.1"
+pretty_assertions = "1.4"
+proptest = "1.5"
+rstest = "0.26"
+tempfile = "3"
+tokio = { workspace = true, features = ["full", "test-util"] }
+tracing-subscriber = { workspace = true }
+tracing-test = "0.2"

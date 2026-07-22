@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Ordering + inclusion index for the Dynamo Recipes catalog.
+# Each id must have a matching docs/recipes/_catalog/recipes/<id>.yaml file.
+# `recipes:` lists the ACTIVE (customer-visible) recipes in nav order — this
+# order controls the sidebar/landing order and matches the Recipes tab in
+# docs/index.yml. `deferred_recipes:` lists recipes held back from the rendered
+# R1 surface (no rendered page); their per-entry files live alongside the
+# active ones in recipes/<id>.yaml.
+schema_version: 1
+recipes:
+- kimi-k2-6
+- nemotron-3-ultra
+- nemotron-3-super
+- glm-5-nvfp4
+- deepseek-v3-2-nvfp4
+- gpt-oss-120b
+- qwen3-32b
+- qwen3-235b-a22b-fp8
+- qwen3-32b-fp8
+- llama-3-3-70b
+deferred_recipes:
+- qwen3-6-35b
+- kimi-k2-5
+- qwen3-vl-30b

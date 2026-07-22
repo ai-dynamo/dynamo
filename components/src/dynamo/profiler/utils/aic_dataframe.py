@@ -29,13 +29,22 @@ from aiconfigurator.sdk.picking import _build_disagg_summary_dict
 
 
 def make_parallel_label(tp: int, pp: int, dp: int, moe_tp: int, moe_ep: int) -> str:
-    """Build the ``parallel`` label string used for dedup in picking."""
+    """Build the ``parallel`` label string used for dedup in picking.
+
+    Injective across ``(tp, pp, dp, moe_tp, moe_ep)`` — every distinct
+    5-tuple maps to a distinct string. Default-1 dimensions are omitted
+    from the label for readability.
+    """
+    parts = [f"tp{tp}"]
+    if pp > 1:
+        parts.append(f"pp{pp}")
+    if dp > 1:
+        parts.append(f"dp{dp}")
+    if moe_tp > 1:
+        parts.append(f"moetp{moe_tp}")
     if moe_ep > 1:
-        return f"dep{moe_ep}"
-    elif moe_tp > 1:
-        return f"tep{moe_tp}"
-    else:
-        return f"tp{tp}"
+        parts.append(f"moeep{moe_ep}")
+    return "-".join(parts)
 
 
 def build_prefill_row(

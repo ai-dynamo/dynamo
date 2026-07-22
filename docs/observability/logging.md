@@ -2,7 +2,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Logging
+subtitle: Structured text and JSONL logging for local Dynamo processes, with optional OTLP export to Loki via the OpenTelemetry Collector.
 ---
+
+> [!IMPORTANT]
+> Set `OTEL_EXPORT_ENABLED=true` on every Dynamo process. Without it, logs never leave the process and Loki will be silent regardless of `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`.
 
 ## Overview
 
@@ -247,7 +251,7 @@ You can provide a custom request ID using the `x-request-id` header. This ID wil
 
 ### Example Request with Custom Request ID
 
-```sh
+```bash
 curl -X POST http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -H 'x-request-id: 8372eac7-5f43-4d76-beca-0a94cfb311d0' \

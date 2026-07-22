@@ -18,6 +18,7 @@ pytestmark = [
     pytest.mark.sglang,
     pytest.mark.trtllm,
     pytest.mark.vllm,
+    pytest.mark.core,
 ]
 
 # Easy to edit later:

@@ -8,7 +8,7 @@ to ensure compatibility with the Dynamo HTTP frontend.
 """
 # TODO: Replace these Pydantic models with Python bindings to the Rust protocol types once PyO3 bindings are available.
 
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel
 
@@ -73,8 +73,16 @@ class NvCreateVideoRequest(BaseModel):
     user: Optional[str] = None
     """Optional user identifier."""
 
-    response_format: Optional[str] = None
-    """Response format: 'url' or 'b64_json' (default: 'url')."""
+    response_format: Optional[Literal["url", "b64_json"]] = None
+    """How the generated data should be returned: 'url' or 'b64_json'.
+    If unset, handlers default to 'url'."""
+
+    output_format: Optional[str] = None
+    """Requested container format (e.g. 'mp4', 'mjpeg').
+    This is a hint; check output_format in the response data for the actual format."""
+
+    stream: Optional[bool] = None
+    """Whether to stream the video generation (default: false)."""
 
     nvext: Optional[VideoNvExt] = None
     """NVIDIA extensions."""
@@ -85,6 +93,9 @@ class VideoData(BaseModel):
 
     Matches Rust VideoData in lib/llm/src/protocols/openai/videos.rs.
     """
+
+    output_format: str
+    """Actual container format of this video."""
 
     url: Optional[str] = None
     """URL of the generated video (if response_format is 'url')."""

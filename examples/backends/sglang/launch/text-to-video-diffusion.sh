@@ -14,7 +14,7 @@ source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 # Defaults
 WAN_SIZE="1b"
 FS_URL="file:///tmp/dynamo_media"
-HTTP_PORT="${HTTP_PORT:-8000}"
+HTTP_PORT="${DYN_HTTP_PORT:-${HTTP_PORT:-8000}}"
 NUM_FRAMES=17
 HEIGHT=480
 WIDTH=832

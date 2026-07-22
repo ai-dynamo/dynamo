@@ -65,6 +65,7 @@ def tensor_service(runtime):
         model_name: str,
         *,
         runtime_config: Optional[ModelRuntimeConfig] = None,
+        tensor_model_config: Optional[dict[str, Any]] = None,
         checksum: str = "dummy-mdcsum",
     ) -> AsyncIterator[Tuple[str, int]]:
         host = "127.0.0.1"
@@ -74,7 +75,11 @@ def tensor_service(runtime):
         tensor_model_service = KserveGrpcService(port=port, host=host)
 
         tensor_model_service.add_tensor_model(
-            model_name, checksum, engine, runtime_config=runtime_config
+            model_name,
+            checksum,
+            engine,
+            runtime_config=runtime_config,
+            tensor_model_config=tensor_model_config,
         )
 
         async def _serve():
@@ -94,8 +99,8 @@ def tensor_service(runtime):
 
 @pytest.mark.asyncio
 @pytest.mark.forked
-async def test_model_config_uses_runtime_config(tensor_service):
-    """Ensure tensor runtime_config is returned via the ModelConfig endpoint."""
+async def test_model_config_uses_tensor_model_config(tensor_service):
+    """Ensure tensor metadata is returned via the ModelConfig endpoint."""
     import tritonclient.grpc as grpcclient
 
     model_name = "tensor-config-model"
@@ -109,10 +114,7 @@ async def test_model_config_uses_runtime_config(tensor_service):
             {"name": "results", "data_type": "Bytes", "shape": [-1]},
         ],
     }
-    runtime_config = ModelRuntimeConfig()
-    runtime_config.set_tensor_model_config(tensor_config)
-
-    async with tensor_service(model_name, runtime_config=runtime_config) as (
+    async with tensor_service(model_name, tensor_model_config=tensor_config) as (
         host,
         port,
     ):
@@ -140,12 +142,12 @@ async def test_model_config_uses_runtime_config(tensor_service):
 
 @pytest.mark.asyncio
 @pytest.mark.forked
-async def test_model_config_missing_runtime_config_errors(tensor_service):
-    """ModelConfig should return NOT_FOUND when no tensor runtime_config is saved."""
+async def test_model_config_missing_tensor_config_errors(tensor_service):
+    """ModelConfig should return NOT_FOUND when no tensor metadata is saved."""
     model_name = "tensor-config-missing"
     import tritonclient.grpc as grpcclient
 
-    async with tensor_service(model_name, runtime_config=None) as (host, port):
+    async with tensor_service(model_name) as (host, port):
         client = grpcclient.InferenceServerClient(url=f"{host}:{port}")
         try:
             with pytest.raises(InferenceServerException) as excinfo:

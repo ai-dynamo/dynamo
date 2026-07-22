@@ -15,6 +15,7 @@ import enum
 import logging
 import re
 import threading
+from collections.abc import Mapping
 from functools import lru_cache
 from typing import TYPE_CHECKING, Optional, Pattern
 
@@ -328,14 +329,42 @@ def get_prometheus_expfmt(
         return ""
 
 
+def gather_with_labels(
+    registry: "CollectorRegistry",
+    auto_labels: Mapping[str, str],
+    *,
+    prefix_filters: Optional[list[str]] = None,
+    exclude_prefixes: Optional[list[str]] = None,
+) -> str:
+    """Scrape ``registry`` into Prometheus exposition text with
+    ``auto_labels`` injected at collection time. Existing labels on the
+    source metrics win over auto-labels of the same name.
+
+    Lives here (as a leaf utility next to :func:`get_prometheus_expfmt`)
+    so ``dynamo.common.backend.metrics`` can import it without dragging
+    in the broader backend module.
+    """
+    return get_prometheus_expfmt(
+        registry,
+        metric_prefix_filters=prefix_filters,
+        exclude_prefixes=exclude_prefixes,
+        inject_custom_labels=dict(auto_labels) if auto_labels else None,
+    )
+
+
 class LLMBackendMetrics:
-    """Prometheus metrics for LLM backends with `dynamo_component_` prefix.
+    """Engine-side gauges in the `dynamo_component_` namespace.
+
+    Lifecycle gauges that the framework times (cleanup, drain) live
+    Rust-side via `dynamo_backend_common::LifecycleGauges` — they emit
+    regardless of engine opt-in. `model_load_time_seconds` stays here for
+    parity with the legacy entry points (both legacy `main.py` and the
+    unified bridge populate it).
 
     Usage:
         metrics = LLMBackendMetrics(registry, model_name="Qwen/Qwen3-0.6B", component_name="backend")
         metrics.set_total_blocks("0", 1000)
         metrics.set_gpu_cache_usage("0", 0.75)
-        metrics.set_model_load_time(5.2)
     """
 
     def __init__(
@@ -344,7 +373,7 @@ class LLMBackendMetrics:
         model_name: str = "",
         component_name: str = "",
     ) -> None:
-        """Create all Dynamo component gauges."""
+        """Create per-rank engine gauges plus `model_load_time_seconds`."""
         from prometheus_client import Gauge
 
         self.total_blocks = Gauge(
@@ -357,6 +386,13 @@ class LLMBackendMetrics:
         self.gpu_cache_usage_percent = Gauge(
             f"{name_prefix.COMPONENT}_{kvstats.GPU_CACHE_USAGE_PERCENT}",
             "GPU cache usage as a percentage (0.0-1.0).",
+            labelnames=[labels.MODEL, labels.COMPONENT, labels.DP_RANK],
+            registry=registry,
+            multiprocess_mode="max",
+        )
+        self.kv_cache_hit_rate = Gauge(
+            f"{name_prefix.COMPONENT}_{kvstats.KV_CACHE_HIT_RATE}",
+            "Prefix cache hit rate (0.0-1.0). Portable across engines.",
             labelnames=[labels.MODEL, labels.COMPONENT, labels.DP_RANK],
             registry=registry,
             multiprocess_mode="max",
@@ -382,6 +418,15 @@ class LLMBackendMetrics:
 
     def set_gpu_cache_usage(self, dp_rank: str, value: float) -> None:
         self.gpu_cache_usage_percent.labels(
+            **{
+                labels.MODEL: self.model_name,
+                labels.COMPONENT: self.component_name,
+                labels.DP_RANK: dp_rank,
+            }
+        ).set(value)
+
+    def set_kv_cache_hit_rate(self, dp_rank: str, value: float) -> None:
+        self.kv_cache_hit_rate.labels(
             **{
                 labels.MODEL: self.model_name,
                 labels.COMPONENT: self.component_name,

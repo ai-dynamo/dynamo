@@ -23,10 +23,9 @@ import (
 	"strconv"
 
 	log "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/plugins"
-	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/scheduling/framework"
-	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/scheduling/types"
-	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
+	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
+	plugins "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
+	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling"
 
 	dynscorer "github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/dynamo_kv_scorer"
 )
@@ -37,7 +36,7 @@ const (
 )
 
 // compile-time type assertion
-var _ framework.Scorer = &DynPrefillScorer{}
+var _ schedtypes.Scorer = &DynPrefillScorer{}
 
 // DynPrefillScorerConfig holds the configuration for the DynPrefillScorer plugin.
 type DynPrefillScorerConfig struct{}
@@ -51,7 +50,6 @@ func DynPrefillScorerFactory(name string, rawParameters json.RawMessage, _ plugi
 		}
 	}
 
-	// Initialize the shared FFI (idempotent)
 	if err := dynscorer.InitFFI(); err != nil {
 		return nil, fmt.Errorf("Dynamo FFI init for prefill scorer failed: %w", err)
 	}
@@ -67,12 +65,6 @@ func NewDynPrefillScorer() *DynPrefillScorer {
 }
 
 // DynPrefillScorer is a scorer plugin for the prefill scheduling profile.
-//
-// When Score() is called, it:
-//  1. Reads PrefillEnabledState from CycleState (written by DisaggProfileHandler).
-//  2. If prefill is NOT enabled, returns zero scores.
-//  3. If prefill IS enabled, calls the Dynamo FFI prefill router to select the best prefill worker.
-//  4. Assigns score 1.0 to all pods (the router's selection is authoritative, communicated via headers).
 type DynPrefillScorer struct {
 	typedName plugins.TypedName
 }
@@ -88,35 +80,36 @@ func (s *DynPrefillScorer) WithName(name string) *DynPrefillScorer {
 	return s
 }
 
-// Score scores pods for prefill suitability.
-func (s *DynPrefillScorer) Score(ctx context.Context, cycleState *schedtypes.CycleState, req *schedtypes.LLMRequest, pods []schedtypes.Pod) map[schedtypes.Pod]float64 {
+// Category returns the scorer category.
+func (s *DynPrefillScorer) Category() schedtypes.ScorerCategory {
+	return schedtypes.Affinity
+}
+
+// Score scores endpoints for prefill suitability.
+func (s *DynPrefillScorer) Score(ctx context.Context, cycleState *schedtypes.CycleState, req *schedtypes.InferenceRequest, endpoints []schedtypes.Endpoint) map[schedtypes.Endpoint]float64 {
 	logger := log.FromContext(ctx)
 
 	if !readPrefillEnabled(cycleState) {
 		logger.V(logutil.VERBOSE).Info("DynPrefillScorer: prefill not enabled, returning zero scores")
-		return uniformScores(pods, 0)
+		return uniformScores(endpoints, 0)
 	}
 
 	requestJSON, err := buildRequestJSON(req)
 	if err != nil {
 		logger.V(logutil.DEFAULT).Error(err, "DynPrefillScorer: failed to build request")
-		return uniformScores(pods, 0)
+		return uniformScores(endpoints, 0)
 	}
 
-	podsJSON := serializePods(pods)
-	logger.V(logutil.DEFAULT).Info("DynPrefillScorer: pods received for scoring",
-		"podCount", len(pods),
-		"podsJSON", string(podsJSON))
+	endpointsJSON := serializeEndpoints(endpoints)
+	logger.V(logutil.DEFAULT).Info("DynPrefillScorer: endpoints received for scoring",
+		"endpointCount", len(endpoints),
+		"endpointsJSON", string(endpointsJSON))
 
-	result, err := dynscorer.CallRoutePrefillRequest(requestJSON, podsJSON)
+	result, err := dynscorer.CallRoutePrefillRequest(requestJSON, endpointsJSON)
 	if err != nil {
 		logger.V(logutil.DEFAULT).Error(err, "DynPrefillScorer: FFI prefill routing failed")
-		// Overwrite PrefillEnabled to false so the decode scorer falls back
-		// to aggregated routing. Without this, the prefill profile "succeeds"
-		// (picker picks a pod) but the prefill header is not set, causing
-		// the sidecar to reject the request in direct routing mode.
 		cycleState.Write(PrefillEnabledStateKey, &PrefillEnabledState{Enabled: false})
-		return uniformScores(pods, 0)
+		return uniformScores(endpoints, 0)
 	}
 
 	prefillWorkerID := strconv.FormatUint(result.WorkerID, 10)
@@ -125,10 +118,6 @@ func (s *DynPrefillScorer) Score(ctx context.Context, cycleState *schedtypes.Cyc
 		"prefillDpRank", result.DpRank,
 		"tokenCount", len(result.TokenData))
 
-	// Set the prefill worker ID and DP rank headers directly on the request.
-	// The request object is shared across all profile runs in the scheduling
-	// cycle, so the decode scorer (which runs in the next profile) will see it.
-	// This is more reliable than CycleState which may be scoped per profile.
 	if req.Headers == nil {
 		req.Headers = map[string]string{}
 	}
@@ -139,8 +128,5 @@ func (s *DynPrefillScorer) Score(ctx context.Context, cycleState *schedtypes.Cyc
 		delete(req.Headers, PrefillDpRankHeader)
 	}
 
-	// Score: 1.0 for all pods. The label-filter has already restricted to prefill workers,
-	// and the FFI router's internal selection is authoritative.
-	// In the future, we could match worker IDs to pod names for precise scoring.
-	return uniformScores(pods, 1.0)
+	return uniformScores(endpoints, 1.0)
 }

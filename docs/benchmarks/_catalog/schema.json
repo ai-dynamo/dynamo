@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ai-dynamo/dynamo/docs/benchmarks/_catalog/schema.json",
+  "title": "Dynamo feature-benchmark catalog entry",
+  "description": "JSON Schema (draft 2020-12) for ONE benchmark object, i.e. the contents of docs/benchmarks/_catalog/benchmarks/<id>.yaml. Each entry is a reproducible performance claim with deployable control and treatment configs.",
+  "type": "object",
+  "required": [
+    "id",
+    "title",
+    "page",
+    "claim",
+    "subtype",
+    "features",
+    "model",
+    "hardware",
+    "traffic",
+    "arms",
+    "results",
+    "maintainer"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Stable slug; must match the filename and the page slug in docs/index.yml.",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "title": {
+      "type": "string",
+      "description": "Display title."
+    },
+    "page": {
+      "type": "string",
+      "description": "docs-relative path to the rendered MDX page.",
+      "pattern": "\\.mdx$"
+    },
+    "claim": {
+      "type": "string",
+      "description": "The performance claim under test."
+    },
+    "subtype": {
+      "type": "string",
+      "enum": [
+        "ab-test",
+        "feature-stack",
+        "topology",
+        "provider-comparison",
+        "hands-on"
+      ]
+    },
+    "features": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Dynamo features/topologies under test.",
+      "items": { "type": "string" }
+    },
+    "model": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string" },
+        "hf_id": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "hardware": {
+      "type": "object",
+      "properties": {
+        "gpu": { "type": "string" },
+        "count": { "type": ["integer", "string"] }
+      },
+      "additionalProperties": true
+    },
+    "traffic": {
+      "type": "string",
+      "description": "Controlled traffic definition."
+    },
+    "arms": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Control and treatment configs. role winner = promoted to a recipe target.",
+      "items": {
+        "type": "object",
+        "required": ["role", "name", "deploy", "perf"],
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": ["winner", "treatment", "baseline"]
+          },
+          "name": { "type": "string" },
+          "deploy": { "type": "string" },
+          "perf": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "results": {
+      "type": "object",
+      "required": ["available"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "summary": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "related_recipes": {
+      "type": "array",
+      "description": "Ids in the recipes catalog (active or deferred).",
+      "items": { "type": "string" }
+    },
+    "maintainer": {
+      "type": ["string", "null"],
+      "description": "Named maintainer (null = unassigned; tracked as a gap)."
+    },
+    "gaps": {
+      "type": "array",
+      "description": "Known contribution-standard gaps.",
+      "items": { "type": "string" }
+    },
+    "promotion_candidate": {
+      "type": "object",
+      "description": "Present when a winning arm is a recipe-promotion candidate.",
+      "required": ["deferred_recipe_id"],
+      "properties": {
+        "deferred_recipe_id": { "type": "string" },
+        "note": { "type": "string" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}

@@ -93,6 +93,34 @@ func TestSGLangBackend_PythonCommandInjection(t *testing.T) {
 			description:       "Direct python command with simple deployer should append flags",
 		},
 		{
+			// LWS worker returns $(LWS_WORKER_INDEX) with needsShell=false, so
+			// flags are appended directly to Args and the kubelet expands both
+			// $(LWS_LEADER_ADDRESS) and $(LWS_WORKER_INDEX) before the container
+			// starts - no sh -c wrapper.
+			name:              "python command LWS worker - direct append (kubelet expansion)",
+			numberOfNodes:     2,
+			role:              RoleWorker,
+			multinodeDeployer: &LWSMultinodeDeployer{},
+			initialCommand:    []string{"python3"},
+			initialArgs:       []string{"-m", "dynamo.sglang", "--model", "llama"},
+			expectedCommand:   []string{"python3"},
+			expectedArgs:      []string{"-m", "dynamo.sglang", "--model", "llama", "--dist-init-addr", "$(LWS_LEADER_ADDRESS):29500", "--nnodes", "2", "--node-rank", "$(LWS_WORKER_INDEX)"},
+			description:       "LWS worker with direct python command should append flags without sh -c wrapping",
+		},
+		{
+			// LWS leader uses rank 0 (plain integer literal) so needsShell is
+			// false for both leader and worker roles.
+			name:              "python command LWS leader - direct append",
+			numberOfNodes:     2,
+			role:              RoleLeader,
+			multinodeDeployer: &LWSMultinodeDeployer{},
+			initialCommand:    []string{"python3"},
+			initialArgs:       []string{"-m", "dynamo.sglang"},
+			expectedCommand:   []string{"python3"},
+			expectedArgs:      []string{"-m", "dynamo.sglang", "--dist-init-addr", "$(LWS_LEADER_ADDRESS):29500", "--nnodes", "2", "--node-rank", "0"},
+			description:       "LWS leader with direct python command should append flags with kubelet-expanded leader hostname",
+		},
+		{
 			name:              "python command shell deployer - shell wrapping",
 			numberOfNodes:     2,
 			role:              RoleWorker,
@@ -200,7 +228,7 @@ func TestSGLangBackend_PythonCommandInjection(t *testing.T) {
 				Args:    append([]string{}, tt.initialArgs...),
 			}
 
-			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, &v1alpha1.DynamoComponentDeploymentSharedSpec{}, "test-service", tt.multinodeDeployer)
+			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{}), "test-service", tt.multinodeDeployer)
 
 			if !reflect.DeepEqual(container.Command, tt.expectedCommand) {
 				t.Errorf("UpdateContainer() command = %v, want %v", container.Command, tt.expectedCommand)
@@ -325,7 +353,7 @@ func TestSGLangBackend_ShellCommandInjection(t *testing.T) {
 				Args:    append([]string{}, tt.initialArgs...),
 			}
 
-			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, &v1alpha1.DynamoComponentDeploymentSharedSpec{}, "test-service", tt.multinodeDeployer)
+			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{}), "test-service", tt.multinodeDeployer)
 
 			if !reflect.DeepEqual(container.Args, tt.expectedArgs) {
 				t.Errorf("UpdateContainer() args = %v, want %v", container.Args, tt.expectedArgs)
@@ -499,7 +527,7 @@ func TestSGLangBackend_ProbeRemoval(t *testing.T) {
 				StartupProbe:   startupProbe,
 			}
 
-			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, &v1alpha1.DynamoComponentDeploymentSharedSpec{}, "test-service", tt.multinodeDeployer)
+			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{}), "test-service", tt.multinodeDeployer)
 
 			if tt.expectProbesRemoved {
 				if container.LivenessProbe != nil {
@@ -603,7 +631,7 @@ func TestSGLangBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 			originalEnvCount := len(container.Env)
 
 			// Call UpdateContainer (single node to avoid multinode logic)
-			backend.UpdateContainer(container, 1, RoleMain, tt.component, "test-service", &GroveMultinodeDeployer{})
+			backend.UpdateContainer(container, 1, RoleMain, betaComponent(t, tt.component), "test-service", &GroveMultinodeDeployer{})
 
 			if tt.expectNoEnvVarChanges {
 				// Check that no new environment variables were added

@@ -150,7 +150,13 @@ def test_radix_tree_mm_block_chaining():
 
     # Verify chain exists
     all_blocks = radix_tree.dump_tree_as_events()
-    assert len(all_blocks) == 2
+    assert (
+        sum(
+            len(json.loads(event)["event"]["data"]["stored"]["blocks"])
+            for event in all_blocks
+        )
+        == 2
+    )
 
     # Query with both hashes should match the chain
     scores = radix_tree.find_matches([parent_hash, child_hash])
@@ -201,7 +207,13 @@ def test_radix_tree_clear_all_blocks():
         make_store_event(1, [make_block(1000), make_block(2000)]),
     )
 
-    assert len(radix_tree.dump_tree_as_events()) == 2
+    assert (
+        sum(
+            len(json.loads(event)["event"]["data"]["stored"]["blocks"])
+            for event in radix_tree.dump_tree_as_events()
+        )
+        == 2
+    )
 
     # Clear all blocks for worker
     radix_tree.clear_all_blocks(worker_id)

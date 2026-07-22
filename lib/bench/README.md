@@ -12,7 +12,9 @@ pre-warms the KV cache with the predicted next-turn prefix after each assistant
 response, cutting TTFT on subsequent turns.
 
 `offline_replay_bench` runs the Rust-native replay loop directly for profiling
-and throughput measurements without going through the Python wrapper.
+and throughput measurements without going through the Python wrapper. It uses
+the mocker's internal polynomial perf model so the results stay focused on
+replay overhead instead of external timing backends.
 
 ## Quick start
 
@@ -108,9 +110,49 @@ See also: [Agent Hints documentation](../../docs/components/frontend/nvext.md#ag
 ```bash
 cargo bench --package dynamo-bench --bench offline_replay_bench -- \
   /path/to/mooncake_trace.jsonl \
+  --engine-type sglang \
   --num-workers 4 \
   --router-mode kv-router \
   --arrival-speedup-ratio 4 \
   --trace-block-size 512 \
   --block-size 64
 ```
+
+`--engine-type` accepts `vllm`, `sglang`, or `trtllm` and defaults to `vllm`.
+Use `--speedup-ratio` and `--decode-speedup-ratio` if you want a simple scaling
+knob while keeping the same internal polynomial model.
+
+Use `--serving-mode disagg` to replay separate prefill and decode pools:
+
+```bash
+cargo bench --package dynamo-bench --bench offline_replay_bench -- \
+  /path/to/mooncake_trace.jsonl \
+  --serving-mode disagg \
+  --num-prefill-workers 2 \
+  --num-decode-workers 4 \
+  --kv-transfer-bandwidth 64 \
+  --kv-bytes-per-token 131072
+```
+
+KVBM offload is available only when the benchmark is built with
+`mocker-kvbm-offload`. Build and run this configuration on a supported Linux
+environment:
+
+```bash
+cargo bench --package dynamo-bench --bench offline_replay_bench \
+  --features mocker-kvbm-offload -- \
+  /path/to/mooncake_trace.jsonl \
+  --engine-type vllm \
+  --num-gpu-blocks 1024 \
+  --num-g2-blocks 8192 \
+  --kv-bytes-per-token 131072
+```
+
+The KVBM capacity and bandwidth flags are omitted from the benchmark CLI when
+the feature is disabled.
+
+## KV router / sharded indexer benchmarks
+
+See [kv_router/INDEXER_BENCH.md](kv_router/INDEXER_BENCH.md) for trace
+acquisition, benchmark commands, and results for the `mooncake_bench` suite:
+`concurrent-radix-tree-compressed` and `branch-sharded-crtc`.

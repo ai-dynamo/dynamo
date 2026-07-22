@@ -29,6 +29,8 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.trtllm,
     pytest.mark.gpu_1,
+    pytest.mark.profiled_vram_gib(2.0),
+    pytest.mark.requested_trtllm_vram_gib(2.0),
 ]
 
 

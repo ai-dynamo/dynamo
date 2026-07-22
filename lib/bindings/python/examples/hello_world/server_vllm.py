@@ -27,7 +27,7 @@ from vllm.entrypoints.openai.api_server import (
 )
 from vllm.inputs import TokensPrompt
 
-from dynamo.llm import ModelInput, ModelType, register_model
+from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
@@ -107,6 +107,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         ModelType.Chat | ModelType.Completions,
         endpoint,
         config.model,
+        worker_type=WorkerType.Aggregated,
     )
 
     engine_args = AsyncEngineArgs(

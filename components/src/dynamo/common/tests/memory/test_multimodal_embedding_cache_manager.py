@@ -8,6 +8,7 @@ import torch
 
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     CachedEmbedding,
+    CacheMutation,
     MultimodalEmbeddingCacheManager,
 )
 
@@ -34,6 +35,9 @@ class TestMultimodalEmbeddingCacheManagerBasicOperations:
         assert retrieved is not None
         assert torch.equal(retrieved.tensor, tensor)
         assert retrieved.image_grid_thw is None
+        assert retrieved.video_grid_thw is None
+        assert retrieved.second_per_grid_ts is None
+        assert retrieved.video_timestamps is None
 
     def test_set_and_get_with_grid(self):
         cache = MultimodalEmbeddingCacheManager(capacity_bytes=1024 * 1024)
@@ -67,6 +71,24 @@ class TestMultimodalEmbeddingCacheManagerBasicOperations:
         assert retrieved is not None
         assert torch.equal(retrieved.tensor, tensor2)
         assert cache.stats["entries"] == 1
+
+    def test_set_with_delta_reports_add_and_evictions(self):
+        tensor_size = 10 * 10 * 4
+        capacity = tensor_size * 2 + 100
+        cache = MultimodalEmbeddingCacheManager(capacity_bytes=capacity)
+        t1 = torch.randn(10, 10)
+        t2 = torch.randn(10, 10)
+        t3 = torch.randn(10, 10)
+
+        m1 = cache.set_with_delta("key1", CachedEmbedding(t1))
+        m2 = cache.set_with_delta("key2", CachedEmbedding(t2))
+        m3 = cache.set_with_delta("key3", CachedEmbedding(t3))
+
+        assert m1 == CacheMutation(True, ["key1"], [])
+        assert m2 == CacheMutation(True, ["key2"], [])
+        assert m3.stored is True
+        assert m3.added_keys == ["key3"]
+        assert m3.removed_keys == ["key1"]
 
 
 class TestMultimodalEmbeddingCacheManagerLRUEviction:
@@ -250,21 +272,36 @@ class TestCachedEmbeddingNamedTuple:
 
     def test_fields(self):
         tensor = torch.randn(4, 4)
-        grid = [[1, 2, 3]]
-        entry = CachedEmbedding(tensor=tensor, image_grid_thw=grid)
+        video_grid = [[1, 2, 3]]
+        timestamps = [[0.0, 0.5]]
+        entry = CachedEmbedding(
+            tensor=tensor,
+            video_grid_thw=video_grid,
+            second_per_grid_ts=0.5,
+            video_timestamps=timestamps,
+        )
 
         assert torch.equal(entry.tensor, tensor)
-        assert entry.image_grid_thw == grid
+        assert entry.image_grid_thw is None
+        assert entry.video_grid_thw == video_grid
+        assert entry.second_per_grid_ts == 0.5
+        assert entry.video_timestamps == timestamps
 
     def test_none_grid(self):
         tensor = torch.randn(4, 4)
         entry = CachedEmbedding(tensor=tensor, image_grid_thw=None)
         assert entry.image_grid_thw is None
+        assert entry.video_grid_thw is None
+        assert entry.second_per_grid_ts is None
+        assert entry.video_timestamps is None
 
     def test_unpacking(self):
         tensor = torch.randn(4, 4)
         grid = [[1, 2, 3]]
         entry = CachedEmbedding(tensor=tensor, image_grid_thw=grid)
-        t, g = entry
+        t, image_grid, video_grid, second_per_grid_ts, video_timestamps = entry
         assert torch.equal(t, tensor)
-        assert g == grid
+        assert image_grid == grid
+        assert video_grid is None
+        assert second_per_grid_ts is None
+        assert video_timestamps is None

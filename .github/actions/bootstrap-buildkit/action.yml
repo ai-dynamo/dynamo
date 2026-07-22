@@ -59,8 +59,8 @@ inputs:
     description: 'Skip the bootstrap step (only create the builder)'
     required: false
     default: 'false'
-  fresh_builder:
-    description: 'Force creation of a new K8s builder even if one already exists. Used by the create-fresh-builder preliminary job.'
+  suppress_fallback_warning:
+    description: 'Suppress the fallback pod warning when intentionally using the Kubernetes driver'
     required: false
     default: 'false'
 
@@ -87,44 +87,39 @@ runs:
       if: inputs.buildkit_worker_addresses == ''
       shell: bash
       run: |
-        if [[ "${{ inputs.fresh_builder }}" != "true" ]] && docker buildx inspect ${{ inputs.builder_name }} > /dev/null 2>&1; then
-            echo "✅ Builder '${{ inputs.builder_name }}' already exists. Skipping creation."
-        else
-          if [[ "${{ inputs.fresh_builder }}" == "true" ]] && docker buildx inspect ${{ inputs.builder_name }} > /dev/null 2>&1; then
-            echo "🔄 Forcing fresh K8s builder: removing existing '${{ inputs.builder_name }}'."
-            docker buildx rm ${{ inputs.builder_name }} || true
-          fi
-          echo "🔨 Creating K8s builder '${{ inputs.builder_name }}'."
-          docker buildx create --use --name ${{ inputs.builder_name }} --driver kubernetes --platform=linux/amd64 \
-          '--driver-opt=requests.ephemeral-storage=${{ inputs.ephemeral_storage }}' \
-          '--driver-opt=namespace=${{ inputs.namespace }}' \
-          '--driver-opt=loadbalance=sticky' \
-          '--driver-opt=replicas=${{ inputs.replicas }}' \
-          '--driver-opt=requests.cpu=${{ inputs.requests_cpu }}' \
-          '--driver-opt=requests.memory=${{ inputs.requests_memory }}' \
-          '--driver-opt=limits.memory=${{ inputs.limits_memory }}' \
-          '--driver-opt="nodeselector=kubernetes.io/arch=amd64,role=dynamo-builder-fallback"' \
-          '--driver-opt="tolerations=${{ inputs.tolerations }}"'
+        # If the builder already exists, these commands will just set the right configurations to use it
+        echo "🔨 Creating K8s builder '${{ inputs.builder_name }}'."
+        docker buildx create --use --name ${{ inputs.builder_name }} --driver kubernetes --platform=linux/amd64 \
+        '--driver-opt=requests.ephemeral-storage=${{ inputs.ephemeral_storage }}' \
+        '--driver-opt=namespace=${{ inputs.namespace }}' \
+        '--driver-opt=loadbalance=sticky' \
+        '--driver-opt=replicas=${{ inputs.replicas }}' \
+        '--driver-opt=requests.cpu=${{ inputs.requests_cpu }}' \
+        '--driver-opt=requests.memory=${{ inputs.requests_memory }}' \
+        '--driver-opt=limits.memory=${{ inputs.limits_memory }}' \
+        '--driver-opt="nodeselector=kubernetes.io/arch=amd64,role=dynamo-builder-fallback"' \
+        '--driver-opt="tolerations=${{ inputs.tolerations }}"'
 
-          docker buildx create --append --name ${{ inputs.builder_name }} --driver kubernetes --platform=linux/arm64 \
-          '--driver-opt=requests.ephemeral-storage=${{ inputs.ephemeral_storage }}' \
-          '--driver-opt=namespace=${{ inputs.namespace }}' \
-          '--driver-opt=loadbalance=sticky' \
-          '--driver-opt=replicas=${{ inputs.replicas }}' \
-          '--driver-opt=requests.cpu=${{ inputs.requests_cpu }}' \
-          '--driver-opt=requests.memory=${{ inputs.requests_memory }}' \
-          '--driver-opt=limits.memory=${{ inputs.limits_memory }}' \
-          '--driver-opt="nodeselector=kubernetes.io/arch=arm64,role=dynamo-builder-fallback"' \
-          '--driver-opt="tolerations=${{ inputs.tolerations }}"'
-        fi
+        docker buildx create --append --name ${{ inputs.builder_name }} --driver kubernetes --platform=linux/arm64 \
+        '--driver-opt=requests.ephemeral-storage=${{ inputs.ephemeral_storage }}' \
+        '--driver-opt=namespace=${{ inputs.namespace }}' \
+        '--driver-opt=loadbalance=sticky' \
+        '--driver-opt=replicas=${{ inputs.replicas }}' \
+        '--driver-opt=requests.cpu=${{ inputs.requests_cpu }}' \
+        '--driver-opt=requests.memory=${{ inputs.requests_memory }}' \
+        '--driver-opt=limits.memory=${{ inputs.limits_memory }}' \
+        '--driver-opt="nodeselector=kubernetes.io/arch=arm64,role=dynamo-builder-fallback"' \
+        '--driver-opt="tolerations=${{ inputs.tolerations }}"'
+
         sleep 3 # Give the builders some time to be ready
 
-        if [[ "${{ inputs.skip_bootstrap }}" != "true" && "${{ inputs.fresh_builder }}" != "true" ]]; then
-          echo "::warning::Build is using fallback pod. Please alert the ops team."
+        if [[ "${{ inputs.suppress_fallback_warning }}" != "true" ]]; then
+          echo "::warning::Build is using fallback pod"
           echo "## ⚠️ Fallback Build Warning" >> $GITHUB_STEP_SUMMARY
-          echo "This build is running on a **fallback pod**. Please alert the ops team." >> $GITHUB_STEP_SUMMARY
+          echo "This build is using the **fallback pod** because the preferred remote builders are unavailable. Expected during nightly runs and outside business hours." >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
         fi
+
 
 
     - name: Bootstrap buildkit

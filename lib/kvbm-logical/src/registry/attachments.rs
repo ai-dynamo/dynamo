@@ -57,11 +57,11 @@ pub(crate) struct AttachmentStore {
     pub(super) multiple_attachments: HashMap<TypeId, Vec<Box<dyn Any + Send + Sync>>>,
     /// Track which types are registered and how
     pub(super) type_registry: HashMap<TypeId, AttachmentMode>,
-    /// Storage for weak block references - separate from generic attachments, keyed by TypeId
-    pub(crate) weak_blocks: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
-    /// Explicit presence tracking for Block<T, Registered> lifecycle
-    /// Key is TypeId::of::<T>() - indicates a Block<T, Registered> exists somewhere
-    pub(super) presence_markers: HashMap<TypeId, ()>,
+    /// Refcounted presence tracking for `Block<T, Registered>` lifecycle.
+    /// Each presence-bearing slot (`Primary`/`Duplicate`/`Inactive`) for
+    /// this hash and tier `T` contributes one count. `has_block::<T>`
+    /// returns `count > 0`. Key is `TypeId::of::<T>()`.
+    pub(crate) presence_markers: HashMap<TypeId, u32>,
 }
 
 impl AttachmentStore {
@@ -70,7 +70,6 @@ impl AttachmentStore {
             unique_attachments: HashMap::new(),
             multiple_attachments: HashMap::new(),
             type_registry: HashMap::new(),
-            weak_blocks: HashMap::new(),
             presence_markers: HashMap::new(),
         }
     }
