@@ -1,6 +1,6 @@
 # Token-in/token-out parity runner
 
-This runner captures `GenerateRequest` payloads from upstream vLLM 0.23.0's
+This runner captures `GenerateRequest` payloads from upstream vLLM 0.24.0's
 render endpoints, sends the identical token and multimodal feature payloads to
 upstream vLLM and Dynamo, and compares every stable response field exactly.
 Only the intrinsically generated top-level `request_id` value is normalized.

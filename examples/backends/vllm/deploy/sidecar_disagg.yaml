@@ -15,87 +15,89 @@
 # reaches its engine over 127.0.0.1:50051. The sidecar is given ONLY the
 # endpoint and discovers its role from the engine.
 # Requires the custom sidecar image described in deploy/README.md.
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: vllm-sidecar-disagg
 spec:
-  services:
-    Frontend:
-      componentType: frontend
+  components:
+    - name: Frontend
+      type: frontend
       replicas: 1
-      extraPodSpec:
-        mainContainer:
-          image: my-registry/vllm-sidecar-runtime:my-tag
-    VllmSidecarDecodeWorker:
-      envFromSecret: hf-token-secret
-      componentType: worker
-      subComponentType: decode
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: my-registry/vllm-sidecar-runtime:my-tag
+    - name: VllmSidecarDecodeWorker
+      type: worker
       replicas: 1
-      resources:
-        requests:
-          custom:
-            # Increase this value for larger models
-            ephemeral-storage: "2Gi"
-      extraPodSpec:
-        containers:
-          - name: vllm-engine
-            image: my-registry/vllm-sidecar-runtime:my-tag
-            command:
-              - vllm-rs
-              - serve
-              - Qwen/Qwen3-0.6B
-              - --grpc-port
-              - "50051"
-              - --enforce-eager
-              - --kv-transfer-config
-              - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
-            resources:
-              limits:
-                nvidia.com/gpu: "1"
-        # Endpoint-only; role discovered from the engine as DECODE.
-        mainContainer:
-          image: my-registry/vllm-sidecar-runtime:my-tag
-          workingDir: /workspace/examples/backends/vllm
-          command:
-            - dynamo-vllm-sidecar
-          args:
-            - --grpc-endpoint
-            - 127.0.0.1:50051
-    VllmSidecarPrefillWorker:
-      envFromSecret: hf-token-secret
-      componentType: worker
-      subComponentType: prefill
+      podTemplate:
+        spec:
+          containers:
+            # Endpoint-only; role is configured explicitly as decode.
+            - name: main
+              image: my-registry/vllm-sidecar-runtime:my-tag
+              command: [dynamo-vllm-sidecar]
+              args:
+                - --grpc-endpoint
+                - 127.0.0.1:50051
+                - --disaggregation-mode
+                - decode
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              resources:
+                requests:
+                  ephemeral-storage: 2Gi
+            - name: vllm-engine
+              image: my-registry/vllm-sidecar-runtime:my-tag
+              command:
+                - vllm-rs
+                - serve
+                - Qwen/Qwen3-0.6B
+                - --grpc-port
+                - "50051"
+                - --enforce-eager
+                - --kv-transfer-config
+                - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
+              resources:
+                limits:
+                  nvidia.com/gpu: "1"
+    - name: VllmSidecarPrefillWorker
+      type: worker
       replicas: 1
-      resources:
-        requests:
-          custom:
-            # Increase this value for larger models
-            ephemeral-storage: "2Gi"
-      extraPodSpec:
-        containers:
-          - name: vllm-engine
-            image: my-registry/vllm-sidecar-runtime:my-tag
-            command:
-              - vllm-rs
-              - serve
-              - Qwen/Qwen3-0.6B
-              - --grpc-port
-              - "50051"
-              - --enforce-eager
-              - --kv-transfer-config
-              - '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
-              - --kv-events-config
-              - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'
-            resources:
-              limits:
-                nvidia.com/gpu: "1"
-        # Endpoint-only; role discovered from the engine as PREFILL.
-        mainContainer:
-          image: my-registry/vllm-sidecar-runtime:my-tag
-          workingDir: /workspace/examples/backends/vllm
-          command:
-            - dynamo-vllm-sidecar
-          args:
-            - --grpc-endpoint
-            - 127.0.0.1:50051
+      podTemplate:
+        spec:
+          containers:
+            # Endpoint-only; role is configured explicitly as prefill.
+            - name: main
+              image: my-registry/vllm-sidecar-runtime:my-tag
+              command: [dynamo-vllm-sidecar]
+              args:
+                - --grpc-endpoint
+                - 127.0.0.1:50051
+                - --disaggregation-mode
+                - prefill
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              resources:
+                requests:
+                  ephemeral-storage: 2Gi
+            - name: vllm-engine
+              image: my-registry/vllm-sidecar-runtime:my-tag
+              command:
+                - vllm-rs
+                - serve
+                - Qwen/Qwen3-0.6B
+                - --grpc-port
+                - "50051"
+                - --enforce-eager
+                - --kv-transfer-config
+                - '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
+                - --kv-events-config
+                - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'
+              resources:
+                limits:
+                  nvidia.com/gpu: "1"

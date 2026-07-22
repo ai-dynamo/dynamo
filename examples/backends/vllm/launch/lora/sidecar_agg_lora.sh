@@ -3,14 +3,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 set -e
-trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../../common/launch_utils.sh"
+source "$SCRIPT_DIR/../../../../common/gpu_utils.sh"
+trap dynamo_exit_trap EXIT
 
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
+GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 MAX_LORAS="${MAX_LORAS:-4}"
 MAX_LORA_RANK="${MAX_LORA_RANK:-64}"
 GRPC_HOST="${GRPC_HOST:-127.0.0.1}"
@@ -33,6 +35,7 @@ vllm-rs serve "$MODEL" \
     --grpc-port "$GRPC_PORT" \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
+    $GPU_MEM_ARGS \
     --enable-lora \
     --max-loras "$MAX_LORAS" \
     --max-lora-rank "$MAX_LORA_RANK" &

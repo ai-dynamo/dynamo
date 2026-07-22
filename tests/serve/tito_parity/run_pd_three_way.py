@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import atexit
 import copy
 import json
 import sys
@@ -15,9 +16,10 @@ from typing import Any, Iterator
 
 import requests
 import run_parity as parity
+from tests.utils.port_utils import allocate_ports, deallocate_ports
 
-PREFILL_PORT = 8100
-DECODE_PORT = 8200
+PREFILL_PORT, DECODE_PORT = allocate_ports(2, 19_000)
+atexit.register(deallocate_ports, [PREFILL_PORT, DECODE_PORT])
 UPSTREAM_RUNS = 2
 
 
@@ -90,9 +92,9 @@ def upstream_pd_pair(
 ) -> Iterator[None]:
     prefix = f"upstream-run-{run_number}"
     decode_environment = environment.copy()
-    decode_environment["VLLM_NIXL_SIDE_CHANNEL_PORT"] = "20099"
+    decode_environment["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(parity.DECODE_NIXL_PORT)
     prefill_environment = environment.copy()
-    prefill_environment["VLLM_NIXL_SIDE_CHANNEL_PORT"] = "20098"
+    prefill_environment["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(parity.PREFILL_NIXL_PORT)
     with parity.run_server(
         f"{prefix}-decode",
         upstream_worker_command(model, DECODE_PORT),
@@ -434,8 +436,7 @@ def compare_three_way(
             ):
                 if missing:
                     failures.append(
-                        f"{key}: {side} omitted requested fields: "
-                        f"{', '.join(missing)}"
+                        f"{key}: {side} omitted requested fields: {', '.join(missing)}"
                     )
 
     (output_dir / "summary.json").write_text(
@@ -519,7 +520,8 @@ def main() -> int:
                 groups = parity.build_runs(
                     cases, rendered, args.suite, args.max_concurrency
                 )
-            assert groups is not None
+            if groups is None:
+                raise RuntimeError("request groups were not initialized")
             results, run_requests = execute_pd_runs(groups, request_timeout)
             write_partial_results(
                 output_dir / f"upstream-run-{run_number}-responses.json", results
@@ -530,12 +532,19 @@ def main() -> int:
             elif requests_by_key != run_requests:
                 raise AssertionError("upstream P/D runs received different requests")
 
-    assert groups is not None
-    assert requests_by_key is not None
+    if groups is None or requests_by_key is None:
+        raise RuntimeError("upstream P/D runs did not initialize comparison state")
     dynamo_environment = environment.copy()
     dynamo_environment.update(
         {
             "DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE": "1",
+            "DYN_HTTP_PORT": str(parity.DYNAMO_PORT),
+            "DYN_DECODE_SYSTEM_PORT": str(parity.DECODE_SYSTEM_PORT),
+            "DYN_PREFILL_SYSTEM_PORT": str(parity.PREFILL_SYSTEM_PORT),
+            "DYN_DECODE_NIXL_PORT": str(parity.DECODE_NIXL_PORT),
+            "DYN_PREFILL_NIXL_PORT": str(parity.PREFILL_NIXL_PORT),
+            "DYN_DECODE_KV_EVENT_PORT": str(parity.DECODE_KV_EVENT_PORT),
+            "DYN_PREFILL_KV_EVENT_PORT": str(parity.PREFILL_KV_EVENT_PORT),
             "DYN_HTTP_BODY_LIMIT_MB": "200",
             "DYN_FILE_KV_TTL_SECS": "1800",
             "MAX_MODEL_LEN": str(parity.MODEL_MAX_LEN),
@@ -571,8 +580,7 @@ def main() -> int:
         raise AssertionError("upstream and Dynamo received different requests")
     compare_three_way(upstream_results, dynamo_results, requests_by_key, output_dir)
     print(
-        f"Three-way P/D parity passed for {len(requests_by_key)} requests: "
-        f"{output_dir}"
+        f"Three-way P/D parity passed for {len(requests_by_key)} requests: {output_dir}"
     )
     return 0
 

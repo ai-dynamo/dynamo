@@ -14,50 +14,51 @@
 # model and role from the vLLM gRPC API. This template requires the custom
 # sidecar image described in deploy/README.md; the standard vllm-runtime image
 # does not install vllm-rs or dynamo-vllm-sidecar.
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: vllm-sidecar-agg
 spec:
-  services:
-    Frontend:
-      envFromSecret: hf-token-secret
-      componentType: frontend
+  components:
+    - name: Frontend
+      type: frontend
       replicas: 1
-      extraPodSpec:
-        mainContainer:
-          image: my-registry/vllm-sidecar-runtime:my-tag
-    VllmSidecarWorker:
-      envFromSecret: hf-token-secret
-      componentType: worker
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: my-registry/vllm-sidecar-runtime:my-tag
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+    - name: VllmSidecarWorker
+      type: worker
       replicas: 1
-      resources:
-        requests:
-          custom:
-            # Increase this value for larger models
-            ephemeral-storage: "2Gi"
-      extraPodSpec:
-        # Engine container: holds the GPU and runs the Rust vLLM server.
-        containers:
-          - name: vllm-engine
-            image: my-registry/vllm-sidecar-runtime:my-tag
-            command:
-              - vllm-rs
-              - serve
-              - Qwen/Qwen3-0.6B
-              - --grpc-port
-              - "50051"
-              - --enforce-eager
-            resources:
-              limits:
-                nvidia.com/gpu: "1"
-        # Sidecar container (Dynamo worker): CPU-only vLLM gRPC client.
-        # Endpoint-only; model and role are discovered from the engine.
-        mainContainer:
-          image: my-registry/vllm-sidecar-runtime:my-tag
-          workingDir: /workspace/examples/backends/vllm
-          command:
-            - dynamo-vllm-sidecar
-          args:
-            - --grpc-endpoint
-            - 127.0.0.1:50051
+      podTemplate:
+        spec:
+          containers:
+            # Sidecar container (Dynamo worker): CPU-only vLLM gRPC client.
+            # Endpoint-only; model and role are discovered from the engine.
+            - name: main
+              image: my-registry/vllm-sidecar-runtime:my-tag
+              command: [dynamo-vllm-sidecar]
+              args: [--grpc-endpoint, 127.0.0.1:50051]
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              resources:
+                requests:
+                  ephemeral-storage: 2Gi
+            # Engine container: holds the GPU and runs the Rust vLLM server.
+            - name: vllm-engine
+              image: my-registry/vllm-sidecar-runtime:my-tag
+              command:
+                - vllm-rs
+                - serve
+                - Qwen/Qwen3-0.6B
+                - --grpc-port
+                - "50051"
+                - --enforce-eager
+              resources:
+                limits:
+                  nvidia.com/gpu: "1"

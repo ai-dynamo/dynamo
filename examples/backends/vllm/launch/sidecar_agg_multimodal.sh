@@ -20,17 +20,18 @@
 # token IDs. No NIXL/encoder transfer is involved for aggregated serving.
 
 set -e
-trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh" # print_launch_banner, print_curl_footer, wait_any_exit
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh" # build_vllm_gpu_mem_args
+trap dynamo_exit_trap EXIT
 
 # Default model: LLaVA-1.5, whose single `<image>` placeholder is a real
 # tokenizer token (id 32000), so the marker-expansion path in llm-multimodal
 # resolves. Qwen-VL does NOT work with this frontend: its llm-multimodal spec
 # hardcodes the marker `<image>`, but the real Qwen tokenizer only has
 # `<|image_pad|>`, so backend init fails resolving the marker token id.
-MODEL="${DYN_MODEL_NAME:-llava-hf/llava-1.5-7b-hf}"
+MODEL="${MODEL:-${DYN_MODEL_NAME:-llava-hf/llava-1.5-7b-hf}}"
 
 # Parse command line arguments
 EXTRA_ARGS=()
@@ -59,6 +60,7 @@ done
 # ---- Tunable (override via env vars) ----
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
+GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 GRPC_HOST="${GRPC_HOST:-127.0.0.1}"
 GRPC_PORT="${GRPC_PORT:-50051}"
 # vllm-rs runs its own OpenAI HTTP frontend; it is unused by the sidecar but
@@ -100,6 +102,7 @@ vllm-rs serve "$MODEL" \
     --grpc-port "$GRPC_PORT" \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
+    $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 
 # 3. Dynamo sidecar worker (no vllm import; vLLM gRPC client only). It receives

@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import math
 import re
 import sys
 import time
@@ -174,7 +175,7 @@ def prepare_requests(
 
 def observe_live_gauges(
     request: dict[str, Any], before: MetricSnapshot, output_dir: Path, timeout: int
-) -> parity.HttpResult:
+) -> tuple[list[dict[str, Any]], list[parity.HttpResult]]:
     model = request["model"]
     baseline_active = metric_value_or_zero(
         before, "dynamo_frontend_active_requests", {"model": model}
@@ -190,16 +191,30 @@ def observe_live_gauges(
     queue_observed = False
     live_text = ""
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(
-            parity.post_json,
-            parity.DYNAMO_PORT,
-            parity.GENERATE_PATH,
-            request,
-            timeout,
+    requests = []
+    for index in range(parity.MAX_NUM_SEQS + 1):
+        pressure_request = copy.deepcopy(request)
+        pressure_request["request_id"] = f"{request['request_id']}-pressure-{index}"
+        pressure_request["sampling_params"]["max_tokens"] = max(
+            pressure_request["sampling_params"]["max_tokens"], 256
         )
+        requests.append(pressure_request)
+
+    with ThreadPoolExecutor(max_workers=len(requests)) as executor:
+        futures = [
+            executor.submit(
+                parity.post_json,
+                parity.DYNAMO_PORT,
+                parity.GENERATE_PATH,
+                pressure_request,
+                timeout,
+            )
+            for pressure_request in requests
+        ]
         deadline = time.monotonic() + timeout
-        while not future.done() and time.monotonic() < deadline:
+        while (
+            not all(future.done() for future in futures) and time.monotonic() < deadline
+        ):
             live_text, live = scrape_metrics(parity.DYNAMO_PORT)
             active = metric_value_or_zero(
                 live, "dynamo_frontend_active_requests", {"model": model}
@@ -216,7 +231,7 @@ def observe_live_gauges(
             if active_observed and inflight_observed and queue_observed:
                 break
             time.sleep(0.005)
-        result = future.result(timeout=timeout)
+        results = [future.result(timeout=timeout) for future in futures]
 
     (output_dir / "metrics-live.prom").write_text(live_text, encoding="utf-8")
     if not active_observed:
@@ -225,7 +240,7 @@ def observe_live_gauges(
         raise AssertionError("inflight_requests never rose while Generate was running")
     if not queue_observed:
         raise AssertionError("queued_requests never rose before the first output token")
-    return result
+    return requests, results
 
 
 def assert_metric_deltas(
@@ -368,7 +383,11 @@ def assert_metric_deltas(
             "dynamo_frontend_worker_last_inter_token_latency_seconds",
             {"worker_type": "decode"},
         )
-        if not worker_ttft or not worker_input or not worker_itl:
+        populated = all(
+            values and any(math.isfinite(value) and value > 0 for value in values)
+            for values in (worker_ttft, worker_input, worker_itl)
+        )
+        if not populated:
             raise AssertionError(
                 f"missing P/D worker timing series: ttft={len(worker_ttft)} "
                 f"input={len(worker_input)} itl={len(worker_itl)}"
@@ -430,6 +449,13 @@ def main() -> int:
     dynamo_environment.update(
         {
             "DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE": "1",
+            "DYN_HTTP_PORT": str(parity.DYNAMO_PORT),
+            "DYN_DECODE_SYSTEM_PORT": str(parity.DECODE_SYSTEM_PORT),
+            "DYN_PREFILL_SYSTEM_PORT": str(parity.PREFILL_SYSTEM_PORT),
+            "DYN_DECODE_NIXL_PORT": str(parity.DECODE_NIXL_PORT),
+            "DYN_PREFILL_NIXL_PORT": str(parity.PREFILL_NIXL_PORT),
+            "DYN_DECODE_KV_EVENT_PORT": str(parity.DECODE_KV_EVENT_PORT),
+            "DYN_PREFILL_KV_EVENT_PORT": str(parity.PREFILL_KV_EVENT_PORT),
             "DYN_HTTP_BODY_LIMIT_MB": "200",
             "DYN_FILE_KV_TTL_SECS": "1800",
             "MAX_MODEL_LEN": str(parity.MODEL_MAX_LEN),
@@ -460,7 +486,7 @@ def main() -> int:
         before_text, before = scrape_metrics(parity.DYNAMO_PORT)
         first_text = copy.deepcopy(text_request)
         first_text["request_id"] = f"metrics-{args.topology}-text-first"
-        first_result = observe_live_gauges(
+        live_requests, live_results = observe_live_gauges(
             first_text, before, output_dir, request_timeout
         )
 
@@ -482,8 +508,8 @@ def main() -> int:
         )
         after_text, after = scrape_metrics(parity.DYNAMO_PORT)
 
-    requests_sent = [first_text, cached_text, vlm_request]
-    results = [first_result, cached_result, vlm_result]
+    requests_sent = [*live_requests, cached_text, vlm_request]
+    results = [*live_results, cached_result, vlm_result]
     (output_dir / "metrics-before.prom").write_text(before_text, encoding="utf-8")
     (output_dir / "metrics-after.prom").write_text(after_text, encoding="utf-8")
     (output_dir / "requests.json").write_text(

@@ -22,7 +22,7 @@
 set -e
 
 # Common configuration
-MODEL="Qwen/Qwen3-0.6B"
+MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
@@ -33,7 +33,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     exit 0
 fi
 
-trap 'echo Cleaning up...; kill 0' EXIT
+trap dynamo_exit_trap EXIT
 
 # vLLM gRPC ports (one per engine).
 DECODE_GRPC_PORT="${DECODE_GRPC_PORT:-50051}"
@@ -65,17 +65,17 @@ DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 
 # 4. Prefill engine: vllm-rs serve, kv_producer, vLLM gRPC on PREFILL_GRPC_PORT.
 # KV events published so KV-aware routing can observe the prefill cache.
-CUDA_VISIBLE_DEVICES=1 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 vllm-rs serve "$MODEL" \
+CUDA_VISIBLE_DEVICES=1 VLLM_NIXL_SIDE_CHANNEL_PORT="${PREFILL_NIXL_SIDE_CHANNEL_PORT:-20097}" vllm-rs serve "$MODEL" \
     --port "$PREFILL_HTTP_PORT" \
     --grpc-port "$PREFILL_GRPC_PORT" \
     --enforce-eager \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}' \
-    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' &
+    --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${PREFILL_KV_EVENT_PORT:-20081}\",\"enable_kv_cache_events\":true}" &
 
 # 5. Prefill sidecar worker (endpoint-only; role discovered as PREFILL).
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
     dynamo-vllm-sidecar \
     --grpc-endpoint "127.0.0.1:${PREFILL_GRPC_PORT}" &
 
-# Exit on first process failure; kill 0 in the EXIT trap tears down the rest
+# Exit on first process failure; the shared EXIT trap reaps the rest.
 wait_any_exit

@@ -18,13 +18,14 @@
 # engine process.
 
 set -e
-trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh" # print_launch_banner, wait_any_exit
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh" # build_vllm_gpu_mem_args
+trap dynamo_exit_trap EXIT
 
 # Default model
-MODEL="Qwen/Qwen3-0.6B"
+MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 
 # Parse command line arguments
 EXTRA_ARGS=()
@@ -59,6 +60,7 @@ done
 # ---- Tunable (override via env vars) ----
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
+GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 GRPC_HOST="${GRPC_HOST:-127.0.0.1}"
 GRPC_PORT="${GRPC_PORT:-50051}"
 # vllm-rs runs its own OpenAI HTTP frontend; it is unused by the sidecar but
@@ -93,6 +95,7 @@ vllm-rs serve "$MODEL" \
     --kv-transfer-config "$KV_TRANSFER_CONFIG" \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
+    $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 
 # 3. Dynamo sidecar worker (no vllm/kvbm import; vLLM gRPC client only). It

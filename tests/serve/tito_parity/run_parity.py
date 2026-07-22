@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import atexit
 import base64
 import copy
 import difflib
@@ -27,9 +28,35 @@ import requests
 from PIL import Image, ImageDraw
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from tests.utils.port_utils import allocate_ports, deallocate_ports  # noqa: E402
+
 GENERATE_PATH = "/inference/v1/generate"
-UPSTREAM_PORT = 8000
-DYNAMO_PORT = 8000
+(
+    UPSTREAM_PORT,
+    DYNAMO_PORT,
+    DECODE_SYSTEM_PORT,
+    PREFILL_SYSTEM_PORT,
+    DECODE_NIXL_PORT,
+    PREFILL_NIXL_PORT,
+    DECODE_KV_EVENT_PORT,
+    PREFILL_KV_EVENT_PORT,
+) = allocate_ports(8, 18_000)
+atexit.register(
+    deallocate_ports,
+    [
+        UPSTREAM_PORT,
+        DYNAMO_PORT,
+        DECODE_SYSTEM_PORT,
+        PREFILL_SYSTEM_PORT,
+        DECODE_NIXL_PORT,
+        PREFILL_NIXL_PORT,
+        DECODE_KV_EVENT_PORT,
+        PREFILL_KV_EVENT_PORT,
+    ],
+)
 MODEL_MAX_LEN = 4096
 MAX_NUM_SEQS = 4
 KV_CACHE_BYTES = 4_294_967_296
@@ -421,9 +448,9 @@ def build_runs(
                 requests_for_run = []
                 for case in expanded:
                     request = copy.deepcopy(rendered[case.name])
-                    request[
-                        "request_id"
-                    ] = f"parity-{suite}-c{concurrency}-r{repetition}-{case.name}"
+                    request["request_id"] = (
+                        f"parity-{suite}-c{concurrency}-r{repetition}-{case.name}"
+                    )
                     requests_for_run.append(
                         RequestRun(
                             key=f"c{concurrency}-r{repetition}-{case.name}",
@@ -800,6 +827,13 @@ def main() -> int:
     dynamo_environment.update(
         {
             "DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE": "1",
+            "DYN_HTTP_PORT": str(DYNAMO_PORT),
+            "DYN_DECODE_SYSTEM_PORT": str(DECODE_SYSTEM_PORT),
+            "DYN_PREFILL_SYSTEM_PORT": str(PREFILL_SYSTEM_PORT),
+            "DYN_DECODE_NIXL_PORT": str(DECODE_NIXL_PORT),
+            "DYN_PREFILL_NIXL_PORT": str(PREFILL_NIXL_PORT),
+            "DYN_DECODE_KV_EVENT_PORT": str(DECODE_KV_EVENT_PORT),
+            "DYN_PREFILL_KV_EVENT_PORT": str(PREFILL_KV_EVENT_PORT),
             "DYN_HTTP_BODY_LIMIT_MB": "200",
             "DYN_FILE_KV_TTL_SECS": "1800",
             "MAX_MODEL_LEN": str(MODEL_MAX_LEN),
