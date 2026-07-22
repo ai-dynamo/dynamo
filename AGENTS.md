@@ -31,9 +31,10 @@ to it — edit only the canonical copy. Reach for the right group first:
 **For developing Dynamo:**
 
 - `debug-session` — structured bug investigation with a persistent worklog
-- `dep-create` — create or update Dynamo Enhancement Proposals as GitHub issues
-- `dep-status` — check DEP status and list DEPs by lifecycle state or area
-- `dep-update` — advance DEP lifecycle: triage, PIC assignment, review, approval
+- `dep-create` — author a new DEP in `ai-dynamo/enhancements` (PR + tracking issue)
+- `dep-render` — render a DEP on the docs-site Proposals tab with a read-only GitHub comment mirror
+- `dep-status` — check DEP status and find DEPs in `ai-dynamo/enhancements`
+- `dep-update` — advance a DEP's lifecycle via a follow-up PR in `ai-dynamo/enhancements`
 - `dynamo-clone-hotpath-audit` — audit Rust hot-path `.clone()` calls
 - `dynamo-docs` — Fern docs-site content per the style guide
 - `dynamo-frontend-benchmark` — benchmark/profile the frontend against mock workers
@@ -139,8 +140,9 @@ cargo fmt --all && cargo clippy --workspace
 - Full CI on a PR runs only after a maintainer comments `/ok to test <sha>` with the short
   SHA of the latest commit; copy-pr-bot then creates the `pull-request/N` branch that
   triggers it. Fix failures before requesting human review.
-- Architecture changes require a Dynamo Enhancement Proposal (DEP), filed as a GitHub
-  issue on `ai-dynamo/dynamo` with `dep:*` labels (the `dep-create` skill automates this).
+- Architecture changes require a Dynamo Enhancement Proposal (DEP): a markdown proposal in
+  `ai-dynamo/enhancements` (added by a PR plus a tracking issue), rendered on the docs-site
+  Proposals tab (the `dep-create` skill authors one; `dep-render` publishes the page).
 
 See [`docs/contribution-guide.md`](docs/contribution-guide.md) for the full workflow
 (issue sizing, CODEOWNERS, review process).

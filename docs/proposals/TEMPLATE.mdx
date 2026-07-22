@@ -1,0 +1,207 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "DEP Template"
+subtitle: "Copy this file to docs/proposals/NNNN-your-feature.mdx and fill it in."
+# GitHub sources mirrored (read-only) onto the rendered page. Fill `pr` once
+# your draft PR exists and `tracking-issue` once you open the anchor issue.
+# These document intent; the client runtime reads the matching <PrInlineComments>
+# props near the bottom, so keep the two in sync.
+pr:
+tracking-issue:
+---
+
+{/*
+  Adapted from ai-dynamo/enhancements/NNNN-complete-template.md
+  (https://github.com/ai-dynamo/enhancements/blob/main/NNNN-complete-template.md).
+  Section vocabulary and ordering match the enhancements repo so DEPs stay
+  portable between the two homes. In-tree additions: a DEP number field, a
+  Tracking Issue field, an MDX status banner, and a read-only mirror of the
+  DEP's GitHub issue + PR comments (the <PrInlineComments> block at the bottom).
+  Top-level sections use H2 (the page title comes from the frontmatter above) to
+  match the Fern docs-site convention. Delete this comment block when you copy
+  the template. Set your DEP number on <DepMetadata dep="...">, and once your
+  draft PR and tracking issue exist, add pr={<number>} to <DepMetadata> and
+  pr={<number>} issue={<number>} to <PrInlineComments> (snippet near the bottom).
+*/}
+
+import { DepMetadata } from "@/components/DepMetadata";
+import { PrInlineComments } from "@/components/PrInlineComments";
+
+{/* Metadata card. The status pill (Draft / Under Review / Accepted / Rejected
+    / Deferred / Implemented / Replaced) gives an at-a-glance status; the
+    WARNING banner below is the REQ-1 status admonition. Once your draft PR
+    exists, add pr={NUMBER} to surface a "View PR" action and fill the
+    trackingIssue URL. Do not repeat the front-matter `title` here — Fern
+    renders it as the page H1 above the card. */}
+
+<DepMetadata
+  dep="NNNN"
+  status="Draft"
+  category="Architecture"
+  owningSig="[SIG that owns this DEP — e.g. SIG-Router, SIG-KV-Memory]"
+  authors="[@your-github-handle](https://github.com/your-github-handle)"
+  sponsor="[Code owner or maintainer shepherding the process]"
+  requiredReviewers="[@approver-one](https://github.com/approver-one), [@approver-two](https://github.com/approver-two)"
+  reviewDate="[Target date for review]"
+  trackingIssue="https://github.com/ai-dynamo/enhancements/issues"
+/>
+
+> [!WARNING]
+> **Status: Draft.** This proposal is under active discussion and is not an accepted decision. Update this banner whenever the status changes. See the [status banner convention](./README.mdx#status-banner-convention).
+
+## Summary
+
+**[Required]**
+
+## Motivation
+
+**[Required]**
+
+Describe the problem that needs to be addressed with enough detail for someone familiar with the project to understand. Generally one to two short paragraphs. Additional details can go in the Background section. Cover **what** the issue is and **why** it needs to be addressed. Link to GitHub issues if relevant.
+
+### Goals
+
+**[Optional. Omit if not applicable.]**
+
+List additional goals as bullet points. Goals may be aspirational or difficult to measure but guide the proposal.
+
+* Goal
+* Goal
+* Goal
+
+### Non Goals
+
+**[Optional. Omit if not applicable.]**
+
+List items that are out of scope or specifically not required. Indicates the scope of the proposal and the issue being resolved.
+
+### Requirements
+
+**[Optional. Omit if not applicable.]**
+
+List additional requirements in numbered subheadings.
+
+#### REQ 1: [Title]
+
+Describe the requirement in as much detail as necessary for others to understand it and how it applies to the DEP. Requirements should be measurable and are used to determine whether a DEP has been successfully implemented.
+
+Name requirements with a monotonically increasing number, for example `REQ 1: Title`, then `REQ 2: Title`. Use title case. Keep names as descriptive as possible while remaining terse.
+
+Use all-caps, bolded terms like **MUST** and **SHOULD** when describing each requirement. See [RFC-2119](https://datatracker.ietf.org/doc/html/rfc2119) for details.
+
+## Proposal
+
+**[Required]**
+
+Describe the high-level design. Use subsections as needed, but start with an overview and then dig into the details. Provide images and diagrams to aid understanding.
+
+## Implementation Details
+
+**[Optional. Omit if not applicable.]**
+
+Add detailed items here including interface signatures. Add anything relevant that is more of a detail than central to the proposal. Use subsections and bullet points as needed. Link to the implementation PR if applicable.
+
+### Deferred to Implementation
+
+**[Optional. Omit if not applicable.]**
+
+List items that are under discussion but that will be resolved only during implementation or code review.
+
+## Implementation Phases
+
+**[Optional. Omit if not applicable.]**
+
+List phases of implementation (can be a single phase). Give each phase a monotonically increasing number, for example `Phase 0`, then `Phase 1`. Give phases titles if it helps.
+
+### Phase 0: [Optional Title]
+
+**Release Target**: [Date]
+
+**Effort Estimate**: [Estimate of time and number of engineers to complete the phase]
+
+**Work Items**: [One or more links to GitHub issues]
+
+**Supported API / Behavior**:
+
+* [Name and concise description of the API or behavior]
+
+**Not Supported**:
+
+* [Name and concise description of the API or behavior]
+
+## Related Proposals
+
+**[Optional. Omit if not applicable.]**
+
+* File
+* File
+
+## Alternate Solutions
+
+**[Required. If not applicable, write N/A.]**
+
+List solutions that were considered but ultimately rejected. Free form is fine; one possible format is shown below.
+
+### Alt 1: [Title]
+
+**Pros**:
+
+* [Positive aspects of this solution]
+
+**Cons**:
+
+* [Negative aspects of this solution]
+
+**Reason Rejected**:
+
+* [Why this option was not chosen]
+
+**Notes**:
+
+[Optional additional comments about this solution.]
+
+## Background
+
+**[Optional. Omit if not applicable.]**
+
+Add context and references to help reviewers and authors understand the problem and the solution being proposed.
+
+### References
+
+**[Optional. Omit if not applicable.]**
+
+* [Hyper-linked title of an external reference]
+
+### Terminology and Definitions
+
+**[Optional. Omit if not applicable.]**
+
+List additional terms and definitions. Keep definitions concise and link to external resources where useful. Keep the list sorted alphabetically.
+
+| Term | Definition |
+| :--- | :--------- |
+| **Term** | Definition |
+
+### Acronyms and Abbreviations
+
+**[Optional. Omit if not applicable.]**
+
+List frequently used acronyms and abbreviations that are uncommon or unlikely to be known by the reader. Keep the list sorted alphabetically.
+
+**ACR**: Expanded meaning
+
+{/* Read-only mirror of this DEP's GitHub comments — keep it last on the page.
+    It renders three surfaces from the public GitHub API:
+      - inline PR review comments, anchored as highlights on the text above;
+      - "Revision discussion": the PR conversation;
+      - "Design discussion": the tracking-issue thread (durable debate).
+    Set pr={<your PR>} once the draft PR exists, and issue={<your issue>} once
+    the tracking issue exists (omit issue to show the "open a tracking issue"
+    empty state). If your PR touches multiple files, also set
+    path="docs/proposals/NNNN-your-feature.mdx" so the inline review here only
+    mirrors comments on this page. Every card deep-links to GitHub to reply;
+    the page never posts. See fern/components/PrInlineComments.tsx and
+    fern/js/dep-pr-comments.js. */}
+
+<PrInlineComments pr={12345} issue={67890} />
