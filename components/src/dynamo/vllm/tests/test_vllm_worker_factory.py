@@ -687,6 +687,128 @@ class TestPrefillRegistrationContract:
 
 
 @pytest.mark.asyncio
+async def test_prefill_worker_wires_stat_logger_and_seeds_kv_gauges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict = {}
+    stop_after_register = RuntimeError("stop-after-register")
+
+    class RecordingStatLoggerFactory:
+        def __init__(self, *, endpoint, component_gauges=None):
+            captured["factory_endpoint"] = endpoint
+            captured["component_gauges"] = component_gauges
+            self.num_gpu_blocks: list[int] = []
+            self.init_publish_calls = 0
+            captured["factory"] = self
+
+        def set_num_gpu_blocks_all(self, num_blocks: int) -> None:
+            self.num_gpu_blocks.append(num_blocks)
+
+        def init_publish(self) -> None:
+            self.init_publish_calls += 1
+
+    async def fake_register_vllm_model(
+        model_input,
+        model_type,
+        endpoint,
+        config,
+        engine_client,
+        vllm_config,
+        worker_type,
+        needs,
+    ) -> None:
+        captured["model_input"] = model_input
+        captured["model_type"] = model_type
+        captured["worker_type"] = worker_type
+        captured["needs"] = needs
+        raise stop_after_register
+
+    engine_client = Mock()
+    vllm_config = Mock()
+    vllm_config.additional_config = {}
+    vllm_config.cache_config.num_gpu_blocks = 9
+    engine_tuple: EngineSetupResult = (
+        engine_client,
+        vllm_config,
+        Mock(),
+        "/tmp/prom",
+        Mock(),
+    )
+    setup_vllm_engine = Mock(return_value=engine_tuple)
+
+    factory = WorkerFactory(
+        setup_vllm_engine_fn=setup_vllm_engine,
+        setup_kv_event_publisher_fn=Mock(return_value=None),
+        register_vllm_model_fn=fake_register_vllm_model,
+        setup_fpm_relay_fn=Mock(return_value=None),
+        setup_metrics_collection_fn=Mock(),
+    )
+    factory._maybe_get_encode_worker_client = AsyncMock(return_value=None)  # type: ignore[assignment]
+    factory._maybe_wait_for_failover_lock = AsyncMock()  # type: ignore[assignment]
+    factory.register_engine_routes = Mock()  # type: ignore[assignment]
+
+    mock_handler = Mock(embedding_cache_manager=None)
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.PrefillWorkerHandler",
+        Mock(return_value=mock_handler),
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.StatLoggerFactory",
+        RecordingStatLoggerFactory,
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 2)
+    )
+
+    async def _noop(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.configure_kv_event_block_size", _noop
+    )
+
+    config = _make_config(
+        disaggregation_mode=DisaggregationMode.PREFILL,
+        route_to_encoder=False,
+        use_vllm_tokenizer=False,
+        namespace="dyn",
+        component="prefill",
+        endpoint="generate",
+        served_model_name="m",
+        model="m",
+        frontend_decoding=False,
+        enable_multimodal=False,
+        enable_rl=False,
+        engine_args=SimpleNamespace(enable_lora=False),
+    )
+    endpoint = Mock(connection_id=Mock(return_value="cid"))
+    runtime = Mock()
+    runtime.endpoint.return_value = endpoint
+
+    with pytest.raises(RuntimeError, match="stop-after-register"):
+        await factory._create_prefill_worker(
+            runtime,
+            config,
+            asyncio.Event(),
+            [],
+        )
+
+    recording_factory = captured["factory"]
+    setup_vllm_engine.assert_called_once_with(
+        config,
+        recording_factory,
+        fpm_worker_id="cid",
+    )
+    assert captured["factory_endpoint"] is endpoint
+    assert recording_factory.num_gpu_blocks == [4]
+    assert recording_factory.init_publish_calls == 1
+    assert captured["model_input"] == ModelInput.Tokens
+    assert captured["model_type"] == ModelType.Prefill
+    assert captured["worker_type"] == WorkerType.Prefill
+    assert captured["needs"] == [[WorkerType.Decode]]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("lora_enabled", [True, False])
 async def test_prefill_serves_lora_lifecycle_endpoints_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
