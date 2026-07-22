@@ -848,6 +848,9 @@ jobs:
       needs.changed-files.outputs.frontend == 'true' ||
       needs.changed-files.outputs.operator == 'true' ||
       needs.changed-files.outputs.snapshot == 'true' ||
+      needs.changed-files.outputs.snapshot_vllm == 'true' ||
+      needs.changed-files.outputs.snapshot_sglang == 'true' ||
+      needs.changed-files.outputs.snapshot_trtllm == 'true' ||
       needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-compliance-audit.yml
     with:
