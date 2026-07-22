@@ -791,8 +791,6 @@ class HandlerBase(BaseGenerativeHandler):
         Returns:
             Processed input for TRT-LLM (dict with prompt/token_ids, or raw token_ids)
         """
-        reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
-
         # DECODE mode: Use prefill metadata to skip re-processing multimodal content
         # Per TRT-LLM team: DECODE never needs to reload images - KV cache has the context
         has_prefill_metadata = epd_metadata and (
@@ -957,6 +955,8 @@ class HandlerBase(BaseGenerativeHandler):
             embeddings: Optional tensor or dict containing embeddings for multimodal processing
             ep_disaggregated_params: Optional DisaggregatedParams from encode worker (full EPD flow)
         """
+        reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
+
         request_token_ids = request.get("token_ids")
         logging.debug(
             "Request summary: token_ids=%s keys=%s has_embeddings=%s has_ep_disaggregated_params=%s",

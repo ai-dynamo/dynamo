@@ -10,7 +10,7 @@ def reject_unsupported_multimodal_uuids(multi_modal_uuids: object) -> None:
     if multi_modal_uuids is None:
         return
 
-    unsupported = "Image UUID caching is supported only by the vLLM backend"
+    unsupported = "Cache UUIDs are supported only by the vLLM backend"
     if not isinstance(multi_modal_uuids, Mapping):
         raise ValueError(unsupported)
 
