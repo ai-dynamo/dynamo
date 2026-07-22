@@ -75,10 +75,8 @@ impl EppRouter {
         let adapter =
             TopologyAdapter::spawn(reflector.as_ref().clone(), selector.clone(), defaults);
 
-        // Best-effort wait for the selector to admit at least one worker. The
-        // reconcile loop must first see Ready pods and register them, after
-        // which the selector reports ready. Per-pick checks still apply, so we
-        // never block startup beyond the bound.
+        // Best-effort, bounded wait for the selector to admit a Ready worker;
+        // per-pick checks still apply, so startup never blocks past the bound.
         wait_for_selector_ready(selector.as_ref()).await;
 
         Ok(Self {
@@ -102,17 +100,9 @@ impl EppRouter {
         )
     }
 
-    /// Tokenize a chat-completions request body for routing. Returns
-    /// `(token_ids, priority_jump, strict_priority, cache_salt)`.
-    ///
-    /// Priority uses header-over-body precedence via the shared
-    /// [`resolve_request_priority`], so the EPP and the frontend preprocessor
-    /// apply one policy: a valid `x-dynamo-request-priority` /
-    /// `x-dynamo-request-strict-priority` header (including zero or negative)
-    /// overrides the body `agent_hints`; malformed/missing headers fall back to
-    /// the body independently; `latency_sensitivity` applies only when no
-    /// priority exists. `cache_salt` is the body-derived KV cache namespace
-    /// (`nvext.cache_salt`, legacy top-level fallback) via Dynamo's precedence.
+    /// Tokenize a chat body for routing → `(token_ids, priority_jump,
+    /// strict_priority, cache_salt)`. Priority uses header-over-body precedence
+    /// via [`resolve_request_priority`]; `cache_salt` via [`request_cache_salt`].
     async fn tokenize(
         &self,
         request_body: bytes::Bytes,
@@ -141,19 +131,16 @@ impl EppRouter {
         ))
     }
 
-    /// Intersect `allowed` Ready worker IDs with an Envoy `candidate_subset`
-    /// (endpoint addresses, `ip:port` or bare `ip`). The reflector's endpoints
-    /// are scheme-less `ip:port`, so a worker matches when the subset contains
-    /// its full `ip:port` or its bare `ip`. An empty result for a non-empty
-    /// subset means no Ready pod matched the hint.
+    /// Intersect `allowed` Ready workers with an Envoy `candidate_subset`. The
+    /// reflector's endpoints are scheme-less `ip:port`, so a worker matches the
+    /// subset's full `ip:port` or bare `ip`; empty means nothing matched.
     fn subset_worker_ids(
         &self,
         allowed: &HashSet<u64>,
         candidate_subset: &[String],
     ) -> HashSet<u64> {
         let candidates: HashSet<&str> = candidate_subset.iter().map(String::as_str).collect();
-        // Filter under a single snapshot borrow; the predicate borrows each
-        // endpoint, so we don't clone one per candidate just to test membership.
+        // Single borrow; the predicate borrows each endpoint (no per-candidate clone).
         self.reflector
             .filter_workers_by_endpoint(allowed, |endpoint| {
                 endpoint_in_subset(endpoint, &candidates)
@@ -161,10 +148,8 @@ impl EppRouter {
     }
 }
 
-/// Combine the pod-reflector readiness with the optional peer-discovery readiness
-/// into the overall EPP health signal. `peer_ready = None` means replication is
-/// disabled (single replica, no peer gate), so readiness is exactly pod
-/// readiness; `Some(false)` holds the pod NOT_SERVING until the initial peer sync.
+/// Overall EPP health: pod readiness AND, when replicated (`peer_ready = Some`),
+/// the initial peer sync. `None` means no replication → pod readiness alone.
 fn compute_ready(pod_ready: bool, peer_ready: Option<bool>) -> bool {
     pod_ready && peer_ready.unwrap_or(true)
 }
@@ -228,11 +213,9 @@ impl EndpointPicker for EppRouter {
             return Err(PickError::NoEndpoints);
         }
 
-        // Honor Envoy's InferencePool subset hint
-        // (`x-gateway-destination-endpoint-subset`): constrain routing to Ready
-        // workers inside the requested subset. A non-empty subset that matches no
-        // Ready pod must not fall back to the full set — refuse rather than route
-        // outside the subset.
+        // Honor Envoy's subset hint (`x-gateway-destination-endpoint-subset`):
+        // constrain to Ready workers in the subset. A non-empty subset matching
+        // nothing must refuse, not fall back to the full set.
         if !req.candidate_subset.is_empty() {
             allowed = self.subset_worker_ids(&allowed, &req.candidate_subset);
             if allowed.is_empty() {
@@ -251,18 +234,16 @@ impl EndpointPicker for EppRouter {
                 .reflector
                 .resolve_endpoint(worker_id)
                 .ok_or(PickError::NoEndpoints)?;
-            // Routing is driven entirely by the destination mutation the server
-            // derives from `endpoint`; aggregated raw-vLLM workers consume no
-            // `x-dynamo-*` routing headers, so none are emitted.
+            // Routing comes from the destination mutation; aggregated raw-vLLM
+            // workers read no `x-dynamo-*` headers, so none are emitted.
             return Ok(PickResult {
                 endpoint,
                 ..Default::default()
             });
         }
 
-        // Raw priority headers (transport-neutral): the shared resolver applies
-        // header-over-body precedence, so header-supplied priority is honored
-        // here just as it is on the frontend preprocessor path.
+        // Header-over-body priority (via the shared resolver), honored here as on
+        // the frontend path.
         let priority_header =
             first_header(&req.headers, HEADER_REQUEST_PRIORITY).map(str::to_owned);
         let strict_priority_header =
@@ -276,11 +257,9 @@ impl EndpointPicker for EppRouter {
         // body's `cache_salt`, matching the frontend's header-routing precedence.
         let cache_salt = tenant_id_header(&req.headers).or(body_salt);
 
-        // Mint an EPP-side reservation id (not the gateway request id): the
-        // booking key can't collide with a reused `x-request-id`, and it stays
-        // EPP-known so it's releasable even if the reserve response is lost. It
-        // rides back on `PickResult::reservation_id`, so the server hands it to
-        // the lifecycle callbacks without any shared, request-id-keyed map.
+        // EPP-minted booking key (not the reused `x-request-id`): stays
+        // EPP-known/releasable and rides back on `PickResult::reservation_id`,
+        // so the server frees it via the callbacks without a shared map.
         let reservation_id = uuid::Uuid::new_v4().to_string();
 
         let select_req = SelectRequest {
@@ -288,8 +267,7 @@ impl EndpointPicker for EppRouter {
             reservation_id: reservation_id.clone(),
             token_ids: tokens,
             allowed_worker_ids: Some(allowed),
-            // Effective (header-over-body) values; a well-formed header including
-            // zero or negative is honored, `None` only when unset everywhere.
+            // Effective header-over-body values; `None` only when unset everywhere.
             priority_jump,
             strict_priority,
             cache_salt,
@@ -298,9 +276,8 @@ impl EndpointPicker for EppRouter {
         let resp = match self.selector.select_and_reserve(select_req).await {
             Ok(resp) => resp,
             Err(e) => {
-                // Best-effort release any booking the selector may have created
-                // before the response was lost, so no reservation leaks. A failed
-                // pick never reaches the server's completion callback.
+                // Release any booking made before the response was lost (a failed
+                // pick never reaches the completion callback).
                 if let Err(cleanup) = self.selector.free_reservation(&reservation_id).await {
                     tracing::debug!(request_id = %req.request_id, %reservation_id, error = %cleanup, "reservation cleanup after failed reserve");
                 }
@@ -308,55 +285,43 @@ impl EndpointPicker for EppRouter {
             }
         };
 
-        // The reflector is the source of truth for both the routable address and
-        // readiness. If it can no longer resolve the selected worker, the pod left
-        // Ready/the pool in the race between building `allowed` and now, so the
-        // selection is stale: refuse rather than route to a draining pod or a
-        // stale registration-time address. Mirrors the body-less path above.
+        // The reflector owns the address + readiness. If it can no longer resolve
+        // the worker, the pod left Ready in the race since we built `allowed`, so
+        // the selection is stale: refuse rather than route to a stale address.
         let Some(endpoint) = self.reflector.resolve_endpoint(resp.worker_id) else {
             tracing::warn!(
                 worker_id = resp.worker_id,
                 "Selected worker no longer resolvable in reflector; treating selection as stale"
             );
-            // The booking succeeded but we are not routing it: release it so the
-            // stale selection does not leak load (a failed pick never triggers
-            // `on_request_complete`).
+            // Booked but not routed; release so the stale selection doesn't leak.
             if let Err(cleanup) = self.selector.free_reservation(&reservation_id).await {
                 tracing::debug!(request_id = %req.request_id, %reservation_id, error = %cleanup, "reservation cleanup after stale selection");
             }
             return Err(PickError::NoEndpoints);
         };
 
-        // Routing is driven by the destination mutation the server derives from
-        // `endpoint`; aggregated raw-vLLM workers consume no `x-dynamo-*` routing
-        // headers, so none are emitted here. (Disaggregated routing will add its
-        // own header contract alongside the consumer that reads it.)
+        // Routing comes from the destination mutation; aggregated raw-vLLM workers
+        // read no `x-dynamo-*` headers. (Disaggregated will add its own contract.)
         Ok(PickResult {
             endpoint,
-            // Worker re-tokenizes the forwarded request (llm-d parity); the EPP
-            // tokenizes only for routing, so no token_ids are injected.
+            // Worker re-tokenizes the forwarded request (llm-d parity); no inject.
             token_ids: None,
-            // Ride the booking id back to the server so the lifecycle callbacks
-            // free this exact reservation for this stream — no shared map.
+            // Booking id for the server's lifecycle callbacks (no shared map).
             reservation_id: Some(reservation_id),
             ..Default::default()
         })
     }
 
-    /// The gateway signalled the response is complete: release the booking made
-    /// in `pick`. `booking_id` is the reservation id `pick` returned for this
-    /// stream. `free_reservation` is idempotent, so a request that never booked
-    /// (e.g. body-less routing, where `booking_id` is the request id) is a no-op.
+    /// Response complete: release the booking from `pick`. `booking_id` is that
+    /// reservation id; `free_reservation` is idempotent (body-less pick → no-op).
     async fn on_request_complete(&self, booking_id: &str) {
         if let Err(e) = self.selector.free_reservation(booking_id).await {
             tracing::warn!(reservation_id = booking_id, error = %e, "Failed to free reservation");
         }
     }
 
-    /// First token generated: release this request's prefill load while leaving
-    /// its decode load booked until `on_request_complete`. Applies in aggregated
-    /// serving too (drops the transient prefill contribution). `booking_id` is the
-    /// reservation id `pick` returned; `prefill_complete` is idempotent.
+    /// First token: release prefill load, keep decode booked until completion.
+    /// `booking_id` is `pick`'s reservation id; `prefill_complete` is idempotent.
     async fn on_prefill_complete(&self, booking_id: &str) {
         if let Err(e) = self.selector.prefill_complete(booking_id).await {
             tracing::warn!(reservation_id = booking_id, error = %e, "Failed to mark prefill complete");
