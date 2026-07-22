@@ -30,31 +30,65 @@ Dynamo is backend-agnostic and Kubernetes-native without being Kubernetes-only. 
 
 ## Pull a Container
 
-Containers have all dependencies pre-installed. Pick your backend:
-
 <Tabs>
-  <Tab title="SGLang" language="sglang">
-    ```bash
-    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
-    ```
+  <Tab title="CUDA">
+
+    Containers have all dependencies pre-installed. Pick your backend:
+
+    <Tabs>
+      <Tab title="SGLang" language="sglang">
+        ```bash
+        docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
+        ```
+      </Tab>
+      <Tab title="TensorRT-LLM" language="trtllm">
+        ```bash
+        docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
+        ```
+      </Tab>
+      <Tab title="vLLM" language="vllm">
+        ```bash
+        docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+        ```
+      </Tab>
+    </Tabs>
+
+    For container versions and tags, see [Release Artifacts](../reference/release-artifacts.md#container-images).
+
   </Tab>
-  <Tab title="TensorRT-LLM" language="trtllm">
-    ```bash
-    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
-    ```
-  </Tab>
-  <Tab title="vLLM" language="vllm">
-    ```bash
-    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
-    ```
+  <Tab title="XPU">
+
+    XPU images are not pre-built — build from source first. Pick your backend:
+
+    <Tabs>
+      <Tab title="vLLM">
+        ```bash
+        git clone https://github.com/ai-dynamo/dynamo.git
+        cd dynamo
+        container/render.py --framework=vllm --device=xpu --target=runtime
+        docker build -t dynamo:latest-vllm-xpu-runtime \
+          -f container/vllm-runtime-xpu-amd64-rendered.Dockerfile .
+        container/run.sh --image dynamo:latest-vllm-xpu-runtime --device=xpu -it
+        ```
+      </Tab>
+      <Tab title="SGLang">
+        ```bash
+        git clone https://github.com/ai-dynamo/dynamo.git
+        cd dynamo
+        container/render.py --framework=sglang --device=xpu --target=runtime
+        docker build -t dynamo:latest-sglang-xpu-runtime \
+          -f container/sglang-runtime-xpu-amd64-rendered.Dockerfile .
+        container/run.sh --image dynamo:latest-sglang-xpu-runtime --device=xpu -it
+        ```
+      </Tab>
+    </Tabs>
+
   </Tab>
 </Tabs>
 
 <Warning>
 **Hugging Face token required for gated models.** Llama, Kimi, Qwen-VL, and other gated models require `HF_TOKEN` in your environment and accepting the model card's license on huggingface.co. Set `export HF_TOKEN=hf_…` before launching.
 </Warning>
-
-For container versions and tags, see [Release Artifacts](../reference/release-artifacts.md#container-images).
 
 ## Start the Frontend
 
@@ -73,21 +107,39 @@ python3 -m dynamo.frontend --discovery-backend file
 In another terminal, launch a worker for your backend:
 
 <Tabs>
-  <Tab title="SGLang" language="sglang">
-    ```bash
-    python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --discovery-backend file
-    ```
+  <Tab title="CUDA">
+    <Tabs>
+      <Tab title="SGLang" language="sglang">
+        ```bash
+        python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --discovery-backend file
+        ```
+      </Tab>
+      <Tab title="TensorRT-LLM" language="trtllm">
+        ```bash
+        python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --discovery-backend file
+        ```
+      </Tab>
+      <Tab title="vLLM" language="vllm">
+        ```bash
+        python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file
+        ```
+      </Tab>
+    </Tabs>
   </Tab>
-  <Tab title="TensorRT-LLM" language="trtllm">
-    ```bash
-    python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --discovery-backend file
-    ```
-  </Tab>
-  <Tab title="vLLM" language="vllm">
-    ```bash
-    python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file \
-      --kv-events-config '{"enable_kv_cache_events": false}'
-    ```
+  <Tab title="XPU">
+    <Tabs>
+      <Tab title="vLLM">
+        ```bash
+        VLLM_TARGET_DEVICE=xpu \
+          python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file
+        ```
+      </Tab>
+      <Tab title="SGLang">
+        ```bash
+        python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --discovery-backend file
+        ```
+      </Tab>
+    </Tabs>
   </Tab>
 </Tabs>
 
