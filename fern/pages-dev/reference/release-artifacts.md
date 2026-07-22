@@ -11,10 +11,10 @@ This document provides a comprehensive inventory of all Dynamo release artifacts
 
 Release history in this document begins at v0.6.0.
 
-## Current Release: Dynamo v1.2.1
+## Current Release: Dynamo v1.3.0
 
-- **GitHub Release:** [v1.2.1](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.1)
-- **Docs:** [v1.2.1](https://docs.nvidia.com/dynamo)
+- **GitHub Release:** [v1.3.0](https://github.com/ai-dynamo/dynamo/releases/tag/v1.3.0)
+- **Docs:** [v1.3.0](https://docs.nvidia.com/dynamo)
 - **NGC Collection:** [ai-dynamo](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)
 
 > **Experimental:** [v1.2.0-deepseek-v4-dev.3](#v120-deepseek-v4-dev3) *(DeepSeek-V4-Flash / V4-Pro on Blackwell, vLLM + SGLang containers only)* is available as an experimental preview. Tagged **Pre-Releases** and experimental builds are listed under [Pre-Release Artifacts](#pre-release-artifacts).
@@ -23,17 +23,16 @@ Release history in this document begins at v0.6.0.
 
 | Image:Tag | Description | Backend | CUDA | Arch | NGC | Notes |
 |-----------|-------------|---------|------|------|-----|-------|
-| `vllm-runtime:1.2.1` | Runtime container for vLLM backend | vLLM `v0.20.1` | `v12.9` | AMD64/ARM64 | [NGC: vllm-runtime 1.2.1](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime?version=1.2.1) | |
-| `vllm-runtime:1.2.1-cuda13` | Runtime container for vLLM backend (CUDA 13) | vLLM `v0.20.1` | `v13.0` | AMD64/ARM64 | [NGC: vllm-runtime 1.2.1-cuda13](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime?version=1.2.1-cuda13) | |
-| `vllm-runtime:1.2.1-efa-amd64` | Runtime container for vLLM with AWS EFA | vLLM `v0.20.1` | `v12.9` | AMD64 | [NGC: vllm-runtime 1.2.1-efa-amd64](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime?version=1.2.1-efa-amd64) | Experimental |
-| `sglang-runtime:1.2.1` | Runtime container for SGLang backend | SGLang `v0.5.11` | `v12.9` | AMD64/ARM64 | [NGC: sglang-runtime 1.2.1](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/sglang-runtime?version=1.2.1) | |
-| `sglang-runtime:1.2.1-cuda13` | Runtime container for SGLang backend (CUDA 13) | SGLang `v0.5.11` | `v13.0` | AMD64/ARM64 | [NGC: sglang-runtime 1.2.1-cuda13](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/sglang-runtime?version=1.2.1-cuda13) | |
-| `tensorrtllm-runtime:1.2.1` | Runtime container for TensorRT-LLM backend | TRT-LLM `v1.3.0rc14` | `v13.1` | AMD64/ARM64 | [NGC: tensorrtllm-runtime 1.2.1](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/tensorrtllm-runtime?version=1.2.1) | |
-| `tensorrtllm-runtime:1.2.1-efa-amd64` | Runtime container for TensorRT-LLM with AWS EFA | TRT-LLM `v1.3.0rc14` | `v13.1` | AMD64 | [NGC: tensorrtllm-runtime 1.2.1-efa-amd64](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/tensorrtllm-runtime?version=1.2.1-efa-amd64) | Experimental |
-| `dynamo-frontend:1.2.1` | API gateway with Endpoint Prediction Protocol (EPP) | — | — | AMD64/ARM64 | [NGC: dynamo-frontend 1.2.1](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/dynamo-frontend?version=1.2.1) | |
-| `dynamo-planner:1.2.1` | Standalone Planner image used by Profiler jobs and Planner pods | — | — | AMD64/ARM64 | [NGC: dynamo-planner 1.2.1](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/dynamo-planner?version=1.2.1) | |
-| `kubernetes-operator:1.2.1` | Kubernetes operator for Dynamo deployments | — | — | AMD64/ARM64 | [NGC: kubernetes-operator 1.2.1](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/kubernetes-operator?version=1.2.1) | |
-| `snapshot-agent:1.2.1` | Snapshot agent for fast GPU worker recovery via CRIU | — | — | AMD64/ARM64 | [NGC: snapshot-agent 1.2.1](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/snapshot-agent?version=1.2.1) | Preview |
+| `vllm-runtime:1.3.0` | Runtime container for vLLM backend | vLLM `v0.23.0` | `v13.0` | AMD64/ARM64 | [NGC: vllm-runtime 1.3.0](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime?version=1.3.0) | |
+| `vllm-runtime:1.3.0-efa` | Runtime container for vLLM with AWS EFA | vLLM `v0.23.0` | `v13.0` | AMD64/ARM64 | [NGC: vllm-runtime 1.3.0-efa](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime?version=1.3.0-efa) | Experimental |
+| `sglang-runtime:1.3.0` | Runtime container for SGLang backend | SGLang `v0.5.14` | `v13.0` | AMD64/ARM64 | [NGC: sglang-runtime 1.3.0](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/sglang-runtime?version=1.3.0) | |
+| `sglang-runtime:1.3.0-efa` | Runtime container for SGLang with AWS EFA | SGLang `v0.5.14` | `v13.0` | AMD64/ARM64 | [NGC: sglang-runtime 1.3.0-efa](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/sglang-runtime?version=1.3.0-efa) | Experimental |
+| `tensorrtllm-runtime:1.3.0` | Runtime container for TensorRT-LLM backend | TRT-LLM `v1.3.0rc19` | `v13.1` | AMD64/ARM64 | [NGC: tensorrtllm-runtime 1.3.0](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/tensorrtllm-runtime?version=1.3.0) | |
+| `tensorrtllm-runtime:1.3.0-efa` | Runtime container for TensorRT-LLM with AWS EFA | TRT-LLM `v1.3.0rc19` | `v13.1` | AMD64/ARM64 | [NGC: tensorrtllm-runtime 1.3.0-efa](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/tensorrtllm-runtime?version=1.3.0-efa) | Experimental |
+| `dynamo-frontend:1.3.0` | API gateway with Endpoint Prediction Protocol (EPP) | — | — | AMD64/ARM64 | [NGC: dynamo-frontend 1.3.0](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/dynamo-frontend?version=1.3.0) | |
+| `dynamo-planner:1.3.0` | Standalone Planner image used by Profiler jobs and Planner pods | — | — | AMD64/ARM64 | [NGC: dynamo-planner 1.3.0](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/dynamo-planner?version=1.3.0) | |
+| `kubernetes-operator:1.3.0` | Kubernetes operator for Dynamo deployments | — | — | AMD64/ARM64 | [NGC: kubernetes-operator 1.3.0](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/kubernetes-operator?version=1.3.0) | |
+| `snapshot-agent:1.3.0` | Snapshot agent for fast GPU worker recovery via CRIU | — | — | AMD64/ARM64 | [NGC: snapshot-agent 1.3.0](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/snapshot-agent?version=1.3.0) | Preview |
 
 ### Python Wheels
 
@@ -42,16 +41,16 @@ See the [NGC container collection](https://catalog.ngc.nvidia.com/orgs/nvidia/te
 
 | Package | Description | Python | Platform | PyPI |
 |---------|-------------|--------|----------|------|
-| `ai-dynamo==1.2.1` | Main package with backend integrations (vLLM, SGLang, TRT-LLM) | `3.10`–`3.12` | Linux (glibc `v2.28+`) | [PyPI: ai-dynamo 1.2.1](https://pypi.org/project/ai-dynamo/1.2.1/) |
-| `ai-dynamo-runtime==1.2.1` | Core Python bindings for Dynamo runtime | `3.10`–`3.12` | Linux (glibc `v2.28+`) | [PyPI: ai-dynamo-runtime 1.2.1](https://pypi.org/project/ai-dynamo-runtime/1.2.1/) |
-| `kvbm==1.2.1` | KV Block Manager for disaggregated KV cache | `3.10`–`3.12` | Linux (glibc `v2.28+`) | [PyPI: kvbm 1.2.1](https://pypi.org/project/kvbm/1.2.1/) |
+| `ai-dynamo==1.3.0.post1` | Main package with backend integrations (vLLM, SGLang, TRT-LLM) | `3.10`–`3.12` | Linux (glibc `v2.28+`) | [PyPI: ai-dynamo 1.3.0.post1](https://pypi.org/project/ai-dynamo/1.3.0.post1/) |
+| `ai-dynamo-runtime==1.3.0.post1` | Core Python bindings for Dynamo runtime | `3.10`–`3.12` | Linux (glibc `v2.28+`) | [PyPI: ai-dynamo-runtime 1.3.0.post1](https://pypi.org/project/ai-dynamo-runtime/1.3.0.post1/) |
+| `kvbm==1.3.0.post1` | KV Block Manager for disaggregated KV cache | `3.10`–`3.12` | Linux (glibc `v2.28+`) | [PyPI: kvbm 1.3.0.post1](https://pypi.org/project/kvbm/1.3.0.post1/) |
 
 ### Helm Charts
 
 | Chart | Description | NGC |
 |-------|-------------|-----|
-| `dynamo-platform-1.2.1` | Platform services (etcd, NATS) and Dynamo Operator for Dynamo cluster | [NGC Helm: dynamo-platform-1.2.1](https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.2.1.tgz) |
-| `snapshot-1.2.1` | Snapshot DaemonSet for fast GPU worker recovery | [NGC Helm: snapshot-1.2.1](https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/snapshot-1.2.1.tgz) |
+| `dynamo-platform-1.3.0` | Platform services (etcd, NATS) and Dynamo Operator for Dynamo cluster | [NGC Helm: dynamo-platform-1.3.0](https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.3.0.tgz) |
+| `snapshot-1.3.0` | Snapshot DaemonSet for fast GPU worker recovery | [NGC Helm: snapshot-1.3.0](https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/snapshot-1.3.0.tgz) |
 
 <Note>
 The `dynamo-crds` Helm chart is deprecated as of v1.0.0; CRDs are now managed by the Dynamo Operator. The `dynamo-graph` Helm chart is deprecated as of v0.9.0.
@@ -61,18 +60,18 @@ The `dynamo-crds` Helm chart is deprecated as of v1.0.0; CRDs are now managed by
 
 | Crate | Description | MSRV (Rust) | crates.io |
 |-------|-------------|-------------|-----------|
-| `dynamo-runtime@1.2.1` | Core distributed runtime library | `v1.82` | [crates.io: dynamo-runtime 1.2.1](https://crates.io/crates/dynamo-runtime/1.2.1) |
-| `dynamo-llm@1.2.1` | LLM inference engine | `v1.82` | [crates.io: dynamo-llm 1.2.1](https://crates.io/crates/dynamo-llm/1.2.1) |
-| `dynamo-protocols@1.2.1` | Async OpenAI-compatible API client | `v1.82` | [crates.io: dynamo-protocols 1.2.1](https://crates.io/crates/dynamo-protocols/1.2.1) |
+| `dynamo-runtime@1.3.0` | Core distributed runtime library | `v1.82` | [crates.io: dynamo-runtime 1.3.0](https://crates.io/crates/dynamo-runtime/1.3.0) |
+| `dynamo-llm@1.3.0` | LLM inference engine | `v1.82` | [crates.io: dynamo-llm 1.3.0](https://crates.io/crates/dynamo-llm/1.3.0) |
+| `dynamo-protocols@1.3.0` | Async OpenAI-compatible API client | `v1.82` | [crates.io: dynamo-protocols 1.3.0](https://crates.io/crates/dynamo-protocols/1.3.0) |
 | `dynamo-async-openai@1.0.2` | Deprecated legacy OpenAI client; use **`dynamo-protocols`** | `v1.82` | [crates.io: dynamo-async-openai 1.0.2](https://crates.io/crates/dynamo-async-openai/1.0.2) |
-| `dynamo-parsers@1.2.1` | Protocol parsers (SSE, JSON streaming) | `v1.82` | [crates.io: dynamo-parsers 1.2.1](https://crates.io/crates/dynamo-parsers/1.2.1) |
-| `dynamo-memory@1.2.1` | Memory management utilities | `v1.82` | [crates.io: dynamo-memory 1.2.1](https://crates.io/crates/dynamo-memory/1.2.1) |
-| `dynamo-config@1.2.1` | Configuration management | `v1.82` | [crates.io: dynamo-config 1.2.1](https://crates.io/crates/dynamo-config/1.2.1) |
-| `dynamo-tokens@1.2.1` | Tokenizer bindings for LLM inference | `v1.82` | [crates.io: dynamo-tokens 1.2.1](https://crates.io/crates/dynamo-tokens/1.2.1) |
-| `dynamo-tokenizers@1.2.1` | Tokenizer library for LLM inference | `v1.82` | [crates.io: dynamo-tokenizers 1.2.1](https://crates.io/crates/dynamo-tokenizers/1.2.1) |
-| `dynamo-mocker@1.2.1` | Inference engine simulator for benchmarking | `v1.82` | [crates.io: dynamo-mocker 1.2.1](https://crates.io/crates/dynamo-mocker/1.2.1) |
-| `dynamo-kv-router@1.2.1` | KV-aware request routing library | `v1.82` | [crates.io: dynamo-kv-router 1.2.1](https://crates.io/crates/dynamo-kv-router/1.2.1) |
-| `kvbm-logical@1.2.1` | Logical layer for the KV Block Manager | `v1.82` | [crates.io: kvbm-logical 1.2.1](https://crates.io/crates/kvbm-logical/1.2.1) |
+| `dynamo-parsers@1.3.0` | Protocol parsers (SSE, JSON streaming) | `v1.82` | [crates.io: dynamo-parsers 1.3.0](https://crates.io/crates/dynamo-parsers/1.3.0) |
+| `dynamo-memory@1.3.0` | Memory management utilities | `v1.82` | [crates.io: dynamo-memory 1.3.0](https://crates.io/crates/dynamo-memory/1.3.0) |
+| `dynamo-config@1.3.0` | Configuration management | `v1.82` | [crates.io: dynamo-config 1.3.0](https://crates.io/crates/dynamo-config/1.3.0) |
+| `dynamo-tokens@1.3.0` | Tokenizer bindings for LLM inference | `v1.82` | [crates.io: dynamo-tokens 1.3.0](https://crates.io/crates/dynamo-tokens/1.3.0) |
+| `dynamo-tokenizers@1.3.0` | Tokenizer library for LLM inference | `v1.82` | [crates.io: dynamo-tokenizers 1.3.0](https://crates.io/crates/dynamo-tokenizers/1.3.0) |
+| `dynamo-mocker@1.3.0` | Inference engine simulator for benchmarking | `v1.82` | [crates.io: dynamo-mocker 1.3.0](https://crates.io/crates/dynamo-mocker/1.3.0) |
+| `dynamo-kv-router@1.3.0` | KV-aware request routing library | `v1.82` | [crates.io: dynamo-kv-router 1.3.0](https://crates.io/crates/dynamo-kv-router/1.3.0) |
+| `kvbm-logical@1.3.0` | Logical layer for the KV Block Manager | `v1.82` | [crates.io: kvbm-logical 1.3.0](https://crates.io/crates/kvbm-logical/1.3.0) |
 
 ## Quick Install Commands
 
@@ -83,24 +82,21 @@ For detailed run instructions, see the backend-specific guides: [vLLM](../backen
 </Tip>
 
 ```bash
-# Runtime containers
-docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
-docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
-docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
+# Runtime containers (CUDA 13)
+docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0
+docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
 
-# CUDA 13 variants
-docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1-cuda13
-docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1-cuda13
-
-# EFA variants (AWS, AMD64 only, experimental)
-docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1-efa-amd64
-docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1-efa-amd64
+# EFA variants (AWS, experimental)
+docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-efa
+docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0-efa
+docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0-efa
 
 # Infrastructure containers
-docker pull nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.1
-docker pull nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1
-docker pull nvcr.io/nvidia/ai-dynamo/kubernetes-operator:1.2.1
-docker pull nvcr.io/nvidia/ai-dynamo/snapshot-agent:1.2.1
+docker pull nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.0
+docker pull nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.3.0
+docker pull nvcr.io/nvidia/ai-dynamo/kubernetes-operator:1.3.0
+docker pull nvcr.io/nvidia/ai-dynamo/snapshot-agent:1.3.0
 ```
 
 ### Python Wheels (PyPI)
@@ -111,17 +107,17 @@ For detailed installation instructions, see the [Quickstart](https://docs.nvidia
 
 ```bash
 # Install Dynamo with a specific backend (vLLM and SGLang)
-uv pip install "ai-dynamo[vllm]==1.2.1"
-uv pip install --prerelease=allow "ai-dynamo[sglang]==1.2.1"
+uv pip install "ai-dynamo[vllm]==1.3.0.post1"
+uv pip install --prerelease=allow "ai-dynamo[sglang]==1.3.0.post1"
 
 # TensorRT-LLM: use container (see above)
-docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
+docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
 
 # Install Dynamo core only
-uv pip install ai-dynamo==1.2.1
+uv pip install ai-dynamo==1.3.0.post1
 
 # Install standalone KVBM
-uv pip install kvbm==1.2.1
+uv pip install kvbm==1.3.0.post1
 ```
 
 ### Helm Charts (NGC)
@@ -131,8 +127,8 @@ For Kubernetes deployment instructions, see the [Kubernetes Installation Guide](
 </Tip>
 
 ```bash
-helm install dynamo-platform oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform --version 1.2.1
-helm install snapshot oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/snapshot --version 1.2.1
+helm install dynamo-platform oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform --version 1.3.0
+helm install snapshot oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/snapshot --version 1.3.0
 ```
 
 ### Rust Crates (crates.io)
@@ -142,19 +138,19 @@ For API documentation, see each crate on [docs.rs](https://docs.rs/). To build D
 </Tip>
 
 ```bash
-cargo add dynamo-runtime@1.2.1
-cargo add dynamo-llm@1.2.1
-cargo add dynamo-protocols@1.2.1
+cargo add dynamo-runtime@1.3.0
+cargo add dynamo-llm@1.3.0
+cargo add dynamo-protocols@1.3.0
 # Deprecated legacy crate name — pin only if a dependency requires it; new code should use dynamo-protocols:
 # cargo add dynamo-async-openai@1.0.2
-cargo add dynamo-parsers@1.2.1
-cargo add dynamo-memory@1.2.1
-cargo add dynamo-config@1.2.1
-cargo add dynamo-tokens@1.2.1
-cargo add dynamo-tokenizers@1.2.1
-cargo add dynamo-mocker@1.2.1
-cargo add dynamo-kv-router@1.2.1
-cargo add kvbm-logical@1.2.1
+cargo add dynamo-parsers@1.3.0
+cargo add dynamo-memory@1.3.0
+cargo add dynamo-config@1.3.0
+cargo add dynamo-tokens@1.3.0
+cargo add dynamo-tokenizers@1.3.0
+cargo add dynamo-mocker@1.3.0
+cargo add dynamo-kv-router@1.3.0
+cargo add kvbm-logical@1.3.0
 ```
 
 **CUDA and Driver Requirements:** For detailed CUDA toolkit versions and minimum driver requirements for each container image, see the [Support Matrix](support-matrix.md#cuda-and-driver-requirements).
@@ -162,6 +158,7 @@ cargo add kvbm-logical@1.2.1
 ## Known Issues
 
 For a complete list of known issues, refer to the release notes for each version:
+- [v1.3.0 Release Notes](https://github.com/ai-dynamo/dynamo/releases/tag/v1.3.0)
 - [v1.2.1 Release Notes](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.1)
 - [v1.2.0 Release Notes](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0)
 - [v1.1.1 Release Notes](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.1)
@@ -193,6 +190,7 @@ For backend version pins, see the version-pins table above and the [GitHub Relea
 
 **Stable Releases**
 
+- **v1.3.0**: Minor release. **Backends:** SGLang `v0.5.14` (NIXL `v1.3.0`), TRT-LLM `v1.3.0rc19` (NIXL `v1.0.1`), vLLM `v0.23.0` (NIXL `v1.1.0`); UCX `v1.20.x`. **Images:** CUDA 12 container images discontinued — vLLM and SGLang runtimes ship CUDA 13.0, TensorRT-LLM CUDA 13.1; EFA variants published as `-efa`. **Wheels:** GA wheels published as `1.3.0.post1` (containers remain `:1.3.0`).
 - **v1.2.1**: Patch release. Same backend versions as v1.2.0: SGLang `v0.5.11` (NIXL `v1.0.1`), TRT-LLM `v1.3.0rc14` (NIXL `v0.10.1`), vLLM `v0.20.1` (NIXL `v0.10.1`).
 - **v1.2.0**: Minor release (603 PRs from 82 authors since v1.1.1). **Backends:** SGLang `v0.5.11` (NIXL `v1.0.1`), TRT-LLM `v1.3.0rc14` (NIXL `v0.10.1`), vLLM `v0.20.1` (NIXL `v0.10.1`); UCX `v1.20.0`. **APIs:** DGD/DGDR promoted to `v1beta1` (migrate from `v1alpha1`); duration config fields renamed with explicit unit suffixes (e.g. `*_ttl` → `*_ttl_secs`). **Routing:** CRTC is the default approximate KV router; Branch-Sharded KV Indexer. **Deploy:** Inter-pod GMS sidecar replaces the per-pod pattern; Dynamo Snapshot on CRI-O / OpenShift. **Models:** DeepSeek-V4 on vLLM; multimodal/diffusion (TRT-LLM text-to-image, SGLang disaggregated video). **Note:** CUDA 12 container images are discontinued starting v1.3.0.
 - **v1.1.1**: Patch release. Same backend versions as v1.1.0: SGLang `v0.5.10.post1` (NIXL `v1.0.1`), TRT-LLM `v1.3.0rc11` (NIXL `v0.10.1`), vLLM `v0.19.0` (NIXL `v0.10.1`).
@@ -251,6 +249,7 @@ These crates use repository `https://github.com/ai-dynamo/dynamo.git`. The table
 
 | Version | Release Date | GitHub | Docs | Notes |
 |---------|--------------|--------|------|-------|
+| `v1.3.0` | Jul 20, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v1.3.0) | [Docs](https://docs.nvidia.com/dynamo) | |
 | `v1.2.1` | TBD | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.1) | [Docs](https://docs.nvidia.com/dynamo) | |
 | `v1.2.0` | Jun 2, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0) | [Docs](https://docs.nvidia.com/dynamo) | |
 | `v1.2.0-deepseek-v4-dev.3` | May 9, 2026 | [Tag](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0-deepseek-v4-dev.3) | — | Experimental (DeepSeek-V4-Flash / V4-Pro Blackwell preview; vLLM + SGLang containers only) |
@@ -284,6 +283,8 @@ These crates use repository `https://github.com/ai-dynamo/dynamo.git`. The table
 
 | Image:Tag | vLLM | Arch | CUDA | Notes |
 |-----------|------|------|------|-------|
+| `vllm-runtime:1.3.0` | `v0.23.0` | AMD64/ARM64 | `v13.0` | |
+| `vllm-runtime:1.3.0-efa` | `v0.23.0` | AMD64/ARM64 | `v13.0` | Experimental |
 | `vllm-runtime:1.2.1` | `v0.20.1` | AMD64/ARM64 | `v12.9` | |
 | `vllm-runtime:1.2.1-cuda13` | `v0.20.1` | AMD64/ARM64 | `v13.0` | |
 | `vllm-runtime:1.2.1-efa-amd64` | `v0.20.1` | AMD64 | `v12.9` | Experimental |
@@ -324,6 +325,8 @@ These crates use repository `https://github.com/ai-dynamo/dynamo.git`. The table
 
 | Image:Tag | SGLang | Arch | CUDA | Notes |
 |-----------|--------|------|------|-------|
+| `sglang-runtime:1.3.0` | `v0.5.14` | AMD64/ARM64 | `v13.0` | |
+| `sglang-runtime:1.3.0-efa` | `v0.5.14` | AMD64/ARM64 | `v13.0` | Experimental |
 | `sglang-runtime:1.2.1` | `v0.5.11` | AMD64/ARM64 | `v12.9` | |
 | `sglang-runtime:1.2.1-cuda13` | `v0.5.11` | AMD64/ARM64 | `v13.0` | |
 | `sglang-runtime:1.2.0` | `v0.5.11` | AMD64/ARM64 | `v12.9` | |
@@ -357,6 +360,8 @@ These crates use repository `https://github.com/ai-dynamo/dynamo.git`. The table
 
 | Image:Tag | TRT-LLM | Arch | CUDA | Notes |
 |-----------|---------|------|------|-------|
+| `tensorrtllm-runtime:1.3.0` | `v1.3.0rc19` | AMD64/ARM64 | `v13.1` | |
+| `tensorrtllm-runtime:1.3.0-efa` | `v1.3.0rc19` | AMD64/ARM64 | `v13.1` | Experimental |
 | `tensorrtllm-runtime:1.2.1` | `v1.3.0rc14` | AMD64/ARM64 | `v13.1` | |
 | `tensorrtllm-runtime:1.2.1-efa-amd64` | `v1.3.0rc14` | AMD64 | `v13.1` | Experimental |
 | `tensorrtllm-runtime:1.2.0` | `v1.3.0rc14` | AMD64/ARM64 | `v13.1` | |
@@ -390,6 +395,7 @@ These crates use repository `https://github.com/ai-dynamo/dynamo.git`. The table
 
 | Image:Tag | Arch | Notes |
 |-----------|------|-------|
+| `dynamo-frontend:1.3.0` | AMD64/ARM64 | |
 | `dynamo-frontend:1.2.1` | AMD64/ARM64 | |
 | `dynamo-frontend:1.2.0` | AMD64/ARM64 | |
 | `dynamo-frontend:1.1.1` | AMD64/ARM64 | |
@@ -406,6 +412,7 @@ These crates use repository `https://github.com/ai-dynamo/dynamo.git`. The table
 
 | Image:Tag | Arch | Notes |
 |-----------|------|-------|
+| `kubernetes-operator:1.3.0` | AMD64/ARM64 | |
 | `kubernetes-operator:1.2.1` | AMD64/ARM64 | |
 | `kubernetes-operator:1.2.0` | AMD64/ARM64 | |
 | `kubernetes-operator:1.1.1` | AMD64/ARM64 | |
@@ -427,6 +434,7 @@ These crates use repository `https://github.com/ai-dynamo/dynamo.git`. The table
 
 | Image:Tag | Arch | Notes |
 |-----------|------|-------|
+| `dynamo-planner:1.3.0` | AMD64/ARM64 | |
 | `dynamo-planner:1.2.1` | AMD64/ARM64 | |
 | `dynamo-planner:1.2.0` | AMD64/ARM64 | |
 | `dynamo-planner:1.1.1` | AMD64/ARM64 | |
@@ -436,6 +444,7 @@ These crates use repository `https://github.com/ai-dynamo/dynamo.git`. The table
 
 | Image:Tag | Arch | Notes |
 |-----------|------|-------|
+| `snapshot-agent:1.3.0` | AMD64/ARM64 | Preview |
 | `snapshot-agent:1.2.1` | AMD64/ARM64 | Preview |
 | `snapshot-agent:1.2.0` | AMD64/ARM64 | Preview |
 | `snapshot-agent:1.1.1` | AMD64/ARM64 | Preview |
@@ -454,6 +463,7 @@ These crates use repository `https://github.com/ai-dynamo/dynamo.git`. The table
 
 | Package | Python | Platform | Notes |
 |---------|--------|----------|-------|
+| `ai-dynamo==1.3.0.post1` | `3.10`–`3.12` | Linux (glibc `v2.28+`) | |
 | `ai-dynamo==1.2.1` | `3.10`–`3.12` | Linux (glibc `v2.28+`) | |
 | `ai-dynamo==1.2.0.post1` | `3.10`–`3.12` | Linux (glibc `v2.28+`) | |
 | `ai-dynamo==1.1.1` | `3.10`–`3.12` | Linux (glibc `v2.28+`) | |
@@ -476,6 +486,7 @@ These crates use repository `https://github.com/ai-dynamo/dynamo.git`. The table
 
 | Package | Python | Platform | Notes |
 |---------|--------|----------|-------|
+| `ai-dynamo-runtime==1.3.0.post1` | `3.10`–`3.12` | Linux (glibc `v2.28+`) | |
 | `ai-dynamo-runtime==1.2.1` | `3.10`–`3.12` | Linux (glibc `v2.28+`) | |
 | `ai-dynamo-runtime==1.2.0.post1` | `3.10`–`3.12` | Linux (glibc `v2.28+`) | |
 | `ai-dynamo-runtime==1.1.1` | `3.10`–`3.12` | Linux (glibc `v2.28+`) | |
@@ -498,6 +509,7 @@ These crates use repository `https://github.com/ai-dynamo/dynamo.git`. The table
 
 | Package | Python | Platform | Notes |
 |---------|--------|----------|-------|
+| `kvbm==1.3.0.post1` | `3.10`–`3.12` | Linux (glibc `v2.28+`) | |
 | `kvbm==1.2.1` | `3.10`–`3.12` | Linux (glibc `v2.28+`) | |
 | `kvbm==1.2.0.post1` | `3.10`–`3.12` | Linux (glibc `v2.28+`) | |
 | `kvbm==1.1.1` | `3.10`–`3.12` | Linux (glibc `v2.28+`) | |
@@ -539,6 +551,7 @@ The `dynamo-crds` Helm chart is deprecated as of v1.0.0. CRDs are now managed by
 
 | Chart | Notes |
 |-------|-------|
+| `dynamo-platform-1.3.0` | |
 | `dynamo-platform-1.2.1` | |
 | `dynamo-platform-1.2.0` | |
 | `dynamo-platform-1.1.1` | |
@@ -560,6 +573,7 @@ The `dynamo-crds` Helm chart is deprecated as of v1.0.0. CRDs are now managed by
 
 | Chart | Notes |
 |-------|-------|
+| `snapshot-1.3.0` | Preview |
 | `snapshot-1.2.1` | Preview |
 | `snapshot-1.2.0` | Preview |
 | `snapshot-1.1.1` | Preview |
@@ -591,6 +605,7 @@ The `dynamo-crds` Helm chart is deprecated as of v1.0.0. CRDs are now managed by
 
 | Crate | MSRV (Rust) | Notes |
 |-------|-------------|-------|
+| `dynamo-runtime@1.3.0` | `v1.82` | |
 | `dynamo-runtime@1.2.1` | `v1.82` | |
 | `dynamo-runtime@1.2.0` | `v1.82` | |
 | `dynamo-runtime@1.1.1` | `v1.82` | |
@@ -611,6 +626,7 @@ The `dynamo-crds` Helm chart is deprecated as of v1.0.0. CRDs are now managed by
 
 | Crate | MSRV (Rust) | Notes |
 |-------|-------------|-------|
+| `dynamo-llm@1.3.0` | `v1.82` | |
 | `dynamo-llm@1.2.1` | `v1.82` | |
 | `dynamo-llm@1.2.0` | `v1.82` | |
 | `dynamo-llm@1.1.1` | `v1.82` | |
@@ -633,6 +649,7 @@ On crates.io, **`dynamo-protocols`** lists **`1.1.0`** as its first installable 
 
 | Crate | MSRV (Rust) | Notes |
 |-------|-------------|-------|
+| `dynamo-protocols@1.3.0` | `v1.82` | |
 | `dynamo-protocols@1.2.1` | `v1.82` | |
 | `dynamo-protocols@1.2.0` | `v1.82` | |
 | `dynamo-protocols@1.1.1` | `v1.82` | |
@@ -664,6 +681,7 @@ On crates.io, **`dynamo-protocols`** lists **`1.1.0`** as its first installable 
 
 | Crate | MSRV (Rust) | Notes |
 |-------|-------------|-------|
+| `dynamo-parsers@1.3.0` | `v1.82` | |
 | `dynamo-parsers@1.2.1` | `v1.82` | |
 | `dynamo-parsers@1.2.0` | `v1.82` | |
 | `dynamo-parsers@1.1.1` | `v1.82` | |
@@ -684,6 +702,7 @@ On crates.io, **`dynamo-protocols`** lists **`1.1.0`** as its first installable 
 
 | Crate | MSRV (Rust) | Notes |
 |-------|-------------|-------|
+| `dynamo-memory@1.3.0` | `v1.82` | |
 | `dynamo-memory@1.2.1` | `v1.82` | |
 | `dynamo-memory@1.2.0` | `v1.82` | |
 | `dynamo-memory@1.1.1` | `v1.82` | |
@@ -700,6 +719,7 @@ On crates.io, **`dynamo-protocols`** lists **`1.1.0`** as its first installable 
 
 | Crate | MSRV (Rust) | Notes |
 |-------|-------------|-------|
+| `dynamo-config@1.3.0` | `v1.82` | |
 | `dynamo-config@1.2.1` | `v1.82` | |
 | `dynamo-config@1.2.0` | `v1.82` | |
 | `dynamo-config@1.1.1` | `v1.82` | |
@@ -716,6 +736,7 @@ On crates.io, **`dynamo-protocols`** lists **`1.1.0`** as its first installable 
 
 | Crate | MSRV (Rust) | Notes |
 |-------|-------------|-------|
+| `dynamo-tokens@1.3.0` | `v1.82` | |
 | `dynamo-tokens@1.2.1` | `v1.82` | |
 | `dynamo-tokens@1.2.0` | `v1.82` | |
 | `dynamo-tokens@1.1.1` | `v1.82` | |
@@ -730,6 +751,7 @@ On crates.io, **`dynamo-protocols`** lists **`1.1.0`** as its first installable 
 
 | Crate | MSRV (Rust) | Notes |
 |-------|-------------|-------|
+| `dynamo-tokenizers@1.3.0` | `v1.82` | |
 | `dynamo-tokenizers@1.2.1` | `v1.82` | |
 | `dynamo-tokenizers@1.2.0` | `v1.82` | Initial |
 
@@ -737,6 +759,7 @@ On crates.io, **`dynamo-protocols`** lists **`1.1.0`** as its first installable 
 
 | Crate | MSRV (Rust) | Notes |
 |-------|-------------|-------|
+| `dynamo-mocker@1.3.0` | `v1.82` | |
 | `dynamo-mocker@1.2.1` | `v1.82` | |
 | `dynamo-mocker@1.2.0` | `v1.82` | |
 | `dynamo-mocker@1.1.1` | `v1.82` | |
@@ -749,6 +772,7 @@ On crates.io, **`dynamo-protocols`** lists **`1.1.0`** as its first installable 
 
 | Crate | MSRV (Rust) | Notes |
 |-------|-------------|-------|
+| `dynamo-kv-router@1.3.0` | `v1.82` | |
 | `dynamo-kv-router@1.2.1` | `v1.82` | |
 | `dynamo-kv-router@1.2.0` | `v1.82` | |
 | `dynamo-kv-router@1.1.1` | `v1.82` | |
@@ -761,6 +785,7 @@ On crates.io, **`dynamo-protocols`** lists **`1.1.0`** as its first installable 
 
 | Crate | MSRV (Rust) | Notes |
 |-------|-------------|-------|
+| `kvbm-logical@1.3.0` | `v1.82` | |
 | `kvbm-logical@1.2.1` | `v1.82` | |
 | `kvbm-logical@1.2.0` | `v1.82` | Initial |
 
