@@ -90,40 +90,49 @@ pub async fn spawn_pool_watch(
     Ok((rx, handle))
 }
 
-/// Publish the latest [`PoolState`] derived from the observed pool object.
-/// Sends `None` when the pool is absent or its spec cannot be parsed, so a
+/// Derive the [`PoolState`] from the observed pool object and publish it **only
+/// when it changes**. Absence or an unparseable spec both publish `None`, so a
 /// deleted or malformed pool always clears stale discovery state.
+///
+/// The `InferencePool` also receives status- and metadata-only updates
+/// (conditions, `resourceVersion`, `managedFields`) plus re-delivery on every
+/// watch relist, none of which touch `spec.selector` or the target port.
+/// `PodDiscovery` treats every `pool_rx` change as a full O(pods) rebuild, so
+/// `send_if_modified` suppresses those no-op wakes — discovery is disturbed only
+/// on a real presence, selector, or target-port change.
 fn publish_pool_state(
     obj: Option<DynamicObject>,
     name: &str,
     tx: &watch::Sender<Option<PoolState>>,
 ) {
-    let state = match &obj {
-        None => {
-            tracing::warn!(pool = %name, "InferencePool absent; clearing discovery state");
-            None
-        }
+    let (state, clear_reason) = match &obj {
+        None => (None, Some("absent".to_string())),
         Some(o) => match parse_pool_state(&o.data) {
-            Ok(s) => {
-                tracing::info!(
-                    pool = %name,
-                    target_port = s.target_port,
-                    labels = ?s.match_labels,
-                    "InferencePool resolved"
-                );
-                Some(s)
-            }
-            Err(e) => {
-                tracing::warn!(
-                    pool = %name,
-                    reason = %e,
-                    "InferencePool present but unsupported; clearing discovery state"
-                );
-                None
-            }
+            Ok(s) => (Some(s), None),
+            Err(e) => (None, Some(e.to_string())),
         },
     };
-    let _ = tx.send(state);
+
+    tx.send_if_modified(|current| {
+        if *current == state {
+            return false;
+        }
+        match &state {
+            Some(s) => tracing::info!(
+                pool = %name,
+                target_port = s.target_port,
+                labels = ?s.match_labels,
+                "InferencePool resolved"
+            ),
+            None => tracing::warn!(
+                pool = %name,
+                reason = clear_reason.as_deref().unwrap_or("unknown"),
+                "InferencePool unusable; clearing discovery state"
+            ),
+        }
+        *current = state;
+        true
+    });
 }
 
 /// Why an observed `InferencePool` spec can't be used for discovery. Each
@@ -198,6 +207,83 @@ fn parse_pool_state(data: &serde_json::Value) -> Result<PoolState, PoolSpecError
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A `DynamicObject` carrying `data` (spec/status live here for a CRD read as
+    /// a dynamic object), enough to exercise `publish_pool_state`.
+    fn dyn_obj(data: serde_json::Value) -> DynamicObject {
+        DynamicObject {
+            types: None,
+            metadata: Default::default(),
+            data,
+        }
+    }
+
+    #[test]
+    fn status_only_update_does_not_wake_discovery() {
+        let (tx, mut rx) = watch::channel::<Option<PoolState>>(None);
+
+        // First real spec resolves the pool -> receiver observes a change.
+        publish_pool_state(
+            Some(dyn_obj(json!({
+                "spec": {
+                    "selector": {"matchLabels": {"app": "vllm-qwen"}},
+                    "targetPorts": [{"number": 8000}]
+                },
+                "status": {"conditions": [{"type": "Accepted", "status": "True"}]}
+            }))),
+            "pool",
+            &tx,
+        );
+        assert!(rx.has_changed().unwrap());
+        assert_eq!(rx.borrow_and_update().as_ref().unwrap().target_port, 8000);
+
+        // Same spec, different status/metadata only -> derived state is identical,
+        // so no notification (this is the churn we must suppress).
+        publish_pool_state(
+            Some(dyn_obj(json!({
+                "metadata": {"resourceVersion": "12345"},
+                "spec": {
+                    "selector": {"matchLabels": {"app": "vllm-qwen"}},
+                    "targetPorts": [{"number": 8000}]
+                },
+                "status": {"conditions": [{"type": "Accepted", "status": "False"}]}
+            }))),
+            "pool",
+            &tx,
+        );
+        assert!(!rx.has_changed().unwrap());
+
+        // A real target-port change wakes discovery again.
+        publish_pool_state(
+            Some(dyn_obj(json!({
+                "spec": {
+                    "selector": {"matchLabels": {"app": "vllm-qwen"}},
+                    "targetPorts": [{"number": 9000}]
+                }
+            }))),
+            "pool",
+            &tx,
+        );
+        assert!(rx.has_changed().unwrap());
+        assert_eq!(rx.borrow_and_update().as_ref().unwrap().target_port, 9000);
+    }
+
+    #[test]
+    fn repeated_unparseable_pool_clears_once() {
+        let (tx, mut rx) = watch::channel::<Option<PoolState>>(Some(PoolState {
+            match_labels: BTreeMap::from([("app".to_string(), "vllm-qwen".to_string())]),
+            target_port: 8000,
+        }));
+
+        // Pool edited into an unusable spec -> clears to None (one notification).
+        publish_pool_state(Some(dyn_obj(json!({"spec": {}}))), "pool", &tx);
+        assert!(rx.has_changed().unwrap());
+        assert!(rx.borrow_and_update().is_none());
+
+        // Still unusable on the next delivery -> already None, so no re-wake.
+        publish_pool_state(Some(dyn_obj(json!({"spec": {}}))), "pool", &tx);
+        assert!(!rx.has_changed().unwrap());
+    }
 
     #[test]
     fn parses_v1_target_ports() {
