@@ -20,7 +20,7 @@ from typing import Optional
 
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import PlannerConnector
-from dynamo.planner.connectors.kubernetes_api import (
+from dynamo.planner.connectors.clients.kubernetes_api import (
     DYNAMO_WORKER_METADATA_API_VERSION,
     NVIDIA_API_GROUP,
     KubernetesAPI,
@@ -34,6 +34,7 @@ from dynamo.planner.connectors.mdc import (
 from dynamo.planner.errors import (
     DeploymentModelNameMismatchError,
     DeploymentValidationError,
+    DynamoGraphDeploymentNotReadyError,
     EmptyTargetReplicasError,
     ModelNameNotFoundError,
     PlannerError,
@@ -55,7 +56,8 @@ logger = logging.getLogger(__name__)
 
 CURRENT_WORKER_HASH_ANNOTATION = "nvidia.com/current-worker-hash"
 CURRENT_WORKER_HASH_V2_ANNOTATION = "nvidia.com/current-worker-hash-v2"
-LEGACY_WORKER_HASH = "legacy"
+WORKER_COMPONENT_TYPES = {"worker", "prefill", "decode"}
+WORKER_SUFFIX_COMPONENT_KINDS = {"Deployment", "LeaderWorkerSet"}
 
 
 class KubernetesConnector(PlannerConnector):
@@ -65,6 +67,7 @@ class KubernetesConnector(PlannerConnector):
         model_name: Optional[str] = None,
         k8s_namespace: Optional[str] = None,
         parent_dgd_name: Optional[str] = None,
+        raise_not_ready: bool = False,
     ):
         self.kube_api = KubernetesAPI(k8s_namespace)
 
@@ -87,23 +90,80 @@ class KubernetesConnector(PlannerConnector):
 
         # For backwards compatibility
         self.graph_deployment_name = self.parent_dgd_name
+        self.raise_not_ready = raise_not_ready
+
+    async def async_init(self):
+        """No-op asynchronous lifecycle hook."""
+        return
 
     def get_worker_runtime_namespace(self, base_dynamo_namespace: str) -> str:
         """Return the Dynamo namespace used by the current worker generation.
 
-        Managed DGD rolling updates run worker components in
-        ``<base_namespace>-<worker_hash>`` while non-worker components, including
-        the frontend metrics labels, stay on ``base_namespace``.  The active hash
-        is stored on the parent DGD so planners can discover it dynamically.
+        Newer operators publish the effective runtime namespace on the worker
+        component status. Older operators expose only the active worker hash, so
+        the planner falls back to appending that hash only for Deployment-backed
+        and LeaderWorkerSet-backed workers.
         """
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
-        annotations = deployment.get("metadata", {}).get("annotations", {}) or {}
-        worker_hash = annotations.get(CURRENT_WORKER_HASH_ANNOTATION)
-        if not worker_hash or worker_hash == LEGACY_WORKER_HASH:
-            worker_hash = annotations.get(CURRENT_WORKER_HASH_V2_ANNOTATION)
-        if not worker_hash or worker_hash == LEGACY_WORKER_HASH:
+        worker_status = self._get_first_worker_component_status(deployment)
+        if worker_status:
+            runtime_namespace = worker_status.get("runtimeNamespace")
+            if runtime_namespace:
+                # Newer operators report the effective namespace directly.
+                return runtime_namespace
+
+        worker_hash = self._get_current_worker_hash(deployment)
+        if not worker_hash:
+            # No active managed worker hash means workers use the base namespace.
+            return base_dynamo_namespace
+        if worker_status is None and self._has_worker_component(deployment):
+            # A hash with no worker status leaves the backing kind unknown.
+            raise PlannerError(
+                "Worker component status is not available yet; runtime namespace is indeterminate"
+            )
+        if not self._worker_status_uses_namespace_suffix(worker_status):
+            # Only old Deployment/LWS-backed workers used the hash as a namespace suffix.
             return base_dynamo_namespace
         return f"{base_dynamo_namespace}-{worker_hash}"
+
+    def _get_current_worker_hash(self, deployment: dict) -> Optional[str]:
+        annotations = deployment.get("metadata", {}).get("annotations", {}) or {}
+        worker_hash = annotations.get(CURRENT_WORKER_HASH_ANNOTATION)
+        if worker_hash:
+            return worker_hash
+        return annotations.get(CURRENT_WORKER_HASH_V2_ANNOTATION)
+
+    def _is_worker_component(self, component_name: str, component: dict) -> bool:
+        component_type = get_component_type(component)
+        if component_type:
+            return component_type in WORKER_COMPONENT_TYPES
+        return component_name in WORKER_COMPONENT_TYPES
+
+    def _has_worker_component(self, deployment: dict) -> bool:
+        return any(
+            self._is_worker_component(component_name, component)
+            for component_name, component in get_components_by_name(deployment).items()
+        )
+
+    def _get_first_worker_component_status(self, deployment: dict) -> Optional[dict]:
+        """Return the first worker-class component status in DGD spec order."""
+        status_components = deployment.get("status", {}).get("components", {}) or {}
+        components_by_name = get_components_by_name(deployment)
+        for component_name, component in components_by_name.items():
+            if not self._is_worker_component(component_name, component):
+                continue
+            worker_status = status_components.get(component_name)
+            if worker_status:
+                return worker_status
+        return None
+
+    def _worker_status_uses_namespace_suffix(
+        self, worker_status: Optional[dict]
+    ) -> bool:
+        if not worker_status:
+            return False
+        component_kind = worker_status.get("componentKind", "")
+        return component_kind in WORKER_SUFFIX_COMPONENT_KINDS
 
     async def add_component(
         self, sub_component_type: SubComponentType, blocking: bool = True
@@ -182,8 +242,10 @@ class KubernetesConnector(PlannerConnector):
                 errors.append(str(e))
 
         try:
-            self.get_model_name(
+            self._get_model_name_from_deployment(
                 deployment,
+                prefill_component_name=prefill_component_name,
+                decode_component_name=decode_component_name,
                 require_prefill=require_prefill,
                 require_decode=require_decode,
             )
@@ -196,17 +258,36 @@ class KubernetesConnector(PlannerConnector):
 
     def get_model_name(
         self,
-        deployment: Optional[dict] = None,
         require_prefill: bool = True,
         require_decode: bool = True,
     ) -> str:
-        """Get the model name from the deployment"""
+        """Get the model name from the current deployment."""
         try:
-            if deployment is None:
-                deployment = self.kube_api.get_graph_deployment(
-                    self.graph_deployment_name
+            deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        except PlannerError as e:
+            if self.user_provided_model_name:
+                logger.warning(
+                    f"Failed to get model name from deployment with error: {e}, using provided model name: {self.user_provided_model_name}"
                 )
+                return self.user_provided_model_name
+            raise
 
+        return self._get_model_name_from_deployment(
+            deployment,
+            require_prefill=require_prefill,
+            require_decode=require_decode,
+        )
+
+    def _get_model_name_from_deployment(
+        self,
+        deployment: dict,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
+    ) -> str:
+        """Get the model name from an already-fetched deployment."""
+        try:
             # TODO: dynamo/profiler/utils/config.py already contains DGD config parsing
             # and model name logic, should consolidate
             prefill_model_name = None
@@ -215,12 +296,14 @@ class KubernetesConnector(PlannerConnector):
                 prefill_service = get_component_from_type_or_name(
                     deployment,
                     SubComponentType.PREFILL,
+                    component_name=prefill_component_name,
                 )
                 prefill_model_name = prefill_service.get_model_name()
             if require_decode:
                 decode_service = get_component_from_type_or_name(
                     deployment,
                     SubComponentType.DECODE,
+                    component_name=decode_component_name,
                 )
                 decode_model_name = decode_service.get_model_name()
 
@@ -262,14 +345,27 @@ class KubernetesConnector(PlannerConnector):
 
     def get_gpu_counts(
         self,
-        deployment: Optional[dict] = None,
         require_prefill: bool = True,
         require_decode: bool = True,
     ) -> tuple[int, int]:
-        """Get the GPU counts for prefill and decode components from the deployment.
+        """Get the GPU counts for prefill and decode components."""
+        deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        return self._get_gpu_counts_from_deployment(
+            deployment,
+            require_prefill=require_prefill,
+            require_decode=require_decode,
+        )
+
+    def _get_gpu_counts_from_deployment(
+        self,
+        deployment: dict,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+    ) -> tuple[int, int]:
+        """Get GPU counts from an already-fetched deployment.
 
         Args:
-            deployment: Optional deployment dict, fetched if not provided
+            deployment: Deployment dict to inspect
             require_prefill: Whether to require a prefill component
             require_decode: Whether to require a decode component
 
@@ -279,9 +375,6 @@ class KubernetesConnector(PlannerConnector):
         Raises:
             DeploymentValidationError: If GPU counts cannot be determined from DGD
         """
-        if deployment is None:
-            deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
-
         prefill_gpu_count = 0
         decode_gpu_count = 0
         errors = []
@@ -511,7 +604,8 @@ class KubernetesConnector(PlannerConnector):
         )
         return info
 
-    def get_actual_worker_counts(
+    # todo -> how are we handling 3 active 2 more new workers pending?
+    async def get_actual_worker_counts(
         self,
         prefill_component_name: Optional[str] = None,
         decode_component_name: Optional[str] = None,
@@ -567,8 +661,18 @@ class KubernetesConnector(PlannerConnector):
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
 
         if not self.kube_api.is_deployment_ready(deployment):
+            if self.raise_not_ready:
+                logger.warning(
+                    "Deployment %s is not ready, rejecting this scaling",
+                    self.graph_deployment_name,
+                )
+                raise DynamoGraphDeploymentNotReadyError(
+                    deployment_name=self.graph_deployment_name,
+                    namespace=getattr(self.kube_api, "current_namespace", None),
+                )
             logger.warning(
-                f"Deployment {self.graph_deployment_name} is not ready, ignoring this scaling"
+                "Deployment %s is not ready, ignoring this scaling",
+                self.graph_deployment_name,
             )
             return
 

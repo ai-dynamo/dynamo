@@ -88,7 +88,7 @@ mod tests {
                 output_tokens: Some(5),
                 request_received_ms: Some(start_ms as u64),
                 total_time_ms: Some((end_ms - start_ms) as f64),
-                replay: None,
+                ..Default::default()
             },
             replay: RequestTraceReplayMetrics {
                 trace_block_size: 2,

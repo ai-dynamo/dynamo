@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Build & Test
 
-This is a Rust crate (`kvbm-engine`) in the dynamo workspace. Rust edition 2024, requires rustc 1.93.1+.
+This is a Rust crate (`kvbm-engine`) in the dynamo workspace. Rust edition 2024, requires rustc 1.96.1+.
 
 ```bash
 # Build

@@ -97,7 +97,6 @@ def _new_decode_handler(*, enable_frontend_decoding: bool):
 
     handler._get_input_param = lambda req: {"input_ids": req.get("token_ids", [])}
     handler._resolve_lora = lambda req: None
-    handler._session_kwargs = lambda req: {}
     handler._priority_kwargs = lambda priority: {}
 
     return handler
@@ -109,8 +108,8 @@ async def _empty_stream() -> AsyncGenerator[Dict[str, Any], None]:
 
 
 @pytest.mark.asyncio
-async def test_aggregated_fd_off_passes_url_strings():
-    """Without --frontend-decoding, image_url items pass through as URL strings."""
+async def test_aggregated_fd_off_passes_media_url_strings():
+    """Without frontend decoding, media URL items pass through as strings."""
     handler = _new_decode_handler(enable_frontend_decoding=False)
 
     captured: Dict[str, Any] = {}
@@ -123,13 +122,17 @@ async def test_aggregated_fd_off_passes_url_strings():
 
     request = {
         "token_ids": [1, 2, 3],
-        "multi_modal_data": {"image_url": [{"Url": "https://example.com/a.jpg"}]},
+        "multi_modal_data": {
+            "image_url": [{"Url": "https://example.com/a.jpg"}],
+            "audio_url": [{"Url": "https://example.com/a.wav"}],
+        },
     }
 
     async for _ in handler.generate(request, _Context()):
         pass
 
     assert captured["image_data"] == ["https://example.com/a.jpg"]
+    assert captured["audio_data"] == ["https://example.com/a.wav"]
 
 
 @pytest.mark.asyncio

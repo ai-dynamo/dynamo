@@ -24,8 +24,6 @@ spec:
             - python3
             - -m
             - dynamo.frontend
-          args:
-            - --router-reset-states
       replicas: 1
       subComponentType: null
     VllmDecodeWorker:

@@ -5,8 +5,6 @@ title: Request Migration
 subtitle: Preserves token state and reissues in-flight requests on healthy workers when their original worker fails.
 ---
 
-[简体中文](./request-migration.zh-CN.md)
-
 This document describes how Dynamo implements request migration to handle worker failures gracefully during LLM text generation. Request migration allows in-progress requests to continue on different workers when the original worker becomes unavailable, providing fault tolerance and improved user experience.
 
 ## Overview

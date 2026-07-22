@@ -530,9 +530,10 @@ def test_frontend_api_surface_compliance(
         # nvext is enabled by default; no env needed. (Set
         # DYN_DISABLE_FRONTEND_NVEXT=1 to turn it off.)
         "DYN_REQUEST_TRACE": "1",
-        "DYN_REQUEST_TRACE_SINKS": "jsonl",
-        "DYN_REQUEST_TRACE_OUTPUT_PATH": str(request_trace_path),
-        "DYN_REQUEST_TRACE_JSONL_FLUSH_INTERVAL_MS": "10",
+        "DYN_REQUEST_TRACE_SINKS": "file",
+        "DYN_REQUEST_TRACE_FILE_PATH": str(request_trace_path),
+        "DYN_REQUEST_TRACE_FILE_FORMAT": "jsonl",
+        "DYN_REQUEST_TRACE_FILE_FLUSH_INTERVAL_MS": "10",
         # The SGLang launch scripts invoke `python3`; keep them on the same
         # interpreter environment pytest is running in.
         "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ.get('PATH', '')}",

@@ -23,7 +23,13 @@ The following Helm chart is available for the Dynamo Kubernetes Platform:
 
 ## CRD Management
 
-CRDs are bundled in the operator subchart's `crds/` directory and managed automatically:
+The cluster-wide operator manages Custom Resource Definitions (CRDs) automatically. CRD manifests
+are generated under [`deploy/operator/config/crd/bases`](../operator/config/crd/bases/) and bundled
+in the operator image.
 
-- **Initial install**: Helm natively installs CRDs from the `crds/` directory during `helm install`.
-- **Upgrades**: A `pre-upgrade` hook Job applies CRDs using server-side apply from the operator image. This is necessary because Helm does not update CRDs from the `crds/` directory on `helm upgrade`. This can be disabled by setting `upgradeCRD: false`.
+- **Initial installation and upgrades**: The operator Deployment's `crd-apply` init container applies
+  CRDs from the operator image using server-side apply before the manager starts.
+- **External management**: Set `dynamo-operator.upgradeCRD=false` when another process manages CRDs.
+  With this setting, the chart installs no CRDs. Apply them separately before starting a cluster-wide
+  operator. Namespace-restricted operators require this setting and use the CRDs managed by the
+  cluster-wide operator.

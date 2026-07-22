@@ -29,6 +29,9 @@ cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]
 media-ffmpeg = ["dep:video-rs", "dep:ffmpeg-next", "dep:memfile"]
 bench = ["dynamo-kv-router/bench"]
+# Pull-only CKF Relay stats and snapshots. Keep this separate from `metrics`, which
+# is enabled by normal `dynamo-llm` builds and must not retain diagnostic hot-path work.
+ckf-diagnostics = []
 kv-router-stress = ["dep:clap", "dep:indicatif", "bench"]
 mm-routing = ["dep:llm-multimodal", "dep:llm-tokenizer"]
 request-trace-bench = []
@@ -60,7 +63,7 @@ required-features = ["request-trace-bench"]
 # repo
 dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols"] }
 dynamo-memory = { workspace = true }
-dynamo-mocker = { workspace = true }
+dynamo-mocker = { workspace = true, features = ["zmq-events"] }
 dynamo-rl = { workspace = true }
 dynamo-runtime = { workspace = true }
 dynamo-tokenizers = { workspace = true }
@@ -68,8 +71,8 @@ dynamo-renderer = { workspace = true }
 dynamo-tokens = { workspace = true }
 
 # workspace
-aho-corasick = "1.1"
 anyhow = { workspace = true }
+arc-swap = "1.9.1"
 dynamo-protocols = { workspace = true }
 dynamo-parsers = { workspace = true }
 dynamo-parsers-v2 = { workspace = true }
@@ -83,14 +86,14 @@ derive_builder = { workspace = true }
 either = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }
-hf-hub = { workspace = true }
+hf-hub = { workspace = true, features = ["tokio", "rustls-tls", "ureq"] }
 ipnet = { workspace = true }
 lru = { workspace = true }
 moka = { workspace = true }
-rand = { workspace = true }
 oneshot = { workspace = true }
 parking_lot = { workspace = true }
 prometheus = { workspace = true }
+rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
@@ -102,6 +105,9 @@ tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
 validator = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
@@ -216,6 +222,7 @@ rstest = "0.18.2"
 serial_test = "3"
 temp-env = { version = "0.3.6", features = ["async_closure"] }
 tempfile = "3.17.1"
+tracing-subscriber = { workspace = true }
 insta = { version = "1.41", features = [
   "glob",
   "json",
@@ -225,8 +232,14 @@ insta = { version = "1.41", features = [
 
 lazy_static = "1.4"
 mockito = "1.7.0"
-dynamo-bench = { path = "../bench" }
+dynamo-bench = { path = "../bench", default-features = false, features = [
+  "kv-router-stress-support",
+] }
 tokio-tungstenite = "0.26"
+
+[[test]]
+name = "lora_simulation"
+path = "tests/lora_simulation/main.rs"
 
 [[bin]]
 name = "generate-frontend-openapi"

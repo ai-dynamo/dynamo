@@ -6,6 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from dynamo.common.native_offloading import native_offloading_capacity
+
 
 @dataclass(frozen=True)
 class RuntimeCapacity:
@@ -97,3 +99,30 @@ def get_spec_decode_runtime_data(server_args: Any) -> dict[str, Any] | None:
     if method:
         data["method"] = str(method)
     return data
+
+
+def get_hicache_native_offloading_capacity(
+    server_args: Any, scheduler_info: dict[str, Any]
+) -> dict[str, int] | None:
+    """Return HiCache capacity that is unique beyond the device KV pool."""
+    device_capacity = native_offloading_capacity(
+        scheduler_info.get("max_total_num_tokens")
+    )
+    if device_capacity is None:
+        return None
+
+    host_capacity = native_offloading_capacity(
+        scheduler_info.get("hicache_host_total_tokens")
+    )
+    if host_capacity is None:
+        return None
+
+    policy = getattr(server_args, "hicache_write_policy", None)
+    host_tokens = host_capacity["total_tokens"]
+    # The router already counts device capacity: write-back adds the disjoint host
+    # pool, write-through subtracts its device mirror, and selective overlap is dynamic.
+    if policy == "write_back":
+        return host_capacity
+    if policy == "write_through":
+        return native_offloading_capacity(host_tokens - device_capacity["total_tokens"])
+    return None

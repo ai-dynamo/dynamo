@@ -276,7 +276,8 @@ impl ConcurrentRadixTreeCompressed {
                 });
             }
             ParentChildPlan::Descend(child) => return Ok(StoreInsertStep::Descend(child)),
-            ParentChildPlan::MissingChild { shape_version } => shape_version,
+            ParentChildPlan::InteriorParent { shape_version }
+            | ParentChildPlan::MissingChild { shape_version } => shape_version,
         };
 
         if let Some(parent_hash) = cursor.last_ext_hash

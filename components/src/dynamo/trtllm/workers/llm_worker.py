@@ -440,7 +440,10 @@ async def init_llm_worker(
 
     if config.modality == Modality.MULTIMODAL:
         engine_args["skip_tokenizer_init"] = False
-        model_config = AutoConfig.from_pretrained(config.model, trust_remote_code=True)
+        model_config = AutoConfig.from_pretrained(
+            config.model,
+            trust_remote_code=engine_args.get("trust_remote_code", False),
+        )
         multimodal_processor = MultimodalRequestProcessor(
             model_type=model_config.model_type,
             model_dir=config.model,
@@ -455,8 +458,9 @@ async def init_llm_worker(
         default_sampling_params.detokenize = False
 
     connector = None
-    needs_nixl = config.disaggregation_mode != DisaggregationMode.AGGREGATED or (
+    needs_nixl = (
         config.modality == Modality.MULTIMODAL
+        and config.disaggregation_mode != DisaggregationMode.AGGREGATED
         and (
             config.frontend_decoding
             or config.disaggregation_mode == DisaggregationMode.ENCODE
@@ -530,6 +534,7 @@ async def init_llm_worker(
         # So for now, we just set the parsers from the config
         # TODO: fix this once we have a better way to get total_kv_blocks
         runtime_config = ModelRuntimeConfig()
+        runtime_config.kv_state_endpoint = config.kv_state_endpoint
         runtime_config.context_length = config.max_seq_len
 
         # Set values from config that are available immediately
@@ -674,6 +679,7 @@ async def init_llm_worker(
             additional_metrics=additional_metrics,
             max_seq_len=config.max_seq_len,
             disagg_machine_id=int(endpoint.connection_id()) % 1021,
+            conversation_affinity=config.conversation_affinity,
         )
 
         media_decoder = None
@@ -766,6 +772,7 @@ async def init_llm_worker(
                     zmq_endpoint=consolidator_output_connect_endpoint,
                     zmq_topic="",
                     enable_local_indexer=config.enable_local_indexer,
+                    kv_state_endpoint=config.kv_state_endpoint,
                 )
                 logging.info(
                     f"Created worker-side publisher for consolidated events: "
@@ -784,6 +791,7 @@ async def init_llm_worker(
                 zmq_endpoint=trtllm_zmq_bind_endpoint,
                 enable_local_indexer=config.enable_local_indexer,
                 metrics_collector=metrics_collector,
+                kv_state_endpoint=config.kv_state_endpoint,
             ) as publisher:
                 handler_config.publisher = publisher
                 handler = RequestHandlerFactory().get_request_handler(handler_config)

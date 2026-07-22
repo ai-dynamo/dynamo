@@ -29,6 +29,7 @@ try:
         PlannerPreDeploymentSweepMode,
     )
     from dynamo.profiler.profile_sla import (
+        _check_dgdr_aic_support,
         _extract_profiler_params,
         _write_final_output,
     )
@@ -46,6 +47,7 @@ try:
         FeaturesSpec,
         HardwareSpec,
         MockerSpec,
+        ModelCacheSpec,
         SLASpec,
         WorkloadSpec,
     )
@@ -101,6 +103,65 @@ def _make_ops(tmp_path, **kwargs) -> ProfilerOperationalConfig:
         output_dir=str(tmp_path / "out"),
         **kwargs,
     )
+
+
+def test_aic_support_check_uses_local_pvc_config(tmp_path) -> None:
+    """Preflight support checks avoid Hugging Face when PVC config is present."""
+    local_dir = tmp_path / "model"
+    local_dir.mkdir()
+    (local_dir / "config.json").write_text("{}")
+    dgdr = _make_dgdr(
+        backend="vllm",
+        modelCache=ModelCacheSpec(
+            pvcName="model-cache",
+            pvcMountPath=str(tmp_path),
+            pvcModelPath="model",
+        ),
+    )
+
+    with patch(
+        "dynamo.profiler.profile_sla.check_model_hardware_support",
+        return_value=True,
+    ) as mock_check:
+        assert _check_dgdr_aic_support(dgdr, "vllm", "h200_sxm")
+
+    mock_check.assert_called_once_with(str(local_dir), "h200_sxm", "vllm")
+
+
+def test_aic_support_check_auto_uses_local_pvc_config(tmp_path) -> None:
+    """Auto backend checks receive the resolved PVC model path."""
+    local_dir = tmp_path / "model"
+    local_dir.mkdir()
+    (local_dir / "config.json").write_text("{}")
+    dgdr = _make_dgdr(
+        backend="auto",
+        modelCache=ModelCacheSpec(
+            pvcName="model-cache",
+            pvcMountPath=str(tmp_path),
+            pvcModelPath="model",
+        ),
+    )
+
+    with patch(
+        "dynamo.profiler.profile_sla._check_auto_backend_support",
+        return_value=True,
+    ) as mock_check:
+        assert _check_dgdr_aic_support(dgdr, "auto", "h200_sxm")
+
+    mock_check.assert_called_once_with(str(local_dir), "h200_sxm")
+
+
+def test_aic_support_check_without_pvc_uses_dgdr_model() -> None:
+    """Preflight falls back to the DGDR model when no PVC is configured."""
+    dgdr = _make_dgdr(backend="vllm")
+
+    with patch(
+        "dynamo.profiler.profile_sla.check_model_hardware_support",
+        return_value=True,
+    ) as mock_check:
+        assert _check_dgdr_aic_support(dgdr, "vllm", "h200_sxm")
+
+    mock_check.assert_called_once_with(dgdr.model, "h200_sxm", "vllm")
 
 
 # ---------------------------------------------------------------------------
@@ -469,6 +530,39 @@ class TestAssembleFinalConfig:
         )
 
         assert result is dgd_config
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_final_trtllm_config_enables_chunked_prefill(self, tmp_path):
+        dgdr = _make_dgdr()
+        ops = _make_ops(tmp_path)
+        dgd_config = {
+            "kind": "DynamoGraphDeployment",
+            "spec": {
+                "services": {
+                    "decode": {
+                        "componentType": "worker",
+                        "subComponentType": "decode",
+                        "extraPodSpec": {"mainContainer": {"args": []}},
+                    }
+                }
+            },
+        }
+
+        result = assemble_final_config(
+            dgdr,
+            ops,
+            dgd_config,
+            PickedParallelConfig(tp=1),
+            PickedParallelConfig(tp=1),
+            resolved_backend="trtllm",
+        )
+
+        args = result["spec"]["services"]["decode"]["extraPodSpec"]["mainContainer"][
+            "args"
+        ]
+        idx = args.index("--trtllm.enable_chunked_prefill")
+        assert args[idx + 1] == "true"
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0

@@ -30,6 +30,7 @@ in ``test_invoke_handler_matches_publisher_keyword_set``.
 from __future__ import annotations
 
 import asyncio
+import logging
 import queue
 import threading
 from unittest.mock import MagicMock
@@ -309,6 +310,7 @@ def _build_publisher_stub(monkeypatch, *, attention_dp_size: int, fpm_enabled: b
     pub.component_gauges = MagicMock()
     pub.enable_local_indexer = False
     pub.metrics_collector = None
+    pub.kv_state_endpoint = None
     pub.attention_dp_size = attention_dp_size
     pub.fpm_enabled = fpm_enabled
     pub.processing_initial_created_events = True
@@ -366,6 +368,105 @@ def test_publisher_initialize_constructs_fpm_direct_publisher_when_fpm_enabled(
     assert kwargs["worker_id"] == "worker-abc"
     assert kwargs["dp_size"] == 1
     assert pub.fpm_publisher is not None
+
+
+def _publisher_for_kv_event_test():
+    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
+    pub.additional_metrics = None
+    pub._last_engine_event_id_by_rank = {}
+    pub.processing_initial_created_events = False
+    pub.partial_block_hashes = set()
+    pub.kv_block_size = 4
+    pub.max_window_size = None
+    return pub
+
+
+def _stored_kv_event(cache_salt="tenant-a"):
+    return {
+        "event_id": 1,
+        "attention_dp_rank": 0,
+        "data": {
+            "type": "stored",
+            "parent_hash": None,
+            "blocks": [
+                {
+                    "block_hash": 123,
+                    "cache_salt": cache_salt,
+                    "tokens": [
+                        {"token_id": 1},
+                        {"token_id": 2},
+                        {"token_id": 3},
+                        {"token_id": 4},
+                    ],
+                }
+            ],
+        },
+    }
+
+
+def test_handle_kv_event_forwards_cache_salt_to_direct_publisher():
+    pub = _publisher_for_kv_event_test()
+    publisher = MagicMock()
+    pub.zmq_kv_event_publisher = None
+    pub.kv_event_publishers = {0: publisher}
+
+    pub._handle_kv_event(_stored_kv_event())
+
+    publisher.publish_stored.assert_called_once()
+    assert publisher.publish_stored.call_args.kwargs["cache_salt"] == "tenant-a"
+
+
+def test_handle_kv_event_forwards_cache_salt_to_zmq_publisher():
+    pub = _publisher_for_kv_event_test()
+    pub.zmq_kv_event_publisher = MagicMock()
+    pub.kv_event_publishers = None
+
+    pub._handle_kv_event(_stored_kv_event())
+
+    pub.zmq_kv_event_publisher.publish_stored.assert_called_once()
+    assert pub.zmq_kv_event_publisher.publish_stored.call_args.args[-1] == "tenant-a"
+
+
+@pytest.mark.asyncio
+async def test_polling_loop_drops_conflicting_salts_and_processes_next_event(caplog):
+    pub = _publisher_for_kv_event_test()
+    pub._stop_event = threading.Event()
+    pub.zmq_kv_event_publisher = None
+    publisher = MagicMock()
+    pub.kv_event_publishers = {0: publisher}
+
+    conflicting = _stored_kv_event("tenant-a")
+    conflicting["data"]["blocks"].append(
+        {
+            **conflicting["data"]["blocks"][0],
+            "block_hash": 456,
+            "cache_salt": "tenant-b",
+        }
+    )
+    valid = _stored_kv_event("tenant-c")
+    valid["event_id"] = 2
+
+    async def fetch_events():
+        yield conflicting
+        yield valid
+
+    def handle_event(event):
+        pub._handle_kv_event(event)
+        if event["event_id"] == 2:
+            pub._stop_event.set()
+
+    with caplog.at_level(logging.WARNING):
+        await pub._polling_loop(
+            fetch_events,
+            handle_event,
+            min_sleep=0.001,
+            max_sleep=0.001,
+            backoff_factor=1.0,
+        )
+
+    publisher.publish_stored.assert_called_once()
+    assert publisher.publish_stored.call_args.kwargs["cache_salt"] == "tenant-c"
+    assert "Dropping stored KV event with invalid cache namespace" in caplog.text
 
 
 def test_publisher_initializes_fpm_publisher_under_attention_dp(monkeypatch):

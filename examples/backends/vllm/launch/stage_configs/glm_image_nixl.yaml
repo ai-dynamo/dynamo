@@ -1,0 +1,111 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Stage config for running GLM-Image with AR -> DiT disaggregation
+# using NixlConnector for inter-stage transfer.
+#
+# Works for both single-node and cross-node deployments:
+# - Single-node: Use CUDA_VISIBLE_DEVICES to assign different GPUs to each stage process
+# - Cross-node: Each stage runs on a separate physical machine with independent GPU numbering
+# Both stages use devices: "0" so they always use the first visible GPU in their environment.
+
+stage_args:
+  # Stage 0: AR model (token generation)
+  # Note: tensor_parallel_size controlled via AR_TP env var (default: 1).
+  # Devices controlled via AR_GPUS env var (default: "0").
+  - stage_id: 0
+    stage_type: llm
+    runtime:
+      process: true
+      devices: ${oc.env:AR_GPUS,0}
+      requires_multimodal_data: true
+    engine_args:
+      model_stage: ar
+      worker_type: ar
+      max_num_seqs: 1
+      model_arch: GlmImageForConditionalGeneration
+      model_subdir: vision_language_encoder
+      tokenizer_subdir: processor
+      scheduler_cls: vllm_omni.core.sched.omni_ar_scheduler.OmniARScheduler
+      tensor_parallel_size: ${oc.env:AR_TP,1}
+      gpu_memory_utilization: 0.85
+      enforce_eager: true
+      trust_remote_code: true
+      engine_output_type: token_ids
+      distributed_executor_backend: "mp"
+      enable_prefix_caching: false
+      max_num_batched_tokens: 32768
+    # Explicit connector mapping for AR -> DiT
+    output_connectors:
+      to_stage_1: ar_to_dit_nixl
+    final_output: false
+    is_comprehension: true
+    default_sampling_params:
+      temperature: 0.9
+      top_p: 0.75
+      top_k: 16512
+      max_tokens: 1281
+      stop_token_ids: [16385]
+      seed: 42
+      detokenize: false
+
+  # Stage 1: DiT diffusion model (image generation)
+  # Note: Devices and num_gpus controlled via DIT_GPUS and DIT_TP env vars.
+  # oc.decode converts the env var string to proper Python type (int).
+  - stage_id: 1
+    stage_type: diffusion
+    runtime:
+      process: true
+      devices: ${oc.env:DIT_GPUS,0}
+      requires_multimodal_data: true
+    engine_args:
+      model_stage: dit
+      max_num_seqs: 1
+      model_arch: GlmImagePipeline
+      num_gpus: ${oc.decode:${oc.env:DIT_TP,1}}
+      enforce_eager: true
+      trust_remote_code: true
+      distributed_executor_backend: "mp"
+    engine_input_source: [0]
+    custom_process_input_func: vllm_omni.model_executor.stage_input_processors.glm_image.ar2diffusion
+    # Explicit connector mapping for AR -> DiT
+    input_connectors:
+      from_stage_0: ar_to_dit_nixl
+    # Output connector for DIT -> Router (multi-node: replaces SHM)
+    output_connectors:
+      to_stage_router: dit_to_router
+    final_output: true
+    final_output_type: image
+    default_sampling_params:
+      seed: 42
+      num_inference_steps: 50
+      guidance_scale: 1.5
+      height: 1024
+      width: 1024
+
+runtime:
+  enabled: true
+  defaults:
+    window_size: -1
+    max_inflight: 1
+  edges:
+    - from: 0
+      to: 1
+      window_size: -1
+  # Connector definitions referenced by input_connectors/output_connectors in stage_args.
+  connectors:
+    ar_to_dit_nixl:
+      name: NixlConnector
+      extra:
+        # Set transport backend(s) as needed for your environment, e.g. ["UCX"], ["LIBFABRIC"].
+        # If omitted, connector defaults apply.
+        # backends: ["UCX"]
+        # Optional tuning knobs; adjust/remove based on your NIXL deployment.
+        enforce_handshake_compat: false
+    dit_to_router:
+      # Final DIT stage -> Router connector.
+      # Enables multi-node: router and DIT on different machines (no SHM needed).
+      # Remove to fall back to single-node SHM.
+      name: NixlConnector
+      extra:
+        enforce_handshake_compat: false

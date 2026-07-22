@@ -11,7 +11,15 @@ import base64
 import logging
 from typing import Any, Dict
 
+from transformers import AutoTokenizer
 from vllm_omni.inputs.data import OmniTextPrompt
+
+try:
+    from vllm_omni.model_executor.models.qwen3_tts.prompt_embeds_builder import (
+        Qwen3TTSPromptEmbedsBuilder,
+    )
+except ImportError:
+    Qwen3TTSPromptEmbedsBuilder = None  # type: ignore[assignment, misc]
 
 from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
 from dynamo.common.utils.output_modalities import RequestType
@@ -379,25 +387,25 @@ class AudioGenerationHandler:
 
         Falls back to 2048 if the model-specific estimator is unavailable.
         """
-        try:
-            from vllm_omni.model_executor.models.qwen3_tts.qwen3_tts_talker import (
-                Qwen3TTSTalkerForConditionalGeneration,
+        if Qwen3TTSPromptEmbedsBuilder is None:
+            logger.warning(
+                "Qwen3-TTS prompt estimator is unavailable, using fallback 2048"
+            )
+            return 2048
+
+        if not hasattr(self, "_tts_tokenizer") or self._tts_tokenizer is None:
+            self._tts_tokenizer = AutoTokenizer.from_pretrained(
+                self.config.model,
+                trust_remote_code=self.config.engine_args.trust_remote_code,
+                padding_side="left",
             )
 
-            if not hasattr(self, "_tts_tokenizer") or self._tts_tokenizer is None:
-                from transformers import AutoTokenizer
+        hf_config = self.engine_client.model_config.hf_config
+        talker_config = getattr(hf_config, "talker_config", None)
+        task_type = (tts_params.get("task_type") or ["CustomVoice"])[0]
 
-                self._tts_tokenizer = AutoTokenizer.from_pretrained(
-                    self.config.model,
-                    trust_remote_code=True,
-                    padding_side="left",
-                )
-
-            hf_config = self.engine_client.model_config.hf_config
-            talker_config = getattr(hf_config, "talker_config", None)
-            task_type = (tts_params.get("task_type") or ["CustomVoice"])[0]
-
-            return Qwen3TTSTalkerForConditionalGeneration.estimate_prompt_len_from_additional_information(
+        return (
+            Qwen3TTSPromptEmbedsBuilder.estimate_prompt_len_from_additional_information(
                 additional_information=tts_params,
                 task_type=task_type,
                 tokenize_prompt=lambda t: self._tts_tokenizer(t, padding=False)[
@@ -414,8 +422,4 @@ class AudioGenerationHandler:
                     else None
                 ),
             )
-        except Exception as e:
-            logger.warning(
-                "Failed to estimate TTS prompt length, using fallback 2048: %s", e
-            )
-            return 2048
+        )

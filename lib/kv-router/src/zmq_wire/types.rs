@@ -69,6 +69,14 @@ pub enum RawKvEvent {
         /// LoRA adapter name for adapter-aware block hashing
         #[serde(default, skip_serializing_if = "Option::is_none")]
         lora_name: Option<String>,
+        /// Cache namespace for salted block hashing. The wire field remains `cache_salt`
+        /// to match backend event schemas.
+        #[serde(
+            default,
+            rename = "cache_salt",
+            skip_serializing_if = "Option::is_none"
+        )]
+        cache_namespace: Option<String>,
         /// Multimodal extra info for each block (length should match block_hashes)
         #[serde(default, skip_serializing_if = "Option::is_none")]
         block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,

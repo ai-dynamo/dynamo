@@ -19,14 +19,17 @@ from unittest.mock import AsyncMock, Mock, call, patch
 import pytest
 
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
+from dynamo.planner.connectors.base import PlannerConnector
 from dynamo.planner.connectors.kubernetes import KubernetesConnector
 from dynamo.planner.errors import (
     DeploymentModelNameMismatchError,
     DeploymentValidationError,
     DuplicateSubComponentError,
     DynamoGraphDeploymentNotFoundError,
+    DynamoGraphDeploymentNotReadyError,
     EmptyTargetReplicasError,
     ModelNameNotFoundError,
+    PlannerError,
     SubComponentNotFoundError,
 )
 from dynamo.planner.monitoring.dgd_services import (
@@ -99,6 +102,19 @@ def _deployment(*components):
     }
 
 
+def _deployment_with_worker_status(
+    component_kind, runtime_namespace=None, annotations=None
+):
+    worker_status = {"componentKind": component_kind}
+    if runtime_namespace is not None:
+        worker_status["runtimeNamespace"] = runtime_namespace
+    return {
+        "metadata": {"annotations": annotations or {}},
+        "spec": {"components": [_component("worker", "worker")]},
+        "status": {"components": {"worker": worker_status}},
+    }
+
+
 def test_kubernetes_connector_no_env_var():
     with patch("dynamo.planner.connectors.kubernetes.KubernetesAPI"):
         with pytest.raises(DeploymentValidationError) as exc_info:
@@ -110,29 +126,134 @@ def test_kubernetes_connector_no_env_var():
     }
 
 
-def test_get_worker_runtime_namespace_with_current_hash(
+def test_get_worker_runtime_namespace_uses_status_runtime_namespace(
+    kubernetes_connector, mock_kube_api
+):
+    mock_kube_api.get_graph_deployment.return_value = _deployment_with_worker_status(
+        "PodClique",
+        runtime_namespace="runtime-from-status",
+        annotations={"nvidia.com/current-worker-hash": "abc123"},
+    )
+
+    namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
+
+    assert namespace == "runtime-from-status"
+    mock_kube_api.get_graph_deployment.assert_called_with("test-graph")
+
+
+def test_get_worker_runtime_namespace_falls_back_to_deployment_hash(
+    kubernetes_connector, mock_kube_api
+):
+    mock_kube_api.get_graph_deployment.return_value = _deployment_with_worker_status(
+        "Deployment",
+        annotations={"nvidia.com/current-worker-hash": "abc123"},
+    )
+
+    namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
+
+    assert namespace == "base-ns-abc123"
+
+
+def test_get_worker_runtime_namespace_falls_back_to_worker_name_when_type_missing(
     kubernetes_connector, mock_kube_api
 ):
     mock_kube_api.get_graph_deployment.return_value = {
-        "metadata": {
-            "annotations": {
-                "nvidia.com/current-worker-hash": "abc123",
-            }
-        }
+        "metadata": {"annotations": {"nvidia.com/current-worker-hash": "abc123"}},
+        "spec": {"components": [_component("worker")]},
+        "status": {"components": {"worker": {"componentKind": "Deployment"}}},
     }
 
     namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
 
     assert namespace == "base-ns-abc123"
-    mock_kube_api.get_graph_deployment.assert_called_with("test-graph")
+
+
+def test_get_worker_runtime_namespace_explicit_type_overrides_worker_name_fallback(
+    kubernetes_connector, mock_kube_api
+):
+    mock_kube_api.get_graph_deployment.return_value = {
+        "metadata": {"annotations": {"nvidia.com/current-worker-hash": "abc123"}},
+        "spec": {
+            "components": [
+                _component("worker", "frontend"),
+                _component("serving", "worker"),
+            ]
+        },
+        "status": {
+            "components": {
+                "worker": {
+                    "componentKind": "Deployment",
+                    "runtimeNamespace": "base-ns",
+                },
+                "serving": {"componentKind": "Deployment"},
+            }
+        },
+    }
+
+    namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
+
+    assert namespace == "base-ns-abc123"
+
+
+def test_get_worker_runtime_namespace_falls_back_to_v2_hash(
+    kubernetes_connector, mock_kube_api
+):
+    mock_kube_api.get_graph_deployment.return_value = _deployment_with_worker_status(
+        "Deployment",
+        annotations={"nvidia.com/current-worker-hash-v2": "v2abc"},
+    )
+
+    namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
+
+    assert namespace == "base-ns-v2abc"
+
+
+def test_get_worker_runtime_namespace_uses_legacy_v1_before_v2(
+    kubernetes_connector, mock_kube_api
+):
+    mock_kube_api.get_graph_deployment.return_value = _deployment_with_worker_status(
+        "Deployment",
+        annotations={
+            "nvidia.com/current-worker-hash": "legacy",
+            "nvidia.com/current-worker-hash-v2": "v2abc",
+        },
+    )
+
+    namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
+
+    assert namespace == "base-ns-legacy"
+
+
+def test_get_worker_runtime_namespace_falls_back_to_base_for_grove(
+    kubernetes_connector, mock_kube_api
+):
+    mock_kube_api.get_graph_deployment.return_value = _deployment_with_worker_status(
+        "PodCliqueScalingGroup",
+        annotations={"nvidia.com/current-worker-hash": "abc123"},
+    )
+
+    namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
+
+    assert namespace == "base-ns"
+
+
+def test_get_worker_runtime_namespace_falls_back_to_leader_worker_set_hash(
+    kubernetes_connector, mock_kube_api
+):
+    mock_kube_api.get_graph_deployment.return_value = _deployment_with_worker_status(
+        "LeaderWorkerSet",
+        annotations={"nvidia.com/current-worker-hash": "abc123"},
+    )
+
+    namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
+
+    assert namespace == "base-ns-abc123"
 
 
 def test_get_worker_runtime_namespace_without_hash(kubernetes_connector, mock_kube_api):
-    mock_kube_api.get_graph_deployment.return_value = {
-        "metadata": {
-            "annotations": {},
-        }
-    }
+    mock_kube_api.get_graph_deployment.return_value = _deployment_with_worker_status(
+        "Deployment"
+    )
 
     namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
 
@@ -140,48 +261,41 @@ def test_get_worker_runtime_namespace_without_hash(kubernetes_connector, mock_ku
 
 
 def test_get_worker_runtime_namespace_legacy_hash(kubernetes_connector, mock_kube_api):
+    mock_kube_api.get_graph_deployment.return_value = _deployment_with_worker_status(
+        "Deployment",
+        annotations={"nvidia.com/current-worker-hash": "legacy"},
+    )
+
+    namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
+
+    assert namespace == "base-ns-legacy"
+
+
+def test_get_worker_runtime_namespace_missing_status_with_hash_is_indeterminate(
+    kubernetes_connector, mock_kube_api
+):
     mock_kube_api.get_graph_deployment.return_value = {
         "metadata": {
-            "annotations": {
-                "nvidia.com/current-worker-hash": "legacy",
-            }
-        }
+            "annotations": {"nvidia.com/current-worker-hash": "abc123"},
+        },
+        "spec": {"components": [_component("worker", "worker")]},
+    }
+
+    with pytest.raises(PlannerError, match="runtime namespace is indeterminate"):
+        kubernetes_connector.get_worker_runtime_namespace("base-ns")
+
+
+def test_get_worker_runtime_namespace_missing_status_without_hash_uses_base(
+    kubernetes_connector, mock_kube_api
+):
+    mock_kube_api.get_graph_deployment.return_value = {
+        "metadata": {"annotations": {}},
+        "spec": {"components": [_component("worker", "worker")]},
     }
 
     namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
 
     assert namespace == "base-ns"
-
-
-def test_get_worker_runtime_namespace_with_v2_hash(kubernetes_connector, mock_kube_api):
-    mock_kube_api.get_graph_deployment.return_value = {
-        "metadata": {
-            "annotations": {
-                "nvidia.com/current-worker-hash-v2": "v2abc",
-            }
-        }
-    }
-
-    namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
-
-    assert namespace == "base-ns-v2abc"
-
-
-def test_get_worker_runtime_namespace_with_legacy_v1_and_v2_hash(
-    kubernetes_connector, mock_kube_api
-):
-    mock_kube_api.get_graph_deployment.return_value = {
-        "metadata": {
-            "annotations": {
-                "nvidia.com/current-worker-hash": "legacy",
-                "nvidia.com/current-worker-hash-v2": "v2abc",
-            }
-        }
-    }
-
-    namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
-
-    assert namespace == "base-ns-v2abc"
 
 
 def test_get_service_name_from_sub_component_type(kubernetes_connector):
@@ -556,9 +670,10 @@ async def test_set_component_replicas_empty_target_replicas(
 
 
 @pytest.mark.asyncio
-async def test_set_component_replicas_deployment_not_ready(
+async def test_set_component_replicas_deployment_not_ready_skips_by_default(
     kubernetes_connector, mock_kube_api
 ):
+    """Keep local Kubernetes planners on the legacy skip-tick path."""
     # Arrange
     target_replicas = [
         TargetReplica(sub_component_type=SubComponentType.PREFILL, desired_replicas=3),
@@ -571,8 +686,41 @@ async def test_set_component_replicas_deployment_not_ready(
     mock_kube_api.get_graph_deployment.return_value = mock_deployment
     mock_kube_api.is_deployment_ready.return_value = False
 
-    # Act & Assert
+    # Act
     await kubernetes_connector.set_component_replicas(target_replicas)
+
+    # Assert
+    mock_kube_api.get_graph_deployment.assert_called_once()
+    mock_kube_api.is_deployment_ready.assert_called_once_with(mock_deployment)
+    mock_kube_api.update_graph_replicas.assert_not_called()
+    mock_kube_api.wait_for_graph_deployment_ready.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_set_component_replicas_deployment_not_ready_can_raise_for_global_planner(
+    mock_kube_api_class, mock_kube_api, monkeypatch
+):
+    """Let GlobalPlanner opt in to retryable not-ready rejection."""
+    # Arrange
+    monkeypatch.setattr(
+        "dynamo.planner.connectors.kubernetes.KubernetesAPI", mock_kube_api_class
+    )
+    with patch.dict(os.environ, {"DYN_PARENT_DGD_K8S_NAME": "test-graph"}):
+        connector = KubernetesConnector("test-dynamo-namespace", raise_not_ready=True)
+    target_replicas = [
+        TargetReplica(sub_component_type=SubComponentType.PREFILL, desired_replicas=3),
+        TargetReplica(sub_component_type=SubComponentType.DECODE, desired_replicas=2),
+    ]
+    mock_deployment = _deployment(
+        _component("component1", "prefill", replicas=1),
+        _component("component2", "decode", replicas=2),
+    )
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+    mock_kube_api.is_deployment_ready.return_value = False
+
+    # Act & Assert
+    with pytest.raises(DynamoGraphDeploymentNotReadyError):
+        await connector.set_component_replicas(target_replicas)
 
     mock_kube_api.get_graph_deployment.assert_called_once()
     mock_kube_api.is_deployment_ready.assert_called_once_with(mock_deployment)
@@ -596,6 +744,29 @@ async def test_validate_deployment_true(kubernetes_connector, mock_kube_api):
 
     # Act
     await kubernetes_connector.validate_deployment(decode_component_name="component2")
+
+
+@pytest.mark.asyncio
+async def test_validate_deployment_uses_names_for_unannotated_legacy_components(
+    kubernetes_connector, mock_kube_api
+):
+    mock_kube_api.get_graph_deployment.return_value = _deployment(
+        _component(
+            "VllmPrefillWorker",
+            replicas=1,
+            args=["--served-model-name", "test-model"],
+        ),
+        _component(
+            "VllmDecodeWorker",
+            replicas=1,
+            args=["--served-model-name", "test-model"],
+        ),
+    )
+
+    await kubernetes_connector.validate_deployment(
+        prefill_component_name="VllmPrefillWorker",
+        decode_component_name="VllmDecodeWorker",
+    )
 
 
 @pytest.mark.asyncio
@@ -624,12 +795,15 @@ def test_get_model_name_both_none_raises_error(kubernetes_connector, mock_kube_a
         _component("component1", "prefill", replicas=1),
         _component("component2", "decode", replicas=2),
     )
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
 
     with pytest.raises(ModelNameNotFoundError):
-        kubernetes_connector.get_model_name(mock_deployment)
+        kubernetes_connector.get_model_name()
 
 
-def test_get_model_name_prefill_none_decode_valid_returns_decode(kubernetes_connector):
+def test_get_model_name_prefill_none_decode_valid_returns_decode(
+    kubernetes_connector, mock_kube_api
+):
     # Arrange
     mock_deployment = _deployment(
         _component("component1", "prefill", replicas=1),
@@ -640,8 +814,9 @@ def test_get_model_name_prefill_none_decode_valid_returns_decode(kubernetes_conn
             args=["--served-model-name", "test-model"],
         ),
     )
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
     # Act
-    result = kubernetes_connector.get_model_name(mock_deployment)
+    result = kubernetes_connector.get_model_name()
 
     # Assert
     assert result == "test-model"
@@ -666,7 +841,7 @@ def test_get_model_name_mismatch_raises_error(kubernetes_connector, mock_kube_ap
 
     # Act & Assert
     with pytest.raises(DeploymentModelNameMismatchError) as exc_info:
-        kubernetes_connector.get_model_name(mock_deployment)
+        kubernetes_connector.get_model_name()
 
     exception = exc_info.value
     assert exception.prefill_model_name == "prefill-model"
@@ -692,10 +867,29 @@ def test_get_model_name_agree_returns_model_name(kubernetes_connector, mock_kube
     mock_kube_api.get_graph_deployment.return_value = mock_deployment
 
     # Act
-    result = kubernetes_connector.get_model_name(mock_deployment)
+    result = kubernetes_connector.get_model_name()
 
     # Assert
     assert result == "agreed-model"
+
+
+def test_protocol_positional_flags_match_kubernetes_connector(
+    kubernetes_connector, mock_kube_api
+):
+    """Protocol-style positional flags must not bind to a deployment argument."""
+    mock_kube_api.get_graph_deployment.return_value = _deployment(
+        _component(
+            "decode-worker",
+            "decode",
+            replicas=1,
+            args=["--served-model-name", "decode-model"],
+            gpu=4,
+        )
+    )
+    connector: PlannerConnector = kubernetes_connector
+
+    assert connector.get_model_name(False, True) == "decode-model"
+    assert connector.get_gpu_counts(False, True) == (0, 4)
 
 
 # Tests for Service.get_gpu_count()
@@ -922,7 +1116,8 @@ def test_get_gpu_counts_service_not_found_raises_error(
 # Tests for get_actual_worker_counts
 
 
-def test_get_actual_worker_counts_stable(kubernetes_connector, mock_kube_api):
+@pytest.mark.asyncio
+async def test_get_actual_worker_counts_stable(kubernetes_connector, mock_kube_api):
     """Test get_actual_worker_counts when both services are stable"""
     mock_deployment = _deployment(
         _component("prefill-component"),
@@ -935,7 +1130,7 @@ def test_get_actual_worker_counts_stable(kubernetes_connector, mock_kube_api):
         prefill_count,
         decode_count,
         is_stable,
-    ) = kubernetes_connector.get_actual_worker_counts(
+    ) = await kubernetes_connector.get_actual_worker_counts(
         prefill_component_name="prefill-component",
         decode_component_name="decode-component",
     )
@@ -945,7 +1140,8 @@ def test_get_actual_worker_counts_stable(kubernetes_connector, mock_kube_api):
     assert is_stable is True
 
 
-def test_get_actual_worker_counts_prefill_rollout_in_progress(
+@pytest.mark.asyncio
+async def test_get_actual_worker_counts_prefill_rollout_in_progress(
     kubernetes_connector, mock_kube_api
 ):
     """Test get_actual_worker_counts when prefill has rollout in progress"""
@@ -965,7 +1161,7 @@ def test_get_actual_worker_counts_prefill_rollout_in_progress(
         prefill_count,
         decode_count,
         is_stable,
-    ) = kubernetes_connector.get_actual_worker_counts(
+    ) = await kubernetes_connector.get_actual_worker_counts(
         prefill_component_name="prefill-component",
         decode_component_name="decode-component",
     )
@@ -975,7 +1171,10 @@ def test_get_actual_worker_counts_prefill_rollout_in_progress(
     assert is_stable is False
 
 
-def test_get_actual_worker_counts_prefill_only(kubernetes_connector, mock_kube_api):
+@pytest.mark.asyncio
+async def test_get_actual_worker_counts_prefill_only(
+    kubernetes_connector, mock_kube_api
+):
     """Test get_actual_worker_counts with only prefill component"""
     mock_deployment = _deployment(
         _component("prefill-component", "prefill", replicas=2)
@@ -987,7 +1186,7 @@ def test_get_actual_worker_counts_prefill_only(kubernetes_connector, mock_kube_a
         prefill_count,
         decode_count,
         is_stable,
-    ) = kubernetes_connector.get_actual_worker_counts(
+    ) = await kubernetes_connector.get_actual_worker_counts(
         prefill_component_name="prefill-component",
         decode_component_name=None,
     )
@@ -997,7 +1196,10 @@ def test_get_actual_worker_counts_prefill_only(kubernetes_connector, mock_kube_a
     assert is_stable is True
 
 
-def test_get_actual_worker_counts_decode_only(kubernetes_connector, mock_kube_api):
+@pytest.mark.asyncio
+async def test_get_actual_worker_counts_decode_only(
+    kubernetes_connector, mock_kube_api
+):
     """Test get_actual_worker_counts with only decode component"""
     mock_deployment = _deployment(_component("decode-component", "decode", replicas=4))
     mock_kube_api.get_graph_deployment.return_value = mock_deployment
@@ -1007,7 +1209,7 @@ def test_get_actual_worker_counts_decode_only(kubernetes_connector, mock_kube_ap
         prefill_count,
         decode_count,
         is_stable,
-    ) = kubernetes_connector.get_actual_worker_counts(
+    ) = await kubernetes_connector.get_actual_worker_counts(
         prefill_component_name=None,
         decode_component_name="decode-component",
     )
@@ -1017,7 +1219,10 @@ def test_get_actual_worker_counts_decode_only(kubernetes_connector, mock_kube_ap
     assert is_stable is True
 
 
-def test_get_actual_worker_counts_no_components(kubernetes_connector, mock_kube_api):
+@pytest.mark.asyncio
+async def test_get_actual_worker_counts_no_components(
+    kubernetes_connector, mock_kube_api
+):
     """Test get_actual_worker_counts with no components specified"""
     mock_deployment = {
         "metadata": {"name": "test-graph"},
@@ -1030,7 +1235,7 @@ def test_get_actual_worker_counts_no_components(kubernetes_connector, mock_kube_
         prefill_count,
         decode_count,
         is_stable,
-    ) = kubernetes_connector.get_actual_worker_counts(
+    ) = await kubernetes_connector.get_actual_worker_counts(
         prefill_component_name=None,
         decode_component_name=None,
     )

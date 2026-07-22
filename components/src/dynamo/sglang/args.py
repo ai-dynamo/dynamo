@@ -20,6 +20,7 @@ from sglang.srt.server_args_config_parser import ConfigArgumentMerger
 from dynamo.common.config_dump import register_encoder
 from dynamo.common.configuration.groups import DynamoRuntimeConfig
 from dynamo.common.configuration.groups.runtime_args import DynamoRuntimeArgGroup
+from dynamo.common.configuration.utils import split_served_model_names
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.model_fetch import fetch_model
 from dynamo.common.snapshot.lifecycle import (
@@ -28,7 +29,10 @@ from dynamo.common.snapshot.lifecycle import (
 )
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.sglang._compat import enable_disjoint_streaming_output
+from dynamo.sglang._compat import (
+    enable_disjoint_streaming_output,
+    ensure_sglang_tensor_image_size,
+)
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
 
 configure_dynamo_logging()
@@ -64,6 +68,48 @@ class Config:
             return DisaggregationMode.DECODE
         else:
             return DisaggregationMode.AGGREGATED
+
+
+def _unsupported_fpm_trace_role(dynamo_config: DynamoConfig) -> Optional[str]:
+    """Return the worker role when the selected path does not create an FPM relay."""
+    if is_snapshot_enabled():
+        return "snapshot"
+    if dynamo_config.embedding_worker:
+        return "embedding"
+    if (
+        dynamo_config.multimodal_encode_worker
+        or dynamo_config.multimodal_worker
+        or dynamo_config.dedicated_mm_encoder
+    ):
+        return "dedicated multimodal"
+    if dynamo_config.image_diffusion_worker:
+        return "image diffusion"
+    if dynamo_config.video_generation_worker:
+        return "video generation"
+    return None
+
+
+def _forward_pass_metrics_source(
+    dynamo_config: DynamoConfig, *, fpm_trace_relay_supported: bool = True
+) -> Optional[str]:
+    """Resolve the FPM opt-in source while preserving the legacy port switch."""
+    if os.environ.get("DYN_FORWARDPASS_METRIC_PORT"):
+        return "DYN_FORWARDPASS_METRIC_PORT"
+    if not dynamo_config.fpm_trace:
+        return None
+
+    unsupported_role = _unsupported_fpm_trace_role(dynamo_config)
+    if unsupported_role is None and not fpm_trace_relay_supported:
+        unsupported_role = "unified backend"
+    if unsupported_role is None:
+        return "--fpm-trace/DYN_FPM_TRACE"
+
+    logging.warning(
+        "--fpm-trace/DYN_FPM_TRACE is enabled, but SGLang %s workers do not create a Dynamo "
+        "FPM relay. Trace-based FPM activation is disabled for this worker.",
+        unsupported_role,
+    )
+    return None
 
 
 def use_modelexpress_remote_instance(args: Any) -> bool:
@@ -264,12 +310,16 @@ def _dump_disagg_config_section(disagg_config: dict[str, Any]) -> str:
     return temp_path
 
 
-async def parse_args(args: list[str]) -> Config:
+async def parse_args(
+    args: list[str], *, fpm_trace_relay_supported: bool = True
+) -> Config:
     """Parse CLI arguments and return combined configuration.
     Download the model if necessary.
 
     Args:
         args: Command-line argument strings.
+        fpm_trace_relay_supported: Whether this entry point constructs the
+            Dynamo relay required for trace-based FPM activation.
 
     Returns:
         Config object with server_args and dynamo_args.
@@ -355,6 +405,10 @@ async def parse_args(args: list[str]) -> Config:
     # otherwise fall back to default endpoints
     namespace = dynamo_config.namespace
 
+    # Dynamo's parser consumes --enable-multimodal; forward it to SGLang.
+    if dynamo_config.enable_multimodal:
+        parsed_args.enable_multimodal = True
+
     # If --embedding-worker is set, also set SGLang's --is-embedding flag
     if dynamo_config.embedding_worker:
         parsed_args.is_embedding = True
@@ -392,17 +446,13 @@ async def parse_args(args: list[str]) -> Config:
         endpoint
     )
 
-    # Validate parser flags: error if both --{name} and --dyn-{name} are set.
-    # --dyn-{name} choices are validated by argparse; --{name} by SGLang.
+    # Native and Dynamo tool parsers both construct tool calls, so they remain
+    # mutually exclusive. Reasoning parsers intentionally may be paired: the
+    # native parser gates guided decoding while Dynamo constructs the response.
     _validate_parser_flags(
         parsed_args.tool_call_parser,
         dynamo_config.dyn_tool_call_parser,
         "tool-call-parser",
-    )
-    _validate_parser_flags(
-        parsed_args.reasoning_parser,
-        dynamo_config.dyn_reasoning_parser,
-        "reasoning-parser",
     )
 
     if dynamo_config.custom_jinja_template and dynamo_config.use_sglang_tokenizer:
@@ -428,7 +478,24 @@ async def parse_args(args: list[str]) -> Config:
             )
 
     model_path = parsed_args.model_path
-    # Name the model
+
+    # --served-model-name may pack several names (whitespace-/comma-separated);
+    # the first is the primary, the rest are aliases. Split BEFORE the
+    # model_path fallback so a model path containing whitespace doesn't produce
+    # spurious aliases.
+    served_names = split_served_model_names(parsed_args.served_model_name)
+    if served_names:
+        parsed_args.served_model_name = served_names[0]
+        dynamo_config.served_model_aliases = served_names[1:]
+        if served_names[1:]:
+            logging.info(
+                "Multi-name registration: primary=%r, aliases=%s",
+                served_names[0],
+                served_names[1:],
+            )
+
+    # Name the model — falls back to model_path only if neither
+    # --served-model-name nor an env var supplied one.
     if not parsed_args.served_model_name:
         parsed_args.served_model_name = model_path
     # Download the model if necessary using modelexpress.
@@ -483,6 +550,8 @@ async def parse_args(args: list[str]) -> Config:
         )
     else:
         server_args = ServerArgs.from_cli_args(parsed_args)
+        if server_args.get_model_config().is_multimodal:
+            ensure_sglang_tensor_image_size()
 
     if getattr(server_args, "schedule_low_priority_values_first", False):
         raise ValueError(
@@ -526,11 +595,13 @@ async def parse_args(args: list[str]) -> Config:
     )
 
     # Enable forward pass metrics from dynamo env var if configured
-    if os.environ.get("DYN_FORWARDPASS_METRIC_PORT") and not getattr(
-        server_args, "enable_forward_pass_metrics", False
-    ):
+    fpm_source = _forward_pass_metrics_source(
+        dynamo_config,
+        fpm_trace_relay_supported=fpm_trace_relay_supported,
+    )
+    if fpm_source and not getattr(server_args, "enable_forward_pass_metrics", False):
         server_args.enable_forward_pass_metrics = True
-        logging.info("Enabled forward_pass_metrics from DYN_FORWARDPASS_METRIC_PORT")
+        logging.info("Enabled forward_pass_metrics from %s", fpm_source)
 
     # Auto-detect diffusion worker mode if dllm_algorithm
     diffusion_worker = server_args.dllm_algorithm is not None

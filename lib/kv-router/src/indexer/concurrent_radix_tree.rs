@@ -27,6 +27,8 @@ use parking_lot::RwLock;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::VecDeque;
 
+#[cfg(feature = "bench")]
+use super::WorkerObservationState;
 use super::{
     EventKind, EventWarningKind, KvIndexerMetrics, PreBoundEventCounters, SyncIndexer,
     WorkerLookupStats, WorkerTask,
@@ -296,11 +298,7 @@ impl ConcurrentRadixTree {
             KvCacheEventData::Stored(op) => self.apply_stored(lookup, worker, op, id, counters),
             KvCacheEventData::Removed(op) => self.apply_removed(lookup, worker, op, id),
             KvCacheEventData::Cleared => {
-                // Ensure the worker is tracked in lookup before clearing,
-                // matching RadixTree behavior where `lookup.entry(worker).or_default()`
-                // fires before the match arm.
-                lookup.entry(worker).or_default();
-                self.clear_all_blocks(lookup, worker.worker_id);
+                self.remove_worker_dp_rank(lookup, worker.worker_id, worker.dp_rank);
                 Ok(())
             }
         }
@@ -450,13 +448,10 @@ impl ConcurrentRadixTree {
     }
 
     /// Helper function to remove or clear blocks for a worker.
-    /// If `keep_worker` is true, the worker remains in lookup with empty blocks.
-    /// If `keep_worker` is false, the worker is completely removed from lookup.
-    fn remove_or_clear_worker_blocks(
+    fn remove_worker_blocks(
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
         worker_id: WorkerId,
-        keep_worker: bool,
     ) {
         let workers: Vec<WorkerWithDpRank> = lookup
             .keys()
@@ -468,10 +463,6 @@ impl ConcurrentRadixTree {
             if let Some(worker_lookup) = lookup.remove(&worker) {
                 for (_, block) in worker_lookup.into_iter() {
                     block.write().drop_worker(worker);
-                }
-
-                if keep_worker {
-                    lookup.insert(worker, FxHashMap::default());
                 }
             }
         }
@@ -489,15 +480,6 @@ impl ConcurrentRadixTree {
                 block.write().drop_worker(key);
             }
         }
-    }
-
-    /// Clear all blocks for a worker but keep the worker tracked.
-    fn clear_all_blocks(
-        &self,
-        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
-        worker_id: WorkerId,
-    ) {
-        self.remove_or_clear_worker_blocks(lookup, worker_id, true);
     }
 
     /// Dump the radix tree as a series of RouterEvents that can reconstruct the tree.
@@ -574,6 +556,8 @@ impl SyncIndexer for ConcurrentRadixTree {
     ) -> anyhow::Result<()> {
         let mut lookup = FxHashMap::default();
         let counters = metrics.as_ref().map(|m| m.prebind());
+        #[cfg(feature = "bench")]
+        let mut observation = WorkerObservationState::default();
 
         while let Ok(task) = event_receiver.recv() {
             match task {
@@ -599,15 +583,43 @@ impl SyncIndexer for ConcurrentRadixTree {
                     }
                     let _ = resp.send(applied);
                 }
+                #[cfg(feature = "bench")]
+                WorkerTask::InstallObservation { writer, resp } => {
+                    observation.install(writer, resp);
+                }
+                #[cfg(feature = "bench")]
+                WorkerTask::ObservedEvent {
+                    event,
+                    correlation_id,
+                } => {
+                    let kind = EventKind::of(&event.event.data);
+                    let result = self.apply_event(&mut lookup, event, counters.as_ref());
+                    observation.record(correlation_id, result.is_ok());
+                    if result.is_err() {
+                        tracing::warn!("Failed to apply event: {:?}", result.as_ref().err());
+                    }
+                    if let Some(ref c) = counters {
+                        c.inc(kind, result);
+                    }
+                }
+                #[cfg(feature = "bench")]
+                WorkerTask::SealObservation(resp) => observation.seal(resp),
+                #[cfg(feature = "bench")]
+                WorkerTask::HarvestObservation(resp) => observation.harvest(resp),
                 WorkerTask::Anchor { worker, anchor } => {
                     if let Err(error) = self.apply_anchor(worker, anchor) {
                         tracing::warn!(?error, "Failed to apply anchor");
                     }
                 }
-                WorkerTask::RemoveWorker(worker_id) => {
-                    self.remove_or_clear_worker_blocks(&mut lookup, worker_id, false);
+                WorkerTask::RemoveWorker {
+                    worker_id, resp, ..
+                } => {
+                    self.remove_worker_blocks(&mut lookup, worker_id);
+                    let _ = resp.send(());
                 }
-                WorkerTask::RemoveWorkerDpRank(worker_id, dp_rank) => {
+                WorkerTask::RemoveWorkerDpRank {
+                    worker_id, dp_rank, ..
+                } => {
                     self.remove_worker_dp_rank(&mut lookup, worker_id, dp_rank);
                 }
                 WorkerTask::CleanupStaleChildren => {

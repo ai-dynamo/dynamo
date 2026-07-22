@@ -64,6 +64,32 @@ func TestBuildOpenAIRequest_ForwardsAgentHintsPriority(t *testing.T) {
 	}
 }
 
+func TestBuildOpenAIRequest_ForwardsLegacyTopLevelCacheSalt(t *testing.T) {
+	req := &schedtypes.InferenceRequest{
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			ChatCompletions: &fwkrh.ChatCompletionsRequest{
+				Messages: []fwkrh.Message{
+					{Role: "user", Content: fwkrh.Content{Raw: "hi"}},
+				},
+			},
+			Payload: fwkrh.PayloadMap{
+				"messages":   []any{map[string]any{"role": "user", "content": "hi"}},
+				"model":      "test-model",
+				"cache_salt": "tenant-legacy",
+			},
+		},
+	}
+
+	body, err := BuildOpenAIRequest(req)
+	if err != nil {
+		t.Fatalf("BuildOpenAIRequest returned error: %v", err)
+	}
+	if got := body["cache_salt"]; got != "tenant-legacy" {
+		t.Fatalf("expected legacy cache_salt forwarded to FFI body, got %v", got)
+	}
+}
+
 func TestBuildOpenAIRequest_CompletionsTokenPromptUsesPromptIDs(t *testing.T) {
 	req := &schedtypes.InferenceRequest{
 		TargetModel: "test-model",

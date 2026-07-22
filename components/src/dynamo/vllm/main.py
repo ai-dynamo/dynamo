@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import argparse
 import asyncio
 import json
 import logging
@@ -39,8 +38,6 @@ from dynamo.common.utils.runtime import create_runtime
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import (
     KvEventPublisher,
-    MediaDecoder,
-    MediaFetcher,
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
@@ -61,7 +58,13 @@ from .capacity import (
 )
 from .constants import DisaggregationMode
 from .handlers import get_dp_range_for_worker
+from .headless import run_dynamo_headless
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
+from .kv_connector_protocols import (
+    disable_hybrid_kv_cache_manager_for_incompatible_pd_connector,
+)
+from .multimodal_utils.cache_config import configure_multimodal_embedding_cache
+from .multimodal_utils.media_config import create_frontend_media_config
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
 from .snapshot import prepare_snapshot_engine
 
@@ -107,54 +110,6 @@ def _register_model_source_path(config: Config, vllm_config: VllmConfig) -> str:
     if getattr(vllm_config.model_config, "model_weights", ""):
         return vllm_config.model_config.model
     return config.model
-
-
-def build_headless_namespace(config: Config) -> argparse.Namespace:
-    """Build an argparse Namespace from engine_args for vLLM's run_headless().
-
-    run_headless() expects the raw CLI namespace. We reconstruct it from
-    the already-parsed AsyncEngineArgs so parse_args() doesn't need to
-    leak transport details.
-    """
-    ns = argparse.Namespace(**vars(config.engine_args))
-    # run_headless() reads api_server_count; default to 0 (no API server)
-    if not hasattr(ns, "api_server_count"):
-        ns.api_server_count = 0
-    return ns
-
-
-def run_dynamo_headless(config: Config) -> None:
-    """Run in headless mode for multi-node TP/PP.
-
-    Secondary nodes spawn vLLM workers only — no engine core, no scheduler,
-    no Dynamo endpoints. Bypasses DistributedRuntime entirely (no NATS/etcd).
-    """
-    # Propagate worker_cls for custom load formats so headless workers use
-    # the same model loader settings as the leader node.
-    if config.engine_args.load_format == "gms":
-        config.engine_args.worker_cls = (
-            "gpu_memory_service.integrations.vllm.worker.GMSWorker"
-        )
-
-        if config.gms_shadow_mode:
-            from gpu_memory_service.integrations.vllm.utils import (
-                configure_gms_lock_mode,
-                configure_mx_ports,
-            )
-
-            os.environ["DYN_GMS_SCRATCH_KV_ENABLED"] = "1"
-            configure_gms_lock_mode(config.engine_args)
-            configure_mx_ports(config.engine_args)
-
-    # ModelExpress uses vLLM's plugin path with --load-format=modelexpress.
-    # Dynamo does not set a custom worker class here.
-
-    # Keep the upstream CLI import local so tests that only exercise
-    # build_headless_namespace() do not pull in vLLM's full CLI import graph.
-    from vllm.entrypoints.cli.serve import run_headless
-
-    args = build_headless_namespace(config)
-    run_headless(args)
 
 
 async def worker(argv: list[str] | None = None) -> None:
@@ -464,6 +419,7 @@ def setup_kv_event_publisher(
             enable_local_indexer=config.enable_local_indexer,
             dp_rank=dp_rank,
             image_token_id=image_token_id,
+            kv_state_endpoint=config.kv_state_endpoint,
         )
         kv_publishers.append(kv_publisher)
 
@@ -475,6 +431,7 @@ def setup_kv_event_publisher(
 
 
 def setup_fpm_relay(
+    config: Config,
     generate_endpoint: Endpoint,
     vllm_config: VllmConfig,
 ) -> Optional[list]:
@@ -489,7 +446,7 @@ def setup_fpm_relay(
     Returns:
         List of FpmEventRelay instances, or None if FPM is not enabled.
     """
-    if not envs.is_set("DYN_FORWARDPASS_METRIC_PORT"):
+    if not (envs.is_set("DYN_FORWARDPASS_METRIC_PORT") or config.fpm_trace):
         return None
 
     try:
@@ -596,35 +553,19 @@ def setup_vllm_engine(
             configure_gms_lock_mode(engine_args)
             configure_mx_ports(engine_args)
 
-    # Configure ec_both mode with DynamoMultimodalEmbeddingCacheConnector.
-    # Must happen BEFORE engine setup so vLLM sees ec_transfer_config.
-    if (
-        not config.route_to_encoder
-        and config.multimodal_embedding_cache_capacity_gb > 0
-    ):
-        from vllm.config import ECTransferConfig
-
-        logger.info(
-            "Configuring ec_both mode with DynamoMultimodalEmbeddingCacheConnector "
-            "(capacity=%.2f GB)",
-            config.multimodal_embedding_cache_capacity_gb,
-        )
-        instance_id = 0
-        engine_id = f"{config.namespace}.{config.component}.backend.{instance_id}"
-        engine_args.ec_transfer_config = ECTransferConfig(
-            engine_id=engine_id,
-            ec_role="ec_both",
-            ec_connector="DynamoMultimodalEmbeddingCacheConnector",
-            ec_connector_module_path="dynamo.vllm.multimodal_utils.multimodal_embedding_cache_connector",
-            ec_connector_extra_config={
-                "multimodal_embedding_cache_capacity_gb": config.multimodal_embedding_cache_capacity_gb,
-            },
-        )
-        logger.info("Configured ec_both with engine_id=%s", engine_id)
+    # Must happen before create_engine_config() so vLLM sees ec_transfer_config.
+    configure_multimodal_embedding_cache(
+        engine_args,
+        route_to_encoder=config.route_to_encoder,
+        capacity_gb=config.multimodal_embedding_cache_capacity_gb,
+        namespace=config.namespace,
+        component=config.component,
+    )
 
     # Taken from build_async_engine_client_from_engine_args()
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+    disable_hybrid_kv_cache_manager_for_incompatible_pd_connector(vllm_config)
     default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
 
     # Set up consolidator endpoints if KVBM (DynamoConnector) is enabled
@@ -760,6 +701,7 @@ async def register_vllm_model(
         config.enable_local_indexer
         and config.disaggregation_mode != DisaggregationMode.DECODE
     )
+    runtime_config.kv_state_endpoint = config.kv_state_endpoint
 
     # Add tool/reasoning parsers for decode/aggregated workers. Prefill
     # workers have no OpenAI surface and don't run a parser — key off
@@ -798,18 +740,9 @@ async def register_vllm_model(
 
     # Configure media decoder for frontend image decoding when enabled
     # This enables frontend to decode images and transfer via NIXL RDMA
-    media_decoder = None
-    media_fetcher = None
-    if config.frontend_decoding:
-        media_decoder = MediaDecoder()
-        media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
-        # media_decoder.enable_video({})
-
-        media_fetcher = MediaFetcher()
-        media_fetcher.timeout_ms(30000)
-        allow_internal = os.getenv("DYN_MM_ALLOW_INTERNAL", "0") == "1"
-        media_fetcher.allow_direct_ip(allow_internal)
-        media_fetcher.allow_direct_port(allow_internal)
+    media_decoder, media_fetcher = create_frontend_media_config(
+        config.frontend_decoding
+    )
 
     await register_model(
         model_input,
@@ -825,22 +758,20 @@ async def register_vllm_model(
         worker_type=worker_type,
         needs=needs,
         ignore_weights=should_register_model_ignore_weights(config),
-        # Advertise the worker's LoRA slot budget on the BASE registration so the frontend
-        # allocator can place adapters onto idle-but-LoRA-capable workers before any adapter is
-        # loaded here. Only generative decode/aggregated workers serve the LoRA load endpoints
-        # (load_lora/unload_lora). Prefill and embedding workers register through this same path
-        # but do NOT serve them, so they must not advertise capacity they cannot fulfill — gate on
-        # the model type rather than worker_type (vLLM embedding registers as Aggregated). None
-        # (no capacity) for non-LoRA, prefill, or embedding workers.
-        max_gpu_lora_count=(
-            config.engine_args.max_loras
-            if (
-                getattr(config.engine_args, "enable_lora", False)
-                and model_type not in (ModelType.Prefill, ModelType.Embedding)
-            )
-            else None
-        ),
+        model_aliases=config.served_model_aliases or None,
+        # Advertise LoRA capacity on the BASE card so the frontend can place the first
+        # adapter onto an idle worker. Decode, aggregated, and prefill workers all serve
+        # lifecycle registration; embeddings still do not.
+        max_gpu_lora_count=_base_model_lora_capacity(config, model_type),
     )
+
+
+def _base_model_lora_capacity(config: Config, model_type: ModelType) -> int | None:
+    if not getattr(config.engine_args, "enable_lora", False):
+        return None
+    if model_type == ModelType.Embedding:
+        return None
+    return config.engine_args.max_loras
 
 
 def get_engine_cache_info(engine: AsyncLLM) -> dict[str, Any]:

@@ -224,6 +224,10 @@ fn monitor_for_disconnects_with_timeout(
 
     async_stream::try_stream! {
         tokio::pin!(stream);
+        // Keep the context's watch-backed cancellation future alive across body frames.
+        // Recreating it for every token repeatedly clones a receiver and churns Notify state.
+        let stopped = context.stopped();
+        tokio::pin!(stopped);
         loop {
             tokio::select! {
                 event = stream.next() => {
@@ -269,7 +273,7 @@ fn monitor_for_disconnects_with_timeout(
                         }
                     }
                 }
-                _ = context.stopped() => {
+                _ = &mut stopped => {
                     // Mark as cancelled when context is stopped (client disconnect or timeout)
                     inflight_guard.mark_error(ErrorType::Cancelled);
                     // Token counts (input_tokens, output_tokens) are recorded on
@@ -322,14 +326,28 @@ mod tests {
     use super::*;
     use crate::http::service::metrics::{Endpoint, ErrorType, RequestType, Status};
     use futures::StreamExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    #[derive(Debug)]
-    struct MockContext;
+    #[derive(Debug, Default)]
+    struct MockContext {
+        stopped_polls: AtomicUsize,
+        killed: std::sync::atomic::AtomicBool,
+        track_kill: bool,
+    }
+
     impl MockContext {
         fn new() -> Self {
-            Self
+            Self::default()
+        }
+
+        fn with_kill_tracking() -> Self {
+            Self {
+                track_kill: true,
+                ..Default::default()
+            }
         }
     }
+
     #[async_trait::async_trait]
     impl dynamo_runtime::engine::AsyncEngineContext for MockContext {
         fn id(&self) -> &str {
@@ -337,14 +355,19 @@ mod tests {
         }
         fn stop(&self) {}
         fn stop_generating(&self) {}
-        fn kill(&self) {}
+        fn kill(&self) {
+            if self.track_kill {
+                self.killed.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
         fn is_stopped(&self) -> bool {
             false
         }
         fn is_killed(&self) -> bool {
-            false
+            self.track_kill && self.killed.load(std::sync::atomic::Ordering::SeqCst)
         }
         async fn stopped(&self) {
+            self.stopped_polls.fetch_add(1, Ordering::Relaxed);
             std::future::pending::<()>().await;
         }
         async fn killed(&self) {
@@ -391,6 +414,90 @@ mod tests {
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let handle = ConnectionHandle::create_disabled(tx);
         (metrics, guard, context, handle)
+    }
+
+    #[tokio::test]
+    async fn test_monitor_reuses_stopped_future_across_events() {
+        let model = "reuse-stopped-future";
+        let metrics = Arc::new(Metrics::new());
+        let guard = metrics.clone().create_inflight_guard(
+            model,
+            Endpoint::ChatCompletions,
+            true,
+            "req-reuse",
+        );
+        let context = Arc::new(MockContext::new());
+        let engine_context: Arc<dyn AsyncEngineContext> = context.clone();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let handle = ConnectionHandle::create_disabled(tx);
+        let stream = futures::stream::unfold(0, |index| async move {
+            tokio::task::yield_now().await;
+            (index < 4).then(|| {
+                (
+                    Ok(Event::default().data(format!("token-{index}"))),
+                    index + 1,
+                )
+            })
+        });
+
+        let monitored =
+            monitor_for_disconnects_with_timeout(stream, engine_context, guard, handle, None);
+        tokio::pin!(monitored);
+        while monitored.next().await.is_some() {}
+
+        assert_eq!(
+            context.stopped_polls.load(Ordering::Relaxed),
+            1,
+            "the same stopped future should remain pending across all response events"
+        );
+    }
+
+    fn generate_cancellation_labels() -> CancellationLabels {
+        CancellationLabels {
+            model: "test-model".to_string(),
+            endpoint: Endpoint::Generate.to_string(),
+            request_type: "unary".to_string(),
+        }
+    }
+
+    async fn wait_for_kill(context: &Arc<MockContext>) {
+        for _ in 0..100 {
+            if context.is_killed() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn armed_handle_drop_kills_generate_context() {
+        let context = Arc::new(MockContext::with_kill_tracking());
+        let engine_context: Arc<dyn AsyncEngineContext> = context.clone();
+        let (connection_handle, stream_handle) =
+            create_connection_monitor(engine_context, None, generate_cancellation_labels()).await;
+
+        drop(connection_handle);
+        drop(stream_handle);
+
+        wait_for_kill(&context).await;
+        assert!(context.is_killed());
+    }
+
+    #[tokio::test]
+    async fn disarmed_handle_does_not_kill_generate_context() {
+        let context = Arc::new(MockContext::with_kill_tracking());
+        let engine_context: Arc<dyn AsyncEngineContext> = context.clone();
+        let (mut connection_handle, stream_handle) =
+            create_connection_monitor(engine_context, None, generate_cancellation_labels()).await;
+
+        connection_handle.disarm();
+        drop(connection_handle);
+        drop(stream_handle);
+
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!context.is_killed());
     }
 
     /// Zombie backend with hanging stream is terminated by inactivity timeout.

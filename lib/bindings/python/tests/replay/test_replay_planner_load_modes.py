@@ -82,7 +82,7 @@ def test_planner_callback_error_preserves_python_exception_type():
     # Rust seam).
     class _RaisingPlanner:
         def initial_tick_ms(self):
-            return 1.0  # finite -> seeds a PlannerTick that will fire
+            return 0.0  # Run the callback before the replay can finish.
 
         def on_tick(self, metrics):
             raise ValueError("boom from on_tick")

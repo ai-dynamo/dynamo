@@ -9,6 +9,7 @@ import sglang as sgl
 
 from dynamo._core import Context
 from dynamo.health_check import HEALTH_CHECK_KEY
+from dynamo.sglang._compat import require_reasoning_kwargs
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
@@ -160,13 +161,13 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             **mm_kwargs,
             sampling_params=sampling_params,
             stream=True,
+            **require_reasoning_kwargs(self.engine, inner_request),
             bootstrap_host=bootstrap_host,
             bootstrap_port=bootstrap_port,
             bootstrap_room=bootstrap_room,
             external_trace_header=trace_header,
             rid=trace_id,
             data_parallel_rank=dp_rank,
-            **self._session_kwargs(inner_request),
             lora_path=lora_path,
             **self._priority_kwargs(priority),
         )

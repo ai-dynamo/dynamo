@@ -4,8 +4,6 @@
 title: Planner Design
 ---
 
-[简体中文](./planner-design.zh-CN.md)
-
 > **Tier 3 design documentation** for contributors and architects. For user-facing docs, see [docs/components/planner/](../components/planner/README.md).
 
 ## Overview

@@ -92,6 +92,18 @@ enum PrefillOutcome {
     },
 }
 
+fn extract_bootstrap_info(params: &serde_json::Value) -> Option<BootstrapInfo> {
+    let bootstrap_host = params.get("bootstrap_host")?.as_str()?.to_string();
+    let bootstrap_port = u16::try_from(params.get("bootstrap_port")?.as_u64()?).ok()?;
+    let bootstrap_room = params.get("bootstrap_room")?.as_u64()?;
+    Some(BootstrapInfo {
+        bootstrap_host,
+        bootstrap_port,
+        bootstrap_room,
+        handoff_id: Some(Uuid::new_v4()),
+    })
+}
+
 struct PreparedPrefill {
     worker_id: u64,
     bootstrap_info: Option<BootstrapInfo>,
@@ -128,7 +140,6 @@ pub struct PrefillRouter {
     endpoint_id: OnceLock<EndpointId>,
     cancel_token: CancellationToken,
     router_mode: RouterMode,
-    enforce_disagg: bool,
     session_affinity_ttl: Option<std::time::Duration>,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     /// Model name (used for logging / lifecycle messages).
@@ -170,13 +181,10 @@ impl
         // Save original max_tokens for decode
         let original_max_tokens = req.stop_conditions.max_tokens;
 
-        // If prefill router is not activated (no prefill workers discovered) or has been
-        // deactivated (all prefill workers died), this is aggregated mode -- route directly
-        // to decode. With --enforce-disagg, fail instead of falling back.
+        // If the prefill router is not activated (no prefill workers discovered) or has been
+        // deactivated (all prefill workers died), route directly to the backend. Model admission
+        // remains gated by the registered worker topology before the request reaches this stage.
         if self.lifecycle_state() != PrefillLifecycleState::Active {
-            if self.enforce_disagg {
-                return Err(anyhow::anyhow!(PrefillError::NotActivated));
-            }
             return next.generate(context.map(|_| req)).await;
         }
 
@@ -239,10 +247,20 @@ impl
             } else {
                 drop(prefill_phase_barrier);
                 let completion = Self::consume_prefill_stream(prefill_stream, tracker).await?;
-                PrefillOutcome::Completed {
-                    result: completion.result,
-                    worker_id: prepared.worker_id,
-                    worker_link: completion.worker_link,
+
+                if let Some(bootstrap_info) =
+                    extract_bootstrap_info(&completion.result.disaggregated_params)
+                {
+                    PrefillOutcome::Bootstrap {
+                        bootstrap_info,
+                        worker_id: prepared.worker_id,
+                    }
+                } else {
+                    PrefillOutcome::Completed {
+                        result: completion.result,
+                        worker_id: prepared.worker_id,
+                        worker_link: completion.worker_link,
+                    }
                 }
             };
             Ok((outcome, topology_constraints))
@@ -321,10 +339,6 @@ impl
 }
 
 impl PrefillRouter {
-    pub fn enforce_disagg(&self) -> bool {
-        self.enforce_disagg
-    }
-
     fn prepare_prefill_dispatch(
         &self,
         request: &mut PreprocessedRequest,
@@ -543,61 +557,44 @@ mod tests {
         }
     }
 
-    fn make_test_router(enforce_disagg: bool) -> Arc<PrefillRouter> {
+    fn make_test_router() -> Arc<PrefillRouter> {
         PrefillRouter::disabled(
             Arc::new(crate::discovery::ModelManager::new()),
             RouterMode::RoundRobin,
-            enforce_disagg,
             None,
         )
     }
 
     #[test]
-    fn pending_state_uses_aggregated_fallback_only_when_allowed() {
-        let strict = make_test_router(true);
-        let fallback = make_test_router(false);
-
-        for router in [&strict, &fallback] {
-            assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Pending);
-            assert!(!router.is_activated());
-            assert!(!router.is_deactivated());
-        }
-        assert!(!strict.can_serve_requests());
-        assert!(fallback.can_serve_requests());
+    fn pending_state_is_tracked() {
+        let router = make_test_router();
+        assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Pending);
+        assert!(!router.is_activated());
+        assert!(!router.is_deactivated());
     }
 
     #[test]
-    fn active_state_serves_strict_and_fallback_routers() {
-        for enforce_disagg in [true, false] {
-            let router = make_test_router(enforce_disagg);
-            router.mark_active_for_test();
+    fn active_state_is_tracked() {
+        let router = make_test_router();
+        router.mark_active_for_test();
 
-            assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Active);
-            assert!(!router.is_deactivated());
-            assert!(router.can_serve_requests());
-        }
+        assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Active);
+        assert!(!router.is_deactivated());
     }
 
     #[test]
-    fn unavailable_state_blocks_strict_and_allows_aggregated_fallback() {
-        let strict = make_test_router(true);
-        let fallback = make_test_router(false);
-        strict.mark_active_for_test();
-        fallback.mark_active_for_test();
-        strict.deactivate();
-        fallback.deactivate();
+    fn unavailable_state_is_tracked() {
+        let router = make_test_router();
+        router.mark_active_for_test();
+        router.deactivate();
 
-        for router in [&strict, &fallback] {
-            assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Unavailable);
-            assert!(router.is_deactivated());
-        }
-        assert!(!strict.can_serve_requests());
-        assert!(fallback.can_serve_requests());
+        assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Unavailable);
+        assert!(router.is_deactivated());
     }
 
     #[test]
     fn deactivation_is_idempotent() {
-        let router = make_test_router(true);
+        let router = make_test_router();
         router.mark_active_for_test();
         router.deactivate();
         router.deactivate();
@@ -606,7 +603,7 @@ mod tests {
 
     #[test]
     fn pending_router_latches_worker_availability_transitions() {
-        let router = make_test_router(true);
+        let router = make_test_router();
         router.deactivate();
         assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Unavailable);
 
@@ -618,7 +615,7 @@ mod tests {
 
     #[test]
     fn activation_does_not_overwrite_latched_deactivation() {
-        let router = make_test_router(true);
+        let router = make_test_router();
         router.deactivate();
 
         assert_eq!(
@@ -643,5 +640,43 @@ mod tests {
             Ok(PrefillLifecycleState::Unavailable)
         );
         assert_eq!(PrefillLifecycleState::try_from(3), Err(3));
+    }
+
+    #[test]
+    fn extract_bootstrap_info_parses_valid_params() {
+        let params = serde_json::json!({
+            "bootstrap_host": "10.0.0.5",
+            "bootstrap_port": 12345,
+            "bootstrap_room": 987654321u64,
+            // extra fields (e.g. worker_id) must be ignored
+            "worker_id": {"prefill_worker_id": 7},
+        });
+        let info = extract_bootstrap_info(&params).expect("valid params should parse");
+        assert_eq!(info.bootstrap_host, "10.0.0.5");
+        assert_eq!(info.bootstrap_port, 12345);
+        assert_eq!(info.bootstrap_room, 987654321);
+    }
+
+    #[test]
+    fn extract_bootstrap_info_none_when_field_missing() {
+        // Missing bootstrap_room -> not the bootstrap path (falls through to Completed).
+        let missing_room = serde_json::json!({
+            "bootstrap_host": "10.0.0.5",
+            "bootstrap_port": 12345,
+        });
+        assert!(extract_bootstrap_info(&missing_room).is_none());
+        // An aggregated / vLLM completed prefill carries no bootstrap fields.
+        assert!(extract_bootstrap_info(&serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn extract_bootstrap_info_rejects_out_of_range_port() {
+        // bootstrap_port must fit in u16 -> reject rather than silently truncating.
+        let params = serde_json::json!({
+            "bootstrap_host": "h",
+            "bootstrap_port": 70000,
+            "bootstrap_room": 1,
+        });
+        assert!(extract_bootstrap_info(&params).is_none());
     }
 }

@@ -6,7 +6,6 @@ from __future__ import annotations
 from typing import Any
 
 import pandas as pd
-from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 
 from .scoring import _pick_best_record
 from .search import optimize_dense_agg_with_replay, optimize_dense_disagg_with_replay
@@ -28,6 +27,10 @@ def compare_aic_and_replay_disagg(
             "compare_aic_and_replay_disagg requires synthetic WorkloadSpec with "
             "requestCount and concurrency"
         )
+
+    # Deferred: aiconfigurator is optional, so the package must import without it
+    # (mirrors aic._load_aiconfigurator_modules). Only this function needs AIC.
+    from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 
     aic_task = TaskConfig(
         serving_mode="disagg",

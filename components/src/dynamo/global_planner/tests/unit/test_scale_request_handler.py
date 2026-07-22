@@ -11,6 +11,7 @@ import pytest
 from dynamo.global_planner.scale_handler import PoolIntent, ScaleRequestHandler
 from dynamo.planner import SubComponentType, TargetReplica
 from dynamo.planner.connectors.protocol import ScaleRequest
+from dynamo.planner.errors import DynamoGraphDeploymentNotReadyError
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -654,6 +655,55 @@ async def test_cross_dgd_pair_second_patch_failure_self_corrects(mock_runtime, c
 
 
 @pytest.mark.asyncio
+async def test_cross_dgd_pair_second_patch_not_ready_self_corrects(
+    mock_runtime, caplog
+):
+    """If a later cross-DGD patch is skipped because the DGD is not ready,
+    the first patch stays applied and the request side still reports success."""
+    import logging as _logging
+
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["default-dgd-a", "default-dgd-b"],
+        k8s_namespace="default",
+        min_total_gpus=12,
+        max_total_gpus=12,
+    )
+    connector_a = _install_connector(
+        handler,
+        "default/dgd-a",
+        _dgd_spec(prefill_replicas=3, decode_replicas=3),
+        parent_dgd_name="dgd-a",
+    )
+    connector_b = _install_connector(
+        handler,
+        "default/dgd-b",
+        _dgd_spec(prefill_replicas=3, decode_replicas=3),
+        parent_dgd_name="dgd-b",
+    )
+    handler._intent_cache["default/dgd-b/decode"] = PoolIntent(
+        last_desired=4, last_seen_at=time.time()
+    )
+    connector_b.set_component_replicas.side_effect = DynamoGraphDeploymentNotReadyError(
+        "dgd-b", "default"
+    )
+
+    req = _scale_req(dgd="dgd-a", caller_ns="default-dgd-a", prefill=2)
+    with caplog.at_level(
+        _logging.WARNING, logger="dynamo.global_planner.scale_handler"
+    ):
+        results = await _run(handler, req)
+
+    connector_a.set_component_replicas.assert_called_once()
+    connector_b.set_component_replicas.assert_called_once()
+    assert results[0]["status"] == "success"
+    assert any(
+        "not ready" in rec.message and "will self-correct" in rec.message
+        for rec in caplog.records
+    )
+
+
+@pytest.mark.asyncio
 async def test_cross_dgd_pair_first_patch_failure_yields_error(mock_runtime):
     """If the FIRST K8s patch in a cross-DGD pair fails, nothing has been
     applied yet, the second patch must not be attempted, and the response
@@ -956,6 +1006,32 @@ async def test_out_of_order_requests_pair_via_cache(mock_runtime):
     call_targets = connector.set_component_replicas.call_args[0][0]
     sub_types = {t.sub_component_type.value: t.desired_replicas for t in call_targets}
     assert sub_types == {"decode": 4, "prefill": 2}
+
+
+@pytest.mark.asyncio
+async def test_target_dgd_not_ready_yields_rejected(mock_runtime):
+    """A not-ready target DGD is a retryable no-op, not a successful scale."""
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["app-ns"],
+        k8s_namespace="default",
+    )
+    connector = _install_connector(
+        handler,
+        "default/my-dgd",
+        _dgd_spec(prefill_replicas=1, decode_replicas=1),
+    )
+    connector.set_component_replicas.side_effect = DynamoGraphDeploymentNotReadyError(
+        "my-dgd", "default"
+    )
+
+    req = _scale_req(caller_ns="app-ns", prefill=2)
+    results = await _run(handler, req)
+
+    connector.set_component_replicas.assert_called_once()
+    assert results[0]["status"] == "rejected"
+    assert "not ready" in results[0]["message"]
+    assert results[0]["current_replicas"] == {}
 
 
 @pytest.mark.asyncio

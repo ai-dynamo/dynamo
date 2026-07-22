@@ -65,7 +65,8 @@ where
         if let Some(parent) = request
             .agent_context
             .as_ref()
-            .and_then(|context| context.parent_session_id.clone())
+            .and_then(|context| context.parent_session_id.as_deref())
+            .map(str::to_string)
         {
             match parent_by_session.get(&session_id) {
                 Some(existing) if existing != &parent => {
@@ -510,7 +511,7 @@ mod tests {
                 output_tokens: Some(5),
                 request_received_ms: Some(start_ms as u64),
                 total_time_ms: Some((end_ms - start_ms) as f64),
-                replay: None,
+                ..Default::default()
             },
             replay: RequestTraceReplayMetrics {
                 trace_block_size: 2,

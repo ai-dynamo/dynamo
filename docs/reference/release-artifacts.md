@@ -37,7 +37,8 @@ Release history in this document begins at v0.6.0.
 
 ### Python Wheels
 
-We recommend using the TensorRT-LLM NGC container instead of the `ai-dynamo[trtllm]` wheel. See the [NGC container collection](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo) for supported images.
+For TensorRT-LLM, use the NGC container — not the `ai-dynamo[trtllm]` PyPI extra.
+See the [NGC container collection](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo).
 
 | Package | Description | Python | Platform | PyPI |
 |---------|-------------|--------|----------|------|
@@ -106,11 +107,12 @@ docker pull nvcr.io/nvidia/ai-dynamo/snapshot-agent:1.2.1
 > For detailed installation instructions, see the [Quickstart](https://docs.nvidia.com/dynamo/getting-started/quickstart) in the docs.
 
 ```bash
-# Install Dynamo with a specific backend (Recommended)
+# Install Dynamo with a specific backend (vLLM and SGLang)
 uv pip install "ai-dynamo[vllm]==1.2.1"
 uv pip install --prerelease=allow "ai-dynamo[sglang]==1.2.1"
-# TensorRT-LLM requires the NVIDIA PyPI index and pip
-pip install --pre --extra-index-url https://pypi.nvidia.com "ai-dynamo[trtllm]==1.2.1"
+
+# TensorRT-LLM: use container (see above)
+docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
 
 # Install Dynamo core only
 uv pip install ai-dynamo==1.2.1
@@ -994,8 +996,8 @@ uv pip install --pre --extra-index-url https://pypi.nvidia.com/ ai-dynamo-runtim
 
 | Chart | NGC |
 |-------|-----|
-| `dynamo-platform-1.1.0-dev.1` | [NGC Helm: dynamo-platform 1.1.0-dev.1](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/dynamo-platform?version=1.1.0-dev.1) |
-| `snapshot-1.1.0-dev.1` | [NGC Helm: snapshot 1.1.0-dev.1](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/snapshot?version=1.1.0-dev.1) |
+| `dynamo-platform-1.1.0-dev.1` | [NGC Helm: dynamo-platform 1.1.0-dev.1](https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/helm-charts/dynamo-platform/1.1.0-dev.1) |
+| `snapshot-1.1.0-dev.1` | [NGC Helm: snapshot 1.1.0-dev.1](https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/helm-charts/snapshot/1.1.0-dev.1) |
 
 #### Rust Crates
 

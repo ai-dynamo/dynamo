@@ -32,7 +32,7 @@ pub use tokio_util::sync::CancellationToken;
 
 const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: u64 = 15 * 60;
 
-fn graceful_shutdown_timeout() -> Duration {
+pub(crate) fn graceful_shutdown_timeout() -> Duration {
     let timeout_secs = std::env::var(
         config::environment_names::runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
     )

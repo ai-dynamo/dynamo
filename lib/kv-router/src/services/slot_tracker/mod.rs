@@ -34,23 +34,28 @@ pub async fn run_server(config: SlotTrackerConfig) -> anyhow::Result<()> {
         shutdown_token.cancel();
     });
 
-    let replica_config = setup_replica_sync(
+    let replica_runtime = setup_replica_sync(
         config.replica_sync_port,
         &config.replica_sync_peers,
         cancel_token.child_token(),
     )?;
-    let (registry, peer_manager) = if let Some(replica_config) = replica_config {
+    let (registry, peer_manager) = if let Some(replica_runtime) = &replica_runtime {
+        let replica_config = replica_runtime.config();
         let process_id = replica_config.process_id();
         let registry = Arc::new(SlotTrackerRegistry::new_with_replica_sync(
             cancel_token.clone(),
             replica_config,
         ));
-        let dispatch_registry = Arc::clone(&registry);
-        let peer_manager = PeerManager::start(
+        let dispatch_registry = Arc::downgrade(&registry);
+        let peer_manager = Arc::new(PeerManager::start(
             config.replica_sync_peers,
             cancel_token.child_token(),
-            move |event| dispatch_registry.dispatch_replica_event(event),
-        )?;
+            move |event| {
+                if let Some(registry) = dispatch_registry.upgrade() {
+                    registry.dispatch_replica_event(event);
+                }
+            },
+        )?);
         tracing::info!(
             port = config.port,
             replica_sync_port = config.replica_sync_port,
@@ -69,15 +74,22 @@ pub async fn run_server(config: SlotTrackerConfig) -> anyhow::Result<()> {
         )
     };
 
-    let app = create_router(Arc::new(AppState { registry }), peer_manager);
+    let app = create_router(
+        Arc::new(AppState { registry }),
+        peer_manager.as_ref().map(Arc::clone),
+    );
     let listener = TcpListener::bind(("0.0.0.0", config.port)).await?;
     tracing::info!("HTTP server listening on 0.0.0.0:{}", config.port);
-    axum::serve(listener, app)
+    let result = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             cancel_token.cancelled().await;
             tracing::info!("Received shutdown signal, stopping HTTP server");
         })
-        .await?;
+        .await;
+    if let (Some(peer_manager), Some(replica_runtime)) = (&peer_manager, &replica_runtime) {
+        tokio::join!(peer_manager.shutdown(), replica_runtime.shutdown());
+    }
+    result?;
 
     Ok(())
 }

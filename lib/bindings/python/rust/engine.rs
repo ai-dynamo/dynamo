@@ -3,6 +3,7 @@
 
 use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context as TaskContext, Poll};
 
 use anyhow::{Error, Result};
 use pyo3::prelude::*;
@@ -19,8 +20,8 @@ use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
 use dynamo_runtime::logging::get_distributed_tracing_context;
 pub use dynamo_runtime::{
     pipeline::{
-        AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Data, ManyOut, ResponseStream,
-        SingleIn,
+        AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Data, DataStream, ManyOut,
+        ResponseStream, SingleIn,
     },
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
@@ -30,6 +31,7 @@ use dynamo_runtime::pipeline::ManyIn;
 
 use super::context::{Context, callable_accepts_kwarg};
 use super::errors::{extract_http_like_error, py_exception_to_backend_error};
+use crate::python_payload::{PythonPayload, PythonResponseItem};
 
 /// Add bindings from this crate to the provided module
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -67,6 +69,8 @@ type PyItemStream = Pin<Box<dyn Stream<Item = PyResult<Py<PyAny>>> + Send>>;
 ///
 /// The GIL is acquired on a blocking task rather than inline: under contention
 /// it can block for an unbounded time, which would park the tokio reactor.
+/// The returned stream polls `__anext__` only when its consumer requests an
+/// item, preventing Python from mutating a reused object before it is consumed.
 async fn invoke_generator<F, G>(
     generator: Arc<PyObject>,
     event_loop: Arc<PyObject>,
@@ -93,15 +97,38 @@ where
             }?;
 
             let locals = TaskLocals::new(event_loop.bind(py).clone());
-            pyo3_async_runtimes::tokio::into_stream_with_locals_v1(
-                locals,
-                gen_result.into_bound(py),
-            )
+            demand_driven_python_stream(locals, gen_result.into_bound(py))
         })
     })
     .await
     .map_err(|e| anyhow::anyhow!("failed to offload python call to blocking task: {e}"))??;
 
+    Ok(stream)
+}
+
+fn demand_driven_python_stream(
+    locals: TaskLocals,
+    generator: Bound<'_, PyAny>,
+) -> PyResult<PyItemStream> {
+    let anext = generator.getattr("__anext__")?.unbind();
+    let stream = futures::stream::unfold((anext, locals), |(anext, locals)| async move {
+        let next = Python::with_gil(|py| {
+            pyo3_async_runtimes::into_future_with_locals(&locals, anext.bind(py).call0()?)
+        });
+        let item = match next {
+            Ok(next) => next.await,
+            Err(error) => Err(error),
+        };
+        if item.as_ref().is_err_and(|error| {
+            Python::with_gil(|py| {
+                error.is_instance_of::<pyo3::exceptions::PyStopAsyncIteration>(py)
+            })
+        }) {
+            None
+        } else {
+            Some((item, (anext, locals)))
+        }
+    });
     Ok(Box::pin(stream))
 }
 
@@ -156,6 +183,36 @@ impl PythonAsyncEngine {
             Arc::new(generator),
             Arc::new(event_loop),
         )))
+    }
+}
+
+impl PythonAsyncEngine {
+    pub(crate) fn network_engine(&self) -> PythonNetworkEngine {
+        PythonNetworkEngine(self.0.clone())
+    }
+}
+
+/// Network-only Python engine. Requests and responses stay as Python-owned
+/// objects so the ingress adapter can transcode them directly to and from the
+/// configured request-plane codec.
+#[derive(Clone)]
+pub(crate) struct PythonNetworkEngine(PythonServerStreamingEngine);
+
+#[async_trait::async_trait]
+impl AsyncEngine<SingleIn<PythonPayload>, ManyOut<PythonResponseItem>, Error>
+    for PythonNetworkEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<PythonPayload>,
+    ) -> Result<ManyOut<PythonResponseItem>, Error> {
+        generate_python_stream(
+            &self.0,
+            request,
+            |_py, request| Ok(request.into_inner()),
+            unbuffered_python_response_stream,
+        )
+        .await
     }
 }
 
@@ -215,40 +272,52 @@ where
     Resp: Data + for<'de> Deserialize<'de>,
 {
     async fn generate(&self, request: SingleIn<Req>) -> Result<ManyOut<Annotated<Resp>>, Error> {
-        // Create a context
-        let (request, context) = request.transfer(());
-        let ctx = context.context();
-
-        let id = context.id().to_string();
-        tracing::trace!("processing request: {}", id);
-
-        // Capture current trace context
-        let current_trace_context = get_distributed_tracing_context();
-        let metadata = context.metadata().clone();
-
-        let stream = invoke_generator(
-            self.generator.clone(),
-            self.event_loop.clone(),
-            move |py| Ok(pythonize(py, &request)?.unbind()),
-            self.has_context.then_some({
-                let ctx = ctx.clone();
-                move |py: Python<'_>| {
-                    Py::new(py, Context::new(ctx, current_trace_context, None, metadata))
-                        .map(|c| c.into_any())
-                }
-            }),
+        generate_python_stream(
+            self,
+            request,
+            |py, request| Ok(pythonize(py, &request)?.unbind()),
+            buffered_typed_response_stream::<Resp>,
         )
-        .await?;
-
-        // Drain the Python response stream on a dedicated task, mapping any
-        // generator error to a typed annotated error frame.
-        let rx = spawn_response_forwarder::<Resp>(stream, ctx, id);
-
-        Ok(ResponseStream::new(
-            Box::pin(ReceiverStream::new(rx)),
-            context.context(),
-        ))
+        .await
     }
+}
+
+async fn generate_python_stream<Req, Resp, ToPythonInput, ForwardResponses>(
+    engine: &PythonServerStreamingEngine,
+    request: SingleIn<Req>,
+    to_python_input: ToPythonInput,
+    forward_responses: ForwardResponses,
+) -> Result<ManyOut<Resp>, Error>
+where
+    Req: Data,
+    Resp: Data,
+    ToPythonInput: FnOnce(Python, Req) -> PyResult<Py<PyAny>> + Send + 'static,
+    ForwardResponses:
+        FnOnce(PyItemStream, Arc<dyn AsyncEngineContext>, String) -> DataStream<Resp> + Send,
+{
+    let (request, context) = request.transfer(());
+    let ctx = context.context();
+    let id = context.id().to_string();
+    tracing::trace!("processing request: {}", id);
+
+    let current_trace_context = get_distributed_tracing_context();
+    let metadata = context.metadata().clone();
+    let stream = invoke_generator(
+        engine.generator.clone(),
+        engine.event_loop.clone(),
+        move |py| to_python_input(py, request),
+        engine.has_context.then_some({
+            let ctx = ctx.clone();
+            move |py: Python<'_>| {
+                Py::new(py, Context::new(ctx, current_trace_context, None, metadata))
+                    .map(|context| context.into_any())
+            }
+        }),
+    )
+    .await?;
+
+    let response_stream = forward_responses(stream, ctx, id);
+    Ok(ResponseStream::new(response_stream, context.context()))
 }
 
 async fn process_item<Resp>(
@@ -257,84 +326,7 @@ async fn process_item<Resp>(
 where
     Resp: Data + for<'de> Deserialize<'de>,
 {
-    let item = item.map_err(|e| {
-        Python::with_gil(|py| {
-            e.display(py);
-
-            // Check if the Python exception is a Dynamo error type.
-            // Wrap as Backend* since this is the backend engine context.
-            if let Some((backend_err, message)) = py_exception_to_backend_error(py, &e) {
-                return ResponseProcessingError::Dynamo(
-                    DynamoError::builder()
-                        .error_type(ErrorType::Backend(backend_err))
-                        .message(message)
-                        .build(),
-                );
-            }
-
-            // openai.rs::extract_backend_error_if_present parses the DynamoError
-            // message as JSON {message, code}; emit that shape so the HTTP status
-            // survives instead of defaulting to 500.
-            if let Some((code, message)) = extract_http_like_error(py, &e) {
-                let backend_err = if (400..500).contains(&code) {
-                    BackendError::InvalidArgument
-                } else {
-                    BackendError::Unknown
-                };
-                let json_msg = serde_json::json!({
-                    "message": message,
-                    "code": code,
-                })
-                .to_string();
-                return ResponseProcessingError::Dynamo(
-                    DynamoError::builder()
-                        .error_type(ErrorType::Backend(backend_err))
-                        .message(json_msg)
-                        .build(),
-                );
-            }
-
-            // GeneratorExit from Python's generator protocol (e.g., GC closing
-            // a generator) is treated as an engine shutdown.
-            if e.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py) {
-                return ResponseProcessingError::Dynamo(
-                    DynamoError::builder()
-                        .error_type(ErrorType::Backend(BackendError::EngineShutdown))
-                        .message("engine shutting down")
-                        .build(),
-                );
-            }
-
-            // Map well-known Python exceptions to specific Backend error types.
-            // Order matters: check subclasses before their parents
-            // (e.g., ConnectionRefusedError before ConnectionError).
-            let backend_err = if e.is_instance_of::<pyo3::exceptions::PyValueError>(py)
-                || e.is_instance_of::<pyo3::exceptions::PyTypeError>(py)
-            {
-                BackendError::InvalidArgument
-            } else if e.is_instance_of::<pyo3::exceptions::PyTimeoutError>(py) {
-                BackendError::ConnectionTimeout
-            } else if e.is_instance_of::<pyo3::exceptions::PyConnectionRefusedError>(py) {
-                BackendError::CannotConnect
-            } else if e.is_instance_of::<pyo3::exceptions::PyConnectionResetError>(py)
-                || e.is_instance_of::<pyo3::exceptions::PyBrokenPipeError>(py)
-                || e.is_instance_of::<pyo3::exceptions::PyConnectionError>(py)
-            {
-                BackendError::Disconnected
-            } else if e.is_instance_of::<pyo3::exceptions::asyncio::CancelledError>(py) {
-                BackendError::Cancelled
-            } else {
-                BackendError::Unknown
-            };
-
-            ResponseProcessingError::Dynamo(
-                DynamoError::builder()
-                    .error_type(ErrorType::Backend(backend_err))
-                    .message(e.to_string())
-                    .build(),
-            )
-        })
-    })?;
+    let item = item.map_err(|e| ResponseProcessingError::Dynamo(map_python_exception(e)))?;
     let response = tokio::task::spawn_blocking(move || {
         Python::with_gil(|py| {
             let bound = item.into_bound(py);
@@ -360,6 +352,67 @@ where
     Ok(response)
 }
 
+pub(crate) fn map_python_exception(error: PyErr) -> DynamoError {
+    Python::with_gil(|py| {
+        error.display(py);
+
+        if let Some((backend_err, message)) = py_exception_to_backend_error(py, &error) {
+            return DynamoError::builder()
+                .error_type(ErrorType::Backend(backend_err))
+                .message(message)
+                .build();
+        }
+
+        if let Some((code, message)) = extract_http_like_error(py, &error) {
+            let backend_err = if (400..500).contains(&code) {
+                BackendError::InvalidArgument
+            } else {
+                BackendError::Unknown
+            };
+            let json_msg = serde_json::json!({
+                "message": message,
+                "code": code,
+            })
+            .to_string();
+            return DynamoError::builder()
+                .error_type(ErrorType::Backend(backend_err))
+                .message(json_msg)
+                .build();
+        }
+
+        if error.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py) {
+            return DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+                .message("engine shutting down")
+                .build();
+        }
+
+        let backend_err = if error.is_instance_of::<pyo3::exceptions::PyValueError>(py)
+            || error.is_instance_of::<pyo3::exceptions::PyTypeError>(py)
+        {
+            BackendError::InvalidArgument
+        } else if error.is_instance_of::<pyo3::exceptions::PyTimeoutError>(py) {
+            BackendError::ConnectionTimeout
+        } else if error.is_instance_of::<pyo3::exceptions::PyConnectionRefusedError>(py) {
+            BackendError::CannotConnect
+        } else if error.is_instance_of::<pyo3::exceptions::PyConnectionResetError>(py)
+            || error.is_instance_of::<pyo3::exceptions::PyBrokenPipeError>(py)
+            || error.is_instance_of::<pyo3::exceptions::PyConnectionError>(py)
+        {
+            BackendError::Disconnected
+        } else if error.is_instance_of::<pyo3::exceptions::asyncio::CancelledError>(py) {
+            BackendError::Cancelled
+        } else {
+            BackendError::Unknown
+        };
+
+        DynamoError::builder()
+            .error_type(ErrorType::Backend(backend_err))
+            .message(error.to_string())
+            .build()
+    })
+}
+
 /// Channel depth between the response-forwarding task and the consumer of
 /// the engine's output stream.
 const RESPONSE_CHANNEL_DEPTH: usize = 128;
@@ -373,6 +426,9 @@ const RESPONSE_CHANNEL_DEPTH: usize = 128;
 /// and emitted as annotated error frames, so a failing generator returns as
 /// an error to the client rather than a silently truncated stream.
 /// On a deserialize mismatch the request context is told to stop generating.
+/// The generator is not polled again until [`process_item`] has converted the
+/// current `PyObject` into an owned Rust value, so this channel never buffers
+/// mutable Python objects that a generator could reuse for a later yield.
 fn spawn_response_forwarder<Resp>(
     stream: PyItemStream,
     ctx: Arc<dyn AsyncEngineContext>,
@@ -458,6 +514,103 @@ where
     rx
 }
 
+fn buffered_typed_response_stream<Resp>(
+    stream: PyItemStream,
+    ctx: Arc<dyn AsyncEngineContext>,
+    request_id: String,
+) -> DataStream<Annotated<Resp>>
+where
+    Resp: Data + for<'de> Deserialize<'de>,
+{
+    Box::pin(ReceiverStream::new(spawn_response_forwarder::<Resp>(
+        stream, ctx, request_id,
+    )))
+}
+
+fn unbuffered_python_response_stream(
+    stream: PyItemStream,
+    ctx: Arc<dyn AsyncEngineContext>,
+    request_id: String,
+) -> DataStream<PythonResponseItem> {
+    // Do not poll the generator again until ingress has encoded the current
+    // Python object. A generator may reuse and mutate the same dict/list for
+    // later yields; buffering raw PyObject handles would make earlier frames
+    // observe those later mutations.
+    Box::pin(DirectPythonResponseStream {
+        stream: Some(stream),
+        ctx,
+        request_id,
+        exhausted: false,
+    })
+}
+
+/// Demand-driven network response stream with cooperative Python cancellation.
+///
+/// Ingress stops the request context when the client response connection
+/// closes, then drops this stream. Give the Python generator one final poll so
+/// it can observe `context.is_stopped()` and run its cancellation path. Normal
+/// response delivery remains unbuffered: the next generator item is not polled
+/// until ingress has encoded the current one.
+struct DirectPythonResponseStream {
+    stream: Option<PyItemStream>,
+    ctx: Arc<dyn AsyncEngineContext>,
+    request_id: String,
+    exhausted: bool,
+}
+
+impl Stream for DirectPythonResponseStream {
+    type Item = PythonResponseItem;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        let poll = self
+            .stream
+            .as_mut()
+            .expect("direct Python response stream missing before exhaustion")
+            .as_mut()
+            .poll_next(cx);
+        match poll {
+            Poll::Ready(Some(item)) => {
+                if item.is_err() {
+                    self.exhausted = true;
+                    self.stream.take();
+                }
+                Poll::Ready(Some(PythonResponseItem::new(item)))
+            }
+            Poll::Ready(None) => {
+                self.exhausted = true;
+                self.stream.take();
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl Drop for DirectPythonResponseStream {
+    fn drop(&mut self) {
+        if self.exhausted || !self.ctx.is_stopped() {
+            return;
+        }
+
+        let Some(mut stream) = self.stream.take() else {
+            return;
+        };
+        let request_id = self.request_id.clone();
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        runtime.spawn(async move {
+            // Cooperative Python generators inspect their Context when polled.
+            // Discard the result: the client has already dropped its stream.
+            let _ = stream.next().await;
+            tracing::trace!(
+                request_id,
+                "polled direct Python response generator after cancellation"
+            );
+        });
+    }
+}
+
 /// Channel depth between the inbound forwarder and the Python iterator.
 /// Mirrors the depth used by the wire-side bidirectional ingress forwarder
 /// in `lib/runtime/src/pipeline/network/ingress/push_handler.rs`.
@@ -465,23 +618,18 @@ const BIDIRECTIONAL_INPUT_CHANNEL_DEPTH: usize = 8;
 
 /// Rust-side adapter that bridges a Python `async def generate(request_stream, context)`
 /// callable into an [`AsyncEngine`] of the ManyIn / ManyOut
-/// shape (Req=serde_json::Value, Resp=Annotated<serde_json::Value>).
+/// shape (`PythonPayload` request frames and raw Python response items).
 ///
 /// The adapter:
 ///
-/// 1. Transforms the inbound `RequestStream<serde_json::Value>` into a
+/// 1. Transforms the inbound `RequestStream<PythonPayload>` into a
 ///    `PyAsyncRequestStream` and `context`. Similar to unary engine,
 ///    cancellation observation is the Python engine's responsibility via the
 ///    `context` argument. Input stream can end early if no more inputs are expected.
 /// 2. Invokes the Python generator with `(request_stream, context)`, then
 ///    wraps the returned async generator into a Rust `Stream<Item = PyResult<PyObject>>`.
-/// 3. Depythonizes each item and wraps it as `Annotated<serde_json::Value>`,
-///    and forwards it on the response stream.
-///
-/// Wire types are fixed to `serde_json::Value` on the request side and
-/// `Annotated<serde_json::Value>` on the response side. The Python user
-/// works with dicts on both sides and any schema enforcement is handled in
-/// Python.
+/// 3. Forwards each raw Python response to the ingress payload adapter, which
+///    performs annotation handling and wire serialization in one blocking step.
 pub struct PythonBidirectionalEngine {
     generator: Arc<PyObject>,
     event_loop: Arc<PyObject>,
@@ -504,13 +652,13 @@ impl PythonBidirectionalEngine {
 }
 
 #[async_trait::async_trait]
-impl AsyncEngine<ManyIn<serde_json::Value>, ManyOut<Annotated<serde_json::Value>>, Error>
+impl AsyncEngine<ManyIn<PythonPayload>, ManyOut<PythonResponseItem>, Error>
     for PythonBidirectionalEngine
 {
     async fn generate(
         &self,
-        input: ManyIn<serde_json::Value>,
-    ) -> Result<ManyOut<Annotated<serde_json::Value>>, Error> {
+        input: ManyIn<PythonPayload>,
+    ) -> Result<ManyOut<PythonResponseItem>, Error> {
         let (request_stream, ctx_unit) = input.into_parts();
         let ctx = ctx_unit.context();
         let request_id = ctx_unit.id().to_string();
@@ -523,8 +671,7 @@ impl AsyncEngine<ManyIn<serde_json::Value>, ManyOut<Annotated<serde_json::Value>
         // dispatching task; needed when constructing the Python `Context`.
         let current_trace_context = get_distributed_tracing_context();
 
-        // Forwarder: pull `serde_json::Value` frames off the inbound stream,
-        // pythonize each, and hand the resulting `PyObject` to the Python
+        // Forwarder: move Python-owned frames directly into the Python
         // iterator. The `frame_tx.closed()` arm cancels the forwarder as soon
         // as the Python iterator drops the receiver, so it shuts down promptly
         // instead of blocking on the next inbound frame.
@@ -539,21 +686,7 @@ impl AsyncEngine<ManyIn<serde_json::Value>, ManyOut<Annotated<serde_json::Value>
                 let Some(value) = value else {
                     break;
                 };
-                let pyobj = match Python::with_gil(|py| {
-                    pythonize(py, &value).map(|bound| bound.unbind())
-                }) {
-                    Ok(pyobj) => pyobj,
-                    Err(e) => {
-                        tracing::error!(
-                            request_id = %forwarder_request_id,
-                            error = %e,
-                            "failed to pythonize bidirectional request frame; \
-                             closing input forwarder"
-                        );
-                        break;
-                    }
-                };
-                if frame_tx.send(pyobj).await.is_err() {
+                if frame_tx.send(value.into_inner()).await.is_err() {
                     tracing::debug!(
                         request_id = %forwarder_request_id,
                         "python engine dropped request stream; input forwarder exiting"
@@ -581,13 +714,7 @@ impl AsyncEngine<ManyIn<serde_json::Value>, ManyOut<Annotated<serde_json::Value>
         )
         .await?;
 
-        // Drain the Python response stream on a dedicated task. Sharing
-        // `spawn_response_forwarder` gives the bidirectional engine the same
-        // typed error mapping as the unary engine: a generator that raises now
-        // yields a structured annotated error frame instead of a silently
-        // truncated stream.
-        let rx = spawn_response_forwarder::<serde_json::Value>(stream, ctx.clone(), request_id);
-
-        Ok(ResponseStream::new(Box::pin(ReceiverStream::new(rx)), ctx))
+        let response_stream = unbuffered_python_response_stream(stream, ctx.clone(), request_id);
+        Ok(ResponseStream::new(response_stream, ctx))
     }
 }

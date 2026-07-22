@@ -148,7 +148,7 @@ def test_shared_prefix_accounting_and_unregister(slot_tracker_url: str) -> None:
     assert _loads_by_rank(base_url, "llama-3-8b") == {
         (8, 0): {
             "model_name": "llama-3-8b",
-            "tenant_id": "default",
+            "routing_group": "default",
             "worker_id": 8,
             "dp_rank": 0,
             "active_prefill_tokens": 0,
@@ -204,7 +204,7 @@ def test_prefill_lifecycle_updates_both_load_dimensions(slot_tracker_url: str) -
 
     assert _loads_by_rank(base_url, "llama-3-8b")[(4, 0)] == {
         "model_name": "llama-3-8b",
-        "tenant_id": "default",
+        "routing_group": "default",
         "worker_id": 4,
         "dp_rank": 0,
         "active_prefill_tokens": 64,

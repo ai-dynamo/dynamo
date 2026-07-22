@@ -90,6 +90,15 @@ impl ConcurrentRadixTreeCompressed {
                         block_hash = ?block_hash,
                         "Block not found during remove; skipping"
                     );
+                    // The remove event says this worker evicted the block, so
+                    // any lookup entry for it must not outlive the event. A
+                    // resolve miss with a live entry happens when the hash's
+                    // node was split off and the split child was later dropped
+                    // by clear_children_if_unreachable — without this scrub the
+                    // entry (and the per-worker tracked-block count) leaks
+                    // permanently. Mirrors the scrubs in apply_removed_hash's
+                    // miss branches.
+                    Self::remove_lookup_hashes(lookup, worker, [block_hash]);
                 }
             }
         }
@@ -213,60 +222,35 @@ impl ConcurrentRadixTreeCompressed {
         }
     }
 
-    pub(super) fn remove_or_clear_worker_blocks(
+    pub(super) fn erase_worker_coverage(
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
-        worker_id: WorkerId,
-        keep_worker: bool,
+        target: WorkerRemovalTarget,
+        sweep_tree: bool,
     ) {
-        let workers: Vec<WorkerWithDpRank> = lookup
-            .keys()
-            .filter(|w| w.worker_id == worker_id)
-            .copied()
+        lookup.retain(|worker, _| !target.matches(*worker));
+        if !sweep_tree {
+            return;
+        }
+
+        let mut queue = VecDeque::new();
+        self.root.push_children_into(&mut queue);
+        let anchor_roots: Vec<_> = self
+            .anchor_nodes
+            .iter()
+            .map(|entry| entry.value().clone())
             .collect();
+        queue.extend(anchor_roots);
 
-        for worker in workers {
-            if let Some(worker_lookup) = lookup.remove(&worker) {
-                let mut seen = FxHashSet::<usize>::default();
-                for (_, node) in worker_lookup.into_iter() {
-                    let ptr = Arc::as_ptr(&node) as usize;
-                    if !seen.insert(ptr) {
-                        continue;
-                    }
-                    node.drop_worker(worker);
-                }
-
-                if keep_worker {
-                    lookup.insert(worker, FxHashMap::default());
-                }
+        let mut seen = FxHashSet::<usize>::default();
+        while let Some(node) = queue.pop_front() {
+            let ptr = Arc::as_ptr(&node) as usize;
+            if !seen.insert(ptr) {
+                continue;
             }
-        }
-    }
 
-    pub(super) fn remove_worker_dp_rank(
-        &self,
-        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
-        worker_id: WorkerId,
-        dp_rank: DpRank,
-    ) {
-        let key = WorkerWithDpRank { worker_id, dp_rank };
-        if let Some(worker_lookup) = lookup.remove(&key) {
-            let mut seen = FxHashSet::<usize>::default();
-            for (_, node) in worker_lookup.into_iter() {
-                let ptr = Arc::as_ptr(&node) as usize;
-                if !seen.insert(ptr) {
-                    continue;
-                }
-                node.drop_worker(key);
-            }
+            let children = node.remove_target_and_snapshot_children(target);
+            queue.extend(children);
         }
-    }
-
-    pub(super) fn clear_all_blocks(
-        &self,
-        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
-        worker_id: WorkerId,
-    ) {
-        self.remove_or_clear_worker_blocks(lookup, worker_id, true);
     }
 }

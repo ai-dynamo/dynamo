@@ -51,6 +51,7 @@ fn bs_event(hashes: Vec<u64>, tokens: Vec<u32>, block_size: usize) -> RawKvEvent
         block_size,
         lora_name: None,
         medium: None,
+        cache_namespace: None,
         block_mm_infos: None,
         is_eagle: None,
         group_idx: None,
