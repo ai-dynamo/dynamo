@@ -407,11 +407,9 @@ mod select_service_cli_tests {
         let default = SelectServiceCli::try_parse_from(["dynamo.select_service"]).unwrap();
         assert_eq!(default.router_assume_kv_reuse_override(), None);
 
-        let enabled = SelectServiceCli::try_parse_from([
-            "dynamo.select_service",
-            "--router-assume-kv-reuse",
-        ])
-        .unwrap();
+        let enabled =
+            SelectServiceCli::try_parse_from(["dynamo.select_service", "--router-assume-kv-reuse"])
+                .unwrap();
         assert_eq!(enabled.router_assume_kv_reuse_override(), Some(true));
 
         let disabled = SelectServiceCli::try_parse_from([
