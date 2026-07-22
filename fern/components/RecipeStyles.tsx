@@ -44,21 +44,25 @@ const RECIPE_CSS = `
    (fills edge-to-edge, removing the right gap).
 
    One alignment fix IS needed. The browse pages set hide-toc: true, which
-   removes the right-hand table-of-contents <aside>. Fern's content wrapper
-   (.fern-layout-guide) is margin-inline:auto, so with the TOC gone it CENTERS
-   in the freed width -- splitting the space into two equal gaps and pushing
-   the content ~180px to the right of the sidebar. Documentation-tab pages
-   don't show this because their TOC holds that right-hand space.
+   removes the right-hand table-of-contents <aside>. The content article
+   (.fern-layout-guide > article) is width-capped to --content-width and
+   centered by Tailwind's mx-auto (margin-inline:auto) -- NOT the guide itself,
+   which is full-width with no max-width. With the TOC gone, the guide stretches
+   to fill the freed width, so mx-auto centers the article: the space splits
+   into two equal gaps, pushing content ~180px right of the sidebar.
+   Documentation-tab pages don't show this because their TOC holds that space.
 
-   Left-align the guide on TOC-less pages so it sits right after the sidebar
+   Left-align the article on TOC-less pages so it sits right after the sidebar
    and the entire freed width becomes the (intended) right gap -- matching the
    Docs tab. Scoped via :has() to a fern-main with NO <aside> after the content
    wrapper (i.e. hide-toc pages only: the sidebar <aside> is before it, the TOC
-   <aside> -- when present -- is after it). Individual recipe pages keep their
-   TOC and are untouched. Pure CSS + server-rendered, so no layout flash. */
-main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-guide {
-    margin-inline-start: 0 !important;
-    margin-inline-end: auto !important;
+   <aside> -- when present -- is after it), so individual recipe pages that keep
+   their TOC are untouched. Overriding the guide's margin does nothing (the
+   guide isn't the centered box) -- the override must hit the article's
+   mx-auto. Verified with a headless render; server-rendered, so no flash. */
+main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-guide > article {
+    margin-left: 0 !important;
+    margin-right: auto !important;
 }
 
 /* Product switcher: hide the FontAwesome "code" glyph (</>) placeholder.
