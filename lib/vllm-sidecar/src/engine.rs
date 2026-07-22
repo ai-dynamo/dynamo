@@ -185,6 +185,7 @@ impl VllmSidecarEngine {
             Some(RlWorkerMetadata {
                 admin_base_url,
                 world_size: inference_world_size(parallelism)?,
+                model: discovery.model.model_id.clone(),
             })
         } else {
             None

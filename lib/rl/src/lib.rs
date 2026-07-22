@@ -321,15 +321,18 @@ async fn describe_worker(
         call_worker_routes(state, &endpoint, timeout).await
     };
     match tokio::time::timeout(timeout, probe).await {
-        Ok(Ok(routes)) => worker_info(
-            endpoint,
-            model,
-            routes.routes,
-            routes.system_url,
-            routes.admin_base_url,
-            routes.world_size,
-            None,
-        ),
+        Ok(Ok(routes)) => {
+            let model = resolve_worker_model(model, routes.model);
+            worker_info(
+                endpoint,
+                model,
+                routes.routes,
+                routes.system_url,
+                routes.admin_base_url,
+                routes.world_size,
+                None,
+            )
+        }
         Ok(Err(err)) => worker_info(
             endpoint,
             model,
@@ -360,6 +363,7 @@ struct WorkerRoutes {
     system_url: Option<String>,
     admin_base_url: Option<String>,
     world_size: Option<u32>,
+    model: Option<String>,
 }
 
 async fn call_worker_routes(
@@ -484,13 +488,28 @@ fn parse_worker_routes(value: serde_json::Value) -> anyhow::Result<WorkerRoutes>
                 })?,
         ),
     };
+    let model = match value.get("model") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(model)) if !model.trim().is_empty() => {
+            Some(model.trim().to_string())
+        }
+        Some(_) => anyhow::bail!("worker routes response has invalid 'model'"),
+    };
 
     Ok(WorkerRoutes {
         routes,
         system_url,
         admin_base_url,
         world_size,
+        model,
     })
+}
+
+fn resolve_worker_model(
+    discovered_model: Option<String>,
+    explicit_model: Option<String>,
+) -> Option<String> {
+    explicit_model.or(discovered_model)
 }
 
 fn worker_info(
@@ -626,6 +645,7 @@ mod tests {
             "system_url": "  http://worker:8080  ",
             "admin_base_url": "  http://worker:8120  ",
             "world_size": 2,
+            "model": "  Qwen/Qwen3-0.6B  ",
         }))
         .expect("valid payload");
         let routes: Vec<&str> = parsed.routes.iter().map(String::as_str).collect();
@@ -634,6 +654,32 @@ mod tests {
         assert_eq!(parsed.system_url.as_deref(), Some("http://worker:8080"));
         assert_eq!(parsed.admin_base_url.as_deref(), Some("http://worker:8120"));
         assert_eq!(parsed.world_size, Some(2));
+        assert_eq!(parsed.model.as_deref(), Some("Qwen/Qwen3-0.6B"));
+    }
+
+    #[test]
+    fn explicit_worker_model_wins_over_served_model_alias() {
+        assert_eq!(
+            resolve_worker_model(
+                Some("prime-thunderagent-backend".to_string()),
+                Some("Qwen/Qwen3-0.6B".to_string()),
+            )
+            .as_deref(),
+            Some("Qwen/Qwen3-0.6B")
+        );
+    }
+
+    #[test]
+    fn parse_worker_routes_rejects_invalid_model_metadata() {
+        for model in [serde_json::json!("   "), serde_json::json!(42)] {
+            let error = parse_worker_routes(serde_json::json!({
+                "status": "ok",
+                "routes": [],
+                "model": model,
+            }))
+            .expect_err("invalid model metadata must be rejected");
+            assert!(error.to_string().contains("invalid 'model'"));
+        }
     }
 
     #[test]

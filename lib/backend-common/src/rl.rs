@@ -22,6 +22,7 @@ const RESERVED_ENDPOINTS: [&str; 3] = ["load_lora", "unload_lora", "list_loras"]
 pub struct RlWorkerMetadata {
     pub admin_base_url: String,
     pub world_size: u32,
+    pub model: String,
 }
 
 pub(crate) fn enabled() -> bool {
@@ -137,6 +138,7 @@ impl RlRouteHandler {
             "system_url": self.system_url,
             "admin_base_url": self.metadata.admin_base_url,
             "world_size": self.metadata.world_size,
+            "model": self.metadata.model,
         })
     }
 }
@@ -168,6 +170,7 @@ mod tests {
             metadata: RlWorkerMetadata {
                 admin_base_url: "http://worker:8120".to_string(),
                 world_size: 2,
+                model: "Qwen/Qwen3-0.6B".to_string(),
             },
             system_url: Some("http://worker:8181".to_string()),
         }
@@ -183,6 +186,7 @@ mod tests {
                 "system_url": "http://worker:8181",
                 "admin_base_url": "http://worker:8120",
                 "world_size": 2,
+                "model": "Qwen/Qwen3-0.6B",
             })
         );
     }
