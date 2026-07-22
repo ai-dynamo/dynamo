@@ -19,10 +19,10 @@ pub const STATUS_OK: i32 = 0;
 pub const STATUS_INVALID_INPUT: i32 = 1;
 pub const STATUS_ERROR: i32 = 2;
 pub const STATUS_PANICKED: i32 = 3;
-/// Delegate to the host's default selector; candidate_index_out is ignored.
+/// Delegate to the host's default selector; worker_index_out is ignored.
 pub const STATUS_USE_DEFAULT: i32 = 4;
 
-/// ABI encoding for an unavailable optional candidate capacity.
+/// ABI encoding for an unavailable optional worker capacity.
 pub const CAPACITY_UNAVAILABLE: u64 = u64::MAX;
 
 pub const INPUT_HAS_REQUEST_ID: u32 = 1 << 0;
@@ -39,18 +39,18 @@ pub const SELECTION_MODE_QUERY_ONLY: u32 = 0;
 pub const SELECTION_MODE_TRACKED: u32 = 1;
 pub const SELECTION_MODE_TRACKED_WITH_ADMISSION: u32 = 2;
 
-/// Candidate storage format used by [`WorkerSelectorInputV1`].
-pub const CANDIDATE_FORMAT_COLUMNAR_V1: u32 = 1;
+/// Worker-column storage format used by [`WorkerSelectorInputV1`].
+pub const WORKER_COLUMNS_FORMAT_V1: u32 = 1;
 
-/// Candidate inputs a plugin needs for selection.
+/// Worker inputs a plugin needs for selection.
 ///
 /// Dynamo materializes only the requested inputs. Any non-empty requirement includes
 /// [`Self::IDENTITY`] so a returned index always maps to a worker and data-parallel rank.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct CandidateInputs(u64);
+pub struct WorkerInputs(u64);
 
-impl CandidateInputs {
+impl WorkerInputs {
     pub const NONE: Self = Self(0);
     pub const IDENTITY: Self = Self(1 << 0);
     pub const CACHED_TOKENS: Self = Self(1 << 1);
@@ -58,7 +58,7 @@ impl CandidateInputs {
     pub const LOAD: Self = Self(1 << 3);
     pub const CAPACITY: Self = Self(1 << 4);
     pub const ROUTING: Self = Self(1 << 5);
-    /// Dynamo's complete per-candidate cost before temperature sampling.
+    /// Dynamo's complete per-worker cost before temperature sampling.
     pub const DEFAULT_COST: Self = Self(1 << 6);
     /// KV overlap credit used by Dynamo's default cost, measured in blocks.
     pub const DEFAULT_KV_OVERLAP: Self = Self(1 << 7);
@@ -91,7 +91,7 @@ impl CandidateInputs {
     }
 }
 
-impl BitOr for CandidateInputs {
+impl BitOr for WorkerInputs {
     type Output = Self;
 
     fn bitor(self, rhs: Self) -> Self::Output {
@@ -99,7 +99,7 @@ impl BitOr for CandidateInputs {
     }
 }
 
-impl BitOrAssign for CandidateInputs {
+impl BitOrAssign for WorkerInputs {
     fn bitor_assign(&mut self, rhs: Self) {
         self.0 |= rhs.0;
     }
@@ -216,7 +216,7 @@ impl WorkerSelectorCapacityV1 {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-pub struct WorkerSelectorCandidateColumnsV1 {
+pub struct WorkerSelectorColumnsV1 {
     pub struct_size: u32,
     pub _reserved: u32,
     pub provided_inputs: u64,
@@ -233,7 +233,7 @@ pub struct WorkerSelectorCandidateColumnsV1 {
 }
 
 #[repr(C)]
-struct WorkerSelectorCandidateColumnsHeaderV1 {
+struct WorkerSelectorColumnsHeaderV1 {
     struct_size: u32,
 }
 
@@ -241,7 +241,7 @@ struct WorkerSelectorCandidateColumnsHeaderV1 {
 #[derive(Clone, Copy, Debug)]
 pub struct WorkerSelectorInputV1 {
     pub struct_size: u32,
-    pub candidate_format: u32,
+    pub worker_columns_format: u32,
     pub flags: u32,
     pub block_size: u32,
     pub selection_mode: u32,
@@ -249,14 +249,14 @@ pub struct WorkerSelectorInputV1 {
     pub expected_output_tokens: u64,
     pub request_id: ByteSliceV1,
     pub session_id: ByteSliceV1,
-    pub candidate_columns: *const WorkerSelectorCandidateColumnsV1,
-    pub candidate_count: usize,
+    pub worker_columns: *const WorkerSelectorColumnsV1,
+    pub worker_count: usize,
 }
 
 #[repr(C)]
 struct WorkerSelectorInputHeaderV1 {
     struct_size: u32,
-    candidate_format: u32,
+    worker_columns_format: u32,
 }
 
 #[repr(C)]
@@ -288,19 +288,19 @@ pub type WorkerSelectorCreateV1 = unsafe extern "C" fn(
 pub type WorkerSelectorSelectV1 = unsafe extern "C" fn(
     state: *mut c_void,
     input: *const WorkerSelectorInputV1,
-    candidate_index_out: *mut usize,
+    worker_index_out: *mut usize,
     error_out: *mut WorkerSelectorErrorBufferV1,
 ) -> i32;
 
 pub type WorkerSelectorDestroyV1 = unsafe extern "C" fn(state: *mut c_void);
 
-/// Return the optional candidate inputs required by this configured plugin state.
+/// Return the optional worker inputs required by this configured plugin state.
 ///
 /// The host calls this once after successful creation and caches the result. On [`STATUS_OK`], the
-/// callback must initialize `candidate_inputs_out` with a valid [`CandidateInputs`] bitset.
-pub type WorkerSelectorRequiredCandidateInputsV1 = unsafe extern "C" fn(
+/// callback must initialize `worker_inputs_out` with a valid [`WorkerInputs`] bitset.
+pub type WorkerSelectorRequiredInputsV1 = unsafe extern "C" fn(
     state: *mut c_void,
-    candidate_inputs_out: *mut u64,
+    worker_inputs_out: *mut u64,
     error_out: *mut WorkerSelectorErrorBufferV1,
 ) -> i32;
 
@@ -320,7 +320,7 @@ pub struct WorkerSelectorPluginV1 {
     pub create: Option<WorkerSelectorCreateV1>,
     pub select: Option<WorkerSelectorSelectV1>,
     pub destroy: Option<WorkerSelectorDestroyV1>,
-    pub required_candidate_inputs: Option<WorkerSelectorRequiredCandidateInputsV1>,
+    pub required_worker_inputs: Option<WorkerSelectorRequiredInputsV1>,
 }
 
 #[repr(C)]
@@ -354,7 +354,7 @@ mod tests {
     fn abi_v1_layout_is_stable_on_64_bit_targets() {
         assert_eq!(
             [
-                (size_of::<CandidateInputs>(), align_of::<CandidateInputs>(),),
+                (size_of::<WorkerInputs>(), align_of::<WorkerInputs>(),),
                 (size_of::<ByteSliceV1>(), align_of::<ByteSliceV1>()),
                 (
                     size_of::<WorkerSelectorCacheTiersV1>(),
@@ -373,8 +373,8 @@ mod tests {
                     align_of::<WorkerSelectorRoutingV1>(),
                 ),
                 (
-                    size_of::<WorkerSelectorCandidateColumnsV1>(),
-                    align_of::<WorkerSelectorCandidateColumnsV1>(),
+                    size_of::<WorkerSelectorColumnsV1>(),
+                    align_of::<WorkerSelectorColumnsV1>(),
                 ),
                 (
                     size_of::<WorkerSelectorInputV1>(),
@@ -385,8 +385,8 @@ mod tests {
                     align_of::<WorkerSelectorInputHeaderV1>(),
                 ),
                 (
-                    size_of::<WorkerSelectorCandidateColumnsHeaderV1>(),
-                    align_of::<WorkerSelectorCandidateColumnsHeaderV1>(),
+                    size_of::<WorkerSelectorColumnsHeaderV1>(),
+                    align_of::<WorkerSelectorColumnsHeaderV1>(),
                 ),
                 (
                     size_of::<WorkerSelectorErrorBufferV1>(),
@@ -448,7 +448,7 @@ mod tests {
             [0, 16]
         );
         assert_eq!(
-            offsets!(WorkerSelectorCandidateColumnsV1;
+            offsets!(WorkerSelectorColumnsV1;
                 struct_size,
                 _reserved,
                 provided_inputs,
@@ -468,7 +468,7 @@ mod tests {
         assert_eq!(
             offsets!(WorkerSelectorInputV1;
                 struct_size,
-                candidate_format,
+                worker_columns_format,
                 flags,
                 block_size,
                 selection_mode,
@@ -476,19 +476,16 @@ mod tests {
                 expected_output_tokens,
                 request_id,
                 session_id,
-                candidate_columns,
-                candidate_count,
+                worker_columns,
+                worker_count,
             ),
             [0, 4, 8, 12, 16, 24, 32, 40, 56, 72, 80]
         );
         assert_eq!(
-            offsets!(WorkerSelectorInputHeaderV1; struct_size, candidate_format),
+            offsets!(WorkerSelectorInputHeaderV1; struct_size, worker_columns_format),
             [0, 4]
         );
-        assert_eq!(
-            offsets!(WorkerSelectorCandidateColumnsHeaderV1; struct_size),
-            [0]
-        );
+        assert_eq!(offsets!(WorkerSelectorColumnsHeaderV1; struct_size), [0]);
         assert_eq!(
             offsets!(WorkerSelectorErrorBufferV1; ptr, capacity, written),
             [0, 8, 16]
@@ -500,7 +497,7 @@ mod tests {
                 create,
                 select,
                 destroy,
-                required_candidate_inputs,
+                required_worker_inputs,
             ),
             [0, 4, 8, 16, 24, 32]
         );
@@ -524,29 +521,29 @@ mod tests {
             })
         }
 
-        fn required_candidate_inputs(&self) -> CandidateInputs {
-            CandidateInputs::CACHED_TOKENS
-                | CandidateInputs::CAPACITY
-                | CandidateInputs::ROUTING
-                | CandidateInputs::DEFAULT_COST
-                | CandidateInputs::DEFAULT_KV_OVERLAP
-                | CandidateInputs::DEFAULT_DECODE_LOAD
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            WorkerInputs::CACHED_TOKENS
+                | WorkerInputs::CAPACITY
+                | WorkerInputs::ROUTING
+                | WorkerInputs::DEFAULT_COST
+                | WorkerInputs::DEFAULT_KV_OVERLAP
+                | WorkerInputs::DEFAULT_DECODE_LOAD
         }
 
         fn select(&mut self, input: SelectionInput<'_>) -> Result<Selection, String> {
             if self.out_of_range {
-                return Ok(Selection::Candidate(input.candidate_count()));
+                return Ok(Selection::Worker(input.worker_count()));
             }
             assert_eq!(
-                input.candidate_inputs(),
-                self.required_candidate_inputs().with_identity()
+                input.worker_inputs(),
+                self.required_worker_inputs().with_identity()
             );
             assert_eq!(input.worker_ids(), [1]);
             assert_eq!(input.dp_ranks(), [2]);
             assert_eq!(input.cached_tokens(), Some(&[17][..]));
             assert_eq!(input.cache_tiers(), None);
             assert_eq!(input.loads(), None);
-            assert_eq!(input.candidate_stable_routing_id(0), Some("worker-1"));
+            assert_eq!(input.worker_stable_routing_id(0), Some("worker-1"));
             assert_eq!(input.default_costs(), Some(&[3.5][..]));
             assert_eq!(input.default_kv_overlaps(), Some(&[4.5][..]));
             assert_eq!(input.default_decode_loads(), Some(&[5][..]));
@@ -567,7 +564,7 @@ mod tests {
             Ok(Self)
         }
 
-        fn required_candidate_inputs(&self) -> CandidateInputs {
+        fn required_worker_inputs(&self) -> WorkerInputs {
             panic!("boom")
         }
 
@@ -597,21 +594,17 @@ mod tests {
 
         let mut required_inputs = u64::MAX;
         let status = unsafe {
-            __private::required_candidate_inputs::<ShimPlugin>(
-                state,
-                &mut required_inputs,
-                &mut error,
-            )
+            __private::required_worker_inputs::<ShimPlugin>(state, &mut required_inputs, &mut error)
         };
         assert_eq!(status, STATUS_OK);
         assert_eq!(
             required_inputs,
-            (CandidateInputs::CACHED_TOKENS
-                | CandidateInputs::CAPACITY
-                | CandidateInputs::ROUTING
-                | CandidateInputs::DEFAULT_COST
-                | CandidateInputs::DEFAULT_KV_OVERLAP
-                | CandidateInputs::DEFAULT_DECODE_LOAD)
+            (WorkerInputs::CACHED_TOKENS
+                | WorkerInputs::CAPACITY
+                | WorkerInputs::ROUTING
+                | WorkerInputs::DEFAULT_COST
+                | WorkerInputs::DEFAULT_KV_OVERLAP
+                | WorkerInputs::DEFAULT_DECODE_LOAD)
                 .with_identity()
                 .bits()
         );
@@ -631,8 +624,8 @@ mod tests {
         let default_costs = [3.5_f64];
         let default_kv_overlaps = [4.5_f64];
         let default_decode_loads = [5_u64];
-        let columns = WorkerSelectorCandidateColumnsV1 {
-            struct_size: size_of::<WorkerSelectorCandidateColumnsV1>() as u32,
+        let columns = WorkerSelectorColumnsV1 {
+            struct_size: size_of::<WorkerSelectorColumnsV1>() as u32,
             _reserved: 0,
             provided_inputs: required_inputs,
             worker_ids: worker_ids.as_ptr(),
@@ -648,7 +641,7 @@ mod tests {
         };
         let input = WorkerSelectorInputV1 {
             struct_size: size_of::<WorkerSelectorInputV1>() as u32,
-            candidate_format: CANDIDATE_FORMAT_COLUMNAR_V1,
+            worker_columns_format: WORKER_COLUMNS_FORMAT_V1,
             flags: 0,
             block_size: 16,
             selection_mode: SELECTION_MODE_QUERY_ONLY,
@@ -656,17 +649,17 @@ mod tests {
             expected_output_tokens: 0,
             request_id: ByteSliceV1::empty(),
             session_id: ByteSliceV1::empty(),
-            candidate_columns: &columns,
-            candidate_count: 1,
+            worker_columns: &columns,
+            worker_count: 1,
         };
         let mut selected = usize::MAX;
 
-        let invalid_columns = WorkerSelectorCandidateColumnsV1 {
+        let invalid_columns = WorkerSelectorColumnsV1 {
             cached_tokens: std::ptr::null(),
             ..columns
         };
         let invalid_input = WorkerSelectorInputV1 {
-            candidate_columns: &invalid_columns,
+            worker_columns: &invalid_columns,
             ..input
         };
         let status = unsafe {
@@ -675,7 +668,7 @@ mod tests {
         assert_eq!(status, STATUS_INVALID_INPUT);
 
         let invalid_input = WorkerSelectorInputV1 {
-            candidate_format: 128,
+            worker_columns_format: 128,
             ..input
         };
         let status = unsafe {

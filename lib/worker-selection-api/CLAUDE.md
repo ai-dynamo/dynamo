@@ -8,14 +8,14 @@ This crate defines the stable native contract used by trusted Dynamo worker-sele
 - `lib.rs` owns the raw `repr(C)` ABI types, constants, root exports, and contract tests.
 - `plugin.rs` owns the safe authoring API, input validation, panic containment, export shim, and export macro.
 - Runtime loading, pipeline orchestration, eligibility, pinning, validation, reservation, and accounting belong in the KV router.
-- Future filter, scorer, and picker contracts should share this crate and its candidate types, but do not add modules or ABI entries before those contracts exist.
+- Future filter, scorer, and picker contracts should share this crate and its worker types, but do not add modules or ABI entries before those contracts exist.
 
 ## ABI Rules
 
 - Do not reorder, remove, or change v1 ABI fields or constants. Add a new ABI version for incompatible changes and update the layout test for every ABI change.
 - No Rust-owned allocation, trait object, reference, string, or collection crosses the dynamic-library boundary. The ABI uses C-layout values, raw pointers, lengths, and caller-owned error storage.
-- Treat every pointer, length, struct size, enum value, bitset, and returned candidate index as untrusted at the boundary and validate it before use.
-- Candidate columns are borrowed, demand-declared, and index-aligned. Materialization and allocation reuse remain host responsibilities.
+- Treat every pointer, length, struct size, enum value, bitset, and returned worker index as untrusted at the boundary and validate it before use.
+- Worker columns are borrowed, demand-declared, and index-aligned. Materialization and allocation reuse remain host responsibilities.
 - Never unwind across the ABI. Generated callbacks must contain plugin panics and return an ABI status.
 
 ## Validation

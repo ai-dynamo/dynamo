@@ -9,7 +9,7 @@ use std::{
 #[derive(Clone, Copy)]
 pub struct SelectionInput<'a> {
     raw: &'a WorkerSelectorInputV1,
-    inputs: CandidateInputs,
+    inputs: WorkerInputs,
     worker_ids: &'a [u64],
     dp_ranks: &'a [u32],
     cached_tokens: Option<&'a [u64]>,
@@ -25,7 +25,7 @@ pub struct SelectionInput<'a> {
 impl<'a> SelectionInput<'a> {
     unsafe fn from_abi(
         raw: *const WorkerSelectorInputV1,
-        required_inputs: CandidateInputs,
+        required_inputs: WorkerInputs,
     ) -> Result<Self, &'static str> {
         if raw.is_null() {
             return Err("selection input is null");
@@ -37,44 +37,42 @@ impl<'a> SelectionInput<'a> {
         if header.struct_size < size_of::<WorkerSelectorInputV1>() as u32 {
             return Err("selection input is smaller than ABI v1");
         }
-        if header.candidate_format != CANDIDATE_FORMAT_COLUMNAR_V1 {
-            return Err("candidate format does not match columnar ABI v1");
+        if header.worker_columns_format != WORKER_COLUMNS_FORMAT_V1 {
+            return Err("worker-column format does not match columnar ABI v1");
         }
         let raw = unsafe { &*raw };
-        let columns_ptr = raw.candidate_columns;
+        let columns_ptr = raw.worker_columns;
         if columns_ptr.is_null()
-            || !(columns_ptr as usize)
-                .is_multiple_of(align_of::<WorkerSelectorCandidateColumnsV1>())
+            || !(columns_ptr as usize).is_multiple_of(align_of::<WorkerSelectorColumnsV1>())
         {
-            return Err("candidate columns are null or misaligned");
+            return Err("worker columns are null or misaligned");
         }
-        let columns_header =
-            unsafe { &*columns_ptr.cast::<WorkerSelectorCandidateColumnsHeaderV1>() };
-        if columns_header.struct_size < size_of::<WorkerSelectorCandidateColumnsV1>() as u32 {
-            return Err("candidate columns are smaller than ABI v1");
+        let columns_header = unsafe { &*columns_ptr.cast::<WorkerSelectorColumnsHeaderV1>() };
+        if columns_header.struct_size < size_of::<WorkerSelectorColumnsV1>() as u32 {
+            return Err("worker columns are smaller than ABI v1");
         }
         let columns = unsafe { &*columns_ptr };
-        let inputs = CandidateInputs::from_bits(columns.provided_inputs)
-            .ok_or("selection input contains unknown candidate inputs")?;
+        let inputs = WorkerInputs::from_bits(columns.provided_inputs)
+            .ok_or("selection input contains unknown worker inputs")?;
         if inputs != inputs.with_identity() {
-            return Err("candidate inputs require identity");
+            return Err("worker inputs require identity");
         }
         if !inputs.contains(required_inputs) {
-            return Err("selection input is missing a required candidate input");
+            return Err("selection input is missing a required worker input");
         }
-        let (worker_ids, dp_ranks) = if inputs.contains(CandidateInputs::IDENTITY) {
+        let (worker_ids, dp_ranks) = if inputs.contains(WorkerInputs::IDENTITY) {
             (
                 unsafe {
                     required_column(
                         columns.worker_ids,
-                        raw.candidate_count,
+                        raw.worker_count,
                         "worker-ID column is null or invalid",
                     )
                 }?,
                 unsafe {
                     required_column(
                         columns.dp_ranks,
-                        raw.candidate_count,
+                        raw.worker_count,
                         "data-parallel-rank column is null or invalid",
                     )
                 }?,
@@ -89,65 +87,65 @@ impl<'a> SelectionInput<'a> {
             dp_ranks,
             cached_tokens: unsafe {
                 optional_column(
-                    inputs.contains(CandidateInputs::CACHED_TOKENS),
+                    inputs.contains(WorkerInputs::CACHED_TOKENS),
                     columns.cached_tokens,
-                    raw.candidate_count,
+                    raw.worker_count,
                     "cached-token column is null or invalid",
                 )
             }?,
             cache_tiers: unsafe {
                 optional_column(
-                    inputs.contains(CandidateInputs::CACHE_TIERS),
+                    inputs.contains(WorkerInputs::CACHE_TIERS),
                     columns.cache_tiers,
-                    raw.candidate_count,
+                    raw.worker_count,
                     "cache-tier column is null or invalid",
                 )
             }?,
             loads: unsafe {
                 optional_column(
-                    inputs.contains(CandidateInputs::LOAD),
+                    inputs.contains(WorkerInputs::LOAD),
                     columns.loads,
-                    raw.candidate_count,
+                    raw.worker_count,
                     "load column is null or invalid",
                 )
             }?,
             capacities: unsafe {
                 optional_column(
-                    inputs.contains(CandidateInputs::CAPACITY),
+                    inputs.contains(WorkerInputs::CAPACITY),
                     columns.capacities,
-                    raw.candidate_count,
+                    raw.worker_count,
                     "capacity column is null or invalid",
                 )
             }?,
             routing: unsafe {
                 optional_column(
-                    inputs.contains(CandidateInputs::ROUTING),
+                    inputs.contains(WorkerInputs::ROUTING),
                     columns.routing,
-                    raw.candidate_count,
+                    raw.worker_count,
                     "routing column is null or invalid",
                 )
             }?,
             default_costs: unsafe {
                 optional_column(
-                    inputs.contains(CandidateInputs::DEFAULT_COST),
+                    inputs.contains(WorkerInputs::DEFAULT_COST),
                     columns.default_costs,
-                    raw.candidate_count,
+                    raw.worker_count,
                     "default-cost column is null or invalid",
                 )
             }?,
             default_kv_overlaps: unsafe {
                 optional_column(
-                    inputs.contains(CandidateInputs::DEFAULT_KV_OVERLAP),
+                    inputs.contains(WorkerInputs::DEFAULT_KV_OVERLAP),
                     columns.default_kv_overlaps,
-                    raw.candidate_count,
+                    raw.worker_count,
                     "KV-overlap column is null or invalid",
                 )
             }?,
             default_decode_loads: unsafe {
                 optional_column(
-                    inputs.contains(CandidateInputs::DEFAULT_DECODE_LOAD),
+                    inputs.contains(WorkerInputs::DEFAULT_DECODE_LOAD),
                     columns.default_decode_loads,
-                    raw.candidate_count,
+                    raw.worker_count,
                     "decode-load column is null or invalid",
                 )
             }?,
@@ -175,7 +173,7 @@ impl<'a> SelectionInput<'a> {
         self.raw.flags & INPUT_HAS_SHARED_CACHE_HITS != 0
     }
 
-    pub fn candidate_inputs(&self) -> CandidateInputs {
+    pub fn worker_inputs(&self) -> WorkerInputs {
         self.inputs
     }
 
@@ -196,8 +194,8 @@ impl<'a> SelectionInput<'a> {
         self.optional_str(INPUT_HAS_SESSION_ID, self.raw.session_id)
     }
 
-    /// Number of eligible candidates represented by every provided column.
-    pub fn candidate_count(&self) -> usize {
+    /// Number of eligible workers represented by every provided column.
+    pub fn worker_count(&self) -> usize {
         self.worker_ids.len()
     }
 
@@ -205,7 +203,7 @@ impl<'a> SelectionInput<'a> {
         self.worker_ids.is_empty()
     }
 
-    /// Worker IDs, aligned by index with every other candidate column.
+    /// Worker IDs, aligned by index with every other worker column.
     pub fn worker_ids(&self) -> &'a [u64] {
         self.worker_ids
     }
@@ -247,9 +245,9 @@ impl<'a> SelectionInput<'a> {
         self.default_decode_loads
     }
 
-    pub fn candidate_stable_routing_id(&self, index: usize) -> Option<&'a str> {
+    pub fn worker_stable_routing_id(&self, index: usize) -> Option<&'a str> {
         let value = self.routing?.get(index)?.stable_routing_id;
-        // SAFETY: Candidate strings share the callback-scoped lifetime of this input view.
+        // SAFETY: Worker strings share the callback-scoped lifetime of this input view.
         let bytes = unsafe { value.as_slice() }.ok()?;
         if bytes.is_empty() {
             None
@@ -305,14 +303,14 @@ pub trait WorkerSelectorPlugin: Send + Sized + 'static {
     /// Create independent state for one router role.
     fn from_config(config: &[u8], router_role: RouterRole) -> Result<Self, String>;
 
-    /// Candidate inputs required by this configured strategy.
+    /// Worker inputs required by this configured strategy.
     ///
     /// Dynamo evaluates this once at creation and materializes only these columns. Return
-    /// [`CandidateInputs::IDENTITY`] for a strategy that only needs worker identity, or
-    /// [`CandidateInputs::NONE`] for a strategy that always delegates to the default.
-    fn required_candidate_inputs(&self) -> CandidateInputs;
+    /// [`WorkerInputs::IDENTITY`] for a strategy that only needs worker identity, or
+    /// [`WorkerInputs::NONE`] for a strategy that always delegates to the default.
+    fn required_worker_inputs(&self) -> WorkerInputs;
 
-    /// Select a candidate or delegate this request to Dynamo's default selector.
+    /// Select a worker or delegate this request to Dynamo's default selector.
     /// Calls for one instance are serialized, so stateful strategies can mutate directly.
     /// This runs synchronously on the scheduler actor's request hot path and must be bounded and
     /// non-blocking.
@@ -322,8 +320,8 @@ pub trait WorkerSelectorPlugin: Send + Sized + 'static {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Selection {
-    /// Select an index shared by the aligned candidate columns in [`SelectionInput`].
-    Candidate(usize),
+    /// Select an index shared by the aligned worker columns in [`SelectionInput`].
+    Worker(usize),
     /// Delegate this request to Dynamo's configured default selector.
     UseDefault,
 }
@@ -335,7 +333,7 @@ pub mod __private {
 
     struct PluginState<T> {
         plugin: T,
-        required_inputs: CandidateInputs,
+        required_inputs: WorkerInputs,
     }
 
     pub unsafe extern "C" fn create<T: WorkerSelectorPlugin>(
@@ -358,7 +356,7 @@ pub mod __private {
         };
         match catch_unwind(AssertUnwindSafe(|| {
             let plugin = T::from_config(config, RouterRole::from_abi(router_role))?;
-            let required_inputs = plugin.required_candidate_inputs().with_identity();
+            let required_inputs = plugin.required_worker_inputs().with_identity();
             Ok::<_, String>((plugin, required_inputs))
         })) {
             Ok(Ok((plugin, required_inputs))) => {
@@ -380,27 +378,27 @@ pub mod __private {
         }
     }
 
-    pub unsafe extern "C" fn required_candidate_inputs<T: WorkerSelectorPlugin>(
+    pub unsafe extern "C" fn required_worker_inputs<T: WorkerSelectorPlugin>(
         state: *mut c_void,
-        candidate_inputs_out: *mut u64,
+        worker_inputs_out: *mut u64,
         error_out: *mut WorkerSelectorErrorBufferV1,
     ) -> i32 {
-        if state.is_null() || candidate_inputs_out.is_null() {
-            unsafe { write_error(error_out, "state or candidate-inputs output is null") };
+        if state.is_null() || worker_inputs_out.is_null() {
+            unsafe { write_error(error_out, "state or worker-inputs output is null") };
             return STATUS_INVALID_INPUT;
         }
         let state = unsafe { &*state.cast::<PluginState<T>>() };
-        unsafe { candidate_inputs_out.write(state.required_inputs.bits()) };
+        unsafe { worker_inputs_out.write(state.required_inputs.bits()) };
         STATUS_OK
     }
 
     pub unsafe extern "C" fn select<T: WorkerSelectorPlugin>(
         state: *mut c_void,
         input: *const WorkerSelectorInputV1,
-        candidate_index_out: *mut usize,
+        worker_index_out: *mut usize,
         error_out: *mut WorkerSelectorErrorBufferV1,
     ) -> i32 {
-        if state.is_null() || candidate_index_out.is_null() {
+        if state.is_null() || worker_index_out.is_null() {
             unsafe { write_error(error_out, "state or selection output is null") };
             return STATUS_INVALID_INPUT;
         }
@@ -413,17 +411,17 @@ pub mod __private {
             }
         };
         match catch_unwind(AssertUnwindSafe(|| state.plugin.select(input))) {
-            Ok(Ok(Selection::Candidate(index))) if index < input.candidate_count() => {
-                unsafe { candidate_index_out.write(index) };
+            Ok(Ok(Selection::Worker(index))) if index < input.worker_count() => {
+                unsafe { worker_index_out.write(index) };
                 STATUS_OK
             }
-            Ok(Ok(Selection::Candidate(index))) => {
+            Ok(Ok(Selection::Worker(index))) => {
                 unsafe {
                     write_error(
                         error_out,
                         &format!(
-                            "candidate index {index} is out of range for {} candidates",
-                            input.candidate_count()
+                            "worker index {index} is out of range for {} workers",
+                            input.worker_count()
                         ),
                     )
                 };
@@ -476,8 +474,8 @@ macro_rules! export_worker_selector_plugin {
                 create: Some($crate::__private::create::<$plugin>),
                 select: Some($crate::__private::select::<$plugin>),
                 destroy: Some($crate::__private::destroy::<$plugin>),
-                required_candidate_inputs: Some(
-                    $crate::__private::required_candidate_inputs::<$plugin>,
+                required_worker_inputs: Some(
+                    $crate::__private::required_worker_inputs::<$plugin>,
                 ),
             };
 
