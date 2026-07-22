@@ -31,15 +31,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-const (
-	clusterTestProfilerImageEnv = "DYNAMO_CLUSTERTEST_PROFILER_IMAGE"
-	clusterTestOperatorImageEnv = "DYNAMO_CLUSTERTEST_OPERATOR_IMAGE"
-)
+const clusterTestProfilerImageEnv = "DYNAMO_CLUSTERTEST_PROFILER_IMAGE"
 
 func TestClusterDynamoGraphDeploymentRequestProfilesAndCreatesWorkloadManifests(t *testing.T) {
 	ctx := t.Context()
 	profilerImage := clusterTestRequiredEnv(t, clusterTestProfilerImageEnv)
-	operatorImage := clusterTestRequiredEnv(t, clusterTestOperatorImageEnv)
 	t.Log("Create an isolated namespace in the explicitly unlocked cluster")
 	env := clusterTestEnv.RunT(t)
 
@@ -71,8 +67,6 @@ func TestClusterDynamoGraphDeploymentRequestProfilesAndCreatesWorkloadManifests(
 				Config:        operatorConfig,
 				RuntimeConfig: runtimeConfig,
 			},
-			OperatorImage:           operatorImage,
-			OperatorImagePullPolicy: corev1.PullIfNotPresent,
 		}); err != nil {
 			return err
 		}

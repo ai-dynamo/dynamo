@@ -12,7 +12,7 @@ rewrite conversion webhooks. A caller must therefore explicitly unlock the
 kubeconfig context:
 
 ```text
-DYNAMO_CLUSTERTEST_CONTEXT=kind-dynamo-clustertest
+DYNAMO_CLUSTERTEST_CONTEXT=kind-dynamo-clustertest-v136
 ```
 
 The value must be non-empty and name an existing context. `clusterenv` loads
@@ -103,24 +103,22 @@ test, use `BlockReplicaSets` instead.
 ## External Setup
 
 `make setup-clustertest` creates or reuses the named Kind cluster, writes a
-dedicated kubeconfig under `bin/`, and installs the Dynamo, LWS, Grove, and
-Volcano PodGroup CRDs. It does not build or load images. The caller or CI setup
-must make the webhook proxy, profiler, and operator images available.
+dedicated kubeconfig under `bin/`, installs the Dynamo, LWS, Grove, and Volcano
+PodGroup CRDs, and builds and loads the local profiler image. New clusters use
+the pinned Kubernetes 1.36 node image. The profiler image layers the current
+profiler, planner, common, and deployment utility sources over the matching
+released planner image so the real AIC profiler runs without rebuilding its
+unchanged runtime dependencies.
 
 ```bash
 make setup-clustertest
 KUBECONFIG=bin/clustertest.kubeconfig \
-  DYNAMO_CLUSTERTEST_CONTEXT=kind-dynamo-clustertest \
-  DYNAMO_CLUSTERTEST_PROFILER_IMAGE=<planner-image> \
-  DYNAMO_CLUSTERTEST_OPERATOR_IMAGE=<operator-image> \
+  DYNAMO_CLUSTERTEST_CONTEXT=kind-dynamo-clustertest-v136 \
+  DYNAMO_CLUSTERTEST_PROFILER_IMAGE=dynamo-planner:clustertest \
   make clustertest
 ```
 
 `make envtest` runs the API-only suite, `make clustertest` runs the Kind-backed
 suite, and `make integration` runs both after preparing the standard Kind
-cluster.
-
-## Follow-Up
-
-- TODO: Run `make integration` in the `.github` pre-merge CI, including Kind
-  setup and loading the required local images.
+cluster and its profiler image. The operator pre-merge job runs
+`make integration` directly.

@@ -113,6 +113,9 @@ jobs:
       with:
         component: operator
         platform: linux/amd64
+    - name: Run operator integration tests
+      working-directory: deploy/operator
+      run: make integration
 
   snapshot:
     needs: changed-files

@@ -9,16 +9,19 @@ ENVTEST_ASSETS_CMD = $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN)
 
 CLUSTERTEST_PACKAGES ?= ./internal/testing/clusterenv ./internal/controller
 CLUSTERTEST_TIMEOUT ?= 30m
-CLUSTERTEST_KIND_NAME ?= dynamo-clustertest
+CLUSTERTEST_KIND_NAME ?= dynamo-clustertest-v136
 CLUSTERTEST_CONTEXT = kind-$(CLUSTERTEST_KIND_NAME)
 CLUSTERTEST_KUBECONFIG = $(LOCALBIN)/clustertest.kubeconfig
+CLUSTERTEST_NODE_IMAGE ?= kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5
+CLUSTERTEST_PROFILER_IMAGE ?= dynamo-planner:clustertest
+CLUSTERTEST_PROFILER_BASE_IMAGE ?= nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.3.0
+CLUSTERTEST_PROFILER_DOCKERFILE = internal/testing/clusterenv/images/profiler.Dockerfile
 CLUSTERTEST_LWS_VERSION = $(shell go list -m -f '{{.Version}}' sigs.k8s.io/lws)
 CLUSTERTEST_LWS_CRD_DIR = $(shell go env GOMODCACHE)/sigs.k8s.io/lws@$(CLUSTERTEST_LWS_VERSION)/config/crd/bases
 CLUSTERTEST_GROVE_VERSION = $(shell go list -m -f '{{.Version}}' github.com/ai-dynamo/grove/operator/api)
 CLUSTERTEST_GROVE_CRD_DIR = $(shell go env GOMODCACHE)/github.com/ai-dynamo/grove/operator/api@$(CLUSTERTEST_GROVE_VERSION)/core/v1alpha1/crds
 CLUSTERTEST_VOLCANO_VERSION = $(shell go list -m -f '{{.Version}}' volcano.sh/apis)
 CLUSTERTEST_VOLCANO_PODGROUP_CRD_URL = https://raw.githubusercontent.com/volcano-sh/volcano/$(CLUSTERTEST_VOLCANO_VERSION)/config/crd/volcano/bases/scheduling.volcano.sh_podgroups.yaml
-KIND ?= kind
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -321,13 +324,12 @@ envtest: setup-envtest ## Run envtest-backed operator tests.
 	KUBEBUILDER_ASSETS="$$($(ENVTEST_ASSETS_CMD))" go test $(ENVTEST_PACKAGES)
 
 .PHONY: setup-clustertest
-setup-clustertest: kubectl ## Create or reuse the clustertest Kind cluster and install required CRDs.
-	@command -v $(KIND) >/dev/null || { echo "Error: kind is required for setup-clustertest"; exit 1; }
+setup-clustertest: kubectl kind ## Create or reuse the clustertest Kind cluster and install its prerequisites.
 	@if $(KIND) get clusters | grep -Fxq '$(CLUSTERTEST_KIND_NAME)'; then \
 		echo "Reusing Kind cluster $(CLUSTERTEST_KIND_NAME)"; \
 		$(KIND) export kubeconfig --name '$(CLUSTERTEST_KIND_NAME)' --kubeconfig '$(CLUSTERTEST_KUBECONFIG)'; \
 	else \
-		$(KIND) create cluster --name '$(CLUSTERTEST_KIND_NAME)' --kubeconfig '$(CLUSTERTEST_KUBECONFIG)'; \
+		$(KIND) create cluster --name '$(CLUSTERTEST_KIND_NAME)' --image '$(CLUSTERTEST_NODE_IMAGE)' --kubeconfig '$(CLUSTERTEST_KUBECONFIG)'; \
 	fi
 	$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context '$(CLUSTERTEST_CONTEXT)' apply --server-side -f config/crd/bases
 	go mod download sigs.k8s.io/lws@$(CLUSTERTEST_LWS_VERSION)
@@ -337,18 +339,27 @@ setup-clustertest: kubectl ## Create or reuse the clustertest Kind cluster and i
 	curl --fail --location --silent --show-error '$(CLUSTERTEST_VOLCANO_PODGROUP_CRD_URL)' | \
 		$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context '$(CLUSTERTEST_CONTEXT)' apply --server-side -f -
 	$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context '$(CLUSTERTEST_CONTEXT)' wait --for=condition=Established crd --all --timeout=2m
+	$(CONTAINER_TOOL) build \
+		--build-arg 'BASE_IMAGE=$(CLUSTERTEST_PROFILER_BASE_IMAGE)' \
+		--provenance=false \
+		--tag '$(CLUSTERTEST_PROFILER_IMAGE)' \
+		--file '$(CLUSTERTEST_PROFILER_DOCKERFILE)' \
+		../..
+	$(KIND) load docker-image --name '$(CLUSTERTEST_KIND_NAME)' '$(CLUSTERTEST_PROFILER_IMAGE)'
 
 .PHONY: clustertest
 clustertest: ## Run Pod- and Job-backed controller tests against the explicitly unlocked cluster.
 	@test -n "$${DYNAMO_CLUSTERTEST_CONTEXT:-}" || { echo "Error: DYNAMO_CLUSTERTEST_CONTEXT must be set"; exit 1; }
 	@test -n "$${DYNAMO_CLUSTERTEST_PROFILER_IMAGE:-}" || { echo "Error: DYNAMO_CLUSTERTEST_PROFILER_IMAGE must be set"; exit 1; }
-	@test -n "$${DYNAMO_CLUSTERTEST_OPERATOR_IMAGE:-}" || { echo "Error: DYNAMO_CLUSTERTEST_OPERATOR_IMAGE must be set"; exit 1; }
 	go test -tags=clustertest $(CLUSTERTEST_PACKAGES) \
 		-run '^TestCluster' -count=1 -v -timeout=$(CLUSTERTEST_TIMEOUT)
 
 .PHONY: integration
 integration: envtest setup-clustertest ## Run envtests and clustertests, creating the standard Kind cluster.
-	KUBECONFIG='$(CLUSTERTEST_KUBECONFIG)' DYNAMO_CLUSTERTEST_CONTEXT='$(CLUSTERTEST_CONTEXT)' $(MAKE) clustertest
+	KUBECONFIG='$(CLUSTERTEST_KUBECONFIG)' \
+		DYNAMO_CLUSTERTEST_CONTEXT='$(CLUSTERTEST_CONTEXT)' \
+		DYNAMO_CLUSTERTEST_PROFILER_IMAGE='$(CLUSTERTEST_PROFILER_IMAGE)' \
+		$(MAKE) clustertest
 
 # Utilize Kind or modify the e2e tests to load the image locally, enabling compatibility with other vendors.
 .PHONY: test-e2e  # Run the e2e tests against a Kind k8s instance that is spun up.
@@ -591,7 +602,8 @@ clean-bin: ## Remove all downloaded tool binaries.
 export PATH := $(LOCALBIN):$(PATH)
 
 ## Tool Versions
-KUBECTL_VERSION ?= v1.31.4
+KUBECTL_VERSION ?= v1.36.1
+KIND_VERSION ?= v0.32.0
 HELM_VERSION ?= v3.17.3
 YQ_VERSION ?= v4.45.4
 KUSTOMIZE_VERSION ?= v5.5.0
@@ -601,6 +613,7 @@ GOLANGCI_LINT_VERSION ?= v1.64.8
 
 ## Tool Binaries
 KUBECTL ?= $(LOCALBIN)/kubectl-$(KUBECTL_VERSION)
+KIND ?= $(LOCALBIN)/kind-$(KIND_VERSION)
 HELM ?= $(LOCALBIN)/helm-$(HELM_VERSION)
 YQ ?= $(LOCALBIN)/yq-$(YQ_VERSION)
 KUSTOMIZE ?= $(LOCALBIN)/kustomize-$(KUSTOMIZE_VERSION)
@@ -620,6 +633,17 @@ $(KUBECTL):
 		-o $(KUBECTL)
 	ln -sf $(KUBECTL) $(LOCALBIN)/kubectl
 	chmod +x $(KUBECTL) $(LOCALBIN)/kubectl
+
+.PHONY: kind
+kind: $(KIND) ## Download kind locally if necessary.
+$(KIND):
+	mkdir -p $(LOCALBIN)
+	rm -f $(LOCALBIN)/kind-*
+	curl --retry $(CURL_RETRIES) -fsL \
+		https://kind.sigs.k8s.io/dl/$(KIND_VERSION)/kind-$(GOOS)-$(GOARCH) \
+		-o $(KIND)
+	ln -sf $(KIND) $(LOCALBIN)/kind
+	chmod +x $(KIND) $(LOCALBIN)/kind
 
 .PHONY: helm
 helm: $(HELM) ## Download helm locally if necessary.
