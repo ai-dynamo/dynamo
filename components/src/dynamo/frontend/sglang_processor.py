@@ -330,7 +330,7 @@ def _build_dynamo_preproc(
     try:
         # Forward multimodal URLs so the backend handler can load the media.
         mm_data, mm_uuids = extract_mm_urls(request.get("messages", []))
-        reject_unsupported_multimodal_uuids(mm_uuids, backend="SGLang")
+        reject_unsupported_multimodal_uuids(mm_uuids)
     except ValueError as exc:
         raise PreprocessError(str(exc)) from exc
     if mm_data:

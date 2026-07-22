@@ -232,10 +232,6 @@ def _normalize_vllm_image_parts(messages: list[Any]) -> None:
                 continue
             if image_url.get("detail") is None:
                 image_url["detail"] = "auto"
-            # Older Dynamo clients nested a UUID inside image_url. Lift it into
-            # vLLM's canonical content-part field before the vLLM parser sees it.
-            if part.get("uuid") is None and image_url.get("uuid") is not None:
-                part["uuid"] = image_url["uuid"]
 
 
 class VllmProcessor:

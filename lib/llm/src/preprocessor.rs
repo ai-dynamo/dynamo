@@ -98,6 +98,14 @@ fn routing_priorities(hints: Option<&AgentHints>) -> (Option<f64>, Option<u32>, 
     (priority_jump, strict_priority, priority)
 }
 
+fn invalid_argument_error(message: impl Into<String>) -> anyhow::Error {
+    DynamoError::builder()
+        .error_type(ErrorType::InvalidArgument)
+        .message(message.into())
+        .build()
+        .into()
+}
+
 /// Encode a slice of `f32` values as a base64 string per the OpenAI
 /// `encoding_format=base64` spec: the raw little-endian byte
 /// representation of each `f32` is concatenated and the resulting byte
@@ -1333,36 +1341,16 @@ impl OpenAIPreprocessor {
             for content_part in content_parts.iter() {
                 let (type_str, url, uuid): (&'static str, Option<&url::Url>, Option<String>) =
                     match content_part {
-                        ChatCompletionRequestUserMessageContentPart::ImageUrl(part) => {
-                            #[allow(deprecated)]
-                            let legacy_uuid = part
-                                .image_url
-                                .as_ref()
-                                .and_then(|media| media.uuid.as_ref());
-                            if let (Some(uuid), Some(legacy_uuid)) =
-                                (part.uuid.as_deref(), legacy_uuid)
-                                && uuid::Uuid::parse_str(uuid).ok().as_ref() != Some(legacy_uuid)
-                            {
-                                bail!("image_url top-level and nested uuids must match");
-                            }
-                            (
-                                "image_url",
-                                part.image_url.as_ref().map(|media| &media.url),
-                                part.uuid
-                                    .clone()
-                                    .or_else(|| legacy_uuid.map(ToString::to_string)),
-                            )
-                        }
+                        ChatCompletionRequestUserMessageContentPart::ImageUrl(part) => (
+                            "image_url",
+                            part.image_url.as_ref().map(|media| &media.url),
+                            part.uuid.clone(),
+                        ),
                         ChatCompletionRequestUserMessageContentPart::VideoUrl(part) => {
-                            #[allow(deprecated)]
-                            let has_legacy_uuid = part
-                                .video_url
-                                .as_ref()
-                                .is_some_and(|media| media.uuid.is_some());
-                            if part.uuid.is_some() || has_legacy_uuid {
-                                bail!(
-                                    "multimodal cache UUIDs are supported only for image_url parts with vLLM"
-                                );
+                            if part.uuid.is_some() {
+                                return Err(invalid_argument_error(
+                                    "multimodal cache UUIDs are supported only for image_url parts with vLLM",
+                                ));
                             }
                             (
                                 "video_url",
@@ -1371,15 +1359,10 @@ impl OpenAIPreprocessor {
                             )
                         }
                         ChatCompletionRequestUserMessageContentPart::AudioUrl(part) => {
-                            #[allow(deprecated)]
-                            let has_legacy_uuid = part
-                                .audio_url
-                                .as_ref()
-                                .is_some_and(|media| media.uuid.is_some());
-                            if part.uuid.is_some() || has_legacy_uuid {
-                                bail!(
-                                    "multimodal cache UUIDs are supported only for image_url parts with vLLM"
-                                );
+                            if part.uuid.is_some() {
+                                return Err(invalid_argument_error(
+                                    "multimodal cache UUIDs are supported only for image_url parts with vLLM",
+                                ));
                             }
                             (
                                 "audio_url",
@@ -1396,7 +1379,9 @@ impl OpenAIPreprocessor {
                 }
 
                 if uuid.as_deref().is_some_and(str::is_empty) {
-                    bail!("{type_str} uuid must be a non-empty string");
+                    return Err(invalid_argument_error(format!(
+                        "{type_str} uuid must be a non-empty string"
+                    )));
                 }
 
                 let slots = media_map.entry(type_str.to_string()).or_default();
@@ -1432,9 +1417,9 @@ impl OpenAIPreprocessor {
                         slots.push(MultimodalData::UuidOnly(uuid));
                     }
                     (None, None) => {
-                        bail!(
+                        return Err(invalid_argument_error(format!(
                             "{type_str} part has neither `url` nor `uuid`; at least one is required"
-                        );
+                        )));
                     }
                 }
             }

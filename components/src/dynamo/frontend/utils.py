@@ -104,9 +104,8 @@ def extract_mm_urls(
 
     URL-backed parts become ``Url`` variants. Image parts with no URL and an
     opaque ``uuid`` become ``UuidOnly`` variants for vLLM's multimodal
-    processor cache. The deprecated nested image UUID remains accepted, while
-    cache UUIDs on audio and video are rejected. Image UUID lists preserve
-    slot order::
+    processor cache. Cache UUIDs on audio and video are rejected. Image UUID
+    lists preserve slot order::
 
         ({"image_url": [{"Url": "https://..."}, {"UuidOnly": "image-1"}]},
          {"image_url": ["image-1", "image-1"]})
@@ -132,23 +131,11 @@ def extract_mm_urls(
                 continue
 
             media_value = part.get(part_type)
-            top_level_uuid = part.get("uuid")
-            nested_uuid = (
-                media_value.get("uuid") if isinstance(media_value, dict) else None
-            )
-            for uuid_value in (top_level_uuid, nested_uuid):
-                if uuid_value is not None and (
-                    not isinstance(uuid_value, str) or not uuid_value
-                ):
-                    raise ValueError(f"{part_type} uuid must be a non-empty string")
-            if (
-                top_level_uuid is not None
-                and nested_uuid is not None
-                and top_level_uuid != nested_uuid
+            uuid_value = part.get("uuid")
+            if uuid_value is not None and (
+                not isinstance(uuid_value, str) or not uuid_value
             ):
-                raise ValueError(f"{part_type} top-level and nested uuids must match")
-
-            uuid_value = top_level_uuid if top_level_uuid is not None else nested_uuid
+                raise ValueError(f"{part_type} uuid must be a non-empty string")
             if uuid_value is not None and part_type != "image_url":
                 raise ValueError(
                     "multimodal cache UUIDs are supported only for "

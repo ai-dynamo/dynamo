@@ -182,9 +182,7 @@ sending the same top-level UUID:
 }
 ```
 
-UUIDs are opaque nonempty strings. The top-level field is canonical. Dynamo
-still accepts the deprecated nested `image_url.uuid` form for compatibility,
-but nested values must be UUID-formatted and cannot express UUID-only requests.
+UUIDs are opaque nonempty strings and must use the top-level field shown above.
 A UUID-only request fails on a cache miss because it contains no media payload
 to process. Dynamo also rejects a media content part that has neither a URL nor
 a UUID.

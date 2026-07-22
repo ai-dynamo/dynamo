@@ -647,7 +647,7 @@ async def test_build_engine_inputs_defers_uuid_only_processing_to_worker(
 
 
 @pytest.mark.multimodal
-def test_normalize_vllm_image_parts_lifts_deprecated_nested_uuid(
+def test_normalize_vllm_image_parts_defaults_detail_without_lifting_nested_uuid(
     vllm_processor_module,
 ) -> None:
     messages = [
@@ -669,7 +669,7 @@ def test_normalize_vllm_image_parts_lifts_deprecated_nested_uuid(
     vllm_processor_module._normalize_vllm_image_parts(messages)
 
     part = messages[0]["content"][0]
-    assert part["uuid"] == "92b888ad-e64a-478f-b688-5091e16544e3"
+    assert "uuid" not in part
     assert part["image_url"]["detail"] == "auto"
 
 

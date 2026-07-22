@@ -638,6 +638,7 @@ mod cached_multimodal_uuid {
     use dynamo_llm::model_card::ModelDeploymentCard;
     use dynamo_llm::preprocessor::OpenAIPreprocessor;
     use dynamo_llm::protocols::common::preprocessor::MultimodalData;
+    use dynamo_runtime::error::{DynamoError, ErrorType};
 
     const MODEL_PATH: &str = "tests/data/sample-models/mock-llama-3.1-8b-instruct";
 
@@ -645,6 +646,14 @@ mod cached_multimodal_uuid {
         let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
         mdc.set_name("test-model");
         OpenAIPreprocessor::new(mdc).unwrap()
+    }
+
+    fn assert_invalid_argument(error: &anyhow::Error) {
+        let dynamo_error = error
+            .chain()
+            .find_map(|source| source.downcast_ref::<DynamoError>())
+            .expect("error chain should contain DynamoError");
+        assert_eq!(dynamo_error.error_type(), ErrorType::InvalidArgument);
     }
 
     #[tokio::test]
@@ -669,7 +678,19 @@ mod cached_multimodal_uuid {
         ]"#;
         let request = Request::from(messages, None, None, "test-model".to_string());
 
-        let (preprocessed, _, _) = make_preprocessor()
+        let preprocessor = make_preprocessor();
+
+        #[cfg(feature = "mm-routing")]
+        {
+            let mut builder = dynamo_llm::preprocessor::PreprocessedRequest::builder();
+            let mm_image_entries = preprocessor
+                .gather_multi_modal_data(&request, &mut builder, None, &[])
+                .await
+                .unwrap();
+            assert!(mm_image_entries.is_empty());
+        }
+
+        let (preprocessed, _, _) = preprocessor
             .preprocess_request(&request, None)
             .await
             .unwrap();
@@ -685,65 +706,14 @@ mod cached_multimodal_uuid {
             preprocessed.multi_modal_uuids.as_ref().unwrap()["image_url"],
             vec![Some("image-a".to_string()), Some("image-b".to_string())]
         );
-    }
-
-    #[tokio::test]
-    async fn accepts_deprecated_nested_image_uuid() {
-        let messages = r#"[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": "https://example.com/first.png",
-                            "uuid": "92b888ad-e64a-478f-b688-5091e16544e3"
-                        }
-                    }
-                ]
-            }
-        ]"#;
-        let request = Request::from(messages, None, None, "test-model".to_string());
-
-        let (preprocessed, _, _) = make_preprocessor()
-            .preprocess_request(&request, None)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            preprocessed.multi_modal_uuids.as_ref().unwrap()["image_url"],
-            vec![Some("92b888ad-e64a-478f-b688-5091e16544e3".to_string())]
-        );
-    }
-
-    #[tokio::test]
-    async fn rejects_conflicting_top_level_and_nested_image_uuid() {
-        let messages = r#"[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": "https://example.com/first.png",
-                            "uuid": "92b888ad-e64a-478f-b688-5091e16544e3"
-                        },
-                        "uuid": "catalog-image"
-                    }
-                ]
-            }
-        ]"#;
-        let request = Request::from(messages, None, None, "test-model".to_string());
-
-        let error = make_preprocessor()
-            .preprocess_request(&request, None)
-            .await
-            .expect_err("conflicting UUIDs must be rejected");
-
         assert!(
-            format!("{error:#}").contains("top-level and nested uuids must match"),
-            "unexpected error: {error:#}"
+            preprocessed
+                .extra_args
+                .as_ref()
+                .and_then(|args| args.get("mm_hashes"))
+                .is_none()
         );
+        assert!(preprocessed.mm_routing_info.is_none());
     }
 
     #[tokio::test]
@@ -761,10 +731,8 @@ mod cached_multimodal_uuid {
                 "role": "user",
                 "content": [{
                     "type": "audio_url",
-                    "audio_url": {
-                        "url": "https://example.com/audio.wav",
-                        "uuid": "92b888ad-e64a-478f-b688-5091e16544e3"
-                    }
+                    "audio_url": {"url": "https://example.com/audio.wav"},
+                    "uuid": "cached-audio"
                 }]
             }]"#,
         ] {
@@ -778,6 +746,7 @@ mod cached_multimodal_uuid {
                 format!("{error:#}").contains("supported only for image_url parts with vLLM"),
                 "unexpected error: {error:#}"
             );
+            assert_invalid_argument(&error);
         }
     }
 
@@ -803,6 +772,7 @@ mod cached_multimodal_uuid {
             error_chain.contains("neither `url` nor `uuid`"),
             "unexpected error: {error_chain}"
         );
+        assert_invalid_argument(&error);
     }
 
     #[tokio::test]
@@ -831,6 +801,7 @@ mod cached_multimodal_uuid {
             error_chain.contains("uuid must be a non-empty string"),
             "unexpected error: {error_chain}"
         );
+        assert_invalid_argument(&error);
     }
 }
 
