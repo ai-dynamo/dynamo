@@ -70,9 +70,7 @@ class MMRouterHandler:
             Response chunks from the downstream TRT-LLM worker via KvRouter
         """
         # Reject before the router downloads media or forwards the request.
-        reject_unsupported_multimodal_uuids(
-            request.get("multi_modal_uuids"), backend="TensorRT-LLM"
-        )
+        reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
 
         # Extract messages from extra_args (set by Frontend preprocessor)
         messages = request.get("extra_args", {}).get("messages", [])

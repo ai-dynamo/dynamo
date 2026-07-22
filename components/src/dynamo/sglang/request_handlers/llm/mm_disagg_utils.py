@@ -56,9 +56,7 @@ def _raw_multimodal_content_types(request: Dict[str, Any]) -> set[str]:
 def raise_if_unextracted_multimodal(request: Dict[str, Any]) -> None:
     """Reject unsupported UUIDs or media not extracted by the frontend."""
 
-    reject_unsupported_multimodal_uuids(
-        request.get("multi_modal_uuids"), backend="SGLang"
-    )
+    reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
     mm_data = _multi_modal_data(request)
     raw_types = _raw_multimodal_content_types(request)
     if not (mm_data or raw_types):

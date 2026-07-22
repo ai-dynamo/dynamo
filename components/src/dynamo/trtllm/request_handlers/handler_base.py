@@ -791,9 +791,7 @@ class HandlerBase(BaseGenerativeHandler):
         Returns:
             Processed input for TRT-LLM (dict with prompt/token_ids, or raw token_ids)
         """
-        reject_unsupported_multimodal_uuids(
-            request.get("multi_modal_uuids"), backend="TensorRT-LLM"
-        )
+        reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
 
         # DECODE mode: Use prefill metadata to skip re-processing multimodal content
         # Per TRT-LLM team: DECODE never needs to reload images - KV cache has the context

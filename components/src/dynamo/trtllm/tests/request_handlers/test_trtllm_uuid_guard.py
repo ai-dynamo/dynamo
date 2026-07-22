@@ -14,10 +14,7 @@ if not torch.cuda.is_available():
 
 from dynamo.trtllm.request_handlers.aggregated_handler import AggregatedHandler
 from dynamo.trtllm.request_handlers.handler_base import HandlerBase
-from dynamo.trtllm.request_handlers.handlers import (
-    EncodeHandler,
-    PrefillHandler,
-)
+from dynamo.trtllm.request_handlers.handlers import EncodeHandler, PrefillHandler
 from dynamo.trtllm.tests.request_handlers.utils import create_mock_context
 from dynamo.trtllm.tests.utils import create_mock_request_handler_config
 

@@ -6,17 +6,16 @@
 from collections.abc import Mapping, Sequence
 
 
-def reject_unsupported_multimodal_uuids(
-    multi_modal_uuids: Mapping[str, Sequence[str | None]] | None,
-    *,
-    backend: str,
-) -> None:
-    if not multi_modal_uuids or not any(
-        uuid is not None for uuids in multi_modal_uuids.values() for uuid in uuids
-    ):
+def reject_unsupported_multimodal_uuids(multi_modal_uuids: object) -> None:
+    if multi_modal_uuids is None:
         return
 
-    raise ValueError(
-        "Image UUID caching is supported only by the vLLM "
-        f"backend; {backend} does not support the `uuid` field"
-    )
+    unsupported = "Image UUID caching is supported only by the vLLM backend"
+    if not isinstance(multi_modal_uuids, Mapping):
+        raise ValueError(unsupported)
+
+    for uuids in multi_modal_uuids.values():
+        if not isinstance(uuids, Sequence) or isinstance(uuids, (str, bytes)):
+            raise ValueError(unsupported)
+        if any(uuid is not None for uuid in uuids):
+            raise ValueError(unsupported)

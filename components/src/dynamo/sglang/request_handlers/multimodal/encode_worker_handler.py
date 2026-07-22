@@ -439,9 +439,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         Returns:
             Tuple of (image_urls, video_urls) lists.
         """
-        reject_unsupported_multimodal_uuids(
-            request.get("multi_modal_uuids"), backend="SGLang"
-        )
+        reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
         mm_data = request.get("multi_modal_data")
         if not mm_data:
             raise ValueError("multi_modal_data is required for the encode worker.")

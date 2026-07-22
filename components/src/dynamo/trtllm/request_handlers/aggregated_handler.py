@@ -43,9 +43,7 @@ class AggregatedHandler(HandlerBase):
         """Generate response, optionally using remote encoder for multimodal."""
         # Reject before optional remote encoder/cache work. HandlerBase keeps a
         # second guard as a backstop for paths without these early side effects.
-        reject_unsupported_multimodal_uuids(
-            request.get("multi_modal_uuids"), backend="TensorRT-LLM"
-        )
+        reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
         logging.debug(f"AggregatedHandler Request ID: {context.id()}")
 
         embeddings: Optional[Union[torch.Tensor, dict]] = None

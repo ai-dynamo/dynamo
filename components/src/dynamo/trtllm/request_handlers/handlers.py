@@ -71,9 +71,7 @@ class EncodeHandler(HandlerBase):
         self, request: dict, context: Context
     ) -> AsyncGenerator[dict, None]:
         # EncodeHelper bypasses HandlerBase input preparation.
-        reject_unsupported_multimodal_uuids(
-            request.get("multi_modal_uuids"), backend="TensorRT-LLM"
-        )
+        reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
         logging.debug(f"New Request ID: {context.id()}")
         if self.multimodal_processor is None:
             logging.error("encode handler: no multimodal_processor configured")
@@ -143,9 +141,7 @@ class PrefillHandler(HandlerBase):
         """
         # Reject before optional remote encoder/cache work. HandlerBase keeps a
         # second guard as a backstop for paths without these early side effects.
-        reject_unsupported_multimodal_uuids(
-            request.get("multi_modal_uuids"), backend="TensorRT-LLM"
-        )
+        reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
         logging.debug(f"Prefill Request ID: {context.id()}")
         request_token_ids = request.get("token_ids")
         logging.debug(

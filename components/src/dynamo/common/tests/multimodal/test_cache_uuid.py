@@ -3,9 +3,7 @@
 
 import pytest
 
-from dynamo.common.multimodal.cache_uuid import (
-    reject_unsupported_multimodal_uuids,
-)
+from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
 
 pytestmark = [
     pytest.mark.unit,
@@ -23,11 +21,8 @@ pytestmark = [
         {"image_url": [None], "video_url": [None]},
     ],
 )
-def test_allows_requests_without_cache_uuids(multi_modal_uuids) -> None:
-    reject_unsupported_multimodal_uuids(
-        multi_modal_uuids,
-        backend="test backend",
-    )
+def test_allows_requests_without_cache_uuids(multi_modal_uuids: object) -> None:
+    reject_unsupported_multimodal_uuids(multi_modal_uuids)
 
 
 def test_rejects_request_with_cache_uuid() -> None:
@@ -35,7 +30,22 @@ def test_rejects_request_with_cache_uuid() -> None:
         ValueError,
         match="supported only by the vLLM backend",
     ):
-        reject_unsupported_multimodal_uuids(
-            {"image_url": [None, "cached-image"]},
-            backend="test backend",
-        )
+        reject_unsupported_multimodal_uuids({"image_url": [None, "cached-image"]})
+
+
+@pytest.mark.parametrize(
+    "multi_modal_uuids",
+    [
+        [],
+        "cached-image",
+        {"image_url": None},
+        {"image_url": "cached-image"},
+        {"image_url": 123},
+    ],
+)
+def test_rejects_malformed_cache_uuid_metadata(multi_modal_uuids: object) -> None:
+    with pytest.raises(
+        ValueError,
+        match="supported only by the vLLM backend",
+    ):
+        reject_unsupported_multimodal_uuids(multi_modal_uuids)
