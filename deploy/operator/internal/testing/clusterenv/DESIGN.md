@@ -67,7 +67,12 @@ The harness changes only their names, service references, and CA bundles.
 Conversion references in the checked-in Dynamo CRDs are temporarily pointed at
 the same proxy and restored when `RunM` finishes. `AdditionalAdmission` supports
 dependency webhooks; the controller suite uses the production LWS handler and a
-focused registration generated from its kubebuilder markers.
+focused registration generated from its kubebuilder markers. Dependency
+adapters live under `internal/testing/mocks`: `mocks/lws` wraps the production
+LWS handlers, while `mocks/grove` temporarily provides transparent
+PodCliqueSet handlers at Grove's production paths. Grove CRD schema validation
+and OpenAPI defaulting still run in the API server; the transparent handlers
+are replaced by Grove's production `Setup` API once it is released.
 
 The webhook manager is independent of all per-test controller managers. No
 operator controller runs merely because a test uses admission or conversion.

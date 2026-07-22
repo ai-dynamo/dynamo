@@ -17,7 +17,8 @@ import (
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/clusterenv"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/webhookconfig"
+	grovemock "github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/mocks/grove"
+	lwsmock "github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/mocks/lws"
 	webhooksetup "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/setup"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/go-logr/logr"
@@ -41,7 +42,6 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	lwsscheme "sigs.k8s.io/lws/client-go/clientset/versioned/scheme"
-	lwswebhooks "sigs.k8s.io/lws/pkg/webhooks"
 	vcbatchv1alpha1 "volcano.sh/apis/pkg/apis/batch/v1alpha1"
 	volcanov1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 )
@@ -58,10 +58,14 @@ func newClusterTestEnv() *clusterenv.Env {
 	configv1alpha1.SetDefaultsOperatorConfiguration(operatorConfig)
 	operatorConfig.GPU.DiscoveryEnabled = ptr.To(false)
 	runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, LWS: true}}
+	additionalAdmission := lwsmock.Configurations()
+	groveAdmission := grovemock.Configurations()
+	additionalAdmission.Mutating = append(additionalAdmission.Mutating, groveAdmission.Mutating...)
+	additionalAdmission.Validating = append(additionalAdmission.Validating, groveAdmission.Validating...)
 
 	return clusterenv.New(clusterenv.Options{
 		Scheme:                 newClusterTestScheme(),
-		AdditionalAdmission:    webhookconfig.LeaderWorkerSetConfigurations(),
+		AdditionalAdmission:    additionalAdmission,
 		WebhookProxyImage:      os.Getenv("DYNAMO_CLUSTERTEST_WEBHOOK_PROXY_IMAGE"),
 		EventuallyTimeout:      2 * time.Minute,
 		NamespaceDeleteTimeout: 5 * time.Minute,
@@ -74,7 +78,10 @@ func newClusterTestEnv() *clusterenv.Env {
 			}); err != nil {
 				return err
 			}
-			return lwswebhooks.SetupLeaderWorkerSetWebhook(mgr)
+			if err := lwsmock.Setup(mgr); err != nil {
+				return err
+			}
+			return grovemock.Setup(mgr)
 		},
 	})
 }

@@ -3,11 +3,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-package webhookconfig
+// Package lws installs the upstream LeaderWorkerSet admission handlers and
+// their focused test registrations.
+package lws
 
 import (
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/webhookconfig"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
+	lwswebhooks "sigs.k8s.io/lws/pkg/webhooks"
 )
 
 const (
@@ -19,9 +24,14 @@ const (
 	lwsValidatingPath = "/validate-leaderworkerset-x-k8s-io-v1-leaderworkerset"
 )
 
-// LeaderWorkerSetConfigurations returns the admission registrations generated
-// from the LeaderWorkerSet webhook markers, restricted to LeaderWorkerSet.
-func LeaderWorkerSetConfigurations() Configurations {
+// Setup registers the production LeaderWorkerSet admission handlers.
+func Setup(mgr ctrl.Manager) error {
+	return lwswebhooks.SetupLeaderWorkerSetWebhook(mgr)
+}
+
+// Configurations returns the admission registrations generated from the
+// LeaderWorkerSet webhook markers, restricted to LeaderWorkerSet.
+func Configurations() webhookconfig.Configurations {
 	fail := admissionregistrationv1.Fail
 	none := admissionregistrationv1.SideEffectClassNone
 	operations := []admissionregistrationv1.OperationType{
@@ -36,7 +46,7 @@ func LeaderWorkerSetConfigurations() Configurations {
 			Resources:   []string{lwsResource},
 		},
 	}
-	return Configurations{
+	return webhookconfig.Configurations{
 		Mutating: []*admissionregistrationv1.MutatingWebhookConfiguration{{
 			ObjectMeta: metav1.ObjectMeta{Name: "lws-mutating-webhook-configuration"},
 			Webhooks: []admissionregistrationv1.MutatingWebhook{{

@@ -3,13 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-package webhookconfig
+package lws
 
 import "testing"
 
-func TestLeaderWorkerSetConfigurationsContainOnlyLeaderWorkerSetWebhooks(t *testing.T) {
+func TestConfigurationsContainOnlyLeaderWorkerSetWebhooks(t *testing.T) {
 	t.Log("Build the focused registrations from the upstream LeaderWorkerSet webhook markers")
-	configurations := LeaderWorkerSetConfigurations()
+	configurations := Configurations()
 	if len(configurations.Mutating) != 1 || len(configurations.Mutating[0].Webhooks) != 1 {
 		t.Fatalf("mutating registrations = %#v, want one configuration with one webhook", configurations.Mutating)
 	}
