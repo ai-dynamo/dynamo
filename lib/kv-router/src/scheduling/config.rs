@@ -973,12 +973,25 @@ impl KvRouterConfig {
         self.router_predicted_ttl_secs.is_some()
     }
 
-    /// True when the effective scheduling policy requires each worker to report
-    /// `max_num_batched_tokens` (queue-threshold admission or a router policy
-    /// config is active). Discovery-time callers can validate the value up front
-    /// rather than letting workers silently become unschedulable later.
-    pub fn requires_max_num_batched_tokens(&self) -> bool {
-        self.router_queue_threshold.is_some() || self.router_policy_config.is_some()
+    /// Whether the effective scheduling policy for `model_name` enables queueing.
+    /// This is the invariant that makes `max_num_batched_tokens` mandatory on
+    /// every worker (a queue threshold is a fraction of that capacity), so both
+    /// discovery-time validation and per-worker reconciliation gate on it.
+    ///
+    /// Resolves the actual per-model [`PolicyProfile`](super::policy_config::PolicyProfile)
+    /// rather than inspecting raw config: a policy config whose classes set no
+    /// threshold correctly reports `false`, and `router_queue_threshold` only
+    /// counts when it feeds the resolved (synthetic or fallback) class. Fallible
+    /// because the policy config is parsed on first resolve.
+    pub fn queueing_enabled(
+        &self,
+        model_name: Option<&str>,
+    ) -> Result<bool, super::policy_config::RouterPolicyConfigError> {
+        Ok(self
+            .policy_profile(model_name)?
+            .classes()
+            .iter()
+            .any(super::policy_config::PolicyClassConfig::queueing_enabled))
     }
 
     pub fn assume_kv_reuse(&self, config_override: Option<&RouterConfigOverride>) -> bool {
@@ -1598,5 +1611,20 @@ models:
     fn test_kv_router_config_defaults_are_disabled() {
         assert_eq!(KvRouterConfig::default().router_queue_threshold, None);
         assert_eq!(KvRouterConfig::default().shared_cache_multiplier, 0.0);
+    }
+
+    #[test]
+    fn queueing_enabled_reflects_synthetic_threshold() {
+        // With no policy config the synthetic profile enables queueing iff a queue
+        // threshold is set. (The policy-config path — including a threshold-free
+        // policy resolving to `false` — is covered end-to-end by the selection
+        // service's `threshold_free_policy_does_not_require_max_num_batched_tokens`
+        // reconcile test.)
+        assert!(!KvRouterConfig::default().queueing_enabled(None).unwrap());
+        let with_threshold = KvRouterConfig {
+            router_queue_threshold: Some(0.5),
+            ..Default::default()
+        };
+        assert!(with_threshold.queueing_enabled(None).unwrap());
     }
 }

@@ -113,16 +113,19 @@ impl Selector {
 
         // `max_num_batched_tokens` is applied uniformly to every worker the EPP
         // registers, so validate it once here — before worker discovery — when
-        // the router policy needs it. Without this, a missing/zero value only
-        // surfaces later as a confusing "no schedulable workers" at request time.
-        // The selection service still enforces it per worker as defense in depth.
-        if kv_router_config.requires_max_num_batched_tokens()
-            && cfg.max_num_batched_tokens.unwrap_or(0) == 0
-        {
+        // the resolved policy for this model enables queueing. Without this, a
+        // missing/zero value only surfaces later as a confusing "no schedulable
+        // workers" at request time. Uses the same `queueing_enabled` predicate as
+        // the per-worker reconcile, so both enforce the invariant identically.
+        let queueing_enabled = kv_router_config
+            .queueing_enabled(Some(&cfg.model_name))
+            .map_err(|e| anyhow!("resolving router policy for model {}: {e}", cfg.model_name))?;
+        if queueing_enabled && cfg.max_num_batched_tokens.unwrap_or(0) == 0 {
             anyhow::bail!(
                 "DYN_EPP_MAX_NUM_BATCHED_TOKENS is required (and must be > 0) because the router \
-                 scheduling policy (queue threshold or policy config) is enabled; set it to the \
-                 engine's --max-num-batched-tokens"
+                 scheduling policy enables queueing for model {}; set it to the engine's \
+                 --max-num-batched-tokens",
+                cfg.model_name
             );
         }
 
