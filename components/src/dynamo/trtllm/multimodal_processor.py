@@ -27,7 +27,11 @@ from tensorrt_llm.inputs.utils import async_load_video
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
 from dynamo.common.http import HttpStatusError
-from dynamo.common.http.url_validator import UrlValidationError
+from dynamo.common.http.url_validator import (
+    UrlValidationPolicy,
+    UrlValidationError,
+    validate_media_url,
+)
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -86,6 +90,13 @@ class MultimodalRequestProcessor:
         # Reuse the shared default so this preprocessor and the vLLM/SGLang
         # backends agree on DYN_MM_VIDEO_NUM_FRAMES.
         self.num_video_frames = max(1, VideoLoader.NUM_FRAMES_DEFAULT)
+
+        # Video URLs go through the same SSRF policy as the image path so the
+        # default (DYN_MM_ALLOW_INTERNAL=0) blocks private/loopback/cloud-
+        # metadata targets (169.254/16, 10/8, kubernetes.default,
+        # metadata.google.internal, ...) and disallows http:// for the worker's
+        # direct `async_load_video` fetch.
+        self._url_policy = UrlValidationPolicy.from_env()
 
         # Input processor used only to size an omitted max_tokens (see
         # _expanded_prompt_len). Optional: unavailable for models without a
@@ -438,7 +449,13 @@ class MultimodalRequestProcessor:
                         400, "Local file access is not allowed for video", url
                     )
                 try:
-                    videos.append(await async_load_video(url, self.num_video_frames))
+                    normalized_url = await validate_media_url(url, self._url_policy)
+                except UrlValidationError as e:
+                    raise HttpStatusError(400, str(e), url) from e
+                try:
+                    videos.append(
+                        await async_load_video(normalized_url, self.num_video_frames)
+                    )
                 except (UrlValidationError, HttpStatusError):
                     raise
                 except Exception as e:
