@@ -266,10 +266,6 @@ class TestPromptEmbedsE2E:
         """
         CRITICAL REGRESSION TEST: Ensure prompt_tokens is correctly reported.
 
-        This validates the v2.0.4 fix where prompt_tokens was incorrectly
-        reported as 0 when using embeddings. The worker extracts sequence
-        length from tensor shape and includes it in completion_usage.
-
         Rust tests cannot verify this - it requires E2E validation.
         """
         sequence_length = 20

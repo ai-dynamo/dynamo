@@ -28,3 +28,8 @@
 
 # NGC intermittently returns 503 for this version-filtered page from GitHub runners.
 ^https://catalog\.ngc\.nvidia\.com/orgs/nvidia/teams/ai-dynamo/containers/dynamo-frontend\?version=1\.2\.1$
+
+# The v1.3.0 GitHub release tag is only published when v1.3.0 GA is cut; the
+# canonical release/support-matrix links added by the version bump 404 from CI
+# until then. Remove this entry once the v1.3.0 release is published.
+^https://github\.com/ai-dynamo/dynamo/releases/tag/v1\.3\.0$

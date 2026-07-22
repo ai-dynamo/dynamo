@@ -13,7 +13,8 @@ use dynamo_tokens::SequenceHash;
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
 use std::collections::HashMap;
-use std::future::Future;
+use std::env;
+use std::future::{self, Future};
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -25,7 +26,9 @@ use tokio_util::sync::CancellationToken;
 use super::prefill_tracker::PrefillTimeLoad;
 use super::prompt_registry::{PromptRegistry, WorkerLoadSnapshot};
 use super::request_maps::RequestIndex;
-use super::single::{ActiveSequences, PromptMembershipDelta, RequestId};
+use super::single::{
+    ActiveSequences, DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION, PromptMembershipDelta, RequestId,
+};
 use super::topology::{WorkerDpRange, WorkerTable, WorkerTopologyChange, WorkerTopologyError};
 use super::{PotentialLoadMaps, PrefillTokenDeltas, WorkerLoadProjection};
 use crate::protocols::{
@@ -37,6 +40,44 @@ use crate::protocols::{
 // in ActiveSequencesMultiWorker::force_expire_requests_across_all_workers for
 // more details.
 const FORCE_EXPIRE_REQUESTS_ACROSS_ALL_WORKERS_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Environment override for the stale active-request cleanup guard.
+const DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS: &str = "DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS";
+
+/// Returns the configured stale active-request cleanup guard.
+fn active_request_expiry_duration() -> Duration {
+    active_request_expiry_duration_from_lookup(|key| env::var(key).ok())
+}
+
+/// Parses the cleanup guard from an environment lookup, falling back on invalid input.
+fn active_request_expiry_duration_from_lookup(
+    get_env: impl Fn(&str) -> Option<String>,
+) -> Duration {
+    let Some(raw) = get_env(DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS) else {
+        return DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION;
+    };
+
+    let Ok(seconds) = raw.parse::<u64>() else {
+        tracing::warn!(
+            env = DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
+            value = %raw,
+            default_secs = DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION.as_secs(),
+            "invalid active request expiry override, falling back to default"
+        );
+        return DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION;
+    };
+
+    if seconds == 0 {
+        tracing::warn!(
+            env = DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
+            default_secs = DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION.as_secs(),
+            "active request expiry override must be greater than zero, falling back to default"
+        );
+        return DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION;
+    }
+
+    Duration::from_secs(seconds)
+}
 
 // ---------------------------------------------------------------------------
 // Traits
@@ -53,6 +94,14 @@ pub trait SequencePublisher: Send + Sync {
         &self,
         event: &ActiveSequenceEvent,
     ) -> impl Future<Output = anyhow::Result<()>> + Send;
+
+    /// Publish an owned replica-sync event, avoiding a clone when supported by the transport.
+    fn publish_event_owned(
+        &self,
+        event: ActiveSequenceEvent,
+    ) -> impl Future<Output = anyhow::Result<()>> + Send {
+        async move { self.publish_event(&event).await }
+    }
 
     /// Fire-and-forget publish of an [`ActiveLoad`] metric payload.
     fn publish_load(&self, load: ActiveLoad);
@@ -78,6 +127,22 @@ pub trait SequencePublisher: Send + Sync {
 
     /// Observe that a worker/dp_rank was removed from the router.
     fn observe_worker_removed(&self, _worker: &WorkerWithDpRank, _worker_type: &str) {}
+}
+
+/// No-op publisher for callers that do not need active-sequence event transport.
+pub struct NoopSequencePublisher;
+
+impl SequencePublisher for NoopSequencePublisher {
+    fn publish_event(
+        &self,
+        _event: &ActiveSequenceEvent,
+    ) -> impl Future<Output = anyhow::Result<()>> + Send {
+        future::ready(Ok(()))
+    }
+
+    fn publish_load(&self, _load: ActiveLoad) {}
+
+    fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize) {}
 }
 
 /// Abstraction over event subscription for replica sync.
@@ -112,7 +177,7 @@ pub enum ReplicaWorkerPolicy {
 #[derive(Debug, Clone, Copy)]
 struct SequenceTrackerOptions {
     replica_worker_policy: ReplicaWorkerPolicy,
-    expiry_enabled: bool,
+    expiry_duration: Option<Duration>,
 }
 
 /// Errors that can occur during sequence management operations.
@@ -210,7 +275,39 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             worker_type,
             SequenceTrackerOptions {
                 replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
-                expiry_enabled: false,
+                expiry_duration: None,
+            },
+        )
+    }
+
+    /// Create a tracker with an explicit stale active-request cleanup guard.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `expiry_duration` or `block_size` is zero.
+    pub fn new_with_expiry_duration(
+        publisher: P,
+        block_size: usize,
+        dp_range: HashMap<u64, (u32, u32)>,
+        replica_sync: bool,
+        router_id: u64,
+        worker_type: &'static str,
+        expiry_duration: Duration,
+    ) -> Self {
+        assert!(
+            !expiry_duration.is_zero(),
+            "expiry_duration must be greater than zero"
+        );
+        Self::new_with_options(
+            publisher,
+            block_size,
+            dp_range,
+            replica_sync,
+            router_id,
+            worker_type,
+            SequenceTrackerOptions {
+                replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
+                expiry_duration: Some(expiry_duration),
             },
         )
     }
@@ -234,11 +331,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             worker_type,
             SequenceTrackerOptions {
                 replica_worker_policy,
-                expiry_enabled: true,
+                expiry_duration: Some(active_request_expiry_duration()),
             },
         )
     }
 
+    /// Builds a tracker from resolved replica-admission and expiry policies.
     fn new_with_options(
         publisher: P,
         block_size: usize,
@@ -250,10 +348,11 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     ) -> Self {
         assert!(block_size > 0, "block_size must be greater than 0");
         let (remote_state_updates, _) = watch::channel(());
-        let workers = if options.expiry_enabled {
-            WorkerTable::new(block_size, &dp_range)
-        } else {
-            WorkerTable::new_without_expiry(block_size, &dp_range)
+        let workers = match options.expiry_duration {
+            Some(duration) => {
+                WorkerTable::new_with_expiry_duration(block_size, &dp_range, duration)
+            }
+            None => WorkerTable::new_without_expiry(block_size, &dp_range),
         };
         let initial_workers: Vec<_> = workers.workers().collect();
         let prompt_registry = PromptRegistry::new(initial_workers.iter().copied());
@@ -354,10 +453,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         // can mirror the same oldest-prefill anchor instead of approximating from receive time.
         let publisher = Arc::clone(&self.publisher);
         tokio::spawn(async move {
-            if let Err(e) = publisher.publish_event(&event).await {
+            let request_id = event.request_id.clone();
+            let worker = event.worker;
+            if let Err(e) = publisher.publish_event_owned(event).await {
                 tracing::error!(
-                    request_id = %event.request_id,
-                    worker = ?event.worker,
+                    request_id = %request_id,
+                    worker = ?worker,
                     "failed to publish active sequence event: {e}"
                 );
             }
@@ -1071,7 +1172,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 mod tests {
     use std::collections::{HashMap, VecDeque};
     use std::future::{self, Future};
-    use std::sync::Mutex;
+    use std::sync::{Condvar, Mutex, mpsc as std_mpsc};
     use std::time::Duration;
 
     use rustc_hash::FxHashMap;
@@ -1084,6 +1185,51 @@ mod tests {
     };
     use crate::sequences::prefill_tracker::PrefillTimeLoadError;
     use crate::test_utils::NoopSequencePublisher;
+
+    /// Verifies that a positive expiry override is accepted.
+    #[test]
+    fn active_request_expiry_duration_override_uses_positive_seconds() {
+        let lookup =
+            |key: &str| (key == DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS).then(|| "3600".to_string());
+
+        assert_eq!(
+            active_request_expiry_duration_from_lookup(lookup),
+            Duration::from_secs(3600)
+        );
+    }
+
+    /// Verifies that absent and invalid expiry overrides use the default.
+    #[test]
+    fn active_request_expiry_duration_override_falls_back_to_default() {
+        assert_eq!(
+            active_request_expiry_duration_from_lookup(|_| None),
+            DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION
+        );
+        for value in ["", "abc", "0"] {
+            let lookup = |key: &str| {
+                (key == DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS).then(|| value.to_string())
+            };
+            assert_eq!(
+                active_request_expiry_duration_from_lookup(lookup),
+                DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION
+            );
+        }
+    }
+
+    /// Verifies that zero duration is rejected before worker-table construction.
+    #[test]
+    #[should_panic(expected = "expiry_duration must be greater than zero")]
+    fn custom_expiry_rejects_zero_duration_at_multi_worker_boundary() {
+        let _ = ActiveSequencesMultiWorker::new_with_expiry_duration(
+            NoopSequencePublisher,
+            4,
+            HashMap::new(),
+            false,
+            0,
+            "test",
+            Duration::ZERO,
+        );
+    }
 
     fn make_sequences() -> ActiveSequencesMultiWorker<NoopSequencePublisher> {
         ActiveSequencesMultiWorker::new(
@@ -1326,6 +1472,48 @@ mod tests {
 
         fn observe_worker_removed(&self, worker: &WorkerWithDpRank, _worker_type: &str) {
             self.state.removed.lock().unwrap().push(*worker);
+        }
+    }
+
+    struct BlockingPublisher {
+        blocked_worker_id: u64,
+        entered: std_mpsc::Sender<()>,
+        release: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl SequencePublisher for BlockingPublisher {
+        fn publish_event(
+            &self,
+            _event: &ActiveSequenceEvent,
+        ) -> impl Future<Output = anyhow::Result<()>> + Send {
+            future::ready(Ok(()))
+        }
+
+        fn publish_load(&self, _load: ActiveLoad) {}
+
+        fn publish_load_batch(&self, loads: Vec<ActiveLoad>) {
+            if !loads
+                .iter()
+                .any(|load| load.worker_id == self.blocked_worker_id)
+            {
+                return;
+            }
+
+            self.entered.send(()).unwrap();
+            let (released, ready) = &*self.release;
+            let mut released = released.lock().unwrap();
+            while !*released {
+                released = ready.wait(released).unwrap();
+            }
+        }
+
+        fn observe_load(
+            &self,
+            _worker: &WorkerWithDpRank,
+            _worker_type: &str,
+            _blocks: usize,
+            _tokens: usize,
+        ) {
         }
     }
 
@@ -2006,6 +2194,105 @@ mod tests {
         assert_eq!(
             sequences.active_request_counts().get(&worker).copied(),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn replica_batch_apply_uses_one_deferred_effect_flush() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let (sequences, publisher) =
+            make_recording_sequences(HashMap::from([(1_u64, (0_u32, 1_u32))]));
+
+        sequences.apply_replica_batch(vec![
+            replica_add("req-1", worker, vec![1, 2, 3]),
+            replica_add("req-2", worker, vec![4, 5, 6]),
+            replica_mark("req-2", worker),
+            replica_free("req-1", worker),
+        ]);
+
+        let batches = publisher.load_batches();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), 1);
+        assert_eq!(batches[0][0].active_decode_blocks, Some(3));
+        assert_eq!(batches[0][0].active_prefill_tokens, Some(0));
+        assert_eq!(sequences.remote_state_update_count(), 1);
+        assert_eq!(sequences.prompt_registry.cleanup_attempts(), 1);
+        assert_eq!(
+            sequences.request_index.worker_for(&"req-2".to_string()),
+            Some(worker)
+        );
+        assert_eq!(
+            sequences.request_index.worker_for(&"req-1".to_string()),
+            None
+        );
+    }
+
+    #[test]
+    fn replica_batches_apply_concurrently_to_independent_workers() {
+        let worker_a = WorkerWithDpRank::new(1, 0);
+        let worker_b = WorkerWithDpRank::new(2, 0);
+        let (entered_tx, entered_rx) = std_mpsc::channel();
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let sequences = Arc::new(ActiveSequencesMultiWorker::new(
+            BlockingPublisher {
+                blocked_worker_id: worker_a.worker_id,
+                entered: entered_tx,
+                release: Arc::clone(&release),
+            },
+            4,
+            HashMap::from([(1, (0, 1)), (2, (0, 1))]),
+            true,
+            0,
+            "test",
+        ));
+
+        let source_a = {
+            let sequences = Arc::clone(&sequences);
+            std::thread::spawn(move || {
+                sequences.apply_replica_batch(vec![replica_add(
+                    "source-a",
+                    worker_a,
+                    vec![1, 2, 3],
+                )]);
+            })
+        };
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("source A should block inside tracker batch flush");
+
+        let (source_b_done_tx, source_b_done_rx) = std_mpsc::channel();
+        let source_b = {
+            let sequences = Arc::clone(&sequences);
+            std::thread::spawn(move || {
+                sequences.apply_replica_batch(vec![replica_add(
+                    "source-b",
+                    worker_b,
+                    vec![4, 5, 6],
+                )]);
+                source_b_done_tx.send(()).unwrap();
+            })
+        };
+        let source_b_completed = source_b_done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .is_ok();
+
+        let (released, ready) = &*release;
+        *released.lock().unwrap() = true;
+        ready.notify_all();
+        source_a.join().unwrap();
+        source_b.join().unwrap();
+
+        assert!(
+            source_b_completed,
+            "source B should apply while source A remains blocked"
+        );
+        assert_eq!(
+            sequences.request_index.worker_for(&"source-a".to_string()),
+            Some(worker_a)
+        );
+        assert_eq!(
+            sequences.request_index.worker_for(&"source-b".to_string()),
+            Some(worker_b)
         );
     }
 

@@ -376,9 +376,22 @@ jobs:
           echo "epp_image_uri=${{ env.ECR_HOSTNAME }}/${EPP_IMAGE_REF}" >> $GITHUB_OUTPUT
 
           CACHE_ARGS=""
-          CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/${EPP_REPOSITORY}:cache "
-          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/${EPP_REPOSITORY}:cache,mode=max "
+          if [[ "${{ inputs.no_cache }}" == "true" ]]; then
+            CACHE_ARGS+="--no-cache "
+          else
+            # Content-addressed cache tag: key the registry :cache on a hash of
+            # the EPP Dockerfile so any Dockerfile change (e.g. adding the
+            # /sbom-go.cdx.json COPY) lands in a fresh cache namespace. A fixed
+            # :cache tag could otherwise import a go-builder layer pushed by a
+            # build that predated a new COPY, silently producing an EPP image
+            # missing /sbom-go.cdx.json — BuildKit validates layer digests, not
+            # file contents. The old fixed :cache tag is simply orphaned.
+            EPP_CACHE_KEY="$(sha256sum deploy/inference-gateway/epp/Dockerfile | cut -c1-12)"
+            EPP_CACHE_REF="${ECR_HOSTNAME}/${EPP_REPOSITORY}:cache-${EPP_CACHE_KEY}"
+            CACHE_ARGS+="--cache-from type=registry,ref=${EPP_CACHE_REF} "
+            if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+              CACHE_ARGS+="--cache-to type=registry,ref=${EPP_CACHE_REF},mode=max "
+            fi
           fi
 
           # Enable sccache to match the runtime image build path
@@ -404,6 +417,26 @@ jobs:
             DOCKER_PROXY="${ECR_HOSTNAME}/dockerhub/" \
             ${SCCACHE_MAKE_ARGS} \
             EXTRA_BUILD_ARGS="${CACHE_ARGS}"
+
+          # Decouple EPP's Go compliance SBOM from the pushed image. Export it to
+          # the workspace NOW, while this builder's cache is warm, so the frontend
+          # build + compliance-extract read /sbom-go.cdx.json + /sbom-go-licenses
+          # from the build context (.epp-sbom/) rather than COPY --from the EPP
+          # image. The image-COPY path was fragile: the "Refresh BuildKit builder"
+          # step below prunes the cache, forcing a re-pull of the pushed EPP image
+          # whose runtime layer could be served from stale cache and miss these
+          # files. Build args mirror image-multiarch-push so the go-builder stage
+          # cache-hits (no rust/go rebuild).
+          rm -rf "${GITHUB_WORKSPACE}/.epp-sbom"
+          make -C deploy/inference-gateway/epp sbom-export \
+            GIT_TAG="${EPP_IMAGE_TAG}" \
+            DOCKER_PROXY="${ECR_HOSTNAME}/dockerhub/" \
+            ${SCCACHE_MAKE_ARGS} \
+            EXTRA_BUILD_ARGS="${CACHE_ARGS}" \
+            SBOM_DEST="${GITHUB_WORKSPACE}/.epp-sbom"
+          echo "EPP SBOM export contents:"
+          ls -la "${GITHUB_WORKSPACE}/.epp-sbom" \
+            "${GITHUB_WORKSPACE}/.epp-sbom/sbom-go-licenses" 2>/dev/null | head -40
       - name: Refresh BuildKit builder (For Frontend Only)
         if: ${{ inputs.target == 'frontend' }}
         uses: ./.github/actions/builder-refresher
@@ -550,6 +583,10 @@ jobs:
           builder_name: ${{ inputs.builder_name }}
           artifact_name_prefix: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
           git_sha: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
+          # Freshly-built ECR EPP image (frontend only) — must match the build's
+          # EPP_IMAGE so the epp stage cache-hits instead of resolving the
+          # rendered default upstream staging tag, which gets garbage-collected.
+          epp_image: ${{ steps.build-epp-image.outputs.epp_image_uri || '' }}
           # Match the build's sccache build-args so the extract reuses the warm
           # wheel_builder/pre_runtime cache instead of a cold rebuild.
           sccache_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}

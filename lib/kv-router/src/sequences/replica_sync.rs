@@ -6,17 +6,17 @@ use std::sync::Arc;
 use std::task::Poll;
 
 use rustc_hash::FxHashMap;
-use tokio::time::{Duration, Instant};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::multi_worker::{
     ActiveSequencesMultiWorker, ReplicaWorkerPolicy, SequencePublisher, SequenceSubscriber,
 };
 use super::prompt_registry::WorkerLoadSnapshot;
-use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData, WorkerWithDpRank};
-
-const MAX_REPLICA_BATCH_EVENTS: usize = 256;
-const MAX_REPLICA_BATCH_DURATION: Duration = Duration::from_millis(1);
+use crate::protocols::{
+    ActiveSequenceEvent, ActiveSequenceEventData, MAX_REPLICA_BATCH_DURATION,
+    MAX_REPLICA_BATCH_EVENTS, WorkerWithDpRank,
+};
 
 #[derive(Default)]
 struct ReplicaBatchEffects {
@@ -51,6 +51,15 @@ impl ReplicaBatchEffects {
 }
 
 impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
+    /// Apply one decoded replica-sync batch and flush its deferred effects once.
+    pub fn apply_replica_batch(&self, events: Vec<ActiveSequenceEvent>) {
+        let mut effects = ReplicaBatchEffects::default();
+        for event in events {
+            self.apply_replica_event(event, &mut effects);
+        }
+        self.flush_replica_batch_effects(&mut effects);
+    }
+
     /// Spawn a background task that subscribes to replica-sync events from peer routers
     /// and applies them to the local state.
     pub fn start_replica_sync<S: SequenceSubscriber + 'static>(
