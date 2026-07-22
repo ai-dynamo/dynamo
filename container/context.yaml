@@ -124,9 +124,9 @@ sglang:
   # Remove this once the SGLang base image contains NIXL PR #1966.
   efa_nixl_patch:
     nixl_version: "1.3.0"
-    # Exact build revision embedded in the wheel; semantic backport of d1e60ec.
+    # Exact build revision embedded in the wheel; semantic backport of ff04fa81.
     source_ref: 0f3c0aec918502aaad4343b99f1cc94cea1e85e0
-    patch_sha256: c24dc80783ba949153e41efeb4c14e63147ca2cf2dfd4174bc727bdec28e7f26
+    patch_sha256: 5f2adb11ecb57170700c2c86fd490af36c89451bcac9c1f05ee5cac2047fb95a
     meson_version: "1.11.1"
   enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
