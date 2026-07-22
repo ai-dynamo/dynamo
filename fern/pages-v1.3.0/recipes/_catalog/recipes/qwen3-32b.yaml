@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: qwen3-32b
+title: Qwen3-32B
+page: recipes/qwen3-32b.mdx
+provider: qwen
+model:
+  name: Qwen3-32B
+  hf_id: Qwen/Qwen3-32B
+  precision: BF16
+status: validated
+targets:
+- id: vllm-disagg-kv-router
+  recommended: true
+  hardware:
+    gpu: H200
+    count: 16
+  runtime:
+    framework: vllm
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - kv-aware-routing
+  workload:
+    type: trace-replay
+    traffic: 'Mooncake conversation trace: 12,031 reqs, 12K avg ISL, 343 avg OSL, fixed schedule'
+    sla: goodput TTFT 2000ms / ITL 25ms
+  deploy:
+    asset: recipes/qwen3-32b/vllm/disagg-kv-router/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/qwen3-32b/vllm/disagg-kv-router/perf.yaml
+  expected_performance:
+    available: false
+    summary: Source README gives directional TTFT/ITL claims and a results video only
+related_benchmarks:
+- qwen3-32b-kv-routing
+maintainer: null
+gaps:
+- No expected performance numbers in source README (directional claims + video only); Expected Performance omitted
+- maintainer unknown
+- 'agg-kvbm single-GPU walkthrough removed from the recipe entirely (2026-06-12): KVBM is being sunset, so no docs re-add
+  is planned. Source assets at recipes/qwen3-32b/vllm/agg-kvbm/ remain untouched pending KVBM deprecation.'

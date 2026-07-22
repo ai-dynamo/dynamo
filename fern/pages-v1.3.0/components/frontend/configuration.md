@@ -1,0 +1,236 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Frontend Configuration Reference
+subtitle: Complete reference for all frontend CLI arguments, environment variables, and HTTP endpoints
+---
+
+This page documents all configuration options for the Dynamo Frontend (`python -m dynamo.frontend`).
+
+Every CLI argument has a corresponding environment variable. CLI arguments take precedence over environment variables.
+
+## HTTP & Networking
+
+| CLI Argument | Env Var | Default | Description |
+|-------------|---------|---------|-------------|
+| `--http-host` | `DYN_HTTP_HOST` | `0.0.0.0` | HTTP listen address |
+| `--http-port` | `DYN_HTTP_PORT` | `8000` | HTTP listen port |
+| `--tls-cert-path` | `DYN_TLS_CERT_PATH` | — | TLS certificate path (PEM). Must be paired with `--tls-key-path` |
+| `--tls-key-path` | `DYN_TLS_KEY_PATH` | — | TLS private key path (PEM). Must be paired with `--tls-cert-path` |
+
+The Rust HTTP server also reads these environment variables (not exposed as CLI args):
+
+| Env Var | Default | Description |
+|---------|---------|-------------|
+| `DYN_HTTP_BODY_LIMIT_MB` | `192` | Maximum request body size in MB |
+| `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` | `5` | Graceful shutdown timeout in seconds |
+
+## Router
+
+This is the canonical CLI and environment-variable reference for the frontend's
+embedded router. The [Router Guide](../router/router-guide.md) explains deployment
+modes and behavior, while [Configuration and Tuning](../router/router-configuration.md)
+explains when to adjust these settings.
+
+### Routing and Readiness
+
+| CLI Argument | Env Var | Default | Description |
+|-------------|---------|---------|-------------|
+| `--router-mode` | `DYN_ROUTER_MODE` | `round-robin` | Routing strategy: `round-robin`, `random`, `power-of-two`, `kv`, `direct`, `least-loaded`, or `device-aware-weighted`. `power-of-two` samples two workers and selects the one with fewer in-flight requests |
+| `--router-min-initial-workers` | `DYN_ROUTER_MIN_INITIAL_WORKERS` | `0` | Minimum workers required before router startup continues. `0` disables the startup wait |
+| `--router-session-affinity-ttl-secs` | `DYN_ROUTER_SESSION_AFFINITY_TTL_SECS` | unset | Enable session affinity and best-effort binding sync with this router-local idle TTL |
+| `--decode-fallback` / `--no-decode-fallback` | `DYN_DECODE_FALLBACK` | `false` | Fall back to aggregated mode when prefill workers are unavailable |
+
+### KV Scoring and Cache Locality
+
+| CLI Argument | Env Var | Default | Description |
+|-------------|---------|---------|-------------|
+| `--load-aware` / `--no-load-aware` | `DYN_ROUTER_LOAD_AWARE` | `false` | Preset for KV load-aware routing without cache-reuse signals; implies `--router-mode kv` |
+| `--router-kv-overlap-score-credit` | `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT` | `1.0` | Credit multiplier for device-local prefix overlap. Must be finite and nonnegative; values greater than `1.0` give overlap extra credit and can make adjusted prefill cost negative |
+| `--router-kv-overlap-score-credit-decay` | `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY` | `0.0` | Decay rate for device-local overlap credit as active prefill load rises above the least-loaded eligible worker. `0` disables decay; `1` halves credit at one request-equivalent of excess load |
+| `--router-prefill-load-scale` | `DYN_ROUTER_PREFILL_LOAD_SCALE` | `1.0` | Scale adjusted prompt-side prefill load after cache-hit credits are subtracted |
+| `--router-host-cache-hit-weight` | `DYN_ROUTER_HOST_CACHE_HIT_WEIGHT` | `0.75` | Credit multiplier from `0.0` to `1.0` for host-pinned cache hits |
+| `--router-disk-cache-hit-weight` | `DYN_ROUTER_DISK_CACHE_HIT_WEIGHT` | `0.25` | Credit multiplier from `0.0` to `1.0` for disk or other lower-tier cache hits |
+| `--shared-cache-multiplier` | `DYN_SHARED_CACHE_MULTIPLIER` | `0.5` | Experimental multiplier from `0.0` to `1.0` for external shared-cache hits |
+| `--shared-cache-type` | `DYN_SHARED_CACHE_TYPE` | `none` | Experimental external shared cache: `none` or `hicache` |
+| `--router-temperature` | `DYN_ROUTER_TEMPERATURE` | `0.0` | Softmax temperature for normalized worker sampling. `0` is deterministic |
+
+### KV State and Indexers
+
+| CLI Argument | Env Var | Default | Description |
+|-------------|---------|---------|-------------|
+| `--router-kv-events` / `--no-router-kv-events` | `DYN_ROUTER_USE_KV_EVENTS` | `true` | Consume worker KV cache events, or predict cache state from routing decisions when disabled |
+| `--router-ttl-secs` | `DYN_ROUTER_TTL_SECS` | `120.0` | Block TTL for prediction-based routing with `--no-router-kv-events` |
+| `--router-predicted-ttl-secs` | `DYN_ROUTER_PREDICTED_TTL_SECS` | unset | Enable a local predict-on-route side indexer with this TTL. Requires KV events and is independent of `--router-ttl-secs` |
+| `--router-event-threads` | `DYN_ROUTER_EVENT_THREADS` | `4` | KV indexer worker threads. Values greater than `1` use the concurrent radix tree, including with `--no-router-kv-events` |
+| `--use-remote-indexer` / `--no-use-remote-indexer` | `DYN_USE_REMOTE_INDEXER` | `false` | Experimental: query a remote indexer served on the worker component instead of maintaining a local primary indexer |
+| `--serve-indexer` / `--no-serve-indexer` | `DYN_SERVE_INDEXER` | `false` | Serve this frontend's local KV indexers over the request plane. Requires `--router-mode kv` with positive overlap credit and is mutually exclusive with `--use-remote-indexer` |
+| `--router-replica-sync` / `--no-router-replica-sync` | `DYN_ROUTER_REPLICA_SYNC` | `false` | Best-effort active-sequence synchronization through the Runtime event plane |
+
+### Active Load and Queueing
+
+| CLI Argument | Env Var | Default | Description |
+|-------------|---------|---------|-------------|
+| `--router-track-active-blocks` / `--no-router-track-active-blocks` | `DYN_ROUTER_TRACK_ACTIVE_BLOCKS` | `true` | Track blocks used by in-progress requests for load balancing |
+| `--router-track-output-blocks` / `--no-router-track-output-blocks` | `DYN_ROUTER_TRACK_OUTPUT_BLOCKS` | `false` | Track output blocks with fractional decay during generation |
+| `--router-assume-kv-reuse` / `--no-router-assume-kv-reuse` | `DYN_ROUTER_ASSUME_KV_REUSE` | `true` | Assume KV cache reuse when tracking active blocks |
+| `--router-track-prefill-tokens` / `--no-router-track-prefill-tokens` | `DYN_ROUTER_TRACK_PREFILL_TOKENS` | `true` | Include prompt-side prefill tokens in active-load accounting |
+| `--router-prefill-load-model` | `DYN_ROUTER_PREFILL_LOAD_MODEL` | `none` | Prompt-side load model: `none` for static load or `aic` for oldest-prefill decay using an AIC prediction |
+| `--router-queue-threshold` | `DYN_ROUTER_QUEUE_THRESHOLD` | unset | Queue threshold fraction of prefill capacity. Setting a numeric value enables queueing; priority hints only affect requests waiting in this queue |
+| `--router-queue-policy` | `DYN_ROUTER_QUEUE_POLICY` | `fcfs` | Queue scheduling policy: `fcfs` for tail TTFT or `wspt` for average TTFT |
+| `--router-policy-config` | `DYN_ROUTER_POLICY_CONFIG` | unset | Startup-only [policy-family and cache-bucket YAML](../router/router-configuration.md#policy-class-queues). When omitted, the threshold and queue policy define one synthetic policy class |
+
+## AIC Prefill Load Model
+
+These options are used only when `--router-mode kv` is combined with `--router-prefill-load-model aic`.
+
+| CLI Argument | Env Var | Default | Description |
+|-------------|---------|---------|-------------|
+| `--aic-backend` | `DYN_AIC_BACKEND` | — | Backend family to model in AIC, for example `vllm` or `sglang` |
+| `--aic-system` | `DYN_AIC_SYSTEM` | — | AIC hardware/system identifier, for example `h200_sxm` |
+| `--aic-model-path` | `DYN_AIC_MODEL_PATH` | — | Model path or model identifier used for AIC perf lookup |
+| `--aic-backend-version` | `DYN_AIC_BACKEND_VERSION` | backend-specific | Pinned AIC database version. If omitted, Dynamo uses the backend default |
+| `--aic-tp-size` | `DYN_AIC_TP_SIZE` | `1` | Tensor-parallel size to model in AIC |
+| `--aic-moe-tp-size` | `DYN_AIC_MOE_TP_SIZE` | — | MoE tensor-parallel size for models that require AIC MoE parallelism |
+| `--aic-moe-ep-size` | `DYN_AIC_MOE_EP_SIZE` | — | MoE expert-parallel size for models that require AIC MoE parallelism |
+| `--aic-attention-dp-size` | `DYN_AIC_ATTENTION_DP_SIZE` | — | Attention data-parallel size for models that require AIC MoE parallelism |
+
+When enabled, the frontend's embedded KV router predicts one expected prefill duration per admitted request, using the selected worker's overlap-derived cached prefix. The router then decays only the oldest active prefill request on each worker for prompt-side load accounting.
+
+For MoE models, AIC requires `aic_tp_size * aic_attention_dp_size == aic_moe_tp_size * aic_moe_ep_size`. For Kimi-style TP-only MoE runs, set `--aic-moe-tp-size` to the same value as `--aic-tp-size`, with `--aic-moe-ep-size 1` and `--aic-attention-dp-size 1`.
+
+## Fault Tolerance
+
+| CLI Argument | Env Var | Default | Description |
+|-------------|---------|---------|-------------|
+| `--migration-limit` | `DYN_MIGRATION_LIMIT` | `0` | Max request migrations per worker disconnect. 0 = disabled |
+| `--active-decode-blocks-threshold` | `DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD` | — | KV cache utilization fraction (0.0–1.0) for busy detection. Setting a value independently enables this rejection check |
+| `--active-prefill-tokens-threshold` | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD` | — | Absolute token count for prefill busy detection. Setting a value independently enables this rejection check |
+| `--active-prefill-tokens-threshold-frac` | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC` | — | Fraction of `max_num_batched_tokens` for prefill busy detection. Setting a value independently enables this rejection check and uses OR logic with the absolute threshold |
+
+The deprecated `--admission-control` and `DYN_ADMISSION_CONTROL` settings are accepted but ignored
+with a startup warning and no longer gate these thresholds. See
+[Request Rejection](../../fault-tolerance/request-rejection.md#migrate-from-admission-control)
+for migration instructions.
+
+## Model Discovery
+
+| CLI Argument | Env Var | Default | Description |
+|-------------|---------|---------|-------------|
+| `--namespace` | `DYN_NAMESPACE` | — | Exact namespace for model discovery scoping |
+| `--namespace-prefix` | `DYN_NAMESPACE_PREFIX` | — | Namespace prefix for discovery (e.g., `ns` matches `ns`, `ns-abc123`). Takes precedence over `--namespace` |
+| `--model-name` | `DYN_MODEL_NAME` | — | Override model name string |
+| `--model-path` | `DYN_MODEL_PATH` | — | Path to local model directory (for private/custom models) |
+| `--kv-cache-block-size` | `DYN_KV_CACHE_BLOCK_SIZE` | — | KV cache block size override |
+
+## Infrastructure
+
+| CLI Argument | Env Var | Default | Description |
+|-------------|---------|---------|-------------|
+| `--discovery-backend` | `DYN_DISCOVERY_BACKEND` | `etcd` | Service discovery: `kubernetes`, `etcd`, `file`, `mem` |
+| `--request-plane` | `DYN_REQUEST_PLANE` | `tcp` | Request distribution: `tcp` (fastest), `nats` |
+| `--event-plane` | `DYN_EVENT_PLANE` | `zmq` | Event publishing: `nats` or `zmq`. Defaults to `zmq` for every discovery backend |
+
+## KServe gRPC
+
+| CLI Argument | Env Var | Default | Description |
+|-------------|---------|---------|-------------|
+| `--kserve-grpc-server` / `--no-kserve-grpc-server` | `DYN_KSERVE_GRPC_SERVER` | `false` | Start KServe gRPC v2 server |
+| `--grpc-metrics-port` | `DYN_GRPC_METRICS_PORT` | `8788` | HTTP metrics port for gRPC service |
+
+See the [Frontend Guide](frontend-guide.md) for KServe message formats and integration details.
+
+## Monitoring
+
+| CLI Argument | Env Var | Default | Description |
+|-------------|---------|---------|-------------|
+| `--metrics-prefix` | `DYN_METRICS_PREFIX` | `dynamo_frontend` | Prefix for frontend Prometheus metrics |
+| `--dump-config-to` | `DYN_DUMP_CONFIG_TO` | — | Dump resolved config to file path |
+
+## Tokenizer
+
+| CLI Argument | Env Var | Default | Description |
+|-------------|---------|---------|-------------|
+| `--tokenizer` | `DYN_TOKENIZER` | `default` | Tokenizer: `default` (HuggingFace) or `fastokens` (high-performance Rust tokenizer). See [Tokenizer](Tokenizer.md) |
+
+## Experimental
+
+| CLI Argument | Env Var | Default | Description |
+|-------------|---------|---------|-------------|
+| `--enable-anthropic-api` | `DYN_ENABLE_ANTHROPIC_API` | `false` | Enable `/v1/messages` (Anthropic Messages API) |
+| `--dyn-chat-processor` | `DYN_CHAT_PROCESSOR` | `dynamo` | Chat processor: `dynamo` (default), `vllm`, or `sglang`. See [Parser Configuration](../../tool-calling/parser-configuration.md) for how this combines with the parser flags. |
+| `--dyn-debug-perf` | `DYN_DEBUG_PERF` | `false` | Log per-function timing for preprocessing (vllm processor only) |
+| `--dyn-preprocess-workers` | `DYN_PREPROCESS_WORKERS` | `0` | Worker processes for CPU-bound preprocessing. 0 = main event loop (vllm processor only) |
+| `-i` / `--interactive` | `DYN_INTERACTIVE` | `false` | Interactive text chat mode |
+
+## HTTP Endpoints
+
+The frontend exposes the following HTTP endpoints:
+
+### OpenAI-Compatible
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/v1/chat/completions` | Chat completions (streaming and non-streaming) |
+| `POST` | `/v1/completions` | Text completions |
+| `POST` | `/v1/embeddings` | Text embeddings |
+| `POST` | `/v1/responses` | Responses API |
+| `POST` | `/v1/images/generations` | Image generation |
+| `POST` | `/v1/videos/generations` | Video generation |
+| `POST` | `/v1/videos/generations/stream` | Video generation (streaming) |
+| `GET` | `/v1/models` | List available models |
+
+### Anthropic (Experimental)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/v1/messages` | Anthropic Messages API (requires `--enable-anthropic-api`) |
+| `POST` | `/v1/messages/count_tokens` | Token counting for Anthropic API |
+
+### Infrastructure
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Health check |
+| `GET` | `/live` | Liveness check |
+| `GET` | `/metrics` | Prometheus metrics |
+| `GET` | `/openapi.json` | OpenAPI specification |
+| `GET` | `/docs` | Swagger UI |
+| `POST` | `/busy_threshold` | Set busy thresholds (gated by `DYN_DISABLE_FRONTEND_ADMIN_API`, see below) |
+| `GET` | `/busy_threshold` | Get current busy thresholds (gated by `DYN_DISABLE_FRONTEND_ADMIN_API`, see below) |
+
+### Frontend feature switches
+
+Environment variables controlling frontend extensions. Extensions are enabled by default. When deploying, consider whether each is needed for your use case; if not, disable it to prevent accidental abuse.
+
+Set an env value of `1` / `true` / `yes` / `on` (case-insensitive) to disable the extension.
+
+| Env Var | Default | Behavior when set (disabled) |
+|---------|---------|------------------------------|
+| `DYN_DISABLE_FRONTEND_NVEXT` | unset (enabled) | Frontend drops `request.nvext` at handler entry on `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/embeddings`, and `/v1/messages`; ignores Dynamo routing headers (`x-dynamo-worker-instance-id`, `x-dynamo-prefill-instance-id`, `x-dynamo-dp-rank`, `x-dynamo-prefill-dp-rank`, `x-dynamo-request-priority`, `x-dynamo-request-strict-priority`) and their compatibility aliases; silently ignores the response-side `nvext.extra_fields` opt-in. Note: disabling this breaks EPP / GAIE serving, Prime-RL-style training that uses `nvext.cache_salt`, multi-tenant agent platforms that forward `nvext.agent_hints`, and clients that opt into response disclosure via `nvext.extra_fields`. |
+| `DYN_DISABLE_FRONTEND_ADMIN_API` | unset (enabled) | `GET /busy_threshold` and `POST /busy_threshold` are not registered (404 instead of 503). Inference, metrics, models, health, and liveness routes are unaffected. |
+
+### Endpoint Path Customization
+
+All endpoint paths can be overridden via environment variables:
+
+| Env Var | Default Path |
+|---------|-------------|
+| `DYN_HTTP_SVC_CHAT_PATH_ENV` | `/v1/chat/completions` |
+| `DYN_HTTP_SVC_CMP_PATH_ENV` | `/v1/completions` |
+| `DYN_HTTP_SVC_EMB_PATH_ENV` | `/v1/embeddings` |
+| `DYN_HTTP_SVC_RESPONSES_PATH_ENV` | `/v1/responses` |
+| `DYN_HTTP_SVC_MODELS_PATH_ENV` | `/v1/models` |
+| `DYN_HTTP_SVC_ANTHROPIC_PATH_ENV` | `/v1/messages` |
+| `DYN_HTTP_SVC_HEALTH_PATH_ENV` | `/health` |
+| `DYN_HTTP_SVC_LIVE_PATH_ENV` | `/live` |
+| `DYN_HTTP_SVC_METRICS_PATH_ENV` | `/metrics` |
+
+## See Also
+
+- [Frontend Overview](README.md) — quick start and feature matrix
+- [Frontend Guide](frontend-guide.md) — KServe gRPC configuration
+- [NVIDIA Request Extensions (nvext)](nvext.md) — custom request fields
+- [Configuration and Tuning](../router/router-configuration.md) — router behavior and tuning guidance
+- [Metrics](../../observability/metrics.md) — available Prometheus metrics
+- [Fault Tolerance](../../fault-tolerance/README.md) — request migration and rejection

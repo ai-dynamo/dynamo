@@ -1,0 +1,253 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Dynamo Operator
+subtitle: Reference for the Dynamo Kubernetes operator covering its controllers, deployment modes, and reconciliation workflow.
+---
+
+## Overview
+
+Dynamo operator is a Kubernetes operator that simplifies the deployment, configuration, and lifecycle management of DynamoGraphs. It automates the reconciliation of custom resources to ensure your desired state is always achieved. This operator is ideal for users who want to manage complex deployments using declarative YAML definitions and Kubernetes-native tooling.
+
+## Architecture
+
+- **Operator Deployment:**
+  Deployed as a Kubernetes `Deployment` in a specific namespace.
+
+- **Controllers:**
+  - `DynamoGraphDeploymentController`: Watches `DynamoGraphDeployment` CRs and orchestrates graph deployments.
+  - `DynamoComponentDeploymentController`: Watches `DynamoComponentDeployment` CRs and handles individual component deployments.
+  - `DynamoGraphDeploymentRequestController`: Watches `DynamoGraphDeploymentRequest` CRs and runs the profiling/generation flow that produces a `DynamoGraphDeployment`.
+  - `DynamoGraphDeploymentScalingAdapterController`: Watches scaling adapter CRs used by external autoscalers and Planner-driven scaling flows.
+  - `DynamoModelController`: Watches `DynamoModel` CRs and manages model lifecycle (e.g., loading LoRA adapters).
+  - `DynamoCheckpointController`: Watches `DynamoCheckpoint` CRs for GPU worker checkpoint/restore workflows.
+
+- **Workflow:**
+  1. A custom resource is created by the user or API server.
+  2. The corresponding controller detects the change and runs reconciliation.
+  3. Kubernetes resources (Deployments, Services, etc.) are created or updated to match the CR spec.
+  4. Status fields are updated to reflect the current state.
+
+## Deployment Modes
+
+The Dynamo operator has one supported production mode and one development/test mode.
+
+### Cluster-Wide Mode
+
+The operator monitors and manages DynamoGraph resources across **all namespaces** in the cluster.
+It owns the cluster-wide Custom Resource Definitions (CRDs), conversion webhook, and conversion
+certificate authority (CA). Deploy exactly one cluster-wide operator per cluster.
+
+**When to Use:**
+
+- You have full cluster admin access
+- You want centralized management of all Dynamo workloads
+- Standard production deployment on a dedicated cluster
+
+### Namespace-Restricted Mode
+
+<Warning>Namespace-restricted mode is only for development and testing. It is not supported for production.</Warning>
+
+A namespace-restricted operator reconciles, validates, and mutates resources only in its target
+namespace. It creates a Lease that makes the cluster-wide operator skip reconciliation and
+admission in that namespace. The namespace-restricted operator serves its own admission webhooks
+using its local feature settings.
+
+Use this mode to test controller changes or feature settings in one namespace on a development
+cluster. It is not a multi-tenancy boundary.
+
+**How It Works:**
+
+1. The namespace-restricted operator creates a Lease named `dynamo-operator-namespace-scope`.
+2. The cluster-wide operator watches these Leases and skips the claimed namespace.
+3. The namespace-restricted ValidatingWebhookConfiguration and MutatingWebhookConfiguration select
+   only the target namespace.
+4. The namespace-restricted operator manages the TLS certificate and CA bundles for its own
+   admission configurations.
+5. The cluster-wide operator remains the only owner of CRDs, conversion, and conversion CA bundles.
+
+If the namespace-restricted Pod becomes unavailable, Lease expiration lets the cluster-wide operator
+resume reconciliation, but does not remove the namespace-restricted webhook configurations. Admission
+continues to target the unavailable Service. Recover the Pod to restore namespace-restricted admission,
+or uninstall the release to remove its webhook configurations. Cluster-wide admission resumes after the
+Lease is deleted or expires.
+
+<Error>
+Set `dynamo-operator.upgradeCRD=false`. Namespace-restricted operators use the CRDs installed and
+updated by the cluster-wide operator.
+</Error>
+
+```bash
+# Install the cluster-wide operator first
+helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz \
+  --namespace dynamo-system \
+  --create-namespace
+
+# Install a namespace-restricted operator for development or testing
+helm install dynamo-test dynamo-platform-${RELEASE_VERSION}.tgz \
+  --namespace test-namespace \
+  --create-namespace \
+  --set dynamo-operator.namespaceRestriction.enabled=true \
+  --set dynamo-operator.upgradeCRD=false \
+  --set dynamo-operator.controllerManager.manager.image.tag=v2.0.0-beta
+```
+
+Set `dynamo-operator.namespaceRestriction.targetNamespace` when the target differs from the Helm
+release namespace.
+
+Install every operator Helm release in a separate namespace. Multiple Dynamo operator releases in
+the same Helm release namespace are not supported.
+
+Run the same operator version in parallel whenever possible. The cluster-wide operator should be
+the same version or newer and must provide the newest APIs in the cluster. A newer namespaced
+controller can be used for development when it does not require CRD fields absent from the
+cluster-wide installation.
+
+**Observability:**
+
+```bash
+# List all namespaces with local operators
+kubectl get lease -A --field-selector metadata.name=dynamo-operator-namespace-scope
+
+# Check which operator version is running in a namespace
+kubectl get lease -n my-namespace dynamo-operator-namespace-scope \
+  -o jsonpath='{.spec.holderIdentity}'
+```
+
+
+## Custom Resource Definitions (CRDs)
+
+Dynamo installs the following Custom Resources. The main deployment path is:
+create or generate a `DynamoGraphDeployment`, then let the operator create the
+lower-level resources that run it.
+
+| Custom Resource | What it represents | Typical use |
+|---|---|---|
+| `DynamoGraphDeployment` (DGD) | The canonical live deployment for a Dynamo inference graph. | Author directly, apply a tuned recipe, or let DGDR generate it. |
+| `DynamoGraphDeploymentRequest` (DGDR) | A deploy-by-intent request that profiles a model/hardware target and generates a DGD. | Start here when you want Dynamo to choose sizing, parallelism, or Planner-enabled generated config. |
+| `DynamoComponentDeployment` (DCD) | Per-component deployments created from a DGD, such as frontend, router, prefill, decode, and planner components. | Usually inspected for debugging rather than authored directly. |
+| `DynamoModel` | Model and adapter lifecycle management layered onto a running deployment. | Load, unload, or manage model artifacts such as LoRA adapters. |
+| `DynamoCheckpoint` | Checkpoint metadata and job configuration for snapshotting GPU workers. | Use with Snapshotting GPU Workers to restore warm workers faster than cold start. |
+
+Advanced and operator-owned resources:
+
+- `DynamoGraphDeploymentScalingAdapter`: scaling interface used by Planner or external autoscalers to adjust component replicas.
+- `DynamoWorkerMetadata`: discovery metadata written for worker pods.
+
+For the complete technical API reference for Dynamo Custom Resource Definitions, see:
+
+**📖 [Dynamo CRD API Reference](./api-reference.md)**
+
+For user-focused workflows, see:
+
+- **[Deployment Overview](./model-deployment-guide.md)** for DGD, DCD, DGDR, and recipes
+- **[DGDR Reference](./dgdr.md)** for deploy-by-intent generated deployments
+- **[Managing Models with DynamoModel Guide](./deployment/dynamomodel-guide.md)**
+- **[Snapshotting GPU Workers](./snapshot.md)** for `DynamoCheckpoint`
+
+## Webhooks
+
+The Dynamo Operator uses **Kubernetes admission webhooks** for real-time validation and mutation of custom resources before they are persisted to the cluster. Webhooks are a required component of the operator and ensure that invalid configurations are rejected immediately at the API server level.
+
+**Key Features:**
+- ✅ Shared certificate infrastructure across all webhook types
+- ✅ Automatic certificate generation and rotation (default, all environments)
+- ✅ cert-manager integration (optional, for custom PKI)
+- ✅ Immutability enforcement for critical fields
+
+For complete documentation on webhooks, certificate management, and troubleshooting, see:
+
+**📖 [Webhooks Guide](./webhooks.md)**
+
+## Observability
+
+The Dynamo Operator provides comprehensive observability through Prometheus metrics and Grafana dashboards. This allows you to monitor:
+
+- **Controller Performance**: Reconciliation loop duration, success rates, and error rates by resource type
+- **Webhook Activity**: Validation performance, admission rates, and denial patterns
+- **Resource Inventory**: Current count of managed resources by state and namespace
+- **Operational Health**: Success rates and health indicators for controllers and webhooks
+
+### Metrics Collection
+
+Metrics are automatically exposed on the operator's `/metrics` endpoint (port 8443 by default) and collected by Prometheus via a ServiceMonitor. The ServiceMonitor is automatically created when you install the operator via Helm (controlled by `metricsService.enabled`, which defaults to `true`).
+
+### Grafana Dashboard
+
+A pre-built Grafana dashboard is available for visualizing operator metrics. The dashboard includes:
+
+- **Reconciliation Metrics**: Rate, duration (P95), and errors by resource type
+- **Webhook Metrics**: Request rate, duration (P95), and denials by resource type and operation
+- **Resource Inventory**: Count of DynamoGraphDeployments by state and namespace
+- **Operational Health**: Success rate gauges for controllers and webhooks
+
+For complete setup instructions and metrics reference, see:
+
+**📖 [Operator Metrics Guide](./observability/operator-metrics.md)**
+
+## Installation
+
+### Quick Install with Helm
+
+```bash
+# Set environment
+export NAMESPACE=dynamo-system
+export RELEASE_VERSION=0.x.x # any version of Dynamo 0.3.2+ listed at https://github.com/ai-dynamo/dynamo/releases
+
+# Install Platform (includes operator)
+helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-${RELEASE_VERSION}.tgz
+helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE} --create-namespace
+```
+
+<Note>
+Namespace-restricted mode is only for development and testing. Use cluster-wide mode for
+production deployments.
+</Note>
+
+### Building from Source
+
+```bash
+# Set environment
+export NAMESPACE=dynamo-system
+export DOCKER_SERVER=your-registry.com/  # your container registry
+export IMAGE_TAG=latest
+
+# Build operator image
+cd deploy/operator
+docker build -t $DOCKER_SERVER/kubernetes-operator:$IMAGE_TAG \
+  --build-context snapshot=../snapshot \
+  --build-arg DOCKER_PROXY="" \
+  .
+docker push $DOCKER_SERVER/kubernetes-operator:$IMAGE_TAG
+cd -
+
+# Install platform with custom operator image (the operator init container applies CRDs)
+cd deploy/helm/charts
+helm install dynamo-platform ./platform/ \
+  --namespace ${NAMESPACE} \
+  --create-namespace \
+  --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/kubernetes-operator" \
+  --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}" \
+  --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
+```
+
+For detailed installation options, see the [Installation Guide](./installation-guide.md)
+
+
+## Development
+
+- **Code Structure:**
+
+The operator is built using Kubebuilder and the operator-sdk, with the following structure:
+
+- `controllers/`: Reconciliation logic
+- `api/v1alpha1/`: CRD types
+- `config/`: Manifests and Helm charts
+
+
+## References
+
+- [Kubernetes Operator Pattern](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/)
+- [Custom Resource Definitions](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)
+- [Operator SDK](https://sdk.operatorframework.io/)
+- [Helm Best Practices for CRDs](https://helm.sh/docs/chart_best_practices/custom_resource_definitions/)
