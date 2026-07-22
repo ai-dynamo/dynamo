@@ -317,10 +317,11 @@ impl DisaggFlowState {
         uuid: Uuid,
         action: IssuedHandoffAction,
         outcome: HandoffActionOutcome,
+        now_ms: f64,
         collector: &mut TraceCollector,
     ) -> Result<()> {
         if matches!(outcome, HandoffActionOutcome::Failed(_)) {
-            collector.on_terminal(uuid, ReplayTerminalStatus::Failed);
+            collector.on_terminal(uuid, now_ms, ReplayTerminalStatus::Failed);
         }
         let actions = self
             .state_mut(uuid)?
@@ -335,6 +336,7 @@ impl DisaggFlowState {
         &mut self,
         uuid: Uuid,
         fact: HandoffFact,
+        now_ms: f64,
         collector: &mut TraceCollector,
     ) -> Result<()> {
         let terminal_status = match fact {
@@ -345,7 +347,7 @@ impl DisaggFlowState {
             _ => None,
         };
         if let Some(status) = terminal_status {
-            collector.on_terminal(uuid, status);
+            collector.on_terminal(uuid, now_ms, status);
         }
         let actions = self.state_mut(uuid)?.coordinator.on_fact(fact)?;
         self.action_queues.enqueue_all(uuid, actions);
@@ -418,7 +420,13 @@ impl DisaggFlowState {
         {
             stats.prefill_assignments.insert(uuid, worker_idx);
         }
-        self.acknowledge_action(uuid, action, HandoffActionOutcome::Submitted, collector)?;
+        self.acknowledge_action(
+            uuid,
+            action,
+            HandoffActionOutcome::Submitted,
+            now_ms,
+            collector,
+        )?;
         self.process_lifecycle_events(lifecycle_events, now_ms, collector, stats)
     }
 
@@ -458,7 +466,13 @@ impl DisaggFlowState {
                 .transition_log
                 .push(DisaggTransition::DestinationAccepted { uuid });
         }
-        self.acknowledge_action(uuid, action, HandoffActionOutcome::Accepted, collector)?;
+        self.acknowledge_action(
+            uuid,
+            action,
+            HandoffActionOutcome::Accepted,
+            now_ms,
+            collector,
+        )?;
         self.process_lifecycle_events(lifecycle_events, now_ms, collector, stats)
     }
 
@@ -543,6 +557,7 @@ impl DisaggFlowState {
                             handoff_id,
                             transfer_timing,
                         },
+                        now_ms,
                         collector,
                     )?;
                 }
@@ -571,6 +586,7 @@ impl DisaggFlowState {
                             handoff_id,
                             transferable_prompt_tokens,
                         },
+                        now_ms,
                         collector,
                     )?;
                 }
@@ -625,9 +641,11 @@ impl DisaggFlowState {
     fn inspect_prefill_signal(
         &mut self,
         signal: &OutputSignal,
+        now_ms: f64,
         collector: &mut TraceCollector,
     ) -> Result<PrefillSignalDisposition> {
         if !signal.rejected
+            && signal.token_id.is_some()
             && let Some(capture) = self.conformance_capture.as_mut()
         {
             capture.source_output_tokens += 1;
@@ -640,8 +658,13 @@ impl DisaggFlowState {
         }
 
         let handoff_id = self.state(signal.uuid)?.handoff_id;
-        collector.on_terminal(signal.uuid, ReplayTerminalStatus::Rejected);
-        self.apply_handoff_fact(signal.uuid, HandoffFact::Failed { handoff_id }, collector)?;
+        collector.on_terminal(signal.uuid, now_ms, ReplayTerminalStatus::Rejected);
+        self.apply_handoff_fact(
+            signal.uuid,
+            HandoffFact::Failed { handoff_id },
+            now_ms,
+            collector,
+        )?;
         Ok(PrefillSignalDisposition::Rejected)
     }
 
@@ -655,7 +678,13 @@ impl DisaggFlowState {
         now_ms: f64,
         collector: &mut TraceCollector,
     ) -> Result<Option<ScheduledTransfer>> {
-        self.acknowledge_action(uuid, action, HandoffActionOutcome::Scheduled, collector)?;
+        self.acknowledge_action(
+            uuid,
+            action,
+            HandoffActionOutcome::Scheduled,
+            now_ms,
+            collector,
+        )?;
         self.state_mut(uuid)?.transfer_pending();
         let handoff_id = self.state(uuid)?.handoff_id;
         if delay_ms > 0.0 {
@@ -667,6 +696,7 @@ impl DisaggFlowState {
         self.apply_handoff_fact(
             uuid,
             HandoffFact::TransferCompleted { handoff_id },
+            now_ms,
             collector,
         )?;
         Ok(None)
@@ -696,7 +726,13 @@ impl DisaggFlowState {
         stats
             .transition_log
             .push(DisaggTransition::DestinationActivated { uuid });
-        self.acknowledge_action(uuid, action, HandoffActionOutcome::Applied, collector)?;
+        self.acknowledge_action(
+            uuid,
+            action,
+            HandoffActionOutcome::Applied,
+            now_ms,
+            collector,
+        )?;
         self.process_lifecycle_events(lifecycle_events, now_ms, collector, stats)
     }
 
@@ -726,7 +762,7 @@ impl DisaggFlowState {
         stats: &mut DisaggRuntimeStats,
     ) -> Result<()> {
         collector.on_source_released(uuid, now_ms);
-        self.acknowledge_action(uuid, action, outcome, collector)?;
+        self.acknowledge_action(uuid, action, outcome, now_ms, collector)?;
         self.process_lifecycle_events(lifecycle_events, now_ms, collector, stats)
     }
 
@@ -754,6 +790,7 @@ impl DisaggFlowState {
     fn record_decode_terminal(
         &self,
         signal: &OutputSignal,
+        now_ms: f64,
         collector: &mut TraceCollector,
         traffic: &mut TrafficAccumulator,
     ) -> Result<()> {
@@ -776,7 +813,7 @@ impl DisaggFlowState {
         } else {
             ReplayTerminalStatus::Completed
         };
-        collector.on_terminal(signal.uuid, terminal_status);
+        collector.on_terminal(signal.uuid, now_ms, terminal_status);
         Ok(())
     }
 
@@ -1119,12 +1156,12 @@ where
         outcome: HandoffActionOutcome,
     ) -> Result<()> {
         self.flow
-            .acknowledge_action(uuid, action, outcome, &mut self.collector)
+            .acknowledge_action(uuid, action, outcome, self.now_ms, &mut self.collector)
     }
 
     fn apply_handoff_fact(&mut self, uuid: Uuid, fact: HandoffFact) -> Result<()> {
         self.flow
-            .apply_handoff_fact(uuid, fact, &mut self.collector)
+            .apply_handoff_fact(uuid, fact, self.now_ms, &mut self.collector)
     }
 
     /// Submit a coordinator-owned prefill onto a selected worker.
@@ -1563,7 +1600,7 @@ where
             }
             Some(HandoffCompletion::Canceled) => {
                 self.collector
-                    .on_terminal(uuid, ReplayTerminalStatus::Canceled);
+                    .on_terminal(uuid, self.now_ms, ReplayTerminalStatus::Canceled);
                 self.cancel_prefill_route(uuid)?;
                 self.cancel_decode_route(uuid)?;
                 self.finish_logical_request(uuid, true)?;
@@ -1694,7 +1731,7 @@ where
     fn process_prefill_signal(&mut self, signal: OutputSignal) -> Result<()> {
         match self
             .flow
-            .inspect_prefill_signal(&signal, &mut self.collector)?
+            .inspect_prefill_signal(&signal, self.now_ms, &mut self.collector)?
         {
             PrefillSignalDisposition::Pending | PrefillSignalDisposition::Rejected => {
                 return Ok(());
@@ -1742,8 +1779,12 @@ where
             Vec::new()
         };
         self.record_router_pending();
-        self.flow
-            .record_decode_terminal(&signal, &mut self.collector, &mut self.traffic)?;
+        self.flow.record_decode_terminal(
+            &signal,
+            self.now_ms,
+            &mut self.collector,
+            &mut self.traffic,
+        )?;
         self.finish_logical_request(signal.uuid, false)?;
         self.dispatch_decode_placements(placements)?;
         Ok(())

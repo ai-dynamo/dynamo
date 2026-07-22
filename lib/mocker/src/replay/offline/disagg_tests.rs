@@ -9,6 +9,7 @@ use super::super::entrypoints::{
     run_concurrency_collect, run_concurrency_workload_collect, run_trace_collect,
     run_trace_workload_collect,
 };
+use super::super::extensions::kv_events::HandoffDisaggRuntime;
 use super::super::planner_hook::PlannerTickDecision;
 use super::*;
 use crate::common::protocols::{
@@ -353,6 +354,43 @@ fn run_trace_with_details(
     .run()
     .unwrap();
     collector.finish()
+}
+
+#[rstest::rstest]
+#[case(EngineType::Vllm)]
+#[case(EngineType::Sglang)]
+fn zero_output_disagg_does_not_count_a_source_token(#[case] engine_type: EngineType) {
+    let mut config = match engine_type {
+        EngineType::Vllm => disagg_config(),
+        EngineType::Sglang => sglang_disagg_config(),
+        EngineType::Trtllm => unreachable!(),
+    };
+    config.num_prefill_workers = 1;
+    config.num_decode_workers = 1;
+    let request = DirectRequest {
+        tokens: vec![1; 64],
+        max_output_tokens: 0,
+        uuid: Some(Uuid::from_u128(90_010)),
+        arrival_timestamp_ms: Some(0.0),
+        ..Default::default()
+    };
+    let mut runtime =
+        HandoffDisaggRuntime::new_handoff_conformance(&config, VecDeque::from([request])).unwrap();
+
+    runtime.run_to_completion().unwrap();
+
+    assert_eq!(
+        runtime
+            .flow
+            .conformance_capture
+            .as_ref()
+            .unwrap()
+            .source_output_tokens,
+        0
+    );
+    let report = std::mem::take(&mut runtime.collector).finish();
+    assert_eq!(report.request_counts.completed_requests, 1);
+    assert_eq!(report.request_counts.total_output_tokens, 0);
 }
 
 fn multiturn_trace() -> Trace {

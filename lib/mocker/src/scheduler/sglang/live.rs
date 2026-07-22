@@ -11,8 +11,8 @@ use crate::common::protocols::{
 };
 use crate::scheduler::{
     AdmissionEvent, LiveBoundaryCore, LivePassExecution, LiveSchedulerState, MockerMetrics,
-    SchedulerCommand, SchedulerCommandEffects, SchedulerCommandEnvelope, SchedulerHandle,
-    SchedulerLifecycleEvent, spawn_live_scheduler,
+    SchedulerCancellationEnvelope, SchedulerCommand, SchedulerCommandEffects,
+    SchedulerCommandEnvelope, SchedulerHandle, SchedulerLifecycleEvent, spawn_live_scheduler,
 };
 
 use super::core::SglangCore;
@@ -100,6 +100,10 @@ impl SchedulerHandle for SglangScheduler {
 
     fn command_sender(&self) -> mpsc::Sender<SchedulerCommandEnvelope> {
         self.inner.command_sender()
+    }
+
+    fn cancellation_sender(&self) -> mpsc::Sender<SchedulerCancellationEnvelope> {
+        self.inner.cancellation_sender()
     }
 
     fn take_lifecycle_receiver(&mut self) -> Option<mpsc::Receiver<SchedulerLifecycleEvent>> {
