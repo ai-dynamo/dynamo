@@ -96,4 +96,4 @@ If you author your own worker with the Dynamo SDK, the `graceful_shutdown` param
 - [Graceful Shutdown Architecture](../design-docs/graceful-shutdown.md) - Signal handling, drain sequence, and resource cleanup internals
 - [Request Migration](request-migration.md) - How interrupted requests migrate to healthy workers
 - [Request Cancellation Architecture](../design-docs/request-cancellation.md) - Canceling in-flight requests
-- [Health Checks](../observability/health-checks.mdx) - Liveness and readiness probes
+- [Health Check Reference](../reference/observability/health-checks.mdx) - Liveness and readiness endpoints

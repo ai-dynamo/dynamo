@@ -15,7 +15,7 @@ For LMCache setup and its separate metrics endpoint, see
 
 For Dynamo runtime metrics, see the [Metrics Catalog](../../reference/observability/metrics-catalog.mdx).
 
-For a visualization walkthrough, see [Metrics and Dashboards](../../observability/metrics.mdx).
+For a visualization walkthrough, see [Metrics and Dashboards](../../observability/local-observability.mdx#view-metrics-and-dashboards).
 
 ## Environment Variables and Flags
 
@@ -138,7 +138,7 @@ Troubleshooting LMCache-related metrics and logs is documented in:
 
 ### Dynamo Metrics
 - [Metrics Catalog](../../reference/observability/metrics-catalog.mdx) - Dynamo runtime metric definitions
-- [Metrics and Dashboards](../../observability/metrics.mdx) - Visualization walkthrough
+- [Metrics and Dashboards](../../observability/local-observability.mdx#view-metrics-and-dashboards) - Visualization walkthrough
 - Dynamo runtime metrics (prefixed with `dynamo_*`) are available at the same `/metrics` endpoint alongside vLLM metrics
   - Implementation: `lib/runtime/src/metrics.rs` (Rust runtime metrics)
   - Metric names: `lib/runtime/src/metrics/prometheus_names.rs` (metric name constants)

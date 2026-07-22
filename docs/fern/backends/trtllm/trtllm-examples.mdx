@@ -24,60 +24,149 @@ the command. Set the environment variables defined at the top of a script to ove
 Starts the frontend and one TensorRT-LLM worker that handles both prefill and decode. Use it as the
 baseline local text-generation deployment.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYNAMO_HOME` | `/workspace` | Dynamo checkout or container workspace used to resolve configuration files. |
+| `MODEL_PATH` | `Qwen/Qwen3-0.6B` | Model identifier or local model path passed to TensorRT-LLM. |
+| `SERVED_MODEL_NAME` | `Qwen/Qwen3-0.6B` | Model name registered with and accepted by the frontend. |
+| `AGG_ENGINE_ARGS` | `$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3/agg.yaml` | TensorRT-LLM engine configuration for the aggregated worker. |
+| `MODALITY` | `text` | Input modality registered by the worker. |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | `http://localhost:4317` | OpenTelemetry Protocol endpoint that receives traces. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+
+**Command-line flags:** `--enable-otel` enables OpenTelemetry tracing; `--unified` uses the unified
+backend entry point.
+
+**Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
+
 ```bash
 ./launch/agg.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/agg.sh)
 </Accordion>
 <Accordion title="Worker Metrics">
 
 Runs the baseline topology with the worker metrics configuration enabled. Use it to inspect
 TensorRT-LLM and Dynamo metrics during local testing.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYNAMO_HOME` | `/workspace` | Dynamo checkout or container workspace used to resolve configuration files. |
+| `MODEL_PATH` | `Qwen/Qwen3-0.6B` | Model identifier or local model path passed to TensorRT-LLM. |
+| `SERVED_MODEL_NAME` | `Qwen/Qwen3-0.6B` | Model name registered with and accepted by the frontend. |
+| `AGG_ENGINE_ARGS` | `$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3/agg.yaml` | TensorRT-LLM engine configuration for the aggregated worker. |
+| `MODALITY` | `text` | Input modality registered by the worker. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
+
 ```bash
 ./launch/agg_metrics.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/agg_metrics.sh)
 </Accordion>
 <Accordion title="Image and Text Inputs">
 
 Starts one multimodal TensorRT-LLM worker for requests that combine media and text. Override the
 model and engine settings through the environment variables defined by the script.
 
+The default model is `Qwen/Qwen2-VL-7B-Instruct`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYNAMO_HOME` | `/workspace` | Dynamo checkout or container workspace used to resolve configuration files. |
+| `MODEL_PATH` | `Qwen/Qwen2-VL-7B-Instruct` | Model identifier or local model path passed to TensorRT-LLM. |
+| `SERVED_MODEL_NAME` | `Qwen/Qwen2-VL-7B-Instruct` | Model name registered with and accepted by the frontend. |
+| `AGG_ENGINE_ARGS` | `$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen2-vl-7b-instruct/agg.yaml` | TensorRT-LLM engine configuration for the aggregated worker. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+
 ```bash
 ./launch/agg_multimodal.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/agg_multimodal.sh)
 </Accordion>
 <Accordion title="Cache-Aware Multimodal Routing">
 
 Places a multimodal router worker between the frontend and TensorRT-LLM. The router computes media
 hashes and uses cache overlap to select a backend worker.
 
+The default model is `Qwen/Qwen3-VL-2B-Instruct`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYNAMO_HOME` | `/workspace` | Dynamo checkout or container workspace used to resolve configuration files. |
+| `MODEL_PATH` | `Qwen/Qwen3-VL-2B-Instruct` | Model identifier or local model path passed to TensorRT-LLM. |
+| `SERVED_MODEL_NAME` | `Qwen/Qwen3-VL-2B-Instruct` | Model name registered with and accepted by the frontend. |
+| `AGG_ENGINE_ARGS` | `$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/agg.yaml` | TensorRT-LLM engine configuration for the aggregated worker. |
+| `MODEL_TYPE` | `qwen3_vl` | TensorRT-LLM multimodal model type used by the router worker. |
+| `BLOCK_SIZE` | `32` | KV-cache block size; it must match the backend block size for KV routing. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+
 ```bash
 ./launch/agg_multimodal_router.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/agg_multimodal_router.sh)
 </Accordion>
 <Accordion title="KV-Aware Load Balancing">
 
 Starts workers behind the KV router and publishes cache events for prefix-aware request placement.
 Use it to test cache reuse across replicated workers.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYNAMO_HOME` | `/workspace` | Dynamo checkout or container workspace used to resolve configuration files. |
+| `MODEL_PATH` | `Qwen/Qwen3-0.6B` | Model identifier or local model path passed to TensorRT-LLM. |
+| `SERVED_MODEL_NAME` | `Qwen/Qwen3-0.6B` | Model name registered with and accepted by the frontend. |
+| `AGG_ENGINE_ARGS` | `$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3/agg.yaml` | TensorRT-LLM engine configuration for the aggregated worker. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+
 ```bash
 ./launch/agg_router.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/agg_router.sh)
 </Accordion>
 <Accordion title="KV Routing Without Cache Events">
 
 Runs the KV router in approximate mode, which predicts cache placement without consuming backend KV
 events. Use it when the workers cannot publish cache events.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYNAMO_HOME` | `/workspace` | Dynamo checkout or container workspace used to resolve configuration files. |
+| `MODEL_PATH` | `Qwen/Qwen3-0.6B` | Model identifier or local model path passed to TensorRT-LLM. |
+| `SERVED_MODEL_NAME` | `Qwen/Qwen3-0.6B` | Model name registered with and accepted by the frontend. |
+| `AGG_ENGINE_ARGS` | `$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3/agg.yaml` | TensorRT-LLM engine configuration for the aggregated worker. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+
 ```bash
 ./launch/agg_router_approx.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/agg_router_approx.sh)
 </Accordion>
 </AccordionGroup>
 
@@ -89,40 +178,116 @@ events. Use it when the workers cannot publish cache events.
 Runs prefill and decode in separate TensorRT-LLM workers and transfers KV cache between them. Use it
 to tune or scale the two inference stages independently.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYNAMO_HOME` | `/workspace` | Dynamo checkout or container workspace used to resolve configuration files. |
+| `MODEL_PATH` | `Qwen/Qwen3-0.6B` | Model identifier or local model path passed to TensorRT-LLM. |
+| `SERVED_MODEL_NAME` | `Qwen/Qwen3-0.6B` | Model name registered with and accepted by the frontend. |
+| `PREFILL_ENGINE_ARGS` | `$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3/prefill.yaml` | TensorRT-LLM engine configuration for the prefill worker. |
+| `DECODE_ENGINE_ARGS` | `$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3/decode.yaml` | TensorRT-LLM engine configuration for the decode worker. |
+| `PREFILL_CUDA_VISIBLE_DEVICES` | `0` | GPU devices assigned to the prefill worker. |
+| `DECODE_CUDA_VISIBLE_DEVICES` | `1` | GPU devices assigned to the decode worker. |
+| `MODALITY` | `text` | Input modality registered by the worker. |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | `http://localhost:4317` | OpenTelemetry Protocol endpoint that receives traces. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT1` | `8081` | System and metrics port for the first worker. |
+| `DYN_SYSTEM_PORT2` | `8082` | System and metrics port for the second worker. |
+
+**Command-line flags:** `--unified` uses the unified backend entry point; `--enable-otel` enables
+OpenTelemetry tracing.
+
 ```bash
 ./launch/disagg.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/disagg.sh)
 </Accordion>
 <Accordion title="Cache-Aware Prefill Routing">
 
 Adds KV-aware placement to the disaggregated topology. Requests with reusable prefixes are routed to
 the prefill worker that is most likely to hold the matching cache blocks.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYNAMO_HOME` | `/workspace` | Dynamo checkout or container workspace used to resolve configuration files. |
+| `MODEL_PATH` | `Qwen/Qwen3-0.6B` | Model identifier or local model path passed to TensorRT-LLM. |
+| `SERVED_MODEL_NAME` | `Qwen/Qwen3-0.6B` | Model name registered with and accepted by the frontend. |
+| `PREFILL_ENGINE_ARGS` | `$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3/prefill.yaml` | TensorRT-LLM engine configuration for the prefill worker. |
+| `DECODE_ENGINE_ARGS` | `$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3/decode.yaml` | TensorRT-LLM engine configuration for the decode worker. |
+| `PREFILL_CUDA_VISIBLE_DEVICES` | `0` | GPU devices assigned to the prefill worker. |
+| `DECODE_CUDA_VISIBLE_DEVICES` | `1` | GPU devices assigned to the decode worker. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+
 ```bash
 ./launch/disagg_router.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/disagg_router.sh)
 </Accordion>
 <Accordion title="Prefill and Decode on One GPU">
 
 Runs separate prefill and decode processes on one GPU with explicit KV-token limits. Use it for
 functional testing of disaggregation on a single-GPU host.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `MAX_SEQ_LEN` | `4096` | Maximum sequence length configured for TensorRT-LLM. |
+| `MAX_CONCURRENT_SEQS` | `2` | Maximum number of sequences scheduled concurrently. |
+| `MAX_TOTAL_TOKENS` | `25000` | TensorRT-LLM KV-cache token capacity per worker. |
+| `DYNAMO_HOME` | `/workspace` | Dynamo checkout or container workspace used to resolve configuration files. |
+| `PREFILL_ENGINE_ARGS` | `$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3/prefill.yaml` | TensorRT-LLM engine configuration for the prefill worker. |
+| `DECODE_ENGINE_ARGS` | `$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3/decode.yaml` | TensorRT-LLM engine configuration for the decode worker. |
+| `CUDA_VISIBLE_DEVICES` | `0` | GPU devices visible to the launched worker processes. |
+| `MODALITY` | `text` | Input modality registered by the worker. |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | `http://localhost:4317` | OpenTelemetry Protocol endpoint that receives traces. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT1` | `8081` | System and metrics port for the first worker. |
+| `DYN_SYSTEM_PORT2` | `8082` | System and metrics port for the second worker. |
+
+**Command-line flags:** `--enable-otel` enables OpenTelemetry tracing.
+
 ```bash
 ./launch/disagg_same_gpu.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/disagg_same_gpu.sh)
 </Accordion>
 <Accordion title="GPT-OSS on Multiple GPUs">
 
 Launches GPT-OSS 120B with one four-GPU prefill worker and one four-GPU decode worker. The complete
 topology requires eight GPUs.
 
+The local model path defaults to `/model`, and the served model name defaults to
+`openai/gpt-oss-120b`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYNAMO_HOME` | `/workspace` | Dynamo checkout or container workspace used to resolve configuration files. |
+| `MODEL_PATH` | `/model` | Model identifier or local model path passed to TensorRT-LLM. |
+| `SERVED_MODEL_NAME` | `openai/gpt-oss-120b` | Model name registered with and accepted by the frontend. |
+| `PREFILL_ENGINE_ARGS` | `$DYNAMO_HOME/examples/backends/trtllm/engine_configs/gpt-oss-120b/prefill.yaml` | TensorRT-LLM engine configuration for the prefill worker. |
+| `DECODE_ENGINE_ARGS` | `$DYNAMO_HOME/examples/backends/trtllm/engine_configs/gpt-oss-120b/decode.yaml` | TensorRT-LLM engine configuration for the decode worker. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+
 ```bash
 ./launch/gpt_oss_disagg.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/gpt_oss_disagg.sh)
 </Accordion>
 </AccordionGroup>
 
@@ -136,20 +301,50 @@ topology requires eight GPUs.
 Starts an image-diffusion worker with FLUX as the default model. The default configuration uses one
 GPU.
 
+The default model is `black-forest-labs/FLUX.2-klein-4B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYNAMO_HOME` | `/workspace` | Dynamo checkout or container workspace used to resolve configuration files. |
+| `MODEL_PATH` | `black-forest-labs/FLUX.2-klein-4B` | Model identifier or local model path passed to TensorRT-LLM. |
+| `SERVED_MODEL_NAME` | `black-forest-labs/FLUX.2-klein-4B` | Model name registered with and accepted by the frontend. |
+| `MEDIA_OUTPUT_FS_URL` | `file:///tmp/dynamo_media` | Object-store URL where generated media is written. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+
+**Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
+
 ```bash
 ./launch/agg_image_diffusion.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/agg_image_diffusion.sh)
 </Accordion>
 <Accordion title="Text-to-Video Generation">
 
 Starts a video-diffusion worker with a Wan model as the default. The default configuration uses one
 GPU.
 
+The default model is `Wan-AI/Wan2.1-T2V-1.3B-Diffusers`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYNAMO_HOME` | `/workspace` | Dynamo checkout or container workspace used to resolve configuration files. |
+| `MODEL_PATH` | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` | Model identifier or local model path passed to TensorRT-LLM. |
+| `SERVED_MODEL_NAME` | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` | Model name registered with and accepted by the frontend. |
+| `MEDIA_OUTPUT_FS_URL` | `file:///tmp/dynamo_media` | Object-store URL where generated media is written. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+
+**Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
+
 ```bash
 ./launch/agg_video_diffusion.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/agg_video_diffusion.sh)
 </Accordion>
 </AccordionGroup>
 
@@ -161,40 +356,121 @@ GPU.
 Runs a vision encoder separately from a worker that performs both prefill and decode. The default
 Qwen vision-language configuration co-locates both workers on one GPU.
 
+The default model is `Qwen/Qwen3-VL-2B-Instruct`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYNAMO_HOME` | `/workspace` | Dynamo checkout or container workspace used to resolve configuration files. |
+| `MODEL_PATH` | `Qwen/Qwen3-VL-2B-Instruct` | Model identifier or local model path passed to TensorRT-LLM. |
+| `SERVED_MODEL_NAME` | `Qwen/Qwen3-VL-2B-Instruct` | Model name registered with and accepted by the frontend. |
+| `ENCODE_ENGINE_ARGS` | `$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/encode.yaml` | TensorRT-LLM engine configuration for the encode worker. |
+| `PD_ENGINE_ARGS` | `$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/agg.yaml` | TensorRT-LLM engine configuration for the combined prefill/decode worker. |
+| `ENCODE_CUDA_VISIBLE_DEVICES` | `0` | GPU devices assigned to the encode worker. |
+| `ENCODE_ENDPOINT` | `dyn://dynamo.encode.generate` | Dynamo endpoint used to send work to the encode worker. |
+| `ALLOWED_LOCAL_MEDIA_PATH` | `/tmp` | Local directory from which multimodal requests may load media. |
+| `MAX_FILE_SIZE_MB` | `50` | Maximum accepted local media file size, in MiB. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT1` | `8081` | System and metrics port for the first worker. |
+| `DYN_SYSTEM_PORT2` | `8082` | System and metrics port for the second worker. |
+
 ```bash
 ./launch/disagg_e_pd.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/disagg_e_pd.sh)
 </Accordion>
 <Accordion title="Multimodal Prefill and Decode">
 
 Splits multimodal inference across prefill and decode workers while applying the script's KV-cache
 settings to both stages. Use it to test multimodal KV transfer.
 
+The default model is `Qwen/Qwen3-VL-2B-Instruct`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYNAMO_HOME` | `/workspace` | Dynamo checkout or container workspace used to resolve configuration files. |
+| `MODEL_PATH` | `Qwen/Qwen3-VL-2B-Instruct` | Model identifier or local model path passed to TensorRT-LLM. |
+| `SERVED_MODEL_NAME` | `Qwen3-VL-2B-Instruct` | Model name registered with and accepted by the frontend. |
+| `PREFILL_ENGINE_ARGS` | `$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/prefill.yaml` | TensorRT-LLM engine configuration for the prefill worker. |
+| `DECODE_ENGINE_ARGS` | `$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/decode.yaml` | TensorRT-LLM engine configuration for the decode worker. |
+| `PREFILL_CUDA_VISIBLE_DEVICES` | `0` | GPU devices assigned to the prefill worker. |
+| `DECODE_CUDA_VISIBLE_DEVICES` | `1` | GPU devices assigned to the decode worker. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+
 ```bash
 ./launch/disagg_multimodal.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/disagg_multimodal.sh)
 </Accordion>
 <Accordion title="Separate Encode, Prefill, and Decode Workers">
 
 Runs each multimodal stage in its own worker so encoding, prefill, and decode can be placed and
 tuned independently.
 
+The default model is `meta-llama/Llama-4-Scout-17B-16E-Instruct`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYNAMO_HOME` | `/workspace` | Dynamo checkout or container workspace used to resolve configuration files. |
+| `MODEL_PATH` | `meta-llama/Llama-4-Scout-17B-16E-Instruct` | Model identifier or local model path passed to TensorRT-LLM. |
+| `SERVED_MODEL_NAME` | `meta-llama/Llama-4-Scout-17B-16E-Instruct` | Model name registered with and accepted by the frontend. |
+| `PREFILL_ENGINE_ARGS` | `$DYNAMO_HOME/examples/backends/trtllm/engine_configs/llama4/multimodal/llama4-Scout/prefill.yaml` | TensorRT-LLM engine configuration for the prefill worker. |
+| `DECODE_ENGINE_ARGS` | `$DYNAMO_HOME/examples/backends/trtllm/engine_configs/llama4/multimodal/llama4-Scout/decode.yaml` | TensorRT-LLM engine configuration for the decode worker. |
+| `ENCODE_ENGINE_ARGS` | `$DYNAMO_HOME/examples/backends/trtllm/engine_configs/llama4/multimodal/llama4-Scout/encode.yaml` | TensorRT-LLM engine configuration for the encode worker. |
+| `PREFILL_CUDA_VISIBLE_DEVICES` | `0,1,2,3` | GPU devices assigned to the prefill worker. |
+| `DECODE_CUDA_VISIBLE_DEVICES` | `4,5,6,7` | GPU devices assigned to the decode worker. |
+| `ENCODE_CUDA_VISIBLE_DEVICES` | `0` | GPU devices assigned to the encode worker. |
+| `ENCODE_ENDPOINT` | `dyn://dynamo.encode.generate` | Dynamo endpoint used to send work to the encode worker. |
+| `ALLOWED_LOCAL_MEDIA_PATH` | `/tmp` | Local directory from which multimodal requests may load media. |
+| `MAX_FILE_SIZE_MB` | `50` | Maximum accepted local media file size, in MiB. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+
 ```bash
 ./launch/epd_disagg.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/epd_disagg.sh)
 </Accordion>
 <Accordion title="Image Inputs with Multimodal Embedding Transfer">
 
 Runs the encode-prefill-decode pipeline with the multimodal image and embedding-transfer path
 enabled. Use it to test transferring prepared media features between workers.
 
+The default model is `Qwen/Qwen3-VL-2B-Instruct`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYNAMO_HOME` | `/workspace` | Dynamo checkout or container workspace used to resolve configuration files. |
+| `MODEL_PATH` | `Qwen/Qwen3-VL-2B-Instruct` | Model identifier or local model path passed to TensorRT-LLM. |
+| `SERVED_MODEL_NAME` | `Qwen/Qwen3-VL-2B-Instruct` | Model name registered with and accepted by the frontend. |
+| `PREFILL_ENGINE_ARGS` | `$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/prefill.yaml` | TensorRT-LLM engine configuration for the prefill worker. |
+| `DECODE_ENGINE_ARGS` | `$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/decode.yaml` | TensorRT-LLM engine configuration for the decode worker. |
+| `ENCODE_ENGINE_ARGS` | `$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/encode.yaml` | TensorRT-LLM engine configuration for the encode worker. |
+| `PREFILL_CUDA_VISIBLE_DEVICES` | `0` | GPU devices assigned to the prefill worker. |
+| `DECODE_CUDA_VISIBLE_DEVICES` | `0` | GPU devices assigned to the decode worker. |
+| `ENCODE_CUDA_VISIBLE_DEVICES` | `0` | GPU devices assigned to the encode worker. |
+| `ENCODE_ENDPOINT` | `dyn://dynamo.encode.generate` | Dynamo endpoint used to send work to the encode worker. |
+| `ALLOWED_LOCAL_MEDIA_PATH` | `/tmp` | Local directory from which multimodal requests may load media. |
+| `MAX_FILE_SIZE_MB` | `50` | Maximum accepted local media file size, in MiB. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT1` | `8081` | System and metrics port for the first worker. |
+| `DYN_SYSTEM_PORT2` | `8082` | System and metrics port for the second worker. |
+| `DYN_SYSTEM_PORT3` | `8083` | System and metrics port for the third worker. |
+
 ```bash
 ./launch/epd_multimodal_image_and_embeddings.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/epd_multimodal_image_and_embeddings.sh)
 </Accordion>
 </AccordionGroup>
 

@@ -98,7 +98,7 @@ Each worker type has a specialized health check payload that validates the full 
 | Prefill | Same payload structure as decode, adapted for prefill request format |
 | vLLM-Omni | Short generation request via AsyncOmni with the model's BOS token |
 
-Health checks are registered with the Dynamo runtime and called by the frontend or Kubernetes liveness probes. The payload can be overridden via `DYN_HEALTH_CHECK_PAYLOAD` environment variable. See [Health Checks](../../observability/health-checks.mdx) for the broader health check architecture.
+Health checks are registered with the Dynamo runtime and called by the frontend or Kubernetes liveness probes. The payload can be overridden via `DYN_HEALTH_CHECK_PAYLOAD` environment variable. See [Observability Architecture](../../design-docs/observability.md#active-worker-health-checks) for the active health-check design.
 
 ## Request Cancellation
 

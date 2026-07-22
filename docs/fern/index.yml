@@ -68,7 +68,6 @@ navigation:
       # Kubernetes Guide tab used skip-slug: true).
       - title: Kubernetes
         icon: fa-brands fa-kubernetes
-        skip-slug: true
         layout:
           # ==================== Getting Started ====================
           - section: Getting Started
@@ -235,14 +234,10 @@ navigation:
             icon: screwdriver-wrench
             collapsed: open-by-default
             contents:
-              - page: Metrics and Dashboards
-                path: observability/metrics.mdx
+              - page: Observability
+                path: observability/local-observability.mdx
               - page: Health Checks
                 path: observability/health-checks.mdx
-              - page: Tracing
-                path: observability/tracing.mdx
-              - page: Logging
-                path: observability/logging.mdx
 
   - tab: use-cases
     layout:
@@ -618,6 +613,8 @@ navigation:
                 path: design-docs/vllm-omni-disaggregated.md
               - page: Distributed Runtime
                 path: design-docs/distributed-runtime.md
+              - page: Observability Architecture
+                path: design-docs/observability.md
               - page: Mocker Engine Architecture
                 path: design-docs/mocker-architecture.md
               - section: Communication Planes
@@ -794,6 +791,10 @@ navigation:
         contents:
           - page: Local Stack
             path: reference/observability/local-stack.mdx
+          - page: Health Checks
+            path: reference/observability/health-checks.mdx
+          - page: Logging
+            path: reference/observability/logging.mdx
           - page: Environment Variables
             path: reference/observability/environment-variables.mdx
           - page: Metrics Catalog
@@ -918,4 +919,3 @@ navigation:
                 path: templates/infrastructure-readme.md
               - page: Integration README
                 path: templates/integration-readme.md
-  

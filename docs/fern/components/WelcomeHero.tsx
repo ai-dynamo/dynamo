@@ -13,19 +13,19 @@
 import { useEffect, useState } from "react";
 import { TerminalDemo } from "./TerminalDemo";
 
-const DESCRIPTORS = [
-  "open source.",
-  "Kubernetes-native.",
-  "modular by design.",
-  "built for distributed inference.",
+const STATEMENTS = [
+  "works with vLLM, SGLang, and TensorRT-LLM.",
+  "supports NVIDIA and AMD GPUs, and Intel XPUs.",
+  "runs on Kubernetes, Slurm, or locally.",
+  "scales one component or the full stack.",
 ];
 
 const CALENDAR_URL =
   "https://calendar.google.com/calendar/u/0/r?cid=Y19jMjQ0OGQyZWZiMDllYWMyZGRlZTFmMzQ1MjQxMjQxMzViZDNmNDU1NDg2ODc2OTA1OTEwNWUxOGUxYjk3ZThmQGdyb3VwLmNhbGVuZGFyLmdvb2dsZS5jb20";
 
 function RotatingStatement() {
-  const [descriptorIndex, setDescriptorIndex] = useState(0);
-  const [displayed, setDisplayed] = useState(DESCRIPTORS[0]);
+  const [statementIndex, setStatementIndex] = useState(0);
+  const [displayed, setDisplayed] = useState(STATEMENTS[0]);
   const [deleting, setDeleting] = useState(false);
   const [reduceMotion, setReduceMotion] = useState(false);
 
@@ -39,60 +39,53 @@ function RotatingStatement() {
 
   useEffect(() => {
     if (reduceMotion) {
-      setDescriptorIndex(0);
-      setDisplayed(DESCRIPTORS[0]);
+      setStatementIndex(0);
+      setDisplayed(STATEMENTS[0]);
       setDeleting(false);
       return;
     }
 
-    const descriptor = DESCRIPTORS[descriptorIndex];
+    const statement = STATEMENTS[statementIndex];
     let delay = deleting ? 34 : 62;
     let next = displayed;
     let nextDeleting = deleting;
-    let nextIndex = descriptorIndex;
+    let nextIndex = statementIndex;
 
-    if (!deleting && displayed === descriptor) {
+    if (!deleting && displayed === statement) {
       delay = 1800;
       nextDeleting = true;
     } else if (deleting && displayed.length === 0) {
       delay = 260;
       nextDeleting = false;
-      nextIndex = (descriptorIndex + 1) % DESCRIPTORS.length;
+      nextIndex = (statementIndex + 1) % STATEMENTS.length;
     } else if (deleting) {
-      next = descriptor.slice(0, Math.max(0, displayed.length - 1));
+      next = statement.slice(0, Math.max(0, displayed.length - 1));
     } else {
-      next = descriptor.slice(0, displayed.length + 1);
+      next = statement.slice(0, displayed.length + 1);
     }
 
     const timer = window.setTimeout(() => {
       setDisplayed(next);
       setDeleting(nextDeleting);
-      setDescriptorIndex(nextIndex);
+      setStatementIndex(nextIndex);
     }, delay);
 
     return () => window.clearTimeout(timer);
-  }, [deleting, descriptorIndex, displayed, reduceMotion]);
+  }, [deleting, displayed, reduceMotion, statementIndex]);
 
   return (
     <div className="dynamo-welcome__statement">
       <p aria-hidden="true">
-        <span>Dynamo is </span>
+        <span>Dynamo </span>
         <span className="dynamo-welcome__typed">{displayed}</span>
         <span className="dynamo-welcome__cursor" />
       </p>
       <p className="dynamo-welcome__sr-only">
-        Dynamo is open source, Kubernetes-native, modular by design, and built
-        for distributed inference.
+        Dynamo works with vLLM, SGLang, and TensorRT-LLM; supports NVIDIA and
+        AMD GPUs and Intel XPUs; runs on Kubernetes, Slurm, or locally; and
+        scales one component or the full stack.
       </p>
     </div>
-  );
-}
-
-function GitHubIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.87c-2.78.6-3.37-1.18-3.37-1.18-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.9 1.53 2.35 1.09 2.92.83.09-.65.35-1.09.64-1.34-2.22-.25-4.55-1.11-4.55-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.64 0 0 .84-.27 2.75 1.02A9.58 9.58 0 0 1 12 6.82a9.6 9.6 0 0 1 2.5.34c1.9-1.29 2.74-1.02 2.74-1.02.55 1.37.2 2.39.1 2.64.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.68-4.57 4.93.36.31.68.92.68 1.86V21c0 .27.18.58.69.48A10 10 0 0 0 12 2Z" />
-    </svg>
   );
 }
 
@@ -115,12 +108,7 @@ function CalendarIcon() {
 function CommunityRail() {
   const links = [
     {
-      label: "GitHub",
-      href: "https://github.com/ai-dynamo/dynamo",
-      icon: <GitHubIcon />,
-    },
-    {
-      label: "Community Slack",
+      label: "Join community Slack",
       href: "https://communityinviter.com/apps/cloud-native/cncf",
       icon: <ChatIcon />,
     },
@@ -137,13 +125,7 @@ function CommunityRail() {
       aria-label="Dynamo community links"
     >
       {links.map(({ label, href, icon }) => (
-        <a
-          key={label}
-          href={href}
-          target="_blank"
-          rel="noopener noreferrer"
-          aria-label={label}
-        >
+        <a key={label} href={href} target="_blank" rel="noopener noreferrer">
           {icon}
           <span>{label}</span>
         </a>

@@ -489,5 +489,5 @@ watch 'curl -s localhost:8000/metrics | grep -E "(migration|rejection)"'
 
 - [Request Migration](request-migration.md) - Migration implementation details
 - [Request Cancellation](request-cancellation.md) - Cancellation implementation
-- [Health Checks](../observability/health-checks.mdx) - Health monitoring
+- [Health Check Reference](../reference/observability/health-checks.mdx) - Health monitoring
 - [Metrics Catalog](../reference/observability/metrics-catalog.mdx) - Available metrics for monitoring

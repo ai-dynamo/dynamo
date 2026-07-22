@@ -8,7 +8,7 @@ subtitle: Understand the operator's default liveness, readiness, and startup pro
 
 The Dynamo operator attaches sensible health probes to every component, so most deployments need no probe configuration at all. Override them when a large model needs a longer startup window, or when your engine exposes health differently. This page covers the defaults and how to override them in a DynamoGraphDeployment (DGD).
 
-This is a [how-to](dgd-guide.md) for an existing deployment. For the health endpoints themselves and local-process health signals, see [Health Checks](../observability/health-checks.mdx).
+This is a [how-to](dgd-guide.md) for an existing deployment. For the health endpoints themselves and local-process health signals, see [Health Check Reference](../reference/observability/health-checks.mdx).
 
 ## What the operator sets by default
 
@@ -68,6 +68,6 @@ For multinode deployments the operator adjusts probes by backend and node role �
 
 ## Related pages
 
-- [Health Checks](../observability/health-checks.mdx) — health endpoints and local-process signals.
+- [Health Check Reference](../reference/observability/health-checks.mdx) — health endpoints and local-process signals.
 - [API Reference](api-reference.md) — full probe defaults per component type.
 - [Model Caching](model-caching.md) — remove startup download time instead of extending probes.

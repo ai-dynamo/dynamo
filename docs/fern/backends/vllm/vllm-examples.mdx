@@ -25,25 +25,72 @@ variables to override defaults.
 Starts the frontend and one vLLM worker that handles both prefill and decode. The default
 configuration uses one GPU and is the baseline local text-generation deployment.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `MAX_MODEL_LEN` | `4096` | Maximum model context length. |
+| `MAX_CONCURRENT_SEQS` | `2` | Maximum number of sequences scheduled concurrently. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
+
+**Command-line flags:** `--model` sets the model identifier or path; `--unified` uses the unified
+backend entry point.
+
+**Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
+
 ```bash
 ./launch/agg.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg.sh)
 </Accordion>
 <Accordion title="Text Embeddings">
 
 Starts a vLLM pooling worker and exposes the OpenAI-compatible embeddings endpoint. Use it for
 vector search, retrieval, and other embedding workloads.
 
+The default model is `Qwen/Qwen3-Embedding-0.6B`. The script declares a GPU requirement of 1.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `MAX_MODEL_LEN` | `2048` | Maximum model context length. |
+| `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
+
+**Command-line flags:** `--model` sets the model identifier or path.
+
+**Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
+
 ```bash
 ./launch/agg_embed.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_embed.sh)
 </Accordion>
 <Accordion title="Embedding Load Balancing and Model Dispatch">
 
 Starts two embedding workers behind one frontend. Use identical model arguments to test load
 balancing, or different models to test model-name-based request dispatch.
+
+The script declares a GPU requirement of 2.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT1` | `${DYN_SYSTEM_PORT:-8081}` | System and metrics port for the first worker. |
+| `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
+| `DYN_SYSTEM_PORT2` | `8082` | System and metrics port for the second worker. |
+| `MAX_MODEL_LEN` | `2048` | Maximum model context length. |
+
+**Positional and pass-through arguments:** Supply two model names. Any remaining arguments are
+forwarded to both vLLM workers.
 
 ```bash
 ./launch/agg_embed_multiworker.sh \
@@ -51,112 +98,288 @@ balancing, or different models to test model-name-based request dispatch.
   Qwen/Qwen3-Embedding-0.6B
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_embed_multiworker.sh)
 </Accordion>
 <Accordion title="Image and Video Inputs">
 
 Serves a multimodal model with media preprocessing in the Dynamo frontend and one vLLM worker. Use
 it as the baseline image or video deployment.
 
+The default model is `Qwen/Qwen3-VL-30B-A3B-Instruct-FP8`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_MODEL_NAME` | `Qwen/Qwen3-VL-30B-A3B-Instruct-FP8` | Model identifier or local model path loaded by the worker. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `MAX_MODEL_LEN` | `4096` | Maximum model context length. |
+| `MAX_CONCURRENT_SEQS` | `2` | Maximum number of sequences scheduled concurrently. |
+| `CUDA_VISIBLE_DEVICES` | `0` | GPU devices visible to the launched worker processes. |
+| `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
+
+**Command-line flags:** `--model` sets the model identifier or path.
+
+**Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
+
 ```bash
 ./launch/agg_multimodal.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_multimodal.sh)
 </Accordion>
 <Accordion title="Cache-Aware Multimodal Routing">
 
 Expands media placeholders into routing tokens, hashes each media item, and routes requests by text
 and media cache overlap. This path uses the Rust multimodal router in the frontend.
 
+The default model is `Qwen/Qwen3-VL-2B-Instruct`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `MODEL` | `Qwen/Qwen3-VL-2B-Instruct` | Model identifier or local model path loaded by the worker. |
+| `NAMESPACE` | `mm-router` | Dynamo discovery namespace used by the frontend and workers. |
+| `HTTP_PORT` | `${DYN_HTTP_PORT:-8000}` | Port used by the corresponding service or worker. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `BLOCK_SIZE` | `16` | KV-cache block size; it must match the backend block size for KV routing. |
+| `GPU_MEMORY_UTILIZATION` | `0.20` | Fraction of GPU memory available to each backend worker. |
+| `MAX_MODEL_LEN` | `4096` | Maximum model context length. |
+| `NUM_WORKERS` | `2` | Number of backend workers launched by the script. |
+| `SINGLE_GPU` | `false` | When `true`, places all workers on GPU 0 for functional testing. |
+| `NATS_SERVER` | `nats://127.0.0.1:4222` | NATS server URL used for Dynamo discovery and messaging. |
+| `ETCD_ENDPOINTS` | `http://127.0.0.1:2379` | etcd endpoint used for Dynamo discovery state. |
+| `VLLM_SYSTEM_PORT_BASE` | `18081` | Starting system and metrics port for vLLM workers. |
+| `KV_EVENTS_PORT_BASE` | `5557` | Starting port for per-worker KV event publishers. |
+| `DYN_LOG` | `info,mm_routing=debug,dynamo_kv_router::scheduling=debug,dynamo_llm::kv_router=debug` | Dynamo log filter used by the launched processes. |
+| `VLLM_EXTRA_ARGS` | `Empty` | Additional arguments appended to each `dynamo.vllm` worker command. |
+
+**Command-line flags:** `--model` sets the model identifier or path; `--num-workers` sets the worker
+count; `--single-gpu` places workers on one accelerator.
+
+**Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
+
 ```bash
 ./launch/agg_multimodal_router.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_multimodal_router.sh)
 </Accordion>
 <Accordion title="Multimodal Routing with vLLM Preprocessing">
 
 Uses vLLM's Python chat processor in the frontend to expand media tokens and compute media hashes
-for KV routing. Choose this variant when you need vLLM preprocessing or pre-rendered multimodal
-transfer.
+for KV routing. The script launches the requested frontend and worker replicas, but requires NATS
+and etcd to be running before it starts.
+
+The default model is `Qwen/Qwen3-VL-2B-Instruct`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `MODEL` | `Qwen/Qwen3-VL-2B-Instruct` | Model identifier or local model path loaded by the worker. |
+| `NAMESPACE` | `dynamo` | Dynamo discovery namespace used by the frontend and workers. |
+| `HTTP_PORT` | `${DYN_HTTP_PORT:-8000}` | Port used by the corresponding service or worker. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `BLOCK_SIZE` | `16` | KV-cache block size; it must match the backend block size for KV routing. |
+| `GPU_MEMORY_UTILIZATION` | `0.40` | Fraction of GPU memory available to each backend worker. |
+| `MAX_MODEL_LEN` | `4096` | Maximum model context length. |
+| `NUM_WORKERS` | `2` | Number of backend workers launched by the script. |
+| `SINGLE_GPU` | `false` | When `true`, places all workers on GPU 0 for functional testing. |
+| `NUM_FRONTENDS` | `1` | Number of frontend replicas launched by the script. |
+| `NATS_SERVER` | `nats://127.0.0.1:4222` | NATS server URL used for Dynamo discovery and messaging. |
+| `ETCD_ENDPOINTS` | `http://127.0.0.1:2379` | etcd endpoint used for Dynamo discovery state. |
+| `VLLM_SYSTEM_PORT_BASE` | `18081` | Starting system and metrics port for vLLM workers. |
+| `KV_EVENTS_PORT_BASE` | `29080` | Starting port for per-worker KV event publishers. |
+| `DYN_MM_IMAGE_CACHE_SIZE` | `32` | Frontend multimodal image-cache capacity. |
+| `DYNAMO_MM_TRANSFER` | `shm` | Transport used to transfer preprocessed multimodal data. |
+| `VLLM_EXTRA_ARGS` | `Empty` | Additional arguments appended to each `dynamo.vllm` worker command. |
+| `FRONTEND_EXTRA_ARGS` | `Empty` | Additional arguments appended to each frontend command. |
+| `FRONTEND_SYSTEM_PORT_BASE` | `9080` | Starting system port for frontend replicas. |
+
+**Command-line flags:** `--model` sets the model identifier or path; `--num-workers` sets the worker
+count; `--single-gpu` places workers on one accelerator.
+
+**Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
 
 ```bash
 ./launch/agg_multimodal_router_chat_processor.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_multimodal_router_chat_processor.sh)
 </Accordion>
 <Accordion title="Request-Plane Transport Modes">
 
 Starts the baseline worker through the request-plane mode selected by the script flags. Use it to
 compare or validate the available frontend-to-worker transports.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `MAX_MODEL_LEN` | `4096` | Maximum model context length. |
+| `MAX_CONCURRENT_SEQS` | `2` | Maximum number of sequences scheduled concurrently. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
+
+**Command-line flags:** `--tcp` uses the TCP request plane (the default); `--nats` uses the NATS
+request plane.
+
 ```bash
 ./launch/agg_request_planes.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_request_planes.sh)
 </Accordion>
 <Accordion title="KV-Aware Load Balancing">
 
 Starts two workers behind the KV router and publishes cache events over ZeroMQ (ZMQ) for
 prefix-aware placement. The default topology uses two GPUs.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT1` | `8081` | System and metrics port for the first worker. |
+| `DYN_SYSTEM_PORT2` | `8082` | System and metrics port for the second worker. |
+
 ```bash
 ./launch/agg_router.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_router.sh)
 </Accordion>
 <Accordion title="KV Routing Without Cache Events">
 
 Runs the KV router in approximate mode, which predicts cache placement without consuming backend KV
 events. Use it when event publishing is unavailable.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT1` | `8081` | System and metrics port for the first worker. |
+| `DYN_SYSTEM_PORT2` | `8082` | System and metrics port for the second worker. |
+
 ```bash
 ./launch/agg_router_approx.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_router_approx.sh)
 </Accordion>
 <Accordion title="Replicated Frontends and Routers">
 
 Starts two frontend and KV-router replicas on separate ports while sharing routing state. Use it to
 exercise multiple ingress replicas against the same worker pool.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT_R1` | `8000` | HTTP port for the first frontend replica. |
+| `DYN_HTTP_PORT_R2` | `8001` | HTTP port for the second frontend replica. |
+| `DYN_SYSTEM_PORT_R1` | `8091` | System port for the first frontend or router replica. |
+| `DYN_SYSTEM_PORT_R2` | `8092` | System port for the second frontend or router replica. |
+| `DYN_SYSTEM_PORT1` | `8081` | System and metrics port for the first worker. |
+| `DYN_SYSTEM_PORT2` | `8082` | System and metrics port for the second worker. |
+
 ```bash
 ./launch/agg_router_replicas.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_router_replicas.sh)
 </Accordion>
 <Accordion title="Speculative Decoding with EAGLE">
 
-Runs a main model with an EAGLE draft model so accepted draft tokens can reduce decode latency. Use
-the model and draft settings in the script as the starting configuration.
+Runs `meta-llama/Meta-Llama-3.1-8B-Instruct` with the
+`yuhuili/EAGLE3-LLaMA3.1-Instruct-8B` draft model on one GPU. The worker uses the `eagle3` method and
+proposes two speculative tokens per step.
+
+The default model is `meta-llama/Meta-Llama-3.1-8B-Instruct`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
 
 ```bash
 ./launch/agg_spec_decoding.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_spec_decoding.sh)
 </Accordion>
 <Accordion title="OpenTelemetry Tracing">
 
 Enables tracing on the frontend and worker so requests appear in the local observability stack.
 Start the tracing stack before running this example.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | `http://localhost:4317` | OpenTelemetry Protocol endpoint that receives traces. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
+
+**Command-line flags:** `--model` sets the model identifier or path.
+
+**Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
+
 ```bash
 ./launch/agg_tracing.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_tracing.sh)
 </Accordion>
 <Accordion title="Data-Parallel Attention and Expert Parallelism">
 
 Starts multiple data-parallel workers for a Mixture-of-Experts model and lets Dynamo route among the
 data-parallel ranks. The default Qwen configuration uses four GPUs.
 
+The default model is `Qwen/Qwen3-30B-A3B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+
 ```bash
 ./launch/dep.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/dep.sh)
 </Accordion>
 <Accordion title="Multi-Node DeepSeek-R1 Expert Parallelism">
 
 Runs DeepSeek-R1 with data-parallel attention and expert parallelism across multiple nodes. Each
 node starts its assigned data-parallel ranks and joins the same distributed worker group.
+
+The default model is `deepseek-ai/DeepSeek-R1`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+
+**Command-line flags:** `--num-nodes` sets the total node count; `--node-rank` sets this node’s
+rank; `--gpus-per-node` sets the GPU count on each node; `--master-addr` sets the distributed
+rendezvous address; `--log-dir` sets the log directory; `--model` sets the model identifier or path.
 
 Replace `192.0.2.10` with the head node's reachable IP address. Run on the head node:
 
@@ -178,11 +401,26 @@ Run on the second node:
   --master-addr 192.0.2.10
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/dsr1_dep.sh)
 </Accordion>
 <Accordion title="Tensor Parallelism Across Nodes">
 
 Runs one tensor-parallel vLLM worker across a head node and a worker node using vLLM
 multiprocessing. Use it when the tensor-parallel size exceeds the GPUs available on one host.
+
+The default model is `meta-llama/Llama-3.1-8B-Instruct`. The script requires eight GPUs on each of
+two nodes, with NATS and etcd reachable from the head node.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `MODEL` | `meta-llama/Llama-3.1-8B-Instruct` | Model identifier or local model path loaded by the worker. |
+| `TENSOR_PARALLEL_SIZE` | `16` | Tensor-parallel degree used by the backend. |
+| `NNODES` | `2` | Number of nodes participating in the tensor-parallel deployment. |
+
+**Command-line flags:** `--head` starts the head-node process; `--worker` starts a worker-node
+process; `--head-ip` sets the reachable head-node IP address.
 
 Replace `192.0.2.10` with the head node's reachable IP address. Run on the head node:
 
@@ -196,6 +434,7 @@ Run the worker command on the second node:
 ./launch/multi_node_tp.sh --worker --head-ip 192.0.2.10
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/multi_node_tp.sh)
 </Accordion>
 </AccordionGroup>
 
@@ -207,80 +446,211 @@ Run the worker command on the second node:
 Runs prefill and decode in separate vLLM workers and transfers KV cache through NIXL. Use
 `--unified` to exercise the unified worker entry point with the same topology.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT1` | `8081` | System and metrics port for the first worker. |
+| `DYN_SYSTEM_PORT2` | `8082` | System and metrics port for the second worker. |
+
+**Command-line flags:** `--unified` uses the unified backend entry point.
+
 ```bash
 ./launch/disagg.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg.sh)
 </Accordion>
 <Accordion title="Dedicated Encoder with a Combined Language-Model Worker">
 
 Runs media encoding separately from a worker that performs both prefill and decode. Use it when
 encoding should scale independently but language-model stages can remain together.
 
+The default model is `Qwen/Qwen3-VL-30B-A3B-Instruct-FP8`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_ENCODE_WORKER_GPU` | `1` | GPU for the encode worker; `--single-gpu` changes the default to `0`. |
+| `DYN_PD_WORKER_GPU` | `2` | GPU for the combined prefill/decode worker; `--single-gpu` changes the default to `0`. |
+| `DYN_ENCODE_GPU_MEM` | `0.9` | Encode-worker GPU-memory fraction; `--single-gpu` changes the default to `0.1`. |
+| `DYN_PD_GPU_MEM` | `0.9` | Prefill/decode GPU-memory fraction; `--single-gpu` changes the default to `0.7`. |
+| `DYN_SYSTEM_PORT1` | `8081` | System and metrics port for the first worker. |
+| `DYN_SYSTEM_PORT2` | `8082` | System and metrics port for the second worker. |
+
+**Command-line flags:** `--model` sets the model identifier or path; `--single-gpu` places workers
+on one accelerator.
+
+**Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
+
 ```bash
 ./launch/disagg_multimodal_e_pd.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_multimodal_e_pd.sh)
 </Accordion>
 <Accordion title="Separate Encode, Prefill, and Decode Workers">
 
 Splits multimodal inference into dedicated encode, prefill, and decode workers. The script offers
 single-GPU and two-GPU modes for functional testing in addition to the full layout.
 
+The default model is `llava-hf/llava-1.5-7b-hf`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_ENCODE_WORKER_GPU` | `0` | GPU for the encode worker in the default three-GPU layout. |
+| `DYN_PREFILL_WORKER_GPU` | `1` | GPU for the prefill worker; packed modes change this default to `0`. |
+| `DYN_DECODE_WORKER_GPU` | `2` | GPU for the decode worker; `--two-gpu` changes this to `1` and `--single-gpu` to `0`. |
+| `DYN_ENCODE_GPU_MEM` | `0.9` | Encode-worker GPU-memory fraction; packed modes change the default to `0.1`. |
+| `DYN_PREFILL_GPU_MEM` | `0.9` | Prefill-worker GPU-memory fraction; two- and one-GPU modes use `0.7` and `0.4`. |
+| `DYN_DECODE_GPU_MEM` | `0.9` | Decode-worker GPU-memory fraction; single-GPU mode changes the default to `0.4`. |
+| `VLLM_NIXL_SIDE_CHANNEL_PORT_ENCODE` | `20097` | NIXL side-channel port used by the encode worker. |
+| `VLLM_NIXL_SIDE_CHANNEL_PORT_PREFILL` | `20098` | NIXL side-channel port used by the prefill worker. |
+| `VLLM_NIXL_SIDE_CHANNEL_PORT_DECODE` | `20099` | NIXL side-channel port used by the decode worker. |
+| `VLLM_ZMQ_PORT_ENCODE` | `20080` | ZeroMQ port used by the encode worker. |
+| `VLLM_ZMQ_PORT_PREFILL` | `20081` | ZeroMQ port used by the prefill worker. |
+| `VLLM_ZMQ_PORT_DECODE` | `20082` | ZeroMQ port used by the decode worker. |
+| `DYN_SYSTEM_PORT1` | `8081` | System and metrics port for the first worker. |
+| `DYN_SYSTEM_PORT2` | `8082` | System and metrics port for the second worker. |
+| `DYN_SYSTEM_PORT3` | `8083` | System and metrics port for the third worker. |
+
+**Command-line flags:** `--model` sets the model identifier or path; `--single-gpu` places workers
+on one accelerator; `--two-gpu` places encode and prefill on GPU 0 and decode on GPU 1.
+
 ```bash
 ./launch/disagg_multimodal_epd.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_multimodal_epd.sh)
 </Accordion>
 <Accordion title="Multimodal Prefill and Decode Without a Separate Encoder">
 
 Runs a two-worker multimodal topology in which the prefill worker also performs vision encoding. It
 uses fewer processes than encode-prefill-decode at the cost of more work on prefill.
 
+The default model is `Qwen/Qwen3-VL-2B-Instruct`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_PREFILL_WORKER_GPU` | `0` | GPU device assigned to the corresponding worker. |
+| `DYN_DECODE_WORKER_GPU` | `1` | GPU device assigned to the corresponding worker. |
+| `DYN_PREFILL_GPU_MEM` | `0.9` | GPU-memory fraction assigned to the corresponding worker. |
+| `DYN_DECODE_GPU_MEM` | `0.9` | GPU-memory fraction assigned to the corresponding worker. |
+| `DYN_SYSTEM_PORT1` | `${DYN_SYSTEM_PORT:-8081}` | System and metrics port for the first worker. |
+| `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
+| `DYN_SYSTEM_PORT2` | `8082` | System and metrics port for the second worker. |
+
+**Command-line flags:** `--model` sets the model identifier or path; `--single-gpu` places workers
+on one accelerator.
+
 ```bash
 ./launch/disagg_multimodal_p_d.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_multimodal_p_d.sh)
 </Accordion>
 <Accordion title="Independent Prefill and Decode Pools">
 
 Routes requests across separate prefill and decode pools using cache events from the workers. The
 frontend also discovers prefill workers and activates its internal prefill router.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+
 ```bash
 ./launch/disagg_router.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_router.sh)
 </Accordion>
 <Accordion title="KV-Aware Routing on Intel Gaudi">
 
 Runs the disaggregated KV-routing topology with the device settings required for Intel Gaudi
 accelerators.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+
 ```bash
 ./launch/disagg_router_gaudi.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_router_gaudi.sh)
 </Accordion>
 <Accordion title="Prefill and Decode on One GPU">
 
 Runs separate prefill and decode processes on the same GPU with reduced model-length and concurrency
 limits. Use it for functional testing of KV transfer without a multi-GPU host.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `MAX_MODEL_LEN` | `4096` | Maximum model context length. |
+| `MAX_CONCURRENT_SEQS` | `2` | Maximum number of sequences scheduled concurrently. |
+| `DEFAULT_KV_CACHE_BYTES` | `1023525000` | Per-worker KV-cache capacity used when no profiler override is present. |
+| `CUDA_VISIBLE_DEVICES` | `0` | GPU devices visible to the launched worker processes. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_CHAT_PROCESSOR` | `Empty` | Chat processor used by the frontend for multimodal preprocessing. |
+| `DYN_ROUTER_MODE` | `Empty` | Optional router mode passed to the frontend for this topology. |
+| `DYN_SYSTEM_PORT1` | `8081` | System and metrics port for the first worker. |
+| `DYN_VLLM_NIXL_SIDE_CHANNEL_PORT1` | `5600` | NIXL side-channel port for the first worker. |
+| `DYN_SYSTEM_PORT2` | `8082` | System and metrics port for the second worker. |
+| `DYN_VLLM_NIXL_SIDE_CHANNEL_PORT2` | `20097` | NIXL side-channel port for the second worker. |
+| `DYN_VLLM_KV_EVENT_PORT` | `20081` | Port used by the vLLM KV event publisher. |
+
 ```bash
 ./launch/disagg_same_gpu.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_same_gpu.sh)
 </Accordion>
 <Accordion title="OpenTelemetry Tracing Across Prefill and Decode">
 
 Enables tracing on the frontend, prefill worker, and decode worker so a request can be followed
 across the full disaggregated path. Start the tracing stack first.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | `http://localhost:4317` | OpenTelemetry Protocol endpoint that receives traces. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT1` | `8081` | System and metrics port for the first worker. |
+| `DYN_SYSTEM_PORT2` | `8082` | System and metrics port for the second worker. |
+
+**Command-line flags:** `--model` sets the model identifier or path.
+
 ```bash
 ./launch/disagg_tracing.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_tracing.sh)
 </Accordion>
 </AccordionGroup>
 
@@ -294,70 +664,146 @@ across the full disaggregated path. Start the tracing stack first.
 Enables FlexKV on a worker that handles both prefill and decode. Use it to test external KV-cache
 storage without a router.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+
 ```bash
 ./launch/agg_flexkv.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_flexkv.sh)
 </Accordion>
 <Accordion title="FlexKV Offloading with KV Routing">
 
 Combines FlexKV with KV-aware routing so the frontend places requests by cache locality while
 workers offload cache blocks.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+
 ```bash
 ./launch/agg_flexkv_router.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_flexkv_router.sh)
 </Accordion>
 <Accordion title="KV Block Manager Offloading for One Worker">
 
 Enables the KV Block Manager (KVBM) on a single worker and configures CPU-backed cache capacity. Use
 it to test local KV-cache offloading.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+
 ```bash
 ./launch/agg_kvbm.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_kvbm.sh)
 </Accordion>
 <Accordion title="KV Block Manager Offloading with KV Routing">
 
 Starts multiple KVBM-enabled workers behind the KV router. Each worker uses distinct event and
 coordination ports so the router can track its cache state.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+
 ```bash
 ./launch/agg_kvbm_router.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_kvbm_router.sh)
 </Accordion>
 <Accordion title="LMCache Offloading for One Worker">
 
 Connects one vLLM worker to LMCache through the in-process connector. Use it as the baseline LMCache
 deployment.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `MAX_MODEL_LEN` | `4096` | Maximum model context length. |
+| `MAX_CONCURRENT_SEQS` | `2` | Maximum number of sequences scheduled concurrently. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
+
 ```bash
 ./launch/agg_lmcache.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_lmcache.sh)
 </Accordion>
 <Accordion title="Out-of-Process LMCache Server">
 
 Starts an LMCache server as a separate process and connects the vLLM worker through the multiprocess
 connector. Use it to isolate cache management from the inference worker.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `MAX_MODEL_LEN` | `4096` | Maximum model context length. |
+| `MAX_CONCURRENT_SEQS` | `2` | Maximum number of sequences scheduled concurrently. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `LMCACHE_PORT` | `5555` | LMCache data-plane port. |
+| `LMCACHE_HTTP_PORT` | `8080` | LMCache HTTP administration port. |
+| `LMCACHE_L1_SIZE_GB` | `16` | LMCache L1 cache capacity, in GiB. |
+| `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
+
 ```bash
 ./launch/agg_lmcache_mp.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_lmcache_mp.sh)
 </Accordion>
 <Accordion title="LMCache with Multiprocess Metrics">
 
 Runs the in-process LMCache connector while configuring a Prometheus multiprocess directory. Use it
 to validate metric collection in a multi-process-style environment.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `PROMETHEUS_MULTIPROC_DIR` | `/tmp/prometheus_multiproc_$$_$RANDOM` | Directory used by Prometheus multiprocess metrics. |
+| `MAX_MODEL_LEN` | `4096` | Maximum model context length. |
+| `MAX_CONCURRENT_SEQS` | `2` | Maximum number of sequences scheduled concurrently. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
+
 ```bash
 ./launch/agg_lmcache_multiproc.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_lmcache_multiproc.sh)
 </Accordion>
 </AccordionGroup>
 
@@ -369,50 +815,95 @@ to validate metric collection in a multi-process-style environment.
 Runs separate prefill and decode workers and enables FlexKV on prefill. Use it to test offloading
 cache created during prompt processing before transfer to decode.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+
 ```bash
 ./launch/disagg_flexkv.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_flexkv.sh)
 </Accordion>
 <Accordion title="KV Block Manager on the Prefill Worker">
 
 Runs separate prefill and decode workers with KVBM enabled on prefill and CPU cache storage. Decode
 receives the transferred KV state without enabling KVBM.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+
 ```bash
 ./launch/disagg_kvbm.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_kvbm.sh)
 </Accordion>
 <Accordion title="Two Prefill and Two Decode Workers with KVBM">
 
 Scales the KVBM topology to two prefill and two decode workers behind the KV router. Distinct
 barrier identifiers keep the prefill workers' offload coordination separate.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+
 ```bash
 ./launch/disagg_kvbm_2p2d.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_kvbm_2p2d.sh)
 </Accordion>
 <Accordion title="KVBM with Cache-Aware Pool Routing">
 
 Combines separate prefill and decode pools, KV-aware routing, and KVBM-backed offloading. Use it to
 test cache placement and offload behavior together.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+
 ```bash
 ./launch/disagg_kvbm_router.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_kvbm_router.sh)
 </Accordion>
 <Accordion title="LMCache on the Prefill Worker">
 
 Runs separate prefill and decode workers and enables LMCache on prefill. Use it to test
 LMCache-backed prompt-cache offloading in a disaggregated topology.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+
 ```bash
 ./launch/disagg_lmcache.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_lmcache.sh)
 </Accordion>
 </AccordionGroup>
 
@@ -426,40 +917,96 @@ LMCache-backed prompt-cache offloading in a disaggregated topology.
 Starts a vLLM-Omni worker for audio generation. Override the default model and generation settings
 through the script flags.
 
+The default model is `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
+
+**Command-line flags:** `--model` sets the model identifier or path.
+
+**Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
+
 ```bash
 ./launch/agg_omni_audio.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_audio.sh)
 </Accordion>
 <Accordion title="Image-to-Video Generation">
 
 Starts a vLLM-Omni image-to-video pipeline with a Wan model by default. Pass a different model or
 worker arguments through the script options.
 
+The default model is `Wan-AI/Wan2.2-TI2V-5B-Diffusers`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
+
+**Command-line flags:** `--model` sets the model identifier or path.
+
+**Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
+
 ```bash
 ./launch/agg_omni_i2v.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_i2v.sh)
 </Accordion>
 <Accordion title="Text-to-Image Generation">
 
 Starts a vLLM-Omni image-generation worker and exposes the generation endpoint. Use the script flags
 to select the model.
 
+The default model is `Qwen/Qwen-Image`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
+
+**Command-line flags:** `--model` sets the model identifier or path.
+
+**Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
+
 ```bash
 ./launch/agg_omni_image.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_image.sh)
 </Accordion>
 <Accordion title="Text-to-Video Generation">
 
 Starts a vLLM-Omni video-generation worker and exposes the generation endpoint. Use the script flags
 to select the model and generation settings.
 
+The default model is `Wan-AI/Wan2.1-T2V-1.3B-Diffusers`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
+
+**Command-line flags:** `--model` sets the model identifier or path.
+
+**Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
+
 ```bash
 ./launch/agg_omni_video.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_video.sh)
 </Accordion>
 </AccordionGroup>
 
@@ -471,10 +1018,26 @@ to select the model and generation settings.
 Splits GLM-Image across an autoregressive stage and a diffusion stage on separate GPUs. A router
 coordinates the intermediate token output and final image response.
 
+The default model is `zai-org/GLM-Image`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `MODEL` | `zai-org/GLM-Image` | Model identifier or local model path loaded by the worker. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_NAMESPACE` | `Empty` | Dynamo discovery namespace used by the frontend and workers. |
+
+**Command-line flags:** `--model` sets the model identifier or path; `--stage-configs-path`
+sets the diffusion stage-configuration file.
+
+**Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
+
 ```bash
 ./launch/disagg_omni_glm_image.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_omni_glm_image.sh)
 </Accordion>
 </AccordionGroup>
 
@@ -486,32 +1049,79 @@ coordinates the intermediate token output and final image response.
 <Accordion title="Dynamic LoRA Adapter Serving">
 
 Starts one vLLM worker with Low-Rank Adaptation (LoRA) support and loads adapters from the
-configured object store. Complete the LoRA setup for the example before running it.
+configured object store.
+
+The script expects MinIO at `http://localhost:9000` and loads adapters from the `my-loras` bucket.
+Run `launch/lora/setup_minio.sh --start` first to start MinIO and upload the example adapter.
+
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_SYSTEM_PORT1` | `8081` | System and metrics port for the first worker. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `MAX_MODEL_LEN` | `4096` | Maximum model context length. |
+| `MAX_CONCURRENT_SEQS` | `2` | Maximum number of sequences scheduled concurrently. |
 
 ```bash
 ./launch/lora/agg_lora.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/lora/agg_lora.sh)
 </Accordion>
 <Accordion title="LoRA Adapters with KV-Aware Routing">
 
 Starts LoRA-capable workers behind the KV router. Use it to test adapter selection together with
 prefix-cache-aware request placement.
 
+The script expects MinIO at `http://localhost:9000` and loads adapters from the `my-loras` bucket.
+Run `launch/lora/setup_minio.sh --start` first to start MinIO and upload the example adapter.
+
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_SYSTEM_PORT1` | `8081` | System and metrics port for the first worker. |
+| `DYN_SYSTEM_PORT2` | `8082` | System and metrics port for the second worker. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+
 ```bash
 ./launch/lora/agg_lora_router.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/lora/agg_lora_router.sh)
 </Accordion>
 <Accordion title="Multimodal LoRA Adapters">
 
 Serves a multimodal model with dynamically selected LoRA adapters. Use it for image-and-text
 requests that require adapter-specific behavior.
 
+The default model is `Qwen/Qwen3-VL-2B-Instruct`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_MODEL_NAME` | `Qwen/Qwen3-VL-2B-Instruct` | Model identifier or local model path loaded by the worker. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
+| `DYN_LORA_PATH` | `/tmp/dynamo_loras_multimodal` | Directory containing LoRA adapter subdirectories. |
+| `DYN_MAX_LORA_RANK` | `64` | Maximum LoRA rank accepted by the worker. |
+| `CUDA_VISIBLE_DEVICES` | `0` | GPU devices visible to the launched worker processes. |
+
+**Command-line flags:** `--model` sets the model identifier or path.
+
+**Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
+
 ```bash
 ./launch/lora/multimodal/lora_agg.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/lora/multimodal/lora_agg.sh)
 </Accordion>
 </AccordionGroup>
 
@@ -524,107 +1134,305 @@ requests that require adapter-specific behavior.
 
 Runs LoRA-capable vLLM workers on Intel XPU devices behind the KV router.
 
+The script expects MinIO at `http://localhost:9000` and loads adapters from the `my-loras` bucket.
+Run `launch/lora/setup_minio.sh --start` first to start MinIO and upload the example adapter.
+
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_SYSTEM_PORT1` | `8081` | System and metrics port for the first worker. |
+| `DYN_SYSTEM_PORT2` | `8082` | System and metrics port for the second worker. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+
 ```bash
 ./launch/lora/xpu/agg_lora_router_xpu.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/lora/xpu/agg_lora_router_xpu.sh)
 </Accordion>
 <Accordion title="Dynamic LoRA Adapter Serving">
 
 Runs one LoRA-capable vLLM worker on an Intel XPU device.
 
+The script expects MinIO at `http://localhost:9000` and loads adapters from the `my-loras` bucket.
+Run `launch/lora/setup_minio.sh --start` first to start MinIO and upload the example adapter.
+
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_SYSTEM_PORT1` | `8081` | System and metrics port for the first worker. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `MAX_MODEL_LEN` | `4096` | Maximum model context length. |
+| `MAX_CONCURRENT_SEQS` | `2` | Maximum number of sequences scheduled concurrently. |
+| `BLOCK_SIZE` | `64` | KV-cache block size; it must match the backend block size for KV routing. |
+
 ```bash
 ./launch/lora/xpu/agg_lora_xpu.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/lora/xpu/agg_lora_xpu.sh)
 </Accordion>
 <Accordion title="LMCache with Multiprocess Metrics">
 
 Runs LMCache on Intel XPU while configuring the Prometheus multiprocess directory used by
 multi-process deployments.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `PROMETHEUS_MULTIPROC_DIR` | `/tmp/prometheus_multiproc_$$_$RANDOM` | Directory used by Prometheus multiprocess metrics. |
+| `ZE_AFFINITY_MASK` | `0` | Intel XPU devices visible to the launched worker process. |
+| `MAX_MODEL_LEN` | `4096` | Maximum model context length. |
+| `MAX_CONCURRENT_SEQS` | `2` | Maximum number of sequences scheduled concurrently. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
+| `BLOCK_SIZE` | `64` | KV-cache block size; it must match the backend block size for KV routing. |
+
 ```bash
 ./launch/xpu/agg_lmcache_multiproc_xpu.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/xpu/agg_lmcache_multiproc_xpu.sh)
 </Accordion>
 <Accordion title="LMCache Offloading">
 
 Connects a vLLM worker on Intel XPU to LMCache for KV-cache offloading.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `ZE_AFFINITY_MASK` | `0` | Intel XPU devices visible to the launched worker process. |
+| `MAX_MODEL_LEN` | `4096` | Maximum model context length. |
+| `MAX_CONCURRENT_SEQS` | `2` | Maximum number of sequences scheduled concurrently. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
+| `BLOCK_SIZE` | `64` | KV-cache block size; it must match the backend block size for KV routing. |
+
 ```bash
 ./launch/xpu/agg_lmcache_xpu.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/xpu/agg_lmcache_xpu.sh)
 </Accordion>
 <Accordion title="Multimodal Routing with vLLM Preprocessing">
 
 Uses vLLM's Python chat processor on the frontend and routes multimodal requests to workers on Intel
-XPU devices.
+XPU devices. The script requires NATS and etcd to be running before it starts.
+
+The default model is `Qwen/Qwen3-VL-2B-Instruct`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `MODEL` | `Qwen/Qwen3-VL-2B-Instruct` | Model identifier or local model path loaded by the worker. |
+| `NAMESPACE` | `dynamo` | Dynamo discovery namespace used by the frontend and workers. |
+| `HTTP_PORT` | `${DYN_HTTP_PORT:-8000}` | Port used by the corresponding service or worker. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `BLOCK_SIZE` | `16` | KV-cache block size; it must match the backend block size for KV routing. |
+| `GPU_MEMORY_UTILIZATION` | `0.40` | Fraction of GPU memory available to each backend worker. |
+| `MAX_MODEL_LEN` | `4096` | Maximum model context length. |
+| `NUM_WORKERS` | `2` | Number of backend workers launched by the script. |
+| `SINGLE_GPU` | `false` | When `true`, places all workers on GPU 0 for functional testing. |
+| `NUM_FRONTENDS` | `1` | Number of frontend replicas launched by the script. |
+| `NATS_SERVER` | `nats://127.0.0.1:4222` | NATS server URL used for Dynamo discovery and messaging. |
+| `ETCD_ENDPOINTS` | `http://127.0.0.1:2379` | etcd endpoint used for Dynamo discovery state. |
+| `VLLM_SYSTEM_PORT_BASE` | `18081` | Starting system and metrics port for vLLM workers. |
+| `KV_EVENTS_PORT_BASE` | `29080` | Starting port for per-worker KV event publishers. |
+| `DYN_MM_IMAGE_CACHE_SIZE` | `32` | Frontend multimodal image-cache capacity. |
+| `DYNAMO_MM_TRANSFER` | `shm` | Transport used to transfer preprocessed multimodal data. |
+| `VLLM_EXTRA_ARGS` | `Empty` | Additional arguments appended to each `dynamo.vllm` worker command. |
+| `FRONTEND_EXTRA_ARGS` | `Empty` | Additional arguments appended to each frontend command. |
+| `ZE_AFFINITY_MASK` | None | Comma-separated XPU assignments; required when `NUM_WORKERS` is greater than `1`. |
+| `DYN_SYSTEM_PORT1` | `18081` | System and metrics port for the first worker. |
+| `FRONTEND_SYSTEM_PORT_BASE` | `9080` | Starting system port for frontend replicas. |
+
+**Command-line flags:** `--model` sets the model identifier or path; `--num-workers` sets the worker
+count; `--single-gpu` places workers on one accelerator.
+
+**Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
 
 ```bash
 ./launch/xpu/agg_multimodal_router_chat_processor_xpu.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/xpu/agg_multimodal_router_chat_processor_xpu.sh)
 </Accordion>
 <Accordion title="Cache-Aware Multimodal Routing">
 
 Uses the Rust multimodal routing path to place image and text requests across vLLM workers on Intel
 XPU devices.
 
+The default model is `Qwen/Qwen3-VL-2B-Instruct`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `MODEL` | `Qwen/Qwen3-VL-2B-Instruct` | Model identifier or local model path loaded by the worker. |
+| `NAMESPACE` | `lightseek-poc` | Dynamo discovery namespace used by the frontend and workers. |
+| `HTTP_PORT` | `${DYN_HTTP_PORT:-8000}` | Port used by the corresponding service or worker. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `BLOCK_SIZE` | `16` | KV-cache block size; it must match the backend block size for KV routing. |
+| `GPU_MEMORY_UTILIZATION` | `0.20` | Fraction of GPU memory available to each backend worker. |
+| `MAX_MODEL_LEN` | `4096` | Maximum model context length. |
+| `NUM_WORKERS` | `2` | Number of backend workers launched by the script. |
+| `SINGLE_GPU` | `false` | When `true`, places all workers on GPU 0 for functional testing. |
+| `NATS_SERVER` | `nats://127.0.0.1:4222` | NATS server URL used for Dynamo discovery and messaging. |
+| `ETCD_ENDPOINTS` | `http://127.0.0.1:2379` | etcd endpoint used for Dynamo discovery state. |
+| `VLLM_SYSTEM_PORT_BASE` | `18081` | Starting system and metrics port for vLLM workers. |
+| `KV_EVENTS_PORT_BASE` | `5557` | Starting port for per-worker KV event publishers. |
+| `DYN_LOG` | `info,lightseek_mm=debug,dynamo_kv_router::scheduling=debug` | Dynamo log filter used by the launched processes. |
+| `VLLM_EXTRA_ARGS` | `Empty` | Additional arguments appended to each `dynamo.vllm` worker command. |
+| `ZE_AFFINITY_MASK` | None | Comma-separated XPU assignments; required when `NUM_WORKERS` is greater than `1`. |
+| `DYN_SYSTEM_PORT1` | `18081` | System and metrics port for the first worker. |
+
+**Command-line flags:** `--model` sets the model identifier or path; `--num-workers` sets the worker
+count; `--single-gpu` places workers on one accelerator.
+
+**Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
+
 ```bash
 ./launch/xpu/agg_multimodal_router_xpu.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/xpu/agg_multimodal_router_xpu.sh)
 </Accordion>
 <Accordion title="Image and Video Inputs">
 
 Serves multimodal requests with frontend media preprocessing and one vLLM worker on an Intel XPU
 device.
 
+The default model is `Qwen/Qwen3-VL-8B-Instruct`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `MAX_MODEL_LEN` | `4096` | Maximum model context length. |
+| `MAX_CONCURRENT_SEQS` | `2` | Maximum number of sequences scheduled concurrently. |
+| `ZE_AFFINITY_MASK` | `0` | Intel XPU devices visible to the launched worker process. |
+| `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
+| `BLOCK_SIZE` | `64` | KV-cache block size; it must match the backend block size for KV routing. |
+
+**Command-line flags:** `--model` sets the model identifier or path.
+
+**Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
+
 ```bash
 ./launch/xpu/agg_multimodal_xpu.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/xpu/agg_multimodal_xpu.sh)
 </Accordion>
 <Accordion title="Request-Plane Transport Modes">
 
 Runs the selected frontend-to-worker request-plane transport with a vLLM worker on Intel XPU.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `ZE_AFFINITY_MASK` | `0` | Intel XPU devices visible to the launched worker process. |
+| `MAX_MODEL_LEN` | `4096` | Maximum model context length. |
+| `MAX_CONCURRENT_SEQS` | `2` | Maximum number of sequences scheduled concurrently. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
+| `BLOCK_SIZE` | `64` | KV-cache block size; it must match the backend block size for KV routing. |
+
+**Command-line flags:** `--tcp` uses the TCP request plane (the default); `--nats` uses the NATS
+request plane.
+
 ```bash
 ./launch/xpu/agg_request_planes_xpu.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/xpu/agg_request_planes_xpu.sh)
 </Accordion>
 <Accordion title="KV Routing Without Cache Events">
 
 Uses approximate cache tracking to route requests across vLLM workers on Intel XPU without backend
 KV events.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT1` | `8081` | System and metrics port for the first worker. |
+| `DYN_SYSTEM_PORT2` | `8082` | System and metrics port for the second worker. |
+
 ```bash
 ./launch/xpu/agg_router_approx_xpu.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/xpu/agg_router_approx_xpu.sh)
 </Accordion>
 <Accordion title="KV-Aware Load Balancing">
 
 Runs vLLM workers on Intel XPU behind the KV router and publishes cache events for prefix-aware
 placement.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT1` | `8081` | System and metrics port for the first worker. |
+| `DYN_SYSTEM_PORT2` | `8082` | System and metrics port for the second worker. |
+
 ```bash
 ./launch/xpu/agg_router_xpu.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/xpu/agg_router_xpu.sh)
 </Accordion>
 <Accordion title="Single-Worker Text Generation">
 
 Starts the frontend and one vLLM worker on an Intel XPU device. Use it as the baseline XPU
 text-generation deployment.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `ZE_AFFINITY_MASK` | `0` | Intel XPU devices visible to the launched worker process. |
+| `MAX_MODEL_LEN` | `4096` | Maximum model context length. |
+| `MAX_CONCURRENT_SEQS` | `2` | Maximum number of sequences scheduled concurrently. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
+| `BLOCK_SIZE` | `64` | KV-cache block size; it must match the backend block size for KV routing. |
+
+**Command-line flags:** `--model` sets the model identifier or path.
+
+**Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
+
 ```bash
 ./launch/xpu/agg_xpu.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/xpu/agg_xpu.sh)
 </Accordion>
 </AccordionGroup>
 
@@ -636,20 +1444,44 @@ text-generation deployment.
 Splits multimodal inference into encode, prefill, and decode workers on Intel XPU devices, with a
 single-device mode for functional testing.
 
+The default model is `llava-hf/llava-1.5-7b-hf`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DEVICE_PLATFORM` | `cuda` | Accelerator platform used to choose the worker device mapping. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_ENCODE_WORKER_GPU` | `0` | GPU device assigned to the corresponding worker. |
+| `DYN_PREFILL_WORKER_GPU` | `1` | GPU device assigned to the corresponding worker. |
+| `DYN_DECODE_WORKER_GPU` | `2` | GPU device assigned to the corresponding worker. |
+| `DYN_ENCODE_GPU_MEM` | `0.9` | GPU-memory fraction assigned to the corresponding worker. |
+| `DYN_PREFILL_GPU_MEM` | `0.9` | GPU-memory fraction assigned to the corresponding worker. |
+| `DYN_DECODE_GPU_MEM` | `0.9` | GPU-memory fraction assigned to the corresponding worker. |
+
+**Command-line flags:** `--model` sets the model identifier or path; `--single-gpu` places workers
+on one accelerator.
+
 ```bash
 ./launch/xpu/disagg_multimodal_epd_xpu.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/xpu/disagg_multimodal_epd_xpu.sh)
 </Accordion>
 <Accordion title="KV Routing with Direct Device Transfer">
 
 Runs separate prefill and decode pools on Intel XPU with KV-aware routing and direct device-memory
 transfer between workers.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration:** This script does not define user-facing environment-variable overrides.
+
 ```bash
 ./launch/xpu/disagg_router_xpu_gdr.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/xpu/disagg_router_xpu_gdr.sh)
 </Accordion>
 </AccordionGroup>
 

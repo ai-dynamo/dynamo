@@ -1061,8 +1061,19 @@ article:has(.dynamo-welcome)::before {
 /* Turn Fern's generated title and subtitle into the first half of the hero. */
 article:has(.dynamo-welcome) > header {
     margin: 0;
-    padding: clamp(5rem, 10vh, 7.5rem) 1rem 0;
+    padding: clamp(3rem, 6vh, 4.5rem) 1rem 0;
     text-align: center;
+}
+
+article:has(.dynamo-welcome) > header::before {
+    content: "";
+    display: block;
+    width: 78px;
+    height: 78px;
+    margin: 0 auto 1.35rem;
+    border-radius: 18px;
+    background: url("https://avatars.githubusercontent.com/u/201626793?s=200&v=4") center / cover no-repeat;
+    box-shadow: 0 14px 36px rgba(54, 86, 0, 0.18);
 }
 
 article:has(.dynamo-welcome) > header .fern-breadcrumb {
@@ -1072,10 +1083,10 @@ article:has(.dynamo-welcome) > header .fern-breadcrumb {
 article:has(.dynamo-welcome) > header .fern-page-heading {
     display: block;
     width: 100%;
-    font-size: clamp(4.5rem, 10vw, 8.5rem);
+    font-size: clamp(3.75rem, 8vw, 6.75rem);
     font-weight: 600;
     line-height: 0.9;
-    letter-spacing: -0.065em;
+    letter-spacing: -0.055em;
 }
 
 article:has(.dynamo-welcome) > header div:has(.fern-page-heading) {
@@ -1084,11 +1095,12 @@ article:has(.dynamo-welcome) > header div:has(.fern-page-heading) {
 }
 
 article:has(.dynamo-welcome) > header .fern-page-subtitle {
-    max-width: 680px;
+    max-width: 900px;
     margin: clamp(1.5rem, 3vw, 2.25rem) auto 0;
     font-size: clamp(1.05rem, 2vw, 1.35rem);
     line-height: 1.55;
     color: var(--grayscale-a11);
+    white-space: nowrap;
 }
 
 article:has(.dynamo-welcome) > header .fern-page-subtitle p {
@@ -1109,7 +1121,7 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
 }
 
 .dynamo-welcome__statement {
-    min-height: 2.75rem;
+    min-height: 3.5rem;
     font-family: RobotoMono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: clamp(1rem, 2vw, 1.25rem);
     color: var(--grayscale-a11);
@@ -1198,7 +1210,7 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
 /* At a typical desktop viewport only the top of this frame is above the fold. */
 .dynamo-welcome__terminal {
     position: relative;
-    margin: clamp(10rem, 24vh, 15rem) auto 4.5rem;
+    margin: clamp(8rem, 18vh, 11rem) auto 4.5rem;
 }
 
 .dynamo-welcome__terminal::before {
@@ -1230,10 +1242,10 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
     z-index: 30;
     display: flex;
     flex-direction: column;
-    gap: 0.35rem;
-    padding: 0.4rem;
+    gap: 0.25rem;
+    padding: 0.45rem;
     border: 1px solid rgba(127, 127, 127, 0.22);
-    border-radius: 999px;
+    border-radius: 14px;
     background: rgba(255, 255, 255, 0.78);
     box-shadow: 0 12px 36px rgba(0, 0, 0, 0.1);
     backdrop-filter: blur(16px);
@@ -1245,12 +1257,17 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
 
 .dynamo-welcome__community a {
     position: relative;
-    display: grid;
-    width: 2.25rem;
-    height: 2.25rem;
-    place-items: center;
-    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    min-width: 184px;
+    min-height: 2.65rem;
+    padding: 0.65rem 0.8rem;
+    border-radius: 9px;
     color: var(--grayscale-a11) !important;
+    font-size: 0.84rem;
+    font-weight: 550;
+    line-height: 1.15;
     text-decoration: none !important;
     transition: color 150ms ease, background 150ms ease;
 }
@@ -1267,6 +1284,7 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
 }
 
 .dynamo-welcome__community svg {
+    flex: 0 0 1.15rem;
     width: 1.15rem;
     height: 1.15rem;
     fill: none;
@@ -1276,32 +1294,9 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
     stroke-linejoin: round;
 }
 
-.dynamo-welcome__community a:first-child svg {
-    fill: currentColor;
-    stroke: none;
-}
-
 .dynamo-welcome__community a span {
-    position: absolute;
-    top: 50%;
-    right: calc(100% + 0.6rem);
-    padding: 0.35rem 0.55rem;
-    border-radius: 6px;
-    background: #171717;
-    color: #fff;
-    font-size: 0.75rem;
-    line-height: 1;
+    position: static;
     white-space: nowrap;
-    opacity: 0;
-    pointer-events: none;
-    transform: translate(4px, -50%);
-    transition: opacity 120ms ease, transform 120ms ease;
-}
-
-.dynamo-welcome__community a:hover span,
-.dynamo-welcome__community a:focus-visible span {
-    opacity: 1;
-    transform: translate(0, -50%);
 }
 
 @media (max-width: 1360px) {
@@ -1312,16 +1307,8 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
         flex-direction: row;
     }
 
-    .dynamo-welcome__community a span {
-        top: calc(100% + 0.6rem);
-        right: auto;
-        left: 50%;
-        transform: translate(-50%, -4px);
-    }
-
-    .dynamo-welcome__community a:hover span,
-    .dynamo-welcome__community a:focus-visible span {
-        transform: translate(-50%, 0);
+    .dynamo-welcome__community a {
+        min-width: 0;
     }
 }
 
@@ -1331,22 +1318,48 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
     }
 
     article:has(.dynamo-welcome) > header {
-        padding-top: 4rem;
+        padding-top: 2.75rem;
+    }
+
+    article:has(.dynamo-welcome) > header::before {
+        width: 60px;
+        height: 60px;
+        margin-bottom: 1rem;
+        border-radius: 14px;
     }
 
     article:has(.dynamo-welcome) > header .fern-page-heading {
-        font-size: clamp(4rem, 21vw, 6rem);
+        font-size: clamp(3.5rem, 18vw, 4.75rem);
+    }
+
+    article:has(.dynamo-welcome) > header .fern-page-subtitle {
+        max-width: 340px;
+        white-space: normal;
     }
 
     .dynamo-welcome__terminal {
-        margin-top: 6rem;
+        margin-top: 4.5rem;
     }
 
     .dynamo-welcome__statement {
         width: 100%;
-        min-height: 4.5rem;
+        min-height: 6.5rem;
         font-size: 0.95rem;
         line-height: 1.65;
+    }
+
+    .dynamo-welcome__community {
+        flex-direction: column;
+        width: fit-content;
+        max-width: calc(100% - 1rem);
+        padding: 0.35rem;
+    }
+
+    .dynamo-welcome__community a {
+        gap: 0.45rem;
+        min-width: 190px;
+        padding: 0.6rem 0.65rem;
+        font-size: 0.78rem;
     }
 }
 

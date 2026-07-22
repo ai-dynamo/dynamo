@@ -99,7 +99,7 @@ Each worker type has a specialized health check payload that validates the full 
 | Video Generation | Minimal video generation request |
 | Embedding | Standard embedding request |
 
-Health checks are registered with the Dynamo runtime and called by the frontend or Kubernetes liveness probes. See [Health Checks](../../observability/health-checks.mdx) for the broader health check architecture.
+Health checks are registered with the Dynamo runtime and called by the frontend or Kubernetes liveness probes. See [Observability Architecture](../../design-docs/observability.md#active-worker-health-checks) for the active health-check design.
 
 ## Metrics and KV Events
 
@@ -114,7 +114,7 @@ DYN_SYSTEM_PORT=8081 python -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --enab
 Both SGLang engine metrics (`sglang:*` prefix) and Dynamo runtime metrics (`dynamo_*` prefix) are served from the same endpoint.
 
 For metric details, see [SGLang Observability](sglang-observability.md). For a visualization
-walkthrough, see [Metrics and Dashboards](../../observability/metrics.mdx).
+walkthrough, see [Metrics and Dashboards](../../observability/local-observability.mdx#view-metrics-and-dashboards).
 
 ### KV Events
 

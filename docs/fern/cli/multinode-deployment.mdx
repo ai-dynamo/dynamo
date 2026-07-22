@@ -10,6 +10,10 @@ When a model's tensor-parallel size exceeds the number of GPUs on one node, you 
 
 Reach for this only when one model copy genuinely does not fit on a single node. If it fits on one node, stay [single-node](overview.mdx#multiple-gpus-on-one-node) — tensor parallelism synchronizes on every layer, and crossing the node boundary trades the fast intra-node NVLink interconnect for slower inter-node networking.
 
+<Note>
+For spanning **multiple machines**, we recommend [Kubernetes](../kubernetes/deployment/multinode-deployment.md) instead — it handles the cross-node scheduling, networking, and fault tolerance for you. The CLI path documented here works and is fully real, but you own placement and restarts by hand. Use it if you're set on the CLI for a fixed set of machines you control.
+</Note>
+
 ## How multi-node works without the operator
 
 On Kubernetes, multi-node serving relies on a gang-scheduler (Grove, KAI, or Volcano) to place all the pods across nodes atomically and wire up their networking. That scheduling problem only exists because Kubernetes owns placement — the actual cross-node mechanism underneath is plain `torch.distributed`.

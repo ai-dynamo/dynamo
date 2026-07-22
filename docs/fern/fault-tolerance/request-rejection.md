@@ -182,4 +182,4 @@ The 503 body identifies the condition:
 - [Request Rejection Architecture](../design-docs/request-rejection.md) - Busy-detection logic, worker load monitoring, and admission internals
 - [Metrics Catalog](../reference/observability/metrics-catalog.mdx#cancellation-and-rejection) - Rejection and admission metrics
 - [Request Migration](request-migration.md) - Recovering in-flight requests after a worker failure
-- [Health Checks](../observability/health-checks.mdx) - Worker health monitoring
+- [Observability Architecture](../design-docs/observability.md#active-worker-health-checks) - Worker health monitoring

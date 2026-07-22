@@ -1,0 +1,134 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Observe a Local Deployment
+subtitle: Inspect Dynamo metrics, traces, and logs with the local observability stack
+---
+
+Use the stack from [Install Observability](../cli/observability.mdx) to inspect a local Dynamo
+deployment. This guide covers the common operational workflows; configuration fields and signal
+internals live in Reference and Design Documents.
+
+## View Metrics and Dashboards
+
+<Steps toc={true}>
+<Step title="Start the frontend" id="start-the-frontend">
+
+Start the frontend on port `8000`:
+
+```bash
+python -m dynamo.frontend
+```
+
+</Step>
+<Step title="Start a worker" id="start-a-worker">
+
+In another terminal, start a vLLM worker and expose its system metrics on port `8081`:
+
+```bash
+DYN_SYSTEM_PORT=8081 python -m dynamo.vllm \
+  --model Qwen/Qwen3-0.6B \
+  --enforce-eager
+```
+
+The supplied Prometheus configuration scrapes the frontend at `host.docker.internal:8000` and
+workers at `host.docker.internal:8081` and `host.docker.internal:8082`.
+
+</Step>
+<Step title="Generate traffic" id="generate-metrics">
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "max_completion_tokens": 100
+  }'
+```
+
+</Step>
+<Step title="Inspect the metrics" id="inspect-metrics">
+
+Check the frontend at `http://localhost:8000/metrics` and the worker at
+`http://localhost:8081/metrics`. Then open Grafana at `http://localhost:3000`, sign in with username
+`dynamo` and password `dynamo`, and open **Dashboards > Dynamo Dashboard**.
+
+Prometheus registers labeled series after the first matching request, so some metric families remain
+empty until the deployment serves traffic.
+
+</Step>
+</Steps>
+
+For metric definitions and labels, see the [Metrics Catalog](../reference/observability/metrics-catalog.mdx)
+and [Metric Labels](../reference/observability/metric-labels.mdx).
+
+## Inspect Traces and Exported Logs
+
+Dynamo exports traces and logs together when OpenTelemetry Protocol (OTLP) export is enabled. The
+local OpenTelemetry Collector sends traces to Tempo and logs to Loki.
+
+<Steps toc={true}>
+<Step title="Launch a traced deployment" id="launch-a-traced-deployment">
+
+Run the aggregated vLLM tracing example:
+
+```bash
+cd examples/backends/vllm/launch
+./agg_tracing.sh
+```
+
+For a two-GPU prefill/decode deployment, use `./disagg_tracing.sh` instead. The scripts enable JSONL
+logging and OTLP export and assign service names to the Dynamo processes.
+
+</Step>
+<Step title="Send an identifiable request" id="send-an-identifiable-request">
+
+Use the model name printed by the launch script. Add `x-request-id` to correlate the request across
+traces and logs:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'x-request-id: test-trace-001' \
+  -d '{
+    "model": "<MODEL>",
+    "messages": [{"role": "user", "content": "What is the capital of France?"}],
+    "max_completion_tokens": 100
+  }'
+```
+
+</Step>
+<Step title="Find the trace" id="find-the-trace">
+
+In Grafana, open **Explore**, select **Tempo**, and use **Search**. Filter by a service name such as
+`dynamo-frontend`, a span name such as `http-request`, or the request attribute
+`x_request_id=test-trace-001`.
+
+</Step>
+<Step title="Find the logs" id="find-the-logs">
+
+In **Explore**, select **Loki** and search for the same `x_request_id` or `trace_id`. The provisioned
+Loki data source links trace IDs back to Tempo.
+
+</Step>
+</Steps>
+
+To configure export endpoints, sampling, service names, or logging levels, see
+[Environment Variables](../reference/observability/environment-variables.mdx). For log formats and
+fields, see [Logging Reference](../reference/observability/logging.mdx). For the signal pipeline and
+span relationships, see [Observability Architecture](../design-docs/observability.md).
+
+## Troubleshoot Collection
+
+- **Prometheus target is down:** Open `http://localhost:9090/targets`, confirm the process uses the
+  configured port, and confirm it is reachable through `host.docker.internal`.
+- **Tempo or Loki is empty:** Set `OTEL_EXPORT_ENABLED=true` on every process and use the Collector's
+  gRPC endpoint, `http://localhost:4317`, for OTLP export.
+- **Only some components appear:** Environment variables are process-local. Export the OTLP and
+  logging variables before starting the frontend, router, and each worker.
+- **Stack service is unhealthy:** Run `docker compose -f dev/docker-observability.yml ps` and inspect
+  the relevant service with `docker compose -f dev/docker-observability.yml logs <service>`.
+
+Service ports, configuration files, and optional profiles are listed in the
+[Local Observability Stack Reference](../reference/observability/local-stack.mdx).

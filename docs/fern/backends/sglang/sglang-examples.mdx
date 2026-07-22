@@ -24,60 +24,166 @@ the command. Pass supported flags after the script name to override its defaults
 Starts the frontend and one SGLang worker that handles both prefill and decode. The default
 configuration uses one GPU and is the baseline local text-generation deployment.
 
+The default model is `Qwen/Qwen3-0.6B`. The script declares a GPU requirement of 1.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | `http://localhost:4317` | OpenTelemetry Protocol endpoint that receives traces. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
+
+**Command-line flags:** `--model-path` sets the model path; `--enable-otel` enables OpenTelemetry
+tracing; `--unified` uses the unified backend entry point.
+
+**Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
+
 ```bash
 ./launch/agg.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/agg.sh)
 </Accordion>
 <Accordion title="Agentic Workloads with Session Affinity">
 
 Starts a tensor-parallel worker behind session-aware routing with KV-event tracking, sticky
 sessions, reasoning parsing, and tool-call parsing. The default model uses two GPUs.
 
+The default model is `zai-org/GLM-4.7-Flash`. The default topology uses two GPUs because the model runs with `--tp 2`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
+
+**Command-line flags:** `--model-path` sets the model path; `--tp` configures the corresponding
+launch option.
+
+**Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
+
 ```bash
 ./launch/agg_agent.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/agg_agent.sh)
 </Accordion>
 <Accordion title="Text Embeddings">
 
 Starts an SGLang embedding worker and exposes the OpenAI-compatible embeddings endpoint. Use it for
 vector search, retrieval, and other embedding workloads.
 
+The default model is `Qwen/Qwen3-Embedding-4B`. The script declares a GPU requirement of 1.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
+
+**Command-line flags:** `--model-path` sets the model path.
+
+**Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
+
 ```bash
 ./launch/agg_embed.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/agg_embed.sh)
 </Accordion>
 <Accordion title="Cache-Aware Multimodal Routing">
 
 Routes multimodal requests by their text and media-derived cache keys so repeated images can reuse
 cached work. This example requires the `mm-routing` build feature and a compatible SGLang build.
 
+The default model is `Qwen/Qwen3-VL-2B-Instruct`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `MODEL` | `Qwen/Qwen3-VL-2B-Instruct` | Model identifier or local model path loaded by the worker. |
+| `NAMESPACE` | `sglang-mm-router` | Dynamo discovery namespace used by the frontend and workers. |
+| `HTTP_PORT` | `${DYN_HTTP_PORT:-8000}` | Port used by the corresponding service or worker. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `BLOCK_SIZE` | `16` | KV-cache block size; it must match the backend block size for KV routing. |
+| `MAX_MODEL_LEN` | `4096` | Maximum model context length. |
+| `NUM_WORKERS` | `2` | Number of backend workers launched by the script. |
+| `SINGLE_GPU` | `false` | When `true`, places all workers on GPU 0 for functional testing. |
+| `NATS_SERVER` | `nats://127.0.0.1:4222` | NATS server URL used for Dynamo discovery and messaging. |
+| `ETCD_ENDPOINTS` | `http://127.0.0.1:2379` | etcd endpoint used for Dynamo discovery state. |
+| `SGLANG_SYSTEM_PORT_BASE` | `18091` | Starting system and metrics port for SGLang workers. |
+| `KV_EVENTS_PORT_BASE` | `29090` | Starting port for per-worker KV event publishers. |
+| `DYN_LOG` | `info,mm_routing=debug,dynamo_kv_router::scheduling=debug,dynamo_llm::kv_router=debug` | Dynamo log filter used by the launched processes. |
+| `SGLANG_EXTRA_ARGS` | `Empty` | Additional arguments appended to each `dynamo.sglang` worker command. |
+
+**Command-line flags:** `--model` sets the model identifier or path; `--num-workers` sets the worker
+count; `--single-gpu` places workers on one accelerator.
+
+**Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
+
 ```bash
 ./launch/agg_multimodal_router.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/agg_multimodal_router.sh)
 </Accordion>
 <Accordion title="KV-Aware Load Balancing">
 
 Starts two workers behind the KV router and publishes cache events for prefix-aware request
 placement. The default topology uses two GPUs.
 
+The default model is `Qwen/Qwen3-0.6B`. The script declares a GPU requirement of 2.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | `http://localhost:4317` | OpenTelemetry Protocol endpoint that receives traces. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT_WORKER1` | `8081` | System and metrics port for the corresponding worker. |
+| `DYN_SYSTEM_PORT_WORKER2` | `8082` | System and metrics port for the corresponding worker. |
+
+**Command-line flags:** `--enable-otel` enables OpenTelemetry tracing; `--approx` configures the
+corresponding launch option.
+
 ```bash
 ./launch/agg_router.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/agg_router.sh)
 </Accordion>
 <Accordion title="Image and Video Inputs">
 
 Serves a vision-language model for image and video prompts. Pass `--frontend-decoding` to decode
 media in the Dynamo frontend and transfer the result to SGLang.
 
+The default model is `Qwen/Qwen3-VL-2B-Instruct`. The script declares a GPU requirement of 1.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | `http://localhost:4317` | OpenTelemetry Protocol endpoint that receives traces. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `NIXL_PLUGIN_DIR` | `$NIXL_WHEEL_LIBS/plugins` | Directory containing NIXL plugins. |
+| `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
+
+**Command-line flags:** `--model-path` sets the model path; `--chat-template` sets the backend chat
+template; `--page-size` sets the KV-cache page size; `--enable-otel` enables OpenTelemetry tracing;
+`--frontend-decoding` moves media preprocessing into
+the Dynamo frontend.
+
+**Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
+
 ```bash
 ./launch/agg_vision.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/agg_vision.sh)
 </Accordion>
 </AccordionGroup>
 
@@ -89,50 +195,142 @@ media in the Dynamo frontend and transfer the result to SGLang.
 Runs prefill and decode on separate workers so each stage can be scaled and tuned independently. The
 default topology uses two GPUs and transfers KV cache between the workers.
 
+The default model is `Qwen/Qwen3-0.6B`. The script declares a GPU requirement of 2.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | `http://localhost:4317` | OpenTelemetry Protocol endpoint that receives traces. |
+| `DYN_DISAGG_BOOTSTRAP_PORT` | `12345` | Bootstrap port used to establish disaggregated worker connections. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT1` | `8081` | System and metrics port for the first worker. |
+| `DYN_SYSTEM_PORT2` | `8082` | System and metrics port for the second worker. |
+
+**Command-line flags:** `--unified` uses the unified backend entry point; `--enable-otel` enables
+OpenTelemetry tracing.
+
 ```bash
 ./launch/disagg.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/disagg.sh)
 </Accordion>
 <Accordion title="Independent Prefill and Decode Pools">
 
 Starts two prefill and two decode workers with KV-aware routing across both pools. Use this four-GPU
 example to test scaling and cache-aware placement.
 
+The default model is `Qwen/Qwen3-0.6B`. The script declares a GPU requirement of 4.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | `http://localhost:4317` | OpenTelemetry Protocol endpoint that receives traces. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT1` | `8081` | System and metrics port for the first worker. |
+| `DYN_SYSTEM_PORT2` | `8082` | System and metrics port for the second worker. |
+| `DYN_SYSTEM_PORT3` | `8083` | System and metrics port for the third worker. |
+| `DYN_SYSTEM_PORT4` | `8084` | System and metrics port for the fourth worker. |
+
+**Command-line flags:** `--enable-otel` enables OpenTelemetry tracing.
+
 ```bash
 ./launch/disagg_router.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/disagg_router.sh)
 </Accordion>
 <Accordion title="Prefill and Decode on One GPU">
 
 Runs separate prefill and decode processes on the same GPU with reduced memory limits. Use it for
 functional testing of the disaggregated path without a multi-GPU host.
 
+The default model is `Qwen/Qwen3-0.6B`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `CONTEXT_LENGTH` | `4096` | Context length configured for the model. |
+| `MAX_RUNNING_REQUESTS` | `2` | Maximum number of requests run concurrently. |
+| `MAX_TOTAL_TOKENS` | `25000` | TensorRT-LLM KV-cache token capacity per worker. |
+| `CUDA_VISIBLE_DEVICES` | `0` | GPU devices visible to the launched worker processes. |
+| `DYN_DISAGG_BOOTSTRAP_PORT` | `12345` | Bootstrap port used to establish disaggregated worker connections. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_CHAT_PROCESSOR` | `Empty` | Chat processor used by the frontend for multimodal preprocessing. |
+| `DYN_ROUTER_MODE` | `Empty` | Optional router mode passed to the frontend for this topology. |
+| `DYN_SYSTEM_PORT1` | `8081` | System and metrics port for the first worker. |
+| `DYN_SYSTEM_PORT2` | `8082` | System and metrics port for the second worker. |
+
+**Command-line flags:** `--model` sets the model identifier or path; `--single-gpu` places workers
+on one accelerator.
+
 ```bash
 ./launch/disagg_same_gpu.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/disagg_same_gpu.sh)
 </Accordion>
 <Accordion title="Separate Encode, Prefill, and Decode Workers">
 
 Splits vision encoding, language-model prefill, and decode into three workers. The default layout
 uses three GPUs; `--single-gpu` co-locates them for functional testing.
 
+The default model is `Qwen/Qwen2.5-VL-7B-Instruct`.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_ENCODE_WORKER_GPU` | `0` | GPU for the encode worker in the default three-GPU layout. |
+| `DYN_PREFILL_WORKER_GPU` | `1` | GPU for the prefill worker; `--single-gpu` changes the default to `0`. |
+| `DYN_DECODE_WORKER_GPU` | `2` | GPU for the decode worker; `--single-gpu` changes the default to `0`. |
+| `DYN_ENCODE_GPU_MEM` | `0.9` | GPU-memory fraction assigned to the corresponding worker. |
+| `DYN_PREFILL_GPU_MEM` | `0.9` | GPU-memory fraction assigned to the corresponding worker. |
+| `DYN_DECODE_GPU_MEM` | `0.9` | GPU-memory fraction assigned to the corresponding worker. |
+| `DYN_DISAGG_BOOTSTRAP_PORT` | `12345` | Bootstrap port used to establish disaggregated worker connections. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT1` | `8081` | System and metrics port for the first worker. |
+| `DYN_SYSTEM_PORT2` | `8082` | System and metrics port for the second worker. |
+
+**Command-line flags:** `--model` sets the model identifier or path; `--served-model-name` sets the
+model name exposed by the API; `--chat-template` sets the backend chat template;
+`--single-gpu` places workers on one accelerator.
+
 ```bash
 ./launch/multimodal_disagg.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/multimodal_disagg.sh)
 </Accordion>
 <Accordion title="Dedicated Encoder with a Combined Language-Model Worker">
 
 Runs vision encoding separately from a worker that performs both prefill and decode. The default
 layout uses two GPUs, with a single-GPU mode available for functional testing.
 
+The default model is `Qwen/Qwen2.5-VL-7B-Instruct`. The default topology uses two GPUs; `--single-gpu` co-locates both workers on one GPU.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_ENCODE_WORKER_GPU` | `0` | GPU device assigned to the corresponding worker. |
+| `DYN_WORKER_GPU` | `1` | GPU for the combined prefill/decode worker; `--single-gpu` changes the default to `0`. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT1` | `8081` | System and metrics port for the first worker. |
+| `DYN_SYSTEM_PORT2` | `8082` | System and metrics port for the second worker. |
+
+**Command-line flags:** `--model` sets the model identifier or path; `--served-model-name` sets the
+model name exposed by the API; `--chat-template` sets the backend chat template;
+`--single-gpu` places workers on one accelerator.
+
 ```bash
 ./launch/multimodal_epd.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/multimodal_epd.sh)
 </Accordion>
 </AccordionGroup>
 
@@ -146,30 +344,77 @@ layout uses two GPUs, with a single-GPU mode available for functional testing.
 Serves LLaDA-style language models that generate text through iterative refinement instead of
 autoregressive decoding. The default configuration uses one GPU.
 
+The default model is `inclusionAI/LLaDA2.0-mini-preview`. The script declares a GPU requirement of 1.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DLLM_ALGORITHM` | `LowConfidence` | Diffusion language-model decoding algorithm. |
+| `DLLM_ALGORITHM_CONFIG` | `Empty` | Configuration passed to the diffusion decoding algorithm. |
+| `NAMESPACE` | `dynamo` | Dynamo discovery namespace used by the frontend and workers. |
+| `COMPONENT` | `backend` | Dynamo component name used in the worker endpoint URI. |
+| `ENDPOINT` | `generate` | Dynamo endpoint name registered by the diffusion worker. |
+| `HTTP_PORT` | `8001` | Port used by the corresponding service or worker. |
+| `TP_SIZE` | `1` | Tensor-parallel degree used by the backend. |
+
 ```bash
 ./launch/diffusion_llada.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/diffusion_llada.sh)
 </Accordion>
 <Accordion title="Text-to-Image Generation">
 
 Starts an image-diffusion worker and serves the generation endpoint. The default FLUX model requires
 one GPU with enough memory for the model.
 
+The default model is `black-forest-labs/FLUX.1-dev`. The script declares a GPU requirement of 1.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `${HTTP_PORT:-8000}` | HTTP port exposed by the Dynamo frontend. |
+| `HTTP_PORT` | `8000` | Port used by the corresponding service or worker. |
+
+**Command-line flags:** `--model-path` sets the model path; `--fs-url` sets the generated-media
+storage URL; `--http-url` sets an optional base URL for serving generated images; `--http-port` sets
+the frontend HTTP port.
+
+**Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
+
 ```bash
 ./launch/image_diffusion.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/image_diffusion.sh)
 </Accordion>
 <Accordion title="Text-to-Video Generation">
 
 Starts a video-generation worker for Wan models. Select the model size and generation settings with
 the script flags; the 14B option uses two GPUs.
 
+The default model is `Wan-AI/Wan2.1-T2V-1.3B-Diffusers`. The `--wan-size 1b` mode uses one GPU, while `--wan-size 14b` uses two GPUs.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `${HTTP_PORT:-8000}` | HTTP port exposed by the Dynamo frontend. |
+| `HTTP_PORT` | `8000` | Port used by the corresponding service or worker. |
+
+**Command-line flags:** `--wan-size` selects the 1B or 14B Wan model; `--fs-url` sets the
+media-storage URL; `--http-port` sets the frontend HTTP port; `--num-frames`, `--height`, and
+`--width` set video dimensions; `--num-inference-steps` sets the denoising step count.
+
+**Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
+
 ```bash
 ./launch/text-to-video-diffusion.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/text-to-video-diffusion.sh)
 </Accordion>
 </AccordionGroup>
 
@@ -184,12 +429,27 @@ The LoRA example also requires the setup described in the
 <Accordion title="Dynamic LoRA Adapter Serving">
 
 Starts one SGLang worker with Low-Rank Adaptation (LoRA) support and loads adapters from the
-configured object store. Complete the LoRA setup linked above before running it.
+configured object store.
+
+The script expects MinIO at `http://localhost:9000` and loads adapters from the `my-loras` bucket.
+Run `launch/lora/setup_minio.sh --start` first to start MinIO and upload the example adapter.
+
+The default model is `Qwen/Qwen3-0.6B`. The script declares a GPU requirement of 1.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `MODEL` | `Qwen/Qwen3-0.6B` | Model identifier or local model path loaded by the worker. |
+| `LORA_NAME` | `codelion/Qwen3-0.6B-accuracy-recovery-lora` | Hugging Face Low-Rank Adaptation (LoRA) adapter repository to load. |
+| `DYN_SYSTEM_PORT` | `8081` | System and metrics port for the worker. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
 
 ```bash
 ./launch/lora/agg_lora.sh
 ```
 
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/lora/agg_lora.sh)
 </Accordion>
 </AccordionGroup>
 

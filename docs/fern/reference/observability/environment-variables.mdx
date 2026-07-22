@@ -5,7 +5,10 @@ title: Environment Variables
 subtitle: Every environment variable that controls Dynamo metrics, tracing, logging, health checks, and request capture.
 ---
 
-This page catalogs the environment variables that govern Dynamo observability. Set them on **every** Dynamo process (frontend, router, workers) that you want to emit signals — a variable set on workers alone does not configure the frontend. For how-to walkthroughs, see the observability guides on [Metrics](../../observability/metrics.mdx), [Tracing](../../observability/tracing.mdx), [Logging](../../observability/logging.mdx), and [Health Checks](../../observability/health-checks.mdx).
+This page catalogs the environment variables that govern Dynamo observability. Set them on every
+frontend, router, or worker that should emit a signal. For local procedures, see
+[Observe a Local Deployment](../../observability/local-observability.mdx) and
+[Check Local Deployment Health](../../observability/health-checks.mdx).
 
 The canonical list of variable names lives in [`lib/runtime/src/config/environment_names.rs`](https://github.com/ai-dynamo/dynamo/blob/main/lib/runtime/src/config/environment_names.rs), which groups them by area (logging, OTLP, system server, canary, request trace). The logging and OTLP variables are read in [`lib/runtime/src/logging.rs`](https://github.com/ai-dynamo/dynamo/blob/main/lib/runtime/src/logging.rs) `setup_logging()`; the `DYN_SYSTEM_*` and health variables are read by the system-status server. The backend log-level variables (`VLLM_LOGGING_LEVEL`, `TLLM_LOG_LEVEL`) are read by the respective engines, not the Dynamo runtime.
 
@@ -163,6 +166,14 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 
 ## Health checks
 
+<ParamField path="DYN_HTTP_SVC_HEALTH_PATH" type="string" default="/health">
+  Path of the frontend health endpoint.
+</ParamField>
+
+<ParamField path="DYN_HTTP_SVC_LIVE_PATH" type="string" default="/live">
+  Path of the frontend liveness endpoint.
+</ParamField>
+
 <ParamField path="DYN_SYSTEM_STARTING_HEALTH_STATUS" type="string" default="notready">
   Initial health status a component reports before its required endpoints are served.
 
@@ -178,7 +189,8 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 </ParamField>
 
 <ParamField path="DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS" type="string">
-  JSON array of endpoints that must be served before the component reports `ready`, e.g. `["generate"]`. Unset by default. Marked deprecated in the runtime source (`environment_names.rs`) — verify current behavior against your release before relying on it.
+  Deprecated compatibility variable. The current runtime logs a warning and does not use this value
+  to select endpoints for system health.
 
   **Operator preset:** `["generate"]` on worker, prefill, and decode pods.
 </ParamField>
@@ -195,6 +207,11 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 
 <ParamField path="DYN_HEALTH_CHECK_REQUEST_TIMEOUT" type="integer" default="3">
   Maximum seconds to wait for a canary health-check response before marking the endpoint unhealthy.
+</ParamField>
+
+<ParamField path="DYN_HEALTH_CHECK_PAYLOAD" type="string">
+  Optional canary payload override for unified backends. Accepts a JSON object or
+  `@/path/to/payload.json` and takes precedence over the backend's default payload.
 </ParamField>
 
 ## Request replay tracing

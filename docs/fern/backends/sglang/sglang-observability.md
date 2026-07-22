@@ -14,7 +14,7 @@ When running SGLang through Dynamo, SGLang engine metrics are automatically pass
 
 For Dynamo runtime metrics, see the [Metrics Catalog](../../reference/observability/metrics-catalog.mdx).
 
-For a visualization walkthrough, see [Metrics and Dashboards](../../observability/metrics.mdx).
+For a visualization walkthrough, see [Metrics and Dashboards](../../observability/local-observability.mdx#view-metrics-and-dashboards).
 
 ### Environment Variables
 
@@ -375,7 +375,7 @@ curl -H 'Content-Type: application/json' \
   http://localhost:8000/v1/chat/completions
 ```
 
-For more details on the Tempo/Grafana tracing infrastructure, see the [Dynamo Tracing Guide](../../observability/tracing.mdx).
+For more details on the Tempo/Grafana tracing infrastructure, see the [Local Observability Guide](../../observability/local-observability.mdx#inspect-traces-and-exported-logs).
 
 ---
 
@@ -490,8 +490,8 @@ This is useful for automated benchmarking pipelines where you want to capture me
 
 ### Dynamo Observability
 - [Metrics Catalog](../../reference/observability/metrics-catalog.mdx) - Dynamo runtime metric definitions
-- [Dynamo Tracing Guide](../../observability/tracing.mdx) - Distributed tracing with OpenTelemetry and Tempo
-- [Metrics and Dashboards](../../observability/metrics.mdx) - Visualization walkthrough
+- [Local Observability Guide](../../observability/local-observability.mdx#inspect-traces-and-exported-logs) - Distributed tracing with OpenTelemetry and Tempo
+- [Metrics and Dashboards](../../observability/local-observability.mdx#view-metrics-and-dashboards) - Visualization walkthrough
 - Dynamo runtime metrics (prefixed with `dynamo_*`) are available at the same `/metrics` endpoint alongside SGLang metrics
   - Implementation: `lib/runtime/src/metrics.rs` (Rust runtime metrics)
   - Metric names: `lib/runtime/src/metrics/prometheus_names.rs` (metric name constants)

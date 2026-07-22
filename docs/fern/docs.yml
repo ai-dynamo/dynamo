@@ -189,7 +189,13 @@ redirects:
   - source: "/dynamo/dev/cli/installation/observability-setup/overview"
     destination: "/dynamo/dev/cli/installation/observability"
   - source: "/dynamo/dev/cli/installation/observability-setup/prometheus-grafana"
-    destination: "/dynamo/dev/cli/operations/metrics-and-dashboards"
+    destination: "/dynamo/dev/cli/operations/observability"
+  - source: "/dynamo/dev/cli/operations/metrics-and-dashboards"
+    destination: "/dynamo/dev/cli/operations/observability"
+  - source: "/dynamo/dev/cli/operations/tracing"
+    destination: "/dynamo/dev/cli/operations/observability"
+  - source: "/dynamo/dev/cli/operations/logging"
+    destination: "/dynamo/dev/cli/operations/observability"
   # Backend launch scripts moved from the CLI guide to Reference.
   - source: "/dynamo/dev/cli/model-deployment/backends/v-llm-deployments"
     destination: "/dynamo/dev/local-deployment-examples/v-llm"
@@ -255,22 +261,9 @@ redirects:
     destination: "/dynamo/dev/benchmarks/kv-router-ab-testing"
 
 # GitHub repository link in navbar
-# navbar-links:
-#   - type: dropdown
-#     text: Digest
-#     links:
-#       - text: All Posts
-#         href: /dynamo/dev/digest
-#       - text: "NVIDIA Dynamo Snapshot: Fast Startup for Inference Workloads on Kubernetes"
-#         href: /dynamo/dev/digest/dynamo-snapshot-fast-startup
-#       - text: "DynoSim: Simulating the Pareto Frontier"
-#         href: /dynamo/dev/digest/dynosim-pareto-frontier
-#       - text: "Dynamo Day 0 support for TokenSpeed"
-#         href: /dynamo/dev/digest/tokenspeed-day-0
-#       - text: "Multi-Turn Agentic Harnesses"
-#         href: /dynamo/dev/digest/agentic-harnesses
-#   - type: github
-#     value: https://github.com/ai-dynamo/dynamo
+navbar-links:
+  - type: github
+    value: https://github.com/ai-dynamo/dynamo
 
 footer: ./components/CustomFooter.tsx
 

@@ -131,4 +131,4 @@ The overflow channel is sized to `Q-1` because the single dispatcher holds one r
 - [Request Rejection](../fault-tolerance/request-rejection.md) - How to enable, tune, and monitor request rejection (use-case guide)
 - [Request Migration Architecture](request-migration.md) - Recovering in-flight requests after worker failure
 - [Metrics Catalog](../reference/observability/metrics-catalog.mdx#cancellation-and-rejection) - Rejection and admission metrics
-- [Health Checks](../observability/health-checks.mdx) - Worker health monitoring
+- [Observability Architecture](observability.md#active-worker-health-checks) - Worker health monitoring

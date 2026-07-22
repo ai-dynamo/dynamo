@@ -26,7 +26,7 @@ These operate automatically and are documented as architecture references, not c
 
 - [Request Cancellation](../design-docs/request-cancellation.md) — the frontend and runtime abort in-flight requests when a client disconnects.
 - [Fault Tolerance Testing](../design-docs/fault-tolerance-testing.md) — the framework for validating these behaviors (cancellation, migration, etcd HA failover, hardware fault injection).
-- [Health Checks](../observability/health-checks.mdx) — liveness/readiness endpoints and engine monitoring that drive failure detection.
+- [Health Check Reference](../reference/observability/health-checks.mdx) — liveness/readiness endpoints and engine monitoring that drive failure detection.
 - [Shadow Engine Failover](../kubernetes/shadow-engine-failover.md) — same-node active/passive engine recovery for Kubernetes (does not preserve in-flight requests or KV cache state).
 - [Distributed Runtime](../design-docs/distributed-runtime.md) — the service discovery and lease mechanism that detects worker loss and reroutes traffic.
 
