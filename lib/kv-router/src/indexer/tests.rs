@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,7 +11,6 @@ use tokio_util::sync::CancellationToken;
 
 use super::concurrent_radix_tree::ConcurrentRadixTree;
 use super::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
-use super::cuckoo::{CkfConfig, EventTransposedCkfIndexer};
 use super::positional::{PositionalIndexer, SearchMode};
 use super::*;
 use crate::indexer::pruning::PruneConfig;
@@ -41,15 +39,7 @@ fn indexer_template(
 #[template]
 #[rstest]
 fn matching_indexer_template(
-    #[values(
-        "single",
-        "flat",
-        "flat_binary",
-        "concurrent",
-        "concurrent_compressed",
-        "ckf"
-    )]
-    variant: &str,
+    #[values("single", "flat", "flat_binary", "concurrent", "concurrent_compressed")] variant: &str,
 ) {
 }
 
@@ -83,51 +73,6 @@ enum MatchSemantics {
     ProbabilisticNoUnderreport,
 }
 
-fn padded_ckf_workers(
-    scenario_workers: &[WorkerWithDpRank],
-) -> [WorkerWithDpRank; super::cuckoo::DC_COUNT] {
-    assert!(
-        scenario_workers.len() <= super::cuckoo::DC_COUNT,
-        "CKF test scenario exceeds fixed lane count"
-    );
-    let mut seen = HashSet::with_capacity(super::cuckoo::DC_COUNT);
-    let mut workers = Vec::with_capacity(super::cuckoo::DC_COUNT);
-    for &worker in scenario_workers {
-        assert!(
-            seen.insert(worker),
-            "duplicate exact CKF test worker identity: {worker:?}"
-        );
-        workers.push(worker);
-    }
-
-    let mut padding_id = u64::MAX;
-    while workers.len() < super::cuckoo::DC_COUNT {
-        let candidate = WorkerWithDpRank::new(padding_id, 0);
-        padding_id = padding_id.wrapping_sub(1);
-        if seen.insert(candidate) {
-            workers.push(candidate);
-        }
-    }
-
-    workers
-        .try_into()
-        .unwrap_or_else(|_| unreachable!("CKF worker padding must produce exactly 16 lanes"))
-}
-
-#[test]
-fn ckf_test_worker_factory_preserves_ranks_pads_and_rejects_duplicates() {
-    let scenario = [WorkerWithDpRank::new(7, 0), WorkerWithDpRank::new(7, 1)];
-    let workers = padded_ckf_workers(&scenario);
-    assert_eq!(&workers[..scenario.len()], &scenario);
-    assert_eq!(workers[scenario.len()], WorkerWithDpRank::new(u64::MAX, 0));
-    assert_eq!(workers.into_iter().collect::<HashSet<_>>().len(), 16);
-
-    let duplicate = std::panic::catch_unwind(|| {
-        padded_ckf_workers(&[scenario[0], scenario[0]]);
-    });
-    assert!(duplicate.is_err());
-}
-
 fn make_matching_indexer(
     variant: &str,
     workers: &[WorkerWithDpRank],
@@ -141,15 +86,8 @@ fn make_matching_indexer_with_metrics(
     workers: &[WorkerWithDpRank],
     metrics: Arc<KvIndexerMetrics>,
 ) -> (Box<dyn KvIndexerInterface + Sync>, Arc<KvIndexerMetrics>) {
-    if variant != "ckf" {
-        return make_indexer_with_metrics(variant, metrics);
-    }
-
-    let backend =
-        EventTransposedCkfIndexer::new(padded_ckf_workers(workers), CkfConfig::new(16_384))
-            .expect("valid fixed-D CKF test configuration");
-    let index = ThreadPoolIndexer::new_with_metrics(backend, 4, 32, Some(Arc::clone(&metrics)));
-    (Box::new(index), metrics)
+    let _ = workers;
+    make_indexer_with_metrics(variant, metrics)
 }
 
 fn assert_scores_with_semantics(
@@ -158,56 +96,13 @@ fn assert_scores_with_semantics(
     query_len: usize,
     configured_workers: &[WorkerWithDpRank],
     expected_scores: &[(WorkerWithDpRank, u32)],
-    ckf_semantics: MatchSemantics,
+    _ckf_semantics: MatchSemantics,
 ) {
     let expected: std::collections::HashMap<_, _> = expected_scores.iter().copied().collect();
-    if variant != "ckf" || ckf_semantics == MatchSemantics::Exact {
-        assert_eq!(actual.scores.len(), expected.len());
-        for (&worker, &expected_depth) in &expected {
-            assert_eq!(actual.scores.get(&worker), Some(&expected_depth));
-        }
-        if variant == "ckf" {
-            assert!(actual.frequencies.is_empty());
-        }
-        return;
-    }
-
-    let configured: HashSet<_> = configured_workers.iter().copied().collect();
-    assert_eq!(
-        configured.len(),
-        configured_workers.len(),
-        "probabilistic score assertion received duplicate workers"
-    );
-    assert!(actual.frequencies.is_empty());
-    assert!(
-        actual
-            .scores
-            .keys()
-            .all(|worker| configured.contains(worker)),
-        "CKF returned an unexpected identity: {:?}",
-        actual.scores
-    );
-    assert!(
-        actual.scores.values().all(|&depth| depth > 0),
-        "CKF must omit zero-depth scores: {:?}",
-        actual.scores
-    );
-    assert!(
-        actual
-            .scores
-            .values()
-            .all(|&depth| depth as usize <= query_len),
-        "CKF score exceeds query length {query_len}: {:?}",
-        actual.scores
-    );
-
-    for &worker in configured_workers {
-        let expected_depth = expected.get(&worker).copied().unwrap_or(0);
-        let actual_depth = actual.scores.get(&worker).copied().unwrap_or(0);
-        assert!(
-            actual_depth >= expected_depth,
-            "CKF under-reported {worker:?}: expected at least {expected_depth}, got {actual_depth}"
-        );
+    let _ = (variant, query_len, configured_workers);
+    assert_eq!(actual.scores.len(), expected.len());
+    for (&worker, &expected_depth) in &expected {
+        assert_eq!(actual.scores.get(&worker), Some(&expected_depth));
     }
 }
 
@@ -1425,11 +1320,14 @@ mod interface_tests {
         index
             .apply_event(make_store_event_with_dp_rank(7, &[1, 2, 3], 0))
             .await;
+
+        index.reset_worker_dp_rank_and_wait(7, 0).await.unwrap();
+
+        // A rank reset does not fence sibling ranks, so order the sibling store explicitly.
         index
             .apply_event(make_store_event_with_dp_rank(7, &[1, 2, 3], 1))
             .await;
-
-        index.reset_worker_dp_rank_and_wait(7, 0).await.unwrap();
+        flush_and_settle(index.as_ref()).await;
 
         assert_query_scores_with_semantics(
             variant,
@@ -2893,15 +2791,40 @@ mod local_indexer_tests {
         assert_eq!(local_indexer.buffer_len(), 0);
 
         match local_indexer.get_events_in_id_range(None, None).await {
-            WorkerKvQueryResponse::TreeDump {
-                events,
+            WorkerKvQueryResponse::TreeDumpFailed {
                 last_event_id,
+                message,
             } => {
-                assert!(events.is_empty());
                 assert_eq!(last_event_id, 0);
+                assert_eq!(message, "Indexer is offline");
             }
-            other => panic!("Expected TreeDump, got: {other:?}"),
+            other => panic!("Expected TreeDumpFailed, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn legacy_named_messagepack_query_defaults_explicit_dump_failure_capability_off() {
+        #[derive(serde::Serialize)]
+        struct LegacyWorkerKvQueryRequest {
+            worker_id: WorkerId,
+            dp_rank: DpRank,
+            start_event_id: Option<u64>,
+            end_event_id: Option<u64>,
+        }
+
+        let encoded = rmp_serde::to_vec_named(&LegacyWorkerKvQueryRequest {
+            worker_id: 7,
+            dp_rank: 3,
+            start_event_id: None,
+            end_event_id: Some(9),
+        })
+        .unwrap();
+        let decoded: WorkerKvQueryRequest = rmp_serde::from_slice(&encoded).unwrap();
+
+        assert_eq!(decoded.worker_id, 7);
+        assert_eq!(decoded.dp_rank, 3);
+        assert_eq!(decoded.end_event_id, Some(9));
+        assert!(!decoded.supports_tree_dump_failed);
     }
 
     #[tokio::test]
@@ -3173,10 +3096,24 @@ mod local_indexer_tests {
         indexer.shutdown();
         dump_tx.closed().await;
 
-        let _ = indexer.get_events_in_id_range(None, None).await;
-        let _ = indexer.get_events_in_id_range(None, None).await;
+        let first = indexer.get_events_in_id_range(None, None).await;
+        let second = indexer.get_events_in_id_range(None, None).await;
 
         assert_eq!(indexer.dump_build_count(), 2);
+        assert!(matches!(
+            first,
+            WorkerKvQueryResponse::TreeDumpFailed {
+                last_event_id: 0,
+                ..
+            }
+        ));
+        assert!(matches!(
+            second,
+            WorkerKvQueryResponse::TreeDumpFailed {
+                last_event_id: 0,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

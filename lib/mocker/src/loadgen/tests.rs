@@ -141,6 +141,43 @@ fn test_from_mooncake_single_turn_preserves_fields() {
 }
 
 #[test]
+fn single_turn_requests_plan_missing_output_tokens_deterministically() {
+    let trace = Trace {
+        block_size: 1,
+        sessions: vec![
+            SessionTrace {
+                session_id: "missing".into(),
+                first_arrival_timestamp_ms: Some(0.0),
+                turns: vec![TurnTrace {
+                    input_length: 2,
+                    max_output_tokens: 3,
+                    hash_ids: vec![10, 11],
+                    ..Default::default()
+                }],
+            },
+            SessionTrace {
+                session_id: "authored".into(),
+                first_arrival_timestamp_ms: Some(1.0),
+                turns: vec![TurnTrace {
+                    input_length: 1,
+                    max_output_tokens: 2,
+                    output_token_ids: Some(vec![20, 21]),
+                    hash_ids: vec![12],
+                    ..Default::default()
+                }],
+            },
+        ],
+    };
+
+    let first = trace.to_single_turn_requests().unwrap();
+    let second = trace.to_single_turn_requests().unwrap();
+
+    assert_eq!(first[0].output_token_ids, second[0].output_token_ids);
+    assert_eq!(first[0].output_token_ids.as_ref().map(Vec::len), Some(3));
+    assert_eq!(first[1].output_token_ids.as_deref(), Some(&[20, 21][..]));
+}
+
+#[test]
 fn test_from_mooncake_preserves_output_token_replay_keys() {
     let file = write_trace(&[
         serde_json::json!({

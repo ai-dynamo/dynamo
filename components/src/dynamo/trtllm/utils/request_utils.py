@@ -5,6 +5,11 @@ from collections.abc import Mapping
 from typing import Any, Optional
 
 
+def normalize_top_k_for_trtllm(top_k: int) -> int:
+    """Translate Dynamo's disabled top-k sentinel to TRT-LLM's sentinel."""
+    return 0 if top_k == -1 else top_k
+
+
 def request_cache_salt(request: Mapping[str, Any]) -> Optional[str]:
     """Return the first non-empty cache_salt, preferring routing hints."""
     routing = request.get("routing") or {}

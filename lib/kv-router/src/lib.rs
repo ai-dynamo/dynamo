@@ -8,8 +8,10 @@
 
 mod active_set;
 pub(crate) mod cleanup;
+pub mod conditional_disagg;
 mod lookup_update;
 
+pub mod identity;
 pub mod indexer;
 pub mod protocols;
 pub mod recovery;
@@ -36,17 +38,18 @@ pub mod test_utils;
 
 // Re-export key types for convenience
 pub use self::multi_worker_sequence::{
-    ActiveSequencesMultiWorker, ReplicaWorkerPolicy, SequenceError, SequencePublisher,
-    SequenceRequest, SequenceSubscriber,
+    ActiveSequencesMultiWorker, NoopSequencePublisher, ReplicaWorkerPolicy, SequenceError,
+    SequencePublisher, SequenceRequest, SequenceSubscriber,
 };
 pub use self::sequence::{ActiveSequences, RequestId};
 pub use self::sequences::{PrefillTokenDeltas, WorkerLoadProjection};
 pub use concurrent_radix_tree::ConcurrentRadixTree;
 pub use concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 pub use config::{
-    KvRouterConfig, RouterConfigOverride, RouterPrefillLoadModel, RouterQueuePolicy,
-    SharedCacheType,
+    ConditionalDisaggPolicyKind, KvRouterConfig, RouterConfigOverride, RouterPrefillLoadModel,
+    RouterQueuePolicy, SharedCacheType,
 };
+pub use identity::DcId;
 #[allow(deprecated)]
 pub use indexer::{
     AnchorAwareBranchShardedIndexer, AnchorRef, AnchorTask, BranchShardedIndexer,
