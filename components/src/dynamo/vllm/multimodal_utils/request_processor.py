@@ -22,7 +22,7 @@ from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.multimodal.audio_loader import AudioLoader
-from dynamo.common.multimodal.image_loader import ImageLoader
+from dynamo.common.multimodal.image_loader import URL_VARIANT_KEY, ImageLoader
 from dynamo.common.multimodal.mm_kwargs_transfer import (
     MmKwargsNixlReceiver,
     MmKwargsReceiver,
@@ -40,13 +40,13 @@ from .models.qwen import (
     build_qwen_embedding_params,
     load_qwen_grid_params,
 )
+from .prefill_worker_utils import parse_image_item
 
 logger = logging.getLogger(__name__)
 
 IMAGE_URL_KEY = "image_url"
 VIDEO_URL_KEY = "video_url"
 AUDIO_URL_KEY = "audio_url"
-URL_VARIANT_KEY = "Url"
 
 
 def pad_mm_hashes_to_64(mm_hashes: list[str]) -> list[str]:
@@ -227,6 +227,7 @@ class VllmMultimodalRequestProcessor:
         self.model = model
         self.engine_client = engine_client
         self.enable_multimodal = enable_multimodal
+        self.enable_frontend_decoding = enable_frontend_decoding
         self.trust_remote_code = trust_remote_code
         self.embedding_loader = embedding_loader
         self.image_loader = image_loader or ImageLoader(
@@ -322,21 +323,23 @@ class VllmMultimodalRequestProcessor:
 
             vllm_mm_data: dict[str, Any] = {}
 
-            # A separate encoder currently supports URL-based images only. Keep
-            # processing other modalities locally so mixed image/video requests
-            # preserve all of their inputs.
+            # A separate encoder consumes URL images and, when frontend
+            # decoding is enabled, frontend-decoded pixels read via NIXL.
+            # Keep processing other modalities locally so mixed image/video
+            # requests preserve all of their inputs.
             if self.embedding_loader is not None:
-                image_urls: list[str] = []
+                image_items_for_encoder: list[Any] = []
                 supported = True
                 for item in mm_map.get(IMAGE_URL_KEY, []):
-                    if isinstance(item, dict) and URL_VARIANT_KEY in item:
-                        image_urls.append(item[URL_VARIANT_KEY])
-                    elif isinstance(item, dict) and "Decoded" in item:
+                    _url, decoded = parse_image_item(item)
+                    if decoded is not None and not self.enable_frontend_decoding:
                         supported = False
+                        break
+                    image_items_for_encoder.append(item)
                 if supported:
                     vllm_mm_data = (
                         await self.embedding_loader.load_multimodal_embeddings(
-                            image_urls,
+                            image_items_for_encoder,
                             request_id,
                             model=self.model,
                             context=context,
