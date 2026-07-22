@@ -482,7 +482,9 @@ where
                     worker.worker_id != target.worker_id
                         && configs.get(&worker.worker_id).is_some_and(|config| {
                             config.supports_router_hints()
-                                && config.router_hint_source_control_endpoint().is_some()
+                                && config
+                                    .router_hint_source_control_endpoint()
+                                    .is_some_and(|endpoint| !endpoint.is_empty())
                         })
                 })?;
             let source_control_endpoint = configs
@@ -1510,21 +1512,26 @@ mod tests {
         make_test_router_with_workers(selector, shared_cache, workers).await
     }
 
-    #[tokio::test]
-    async fn router_hint_excludes_other_dp_ranks_of_selected_target_worker() {
+    fn router_hint_runtime_config(endpoint: Option<&str>) -> ModelRuntimeConfig {
         let mut runtime_config = ModelRuntimeConfig::default();
         runtime_config.runtime_data.insert(
             dynamo_kv_router::router_hint::ROUTER_HINT_RUNTIME_CAPABILITY_KEY.to_string(),
             serde_json::Value::Bool(true),
         );
-        runtime_config.runtime_data.insert(
-            dynamo_kv_router::router_hint::ROUTER_HINT_SOURCE_CONTROL_ENDPOINT_RUNTIME_KEY
-                .to_string(),
-            serde_json::Value::String("tcp://127.0.0.1:23280".to_string()),
-        );
+        if let Some(endpoint) = endpoint {
+            runtime_config.runtime_data.insert(
+                dynamo_kv_router::router_hint::ROUTER_HINT_SOURCE_CONTROL_ENDPOINT_RUNTIME_KEY
+                    .to_string(),
+                serde_json::Value::String(endpoint.to_string()),
+            );
+        }
+        runtime_config
+    }
 
+    #[tokio::test]
+    async fn router_hint_excludes_other_dp_ranks_of_selected_target_worker() {
         let mut workers = HashMap::new();
-        workers.insert(7, runtime_config);
+        workers.insert(7, router_hint_runtime_config(Some("tcp://127.0.0.1:23280")));
         let router = make_test_router_with_workers(
             InspectingSelector {
                 expected_hits: None,
@@ -1546,6 +1553,36 @@ mod tests {
             router.router_hint_for_selection(WorkerWithDpRank::new(7, 0), 0, Some(&candidates));
 
         assert_eq!(hint, None);
+    }
+
+    #[tokio::test]
+    async fn router_hint_skips_sources_without_usable_endpoint() {
+        for source_endpoint in [None, Some("")] {
+            let mut workers = HashMap::new();
+            workers.insert(7, router_hint_runtime_config(Some("tcp://127.0.0.1:23280")));
+            workers.insert(8, router_hint_runtime_config(source_endpoint));
+            let router = make_test_router_with_workers(
+                InspectingSelector {
+                    expected_hits: None,
+                    selected_worker: WorkerWithDpRank::new(7, 0),
+                },
+                None,
+                workers,
+            )
+            .await;
+            let candidates = RouterHintRootCandidates {
+                block_hashes: vec![
+                    ExternalSequenceBlockHash(101),
+                    ExternalSequenceBlockHash(102),
+                ],
+                owner_prefix_blocks: vec![(WorkerWithDpRank::new(8, 0), 2)],
+            };
+
+            let hint =
+                router.router_hint_for_selection(WorkerWithDpRank::new(7, 0), 0, Some(&candidates));
+
+            assert_eq!(hint, None);
+        }
     }
 
     #[tokio::test]
