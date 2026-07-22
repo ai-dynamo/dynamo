@@ -7,6 +7,7 @@ use dynamo_kv_router::protocols::{
 use tempfile::NamedTempFile;
 use uuid::Uuid;
 
+use super::trace::{synthesize_trace_tokens, validate_synthesizable_prompt};
 use super::*;
 
 fn write_trace(lines: &[serde_json::Value]) -> NamedTempFile {
@@ -42,6 +43,18 @@ fn request_trace_row(
         row["agent_context"] = agent_context;
     }
     row
+}
+
+#[test]
+fn trace_synthesis_bounds_each_hash_block_to_remaining_input() {
+    let tokens = synthesize_trace_tokens(1, &[7], usize::MAX).unwrap();
+    assert_eq!(tokens, vec![7]);
+}
+
+#[test]
+fn trace_synthesis_rejects_capacity_overflow() {
+    let error = validate_synthesizable_prompt(1, &[7, 8], usize::MAX).unwrap_err();
+    assert!(error.to_string().contains("capacity overflow"));
 }
 
 #[test]
