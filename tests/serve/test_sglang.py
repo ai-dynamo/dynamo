@@ -879,8 +879,7 @@ def test_sglang_deployment(
 _DISAGGREGATED_OTEL_CONFIG = SGLangConfig(
     name="disaggregated_otel",
     directory=sglang_dir,
-    script_name="disagg.sh",
-    script_args=["--enable-otel"],
+    script_name="sidecar_disagg.sh",
     marks=[],  # applied on the dedicated test below
     model="Qwen/Qwen3-0.6B",
     request_payloads=[chat_payload_default(repeat_count=1)],
@@ -936,7 +935,7 @@ def test_disaggregated_otel_exports_worker_graph_spans(
     predownload_models,
     otlp_collector,
 ):
-    """Disaggregated OTEL must export prefill and decode worker spans."""
+    """The SGLang sidecars must export prefill and decode worker spans."""
     assert num_system_ports >= 2
     collector, otlp_port = otlp_collector
     config = dataclasses.replace(
@@ -948,6 +947,8 @@ def test_disaggregated_otel_exports_worker_graph_spans(
         request,
         ports=dynamo_dynamic_ports,
         extra_env={
+            "DYN_LOGGING_JSONL": "1",
+            "OTEL_EXPORT_ENABLED": "1",
             "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": (f"http://127.0.0.1:{otlp_port}"),
         },
         post_validation=functools.partial(
