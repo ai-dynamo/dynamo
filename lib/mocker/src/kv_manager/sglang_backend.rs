@@ -197,21 +197,22 @@ impl SglangKvManager {
         first_new_token: usize,
     ) -> NodeId {
         self.publish_stored_event(token_ids, kv_indices, first_new_token);
-        self.cache.insert(token_ids, kv_indices);
+        let new_last_node = self.cache.insert(token_ids, kv_indices);
 
-        // Find the new deepest node after insert. Another in-flight request may
-        // have inserted the same materialized blocks first, in which case the
-        // radix cache retains that request's physical pages. Switch this active
-        // request to the canonical pages before releasing its duplicate pages;
-        // otherwise a later retract loses track of the duplicates and leaves
-        // KV publisher refcounts inconsistent with the radix cache.
-        let (matched_len, new_last_node) = self.cache.match_prefix(token_ids);
-        let canonical_indices = self.collect_path_indices(new_last_node);
+        // A concurrent insert can retain different physical pages for the same prefix.
+        // Move the active request to canonical pages before releasing its duplicates.
+        let complete_len =
+            token_ids.len().min(kv_indices.len()) / self.cache.page_size() * self.cache.page_size();
 
         // Acquire the extended path before releasing the old prefix so
         // destination activation never leaves valid transferred KV unprotected.
         self.cache.inc_lock_ref(new_last_node);
-        self.canonicalize_unfinished_indices(kv_indices, &canonical_indices, matched_len);
+        self.canonicalize_unfinished_indices(
+            kv_indices,
+            new_last_node,
+            first_new_token,
+            complete_len,
+        );
         self.cache.dec_lock_ref(last_node);
 
         new_last_node
@@ -407,25 +408,60 @@ impl SglangKvManager {
     fn canonicalize_unfinished_indices(
         &mut self,
         kv_indices: &mut [usize],
-        canonical_indices: &[usize],
-        matched_len: usize,
+        last_node: NodeId,
+        first_new_token: usize,
+        complete_len: usize,
     ) {
         let block_size = self.cache.page_size();
-        let complete_len = matched_len
-            .min(kv_indices.len())
-            .min(canonical_indices.len())
-            / block_size
-            * block_size;
-        debug_assert!(canonical_indices.len() >= complete_len);
+        debug_assert_eq!(complete_len % block_size, 0);
+        debug_assert_eq!(first_new_token % block_size, 0);
+        debug_assert!(complete_len <= kv_indices.len());
+        debug_assert!(first_new_token <= complete_len);
 
         let mut unretained_indices = Vec::new();
-        for block_start in (0..complete_len).step_by(block_size) {
-            let block_end = block_start + block_size;
-            if kv_indices[block_start..block_end] != canonical_indices[block_start..block_end] {
-                unretained_indices.extend_from_slice(&kv_indices[block_start..block_end]);
-                kv_indices[block_start..block_end]
-                    .copy_from_slice(&canonical_indices[block_start..block_end]);
+        let mut current = last_node;
+        let mut path_end = complete_len;
+
+        while path_end > first_new_token {
+            debug_assert_ne!(current, self.cache.root());
+            if current == self.cache.root() {
+                tracing::error!(
+                    path_end,
+                    first_new_token,
+                    complete_len,
+                    "SGLang radix path ended before the materialized prefix"
+                );
+                break;
             }
+
+            let node = self.cache.node(current);
+            let node_len = node.value.len();
+            debug_assert!(node_len <= path_end);
+            if node_len > path_end {
+                tracing::error!(
+                    node_len,
+                    path_end,
+                    complete_len,
+                    "SGLang radix node exceeds the materialized prefix"
+                );
+                break;
+            }
+            let path_start = path_end - node_len;
+            let reconcile_start = path_start.max(first_new_token);
+
+            for block_start in (reconcile_start..path_end).step_by(block_size) {
+                let block_end = block_start + block_size;
+                let node_start = block_start - path_start;
+                let node_end = node_start + block_size;
+                let canonical = &node.value[node_start..node_end];
+                if kv_indices[block_start..block_end] != *canonical {
+                    unretained_indices.extend_from_slice(&kv_indices[block_start..block_end]);
+                    kv_indices[block_start..block_end].copy_from_slice(canonical);
+                }
+            }
+
+            path_end = path_start;
+            current = node.parent.unwrap_or_else(|| self.cache.root());
         }
 
         self.free_indices(&unretained_indices);
@@ -946,10 +982,10 @@ mod tests {
     #[test]
     fn unfinished_duplicate_canonicalization_prevents_missing_parent() {
         let (buffer, sink) = capture_router_event_sink(ROUTER_TEST_WORKER_ID);
-        let mut mgr = SglangKvManager::new(8, 1, KvEventPublishers::new(Some(sink), None), 0);
+        let mut mgr = SglangKvManager::new(32, 4, KvEventPublishers::new(Some(sink), None), 0);
         let mut indexer = RadixTree::new();
 
-        let seed_tokens = [1];
+        let seed_tokens = [1, 2, 3, 4];
         let seed = mgr.allocate_for_request(&seed_tokens).unwrap();
         mgr.cache_finished_req(
             &seed_tokens,
@@ -964,10 +1000,14 @@ mod tests {
         // Two requests miss the same suffix before either inserts it. Their
         // physical suffix pages are distinct even though the logical block is
         // identical.
-        let shared_tokens = [1, 2];
+        let shared_tokens = [1, 2, 3, 4, 5, 6, 7, 8];
         let mut first = mgr.allocate_for_request(&shared_tokens).unwrap();
         let mut duplicate = mgr.allocate_for_request(&shared_tokens).unwrap();
-        assert_ne!(first.kv_indices[1], duplicate.kv_indices[1]);
+        let duplicate_suffix = duplicate.kv_indices[seed_tokens.len()..].to_vec();
+        assert_ne!(
+            first.kv_indices[seed_tokens.len()..],
+            duplicate.kv_indices[seed_tokens.len()..]
+        );
         for event in buffer.drain() {
             indexer.apply_event(event).unwrap();
         }
@@ -988,6 +1028,17 @@ mod tests {
             duplicate.kv_indices, first.kv_indices,
             "the active duplicate must switch to radix-owned canonical pages"
         );
+        assert_eq!(
+            mgr.cache().token_pool.available(),
+            24,
+            "every duplicate slot in the four-token page must return to the pool"
+        );
+        assert!(
+            duplicate_suffix
+                .iter()
+                .all(|idx| !duplicate.kv_indices.contains(idx)),
+            "no duplicate physical slot may remain attached to the active request"
+        );
         for event in buffer.drain() {
             indexer.apply_event(event).unwrap();
         }
@@ -1001,8 +1052,8 @@ mod tests {
             first_last,
             shared_tokens.len(),
         );
-        mgr.evict(1);
-        mgr.evict(1);
+        mgr.evict(seed_tokens.len());
+        mgr.evict(seed_tokens.len());
         for event in buffer.drain() {
             indexer.apply_event(event).unwrap();
         }
@@ -1021,7 +1072,9 @@ mod tests {
             indexer.apply_event(event).unwrap();
         }
 
-        let extended = mgr.allocate_for_request(&[1, 2, 3]).unwrap();
+        let extended = mgr
+            .allocate_for_request(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+            .unwrap();
         let extension_events = buffer.drain();
         assert_eq!(stored_event_count(&extension_events), 1);
         let store = extension_events

@@ -207,10 +207,7 @@ pub(super) fn simulate_decode_step_with_sampler(
         };
     }
 
-    // A zero-output request has no decode work. Leaving it in `running` would
-    // schedule an empty burst forever: it can neither emit a token nor reach
-    // the completion path below. Production traces may contain such rows for
-    // several terminal reasons, so the scheduler must drain them defensively.
+    // Terminal requests have no decode work and otherwise remain in `running` forever.
     let already_completed_indices = running
         .iter()
         .enumerate()

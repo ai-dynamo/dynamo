@@ -202,10 +202,10 @@ impl RadixCache {
     }
 
     /// Insert a token sequence into the tree. Key is page-aligned before insertion.
-    pub fn insert(&mut self, key: &[u64], value: &[usize]) {
+    pub fn insert(&mut self, key: &[u64], value: &[usize]) -> NodeId {
         let aligned_len = self.page_align(key.len());
         if aligned_len == 0 {
-            return;
+            return self.root;
         }
         assert!(
             value.len() >= aligned_len,
@@ -226,8 +226,7 @@ impl RadixCache {
             let child_id = match self.nodes[current].children.get(&ck).copied() {
                 Some(id) => id,
                 None => {
-                    self.create_child(current, &key[key_offset..], &value[key_offset..]);
-                    return;
+                    return self.create_child(current, &key[key_offset..], &value[key_offset..]);
                 }
             };
 
@@ -243,12 +242,19 @@ impl RadixCache {
                     let intermediate = self.split_node(child_id, common_len);
                     key_offset += common_len;
                     if key_offset < key.len() {
-                        self.create_child(intermediate, &key[key_offset..], &value[key_offset..]);
+                        return self.create_child(
+                            intermediate,
+                            &key[key_offset..],
+                            &value[key_offset..],
+                        );
                     }
+                    return intermediate;
                 }
-                return;
+                return current;
             }
         }
+
+        current
     }
 
     fn split_node(&mut self, child_id: NodeId, split_pos: usize) -> NodeId {
@@ -289,7 +295,7 @@ impl RadixCache {
         inter_id
     }
 
-    fn create_child(&mut self, parent_id: NodeId, key: &[u64], value: &[usize]) {
+    fn create_child(&mut self, parent_id: NodeId, key: &[u64], value: &[usize]) -> NodeId {
         let new_node = TreeNode {
             children: HashMap::new(),
             parent: Some(parent_id),
@@ -307,6 +313,8 @@ impl RadixCache {
 
         self.evictable_leaves.insert(new_id);
         self.evictable_size += key.len();
+
+        new_id
     }
 
     pub fn is_leaf(&self, id: NodeId) -> bool {

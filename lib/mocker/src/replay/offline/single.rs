@@ -255,7 +255,8 @@ impl SingleRuntime {
             } else {
                 ReplayTerminalStatus::Completed
             };
-            self.collector.on_terminal(signal.uuid, status);
+            self.collector
+                .on_terminal(signal.uuid, self.current_time_ms, status);
         }
         for _ in 0..completed_requests {
             self.progress.inc_completed();

@@ -514,7 +514,7 @@ impl AggRuntime {
             } else {
                 ReplayTerminalStatus::Completed
             };
-            self.collector.on_terminal(signal.uuid, status);
+            self.collector.on_terminal(signal.uuid, self.now_ms, status);
             #[cfg(test)]
             self.remove_active_request(signal.uuid);
             if let Some(router) = self.router.as_mut() {

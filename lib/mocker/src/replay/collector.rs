@@ -326,6 +326,8 @@ where
 struct TraceRequestStats {
     arrival_time_ms: f64,
     first_admit_ms: Option<f64>,
+    terminal_time_ms: Option<f64>,
+    terminal_status: Option<ReplayTerminalStatus>,
     token_times_ms: Vec<f64>,
     input_length: usize,
     requested_output_length: usize,
@@ -362,7 +364,6 @@ struct PerRequestDetail {
     decode_reused_input_tokens: Option<usize>,
     prefill_route_overlap_tokens: Option<usize>,
     decode_route_overlap_tokens: Option<usize>,
-    terminal_status: Option<ReplayTerminalStatus>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
@@ -391,6 +392,7 @@ pub struct PerRequestRecord {
     pub uuid: String,
     pub arrival_time_ms: f64,
     pub first_admit_ms: Option<f64>,
+    pub terminal_time_ms: f64,
     pub first_token_ms: Option<f64>,
     pub last_token_ms: Option<f64>,
     pub ttft_ms: Option<f64>,
@@ -598,6 +600,8 @@ impl TraceCollector {
             TraceRequestStats {
                 arrival_time_ms,
                 first_admit_ms: None,
+                terminal_time_ms: None,
+                terminal_status: None,
                 token_times_ms: Vec::with_capacity(requested_output_length),
                 input_length,
                 requested_output_length,
@@ -740,9 +744,15 @@ impl TraceCollector {
         }
     }
 
-    pub(crate) fn on_terminal(&mut self, uuid: Uuid, status: ReplayTerminalStatus) {
-        if let Some(detail) = self.detail_mut(uuid) {
-            detail.terminal_status.get_or_insert(status);
+    pub(crate) fn on_terminal(
+        &mut self,
+        uuid: Uuid,
+        terminal_time_ms: f64,
+        status: ReplayTerminalStatus,
+    ) {
+        if let Some(stats) = self.requests.get_mut(&uuid) {
+            stats.terminal_time_ms.get_or_insert(terminal_time_ms);
+            stats.terminal_status.get_or_insert(status);
         }
     }
 
@@ -842,10 +852,18 @@ impl TraceCollector {
             if stats.first_admit_ms.is_none() {
                 continue;
             }
-            let Some(first_token_ms) = stats.first_token_ms() else {
-                continue;
+            let terminal_time_ms = match stats.terminal_status {
+                Some(ReplayTerminalStatus::Completed) => {
+                    stats.terminal_time_ms.or_else(|| stats.last_token_ms())
+                }
+                None => stats.last_token_ms(),
+                Some(
+                    ReplayTerminalStatus::Rejected
+                    | ReplayTerminalStatus::Canceled
+                    | ReplayTerminalStatus::Failed,
+                ) => None,
             };
-            let Some(last_token_ms) = stats.last_token_ms() else {
+            let Some(terminal_time_ms) = terminal_time_ms else {
                 continue;
             };
 
@@ -855,7 +873,13 @@ impl TraceCollector {
             total_output_tokens += output_length;
             total_reused_tokens += stats.reused_input_tokens;
             total_first_admission_reused_tokens += stats.first_admission_reused_input_tokens;
-            duration_ms = duration_ms.max(last_token_ms);
+            duration_ms = duration_ms.max(terminal_time_ms);
+
+            let (Some(first_token_ms), Some(last_token_ms)) =
+                (stats.first_token_ms(), stats.last_token_ms())
+            else {
+                continue;
+            };
 
             let ttft_ms = (first_token_ms - stats.arrival_time_ms).max(0.0);
             let e2e_ms = (last_token_ms - stats.arrival_time_ms).max(0.0);
@@ -966,7 +990,10 @@ impl TraceCollector {
             let Some(detail) = stats.detail.as_deref() else {
                 continue;
             };
-            let Some(terminal_status) = detail.terminal_status else {
+            let Some(terminal_status) = stats.terminal_status else {
+                continue;
+            };
+            let Some(terminal_time_ms) = stats.terminal_time_ms else {
                 continue;
             };
             let first_token_ms = stats.first_token_ms();
@@ -977,6 +1004,7 @@ impl TraceCollector {
                 uuid: uuid.to_string(),
                 arrival_time_ms: stats.arrival_time_ms,
                 first_admit_ms: stats.first_admit_ms,
+                terminal_time_ms,
                 first_token_ms,
                 last_token_ms,
                 ttft_ms: first_token_ms.map(|time| (time - stats.arrival_time_ms).max(0.0)),
@@ -1179,6 +1207,28 @@ mod tests {
         assert_eq!(actual.std_ms, expected.std_ms);
     }
 
+    #[test]
+    fn completed_zero_output_request_counts_without_latency_samples() {
+        let mut collector = TraceCollector::default();
+        collector.set_static_worker_count(0, 1);
+        collector.set_gpus_per_worker(0, 4);
+        let uuid = Uuid::from_u128(99);
+        collector.on_arrival(uuid, 0.0, 32, 0);
+        collector.on_admit(uuid, 5.0, 8);
+        collector.on_terminal(uuid, 25.0, ReplayTerminalStatus::Completed);
+
+        let report = collector.finish();
+
+        assert_eq!(report.request_counts.completed_requests, 1);
+        assert_eq!(report.request_counts.total_input_tokens, 32);
+        assert_eq!(report.request_counts.total_output_tokens, 0);
+        assert_eq!(report.throughput.duration_ms, 25.0);
+        assert_eq!(report.throughput.decode_worker_seconds, 0.025);
+        assert!((report.throughput.gpu_hours - 0.1 / 3600.0).abs() < 1e-12);
+        assert_eq!(report.latency.ttft.mean_ms, 0.0);
+        assert_eq!(report.latency.e2e.mean_ms, 0.0);
+    }
+
     /// With per-request capture on, a standard disagg-style request lifecycle
     /// (arrival → admit → prefill_assigned → decode_assigned → tokens) yields
     /// exactly one record with all fields populated correctly.
@@ -1202,7 +1252,7 @@ mod tests {
         collector.on_token(uuid, 60.0);
         collector.on_token(uuid, 75.0);
         collector.on_token(uuid, 95.0);
-        collector.on_terminal(uuid, ReplayTerminalStatus::Completed);
+        collector.on_terminal(uuid, 95.0, ReplayTerminalStatus::Completed);
 
         let report = collector.finish();
         assert_eq!(report.per_request.len(), 1);
@@ -1210,6 +1260,7 @@ mod tests {
         assert_eq!(rec.uuid, uuid.to_string());
         assert_eq!(rec.arrival_time_ms, 0.0);
         assert_eq!(rec.first_admit_ms, Some(5.0));
+        assert_eq!(rec.terminal_time_ms, 95.0);
         assert_eq!(rec.first_token_ms, Some(50.0));
         assert_eq!(rec.last_token_ms, Some(95.0));
         assert_eq!(rec.ttft_ms, Some(50.0));
@@ -1248,7 +1299,7 @@ mod tests {
         collector.on_decode_assigned(uuid, 1);
         collector.on_token(uuid, 30.0);
         collector.on_token(uuid, 45.0);
-        collector.on_terminal(uuid, ReplayTerminalStatus::Completed);
+        collector.on_terminal(uuid, 45.0, ReplayTerminalStatus::Completed);
 
         let report = collector.finish();
         assert_eq!(report.per_request.len(), 1);
@@ -1417,7 +1468,7 @@ mod tests {
             collector.on_admit(uuid, arrival + 1.0, 0);
             collector.on_decode_assigned(uuid, 0);
             collector.on_token(uuid, arrival + 5.0);
-            collector.on_terminal(uuid, ReplayTerminalStatus::Completed);
+            collector.on_terminal(uuid, arrival + 5.0, ReplayTerminalStatus::Completed);
         }
         let report = collector.finish();
         let arrivals: Vec<f64> = report
@@ -1442,7 +1493,7 @@ mod tests {
         collector.on_decode_assigned(uuid, 1);
         collector.on_token(uuid, 20.0);
         collector.on_token(uuid, 25.0);
-        collector.on_terminal(uuid, ReplayTerminalStatus::Completed);
+        collector.on_terminal(uuid, 25.0, ReplayTerminalStatus::Completed);
 
         let report = collector.finish();
         let line = serde_json::to_string(&report.per_request[0])
@@ -1471,7 +1522,7 @@ mod tests {
         ] {
             let uuid = Uuid::from_u128(uuid_n);
             collector.on_arrival(uuid, uuid_n as f64, 64, 2);
-            collector.on_terminal(uuid, status);
+            collector.on_terminal(uuid, uuid_n as f64 + 1.0, status);
         }
         collector.on_arrival(Uuid::from_u128(4), 4.0, 64, 2);
 

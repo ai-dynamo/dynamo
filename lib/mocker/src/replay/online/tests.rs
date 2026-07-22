@@ -548,10 +548,11 @@ fn test_online_trace_replay_sglang_zero_output_drains_without_phantom_token() {
     )
     .unwrap();
 
-    // Zero-output trace rows are terminally drained but do not manufacture a
-    // token or latency sample. The normal follower must still complete.
+    // Zero-output trace rows count as completed prefill work but do not
+    // manufacture a token or latency sample. The normal follower also completes.
     assert_eq!(report.request_counts.num_requests, 2);
-    assert_eq!(report.request_counts.completed_requests, 1);
+    assert_eq!(report.request_counts.completed_requests, 2);
+    assert_eq!(report.request_counts.total_input_tokens, 128);
     assert_eq!(report.request_counts.total_output_tokens, 2);
 }
 

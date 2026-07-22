@@ -142,11 +142,8 @@ pub(super) fn get_new_batch_prefill(
         }
 
         req.last_node = Some(alloc.last_node);
-        // A fresh/retracted request may match blocks that are already owned by
-        // the radix cache. Keep that ownership boundary on the request so a
-        // decode retraction only frees the newly allocated suffix. Treating
-        // the matched prefix as request-owned would return canonical cache
-        // slots to the token pool while the radix tree still references them.
+        // Cache-hit prefix pages are radix-owned; retraction may free only the
+        // newly allocated suffix.
         if req.materialized_tokens == 0 {
             req.cached_tokens = alloc.prefix_len;
         }

@@ -1933,33 +1933,27 @@ impl VllmCore {
                 continue;
             }
             if policy::generation_complete(&request.sequence, self.args.max_model_len) {
-                already_complete.push(uuid);
+                let handoff_delay_ms = compute_prefill_handoff_delay_ms(
+                    self.args.worker_type,
+                    true,
+                    request.sequence.num_input_tokens(),
+                    self.args.kv_transfer_bandwidth,
+                    self.args.kv_bytes_per_token,
+                );
+                let effects = split_terminal_effects(request.sequence.terminal_signals());
+                debug_assert!(effects.immediate.is_empty());
+                already_complete.push((uuid, handoff_delay_ms, effects.cleanup));
                 continue;
             }
             ready.push(uuid);
             total_length += request.sequence.len();
         }
 
-        // Zero-output requests (and requests whose prompt exactly reaches the
-        // model-length limit) are terminal after prefill. They must release
-        // their runnable slot without manufacturing an output token.
+        // Requests already terminal after prefill must release their running slots
+        // without manufacturing an output token.
         let mut output_signals = Vec::with_capacity(already_complete.len() + ready.len());
-        for uuid in already_complete {
-            let request = self
-                .state
-                .requests
-                .get(&uuid)
-                .expect("terminal request must remain scheduler-owned");
-            let handoff_delay_ms = compute_prefill_handoff_delay_ms(
-                self.args.worker_type,
-                true,
-                request.sequence.num_input_tokens(),
-                self.args.kv_transfer_bandwidth,
-                self.args.kv_bytes_per_token,
-            );
-            let effects = split_terminal_effects(request.sequence.terminal_signals());
-            debug_assert!(effects.immediate.is_empty());
-            self.complete_source(uuid, effects.cleanup);
+        for (uuid, handoff_delay_ms, cleanup) in already_complete {
+            self.complete_source(uuid, cleanup);
             output_signals.push(OutputSignal {
                 uuid,
                 token_id: None,
@@ -1977,9 +1971,11 @@ impl VllmCore {
         }
 
         if self.speculative_sampler.is_some() {
-            if !output_signals.is_empty() {
-                self.state.compact_running();
+            if output_signals.is_empty() {
+                return self.emit_speculative_ready_tokens(ready, collector, decode_start_ms);
             }
+
+            self.state.compact_running();
             let (decode_time, mut speculative_signals) =
                 self.emit_speculative_ready_tokens(ready, collector, decode_start_ms);
             output_signals.append(&mut speculative_signals);
