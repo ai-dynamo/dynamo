@@ -8,109 +8,30 @@ package webhookconfig
 
 import (
 	"fmt"
-	"io"
-	"os"
-	"path/filepath"
-	goruntime "runtime"
-	"strings"
 
-	helmchart "helm.sh/helm/v3/pkg/chart"
-	"helm.sh/helm/v3/pkg/chart/loader"
-	"helm.sh/helm/v3/pkg/chartutil"
-	"helm.sh/helm/v3/pkg/engine"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/operatorchart"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/yaml"
-)
-
-const (
-	operatorChartDirectoryEnv    = "OPERATOR_CHART_DIR"
-	webhookConfigurationTemplate = "templates/webhook-configuration.yaml"
 )
 
 // HelmConfigurations returns the admission registrations rendered from the
 // production operator Helm chart.
 func HelmConfigurations() ([]*admissionregistrationv1.MutatingWebhookConfiguration, []*admissionregistrationv1.ValidatingWebhookConfiguration, error) {
-	chart, err := loader.Load(operatorChartDirectory())
-	if err != nil {
-		return nil, nil, fmt.Errorf("load operator Helm chart: %w", err)
-	}
-	if err := retainWebhookTemplate(chart); err != nil {
-		return nil, nil, err
-	}
-	values, err := chartutil.ToRenderValues(chart, chartutil.Values{}, chartutil.ReleaseOptions{
-		Name:      "operatorenv",
-		Namespace: "operatorenv",
-		IsInstall: true,
-	}, nil)
-	if err != nil {
-		return nil, nil, fmt.Errorf("prepare operator Helm values: %w", err)
-	}
-	rendered, err := engine.Engine{}.Render(chart, values)
-	if err != nil {
-		return nil, nil, fmt.Errorf("render operator Helm chart: %w", err)
-	}
-	manifest, err := webhookConfiguration(rendered)
+	objects, err := operatorchart.Render("templates/webhook-configuration.yaml", operatorchart.Options{
+		ReleaseName: "operatorenv",
+		Namespace:   "operatorenv",
+	})
 	if err != nil {
 		return nil, nil, err
 	}
-	return decodeWebhookConfigurations(manifest)
+	return decodeWebhookConfigurations(objects)
 }
 
-func retainWebhookTemplate(chart *helmchart.Chart) error {
-	templates := chart.Templates[:0]
-	foundWebhookTemplate := false
-	for _, template := range chart.Templates {
-		if template.Name == webhookConfigurationTemplate {
-			foundWebhookTemplate = true
-			templates = append(templates, template)
-			continue
-		}
-		if strings.HasPrefix(filepath.Base(template.Name), "_") {
-			templates = append(templates, template)
-		}
-	}
-	chart.Templates = templates
-	if !foundWebhookTemplate {
-		return fmt.Errorf("operator Helm chart does not contain %s", webhookConfigurationTemplate)
-	}
-	return nil
-}
-
-func operatorChartDirectory() string {
-	if directory := os.Getenv(operatorChartDirectoryEnv); directory != "" {
-		return directory
-	}
-	_, file, _, _ := goruntime.Caller(0)
-	operatorRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
-	return filepath.Join(operatorRoot, "..", "helm", "charts", "platform", "components", "operator")
-}
-
-func webhookConfiguration(rendered map[string]string) (string, error) {
-	for name, manifest := range rendered {
-		if strings.HasSuffix(filepath.ToSlash(name), webhookConfigurationTemplate) {
-			return manifest, nil
-		}
-	}
-	return "", fmt.Errorf("rendered operator Helm chart does not contain %s", webhookConfigurationTemplate)
-}
-
-func decodeWebhookConfigurations(manifest string) ([]*admissionregistrationv1.MutatingWebhookConfiguration, []*admissionregistrationv1.ValidatingWebhookConfiguration, error) {
-	decoder := yaml.NewYAMLOrJSONDecoder(strings.NewReader(manifest), 4096)
+func decodeWebhookConfigurations(objects []unstructured.Unstructured) ([]*admissionregistrationv1.MutatingWebhookConfiguration, []*admissionregistrationv1.ValidatingWebhookConfiguration, error) {
 	var mutating []*admissionregistrationv1.MutatingWebhookConfiguration
 	var validating []*admissionregistrationv1.ValidatingWebhookConfiguration
-	for {
-		var object unstructured.Unstructured
-		if err := decoder.Decode(&object); err != nil {
-			if err == io.EOF {
-				break
-			}
-			return nil, nil, fmt.Errorf("decode rendered webhook configuration: %w", err)
-		}
-		if len(object.Object) == 0 {
-			continue
-		}
+	for _, object := range objects {
 		switch object.GetKind() {
 		case "MutatingWebhookConfiguration":
 			webhook := &admissionregistrationv1.MutatingWebhookConfiguration{}
