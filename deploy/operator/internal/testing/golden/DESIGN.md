@@ -8,13 +8,22 @@ cluster.
 ## API
 
 ```go
+golden.ApplyManifests(t, "testdata/dcd/deployment/input.yaml", env.Client(), env.Namespace())
 golden.MatchManifests(t, env.Client(), env.Namespace(), "testdata/dcd/deployment/output.yaml")
 ```
 
 Controller tests keep one directory per scenario. `input.yaml` contains the
 resource that triggers the controller flow, while `output.yaml` contains the
 complete expected manifest set for that scenario. The mismatch artifact is
-therefore written next to both as `output.yaml.new`.
+therefore written next to both as `output.yaml.new`. Controller test runners
+discover every scenario directory below their `dcd`, `dgd`, or `dgdr` group,
+so adding a directory automatically adds a test case.
+
+`ApplyManifests` decodes every input document as unstructured data and creates
+it through the Kubernetes client, exercising native admission. The namespace
+argument is intentionally explicit because the cluster test client remains
+capable of cluster-wide access; namespaced inputs cannot escape their per-test
+namespace. Cluster-scoped documents remain cluster-scoped.
 
 Every YAML document contributes one expected object. Documents may have
 different kinds. For each GroupVersionKind in the file, the actual namespaced

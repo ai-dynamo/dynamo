@@ -3,7 +3,8 @@
 `clusterenv` supports controller tests that need a complete Kubernetes control
 plane or need to run Pods and Jobs. It connects to an externally managed
 cluster. It does not create clusters, install application images, or deploy the
-operator chart.
+operator chart. The current suite requires no GPUs; future scheduler scenarios
+must provide explicit fake GPU capacity or run in a hardware-backed suite.
 
 ## Cluster Selection
 

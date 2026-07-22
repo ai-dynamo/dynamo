@@ -8,7 +8,9 @@
 package controller
 
 import (
+	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/clusterenv"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/golden"
 	grovemock "github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/mocks/grove"
 	lwsmock "github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/mocks/lws"
 	webhooksetup "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/setup"
@@ -40,16 +43,23 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	lwsscheme "sigs.k8s.io/lws/client-go/clientset/versioned/scheme"
-	"sigs.k8s.io/yaml"
 	vcbatchv1alpha1 "volcano.sh/apis/pkg/apis/batch/v1alpha1"
 	volcanov1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 )
 
+const clusterTestOperatorVersion = "1.3.0"
+
 var clusterTestEnv = newClusterTestEnv()
+
+type clusterTestControllerChain string
+
+const (
+	clusterTestDCDChain clusterTestControllerChain = "dcd"
+	clusterTestDGDChain clusterTestControllerChain = "dgd"
+)
 
 func runClusterTestEnv(runner interface{ Run() int }) int {
 	logf.SetLogger(logr.Discard())
@@ -76,7 +86,7 @@ func newClusterTestEnv() *clusterenv.Env {
 			if err := webhooksetup.Setup(mgr, webhooksetup.Options{
 				Config:            operatorConfig,
 				RuntimeConfig:     runtimeConfig,
-				OperatorVersion:   "1.0.0",
+				OperatorVersion:   clusterTestOperatorVersion,
 				OperatorPrincipal: "system:serviceaccount:dynamo-system:dynamo-operator",
 			}); err != nil {
 				return err
@@ -115,14 +125,75 @@ func newClusterTestScheme() *runtime.Scheme {
 	return scheme
 }
 
-func clusterTestReadInput(t testing.TB, namespace, path string, object client.Object) {
+func clusterTestRunManifestScenarios(t *testing.T, root string, chain clusterTestControllerChain) {
 	t.Helper()
-	contents, err := os.ReadFile(path)
+	clusterTestForEachScenario(t, root, func(t *testing.T, scenarioDir string) {
+		clusterTestRunManifestScenario(t, scenarioDir, chain)
+	})
+}
+
+func clusterTestForEachScenario(t *testing.T, root string, run func(*testing.T, string)) {
+	t.Helper()
+	inputs, err := filepath.Glob(filepath.Join(root, "*", "input.yaml"))
 	if err != nil {
-		t.Fatalf("read cluster-test input %q: %v", path, err)
+		t.Fatalf("find cluster-test scenarios under %q: %v", root, err)
 	}
-	if err := yaml.UnmarshalStrict(contents, object); err != nil {
-		t.Fatalf("decode cluster-test input %q: %v", path, err)
+	if len(inputs) == 0 {
+		t.Fatalf("no cluster-test scenarios found under %q", root)
 	}
-	object.SetNamespace(namespace)
+	for _, input := range inputs {
+		scenarioDir := filepath.Dir(input)
+		t.Run(filepath.Base(scenarioDir), func(t *testing.T) {
+			run(t, scenarioDir)
+		})
+	}
+}
+
+func clusterTestRunManifestScenario(t *testing.T, scenarioDir string, chain clusterTestControllerChain) {
+	t.Helper()
+	env := clusterTestEnv.RunT(t)
+
+	t.Log("Block Pods and ReplicaSets from actuating terminal workload manifests")
+	env.BlockWorkloads()
+
+	t.Log("Apply the scenario input manifests through Kubernetes admission")
+	golden.ApplyManifests(t, filepath.Join(scenarioDir, "input.yaml"), env.Client(), env.Namespace())
+
+	t.Log("Start the controller chain selected by the scenario group")
+	operatorConfig := clusterTestRestrictedConfig(env.Namespace())
+	runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, LWS: true}}
+	env.StartManager(func(mgr ctrl.Manager) error {
+		return clusterTestSetupControllerChain(mgr, chain, operatorConfig, runtimeConfig)
+	})
+
+	t.Log("Match the complete generated manifest contract")
+	golden.MatchManifests(t, env.Client(), env.Namespace(), filepath.Join(scenarioDir, "output.yaml"))
+}
+
+func clusterTestSetupControllerChain(
+	mgr ctrl.Manager,
+	chain clusterTestControllerChain,
+	operatorConfig *configv1alpha1.OperatorConfiguration,
+	runtimeConfig *commoncontroller.RuntimeConfig,
+) error {
+	setupOptions := SetupOptions{Config: operatorConfig, RuntimeConfig: runtimeConfig}
+	switch chain {
+	case clusterTestDCDChain:
+		return SetupDynamoComponentDeployment(mgr, DynamoComponentDeploymentSetupOptions{SetupOptions: setupOptions})
+	case clusterTestDGDChain:
+		if err := SetupDynamoGraphDeployment(mgr, DynamoGraphDeploymentSetupOptions{SetupOptions: setupOptions}); err != nil {
+			return err
+		}
+		return SetupDynamoComponentDeployment(mgr, DynamoComponentDeploymentSetupOptions{SetupOptions: setupOptions})
+	default:
+		return fmt.Errorf("unknown cluster-test controller chain %q", chain)
+	}
+}
+
+func clusterTestRestrictedConfig(namespace string) *configv1alpha1.OperatorConfiguration {
+	config := &configv1alpha1.OperatorConfiguration{}
+	configv1alpha1.SetDefaultsOperatorConfiguration(config)
+	config.Namespace.Restricted = namespace
+	config.GPU.DiscoveryEnabled = ptr.To(false)
+	return config
 }
