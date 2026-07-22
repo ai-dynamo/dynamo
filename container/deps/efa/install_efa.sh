@@ -49,6 +49,10 @@ if [[ ${#installed[@]} -gt 0 ]]; then
     DEBIAN_FRONTEND=noninteractive apt-get purge -y "${installed[@]}"
 fi
 rm -rf /opt/amazon/efa /opt/amazon/ofi-nccl /opt/amazon/aws-ofi-nccl
+# The NGC plugin package does not own this loader entry. Some framework base
+# images leave it behind after the package and plugin directory are removed,
+# and EFA 1.49 rejects the stale path instead of replacing it.
+rm -f /etc/ld.so.conf.d/aws-ofi-nccl.conf
 
 installer_args=(
     -y

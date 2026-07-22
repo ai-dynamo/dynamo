@@ -25,6 +25,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/cache/efa-installer,sharing=locked \
     --mount=type=bind,source=./container/deps/efa/install_efa.sh,target=/tmp/install_efa.sh,readonly \
     /tmp/install_efa.sh "${EFA_VERSION}" "${EFA_INSTALLER_SHA256}" && \
+    # Preserve the existing Dynamo runtime behavior: EFA supplies libfabric,
+    # but its NCCL-OFI plugin is disabled because it can crash TensorRT-LLM.
+    rm -rf /opt/amazon/aws-ofi-nccl /opt/amazon/ofi-nccl && \
+    rm -f /etc/ld.so.conf.d/aws-ofi-nccl.conf && \
     printf '%s\n' /opt/amazon/efa/lib > /etc/ld.so.conf.d/000_efa.conf && \
     ldconfig
 
