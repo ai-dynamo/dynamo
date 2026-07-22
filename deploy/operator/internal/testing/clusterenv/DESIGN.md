@@ -45,8 +45,8 @@ func TestController(t *testing.T) {
 `RunM` owns the package-wide cluster connection and webhook runtime. They start
 lazily on the first `RunT`, so packages with no selected cluster tests do not
 touch a cluster. `RunT` creates a unique namespace and one test environment.
-`StartManager` starts exactly the controller selected by that test and limits
-its cache to the test namespace.
+`StartManager` starts only the controller or contiguous controller chain
+explicitly selected by that test and limits its cache to the test namespace.
 
 The client is intentionally not namespace restricted. Tests must put all
 namespaced fixtures in `TestEnv.Namespace()` and must not mutate unrelated
@@ -78,10 +78,16 @@ external setup.
 
 ## Manifest Boundary
 
-Manifest contract tests install the LWS, Grove, and Volcano PodGroup CRDs but do
-not run their controllers. `BlockWorkloads` creates a namespace-scoped
-`ResourceQuota` with zero allowances for ReplicaSets and Pods, then waits for
-the quota controller to publish its status.
+Manifest contracts cover the full relevant Dynamo controller chain through the
+terminal workload API. They include both intermediate Dynamo resources and the
+resulting Deployment, LeaderWorkerSet, or Grove manifests in one golden file;
+checking only the next controller boundary makes the effective workload harder
+to review. Tests install the LWS, Grove, and Volcano PodGroup CRDs but do not run
+their controllers.
+
+`BlockWorkloads` creates a namespace-scoped `ResourceQuota` with zero allowances
+for ReplicaSets and Pods, then waits for the quota controller to publish its
+status.
 
 This lets the Dynamo controller store Deployments with their real replica
 counts, LeaderWorkerSets, and Grove resources while preventing downstream

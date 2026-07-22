@@ -21,17 +21,26 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
-func TestClusterDynamoGraphDeploymentCreatesComponentManifests(t *testing.T) {
+func TestClusterDynamoGraphDeploymentCreatesComponentAndDeploymentManifests(t *testing.T) {
 	env := clusterTestEnv.RunT(t)
 
-	t.Log("Block downstream workload actuation and start only the DGD reconciler")
+	t.Log("Block downstream workload actuation and start the DGD-to-DCD controller chain")
 	env.BlockWorkloads()
 	operatorConfig := clusterTestRestrictedConfig(env.Namespace())
+	runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{}}
 	env.StartManager(func(mgr ctrl.Manager) error {
-		return SetupDynamoGraphDeployment(mgr, DynamoGraphDeploymentSetupOptions{
+		if err := SetupDynamoGraphDeployment(mgr, DynamoGraphDeploymentSetupOptions{
 			SetupOptions: SetupOptions{
 				Config:        operatorConfig,
-				RuntimeConfig: &commoncontroller.RuntimeConfig{Gate: features.Gates{}},
+				RuntimeConfig: runtimeConfig,
+			},
+		}); err != nil {
+			return err
+		}
+		return SetupDynamoComponentDeployment(mgr, DynamoComponentDeploymentSetupOptions{
+			SetupOptions: SetupOptions{
+				Config:        operatorConfig,
+				RuntimeConfig: runtimeConfig,
 			},
 		})
 	})
@@ -67,7 +76,7 @@ func TestClusterDynamoGraphDeploymentCreatesComponentManifests(t *testing.T) {
 		t.Fatalf("create DGD: %v", err)
 	}
 
-	t.Log("Match the complete DCD set produced at the DGD controller boundary")
+	t.Log("Match the DCDs and their terminal Deployments in one complete manifest contract")
 	golden.MatchManifests(t, env.Client(), env.Namespace(), "testdata/dynamographdeployment-components.yaml")
 }
 
