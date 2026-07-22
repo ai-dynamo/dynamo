@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -76,6 +77,137 @@ async def test_extracts_mixed_url_data_url_and_decoded_media():
     processor.video_loader.load_video_batch.assert_awaited_once_with(video_items)
     processor.audio_loader.load_audio_batch.assert_awaited_once_with(audio_items)
     processor.audio_loader.load_audio.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_extracts_independent_modalities_concurrently():
+    processor = _processor()
+    started: set[str] = set()
+    all_started = asyncio.Event()
+
+    async def load(modality, value):
+        started.add(modality)
+        if len(started) == 3:
+            all_started.set()
+        await asyncio.wait_for(all_started.wait(), timeout=1)
+        return [value]
+
+    async def load_image(_):
+        return await load("image", image)
+
+    async def load_video(_):
+        return await load("video", video)
+
+    async def load_audio(_):
+        return await load("audio", audio)
+
+    image, video, audio = object(), object(), object()
+    processor.image_loader.load_image_batch.side_effect = load_image
+    processor.video_loader.load_video_batch.side_effect = load_video
+    processor.audio_loader.load_audio_batch.side_effect = load_audio
+
+    result = await processor.extract_multimodal_data(
+        {
+            "multi_modal_data": {
+                "image_url": [{"Url": "https://example.com/image.png"}],
+                "video_url": [{"Url": "https://example.com/video.mp4"}],
+                "audio_url": [{"Url": "https://example.com/audio.wav"}],
+            }
+        },
+        "request-concurrent",
+        None,
+    )
+
+    assert result == {"image": image, "video": video, "audio": audio}
+
+
+@pytest.mark.asyncio
+async def test_media_load_failure_cancels_sibling_loads():
+    processor = _processor()
+    image_started = asyncio.Event()
+    image_cancelled = asyncio.Event()
+    failure = RuntimeError("video decode failed")
+
+    async def load_image(_):
+        image_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            image_cancelled.set()
+            raise
+
+    async def load_video(_):
+        await image_started.wait()
+        raise failure
+
+    processor.image_loader.load_image_batch.side_effect = load_image
+    processor.video_loader.load_video_batch.side_effect = load_video
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await processor.extract_multimodal_data(
+            {
+                "multi_modal_data": {
+                    "image_url": [{"Url": "https://example.com/image.png"}],
+                    "video_url": [{"Url": "https://example.com/video.mp4"}],
+                }
+            },
+            "request-failure",
+            None,
+        )
+
+    assert exc_info.value is failure
+    assert image_cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_extract_cancellation_cancels_all_media_loads():
+    processor = _processor()
+    started: set[str] = set()
+    all_started = asyncio.Event()
+    cancelled: set[str] = set()
+
+    async def block(modality):
+        started.add(modality)
+        if len(started) == 3:
+            all_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.add(modality)
+            raise
+
+    async def block_image(_):
+        await block("image")
+
+    async def block_video(_):
+        await block("video")
+
+    async def block_audio(_):
+        await block("audio")
+
+    processor.image_loader.load_image_batch.side_effect = block_image
+    processor.video_loader.load_video_batch.side_effect = block_video
+    processor.audio_loader.load_audio_batch.side_effect = block_audio
+    task = asyncio.create_task(
+        processor.extract_multimodal_data(
+            {
+                "multi_modal_data": {
+                    "image_url": [{"Url": "https://example.com/image.png"}],
+                    "video_url": [{"Url": "https://example.com/video.mp4"}],
+                    "audio_url": [{"Url": "https://example.com/audio.wav"}],
+                }
+            },
+            "request-cancelled",
+            None,
+        )
+    )
+    await asyncio.wait_for(all_started.wait(), timeout=1)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert cancelled == {"image", "video", "audio"}
 
 
 @pytest.mark.asyncio
@@ -238,6 +370,43 @@ async def test_audio_in_video_preserves_order_and_merges_standalone_audio():
         "video": [video_a, video_b],
         "audio": [standalone_audio, audio_a, audio_b],
     }
+
+
+@pytest.mark.asyncio
+async def test_audio_in_video_item_loading_remains_serial():
+    processor = _processor()
+    processor.video_loader.load_video_batch.return_value = [object(), object()]
+    active = 0
+    max_active = 0
+
+    async def load_audio(url):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0)
+        active -= 1
+        return url
+
+    processor.audio_loader.load_audio.side_effect = load_audio
+    result = await processor.extract_multimodal_data(
+        {
+            "multi_modal_data": {
+                "video_url": [
+                    {"Url": "https://example.com/a.mp4"},
+                    {"Url": "https://example.com/b.mp4"},
+                ]
+            }
+        },
+        "request-audio-bounded",
+        None,
+        {"use_audio_in_video": True},
+    )
+
+    assert result["audio"] == [
+        "https://example.com/a.mp4",
+        "https://example.com/b.mp4",
+    ]
+    assert max_active == 1
 
 
 @pytest.mark.asyncio

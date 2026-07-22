@@ -11,8 +11,10 @@ multimodal UUIDs, and the model-specific prefill/decode handoff.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import pickle
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -47,6 +49,28 @@ IMAGE_URL_KEY = "image_url"
 VIDEO_URL_KEY = "video_url"
 AUDIO_URL_KEY = "audio_url"
 URL_VARIANT_KEY = "Url"
+
+
+async def _gather_media_loads(
+    loads: dict[str, Awaitable[Any]],
+) -> dict[str, Any]:
+    """Run independent media loads together and cancel siblings on failure."""
+    if not loads:
+        return {}
+    if len(loads) == 1:
+        name, load = next(iter(loads.items()))
+        return {name: await load}
+
+    names = list(loads)
+    tasks = [asyncio.ensure_future(loads[name]) for name in names]
+    try:
+        results = await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+    return dict(zip(names, results, strict=True))
 
 
 def pad_mm_hashes_to_64(mm_hashes: list[str]) -> list[str]:
@@ -343,73 +367,93 @@ class VllmMultimodalRequestProcessor:
                         )
                     )
 
+            media_loads: dict[str, Awaitable[Any]] = {}
             image_items = mm_map.get(IMAGE_URL_KEY, [])
             image_key = "vision_chunk" if self.use_unified_vision_chunk else "image"
             if image_key not in vllm_mm_data and image_items:
-                with _nvtx.annotate("mm_backend:image_download", color="green"):
-                    images = await self.image_loader.load_image_batch(image_items)
-                if images:
-                    if self.use_unified_vision_chunk:
-                        chunks = [
-                            {"type": "image", "image": image, "uuid": None}
-                            for image in images
-                        ]
-                        vllm_mm_data[image_key] = (
-                            chunks[0] if len(chunks) == 1 else chunks
-                        )
-                    else:
-                        vllm_mm_data[image_key] = (
-                            images[0] if len(images) == 1 else images
-                        )
+
+                async def load_images() -> Any:
+                    with _nvtx.annotate("mm_backend:image_download", color="green"):
+                        return await self.image_loader.load_image_batch(image_items)
+
+                media_loads["image"] = load_images()
 
             video_items = mm_map.get(VIDEO_URL_KEY, [])
             if video_items:
-                videos = await self.video_loader.load_video_batch(video_items)
-                if videos:
-                    vllm_mm_data["video"] = videos[0] if len(videos) == 1 else videos
+                media_loads["video"] = self.video_loader.load_video_batch(video_items)
 
             audio_items = mm_map.get(AUDIO_URL_KEY, [])
             if audio_items:
-                audios = await self.audio_loader.load_audio_batch(audio_items)
-                if audios:
-                    vllm_mm_data["audio"] = audios[0] if len(audios) == 1 else audios
+                media_loads["audio"] = self.audio_loader.load_audio_batch(audio_items)
 
             if (
                 video_items
                 and mm_processor_kwargs
                 and mm_processor_kwargs.get("use_audio_in_video", False)
             ):
-                video_audios = []
-                for item in video_items:
-                    url = item.get(URL_VARIANT_KEY) if isinstance(item, dict) else None
-                    if not url:
-                        raise ValueError(
-                            "use_audio_in_video requires all video items to be "
-                            "URL-based. Got a non-URL video item (e.g. frontend-"
-                            "decoded). Audio extraction from decoded video data "
-                            "is not yet supported."
+
+                async def load_video_audios() -> list[Any]:
+                    video_audios = []
+                    for item in video_items:
+                        url = (
+                            item.get(URL_VARIANT_KEY)
+                            if isinstance(item, dict)
+                            else None
                         )
-                    try:
-                        video_audios.append(await self.audio_loader.load_audio(url))
-                    except Exception:
-                        logger.error(
-                            "Request %s failed to extract audio from video. "
-                            "use_audio_in_video requires every video to "
-                            "contain an audio stream.",
-                            request_id,
-                        )
-                        raise
-                if video_audios:
-                    existing = vllm_mm_data.get("audio")
-                    existing_items = (
-                        existing
-                        if isinstance(existing, list)
-                        else ([existing] if existing is not None else [])
-                    )
-                    all_audios = existing_items + video_audios
-                    vllm_mm_data["audio"] = (
-                        all_audios[0] if len(all_audios) == 1 else all_audios
-                    )
+                        if not url:
+                            raise ValueError(
+                                "use_audio_in_video requires all video items to be "
+                                "URL-based. Got a non-URL video item (e.g. frontend-"
+                                "decoded). Audio extraction from decoded video data "
+                                "is not yet supported."
+                            )
+                        try:
+                            video_audios.append(await self.audio_loader.load_audio(url))
+                        except Exception:
+                            logger.error(
+                                "Request %s failed to extract audio from video. "
+                                "use_audio_in_video requires every video to "
+                                "contain an audio stream.",
+                                request_id,
+                            )
+                            raise
+                    return video_audios
+
+                media_loads["video_audio"] = load_video_audios()
+
+            loaded_media = await _gather_media_loads(media_loads)
+
+            images = loaded_media.get("image")
+            if images:
+                if self.use_unified_vision_chunk:
+                    chunks = [
+                        {"type": "image", "image": image, "uuid": None}
+                        for image in images
+                    ]
+                    vllm_mm_data[image_key] = chunks[0] if len(chunks) == 1 else chunks
+                else:
+                    vllm_mm_data[image_key] = images[0] if len(images) == 1 else images
+
+            videos = loaded_media.get("video")
+            if videos:
+                vllm_mm_data["video"] = videos[0] if len(videos) == 1 else videos
+
+            audios = loaded_media.get("audio")
+            if audios:
+                vllm_mm_data["audio"] = audios[0] if len(audios) == 1 else audios
+
+            video_audios = loaded_media.get("video_audio")
+            if video_audios:
+                existing = vllm_mm_data.get("audio")
+                existing_items = (
+                    existing
+                    if isinstance(existing, list)
+                    else ([existing] if existing is not None else [])
+                )
+                all_audios = existing_items + video_audios
+                vllm_mm_data["audio"] = (
+                    all_audios[0] if len(all_audios) == 1 else all_audios
+                )
 
             return vllm_mm_data or None
         finally:
