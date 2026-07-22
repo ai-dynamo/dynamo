@@ -43,3 +43,6 @@
 # tree/main link in templates/dgdr.mdx 404s from CI until the PR is merged.
 ^https://github\.com/ai-dynamo/dynamo/tree/main/examples/deployments/dgdr$
 
+# This example is introduced by the same PR as its docs link, so the main-branch
+# URL returns 404 until merge.
+^https://github\.com/ai-dynamo/dynamo/tree/main/examples/power-aware-budget$

@@ -164,6 +164,7 @@
 /aisimulate/                                                                 @ai-dynamo/dynamo-planner-codeowners
 /examples/aisimulate/                                                        @ai-dynamo/dynamo-planner-codeowners
 /examples/global_planner/                                                    @ai-dynamo/dynamo-planner-codeowners
+/examples/power-aware-budget/                                                @ai-dynamo/dynamo-planner-codeowners
 /components/src/dynamo/planner/                                              @ai-dynamo/dynamo-planner-codeowners
 /components/src/dynamo/profiler/                                             @ai-dynamo/dynamo-planner-codeowners
 /components/src/dynamo/planner/core/                                         @ai-dynamo/dynamo-planner-codeowners
