@@ -105,7 +105,9 @@ impl PlacementPolicy<DirectRequest> for AdaptivePoolPlacement {
             Self::RoundRobin(policy) => {
                 PlacementPolicy::<DirectRequest>::observe(policy, observation, now_ms)
             }
-            Self::Kv(policy) => policy.observe(observation, now_ms),
+            Self::Kv(policy) => {
+                PlacementPolicy::<DirectRequest>::observe(policy, observation, now_ms)
+            }
         }
     }
 
@@ -114,7 +116,9 @@ impl PlacementPolicy<DirectRequest> for AdaptivePoolPlacement {
             Self::RoundRobin(policy) => {
                 PlacementPolicy::<DirectRequest>::cancel_pending(policy, request_id)
             }
-            Self::Kv(policy) => policy.cancel_pending(request_id),
+            Self::Kv(policy) => {
+                PlacementPolicy::<DirectRequest>::cancel_pending(policy, request_id)
+            }
         }
     }
 
@@ -123,7 +127,9 @@ impl PlacementPolicy<DirectRequest> for AdaptivePoolPlacement {
             Self::RoundRobin(policy) => {
                 PlacementPolicy::<DirectRequest>::request_terminal(policy, request_id, now_ms)
             }
-            Self::Kv(policy) => policy.request_terminal(request_id, now_ms),
+            Self::Kv(policy) => {
+                PlacementPolicy::<DirectRequest>::request_terminal(policy, request_id, now_ms)
+            }
         }
     }
 
@@ -132,14 +138,16 @@ impl PlacementPolicy<DirectRequest> for AdaptivePoolPlacement {
             Self::RoundRobin(policy) => {
                 PlacementPolicy::<DirectRequest>::prefill_completed(policy, request_id, now_ms)
             }
-            Self::Kv(policy) => policy.prefill_completed(request_id, now_ms),
+            Self::Kv(policy) => {
+                PlacementPolicy::<DirectRequest>::prefill_completed(policy, request_id, now_ms)
+            }
         }
     }
 
     fn pending_count(&self) -> usize {
         match self {
             Self::RoundRobin(policy) => PlacementPolicy::<DirectRequest>::pending_count(policy),
-            Self::Kv(policy) => policy.pending_count(),
+            Self::Kv(policy) => PlacementPolicy::<DirectRequest>::pending_count(policy),
         }
     }
 
@@ -148,7 +156,9 @@ impl PlacementPolicy<DirectRequest> for AdaptivePoolPlacement {
             Self::RoundRobin(policy) => {
                 PlacementPolicy::<DirectRequest>::worker_ready(policy, worker, now_ms)
             }
-            Self::Kv(policy) => policy.worker_ready(worker, now_ms),
+            Self::Kv(policy) => {
+                PlacementPolicy::<DirectRequest>::worker_ready(policy, worker, now_ms)
+            }
         }
     }
 
@@ -157,7 +167,9 @@ impl PlacementPolicy<DirectRequest> for AdaptivePoolPlacement {
             Self::RoundRobin(policy) => {
                 PlacementPolicy::<DirectRequest>::worker_draining(policy, worker, now_ms)
             }
-            Self::Kv(policy) => policy.worker_draining(worker, now_ms),
+            Self::Kv(policy) => {
+                PlacementPolicy::<DirectRequest>::worker_draining(policy, worker, now_ms)
+            }
         }
     }
 
@@ -166,7 +178,9 @@ impl PlacementPolicy<DirectRequest> for AdaptivePoolPlacement {
             Self::RoundRobin(policy) => {
                 PlacementPolicy::<DirectRequest>::worker_removed(policy, worker, now_ms)
             }
-            Self::Kv(policy) => policy.worker_removed(worker, now_ms),
+            Self::Kv(policy) => {
+                PlacementPolicy::<DirectRequest>::worker_removed(policy, worker, now_ms)
+            }
         }
     }
 
@@ -175,7 +189,7 @@ impl PlacementPolicy<DirectRequest> for AdaptivePoolPlacement {
             Self::RoundRobin(policy) => {
                 PlacementPolicy::<DirectRequest>::topology_settled(policy, now_ms)
             }
-            Self::Kv(policy) => policy.topology_settled(now_ms),
+            Self::Kv(policy) => PlacementPolicy::<DirectRequest>::topology_settled(policy, now_ms),
         }
     }
 }

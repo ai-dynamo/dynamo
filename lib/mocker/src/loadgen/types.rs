@@ -9,6 +9,7 @@ use dynamo_kv_router::protocols::{
 use dynamo_tokens::SequenceHash;
 use uuid::Uuid;
 
+use super::trace::synthesize_validated_trace_tokens;
 use crate::common::protocols::DirectRequest;
 
 pub const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
@@ -199,6 +200,126 @@ pub struct ReadyTurn {
     pub replay_key: Option<String>,
     pub scheduled_ready_at_ms: f64,
     pub replay_hashes: Option<ReplayRequestHashes>,
-    pub(crate) emit_session_metadata: bool,
     pub request: DirectRequest,
+}
+
+/// A request whose prompt may still be represented by one hash id per trace
+/// block. Offline aggregated replay keeps this compact form while the router
+/// queues the request and materializes tokens only when a worker admits it.
+#[derive(Debug)]
+pub(crate) enum ReplayRequestPayload {
+    Materialized(DirectRequest),
+    Deferred {
+        request_metadata: DirectRequest,
+        input_length: usize,
+        hash_ids: Vec<u64>,
+        trace_block_size: usize,
+    },
+}
+
+impl ReplayRequestPayload {
+    pub(crate) fn materialized(request: DirectRequest) -> Self {
+        Self::Materialized(request)
+    }
+
+    pub(super) fn deferred(
+        request_metadata: DirectRequest,
+        input_length: usize,
+        hash_ids: Vec<u64>,
+        trace_block_size: usize,
+    ) -> Self {
+        debug_assert!(request_metadata.tokens.is_empty());
+        Self::Deferred {
+            request_metadata,
+            input_length,
+            hash_ids,
+            trace_block_size,
+        }
+    }
+
+    pub(crate) fn input_length(&self) -> usize {
+        match self {
+            Self::Materialized(request) => request.tokens.len(),
+            Self::Deferred { input_length, .. } => *input_length,
+        }
+    }
+
+    pub(crate) fn metadata(&self) -> &DirectRequest {
+        match self {
+            Self::Materialized(request) => request,
+            Self::Deferred {
+                request_metadata, ..
+            } => request_metadata,
+        }
+    }
+
+    pub(crate) fn metadata_mut(&mut self) -> &mut DirectRequest {
+        match self {
+            Self::Materialized(request) => request,
+            Self::Deferred {
+                request_metadata, ..
+            } => request_metadata,
+        }
+    }
+
+    pub(crate) fn materialized_tokens(&self) -> Option<&[u32]> {
+        match self {
+            Self::Materialized(request) => Some(&request.tokens),
+            Self::Deferred { .. } => None,
+        }
+    }
+
+    pub(crate) fn prompt_tokens(&self) -> Vec<u32> {
+        match self {
+            Self::Materialized(request) => request.tokens.clone(),
+            Self::Deferred {
+                input_length,
+                hash_ids,
+                trace_block_size,
+                ..
+            } => synthesize_validated_trace_tokens(*input_length, hash_ids, *trace_block_size),
+        }
+    }
+
+    pub(crate) fn into_direct_request(self) -> DirectRequest {
+        match self {
+            Self::Materialized(request) => request,
+            Self::Deferred {
+                mut request_metadata,
+                input_length,
+                hash_ids,
+                trace_block_size,
+            } => {
+                request_metadata.tokens =
+                    synthesize_validated_trace_tokens(input_length, &hash_ids, trace_block_size);
+                request_metadata
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct CompactReadyTurn {
+    pub(crate) request_uuid: Uuid,
+    pub(crate) session_id: String,
+    pub(crate) turn_index: usize,
+    pub(crate) replay_key: Option<String>,
+    pub(crate) scheduled_ready_at_ms: f64,
+    pub(crate) replay_hashes: Option<ReplayRequestHashes>,
+    pub(crate) emit_session_metadata: bool,
+    pub(crate) request: ReplayRequestPayload,
+}
+
+impl CompactReadyTurn {
+    pub(crate) fn into_ready_turn(self) -> ReadyTurn {
+        ReadyTurn {
+            request_uuid: self.request_uuid,
+            session_id: self.session_id,
+            turn_index: self.turn_index,
+            replay_key: self.replay_key,
+            scheduled_ready_at_ms: self.scheduled_ready_at_ms,
+            replay_hashes: self.replay_hashes,
+            request: self.request.into_direct_request(),
+        }
+    }
 }

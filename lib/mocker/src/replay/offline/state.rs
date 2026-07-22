@@ -8,7 +8,7 @@ use crate::common::handoff::{
 };
 use crate::common::protocols::DirectRequest;
 use crate::common::protocols::MockEngineArgs;
-use crate::loadgen::ReplayRequestHashes;
+use crate::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
 use crate::replay::TraceCollector;
 use crate::scheduler::{
     EngineCore, EnginePassResult, SchedulerCommand, SchedulerCommandEffects,
@@ -23,7 +23,7 @@ pub(crate) enum AggRequestPhase {
 }
 
 pub(crate) struct AggRequestState {
-    request: Option<DirectRequest>,
+    request: Option<ReplayRequestPayload>,
     pub(in crate::replay::offline) phase: AggRequestPhase,
     pub(in crate::replay::offline) prefill_completed: bool,
     pub(in crate::replay::offline) input_tokens: usize,
@@ -31,9 +31,9 @@ pub(crate) struct AggRequestState {
 }
 
 impl AggRequestState {
-    pub(crate) fn new_queued(request: DirectRequest) -> Self {
-        let input_tokens = request.tokens.len();
-        let output_tokens = request.max_output_tokens;
+    pub(crate) fn new_queued(request: ReplayRequestPayload) -> Self {
+        let input_tokens = request.input_length();
+        let output_tokens = request.metadata().max_output_tokens;
         Self {
             request: Some(request),
             phase: AggRequestPhase::QueuedAtRouter,
@@ -62,7 +62,7 @@ impl AggRequestState {
             .take()
             .ok_or_else(|| anyhow!("offline replay missing queued request payload for {uuid}"))?;
         self.phase = AggRequestPhase::Running;
-        Ok(request)
+        Ok(request.into_direct_request())
     }
 }
 
@@ -446,9 +446,10 @@ impl OfflineWorkerState {
 mod tests {
     use uuid::Uuid;
 
-    use super::{DisaggRequestState, OfflineWorkerState};
+    use super::{AggRequestState, DisaggRequestState, OfflineWorkerState};
     use crate::common::handoff::{HandoffId, HandoffOrder};
     use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs, WorkerType};
+    use crate::loadgen::{SessionTrace, Trace, TurnTrace, WorkloadDriver};
     use crate::replay::offline::extensions::kv_events::KvCacheEventData;
     use crate::scheduler::{SchedulerCommand, SchedulerCommandResult};
 
@@ -576,6 +577,37 @@ mod tests {
         assert_eq!(request.max_output_tokens, 1);
         assert_eq!(request.priority, -3);
         assert_eq!(request.strict_priority, 9);
+    }
+
+    #[test]
+    fn agg_queued_prompt_materializes_only_when_admitted() {
+        let trace = Trace {
+            block_size: 64,
+            sessions: vec![SessionTrace {
+                session_id: "deferred".to_string(),
+                first_arrival_timestamp_ms: Some(0.0),
+                turns: vec![TurnTrace {
+                    input_length: 128,
+                    max_output_tokens: 4,
+                    hash_ids: vec![11, 12],
+                    ..Default::default()
+                }],
+            }],
+        };
+        let mut driver = WorkloadDriver::new_trace(trace, 64).unwrap();
+        let compact = driver.pop_ready_compact(0.0, 1).pop().unwrap();
+        let uuid = compact.request_uuid;
+        let payload = compact.request;
+        assert!(payload.materialized_tokens().is_none());
+
+        let mut state = AggRequestState::new_queued(payload);
+
+        assert_eq!(state.input_tokens, 128);
+        assert_eq!(state.output_tokens, 4);
+        let request = state.take_queued_request(uuid).unwrap();
+        assert_eq!(request.tokens.len(), 128);
+        assert!(request.tokens[..64].iter().all(|token| *token == 11));
+        assert!(request.tokens[64..].iter().all(|token| *token == 12));
     }
 
     #[test]

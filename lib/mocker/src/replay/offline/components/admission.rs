@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use super::ReplayMode;
 use crate::common::protocols::DirectRequest;
-use crate::loadgen::{ReplayRequestHashes, WorkloadDriver};
+use crate::loadgen::{ReplayRequestHashes, ReplayRequestPayload, WorkloadDriver};
 use crate::replay::offline::core::{AdmissionSource as CoreAdmissionSource, ReadyArrival};
 
 pub(in crate::replay) trait ReplayAdmissionMetadata: Sized {
@@ -102,6 +102,28 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
         now_ms: f64,
         cluster_in_flight: usize,
     ) -> Result<Vec<ReadyArrival<DirectRequest, Metadata>>> {
+        Ok(self
+            .drain_ready_compact(now_ms, cluster_in_flight)?
+            .into_iter()
+            .map(|ready| ReadyArrival {
+                request: ready.request.into_direct_request(),
+                arrival_time_ms: ready.arrival_time_ms,
+                metadata: ready.metadata,
+                session_id: ready.session_id,
+                turn_index: ready.turn_index,
+            })
+            .collect())
+    }
+
+    /// Aggregated replay keeps full-prompt workload arrivals compact while
+    /// they wait in the router queue. Legacy request queues and cumulative-
+    /// delta workloads remain materialized because they do not have an
+    /// independent compact prompt representation.
+    pub(in crate::replay::offline) fn drain_ready_compact(
+        &mut self,
+        now_ms: f64,
+        cluster_in_flight: usize,
+    ) -> Result<Vec<ReadyArrival<ReplayRequestPayload, Metadata>>> {
         match (&self.mode, &mut self.source) {
             (ReplayMode::Trace, AdmissionSource::Requests(pending)) => {
                 let mut ready = Vec::new();
@@ -117,7 +139,7 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
                         .pop_front()
                         .expect("front request must exist when arrival is ready");
                     ready.push(ReadyArrival {
-                        request,
+                        request: ReplayRequestPayload::materialized(request),
                         arrival_time_ms,
                         metadata: Metadata::from_hashes(None),
                         session_id: None,
@@ -127,7 +149,7 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
                 Ok(ready)
             }
             (ReplayMode::Trace, AdmissionSource::Workload(driver)) => Ok(driver
-                .pop_ready(now_ms, usize::MAX)
+                .pop_ready_compact(now_ms, usize::MAX)
                 .into_iter()
                 .map(|ready| {
                     let session_id = ready.emit_session_metadata.then_some(ready.session_id);
@@ -145,11 +167,12 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
                 let mut ready = Vec::new();
                 let mut simulated_in_flight = cluster_in_flight;
                 while simulated_in_flight < *max_in_flight {
-                    let Some(request) = pending.pop_front() else {
+                    let Some(mut request) = pending.pop_front() else {
                         break;
                     };
+                    request.arrival_timestamp_ms = Some(now_ms);
                     ready.push(ReadyArrival {
-                        request,
+                        request: ReplayRequestPayload::materialized(request),
                         arrival_time_ms: now_ms,
                         metadata: Metadata::from_hashes(None),
                         session_id: None,
@@ -163,7 +186,7 @@ impl<Metadata: ReplayAdmissionMetadata> AdmissionQueue<Metadata> {
                 // The driver owns the session cap and only ever holds active sessions'
                 // turns in its heap, so drain everything ready in heap (i.e. limit=usize MAX).
                 Ok(driver
-                    .pop_ready(now_ms, usize::MAX)
+                    .pop_ready_compact(now_ms, usize::MAX)
                     .into_iter()
                     .map(|ready| {
                         let session_id = ready.emit_session_metadata.then_some(ready.session_id);

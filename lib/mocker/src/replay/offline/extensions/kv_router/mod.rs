@@ -32,7 +32,7 @@ use uuid::Uuid;
 
 use crate::common::protocols::DirectRequest;
 use crate::common::protocols::MockEngineArgs;
-use crate::loadgen::ReplayRequestHashes;
+use crate::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
 use crate::replay::ReplayPrefillLoadEstimator;
 use crate::replay::offline::components::{KvReplayMetadata, ReplayAdmissionMetadata};
 use crate::replay::offline::core::{
@@ -281,23 +281,65 @@ impl KvRouterPlacement {
     }
 }
 
-impl PlacementPolicy<DirectRequest> for KvRouterPlacement {
+trait PlacementRequestView {
+    fn metadata(&self) -> &DirectRequest;
+    fn input_length(&self) -> usize;
+    fn materialized_tokens(&self) -> Option<&[u32]>;
+}
+
+impl PlacementRequestView for DirectRequest {
+    fn metadata(&self) -> &DirectRequest {
+        self
+    }
+
+    fn input_length(&self) -> usize {
+        self.tokens.len()
+    }
+
+    fn materialized_tokens(&self) -> Option<&[u32]> {
+        Some(&self.tokens)
+    }
+}
+
+impl PlacementRequestView for ReplayRequestPayload {
+    fn metadata(&self) -> &DirectRequest {
+        self.metadata()
+    }
+
+    fn input_length(&self) -> usize {
+        self.input_length()
+    }
+
+    fn materialized_tokens(&self) -> Option<&[u32]> {
+        self.materialized_tokens()
+    }
+}
+
+impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlacement {
     type Metadata = KvReplayMetadata;
     type Observation = RouterEventBatch;
 
     fn place(
         &mut self,
-        request: &DirectRequest,
+        request: &Request,
         metadata: Self::Metadata,
         session_id: Option<String>,
         now_ms: f64,
     ) -> Result<PlacementEffects> {
-        let request_id = request
+        let request_metadata = request.metadata();
+        let request_id = request_metadata
             .uuid
             .ok_or_else(|| anyhow!("KV placement requires a request UUID"))?;
         let admissions = self
             .router
-            .on_request_arrival_for_session(request, metadata.into_hashes(), session_id, now_ms)?
+            .on_compact_request_arrival_for_session(
+                request_metadata,
+                request.input_length(),
+                request.materialized_tokens(),
+                metadata.into_hashes(),
+                session_id,
+                now_ms,
+            )?
             .admissions;
         let mut decision = PlacementDecision::Queued;
         let mut released = Vec::with_capacity(admissions.len().saturating_sub(1));
@@ -401,6 +443,7 @@ impl OfflineReplayRouter {
         self.on_request_arrival_for_session(request, replay_hashes, None, now_ms)
     }
 
+    #[cfg(test)]
     pub(crate) fn on_request_arrival_for_session(
         &mut self,
         request: &DirectRequest,
@@ -408,7 +451,32 @@ impl OfflineReplayRouter {
         session_id: Option<String>,
         now_ms: f64,
     ) -> Result<RouterEffects> {
-        let pending = self.build_pending_request(request, replay_hashes, session_id)?;
+        self.on_compact_request_arrival_for_session(
+            request,
+            request.tokens.len(),
+            Some(&request.tokens),
+            replay_hashes,
+            session_id,
+            now_ms,
+        )
+    }
+
+    pub(crate) fn on_compact_request_arrival_for_session(
+        &mut self,
+        request: &DirectRequest,
+        input_length: usize,
+        materialized_tokens: Option<&[u32]>,
+        replay_hashes: Option<ReplayRequestHashes>,
+        session_id: Option<String>,
+        now_ms: f64,
+    ) -> Result<RouterEffects> {
+        let pending = self.build_pending_request(
+            request,
+            input_length,
+            materialized_tokens,
+            replay_hashes,
+            session_id,
+        )?;
         let decay_now = self.decay_now(now_ms);
         let (class_index, snapshot) = match self
             .profile
@@ -628,6 +696,8 @@ impl OfflineReplayRouter {
     fn build_pending_request(
         &self,
         request: &DirectRequest,
+        input_length: usize,
+        materialized_tokens: Option<&[u32]>,
         replay_hashes: Option<ReplayRequestHashes>,
         session_id: Option<String>,
     ) -> Result<PendingRequest> {
@@ -645,20 +715,18 @@ impl OfflineReplayRouter {
                 } else if self.config.router_assume_kv_reuse {
                     Some(replay_hashes.sequence_hashes)
                 } else {
-                    self.config.compute_seq_hashes_for_tracking(
-                        &request.tokens,
-                        self.block_size,
-                        None,
-                        BlockHashOptions::default(),
-                        None,
-                    )
+                    self.config
+                        .random_seq_hashes_for_tracking(input_length / self.block_size as usize)
                 };
                 (overlaps, token_seq)
             }
             None => {
-                let overlaps = self.indexer.find_matches_for_request(&request.tokens, None);
+                let tokens = materialized_tokens.ok_or_else(|| {
+                    anyhow!("offline replay requires prompt tokens when replay hashes are absent")
+                })?;
+                let overlaps = self.indexer.find_matches_for_request(tokens, None);
                 let token_seq = self.config.compute_seq_hashes_for_tracking(
-                    &request.tokens,
+                    tokens,
                     self.block_size,
                     None,
                     BlockHashOptions::default(),
@@ -671,7 +739,7 @@ impl OfflineReplayRouter {
         Ok(PendingRequest {
             uuid,
             token_seq,
-            isl_tokens: request.tokens.len(),
+            isl_tokens: input_length,
             overlaps,
             track_prefill_tokens: self.config.router_track_prefill_tokens,
             expected_output_tokens: Some(
@@ -976,8 +1044,15 @@ mod tests {
     #[test]
     fn session_identity_reaches_scheduling_request() {
         let router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
+        let request = request(1, 7);
         let pending = router
-            .build_pending_request(&request(1, 7), None, Some("session-a".to_string()))
+            .build_pending_request(
+                &request,
+                request.tokens.len(),
+                Some(&request.tokens),
+                None,
+                Some("session-a".to_string()),
+            )
             .unwrap();
         let scheduling_request = pending.scheduling_request(64, FxHashMap::default());
 

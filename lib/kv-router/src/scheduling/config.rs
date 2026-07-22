@@ -1020,8 +1020,19 @@ impl KvRouterConfig {
             };
             Some(compute_seq_hash_for_block(block_hashes))
         } else {
-            Some((0..num_blocks).map(|_| fastrand::u64(..)).collect())
+            self.random_seq_hashes_for_tracking(num_blocks)
         }
+    }
+
+    /// Generate non-reusable sequence identities for a known number of full
+    /// blocks. Callers that already have compact block metadata can use this
+    /// without materializing the original token sequence solely to recover its
+    /// length.
+    pub fn random_seq_hashes_for_tracking(&self, num_blocks: usize) -> Option<Vec<u64>> {
+        if !self.router_track_active_blocks {
+            return None;
+        }
+        Some((0..num_blocks).map(|_| fastrand::u64(..)).collect())
     }
 
     /// Check if KV event subscription should be started.
@@ -1170,6 +1181,18 @@ mod tests {
         );
 
         assert_eq!(seq_hashes, Some(compute_seq_hash_for_block(&precomputed)));
+    }
+
+    #[test]
+    fn random_seq_hashes_for_tracking_uses_block_count_and_tracking_policy() {
+        let config = KvRouterConfig::default();
+        assert_eq!(config.random_seq_hashes_for_tracking(3).unwrap().len(), 3);
+
+        let disabled = KvRouterConfig {
+            router_track_active_blocks: false,
+            ..Default::default()
+        };
+        assert_eq!(disabled.random_seq_hashes_for_tracking(3), None);
     }
 
     #[test]
