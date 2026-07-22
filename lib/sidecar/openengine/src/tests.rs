@@ -960,6 +960,44 @@ async fn fake_tonic_server_discovery_and_aggregate_stream() {
     assert!(terminal.finish_reason.is_some());
     assert_eq!(terminal.completion_usage.as_ref().unwrap().total_tokens, 4);
 
+    // Response selection is consumed by Dynamo's frontend/postprocessor. It
+    // must not be treated as an engine-specific argument by the sidecar.
+    let mut response_selection = request();
+    response_selection.extra_args = Some(serde_json::json!({
+        "nvext": {
+            "extra_fields": [
+                "worker_id",
+                "timing",
+                "engine_data",
+                "completion_token_ids"
+            ]
+        }
+    }));
+    let selected_outputs = engine
+        .generate(
+            response_selection,
+            GenerateContext::new(dynamo_backend_common::testing::mock_context(), None),
+        )
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+    assert_eq!(selected_outputs.len(), 2);
+
+    let mut unsupported_nvext = request();
+    unsupported_nvext.extra_args = Some(serde_json::json!({
+        "nvext": {"metadata_upload": {"url": "s3://bucket/results"}}
+    }));
+    assert!(
+        engine
+            .generate(
+                unsupported_nvext,
+                GenerateContext::new(dynamo_backend_common::testing::mock_context(), None),
+            )
+            .await
+            .is_err()
+    );
+
     // Some multimodal processors (notably Phi-4 audio) require the rendered
     // text prompt so they can expand media placeholders. Preserve it when the
     // frontend supplies it instead of forcing token-only input.

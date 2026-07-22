@@ -1398,6 +1398,40 @@ fn advertised_dp_ranks(discovery: &Discovery) -> Result<HashSet<u32>, DynamoErro
     Ok((start..end).collect())
 }
 
+fn is_frontend_only_nvext(value: &serde_json::Value, cache_namespace: Option<&str>) -> bool {
+    let Some(nvext) = value.as_object() else {
+        return false;
+    };
+    nvext.iter().all(|(key, value)| match key.as_str() {
+        // These fields select data that Dynamo's response postprocessor builds
+        // from the normal backend output. They do not alter engine execution.
+        "extra_fields" => value.as_array().is_some_and(|fields| {
+            fields.iter().all(|field| {
+                field.as_str().is_some_and(|field| {
+                    matches!(
+                        field,
+                        "worker_id"
+                            | "timing"
+                            | "engine_data"
+                            | "stop_reason"
+                            | "completion_token_ids"
+                            | "prompt_logprobs"
+                    )
+                })
+            })
+        }),
+        // The preprocessor duplicates cache_salt into RoutingHints. Consume
+        // this copy only when it agrees with the value sent over OpenEngine.
+        "cache_salt" => value
+            .as_str()
+            .filter(|salt| !salt.is_empty())
+            .is_some_and(|salt| cache_namespace == Some(salt)),
+        // metadata_upload and token_in require backend-specific behavior and
+        // remain rejected rather than being silently dropped.
+        _ => false,
+    })
+}
+
 fn validate_request_capabilities(
     discovery: &Discovery,
     request: &PreprocessedRequest,
@@ -1500,25 +1534,33 @@ fn validate_request_capabilities(
             let is_supported = matches!(
                 key.as_str(),
                 "messages" | "bypass_prefix_cache" | "disable_prefix_cache"
-            ) || (key == "mm_hashes"
-                && value.as_array().is_some_and(|hashes| {
-                    !hashes.is_empty()
-                        && hashes.iter().all(|hash| {
-                            hash.as_str().is_some_and(|hash| {
-                                hash.len() == 16
-                                    && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+            ) || (key == "nvext"
+                && is_frontend_only_nvext(
+                    value,
+                    request
+                        .routing
+                        .as_ref()
+                        .and_then(|routing| routing.cache_namespace.as_deref()),
+                ))
+                || (key == "mm_hashes"
+                    && value.as_array().is_some_and(|hashes| {
+                        !hashes.is_empty()
+                            && hashes.iter().all(|hash| {
+                                hash.as_str().is_some_and(|hash| {
+                                    hash.len() == 16
+                                        && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                                })
                             })
-                        })
-                })
-                && request
-                    .multi_modal_data
-                    .as_ref()
-                    .and_then(|media| media.get("image_url"))
-                    .is_some_and(|images| {
-                        value
-                            .as_array()
-                            .is_some_and(|hashes| hashes.len() == images.len())
-                    }))
+                    })
+                    && request
+                        .multi_modal_data
+                        .as_ref()
+                        .and_then(|media| media.get("image_url"))
+                        .is_some_and(|images| {
+                            value
+                                .as_array()
+                                .is_some_and(|hashes| hashes.len() == images.len())
+                        }))
                 || (key == "formatted_prompt"
                     && request
                         .multi_modal_data
