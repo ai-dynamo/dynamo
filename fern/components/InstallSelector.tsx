@@ -7,9 +7,11 @@
  * Server component (no "use client"): it expands the generated data
  * (install-selector-data.ts) into hidden radios + <label> chips + [data-*]
  * command blocks, and a generated :has() stylesheet that reveals exactly one
- * block per selection. All interactivity is pure CSS — no client JavaScript.
- * Delivered as a page-level <style> + injected markup, mirroring the CSS-only
- * pattern in RecipeStyles.tsx (which survives the shared NVIDIA global theme).
+ * block per selection. The selection is pure CSS — no bundled or hydrated JS;
+ * the only script is the copy button's inline onclick handler (which a strict
+ * CSP without unsafe-inline would block). Delivered as a page-level <style> +
+ * injected markup, mirroring the CSS-only pattern in RecipeStyles.tsx (which
+ * survives the shared NVIDIA global theme).
  *
  * Register via docs.yml `experimental.mdx-components: ./components` and IMPORT it
  * on the page (ambient use renders "Unsupported JSX tag"):
@@ -123,10 +125,19 @@ function buildHtml(data: Data): string {
 
   let blocks = "";
   for (const fw of fws)
-    for (const [ch] of CHANNELS)
-      data[fw][ch].forEach((e, i) => {
+    for (const [ch] of CHANNELS) {
+      const entries = data[fw][ch];
+      if (!entries.length) {
+        // No versions for this framework/channel — show a note instead of a blank area.
+        blocks +=
+          `<div class="is-block" data-block data-fw="${esc(fw)}" data-ch="${esc(ch)}">` +
+          `<div class="is-cmd is-note"><pre>No ${esc(ch)} builds available for ${esc(data[fw].label)} right now.</pre></div></div>`;
+        continue;
+      }
+      entries.forEach((e, i) => {
         for (const [form] of FORMS) blocks += block(data, fw, ch, e, i, form);
       });
+    }
 
   return (
     `<div class="is-head"><h3>Choose your build</h3></div>` +

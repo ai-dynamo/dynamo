@@ -42,19 +42,36 @@ def tabs(version: str) -> str:
 
 def freeze(text: str, version: str) -> str:
     if "BEGIN:install-selector" not in text:
-        return text
-    text = re.sub(
+        return text  # older snapshot that never had the selector
+    # Fail loudly rather than shipping a half-frozen page: if the marker is present
+    # the block MUST be substituted and the import stripped, or the release would
+    # render a literal <InstallSelector /> ("Unsupported JSX tag") that fern check
+    # does not catch.
+    text, blocks = re.subn(
         r"\{/\* BEGIN:install-selector.*?\*/\}.*?\{/\* END:install-selector \*/\}",
         tabs(version),
         text,
         flags=re.S,
     )
-    return re.sub(r"^import \{ InstallSelector \}.*\n\n?", "", text, flags=re.M)
+    if blocks != 1:
+        raise SystemExit(
+            f"freeze_install_selector: BEGIN marker present but block substitution "
+            f"count is {blocks} (missing or duplicate END:install-selector marker?)"
+        )
+    text, imports = re.subn(
+        r"^import \{ InstallSelector \}.*\n\n?", "", text, flags=re.M
+    )
+    if imports != 1:
+        raise SystemExit(
+            f"freeze_install_selector: expected 1 InstallSelector import to strip, found {imports}"
+        )
+    return text
 
 
 def main() -> int:
     page, version = Path(sys.argv[1]), sys.argv[2]
     if not page.exists():
+        print(f"warning: {page} not found — skipping selector freeze", file=sys.stderr)
         return 0
     out = freeze(page.read_text(), version)
     page.write_text(out)

@@ -132,6 +132,12 @@ jobs:
         # container/context.yaml history, release tags, and nightly commit versions.
         run: |
           git -C source-checkout fetch --unshallow --tags 2>/dev/null || git -C source-checkout fetch --tags
+          # Fail rather than silently produce a collapsed nightly history from a
+          # still-shallow clone (e.g. a transient --unshallow failure).
+          if [ "$(git -C source-checkout rev-parse --is-shallow-repository)" != "false" ]; then
+            echo "::error::source-checkout is still shallow after fetch; nightly history would be incomplete"
+            exit 1
+          fi
           python3 -m pip install --quiet pyyaml
           python3 source-checkout/.github/scripts/build_install_selector.py --refresh-support-matrix
 
@@ -499,7 +505,11 @@ jobs:
           fi
 
       - name: Freeze the install selector in the versioned Quickstart
-        # Dev keeps the interactive selector; a release snapshot is static and pinned.
+        # Dev keeps the interactive selector; a release snapshot is static and pinned,
+        # so this strips the <InstallSelector /> import from the tagged pages. Note the
+        # tag build does NOT regenerate install-selector-data.ts — the still-live dev
+        # pages resolve their import from the module a prior dev sync committed to
+        # docs-website (stale-but-present is fine during a tag publish).
         run: |
           python3 source-checkout/.github/scripts/freeze_install_selector.py \
             "docs-checkout/fern/pages-${{ steps.version.outputs.tag }}/getting-started/quickstart.mdx" \

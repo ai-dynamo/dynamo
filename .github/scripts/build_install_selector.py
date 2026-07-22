@@ -15,8 +15,9 @@ Data sources (all authoritative, no credentials required):
   * backend version -> nightly window -- git history of ``container/context.yaml``.
   * per-window latest PUBLISHED nightly -- the live NGC tag list (``nvcr.io``
     anonymous pull token) gives the exact ``YYYYMMDD-<sha>`` tag; the wheel version
-    derives from ``pyproject.toml`` at that ``<sha>``. GC'd or skipped nights never
-    appear, so a dead command is never emitted.
+    derives from ``pyproject.toml`` at that ``<sha>`` and is confirmed against the
+    ``pypi.nvidia.com`` index. GC'd or skipped nights never appear, so a dead
+    command is never emitted.
 
 Scope: the ``STABLE_RELEASES_BACK`` most recent stable releases and nightly builds
 pinned within ``NIGHTLY_DAYS_BACK`` days of the latest published nightly.
@@ -25,7 +26,6 @@ Usage:
     build_install_selector.py                        # write JSON + TS module
     build_install_selector.py --refresh-support-matrix   # also refresh the ToT row
     build_install_selector.py --stdout               # print JSON to stdout
-    build_install_selector.py --check                # exit 1 if the on-disk JSON is stale
 """
 from __future__ import annotations
 
@@ -109,7 +109,12 @@ def read_current(repo_root: Path) -> dict[str, tuple[str, str]]:
             raise SystemExit(
                 f"{CONTEXT}: no runtime_image_tag for {fw.key}.{fw.device}"
             )
-        out[fw.label] = (parse_version(tag), tag)
+        version = parse_version(tag)
+        if not fw.version_re.match(version):
+            raise SystemExit(
+                f"{CONTEXT}: {fw.key}.{fw.device} tag {tag!r} is not a recognized backend version"
+            )
+        out[fw.label] = (version, tag)
     return out
 
 
@@ -191,11 +196,19 @@ def _ngc_token(repo: str) -> str:
 
 
 def ngc_tag_list(repo: str) -> list[str]:
-    req = urllib.request.Request(
-        f"https://nvcr.io/v2/{repo}/tags/list",
-        headers={"Authorization": f"Bearer {_ngc_token(repo)}"},
-    )
-    return json.load(urllib.request.urlopen(req, timeout=30)).get("tags") or []
+    token = _ngc_token(repo)
+    url = f"https://nvcr.io/v2/{repo}/tags/list?n=1000"
+    tags: list[str] = []
+    while url:
+        resp = urllib.request.urlopen(
+            urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"}),
+            timeout=30,
+        )
+        tags += json.load(resp).get("tags") or []
+        # Docker Registry v2 paginates via a `Link: <...>; rel="next"` header.
+        m = re.search(r'<([^>]+)>;\s*rel="next"', resp.headers.get("Link", ""))
+        url = f"https://nvcr.io{m.group(1)}" if m else None
+    return tags
 
 
 def ngc_dated_tags(image: str) -> dict[int, tuple[str, str]]:
@@ -223,10 +236,18 @@ def ngc_release_tags(image: str) -> set[str]:
 _ROW = re.compile(
     r"^\|\s*\*\*(v\d+\.\d+\.\d+)\*\*\s*\|\s*`([^`]+)`\s*\|\s*`([^`]+)`\s*\|\s*`([^`]+)`\s*\|"
 )
+# _ROW hard-codes the column order; fail loudly if the table header ever drifts.
+_HEADER_RE = re.compile(
+    r"^\|\s*\*\*Dynamo\*\*\s*\|\s*\*\*SGLang\*\*\s*\|\s*\*\*TensorRT-LLM\*\*\s*\|\s*\*\*vLLM\*\*\s*\|"
+)
 
 
 def stable_by_framework(live: dict[str, set[str] | None]) -> dict[str, list[dict]]:
     text = (REPO_ROOT / SUPPORT_MATRIX).read_text()
+    if not any(_HEADER_RE.match(line.strip()) for line in text.splitlines()):
+        raise SystemExit(
+            f"{SUPPORT_MATRIX}: Backend Dependencies header changed; _ROW column order is stale"
+        )
     releases: dict[str, dict[str, str]] = {}
     for line in text.splitlines():
         m = _ROW.match(line.strip())
@@ -281,6 +302,31 @@ def base_version_at(sha: str) -> str | None:
     return m.group(1) if m else None
 
 
+def pypi_dev_versions() -> set[str] | None:
+    """Published ``ai-dynamo`` nightly dev versions on the NVIDIA index.
+
+    ``None`` means the index couldn't be reached — callers then keep the derived
+    pin rather than dropping every wheel command.
+    """
+    try:
+        html = urllib.request.urlopen(f"{PYPI}/ai-dynamo/", timeout=30).read().decode()
+    except Exception as exc:
+        print(f"warning: pypi.nvidia.com index fetch failed: {exc}", file=sys.stderr)
+        return None
+    return set(re.findall(r"ai_dynamo-(\d+\.\d+\.\d+\.dev\d{8})", html))
+
+
+def wheel_version_for(date: str, sha: str, published: set[str] | None) -> str | None:
+    """``<pyproject version at sha>.dev<date>`` if that wheel is actually published."""
+    base = base_version_at(sha)
+    if not base:
+        return None
+    version = f"{base}.dev{date}"
+    if published is not None and version not in published:
+        return None  # container shipped but the wheel didn't — don't emit a 404
+    return version
+
+
 # --------------------------------------------------------------------------- #
 # command construction
 # --------------------------------------------------------------------------- #
@@ -302,13 +348,13 @@ def nightly_latest_commands(
 ) -> dict[str, str]:
     img, extra, wheel = META[label]
     cmds = {"container": run(f"{REGISTRY}/{img}-runtime-nightly:latest")}
-    if wheel:
-        # Pin the wheel: --extra-index-url pools with public PyPI, so an unpinned
-        # --pre install can resolve a stable release instead of the nightly.
-        pin = f"=={wheel_version}" if wheel_version else ""
+    # Pin the wheel: --extra-index-url pools with public PyPI, so an unpinned --pre
+    # install can resolve a stable release. Omit it when we can't pin (rather than
+    # emit an unpinned command that may point at a stable version).
+    if wheel and wheel_version:
         cmds[
             "wheel"
-        ] = f'uv pip install --pre --extra-index-url {PYPI}/ "ai-dynamo[{extra}]{pin}"'
+        ] = f'uv pip install --pre --extra-index-url {PYPI}/ "ai-dynamo[{extra}]=={wheel_version}"'
     return cmds
 
 
@@ -331,7 +377,7 @@ def build() -> dict:
     changes = read_history(REPO_ROOT)
 
     dated_by_img: dict[str, dict] = {}
-    reltags_by_img: dict[str, set] = {}
+    reltags_by_img: dict[str, set[str] | None] = {}
     for label in META:
         img = META[label][0]
         try:
@@ -347,6 +393,7 @@ def build() -> dict:
             print(f"warning: NGC release tags failed for {img}: {exc}", file=sys.stderr)
             reltags_by_img[img] = None
 
+    published = pypi_dev_versions()
     stable = stable_by_framework(reltags_by_img)
     data: dict[str, dict] = {}
 
@@ -387,11 +434,7 @@ def build() -> dict:
             version, start, end = wins[idx]
             if end is None:  # current build
                 hit = latest_in_window(dated, start, None)
-                wheel_version = None
-                if hit:
-                    date, sha = hit
-                    base = base_version_at(sha)
-                    wheel_version = f"{base}.dev{date}" if base else None
+                wheel_version = wheel_version_for(*hit, published) if hit else None
                 entry["nightly"].append(
                     {
                         "backend_version": version,
@@ -406,8 +449,7 @@ def build() -> dict:
             date, sha = hit
             if cutoff is not None and int(date) < cutoff:
                 continue
-            base = base_version_at(sha)
-            wheel_version = f"{base}.dev{date}" if base else None
+            wheel_version = wheel_version_for(date, sha, published)
             entry["nightly"].append(
                 {
                     "backend_version": version,
@@ -451,9 +493,6 @@ def main() -> int:
         "--stdout", action="store_true", help="print JSON instead of writing"
     )
     ap.add_argument(
-        "--check", action="store_true", help="exit 1 if the on-disk JSON is stale"
-    )
-    ap.add_argument(
         "--refresh-support-matrix",
         action="store_true",
         help="also rewrite the main (ToT) row in support-matrix.md",
@@ -467,15 +506,6 @@ def main() -> int:
     data = build()
     json_text = as_json(data)
 
-    if args.check:
-        target = REPO_ROOT / args.out
-        current = target.read_text() if target.exists() else ""
-        if current != json_text:
-            print(
-                f"{args.out} is stale — run build_install_selector.py", file=sys.stderr
-            )
-            return 1
-        return 0
     if args.stdout:
         sys.stdout.write(json_text)
         return 0
