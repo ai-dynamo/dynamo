@@ -134,14 +134,16 @@ navigation:
                 path: kubernetes/model-caching.md
               - page: KV Cache Offloading
                 path: kubernetes/dgd-kv-offloading.md
-              - section: Auto Deploy with DGDR
-                contents:
-                - page: DGDR Walkthrough
-                  path: kubernetes/dgdr-guide.md
-                - page: Dynamo Profiler
-                  path: kubernetes/dgdr-profiler.md
-                - page: Dynamo Planner
-                  path: kubernetes/dgdr-planner.md
+
+          - section: Auto Deployment
+            icon: wand-magic-sparkles
+            contents:
+              - page: DGDR Walkthrough
+                path: kubernetes/dgdr-guide.md
+              - page: Dynamo Profiler
+                path: kubernetes/dgdr-profiler.md
+              - page: Dynamo Planner
+                path: kubernetes/dgdr-planner.md
 
           - section: Operations
             icon: screwdriver-wrench
@@ -181,7 +183,7 @@ navigation:
             collapsed: open-by-default
             contents:
               - page: Introduction
-                path: cli/introduction.md
+                path: cli/introduction.mdx
               - page: Quickstart
                 path: getting-started/quickstart.mdx
 

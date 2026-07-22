@@ -167,7 +167,13 @@ html.dark,
    Fern tab variants only expose a dropdown. custom.js replaces the User Guide
    dropdown with this vertical, always-visible, version-aware selector. */
 #fern-sidebar .fern-variant-selector {
-    display: none !important;
+    position: absolute !important;
+    width: 1px !important;
+    height: 1px !important;
+    overflow: hidden !important;
+    clip-path: inset(50%) !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
 }
 
 /* Reserve the final selector height while custom.js attaches. This prevents
@@ -181,9 +187,9 @@ html.dark,
     border-radius: 10px;
     background: linear-gradient(
         100deg,
-        #eff1ef 20%,
-        #e5e8e5 40%,
-        #eff1ef 60%
+        var(--grayscale-3) 20%,
+        var(--grayscale-4) 40%,
+        var(--grayscale-3) 60%
     );
     background-size: 200% 100%;
     content: "";
@@ -210,12 +216,12 @@ html.dark,
     border: 0 !important;
     border-radius: 10px;
     outline: 0 !important;
-    background: #eff1ef;
+    background: var(--grayscale-3);
     box-shadow: none !important;
     isolation: isolate;
 }
 
-/* The NVIDIA-green selected surface moves between rows. */
+/* The active surface uses the same colors as Fern's product toggle. */
 .dynamo-variant-selector::before {
     position: absolute;
     z-index: 0;
@@ -224,7 +230,7 @@ html.dark,
     left: 4px;
     height: 50px;
     border-radius: 6px;
-    background: var(--nv-color-green);
+    background: var(--background);
     content: "";
     transform: translateY(0);
     transition: transform 140ms ease;
@@ -244,7 +250,7 @@ html.dark,
     gap: 0.65rem;
     padding: 0.4rem 0.65rem;
     border-radius: 6px;
-    color: var(--grayscale-a12);
+    color: var(--grayscale-11);
     font-size: 0.875rem;
     font-weight: 600;
     line-height: 1;
@@ -253,16 +259,29 @@ html.dark,
 }
 
 .dynamo-variant-selector-option[data-state="inactive"]:hover {
-    background: #e5e8e5;
+    background: var(--grayscale-4);
 }
 
 .dynamo-variant-selector-option[data-state="active"] {
-    color: #ffffff;
+    color: var(--grayscale-12);
 }
 
 .dynamo-variant-selector-option:focus-visible {
-    outline: 2px solid currentColor;
-    outline-offset: -4px;
+    background: var(--grayscale-4);
+    outline: none;
+}
+
+.dark .dynamo-variant-selector {
+    background: var(--grayscale-4);
+}
+
+.dark .dynamo-variant-selector::before {
+    background: var(--grayscale-6);
+}
+
+.dark .dynamo-variant-selector-option[data-state="inactive"]:hover,
+.dark .dynamo-variant-selector-option:focus-visible {
+    background: var(--grayscale-5);
 }
 
 .dynamo-variant-selector-icon {

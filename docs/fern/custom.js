@@ -50,6 +50,83 @@
     });
   }
 
+  function setIcon(selector, variantId, svg) {
+    const icon = selector.querySelector(
+      `[data-variant="${variantId}"] .dynamo-variant-selector-icon`,
+    );
+
+    if (icon == null || svg == null) {
+      return false;
+    }
+
+    icon.replaceChildren(svg.cloneNode(true));
+    return true;
+  }
+
+  function variantIdFromTitle(title) {
+    const normalizedTitle = title.toLowerCase();
+
+    if (normalizedTitle.includes("kubernetes")) {
+      return "kubernetes";
+    }
+
+    if (normalizedTitle.includes("cli")) {
+      return "cli";
+    }
+
+    return null;
+  }
+
+  async function hydrateNativeIcons(
+    nativeSelector,
+    selector,
+    prefix,
+    activeVariant,
+  ) {
+    if (selector.dataset.iconState != null) {
+      return;
+    }
+
+    selector.dataset.iconState = "loading";
+
+    // The closed trigger contains Fern's exact Font Awesome icon for the
+    // current variant. Copy it immediately.
+    setIcon(selector, activeVariant, nativeSelector.querySelector("svg"));
+
+    const inactiveVariants = variants.filter(
+      ({ id }) => id !== activeVariant,
+    );
+
+    const results = await Promise.allSettled(
+      inactiveVariants.map(async (variant) => {
+        const response = await fetch(`${prefix}${variant.landingPath}`, {
+          credentials: "same-origin",
+        });
+
+        if (!response.ok) {
+          throw new Error(`Unable to load ${variant.label} icon`);
+        }
+
+        const page = new DOMParser().parseFromString(
+          await response.text(),
+          "text/html",
+        );
+        const svg = page.querySelector(".fern-variant-selector svg");
+
+        if (!setIcon(selector, variant.id, svg)) {
+          throw new Error(`Unable to find ${variant.label} icon`);
+        }
+      }),
+    );
+
+    selector.dataset.iconState = results.every(
+      ({ status }) => status === "fulfilled",
+    )
+      ? "ready"
+      : "fallback";
+  }
+
+
   function setSelectedVariant(selector, activeVariant) {
     selector.dataset.activeVariant = activeVariant;
 
@@ -159,15 +236,20 @@
         `:scope > .${CUSTOM_SELECTOR_CLASS}`,
       );
 
+      const selector = existingSelector ?? buildSelector(prefix, activeVariant);
+
       if (existingSelector != null) {
-        updateSelector(existingSelector, prefix, activeVariant);
+        updateSelector(selector, prefix, activeVariant);
       } else {
-        container.insertBefore(
-          buildSelector(prefix, activeVariant),
-          nativeSelector,
-        );
+        container.insertBefore(selector, nativeSelector);
       }
 
+      hydrateNativeIcons(
+        nativeSelector,
+        selector,
+        prefix,
+        activeVariant,
+      );
       nativeSelector.setAttribute("aria-hidden", "true");
       nativeSelector.setAttribute("tabindex", "-1");
     });

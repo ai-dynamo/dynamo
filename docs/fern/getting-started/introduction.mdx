@@ -1,167 +1,183 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Introduction to Dynamo
+title: Kubernetes User Guide
 sidebar-title: Introduction
+subtitle: Install, deploy, and operate Dynamo on Kubernetes
 ---
 
-Dynamo is an open-source, high-throughput, low-latency inference framework for serving generative AI workloads in distributed environments. It is Kubernetes-native for production, while the same frontend, router, and worker stack also runs in local containers for evaluation or incremental adoption.
+Use this page as a map of the Kubernetes user guide. Start with the quickstart, then follow the sections that match your cluster and deployment needs.
 
-This User Guide covers installing, deploying, and operating Dynamo on Kubernetes. New here? Pick a quickstart below.
+> [!NOTE]
+> This page covers the **Kubernetes** path. To run Dynamo directly on a workstation or virtual machine without Kubernetes, see the [Local CLI User Guide](../cli/introduction.mdx).
 
-## Get Started
+## Getting Started
 
-Dynamo is **Kubernetes-native, but not Kubernetes-only**. The full feature set — operator, CRDs, autoscaling, inference gateway, and multinode scheduling — runs on Kubernetes, while the same frontend, router, and worker stack also runs locally for evaluation. This guide assumes a Kubernetes cluster; to run in a local environment or build from source, see [Local Deployment](#local-deployment).
-
-<CardGroup cols={3}>
-  <Card title="Kubernetes Quickstart" icon="regular cubes" href="/dynamo/dev/kubernetes">
-    Cluster fast path — the full production stack.
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="regular cubes" href="../kubernetes/README.md">
+    Install Dynamo and serve a model on a Kubernetes cluster.
   </Card>
-  <Card title="Local Quickstart" icon="regular laptop-code" href="/dynamo/dev/getting-started/local-installation">
-    Container fast path — running in about five minutes.
-  </Card>
-  <Card title="Compatibility" icon="regular table-list" href="/dynamo/dev/reference/compatibility">
-    Supported platforms and a feature-by-backend comparison.
+  <Card title="Compatibility" icon="regular table-list" href="../reference/compatibility.mdx">
+    Check supported platforms, backends, features, and dependencies.
   </Card>
 </CardGroup>
 
 ## Installation
 
-Install the operator and CRDs on your cluster, then set up the fabric and storage your workload needs.
+Install the Dynamo platform and prepare networking, storage, and observability for your cluster.
 
 <CardGroup cols={2}>
-  <Card title="Install Dynamo" icon="regular gears" href="/dynamo/dev/kubernetes/installation-guide">
-    Operator, CRDs, and Helm install.
+  <Card title="Install Dynamo" icon="regular gears" href="../kubernetes/installation-guide.md">
+    Install the operator, custom resource definitions, and platform services.
   </Card>
-  <Card title="Multinode Orchestration" icon="regular diagram-project" href="/dynamo/dev/kubernetes/multinode-installation">
-    Grove and LWS for models that span nodes.
+  <Card title="Multinode Orchestration" icon="regular diagram-project" href="../kubernetes/multinode-installation.md">
+    Configure Grove or LeaderWorkerSet for workloads that span nodes.
   </Card>
-  <Card title="RDMA Setup" icon="regular network-wired" href="/dynamo/dev/kubernetes/cloud-providers/rdma-setup">
-    InfiniBand and EFA for high-speed KV transfer.
-  </Card>
-  <Card title="Model Storage" icon="regular hard-drive" href="/dynamo/dev/kubernetes/cloud-providers/model-storage-overview">
-    Persistent volumes and shared filesystems for weights.
+  <Card title="Observability" icon="regular chart-line" href="../observability/README.md">
+    Set up the monitoring stack for a Kubernetes deployment.
   </Card>
 </CardGroup>
 
-Running on a managed Kubernetes service? Each provider has its own setup for clusters, networking, and storage.
+### RDMA Setup
+
+<CardGroup cols={3}>
+  <Card title="RDMA Overview" icon="regular network-wired" href="../kubernetes/cloud-providers/rdma-setup.md">
+    Prepare high-speed networking for distributed serving.
+  </Card>
+  <Card title="InfiniBand on Azure" icon="regular cloud" href="../kubernetes/cloud-providers/aks/rdma-infiniband.md">
+    Configure InfiniBand for Azure Kubernetes Service.
+  </Card>
+  <Card title="EFA on AWS" icon="regular cloud" href="../kubernetes/cloud-providers/eks/efa.md">
+    Configure Elastic Fabric Adapter for Amazon EKS.
+  </Card>
+</CardGroup>
+
+### Model Storage
+
+<CardGroup cols={2}>
+  <Card title="Model Storage Overview" icon="regular hard-drive" href="../kubernetes/cloud-providers/model-storage-overview.md">
+    Choose a storage approach for model weights.
+  </Card>
+  <Card title="AKS Storage" icon="regular database" href="../kubernetes/cloud-providers/aks/storage.md">
+    Compare storage options for Azure Kubernetes Service.
+  </Card>
+  <Card title="Azure Lustre CSI Driver" icon="regular database" href="../kubernetes/cloud-providers/aks/azure-lustre-csi.md">
+    Mount Azure Managed Lustre with the Container Storage Interface driver.
+  </Card>
+  <Card title="EFS" icon="regular database" href="../kubernetes/cloud-providers/eks/efs.md">
+    Use Amazon Elastic File System for shared model storage.
+  </Card>
+</CardGroup>
+
+### Managed Kubernetes
 
 <AccordionGroup>
   <Accordion title="Amazon Web Services">
     <CardGroup cols={2}>
-      <Card title="EKS Setup" icon="regular cubes" href="/dynamo/dev/kubernetes/cloud-providers/eks/eks">
-        Stand up an EKS cluster for Dynamo.
+      <Card title="EKS Setup" icon="regular cubes" href="../kubernetes/cloud-providers/eks/eks.md">
+        Prepare an Amazon EKS cluster for Dynamo.
       </Card>
-      <Card title="ECS" icon="regular box" href="/dynamo/dev/kubernetes/cloud-providers/ecs/ecs">
-        Run Dynamo on Elastic Container Service.
+      <Card title="ECS" icon="regular box" href="../kubernetes/cloud-providers/ecs/ecs.md">
+        Deploy Dynamo with Amazon Elastic Container Service.
       </Card>
     </CardGroup>
   </Accordion>
   <Accordion title="Microsoft Azure">
     <CardGroup cols={2}>
-      <Card title="AKS Setup" icon="regular cubes" href="/dynamo/dev/kubernetes/cloud-providers/aks/aks">
-        Stand up an AKS cluster for Dynamo.
+      <Card title="AKS Setup" icon="regular cubes" href="../kubernetes/cloud-providers/aks/aks.md">
+        Prepare an Azure Kubernetes Service cluster for Dynamo.
       </Card>
-      <Card title="Spot VMs" icon="regular bolt" href="/dynamo/dev/kubernetes/cloud-providers/aks/spot-vms">
-        Cost-optimized capacity for interruptible workloads.
+      <Card title="Spot VMs" icon="regular bolt" href="../kubernetes/cloud-providers/aks/spot-vms.md">
+        Use interruptible capacity for suitable workloads.
       </Card>
     </CardGroup>
   </Accordion>
   <Accordion title="Google Cloud">
     <CardGroup cols={2}>
-      <Card title="GKE Setup" icon="regular cubes" href="/dynamo/dev/kubernetes/cloud-providers/gke/gke">
-        Stand up a GKE cluster for Dynamo.
+      <Card title="GKE Setup" icon="regular cubes" href="../kubernetes/cloud-providers/gke/gke.md">
+        Prepare a Google Kubernetes Engine cluster for Dynamo.
       </Card>
     </CardGroup>
   </Accordion>
 </AccordionGroup>
 
-## Deploy
+## Model Deployment
 
-Deploying a model means describing an inference graph — a Frontend plus one or more workers — as a Kubernetes custom resource, then letting the Dynamo operator reconcile it into running pods. There are two paths: author a **DynamoGraphDeployment (DGD)** by hand for full control, or describe intent with a **DynamoGraphDeploymentRequest (DGDR)** and let the profiler size it for you. Start with the [Model Deployment overview](/dynamo/dev/getting-started/kubernetes-deployment) to choose between them.
-
-### Deploy with DGD
-
-Author the spec — components, parallelism, replicas — and `kubectl apply` it. A DGD works for any model and backend, and is the object that serves traffic.
+Create and tune Kubernetes deployments for different models and serving patterns.
 
 <CardGroup cols={2}>
-  <Card title="DGD Walkthrough" icon="regular cloud-arrow-up" href="/dynamo/dev/kubernetes/dgd-guide">
-    Deploy a model end to end with a hand-authored DGD.
+  <Card title="Model Deployment Introduction" icon="regular circle-info" href="kubernetes-deployment.md">
+    Choose a deployment workflow and learn the core Kubernetes resources.
   </Card>
-  <Card title="Disaggregated Serving" icon="regular arrows-split-up-and-left" href="/dynamo/dev/features/disaggregated-serving">
-    Split prefill and decode into independently scaled workers.
+  <Card title="Deploy with DGD" icon="regular cloud-arrow-up" href="../kubernetes/dgd-guide.md">
+    Define and apply a DynamoGraphDeployment.
   </Card>
-  <Card title="Size with AIConfigurator" icon="regular ruler-combined" href="/dynamo/dev/kubernetes/dgd-aiconfigurator">
-    Auto-pick TP/PP/DP and replica counts for a latency target.
+  <Card title="KV-Aware Routing" icon="regular route" href="../kubernetes/dgd-kv-routing.md">
+    Route requests according to cached prompt prefixes.
   </Card>
-  <Card title="Multinode Deployments" icon="regular network-wired" href="/dynamo/dev/kubernetes/deployment/multinode-deployment">
-    Scale a single model across multiple nodes.
+  <Card title="Disaggregated Serving" icon="regular arrows-split-up-and-left" href="../features/disaggregated-serving/README.md">
+    Scale prefill and decode workers independently.
+  </Card>
+  <Card title="Size with AIConfigurator" icon="regular ruler-combined" href="../kubernetes/dgd-aiconfigurator.md">
+    Select parallelism and replica settings for a workload.
+  </Card>
+  <Card title="Multinode Deployments" icon="regular network-wired" href="../kubernetes/deployment/multinode-deployment.md">
+    Deploy a model across multiple Kubernetes nodes.
+  </Card>
+  <Card title="Model Caching" icon="regular database" href="../kubernetes/model-caching.md">
+    Reduce model-loading time across pods.
+  </Card>
+  <Card title="KV Cache Offloading" icon="regular layer-group" href="../kubernetes/dgd-kv-offloading.md">
+    Extend KV cache capacity beyond GPU memory.
   </Card>
 </CardGroup>
 
 ### Auto Deploy with DGDR
 
-Describe the model, backend, and optional SLA targets; the profiler analyzes your GPUs, picks a configuration, and generates a DGD you can inspect before it serves.
-
 <CardGroup cols={3}>
-  <Card title="DGDR Walkthrough" icon="regular wand-magic-sparkles" href="/dynamo/dev/kubernetes/dgdr-guide">
-    Deploy by intent and let Dynamo size the graph.
+  <Card title="DGDR Walkthrough" icon="regular wand-magic-sparkles" href="../kubernetes/dgdr-guide.md">
+    Generate a deployment from model and workload requirements.
   </Card>
-  <Card title="Dynamo Profiler" icon="regular gauge-high" href="/dynamo/dev/components/profiler/profiler-guide">
-    Profile GPUs to select a deployment configuration.
+  <Card title="Dynamo Profiler" icon="regular gauge-high" href="../kubernetes/dgdr-profiler.md">
+    Profile candidate configurations on your hardware.
   </Card>
-  <Card title="Dynamo Planner" icon="regular sliders" href="/dynamo/dev/components/planner/planner-guide">
-    Autoscale prefill and decode to meet an SLA.
-  </Card>
-</CardGroup>
-
-### Tune a Deployment
-
-Capabilities you turn on per workload, on either path.
-
-<CardGroup cols={3}>
-  <Card title="Model Caching" icon="regular database" href="/dynamo/dev/kubernetes/model-caching">
-    Load weights faster and share them across pods.
-  </Card>
-  <Card title="KV-Aware Routing" icon="regular route" href="/dynamo/dev/kubernetes/dgd-kv-routing">
-    Route to the worker that already holds the prompt's KV prefix.
-  </Card>
-  <Card title="KV Cache Offloading" icon="regular layer-group" href="/dynamo/dev/kubernetes/dgd-kv-offloading">
-    Spill KV blocks to host memory or disk for longer contexts.
+  <Card title="Dynamo Planner" icon="regular sliders" href="../kubernetes/dgdr-planner.md">
+    Select and adjust deployment configurations.
   </Card>
 </CardGroup>
 
 ## Operations
 
-Keep a deployment observable and right-sized.
+Observe, size, benchmark, and simulate Kubernetes deployments.
 
-<CardGroup cols={2}>
-  <Card title="Metrics" icon="regular chart-line" href="/dynamo/dev/kubernetes/observability/metrics">
-    Prometheus metrics for the frontend, router, and workers.
+<CardGroup cols={3}>
+  <Card title="Observability" icon="regular chart-line" href="../kubernetes/observability/metrics.md">
+    Collect metrics from the operator and serving components.
   </Card>
-  <Card title="Logging" icon="regular file-lines" href="/dynamo/dev/kubernetes/observability/logging">
-    Structured logs across components.
+  <Card title="Sizing with AIConfigurator" icon="regular ruler-combined" href="../tools/aic.md">
+    Estimate deployment resources from workload targets.
   </Card>
-  <Card title="Sizing with AIConfigurator" icon="regular ruler-combined" href="/dynamo/dev/tools/aic">
-    Pick parallelism and replicas for a latency target.
-  </Card>
-  <Card title="Benchmarking with AIPerf" icon="regular stopwatch" href="/dynamo/dev/tools/aiperf">
+  <Card title="Benchmarking with AIPerf" icon="regular stopwatch" href="../tools/aiperf.md">
     Measure throughput and latency under load.
   </Card>
 </CardGroup>
 
-## Local Deployment
+### Inference Simulation with DynoSim
 
-Evaluate Dynamo or develop against it without a cluster.
-
-<CardGroup cols={3}>
-  <Card title="Local Quickstart" icon="regular laptop-code" href="/dynamo/dev/getting-started/local-installation">
-    Run the frontend, router, and workers in local containers.
+<CardGroup cols={2}>
+  <Card title="DynoSim Overview" icon="regular circle-info" href="../dynosim/README.md">
+    Learn the simulation workflow and components.
   </Card>
-  <Card title="Build from Source" icon="regular hammer" href="/dynamo/dev/getting-started/building-from-source">
-    Build Dynamo against `main`.
+  <Card title="Live Simulation with Mocker" icon="regular server" href="../dynosim/mocker.md">
+    Exercise a live frontend with simulated workers.
   </Card>
-  <Card title="Minikube Setup" icon="regular box" href="/dynamo/dev/kubernetes/deployment/minikube">
-    A local single-node cluster for testing.
+  <Card title="Simulation Runs" icon="regular play" href="../dynosim/runs.md">
+    Run repeatable inference simulations.
+  </Card>
+  <Card title="Simulation Sweeps" icon="regular magnifying-glass-chart" href="../dynosim/sweeps.md">
+    Compare configurations across a parameter sweep.
+  </Card>
+  <Card title="Planner Simulation Benchmarking" icon="regular gauge" href="../dynosim/planner-benchmarking.md">
+    Evaluate planner decisions with simulated workloads.
   </Card>
 </CardGroup>
