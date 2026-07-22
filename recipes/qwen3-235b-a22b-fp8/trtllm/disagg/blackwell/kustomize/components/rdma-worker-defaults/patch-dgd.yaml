@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-235b-a22b-disagg
+spec:
+  services:
+    TRTLLMPrefillWorker:
+      extraPodSpec:
+        mainContainer:
+          env: &rdmaEnvironment
+            - name: NIXL_TELEMETRY_ENABLE
+              value: "y"
+            - name: NIXL_TELEMETRY_EXPORTER
+              value: prometheus
+            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+              value: "19090"
+            - name: NCCL_DEBUG
+              value: WARN
+          securityContext: &rdmaSecurityContext
+            privileged: true
+            runAsUser: 0
+            capabilities:
+              add:
+                - IPC_LOCK
+                - SYS_PTRACE
+    TRTLLMDecodeWorker:
+      extraPodSpec:
+        mainContainer:
+          env: *rdmaEnvironment
+          securityContext: *rdmaSecurityContext

@@ -1,0 +1,138 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-235b-a22b-disagg
+spec:
+  services:
+    TRTLLMPrefillWorker:
+      extraPodMetadata: &gcpMetadata
+        annotations:
+          networking.gke.io/default-interface: eth0
+          networking.gke.io/interfaces: |
+            [{"interfaceName":"eth0","network":"default"},
+             {"interfaceName":"eth2","network":"rdma-0"},
+             {"interfaceName":"eth3","network":"rdma-1"},
+             {"interfaceName":"eth4","network":"rdma-2"},
+             {"interfaceName":"eth5","network":"rdma-3"}]
+      resources:
+        limits:
+          gpu: "2"
+          custom:
+            networking.gke.io.networks/rdma-0: "1"
+            networking.gke.io.networks/rdma-1: "1"
+            networking.gke.io.networks/rdma-2: "1"
+            networking.gke.io.networks/rdma-3: "1"
+            networking.gke.io.networks/rdma-0.IP: "1"
+            networking.gke.io.networks/rdma-1.IP: "1"
+            networking.gke.io.networks/rdma-2.IP: "1"
+            networking.gke.io.networks/rdma-3.IP: "1"
+        requests:
+          gpu: "2"
+          custom:
+            networking.gke.io.networks/rdma-0: "1"
+            networking.gke.io.networks/rdma-1: "1"
+            networking.gke.io.networks/rdma-2: "1"
+            networking.gke.io.networks/rdma-3: "1"
+            networking.gke.io.networks/rdma-0.IP: "1"
+            networking.gke.io.networks/rdma-1.IP: "1"
+            networking.gke.io.networks/rdma-2.IP: "1"
+            networking.gke.io.networks/rdma-3.IP: "1"
+            ephemeral-storage: 2Gi
+      extraPodSpec:
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
+          - key: kubernetes.io/arch
+            operator: Equal
+            value: arm64
+            effect: NoSchedule
+        mainContainer:
+          env: &gcpEnvironment
+            - name: NCCL_SOCKET_IFNAME
+              value: eth0
+            - name: NCCL_CROSS_NIC
+              value: "0"
+          volumeMounts:
+            - name: prefill-config
+              mountPath: /engine_configs
+            - name: model-cache
+              mountPath: /mnt/model-cache
+            - name: gib
+              mountPath: /usr/local/gib
+            - name: nvidia
+              mountPath: /usr/local/nvidia
+        volumes:
+          - name: prefill-config
+            configMap:
+              name: prefill-config
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: model-cache
+          - name: gib
+            hostPath:
+              path: /home/kubernetes/bin/gib
+          - name: nvidia
+            hostPath:
+              path: /home/kubernetes/bin/nvidia
+    TRTLLMDecodeWorker:
+      extraPodMetadata: *gcpMetadata
+      resources:
+        limits:
+          gpu: "4"
+          custom:
+            networking.gke.io.networks/rdma-0: "1"
+            networking.gke.io.networks/rdma-1: "1"
+            networking.gke.io.networks/rdma-2: "1"
+            networking.gke.io.networks/rdma-3: "1"
+            networking.gke.io.networks/rdma-0.IP: "1"
+            networking.gke.io.networks/rdma-1.IP: "1"
+            networking.gke.io.networks/rdma-2.IP: "1"
+            networking.gke.io.networks/rdma-3.IP: "1"
+        requests:
+          gpu: "4"
+          custom:
+            networking.gke.io.networks/rdma-0: "1"
+            networking.gke.io.networks/rdma-1: "1"
+            networking.gke.io.networks/rdma-2: "1"
+            networking.gke.io.networks/rdma-3: "1"
+            networking.gke.io.networks/rdma-0.IP: "1"
+            networking.gke.io.networks/rdma-1.IP: "1"
+            networking.gke.io.networks/rdma-2.IP: "1"
+            networking.gke.io.networks/rdma-3.IP: "1"
+            ephemeral-storage: 2Gi
+      extraPodSpec:
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
+          - key: kubernetes.io/arch
+            operator: Equal
+            value: arm64
+            effect: NoSchedule
+        mainContainer:
+          env: *gcpEnvironment
+          volumeMounts:
+            - name: decode-config
+              mountPath: /engine_configs
+            - name: model-cache
+              mountPath: /mnt/model-cache
+            - name: gib
+              mountPath: /usr/local/gib
+            - name: nvidia
+              mountPath: /usr/local/nvidia
+        volumes:
+          - name: decode-config
+            configMap:
+              name: decode-config
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: model-cache
+          - name: gib
+            hostPath:
+              path: /home/kubernetes/bin/gib
+          - name: nvidia
+            hostPath:
+              path: /home/kubernetes/bin/nvidia

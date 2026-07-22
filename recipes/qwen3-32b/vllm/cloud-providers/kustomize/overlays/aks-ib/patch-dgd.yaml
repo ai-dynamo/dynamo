@@ -1,0 +1,60 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: q32b-1p1d-cloud-provider
+spec:
+  services:
+    Frontend:
+      resources:
+        requests:
+          custom:
+            ephemeral-storage: 30Gi
+    VllmPrefillWorker:
+      extraPodSpec:
+        tolerations: &gpuTolerations
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
+        mainContainer:
+          env: &aksEnvironment
+            - name: UCX_NET_DEVICES
+              value: mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1
+            - name: UCX_IB_GPU_DIRECT_RDMA
+              value: "yes"
+            - name: NCCL_SOCKET_IFNAME
+              value: eth0
+          volumeMounts: &aksVolumeMounts
+            - name: model-cache
+              mountPath: /model-cache
+            - name: ib
+              mountPath: /dev/infiniband
+        volumes: &aksVolumes
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: model-cache
+          - name: ib
+            hostPath:
+              path: /dev/infiniband
+      resources:
+        limits:
+          custom:
+            rdma/shared_ib: "1"
+        requests:
+          custom:
+            rdma/shared_ib: "1"
+    VllmDecodeWorker:
+      extraPodSpec:
+        tolerations: *gpuTolerations
+        mainContainer:
+          env: *aksEnvironment
+          volumeMounts: *aksVolumeMounts
+        volumes: *aksVolumes
+      resources:
+        limits:
+          custom:
+            rdma/shared_ib: "1"
+        requests:
+          custom:
+            rdma/shared_ib: "1"
