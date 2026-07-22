@@ -173,8 +173,7 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
 RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        jq{% if device == "cuda" and make_efa %} \
-        libhwloc15{% endif %}; \
+        jq; \
     rm -rf /var/lib/apt/lists/*
 
 # Layer the released vLLM-Omni package matching the pinned upstream ref while
