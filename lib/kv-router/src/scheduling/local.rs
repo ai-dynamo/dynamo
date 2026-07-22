@@ -268,7 +268,6 @@ where
             priority_jump,
             strict_priority,
             policy_class,
-            session_id,
             overlap,
             shared_cache_hits,
         } = request;
@@ -286,7 +285,6 @@ where
             priority_jump,
             strict_priority,
             policy_class,
-            session_id,
             overlap,
             shared_cache_hits,
             worker_loads: FxHashMap::default(),
@@ -443,7 +441,6 @@ where
             priority_jump,
             strict_priority,
             policy_class,
-            session_id: None,
             expected_output_tokens,
             pinned_worker,
             allowed_worker_ids,
@@ -845,7 +842,6 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
-            session_id: None,
             overlap: OverlapSignals::default(),
             shared_cache_hits: None,
         }
@@ -1397,7 +1393,7 @@ mod tests {
     struct AbortCountingPolicy(Arc<AtomicUsize>);
 
     impl PolicyClassAdmissionPolicy for AbortCountingPolicy {
-        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
+        fn admit(&mut self, _request: AdmissionRequest) -> AdmissionDecision {
             AdmissionDecision::Ready(WorkerPlacement::Any)
         }
 
@@ -1412,7 +1408,7 @@ mod tests {
     struct DeferredAbortCountingPolicy(Arc<AtomicUsize>);
 
     impl PolicyClassAdmissionPolicy for DeferredAbortCountingPolicy {
-        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
+        fn admit(&mut self, _request: AdmissionRequest) -> AdmissionDecision {
             AdmissionDecision::Defer
         }
 
@@ -1463,6 +1459,7 @@ mod tests {
         let mut response = scheduler
             .schedule_request(request(ScheduleMode::TrackedWithLifecycle {
                 request_id: "req-1".to_owned(),
+                admission_session: None,
             }))
             .await
             .unwrap();
@@ -1524,6 +1521,7 @@ mod tests {
                 scheduler
                     .schedule_request(request(ScheduleMode::TrackedWithLifecycle {
                         request_id: "cancelled-pending".to_owned(),
+                        admission_session: None,
                     }))
                     .await
             })

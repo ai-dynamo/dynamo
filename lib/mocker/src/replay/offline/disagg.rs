@@ -791,12 +791,11 @@ impl DisaggRuntime {
         }
         let request = self.state(uuid)?.build_prefill_request()?;
         let replay_hashes = self.state_mut(uuid)?.take_replay_hashes();
-        let session_id = self.state(uuid)?.session_id().map(str::to_owned);
         let admissions = self
             .prefill_router
             .as_mut()
             .expect("prefill router presence checked above")
-            .on_request_arrival_for_session(&request, replay_hashes, session_id, self.now_ms)?
+            .on_request_arrival(&request, replay_hashes, self.now_ms)?
             .admissions;
         self.record_router_pending();
         self.dispatch_prefill_admissions(admissions)
@@ -815,12 +814,11 @@ impl DisaggRuntime {
             state.destination_routed = true;
         }
         let request = self.state(uuid)?.original_request()?.clone();
-        let session_id = self.state(uuid)?.session_id().map(str::to_owned);
         let admissions = self
             .decode_router
             .as_mut()
             .expect("decode router presence checked above")
-            .on_request_arrival_for_session(&request, None, session_id, self.now_ms)?
+            .on_request_arrival(&request, None, self.now_ms)?
             .admissions;
         self.record_router_pending();
         self.dispatch_decode_admissions(admissions)?;
@@ -1246,7 +1244,6 @@ impl DisaggRuntime {
         mut request: DirectRequest,
         arrival_time_ms: f64,
         replay_hashes: Option<ReplayRequestHashes>,
-        session_id: Option<String>,
     ) -> Result<Uuid> {
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
         request.uuid = Some(uuid);
@@ -1268,7 +1265,6 @@ impl DisaggRuntime {
             handoff_id,
             self.handoff_order,
             replay_hashes,
-            session_id,
         );
         let actions = state.coordinator.start()?;
         self.requests.insert(uuid, state);
@@ -1574,8 +1570,7 @@ impl DisaggRuntime {
                 turn_index,
             } = ready;
             let session_metadata = session_id.clone().zip(turn_index);
-            let uuid =
-                self.on_external_arrival(request, arrival_time_ms, replay_hashes, session_id)?;
+            let uuid = self.on_external_arrival(request, arrival_time_ms, replay_hashes)?;
             if let Some((session_id, turn_index)) = session_metadata {
                 self.collector
                     .on_session_metadata(uuid, session_id, turn_index);

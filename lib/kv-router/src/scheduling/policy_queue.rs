@@ -13,9 +13,10 @@ use tokio::time::Instant;
 use super::config::RouterQueuePolicy;
 use super::policy_config::{PolicyClassConfig, PolicyProfile};
 use super::queue_admission::{
-    AdmissionDecision, AdmissionEvent, AdmissionId, AdmissionRequest, AdmissionTicket,
-    ClassAdmissionAction, PolicyClassAdmissionPolicies, PolicyClassAdmissionPolicy,
-    RequestProgress, RequestProgressUpdater, WorkerEligibility, WorkerPlacement,
+    AdmissionDecision, AdmissionEvent, AdmissionId, AdmissionRequest, AdmissionSession,
+    AdmissionTicket, ClassAdmissionAction, PolicyClassAdmissionPolicies,
+    PolicyClassAdmissionPolicy, RequestProgress, RequestProgressUpdater, WorkerEligibility,
+    WorkerPlacement,
 };
 use super::types::KvSchedulerError;
 use crate::protocols::WorkerWithDpRank;
@@ -522,7 +523,7 @@ impl<T> PolicyQueue<T> {
     pub(crate) fn admit(
         &mut self,
         class_index: usize,
-        session_id: Option<&str>,
+        session: Option<AdmissionSession>,
         context_tokens: usize,
         worker_eligibility: WorkerEligibility,
     ) -> Option<(AdmissionTicket, RequestProgressUpdater, AdmissionDecision)> {
@@ -533,7 +534,7 @@ impl<T> PolicyQueue<T> {
         let (progress, updater) = RequestProgress::new(context_tokens);
         let decision = policy.admit(AdmissionRequest::with_progress(
             id,
-            session_id,
+            session,
             progress,
             worker_eligibility,
         ));
@@ -1150,7 +1151,7 @@ mod tests {
     struct ReadyPolicy;
 
     impl PolicyClassAdmissionPolicy for ReadyPolicy {
-        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
+        fn admit(&mut self, _request: AdmissionRequest) -> AdmissionDecision {
             AdmissionDecision::Ready(WorkerPlacement::Any)
         }
     }
@@ -1158,7 +1159,7 @@ mod tests {
     struct ZeroIntervalPolicy;
 
     impl PolicyClassAdmissionPolicy for ZeroIntervalPolicy {
-        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
+        fn admit(&mut self, _request: AdmissionRequest) -> AdmissionDecision {
             AdmissionDecision::Bypass
         }
 
@@ -1173,7 +1174,7 @@ mod tests {
     }
 
     impl PolicyClassAdmissionPolicy for CountingPolicy {
-        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
+        fn admit(&mut self, _request: AdmissionRequest) -> AdmissionDecision {
             AdmissionDecision::Bypass
         }
 

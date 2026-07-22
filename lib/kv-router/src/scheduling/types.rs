@@ -18,7 +18,7 @@ use crate::protocols::{
     WorkerWithDpRank,
 };
 use crate::scheduling::policy_queue::QueueRejection;
-use crate::scheduling::queue_admission::RequestProgressUpdater;
+use crate::scheduling::queue_admission::{AdmissionSession, RequestProgressUpdater};
 use crate::sequences::WorkerLoadProjection;
 
 pub type OverloadedWorkerProvider =
@@ -92,6 +92,7 @@ pub enum ScheduleMode {
     /// Tracks worker and request lifecycle state; the caller reports dispatch and a terminal outcome.
     TrackedWithLifecycle {
         request_id: String,
+        admission_session: Option<AdmissionSession>,
     },
 }
 
@@ -115,7 +116,7 @@ impl ScheduleMode {
     pub fn request_id(&self) -> Option<&str> {
         match self {
             Self::QueryOnly { request_id } => request_id.as_deref(),
-            Self::Tracked { request_id } | Self::TrackedWithLifecycle { request_id } => {
+            Self::Tracked { request_id } | Self::TrackedWithLifecycle { request_id, .. } => {
                 Some(request_id)
             }
         }
@@ -130,7 +131,7 @@ impl ScheduleMode {
 
     pub(crate) fn lifecycle_request_id(&self) -> Option<&str> {
         match self {
-            Self::TrackedWithLifecycle { request_id } => Some(request_id),
+            Self::TrackedWithLifecycle { request_id, .. } => Some(request_id),
             Self::QueryOnly { .. } | Self::Tracked { .. } => None,
         }
     }
@@ -138,7 +139,7 @@ impl ScheduleMode {
     pub fn tracked_request_id(&self) -> Option<&str> {
         match self {
             Self::QueryOnly { .. } => None,
-            Self::Tracked { request_id } | Self::TrackedWithLifecycle { request_id } => {
+            Self::Tracked { request_id } | Self::TrackedWithLifecycle { request_id, .. } => {
                 Some(request_id)
             }
         }
@@ -160,7 +161,6 @@ pub struct ScheduleRequest {
     pub priority_jump: f64,
     pub strict_priority: u32,
     pub policy_class: Option<String>,
-    pub session_id: Option<String>,
     pub overlap: OverlapSignals,
     pub shared_cache_hits: Option<SharedCacheHits>,
 }
@@ -187,7 +187,6 @@ pub struct SchedulingRequest {
     pub priority_jump: f64,
     pub strict_priority: u32,
     pub policy_class: Option<String>,
-    pub session_id: Option<String>,
 
     // Overlap and cache signals.
     pub overlap: OverlapSignals,

@@ -11,6 +11,34 @@ use serde::Deserialize;
 
 use crate::protocols::WorkerWithDpRank;
 
+/// Session metadata carried opaquely to an admission policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmissionSession {
+    session_id: String,
+    final_request: bool,
+}
+
+impl AdmissionSession {
+    pub fn new(session_id: impl Into<String>, final_request: bool) -> Self {
+        Self {
+            session_id: session_id.into(),
+            final_request,
+        }
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub fn is_final_request(&self) -> bool {
+        self.final_request
+    }
+
+    pub fn into_session_id(self) -> String {
+        self.session_id
+    }
+}
+
 /// Router-assigned identity for one request's admission lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AdmissionId(u64);
@@ -143,36 +171,36 @@ impl WorkerEligibilitySnapshot {
 /// return [`AdmissionDecision::Bypass`] when optional context does not apply.
 /// The actor-owned scheduling request is intentionally not exposed.
 #[derive(Clone)]
-pub struct AdmissionRequest<'a> {
+pub struct AdmissionRequest {
     id: AdmissionId,
-    session_id: Option<&'a str>,
+    session: Option<AdmissionSession>,
     progress: RequestProgress,
     worker_eligibility: WorkerEligibility,
 }
 
-impl<'a> AdmissionRequest<'a> {
+impl AdmissionRequest {
     /// Constructs a request with progress fixed at `context_tokens`.
     ///
     /// Live progress is only supplied by the scheduler-owned admission path.
     pub fn new(
         id: AdmissionId,
-        session_id: Option<&'a str>,
+        session: Option<AdmissionSession>,
         context_tokens: usize,
         worker_eligibility: WorkerEligibility,
     ) -> Self {
         let (progress, _) = RequestProgress::new(context_tokens);
-        Self::with_progress(id, session_id, progress, worker_eligibility)
+        Self::with_progress(id, session, progress, worker_eligibility)
     }
 
     pub(crate) fn with_progress(
         id: AdmissionId,
-        session_id: Option<&'a str>,
+        session: Option<AdmissionSession>,
         progress: RequestProgress,
         worker_eligibility: WorkerEligibility,
     ) -> Self {
         Self {
             id,
-            session_id,
+            session,
             progress,
             worker_eligibility,
         }
@@ -182,8 +210,12 @@ impl<'a> AdmissionRequest<'a> {
         self.id
     }
 
-    pub fn session_id(&self) -> Option<&'a str> {
-        self.session_id
+    pub fn session(&self) -> Option<&AdmissionSession> {
+        self.session.as_ref()
+    }
+
+    pub fn take_session(&mut self) -> Option<AdmissionSession> {
+        self.session.take()
     }
 
     /// Full tokenized request context, not uncached prefill work.
@@ -265,7 +297,7 @@ pub enum AdmissionAction {
 /// or capacity changes. Host shutdown drops the policy and its requests
 /// together, so no terminal events are delivered after shutdown begins.
 pub trait PolicyClassAdmissionPolicy: Send {
-    fn admit(&mut self, request: AdmissionRequest<'_>) -> AdmissionDecision;
+    fn admit(&mut self, request: AdmissionRequest) -> AdmissionDecision;
 
     fn on_event(&mut self, _event: AdmissionEvent) -> Vec<AdmissionAction> {
         Vec::new()
@@ -317,9 +349,12 @@ mod tests {
     struct ReadyPolicy;
 
     impl PolicyClassAdmissionPolicy for ReadyPolicy {
-        fn admit(&mut self, request: AdmissionRequest<'_>) -> AdmissionDecision {
+        fn admit(&mut self, request: AdmissionRequest) -> AdmissionDecision {
             assert_eq!(request.id(), AdmissionId::new(7));
-            assert_eq!(request.session_id(), Some("session"));
+            assert_eq!(
+                request.session().map(AdmissionSession::session_id),
+                Some("session")
+            );
             assert_eq!(request.context_tokens(), 42);
             let worker = WorkerWithDpRank::new(3, 0);
             let eligibility = request.worker_eligibility().snapshot();
@@ -337,7 +372,7 @@ mod tests {
         assert_eq!(
             policy.admit(AdmissionRequest::new(
                 AdmissionId::new(7),
-                Some("session"),
+                Some(AdmissionSession::new("session", false)),
                 42,
                 eligibility,
             )),

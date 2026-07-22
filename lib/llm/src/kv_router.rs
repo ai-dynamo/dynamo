@@ -15,9 +15,10 @@ use dynamo_kv_router::{
         WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
     scheduling::{
-        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, RequestLifecycleLease,
-        RequestProgressUpdater, ScheduleMode, ScheduleRequest, TieredOverlapRefresher,
-        effective_prefill_tokens, overlap::cache_hit_estimates_from_tiered_matches,
+        AdmissionSession, CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider,
+        RequestLifecycleLease, RequestProgressUpdater, ScheduleMode, ScheduleRequest,
+        TieredOverlapRefresher, effective_prefill_tokens,
+        overlap::cache_hit_estimates_from_tiered_matches,
     },
 };
 use dynamo_runtime::{
@@ -553,7 +554,7 @@ where
             priority_jump,
             strict_priority,
             policy_class,
-            session_id,
+            session_id.map(|id| AdmissionSession::new(id, false)),
             expected_output_tokens,
             pinned_worker,
             allowed_worker_ids,
@@ -578,7 +579,7 @@ where
         priority_jump: f64,
         strict_priority: u32,
         policy_class: Option<String>,
-        session_id: Option<String>,
+        admission_session: Option<AdmissionSession>,
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -596,6 +597,7 @@ where
         let mode = if update_states && track_lifecycle {
             ScheduleMode::TrackedWithLifecycle {
                 request_id: context_id.expect("validated above").to_string(),
+                admission_session,
             }
         } else if update_states {
             ScheduleMode::Tracked {
@@ -695,7 +697,6 @@ where
                 priority_jump,
                 strict_priority,
                 policy_class,
-                session_id,
                 expected_output_tokens,
                 pinned_worker,
                 allowed_worker_ids,
