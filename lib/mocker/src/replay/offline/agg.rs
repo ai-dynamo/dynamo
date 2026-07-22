@@ -1397,6 +1397,53 @@ mod tests {
     }
 
     #[test]
+    fn sglang_zero_output_request_does_not_block_following_work() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .block_size(4)
+            .num_gpu_blocks(32)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(1))
+            .speedup_ratio(1000.0)
+            .sglang(Some(SglangArgs {
+                page_size: Some(4),
+                chunked_prefill_size: Some(16),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap();
+        let requests = vec![
+            DirectRequest {
+                tokens: vec![1; 4],
+                max_output_tokens: 0,
+                uuid: Some(Uuid::from_u128(9_000)),
+                arrival_timestamp_ms: Some(0.0),
+                ..Default::default()
+            },
+            DirectRequest {
+                tokens: vec![2; 4],
+                max_output_tokens: 1,
+                uuid: Some(Uuid::from_u128(9_001)),
+                arrival_timestamp_ms: Some(1.0),
+                ..Default::default()
+            },
+        ];
+
+        let (collector, _) =
+            run_trace_multi_collect_with_stats(&args, requests, 1, ReplayRouterMode::RoundRobin);
+        let mut snapshots = collector.snapshots();
+        snapshots.sort_by_key(|snapshot| snapshot.requested_output_length);
+
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0].requested_output_length, 0);
+        assert_eq!(snapshots[0].output_length, 0);
+        assert!(snapshots[0].first_admit_ms.is_some());
+        assert_eq!(snapshots[0].first_token_ms, None);
+        assert_eq!(snapshots[1].requested_output_length, 1);
+        assert_eq!(snapshots[1].output_length, 1);
+    }
+
+    #[test]
     fn sglang_completion_visible_fpm_reaches_aggregated_buffer() {
         let pending = normalize_trace_requests(
             vec![DirectRequest {

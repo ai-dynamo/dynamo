@@ -192,19 +192,26 @@ impl SglangKvManager {
     pub fn cache_unfinished_req(
         &mut self,
         token_ids: &[u64],
-        kv_indices: &[usize],
+        kv_indices: &mut [usize],
         last_node: NodeId,
         first_new_token: usize,
     ) -> NodeId {
         self.publish_stored_event(token_ids, kv_indices, first_new_token);
         self.cache.insert(token_ids, kv_indices);
 
-        // Find the new deepest node after insert
-        let (_, new_last_node) = self.cache.match_prefix(token_ids);
+        // Find the new deepest node after insert. Another in-flight request may
+        // have inserted the same materialized blocks first, in which case the
+        // radix cache retains that request's physical pages. Switch this active
+        // request to the canonical pages before releasing its duplicate pages;
+        // otherwise a later retract loses track of the duplicates and leaves
+        // KV publisher refcounts inconsistent with the radix cache.
+        let (matched_len, new_last_node) = self.cache.match_prefix(token_ids);
+        let canonical_indices = self.collect_path_indices(new_last_node);
 
         // Acquire the extended path before releasing the old prefix so
         // destination activation never leaves valid transferred KV unprotected.
         self.cache.inc_lock_ref(new_last_node);
+        self.canonicalize_unfinished_indices(kv_indices, &canonical_indices, matched_len);
         self.cache.dec_lock_ref(last_node);
 
         new_last_node
@@ -283,7 +290,7 @@ impl SglangKvManager {
         self.release_unpublished_indices(surplus);
         prefix_indices.append(&mut unpublished_indices);
         let new_last_node =
-            self.cache_unfinished_req(token_ids, &prefix_indices, last_node, prefix_len);
+            self.cache_unfinished_req(token_ids, &mut prefix_indices, last_node, prefix_len);
         self.log_trace("activate_destination", missing_tokens);
         AllocResult {
             prefix_len,
@@ -391,6 +398,33 @@ impl SglangKvManager {
             let block_end = block_start + block_size;
             if canonical_indices[block_end - 1] != kv_indices[block_end - 1] {
                 unretained_indices.extend_from_slice(&kv_indices[block_start..block_end]);
+            }
+        }
+
+        self.free_indices(&unretained_indices);
+    }
+
+    fn canonicalize_unfinished_indices(
+        &mut self,
+        kv_indices: &mut [usize],
+        canonical_indices: &[usize],
+        matched_len: usize,
+    ) {
+        let block_size = self.cache.page_size();
+        let complete_len = matched_len
+            .min(kv_indices.len())
+            .min(canonical_indices.len())
+            / block_size
+            * block_size;
+        debug_assert!(canonical_indices.len() >= complete_len);
+
+        let mut unretained_indices = Vec::new();
+        for block_start in (0..complete_len).step_by(block_size) {
+            let block_end = block_start + block_size;
+            if kv_indices[block_start..block_end] != canonical_indices[block_start..block_end] {
+                unretained_indices.extend_from_slice(&kv_indices[block_start..block_end]);
+                kv_indices[block_start..block_end]
+                    .copy_from_slice(&canonical_indices[block_start..block_end]);
             }
         }
 
@@ -573,6 +607,7 @@ mod tests {
     use crate::common::protocols::KvCacheEventSink;
     use crate::scheduler::capture_router_event_sink;
     use crate::scheduler::test_utils::{RouterIndexerHarness, stored_hashes};
+    use dynamo_kv_router::RadixTree;
     use dynamo_kv_router::protocols::{RouterEvent, WorkerId, compute_seq_hash_for_block};
 
     const ROUTER_TEST_WORKER_ID: WorkerId = 31;
@@ -758,16 +793,16 @@ mod tests {
         let out_of_domain_token = u32::MAX as u64 + 1;
         let tokens = [out_of_domain_token, 2, 3, 4, 5, 6];
 
-        let alloc = mgr.allocate_for_request(&tokens[..2]).unwrap();
+        let mut alloc = mgr.allocate_for_request(&tokens[..2]).unwrap();
         let first_last_node =
-            mgr.cache_unfinished_req(&tokens[..2], &alloc.kv_indices, alloc.last_node, 0);
+            mgr.cache_unfinished_req(&tokens[..2], &mut alloc.kv_indices, alloc.last_node, 0);
 
         let mut kv_indices = alloc.kv_indices;
         kv_indices.extend_from_slice(&mgr.cache_mut().token_pool.allocate(4).unwrap());
         mgr.kv_event_publishers = KvEventPublishers::new(Some(sink.clone()), None);
 
         let last_after_first_cache =
-            mgr.cache_unfinished_req(&tokens[..4], &kv_indices[..4], first_last_node, 2);
+            mgr.cache_unfinished_req(&tokens[..4], &mut kv_indices[..4], first_last_node, 2);
         let events = sink.clone_events();
         assert_eq!(events.len(), 1);
         let KvCacheEventData::Stored(first_store) = &events[0].data else {
@@ -909,6 +944,107 @@ mod tests {
     }
 
     #[test]
+    fn unfinished_duplicate_canonicalization_prevents_missing_parent() {
+        let (buffer, sink) = capture_router_event_sink(ROUTER_TEST_WORKER_ID);
+        let mut mgr = SglangKvManager::new(8, 1, KvEventPublishers::new(Some(sink), None), 0);
+        let mut indexer = RadixTree::new();
+
+        let seed_tokens = [1];
+        let seed = mgr.allocate_for_request(&seed_tokens).unwrap();
+        mgr.cache_finished_req(
+            &seed_tokens,
+            &seed.kv_indices,
+            seed.last_node,
+            seed.prefix_len,
+        );
+        for event in buffer.drain() {
+            indexer.apply_event(event).unwrap();
+        }
+
+        // Two requests miss the same suffix before either inserts it. Their
+        // physical suffix pages are distinct even though the logical block is
+        // identical.
+        let shared_tokens = [1, 2];
+        let mut first = mgr.allocate_for_request(&shared_tokens).unwrap();
+        let mut duplicate = mgr.allocate_for_request(&shared_tokens).unwrap();
+        assert_ne!(first.kv_indices[1], duplicate.kv_indices[1]);
+        for event in buffer.drain() {
+            indexer.apply_event(event).unwrap();
+        }
+
+        let first_last = mgr.cache_unfinished_req(
+            &shared_tokens,
+            &mut first.kv_indices,
+            first.last_node,
+            first.prefix_len,
+        );
+        let duplicate_last = mgr.cache_unfinished_req(
+            &shared_tokens,
+            &mut duplicate.kv_indices,
+            duplicate.last_node,
+            duplicate.prefix_len,
+        );
+        assert_eq!(
+            duplicate.kv_indices, first.kv_indices,
+            "the active duplicate must switch to radix-owned canonical pages"
+        );
+        for event in buffer.drain() {
+            indexer.apply_event(event).unwrap();
+        }
+
+        // Mirror retracting the duplicate after its full prefix was cached,
+        // then finish and evict the canonical request.
+        mgr.free_request(duplicate_last);
+        mgr.cache_finished_req(
+            &shared_tokens,
+            &first.kv_indices,
+            first_last,
+            shared_tokens.len(),
+        );
+        mgr.evict(1);
+        mgr.evict(1);
+        for event in buffer.drain() {
+            indexer.apply_event(event).unwrap();
+        }
+
+        // Restore only the first block, then extend through the formerly
+        // duplicated block. A leaked duplicate publisher refcount would
+        // suppress re-storing block 2 and emit block 3 with a missing parent.
+        let restored = mgr.allocate_for_request(&seed_tokens).unwrap();
+        mgr.cache_finished_req(
+            &seed_tokens,
+            &restored.kv_indices,
+            restored.last_node,
+            restored.prefix_len,
+        );
+        for event in buffer.drain() {
+            indexer.apply_event(event).unwrap();
+        }
+
+        let extended = mgr.allocate_for_request(&[1, 2, 3]).unwrap();
+        let extension_events = buffer.drain();
+        assert_eq!(stored_event_count(&extension_events), 1);
+        let store = extension_events
+            .iter()
+            .find_map(|event| match &event.event.data {
+                KvCacheEventData::Stored(store) => Some(store),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            store.blocks.len(),
+            2,
+            "both missing descendants must be stored"
+        );
+        for event in extension_events {
+            indexer.apply_event(event).unwrap();
+        }
+
+        mgr.free_indices(&extended.kv_indices[extended.prefix_len..]);
+        mgr.free_request(extended.last_node);
+    }
+
+    #[test]
     fn test_allocate_oom() {
         let mut mgr = SglangKvManager::new(3, 1, KvEventPublishers::default(), 0);
 
@@ -927,10 +1063,10 @@ mod tests {
         let chunk1_len = 3;
         let chunk2_len = 6;
 
-        let alloc1 = mgr.allocate_for_request(&tokens[..chunk1_len]).unwrap();
+        let mut alloc1 = mgr.allocate_for_request(&tokens[..chunk1_len]).unwrap();
         let new_last = mgr.cache_unfinished_req(
             &tokens[..chunk1_len],
-            &alloc1.kv_indices,
+            &mut alloc1.kv_indices,
             alloc1.last_node,
             0,
         );

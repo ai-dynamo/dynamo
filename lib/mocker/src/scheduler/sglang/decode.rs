@@ -66,7 +66,7 @@ pub(super) fn cache_materialized_prefix(
     let sequence = req.sequence_prefix(aligned_tokens);
     let new_last = kv_manager.cache_unfinished_req(
         &sequence,
-        &req.kv_indices[..aligned_tokens],
+        &mut req.kv_indices[..aligned_tokens],
         last_node,
         req.cached_tokens,
     );
@@ -207,6 +207,51 @@ pub(super) fn simulate_decode_step_with_sampler(
         };
     }
 
+    // A zero-output request has no decode work. Leaving it in `running` would
+    // schedule an empty burst forever: it can neither emit a token nor reach
+    // the completion path below. Production traces may contain such rows for
+    // several terminal reasons, so the scheduler must drain them defensively.
+    let already_completed_indices = running
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, req)| (req.remaining_output_tokens() == 0).then_some(idx))
+        .collect::<Vec<_>>();
+    let mut output_signals = already_completed_indices
+        .iter()
+        .map(|&idx| {
+            let req = &running[idx];
+            OutputSignal {
+                uuid: req.uuid,
+                token_id: None,
+                completed: true,
+                rejected: false,
+                handoff_delay_ms: compute_prefill_handoff_delay_ms(
+                    config.worker_type,
+                    true,
+                    req.prompt_len(),
+                    config.kv_transfer_bandwidth,
+                    config.kv_bytes_per_token,
+                ),
+            }
+        })
+        .collect::<Vec<_>>();
+    let no_token_signal_count = output_signals.len();
+    let mut completed_requests = already_completed_indices
+        .iter()
+        .rev()
+        .map(|&idx| running.remove(idx))
+        .collect::<Vec<_>>();
+    completed_requests.reverse();
+
+    if running.is_empty() {
+        return DecodeResult {
+            completed_requests,
+            output_signals,
+            end_ms: current_time_ms,
+            ..DecodeResult::default()
+        };
+    }
+
     let max_burst = if config.worker_type == crate::common::protocols::WorkerType::Prefill {
         1
     } else {
@@ -216,10 +261,11 @@ pub(super) fn simulate_decode_step_with_sampler(
     let retracted_any = !retracted.is_empty();
     if running.is_empty() {
         return DecodeResult {
+            completed_requests,
+            output_signals,
             requests: retracted,
             retracted_any,
             end_ms: current_time_ms,
-            ..DecodeResult::default()
         };
     }
 
@@ -253,10 +299,11 @@ pub(super) fn simulate_decode_step_with_sampler(
             "Failed to reserve speculative decode tokens after capacity preflight"
         );
         return DecodeResult {
+            completed_requests,
+            output_signals,
             requests: retracted,
             retracted_any,
             end_ms: current_time_ms,
-            ..DecodeResult::default()
         };
     };
 
@@ -273,7 +320,7 @@ pub(super) fn simulate_decode_step_with_sampler(
             }
         })
         .collect::<Vec<_>>();
-    let mut output_signals = Vec::with_capacity(sampled_bursts.iter().copied().sum::<usize>());
+    output_signals.reserve(sampled_bursts.iter().copied().sum::<usize>());
     let mut completed_indices = Vec::new();
 
     for (idx, (req, burst)) in running.iter_mut().zip(sampled_bursts).enumerate() {
@@ -318,15 +365,16 @@ pub(super) fn simulate_decode_step_with_sampler(
 
     debug_assert_eq!(
         reservation.len(),
-        reserved_tokens.saturating_sub(output_signals.len())
+        reserved_tokens.saturating_sub(output_signals.len() - no_token_signal_count)
     );
     kv_manager.release_decode_reservation(reservation);
 
-    let mut completed_requests = Vec::with_capacity(completed_indices.len());
+    let mut newly_completed_requests = Vec::with_capacity(completed_indices.len());
     for &idx in completed_indices.iter().rev() {
-        completed_requests.push(running.remove(idx));
+        newly_completed_requests.push(running.remove(idx));
     }
-    completed_requests.reverse();
+    newly_completed_requests.reverse();
+    completed_requests.extend(newly_completed_requests);
 
     DecodeResult {
         requests: retracted,

@@ -73,6 +73,34 @@ fn router_args() -> MockEngineArgs {
         .unwrap()
 }
 
+#[test]
+fn zero_output_request_completes_after_prefill() {
+    let mut core = VllmCore::new(make_args());
+    let uuid = core.receive(DirectRequest {
+        tokens: vec![1, 2, 3, 4],
+        max_output_tokens: 0,
+        uuid: Some(Uuid::from_u128(90_001)),
+        ..Default::default()
+    });
+    let mut collector = crate::replay::TraceCollector::default();
+
+    let pass = core.execute_pass(&mut collector, 0.0);
+
+    assert!(core.state.requests.is_empty());
+    assert_eq!(core.kv_manager.num_active_blocks(), 0);
+    assert_eq!(pass.completed_requests, 1);
+    assert!(matches!(
+        pass.output_signals.as_slice(),
+        [OutputSignal {
+            uuid: signal_uuid,
+            token_id: None,
+            completed: true,
+            rejected: false,
+            ..
+        }] if *signal_uuid == uuid
+    ));
+}
+
 mod source_holds {
     use super::*;
 

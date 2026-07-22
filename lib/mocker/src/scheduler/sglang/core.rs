@@ -642,7 +642,9 @@ impl SglangCore {
 
         if let Some(collector) = collector {
             for signal in &decode.output_signals {
-                collector.on_token(signal.uuid, decode.end_ms);
+                if signal.token_id.is_some() {
+                    collector.on_token(signal.uuid, decode.end_ms);
+                }
             }
         }
 

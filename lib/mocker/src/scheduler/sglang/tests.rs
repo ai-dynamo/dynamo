@@ -90,6 +90,151 @@ fn make_decoded_request(
     running.pop().unwrap()
 }
 
+#[test]
+fn zero_output_request_completes_after_prefill() {
+    let mut core = SglangCore::new(test_args(32, 4, 16));
+    let uuid = core.receive(direct_request(vec![1, 2, 3, 4], 0));
+
+    let pass = core.execute_pass_internal(None, 0.0);
+
+    assert!(core.is_empty());
+    assert_eq!(pass.completed_requests, 1);
+    assert!(matches!(
+        pass.output_signals.as_slice(),
+        [OutputSignal {
+            uuid: signal_uuid,
+            token_id: None,
+            completed: true,
+            rejected: false,
+            ..
+        }] if *signal_uuid == uuid
+    ));
+}
+
+#[test]
+fn zero_output_completion_survives_decode_reservation_failure() {
+    let config = SglangConfig::from_args(&test_args(2, 4, 16));
+    let mut kv_manager = SglangKvManager::new(8, 4, KvEventPublishers::default(), 0);
+    let zero_alloc = kv_manager.allocate_for_request(&[1, 2, 3, 4]).unwrap();
+    let normal_alloc = kv_manager.allocate_for_request(&[5, 6, 7, 8]).unwrap();
+    let zero_uuid = Uuid::from_u128(90_004);
+    let normal_uuid = Uuid::from_u128(90_005);
+    let mut running = vec![
+        SglangRequest {
+            uuid: zero_uuid,
+            prompt_tokens: vec![1, 2, 3, 4],
+            max_output_tokens: 0,
+            planned_output_ids: None,
+            output_ids: Vec::new(),
+            last_node: Some(zero_alloc.last_node),
+            kv_indices: zero_alloc.kv_indices,
+            materialized_tokens: 4,
+            cached_tokens: 0,
+            allocated_tokens: 4,
+        },
+        SglangRequest {
+            uuid: normal_uuid,
+            prompt_tokens: vec![5, 6, 7, 8],
+            max_output_tokens: 1,
+            planned_output_ids: None,
+            output_ids: Vec::new(),
+            last_node: Some(normal_alloc.last_node),
+            kv_indices: normal_alloc.kv_indices,
+            materialized_tokens: 4,
+            cached_tokens: 0,
+            allocated_tokens: 4,
+        },
+    ];
+
+    // The normal request cannot reserve a decode token while both prompts own
+    // the entire pool. Its retry must not discard the zero-output completion.
+    let result = decode::simulate_decode_step_with_sampler(
+        &mut running,
+        &mut kv_manager,
+        &config,
+        None,
+        0.0,
+        false,
+    );
+
+    assert_eq!(running.len(), 1);
+    assert_eq!(running[0].uuid, normal_uuid);
+    assert_eq!(result.completed_requests.len(), 1);
+    assert!(matches!(
+        result.output_signals.as_slice(),
+        [OutputSignal {
+            uuid: signal_uuid,
+            token_id: None,
+            completed: true,
+            rejected: false,
+            ..
+        }] if *signal_uuid == zero_uuid
+    ));
+}
+
+#[test]
+fn fresh_prefill_tracks_cache_owned_prefix_indices() {
+    let args = test_args(8, 4, 16);
+    let config = SglangConfig::from_args(&args);
+    let (buffer, sink) = capture_router_event_sink(ROUTER_TEST_WORKER_ID);
+    let mut kv_manager = SglangKvManager::new(11, 4, KvEventPublishers::new(Some(sink), None), 0);
+    let prompt = vec![1, 2, 3, 4];
+
+    let cached = kv_manager.allocate_for_request(&prompt).unwrap();
+    kv_manager.cache_finished_req(
+        &prompt,
+        &cached.kv_indices,
+        cached.last_node,
+        cached.prefix_len,
+    );
+    let mut waiting = VecDeque::from([SglangRequest {
+        uuid: Uuid::from_u128(90_002),
+        prompt_tokens: prompt.clone(),
+        max_output_tokens: 1,
+        planned_output_ids: None,
+        output_ids: Vec::new(),
+        last_node: None,
+        kv_indices: Vec::new(),
+        materialized_tokens: 0,
+        cached_tokens: 0,
+        allocated_tokens: 0,
+    }]);
+    let req = get_new_batch_prefill(&mut waiting, &mut kv_manager, &config, 0.7, &[])
+        .can_run
+        .pop()
+        .unwrap();
+
+    assert_eq!(req.cached_tokens, prompt.len());
+    assert_eq!(req.kv_indices, cached.kv_indices);
+
+    // Leave four free slots and one block of page growth for the cache-hit
+    // request. Reserved page overhead makes check_decode_mem retract it, while
+    // the remaining request still fits without evicting the cached prompt.
+    let blocker_tokens = vec![9, 10, 11];
+    let blocker_alloc = kv_manager.allocate_for_request(&blocker_tokens).unwrap();
+    let blocker = SglangRequest {
+        uuid: Uuid::from_u128(90_003),
+        prompt_tokens: blocker_tokens,
+        max_output_tokens: 1,
+        planned_output_ids: None,
+        output_ids: Vec::new(),
+        last_node: Some(blocker_alloc.last_node),
+        kv_indices: blocker_alloc.kv_indices,
+        materialized_tokens: 3,
+        cached_tokens: 0,
+        allocated_tokens: 4,
+    };
+    buffer.drain();
+
+    let mut running = vec![req, blocker];
+    let retracted = decode::check_decode_mem(&mut running, &mut kv_manager, &config);
+    assert_eq!(retracted.len(), 1);
+    assert_eq!(retracted[0].uuid, Uuid::from_u128(90_002));
+    assert_eq!(removed_event_count(&buffer.drain()), 0);
+    assert_eq!(kv_manager.cache().token_pool.available(), 4);
+    assert_eq!(kv_manager.cache_mut().match_prefix(&prompt).0, prompt.len());
+}
+
 mod source_holds {
     use super::*;
 
