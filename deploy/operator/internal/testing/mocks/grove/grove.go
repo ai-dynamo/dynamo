@@ -3,8 +3,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Package grove provides transparent PodCliqueSet admission handlers until
-// Grove exposes its production handlers as an importable package.
 package grove
 
 import (

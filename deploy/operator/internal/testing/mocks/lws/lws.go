@@ -3,8 +3,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Package lws installs the upstream LeaderWorkerSet admission handlers and
-// their focused test registrations.
 package lws
 
 import (
