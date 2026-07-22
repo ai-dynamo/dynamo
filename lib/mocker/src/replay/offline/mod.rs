@@ -22,5 +22,6 @@ pub(crate) use entrypoints::{
     simulate_concurrency_workload, simulate_concurrency_workload_accumulating_deltas,
     simulate_concurrency_workload_disagg, simulate_trace, simulate_trace_disagg,
     simulate_trace_workload, simulate_trace_workload_accumulating_deltas,
-    simulate_trace_workload_disagg,
+    simulate_trace_workload_disagg, simulate_trace_workload_disagg_without_session_metadata,
+    simulate_trace_workload_without_session_metadata,
 };
