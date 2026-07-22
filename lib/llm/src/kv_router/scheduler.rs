@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_kv_router::protocols::{LocalBlockHash, SharedCacheHits};
+use dynamo_kv_router::protocols::{LocalBlockHash, SharedCacheHits, WorkerSelectionTelemetry};
 use dynamo_kv_router::scheduling::PolicyClassAdmissionPolicies;
 pub use dynamo_kv_router::scheduling::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap,
@@ -165,6 +165,18 @@ where
         response
     }
 
+    pub async fn schedule_request_with_telemetry(
+        &self,
+        request: ScheduleRequest,
+    ) -> Result<(SchedulingResponse, WorkerSelectionTelemetry), KvSchedulerError> {
+        let response = self.inner.schedule_request_with_telemetry(request).await;
+        if let Err(KvSchedulerError::QueueRejected(rejection)) = &response {
+            self.observe_queue_rejection(rejection);
+        }
+        self.update_queue_metrics();
+        response
+    }
+
     #[expect(clippy::too_many_arguments)]
     pub async fn schedule(
         &self,
@@ -304,11 +316,17 @@ where
     }
 
     fn observe_schedule_result(&self, response: &Result<SchedulingResponse, KvSchedulerError>) {
-        if let Err(KvSchedulerError::QueueRejected(rejection)) = response
-            && let Some(metrics) = self
-                .queue_metric_indices
-                .get(&rejection.policy_class)
-                .and_then(|index| self.queue_metrics.get(*index))
+        if let Err(KvSchedulerError::QueueRejected(rejection)) = response {
+            self.observe_queue_rejection(rejection);
+        }
+        self.update_queue_metrics();
+    }
+
+    fn observe_queue_rejection(&self, rejection: &dynamo_kv_router::scheduling::QueueRejection) {
+        if let Some(metrics) = self
+            .queue_metric_indices
+            .get(&rejection.policy_class)
+            .and_then(|index| self.queue_metrics.get(*index))
         {
             match rejection.limit_kind {
                 dynamo_kv_router::scheduling::QueueLimitKind::Requests => {
@@ -322,7 +340,6 @@ where
                 }
             }
         }
-        self.update_queue_metrics();
     }
 
     pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {

@@ -549,6 +549,43 @@ pub struct WorkerSelectionResult {
     pub cached_tokens: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct WorkerSelectionTelemetry {
+    /// Number of eligible worker/ranks evaluated by the selector.
+    pub candidate_workers: usize,
+
+    /// Scores for the selected worker, when the selector exposes them.
+    pub selected_scores: Option<WorkerSelectionScores>,
+
+    /// Tie-break reason, when the decision required one.
+    pub tie_break: Option<WorkerSelectionTieBreak>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WorkerSelectionScores {
+    /// Cache-overlap credit applied to the selected worker, in decision-score units.
+    pub kv_overlap_score: f64,
+
+    /// Load score before cache-overlap credit, in decision-score units.
+    pub worker_load_score: f64,
+
+    /// Final score used for selection after cache credit and routing constraints.
+    pub final_score: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerSelectionTieBreak {
+    EqualScore,
+}
+
+impl WorkerSelectionTieBreak {
+    pub fn as_label(self) -> &'static str {
+        match self {
+            Self::EqualScore => "equal_score",
+        }
+    }
+}
+
 /// Active load metrics for a worker, used for overload detection.
 ///
 /// Published by workers (with `kv_used_blocks`) and by the scheduler (with

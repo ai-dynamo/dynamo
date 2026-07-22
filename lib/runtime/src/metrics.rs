@@ -91,6 +91,19 @@ pub trait PrometheusMetric: prometheus::core::Collector + Clone + Send + Sync + 
     {
         panic!("with_opts_and_label_names is not implemented for this metric type");
     }
+
+    /// Create a new histogram vector with custom buckets.
+    /// This is a default implementation that will panic for non-HistogramVec metrics.
+    fn with_histogram_opts_and_label_names(
+        _opts: prometheus::HistogramOpts,
+        _label_names: &[&str],
+        _buckets: Option<Vec<f64>>,
+    ) -> Result<Self, prometheus::Error>
+    where
+        Self: Sized,
+    {
+        panic!("with_histogram_opts_and_label_names is not implemented for this metric type");
+    }
 }
 
 // Implement the trait for Counter, IntCounter, and Gauge
@@ -194,6 +207,26 @@ impl PrometheusMetric for prometheus::CounterVec {
         label_names: &[&str],
     ) -> Result<Self, prometheus::Error> {
         prometheus::CounterVec::new(opts, label_names)
+    }
+}
+
+impl PrometheusMetric for prometheus::HistogramVec {
+    fn with_opts(_opts: prometheus::Opts) -> Result<Self, prometheus::Error> {
+        Err(prometheus::Error::Msg(
+            "HistogramVec requires label names, use with_histogram_opts_and_label_names instead"
+                .to_string(),
+        ))
+    }
+
+    fn with_histogram_opts_and_label_names(
+        mut opts: prometheus::HistogramOpts,
+        label_names: &[&str],
+        buckets: Option<Vec<f64>>,
+    ) -> Result<Self, prometheus::Error> {
+        if let Some(custom_buckets) = buckets {
+            opts = opts.buckets(custom_buckets);
+        }
+        prometheus::HistogramVec::new(opts, label_names)
     }
 }
 
@@ -354,6 +387,15 @@ pub fn create_metric<T: PrometheusMetric, H: MetricsHierarchy + ?Sized>(
             opts = opts.const_label(key.clone(), value.clone());
         }
         T::with_histogram_opts_and_buckets(opts, buckets)?
+    } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<prometheus::HistogramVec>() {
+        // Special handling for HistogramVec with label names and custom buckets.
+        let mut opts = prometheus::HistogramOpts::new(&metric_name, metric_desc);
+        for (key, value) in &updated_labels {
+            opts = opts.const_label(key.clone(), value.clone());
+        }
+        let label_names = const_labels
+            .ok_or_else(|| anyhow::anyhow!("HistogramVec requires const_labels parameter"))?;
+        T::with_histogram_opts_and_label_names(opts, label_names, buckets)?
     } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<prometheus::IntCounterVec>() {
         // Special handling for IntCounterVec with label names
         // const_labels parameter is required for IntCounterVec
@@ -428,7 +470,7 @@ impl<H: MetricsHierarchy> Metrics<H> {
     // - GaugeVec: ✅ IMPLEMENTED - create_gaugevec()
     // - GaugeHistogram: create_gauge_histogram() - for gauge histograms
     // - Histogram: ✅ IMPLEMENTED - create_histogram()
-    // - HistogramVec with custom buckets: create_histogram_with_buckets()
+    // - HistogramVec: ✅ IMPLEMENTED - create_histogramvec()
     // - Info: create_info() - for info metrics with labels
     // - IntCounter: ✅ IMPLEMENTED - create_intcounter()
     // - IntCounterVec: ✅ IMPLEMENTED - create_intcountervec()
@@ -507,6 +549,25 @@ impl<H: MetricsHierarchy> Metrics<H> {
         buckets: Option<Vec<f64>>,
     ) -> anyhow::Result<prometheus::Histogram> {
         create_metric(&self.hierarchy, name, description, labels, buckets, None)
+    }
+
+    /// Create a HistogramVec metric with label names and custom buckets.
+    pub fn create_histogramvec(
+        &self,
+        name: &str,
+        description: &str,
+        const_labels: &[&str],
+        const_label_values: &[(&str, &str)],
+        buckets: Option<Vec<f64>>,
+    ) -> anyhow::Result<prometheus::HistogramVec> {
+        create_metric(
+            &self.hierarchy,
+            name,
+            description,
+            const_label_values,
+            buckets,
+            Some(const_labels),
+        )
     }
 
     /// Create an IntCounter metric
@@ -1072,6 +1133,32 @@ mod test_helpers {
 mod test_metricsregistry_units {
     use super::*;
 
+    struct TestHierarchy {
+        registry: MetricsRegistry,
+    }
+
+    impl TestHierarchy {
+        fn new() -> Self {
+            Self {
+                registry: MetricsRegistry::new(),
+            }
+        }
+    }
+
+    impl MetricsHierarchy for TestHierarchy {
+        fn basename(&self) -> String {
+            "test".to_string()
+        }
+
+        fn parent_hierarchies(&self) -> Vec<&dyn MetricsHierarchy> {
+            Vec::new()
+        }
+
+        fn get_metrics_registry(&self) -> &MetricsRegistry {
+            &self.registry
+        }
+    }
+
     #[test]
     fn test_build_component_metric_name_with_prefix() {
         // Test that build_component_metric_name correctly prepends the dynamo_component prefix
@@ -1133,6 +1220,41 @@ mod test_metricsregistry_units {
         assert!(parse_prometheus_metric("metric_name").is_none()); // No value
 
         println!("✓ Prometheus metric parsing works correctly!");
+    }
+
+    #[test]
+    fn test_create_histogramvec_observes_dynamic_labels() {
+        use super::test_helpers::parse_prometheus_metric;
+
+        let hierarchy = TestHierarchy::new();
+        let histogram = hierarchy
+            .metrics()
+            .create_histogramvec(
+                "test_histogramvec",
+                "A test histogram vector",
+                &[labels::MODEL],
+                &[("scope", "router")],
+                Some(vec![1.0, 2.0, 4.0]),
+            )
+            .unwrap();
+        histogram.with_label_values(&["model-a"]).observe(1.5);
+
+        let output = hierarchy.metrics().prometheus_expfmt().unwrap();
+        let sum = output
+            .lines()
+            .filter_map(parse_prometheus_metric)
+            .find(|(name, _, _)| name == "dynamo_component_test_histogramvec_sum")
+            .expect("histogramvec sum should be exported");
+        assert_eq!(sum.1.get(labels::MODEL), Some(&"model-a".to_string()));
+        assert_eq!(sum.1.get("scope"), Some(&"router".to_string()));
+        assert_eq!(sum.2, 1.5);
+
+        let count = output
+            .lines()
+            .filter_map(parse_prometheus_metric)
+            .find(|(name, _, _)| name == "dynamo_component_test_histogramvec_count")
+            .expect("histogramvec count should be exported");
+        assert_eq!(count.2, 1.0);
     }
 
     #[test]
