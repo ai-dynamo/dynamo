@@ -467,8 +467,10 @@ pub struct Client {
     /// routing snapshot — read only by the KV-router's `RoutingEligibility` to
     /// reject dead workers on every path (availability overrides cache affinity)
     /// while the candidate watch catches up, and to break a sticky session
-    /// affinity bound to a now-dead worker. TTL-bounded (see `FENCE_TTL`); a
-    /// re-registered worker gets a fresh lease id, so stale entries only expire.
+    /// affinity bound to a now-dead worker. Cleared early by
+    /// `unfence_present_instances` when an id reappears (a live worker that only
+    /// transiently dropped from availability), and TTL-bounded (see `FENCE_TTL`)
+    /// as a backstop for ids that never return.
     fenced_instances: Arc<std::sync::RwLock<HashMap<u64, std::time::Instant>>>,
 }
 
@@ -636,6 +638,24 @@ impl Client {
         fenced.retain(|_, fenced_at| now.duration_since(*fenced_at) < FENCE_TTL);
         for id in removed_instance_ids {
             fenced.insert(*id, now);
+        }
+    }
+
+    /// Clear the fence for instances that are present again. A worker that only
+    /// transiently dropped from availability (e.g. `report_instance_down` then
+    /// reconcile) reappears under the same id, so its fence must be lifted
+    /// promptly instead of waiting out [`FENCE_TTL`].
+    pub fn unfence_present_instances(&self, present_instance_ids: &[u64]) {
+        if present_instance_ids.is_empty() {
+            return;
+        }
+        // Read-guarded fast path: nothing fenced, nothing to clear.
+        if self.fenced_instances.read().unwrap().is_empty() {
+            return;
+        }
+        let mut fenced = self.fenced_instances.write().unwrap();
+        for id in present_instance_ids {
+            fenced.remove(id);
         }
     }
 

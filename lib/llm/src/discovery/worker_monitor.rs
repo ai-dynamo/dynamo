@@ -828,6 +828,11 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         // fence removed workers so the router stops selecting
                         // them (candidate/affinity) before the candidate watch converges.
                         client.fence_instances_removed(&removed_workers);
+                        // A live worker that only transiently dropped from availability
+                        // reappears under the same id; clear its fence promptly instead of
+                        // waiting out the TTL.
+                        let present_ids: Vec<u64> = runtime_configs.keys().copied().collect();
+                        client.unfence_present_instances(&present_ids);
                         // Mirror the prune to the prefill Client (disagg). Prefill workers are
                         // routed by a separate PrefillRouter with its own Client, so its
                         // overloaded set must be cleared too or removed prefill ids would
@@ -835,6 +840,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         if let Some(prefill_client) = prefill_client_holder.read().unwrap().clone() {
                             prefill_client.clear_overloaded_instances_for_removed(&removed_workers);
                             prefill_client.fence_instances_removed(&removed_workers);
+                            prefill_client.unfence_present_instances(&present_ids);
                         }
 
                         // Update worker load states with runtime config values for all dp_ranks
@@ -1048,6 +1054,12 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             client.fence_instances_removed(&removed_workers);
                         }
 
+                        // Clear the fence for any worker present again (same id) — a
+                        // returning worker adds no removals this cycle, so unfence
+                        // outside the removed-workers block.
+                        let present_ids: Vec<u64> = current_instances.iter().copied().collect();
+                        client.unfence_present_instances(&present_ids);
+
                         known_decode_workers = current_instances;
                     }
 
@@ -1099,6 +1111,12 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             client.clear_overloaded_instances_for_removed(&removed_workers);
                             client.fence_instances_removed(&removed_workers);
                         }
+
+                        // Clear the fence for any worker present again (same id) — a
+                        // returning worker adds no removals this cycle, so unfence
+                        // outside the removed-workers block.
+                        let present_ids: Vec<u64> = current_instances.iter().copied().collect();
+                        client.unfence_present_instances(&present_ids);
 
                         known_prefill_workers = current_instances;
                     }
