@@ -4,8 +4,6 @@
 //! SGLang KV manager — wraps [`RadixCache`] with request-level lifecycle
 //! operations and KV event publishing.
 
-use std::collections::VecDeque;
-
 use crate::cache::radix_cache::{NodeId, RadixCache};
 use crate::common::kv_cache_trace;
 use crate::common::protocols::KvEventPublishers;
@@ -88,7 +86,8 @@ pub struct SglangKvManager {
 }
 
 pub struct DecodeTokenReservation {
-    indices: VecDeque<usize>,
+    indices: Vec<usize>,
+    next: usize,
 }
 
 pub struct SglangDestinationReservation {
@@ -116,13 +115,16 @@ impl SglangDestinationReservation {
 
 impl DecodeTokenReservation {
     fn take(&mut self) -> usize {
-        self.indices
-            .pop_front()
-            .expect("reserved decode token allocation must be infallible")
+        let idx = *self
+            .indices
+            .get(self.next)
+            .expect("reserved decode token allocation must be infallible");
+        self.next += 1;
+        idx
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.indices.len()
+        self.indices.len() - self.next
     }
 }
 
@@ -153,17 +155,21 @@ impl SglangKvManager {
 
     /// Try to allocate KV cache for a new request.
     /// Returns `None` if the pool doesn't have enough token slots (OOM).
-    pub(crate) fn allocate_for_request(&mut self, token_ids: &[u64]) -> Option<AllocResult> {
+    pub(crate) fn allocate_for_request(&mut self, token_ids: &[u32]) -> Option<AllocResult> {
         let (prefix_len, last_node) = self.cache.match_prefix(token_ids);
 
         let new_tokens = token_ids.len() - prefix_len;
 
         let prefix_indices = self.collect_path_indices(last_node);
 
-        let new_indices = self.cache.token_pool.allocate(new_tokens)?;
-
         let mut kv_indices = prefix_indices;
-        kv_indices.extend_from_slice(&new_indices);
+        if !self
+            .cache
+            .token_pool
+            .allocate_into(new_tokens, &mut kv_indices)
+        {
+            return None;
+        }
 
         self.cache.inc_lock_ref(last_node);
 
@@ -189,7 +195,7 @@ impl SglangKvManager {
     /// page-aligned cached prefix.
     pub(crate) fn extend_allocation(
         &mut self,
-        token_ids: &[u64],
+        token_ids: &[u32],
         lease: &mut ActiveKvLease,
     ) -> bool {
         let prefix_len = lease.kv_indices.len();
@@ -200,17 +206,20 @@ impl SglangKvManager {
             token_ids.len()
         );
         let new_tokens = token_ids.len() - prefix_len;
-        let Some(new_indices) = self.cache.token_pool.allocate(new_tokens) else {
+        if !self
+            .cache
+            .token_pool
+            .allocate_into(new_tokens, &mut lease.kv_indices)
+        {
             return false;
-        };
+        }
 
-        lease.kv_indices.extend_from_slice(&new_indices);
         self.publish_stored_event(token_ids, &lease.kv_indices, prefix_len);
         self.log_trace("allocation", new_tokens);
         true
     }
 
-    pub(crate) fn extend_cached_prefix(&mut self, token_ids: &[u64], lease: &mut ActiveKvLease) {
+    pub(crate) fn extend_cached_prefix(&mut self, token_ids: &[u32], lease: &mut ActiveKvLease) {
         let complete_len = token_ids.len() / self.cache.page_size() * self.cache.page_size();
         if complete_len <= lease.cached_tokens {
             return;
@@ -244,7 +253,7 @@ impl SglangKvManager {
         lease.kv_indices.push(new_idx);
     }
 
-    pub(crate) fn finish(&mut self, token_ids: &[u64], mut lease: ActiveKvLease) {
+    pub(crate) fn finish(&mut self, token_ids: &[u32], mut lease: ActiveKvLease) {
         let Some(last_node) = lease.last_node.take() else {
             debug_assert!(lease.kv_indices.is_empty());
             debug_assert_eq!(lease.cached_tokens, 0);
@@ -258,8 +267,8 @@ impl SglangKvManager {
             lease.cached_tokens,
             lease.len()
         );
-        let unretained_tail = lease.kv_indices.split_off(complete_len);
-        self.free_indices(&unretained_tail);
+        self.free_indices(&lease.kv_indices[complete_len..]);
+        lease.kv_indices.truncate(complete_len);
 
         if complete_len == 0 {
             self.cache.dec_lock_ref(last_node);
@@ -287,7 +296,7 @@ impl SglangKvManager {
     /// then unlocks the path.
     fn cache_finished_req(
         &mut self,
-        token_ids: &[u64],
+        token_ids: &[u32],
         kv_indices: &[usize],
         last_node: NodeId,
         first_new_token: usize,
@@ -317,7 +326,7 @@ impl SglangKvManager {
     /// subsequent calls.
     fn cache_unfinished_req(
         &mut self,
-        token_ids: &[u64],
+        token_ids: &[u32],
         kv_indices: &mut [usize],
         last_node: NodeId,
         first_new_token: usize,
@@ -337,18 +346,22 @@ impl SglangKvManager {
             self.cache
                 .insert_from_node(last_node, first_new_token, token_ids, kv_indices);
 
-        // A concurrent insert can retain different physical pages for the same prefix.
+        // An interleaved insert can retain different physical pages for the same prefix.
         // Move the active request to canonical pages before releasing its duplicates.
         // Acquire the extended path before releasing the old prefix so
         // destination activation never leaves valid transferred KV unprotected.
-        self.cache.inc_lock_ref(new_last_node);
+        if new_last_node != last_node {
+            self.cache.inc_lock_ref(new_last_node);
+        }
         self.canonicalize_unfinished_indices(
             kv_indices,
             new_last_node,
             first_new_token,
             complete_len,
         );
-        self.cache.dec_lock_ref(last_node);
+        if new_last_node != last_node {
+            self.cache.dec_lock_ref(last_node);
+        }
 
         new_last_node
     }
@@ -366,14 +379,12 @@ impl SglangKvManager {
         self.cache
             .token_pool
             .allocate(count)
-            .map(|indices| DecodeTokenReservation {
-                indices: indices.into(),
-            })
+            .map(|indices| DecodeTokenReservation { indices, next: 0 })
     }
 
     pub(crate) fn reserve_destination(
         &mut self,
-        token_ids: &[u64],
+        token_ids: &[u32],
     ) -> Option<SglangDestinationReservation> {
         let (prefix_len, last_node) = self.cache.match_prefix(token_ids);
         let mut prefix_indices = self.collect_path_indices(last_node);
@@ -412,7 +423,7 @@ impl SglangKvManager {
     pub(crate) fn activate_destination(
         &mut self,
         reservation: SglangDestinationReservation,
-        token_ids: &[u64],
+        token_ids: &[u32],
     ) -> AllocResult {
         let SglangDestinationReservation {
             prefix_len,
@@ -449,8 +460,12 @@ impl SglangKvManager {
     }
 
     pub fn release_decode_reservation(&mut self, reservation: DecodeTokenReservation) {
-        let indices = reservation.indices.into_iter().collect::<Vec<_>>();
-        self.release_unpublished_indices(indices);
+        let indices = &reservation.indices[reservation.next..];
+        if indices.is_empty() {
+            return;
+        }
+        self.cache.token_pool.free(indices);
+        self.log_trace("release_unpublished", indices.len());
     }
 
     fn release_unpublished_indices(&mut self, indices: Vec<usize>) {
@@ -490,9 +505,9 @@ impl SglangKvManager {
             lease.cached_tokens,
             lease.len()
         );
-        let owned_suffix = lease.kv_indices.split_off(lease.cached_tokens);
+        let owned_suffix = &lease.kv_indices[lease.cached_tokens..];
         let capacity_improved = !owned_suffix.is_empty() || last_node != self.cache.root();
-        self.free_indices(&owned_suffix);
+        self.free_indices(owned_suffix);
         self.cache.dec_lock_ref(last_node);
         capacity_improved
     }
@@ -678,7 +693,7 @@ impl SglangKvManager {
 
     fn publish_stored_event(
         &mut self,
-        token_ids: &[u64],
+        token_ids: &[u32],
         indices: &[usize],
         first_new_token: usize,
     ) -> usize {
@@ -778,17 +793,9 @@ impl SglangKvManager {
         hashed_blocks
     }
 
-    fn local_hashes_for_range(&self, token_ids: &[u64]) -> Vec<LocalBlockHash> {
-        let tokens = token_ids
-            .iter()
-            .map(|&token| {
-                u32::try_from(token).unwrap_or_else(|_| {
-                    panic!("local_hashes_for_range: token {token} exceeds router u32 token domain")
-                })
-            })
-            .collect::<Vec<_>>();
+    fn local_hashes_for_range(&self, token_ids: &[u32]) -> Vec<LocalBlockHash> {
         compute_block_hash_for_seq(
-            &tokens,
+            token_ids,
             self.cache.page_size() as u32,
             BlockHashOptions::default(),
         )
@@ -904,6 +911,29 @@ mod tests {
             + std::mem::size_of::<Option<NodeId>>();
 
         assert_eq!(std::mem::size_of::<ActiveKvLease>(), previous_fields);
+    }
+
+    #[test]
+    fn partially_consumed_decode_reservation_releases_only_unused_slots() {
+        let mut mgr = SglangKvManager::new(4, 1, KvEventPublishers::default(), 0);
+        let mut reservation = mgr.reserve_decode_tokens(3).unwrap();
+        let consumed = reservation.take();
+        assert_eq!(reservation.len(), 2);
+        let mut expected_unused = reservation.indices[reservation.next..].to_vec();
+
+        mgr.release_decode_reservation(reservation);
+        assert_eq!(mgr.cache().available_tokens(), 3);
+
+        let mut reallocated = mgr
+            .cache_mut()
+            .token_pool
+            .allocate(expected_unused.len())
+            .unwrap();
+        expected_unused.sort_unstable();
+        reallocated.sort_unstable();
+        assert_eq!(reallocated, expected_unused);
+        assert!(reallocated.windows(2).all(|pair| pair[0] != pair[1]));
+        assert!(!reallocated.contains(&consumed));
     }
 
     #[test]
@@ -1130,8 +1160,7 @@ mod tests {
     fn test_cache_materialization_processes_only_newly_completed_blocks() {
         let sink = Arc::new(MockSink::new());
         let mut mgr = SglangKvManager::new(100, 2, KvEventPublishers::default(), 0);
-        let out_of_domain_token = u32::MAX as u64 + 1;
-        let tokens = [out_of_domain_token, 2, 3, 4, 5, 6];
+        let tokens = [1, 2, 3, 4, 5, 6];
 
         let mut alloc = mgr.allocate_for_request(&tokens[..2]).unwrap();
         let alloc_last_node = alloc.lease.last_node();
@@ -1170,15 +1199,6 @@ mod tests {
             1,
             "finished cache should store only the newly completed block"
         );
-    }
-
-    #[test]
-    #[should_panic(
-        expected = "local_hashes_for_range: token 4294967296 exceeds router u32 token domain"
-    )]
-    fn test_local_hashes_reject_out_of_domain_tokens() {
-        let mgr = SglangKvManager::new(100, 1, KvEventPublishers::default(), 0);
-        let _ = mgr.local_hashes_for_range(&[u32::MAX as u64 + 1]);
     }
 
     #[test]

@@ -32,17 +32,23 @@ impl TokenPool {
 
     /// Allocate `n` token slots. Returns `None` if not enough free slots.
     pub fn allocate(&mut self, n: usize) -> Option<Vec<usize>> {
+        let mut indices = Vec::new();
+        self.allocate_into(n, &mut indices).then_some(indices)
+    }
+
+    /// Append `n` allocated token slots to `indices` without an intermediate vector.
+    pub fn allocate_into(&mut self, n: usize, indices: &mut Vec<usize>) -> bool {
         if self.available() < n {
-            return None;
+            return false;
         }
 
+        indices.reserve(n);
         let recycled = n.min(self.free.len());
         let fresh = n - recycled;
-        let mut indices = Vec::with_capacity(n);
         indices.extend(self.free.drain(self.free.len() - recycled..));
         indices.extend(self.next_fresh..self.next_fresh + fresh);
         self.next_fresh += fresh;
-        Some(indices)
+        true
     }
 
     /// Return token slots to the free pool.
@@ -62,10 +68,10 @@ impl TokenPool {
 /// A single node in the radix tree.
 pub struct TreeNode {
     /// Children keyed by `child.key[..page_size]` (a "child key").
-    pub children: FxHashMap<Vec<u64>, NodeId>,
+    pub children: FxHashMap<Vec<u32>, NodeId>,
     pub parent: Option<NodeId>,
     /// Token IDs stored at this edge.
-    pub key: Vec<u64>,
+    pub key: Vec<u32>,
     /// KV cache pool token indices. Length = `key.len()`.
     pub value: Vec<usize>,
     /// Walk-to-root reference count (protected when > 0).
@@ -123,7 +129,7 @@ impl RadixCache {
         self.nodes.len()
     }
 
-    fn child_key<'a>(&self, key: &'a [u64]) -> &'a [u64] {
+    fn child_key<'a>(&self, key: &'a [u32]) -> &'a [u32] {
         &key[..self.page_size.min(key.len())]
     }
 
@@ -131,7 +137,7 @@ impl RadixCache {
         len / self.page_size * self.page_size
     }
 
-    fn key_match(&self, key0: &[u64], key1: &[u64]) -> usize {
+    fn key_match(&self, key0: &[u32], key1: &[u32]) -> usize {
         if self.page_size == 1 {
             key0.iter().zip(key1).take_while(|(a, b)| a == b).count()
         } else {
@@ -147,7 +153,7 @@ impl RadixCache {
         }
     }
 
-    pub fn match_prefix(&mut self, key: &[u64]) -> (usize, NodeId) {
+    pub fn match_prefix(&mut self, key: &[u32]) -> (usize, NodeId) {
         let now = Instant::now();
         self.nodes[self.root].last_access_time = now;
 
@@ -185,7 +191,7 @@ impl RadixCache {
 
     /// Read-only prefix match length (does not mutate timestamps or split nodes).
     /// Used for LPM scheduling scoring.
-    pub fn prefix_match_len(&self, key: &[u64]) -> usize {
+    pub fn prefix_match_len(&self, key: &[u32]) -> usize {
         let mut current = self.root;
         let mut matched: usize = 0;
 
@@ -213,7 +219,7 @@ impl RadixCache {
     }
 
     /// Insert a token sequence into the tree. Key is page-aligned before insertion.
-    pub fn insert(&mut self, key: &[u64], value: &[usize]) -> NodeId {
+    pub fn insert(&mut self, key: &[u32], value: &[usize]) -> NodeId {
         self.insert_from(self.root, 0, key, value, false)
     }
 
@@ -226,7 +232,7 @@ impl RadixCache {
         &mut self,
         prefix_node: NodeId,
         prefix_len: usize,
-        key: &[u64],
+        key: &[u32],
         value: &[usize],
     ) -> NodeId {
         self.insert_from(prefix_node, prefix_len, key, value, true)
@@ -236,7 +242,7 @@ impl RadixCache {
         &mut self,
         start_node: NodeId,
         prefix_len: usize,
-        key: &[u64],
+        key: &[u32],
         value: &[usize],
         allow_locked_tail_extension: bool,
     ) -> NodeId {
@@ -329,7 +335,7 @@ impl RadixCache {
     fn extend_leaf(
         &mut self,
         node_id: NodeId,
-        key: &[u64],
+        key: &[u32],
         value: &[usize],
         now: Instant,
     ) -> NodeId {
@@ -394,7 +400,7 @@ impl RadixCache {
         inter_id
     }
 
-    fn create_child(&mut self, parent_id: NodeId, key: &[u64], value: &[usize]) -> NodeId {
+    fn create_child(&mut self, parent_id: NodeId, key: &[u32], value: &[usize]) -> NodeId {
         let new_node = TreeNode {
             children: FxHashMap::default(),
             parent: Some(parent_id),
@@ -548,6 +554,7 @@ mod tests {
     fn test_token_pool_allocate_and_free() {
         let mut pool = TokenPool::new(10);
         assert_eq!(pool.available(), 10);
+        assert!(pool.allocate(usize::MAX).is_none());
         let a = pool.allocate(3).unwrap();
         assert_eq!(a.len(), 3);
         assert_eq!(pool.available(), 7);
@@ -558,6 +565,22 @@ mod tests {
         assert_eq!(pool.available(), 3);
         pool.free(&b);
         assert_eq!(pool.available(), 10);
+    }
+
+    #[test]
+    fn test_allocate_into_failure_is_atomic() {
+        let mut pool = TokenPool::new(6);
+        let allocated = pool.allocate(4).unwrap();
+        pool.free(&allocated[1..3]);
+        let available_before = pool.available();
+        let mut destination = vec![99];
+
+        assert!(!pool.allocate_into(available_before + 1, &mut destination));
+        assert_eq!(destination, vec![99]);
+        assert_eq!(pool.available(), available_before);
+
+        let subsequent = pool.allocate(available_before).unwrap();
+        assert_eq!(subsequent, vec![1, 2, 4, 5]);
     }
 
     #[test]
