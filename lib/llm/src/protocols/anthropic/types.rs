@@ -14,7 +14,7 @@ pub use dynamo_protocols::types::anthropic::*;
 use dynamo_protocols::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
-    ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImage,
+    ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImageArgs,
     ChatCompletionRequestMessageContentPartText, ChatCompletionRequestSystemMessage,
     ChatCompletionRequestSystemMessageContent, ChatCompletionRequestToolMessage,
     ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
@@ -196,18 +196,11 @@ fn convert_user_blocks(
                 let data_uri = format!("data:{};base64,{}", source.media_type, source.data);
                 let url = url::Url::parse(&data_uri)
                     .map_err(|e| anyhow::anyhow!("invalid image data URI: {e}"))?;
-                #[allow(deprecated)]
-                let image_url = ImageUrl {
-                    url,
-                    detail: None,
-                    uuid: None,
-                };
-                content_parts.push(ChatCompletionRequestUserMessageContentPart::ImageUrl(
-                    ChatCompletionRequestMessageContentPartImage {
-                        image_url: Some(image_url),
-                        uuid: None,
-                    },
-                ));
+                let image_url = ImageUrl::from(url.to_string());
+                let image_part = ChatCompletionRequestMessageContentPartImageArgs::default()
+                    .image_url(image_url)
+                    .build()?;
+                content_parts.push(image_part.into());
             }
             AnthropicContentBlock::ToolResult {
                 tool_use_id,
