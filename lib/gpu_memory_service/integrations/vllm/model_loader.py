@@ -18,13 +18,18 @@ import torch
 from gpu_memory_service.client.torch.allocator import (
     get_or_create_gms_client_memory_manager,
     gms_use_mem_pool,
+    retire_gms_mem_pool,
 )
 from gpu_memory_service.client.torch.module import (
     materialize_module_from_gms,
     rebind_nonparameter_tensors,
 )
 from gpu_memory_service.common.locks import GrantedLockType
-from gpu_memory_service.common.utils import get_socket_path
+from gpu_memory_service.common.utils import (
+    ENV_DIAGNOSTIC_RETIRE_WEIGHTS_MEM_POOL,
+    get_socket_path,
+    is_truthy_env,
+)
 from gpu_memory_service.integrations.common.utils import (
     GMSCommittedMemoryStats,
     get_gms_lock_mode,
@@ -349,6 +354,9 @@ def _load_write_mode_impl(
                 process_weights_after_loading(model, model_config, target_device)
 
             torch.cuda.empty_cache()
+
+    if is_truthy_env(ENV_DIAGNOSTIC_RETIRE_WEIGHTS_MEM_POOL):
+        retire_gms_mem_pool(gms_client)
 
     stats = prepare_gms_write(gms_client, model)
     # The private clones must exist before vLLM profiles memory so the

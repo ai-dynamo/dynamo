@@ -25,6 +25,7 @@ if not HAS_TORCH:
 
 import msgspec
 import torch
+from gpu_memory_service.client.torch import allocator as torch_allocator
 from gpu_memory_service.client.torch import module as torch_module
 from gpu_memory_service.client.torch.module import (
     materialize_module_from_gms,
@@ -37,6 +38,7 @@ from gpu_memory_service.client.torch.tensor import (
     ModuleTensorKind,
     StorageManifest,
 )
+from gpu_memory_service.common.locks import GrantedLockType
 from gpu_memory_service.integrations.common import utils as common_utils
 from gpu_memory_service.integrations.trtllm import model_loader as trtllm_model_loader
 from gpu_memory_service.integrations.vllm import model_loader
@@ -179,6 +181,70 @@ def clear_pending_write(monkeypatch):
     monkeypatch.setattr(model_loader, "_pending_gms_client", None)
     monkeypatch.setattr(model_loader, "_last_imported_weights_bytes", 0)
     monkeypatch.setattr(model_loader, "_last_model_memory_usage_offset_bytes", 0)
+
+
+def test_retire_gms_mem_pool_releases_inactive_mapping(monkeypatch):
+    va = 0x100000
+
+    class Manager:
+        tag = "weights"
+
+        def __init__(self):
+            self.mappings = {
+                va: SimpleNamespace(aligned_size=4096),
+            }
+
+        @property
+        def total_bytes(self):
+            return sum(mapping.aligned_size for mapping in self.mappings.values())
+
+    manager = Manager()
+
+    class Pool:
+        def __del__(self):
+            manager.mappings.clear()
+
+    state = torch_allocator._TagState(
+        manager=manager,
+        mem_pool=Pool(),
+        socket_path="/tmp/gms",
+        device=0,
+    )
+    monkeypatch.setattr(torch_allocator, "_tag_states", {"weights": state})
+
+    released = torch_allocator.retire_gms_mem_pool(manager)
+
+    assert released == (1, 4096)
+    assert state.mem_pool is None
+    assert manager.mappings == {}
+
+
+def test_retired_weights_pool_refuses_unsafe_residual_pruning(monkeypatch):
+    mapping = SimpleNamespace(
+        allocation_id="backend-owned",
+        aligned_size=4096,
+        handle=1,
+    )
+    manager = SimpleNamespace(
+        tag="weights",
+        granted_lock_type=GrantedLockType.RW,
+        is_unmapped=False,
+        mappings={0x200000: mapping},
+        device=0,
+    )
+    monkeypatch.setenv("DYN_GMS_DIAGNOSTIC_RETIRE_WEIGHTS_MEM_POOL", "1")
+
+    with pytest.raises(
+        RuntimeError,
+        match="refusing unsafe direct pruning",
+    ):
+        torch_allocator.prune_allocations(
+            manager,
+            referenced_allocation_ids=set(),
+            synchronize=False,
+        )
+
+    assert manager.mappings == {0x200000: mapping}
 
 
 @pytest.fixture

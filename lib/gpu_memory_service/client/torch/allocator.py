@@ -12,6 +12,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Iterator, Optional
 
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
+from gpu_memory_service.common.utils import (
+    ENV_DIAGNOSTIC_RETIRE_WEIGHTS_MEM_POOL,
+    is_truthy_env,
+)
 from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm_device_type
 
 if TYPE_CHECKING:
@@ -264,6 +268,33 @@ def get_gms_client_memory_managers() -> tuple["GMSClientMemoryManager", ...]:
     return tuple(state.manager for state in _tag_states.values())
 
 
+def retire_gms_mem_pool(manager: "GMSClientMemoryManager") -> tuple[int, int]:
+    """Release a private pool and let PyTorch free its inactive segments."""
+    if manager.tag is None:
+        raise RuntimeError("Cannot retire the MemPool of an untagged GMS manager")
+    state = _tag_states.get(manager.tag)
+    if state is None or state.manager is not manager:
+        raise RuntimeError(f"No GMS allocator state for tag={manager.tag!r}")
+    if state.mem_pool is None:
+        raise RuntimeError(f"GMS allocator tag={manager.tag!r} has no MemPool")
+
+    before_count = len(manager.mappings)
+    before_bytes = manager.total_bytes
+    mem_pool = state.mem_pool
+    state.mem_pool = None
+    del mem_pool
+    released_count = before_count - len(manager.mappings)
+    released_bytes = before_bytes - manager.total_bytes
+    logger.info(
+        "[GMS] Retired PyTorch MemPool for tag=%s; allocator released "
+        "%d mappings / %.2f GiB",
+        manager.tag,
+        released_count,
+        released_bytes / (1 << 30),
+    )
+    return released_count, released_bytes
+
+
 def prune_allocations(
     manager: "GMSClientMemoryManager",
     *,
@@ -300,6 +331,28 @@ def prune_allocations(
         torch_device().synchronize(manager.device)
 
     keep = {str(allocation_id) for allocation_id in referenced_allocation_ids}
+    if (
+        manager.tag == "weights"
+        and is_truthy_env(ENV_DIAGNOSTIC_RETIRE_WEIGHTS_MEM_POOL)
+    ):
+        residual = [
+            mapping
+            for mapping in manager.mappings.values()
+            if str(mapping.allocation_id) not in keep and mapping.handle != 0
+        ]
+        if residual:
+            residual_bytes = sum(int(mapping.aligned_size) for mapping in residual)
+            raise RuntimeError(
+                "PyTorch MemPool retirement left "
+                f"{len(residual)} active GMS mappings / "
+                f"{residual_bytes / (1 << 30):.2f} GiB outside the model "
+                "storage keep set; refusing unsafe direct pruning"
+            )
+        logger.info(
+            "[GMS] PyTorch MemPool retirement left no mapped weights "
+            "allocations outside the model storage keep set"
+        )
+        return
 
     pruned_allocations = 0
     pruned_bytes = 0
