@@ -63,7 +63,7 @@ required-features = ["request-trace-bench"]
 # repo
 dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols"] }
 dynamo-memory = { workspace = true }
-dynamo-mocker = { workspace = true }
+dynamo-mocker = { workspace = true, features = ["zmq-events"] }
 dynamo-rl = { workspace = true }
 dynamo-runtime = { workspace = true }
 dynamo-tokenizers = { workspace = true }
@@ -72,6 +72,7 @@ dynamo-tokens = { workspace = true }
 
 # workspace
 anyhow = { workspace = true }
+arc-swap = "1.9.1"
 dynamo-protocols = { workspace = true }
 dynamo-parsers = { workspace = true }
 dynamo-parsers-v2 = { workspace = true }
@@ -85,7 +86,7 @@ derive_builder = { workspace = true }
 either = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }
-hf-hub = { workspace = true }
+hf-hub = { workspace = true, features = ["tokio", "rustls-tls", "ureq"] }
 ipnet = { workspace = true }
 lru = { workspace = true }
 moka = { workspace = true }
@@ -231,7 +232,9 @@ insta = { version = "1.41", features = [
 
 lazy_static = "1.4"
 mockito = "1.7.0"
-dynamo-bench = { path = "../bench" }
+dynamo-bench = { path = "../bench", default-features = false, features = [
+  "kv-router-stress-support",
+] }
 tokio-tungstenite = "0.26"
 
 [[test]]

@@ -14,7 +14,7 @@ use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 use std::env;
-use std::future::Future;
+use std::future::{self, Future};
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -95,6 +95,14 @@ pub trait SequencePublisher: Send + Sync {
         event: &ActiveSequenceEvent,
     ) -> impl Future<Output = anyhow::Result<()>> + Send;
 
+    /// Publish an owned replica-sync event, avoiding a clone when supported by the transport.
+    fn publish_event_owned(
+        &self,
+        event: ActiveSequenceEvent,
+    ) -> impl Future<Output = anyhow::Result<()>> + Send {
+        async move { self.publish_event(&event).await }
+    }
+
     /// Fire-and-forget publish of an [`ActiveLoad`] metric payload.
     fn publish_load(&self, load: ActiveLoad);
 
@@ -119,6 +127,22 @@ pub trait SequencePublisher: Send + Sync {
 
     /// Observe that a worker/dp_rank was removed from the router.
     fn observe_worker_removed(&self, _worker: &WorkerWithDpRank, _worker_type: &str) {}
+}
+
+/// No-op publisher for callers that do not need active-sequence event transport.
+pub struct NoopSequencePublisher;
+
+impl SequencePublisher for NoopSequencePublisher {
+    fn publish_event(
+        &self,
+        _event: &ActiveSequenceEvent,
+    ) -> impl Future<Output = anyhow::Result<()>> + Send {
+        future::ready(Ok(()))
+    }
+
+    fn publish_load(&self, _load: ActiveLoad) {}
+
+    fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize) {}
 }
 
 /// Abstraction over event subscription for replica sync.
@@ -429,10 +453,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         // can mirror the same oldest-prefill anchor instead of approximating from receive time.
         let publisher = Arc::clone(&self.publisher);
         tokio::spawn(async move {
-            if let Err(e) = publisher.publish_event(&event).await {
+            let request_id = event.request_id.clone();
+            let worker = event.worker;
+            if let Err(e) = publisher.publish_event_owned(event).await {
                 tracing::error!(
-                    request_id = %event.request_id,
-                    worker = ?event.worker,
+                    request_id = %request_id,
+                    worker = ?worker,
                     "failed to publish active sequence event: {e}"
                 );
             }

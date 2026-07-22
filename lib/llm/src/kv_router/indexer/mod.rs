@@ -37,8 +37,9 @@ pub use self::side::SideIndexer;
 #[cfg(feature = "ckf-diagnostics")]
 pub(crate) use recovery::WorkerQueryHealthSnapshot;
 pub(crate) use recovery::{
-    DEFAULT_RECOVERY_ATTEMPT_TIMEOUT, RecoveryResetReason, RecoverySupervisor, RecoveryTarget,
-    SourceEpoch, TargetFaultDisposition, start_target_subscriber,
+    DEFAULT_RECOVERY_ATTEMPT_TIMEOUT, KvEventSubscriptionHandle, RecoveryResetReason,
+    RecoverySupervisor, RecoveryTarget, SourceEpoch, TargetFaultDisposition,
+    start_target_subscriber,
 };
 pub(crate) use recovery::{start_subscriber, start_worker_kv_query_endpoint};
 
