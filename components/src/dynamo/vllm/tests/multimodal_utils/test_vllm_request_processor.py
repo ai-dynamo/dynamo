@@ -25,10 +25,12 @@ def _processor(
     model: str = "Qwen/Qwen3-VL-2B-Instruct",
     enabled: bool = True,
     unified_vision_chunk: bool = False,
+    frontend_decoding: bool = False,
 ) -> mod.VllmMultimodalRequestProcessor:
     return mod.VllmMultimodalRequestProcessor(
         model=model,
         enable_multimodal=enabled,
+        enable_frontend_decoding=frontend_decoding,
         image_loader=SimpleNamespace(load_image_batch=AsyncMock(return_value=[])),
         video_loader=SimpleNamespace(load_video_batch=AsyncMock(return_value=[])),
         audio_loader=SimpleNamespace(
@@ -112,6 +114,58 @@ async def test_merges_encoder_images_with_local_video_and_decoded_fallback():
 
     assert result == {"image": decoded_image}
     processor.embedding_loader.load_multimodal_embeddings.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_forwards_decoded_images_to_encoder_with_frontend_decoding():
+    """With --frontend-decoding, Decoded items go to the separate encoder
+    instead of falling back to the local loader."""
+    processor = _processor(frontend_decoding=True)
+    encoded_image = {"image_embeds": object()}
+    processor.embedding_loader = SimpleNamespace(
+        load_multimodal_embeddings=AsyncMock(return_value={"image": encoded_image})
+    )
+
+    image_items = [
+        {"Url": "https://example.com/image.png"},
+        {"Decoded": {"shape": [4, 4, 3], "content_hash": "0123456789abcdef"}},
+    ]
+    result = await processor.extract_multimodal_data(
+        {"multi_modal_data": {"image_url": image_items}},
+        "request-fd-epd",
+        None,
+    )
+
+    assert result == {"image": encoded_image}
+    processor.image_loader.load_image_batch.assert_not_awaited()
+    processor.embedding_loader.load_multimodal_embeddings.assert_awaited_once()
+    forwarded = processor.embedding_loader.load_multimodal_embeddings.call_args[0][0]
+    assert forwarded == image_items
+
+
+@pytest.mark.asyncio
+async def test_rejects_malformed_encoder_image_item_before_dispatch():
+    processor = _processor(frontend_decoding=True)
+    processor.embedding_loader = SimpleNamespace(
+        load_multimodal_embeddings=AsyncMock(return_value={})
+    )
+
+    with pytest.raises(ValueError, match="Unsupported image item"):
+        await processor.extract_multimodal_data(
+            {
+                "multi_modal_data": {
+                    "image_url": [
+                        {"Url": "https://example.com/image.png"},
+                        {"ignored": "value"},
+                    ]
+                }
+            },
+            "request-malformed",
+            None,
+        )
+
+    processor.embedding_loader.load_multimodal_embeddings.assert_not_awaited()
+    processor.image_loader.load_image_batch.assert_not_awaited()
 
 
 @pytest.mark.asyncio

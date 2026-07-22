@@ -14,6 +14,7 @@ export DYN_REQUEST_PLANE=tcp
 # Default values
 MODEL_NAME="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
 SINGLE_GPU=false
+FRONTEND_DECODING=false
 
 # Parse command line arguments
 # All extra arguments are passed through to the PD worker's dynamo.vllm
@@ -29,6 +30,10 @@ while [[ $# -gt 0 ]]; do
             SINGLE_GPU=true
             shift
             ;;
+        --frontend-decoding)
+            FRONTEND_DECODING=true
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS] [EXTRA_ARGS...]"
             echo ""
@@ -38,6 +43,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --model <model_name>          Specify the VLM model to use (default: $MODEL_NAME)"
             echo "                                LLaVA 1.5 7B, Qwen2.5-VL, and Phi3V models have predefined templates"
             echo "  --single-gpu                  Run encode and PD workers on the same GPU (for small models, e.g. 2B)"
+            echo "  --frontend-decoding           Decode images in the Rust frontend and transfer pixels to the encode worker via NIXL"
             echo "  -h, --help                    Show this help message"
             echo ""
             echo "All additional arguments are passed through to the PD worker's dynamo.vllm."
@@ -82,6 +88,14 @@ unset DYN_SYSTEM_PORT
 
 EXTRA_ARGS=""
 PD_GPU_MEM_ARGS=""
+
+# --frontend-decoding must reach BOTH workers: the PD worker's model card
+# advertises the media decoder (so the frontend decodes), and the encode
+# worker needs the flag to read decoded pixels via NIXL.
+FD_ARGS=""
+if [[ "$FRONTEND_DECODING" == "true" ]]; then
+    FD_ARGS="--frontend-decoding"
+fi
 
 # GPU assignments (override via environment variables)
 # In single-GPU mode both workers share the same GPU.
@@ -132,6 +146,7 @@ python -m dynamo.vllm \
   --disaggregation-mode encode \
   --model "$MODEL_NAME" \
   --gpu-memory-utilization "$DYN_ENCODE_GPU_MEM" \
+  $FD_ARGS \
   $EXTRA_ARGS &
 
 # Start PD worker (aggregated prefill+decode, routes to encoder for embeddings)
@@ -145,6 +160,7 @@ python -m dynamo.vllm \
   --enable-mm-embeds \
   --model "$MODEL_NAME" \
   $PD_GPU_MEM_ARGS \
+  $FD_ARGS \
   $EXTRA_ARGS \
   "${EXTRA_PD_ARGS[@]}" &
 
