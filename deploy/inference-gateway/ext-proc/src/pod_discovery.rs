@@ -226,6 +226,23 @@ impl PodDiscovery {
         self.index.read().unwrap().keys().copied().collect()
     }
 
+    /// Whether any `Ready`, pool-selected worker exists. O(1) — lets the hot path
+    /// test emptiness without materializing the id set.
+    pub fn has_ready_workers(&self) -> bool {
+        !self.index.read().unwrap().is_empty()
+    }
+
+    /// Resolve any `Ready` worker's `ip:port` endpoint, for body-less requests
+    /// that route to an arbitrary worker without building an id set.
+    pub fn resolve_any_endpoint(&self) -> Option<String> {
+        self.index
+            .read()
+            .unwrap()
+            .values()
+            .next()
+            .map(|entry| entry.endpoint.clone())
+    }
+
     // Resolve a `worker_id` to its current `ip:port` HTTP endpoint.
     pub fn resolve_endpoint(&self, worker_id: u64) -> Option<String> {
         self.index

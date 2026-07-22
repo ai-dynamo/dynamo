@@ -208,32 +208,47 @@ impl EndpointPicker for EppRouter {
             ));
         }
 
-        let mut allowed = self.reflector.ready_worker_ids();
-        if allowed.is_empty() {
+        if !self.reflector.has_ready_workers() {
             return Err(PickError::NoEndpoints);
         }
 
-        // Honor Envoy's subset hint (`x-gateway-destination-endpoint-subset`):
-        // constrain to Ready workers in the subset. A non-empty subset matching
-        // nothing must refuse, not fall back to the full set.
-        if !req.candidate_subset.is_empty() {
-            allowed = self.subset_worker_ids(&allowed, &req.candidate_subset);
-            if allowed.is_empty() {
+        // Only the subset-hint path needs an explicit id set. On the ordinary
+        // path we pass `None` and let the selector schedule over its own catalog
+        // (the stale-selection guard below still validates the chosen worker), so
+        // no O(worker-count) set is built per request.
+        let allowed: Option<HashSet<u64>> = if req.candidate_subset.is_empty() {
+            None
+        } else {
+            // Honor Envoy's subset hint (`x-gateway-destination-endpoint-subset`):
+            // constrain to Ready workers in the subset, refusing (not falling back
+            // to the full set) when nothing matches.
+            let filtered =
+                self.subset_worker_ids(&self.reflector.ready_worker_ids(), &req.candidate_subset);
+            if filtered.is_empty() {
                 tracing::warn!(
                     subset = ?req.candidate_subset,
                     "No Ready pod matches the subset hint; refusing to route outside the subset"
                 );
                 return Err(PickError::NoEndpoints);
             }
-        }
+            Some(filtered)
+        };
 
-        // Body-less requests (no prompt to tokenize) route to any Ready worker.
+        // Body-less requests (no prompt to tokenize) route to any Ready worker,
+        // staying inside the subset when one was given.
         if req.body.is_empty() {
-            let worker_id = *allowed.iter().next().ok_or(PickError::NoEndpoints)?;
-            let endpoint = self
-                .reflector
-                .resolve_endpoint(worker_id)
-                .ok_or(PickError::NoEndpoints)?;
+            let endpoint = match &allowed {
+                Some(ids) => {
+                    let worker_id = *ids.iter().next().ok_or(PickError::NoEndpoints)?;
+                    self.reflector
+                        .resolve_endpoint(worker_id)
+                        .ok_or(PickError::NoEndpoints)?
+                }
+                None => self
+                    .reflector
+                    .resolve_any_endpoint()
+                    .ok_or(PickError::NoEndpoints)?,
+            };
             // Routing comes from the destination mutation; aggregated raw-vLLM
             // workers read no `x-dynamo-*` headers, so none are emitted.
             return Ok(PickResult {
@@ -266,7 +281,9 @@ impl EndpointPicker for EppRouter {
             model_name: self.model_name.clone(),
             reservation_id: reservation_id.clone(),
             token_ids: tokens,
-            allowed_worker_ids: Some(allowed),
+            // `None` on the ordinary path: the selector schedules over its
+            // catalog; `Some` only carries an Envoy subset constraint.
+            allowed_worker_ids: allowed,
             // Effective header-over-body values; `None` only when unset everywhere.
             priority_jump,
             strict_priority,
@@ -286,8 +303,8 @@ impl EndpointPicker for EppRouter {
         };
 
         // The reflector owns the address + readiness. If it can no longer resolve
-        // the worker, the pod left Ready in the race since we built `allowed`, so
-        // the selection is stale: refuse rather than route to a stale address.
+        // the selected worker, the pod left Ready in the race, so the selection is
+        // stale: refuse rather than route to a stale address.
         let Some(endpoint) = self.reflector.resolve_endpoint(resp.worker_id) else {
             tracing::warn!(
                 worker_id = resp.worker_id,
