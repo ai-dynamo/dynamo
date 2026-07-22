@@ -24,7 +24,6 @@ docs:
   - 'docs/**'
   - 'fern/**'
   - '.github/workflows/fern-docs.yml'
-  - '.github/scripts/build_install_selector.py'
   - '**/*.md'
   - '**/*.txt'
   - '**/.gitignore'

@@ -2,16 +2,32 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: "Streaming Tokens and Tools: Multi-Turn Agentic Harness Support in Dynamo"
-sidebar-title: Multi-Turn Agentic Harnesses
+sidebar-title: Agentic Harness Support
 subtitle: "Matej Kosec, Ishan Dhanani, Benjamin Klieger, Dan Gil and Alec Flowers — April 2026"
 description: "Streaming Tokens and Tools: Multi-Turn Agentic Harness Support in Dynamo"
 keywords: agentic inference, responses api, messages api, tool calling, interleaved reasoning, prefix caching, agent hints, Dynamo
 last-updated: Apr 30, 2026
+hide-page-actions: true
 ---
+
+import { BlogArticleMeta } from "@/components/BlogArticleMeta";
+
+<BlogArticleMeta
+  authors={[
+    { name: "Matej Kosec" },
+    { name: "Ishan Dhanani" },
+    { name: "Benjamin Klieger" },
+    { name: "Dan Gil" },
+    { name: "Alec Flowers" },
+  ]}
+  category="Agentic AI"
+  date="April 30, 2026"
+  readTime="18 min read"
+/>
 
 An agentic exchange must preserve a structured interaction: assistant turns interleave reasoning with one or more tool calls, and subsequent user turns return the corresponding tool results to the model context. Reasoning replay is model- and turn-dependent: some reasoning should be retained, while some should be dropped. The inference engine is responsible for this more expressive interaction and for producing correctly segmented API results. Tool-call parsing and reasoning parsing need to happen before the attached harness consumes the response. High-value agentic workflows such as coding also depend on a responsive harness experience: reasoning segments, tool-call events, and request metadata need to stream back as the turn unfolds instead of arriving after a final text response. This post covers lessons from running real agentic clients against Dynamo: how we hardened parser and API coverage and how those parser layers became standalone reusable crates.
 
-These changes build on the performance considerations outlined in our [first post](./agentic-inference.md), which focused on the serving architecture underneath agentic inference: the frontend, router, and KV cache management. This follow-up focuses on correctness, user-experience equivalence, and performance.
+These changes build on the performance considerations outlined in our [first post](./agentic-inference.mdx), which focused on the serving architecture underneath agentic inference: the frontend, router, and KV cache management. This follow-up focuses on correctness, user-experience equivalence, and performance.
 
 Agentic harnesses are still evolving quickly. Claude Code, Codex, and OpenClaw expose the same pressure points from different API surfaces, so the examples below focus on the core behaviors that custom serving stacks need to reproduce.
 

@@ -61,8 +61,9 @@ navigation:
                 path: getting-started/introduction.mdx
               - page: Quickstart
                 path: kubernetes/README.md
-              - page: Compatibility
-                path: reference/compatibility.mdx
+              - link: Compatibility
+                href: /dynamo/dev/reference/compatibility
+                target: _blank
               # - page: Local Quickstart
               #   path: getting-started/quickstart.mdx
 
@@ -70,8 +71,6 @@ navigation:
             icon: download
             collapsed: open-by-default
             contents:
-            - page: Get Dynamo
-              path: getting-started/get-dynamo.mdx
             - page: Install Dynamo
               path: kubernetes/installation-guide.md
             - page: Multinode Orchestration
@@ -188,13 +187,14 @@ navigation:
                 path: cli/introduction.mdx
               - page: Quickstart
                 path: getting-started/quickstart.mdx
+              - link: Compatibility
+                href: /dynamo/dev/reference/compatibility
+                target: _blank
 
           - section: Installation
             icon: download
             collapsed: open-by-default
             contents:
-              - page: Get Dynamo
-                path: getting-started/get-dynamo.mdx
               - page: Install Dynamo
                 path: getting-started/local-installation.mdx
               - page: Building from Source
@@ -654,6 +654,23 @@ navigation:
                     path: design-docs/graceful-shutdown.md
                   - page: Fault Tolerance Testing
                     path: design-docs/fault-tolerance-testing.md
+      - section: Contributing
+        icon: code-pull-request
+        contents:
+          - page: Contribution Guide
+            path: contribution-guide.md
+            slug: contribution-guide
+
+      - section: Documentation
+        icon: file-lines
+        contents:
+          - page: Documentation Style Guide
+            path: documentation-style-guide.md
+            slug: style-guide
+          - page: Building and Publishing
+            path: README.md
+            slug: building-and-publishing
+
       - section: Advanced Customizations
         icon: sliders
         contents:
@@ -726,6 +743,8 @@ navigation:
         icon: circle-info
         slug: reference
         layout:
+          - page: Compatibility
+            path: reference/compatibility.mdx
           - page: Release Artifacts
             path: reference/release-artifacts.mdx
           - page: Glossary

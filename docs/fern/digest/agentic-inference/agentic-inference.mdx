@@ -2,12 +2,25 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Full-Stack Optimizations for Agentic Inference with Dynamo
-sidebar-title: Full-Stack Optimizations for Agentic Inference
+sidebar-title: Agentic Inference Optimizations
 subtitle: "Ishan Dhanani and Matej Kosec — March 2026"
 description: "How Dynamo optimizes for agentic workloads at three layers: frontend API, router, and KV cache management."
 keywords: agentic inference, KV cache, prefix caching, agent hints, disaggregated serving, Dynamo
 last-updated: June 12, 2026
+hide-page-actions: true
 ---
+
+import { BlogArticleMeta } from "@/components/BlogArticleMeta";
+
+<BlogArticleMeta
+  authors={[
+    { name: "Ishan Dhanani" },
+    { name: "Matej Kosec" },
+  ]}
+  category="Architecture"
+  date="March 2026"
+  readTime="16 min read"
+/>
 
 Coding agents are starting to write production code at scale. [Stripe’s agents generate 1,300+ PRs per week](https://stripe.dev/blog/minions-stripes-one-shot-end-to-end-coding-agents). [Ramp attributes 30% of merged PRs to agents](https://www.infoq.com/news/2026/01/ramp-coding-agent-platform/). [Spotify reports 650+ agent-generated PRs per month](https://engineering.atspotify.com/2025/11/spotifys-background-coding-agent-part-1). Tools like Claude Code and Codex make hundreds of API calls per coding session, each carrying the full conversation history. Behind every one of these workflows is an inference stack under significant KV cache pressure.
 
@@ -90,7 +103,7 @@ A coding agent follows a sequential pattern: long prefill, tool call, extend pre
 
 ### KV-Aware Placement
 
-Without cache-aware routing, turn 2 of a conversation has a ~1/N chance of landing on the same worker as turn 1. Every miss is a full prefix recomputation which is a significant performance bottleneck and extremely costly for an end user. Dynamo's router maintains a global index of which KV cache blocks exist on which workers. The [Flash Indexer post](../flash-indexer/flash-indexer.md) covers the six iterations that got this indexer to 170M ops/s (**planetary** scale KV routing). On every request, the router queries the index for per-worker overlap scores and selects the worker that minimizes the combined cost of cache miss and current decode load. This cost function is tunable, and we show below how teams can build custom agent aware routing strategies on top of it.
+Without cache-aware routing, turn 2 of a conversation has a ~1/N chance of landing on the same worker as turn 1. Every miss is a full prefix recomputation which is a significant performance bottleneck and extremely costly for an end user. Dynamo's router maintains a global index of which KV cache blocks exist on which workers. The [Flash Indexer post](../flash-indexer/flash-indexer.mdx) covers the six iterations that got this indexer to 170M ops/s (**planetary** scale KV routing). On every request, the router queries the index for per-worker overlap scores and selects the worker that minimizes the combined cost of cache miss and current decode load. This cost function is tunable, and we show below how teams can build custom agent aware routing strategies on top of it.
 
 ### Priority Scheduling
 

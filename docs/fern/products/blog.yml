@@ -19,21 +19,23 @@ navigation:
     path: ../digest/index.mdx
     slug: /
     contents:
-      - page: "Flash Indexer: Inter-Galactic KV Routing"
-        path: ../digest/flash-indexer/flash-indexer.md
-        slug: flash-indexer
-      - page: "Full-Stack Optimizations for Agentic Inference"
-        path: ../digest/agentic-inference/agentic-inference.md
-        slug: agentic-inference
-      - page: "Multi-Turn Agentic Harnesses"
-        path: ../digest/agentic-inference/agentic-harnesses.md
-        slug: agentic-harnesses
-      - page: "DynoSim: Simulating the Pareto Frontier"
-        path: ../digest/dynosim/dynosim-pareto-frontier.md
+      # Keep this archive in reverse chronological order. Publication dates are
+      # rendered in each article header and on the custom landing page.
+      - page: "DynoSim Pareto Frontier"
+        path: ../digest/dynosim/dynosim-pareto-frontier.mdx
         slug: dynosim-pareto-frontier
-      - page: "NVIDIA Dynamo Snapshot: Fast Startup for Inference Workloads on Kubernetes"
-        path: ../digest/snapshot/dynamo-snapshot-fast-startup.md
+      - page: "Dynamo Snapshot"
+        path: ../digest/snapshot/dynamo-snapshot-fast-startup.mdx
         slug: dynamo-snapshot-fast-startup
-      - page: "Dynamo Day 0 support for TokenSpeed"
-        path: ../digest/tokenspeed/tokenspeed-day-0.md
+      - page: "TokenSpeed Day 0 Support"
+        path: ../digest/tokenspeed/tokenspeed-day-0.mdx
         slug: tokenspeed-day-0
+      - page: "Agentic Harness Support"
+        path: ../digest/agentic-inference/agentic-harnesses.mdx
+        slug: agentic-harnesses
+      - page: "Agentic Inference Optimizations"
+        path: ../digest/agentic-inference/agentic-inference.mdx
+        slug: agentic-inference
+      - page: "Flash Indexer"
+        path: ../digest/flash-indexer/flash-indexer.mdx
+        slug: flash-indexer

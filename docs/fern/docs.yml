@@ -109,6 +109,24 @@ redirects:
     destination: "/dynamo/latest/resources/release-artifacts"
   - source: "/dynamo/latest/getting-started/examples"
     destination: "/dynamo/latest/resources/examples"
+  # Community is now a standalone landing page. Contributor and documentation
+  # guides live in the Developer Guide.
+  - source: "/dynamo/connect/contributing-to-dynamo"
+    destination: "/dynamo/dev/contributing/contribution-guide"
+  - source: "/dynamo/connect/contributing/contributing-to-dynamo"
+    destination: "/dynamo/dev/contributing/contribution-guide"
+  - source: "/dynamo/connect/documentation-style-guide"
+    destination: "/dynamo/dev/documentation/style-guide"
+  - source: "/dynamo/connect/contributing/documentation-style-guide"
+    destination: "/dynamo/dev/documentation/style-guide"
+  - source: "/dynamo/connect/docs-website"
+    destination: "/dynamo/dev/documentation/building-and-publishing"
+  - source: "/dynamo/connect/contributing/docs-website"
+    destination: "/dynamo/dev/documentation/building-and-publishing"
+  - source: "/dynamo/getting-started/contribution-guide"
+    destination: "/dynamo/contributing/contribution-guide"
+  - source: "/dynamo/dev/getting-started/contribution-guide"
+    destination: "/dynamo/dev/contributing/contribution-guide"
   # Documentation section: style guide moved out of getting-started, and the
   # docs-system guide ("Dynamo Docs Guide") was renamed. Dev-only (main).
   - source: "/dynamo/dev/getting-started/documentation-style-guide"

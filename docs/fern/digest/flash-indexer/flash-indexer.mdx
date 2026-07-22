@@ -6,7 +6,24 @@ subtitle: "Rudy Pei, [John Thomson](https://developer.nvidia.com/blog/author/jwi
 description: "Dynamo's Flash Indexer tracks every cached KV block across all inference workers at 170M ops/s. Six iterations of data structure design got it there."
 keywords: KV cache, prefix caching, LLM inference, radix tree, distributed inference, disaggregated serving, Dynamo, concurrent data structures, block routing
 last-updated: February 23, 2026
+hide-page-actions: true
 ---
+
+import { BlogArticleMeta } from "@/components/BlogArticleMeta";
+
+<BlogArticleMeta
+  authors={[
+    { name: "Rudy Pei" },
+    { name: "John Thomson", href: "https://developer.nvidia.com/blog/author/jwillthomson/" },
+    { name: "Janelle Cai" },
+    { name: "Alec Flowers" },
+    { name: "Ryan Olson" },
+    { name: "Dan Gil" },
+  ]}
+  category="Engineering"
+  date="February 23, 2026"
+  readTime="13 min read"
+/>
 
 The **Flash Indexer** is a concurrent global index of every cached KV block across every inference worker, sustaining over **100 million operations per second**. It evolved through six iterations—from a Python dictionary to a jump-optimized spatial index—to the point where network latency, tokenization, and hashing are the bottlenecks. We're shipping it as the default indexer in Dynamo v1.0.0.
 

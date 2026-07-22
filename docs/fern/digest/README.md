@@ -1,93 +1,99 @@
-# Adding a Digest Post
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
 
-Follow these steps to publish a new Digest post on the Dynamo docs site.
+# Adding a Blog Post
 
-## Step 1: Write the Digest Post
+Follow these steps to publish a post in the Dynamo Blog product.
 
-Create a new Markdown file in this folder (`docs/digest/`):
+## Step 1: Write the Post
+
+Create an MDX file under `docs/digest/` using a topic folder when the post has supporting images:
 
 ```text
-docs/digest/my-post-slug.md
+docs/digest/my-post/my-post.mdx
 ```
 
-Use kebab-case for the filename. The filename becomes the URL slug
-(e.g., `my-post-slug.md` serves at `/dynamo/dev/digest/my-post-slug`).
-
-Add frontmatter at the top of the file:
+Use kebab-case for the filename. Add the standard SPDX header and metadata:
 
 ```yaml
 ---
-title: Your Digest Post Title
-description: A one-sentence summary shown in search results and social previews.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Your Blog Post Title
+description: A one-sentence summary for search results and social previews.
+keywords: Dynamo, inference
+last-updated: July 22, 2026
 ---
 ```
 
-## Step 2: Add the Post to Navigation
-
-Open `docs/index.yml` and add a page entry under the **Digest** section:
-
-```yaml
-  - section: Digest
-    path: digest/index.mdx
-    slug: digest
-    contents:
-      - page: Your Digest Post Title
-        path: digest/my-post-slug.md
-```
-
-Each new post gets a `- page:` entry in the `contents` list. The `page`
-value is the display name in the sidebar; the `path` points to your file.
-
-## Step 3: Add a Card to the Landing Page
-
-Open `docs/digest/index.mdx` and add a `<Card>` inside the existing `<CardGroup>`:
+Import and render the editorial metadata component immediately after the frontmatter:
 
 ```mdx
-<Card
-  title="Your Digest Post Title"
-  icon="regular newspaper"
-  href="/dynamo/dev/digest/my-post-slug"
->
-  A brief summary of what this post covers (1-2 sentences).
-</Card>
+import { BlogArticleMeta } from "@/components/BlogArticleMeta";
+
+<BlogArticleMeta
+  authors={[
+    { name: "Author One", github: "verified-handle" },
+    { name: "Author Two", href: "https://developer.nvidia.com/blog/author/verified-profile/" },
+  ]}
+  category="Engineering"
+  date="July 22, 2026"
+  readTime="8 min read"
+/>
 ```
 
-### Card Fields
+Estimate reading time from the body word count at approximately 200 words per minute.
+Only add `github` after verifying that the account belongs to the credited author. Git blame and
+commit authorship are not substitutes for editorial authorship. Authors without a verified profile
+render with an initials avatar and name tooltip.
 
-| Field  | Required | Description                                              |
-|--------|----------|----------------------------------------------------------|
-| title  | Yes      | Post title displayed on the card                         |
-| icon   | No       | Font Awesome icon class (e.g., `regular bolt`)           |
-| href   | Yes      | URL path starting with `/dynamo/dev/digest/`             |
-| (body) | Yes      | Short summary text inside the Card tags                  |
+The `category` selects the article's generated editorial cover palette and flow labels. Supporting
+images in the article body receive the standard focus-to-sharp scroll reveal automatically.
 
-The `<CardGroup cols={2}>` wrapper is already in `index.mdx`. Just add your
-`<Card>` inside it.
+## Step 2: Add the Post to the Blog Navigation
 
-Browse icons at https://fontawesome.com/icons (Free tier).
-
-## Step 4 (Optional): Add the Post to the Navbar Dropdown
-
-Open `fern/docs.yml` and add a link under the Digest dropdown in `navbar-links`:
+Open `docs/fern/products/blog.yml` and add the post at the correct position in the reverse-chronological list:
 
 ```yaml
-navbar-links:
-  - type: dropdown
-    text: Digest
-    links:
-      - text: All Posts
-        href: /dynamo/dev/digest
-      - text: Your Digest Post Title
-        href: /dynamo/dev/digest/my-post-slug
+contents:
+  - page: Your Blog Post Title
+    path: ../digest/my-post/my-post.mdx
+    slug: my-post
 ```
 
-Only add featured/recent posts here. The dropdown should stay short (5 items max).
-Posts that are no longer featured can be removed from the dropdown while remaining
-accessible from the landing page and sidebar.
+Keep the explicit `slug` stable after publication. The public URL is `/dynamo/blog/my-post`.
+
+## Step 3: Add the Post to the Landing Page
+
+Open `docs/fern/components/BlogLanding.tsx` and add an entry to `ARTICLES` in reverse chronological order:
+
+```tsx
+{
+  title: "Your Blog Post Title",
+  description: "A concise summary of the post.",
+  href: "/dynamo/blog/my-post",
+  date: "July 22, 2026",
+  readTime: "8 min read",
+  category: "Engineering",
+  art: "indexer",
+},
+```
+
+Use an existing `art` treatment unless the post needs a deliberately new visual direction. The landing page uses custom React and CSS rather than Fern card components.
+
+## Step 4: Add the Sidebar Date Label
+
+Add the post date to the Blog archive selectors in `docs/fern/main.css`. Scope the selector to the post slug so the label appears only in the Blog sidebar.
 
 ## Quick Checklist
 
-- [ ] Digest post `.md` file created in `docs/digest/`
-- [ ] Page entry added to `docs/index.yml` under the Digest section
-- [ ] Card added to `docs/digest/index.mdx`
-- [ ] (Optional) Link added to the Digest dropdown in `fern/docs.yml`
+- [ ] MDX post includes SPDX frontmatter and metadata
+- [ ] `BlogArticleMeta` includes author, publication date, category, and reading time
+- [ ] Generated cover labels and category palette fit the article
+- [ ] Post is added to `products/blog.yml` in reverse chronological order
+- [ ] Post is added to `BlogLanding.tsx`
+- [ ] Sidebar date label is added to `main.css`
+- [ ] Internal links include the `.mdx` extension
+- [ ] `fern check --local --warnings` passes without new errors
