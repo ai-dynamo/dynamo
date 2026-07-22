@@ -216,6 +216,9 @@ fn merge_router_hint_tier_candidates(
             (!hashes.is_empty()).then_some((*worker, continuation.start_pos, hashes.as_slice()))
         })
         .collect::<Vec<_>>();
+    // Router hints intentionally retain one compact root-aligned chain. When
+    // workers diverge at the same extension position, this deterministic order
+    // decides which branch is represented beyond the shared prefix.
     extension_rows.sort_unstable_by_key(|(worker, start_pos, _)| (*start_pos, *worker));
 
     for (worker, start_pos, hashes) in extension_rows {
@@ -440,6 +443,62 @@ mod tests {
             ]
         );
         assert_eq!(candidates.owner_prefix_blocks, vec![(worker, 2)]);
+    }
+
+    #[tokio::test]
+    async fn query_lower_tiers_keeps_divergent_hint_source_at_shared_prefix() {
+        let indexers = LowerTierIndexers::new(1, 4);
+        let worker_1 = WorkerWithDpRank::new(7, 0);
+        let worker_2 = WorkerWithDpRank::new(8, 0);
+        let lower_tier = indexers.get_or_create(StorageTier::HostPinned);
+        lower_tier
+            .apply_event(store_event(7, 0, 0, Some(101), &[12], &[102]))
+            .await;
+        lower_tier
+            .apply_event(store_event(8, 0, 1, Some(101), &[12], &[202]))
+            .await;
+        let _ = lower_tier.dump_events().await.unwrap();
+
+        let mut overlap_scores = OverlapScores::new();
+        overlap_scores.scores.insert(worker_1, 1);
+        overlap_scores.scores.insert(worker_2, 1);
+        let mut last_matched_hashes = FxHashMap::default();
+        last_matched_hashes.insert(worker_1, ExternalSequenceBlockHash(101));
+        last_matched_hashes.insert(worker_2, ExternalSequenceBlockHash(101));
+        let device_matches = MatchDetails {
+            overlap_scores,
+            last_matched_hashes,
+            router_hint_root_candidates: Some(RouterHintRootCandidates {
+                block_hashes: vec![ExternalSequenceBlockHash(101)],
+                owner_prefix_blocks: vec![(worker_1, 1), (worker_2, 1)],
+            }),
+        };
+
+        let sequence = local_hashes(&[11, 12, 13]);
+        let result = query_lower_tiers_with_options(
+            &indexers,
+            &sequence,
+            &device_matches,
+            LowerTierQueryOptions {
+                retain_router_hint_chain: true,
+            },
+        );
+        let candidates = result
+            .get(&StorageTier::HostPinned)
+            .and_then(|details| details.router_hint_root_candidates.as_ref())
+            .unwrap();
+
+        assert_eq!(
+            candidates.block_hashes,
+            vec![
+                ExternalSequenceBlockHash(101),
+                ExternalSequenceBlockHash(102),
+            ]
+        );
+        assert_eq!(
+            candidates.owner_prefix_blocks,
+            vec![(worker_1, 2), (worker_2, 1)]
+        );
     }
 
     #[tokio::test]
