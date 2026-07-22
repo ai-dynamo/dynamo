@@ -76,7 +76,9 @@ class Framework:
 FRAMEWORKS = [
     Framework("vLLM", "vllm", "cuda13.0", re.compile(r"^v\d+\.\d+\.\d+")),
     Framework("SGLang", "sglang", "cuda13.0", re.compile(r"^v\d+\.\d+")),
-    Framework("TensorRT-LLM", "trtllm", "cuda13.1", re.compile(r"^\d+\.\d+\.\d+rc\d+")),
+    Framework(
+        "TensorRT-LLM", "trtllm", "cuda13.1", re.compile(r"^\d+\.\d+\.\d+(rc\d+)?")
+    ),
 ]
 
 
