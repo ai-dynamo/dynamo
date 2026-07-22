@@ -36,7 +36,7 @@ CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} python3 -m sglang.launch_server 
     --openengine-port "$OPENENGINE_PORT" \
     --page-size 16 \
     --enable-lora \
-    --kv-events-config "{\"publisher\":\"zmq\",\"endpoint\":\"tcp://127.0.0.1:$KV_EVENT_PORT\",\"topic\":\"\"}" \
+    --kv-events-config "{\"publisher\":\"zmq\",\"endpoint\":\"tcp://*:$KV_EVENT_PORT\",\"topic\":\"\"}" \
     $GPU_MEM_ARGS &
 DYN_SYSTEM_PORT="$SYSTEM_PORT" dynamo-openengine-sidecar \
     --openengine-endpoint "http://127.0.0.1:$OPENENGINE_PORT" \

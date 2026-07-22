@@ -48,7 +48,7 @@ VLLM_NIXL_SIDE_CHANNEL_PORT="$PREFILL_NIXL_PORT" \
     --enable-lora \
     --max-loras 4 \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}' \
-    --kv-events-config "{\"enable_kv_cache_events\":true,\"publisher\":\"zmq\",\"endpoint\":\"tcp://127.0.0.1:$PREFILL_EVENT_PORT\",\"topic\":\"kv-events\"}" \
+    --kv-events-config "{\"enable_kv_cache_events\":true,\"publisher\":\"zmq\",\"endpoint\":\"tcp://*:$PREFILL_EVENT_PORT\",\"topic\":\"kv-events\"}" \
     $GPU_MEM_ARGS &
 CUDA_VISIBLE_DEVICES=${DECODE_CUDA_VISIBLE_DEVICES:-1} \
 VLLM_USE_RUST_FRONTEND=1 \
@@ -63,7 +63,7 @@ VLLM_NIXL_SIDE_CHANNEL_PORT="$DECODE_NIXL_PORT" \
     --enable-lora \
     --max-loras 4 \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}' \
-    --kv-events-config "{\"enable_kv_cache_events\":true,\"publisher\":\"zmq\",\"endpoint\":\"tcp://127.0.0.1:$DECODE_EVENT_PORT\",\"topic\":\"kv-events\"}" \
+    --kv-events-config "{\"enable_kv_cache_events\":true,\"publisher\":\"zmq\",\"endpoint\":\"tcp://*:$DECODE_EVENT_PORT\",\"topic\":\"kv-events\"}" \
     $GPU_MEM_ARGS &
 
 DYN_SYSTEM_PORT="$PREFILL_SYSTEM_PORT" dynamo-openengine-sidecar \

@@ -72,7 +72,7 @@ spec:
           - --max-loras
           - "4"
           - --kv-events-config
-          - '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://127.0.0.1:5557","topic":"kv-events"}'
+          - '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","topic":"kv-events"}'
           command: [vllm, serve]
           env:
           - name: HF_HOME

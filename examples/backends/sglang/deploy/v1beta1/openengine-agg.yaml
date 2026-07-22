@@ -57,7 +57,7 @@ spec:
           - "16"
           - --enable-lora
           - --kv-events-config
-          - '{"publisher":"zmq","endpoint":"tcp://127.0.0.1:5557","topic":""}'
+          - '{"publisher":"zmq","endpoint":"tcp://*:5557","topic":""}'
           command: [python3, -m, sglang.launch_server]
           env:
           - {name: HF_HOME, value: /model-cache}

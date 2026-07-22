@@ -45,7 +45,7 @@ CUDA_VISIBLE_DEVICES=${PREFILL_CUDA_VISIBLE_DEVICES:-0} python3 -m sglang.launch
     --disaggregation-mode prefill \
     --disaggregation-transfer-backend nixl \
     --disaggregation-bootstrap-port "$BOOTSTRAP_PORT" \
-    --kv-events-config "{\"publisher\":\"zmq\",\"endpoint\":\"tcp://127.0.0.1:$PREFILL_EVENT_PORT\",\"topic\":\"\"}" \
+    --kv-events-config "{\"publisher\":\"zmq\",\"endpoint\":\"tcp://*:$PREFILL_EVENT_PORT\",\"topic\":\"\"}" \
     $GPU_MEM_ARGS &
 CUDA_VISIBLE_DEVICES=${DECODE_CUDA_VISIBLE_DEVICES:-1} python3 -m sglang.launch_server \
     --model-path "$MODEL" \
@@ -59,7 +59,7 @@ CUDA_VISIBLE_DEVICES=${DECODE_CUDA_VISIBLE_DEVICES:-1} python3 -m sglang.launch_
     --disaggregation-mode decode \
     --disaggregation-transfer-backend nixl \
     --disaggregation-bootstrap-port "$BOOTSTRAP_PORT" \
-    --kv-events-config "{\"publisher\":\"zmq\",\"endpoint\":\"tcp://127.0.0.1:$DECODE_EVENT_PORT\",\"topic\":\"\"}" \
+    --kv-events-config "{\"publisher\":\"zmq\",\"endpoint\":\"tcp://*:$DECODE_EVENT_PORT\",\"topic\":\"\"}" \
     $GPU_MEM_ARGS &
 
 DYN_SYSTEM_PORT="$PREFILL_SYSTEM_PORT" dynamo-openengine-sidecar \

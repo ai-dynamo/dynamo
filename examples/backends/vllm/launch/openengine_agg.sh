@@ -42,7 +42,7 @@ CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} VLLM_USE_RUST_FRONTEND=1 \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
     --enable-lora \
     --max-loras 4 \
-    --kv-events-config "{\"enable_kv_cache_events\":true,\"publisher\":\"zmq\",\"endpoint\":\"tcp://127.0.0.1:$KV_EVENT_PORT\",\"topic\":\"kv-events\"}" \
+    --kv-events-config "{\"enable_kv_cache_events\":true,\"publisher\":\"zmq\",\"endpoint\":\"tcp://*:$KV_EVENT_PORT\",\"topic\":\"kv-events\"}" \
     $GPU_MEM_ARGS &
 DYN_SYSTEM_PORT="$SYSTEM_PORT" dynamo-openengine-sidecar \
     --openengine-endpoint "http://127.0.0.1:$OPENENGINE_PORT" \
