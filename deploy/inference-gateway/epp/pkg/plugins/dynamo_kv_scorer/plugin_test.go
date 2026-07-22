@@ -17,27 +17,35 @@ limitations under the License.
 package dynamo_kv_scorer
 
 import (
-	"reflect"
+	"encoding/json"
 	"testing"
 
 	fwkrh "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/requesthandling"
 	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling"
 )
 
-// TestBuildOpenAIRequest_ForwardsAgentHintsPriority pins the contract that
-// nvext.agent_hints.priority arriving on the original request body is
-// preserved in the JSON sent across FFI to the Rust router. Without this,
-// the router falls back to priority_jump=0.0 for every request and queue
-// ordering silently regresses.
-func TestBuildOpenAIRequest_ForwardsAgentHintsPriority(t *testing.T) {
+// ffiBody builds the FFI JSON and parses it back into a map for assertions.
+func ffiBody(t *testing.T, req *schedtypes.InferenceRequest) map[string]any {
+	t.Helper()
+	s, err := BuildOpenAIRequestJSON(req)
+	if err != nil {
+		t.Fatalf("BuildOpenAIRequestJSON returned error: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal([]byte(s), &body); err != nil {
+		t.Fatalf("failed to unmarshal FFI JSON: %v (json=%s)", err, s)
+	}
+	return body
+}
+
+// TestBuildOpenAIRequestJSON_ForwardsAgentHintsPriority pins the contract that
+// nvext.agent_hints.priority on the original request body is preserved in the
+// JSON sent across FFI to the Rust router. Without it, the router falls back to
+// priority_jump=0.0 for every request and queue ordering silently regresses.
+func TestBuildOpenAIRequestJSON_ForwardsAgentHintsPriority(t *testing.T) {
 	req := &schedtypes.InferenceRequest{
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			ChatCompletions: &fwkrh.ChatCompletionsRequest{
-				Messages: []fwkrh.Message{
-					{Role: "user", Content: fwkrh.Content{Raw: "hi"}},
-				},
-			},
 			Payload: fwkrh.PayloadMap{
 				"messages": []any{map[string]any{"role": "user", "content": "hi"}},
 				"model":    "test-model",
@@ -46,11 +54,7 @@ func TestBuildOpenAIRequest_ForwardsAgentHintsPriority(t *testing.T) {
 		},
 	}
 
-	body, err := BuildOpenAIRequest(req)
-	if err != nil {
-		t.Fatalf("BuildOpenAIRequest returned error: %v", err)
-	}
-
+	body := ffiBody(t, req)
 	nvext, ok := body["nvext"].(map[string]any)
 	if !ok {
 		t.Fatalf("expected nvext to be a map, got %T", body["nvext"])
@@ -59,20 +63,17 @@ func TestBuildOpenAIRequest_ForwardsAgentHintsPriority(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected agent_hints to be a map, got %T", nvext["agent_hints"])
 	}
-	if got := hints["priority"]; got != 7 {
-		t.Fatalf("expected priority=7 forwarded to FFI body, got %v", got)
+	if got := hints["priority"]; got != float64(7) { // JSON numbers decode to float64
+		t.Fatalf("expected priority=7 forwarded to FFI body, got %v (%T)", got, got)
 	}
 }
 
-func TestBuildOpenAIRequest_ForwardsLegacyTopLevelCacheSalt(t *testing.T) {
+// TestBuildOpenAIRequestJSON_ForwardsLegacyTopLevelCacheSalt verifies a
+// top-level cache_salt on the request body is forwarded to the router.
+func TestBuildOpenAIRequestJSON_ForwardsLegacyTopLevelCacheSalt(t *testing.T) {
 	req := &schedtypes.InferenceRequest{
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			ChatCompletions: &fwkrh.ChatCompletionsRequest{
-				Messages: []fwkrh.Message{
-					{Role: "user", Content: fwkrh.Content{Raw: "hi"}},
-				},
-			},
 			Payload: fwkrh.PayloadMap{
 				"messages":   []any{map[string]any{"role": "user", "content": "hi"}},
 				"model":      "test-model",
@@ -81,104 +82,20 @@ func TestBuildOpenAIRequest_ForwardsLegacyTopLevelCacheSalt(t *testing.T) {
 		},
 	}
 
-	body, err := BuildOpenAIRequest(req)
-	if err != nil {
-		t.Fatalf("BuildOpenAIRequest returned error: %v", err)
-	}
+	body := ffiBody(t, req)
 	if got := body["cache_salt"]; got != "tenant-legacy" {
 		t.Fatalf("expected legacy cache_salt forwarded to FFI body, got %v", got)
 	}
 }
 
-func TestBuildOpenAIRequest_CompletionsTokenPromptUsesPromptIDs(t *testing.T) {
-	req := &schedtypes.InferenceRequest{
-		TargetModel: "test-model",
-		Body: &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{
-				Prompt: fwkrh.Prompt{TokenIDs: []uint32{101, 102, 103}},
-			},
-		},
-	}
-
-	body, err := BuildOpenAIRequest(req)
-	if err != nil {
-		t.Fatalf("BuildOpenAIRequest returned error: %v", err)
-	}
-
-	if _, ok := body["messages"]; ok {
-		t.Fatalf("did not expect token-id completions to synthesize messages: %v", body["messages"])
-	}
-	if got := body["prompt"]; !reflect.DeepEqual(got, []uint32{101, 102, 103}) {
-		t.Fatalf("expected prompt token IDs, got %#v", got)
-	}
-	if got := body["model"]; got != "test-model" {
-		t.Fatalf("expected model=test-model, got %v", got)
-	}
-}
-
-func TestBuildOpenAIRequest_CompletionsTextPromptKeepsLegacyMessageShape(t *testing.T) {
-	req := &schedtypes.InferenceRequest{
-		TargetModel: "test-model",
-		Body: &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{
-				Prompt: fwkrh.Prompt{Raw: "hello"},
-			},
-		},
-	}
-
-	body, err := BuildOpenAIRequest(req)
-	if err != nil {
-		t.Fatalf("BuildOpenAIRequest returned error: %v", err)
-	}
-
-	if _, ok := body["prompt"]; ok {
-		t.Fatalf("did not expect text completions to change to prompt field: %v", body["prompt"])
-	}
-	messages, ok := body["messages"].([]map[string]any)
-	if !ok {
-		t.Fatalf("expected legacy messages shape, got %#v", body["messages"])
-	}
-	if len(messages) != 1 || messages[0]["role"] != "user" || messages[0]["content"] != "hello" {
-		t.Fatalf("expected single user message with content=hello, got %#v", messages)
-	}
-}
-
-func TestBuildOpenAIRequest_CompletionsStringArrayPromptKeepsLegacyMessageShape(t *testing.T) {
-	req := &schedtypes.InferenceRequest{
-		TargetModel: "test-model",
-		Body: &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{
-				Prompt: fwkrh.Prompt{Strings: []string{"hello", "world"}},
-			},
-		},
-	}
-
-	body, err := BuildOpenAIRequest(req)
-	if err != nil {
-		t.Fatalf("BuildOpenAIRequest returned error: %v", err)
-	}
-
-	if _, ok := body["prompt"]; ok {
-		t.Fatalf("did not expect string-array completions to change to prompt field: %v", body["prompt"])
-	}
-	messages, ok := body["messages"].([]map[string]any)
-	if !ok {
-		t.Fatalf("expected legacy messages shape, got %#v", body["messages"])
-	}
-	if len(messages) != 1 || messages[0]["role"] != "user" || messages[0]["content"] != "hello world" {
-		t.Fatalf("expected single user message with content='hello world', got %#v", messages)
-	}
-}
-
-// TestBuildOpenAIRequest_PreservesToolCallFields pins the contract that a
-// multi-turn tool conversation survives intact in the JSON sent across FFI to
-// the Rust router. The router parses this body and re-renders the model's chat
-// template to tokenize, so it needs the full message structure. If tool_calls /
-// tool_call_id are dropped, the router's strict parse fails with
-// "missing field tool_call_id" and the request is unroutable (503 no healthy
-// upstream); reasoning/tool parsing is also lost when the template renders an
-// incomplete prompt.
-func TestBuildOpenAIRequest_PreservesToolCallFields(t *testing.T) {
+// TestBuildOpenAIRequestJSON_PreservesToolCallFields pins the contract that a
+// multi-turn tool conversation survives intact in the JSON sent across FFI. The
+// router parses this body and re-renders the model's chat template to tokenize,
+// so it needs the full message structure. If tool_calls / tool_call_id are
+// dropped, the router's strict parse fails ("missing field tool_call_id") and
+// the request is unroutable (503 no healthy upstream); reasoning/tool parsing is
+// also lost when the template renders an incomplete prompt.
+func TestBuildOpenAIRequestJSON_PreservesToolCallFields(t *testing.T) {
 	toolCall := map[string]any{
 		"id":   "call-abc",
 		"type": "function",
@@ -190,15 +107,6 @@ func TestBuildOpenAIRequest_PreservesToolCallFields(t *testing.T) {
 	req := &schedtypes.InferenceRequest{
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			// The typed view only carries role+content; the raw payload below is
-			// the source of truth and must be forwarded verbatim.
-			ChatCompletions: &fwkrh.ChatCompletionsRequest{
-				Messages: []fwkrh.Message{
-					{Role: "user", Content: fwkrh.Content{Raw: "weather in Tokyo?"}},
-					{Role: "assistant", Content: fwkrh.Content{Raw: ""}},
-					{Role: "tool", Content: fwkrh.Content{Raw: "18C rain"}},
-				},
-			},
 			Payload: fwkrh.PayloadMap{
 				"model": "alias-model",
 				"messages": []any{
@@ -210,10 +118,7 @@ func TestBuildOpenAIRequest_PreservesToolCallFields(t *testing.T) {
 		},
 	}
 
-	body, err := BuildOpenAIRequest(req)
-	if err != nil {
-		t.Fatalf("BuildOpenAIRequest returned error: %v", err)
-	}
+	body := ffiBody(t, req)
 
 	// Target model must override the caller's alias.
 	if got := body["model"]; got != "test-model" {
@@ -221,11 +126,8 @@ func TestBuildOpenAIRequest_PreservesToolCallFields(t *testing.T) {
 	}
 
 	msgs, ok := body["messages"].([]any)
-	if !ok {
-		t.Fatalf("expected messages []any from raw payload, got %T", body["messages"])
-	}
-	if len(msgs) != 3 {
-		t.Fatalf("expected 3 messages, got %d", len(msgs))
+	if !ok || len(msgs) != 3 {
+		t.Fatalf("expected 3 messages, got %#v", body["messages"])
 	}
 
 	// Assistant turn must retain tool_calls.
@@ -244,5 +146,50 @@ func TestBuildOpenAIRequest_PreservesToolCallFields(t *testing.T) {
 	}
 	if got := tool["tool_call_id"]; got != "call-abc" {
 		t.Fatalf("tool message lost tool_call_id: got %v in %#v", got, tool)
+	}
+}
+
+// TestBuildOpenAIRequestJSON_ForwardsCompletionsPayload verifies a /v1/completions
+// body is forwarded verbatim (the Rust preprocessor handles it via the prompt
+// field), with only the model overridden to the resolved target.
+func TestBuildOpenAIRequestJSON_ForwardsCompletionsPayload(t *testing.T) {
+	req := &schedtypes.InferenceRequest{
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			Payload: fwkrh.PayloadMap{
+				"model":  "alias-model",
+				"prompt": "hello world",
+			},
+		},
+	}
+
+	body := ffiBody(t, req)
+	if got := body["prompt"]; got != "hello world" {
+		t.Fatalf("expected prompt forwarded, got %v", got)
+	}
+	if got := body["model"]; got != "test-model" {
+		t.Fatalf("expected model overridden to test-model, got %v", got)
+	}
+}
+
+// TestBuildOpenAIRequestJSON_MissingPayloadReturnsError verifies that when the
+// raw payload is unavailable the request is not KV-routable: an error is
+// returned so the scorer falls back to non-KV routing rather than a lossy
+// role/content reconstruction (which would drop tool-calling fields).
+func TestBuildOpenAIRequestJSON_MissingPayloadReturnsError(t *testing.T) {
+	req := &schedtypes.InferenceRequest{
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			ChatCompletions: &fwkrh.ChatCompletionsRequest{
+				Messages: []fwkrh.Message{
+					{Role: "user", Content: fwkrh.Content{Raw: "hi"}},
+				},
+			},
+			// No Payload set — the typed view cannot carry tool-calling fields.
+		},
+	}
+
+	if _, err := BuildOpenAIRequestJSON(req); err == nil {
+		t.Fatalf("expected an error when the raw payload is unavailable, got nil")
 	}
 }

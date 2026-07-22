@@ -283,127 +283,38 @@ func SerializeEndpointsToJSON(endpoints []schedtypes.Endpoint) (string, error) {
 	return string(data), nil
 }
 
-func BuildOpenAIRequest(req *schedtypes.InferenceRequest) (map[string]any, error) {
+// BuildOpenAIRequestJSON serializes the request as an OpenAI-compatible JSON
+// body for the Rust router's FFI.
+//
+// A successfully parsed OpenAI request always yields a populated Payload holding
+// the complete body, so it is forwarded verbatim (overriding only the resolved
+// target model). This preserves tool_calls, tool_call_id, tools, and reasoning
+// content that the router's strict parse and chat-template rendering require —
+// fields the typed ChatCompletions view does not model. When the payload is
+// unavailable the request cannot be KV-routed, so an error is returned and the
+// scorer falls back to non-KV routing rather than a lossy reconstruction.
+func BuildOpenAIRequestJSON(req *schedtypes.InferenceRequest) (string, error) {
 	if req == nil || req.Body == nil {
-		return nil, fmt.Errorf("missing request body")
+		return "", fmt.Errorf("missing request body")
 	}
 
-	// Prefer the full, original request body. The Rust router parses this JSON
-	// and re-renders the model's chat template to tokenize for KV-aware routing,
-	// so it needs the complete message structure — tool_calls, tool_call_id,
-	// tools, reasoning/thinking content, multimodal parts, etc. The typed
-	// ChatCompletions view only models role+content; reconstructing from it
-	// drops those fields, which breaks routing in two ways:
-	//  1. On tool-calling turns the router's strict parse fails (a role:"tool"
-	//     message is missing the required tool_call_id), route_decode_request
-	//     returns an error, no worker is selected, and the request is dropped
-	//     as 503 "no healthy upstream" — multi-turn tool calling is unroutable.
-	//  2. Even when parsing succeeds, the chat template renders an incomplete
-	//     prompt, so reasoning/tool parsing is lost (e.g. on non-streaming
-	//     requests) and tokenization no longer matches what the worker sees.
-	if pm, ok := req.Body.Payload.(fwkrh.PayloadMap); ok && len(pm) > 0 {
-		requestBody := make(map[string]any, len(pm))
-		maps.Copy(requestBody, pm)
-		// Route on the resolved target model, not whatever alias the caller sent.
-		if strings.TrimSpace(req.TargetModel) != "" {
-			requestBody["model"] = req.TargetModel
-		}
-		return requestBody, nil
+	pm, ok := req.Body.Payload.(fwkrh.PayloadMap)
+	if !ok || len(pm) == 0 {
+		return "", fmt.Errorf("request payload unavailable; cannot build KV-routing request")
 	}
 
-	// Fallback: the raw payload is unavailable (not unmarshaled). Reconstruct a
-	// minimal request from the framework's typed view. Tool-calling turns cannot
-	// be represented here, but plain chat/completion routing still works.
-	return buildOpenAIRequestFromTyped(req)
-}
-
-// buildOpenAIRequestFromTyped reconstructs a minimal request from the
-// framework's typed request view. The typed Message only models role+content,
-// so this cannot preserve tool-calling fields (tool_calls / tool_call_id / name)
-// or other structure the raw payload carries; it is only used when the raw
-// payload is unavailable.
-func buildOpenAIRequestFromTyped(req *schedtypes.InferenceRequest) (map[string]any, error) {
-	requestBody := make(map[string]any)
-
-	if req.Body.ChatCompletions != nil && len(req.Body.ChatCompletions.Messages) > 0 {
-		messages := make([]map[string]any, 0, len(req.Body.ChatCompletions.Messages))
-		anyNonEmpty := false
-		for _, msg := range req.Body.ChatCompletions.Messages {
-			content := msg.Content.PlainText()
-			if strings.TrimSpace(content) != "" {
-				anyNonEmpty = true
-			}
-			messages = append(messages, map[string]any{
-				"role":    msg.Role,
-				"content": content,
-			})
-		}
-		if !anyNonEmpty {
-			return nil, fmt.Errorf("empty chat messages")
-		}
-		requestBody["messages"] = messages
-	} else if req.Body.Completions != nil && !req.Body.Completions.Prompt.IsEmpty() {
-		addCompletionPrompt(requestBody, req.Body.Completions.Prompt)
-	} else {
-		return nil, fmt.Errorf("no messages or prompt provided")
-	}
-
+	requestBody := make(map[string]any, len(pm))
+	maps.Copy(requestBody, pm)
+	// Route on the resolved target model, not whatever alias the caller sent.
 	if strings.TrimSpace(req.TargetModel) != "" {
 		requestBody["model"] = req.TargetModel
-	} else {
-		requestBody["model"] = "default"
 	}
 
-	// Forward the caller's nvext block so the Rust router can lift
-	// nvext.agent_hints.priority into priority_jump.
-	if nvext := extractNvext(req.Body.Payload); nvext != nil {
-		requestBody["nvext"] = nvext
+	data, err := json.Marshal(requestBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request JSON: %w", err)
 	}
-	if cacheSalt := extractTopLevelCacheSalt(req.Body.Payload); cacheSalt != "" {
-		requestBody["cache_salt"] = cacheSalt
-	}
-
-	return requestBody, nil
-}
-
-func addCompletionPrompt(requestBody map[string]any, prompt fwkrh.Prompt) {
-	if len(prompt.TokenIDs) > 0 {
-		tokenIDs := make([]uint32, len(prompt.TokenIDs))
-		copy(tokenIDs, prompt.TokenIDs)
-		requestBody["prompt"] = tokenIDs
-		return
-	}
-
-	// Keep non-token completions on the legacy chat-shaped scorer path.
-	requestBody["messages"] = []map[string]any{
-		{
-			"role":    "user",
-			"content": prompt.PlainText(),
-		},
-	}
-}
-
-// extractNvext returns the caller-supplied nvext object from the PayloadMap,
-// or nil when the payload is not a map or does not contain an nvext object.
-//
-// This is how routing hints — most notably nvext.agent_hints.priority — reach
-// the Rust router via the FFI JSON.
-func extractNvext(payload fwkrh.RequestPayload) map[string]any {
-	pm, ok := payload.(fwkrh.PayloadMap)
-	if !ok {
-		return nil
-	}
-	nvext, _ := pm["nvext"].(map[string]any)
-	return nvext
-}
-
-func extractTopLevelCacheSalt(payload fwkrh.RequestPayload) string {
-	pm, ok := payload.(fwkrh.PayloadMap)
-	if !ok {
-		return ""
-	}
-	cacheSalt, _ := pm["cache_salt"].(string)
-	return cacheSalt
+	return string(data), nil
 }
 
 // CallAddRequest registers a request with the router's bookkeeping.

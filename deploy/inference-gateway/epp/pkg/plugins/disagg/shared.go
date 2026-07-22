@@ -27,8 +27,6 @@ limitations under the License.
 package disagg
 
 import (
-	"encoding/json"
-	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -71,15 +69,7 @@ func readPrefillEnabled(cycleState *schedtypes.CycleState) bool {
 
 // buildRequestJSON builds an OpenAI-compatible JSON string from a GAIE LLMRequest.
 func buildRequestJSON(req *schedtypes.InferenceRequest) (string, error) {
-	requestBody, err := dynscorer.BuildOpenAIRequest(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to build OpenAI request: %w", err)
-	}
-	data, err := json.Marshal(requestBody)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal request JSON: %w", err)
-	}
-	return string(data), nil
+	return dynscorer.BuildOpenAIRequestJSON(req)
 }
 
 // serializeEndpoints converts endpoints to a JSON string for the FFI filter.
