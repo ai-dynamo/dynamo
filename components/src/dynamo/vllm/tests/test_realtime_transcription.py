@@ -237,3 +237,53 @@ def test_clear_cancels_uncommitted_turn_and_allows_next_utterance():
         if event["type"] == "conversation.item.input_audio_transcription.completed"
     ]
     assert len(completed) == 1
+
+
+def test_next_turn_is_pumped_while_previous_turn_uses_engine_slot():
+    class _BlockingFirstEngine:
+        def __init__(self, release: asyncio.Event) -> None:
+            self.release = release
+            self.started = 0
+
+        async def generate(self, *, prompt, sampling_params, request_id):
+            del sampling_params, request_id
+            async for _ in prompt:
+                pass
+            self.started += 1
+            if self.started == 1:
+                await self.release.wait()
+            yield SimpleNamespace(
+                prompt_token_ids=[1],
+                outputs=[SimpleNamespace(text="ok", token_ids=[2])],
+            )
+
+    async def scenario():
+        release = asyncio.Event()
+        engine = _BlockingFirstEngine(release)
+        handler = _handler(engine)
+        pcm = base64.b64encode(np.ones(480, dtype=np.int16).tobytes()).decode()
+
+        async def request_stream():
+            yield {"type": "session.update", "session": _session()}
+            for _ in range(2):
+                yield {"type": "input_audio_buffer.append", "audio": pcm}
+                yield {"type": "input_audio_buffer.commit"}
+            release.set()
+
+        result = await asyncio.wait_for(
+            _collect(handler.generate(request_stream(), _Context())), timeout=1
+        )
+        return result, engine
+
+    async def _collect(stream):
+        return [event async for event in stream]
+
+    result, engine = asyncio.run(scenario())
+
+    completed = [
+        event
+        for event in result
+        if event["type"] == "conversation.item.input_audio_transcription.completed"
+    ]
+    assert engine.started == 2
+    assert len(completed) == 2

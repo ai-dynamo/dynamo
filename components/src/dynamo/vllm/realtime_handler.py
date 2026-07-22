@@ -18,6 +18,7 @@ import numpy as np
 
 from dynamo._core import Context
 
+from .realtime_connection import RealtimeConnection, RealtimeTurn
 from .realtime_events import (
     input_audio_buffer_cleared_event,
     input_audio_buffer_committed_event,
@@ -149,8 +150,9 @@ def decode_pcm16(audio_b64: str) -> np.ndarray:
     return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
 
-class _Turn:
+class _Turn(RealtimeTurn):
     def __init__(self, *, input_rate: int, model_sample_rate: int) -> None:
+        super().__init__()
         self.item_id = f"item_{uuid.uuid4().hex}"
         self.request_id = f"rt_{uuid.uuid4().hex}"
         self.input_rate = input_rate
@@ -158,7 +160,6 @@ class _Turn:
         self.pending_audio = np.empty(0, dtype=np.float32)
         self.received_samples = 0
         self.audio: asyncio.Queue[np.ndarray | None] = asyncio.Queue()
-        self.task: asyncio.Task | None = None
 
     def append_audio(self, waveform: np.ndarray) -> np.ndarray | None:
         received_samples = self.received_samples + len(waveform)
@@ -255,7 +256,6 @@ class RealtimeTranscriptionHandler:
     async def _run_turn(
         self,
         turn: _Turn,
-        output: "asyncio.Queue[dict | None]",
         context: Context,
     ) -> None:
         input_stream: asyncio.Queue[list[int]] = asyncio.Queue()
@@ -288,12 +288,12 @@ class RealtimeTranscriptionHandler:
                     input_stream.put_nowait(token_ids)
                 if delta:
                     transcript += delta
-                    await output.put(
+                    await turn.events.put(
                         input_audio_transcription_delta_event(turn.item_id, delta)
                     )
 
             if not context.is_stopped():
-                await output.put(
+                await turn.events.put(
                     input_audio_transcription_completed_event(
                         turn.item_id,
                         transcript,
@@ -305,7 +305,7 @@ class RealtimeTranscriptionHandler:
             raise
         except Exception as exc:  # noqa: BLE001 - isolate engine failures per turn
             logger.exception("realtime transcription failed: %s", exc)
-            await output.put(
+            await turn.events.put(
                 input_audio_transcription_failed_event(
                     turn.item_id, "Transcription failed"
                 )
@@ -348,147 +348,114 @@ class RealtimeTranscriptionHandler:
         request_stream: AsyncGenerator[Any, None],
         context: Context,
     ) -> AsyncGenerator[dict, None]:
-        output: asyncio.Queue[dict | None] = asyncio.Queue(maxsize=256)
-        active_turn: _Turn | None = None
-        tasks: set[asyncio.Task] = set()
         input_rate = OPENAI_PCM_SAMPLE_RATE
-        turn_slot = asyncio.Semaphore(1)
 
-        def finish_turn(task: asyncio.Task) -> None:
-            tasks.discard(task)
-            turn_slot.release()
+        connection = RealtimeConnection[_Turn](
+            context=context,
+            run_turn=self._run_turn,
+            max_concurrent_turns=1,
+            max_queued_turns=1,
+        )
 
-        async def start_turn() -> _Turn:
-            nonlocal active_turn
-            if active_turn is None:
-                await turn_slot.acquire()
-                active_turn = _Turn(
-                    input_rate=input_rate,
-                    model_sample_rate=self.model_sample_rate,
-                )
-                task = asyncio.create_task(self._run_turn(active_turn, output, context))
-                active_turn.task = task
-                tasks.add(task)
-                task.add_done_callback(finish_turn)
-            return active_turn
+        def new_turn() -> _Turn:
+            return _Turn(
+                input_rate=input_rate,
+                model_sample_rate=self.model_sample_rate,
+            )
 
-        async def pump() -> None:
-            nonlocal active_turn, input_rate
-            try:
-                async for event in request_stream:
-                    if context.is_stopped():
-                        break
-                    if not isinstance(event, dict):
-                        await output.put(
-                            invalid_request_error_event(
-                                "invalid_event", "event must be an object"
-                            )
-                        )
-                        continue
-                    event_type = event.get("type")
-                    if event_type == "session.update":
-                        session = event.get("session")
-                        error = self._validate_session(session)
-                        if error:
-                            await output.put(
-                                invalid_request_error_event(
-                                    "invalid_session",
-                                    error,
-                                    client_event_id=event.get("event_id"),
-                                )
-                            )
-                            continue
-                        input_rate = session["audio"]["input"]["format"]["rate"]
-                        await output.put(session_updated_event(session))
-                    elif event_type == "input_audio_buffer.append":
-                        try:
-                            waveform = decode_pcm16(event.get("audio", ""))
-                        except ValueError as exc:
-                            await output.put(
-                                invalid_request_error_event(
-                                    "invalid_audio",
-                                    str(exc),
-                                    client_event_id=event.get("event_id"),
-                                )
-                            )
-                            continue
-                        turn = await start_turn()
-                        try:
-                            ready = turn.append_audio(waveform)
-                        except ValueError as exc:
-                            if turn.task is not None:
-                                turn.task.cancel()
-                            active_turn = None
-                            await output.put(
-                                invalid_request_error_event(
-                                    "invalid_audio",
-                                    str(exc),
-                                    client_event_id=event.get("event_id"),
-                                )
-                            )
-                            continue
-                        if ready is not None:
-                            turn.audio.put_nowait(ready)
-                    elif event_type == "input_audio_buffer.commit":
-                        if active_turn is None:
-                            await output.put(
-                                invalid_request_error_event(
-                                    "invalid_audio", "input audio buffer is empty"
-                                )
-                            )
-                            continue
-                        remainder = active_turn.flush_audio()
-                        if remainder is not None:
-                            active_turn.audio.put_nowait(remainder)
-                        await output.put(
-                            input_audio_buffer_committed_event(active_turn.item_id)
-                        )
-                        active_turn.audio.put_nowait(None)
-                        active_turn = None
-                    elif event_type == "input_audio_buffer.clear":
-                        if active_turn is not None:
-                            if active_turn.task is not None:
-                                active_turn.task.cancel()
-                            active_turn = None
-                        await output.put(input_audio_buffer_cleared_event())
-                    else:
-                        await output.put(
-                            invalid_request_error_event(
-                                "unsupported_event",
-                                f"unsupported event type: {event_type}",
-                                client_event_id=event.get("event_id"),
-                            )
-                        )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001 - keep the connection diagnosable
-                logger.exception("realtime transcription input failed: %s", exc)
-                await output.put(
+        def close_turn(turn: _Turn) -> None:
+            remainder = turn.flush_audio()
+            if remainder is not None:
+                turn.audio.put_nowait(remainder)
+            turn.audio.put_nowait(None)
+
+        async def handle_event(
+            event: Any,
+            connection: RealtimeConnection[_Turn],
+        ) -> None:
+            nonlocal input_rate
+            if not isinstance(event, dict):
+                connection.emit(
                     invalid_request_error_event(
-                        "server_error", "Internal transcription error"
+                        "invalid_event", "event must be an object"
                     )
                 )
-            finally:
-                if active_turn is not None:
-                    remainder = active_turn.flush_audio()
-                    if remainder is not None:
-                        active_turn.audio.put_nowait(remainder)
-                    active_turn.audio.put_nowait(None)
-                    active_turn = None
-                await asyncio.gather(*list(tasks), return_exceptions=True)
-                await output.put(None)
+                return
+            event_type = event.get("type")
+            if event_type == "session.update":
+                session = event.get("session")
+                error = self._validate_session(session)
+                if error:
+                    connection.emit(
+                        invalid_request_error_event(
+                            "invalid_session",
+                            error,
+                            client_event_id=event.get("event_id"),
+                        )
+                    )
+                    return
+                input_rate = session["audio"]["input"]["format"]["rate"]
+                connection.emit(session_updated_event(session))
+            elif event_type == "input_audio_buffer.append":
+                try:
+                    waveform = decode_pcm16(event.get("audio", ""))
+                except ValueError as exc:
+                    connection.emit(
+                        invalid_request_error_event(
+                            "invalid_audio",
+                            str(exc),
+                            client_event_id=event.get("event_id"),
+                        )
+                    )
+                    return
+                turn = await connection.ensure_turn(new_turn)
+                try:
+                    ready = turn.append_audio(waveform)
+                except ValueError as exc:
+                    connection.cancel_active_turn()
+                    connection.emit(
+                        invalid_request_error_event(
+                            "invalid_audio",
+                            str(exc),
+                            client_event_id=event.get("event_id"),
+                        )
+                    )
+                    return
+                if ready is not None:
+                    turn.audio.put_nowait(ready)
+            elif event_type == "input_audio_buffer.commit":
+                turn = connection.active_turn
+                if turn is None:
+                    connection.emit(
+                        invalid_request_error_event(
+                            "invalid_audio", "input audio buffer is empty"
+                        )
+                    )
+                    return
+                remainder = turn.flush_audio()
+                if remainder is not None:
+                    turn.audio.put_nowait(remainder)
+                await connection.emit_for_turn(
+                    turn,
+                    input_audio_buffer_committed_event(turn.item_id),
+                )
+                turn.audio.put_nowait(None)
+                connection.finish_active_turn()
+            elif event_type == "input_audio_buffer.clear":
+                connection.cancel_active_turn()
+                connection.emit(input_audio_buffer_cleared_event())
+            else:
+                connection.emit(
+                    invalid_request_error_event(
+                        "unsupported_event",
+                        f"unsupported event type: {event_type}",
+                        client_event_id=event.get("event_id"),
+                    )
+                )
 
-        pump_task = asyncio.create_task(pump())
-        try:
-            while (event := await output.get()) is not None:
-                yield event
-        finally:
-            pump_task.cancel()
-            pending = list(tasks)
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(
-                pump_task,
-                *pending,
-                return_exceptions=True,
-            )
+        async for event in connection.generate(
+            request_stream,
+            handle_event=handle_event,
+            close_active_turn=close_turn,
+        ):
+            yield event
