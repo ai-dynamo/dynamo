@@ -193,6 +193,72 @@ pub(crate) fn kv_publisher_metrics() -> Option<Arc<KvPublisherMetrics>> {
 }
 
 // ---------------------------------------------------------------------------
+// Direct-ZMQ KV ingress metrics
+// ---------------------------------------------------------------------------
+
+pub(crate) struct KvZmqIngressMetrics {
+    sources: IntGaugeVec,
+    batches_total: IntCounter,
+    lifecycle_total: IntCounterVec,
+}
+
+static KV_ZMQ_INGRESS_METRICS: OnceLock<Arc<KvZmqIngressMetrics>> = OnceLock::new();
+
+impl KvZmqIngressMetrics {
+    pub(crate) fn from_component(component: &Component) -> Arc<Self> {
+        KV_ZMQ_INGRESS_METRICS
+            .get_or_init(|| {
+                let metrics = component.metrics();
+                let sources = metrics
+                    .create_intgaugevec(
+                        "router_kv_zmq_ingress_sources",
+                        "Number of direct-ZMQ KV ingress sources by lifecycle state",
+                        &["state"],
+                        &[],
+                    )
+                    .expect("failed to create router_kv_zmq_ingress_sources gauge");
+                let batches_total = metrics
+                    .create_intcounter(
+                        "router_kv_zmq_ingress_batches_total",
+                        "Total direct-ZMQ KV ingress batches handed to WorkerQueryClient",
+                        &[],
+                    )
+                    .expect("failed to create router_kv_zmq_ingress_batches_total counter");
+                let lifecycle_total = metrics
+                    .create_intcountervec(
+                        "router_kv_zmq_ingress_lifecycle_total",
+                        "Total direct-ZMQ KV ingress lifecycle transitions and errors",
+                        &["action"],
+                        &[],
+                    )
+                    .expect("failed to create router_kv_zmq_ingress_lifecycle_total counter");
+                Arc::new(Self {
+                    sources,
+                    batches_total,
+                    lifecycle_total,
+                })
+            })
+            .clone()
+    }
+
+    pub(crate) fn increment_sources(&self, state: &'static str) {
+        self.sources.with_label_values(&[state]).inc();
+    }
+
+    pub(crate) fn decrement_sources(&self, state: &'static str) {
+        self.sources.with_label_values(&[state]).dec();
+    }
+
+    pub(crate) fn increment_batch(&self) {
+        self.batches_total.inc();
+    }
+
+    pub(crate) fn increment_lifecycle(&self, action: &'static str) {
+        self.lifecycle_total.with_label_values(&[action]).inc();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Router worker status metrics (component-scoped gauges)
 // ---------------------------------------------------------------------------
 

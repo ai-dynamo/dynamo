@@ -21,7 +21,8 @@ pub struct CommonExt {
     #[builder(default, setter(strip_option))]
     pub min_tokens: Option<u32>,
 
-    /// Integer that controls the number of top tokens to consider. Set to -1 to consider all tokens.
+    /// Integer that controls the number of top tokens to consider. Set to -1 or 0 to consider all
+    /// tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub top_k: Option<i32>,

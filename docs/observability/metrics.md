@@ -447,13 +447,16 @@ Gauges track pending work in each router policy class. They are registered by th
 
 #### KV Indexer Metrics
 
-Tracks KV cache events applied to the router's radix tree index. Only appears when `--router-kv-overlap-score-credit` is greater than 0 (default) and workers are publishing KV events. Will not appear if `--router-kv-overlap-score-credit 0` is set or no KV events have been received.
+Tracks KV cache events applied to the frontend-embedded router's radix tree index. The counter includes events applied to both the device tier and lower tiers such as host-pinned memory and disk. Only appears when `--router-kv-overlap-score-credit` is greater than 0 (default) and workers are publishing KV events. Will not appear if `--router-kv-overlap-score-credit 0` is set or no KV events have been received.
 
 | Metric | Type | Description |
 |--------|------|-------------|
 | `dynamo_component_kv_cache_events_applied` | Counter | KV cache events applied to the index |
 
-**Additional labels:** `status` (`ok` / `parent_block_not_found` / `block_not_found` / `invalid_block`), `event_type` (`stored` / `removed` / `cleared`)
+**Additional labels:** `status` (`ok` / `parent_block_not_found` / `block_not_found` / `invalid_block` / `capacity_exhausted` / `indexer_invariant_violation`), `event_type` (`stored` / `removed` / `cleared`)
+
+The standalone indexer exposes the device-tier-only counter
+`dynamo_kvrouter_kv_cache_events_applied`; see the [Standalone KV Indexer](../components/router/standalone-indexer.md).
 
 #### Per-Worker Load and Timing Gauges (`dynamo_frontend_worker_*`)
 
