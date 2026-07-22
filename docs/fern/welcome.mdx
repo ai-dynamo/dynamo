@@ -10,33 +10,15 @@ hide-page-actions: true
 
 import { WelcomeHero } from "@/components/WelcomeHero";
 import { EventsCalendar } from "@/components/EventsCalendar";
+import { WhyDynamo } from "@/components/WhyDynamo";
 
 <WelcomeHero src="./assets/hero-demo-25.cast" />
 
 ## Why Dynamo
 
-<CardGroup cols={2}>
-  <Card title="Production-grade best performance" icon="regular gauge-high">
-    As shown on [InferenceX](https://inferencex.semianalysis.com/), Dynamo
-    delivers the best performance for distributed inference and showcases
-    state-of-the-art fault tolerance.
-  </Card>
-  <Card title="Best SW integration and interop" icon="regular puzzle-piece">
-    Works with every major inference engine (LightSeek, SGLang, TRT-LLM, vLLM),
-    plugs into any network or storage layer through NIXL, integrates the widest
-    range of KV caches (LMCache, HiCache, FlexKV), and runs anywhere —
-    Kubernetes, Slurm, or local.
-  </Card>
-  <Card title="HW Neutrality" icon="regular microchip">
-    In addition to NVIDIA GPUs, Dynamo supports Intel XPUs and AMD GPUs.
-  </Card>
-  <Card title="Open & Community-Driven" icon="regular users">
-    Open source and developed in the open. Adopt one component at a time, or run
-    the full stack.
-  </Card>
-</CardGroup>
+Dynamo optimizes the system around the inference engine. Scroll through the core capabilities that can be adopted independently or as a complete serving stack.
 
-Dynamo optimizes the system around the inference engine: it adds the distributed layer — disaggregated serving, smart routing, KV cache management across memory tiers, and autoscaling — on top of any supported backend.
+<WhyDynamo />
 
 ## Community Events
 

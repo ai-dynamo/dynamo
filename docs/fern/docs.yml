@@ -310,7 +310,6 @@ logo:
   light: ./assets/NVIDIA_light.svg
   height: 20
   href: /dynamo/getting-started
-  right-text: Documentation
 
 favicon: ./assets/NVIDIA_symbol.svg
 

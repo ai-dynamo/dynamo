@@ -6,7 +6,7 @@
  *
  * Fern renders the page title and subtitle from frontmatter. This component
  * starts immediately below them with a rotating Dynamo statement, the primary
- * quickstart action, a compact community rail, and the terminal demonstration.
+ * quickstart action, a community notification stack, and the terminal demonstration.
  */
 "use client";
 
@@ -89,10 +89,20 @@ function RotatingStatement() {
   );
 }
 
-function ChatIcon() {
+function SlackIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="slack-icon">
+      <path d="M9.2 3.5a2 2 0 0 1 2 2v4h-2a2 2 0 0 1 0-4V3.5Zm0 7.5H5.5a2 2 0 1 0 0 4h3.7v-4Zm1.6 0h4v-5.5a2 2 0 1 1 4 0V11h-8Zm4 1.6h3.7a2 2 0 1 1 0 4h-3.7v-4Zm-1.6 0h-4v5.9a2 2 0 1 0 4 0v-5.9Z" />
+    </svg>
+  );
+}
+
+function WeChatIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M7 8h10M7 12h7m-9.5 7 1.2-3.2A7 7 0 1 1 19 12a7 7 0 0 1-9.8 6.4L4.5 19Z" />
+      <path d="M10.2 5C5.7 5 2.5 7.7 2.5 11c0 1.9 1.1 3.6 2.9 4.7l-.7 2.2 2.6-1.3c.9.2 1.8.4 2.9.4 4.5 0 7.7-2.7 7.7-6S14.7 5 10.2 5Z" />
+      <path d="M13.7 9.2c4.4 0 7.8 2.5 7.8 5.8 0 1.8-1 3.4-2.8 4.5l.6 2-2.4-1.2c-1 .3-2 .5-3.2.5-3.8 0-6.8-1.9-7.6-4.5" />
+      <path d="M7.4 9.3h.1m5.3 0h.1m-.5 4.2h.1m5 0h.1" />
     </svg>
   );
 }
@@ -101,21 +111,33 @@ function CalendarIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M7 3v3m10-3v3M4 9h16M5 5h14a1 1 0 0 1 1 1v14H4V6a1 1 0 0 1 1-1Z" />
+      <path d="M8 13h3v3H8z" />
     </svg>
   );
 }
 
 function CommunityRail() {
-  const links = [
+  const notifications = [
     {
-      label: "Join community Slack",
+      app: "CNCF Slack",
+      message: "Join the #ai-dynamo channel",
       href: "https://communityinviter.com/apps/cloud-native/cncf",
-      icon: <ChatIcon />,
+      icon: <SlackIcon />,
+      tone: "slack",
     },
     {
-      label: "Community calendar",
+      app: "WeChat",
+      message: "Ask to join the Dynamo community group",
+      href: "/dynamo/dev/contribution-guide.zh-CN",
+      icon: <WeChatIcon />,
+      tone: "wechat",
+    },
+    {
+      app: "Calendar",
+      message: "See upcoming community events",
       href: CALENDAR_URL,
       icon: <CalendarIcon />,
+      tone: "calendar",
     },
   ];
 
@@ -124,10 +146,22 @@ function CommunityRail() {
       className="dynamo-welcome__community"
       aria-label="Dynamo community links"
     >
-      {links.map(({ label, href, icon }) => (
-        <a key={label} href={href} target="_blank" rel="noopener noreferrer">
-          {icon}
-          <span>{label}</span>
+      {notifications.map(({ app, message, href, icon, tone }) => (
+        <a
+          key={app}
+          className={`dynamo-welcome__notification dynamo-welcome__notification--${tone}`}
+          href={href}
+          target={href.startsWith("http") ? "_blank" : undefined}
+          rel={href.startsWith("http") ? "noopener noreferrer" : undefined}
+        >
+          <span className="dynamo-welcome__notification-icon">{icon}</span>
+          <span className="dynamo-welcome__notification-copy">
+            <span className="dynamo-welcome__notification-app">
+              {app}
+              <small>now</small>
+            </span>
+            <span>{message}</span>
+          </span>
         </a>
       ))}
     </nav>
@@ -142,8 +176,6 @@ export interface WelcomeHeroProps {
 export function WelcomeHero({ src }: WelcomeHeroProps) {
   return (
     <div className="dynamo-welcome">
-      <CommunityRail />
-
       <section
         className="dynamo-welcome__intro"
         aria-label="Get started with Dynamo"
@@ -166,6 +198,8 @@ export function WelcomeHero({ src }: WelcomeHeroProps) {
           rows="25"
         />
       </div>
+
+      <CommunityRail />
     </div>
   );
 }
