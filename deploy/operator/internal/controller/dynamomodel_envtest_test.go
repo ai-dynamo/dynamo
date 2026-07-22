@@ -58,7 +58,7 @@ var _ = Describe("DynamoModel Controller", func() {
 	Context("When reconciling LoRA model", func() {
 		It("Should discover endpoints and set conditions", func() {
 			ctx := context.Background()
-			namespace := defaultNamespace
+			namespace := envtestNamespace
 			modelName := "test-lora-model"
 			baseModelName := "base-model-lora"
 
@@ -157,7 +157,7 @@ var _ = Describe("DynamoModel Controller", func() {
 	Context("When reconciling with non-Pod endpoints", func() {
 		It("Should skip endpoints without Pod TargetRef", func() {
 			ctx := context.Background()
-			namespace := defaultNamespace
+			namespace := envtestNamespace
 			modelName := "test-non-pod-model"
 			baseModelName := "base-model-non-pod"
 
@@ -257,7 +257,7 @@ var _ = Describe("DynamoModel Controller", func() {
 	Context("When reconciling base model", func() {
 		It("Should set EndpointsReady=True when endpoints exist", func() {
 			ctx := context.Background()
-			namespace := defaultNamespace
+			namespace := envtestNamespace
 			modelName := "test-base-model"
 			baseModelName := "base-model-base"
 
@@ -333,7 +333,7 @@ var _ = Describe("DynamoModel Controller", func() {
 
 		It("Should set EndpointsReady=False when no endpoints exist", func() {
 			ctx := context.Background()
-			namespace := defaultNamespace
+			namespace := envtestNamespace
 			modelName := "test-base-model-no-endpoints"
 			baseModelName := "base-model-none"
 
