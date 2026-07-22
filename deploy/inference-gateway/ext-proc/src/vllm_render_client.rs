@@ -5,6 +5,10 @@
 //!
 //! The client is intentionally limited to protocol handling. Callers decide how
 //! a render failure affects request routing.
+//!
+//! The client sends no `Authorization` header, so it targets unauthenticated
+//! in-cluster renderers (a sidecar or an internal Service). Authenticated
+//! renderers (vLLM `--api-key` / `VLLM_API_KEY`) are a follow-up.
 
 use std::time::Duration;
 
