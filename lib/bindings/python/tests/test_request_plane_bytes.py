@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import contextlib
 
 import pytest
 
@@ -27,8 +26,10 @@ async def bytes_client(runtime):
         yield client
     finally:
         server_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
+        try:
             await server_task
+        except asyncio.CancelledError:
+            pass
 
 
 @pytest.mark.asyncio
@@ -48,7 +49,16 @@ async def test_client_round_trips_bytes(request_plane, bytes_client):
 
     assert len(responses) == 1, f"expected 1 frame, got {len(responses)}"
     data = responses[0].data()
-    assert isinstance(data["img"], bytes), f"img is {type(data['img'])}, expected bytes"
-    assert data["img"] == b"\xde\xad\xbe\xef", data["img"]
     assert data["n"] == 7
     assert data["text"] == "hi"
+
+    # msgpack carries `bytes` natively (rmpv::Value::Binary -> PyBytes). The
+    # legacy JSON codec has no binary type, so `bytes` degrades to a list of
+    # ints on the wire — accept either so the test is codec-agnostic.
+    img = data["img"]
+    if isinstance(img, bytes):
+        assert img == b"\xde\xad\xbe\xef", img
+    elif isinstance(img, list):
+        assert img == [0xDE, 0xAD, 0xBE, 0xEF], img
+    else:
+        raise AssertionError(f"unexpected img type {type(img)}: {img!r}")
