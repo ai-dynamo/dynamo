@@ -114,3 +114,8 @@ KUBECONFIG=bin/clustertest.kubeconfig \
 `make envtest` runs the API-only suite, `make clustertest` runs the Kind-backed
 suite, and `make integration` runs both after preparing the standard Kind
 cluster.
+
+## Follow-Up
+
+- TODO: Run `make integration` in the `.github` pre-merge CI, including Kind
+  setup and loading the required local images.
