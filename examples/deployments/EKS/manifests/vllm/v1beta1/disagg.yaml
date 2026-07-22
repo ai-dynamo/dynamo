@@ -22,7 +22,7 @@ spec:
           - /bin/bash
           - -c
           - |
-            exec python3 -m dynamo.frontend --router-mode kv --router-reset-states
+            exec python3 -m dynamo.frontend --router-mode kv
           env:
           - name: HF_HOME
             value: /home/dynamo/.cache/huggingface

@@ -170,6 +170,9 @@ class GMSClientMemoryManager:
         self._mappings: Dict[int, LocalMapping] = {}
         self._inverse_mapping: Dict[str, int] = {}
         self._scratch_mappings: Dict[int, _ScratchMapping] = {}
+        # All scratch mappings alias ONE shared physical granule (N KV layers ->
+        # one scratch_size block, not N). Created lazily, released once.
+        self._shared_scratch_handle: int = 0
 
         self._unmapped = False
         self._aborted = False
@@ -516,10 +519,14 @@ class GMSClientMemoryManager:
             if scratch.scratch_handle == 0:
                 continue
             self._vmm.unmap(base_va, scratch.va_reserved_size)
-            self._vmm.release(scratch.scratch_handle)
             scratch.scratch_handle = 0
             unmapped_count += 1
             total_bytes += scratch.va_reserved_size
+        # Every mapping aliased the one shared granule; release it once, after all
+        # ranges are unmapped.
+        if self._shared_scratch_handle != 0:
+            self._vmm.release(self._shared_scratch_handle)
+            self._shared_scratch_handle = 0
 
         self._va_preserved = True
         self._unmapped = True
@@ -694,15 +701,20 @@ class GMSClientMemoryManager:
         aligned_size = align_to_granularity(size, self.granularity)
         va_reserved_size = align_to_granularity(size, self.scratch_size)
 
-        ok, scratch_handle = self._vmm.create_tolerate_oom(
-            self.scratch_size, self.device
-        )
-        if not ok:
-            raise RuntimeError(
-                f"VMM physical memory allocation failed "
-                f"({self.scratch_size // (1 << 20)} MiB) on "
-                f"{self.device_type.value} device {self.device}"
+        if self._shared_scratch_handle != 0:
+            # Reuse the one shared granule; every mapping aliases it.
+            scratch_handle = self._shared_scratch_handle
+        else:
+            ok, scratch_handle = self._vmm.create_tolerate_oom(
+                self.scratch_size, self.device
             )
+            if not ok:
+                raise RuntimeError(
+                    f"VMM physical memory allocation failed "
+                    f"({self.scratch_size // (1 << 20)} MiB) on "
+                    f"{self.device_type.value} device {self.device}"
+                )
+            self._shared_scratch_handle = scratch_handle
 
         va = self._vmm.address_reserve(va_reserved_size, self.scratch_size)
         for offset in range(0, va_reserved_size, self.scratch_size):
@@ -794,7 +806,11 @@ class GMSClientMemoryManager:
         self._vmm.synchronize()
         if scratch.scratch_handle:
             self._vmm.unmap(base_va, scratch.va_reserved_size)
-            self._vmm.release(scratch.scratch_handle)
+            # Shared granule: release only once the last mapping is gone
+            # (this entry was already popped above).
+            if self._shared_scratch_handle != 0 and not self._scratch_mappings:
+                self._vmm.release(self._shared_scratch_handle)
+                self._shared_scratch_handle = 0
         self._vmm.address_free(base_va, scratch.va_reserved_size)
         return True
 
@@ -819,6 +835,7 @@ class GMSClientMemoryManager:
             self._mappings.clear()
             self._inverse_mapping.clear()
             self._scratch_mappings.clear()
+            self._shared_scratch_handle = 0
         else:
             self._vmm.synchronize()
             for base_va in list(self._scratch_mappings.keys()):

@@ -443,7 +443,6 @@ impl BlockTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::{Rng, SeedableRng, rngs::StdRng};
     use rustc_hash::FxHashSet;
 
     fn released(path: &[SequenceHash], remove_from: usize) -> Option<ReleasedPromptPath> {
@@ -655,7 +654,7 @@ mod tests {
             vec![8, 9, 11],
             vec![12],
         ];
-        let mut rng = StdRng::seed_from_u64(0x5eed_51a7);
+        let mut rng = fastrand::Rng::with_seed(0x5eed_51a7);
         let mut tracker = BlockTracker::default();
         let mut chains = (0..SLOTS).map(|_| None).collect::<Vec<_>>();
         let mut reference = (0..SLOTS)
@@ -665,10 +664,10 @@ mod tests {
         let mut next_output = 1_000_000_u64;
 
         for _ in 0..STEPS {
-            let slot = rng.random_range(0..SLOTS);
+            let slot = rng.usize(0..SLOTS);
             match (&mut chains[slot], &mut reference[slot]) {
                 (chain @ None, reference @ None) => {
-                    let prompt = &prompts[rng.random_range(0..prompts.len())];
+                    let prompt = &prompts[rng.usize(0..prompts.len())];
                     let expected_first_new =
                         prompt.iter().position(|hash| !counts.contains_key(hash));
                     let (new_chain, first_new) = tracker.acquire_prompt(prompt);
@@ -679,7 +678,7 @@ mod tests {
                     *chain = Some(new_chain);
                     *reference = Some((prompt.clone(), prompt.len()));
                 }
-                (Some(chain), Some((blocks, _))) if rng.random_bool(0.35) => {
+                (Some(chain), Some((blocks, _))) if rng.f64() < 0.35 => {
                     let hash = next_output;
                     next_output += 1;
                     tracker.append_output(chain, hash);

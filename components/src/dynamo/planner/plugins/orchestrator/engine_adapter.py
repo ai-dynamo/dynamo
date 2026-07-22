@@ -88,6 +88,10 @@ from dynamo.planner.plugins.builtins import (
     BuiltinLoadPropose,
     BuiltinThroughputPropose,
 )
+from dynamo.planner.plugins.builtins.observe import (
+    EnvironmentObserver,
+    ObserveStageRequest,
+)
 from dynamo.planner.plugins.clock import Clock, VirtualClock, WallClock
 from dynamo.planner.plugins.merge.types import ComponentKey
 from dynamo.planner.plugins.orchestrator.orchestrator import LocalPlannerOrchestrator
@@ -129,10 +133,12 @@ class OrchestratorEngineAdapter:
         config,  # PlannerConfig
         capabilities: WorkerCapabilities,
         *,
+        observe_plugin: Optional[EnvironmentObserver] = None,
         clock: Optional[Clock] = None,
     ) -> None:
         self._config = config
         self._capabilities = capabilities
+        self._observe_plugin = observe_plugin
         # Clock is shared with all sub-components (CircuitBreaker,
         # PluginRegistryServer, PluginScheduler, LocalPlannerOrchestrator).
         # Default ``WallClock`` is correct for production / K8s smoke
@@ -571,7 +577,11 @@ class OrchestratorEngineAdapter:
         # 3. Build PipelineContext + baseline and drive the orchestrator.
         ctx = self._tick_input_to_context(tick_input)
         baseline = self._baseline_from_worker_counts(tick_input.worker_counts)
-        outcome = await self._orchestrator.tick(ctx, baseline)
+        outcome = await self._orchestrator.tick(
+            ctx,
+            baseline,
+            tick_now=scheduled_tick.at_monotonic_s,
+        )
 
         # 4. Project PipelineOutcome onto PlannerEffects.
         scale_to = self._project_scale_to(
@@ -620,6 +630,19 @@ class OrchestratorEngineAdapter:
             next_tick=self._compute_next_scheduled_tick(),
             diagnostics=diagnostics,
         )
+
+    async def observe(self, scheduled_tick: ScheduledTick, now_s: float) -> TickInput:
+        """Run the in-process OBSERVE plugin for native planner execution.
+
+        Replay and tests can continue to bypass observation collection by
+        calling ``tick(..., tick_input)`` directly.
+        """
+        if self._observe_plugin is None:
+            raise RuntimeError("No observe plugin configured")
+        response = await self._observe_plugin.Observe(
+            ObserveStageRequest(scheduled_tick=scheduled_tick, now_s=now_s)
+        )
+        return response.tick_input
 
     def _project_load_diagnostics(self, diagnostics: TickDiagnostics) -> None:
         """Read ``BuiltinLoadPropose._last_load_diagnostics`` and write
@@ -866,6 +889,7 @@ class OrchestratorEngineAdapter:
         # described by the separate need_* fields below.
         return ScheduledTick(
             at_s=at_s,
+            at_monotonic_s=at_monotonic,
             run_load_scaling=load_loop_due,
             run_throughput_scaling=throughput_loop_due,
             need_worker_states=True,

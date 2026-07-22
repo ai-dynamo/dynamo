@@ -73,8 +73,6 @@ def get_aiperf_cmd(
         str(concurrency),
         "--request-count",
         str(request_count),
-        "--prompt-input-tokens-block-size",
-        str(block_size),
         "--random-seed",
         str(seed),
         "--artifact-dir",

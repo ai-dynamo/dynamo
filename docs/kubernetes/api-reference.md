@@ -793,6 +793,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `endpoints` _[EndpointInfo](#endpointinfo) array_ | Endpoints is the current list of all endpoints for this model |  | Optional: \{\} <br /> |
 | `readyEndpoints` _integer_ | ReadyEndpoints is the count of endpoints that are ready |  |  |
+| `loraFallbackCoveredEndpoints` _integer_ | LoRAFallbackCoveredEndpoints is the count of legacy prefill endpoints<br />covered by a capable prefill during a rolling upgrade. These endpoints are<br />excluded from ReadyEndpoints because they cannot serve the adapter directly. |  | Optional: \{\} <br /> |
 | `totalEndpoints` _integer_ | TotalEndpoints is the total count of endpoints |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions represents the latest available observations of the model's state |  | Optional: \{\} <br /> |
 
@@ -831,7 +832,8 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `address` _string_ | Address is the full address of the endpoint (e.g., "http://10.0.1.5:9090") |  |  |
 | `podName` _string_ | PodName is the name of the pod serving this endpoint |  | Optional: \{\} <br /> |
-| `ready` _boolean_ | Ready indicates whether the endpoint is ready to serve traffic<br />For LoRA models: true if the POST /loras request succeeded with a 2xx status code<br />For base models: always false (no probing performed) |  |  |
+| `ready` _boolean_ | Ready indicates whether this endpoint is ready to serve traffic.<br />For LoRA models: true only if this endpoint's lifecycle request succeeded.<br />For base models: always false (no probing performed). |  |  |
+| `loraFallbackCovered` _boolean_ | LoRAFallbackCovered indicates a legacy prefill endpoint that cannot manage<br />LoRAs itself is covered by a capable prefill in the same topology during a<br />rolling upgrade. It does not make this endpoint ready to serve the adapter. |  | Optional: \{\} <br /> |
 
 
 #### ExtraPodMetadata
@@ -3802,12 +3804,17 @@ For multinode deployments, the operator modifies probes based on the backend fra
 
 #### VLLM Backend
 
-The operator automatically selects between two deployment modes based on parallelism configuration:
+The operator automatically applies distributed execution configuration based on parallelism settings:
 
-**Tensor/Pipeline Parallel Mode** (when `world_size > GPUs_per_node`):
-- Uses Ray for distributed execution (`--distributed-executor-backend ray`)
-- **Leader nodes**: Starts Ray head and runs vLLM; all probes remain active
-- **Worker nodes**: Run Ray agents only; all probes (liveness, readiness, startup) are removed
+**Tensor/Pipeline Parallel Mode (Recommended)** (when `world_size > GPUs_per_node`):
+- Uses PyTorch multiprocessing (mp) backend for distributed execution (`--distributed-executor-backend mp`)
+- Supports multi-node deployments with PyTorch's native distributed initialization
+- **All nodes**: Run vLLM with proper `--nnodes`, `--node-rank`, `--master-addr` flags injected
+- **Probes**: Worker probes adjusted; leader probes remain active
+
+**Ray Backend**:
+- Used for use cases such as Elastic EP
+- Install with `pip install "ray>=2.55.0"` and configure `--distributed-executor-backend ray`
 
 **Data Parallel Mode** (when `world_size × data_parallel_size > GPUs_per_node`):
 - **Worker nodes**: All probes (liveness, readiness, startup) are removed
@@ -3971,7 +3978,8 @@ Default container ports are configured based on component type:
 ## Backend-Specific Configurations
 
 ### VLLM
-- **Ray Head Port**: 6379 (for Ray cluster coordination in multinode TP/PP deployments)
+- **Ray Head Port**: 6379 (for Ray-based multinode deployments)
+- **MP Master Port**: 29500 (for PyTorch distributed multinode TP/PP deployments with mp backend)
 - **Data Parallel RPC Port**: 13445 (for data parallel multinode deployments)
 
 ### SGLang

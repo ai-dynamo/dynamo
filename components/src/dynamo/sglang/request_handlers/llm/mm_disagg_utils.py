@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Multimodal media extraction shared by the disaggregated prefill and decode
-workers, so both feed identical image/video URLs to the engine and reproduce the
-same token layout the transferred KV depends on.
+workers, so both feed identical media URLs to the engine and reproduce the same
+token layout the transferred KV depends on.
 """
 
 import logging
@@ -12,8 +12,11 @@ from typing import Any, Dict, Optional
 logger = logging.getLogger(__name__)
 
 IMAGE_URL_KEY = "image_url"
+AUDIO_URL_KEY = "audio_url"
 VIDEO_URL_KEY = "video_url"
-_SUPPORTED_MULTIMODAL_CONTENT_TYPES = frozenset({IMAGE_URL_KEY, VIDEO_URL_KEY})
+_SUPPORTED_MULTIMODAL_CONTENT_TYPES = frozenset(
+    {IMAGE_URL_KEY, AUDIO_URL_KEY, VIDEO_URL_KEY}
+)
 
 
 def _multi_modal_data(request: Dict[str, Any]) -> Dict[str, Any]:
@@ -66,8 +69,8 @@ def raise_if_unextracted_multimodal(request: Dict[str, Any]) -> None:
     message = (
         "Multimodal input received but SGLang worker did not receive "
         f"corresponding multi_modal_data for: {types_str}. Ensure the "
-        "frontend processor extracted image_url/video_url content or remove "
-        "image_url/video_url content."
+        "frontend processor extracted image_url/audio_url/video_url content or "
+        "remove the corresponding multimodal content."
     )
     logger.error(message)
     raise RuntimeError(message)
@@ -112,20 +115,27 @@ def extract_media_urls(
 
 
 def build_disagg_mm_kwargs(request: Dict[str, Any]) -> Dict[str, Any]:
-    """Build the ``image_data``/``video_data`` kwargs for a disaggregated worker's
-    ``async_generate`` call. Both keys are always present (``None`` when absent).
+    """Build media kwargs for a disaggregated worker's ``async_generate`` call.
+
+    All keys are always present (``None`` when absent).
     """
     mm_data = _multi_modal_data(request)
     image_data = extract_media_urls(mm_data, IMAGE_URL_KEY)
+    audio_data = extract_media_urls(mm_data, AUDIO_URL_KEY)
     video_data = extract_media_urls(mm_data, VIDEO_URL_KEY)
     # TODO: Native EP/D works with this raw-media path, but both prefill and
     # decode call it, so SGLang may fetch/load/preprocess the same media twice.
     # Remove the duplicate preprocessing once native EP/D can share processed
     # media or embeddings while preserving decode-side token layout.
-    if image_data or video_data:
+    if image_data or audio_data or video_data:
         logger.debug(
-            "disaggregated multimodal request: images=%d, videos=%d",
+            "disaggregated multimodal request: images=%d, audio=%d, videos=%d",
             len(image_data or []),
+            len(audio_data or []),
             len(video_data or []),
         )
-    return {"image_data": image_data, "video_data": video_data}
+    return {
+        "image_data": image_data,
+        "audio_data": audio_data,
+        "video_data": video_data,
+    }

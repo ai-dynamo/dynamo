@@ -249,6 +249,27 @@ def test_disaggregation_mode_legacy_aggregated_value_warns():
     assert config.disaggregation_mode == DisaggregationMode.AGGREGATED
 
 
+def test_conversation_affinity_cli_flag(monkeypatch):
+    """--conversation-affinity sets conversation_affinity=True in Config."""
+    monkeypatch.delenv("DYN_ENGINE_CONV_AFFINITY", raising=False)
+    config = parse_args(["--model", "fake-model", "--conversation-affinity"])
+    assert config.conversation_affinity is True
+
+
+def test_conversation_affinity_env_var(monkeypatch):
+    """DYN_ENGINE_CONV_AFFINITY=true is read and sets conversation_affinity=True."""
+    monkeypatch.setenv("DYN_ENGINE_CONV_AFFINITY", "true")
+    config = parse_args(["--model", "fake-model"])
+    assert config.conversation_affinity is True
+
+
+def test_conversation_affinity_defaults_false(monkeypatch):
+    """conversation_affinity defaults to False when neither flag nor env var is set."""
+    monkeypatch.delenv("DYN_ENGINE_CONV_AFFINITY", raising=False)
+    config = parse_args(["--model", "fake-model"])
+    assert config.conversation_affinity is False
+
+
 def test_enable_multimodal_rejects_diffusion_modality():
     with pytest.raises(ValueError, match="--enable-multimodal cannot be combined"):
         parse_args(

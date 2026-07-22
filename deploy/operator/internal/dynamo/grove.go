@@ -17,6 +17,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -502,7 +503,7 @@ func injectKaiSchedulerIfEnabled(
 	validatedQueueName string,
 ) {
 	// Only proceed if grove is enabled, kai-scheduler is enabled, and no manual schedulerName is set
-	if !runtimeConfig.GroveEnabled || !runtimeConfig.KaiSchedulerEnabled {
+	if !runtimeConfig.Gate.Enabled(features.Grove) || !runtimeConfig.Gate.Enabled(features.KaiScheduler) {
 		return
 	}
 
@@ -529,7 +530,7 @@ func injectVolcanoSchedulerIfEnabled(
 	clique *grovev1alpha1.PodCliqueTemplateSpec,
 	runtimeConfig *controller_common.RuntimeConfig,
 ) {
-	if !runtimeConfig.GroveEnabled || !runtimeConfig.VolcanoSchedulerEnabled {
+	if !runtimeConfig.Gate.Enabled(features.Grove) || !runtimeConfig.Gate.Enabled(features.VolcanoScheduler) {
 		return
 	}
 
@@ -548,7 +549,7 @@ func injectVolcanoQueueAnnotation(
 	annotations map[string]string,
 	runtimeConfig *controller_common.RuntimeConfig,
 ) {
-	if !runtimeConfig.GroveEnabled || !runtimeConfig.VolcanoSchedulerEnabled {
+	if !runtimeConfig.Gate.Enabled(features.Grove) || !runtimeConfig.Gate.Enabled(features.VolcanoScheduler) {
 		return
 	}
 

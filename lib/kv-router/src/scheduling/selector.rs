@@ -3,7 +3,6 @@
 
 use std::collections::HashMap;
 
-use rand::Rng;
 use rustc_hash::FxHashMap;
 
 use super::config::KvRouterConfig;
@@ -30,8 +29,7 @@ fn softmax_sample(
     logits: &FxHashMap<WorkerWithDpRank, f64>,
     temperature: f64,
 ) -> (WorkerWithDpRank, f64) {
-    let mut rng = rand::rng();
-    softmax_sample_with_sample(logits, temperature, rng.random())
+    softmax_sample_with_sample(logits, temperature, fastrand::f64())
 }
 
 fn softmax_sample_with_sample(
@@ -373,7 +371,6 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             let mut best_worker = None;
             let mut best_logit = f64::INFINITY;
             let mut tie_count = 0usize;
-            let mut rng = rand::rng();
             eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
                 let score = get_score(worker);
                 if score < best_logit {
@@ -386,7 +383,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 if score == best_logit {
                     tie_count += 1;
                     // Reservoir sampling keeps tied minima uniform without collecting workers.
-                    if rng.random_range(0..tie_count) == 0 {
+                    if fastrand::usize(0..tie_count) == 0 {
                         best_worker = Some(worker);
                     }
                 }
