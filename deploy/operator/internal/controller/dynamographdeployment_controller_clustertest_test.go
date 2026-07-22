@@ -45,13 +45,13 @@ func TestClusterDynamoGraphDeploymentCreatesComponentAndDeploymentManifests(t *t
 
 	t.Log("Create a non-Grove graph with independently named frontend and decode components")
 	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
-	clusterTestReadInput(t, env.Namespace(), "testdata/dgd-components/input.yaml", dgd)
+	clusterTestReadInput(t, env.Namespace(), "testdata/dgd/components/input.yaml", dgd)
 	if err := env.Client().Create(t.Context(), dgd); err != nil {
 		t.Fatalf("create DGD: %v", err)
 	}
 
 	t.Log("Match the DCDs and their terminal Deployments in one complete manifest contract")
-	golden.MatchManifests(t, env.Client(), env.Namespace(), "testdata/dgd-components/output.yaml")
+	golden.MatchManifests(t, env.Client(), env.Namespace(), "testdata/dgd/components/output.yaml")
 }
 
 func TestClusterDynamoGraphDeploymentCreatesGroveManifest(t *testing.T) {
@@ -71,13 +71,13 @@ func TestClusterDynamoGraphDeploymentCreatesGroveManifest(t *testing.T) {
 
 	t.Log("Create a Grove graph containing single-node and multinode components")
 	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
-	clusterTestReadInput(t, env.Namespace(), "testdata/dgd-grove/input.yaml", dgd)
+	clusterTestReadInput(t, env.Namespace(), "testdata/dgd/grove/input.yaml", dgd)
 	if err := env.Client().Create(t.Context(), dgd); err != nil {
 		t.Fatalf("create Grove DGD: %v", err)
 	}
 
 	t.Log("Match the complete PodCliqueSet produced without running Grove controllers")
-	golden.MatchManifests(t, env.Client(), env.Namespace(), "testdata/dgd-grove/output.yaml")
+	golden.MatchManifests(t, env.Client(), env.Namespace(), "testdata/dgd/grove/output.yaml")
 }
 
 func clusterTestRestrictedConfig(namespace string) *configv1alpha1.OperatorConfiguration {

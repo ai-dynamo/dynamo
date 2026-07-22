@@ -8,7 +8,7 @@ cluster.
 ## API
 
 ```go
-golden.MatchManifests(t, env.Client(), env.Namespace(), "testdata/dcd-deployment/output.yaml")
+golden.MatchManifests(t, env.Client(), env.Namespace(), "testdata/dcd/deployment/output.yaml")
 ```
 
 Controller tests keep one directory per scenario. `input.yaml` contains the

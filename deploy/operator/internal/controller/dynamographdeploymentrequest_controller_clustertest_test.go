@@ -81,7 +81,7 @@ func TestClusterDynamoGraphDeploymentRequestProfilesAndCreatesWorkloadManifests(
 
 	t.Log("Create a rapid DGDR that runs AIConfigurator with simulated GPU performance data")
 	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}
-	clusterTestReadInput(t, env.Namespace(), "testdata/dgdr-profiler/input.yaml", dgdr)
+	clusterTestReadInput(t, env.Namespace(), "testdata/dgdr/profiler/input.yaml", dgdr)
 	dgdr.Spec.Image = profilerImage
 	if err := env.Client().Create(ctx, dgdr); err != nil {
 		t.Fatalf("create DGDR: %v", err)
@@ -135,7 +135,7 @@ func TestClusterDynamoGraphDeploymentRequestProfilesAndCreatesWorkloadManifests(
 	}
 
 	t.Log("Match the generated DGD and its terminal Grove manifest")
-	golden.MatchManifests(t, env.Client(), env.Namespace(), "testdata/dgdr-profiler/output.yaml")
+	golden.MatchManifests(t, env.Client(), env.Namespace(), "testdata/dgdr/profiler/output.yaml")
 }
 
 func clusterTestRequiredEnv(t *testing.T, name string) string {

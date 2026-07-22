@@ -34,13 +34,13 @@ func TestClusterDynamoComponentDeploymentCreatesDeploymentManifest(t *testing.T)
 
 	t.Log("Create a single-node decode component with a production replica count")
 	dcd := &nvidiacomv1beta1.DynamoComponentDeployment{}
-	clusterTestReadInput(t, env.Namespace(), "testdata/dcd-deployment/input.yaml", dcd)
+	clusterTestReadInput(t, env.Namespace(), "testdata/dcd/deployment/input.yaml", dcd)
 	if err := env.Client().Create(t.Context(), dcd); err != nil {
 		t.Fatalf("create deployment DCD: %v", err)
 	}
 
 	t.Log("Match the Deployment while the quota prevents its ReplicaSet from being actuated")
-	golden.MatchManifests(t, env.Client(), env.Namespace(), "testdata/dcd-deployment/output.yaml")
+	golden.MatchManifests(t, env.Client(), env.Namespace(), "testdata/dcd/deployment/output.yaml")
 }
 
 func TestClusterDynamoComponentDeploymentCreatesLeaderWorkerSetManifest(t *testing.T) {
@@ -60,11 +60,11 @@ func TestClusterDynamoComponentDeploymentCreatesLeaderWorkerSetManifest(t *testi
 
 	t.Log("Create a two-node decode component with two LWS replicas")
 	dcd := &nvidiacomv1beta1.DynamoComponentDeployment{}
-	clusterTestReadInput(t, env.Namespace(), "testdata/dcd-lws/input.yaml", dcd)
+	clusterTestReadInput(t, env.Namespace(), "testdata/dcd/lws/input.yaml", dcd)
 	if err := env.Client().Create(t.Context(), dcd); err != nil {
 		t.Fatalf("create LWS DCD: %v", err)
 	}
 
 	t.Log("Match the LeaderWorkerSet without running the LWS controller")
-	golden.MatchManifests(t, env.Client(), env.Namespace(), "testdata/dcd-lws/output.yaml")
+	golden.MatchManifests(t, env.Client(), env.Namespace(), "testdata/dcd/lws/output.yaml")
 }
