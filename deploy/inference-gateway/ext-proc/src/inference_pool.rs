@@ -309,7 +309,7 @@ mod tests {
         });
         assert_eq!(
             parse_pool_state(&data).unwrap_err(),
-            "spec.selector.matchLabels is empty (would select every pod in the namespace)"
+            "spec.selector.matchLabels is empty, needs at least one match label"
         );
     }
 
