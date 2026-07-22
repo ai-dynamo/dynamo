@@ -12,7 +12,7 @@ spec:
     podTemplate:
         metadata:
             annotations:
-                nvidia.com/dynamo-operator-origin-version: 1.3.0
+                nvidia.com/dynamo-operator-origin-version: $pattern:1\.4\.0-alpha\.[0-9]+\+g[0-9a-f]+
             labels:
                 nvidia.com/dynamo-worker-hash: $pattern:[0-9a-f]{8}
         spec:
@@ -35,7 +35,7 @@ spec:
     podTemplate:
         metadata:
             annotations:
-                nvidia.com/dynamo-operator-origin-version: 1.3.0
+                nvidia.com/dynamo-operator-origin-version: $pattern:1\.4\.0-alpha\.[0-9]+\+g[0-9a-f]+
         spec:
             containers:
                 - image: registry.example/dynamo-frontend:test

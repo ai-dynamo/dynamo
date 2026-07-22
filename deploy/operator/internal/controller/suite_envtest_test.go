@@ -1,3 +1,5 @@
+//go:build !clustertest
+
 /*
  * SPDX-FileCopyrightText: Copyright (c) 2022 Atalaya Tech. Inc
  * SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
@@ -46,13 +48,7 @@ func setupProductionWebhooks(mgr ctrl.Manager, opts operatorenv.WebhookSetupOpti
 }
 
 func TestMain(m *testing.M) {
-	os.Exit(runClusterTestEnv(testRunnerFunc(func() int { return sharedEnv.RunM(m) })))
-}
-
-type testRunnerFunc func() int
-
-func (f testRunnerFunc) Run() int {
-	return f()
+	os.Exit(sharedEnv.RunM(m))
 }
 
 func TestControllers(t *testing.T) {

@@ -15,6 +15,16 @@ import (
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
+func TestRequireEnv(t *testing.T) {
+	t.Log("Set a cluster-test input in the process environment")
+	t.Setenv("DYNAMO_CLUSTERTEST_REQUIRED_TEST", "configured")
+
+	t.Log("Return the configured value")
+	if value := RequireEnv(t, "DYNAMO_CLUSTERTEST_REQUIRED_TEST"); value != "configured" {
+		t.Fatalf("RequireEnv() = %q, want configured", value)
+	}
+}
+
 func TestLoadRESTConfigRequiresUnlockedContext(t *testing.T) {
 	t.Setenv(ContextEnvVar, "")
 

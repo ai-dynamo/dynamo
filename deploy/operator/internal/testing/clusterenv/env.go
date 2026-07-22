@@ -70,10 +70,18 @@ func New(opts Options) *Env {
 	return &Env{opts: normalizeOptions(opts)}
 }
 
+// RequireEnv returns a required cluster-test environment variable.
+func RequireEnv(tb testing.TB, name string) string {
+	tb.Helper()
+	value := os.Getenv(name)
+	if value == "" {
+		tb.Fatalf("%s must be set for cluster tests", name)
+	}
+	return value
+}
+
 // RunM owns the shared cluster connection and webhook runtime for one package.
-// Its runner is normally *testing.M; the interface allows multiple test
-// environments to compose their package lifecycles without running tests twice.
-func (e *Env) RunM(m interface{ Run() int }) int {
+func (e *Env) RunM(m *testing.M) int {
 	e.mu.Lock()
 	e.runM = true
 	e.mu.Unlock()

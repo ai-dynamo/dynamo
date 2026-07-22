@@ -13,7 +13,7 @@ spec:
         cliques:
             - annotations:
                 nvidia.com/dynamo-discovery-backend: kubernetes
-                nvidia.com/dynamo-operator-origin-version: 1.3.0
+                nvidia.com/dynamo-operator-origin-version: $pattern:1\.4\.0-alpha\.[0-9]+\+g[0-9a-f]+
               labels:
                 nvidia.com/dynamo-component: frontend
                 nvidia.com/dynamo-component-type: frontend
@@ -102,7 +102,7 @@ spec:
                 roleName: frontend
             - annotations:
                 nvidia.com/dynamo-discovery-backend: kubernetes
-                nvidia.com/dynamo-operator-origin-version: 1.3.0
+                nvidia.com/dynamo-operator-origin-version: $pattern:1\.4\.0-alpha\.[0-9]+\+g[0-9a-f]+
               labels:
                 nvidia.com/dynamo-component: decode
                 nvidia.com/dynamo-component-type: decode
@@ -212,7 +212,7 @@ spec:
                 roleName: decode-ldr
             - annotations:
                 nvidia.com/dynamo-discovery-backend: kubernetes
-                nvidia.com/dynamo-operator-origin-version: 1.3.0
+                nvidia.com/dynamo-operator-origin-version: $pattern:1\.4\.0-alpha\.[0-9]+\+g[0-9a-f]+
               labels:
                 nvidia.com/dynamo-component: decode
                 nvidia.com/dynamo-component-type: decode
