@@ -13,9 +13,8 @@ CLUSTERTEST_KIND_NAME ?= dynamo-clustertest-v136
 CLUSTERTEST_CONTEXT = kind-$(CLUSTERTEST_KIND_NAME)
 CLUSTERTEST_KUBECONFIG = $(LOCALBIN)/clustertest.kubeconfig
 CLUSTERTEST_NODE_IMAGE ?= kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5
-CLUSTERTEST_PROFILER_IMAGE ?= dynamo-planner:clustertest
-CLUSTERTEST_PROFILER_BASE_IMAGE ?= nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.3.0
-CLUSTERTEST_PROFILER_DOCKERFILE = internal/testing/clusterenv/images/profiler.Dockerfile
+CLUSTERTEST_PROFILER_IMAGE ?= $(DYNAMO_CLUSTERTEST_PROFILER_IMAGE)
+CLUSTERTEST_OPERATOR_IMAGE ?= $(DYNAMO_CLUSTERTEST_OPERATOR_IMAGE)
 CLUSTERTEST_LWS_VERSION = $(shell go list -m -f '{{.Version}}' sigs.k8s.io/lws)
 CLUSTERTEST_LWS_CRD_DIR = $(shell go env GOMODCACHE)/sigs.k8s.io/lws@$(CLUSTERTEST_LWS_VERSION)/config/crd/bases
 CLUSTERTEST_GROVE_VERSION = $(shell go list -m -f '{{.Version}}' github.com/ai-dynamo/grove/operator/api)
@@ -325,6 +324,10 @@ envtest: setup-envtest ## Run envtest-backed operator tests.
 
 .PHONY: setup-clustertest
 setup-clustertest: kubectl kind ## Create or reuse the clustertest Kind cluster and install its prerequisites.
+	@test -n '$(CLUSTERTEST_PROFILER_IMAGE)' || { echo "Error: DYNAMO_CLUSTERTEST_PROFILER_IMAGE must name a locally available production planner image"; exit 1; }
+	@$(CONTAINER_TOOL) image inspect '$(CLUSTERTEST_PROFILER_IMAGE)' >/dev/null 2>&1 || { echo "Error: planner image $(CLUSTERTEST_PROFILER_IMAGE) is not available locally"; exit 1; }
+	@test -n '$(CLUSTERTEST_OPERATOR_IMAGE)' || { echo "Error: DYNAMO_CLUSTERTEST_OPERATOR_IMAGE must name a locally available production operator image"; exit 1; }
+	@$(CONTAINER_TOOL) image inspect '$(CLUSTERTEST_OPERATOR_IMAGE)' >/dev/null 2>&1 || { echo "Error: operator image $(CLUSTERTEST_OPERATOR_IMAGE) is not available locally"; exit 1; }
 	@if $(KIND) get clusters | grep -Fxq '$(CLUSTERTEST_KIND_NAME)'; then \
 		echo "Reusing Kind cluster $(CLUSTERTEST_KIND_NAME)"; \
 		$(KIND) export kubeconfig --name '$(CLUSTERTEST_KIND_NAME)' --kubeconfig '$(CLUSTERTEST_KUBECONFIG)'; \
@@ -339,18 +342,14 @@ setup-clustertest: kubectl kind ## Create or reuse the clustertest Kind cluster 
 	curl --fail --location --silent --show-error '$(CLUSTERTEST_VOLCANO_PODGROUP_CRD_URL)' | \
 		$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context '$(CLUSTERTEST_CONTEXT)' apply --server-side -f -
 	$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context '$(CLUSTERTEST_CONTEXT)' wait --for=condition=Established crd --all --timeout=2m
-	$(CONTAINER_TOOL) build \
-		--build-arg 'BASE_IMAGE=$(CLUSTERTEST_PROFILER_BASE_IMAGE)' \
-		--provenance=false \
-		--tag '$(CLUSTERTEST_PROFILER_IMAGE)' \
-		--file '$(CLUSTERTEST_PROFILER_DOCKERFILE)' \
-		../..
 	$(KIND) load docker-image --name '$(CLUSTERTEST_KIND_NAME)' '$(CLUSTERTEST_PROFILER_IMAGE)'
+	$(KIND) load docker-image --name '$(CLUSTERTEST_KIND_NAME)' '$(CLUSTERTEST_OPERATOR_IMAGE)'
 
 .PHONY: clustertest
 clustertest: ## Run Pod- and Job-backed controller tests against the explicitly unlocked cluster.
 	@test -n "$${DYNAMO_CLUSTERTEST_CONTEXT:-}" || { echo "Error: DYNAMO_CLUSTERTEST_CONTEXT must be set"; exit 1; }
 	@test -n "$${DYNAMO_CLUSTERTEST_PROFILER_IMAGE:-}" || { echo "Error: DYNAMO_CLUSTERTEST_PROFILER_IMAGE must be set"; exit 1; }
+	@test -n "$${DYNAMO_CLUSTERTEST_OPERATOR_IMAGE:-}" || { echo "Error: DYNAMO_CLUSTERTEST_OPERATOR_IMAGE must be set"; exit 1; }
 	go test -tags=clustertest $(CLUSTERTEST_PACKAGES) \
 		-run '^TestCluster' -count=1 -v -timeout=$(CLUSTERTEST_TIMEOUT)
 
@@ -359,6 +358,7 @@ integration: envtest setup-clustertest ## Run envtests and clustertests, creatin
 	KUBECONFIG='$(CLUSTERTEST_KUBECONFIG)' \
 		DYNAMO_CLUSTERTEST_CONTEXT='$(CLUSTERTEST_CONTEXT)' \
 		DYNAMO_CLUSTERTEST_PROFILER_IMAGE='$(CLUSTERTEST_PROFILER_IMAGE)' \
+		DYNAMO_CLUSTERTEST_OPERATOR_IMAGE='$(CLUSTERTEST_OPERATOR_IMAGE)' \
 		$(MAKE) clustertest
 
 # Utilize Kind or modify the e2e tests to load the image locally, enabling compatibility with other vendors.

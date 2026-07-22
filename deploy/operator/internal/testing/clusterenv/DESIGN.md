@@ -105,21 +105,22 @@ test, use `BlockReplicaSets` instead.
 
 `make setup-clustertest` creates or reuses the named Kind cluster, writes a
 dedicated kubeconfig under `bin/`, installs the Dynamo, LWS, Grove, and Volcano
-PodGroup CRDs, and builds and loads the local profiler image. New clusters use
-the pinned Kubernetes 1.36 node image. The profiler image layers the current
-profiler, planner, common, and deployment utility sources over the matching
-released planner image so the real AIC profiler runs without rebuilding its
-unchanged runtime dependencies.
+PodGroup CRDs, and loads caller-provided planner and operator images. New
+clusters use the pinned Kubernetes 1.36 node image. Both images must be regular
+production images built from the checkout under test; the cluster harness does
+not build or modify application images. DGDR tests use the operator image's
+`dgd-apply-overrides` binary when a scenario customizes its generated DGD.
 
 ```bash
-make setup-clustertest
-KUBECONFIG=bin/clustertest.kubeconfig \
-  DYNAMO_CLUSTERTEST_CONTEXT=kind-dynamo-clustertest-v136 \
-  DYNAMO_CLUSTERTEST_PROFILER_IMAGE=dynamo-planner:clustertest \
-  make clustertest
+make docker-build-planner PLANNER_IMG=dynamo-planner:clustertest
+make docker-build IMG=dynamo-operator:clustertest
+DYNAMO_CLUSTERTEST_PROFILER_IMAGE=dynamo-planner:clustertest \
+  DYNAMO_CLUSTERTEST_OPERATOR_IMAGE=dynamo-operator:clustertest \
+  make integration
 ```
 
 `make envtest` runs the API-only suite, `make clustertest` runs the Kind-backed
 suite, and `make integration` runs both after preparing the standard Kind
-cluster and its profiler image. The operator pre-merge job runs
-`make integration` directly.
+cluster with the supplied images. Full PR CI passes the production images
+created by `planner-build` and `operator`; the lightweight operator pre-merge
+job runs only the API-only suite.

@@ -58,6 +58,7 @@ jobs:
     needs:
       - changed-files
       - operator
+      - operator-integration
       - helm-chart-tests
       - snapshot-agent
       - snapshot-placeholder-vllm
@@ -548,7 +549,10 @@ jobs:
   planner-build:
     name: planner # This name overlaps with other planner jobs to group them in the UI
     needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'
+    if: |
+      needs.changed-files.outputs.core == 'true' ||
+      needs.changed-files.outputs.planner == 'true' ||
+      needs.changed-files.outputs.operator == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: dynamo
@@ -572,6 +576,38 @@ jobs:
       contents: read
       actions: read
     secrets: inherit
+
+  operator-integration:
+    name: Operator Integration
+    needs: [changed-files, planner-build, operator]
+    if: |
+      always() && !cancelled() &&
+      needs.changed-files.outputs.operator == 'true' &&
+      needs.planner-build.result == 'success' &&
+      needs.operator.result == 'success'
+    runs-on: prod-default-v2
+    permissions:
+      contents: read
+    env:
+      DYNAMO_CLUSTERTEST_PROFILER_IMAGE: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ needs.planner-build.outputs.target_tag_plain }}
+      DYNAMO_CLUSTERTEST_OPERATOR_IMAGE: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.operator.outputs.operator_default_tag }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 0
+      - name: Log in to ECR
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      - name: Pull production images
+        run: |
+          docker pull "$DYNAMO_CLUSTERTEST_PROFILER_IMAGE"
+          docker pull "$DYNAMO_CLUSTERTEST_OPERATOR_IMAGE"
+      - name: Run operator integration tests
+        working-directory: deploy/operator
+        run: make integration
 
   frontend-build:
     name: frontend

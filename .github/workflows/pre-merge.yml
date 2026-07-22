@@ -115,9 +115,9 @@ jobs:
       with:
         component: operator
         platform: linux/amd64
-    - name: Run operator integration tests
+    - name: Run operator envtests
       working-directory: deploy/operator
-      run: make integration
+      run: make envtest
 
   snapshot:
     needs: changed-files
