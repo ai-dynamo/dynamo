@@ -4,7 +4,6 @@
 //! SGLang KV manager — wraps [`RadixCache`] with request-level lifecycle
 //! operations and KV event publishing.
 
-use std::collections::HashMap;
 use std::collections::VecDeque;
 
 use crate::cache::radix_cache::{NodeId, RadixCache};
@@ -15,6 +14,7 @@ use dynamo_kv_router::protocols::{
     KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, compute_block_hash_for_seq,
     compute_next_seq_hash,
 };
+use rustc_hash::FxHashMap;
 
 /// Result of `allocate_for_request`.
 pub struct AllocResult {
@@ -35,11 +35,11 @@ pub struct SglangKvManager {
     next_event_id: u64,
     /// Maps each complete block's terminal pool_idx → block_hash assigned
     /// during Stored events, so Removed events can use the same block_hash.
-    idx_to_block_hash: HashMap<usize, ExternalSequenceBlockHash>,
+    idx_to_block_hash: FxHashMap<usize, ExternalSequenceBlockHash>,
     /// Tracks how many live pool slots currently advertise the same logical
     /// block hash so router events reflect logical block visibility, not
     /// transient slot ownership.
-    block_hash_refcounts: HashMap<ExternalSequenceBlockHash, usize>,
+    block_hash_refcounts: FxHashMap<ExternalSequenceBlockHash, usize>,
 }
 
 pub struct DecodeTokenReservation {
@@ -93,8 +93,8 @@ impl SglangKvManager {
             kv_event_publishers,
             dp_rank,
             next_event_id: 0,
-            idx_to_block_hash: HashMap::new(),
-            block_hash_refcounts: HashMap::new(),
+            idx_to_block_hash: FxHashMap::default(),
+            block_hash_refcounts: FxHashMap::default(),
         }
     }
 
@@ -143,23 +143,25 @@ impl SglangKvManager {
         &mut self,
         token_ids: &[u64],
         prefix_len: usize,
-        prefix_indices: &[usize],
+        mut prefix_indices: Vec<usize>,
         last_node: NodeId,
-    ) -> Option<AllocResult> {
+    ) -> Result<AllocResult, Vec<usize>> {
         let new_tokens = token_ids.len().saturating_sub(prefix_len);
-        let new_indices = self.cache.token_pool.allocate(new_tokens)?;
+        let Some(new_indices) = self.cache.token_pool.allocate(new_tokens) else {
+            return Err(prefix_indices);
+        };
 
-        let mut kv_indices = prefix_indices[..prefix_len].to_vec();
-        kv_indices.extend_from_slice(&new_indices);
+        debug_assert_eq!(prefix_indices.len(), prefix_len);
+        prefix_indices.extend_from_slice(&new_indices);
 
         self.cache.inc_lock_ref(last_node);
 
-        self.publish_stored_event(token_ids, &kv_indices, prefix_len);
+        self.publish_stored_event(token_ids, &prefix_indices, prefix_len);
         self.log_trace("allocation", new_tokens);
 
-        Some(AllocResult {
+        Ok(AllocResult {
             prefix_len,
-            kv_indices,
+            kv_indices: prefix_indices,
             last_node,
         })
     }
@@ -176,8 +178,17 @@ impl SglangKvManager {
         first_new_token: usize,
     ) {
         self.publish_stored_event(token_ids, kv_indices, first_new_token);
-        self.cache.insert(token_ids, kv_indices);
-        self.release_unretained_finished_indices(token_ids, kv_indices);
+        let new_last_node =
+            self.cache
+                .insert_from_node(last_node, first_new_token, token_ids, kv_indices);
+        let complete_len =
+            token_ids.len().min(kv_indices.len()) / self.cache.page_size() * self.cache.page_size();
+        self.release_unretained_finished_indices(
+            kv_indices,
+            new_last_node,
+            first_new_token,
+            complete_len,
+        );
         self.cache.dec_lock_ref(last_node);
     }
 
@@ -207,7 +218,9 @@ impl SglangKvManager {
         );
 
         self.publish_stored_event(token_ids, kv_indices, first_new_token);
-        let new_last_node = self.cache.insert(token_ids, kv_indices);
+        let new_last_node =
+            self.cache
+                .insert_from_node(last_node, first_new_token, token_ids, kv_indices);
 
         // A concurrent insert can retain different physical pages for the same prefix.
         // Move the active request to canonical pages before releasing its duplicates.
@@ -376,37 +389,60 @@ impl SglangKvManager {
         indices
     }
 
-    fn release_unretained_finished_indices(&mut self, token_ids: &[u64], kv_indices: &[usize]) {
+    fn release_unretained_finished_indices(
+        &mut self,
+        kv_indices: &[usize],
+        last_node: NodeId,
+        first_new_token: usize,
+        complete_len: usize,
+    ) {
         let block_size = self.cache.page_size();
-        let complete_len = token_ids.len().min(kv_indices.len()) / block_size * block_size;
         if complete_len == 0 {
             return;
         }
 
-        let (matched_len, last_node) = self.cache.match_prefix(&token_ids[..complete_len]);
-        debug_assert_eq!(
-            matched_len, complete_len,
-            "completed SGLang sequence should be fully cached after insert"
-        );
-        if matched_len < complete_len {
-            return;
-        }
-
-        let canonical_indices = self.collect_path_indices(last_node);
-        debug_assert!(
-            canonical_indices.len() >= complete_len,
-            "cached SGLang sequence path should carry complete KV indices"
-        );
-        if canonical_indices.len() < complete_len {
-            return;
-        }
-
         let mut unretained_indices = Vec::new();
-        for block_start in (0..complete_len).step_by(block_size) {
-            let block_end = block_start + block_size;
-            if canonical_indices[block_end - 1] != kv_indices[block_end - 1] {
-                unretained_indices.extend_from_slice(&kv_indices[block_start..block_end]);
+        let mut current = last_node;
+        let mut path_end = complete_len;
+
+        while path_end > first_new_token {
+            debug_assert_ne!(current, self.cache.root());
+            if current == self.cache.root() {
+                tracing::error!(
+                    path_end,
+                    first_new_token,
+                    complete_len,
+                    "SGLang radix path ended before finished-request reconciliation"
+                );
+                break;
             }
+
+            let node = self.cache.node(current);
+            let node_len = node.value.len();
+            debug_assert!(node_len <= path_end);
+            if node_len > path_end {
+                tracing::error!(
+                    node_len,
+                    path_end,
+                    complete_len,
+                    "SGLang radix node exceeds finished materialized prefix"
+                );
+                break;
+            }
+            let path_start = path_end - node_len;
+            let reconcile_start = path_start.max(first_new_token);
+
+            for block_start in (reconcile_start..path_end).step_by(block_size) {
+                let block_end = block_start + block_size;
+                let node_start = block_start - path_start;
+                let node_end = node_start + block_size;
+                if kv_indices[block_start..block_end] != node.value[node_start..node_end] {
+                    unretained_indices.extend_from_slice(&kv_indices[block_start..block_end]);
+                }
+            }
+
+            path_end = path_start;
+            current = node.parent.unwrap_or(self.cache.root());
         }
 
         self.free_indices(&unretained_indices);

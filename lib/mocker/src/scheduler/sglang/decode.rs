@@ -63,13 +63,22 @@ pub(super) fn cache_materialized_prefix(
         )
     });
 
-    let sequence = req.sequence_prefix(aligned_tokens);
-    let new_last = kv_manager.cache_unfinished_req(
-        &sequence,
-        &mut req.kv_indices[..aligned_tokens],
-        last_node,
-        req.cached_tokens,
-    );
+    let new_last = if aligned_tokens <= req.prompt_len() {
+        kv_manager.cache_unfinished_req(
+            &req.prompt_tokens[..aligned_tokens],
+            &mut req.kv_indices[..aligned_tokens],
+            last_node,
+            req.cached_tokens,
+        )
+    } else {
+        let sequence = req.sequence_prefix(aligned_tokens).into_owned();
+        kv_manager.cache_unfinished_req(
+            &sequence,
+            &mut req.kv_indices[..aligned_tokens],
+            last_node,
+            req.cached_tokens,
+        )
+    };
     req.last_node = Some(new_last);
     req.cached_tokens = aligned_tokens;
     req.debug_assert_invariants(config.block_size);
@@ -171,8 +180,7 @@ pub(super) fn cleanup_completed_request(
     kv_manager: &mut SglangKvManager,
     block_size: usize,
 ) {
-    let sequence = request.sequence_tokens();
-    let tokens_to_cache = floor_to_block(sequence.len(), block_size);
+    let tokens_to_cache = floor_to_block(request.current_sequence_len(), block_size);
     if request.kv_indices.len() > tokens_to_cache {
         kv_manager.free_indices(&request.kv_indices[tokens_to_cache..]);
     }
@@ -181,12 +189,22 @@ pub(super) fn cleanup_completed_request(
         return;
     };
     if tokens_to_cache > 0 {
-        kv_manager.cache_finished_req(
-            &sequence[..tokens_to_cache],
-            &request.kv_indices[..tokens_to_cache],
-            last_node,
-            request.cached_tokens,
-        );
+        if tokens_to_cache <= request.prompt_len() {
+            kv_manager.cache_finished_req(
+                &request.prompt_tokens[..tokens_to_cache],
+                &request.kv_indices[..tokens_to_cache],
+                last_node,
+                request.cached_tokens,
+            );
+        } else {
+            let sequence = request.sequence_tokens().into_owned();
+            kv_manager.cache_finished_req(
+                &sequence[..tokens_to_cache],
+                &request.kv_indices[..tokens_to_cache],
+                last_node,
+                request.cached_tokens,
+            );
+        }
     } else {
         kv_manager.free_request(last_node);
     }

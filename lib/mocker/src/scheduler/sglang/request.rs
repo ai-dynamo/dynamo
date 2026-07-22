@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -53,16 +54,20 @@ impl SglangRequest {
         self.materialized_tokens / block_size * block_size
     }
 
-    pub(super) fn sequence_tokens(&self) -> Vec<u64> {
+    pub(super) fn sequence_tokens(&self) -> Cow<'_, [u64]> {
+        if self.output_ids.is_empty() {
+            return Cow::Borrowed(&self.prompt_tokens);
+        }
+
         let mut sequence = self.prompt_tokens.clone();
         sequence.extend(self.output_ids.iter().map(|&token| token as u64));
-        sequence
+        Cow::Owned(sequence)
     }
 
-    pub(super) fn sequence_prefix(&self, len: usize) -> Vec<u64> {
+    pub(super) fn sequence_prefix(&self, len: usize) -> Cow<'_, [u64]> {
         let prompt_len = self.prompt_len();
         if len <= prompt_len {
-            return self.prompt_tokens[..len].to_vec();
+            return Cow::Borrowed(&self.prompt_tokens[..len]);
         }
 
         let mut prefix = self.prompt_tokens.clone();
@@ -71,7 +76,7 @@ impl SglangRequest {
                 .iter()
                 .map(|&token| token as u64),
         );
-        prefix
+        Cow::Owned(prefix)
     }
 
     pub(super) fn next_output_token(&self) -> u32 {

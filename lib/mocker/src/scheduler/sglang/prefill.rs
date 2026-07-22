@@ -106,6 +106,8 @@ pub(super) fn get_new_batch_prefill(
         let chunk_end = req.materialized_tokens + chunk_tokens;
         let old_allocated_tokens = req.allocated_tokens;
         let prev_node = req.last_node.take();
+        let prefix_indices =
+            (req.materialized_tokens > 0).then(|| std::mem::take(&mut req.kv_indices));
         let alloc_tokens = req.sequence_prefix(chunk_end);
         let actual_new_tokens = alloc_tokens.len().saturating_sub(req.materialized_tokens);
         let available = kv_manager.cache().token_pool.available();
@@ -120,12 +122,18 @@ pub(super) fn get_new_batch_prefill(
                     req.uuid, req.materialized_tokens
                 )
             });
-            kv_manager.allocate_after_prefix(
+            match kv_manager.allocate_after_prefix(
                 &alloc_tokens,
                 req.materialized_tokens,
-                &req.kv_indices[..req.materialized_tokens],
+                prefix_indices.expect("materialized request must retain its KV indices"),
                 last_node,
-            )
+            ) {
+                Ok(alloc) => Some(alloc),
+                Err(indices) => {
+                    req.kv_indices = indices;
+                    None
+                }
+            }
         } else {
             kv_manager.allocate_for_request(&alloc_tokens)
         };
