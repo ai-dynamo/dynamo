@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from dynamo.vllm.realtime import RealtimeTranscriptionHandler
+from dynamo.vllm.realtime import RealtimeHandler, RealtimeTranscriptionHandler
 
 pytestmark = [
     pytest.mark.unit,
@@ -29,6 +29,17 @@ class _Context:
 
     def is_stopped(self) -> bool:
         return self.stopped
+
+
+class _RecordingHandler:
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+
+    async def generate(self, request_stream, context):
+        del context
+        async for event in request_stream:
+            self.events.append(event)
+        yield {"type": "session.updated"}
 
 
 class _FakeEngine:
@@ -87,6 +98,47 @@ async def _drive(handler, events):
             yield event
 
     return [event async for event in handler.generate(request_stream(), _Context())]
+
+
+def test_dispatches_session_and_replays_initial_update():
+    transcription = _RecordingHandler()
+    handler = RealtimeHandler({"transcription": transcription})
+    events = [
+        {
+            "type": "session.update",
+            "event_id": "event_1",
+            "session": {"type": "transcription"},
+        },
+        {"type": "input_audio_buffer.commit"},
+    ]
+
+    result = asyncio.run(_drive(handler, events))
+
+    assert result == [{"type": "session.updated"}]
+    assert transcription.events == events
+
+
+def test_rejects_unsupported_session_type():
+    transcription = _RecordingHandler()
+    handler = RealtimeHandler({"transcription": transcription})
+
+    result = asyncio.run(
+        _drive(
+            handler,
+            [
+                {
+                    "type": "session.update",
+                    "event_id": "event_1",
+                    "session": {"type": "realtime"},
+                }
+            ],
+        )
+    )
+
+    assert result[0]["type"] == "error"
+    assert result[0]["error"]["code"] == "unsupported_session"
+    assert result[0]["error"]["event_id"] == "event_1"
+    assert transcription.events == []
 
 
 def test_transcription_session_streams_canonical_events_and_resamples_audio():
