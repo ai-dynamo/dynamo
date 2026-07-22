@@ -638,10 +638,6 @@ pub mod tcp_response_stream {
     /// Per-stream response flow-control window in bytes.
     pub const DYN_TCP_RESPONSE_STREAM_WINDOW_BYTES: &str = "DYN_TCP_RESPONSE_STREAM_WINDOW_BYTES";
 
-    /// Per-connection response flow-control window in bytes.
-    pub const DYN_TCP_RESPONSE_CONNECTION_WINDOW_BYTES: &str =
-        "DYN_TCP_RESPONSE_CONNECTION_WINDOW_BYTES";
-
     /// Enables diagnostic TCP_INFO data-segment accounting for response sockets.
     pub const DYN_TCP_RESPONSE_PACKET_METRICS: &str = "DYN_TCP_RESPONSE_PACKET_METRICS";
 }
@@ -895,7 +891,6 @@ mod tests {
             tcp_response_stream::DYN_TCP_RESPONSE_BATCH_MAX_BYTES,
             tcp_response_stream::DYN_TCP_RESPONSE_BATCH_MAX_FRAMES,
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_WINDOW_BYTES,
-            tcp_response_stream::DYN_TCP_RESPONSE_CONNECTION_WINDOW_BYTES,
             tcp_response_stream::DYN_TCP_RESPONSE_PACKET_METRICS,
             // Event Plane
             event_plane::DYN_EVENT_PLANE,

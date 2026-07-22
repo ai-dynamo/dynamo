@@ -39,8 +39,8 @@
 //!
 //! # Server-Client Interaction
 //!
-//! See the test cases below for detailed examples. Note that the response stream expects the client
-//! to send a [`ResponseStreamPrologue`] in order to properly establish the stream.
+//! See the test cases below for detailed examples. A response `Prologue` activates
+//! the logical stream before any `Data` frames are sent.
 //!
 //! # Stream Types
 //!
@@ -77,8 +77,10 @@
 //!
 //! A dedicated request socket starts with a `CallHomeHandshake` carrying its
 //! subject and [`StreamType::Request`]. A response-mux connection instead uses
-//! a versioned handshake containing the frontend and physical-connection UUIDs;
-//! incompatible response versions are rejected without a legacy fallback.
+//! [`mux::MuxCodec`] from the first byte: `ConnectionHello` carries the protocol
+//! version and frontend UUID, and the frontend returns an empty
+//! `ConnectionReady`. Incompatible response versions are rejected without a
+//! legacy fallback.
 //!
 //! # Control / Shutdown Protocol
 //!
@@ -101,7 +103,7 @@
 //!
 //! ## Response mux (downstream → upstream) — bidirectional
 //!
-//! - Upstream writes: mux `Stop`, `Kill`, `WindowUpdate`, `ConnectionAck`, and `Reset` frames.
+//! - Upstream writes: mux `Stop`, `Kill`, `WindowUpdate`, and `Reset` frames.
 //! - Downstream writes: mux `Prologue`, `Data`, `End`, and `Reset` frames.
 //!
 //! ## Request stream (upstream → downstream) — unidirectional after the handshake
@@ -121,8 +123,8 @@ use serde::{Deserialize, Serialize};
 
 #[allow(unused_imports)]
 use super::{
-    ConnectionInfo, PendingConnections, RegisteredStream, ResponseService, ResponseStreamPrologue,
-    StreamOptions, StreamReceiver, StreamSender, StreamType, codec::TwoPartCodec,
+    ConnectionInfo, PendingConnections, RegisteredStream, ResponseService, StreamOptions,
+    StreamReceiver, StreamSender, StreamType, codec::TwoPartCodec,
 };
 
 const TCP_TRANSPORT: &str = "tcp_server";
@@ -228,7 +230,6 @@ pub struct ResponseMuxConnectionInfo {
     pub frontend_server_id: uuid::Uuid,
     pub stream_id: uuid::Uuid,
     pub context: String,
-    pub version: u8,
 }
 
 impl From<ResponseMuxConnectionInfo> for ConnectionInfo {

@@ -103,7 +103,11 @@ Additional TCP-specific environment variables:
 
 The TCP response path always uses the versioned `tcp_response_mux_v1` protocol. Each worker process maintains four persistent response connections to each frontend it communicates with, and logical responses share those connections. For example, eight worker processes paired with one frontend maintain 32 physical response connections after warmup. Request streams remain on their existing dedicated sockets.
 
-Data frames are batched for up to 1 ms by default to reduce small TCP writes and per-packet operating system overhead. Set `DYN_TCP_RESPONSE_BATCH_INTERVAL_MS=0` for opportunistic batching without an intentional delay. Values above 100 ms or malformed values prevent runtime initialization.
+Response connections use the mux codec from the first byte. A worker sends a binary `ConnectionHello` containing the protocol version and frontend UUID, and the frontend returns an empty `ConnectionReady`. Every subsequent frame has a 21-byte header containing the payload length, frame kind, and logical-stream UUID. Successful stream prologues and reset frames have empty payloads; a failed prologue carries its error as UTF-8 text.
+
+Workers submit prologue and reset frames through an urgent writer lane and submit data and end frames through an ordered bounded lane. Data frames are batched for up to 1 ms by default to reduce small TCP writes and per-packet operating system overhead. Set `DYN_TCP_RESPONSE_BATCH_INTERVAL_MS=0` for opportunistic batching without an intentional delay. Values above 100 ms or malformed values prevent runtime initialization.
+
+Per-stream credits isolate slow consumers. Each logical stream can queue at most eight ordered frames, and a bounded connection queue limits total userspace memory. The mux does not add a connection-level credit window: TCP provides physical-connection backpressure. Host pools live for the worker-process lifetime, and a process-wide maintenance task warms new frontend pools to four connections and replaces failed connections.
 
 The response mux supports the following tuning variables:
 
@@ -111,8 +115,7 @@ The response mux supports the following tuning variables:
 - `DYN_TCP_RESPONSE_BATCH_MAX_BYTES`: Maximum encoded bytes per batch (default: `65536`)
 - `DYN_TCP_RESPONSE_BATCH_MAX_FRAMES`: Maximum frames per batch (default: `64`)
 - `DYN_TCP_RESPONSE_STREAM_WINDOW_BYTES`: Initial per-stream flow-control window (default: `262144`)
-- `DYN_TCP_RESPONSE_CONNECTION_WINDOW_BYTES`: Initial per-connection flow-control window (default: `262144`)
-- `DYN_TCP_RESPONSE_PACKET_METRICS`: Enable detailed per-frame timing and Linux TCP segment diagnostics (`0` or `1`, default: `0`)
+- `DYN_TCP_RESPONSE_PACKET_METRICS`: Enable Linux TCP segment diagnostics (`0` or `1`, default: `0`)
 
 Response mux versions do not fall back to the former dedicated response protocol. Upgrade frontends and workers together so both sides support `tcp_response_mux_v1`; mixed versions reject the response connection during its handshake.
 

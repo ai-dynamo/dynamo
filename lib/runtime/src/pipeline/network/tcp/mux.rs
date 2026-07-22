@@ -3,22 +3,15 @@
 
 //! Multiplexed TCP response-stream protocol.
 //!
-//! A short [`TwoPartCodec`] handshake validates the version and frontend
-//! identity. The persistent connection then switches to [`MuxCodec`], whose
-//! compact fixed-width header carries the frame kind and logical stream UUID.
-//! Connection writers can batch those frames without changing their wire
-//! representation.
+//! [`MuxCodec`] carries both the connection handshake and logical response
+//! streams. Its compact fixed-width header lets connection writers batch frames
+//! without copying their payloads.
 
 use std::{io, sync::OnceLock, time::Duration};
 
 use bytes::{BufMut, Bytes, BytesMut};
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::pipeline::{
-    error::TwoPartCodecError,
-    network::codec::{TwoPartCodec, TwoPartMessage, TwoPartMessageType},
-};
 use tokio_util::codec::{Decoder, Encoder};
 
 pub mod client;
@@ -27,7 +20,7 @@ pub const RESPONSE_MUX_VERSION: u8 = 1;
 pub const RESPONSE_MUX_POOL_SIZE: usize = 4;
 pub const RESPONSE_MUX_WRITER_QUEUE: usize = 4096;
 pub const RESPONSE_MUX_STREAM_WRITER_QUEUE: usize = 8;
-pub const RESPONSE_MUX_IDLE_TTL_SECS: u64 = 300;
+pub const RESPONSE_MUX_CONNECTION_QUEUE_BYTES: usize = 262_144;
 pub const RESPONSE_MUX_CONNECT_TIMEOUT_SECS: u64 = 5;
 
 pub const RESPONSE_MUX_DEFAULT_BATCH_INTERVAL_MS: u64 = 1;
@@ -35,10 +28,7 @@ pub const RESPONSE_MUX_MAX_BATCH_INTERVAL_MS: u64 = 100;
 pub const RESPONSE_MUX_DEFAULT_BATCH_MAX_BYTES: usize = 65_536;
 pub const RESPONSE_MUX_DEFAULT_BATCH_MAX_FRAMES: usize = 64;
 pub const RESPONSE_MUX_DEFAULT_STREAM_WINDOW_BYTES: usize = 262_144;
-pub const RESPONSE_MUX_DEFAULT_CONNECTION_WINDOW_BYTES: usize = 262_144;
 pub const RESPONSE_MUX_CREDIT_UPDATE_BYTES: usize = 65_536;
-pub const RESPONSE_MUX_CREDIT_UPDATE_INTERVAL: Duration = Duration::from_millis(1);
-pub const RESPONSE_MUX_SCHEDULER_QUANTUM: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResponseMuxConfig {
@@ -47,7 +37,6 @@ pub struct ResponseMuxConfig {
     pub batch_max_bytes: usize,
     pub batch_max_frames: usize,
     pub stream_window_bytes: usize,
-    pub connection_window_bytes: usize,
 }
 
 impl ResponseMuxConfig {
@@ -108,11 +97,6 @@ impl ResponseMuxConfig {
             env::DYN_TCP_RESPONSE_STREAM_WINDOW_BYTES,
             RESPONSE_MUX_DEFAULT_STREAM_WINDOW_BYTES,
         )?;
-        let connection_window_bytes = parse(
-            &mut read,
-            env::DYN_TCP_RESPONSE_CONNECTION_WINDOW_BYTES,
-            RESPONSE_MUX_DEFAULT_CONNECTION_WINDOW_BYTES,
-        )?;
         for (name, value) in [
             (env::DYN_TCP_RESPONSE_BATCH_MAX_BYTES, batch_max_bytes),
             (env::DYN_TCP_RESPONSE_BATCH_MAX_FRAMES, batch_max_frames),
@@ -120,25 +104,15 @@ impl ResponseMuxConfig {
                 env::DYN_TCP_RESPONSE_STREAM_WINDOW_BYTES,
                 stream_window_bytes,
             ),
-            (
-                env::DYN_TCP_RESPONSE_CONNECTION_WINDOW_BYTES,
-                connection_window_bytes,
-            ),
         ] {
             if value == 0 {
                 anyhow::bail!("{name} must be greater than zero");
             }
         }
-        for (name, value) in [
-            (
-                env::DYN_TCP_RESPONSE_STREAM_WINDOW_BYTES,
-                stream_window_bytes,
-            ),
-            (
-                env::DYN_TCP_RESPONSE_CONNECTION_WINDOW_BYTES,
-                connection_window_bytes,
-            ),
-        ] {
+        for (name, value) in [(
+            env::DYN_TCP_RESPONSE_STREAM_WINDOW_BYTES,
+            stream_window_bytes,
+        )] {
             if value > u32::MAX as usize {
                 anyhow::bail!("{name} must fit in an unsigned 32-bit credit update");
             }
@@ -149,7 +123,6 @@ impl ResponseMuxConfig {
             batch_max_bytes,
             batch_max_frames,
             stream_window_bytes,
-            connection_window_bytes,
         })
     }
 
@@ -169,25 +142,8 @@ pub fn initialize_response_mux_config() -> anyhow::Result<ResponseMuxConfig> {
     Ok(*RESPONSE_MUX_CONFIG.get().expect("response mux config set"))
 }
 
-pub fn response_packet_metrics_enabled() -> bool {
-    RESPONSE_MUX_CONFIG
-        .get()
-        .is_some_and(|config| config.packet_metrics)
-}
-
-pub const MUX_HEADER_LEN: usize = 24;
-
-/// First header-only frame on a newly accepted TCP stream.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ConnectionHandshake {
-    /// Persistent connection carrying many downstream -> upstream responses.
-    ResponseMux {
-        version: u8,
-        frontend_server_id: Uuid,
-        connection_id: Uuid,
-    },
-}
+pub const MUX_HEADER_LEN: usize = 21;
+const CONNECTION_HELLO_LEN: usize = 17;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -199,7 +155,8 @@ pub enum MuxFrameKind {
     Kill = 5,
     WindowUpdate = 6,
     Reset = 7,
-    ConnectionAck = 8,
+    ConnectionHello = 8,
+    ConnectionReady = 9,
 }
 
 impl TryFrom<u8> for MuxFrameKind {
@@ -214,26 +171,12 @@ impl TryFrom<u8> for MuxFrameKind {
             5 => Ok(Self::Kill),
             6 => Ok(Self::WindowUpdate),
             7 => Ok(Self::Reset),
-            8 => Ok(Self::ConnectionAck),
+            8 => Ok(Self::ConnectionHello),
+            9 => Ok(Self::ConnectionReady),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("unknown response mux frame kind {value}"),
             )),
-        }
-    }
-}
-
-impl MuxFrameKind {
-    pub const fn metric_label(self) -> &'static str {
-        match self {
-            Self::Prologue => "prologue",
-            Self::Data => "data",
-            Self::End => "end",
-            Self::Stop => "stop",
-            Self::Kill => "kill",
-            Self::WindowUpdate => "window_update",
-            Self::Reset => "reset",
-            Self::ConnectionAck => "connection_ack",
         }
     }
 }
@@ -264,27 +207,32 @@ impl MuxFrame {
         Self::new(MuxFrameKind::WindowUpdate, stream_id, payload.freeze())
     }
 
-    pub fn connection_ack(decoded_bytes: u64) -> Self {
-        Self::new(
-            MuxFrameKind::ConnectionAck,
-            Uuid::nil(),
-            decoded_bytes.to_be_bytes().to_vec().into(),
-        )
+    pub fn connection_hello(version: u8, frontend_server_id: Uuid) -> Self {
+        let mut payload = BytesMut::with_capacity(CONNECTION_HELLO_LEN);
+        payload.put_u8(version);
+        payload.extend_from_slice(frontend_server_id.as_bytes());
+        Self::new(MuxFrameKind::ConnectionHello, Uuid::nil(), payload.freeze())
     }
 
-    pub fn connection_ack_offset(&self) -> io::Result<u64> {
-        if self.kind != MuxFrameKind::ConnectionAck || self.payload.len() != 8 {
+    pub fn connection_ready() -> Self {
+        Self::empty(MuxFrameKind::ConnectionReady, Uuid::nil())
+    }
+
+    pub fn connection_identity(&self) -> io::Result<(u8, Uuid)> {
+        if self.kind != MuxFrameKind::ConnectionHello || self.payload.len() != CONNECTION_HELLO_LEN
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "response mux connection ACK must contain eight bytes",
+                "response mux connection hello must contain a version and frontend UUID",
             ));
         }
-        Ok(u64::from_be_bytes(
-            self.payload
-                .as_ref()
-                .try_into()
-                .expect("validated connection ACK length"),
-        ))
+        let frontend_server_id = Uuid::from_slice(&self.payload[1..]).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid response mux frontend UUID: {err}"),
+            )
+        })?;
+        Ok((self.payload[0], frontend_server_id))
     }
 
     pub fn encoded_len(&self) -> usize {
@@ -301,15 +249,6 @@ impl MuxFrame {
         Ok(u32::from_be_bytes(self.payload[..4].try_into().unwrap()))
     }
 
-    pub fn into_two_part(self) -> TwoPartMessage {
-        let mut header = BytesMut::with_capacity(20);
-        header.put_u8(self.kind as u8);
-        header.put_u8(0); // flags, reserved for future protocol use
-        header.put_u16(0);
-        header.extend_from_slice(self.stream_id.as_bytes());
-        TwoPartMessage::new(header.freeze(), self.payload)
-    }
-
     /// Split the wire representation into a small header and the original
     /// payload allocation so connection writers can coalesce headers while
     /// retaining large payloads as `Bytes` for vectored I/O.
@@ -319,54 +258,11 @@ impl MuxFrame {
         Ok((header.freeze(), self.payload.clone()))
     }
 
-    pub fn try_from_two_part(message: TwoPartMessage) -> io::Result<Self> {
-        let (header, payload) = match message.into_message_type() {
-            TwoPartMessageType::HeaderOnly(header) => (header, Bytes::new()),
-            TwoPartMessageType::HeaderAndData(header, data) => (header, data),
-            TwoPartMessageType::DataOnly(_) | TwoPartMessageType::Empty => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "response mux frame is missing its fixed header",
-                ));
-            }
-        };
-
-        if header.len() != 20 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "invalid response mux header length {}, expected 20",
-                    header.len()
-                ),
-            ));
-        }
-        if header[1..4] != [0, 0, 0] {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "response mux frame has unsupported flags",
-            ));
-        }
-
-        let kind = MuxFrameKind::try_from(header[0])?;
-        let stream_id = Uuid::from_slice(&header[4..20]).map_err(|err| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("invalid response mux stream UUID: {err}"),
-            )
-        })?;
-        let is_connection_frame = kind == MuxFrameKind::ConnectionAck;
-        if stream_id.is_nil() != is_connection_frame {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "only connection-level frames must use the nil stream UUID",
-            ));
-        }
-
-        Self::validate(Self::new(kind, stream_id, payload))
-    }
-
     fn validate(frame: Self) -> io::Result<Self> {
-        let is_connection_frame = frame.kind == MuxFrameKind::ConnectionAck;
+        let is_connection_frame = matches!(
+            frame.kind,
+            MuxFrameKind::ConnectionHello | MuxFrameKind::ConnectionReady
+        );
         if frame.stream_id.is_nil() != is_connection_frame {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -374,7 +270,9 @@ impl MuxFrame {
             ));
         }
         match frame.kind {
-            MuxFrameKind::Stop | MuxFrameKind::Kill if !frame.payload.is_empty() => {
+            MuxFrameKind::End | MuxFrameKind::Stop | MuxFrameKind::Kill | MuxFrameKind::Reset
+                if !frame.payload.is_empty() =>
+            {
                 Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "control frame must not contain a payload",
@@ -384,18 +282,21 @@ impl MuxFrame {
                 frame.window_credits()?;
                 Ok(frame)
             }
-            MuxFrameKind::ConnectionAck => {
-                frame.connection_ack_offset()?;
+            MuxFrameKind::ConnectionHello => {
+                frame.connection_identity()?;
                 Ok(frame)
             }
+            MuxFrameKind::ConnectionReady if !frame.payload.is_empty() => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "response mux connection ready must be empty",
+            )),
             _ => Ok(frame),
         }
     }
 }
 
-/// Compact response-mux framing used after the versioned connection
-/// handshake. Each frame is `payload_len:u32`, kind, flags, reserved, UUID,
-/// then payload. The fixed header is 24 bytes.
+/// Compact response-mux framing. Each frame is `payload_len:u32`, kind, UUID,
+/// then payload.
 #[derive(Clone, Debug)]
 pub struct MuxCodec {
     max_message_size: usize,
@@ -434,8 +335,6 @@ impl MuxCodec {
         dst.reserve(MUX_HEADER_LEN);
         dst.put_u32(payload_len);
         dst.put_u8(frame.kind as u8);
-        dst.put_u8(0);
-        dst.put_u16(0);
         dst.extend_from_slice(frame.stream_id.as_bytes());
         Ok(())
     }
@@ -479,14 +378,8 @@ impl Decoder for MuxCodec {
             src.reserve(encoded_len - src.len());
             return Ok(None);
         }
-        if src[5] != 0 || src[6..8] != [0, 0] {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "response mux frame has unsupported flags or reserved bits",
-            ));
-        }
         let kind = MuxFrameKind::try_from(src[4])?;
-        let stream_id = Uuid::from_slice(&src[8..24]).map_err(|err| {
+        let stream_id = Uuid::from_slice(&src[5..21]).map_err(|err| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("invalid response mux stream UUID: {err}"),
@@ -501,16 +394,7 @@ impl Decoder for MuxCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::network::codec::TwoPartCodec;
     use tokio_util::codec::{Decoder, Encoder};
-
-    fn encode(frame: MuxFrame) -> BytesMut {
-        let mut bytes = BytesMut::new();
-        TwoPartCodec::default()
-            .encode(frame.into_two_part(), &mut bytes)
-            .unwrap();
-        bytes
-    }
 
     fn encode_compact(frame: MuxFrame) -> BytesMut {
         let mut bytes = BytesMut::new();
@@ -526,10 +410,11 @@ mod tests {
             stream_id,
             Bytes::from_static(b"payload"),
         );
-        let codec = TwoPartCodec::default();
-        let encoded = codec.encode_message(frame.clone().into_two_part()).unwrap();
-        let decoded = codec.decode_message(encoded).unwrap();
-        assert_eq!(MuxFrame::try_from_two_part(decoded).unwrap(), frame);
+        let mut encoded = encode_compact(frame.clone());
+        assert_eq!(
+            MuxCodec::default().decode(&mut encoded).unwrap(),
+            Some(frame)
+        );
     }
 
     #[test]
@@ -539,26 +424,29 @@ mod tests {
             Uuid::new_v4(),
             Bytes::from_static(&[1, 2]),
         );
-        assert!(MuxFrame::try_from_two_part(frame.into_two_part()).is_err());
+        let mut encoded = BytesMut::new();
+        MuxCodec::default().encode(frame, &mut encoded).unwrap();
+        assert!(MuxCodec::default().decode(&mut encoded).is_err());
     }
 
     #[test]
-    fn connection_ack_round_trips_with_cumulative_byte_offset() {
-        let frame = MuxFrame::connection_ack(987_654);
-        let decoded = MuxFrame::try_from_two_part(frame.clone().into_two_part()).unwrap();
+    fn connection_hello_round_trips_identity() {
+        let frontend_server_id = Uuid::new_v4();
+        let frame = MuxFrame::connection_hello(RESPONSE_MUX_VERSION, frontend_server_id);
+        let mut encoded = encode_compact(frame.clone());
+        let decoded = MuxCodec::default().decode(&mut encoded).unwrap().unwrap();
         assert_eq!(decoded, frame);
-        assert_eq!(decoded.connection_ack_offset().unwrap(), 987_654);
-        assert_eq!(decoded.encoded_len(), 32);
-    }
-
-    #[test]
-    fn connection_ack_rejects_stream_uuid() {
-        let frame = MuxFrame::new(
-            MuxFrameKind::ConnectionAck,
-            Uuid::new_v4(),
-            128_u64.to_be_bytes().to_vec().into(),
+        assert_eq!(
+            decoded.connection_identity().unwrap(),
+            (RESPONSE_MUX_VERSION, frontend_server_id)
         );
-        assert!(MuxFrame::try_from_two_part(frame.into_two_part()).is_err());
+
+        let mut invalid = encode_compact(MuxFrame::new(
+            MuxFrameKind::ConnectionReady,
+            Uuid::new_v4(),
+            Bytes::new(),
+        ));
+        assert!(MuxCodec::default().decode(&mut invalid).is_err());
     }
 
     #[test]
@@ -624,26 +512,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn malformed_outer_lengths_are_rejected() {
-        let mut input = BytesMut::new();
-        input.put_u64(u64::MAX);
-        input.put_u64(1);
-        input.put_u64(0);
-        assert!(TwoPartCodec::default().decode(&mut input).is_err());
-    }
-
-    #[test]
-    fn compact_codec_rejects_flags_and_connection_uuid_mismatch() {
-        let mut flags = encode_compact(MuxFrame::empty(MuxFrameKind::End, Uuid::new_v4()));
-        flags[5] = 1;
-        assert!(MuxCodec::default().decode(&mut flags).is_err());
-
-        let mut invalid = encode_compact(MuxFrame::connection_ack(64));
-        invalid[8..24].copy_from_slice(Uuid::new_v4().as_bytes());
-        assert!(MuxCodec::default().decode(&mut invalid).is_err());
-    }
-
     fn config(values: &[(&str, &str)]) -> anyhow::Result<ResponseMuxConfig> {
         let values = values
             .iter()
@@ -660,7 +528,6 @@ mod tests {
         assert_eq!(config.batch_max_bytes, 65_536);
         assert_eq!(config.batch_max_frames, 64);
         assert_eq!(config.stream_window_bytes, 262_144);
-        assert_eq!(config.connection_window_bytes, 262_144);
     }
 
     #[test]

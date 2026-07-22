@@ -179,17 +179,6 @@ pub enum ControlMessage {
     Sentinel,
 }
 
-/// This is the first message in a `ResponseStream`. This is not a message that gets process
-/// by the general pipeline, but is a control message that is awaited before the
-/// [`AsyncEngine::generate`] method is allowed to return.
-///
-/// If an error is present, the [`AsyncEngine::generate`] method will return the error instead
-/// of returning the `ResponseStream`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ResponseStreamPrologue {
-    error: Option<String>,
-}
-
 pub type StreamProvider<T> = tokio::sync::oneshot::Receiver<Result<T, String>>;
 
 /// Owning `Drop` here (rather than on `RegisteredStream`) lets `into_parts()`
@@ -354,46 +343,25 @@ mod registered_stream_tests {
 //     }
 // }
 
-// this probably needs to be come a ResponseStreamSender
-// since the prologue in this scenario sender telling the receiver
-// that all is good and it's ready to send
-//
-// in the RequestStreamSender, the prologue would be coming from the
-// receiver, so the sender would have to await the prologue which if
-// was not an error, would indicate the RequestStreamReceiver is read
-// to receive data.
-#[async_trait]
-pub(crate) trait MultiplexedStreamSender: Send + Sync {
-    async fn send_data(&self, data: Bytes) -> Result<()>;
-    async fn send_prologue(&self, error: Option<String>) -> Result<(), String>;
-    async fn finish(&self) -> Result<()>;
-}
-
 enum StreamSenderInner {
     Dedicated(tokio::sync::mpsc::Sender<TwoPartMessage>),
-    Multiplexed(Arc<dyn MultiplexedStreamSender>),
+    Multiplexed(tcp::mux::client::MuxResponseStreamSender),
 }
 
 pub struct StreamSender {
     inner: StreamSenderInner,
-    prologue: Option<ResponseStreamPrologue>,
 }
 
 impl StreamSender {
-    pub(crate) fn dedicated(
-        tx: tokio::sync::mpsc::Sender<TwoPartMessage>,
-        prologue: Option<ResponseStreamPrologue>,
-    ) -> Self {
+    pub(crate) fn dedicated(tx: tokio::sync::mpsc::Sender<TwoPartMessage>) -> Self {
         Self {
             inner: StreamSenderInner::Dedicated(tx),
-            prologue,
         }
     }
 
-    pub(crate) fn multiplexed(sender: Arc<dyn MultiplexedStreamSender>) -> Self {
+    pub(crate) fn multiplexed(sender: tcp::mux::client::MuxResponseStreamSender) -> Self {
         Self {
             inner: StreamSenderInner::Multiplexed(sender),
-            prologue: Some(ResponseStreamPrologue { error: None }),
         }
     }
 
@@ -418,41 +386,20 @@ impl StreamSender {
         }
     }
 
-    #[allow(clippy::needless_update)]
     pub async fn send_prologue(&mut self, error: Option<String>) -> Result<(), String> {
-        // leaving the original logic in place for now
-        // error overrides the dissolved prologue, but the only field on `ResponseStreamPrologue` is `error`
-        // so the second argument can never be used, and the value of error passed by the caller would always be used
-        if let Some(_prologue) = self.prologue.take() {
-            // let prologue = ResponseStreamPrologue { error, ..prologue };
-            let prologue = ResponseStreamPrologue { error };
-            let header_bytes: Bytes = match serde_json::to_vec(&prologue) {
-                Ok(b) => b.into(),
-                Err(err) => {
-                    tracing::error!(%err, "send_prologue: ResponseStreamPrologue did not serialize to a JSON array");
-                    return Err("Invalid prologue".to_string());
-                }
-            };
-            match &self.inner {
-                StreamSenderInner::Dedicated(tx) => tx
-                    .send(TwoPartMessage::from_header(header_bytes))
-                    .await
-                    .map_err(|e| e.to_string())?,
-                StreamSenderInner::Multiplexed(sender) => {
-                    sender.send_prologue(prologue.error).await?
-                }
+        match &mut self.inner {
+            StreamSenderInner::Dedicated(_) => {
+                Err("prologues are not valid on a dedicated request sender".to_string())
             }
-        } else {
-            panic!("Prologue already sent; or not set; logic error");
+            StreamSenderInner::Multiplexed(sender) => sender.send_prologue(error).await,
         }
-        Ok(())
     }
 
     /// Finish one logical response stream without closing a shared physical
     /// connection. Dedicated request-stream senders retain their existing
     /// drop-driven lifecycle and therefore have no explicit finish action.
-    pub async fn finish(&self) -> Result<()> {
-        match &self.inner {
+    pub async fn finish(self) -> Result<()> {
+        match self.inner {
             StreamSenderInner::Dedicated(_) => Ok(()),
             StreamSenderInner::Multiplexed(sender) => sender.finish().await,
         }
@@ -489,8 +436,8 @@ impl AsRef<[u8]> for StreamRxItem {
 pub(crate) struct StreamReceiverHooks {
     pub context: Arc<dyn AsyncEngineContext>,
     pub window_update_threshold: usize,
-    pub on_window_update: Arc<dyn Fn(usize) + Send + Sync>,
-    pub on_close: Arc<dyn Fn(ControlMessage) + Send + Sync>,
+    pub on_window_update: Box<dyn Fn(usize) + Send + Sync>,
+    pub on_close: Box<dyn Fn(ControlMessage) + Send + Sync>,
 }
 
 pub struct StreamReceiver {
