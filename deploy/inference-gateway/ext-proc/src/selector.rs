@@ -50,10 +50,6 @@ pub struct SelectRequest {
     pub allowed_worker_ids: Option<HashSet<u64>>,
     pub priority_jump: Option<f64>,
     pub strict_priority: Option<u32>,
-    /// KV cache-isolation namespace (Dynamo `cache_salt` / `x-tenant-id`); mixed
-    /// into block hashes so different salts never share cached prefixes. `None`
-    /// selects the default (unsalted) namespace.
-    pub cache_salt: Option<String>,
 }
 
 /// Observability overlap summary (matched token counts).
@@ -291,7 +287,6 @@ impl Selector {
             selection_id: Some(reservation_id.clone()),
             prompt: PromptRequest {
                 token_ids: Some(req.token_ids),
-                cache_namespace: req.cache_salt,
                 ..Default::default()
             },
             router_config_override: None,
