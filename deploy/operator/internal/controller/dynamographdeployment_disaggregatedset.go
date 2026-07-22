@@ -962,14 +962,15 @@ func checkDisaggregatedSetReadiness(ds *unstructured.Unstructured, selection dis
 }
 
 // checkDisaggregatedSetReadiness falls back to the child LWS objects while
-// DisaggregatedSet controllers that expose the v1 API but do not yet publish
-// roleStatuses are still in use. Once roleStatuses exists, it is authoritative.
+// DisaggregatedSet controllers that expose the v1 API do not publish either
+// roleStatuses or generation observation. A role status without observation
+// evidence may still describe the previous spec revision.
 func (r *DynamoGraphDeploymentReconciler) checkDisaggregatedSetReadiness(
 	ctx context.Context,
 	ds *unstructured.Unstructured,
 	selection disaggregatedSetSelection,
 ) (bool, string, map[string]nvidiacomv1beta1.ComponentReplicaStatus, error) {
-	if len(disaggregatedSetRoleStatuses(ds)) > 0 {
+	if len(disaggregatedSetRoleStatuses(ds)) > 0 && disaggregatedSetStatusHasObservation(ds) {
 		ready, reason, statuses := checkDisaggregatedSetReadiness(ds, selection)
 		return ready, reason, statuses, nil
 	}
@@ -1077,6 +1078,29 @@ func disaggregatedSetStatusObserved(ds *unstructured.Unstructured) (bool, string
 		return false, fmt.Sprintf("DisaggregatedSet condition %q has not observed generation %d (observedGeneration=%d)", conditionType, ds.GetGeneration(), observedGeneration)
 	}
 	return true, ""
+}
+
+func disaggregatedSetStatusHasObservation(ds *unstructured.Unstructured) bool {
+	if ds == nil || ds.GetGeneration() == 0 {
+		return true
+	}
+	if _, found := nestedInt64FromObject(ds.Object, "status", "observedGeneration"); found {
+		return true
+	}
+	conditions, found, _ := unstructured.NestedSlice(ds.Object, "status", "conditions")
+	if !found {
+		return false
+	}
+	for _, item := range conditions {
+		condition, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, found := nestedInt64(condition, "observedGeneration"); found {
+			return true
+		}
+	}
+	return false
 }
 
 func disaggregatedSetRoleStatuses(ds *unstructured.Unstructured) map[string]map[string]any {

@@ -295,6 +295,7 @@ func TestCheckDisaggregatedSetReadinessFallsBackToTargetRevisionChildLWS(t *test
 	ds.SetName("demo")
 	ds.SetNamespace("default")
 	ds.SetUID("ds-uid")
+	ds.SetGeneration(2)
 	typedDS := &disaggregatedsetv1.DisaggregatedSet{
 		Spec: disaggregatedsetv1.DisaggregatedSetSpec{Roles: []disaggregatedsetv1.DisaggregatedRoleSpec{
 			{Name: "prefill"},
@@ -304,6 +305,14 @@ func TestCheckDisaggregatedSetReadinessFallsBackToTargetRevisionChildLWS(t *test
 	typedObject, err := runtime.DefaultUnstructuredConverter.ToUnstructured(typedDS)
 	require.NoError(t, err)
 	ds.Object["spec"] = typedObject["spec"]
+	ds.Object["status"] = map[string]any{
+		// These ready-looking statuses may belong to generation 1. Without an
+		// observation marker, readiness must still come from the target children.
+		"roleStatuses": []any{
+			map[string]any{"name": "prefill", "replicas": int64(1), "updatedReplicas": int64(1), "readyReplicas": int64(1)},
+			map[string]any{"name": "decode", "replicas": int64(1), "updatedReplicas": int64(1), "readyReplicas": int64(1)},
+		},
+	}
 	targetRevision := disaggregatedsetutils.ComputeRevision(typedDS.Spec.Roles)
 	selection := disaggregatedSetSelection{
 		componentToRole: map[string]string{"prefill": "prefill", "decode": "decode"},
