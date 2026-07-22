@@ -1523,6 +1523,18 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
+			name: "grove block removal with retained experimental is immutable",
+			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: true},
+				}
+			}),
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{}
+			}),
+			wantWebhookErrs: []string{"spec.components[1].experimental.grove.forceScalingGroup: Invalid value: null: cannot be toggled after creation; delete and recreate the DynamoGraphDeployment to change it"},
+		},
+		{
 			name: "inter-pod failover shadow count is immutable",
 			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				enableAlphaInterPodGMSFailover(dgd.Spec.Services["worker"], 1)

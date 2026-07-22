@@ -12619,12 +12619,15 @@ spec:
                               forceScalingGroup:
                                 description: |-
                                   forceScalingGroup opts a single-node component into rendering as a
-                                  PodCliqueScalingGroup with one single-pod PodClique per replica, so
-                                  each replica is gang-scheduled independently and scaling changes the
-                                  scaling-group replica count. `false` or omitted means automatic
-                                  selection (multi-node and inter-pod GMS components use a scaling
-                                  group, other single-node components a standalone PodClique), not
-                                  "force PodClique". Immutable after creation.
+                                  PodCliqueScalingGroup with one single-pod PodClique per replica.
+                                  Scaling changes the scaling-group replica count; the first
+                                  `minAvailable` replicas share the base PodGang, and replicas beyond
+                                  `minAvailable` are gang-scheduled independently in their own
+                                  PodGangs (set `minAvailable: 1` for fully independent replicas).
+                                  `false` or omitted means automatic selection (multi-node and
+                                  inter-pod GMS components use a scaling group, other single-node
+                                  components a standalone PodClique), not "force PodClique".
+                                  Immutable after creation.
                                 type: boolean
                             type: object
                         type: object

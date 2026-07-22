@@ -329,6 +329,7 @@ func TestValidateExperimentalSpecDoesNotExposePodTemplate(t *testing.T) {
 		fldPath,
 		nvidiacomv1beta1.ComponentTypeWorker,
 		corev1.ResourceRequirements{},
+		true,
 	)
 	assertFieldPaths(t, errs, []string{"spec.components[0].experimental.gpuMemoryService"})
 	if errs[0].BadValue != "" {

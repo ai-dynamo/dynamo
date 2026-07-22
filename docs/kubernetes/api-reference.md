@@ -2567,7 +2567,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `forceScalingGroup` _boolean_ | forceScalingGroup opts a single-node component into rendering as a<br />PodCliqueScalingGroup with one single-pod PodClique per replica, so<br />each replica is gang-scheduled independently and scaling changes the<br />scaling-group replica count. `false` or omitted means automatic<br />selection (multi-node and inter-pod GMS components use a scaling<br />group, other single-node components a standalone PodClique), not<br />"force PodClique". Immutable after creation. |  | Optional: \{\} <br /> |
+| `forceScalingGroup` _boolean_ | forceScalingGroup opts a single-node component into rendering as a<br />PodCliqueScalingGroup with one single-pod PodClique per replica.<br />Scaling changes the scaling-group replica count; the first<br />`minAvailable` replicas share the base PodGang, and replicas beyond<br />`minAvailable` are gang-scheduled independently in their own<br />PodGangs (set `minAvailable: 1` for fully independent replicas).<br />`false` or omitted means automatic selection (multi-node and<br />inter-pod GMS components use a scaling group, other single-node<br />components a standalone PodClique), not "force PodClique".<br />Immutable after creation. |  | Optional: \{\} <br /> |
 
 
 #### HardwareSpec

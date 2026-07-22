@@ -98,10 +98,16 @@ func failoverForExperimental(experimental *nvidiacomv1beta1.ExperimentalSpec) *n
 	return experimental.Failover
 }
 
+func groveForExperimental(experimental *nvidiacomv1beta1.ExperimentalSpec) *nvidiacomv1beta1.GroveSpec {
+	if experimental == nil {
+		return nil
+	}
+	return experimental.Grove
+}
+
 func forceScalingGroupFor(experimental *nvidiacomv1beta1.ExperimentalSpec) bool {
-	return experimental != nil &&
-		experimental.Grove != nil &&
-		experimental.Grove.ForceScalingGroup
+	grove := groveForExperimental(experimental)
+	return grove != nil && grove.ForceScalingGroup
 }
 
 func effectiveGMSMode(mode nvidiacomv1beta1.GPUMemoryServiceMode) nvidiacomv1beta1.GPUMemoryServiceMode {
