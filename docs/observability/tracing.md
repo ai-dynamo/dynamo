@@ -33,7 +33,7 @@ This guide covers single GPU demo setup using Docker Compose. For Kubernetes dep
 Start the observability stack (Prometheus, Grafana, Tempo, exporters). See [Observability Getting Started](README.md#getting-started-quickly) for instructions.
 
 ### 2. Start Dynamo Components
-For a simple single-device deployment, run the aggregated tracing launch script. 
+For a simple single-device deployment, run the aggregated tracing launch script.
 
 #### 2.1 Single GPU
 For a simple single-GPU deployment, this script enables tracing, sets per-component service names, and starts a frontend with a single vLLM worker:
