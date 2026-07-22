@@ -16,7 +16,11 @@ from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeConfig,
 )
 from dynamo.common.utils.runtime import parse_endpoint
-from dynamo.trtllm.backend_args import DynamoTrtllmArgGroup, DynamoTrtllmConfig
+from dynamo.trtllm.backend_args import (
+    DynamoTrtllmArgGroup,
+    DynamoTrtllmConfig,
+    _warn_deprecated,
+)
 from dynamo.trtllm.constants import DisaggregationMode, Modality
 from dynamo.trtllm.dynamic_flags import parse_dynamic_flags
 
@@ -88,26 +92,18 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Config:
         in ("--publish-events-and-metrics", "--no-publish-events-and-metrics")
         for a in cli_args
     ):
-        import warnings
-
-        warnings.warn(
+        _warn_deprecated(
             "--publish-events-and-metrics is deprecated; use --publish-kv-events. "
-            "The old flag stays as an alias for one release.",
-            DeprecationWarning,
-            stacklevel=2,
+            "The old flag stays as an alias for one release."
         )
     if (
         "DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS" in os.environ
         and "DYN_TRTLLM_PUBLISH_KV_EVENTS" not in os.environ
     ):
-        import warnings
-
-        warnings.warn(
+        _warn_deprecated(
             "DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS is deprecated; use "
             "DYN_TRTLLM_PUBLISH_KV_EVENTS. The old env var stays as an "
-            "alias for one release.",
-            DeprecationWarning,
-            stacklevel=2,
+            "alias for one release."
         )
         os.environ["DYN_TRTLLM_PUBLISH_KV_EVENTS"] = os.environ[
             "DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS"

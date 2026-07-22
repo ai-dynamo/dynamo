@@ -23,8 +23,10 @@ class ScheduledTick:
     """Declares when the core next needs to be called, what data it needs,
     and what decisions to make.
 
-    All times are absolute seconds (wall clock for native adapter,
-    simulated clock for replay).
+    ``at_s`` is an absolute wall-clock time for the native adapter and a
+    simulated time for replay. ``at_monotonic_s`` is the matching scheduler
+    timestamp used to make observation-prefetch and plugin-dispatch cadence
+    decisions against the same clock value.
     """
 
     at_s: float
@@ -42,6 +44,7 @@ class ScheduledTick:
     traffic_metrics_duration_s: float = 0.0
     need_worker_states: bool = False
     need_worker_fpm: bool = False
+    at_monotonic_s: Optional[float] = None
 
 
 @dataclass

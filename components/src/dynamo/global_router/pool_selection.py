@@ -9,7 +9,8 @@ Supports two modes:
   grid-based selection strategies mapping (ISL, TTFT) -> prefill pool
   and (context_length, ITL) -> decode pool.
 - "agg": Unified pools handling both prefill and decode (chunked prefill),
-  with grid-based selection mapping (ISL, ITL) -> agg pool.
+  with grid-based selection mapping (TTFT, ITL) -> agg pool, optionally
+  extended to (ISL, TTFT, ITL) -> agg pool.
 
 Both modes support optional priority-based pool overrides from agent hints.
 """
@@ -18,7 +19,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, cast
 
 logger = logging.getLogger(__name__)
 
@@ -268,11 +269,13 @@ class DecodePoolSelectionStrategy:
 
 @dataclass
 class AggPoolSelectionStrategy:
-    """Strategy for selecting agg pools based on TTFT and ITL targets.
+    """Strategy for selecting agg pools based on TTFT, ITL, and optional ISL.
 
     In aggregated mode, each pool handles both prefill and decode. Since both
     phases happen in the same pool, both SLA targets matter for a single routing
-    decision. The grid maps (TTFT target, ITL target) -> pool index.
+    decision. The default grid maps (TTFT target, ITL target) -> pool index.
+    Configuring all ``isl_*`` fields extends it to
+    (input sequence length, TTFT target, ITL target) -> pool index.
 
     This works regardless of whether chunked prefill is enabled:
     - With chunked prefill: ITL reflects combined prefill+decode contention.
@@ -286,8 +289,11 @@ class AggPoolSelectionStrategy:
     itl_min_ms: float
     itl_max_ms: float
     itl_resolution: int
-    agg_pool_mapping: List[List[int]]
+    agg_pool_mapping: List[List[int]] | List[List[List[int]]]
     priority_overrides: List[PriorityPoolOverride] = field(default_factory=list)
+    isl_min: Optional[int] = None
+    isl_max: Optional[int] = None
+    isl_resolution: Optional[int] = None
 
     @property
     def ttft_step_ms(self) -> float:
@@ -304,15 +310,17 @@ class AggPoolSelectionStrategy:
         ttft_target_ms: Optional[float] = None,
         itl_target_ms: Optional[float] = None,
         priority: Optional[int] = None,
+        isl: Optional[int] = None,
     ) -> int:
         """
-        Select agg pool based on TTFT target, ITL target, and optional priority.
+        Select agg pool based on TTFT target, ITL target, optional ISL, and priority.
 
         Args:
             ttft_target_ms: Target time to first token in ms. If None, uses middle of range.
             itl_target_ms: Target inter-token latency in ms. If None, uses middle of range.
             priority: Request priority from agent hints. If set and a priority
                 override rule matches, the override takes precedence over the grid.
+            isl: Input sequence length. Used when the optional ISL grid is configured.
 
         Returns:
             Pool index from agg_pool_mapping or a priority override
@@ -331,13 +339,36 @@ class AggPoolSelectionStrategy:
             (itl_target_ms - self.itl_min_ms) / self.itl_step_ms, self.itl_resolution
         )
 
-        pool_idx = self.agg_pool_mapping[ttft_idx][itl_idx]
+        isl_min, isl_max, isl_resolution = (
+            self.isl_min,
+            self.isl_max,
+            self.isl_resolution,
+        )
+        if isl_min is None or isl_max is None or isl_resolution is None:
+            if any(field is not None for field in (isl_min, isl_max, isl_resolution)):
+                raise ValueError(
+                    "isl_min, isl_max, and isl_resolution must be configured together"
+                )
+            mapping_2d = cast(List[List[int]], self.agg_pool_mapping)
+            pool_idx = mapping_2d[ttft_idx][itl_idx]
+        else:
+            if isl is None:
+                isl = (isl_min + isl_max) // 2
+            isl_idx = self._clamp_index(
+                (isl - isl_min) / ((isl_max - isl_min) / isl_resolution), isl_resolution
+            )
+            mapping_3d = cast(List[List[List[int]]], self.agg_pool_mapping)
+            pool_idx = mapping_3d[isl_idx][ttft_idx][itl_idx]
         pool_idx = _apply_priority_overrides(
             pool_idx, priority, self.priority_overrides
         )
         logger.debug(
-            f"Agg pool selection: TTFT={ttft_target_ms}ms, ITL={itl_target_ms}ms, "
-            f"priority={priority} -> pool {pool_idx}"
+            "Agg pool selection: ISL=%s, TTFT=%sms, ITL=%sms, priority=%s -> pool %s",
+            isl,
+            ttft_target_ms,
+            itl_target_ms,
+            priority,
+            pool_idx,
         )
         return pool_idx
 
@@ -585,25 +616,70 @@ class GlobalRouterConfig:
                 f"itl_max_ms ({agg_strategy.itl_max_ms})"
             )
 
-        # Validate mapping dimensions
-        if len(agg_strategy.agg_pool_mapping) != agg_strategy.ttft_resolution:
-            raise ValueError(
-                f"agg_pool_mapping rows ({len(agg_strategy.agg_pool_mapping)}) "
-                f"does not match ttft_resolution ({agg_strategy.ttft_resolution})"
-            )
-
-        for i, row in enumerate(agg_strategy.agg_pool_mapping):
-            if len(row) != agg_strategy.itl_resolution:
+        isl_min, isl_max, isl_resolution = (
+            agg_strategy.isl_min,
+            agg_strategy.isl_max,
+            agg_strategy.isl_resolution,
+        )
+        if isl_min is None or isl_max is None or isl_resolution is None:
+            if any(field is not None for field in (isl_min, isl_max, isl_resolution)):
                 raise ValueError(
-                    f"agg_pool_mapping row {i} length ({len(row)}) "
-                    f"does not match itl_resolution ({agg_strategy.itl_resolution})"
+                    "isl_min, isl_max, and isl_resolution must be configured together"
                 )
-            for pool_idx in row:
-                if pool_idx < 0 or pool_idx >= self.num_agg_pools:
+            mapping_2d = cast(List[List[int]], agg_strategy.agg_pool_mapping)
+            if len(mapping_2d) != agg_strategy.ttft_resolution:
+                raise ValueError(
+                    f"agg_pool_mapping rows ({len(mapping_2d)}) "
+                    f"does not match ttft_resolution ({agg_strategy.ttft_resolution})"
+                )
+            for i, itl_row in enumerate(mapping_2d):
+                if len(itl_row) != agg_strategy.itl_resolution:
                     raise ValueError(
-                        f"Invalid agg pool index {pool_idx} in mapping "
-                        f"(must be 0 to {self.num_agg_pools - 1})"
+                        f"agg_pool_mapping row {i} length ({len(itl_row)}) "
+                        f"does not match itl_resolution ({agg_strategy.itl_resolution})"
                     )
+                for pool_idx in itl_row:
+                    if pool_idx < 0 or pool_idx >= self.num_agg_pools:
+                        raise ValueError(
+                            f"Invalid agg pool index {pool_idx} in mapping "
+                            f"(must be 0 to {self.num_agg_pools - 1})"
+                        )
+        else:
+            if isl_resolution <= 0:
+                raise ValueError(
+                    "isl_resolution must be positive, " f"got {isl_resolution}"
+                )
+            if isl_min >= isl_max:
+                raise ValueError(
+                    f"isl_min ({isl_min}) must be less than isl_max ({isl_max})"
+                )
+
+            mapping_3d = cast(List[List[List[int]]], agg_strategy.agg_pool_mapping)
+            if len(mapping_3d) != isl_resolution:
+                raise ValueError(
+                    f"agg_pool_mapping ISL rows ({len(mapping_3d)}) "
+                    f"does not match isl_resolution ({isl_resolution})"
+                )
+            for isl_idx, isl_row in enumerate(mapping_3d):
+                if len(isl_row) != agg_strategy.ttft_resolution:
+                    raise ValueError(
+                        f"agg_pool_mapping ISL row {isl_idx} length "
+                        f"({len(isl_row)}) does not match ttft_resolution "
+                        f"({agg_strategy.ttft_resolution})"
+                    )
+                for ttft_idx, itl_row in enumerate(isl_row):
+                    if len(itl_row) != agg_strategy.itl_resolution:
+                        raise ValueError(
+                            f"agg_pool_mapping ISL row {isl_idx}, TTFT row "
+                            f"{ttft_idx} length ({len(itl_row)}) does not match "
+                            f"itl_resolution ({agg_strategy.itl_resolution})"
+                        )
+                    for pool_idx in itl_row:
+                        if pool_idx < 0 or pool_idx >= self.num_agg_pools:
+                            raise ValueError(
+                                f"Invalid agg pool index {pool_idx} in mapping "
+                                f"(must be 0 to {self.num_agg_pools - 1})"
+                            )
 
         for i, override in enumerate(agg_strategy.priority_overrides):
             if override.min_priority > override.max_priority:
@@ -726,6 +802,9 @@ def _load_agg_config(data: dict, mode: str) -> GlobalRouterConfig:
         itl_max_ms=_get_aliased(agg_strategy_data, "itl_max_ms", "itl_max"),
         itl_resolution=agg_strategy_data["itl_resolution"],
         agg_pool_mapping=agg_strategy_data["agg_pool_mapping"],
+        isl_min=agg_strategy_data.get("isl_min"),
+        isl_max=agg_strategy_data.get("isl_max"),
+        isl_resolution=agg_strategy_data.get("isl_resolution"),
         priority_overrides=agg_priority_overrides,
     )
 

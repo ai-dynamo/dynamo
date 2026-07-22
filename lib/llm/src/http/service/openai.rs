@@ -645,10 +645,12 @@ async fn handler_completions(
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);
     let streaming = request.inner.stream.unwrap_or(false);
+    // Canonicalize alias → primary for the metric label.
+    let canonical_model = state.manager().resolve_canonical_name(&request.inner.model);
     let cancellation_labels = CancellationLabels {
         model: state
             .manager()
-            .metric_model_for(&request.inner.model)
+            .metric_model_for(&canonical_model)
             .to_string(),
         endpoint: Endpoint::Completions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
@@ -715,7 +717,7 @@ async fn completions(
 #[tracing::instrument(skip_all)]
 async fn completions_single(
     state: Arc<service_v2::State>,
-    request: Context<NvCreateCompletionRequest>,
+    mut request: Context<NvCreateCompletionRequest>,
     stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
     let request_id = request.id().to_string();
@@ -725,6 +727,15 @@ async fn completions_single(
 
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
+    // Resolve an alias to its primary served name and rewrite the request so
+    // engine routing, metrics, and the OpenAI response.model all use the
+    // canonical primary (matching vLLM/SGLang, where an alias request still
+    // responds with the primary served name). Non-aliases pass through, so
+    // metric_model_for still applies its unknown-model cardinality guard.
+    let canonical = state.manager().resolve_canonical_name(&request.inner.model);
+    if canonical != request.inner.model {
+        request.inner.model = canonical;
+    }
     let model = request.inner.model.clone();
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
@@ -866,7 +877,7 @@ async fn completions_single(
 #[tracing::instrument(skip_all)]
 async fn completions_batch(
     state: Arc<service_v2::State>,
-    request: Context<NvCreateCompletionRequest>,
+    mut request: Context<NvCreateCompletionRequest>,
     stream_handle: ConnectionHandle,
     batch_size: usize,
     n: u8,
@@ -876,6 +887,11 @@ async fn completions_batch(
 
     let request_id = request.id().to_string();
     let streaming = request.inner.stream.unwrap_or(false);
+    // Resolve alias → primary served name (see completions_single).
+    let canonical = state.manager().resolve_canonical_name(&request.inner.model);
+    if canonical != request.inner.model {
+        request.inner.model = canonical;
+    }
     let model = request.inner.model.clone();
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
@@ -1071,6 +1087,13 @@ async fn embeddings(
         request.nvext = None;
     }
 
+    // Resolve alias → primary served name before wrapping the request, so
+    // engine routing, metrics, and the response model all use the canonical
+    // primary (see completions_single). `request` is still owned + mutable here.
+    let canonical = state.manager().resolve_canonical_name(&request.inner.model);
+    if canonical != request.inner.model {
+        request.inner.model = canonical;
+    }
     let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
@@ -1250,8 +1273,13 @@ async fn handler_chat_completions(
     let request_id = get_or_create_request_id(&headers);
     let streaming = request.inner.stream.unwrap_or(false);
     let resolved_model = resolve_request_model(&request.inner.model, template.as_ref());
+    // Canonicalize alias → primary for the metric label.
+    let canonical_model = state.manager().resolve_canonical_name(resolved_model);
     let cancellation_labels = CancellationLabels {
-        model: state.manager().metric_model_for(resolved_model).to_string(),
+        model: state
+            .manager()
+            .metric_model_for(&canonical_model)
+            .to_string(),
         endpoint: Endpoint::ChatCompletions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
@@ -1812,6 +1840,14 @@ async fn chat_completions(
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
     // todo - determine the proper error code for when a request model is not present
+    // Resolve an alias to its primary served name and rewrite the request so
+    // engine routing, metrics, and the OpenAI response.model all use the
+    // canonical primary (matching vLLM/SGLang). Non-aliases pass through so
+    // metric_model_for still applies its unknown-model cardinality guard.
+    let canonical = state.manager().resolve_canonical_name(&request.inner.model);
+    if canonical != request.inner.model {
+        request.inner.model = canonical;
+    }
     let model = request.inner.model.clone();
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
@@ -2192,8 +2228,13 @@ async fn handler_responses(
     let streaming = request.inner.stream.unwrap_or(false);
     let raw_model = request.inner.model.as_deref().unwrap_or("");
     let resolved_model = resolve_request_model(raw_model, template.as_ref());
+    // Canonicalize alias → primary for the metric label.
+    let canonical_model = state.manager().resolve_canonical_name(resolved_model);
     let cancellation_labels = CancellationLabels {
-        model: state.manager().metric_model_for(resolved_model).to_string(),
+        model: state
+            .manager()
+            .metric_model_for(&canonical_model)
+            .to_string(),
         endpoint: Endpoint::Responses.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
@@ -2258,7 +2299,16 @@ async fn responses(
     }
     tracing::trace!("Received responses request: {:?}", request.inner);
 
-    let model = request.inner.model.clone().unwrap_or_default();
+    // Resolve an alias to its primary served name and rewrite the request so
+    // engine routing, metrics, and the response model all use the canonical
+    // primary. The Responses API wraps model in Option<String>, so re-wrap
+    // after resolution. Non-aliases pass through metric_model_for's guard.
+    let original_model = request.inner.model.clone().unwrap_or_default();
+    let canonical = state.manager().resolve_canonical_name(&original_model);
+    if canonical != original_model {
+        request.inner.model = Some(canonical.clone());
+    }
+    let model = canonical;
     let streaming = request.inner.stream.unwrap_or(false);
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
@@ -2676,7 +2726,14 @@ async fn list_models_openai(
     // is hidden until a peer joins.
     let models: HashSet<String> = state.manager().serving_ready_display_names();
     for model_name in models {
-        let context_window = cw_override.or_else(|| card_map.get(&model_name).map(|&cl| cl as u64));
+        // Alias entries have no card of their own (keyed by the primary's
+        // display_name); fall back to the primary's context length.
+        let context_window = cw_override.or_else(|| {
+            card_map
+                .get(&model_name)
+                .or_else(|| card_map.get(&state.manager().resolve_canonical_name(&model_name)))
+                .map(|&cl| cl as u64)
+        });
         data.push(ModelListing {
             id: model_name.clone(),
             object: "model",
@@ -2843,10 +2900,14 @@ fn get_model_retrieve(
         .unwrap()
         .as_secs();
 
+    // Alias entries have no card of their own (cards are keyed by the primary's
+    // display_name); fall back to the primary so an alias reports the same
+    // context_window that `GET /v1/models` lists for it.
+    let canonical_model = state.manager().resolve_canonical_name(model_id);
     let cards = state.manager().get_model_cards();
     let context_length = cards
         .iter()
-        .find(|c| c.display_name == model_id)
+        .find(|c| c.display_name == model_id || c.display_name == canonical_model)
         .map(|c| c.effective_context_length() as u64);
     let context_window: Option<u64> = std::env::var("DYN_CONTEXT_WINDOW")
         .ok()

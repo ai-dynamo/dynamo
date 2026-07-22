@@ -309,7 +309,7 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         gpu_memory_utilization=getattr(args, "gpu_memory_utilization", None),
         mem_fraction_static=getattr(args, "mem_fraction_static", None),
         free_gpu_memory_fraction=getattr(args, "free_gpu_memory_fraction", None),
-        enable_local_indexer=not getattr(args, "durable_kv_events", False),
+        enable_local_indexer=True,
         kv_bytes_per_token=getattr(args, "kv_bytes_per_token", None),
         kv_transfer_bandwidth=getattr(args, "kv_transfer_bandwidth", None),
         kv_transfer_timing_mode=getattr(args, "kv_transfer_timing_mode", "full_prompt"),

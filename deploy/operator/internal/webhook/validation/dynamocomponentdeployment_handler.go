@@ -23,6 +23,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -148,12 +149,13 @@ func (h *DynamoComponentDeploymentHandler) validateDelete(
 // RegisterWithManager registers the webhook with the manager.
 // The handler is automatically wrapped with LeaseAwareValidator to add namespace exclusion logic
 // and ObservedValidator to add metrics collection.
-func (h *DynamoComponentDeploymentHandler) RegisterWithManager(mgr manager.Manager) error {
+func (h *DynamoComponentDeploymentHandler) RegisterWithManager(mgr manager.Manager, gate features.Gate) error {
 	h.registerWithManager(
 		mgr,
 		&nvidiacomv1beta1.DynamoComponentDeployment{},
 		dynamoComponentDeploymentV1Beta1WebhookPath,
 		h,
+		gate,
 	)
 
 	// TODO(1.5): Remove the v1alpha1 endpoint and handler after 1.3 is no longer
@@ -164,6 +166,7 @@ func (h *DynamoComponentDeploymentHandler) RegisterWithManager(mgr manager.Manag
 		&nvidiacomv1alpha1.DynamoComponentDeployment{},
 		dynamoComponentDeploymentV1Alpha1WebhookPath,
 		alphaHandler,
+		gate,
 	)
 	return nil
 }
@@ -173,13 +176,14 @@ func (h *DynamoComponentDeploymentHandler) registerWithManager(
 	object runtime.Object,
 	path string,
 	validator admission.CustomValidator,
+	gate features.Gate,
 ) {
 	leaseAwareValidator := internalwebhook.NewLeaseAwareValidator(validator, internalwebhook.GetExcludedNamespaces())
 	observedValidator := observability.NewObservedValidator(leaseAwareValidator, consts.ResourceTypeDynamoComponentDeployment)
 
-	webhook := admission.
+	webhook := internalwebhook.WithGate(admission.
 		WithCustomValidator(mgr.GetScheme(), object, observedValidator).
-		WithRecoverPanic(true)
+		WithRecoverPanic(true), gate)
 	mgr.GetWebhookServer().Register(path, webhook)
 }
 

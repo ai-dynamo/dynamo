@@ -533,6 +533,39 @@ class TestAssembleFinalConfig:
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
+    def test_final_trtllm_config_enables_chunked_prefill(self, tmp_path):
+        dgdr = _make_dgdr()
+        ops = _make_ops(tmp_path)
+        dgd_config = {
+            "kind": "DynamoGraphDeployment",
+            "spec": {
+                "services": {
+                    "decode": {
+                        "componentType": "worker",
+                        "subComponentType": "decode",
+                        "extraPodSpec": {"mainContainer": {"args": []}},
+                    }
+                }
+            },
+        }
+
+        result = assemble_final_config(
+            dgdr,
+            ops,
+            dgd_config,
+            PickedParallelConfig(tp=1),
+            PickedParallelConfig(tp=1),
+            resolved_backend="trtllm",
+        )
+
+        args = result["spec"]["services"]["decode"]["extraPodSpec"]["mainContainer"][
+            "args"
+        ]
+        idx = args.index("--trtllm.enable_chunked_prefill")
+        assert args[idx + 1] == "true"
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
     def test_none_dgd_config_passes_through_as_none(self, tmp_path):
         dgdr = _make_dgdr()
         ops = _make_ops(tmp_path)

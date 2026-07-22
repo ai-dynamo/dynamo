@@ -310,8 +310,8 @@ Key metrics for saturation analysis:
 
 - `dynamo_frontend_stage_duration_seconds{stage="preprocess"}` -- tokenization time
 - `dynamo_frontend_stage_duration_seconds{stage="transport_roundtrip"}` -- backend latency
-- `dynamo_frontend_queued_requests` -- requests waiting in HTTP queue (should be 0 below saturation)
-- `dynamo_frontend_inflight_requests` -- concurrent in-flight requests
+- `sum(dynamo_frontend_stage_requests{stage=~"preprocess|route|dispatch"})` -- requests waiting in pipeline stages (should be 0 below saturation)
+- `dynamo_frontend_active_requests` -- concurrent active requests
 - `dynamo_frontend_time_to_first_token_seconds` -- TTFT histogram buckets
 
 ---

@@ -25,6 +25,15 @@ from tests.utils.managed_deployment import (
 
 logger = logging.getLogger(__name__)
 
+# kr8s port-forward teardown runs in background threads; on pod termination it
+# can surface expected OSErrors (e.g. EADDRINUSE for a local port still in
+# TIME_WAIT) via threading.excepthook. Under filterwarnings=error those would
+# fail this live-cluster test, so scope the suppression to this module only
+# rather than globally hiding unrelated background-thread crashes.
+pytestmark = pytest.mark.filterwarnings(
+    "ignore::pytest.PytestUnhandledThreadExceptionWarning"
+)
+
 TRANSIENT_K8S_EXCEPTIONS = (
     aiohttp.ClientError,
     asyncio.TimeoutError,

@@ -39,9 +39,8 @@ pub trait TieredMatchProvider: Send + Sync {
 
 /// Per-shard size snapshot returned by [`KvIndexerInterface::shard_sizes`].
 ///
-/// `worker_count` and `block_count` are always populated.
-/// `node_count` is populated only when the `shard-metrics` feature is enabled
-/// on the `dynamo-kv-router` crate; otherwise it is `0`.
+/// `worker_count` and `block_count` are always populated. `node_count` is
+/// reserved for backends that can expose a structural node count.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ShardSizeSnapshot {
     /// Zero-based shard index.
@@ -50,7 +49,7 @@ pub struct ShardSizeSnapshot {
     pub worker_count: usize,
     /// Total cached blocks across all workers in this shard.
     pub block_count: usize,
-    /// Radix-tree node count (only non-zero with `shard-metrics` feature).
+    /// Radix-tree node count, or zero when the backend does not expose one.
     pub node_count: usize,
 }
 
@@ -109,6 +108,21 @@ pub trait KvIndexerInterface {
     /// Indexers that track dp_rank-level granularity should override this.
     async fn remove_worker_dp_rank(&self, worker: WorkerId, _dp_rank: DpRank) {
         self.remove_worker(worker).await;
+    }
+
+    /// Remove one logical worker rank and return only after the reset is visible.
+    ///
+    /// This is a cold-path lifecycle barrier. Implementations must order the
+    /// reset after mutations already accepted for the worker and acknowledge it
+    /// only after those entries can no longer be returned by reads.
+    async fn reset_worker_dp_rank_and_wait(
+        &self,
+        _worker: WorkerId,
+        _dp_rank: DpRank,
+    ) -> Result<(), KvRouterError> {
+        Err(KvRouterError::Unsupported(
+            "acknowledged worker-rank reset is not supported".to_string(),
+        ))
     }
 
     /// Shutdown the KV Indexer.
@@ -253,8 +267,7 @@ pub trait SyncIndexer: Send + Sync + 'static {
         String::new()
     }
 
-    /// Number of radix-tree nodes created since construction.
-    /// Only meaningful when the `shard-metrics` feature is enabled; returns 0 otherwise.
+    /// Number of radix-tree nodes created since construction, when available.
     fn node_count(&self) -> usize {
         0
     }

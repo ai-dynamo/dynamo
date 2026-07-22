@@ -32,11 +32,20 @@ impl SessionAffinityPushRouter {
         ttl: Option<Duration>,
         direct: bool,
     ) -> Result<Self, Error> {
-        Ok(Self {
+        let affinity = ttl.map(AffinityCoordinator::new).transpose()?;
+        Ok(Self::new_with_coordinator(inner, affinity, direct))
+    }
+
+    pub(crate) fn new_with_coordinator(
+        inner: PushRouter<PreprocessedRequest, LlmResponse>,
+        affinity: Option<AffinityCoordinator>,
+        direct: bool,
+    ) -> Self {
+        Self {
             inner,
-            affinity: ttl.map(AffinityCoordinator::new).transpose()?,
+            affinity,
             direct,
-        })
+        }
     }
 
     fn phase(request: &PreprocessedRequest) -> RequestPhase {

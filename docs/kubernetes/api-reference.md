@@ -368,6 +368,7 @@ _Appears in:_
 | `location` _string_ | Deprecated: Location is ignored and no longer populated. It is retained<br />only so older objects continue to validate. |  | Optional: \{\} <br /> |
 | `storageType` _[DynamoCheckpointStorageType](#dynamocheckpointstoragetype)_ | Deprecated: StorageType is ignored and no longer populated. It is retained<br />only so older objects continue to validate. |  | Enum: [pvc s3 oci] <br />Optional: \{\} <br /> |
 | `jobName` _string_ | JobName is the name of the checkpoint creation Job |  | Optional: \{\} <br /> |
+| `podSnapshotName` _string_ | PodSnapshotName is the name of the PodSnapshot this checkpoint created to drive capture. It is<br />the authoritative pointer to the snapshot (which is otherwise located by label, not by<br />reconstructing its name) and lets the controller distinguish a never-created snapshot (empty)<br />from one that was created and later went missing (set, but no longer found). |  | Optional: \{\} <br /> |
 | `createdAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | CreatedAt is the timestamp when the checkpoint became ready |  | Optional: \{\} <br /> |
 | `message` _string_ | Message provides additional information about the current state |  | Optional: \{\} <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | DEPRECATED: Conditions are deprecated. Use status.phase instead. |  | Optional: \{\} <br /> |
@@ -737,6 +738,7 @@ _Appears in:_
 | `restart` _[RestartStatus](#restartstatus)_ | Restart contains the status of the restart of the graph deployment. |  | Optional: \{\} <br /> |
 | `checkpoints` _object (keys:string, values:[ServiceCheckpointStatus](#servicecheckpointstatus))_ | Checkpoints contains per-service checkpoint status information.<br />The map key is the service name from spec.services. |  | Optional: \{\} <br /> |
 | `rollingUpdate` _[RollingUpdateStatus](#rollingupdatestatus)_ | RollingUpdate tracks the progress of operator manged rolling updates.<br />Currently only supported for singl-node, non-Grove deployments (DCD/Deployment). |  | Optional: \{\} <br /> |
+| `placement` _[PlacementStatus](#placementstatus)_ | Placement groups DGD-level scheduler placement signals (score, reporting<br />state, and any future placement fields). |  | Optional: \{\} <br /> |
 
 
 #### DynamoModel
@@ -792,6 +794,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `endpoints` _[EndpointInfo](#endpointinfo) array_ | Endpoints is the current list of all endpoints for this model |  | Optional: \{\} <br /> |
 | `readyEndpoints` _integer_ | ReadyEndpoints is the count of endpoints that are ready |  |  |
+| `loraFallbackCoveredEndpoints` _integer_ | LoRAFallbackCoveredEndpoints is the count of legacy prefill endpoints<br />covered by a capable prefill during a rolling upgrade. These endpoints are<br />excluded from ReadyEndpoints because they cannot serve the adapter directly. |  | Optional: \{\} <br /> |
 | `totalEndpoints` _integer_ | TotalEndpoints is the total count of endpoints |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions represents the latest available observations of the model's state |  | Optional: \{\} <br /> |
 
@@ -830,7 +833,8 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `address` _string_ | Address is the full address of the endpoint (e.g., "http://10.0.1.5:9090") |  |  |
 | `podName` _string_ | PodName is the name of the pod serving this endpoint |  | Optional: \{\} <br /> |
-| `ready` _boolean_ | Ready indicates whether the endpoint is ready to serve traffic<br />For LoRA models: true if the POST /loras request succeeded with a 2xx status code<br />For base models: always false (no probing performed) |  |  |
+| `ready` _boolean_ | Ready indicates whether this endpoint is ready to serve traffic.<br />For LoRA models: true only if this endpoint's lifecycle request succeeded.<br />For base models: always false (no probing performed). |  |  |
+| `loraFallbackCovered` _boolean_ | LoRAFallbackCovered indicates a legacy prefill endpoint that cannot manage<br />LoRAs itself is covered by a capable prefill in the same topology during a<br />rolling upgrade. It does not make this endpoint ready to serve the adapter. |  | Optional: \{\} <br /> |
 
 
 #### ExtraPodMetadata
@@ -1124,6 +1128,47 @@ _Appears in:_
 | `storageClass` _string_ | StorageClass to be used for PVC creation. Required when create is true. |  |  |
 | `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ | Size of the volume in Gi, used during PVC creation. Required when create is true. |  |  |
 | `volumeAccessMode` _[PersistentVolumeAccessMode](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#persistentvolumeaccessmode-v1-core)_ | VolumeAccessMode is the volume access mode of the PVC. Required when create is true. |  |  |
+
+
+#### PlacementScoreState
+
+_Underlying type:_ _string_
+
+PlacementScoreState describes whether placement score is available and how
+complete the reported score is for a graph deployment. See the v1beta1
+PlacementScoreState for the authoritative semantics of each value.
+
+_Validation:_
+- Enum: [Reported Partial Unsupported Unknown]
+
+_Appears in:_
+- [PlacementStatus](#placementstatus)
+
+| Field | Description |
+| --- | --- |
+| `Reported` |  |
+| `Partial` |  |
+| `Unsupported` |  |
+| `Unknown` |  |
+
+
+#### PlacementStatus
+
+
+
+PlacementStatus groups DGD-level scheduler placement fields under a single
+status object so future placement signals can be added without a schema
+break. See the v1beta1 PlacementStatus for the authoritative field docs.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `score` _float_ | Score is the DGD-level scheduler placement score. Normalized to [0.0, 1.0]<br />where higher is better and 1.0 is the best possible placement. |  | Maximum: 1 <br />Minimum: 0 <br />Optional: \{\} <br /> |
+| `state` _[PlacementScoreState](#placementscorestate)_ | State indicates placement score reporting state. |  | Enum: [Reported Partial Unsupported Unknown] <br />Optional: \{\} <br /> |
 
 
 #### PodReference
@@ -1602,6 +1647,7 @@ _Appears in:_
 | `updatedReplicas` _integer_ | UpdatedReplicas is the number of replicas at the current/desired revision.<br />Required for all component kinds. |  | Minimum: 0 <br /> |
 | `readyReplicas` _integer_ | ReadyReplicas is the number of ready replicas.<br />Populated for PodClique, Deployment, and LeaderWorkerSet.<br />Not available for PodCliqueScalingGroup.<br />When nil, the field is omitted from the API response. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `availableReplicas` _integer_ | AvailableReplicas is the number of available replicas.<br />For Deployment: replicas ready for >= minReadySeconds.<br />For PodCliqueScalingGroup: replicas where all constituent PodCliques have >= MinAvailable ready pods.<br />Not available for PodClique or LeaderWorkerSet.<br />When nil, the field is omitted from the API response. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `scheduledReplicas` _integer_ | ScheduledReplicas is the number of replicas the backend scheduler has<br />scheduled, in Dynamo component-replica units. Optional; omitted (nil)<br />when the backend cannot derive it reliably. A nil value means "not<br />reported", never "zero scheduled". |  | Minimum: 0 <br />Optional: \{\} <br /> |
 
 
 #### SharedMemorySpec
@@ -1911,6 +1957,7 @@ _Appears in:_
 | `updatedReplicas` _integer_ | updatedReplicas is the number of replicas at the current/desired revision. |  | Minimum: 0 <br /> |
 | `readyReplicas` _integer_ | readyReplicas is the number of ready replicas. Populated for<br />`PodClique`, `Deployment`, and `LeaderWorkerSet`; not available for<br />`PodCliqueScalingGroup`. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `availableReplicas` _integer_ | availableReplicas is the number of available replicas. Populated for<br />`Deployment` and `PodCliqueScalingGroup`; not available for<br />`PodClique` or `LeaderWorkerSet`. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `scheduledReplicas` _integer_ | scheduledReplicas is the number of replicas the backend scheduler has<br />scheduled, expressed strictly in Dynamo component-replica units (not<br />raw backend pod counts). It is a diagnostic aid for distinguishing<br />capacity/scheduling shortfalls from runtime readiness.<br />It is optional and omitted (nil) when the active backend cannot derive<br />it reliably in component-replica units — for example before the backing<br />resource's status has been observed, or for backends that do not report<br />a scheduling count. A nil value therefore means "not reported", never<br />"zero scheduled"; consumers must not treat absence as a scheduling<br />failure. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 
 
 #### ComponentType
@@ -2373,6 +2420,7 @@ _Appears in:_
 | `restart` _[RestartStatus](#restartstatus)_ | restart contains the status of a graph-level restart. |  | Optional: \{\} <br /> |
 | `checkpoints` _object (keys:string, values:[ComponentCheckpointStatus](#componentcheckpointstatus))_ | checkpoints contains per-component checkpoint status, keyed by component name. |  | Optional: \{\} <br /> |
 | `rollingUpdate` _[RollingUpdateStatus](#rollingupdatestatus)_ | rollingUpdate tracks the progress of operator-managed rolling updates.<br />Currently only supported for single-node, non-Grove deployments (DCD/Deployment). |  | Optional: \{\} <br /> |
+| `placement` _[PlacementStatus](#placementstatus)_ | placement groups DGD-level scheduler placement signals (score, reporting<br />state, and any future placement fields). |  | Optional: \{\} <br /> |
 
 
 #### EPPConfig
@@ -2738,6 +2786,59 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `config` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Config is the full deployment configuration for this Pareto point. |  | Type: object <br /> |
+
+
+#### PlacementScoreState
+
+_Underlying type:_ _string_
+
+PlacementScoreState describes whether placement score is available and how
+complete the reported score is for a graph deployment.
+
+Every backend must set this field after the first reconciliation:
+  - Reported:    a score is available for every scored placement unit.
+  - Partial:     a score is available for some but not all placement units.
+  - Unsupported: the backend does not surface a placement score at all.
+  - Unknown:     the backend supports scores but the current value is
+    indeterminate (e.g. read failure, not yet populated by the
+    scheduler). When set, PlacementStatus.Score must be cleared.
+
+_Validation:_
+- Enum: [Reported Partial Unsupported Unknown]
+
+_Appears in:_
+- [PlacementStatus](#placementstatus)
+
+| Field | Description |
+| --- | --- |
+| `Reported` |  |
+| `Partial` |  |
+| `Unsupported` |  |
+| `Unknown` |  |
+
+
+#### PlacementStatus
+
+
+
+PlacementStatus groups DGD-level scheduler placement fields under a single
+status object so future placement signals (e.g. scheduler contract version,
+last-report timestamp, per-unit reports) can be added without a schema break.
+
+The score source is an open question in DEP #10064 (Grove mirror, typed Grove
+scheduler API, or unstructured provider). Until a source is selected and
+implemented, the DGD controller does not write this field; the schema and
+conversion are landed here so downstream consumers can rely on the shape.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `score` _float_ | score is the DGD-level scheduler placement score aggregated from<br />relevant scheduler placement units. Normalized to [0.0, 1.0] where higher<br />is better and 1.0 represents the best possible placement. Aggregation<br />uses the minimum across placement units so the value is a worst-placement<br />signal for the graph. Scores are only comparable across DGDs that share<br />the same scheduler scoring contract and version. |  | Maximum: 1 <br />Minimum: 0 <br />Optional: \{\} <br /> |
+| `state` _[PlacementScoreState](#placementscorestate)_ | state indicates placement score reporting state. See PlacementScoreState<br />for the semantics of each value. |  | Enum: [Reported Partial Unsupported Unknown] <br />Optional: \{\} <br /> |
 
 
 #### ProfilingPhase
@@ -3453,16 +3554,15 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `restricted` _string_ | Deprecated: Namespace-restricted mode is deprecated and will be removed in a future release.<br />Use cluster-wide mode (leave Restricted empty) instead. |  |  |
-| `scope` _[NamespaceScopeConfiguration](#namespacescopeconfiguration)_ | Deprecated: Scope is only used in namespace-restricted mode, which is deprecated. |  |  |
+| `restricted` _string_ | Restricted enables namespace-restricted mode for development and testing.<br />Namespace-restricted mode is not supported for production. |  |  |
+| `scope` _[NamespaceScopeConfiguration](#namespacescopeconfiguration)_ | Scope configures the namespace ownership claim in namespace-restricted mode. |  |  |
 
 
 #### NamespaceScopeConfiguration
 
 
 
-Deprecated: NamespaceScopeConfiguration is used only by the deprecated namespace-restricted
-mode and will be removed in a future release.
+NamespaceScopeConfiguration configures the development/test namespace ownership claim.
 
 
 
@@ -3800,12 +3900,17 @@ For multinode deployments, the operator modifies probes based on the backend fra
 
 #### VLLM Backend
 
-The operator automatically selects between two deployment modes based on parallelism configuration:
+The operator automatically applies distributed execution configuration based on parallelism settings:
 
-**Tensor/Pipeline Parallel Mode** (when `world_size > GPUs_per_node`):
-- Uses Ray for distributed execution (`--distributed-executor-backend ray`)
-- **Leader nodes**: Starts Ray head and runs vLLM; all probes remain active
-- **Worker nodes**: Run Ray agents only; all probes (liveness, readiness, startup) are removed
+**Tensor/Pipeline Parallel Mode (Recommended)** (when `world_size > GPUs_per_node`):
+- Uses PyTorch multiprocessing (mp) backend for distributed execution (`--distributed-executor-backend mp`)
+- Supports multi-node deployments with PyTorch's native distributed initialization
+- **All nodes**: Run vLLM with proper `--nnodes`, `--node-rank`, `--master-addr` flags injected
+- **Probes**: Worker probes adjusted; leader probes remain active
+
+**Ray Backend**:
+- Used for use cases such as Elastic EP
+- Install with `pip install "ray>=2.55.0"` and configure `--distributed-executor-backend ray`
 
 **Data Parallel Mode** (when `world_size × data_parallel_size > GPUs_per_node`):
 - **Worker nodes**: All probes (liveness, readiness, startup) are removed
@@ -3886,7 +3991,7 @@ These are injected into all components when the corresponding infrastructure ser
 | Variable | Purpose | Default | Type |
 | --- | --- | --- | --- |
 | `USE_STREAMING` | Enables streaming mode for inference request proxying | `true` | `string` (boolean) |
-| `RUST_LOG` | Rust log level and filter configuration | `debug,dynamo_llm::kv_router=trace` | `string` |
+| `RUST_LOG` | Rust log level and filter configuration | `info` | `string` |
 
 ### VLLM Backend
 
@@ -3969,7 +4074,8 @@ Default container ports are configured based on component type:
 ## Backend-Specific Configurations
 
 ### VLLM
-- **Ray Head Port**: 6379 (for Ray cluster coordination in multinode TP/PP deployments)
+- **Ray Head Port**: 6379 (for Ray-based multinode deployments)
+- **MP Master Port**: 29500 (for PyTorch distributed multinode TP/PP deployments with mp backend)
 - **Data Parallel RPC Port**: 13445 (for data parallel multinode deployments)
 
 ### SGLang

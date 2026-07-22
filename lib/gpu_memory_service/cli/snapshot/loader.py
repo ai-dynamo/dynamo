@@ -18,8 +18,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from gpu_memory_service.common import cuda_utils
 from gpu_memory_service.common.utils import get_socket_path
+from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
 from gpu_memory_service.snapshot.backends.sharded_ssd import parse_sharded_ssd_roots
 from gpu_memory_service.snapshot.storage_client import GMSStorageClient
 from gpu_memory_service.snapshot.transfer import TransferBackendKind
@@ -52,7 +52,9 @@ def _load_device(
     # GMSStorageClient still publishes the restored layout from this thread.
     # Ensure the loader's main per-device thread has a current CUDA context for
     # the final synchronize/unmap/commit path.
-    cuda_utils.cuda_runtime_set_device(device)
+    vmm = get_vmm()
+    vmm.ensure_initialized()
+    vmm.runtime_set_device(device)
     client = GMSStorageClient(
         socket_path=get_socket_path(device),
         device=device,
@@ -105,11 +107,22 @@ def _build_parser() -> argparse.ArgumentParser:
         default=2,
         help="Number of independent sharded-ssd restore queues per SSD root.",
     )
+    parser.add_argument(
+        "--device-type",
+        type=str,
+        default=VMMDeviceType.CUDA.value,
+        choices=[d.value for d in VMMDeviceType],
+        help="VMM device type (default: cuda).",
+    )
     return parser
 
 
-def _list_checkpoint_devices(checkpoint_dir: str | None) -> list[int]:
-    devices = cuda_utils.list_devices()
+def _list_checkpoint_devices(
+    checkpoint_dir: str | None,
+) -> list[int]:
+    vmm = get_vmm()
+    vmm.ensure_initialized()
+    devices = vmm.list_devices()
     if not checkpoint_dir:
         return devices
 
@@ -155,6 +168,8 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--sharded-ssd-queues-per-root must be a positive integer")
     checkpoint_dir = args.checkpoint_dir
     max_workers = args.max_workers
+    device_type = VMMDeviceType.from_str(args.device_type)
+    init_vmm(device_type)
     transfer_backend = args.transfer_backend
     sharded_ssd_roots = parse_sharded_ssd_roots(args.sharded_ssd_roots)
     sharded_ssd_queues_per_root = args.sharded_ssd_queues_per_root

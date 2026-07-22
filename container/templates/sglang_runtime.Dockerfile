@@ -13,6 +13,16 @@ FROM framework AS runtime
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 {% endif %}
 
+{% if device != "xpu" %}
+# SGLang 0.5.15 JIT-compiles its native HiCache hash extension, which includes
+# OpenSSL headers and links libcrypto.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        libssl-dev
+{% endif %}
+
 ARG MODELEXPRESS_VERSION
 
 WORKDIR /workspace

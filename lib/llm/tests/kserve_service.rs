@@ -1947,8 +1947,8 @@ pub mod kserve_test {
 
         // Verify metrics are present and have correct values
         assert!(
-            metrics_body.contains("dynamo_frontend_inflight_requests"),
-            "Metrics should contain inflight gauge"
+            metrics_body.contains("dynamo_frontend_active_requests"),
+            "Metrics should contain active requests gauge"
         );
         assert_metric_value(&metrics_body, "test_model", "completions", 1);
         assert_metric_value(&metrics_body, "test_tensor_model", "tensor", 1);

@@ -455,14 +455,22 @@ pub struct SelectAndReserveRequest {
     pub routing_constraints: RoutingConstraints,
 }
 
+/// Booking request: replay the selection cached under `selection_id`, or book
+/// self-contained with `worker_id`. The replay books exactly what `select` captured;
+/// request fields other than the ids and model/routing-group are ignored.
 #[derive(Debug, Deserialize)]
 pub struct ReservationRequest {
     #[serde(default = "default_model_name")]
     pub model_name: String,
     #[serde(default = "default_routing_group")]
     pub routing_group: String,
+    /// The single booking id: the cache key to replay and the scheduler request
+    /// id the booking lands under (the `selection_id` from the matching `select`).
     pub selection_id: String,
-    pub worker_id: WorkerId,
+    /// Explicit, self-contained form: books under `selection_id` on this worker
+    /// without a cached select. Omit to replay the cached `selection_id`.
+    #[serde(default)]
+    pub worker_id: Option<WorkerId>,
     #[serde(default)]
     pub dp_rank: Option<DpRank>,
     #[serde(flatten)]
