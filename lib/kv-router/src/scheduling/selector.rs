@@ -348,15 +348,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                     .map(|(&worker_id, config)| (worker_id, config)),
             )
         {
-            if eligibility.has_eligible_worker_ignoring_overload(
-                workers
-                    .iter()
-                    .map(|(&worker_id, config)| (worker_id, config)),
-            ) {
-                return Err(KvSchedulerError::AllEligibleWorkersOverloaded);
-            }
-
-            return Err(KvSchedulerError::NoEndpoints);
+            return Err(eligibility.no_eligible_worker_error(workers));
         }
 
         let request_blocks = request.request_blocks(block_size);
