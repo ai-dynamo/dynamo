@@ -8,7 +8,11 @@ import os
 
 import pytest
 
-from tests.serve.common import WORKSPACE_DIR, params_with_model_mark, run_serve_deployment
+from tests.serve.common import (
+    WORKSPACE_DIR,
+    params_with_model_mark,
+    run_serve_deployment,
+)
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payloads import ChatPayload
 
@@ -24,23 +28,26 @@ class OpenEngineChatPayload(ChatPayload):
         choice = result["choices"][0]
         assert choice.get("finish_reason"), f"missing terminal finish reason: {result}"
         usage = result.get("usage")
-        assert usage and usage.get("prompt_tokens", 0) > 0, (
-            f"missing terminal prompt usage: {result}"
-        )
-        assert usage.get("completion_tokens", 0) > 0, (
-            f"missing terminal completion usage: {result}"
-        )
+        assert (
+            usage and usage.get("prompt_tokens", 0) > 0
+        ), f"missing terminal prompt usage: {result}"
+        assert (
+            usage.get("completion_tokens", 0) > 0
+        ), f"missing terminal completion usage: {result}"
 
 
 def _payload() -> OpenEngineChatPayload:
     return OpenEngineChatPayload(
         body={
-            "messages": [{"role": "user", "content": "Reply with one short color name."}],
+            "messages": [
+                {"role": "user", "content": "Reply with one short color name."}
+            ],
             "max_tokens": 8,
             "temperature": 0.0,
         },
         repeat_count=1,
         expected_response=[],
+        expected_log=[],
         timeout=90,
     )
 
