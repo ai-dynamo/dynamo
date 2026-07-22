@@ -288,6 +288,34 @@ pub(crate) fn simulate_trace_workload(
         num_workers,
         router_mode,
         false,
+        true,
+        record_per_request,
+        max_sim_time_ms,
+        sla,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn simulate_trace_workload_without_session_metadata(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: Trace,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    simulate_trace_workload_with_delta_mode(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        num_workers,
+        router_mode,
+        false,
+        false,
         record_per_request,
         max_sim_time_ms,
         sla,
@@ -338,6 +366,7 @@ pub(crate) fn simulate_trace_workload_accumulating_deltas(
         num_workers,
         router_mode,
         true,
+        true,
         record_per_request,
         max_sim_time_ms,
         sla,
@@ -353,6 +382,7 @@ fn simulate_trace_workload_with_delta_mode(
     num_workers: usize,
     router_mode: ReplayRouterMode,
     accumulate_session_deltas: bool,
+    emit_session_metadata: bool,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
@@ -362,6 +392,7 @@ fn simulate_trace_workload_with_delta_mode(
             args,
             trace,
             accumulate_session_deltas,
+            emit_session_metadata,
             record_per_request,
             max_sim_time_ms,
             sla,
@@ -375,6 +406,7 @@ fn simulate_trace_workload_with_delta_mode(
             num_workers,
             router_mode,
             accumulate_session_deltas,
+            emit_session_metadata,
             record_per_request,
             max_sim_time_ms,
             sla,
@@ -546,8 +578,60 @@ pub(crate) fn simulate_trace_workload_disagg(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
+    simulate_trace_workload_disagg_with_session_metadata(
+        config,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        router_mode,
+        true,
+        record_per_request,
+        max_sim_time_ms,
+        sla,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn simulate_trace_workload_disagg_without_session_metadata(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: Trace,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    simulate_trace_workload_disagg_with_session_metadata(
+        config,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        router_mode,
+        false,
+        record_per_request,
+        max_sim_time_ms,
+        sla,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn simulate_trace_workload_disagg_with_session_metadata(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: Trace,
+    router_mode: ReplayRouterMode,
+    emit_session_metadata: bool,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
-    let driver = WorkloadDriver::new_trace(trace, config.prefill_args.block_size)?;
+    let mut driver = WorkloadDriver::new_trace(trace, config.prefill_args.block_size)?;
+    if !emit_session_metadata {
+        driver = driver.without_session_metadata();
+    }
     let (collector, _) = DisaggRuntime::new_workload(
         &config,
         router_config,
@@ -635,6 +719,7 @@ pub(crate) fn simulate_trace_workload_single(
     args: MockEngineArgs,
     trace: Trace,
     accumulate_session_deltas: bool,
+    emit_session_metadata: bool,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
@@ -642,11 +727,14 @@ pub(crate) fn simulate_trace_workload_single(
     let started_at = Instant::now();
     let args = args.normalized()?;
     let engine_block_size = args.block_size;
-    let driver = if accumulate_session_deltas {
+    let mut driver = if accumulate_session_deltas {
         trace.into_delta_accumulating_trace_driver_with_block_size(engine_block_size)?
     } else {
         trace.into_trace_driver_with_block_size(engine_block_size)?
     };
+    if !emit_session_metadata {
+        driver = driver.without_session_metadata();
+    }
     let collector = SingleRuntime::new_workload(args, driver, SingleReplayMode::Trace)
         .with_per_request_records(record_per_request)
         .with_max_sim_time_ms(max_sim_time_ms)
@@ -769,17 +857,21 @@ pub(crate) fn simulate_trace_workload_multi(
     num_workers: usize,
     router_mode: ReplayRouterMode,
     accumulate_session_deltas: bool,
+    emit_session_metadata: bool,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
-    let driver = if accumulate_session_deltas {
+    let mut driver = if accumulate_session_deltas {
         trace.into_delta_accumulating_trace_driver_with_block_size(args.block_size)?
     } else {
         trace.into_trace_driver_with_block_size(args.block_size)?
     };
+    if !emit_session_metadata {
+        driver = driver.without_session_metadata();
+    }
     let (collector, _) = AggRuntime::new_workload(
         &args,
         router_config,
