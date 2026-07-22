@@ -1441,6 +1441,10 @@ mod tests {
         assert_eq!(snapshots[0].first_token_ms, None);
         assert_eq!(snapshots[1].requested_output_length, 1);
         assert_eq!(snapshots[1].output_length, 1);
+
+        let report = collector.finish();
+        assert_eq!(report.request_counts.completed_requests, 2);
+        assert_eq!(report.request_counts.total_output_tokens, 1);
     }
 
     #[test]

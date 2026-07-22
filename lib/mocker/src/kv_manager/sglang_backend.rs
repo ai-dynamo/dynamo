@@ -692,12 +692,23 @@ impl SglangKvManager {
             return 0;
         }
 
-        let mut computed_blocks = Vec::new();
         let first_block_start = first_new_token / block_size * block_size;
-        let local_hashes = self.local_hashes_for_range(&token_ids[first_block_start..complete_len]);
+        let Some(first_unpublished_block) = (first_block_start..complete_len)
+            .step_by(block_size)
+            .find(|&block_start| {
+                let representative_idx = indices[block_start + block_size - 1];
+                !self.idx_to_block_hash.contains_key(&representative_idx)
+            })
+        else {
+            return 0;
+        };
+
+        let mut computed_blocks = Vec::new();
+        let local_hashes =
+            self.local_hashes_for_range(&token_ids[first_unpublished_block..complete_len]);
 
         for (block_idx, tokens_hash) in local_hashes.iter().copied().enumerate() {
-            let block_start = first_block_start + block_idx * block_size;
+            let block_start = first_unpublished_block + block_idx * block_size;
             let block_end = block_start + block_size;
             let representative_idx = indices[block_end - 1];
             if self.idx_to_block_hash.contains_key(&representative_idx) {
@@ -1088,6 +1099,31 @@ mod tests {
             store.blocks[0].block_hash,
             ExternalSequenceBlockHash(expected_sequence[0])
         );
+    }
+
+    #[test]
+    fn test_published_prefix_hashes_only_unseen_suffix() {
+        let sink = Arc::new(MockSink::new());
+        let mut mgr =
+            SglangKvManager::new(16, 4, KvEventPublishers::new(Some(sink.clone()), None), 0);
+        let tokens = [1, 2, 3, 4, 5, 6, 7, 8];
+        let indices = mgr.cache_mut().token_pool.allocate(tokens.len()).unwrap();
+
+        assert_eq!(mgr.publish_stored_event(&tokens[..4], &indices[..4], 0), 1);
+        assert_eq!(mgr.publish_stored_event(&tokens, &indices, 0), 1);
+        assert_eq!(mgr.publish_stored_event(&tokens, &indices, 0), 0);
+
+        let events = sink.clone_events();
+        assert_eq!(events.len(), 2);
+        let KvCacheEventData::Stored(first) = &events[0].data else {
+            panic!("expected first stored event");
+        };
+        let KvCacheEventData::Stored(second) = &events[1].data else {
+            panic!("expected suffix stored event");
+        };
+        assert_eq!(first.blocks.len(), 1);
+        assert_eq!(second.blocks.len(), 1);
+        assert_eq!(second.parent_hash, Some(first.blocks[0].block_hash));
     }
 
     #[test]
