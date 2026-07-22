@@ -25,8 +25,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use dynamo_llm::protocols::common::extensions::{
-    HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY, HEADER_TENANT_ID, request_cache_salt,
-    resolve_request_priority,
+    HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY, resolve_request_priority,
 };
 
 use crate::epp_standalone_config::EppStandaloneConfig;
@@ -101,14 +100,14 @@ impl EppRouter {
     }
 
     /// Tokenize a chat body for routing → `(token_ids, priority_jump,
-    /// strict_priority, cache_salt)`. Priority uses header-over-body precedence
-    /// via [`resolve_request_priority`]; `cache_salt` via [`request_cache_salt`].
+    /// strict_priority)`. Priority uses header-over-body precedence via
+    /// [`resolve_request_priority`].
     async fn tokenize(
         &self,
         request_body: bytes::Bytes,
         priority_header: Option<String>,
         strict_priority_header: Option<String>,
-    ) -> Result<(Vec<u32>, Option<f64>, Option<u32>, Option<String>), TokenizeError> {
+    ) -> Result<(Vec<u32>, Option<f64>, Option<u32>), TokenizeError> {
         let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
             serde_json::from_slice(&request_body).map_err(TokenizeError::InvalidBody)?;
         let resolved = resolve_request_priority(
@@ -116,19 +115,13 @@ impl EppRouter {
             priority_header.as_deref(),
             strict_priority_header.as_deref(),
         );
-        let cache_salt = request_cache_salt(&request).map(str::to_owned);
         // Moves the `Bytes` into reqwest (zero-copy) rather than copying.
         let token_ids = self
             .renderer
             .render_chat(request_body)
             .await
             .map_err(TokenizeError::Render)?;
-        Ok((
-            token_ids,
-            resolved.priority_jump,
-            resolved.strict_priority,
-            cache_salt,
-        ))
+        Ok((token_ids, resolved.priority_jump, resolved.strict_priority))
     }
 
     /// Intersect `allowed` Ready workers with an Envoy `candidate_subset`. The
@@ -168,13 +161,6 @@ fn first_header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a s
         .find(|(k, _)| k.eq_ignore_ascii_case(name))
         .map(|(_, v)| v.trim())
         .filter(|v| !v.is_empty())
-}
-
-/// Extract the `x-tenant-id` routing header (case-insensitive, non-empty). The
-/// Dynamo frontend maps this header onto `cache_salt`, taking precedence over
-/// any body value.
-fn tenant_id_header(headers: &[(String, String)]) -> Option<String> {
-    first_header(headers, HEADER_TENANT_ID).map(str::to_owned)
 }
 
 async fn wait_for_selector_ready(selector: &Selector) {
@@ -263,19 +249,32 @@ impl EndpointPicker for EppRouter {
             first_header(&req.headers, HEADER_REQUEST_PRIORITY).map(str::to_owned);
         let strict_priority_header =
             first_header(&req.headers, HEADER_REQUEST_STRICT_PRIORITY).map(str::to_owned);
-        let (tokens, priority_jump, strict_priority, body_salt) = self
+        let (tokens, priority_jump, strict_priority) = self
             .tokenize(req.body.clone(), priority_header, strict_priority_header)
             .await
             .map_err(|e| e.into_pick_error(&req.request_id))?;
-
-        // KV cache-isolation namespace: the `x-tenant-id` header overrides the
-        // body's `cache_salt`, matching the frontend's header-routing precedence.
-        let cache_salt = tenant_id_header(&req.headers).or(body_salt);
 
         // EPP-minted booking key (not the reused `x-request-id`): stays
         // EPP-known/releasable and rides back on `PickResult::reservation_id`,
         // so the server frees it via the callbacks without a shared map.
         let reservation_id = uuid::Uuid::new_v4().to_string();
+
+        // Free the booking if this pick is dropped before it is adopted — the
+        // ext-proc stream can close after the scheduler booked but before the
+        // server stores `booking_id`, and a booked (past-queue) reservation is not
+        // reclaimed by the queue's drop-retraction. Disarmed on the handled paths
+        // below; until then, dropping this future frees the reservation.
+        let mut reservation_guard = {
+            let selector = self.selector.clone();
+            let reservation_id = reservation_id.clone();
+            ReservationGuard::new(move || {
+                tokio::spawn(async move {
+                    if let Err(e) = selector.free_reservation(&reservation_id).await {
+                        tracing::debug!(%reservation_id, error = %e, "reservation cleanup on dropped pick");
+                    }
+                });
+            })
+        };
 
         let select_req = SelectRequest {
             model_name: self.model_name.clone(),
@@ -287,19 +286,12 @@ impl EndpointPicker for EppRouter {
             // Effective header-over-body values; `None` only when unset everywhere.
             priority_jump,
             strict_priority,
-            cache_salt,
         };
 
+        // On either error return below the guard (still armed) frees the booking.
         let resp = match self.selector.select_and_reserve(select_req).await {
             Ok(resp) => resp,
-            Err(e) => {
-                // Release any booking made before the response was lost (a failed
-                // pick never reaches the completion callback).
-                if let Err(cleanup) = self.selector.free_reservation(&reservation_id).await {
-                    tracing::debug!(request_id = %req.request_id, %reservation_id, error = %cleanup, "reservation cleanup after failed reserve");
-                }
-                return Err(PickError::RoutingFailed(e.to_string()));
-            }
+            Err(e) => return Err(PickError::RoutingFailed(e.to_string())),
         };
 
         // The reflector owns the address + readiness. If it can no longer resolve
@@ -310,12 +302,13 @@ impl EndpointPicker for EppRouter {
                 worker_id = resp.worker_id,
                 "Selected worker no longer resolvable in reflector; treating selection as stale"
             );
-            // Booked but not routed; release so the stale selection doesn't leak.
-            if let Err(cleanup) = self.selector.free_reservation(&reservation_id).await {
-                tracing::debug!(request_id = %req.request_id, %reservation_id, error = %cleanup, "reservation cleanup after stale selection");
-            }
             return Err(PickError::NoEndpoints);
         };
+
+        // Success: the caller adopts `reservation_id` synchronously (there is no
+        // await between this return and the server storing `booking_id`), so the
+        // lifecycle callbacks now own the free — disarm the guard.
+        reservation_guard.disarm();
 
         // Routing comes from the destination mutation; aggregated raw-vLLM workers
         // read no `x-dynamo-*` headers. (Disaggregated will add its own contract.)
@@ -342,6 +335,35 @@ impl EndpointPicker for EppRouter {
     async fn on_prefill_complete(&self, booking_id: &str) {
         if let Err(e) = self.selector.prefill_complete(booking_id).await {
             tracing::warn!(reservation_id = booking_id, error = %e, "Failed to mark prefill complete");
+        }
+    }
+}
+
+/// RAII cleanup for a minted reservation. Armed when `reservation_id` is minted;
+/// if the pick future is dropped before the result is adopted (ext-proc stream
+/// closed after a booking), `Drop` runs the cleanup (which schedules an
+/// idempotent `free_reservation`). Disarmed once the pick is handled, so a
+/// successful, adopted pick or an error return does not double-free.
+struct ReservationGuard {
+    on_drop: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl ReservationGuard {
+    fn new(on_drop: impl FnOnce() + Send + 'static) -> Self {
+        Self {
+            on_drop: Some(Box::new(on_drop)),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.on_drop = None;
+    }
+}
+
+impl Drop for ReservationGuard {
+    fn drop(&mut self) {
+        if let Some(on_drop) = self.on_drop.take() {
+            on_drop();
         }
     }
 }
@@ -394,19 +416,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tenant_id_header_is_case_insensitive_and_trims() {
-        let headers = vec![("X-Tenant-Id".to_string(), "  tenant-a  ".to_string())];
-        assert_eq!(tenant_id_header(&headers), Some("tenant-a".to_string()));
-    }
-
-    #[test]
-    fn tenant_id_header_absent_or_empty_is_none() {
-        assert_eq!(tenant_id_header(&[]), None);
-        let empty = vec![("x-tenant-id".to_string(), "   ".to_string())];
-        assert_eq!(tenant_id_header(&empty), None);
-    }
-
-    #[test]
     fn compute_ready_gates_on_pod_and_peer() {
         // No replication (peer_ready = None): readiness == pod readiness.
         assert!(compute_ready(true, None));
@@ -429,5 +438,29 @@ mod tests {
         assert!(!endpoint_in_subset("10.0.0.1:9999", &candidates));
         // Unrelated endpoint does not match.
         assert!(!endpoint_in_subset("10.0.0.3:8000", &candidates));
+    }
+
+    #[test]
+    fn reservation_guard_frees_on_drop_unless_disarmed() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // Dropped while armed — the pick future cancelled after the scheduler
+        // booked but before the server adopts the result: cleanup runs.
+        let fired = Arc::new(AtomicBool::new(false));
+        {
+            let fired = fired.clone();
+            let _guard = ReservationGuard::new(move || fired.store(true, Ordering::SeqCst));
+        }
+        assert!(fired.load(Ordering::SeqCst));
+
+        // Disarmed (successful, adopted pick): cleanup does not run.
+        let fired = Arc::new(AtomicBool::new(false));
+        {
+            let fired = fired.clone();
+            let mut guard = ReservationGuard::new(move || fired.store(true, Ordering::SeqCst));
+            guard.disarm();
+        }
+        assert!(!fired.load(Ordering::SeqCst));
     }
 }
