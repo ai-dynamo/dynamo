@@ -138,7 +138,7 @@ fn publisher(
     let (lifecycle_tx, _lifecycle_rx) = mpsc::channel(4);
     let (metrics_tx, _metrics_rx) = watch::channel(MockerMetrics::default());
     LiveEffectsPublisher::new(
-        Some(output_tx),
+        Some(output_tx.into()),
         Some(admission_tx),
         lifecycle_tx,
         metrics_tx,
