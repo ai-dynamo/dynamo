@@ -273,6 +273,21 @@ class ScaleRequestHandler:
         node_count = 1 if multinode is None else multinode.get("nodeCount", 2)
         return service.get_gpu_count() * int(node_count)
 
+    @staticmethod
+    def _record_pool_component(
+        components_by_pool: dict[str, str],
+        pool_key: str,
+        component_name: str,
+        dgd_name: str,
+    ) -> None:
+        previous_component = components_by_pool.get(pool_key)
+        if previous_component is not None:
+            raise ValueError(
+                f"DGD {dgd_name!r} components {previous_component!r} and "
+                f"{component_name!r} both resolve to planner pool {pool_key!r}"
+            )
+        components_by_pool[pool_key] = component_name
+
     def _read_dgd_pools(
         self,
         connector: KubernetesConnector,
@@ -285,6 +300,7 @@ class ScaleRequestHandler:
         """
         deployment = connector.kube_api.get_graph_deployment(connector.parent_dgd_name)
         pools: dict[str, PoolSpec] = {}
+        components_by_pool: dict[str, str] = {}
         role_hints = role_hints or {}
         for component_name, component in get_components_by_name(deployment).items():
             pool_key = self._component_role(component_name, component, role_hints)
@@ -308,6 +324,12 @@ class ScaleRequestHandler:
                 pool_key = component_name
             if not pool_key:
                 continue
+            self._record_pool_component(
+                components_by_pool,
+                pool_key,
+                component_name,
+                connector.parent_dgd_name,
+            )
             pools[pool_key] = PoolSpec(
                 sub_type=pool_key,
                 component_name=component_name,
@@ -1093,10 +1115,19 @@ class ScaleRequestHandler:
                 connector.parent_dgd_name
             )
             role_hints = self._component_roles.get(connector_key, {})
+            components_by_pool: dict[str, str] = {}
             for component_name, component in get_components_by_name(deployment).items():
                 sub_type = self._component_role(component_name, component, role_hints)
                 if sub_type:
-                    current_replicas[sub_type] = component.get("replicas", 0)
+                    self._record_pool_component(
+                        components_by_pool,
+                        sub_type,
+                        component_name,
+                        connector.parent_dgd_name,
+                    )
+                    current_replicas[sub_type] = Service(
+                        name=component_name, service=component
+                    ).number_replicas()
 
             logger.info(
                 f"Successfully scaled {request.graph_deployment_name}: {current_replicas}"

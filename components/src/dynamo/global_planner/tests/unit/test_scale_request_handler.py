@@ -422,6 +422,17 @@ def _worker_dgd_spec(
     return {"spec": {"components": [component]}}
 
 
+def _two_worker_dgd_spec(replicas=1, gpu=1):
+    """Build a DGD with two generic workers that can resolve to one role."""
+    deployment = _worker_dgd_spec(replicas=replicas, gpu=gpu, component_name="worker-a")
+    deployment["spec"]["components"].extend(
+        _worker_dgd_spec(replicas=replicas, gpu=gpu, component_name="worker-b")["spec"][
+            "components"
+        ]
+    )
+    return deployment
+
+
 def _install_connector(handler, dgd_key, dgd_spec_dict, parent_dgd_name="my-dgd"):
     """Attach a mocked KubernetesConnector to the handler for one DGD."""
     connector = AsyncMock()
@@ -583,6 +594,75 @@ async def test_generic_worker_partner_keeps_component_name(mock_runtime):
     connector_b.kube_api.update_graph_replicas.assert_called_once_with(
         "dgd-b", "worker-svc", 4
     )
+
+
+@pytest.mark.asyncio
+async def test_duplicate_resolved_pool_rejected_in_budget_snapshot(mock_runtime):
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["default-my-dgd"],
+        k8s_namespace="default",
+    )
+    handler.max_total_gpus = 4
+    connector = _install_connector(
+        handler,
+        "default/my-dgd",
+        _two_worker_dgd_spec(),
+    )
+    handler._component_roles["default/my-dgd"] = {
+        "worker-a": "decode",
+        "worker-b": "decode",
+    }
+
+    results = await _run(
+        handler,
+        _scale_req(
+            caller_ns="default-my-dgd",
+            decode=2,
+            decode_component_name="worker-a",
+        ),
+    )
+
+    assert results[0]["status"] == "error"
+    assert "'worker-a' and 'worker-b'" in results[0]["message"]
+    assert "planner pool 'decode'" in results[0]["message"]
+    connector.set_component_replicas.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_resolved_pool_rejected_during_readback(mock_runtime):
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["default-my-dgd"],
+        k8s_namespace="default",
+    )
+    connector = _install_connector(
+        handler,
+        "default/my-dgd",
+        _worker_dgd_spec(replicas=1, component_name="worker-a"),
+    )
+    connector.kube_api.get_graph_deployment.side_effect = [
+        _worker_dgd_spec(replicas=1, component_name="worker-a"),
+        _two_worker_dgd_spec(),
+    ]
+    handler._component_roles["default/my-dgd"] = {
+        "worker-a": "decode",
+        "worker-b": "decode",
+    }
+
+    results = await _run(
+        handler,
+        _scale_req(
+            caller_ns="default-my-dgd",
+            decode=2,
+            decode_component_name="worker-a",
+        ),
+    )
+
+    assert results[0]["status"] == "error"
+    assert "'worker-a' and 'worker-b'" in results[0]["message"]
+    assert "planner pool 'decode'" in results[0]["message"]
+    connector.set_component_replicas.assert_called_once()
 
 
 @pytest.mark.asyncio
