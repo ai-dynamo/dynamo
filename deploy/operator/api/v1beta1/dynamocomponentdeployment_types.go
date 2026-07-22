@@ -98,6 +98,14 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	ComponentType ComponentType `json:"type,omitempty"`
 
+	// RuntimeVersionOverride explicitly sets the Dynamo runtime version for this component.
+	// It overrides the version derived from spec.podTemplate.spec.containers[name=main].image. Set this for images
+	// whose tags are not valid semantic versions (for example, custom or SHA tags), or whose
+	// tag version is not the Dynamo runtime version.
+	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`
+	// +optional
+	RuntimeVersionOverride string `json:"runtimeVersionOverride,omitempty"`
+
 	// globalDynamoNamespace places the component in the global Dynamo
 	// namespace rather than the per-deployment namespace derived from the
 	// DGD name.

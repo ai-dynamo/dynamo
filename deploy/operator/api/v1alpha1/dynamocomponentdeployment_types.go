@@ -69,6 +69,14 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// SubComponentType indicates the sub-role of this component (for example, "prefill").
 	SubComponentType string `json:"subComponentType,omitempty"`
 
+	// RuntimeVersionOverride explicitly sets the Dynamo runtime version for this component.
+	// It overrides the version derived from spec.extraPodSpec.mainContainer.image. Set this for images
+	// whose tags are not valid semantic versions (for example, custom or SHA tags), or whose
+	// tag version is not the Dynamo runtime version.
+	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`
+	// +optional
+	RuntimeVersionOverride string `json:"runtimeVersionOverride,omitempty"`
+
 	// DynamoNamespace is deprecated and will be removed in a future version.
 	// The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component
 	// +kubebuilder:validation:Optional

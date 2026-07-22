@@ -67,14 +67,16 @@ func newBetaDGDForValidation() *nvidiacomv1beta1.DynamoGraphDeployment {
 			BackendFramework: "vllm",
 			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 				{
-					ComponentName: "frontend",
-					ComponentType: nvidiacomv1beta1.ComponentTypeFrontend,
-					Replicas:      k8sptr.To(int32(1)),
+					ComponentName:          "frontend",
+					ComponentType:          nvidiacomv1beta1.ComponentTypeFrontend,
+					RuntimeVersionOverride: "1.1.0",
+					Replicas:               k8sptr.To(int32(1)),
 				},
 				{
-					ComponentName: "worker",
-					ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
-					Replicas:      k8sptr.To(int32(2)),
+					ComponentName:          "worker",
+					ComponentType:          nvidiacomv1beta1.ComponentTypeWorker,
+					RuntimeVersionOverride: "1.1.0",
+					Replicas:               k8sptr.To(int32(2)),
 				},
 			},
 		},
@@ -91,8 +93,9 @@ func newAlphaDGDForCompatibilityValidation() *nvidiacomv1alpha1.DynamoGraphDeplo
 			BackendFramework: "vllm",
 			Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				"worker": {
-					ComponentType: consts.ComponentTypeWorker,
-					Replicas:      k8sptr.To(int32(1)),
+					ComponentType:          consts.ComponentTypeWorker,
+					RuntimeVersionOverride: "1.1.0",
+					Replicas:               k8sptr.To(int32(1)),
 				},
 			},
 		},
