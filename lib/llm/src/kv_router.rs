@@ -479,7 +479,7 @@ where
                 usize::try_from(target_cached_prefix_blocks).unwrap_or(usize::MAX);
             let (source, block_hashes) =
                 candidates.best_source(prefix_blocks_to_beat, |worker| {
-                    worker != target
+                    worker.worker_id != target.worker_id
                         && configs.get(&worker.worker_id).is_some_and(|config| {
                             config.supports_router_hints()
                                 && config.router_hint_source_control_endpoint().is_some()
