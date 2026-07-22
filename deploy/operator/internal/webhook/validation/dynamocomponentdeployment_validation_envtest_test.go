@@ -69,10 +69,11 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "operator-supplied image does not require runtime version override",
+			name: "v1beta1 main image is required",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.RuntimeVersionOverride = ""
 			}),
+			wantWebhookErrs: []string{"spec.podTemplate.spec.containers: Required value: is required"},
 		},
 		{
 			name: "v1alpha1 custom image requires runtime version override",
