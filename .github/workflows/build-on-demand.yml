@@ -22,11 +22,59 @@ on:
         description: 'Build and push operator image, tagged with branch name'
         type: boolean
         default: false
+      mirror_dyn3429_vllm_efa_arm64:
+        description: 'Temporary: mirror the no-hwloc vLLM EFA arm64 child to ACR'
+        type: boolean
+        default: false
+      mirror_dyn3429_vllm_efa_arm64_source_digest:
+        description: 'Immutable arm64 ECR child digest (sha256:...)'
+        type: string
+        required: false
+        default: ''
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
+
+  mirror-dyn3429-vllm-efa-arm64:
+    name: Mirror DYN-3429 vLLM arm64 image to ACR
+    if: inputs.mirror_dyn3429_vllm_efa_arm64
+    runs-on: prod-default-small-v2
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Login to ECR and ACR
+        uses: ./.github/actions/skopeo-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Copy exact arm64 image and verify digest
+        shell: bash
+        env:
+          SOURCE_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          TARGET_REGISTRY: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          SOURCE_DIGEST: ${{ inputs.mirror_dyn3429_vllm_efa_arm64_source_digest }}
+          TARGET_TAG: dyn3429-dc28ef64-vllm-runtime-efa-arm64-no-hwloc
+        run: |
+          set -euo pipefail
+          if [[ ! "${SOURCE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Invalid immutable source digest: ${SOURCE_DIGEST}" >&2
+            exit 1
+          fi
+          source_ref="docker://${SOURCE_REGISTRY}/ai-dynamo/dynamo@${SOURCE_DIGEST}"
+          target_ref="docker://${TARGET_REGISTRY}/ai-dynamo/dynamo:${TARGET_TAG}"
+          source_arch=$(skopeo inspect --format '{{.Architecture}}' "${source_ref}")
+          test "${source_arch}" = arm64
+          skopeo copy --preserve-digests --retry-times 4 "${source_ref}" "${target_ref}"
+          target_digest=$(skopeo inspect --format '{{.Digest}}' "${target_ref}")
+          test "${target_digest}" = "${SOURCE_DIGEST}"
+          printf '### DYN-3429 vLLM arm64 EFA image\n\n%s\n' \
+            "${TARGET_REGISTRY}/ai-dynamo/dynamo@${target_digest}" \
+            >> "${GITHUB_STEP_SUMMARY}"
 
   init:
     runs-on: ubuntu-slim
