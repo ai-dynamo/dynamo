@@ -1023,59 +1023,340 @@ a.fern-card:hover{
 
 /* ===================== Welcome (Home) landing page ===================== */
 
-/* GitHub Star/Fork buttons: rendered as ghbtns.com iframes (immune to Fern's
-   SPA link rewriting). Lay them out in a row with a little breathing room. */
-.github-buttons {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.75rem;
-    align-items: center;
-    margin: 0.5rem 0 1.5rem;
-}
-.github-buttons iframe {
-    border: 0;
-    overflow: hidden;
-    /* iframes are inline by default; keep them aligned to the text baseline row */
-    display: inline-block;
-    vertical-align: middle;
+/* The marker component scopes every override to the Home page. */
+article:has(.dynamo-welcome) {
+    position: relative;
+    isolation: isolate;
+    width: 100% !important;
+    max-width: 1200px !important;
+    padding-inline: clamp(1rem, 3vw, 2.5rem);
 }
 
-/* Brand gradient wash anchored to the top of the page content, echoing the
-   SGLang landing hero. Scoped to the Welcome page via the .welcome-gradient
-   marker div so it never bleeds onto other docs pages. Sits behind content. */
-.welcome-gradient {
+article:has(.dynamo-welcome)::before {
+    content: "";
     position: absolute;
     top: 0;
-    left: 0;
-    right: 0;
-    height: 480px;
+    left: 50%;
+    width: min(100vw, 1440px);
+    height: 760px;
+    transform: translateX(-50%);
     pointer-events: none;
-    z-index: 0;
-    background: radial-gradient(ellipse 120% 80% at 50% 0%,
-        rgba(118, 185, 0, 0.18) 0%,
-        rgba(118, 185, 0, 0.10) 28%,
-        rgba(118, 185, 0, 0.04) 55%,
-        transparent 80%);
+    z-index: -1;
+    background:
+        linear-gradient(rgba(118, 185, 0, 0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(118, 185, 0, 0.035) 1px, transparent 1px),
+        radial-gradient(ellipse 70% 60% at 50% 8%, rgba(118, 185, 0, 0.16), transparent 72%);
+    background-size: 44px 44px, 44px 44px, auto;
+    mask-image: linear-gradient(to bottom, black 0%, black 62%, transparent 100%);
 }
-.dark .welcome-gradient {
-    background: radial-gradient(ellipse 120% 80% at 50% 0%,
-        rgba(118, 185, 0, 0.22) 0%,
-        rgba(118, 185, 0, 0.12) 28%,
-        rgba(118, 185, 0, 0.05) 55%,
-        transparent 80%);
+
+.dark article:has(.dynamo-welcome)::before {
+    background:
+        linear-gradient(rgba(118, 185, 0, 0.055) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(118, 185, 0, 0.055) 1px, transparent 1px),
+        radial-gradient(ellipse 70% 60% at 50% 8%, rgba(118, 185, 0, 0.2), transparent 72%);
+    background-size: 44px 44px, 44px 44px, auto;
 }
-/* Keep page content above the gradient wash. */
-.welcome-gradient ~ * {
+
+/* Turn Fern's generated title and subtitle into the first half of the hero. */
+article:has(.dynamo-welcome) > header {
+    margin: 0;
+    padding: clamp(5rem, 10vh, 7.5rem) 1rem 0;
+    text-align: center;
+}
+
+article:has(.dynamo-welcome) > header .fern-breadcrumb {
+    display: none;
+}
+
+article:has(.dynamo-welcome) > header .fern-page-heading {
+    display: block;
+    width: 100%;
+    font-size: clamp(4.5rem, 10vw, 8.5rem);
+    font-weight: 600;
+    line-height: 0.9;
+    letter-spacing: -0.065em;
+}
+
+article:has(.dynamo-welcome) > header div:has(.fern-page-heading) {
+    width: 100%;
+    justify-content: center;
+}
+
+article:has(.dynamo-welcome) > header .fern-page-subtitle {
+    max-width: 680px;
+    margin: clamp(1.5rem, 3vw, 2.25rem) auto 0;
+    font-size: clamp(1.05rem, 2vw, 1.35rem);
+    line-height: 1.55;
+    color: var(--grayscale-a11);
+}
+
+article:has(.dynamo-welcome) > header .fern-page-subtitle p {
+    margin: 0;
+}
+
+.dynamo-welcome {
     position: relative;
     z-index: 1;
 }
 
-/* Widen the Welcome page beyond the default 812px content width so the cards use
-   the horizontal space freed by hide-toc. Scoped via :has() to the article that
-   contains the .welcome-gradient marker, so other docs pages keep their reading
-   width. The article is normally `w-content-width mx-auto` (812px, centered). */
-article:has(.welcome-gradient) {
-    width: 100% !important;
-    max-width: 1200px !important;
+.dynamo-welcome__intro {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 1.75rem 1rem 0;
+    text-align: center;
 }
 
+.dynamo-welcome__statement {
+    min-height: 2.75rem;
+    font-family: RobotoMono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: clamp(1rem, 2vw, 1.25rem);
+    color: var(--grayscale-a11);
+}
+
+.dynamo-welcome__statement p {
+    margin: 0;
+}
+
+.dynamo-welcome__typed {
+    color: #579000;
+    font-weight: 600;
+}
+
+.dark .dynamo-welcome__typed {
+    color: #8fd120;
+}
+
+.dynamo-welcome__cursor {
+    display: inline-block;
+    width: 0.55em;
+    height: 1.05em;
+    margin-left: 0.16em;
+    vertical-align: -0.16em;
+    background: #76b900;
+    animation: dynamo-cursor-blink 0.9s steps(1, end) infinite;
+}
+
+@keyframes dynamo-cursor-blink {
+    0%, 45% { opacity: 1; }
+    46%, 100% { opacity: 0; }
+}
+
+.dynamo-welcome__sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+.dynamo-welcome__cta {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+    min-height: 3.25rem;
+    margin-top: 1.35rem;
+    padding: 0.85rem 1.45rem;
+    border: 1px solid #76b900;
+    border-radius: 999px;
+    background: #76b900;
+    color: #0b0b0b !important;
+    font-size: 1rem;
+    font-weight: 650;
+    line-height: 1;
+    text-decoration: none !important;
+    box-shadow: 0 10px 30px rgba(76, 122, 0, 0.2);
+    transition: transform 160ms ease, background 160ms ease, box-shadow 160ms ease;
+}
+
+.dynamo-welcome__cta:hover {
+    transform: translateY(-2px);
+    background: #8bd000;
+    box-shadow: 0 14px 36px rgba(76, 122, 0, 0.28);
+}
+
+.dynamo-welcome__cta:focus-visible {
+    outline: 3px solid rgba(118, 185, 0, 0.38);
+    outline-offset: 4px;
+}
+
+.dynamo-welcome__cta svg {
+    width: 1.1rem;
+    height: 1.1rem;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2.25;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+/* At a typical desktop viewport only the top of this frame is above the fold. */
+.dynamo-welcome__terminal {
+    position: relative;
+    margin: clamp(10rem, 24vh, 15rem) auto 4.5rem;
+}
+
+.dynamo-welcome__terminal::before {
+    content: "";
+    position: absolute;
+    inset: -3rem 4% auto;
+    height: 70%;
+    border-radius: 50%;
+    background: radial-gradient(ellipse, rgba(118, 185, 0, 0.15), transparent 68%);
+    filter: blur(30px);
+    pointer-events: none;
+}
+
+.dynamo-welcome__terminal .dynamo-terminal-demo {
+    position: relative;
+    width: 100%;
+    max-width: 1040px;
+    margin: 0 auto;
+    border: 1px solid rgba(118, 185, 0, 0.28);
+    border-radius: 16px;
+    box-shadow: 0 30px 90px rgba(0, 0, 0, 0.28);
+}
+
+/* Compact fixed rail on large screens; it becomes an inline row when space is tight. */
+.dynamo-welcome__community {
+    position: fixed;
+    top: 9rem;
+    right: 1.25rem;
+    z-index: 30;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    padding: 0.4rem;
+    border: 1px solid rgba(127, 127, 127, 0.22);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.78);
+    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.1);
+    backdrop-filter: blur(16px);
+}
+
+.dark .dynamo-welcome__community {
+    background: rgba(15, 15, 15, 0.78);
+}
+
+.dynamo-welcome__community a {
+    position: relative;
+    display: grid;
+    width: 2.25rem;
+    height: 2.25rem;
+    place-items: center;
+    border-radius: 50%;
+    color: var(--grayscale-a11) !important;
+    text-decoration: none !important;
+    transition: color 150ms ease, background 150ms ease;
+}
+
+.dynamo-welcome__community a:hover,
+.dynamo-welcome__community a:focus-visible {
+    color: #4c7900 !important;
+    background: rgba(118, 185, 0, 0.14);
+}
+
+.dark .dynamo-welcome__community a:hover,
+.dark .dynamo-welcome__community a:focus-visible {
+    color: #9bdb2f !important;
+}
+
+.dynamo-welcome__community svg {
+    width: 1.15rem;
+    height: 1.15rem;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.dynamo-welcome__community a:first-child svg {
+    fill: currentColor;
+    stroke: none;
+}
+
+.dynamo-welcome__community a span {
+    position: absolute;
+    top: 50%;
+    right: calc(100% + 0.6rem);
+    padding: 0.35rem 0.55rem;
+    border-radius: 6px;
+    background: #171717;
+    color: #fff;
+    font-size: 0.75rem;
+    line-height: 1;
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+    transform: translate(4px, -50%);
+    transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.dynamo-welcome__community a:hover span,
+.dynamo-welcome__community a:focus-visible span {
+    opacity: 1;
+    transform: translate(0, -50%);
+}
+
+@media (max-width: 1360px) {
+    .dynamo-welcome__community {
+        position: static;
+        width: fit-content;
+        margin: 1.5rem auto 0;
+        flex-direction: row;
+    }
+
+    .dynamo-welcome__community a span {
+        top: calc(100% + 0.6rem);
+        right: auto;
+        left: 50%;
+        transform: translate(-50%, -4px);
+    }
+
+    .dynamo-welcome__community a:hover span,
+    .dynamo-welcome__community a:focus-visible span {
+        transform: translate(-50%, 0);
+    }
+}
+
+@media (max-width: 640px) {
+    article:has(.dynamo-welcome) {
+        padding-inline: 0.75rem;
+    }
+
+    article:has(.dynamo-welcome) > header {
+        padding-top: 4rem;
+    }
+
+    article:has(.dynamo-welcome) > header .fern-page-heading {
+        font-size: clamp(4rem, 21vw, 6rem);
+    }
+
+    .dynamo-welcome__terminal {
+        margin-top: 6rem;
+    }
+
+    .dynamo-welcome__statement {
+        width: 100%;
+        min-height: 4.5rem;
+        font-size: 0.95rem;
+        line-height: 1.65;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .dynamo-welcome__cursor {
+        animation: none;
+        opacity: 1;
+    }
+
+    .dynamo-welcome__cta {
+        transition: none;
+    }
+}
