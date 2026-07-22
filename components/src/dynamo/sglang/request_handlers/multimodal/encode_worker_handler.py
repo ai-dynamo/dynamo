@@ -26,7 +26,11 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.common.multimodal import EMBEDDING_SENDER_FACTORIES, ImageLoader
-from dynamo.common.multimodal.image_loader import DECODED_VARIANT_KEY, URL_VARIANT_KEY
+from dynamo.common.multimodal.image_loader import (
+    DECODED_VARIANT_KEY,
+    URL_VARIANT_KEY,
+    decoded_content_hash_key,
+)
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.llm import MultimodalEmbeddingCachePublisher
 from dynamo.sglang.args import Config
@@ -57,8 +61,6 @@ except ImportError as e:
     import numpy as array_module
 
     DEVICE = "cpu"
-
-CONTENT_HASH_KEY = "content_hash"
 
 
 @dataclass(frozen=True)
@@ -521,18 +523,6 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         variant = variants[0]
         return variant, item[variant]
 
-    @staticmethod
-    def _decoded_content_cache_key(metadata: Any) -> Optional[str]:
-        """Read the canonical key computed by the Rust media decoder."""
-        if not isinstance(metadata, dict):
-            return None
-        key = metadata.get(CONTENT_HASH_KEY)
-        if not isinstance(key, str) or len(key) != 16:
-            return None
-        if any(char not in "0123456789abcdef" for char in key):
-            return None
-        return key
-
     async def _prepare_image_inputs(
         self, image_items: list[Any]
     ) -> tuple[list[Any], list[Optional[str]], dict[int, Optional[CachedEmbedding]],]:
@@ -571,7 +561,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                 )
 
             if cache is not None:
-                cache_key = self._decoded_content_cache_key(value)
+                cache_key = decoded_content_hash_key(value)
                 cache_keys[index] = cache_key
                 if cache_key is None:
                     if not self._decoded_content_hash_warning_emitted:

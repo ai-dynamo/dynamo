@@ -19,6 +19,7 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.common.multimodal import TransferRequest
+from dynamo.common.multimodal.image_loader import decoded_content_hash_key
 from dynamo.sglang.backend_args import DynamoSGLangConfig
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 from dynamo.sglang.request_handlers.multimodal.encode_worker_handler import (
@@ -272,12 +273,7 @@ async def test_encode_worker_missing_decoded_hash_bypasses_cache_and_warns_once(
     ],
 )
 def test_encode_worker_rejects_noncanonical_decoded_content_hash(content_hash):
-    assert (
-        MultimodalEncodeWorkerHandler._decoded_content_cache_key(
-            {"content_hash": content_hash}
-        )
-        is None
-    )
+    assert decoded_content_hash_key({"content_hash": content_hash}) is None
 
 
 @pytest.mark.asyncio
