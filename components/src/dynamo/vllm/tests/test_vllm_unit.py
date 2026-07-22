@@ -1331,6 +1331,44 @@ def _make_engine_config_with_runner(runner="auto", **overrides):
     return SimpleNamespace(**defaults)
 
 
+class TestPoolingWorkerPrefixCachingDefault:
+    """Pooling-family workers must not default prefix caching on: pooling
+    engines never decode, and force-enabling it crashes hybrid-attention
+    models (e.g. ModernBERT: "HybridKVCacheCoordinator requires at least two
+    attention groups") that bare `vllm serve` runs fine.
+    """
+
+    @pytest.mark.parametrize("role", ["embedding_worker", "classify_worker"])
+    def test_pooling_family_defaults_to_disabled(self, role):
+        dynamo_cfg = _make_dynamo_config(**{role: True})
+        engine_cfg = _make_engine_config_with_runner(
+            runner="pooling", enable_prefix_caching=None
+        )
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.enable_prefix_caching is False
+
+    @pytest.mark.parametrize("role", ["embedding_worker", "classify_worker"])
+    def test_explicit_enable_is_preserved(self, role):
+        dynamo_cfg = _make_dynamo_config(**{role: True})
+        engine_cfg = _make_engine_config_with_runner(
+            runner="pooling", enable_prefix_caching=True
+        )
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.enable_prefix_caching is True
+
+    def test_generative_worker_still_defaults_to_enabled(self):
+        dynamo_cfg = _make_dynamo_config()
+        engine_cfg = _make_engine_config_with_runner(enable_prefix_caching=None)
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.enable_prefix_caching is True
+
+
 class TestRunnerPreservation:
     """update_engine_config_with_dynamo must not overwrite a user-set --runner."""
 
