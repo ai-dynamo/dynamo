@@ -52,8 +52,13 @@ from gpu_memory_service.integrations.vllm.patches import (
     apply_scratch_kv_patches,
     patch_memory_snapshot,
 )
+from gpu_memory_service.integrations.vllm.utils import configure_gms_worker_logging
 
 logger = logging.getLogger(__name__)
+
+# Make gpu_memory_service INFO/DEBUG visible in the vLLM worker subprocess, where
+# vLLM's logging config would otherwise drop them.
+configure_gms_worker_logging()
 
 # Trigger model loader registration and utility patches on import
 register_gms_loader()
@@ -228,23 +233,19 @@ class GMSWorker(Worker):
         )
         self.available_kv_cache_memory_bytes = int(projected_available)
 
-        msg = (
+        logger.info(
             "[GMS] projected available memory "
             "%.2f GiB (requested=%.2f GiB, non_kv=%.2f GiB, "
             "torch_peak=%.2f GiB, invisible_weights=%.2f GiB, "
-            "cudagraph_estimate=%.2f GiB, cudagraph_applied=%.2f GiB)"
-            % (
-                projected_available / (1 << 30),
-                self.requested_memory / (1 << 30),
-                non_kv_cache_memory / (1 << 30),
-                torch_peak / (1 << 30),
-                invisible_weights_memory / (1 << 30),
-                cudagraph_memory_estimate / (1 << 30),
-                cudagraph_memory_estimate_applied / (1 << 30),
-            )
+            "cudagraph_estimate=%.2f GiB, cudagraph_applied=%.2f GiB)",
+            projected_available / (1 << 30),
+            self.requested_memory / (1 << 30),
+            non_kv_cache_memory / (1 << 30),
+            torch_peak / (1 << 30),
+            invisible_weights_memory / (1 << 30),
+            cudagraph_memory_estimate / (1 << 30),
+            cudagraph_memory_estimate_applied / (1 << 30),
         )
-        logger.info(msg)
-        print(msg, flush=True)
 
         return int(projected_available)
 
@@ -271,8 +272,9 @@ class GMSWorker(Worker):
             # Client-local scratch only — no GMS server session at init.
             # wake_up will connect RW and allocate fresh server backing.
             get_or_create_scratch_manager(socket, device, tag="kv_cache")
-            with gms_use_mem_pool("kv_cache", torch.device(f"cuda:{device}")):
-                self.model_runner.initialize_kv_cache(kv_cache_config)
+            # The scratch pool is scoped to the KV tensors by
+            # patch_kv_cache_pool_scope(), not the whole initialize_kv_cache.
+            self.model_runner.initialize_kv_cache(kv_cache_config)
         elif self.vllm_config.model_config.enable_sleep_mode:
             get_or_create_gms_client_memory_manager(
                 socket,

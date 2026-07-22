@@ -418,6 +418,30 @@ impl KvEventPublisher {
         self.send_singleton(placement_event)
     }
 
+    /// Publishes events that share one source visibility boundary.
+    pub fn publish_batch_with_storage_tiers(
+        &self,
+        events: Vec<(KvCacheEvent, StorageTier)>,
+    ) -> Result<(), mpsc::error::SendError<Vec<KvCacheEvent>>> {
+        if events.is_empty() {
+            return Ok(());
+        }
+
+        let events = events
+            .into_iter()
+            .map(|(event, storage_tier)| {
+                PlacementEvent::new(
+                    Placement::local_worker(self.worker_id, event.dp_rank, storage_tier),
+                    event,
+                )
+            })
+            .collect();
+
+        self.tx.send(events).map_err(|err| {
+            mpsc::error::SendError(err.0.into_iter().map(|event| event.event).collect())
+        })
+    }
+
     fn send_singleton(
         &self,
         event: PlacementEvent,

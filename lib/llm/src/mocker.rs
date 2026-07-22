@@ -183,6 +183,15 @@ impl KvCacheEventSink for KvEventSinkAdapter {
             .publish_with_storage_tier(event, storage_tier)
             .map_err(|e| anyhow::anyhow!("Failed to send KV event: {}", e))
     }
+
+    fn publish_batch_with_storage_tiers(
+        &self,
+        events: Vec<(KvCacheEvent, StorageTier)>,
+    ) -> anyhow::Result<()> {
+        self.0
+            .publish_batch_with_storage_tiers(events)
+            .map_err(|e| anyhow::anyhow!("Failed to send KV event batch: {}", e))
+    }
 }
 
 fn generate_random_token() -> TokenIdType {
