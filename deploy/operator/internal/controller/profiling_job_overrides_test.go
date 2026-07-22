@@ -28,7 +28,12 @@ import (
 	"k8s.io/utils/ptr"
 )
 
-const profilerEntrypoint = "python"
+const (
+	profilerEntrypoint        = "python"
+	outputCopierShell         = "/bin/sh"
+	outputCopierScriptStub    = "echo sidecar-script"
+	outputCopierOverrideImage = "internal-registry/kubectl:1.29"
+)
 
 func baseJob() *batchv1.Job {
 	return &batchv1.Job{
@@ -957,28 +962,28 @@ func TestApplyProfilingJobOverrides_SidecarUntouched(t *testing.T) {
 
 func TestApplyProfilingJobOverrides_OutputCopierImage(t *testing.T) {
 	job := baseJob()
-	job.Spec.Template.Spec.Containers[1].Command = []string{"/bin/sh", "-c"}
-	job.Spec.Template.Spec.Containers[1].Args = []string{"echo sidecar-script"}
+	job.Spec.Template.Spec.Containers[1].Command = []string{outputCopierShell, "-c"}
+	job.Spec.Template.Spec.Containers[1].Args = []string{outputCopierScriptStub}
 	applyProfilingJobOverrides(job, &batchv1.JobSpec{
 		Template: corev1.PodTemplateSpec{
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{
 					{
 						Name:  ContainerNameOutputCopier,
-						Image: "internal-registry/kubectl:1.29",
+						Image: outputCopierOverrideImage,
 					},
 				},
 			},
 		},
 	})
 	sidecar := job.Spec.Template.Spec.Containers[1]
-	if sidecar.Image != "internal-registry/kubectl:1.29" {
+	if sidecar.Image != outputCopierOverrideImage {
 		t.Errorf("expected output-copier image override, got %s", sidecar.Image)
 	}
-	if len(sidecar.Command) == 0 || sidecar.Command[0] != "/bin/sh" {
+	if len(sidecar.Command) == 0 || sidecar.Command[0] != outputCopierShell {
 		t.Error("output-copier command was unexpectedly overwritten")
 	}
-	if len(sidecar.Args) == 0 || sidecar.Args[0] != "echo sidecar-script" {
+	if len(sidecar.Args) == 0 || sidecar.Args[0] != outputCopierScriptStub {
 		t.Error("output-copier args were unexpectedly overwritten")
 	}
 }
@@ -991,7 +996,7 @@ func TestApplyProfilingJobOverrides_OutputCopierDoesNotOverrideProfiler(t *testi
 				Containers: []corev1.Container{
 					{
 						Name:  ContainerNameOutputCopier,
-						Image: "internal-registry/kubectl:1.29",
+						Image: outputCopierOverrideImage,
 					},
 				},
 			},
@@ -1004,11 +1009,11 @@ func TestApplyProfilingJobOverrides_OutputCopierDoesNotOverrideProfiler(t *testi
 
 func TestApplyProfilingJobOverrides_OutputCopierOnlyImageAndResources(t *testing.T) {
 	job := baseJob()
-	job.Spec.Template.Spec.Containers[1].Command = []string{"/bin/sh", "-c"}
-	job.Spec.Template.Spec.Containers[1].Args = []string{"echo sidecar-script"}
+	job.Spec.Template.Spec.Containers[1].Command = []string{outputCopierShell, "-c"}
+	job.Spec.Template.Spec.Containers[1].Args = []string{outputCopierScriptStub}
 	job.Spec.Template.Spec.Containers[1].Env = []corev1.EnvVar{{
 		Name:  "SIDECAR_MODE",
-		Value: "default",
+		Value: "baseline",
 	}}
 	job.Spec.Template.Spec.Containers[1].VolumeMounts = []corev1.VolumeMount{{
 		Name:      VolumeNameProfilingOutput,
@@ -1025,7 +1030,7 @@ func TestApplyProfilingJobOverrides_OutputCopierOnlyImageAndResources(t *testing
 				Containers: []corev1.Container{
 					{
 						Name:  ContainerNameOutputCopier,
-						Image: "internal-registry/kubectl:1.29",
+						Image: outputCopierOverrideImage,
 						Env: []corev1.EnvVar{{
 							Name:  "SIDECAR_MODE",
 							Value: "custom",
@@ -1063,14 +1068,14 @@ func TestApplyProfilingJobOverrides_OutputCopierOnlyImageAndResources(t *testing
 	if sidecar == nil {
 		t.Fatal("output-copier container not found")
 	}
-	if sidecar.Image != "internal-registry/kubectl:1.29" {
+	if sidecar.Image != outputCopierOverrideImage {
 		t.Errorf("expected output-copier image override, got %s", sidecar.Image)
 	}
 	if sidecar.Resources.Limits.Cpu().Cmp(resource.MustParse("500m")) != 0 {
 		t.Errorf("expected output-copier CPU limit override, got %v", sidecar.Resources.Limits)
 	}
 	mode := findEnv(sidecar.Env, "SIDECAR_MODE")
-	if mode == nil || mode.Value != "default" {
+	if mode == nil || mode.Value != "baseline" {
 		t.Errorf("output-copier env overrides should be ignored, got %+v", mode)
 	}
 	if len(sidecar.EnvFrom) != 0 {
@@ -1086,25 +1091,25 @@ func TestApplyProfilingJobOverrides_OutputCopierOnlyImageAndResources(t *testing
 	if sidecar.SecurityContext == nil || sidecar.SecurityContext.RunAsNonRoot == nil || !*sidecar.SecurityContext.RunAsNonRoot {
 		t.Errorf("output-copier securityContext overrides should be ignored, got %+v", sidecar.SecurityContext)
 	}
-	if len(sidecar.Command) != 2 || sidecar.Command[0] != "/bin/sh" {
+	if len(sidecar.Command) != 2 || sidecar.Command[0] != outputCopierShell {
 		t.Errorf("output-copier command was unexpectedly overwritten: %v", sidecar.Command)
 	}
-	if len(sidecar.Args) != 1 || sidecar.Args[0] != "echo sidecar-script" {
+	if len(sidecar.Args) != 1 || sidecar.Args[0] != outputCopierScriptStub {
 		t.Errorf("output-copier args were unexpectedly overwritten: %v", sidecar.Args)
 	}
 }
 
 func TestApplyProfilingJobOverrides_NamedProfilerAndOutputCopierOverrides(t *testing.T) {
 	job := baseJob()
-	job.Spec.Template.Spec.Containers[1].Command = []string{"/bin/sh", "-c"}
-	job.Spec.Template.Spec.Containers[1].Args = []string{"echo sidecar-script"}
+	job.Spec.Template.Spec.Containers[1].Command = []string{outputCopierShell, "-c"}
+	job.Spec.Template.Spec.Containers[1].Args = []string{outputCopierScriptStub}
 	applyProfilingJobOverrides(job, &batchv1.JobSpec{
 		Template: corev1.PodTemplateSpec{
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{
 					{
 						Name:  ContainerNameOutputCopier,
-						Image: "internal-registry/kubectl:1.29",
+						Image: outputCopierOverrideImage,
 					},
 					{
 						Name:  ContainerNameProfiler,
@@ -1130,13 +1135,13 @@ func TestApplyProfilingJobOverrides_NamedProfilerAndOutputCopierOverrides(t *tes
 	if sidecar == nil {
 		t.Fatal("output-copier container not found")
 	}
-	if sidecar.Image != "internal-registry/kubectl:1.29" {
-		t.Errorf("output-copier image: want internal-registry/kubectl:1.29, got %s", sidecar.Image)
+	if sidecar.Image != outputCopierOverrideImage {
+		t.Errorf("output-copier image: want %s, got %s", outputCopierOverrideImage, sidecar.Image)
 	}
-	if len(sidecar.Command) == 0 || sidecar.Command[0] != "/bin/sh" {
+	if len(sidecar.Command) == 0 || sidecar.Command[0] != outputCopierShell {
 		t.Error("output-copier command was unexpectedly overwritten")
 	}
-	if len(sidecar.Args) == 0 || sidecar.Args[0] != "echo sidecar-script" {
+	if len(sidecar.Args) == 0 || sidecar.Args[0] != outputCopierScriptStub {
 		t.Error("output-copier args were unexpectedly overwritten")
 	}
 }
