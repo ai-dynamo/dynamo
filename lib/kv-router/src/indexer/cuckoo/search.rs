@@ -6,6 +6,11 @@ use std::cell::RefCell;
 
 use super::MAX_VERIFICATION_WINDOW;
 
+// NOTE: Capacity pressure may leave stable holes and therefore non-monotone prefix evidence
+// (hit, miss, later hit). Search is advisory and every exponential, binary, verification, and
+// fallback loop remains structurally bounded by the input length/window. Do not add query retry,
+// a seqlock, or consumer fencing to repair producer capacity omissions.
+
 const MAX_LANES: usize = 16;
 const MAX_VERIFICATION_GROUPS: usize = MAX_LANES * MAX_VERIFICATION_WINDOW;
 
@@ -25,6 +30,7 @@ pub(super) struct FallbackStats {
 }
 
 impl FallbackStats {
+    #[cfg(test)]
     fn merge(&mut self, other: Self) {
         self.left_edge_lanes += other.left_edge_lanes;
         self.activated_lanes += other.activated_lanes;
@@ -93,7 +99,6 @@ fn record_trace(kind: SearchTraceKind, phase: SearchPhase, position: usize, lane
     });
 }
 
-#[cfg(any(not(feature = "metrics"), test))]
 pub(super) fn find_prefix_depths<const D: usize>(
     sequence_len: usize,
     initial_mask: u16,
@@ -111,24 +116,7 @@ pub(super) fn find_prefix_depths<const D: usize>(
     .depths
 }
 
-#[cfg(feature = "metrics")]
-pub(super) fn find_prefix_depths_with_stats<const D: usize>(
-    sequence_len: usize,
-    initial_mask: u16,
-    verification_window: usize,
-    prefetch: impl FnMut(usize),
-    probe: impl FnMut(usize) -> u16,
-) -> PrefixSearchResult<D> {
-    find_prefix_depths_impl::<D, true, false>(
-        sequence_len,
-        initial_mask,
-        verification_window,
-        prefetch,
-        probe,
-    )
-}
-
-#[cfg(any(not(feature = "metrics"), test))]
+#[cfg(test)]
 pub(super) fn find_max_depth_matches<const D: usize>(
     sequence_len: usize,
     initial_mask: u16,
@@ -144,23 +132,6 @@ pub(super) fn find_max_depth_matches<const D: usize>(
         probe,
     )
     .depths
-}
-
-#[cfg(feature = "metrics")]
-pub(super) fn find_max_depth_matches_with_stats<const D: usize>(
-    sequence_len: usize,
-    initial_mask: u16,
-    verification_window: usize,
-    prefetch: impl FnMut(usize),
-    probe: impl FnMut(usize) -> u16,
-) -> PrefixSearchResult<D> {
-    find_max_depth_matches_impl::<D, true, false>(
-        sequence_len,
-        initial_mask,
-        verification_window,
-        prefetch,
-        probe,
-    )
 }
 
 #[cfg(test)]
@@ -312,6 +283,7 @@ fn find_prefix_depths_impl<const D: usize, const FALLBACK: bool, const TRACE: bo
     )
 }
 
+#[cfg(test)]
 fn find_max_depth_matches_impl<const D: usize, const FALLBACK: bool, const TRACE: bool>(
     sequence_len: usize,
     initial_mask: u16,
@@ -425,6 +397,7 @@ fn find_max_depth_matches_impl<const D: usize, const FALLBACK: bool, const TRACE
     PrefixSearchResult { depths, fallback }
 }
 
+#[cfg(test)]
 fn active_lanes_share_ceiling<const D: usize>(state: &PrefixSearchState<D>) -> bool {
     let mut ceiling = None;
     for lane in 0..D {
@@ -440,6 +413,7 @@ fn active_lanes_share_ceiling<const D: usize>(state: &PrefixSearchState<D>) -> b
     true
 }
 
+#[cfg(test)]
 fn project_max_depths<const D: usize>(mut result: PrefixSearchResult<D>) -> PrefixSearchResult<D> {
     let best_depth = result.depths.iter().copied().max().unwrap_or(0);
     for depth in &mut result.depths {
@@ -824,5 +798,30 @@ const fn lane_mask<const D: usize>() -> u16 {
         u16::MAX
     } else {
         (1u16 << D) - 1
+    }
+}
+
+#[cfg(test)]
+mod capacity_hole_tests {
+    use super::*;
+
+    #[test]
+    fn stable_non_monotone_capacity_holes_remain_bounded() {
+        const SEQUENCE_LEN: usize = 64;
+        let (result, trace) = find_prefix_depths_with_test_trace::<1>(
+            SEQUENCE_LEN,
+            1,
+            2,
+            |_| {},
+            |position| u16::from(matches!(position, 0 | 4 | 16 | 32)),
+        );
+
+        assert!(usize::try_from(result.depths[0]).unwrap() <= SEQUENCE_LEN);
+        assert!(trace.iter().all(|event| event.position < SEQUENCE_LEN));
+        let probe_count = trace
+            .iter()
+            .filter(|event| event.kind == SearchTraceKind::Probe)
+            .count();
+        assert!(probe_count <= SEQUENCE_LEN * 2 + MAX_VERIFICATION_WINDOW * 2);
     }
 }

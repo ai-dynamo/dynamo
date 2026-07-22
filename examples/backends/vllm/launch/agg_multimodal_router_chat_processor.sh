@@ -223,12 +223,6 @@ for f in $(seq 1 "${NUM_FRONTENDS}"); do
     FE_HTTP_PORT=$((HTTP_PORT + f - 1))
     FE_SYSTEM_PORT=$((FRONTEND_SYSTEM_PORT_BASE + f - 1))
 
-    # Only reset states on the first replica to avoid wiping shared state.
-    RESET_ARGS=""
-    if [[ "$f" -eq 1 ]]; then
-        RESET_ARGS="--router-reset-states"
-    fi
-
     # Enable replica sync when running multiple frontends.
     SYNC_ARGS=""
     if [[ "${NUM_FRONTENDS}" -gt 1 ]]; then
@@ -245,7 +239,6 @@ for f in $(seq 1 "${NUM_FRONTENDS}"); do
             --dyn-chat-processor vllm \
             --router-mode kv \
             --kv-cache-block-size "${BLOCK_SIZE}" \
-            ${RESET_ARGS} \
             ${SYNC_ARGS} \
             --model-name "${MODEL}" \
             ${FRONTEND_EXTRA_ARGS} &

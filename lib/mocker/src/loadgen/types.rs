@@ -199,5 +199,6 @@ pub struct ReadyTurn {
     pub replay_key: Option<String>,
     pub scheduled_ready_at_ms: f64,
     pub replay_hashes: Option<ReplayRequestHashes>,
+    pub(crate) emit_session_metadata: bool,
     pub request: DirectRequest,
 }

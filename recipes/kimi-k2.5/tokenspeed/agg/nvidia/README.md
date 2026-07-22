@@ -143,7 +143,7 @@ This creates four Deployments + three Services:
 | Resource | Purpose | Image |
 |---|---|---|
 | `kimi-k25-tokenspeed-etcd` (Deployment + Service) | Discovery backend | `gcr.io/etcd-development/etcd:v3.6.7` |
-| `kimi-k25-tokenspeed-nats` (Deployment + Service) | Event plane (JetStream) | `nats:2.12.4` |
+| `kimi-k25-tokenspeed-nats` (Deployment + Service) | NATS Core event plane | `nats:2.12.4` |
 | `kimi-k25-tokenspeed-frontend` (Deployment) | `dynamo.frontend` in KV-router mode on port 8000 | your locally-built `dynamo-tokenspeed` |
 | `kimi-k25-tokenspeed-agg-frontend` (Service) | Stable name for port-forward; selects the frontend Deployment | — |
 | `kimi-k25-tokenspeed-worker` (Deployment) | `dynamo.tokenspeed` against `nvidia/Kimi-K2.5-NVFP4`, TP=4 + EP=4, NVFP4 weights, FP8 KV cache, MLA attention via `trtllm_mla`, MoE via `flashinfer_trtllm`, with `kimi_k25` reasoning + `kimi_k2` tool-call parsers | your locally-built `dynamo-tokenspeed` |

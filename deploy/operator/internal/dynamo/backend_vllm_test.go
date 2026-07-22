@@ -921,7 +921,7 @@ func TestGetWaitLeaderConfigMapName(t *testing.T) {
 }
 
 func TestShouldUseMpBackend(t *testing.T) {
-	// Version-based gate behavior is tested in featuregate.TestOperatorOriginFeatureGate_IsEnabled.
+	// Version-based gate behavior is tested in compatibility.TestGateEnabled.
 	// These tests focus on the explicit override logic and its interaction with the feature gate.
 	tests := []struct {
 		name        string

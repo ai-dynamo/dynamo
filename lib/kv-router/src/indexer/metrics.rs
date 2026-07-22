@@ -148,9 +148,6 @@ pub struct KvIndexerMetrics {
     /// Counter of suspicious-but-valid KV events.
     #[cfg(feature = "metrics")]
     pub kv_cache_event_warnings: IntCounterVec,
-    /// Counters for CKF provenance-fallback behavior.
-    #[cfg(feature = "metrics")]
-    pub ckf_search_fallback: IntCounterVec,
     /// Counters for CKF mutation outcomes that are finer-grained than event status.
     #[cfg(feature = "metrics")]
     pub ckf_mutation: IntCounterVec,
@@ -162,6 +159,8 @@ pub const METRIC_STATUS_PARENT_NOT_FOUND: &str = "parent_block_not_found";
 pub const METRIC_STATUS_BLOCK_NOT_FOUND: &str = "block_not_found";
 pub const METRIC_STATUS_INVALID_BLOCK: &str = "invalid_block";
 pub const METRIC_STATUS_CAPACITY_EXHAUSTED: &str = "capacity_exhausted";
+pub const METRIC_STATUS_ALLOCATION_FAILED: &str = "allocation_failed";
+pub const METRIC_STATUS_OWNERSHIP_DEGREE_OVERFLOW: &str = "ownership_degree_overflow";
 pub const METRIC_STATUS_INDEXER_INVARIANT_VIOLATION: &str = "indexer_invariant_violation";
 
 /// Metric event labels.
@@ -171,13 +170,6 @@ pub const METRIC_EVENT_CLEARED: &str = "cleared";
 
 /// Metric warning labels.
 pub const METRIC_WARNING_DUPLICATE_STORE: &str = "duplicate_store";
-
-/// CKF search-fallback metric labels.
-pub const METRIC_CKF_FALLBACK_LEFT_EDGE_LANES: &str = "left_edge_lanes";
-pub const METRIC_CKF_FALLBACK_ACTIVATED_LANES: &str = "activated_lanes";
-pub const METRIC_CKF_FALLBACK_PROBE_CALLS: &str = "probe_calls";
-pub const METRIC_CKF_FALLBACK_LANE_PROBES: &str = "lane_probes";
-pub const METRIC_CKF_FALLBACK_PROVENANCE_SKIPS: &str = "provenance_skips";
 
 /// CKF mutation metric labels.
 pub const METRIC_CKF_MUTATION_UNKNOWN_REMOVE: &str = "unknown_remove";
@@ -202,14 +194,6 @@ const KV_CACHE_EVENT_WARNINGS_HELP: &str =
 #[cfg(feature = "metrics")]
 const KV_CACHE_EVENT_WARNINGS_LABELS: &[&str] = &["warning_kind"];
 #[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
-const CKF_SEARCH_FALLBACK_SUFFIX: &str = "ckf_search_fallback";
-#[cfg(feature = "metrics")]
-const CKF_SEARCH_FALLBACK_NAME: &str = "dynamo_kvrouter_ckf_search_fallback";
-#[cfg(feature = "metrics")]
-const CKF_SEARCH_FALLBACK_HELP: &str = "CKF provenance-fallback activity and grouped probe cost";
-#[cfg(feature = "metrics")]
-const CKF_SEARCH_FALLBACK_LABELS: &[&str] = &["kind"];
-#[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
 const CKF_MUTATION_SUFFIX: &str = "ckf_mutation_total";
 #[cfg(feature = "metrics")]
 const CKF_MUTATION_NAME: &str = "dynamo_kvrouter_ckf_mutation_total";
@@ -226,13 +210,11 @@ impl KvIndexerMetrics {
     fn new(
         kv_cache_events_applied: IntCounterVec,
         kv_cache_event_warnings: IntCounterVec,
-        ckf_search_fallback: IntCounterVec,
         ckf_mutation: IntCounterVec,
     ) -> Self {
         Self {
             kv_cache_events_applied,
             kv_cache_event_warnings,
-            ckf_search_fallback,
             ckf_mutation,
         }
     }
@@ -249,10 +231,6 @@ impl KvIndexerMetrics {
                 KV_CACHE_EVENT_WARNINGS_LABELS,
             )?,
             IntCounterVec::new(
-                Opts::new(CKF_SEARCH_FALLBACK_NAME, CKF_SEARCH_FALLBACK_HELP),
-                CKF_SEARCH_FALLBACK_LABELS,
-            )?,
-            IntCounterVec::new(
                 Opts::new(CKF_MUTATION_NAME, CKF_MUTATION_HELP),
                 CKF_MUTATION_LABELS,
             )?,
@@ -265,7 +243,6 @@ impl KvIndexerMetrics {
         let metrics = Arc::new(Self::new_prometheus()?);
         registry.register(Box::new(metrics.kv_cache_events_applied.clone()))?;
         registry.register(Box::new(metrics.kv_cache_event_warnings.clone()))?;
-        registry.register(Box::new(metrics.ckf_search_fallback.clone()))?;
         registry.register(Box::new(metrics.ckf_mutation.clone()))?;
         Ok(metrics)
     }
@@ -292,12 +269,6 @@ impl KvIndexerMetrics {
                             &[],
                         ),
                         component.metrics().create_intcountervec(
-                            CKF_SEARCH_FALLBACK_SUFFIX,
-                            CKF_SEARCH_FALLBACK_HELP,
-                            CKF_SEARCH_FALLBACK_LABELS,
-                            &[],
-                        ),
-                        component.metrics().create_intcountervec(
                             CKF_MUTATION_SUFFIX,
                             CKF_MUTATION_HELP,
                             CKF_MUTATION_LABELS,
@@ -307,18 +278,13 @@ impl KvIndexerMetrics {
                         (
                             Ok(kv_cache_events_applied),
                             Ok(kv_cache_event_warnings),
-                            Ok(ckf_search_fallback),
                             Ok(ckf_mutation),
                         ) => Arc::new(Self::new(
                             kv_cache_events_applied,
                             kv_cache_event_warnings,
-                            ckf_search_fallback,
                             ckf_mutation,
                         )),
-                        (Err(e), _, _, _)
-                        | (_, Err(e), _, _)
-                        | (_, _, Err(e), _)
-                        | (_, _, _, Err(e)) => {
+                        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
                             tracing::warn!("Failed to create kv indexer metrics from component: {}. Using unregistered metrics as fallback.", e);
                             Arc::new(Self::new_unregistered())
                         }
@@ -366,6 +332,10 @@ impl KvIndexerMetrics {
                         KvCacheEventError::BlockNotFound => METRIC_STATUS_BLOCK_NOT_FOUND,
                         KvCacheEventError::InvalidBlockSequence => METRIC_STATUS_INVALID_BLOCK,
                         KvCacheEventError::CapacityExhausted => METRIC_STATUS_CAPACITY_EXHAUSTED,
+                        KvCacheEventError::AllocationFailed => METRIC_STATUS_ALLOCATION_FAILED,
+                        KvCacheEventError::OwnershipDegreeOverflow => {
+                            METRIC_STATUS_OWNERSHIP_DEGREE_OVERFLOW
+                        }
                         KvCacheEventError::IndexerInvariantViolation => {
                             METRIC_STATUS_INDEXER_INVARIANT_VIOLATION
                         }
@@ -397,62 +367,6 @@ impl KvIndexerMetrics {
     /// `with_label_values` hashmap lookup on every event.
     pub fn prebind(&self) -> PreBoundEventCounters {
         PreBoundEventCounters::new(self)
-    }
-
-    #[cfg(feature = "metrics")]
-    pub(crate) fn prebind_ckf_search(&self) -> PreBoundCkfSearchCounters {
-        PreBoundCkfSearchCounters::new(&self.ckf_search_fallback)
-    }
-}
-
-#[cfg(feature = "metrics")]
-#[derive(Clone, Debug)]
-pub(crate) struct PreBoundCkfSearchCounters {
-    left_edge_lanes: IntCounter,
-    activated_lanes: IntCounter,
-    probe_calls: IntCounter,
-    lane_probes: IntCounter,
-    provenance_skips: IntCounter,
-}
-
-#[cfg(feature = "metrics")]
-impl PreBoundCkfSearchCounters {
-    fn new(counters: &IntCounterVec) -> Self {
-        Self {
-            left_edge_lanes: counters.with_label_values(&[METRIC_CKF_FALLBACK_LEFT_EDGE_LANES]),
-            activated_lanes: counters.with_label_values(&[METRIC_CKF_FALLBACK_ACTIVATED_LANES]),
-            probe_calls: counters.with_label_values(&[METRIC_CKF_FALLBACK_PROBE_CALLS]),
-            lane_probes: counters.with_label_values(&[METRIC_CKF_FALLBACK_LANE_PROBES]),
-            provenance_skips: counters.with_label_values(&[METRIC_CKF_FALLBACK_PROVENANCE_SKIPS]),
-        }
-    }
-
-    pub(crate) fn record(
-        &self,
-        left_edge_lanes: u64,
-        activated_lanes: u64,
-        probe_calls: u64,
-        lane_probes: u64,
-        provenance_skips: u64,
-    ) {
-        if left_edge_lanes | activated_lanes | probe_calls | lane_probes | provenance_skips == 0 {
-            return;
-        }
-        if left_edge_lanes != 0 {
-            self.left_edge_lanes.inc_by(left_edge_lanes);
-        }
-        if activated_lanes != 0 {
-            self.activated_lanes.inc_by(activated_lanes);
-        }
-        if probe_calls != 0 {
-            self.probe_calls.inc_by(probe_calls);
-        }
-        if lane_probes != 0 {
-            self.lane_probes.inc_by(lane_probes);
-        }
-        if provenance_skips != 0 {
-            self.provenance_skips.inc_by(provenance_skips);
-        }
     }
 }
 
@@ -488,6 +402,8 @@ struct ResultCounters {
     block_not_found: IntCounter,
     invalid_block: IntCounter,
     capacity_exhausted: IntCounter,
+    allocation_failed: IntCounter,
+    ownership_degree_overflow: IntCounter,
     indexer_invariant_violation: IntCounter,
 }
 
@@ -503,6 +419,10 @@ impl ResultCounters {
             invalid_block: counters.with_label_values(&[event_type, METRIC_STATUS_INVALID_BLOCK]),
             capacity_exhausted: counters
                 .with_label_values(&[event_type, METRIC_STATUS_CAPACITY_EXHAUSTED]),
+            allocation_failed: counters
+                .with_label_values(&[event_type, METRIC_STATUS_ALLOCATION_FAILED]),
+            ownership_degree_overflow: counters
+                .with_label_values(&[event_type, METRIC_STATUS_OWNERSHIP_DEGREE_OVERFLOW]),
             indexer_invariant_violation: counters
                 .with_label_values(&[event_type, METRIC_STATUS_INDEXER_INVARIANT_VIOLATION]),
         }
@@ -515,6 +435,8 @@ impl ResultCounters {
             Err(KvCacheEventError::BlockNotFound) => &self.block_not_found,
             Err(KvCacheEventError::InvalidBlockSequence) => &self.invalid_block,
             Err(KvCacheEventError::CapacityExhausted) => &self.capacity_exhausted,
+            Err(KvCacheEventError::AllocationFailed) => &self.allocation_failed,
+            Err(KvCacheEventError::OwnershipDegreeOverflow) => &self.ownership_degree_overflow,
             Err(KvCacheEventError::IndexerInvariantViolation) => &self.indexer_invariant_violation,
         }
     }

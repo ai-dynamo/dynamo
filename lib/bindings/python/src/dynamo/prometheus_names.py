@@ -349,8 +349,10 @@ class request_plane:
 
 
 class router:
-    """Router request metrics (component-scoped aggregate histograms + counter)"""
+    """Router request metrics (component-scoped aggregate histograms + counters)"""
 
+    # Total number of requests admitted by the router scheduler
+    REQUESTS_STARTED_TOTAL = "router_requests_started_total"
     # Total number of requests processed by the router
     REQUESTS_TOTAL = "router_requests_total"
     # Total number of remote indexer overlap queries that failed

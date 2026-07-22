@@ -4,7 +4,7 @@
 import asyncio
 import re as re_mod
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import Any
 from unittest import mock
 from unittest.mock import MagicMock
 
@@ -23,7 +23,6 @@ from tensorrt_llm.llmapi import DisaggregatedParams
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
-from dynamo.trtllm.llm_engine import TrtllmLLMEngine
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.request_handlers.handler_base import HandlerBase
 
@@ -53,6 +52,9 @@ class MockSamplingParams:
     best_of: int = 1
     ignore_eos: bool = False
     guided_decoding: object | None = None
+    max_tokens: int | None = None
+    min_tokens: int | None = None
+    stop_token_ids: list[int] | None = None
 
     def __post_init__(self):
         """Called after dataclass initialization (including via replace())."""
@@ -107,6 +109,14 @@ class TestOverrideSamplingParams:
 
         assert result.temperature == original_temperature
         assert result.top_p == original_top_p
+
+    def test_disabled_top_k_sentinel_is_converted(self):
+        sampling_params = MockSamplingParams()
+        request = {"sampling_options": {"top_k": -1}}
+
+        result = HandlerBase._override_sampling_params(sampling_params, request)
+
+        assert result.top_k == 0
 
     def test_truthy_values_are_applied(self):
         """Test that normal truthy values are correctly set."""
@@ -190,97 +200,6 @@ class TestOverrideSamplingParams:
             HandlerBase._override_sampling_params(sampling_params, request)
 
         mock_post_init.assert_called_once()
-
-
-class TestLLMEngineOverrideSamplingParams:
-    """Tests for the unified LLMEngine _override_sampling_params path."""
-
-    JSON_SCHEMA: ClassVar[dict[str, Any]] = {
-        "type": "object",
-        "properties": {"answer": {"type": "string"}},
-        "required": ["answer"],
-    }
-    JSON_SCHEMA_STRING: ClassVar[str] = (
-        '{"type":"object","properties":{"answer":{"type":"string"}},'
-        '"required":["answer"]}'
-    )
-
-    def test_n_is_passed_through(self):
-        sampling_params = MockSamplingParams()
-        request = {"sampling_options": {"n": 2}}
-
-        result = TrtllmLLMEngine._override_sampling_params(sampling_params, request)
-
-        assert result.n == 2
-        assert result.best_of == 2
-
-    def test_existing_best_of_greater_than_n_is_preserved(self):
-        sampling_params = MockSamplingParams(best_of=4)
-        request = {"sampling_options": {"n": 2}}
-
-        result = TrtllmLLMEngine._override_sampling_params(sampling_params, request)
-
-        assert result.n == 2
-        assert result.best_of == 4
-
-    @pytest.mark.parametrize(
-        ("guided_decoding", "expected_attribute", "expected_value"),
-        [
-            ({"json": JSON_SCHEMA}, "json", JSON_SCHEMA),
-            ({"json": JSON_SCHEMA_STRING}, "json", JSON_SCHEMA_STRING),
-            ({"regex": "[0-9]+"}, "regex", "[0-9]+"),
-            (
-                {"grammar": 'root ::= "yes" | "no"'},
-                "grammar",
-                'root ::= "yes" | "no"',
-            ),
-            ({"choice": ["yes", "no", "maybe"]}, "regex", "(yes|no|maybe)"),
-        ],
-        ids=["json-object", "json-string", "regex", "grammar", "choice"],
-    )
-    def test_guided_decoding_constraints_are_converted(
-        self, guided_decoding, expected_attribute, expected_value
-    ):
-        sampling_params = MockSamplingParams()
-        request = {"sampling_options": {"guided_decoding": guided_decoding}}
-
-        result = TrtllmLLMEngine._override_sampling_params(sampling_params, request)
-
-        assert not isinstance(result.guided_decoding, dict)
-        assert getattr(result.guided_decoding, expected_attribute) == expected_value
-
-    def test_guided_decoding_choice_escapes_regex_metacharacters(self):
-        sampling_params = MockSamplingParams()
-        choices = ["yes (confirmed)", "no [rejected]", "maybe?"]
-        request = {"sampling_options": {"guided_decoding": {"choice": choices}}}
-
-        result = TrtllmLLMEngine._override_sampling_params(sampling_params, request)
-
-        expected = "(" + "|".join(re_mod.escape(choice) for choice in choices) + ")"
-        assert result.guided_decoding.regex == expected
-
-
-@pytest.mark.parametrize(
-    ("override", "expected"),
-    [
-        (None, "xgrammar"),
-        ('{"guided_decoding_backend": "llguidance"}', "llguidance"),
-    ],
-    ids=["configured", "engine-override"],
-)
-def test_unified_guided_decoding_backend_matches_legacy(override, expected):
-    argv = [
-        "--model-path",
-        "Qwen/Qwen3-0.6B",
-        "--guided-decoding-backend",
-        "xgrammar",
-    ]
-    if override is not None:
-        argv.extend(["--override-engine-args", override])
-
-    engine, _ = asyncio.run(TrtllmLLMEngine.from_args(argv))
-
-    assert engine.engine_args["guided_decoding_backend"] == expected
 
 
 class TestGuidedDecodingFromToolChoice:
@@ -467,6 +386,7 @@ class TestDeferredAbortGuard:
     def _make_handler(self) -> HandlerBase:
         config = MagicMock()
         config.shutdown_event = None
+        config.conversation_affinity = False
         return _ConcreteHandler(config)
 
     @pytest.mark.asyncio
@@ -588,6 +508,7 @@ class TestMultimodalGuard:
         config = MagicMock()
         config.multimodal_processor = multimodal_processor
         config.shutdown_event = None
+        config.conversation_affinity = False
         return _ConcreteHandler(config)
 
     async def _prepare(self, handler, request, epd_metadata=None):
@@ -644,6 +565,7 @@ class TestPrefillPromptMetadata:
         config = MagicMock()
         config.multimodal_processor = MagicMock()
         config.shutdown_event = None
+        config.conversation_affinity = False
         return _ConcreteHandler(config)
 
     def _pack_metadata(self, request, processed_input, prompt, prompt_token_ids):
@@ -714,6 +636,7 @@ class TestDisaggRequestId:
         config = MagicMock()
         config.shutdown_event = None
         config.disagg_machine_id = machine_id
+        config.conversation_affinity = False
         handler = _ConcreteHandler(config)
         handler.disaggregation_mode = DisaggregationMode.PREFILL
         return handler
@@ -797,6 +720,7 @@ class TestHealthCheckPriority:
         config = MagicMock()
         config.shutdown_event = None
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.conversation_affinity = False
         handler = _ConcreteHandler(config)
         handler.publisher = None
         handler.multimodal_processor = None
@@ -950,6 +874,47 @@ class TestHealthCheckPriority:
         _, kwargs = handler.engine.llm.generate_async.call_args
         assert kwargs["cache_salt"] == "tenant-a"
 
+    @pytest.mark.asyncio
+    async def test_prefill_skips_generation_stop_conditions(self):
+        handler = self._make_handler()
+        handler.disaggregation_mode = DisaggregationMode.PREFILL
+        handler.disagg_machine_id = 0
+        handler.default_sampling_params = MockSamplingParams(stop_token_ids=[300])
+        generation_result = MagicMock()
+
+        async def empty_aiter(_self):
+            for _ in ():
+                yield
+
+        generation_result.__aiter__ = empty_aiter
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {
+                "max_tokens": 10,
+                "min_tokens": 8,
+                "ignore_eos": True,
+                "stop_token_ids_hidden": [100],
+                "stop_token_ids_visible": [200],
+            },
+            "sampling_options": {},
+        }
+
+        chunks = [
+            c async for c in handler.generate_locally(request, self._make_context())
+        ]
+        assert chunks == []
+
+        handler.engine.llm.generate_async.assert_called_once()
+        _, kwargs = handler.engine.llm.generate_async.call_args
+        sampling_params = kwargs["sampling_params"]
+        assert sampling_params.max_tokens == 1
+        assert sampling_params.min_tokens is None
+        assert sampling_params.ignore_eos is False
+        assert sampling_params.stop_token_ids == [300]
+        assert kwargs["streaming"] is False
+
 
 class TestDefaultMaxTokens:
     """Unit tests for HandlerBase._default_max_tokens (omitted max_tokens sizing)."""
@@ -1084,6 +1049,7 @@ class TestConversationAffinity:
         config = MagicMock()
         config.shutdown_event = None
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.conversation_affinity = False
         handler = _ConcreteHandler(config)
         handler.publisher = None
         handler.multimodal_processor = None
@@ -1238,5 +1204,71 @@ class TestConversationAffinity:
         }
         with pytest.raises(RuntimeError, match="ConversationParams API"):
             async for _ in handler.generate_locally(request, self._make_context()):
+                pass
+        handler.engine.llm.generate_async.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_override_suppresses_dp_rank_and_forwards_conversation_params(
+        self, monkeypatch
+    ):
+        """DYN_ENGINE_CONV_AFFINITY override=True + engine detection disabled →
+        dp_rank suppressed, conversation_params forwarded on first request."""
+        monkeypatch.setattr(
+            "dynamo.trtllm.request_handlers.handler_base.CONVERSATION_PARAMS_AVAILABLE",
+            True,
+        )
+        monkeypatch.setattr(
+            "dynamo.trtllm.conversation_affinity.ConversationParams",
+            _FakeConversationParams,
+        )
+        monkeypatch.setattr(
+            "dynamo.trtllm.request_handlers.handler_base.engine_conversation_affinity_enabled",
+            lambda _: False,
+        )
+        handler = self._make_handler(conversation_affinity=False)
+        # Reset to None so lazy init runs on first request and folds in the override.
+        handler._conversation_affinity = None
+        handler._engine_conversation_affinity_override = True
+        kwargs = await self._drive(
+            handler,
+            {
+                "token_ids": [1, 2, 3],
+                "stop_conditions": {"max_tokens": 10},
+                "sampling_options": {"temperature": 0.7},
+                "routing": {"dp_rank": 3},
+                "agent_context": {"session_id": "run-99:agent-0"},
+            },
+        )
+        # Override must suppress the router rank just like auto-detection does.
+        assert kwargs["scheduling_params"] is None
+        conv_params = kwargs["conversation_params"]
+        assert conv_params is not None
+        assert conv_params.conversation_id == "run-99:agent-0"
+
+    @pytest.mark.asyncio
+    async def test_override_raises_when_conversation_params_api_missing(
+        self, monkeypatch
+    ):
+        """DYN_ENGINE_CONV_AFFINITY=true on a build without ConversationParams →
+        RuntimeError on first request during lazy init."""
+        monkeypatch.setattr(
+            "dynamo.trtllm.request_handlers.handler_base.CONVERSATION_PARAMS_AVAILABLE",
+            False,
+        )
+        handler = self._make_handler(conversation_affinity=False)
+        # Reset to None so lazy init runs and hits the guard.
+        handler._conversation_affinity = None
+        handler._engine_conversation_affinity_override = True
+        handler.engine.llm.generate_async = MagicMock()
+
+        with pytest.raises(RuntimeError, match="DYN_ENGINE_CONV_AFFINITY"):
+            async for _ in handler.generate_locally(
+                {
+                    "token_ids": [1, 2, 3],
+                    "stop_conditions": {"max_tokens": 10},
+                    "sampling_options": {"temperature": 0.7},
+                },
+                self._make_context(),
+            ):
                 pass
         handler.engine.llm.generate_async.assert_not_called()

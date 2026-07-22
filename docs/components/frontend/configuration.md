@@ -27,28 +27,58 @@ The Rust HTTP server also reads these environment variables (not exposed as CLI 
 
 ## Router
 
+This is the canonical CLI and environment-variable reference for the frontend's
+embedded router. The [Router Guide](../router/router-guide.md) explains deployment
+modes and behavior, while [Configuration and Tuning](../router/router-configuration.md)
+explains when to adjust these settings.
+
+### Routing and Readiness
+
 | CLI Argument | Env Var | Default | Description |
 |-------------|---------|---------|-------------|
-| `--router-mode` | `DYN_ROUTER_MODE` | `round-robin` | Routing strategy: `round-robin`, `random`, `kv`, `direct`, `least-loaded`, `device-aware-weighted` |
+| `--router-mode` | `DYN_ROUTER_MODE` | `round-robin` | Routing strategy: `round-robin`, `random`, `power-of-two`, `kv`, `direct`, `least-loaded`, or `device-aware-weighted`. `power-of-two` samples two workers and selects the one with fewer in-flight requests |
+| `--router-min-initial-workers` | `DYN_ROUTER_MIN_INITIAL_WORKERS` | `0` | Minimum workers required before router startup continues. `0` disables the startup wait |
+| `--router-session-affinity-ttl-secs` | `DYN_ROUTER_SESSION_AFFINITY_TTL_SECS` | unset | Enable session affinity and best-effort binding sync with this router-local idle TTL |
+| `--decode-fallback` / `--no-decode-fallback` | `DYN_DECODE_FALLBACK` | `false` | Fall back to aggregated mode when prefill workers are unavailable |
+
+### KV Scoring and Cache Locality
+
+| CLI Argument | Env Var | Default | Description |
+|-------------|---------|---------|-------------|
 | `--load-aware` / `--no-load-aware` | `DYN_ROUTER_LOAD_AWARE` | `false` | Preset for KV load-aware routing without cache-reuse signals; implies `--router-mode kv` |
-| `--router-kv-overlap-score-credit` | `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT` | `1.0` | Credit multiplier for device-local prefix overlap, from 0.0 to 1.0 |
-| `--router-prefill-load-scale` | `DYN_ROUTER_PREFILL_LOAD_SCALE` | `1.0` | Scale adjusted prompt-side prefill load before adding decode blocks |
-| `--router-temperature` | `DYN_ROUTER_TEMPERATURE` | `0.0` | Softmax temperature for normalized worker sampling. 0 = deterministic |
-| `--router-kv-events` / `--no-router-kv-events` | `DYN_ROUTER_USE_KV_EVENTS` | `true` | Enable KV cache state events from workers. Disable for prediction-based routing |
-| `--router-ttl-secs` | `DYN_ROUTER_TTL_SECS` | `120.0` | Block TTL when KV events are disabled |
-| `--router-replica-sync` / `--no-router-replica-sync` | `DYN_ROUTER_REPLICA_SYNC` | `false` | Sync state across multiple router instances |
-| `--router-snapshot-threshold` | `DYN_ROUTER_SNAPSHOT_THRESHOLD` | `1000000` | Messages before triggering a snapshot |
-| `--router-reset-states` / `--no-router-reset-states` | `DYN_ROUTER_RESET_STATES` | `false` | Reset router state on startup. **Warning:** affects existing replicas |
+| `--router-kv-overlap-score-credit` | `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT` | `1.0` | Credit multiplier for device-local prefix overlap. Must be finite and nonnegative; values greater than `1.0` give overlap extra credit and can make adjusted prefill cost negative |
+| `--router-kv-overlap-score-credit-decay` | `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY` | `0.0` | Decay rate for device-local overlap credit as active prefill load rises above the least-loaded eligible worker. `0` disables decay; `1` halves credit at one request-equivalent of excess load |
+| `--router-prefill-load-scale` | `DYN_ROUTER_PREFILL_LOAD_SCALE` | `1.0` | Scale adjusted prompt-side prefill load after cache-hit credits are subtracted |
+| `--router-host-cache-hit-weight` | `DYN_ROUTER_HOST_CACHE_HIT_WEIGHT` | `0.75` | Credit multiplier from `0.0` to `1.0` for host-pinned cache hits |
+| `--router-disk-cache-hit-weight` | `DYN_ROUTER_DISK_CACHE_HIT_WEIGHT` | `0.25` | Credit multiplier from `0.0` to `1.0` for disk or other lower-tier cache hits |
+| `--shared-cache-multiplier` | `DYN_SHARED_CACHE_MULTIPLIER` | `0.5` | Experimental multiplier from `0.0` to `1.0` for external shared-cache hits |
+| `--shared-cache-type` | `DYN_SHARED_CACHE_TYPE` | `none` | Experimental external shared cache: `none` or `hicache` |
+| `--router-temperature` | `DYN_ROUTER_TEMPERATURE` | `0.0` | Softmax temperature for normalized worker sampling. `0` is deterministic |
+
+### KV State and Indexers
+
+| CLI Argument | Env Var | Default | Description |
+|-------------|---------|---------|-------------|
+| `--router-kv-events` / `--no-router-kv-events` | `DYN_ROUTER_USE_KV_EVENTS` | `true` | Consume worker KV cache events, or predict cache state from routing decisions when disabled |
+| `--router-ttl-secs` | `DYN_ROUTER_TTL_SECS` | `120.0` | Block TTL for prediction-based routing with `--no-router-kv-events` |
+| `--router-predicted-ttl-secs` | `DYN_ROUTER_PREDICTED_TTL_SECS` | unset | Enable a local predict-on-route side indexer with this TTL. Requires KV events and is independent of `--router-ttl-secs` |
+| `--router-event-threads` | `DYN_ROUTER_EVENT_THREADS` | `4` | KV indexer worker threads. Values greater than `1` use the concurrent radix tree, including with `--no-router-kv-events` |
+| `--use-remote-indexer` / `--no-use-remote-indexer` | `DYN_USE_REMOTE_INDEXER` | `false` | Experimental: query a remote indexer served on the worker component instead of maintaining a local primary indexer |
+| `--serve-indexer` / `--no-serve-indexer` | `DYN_SERVE_INDEXER` | `false` | Serve this frontend's local KV indexers over the request plane. Requires `--router-mode kv` with positive overlap credit and is mutually exclusive with `--use-remote-indexer` |
+| `--router-replica-sync` / `--no-router-replica-sync` | `DYN_ROUTER_REPLICA_SYNC` | `false` | Best-effort active-sequence synchronization through the Runtime event plane |
+
+### Active Load and Queueing
+
+| CLI Argument | Env Var | Default | Description |
+|-------------|---------|---------|-------------|
 | `--router-track-active-blocks` / `--no-router-track-active-blocks` | `DYN_ROUTER_TRACK_ACTIVE_BLOCKS` | `true` | Track blocks used by in-progress requests for load balancing |
-| `--router-assume-kv-reuse` / `--no-router-assume-kv-reuse` | `DYN_ROUTER_ASSUME_KV_REUSE` | `true` | Assume KV cache reuse when tracking active blocks |
 | `--router-track-output-blocks` / `--no-router-track-output-blocks` | `DYN_ROUTER_TRACK_OUTPUT_BLOCKS` | `false` | Track output blocks with fractional decay during generation |
-| `--router-track-prefill-tokens` / `--no-router-track-prefill-tokens` | `DYN_ROUTER_TRACK_PREFILL_TOKENS` | `true` | Track prompt-side prefill load in worker load accounting |
-| `--router-prefill-load-model` | `DYN_ROUTER_PREFILL_LOAD_MODEL` | `none` | Prompt-side load model: `none` for static load, `aic` for oldest-prefill decay using an AIC prediction |
-| `--router-event-threads` | `DYN_ROUTER_EVENT_THREADS` | `4` | KV indexer worker threads. >1 enables the concurrent radix tree, including with `--no-router-kv-events` |
+| `--router-assume-kv-reuse` / `--no-router-assume-kv-reuse` | `DYN_ROUTER_ASSUME_KV_REUSE` | `true` | Assume KV cache reuse when tracking active blocks |
+| `--router-track-prefill-tokens` / `--no-router-track-prefill-tokens` | `DYN_ROUTER_TRACK_PREFILL_TOKENS` | `true` | Include prompt-side prefill tokens in active-load accounting |
+| `--router-prefill-load-model` | `DYN_ROUTER_PREFILL_LOAD_MODEL` | `none` | Prompt-side load model: `none` for static load or `aic` for oldest-prefill decay using an AIC prediction |
 | `--router-queue-threshold` | `DYN_ROUTER_QUEUE_THRESHOLD` | unset | Queue threshold fraction of prefill capacity. Setting a numeric value enables queueing; priority hints only affect requests waiting in this queue |
-| `--router-queue-policy` | `DYN_ROUTER_QUEUE_POLICY` | `fcfs` | Queue scheduling policy: `fcfs` (tail TTFT), `wspt` (avg TTFT), or `lcfs` (comparison-only reverse ordering) |
-| `--router-policy-config` | `DYN_ROUTER_POLICY_CONFIG` | — | Startup-only [policy-family and cache-bucket YAML](../router/router-configuration.md#policy-class-queues). Uses one synthetic policy class when omitted; queueing requires a numeric threshold |
-| `--decode-fallback` / `--no-decode-fallback` | `DYN_DECODE_FALLBACK` | `false` | Fall back to aggregated mode when prefill workers unavailable |
+| `--router-queue-policy` | `DYN_ROUTER_QUEUE_POLICY` | `fcfs` | Queue scheduling policy: `fcfs` for tail TTFT or `wspt` for average TTFT |
+| `--router-policy-config` | `DYN_ROUTER_POLICY_CONFIG` | unset | Startup-only [policy-family and cache-bucket YAML](../router/router-configuration.md#policy-class-queues). When omitted, the threshold and queue policy define one synthetic policy class |
 
 ## AIC Prefill Load Model
 
@@ -99,7 +129,7 @@ for migration instructions.
 |-------------|---------|---------|-------------|
 | `--discovery-backend` | `DYN_DISCOVERY_BACKEND` | `etcd` | Service discovery: `kubernetes`, `etcd`, `file`, `mem` |
 | `--request-plane` | `DYN_REQUEST_PLANE` | `tcp` | Request distribution: `tcp` (fastest), `nats` |
-| `--event-plane` | `DYN_EVENT_PLANE` | auto | Event publishing: `nats`, `zmq`; defaults to `zmq` for `file`/`mem` discovery and `nats` for `etcd`/`kubernetes` |
+| `--event-plane` | `DYN_EVENT_PLANE` | `zmq` | Event publishing: `nats` or `zmq`. Defaults to `zmq` for every discovery backend |
 
 ## KServe gRPC
 
@@ -196,17 +226,11 @@ All endpoint paths can be overridden via environment variables:
 | `DYN_HTTP_SVC_LIVE_PATH_ENV` | `/live` |
 | `DYN_HTTP_SVC_METRICS_PATH_ENV` | `/metrics` |
 
-## Deprecated
-
-| CLI Argument | Env Var | Description |
-|-------------|---------|-------------|
-| `--router-durable-kv-events` | `DYN_ROUTER_DURABLE_KV_EVENTS` | Use event-plane local indexer instead |
-
 ## See Also
 
 - [Frontend Overview](README.md) — quick start and feature matrix
 - [Frontend Guide](frontend-guide.md) — KServe gRPC configuration
 - [NVIDIA Request Extensions (nvext)](nvext.md) — custom request fields
-- [Configuration and Tuning](../router/router-configuration.md) — detailed routing configuration
+- [Configuration and Tuning](../router/router-configuration.md) — router behavior and tuning guidance
 - [Metrics](../../observability/metrics.md) — available Prometheus metrics
 - [Fault Tolerance](../../fault-tolerance/README.md) — request migration and rejection

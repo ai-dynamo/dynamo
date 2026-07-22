@@ -54,6 +54,112 @@ def test_build_dgd_config_preserves_type_meta(backend: str, mode: str) -> None:
     assert dgd_config["kind"] == "DynamoGraphDeployment"
 
 
+def test_build_dgd_config_vllm_disagg_restores_runtime_args() -> None:
+    """AIC tuning args must not remove Dynamo's vLLM disaggregation contract."""
+    modifier = CONFIG_MODIFIERS["vllm"]
+    dgd_config = modifier.build_dgd_config(
+        mode="disagg",
+        model_name="test/model",
+        image="example/vllm:test",
+        prefill_cli_args=["--tensor-parallel-size", "2"],
+        decode_cli_args=["--tensor-parallel-size", "4"],
+    )
+
+    services = dgd_config["spec"]["services"]
+    prefill = next(
+        service
+        for service in services.values()
+        if service.get("subComponentType") == "prefill"
+    )
+    decode = next(
+        service
+        for service in services.values()
+        if service.get("subComponentType") == "decode"
+    )
+    prefill_args = prefill["extraPodSpec"]["mainContainer"]["args"]
+    decode_args = decode["extraPodSpec"]["mainContainer"]["args"]
+
+    assert prefill_args[prefill_args.index("--tensor-parallel-size") + 1] == "2"
+    assert prefill_args[prefill_args.index("--disaggregation-mode") + 1] == "prefill"
+    assert (
+        prefill_args[prefill_args.index("--kv-transfer-config") + 1]
+        == '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+    )
+    assert decode_args[decode_args.index("--tensor-parallel-size") + 1] == "4"
+    assert decode_args[decode_args.index("--disaggregation-mode") + 1] == "decode"
+    assert "--kv-transfer-config" not in decode_args
+
+
+def test_build_dgd_config_vllm_disagg_preserves_explicit_kv_config() -> None:
+    """An explicit connector remains authoritative while worker roles are canonical."""
+    custom_kv_config = (
+        '{"kv_connector":"NixlConnector","kv_role":"kv_both",'
+        '"kv_buffer_device":"cpu"}'
+    )
+    modifier = CONFIG_MODIFIERS["vllm"]
+    dgd_config = modifier.build_dgd_config(
+        mode="disagg",
+        model_name="test/model",
+        image="example/vllm:test",
+        prefill_cli_args=[
+            "--disaggregation-mode=decode",
+            f"--kv-transfer-config '{custom_kv_config}'",
+        ],
+        decode_cli_args=["--disaggregation-mode", "prefill"],
+    )
+
+    services = dgd_config["spec"]["services"]
+    prefill_args = next(
+        service["extraPodSpec"]["mainContainer"]["args"]
+        for service in services.values()
+        if service.get("subComponentType") == "prefill"
+    )
+    decode_args = next(
+        service["extraPodSpec"]["mainContainer"]["args"]
+        for service in services.values()
+        if service.get("subComponentType") == "decode"
+    )
+
+    assert prefill_args.count("--disaggregation-mode") == 1
+    assert prefill_args[prefill_args.index("--disaggregation-mode") + 1] == "prefill"
+    assert prefill_args.count("--kv-transfer-config") == 1
+    assert (
+        prefill_args[prefill_args.index("--kv-transfer-config") + 1] == custom_kv_config
+    )
+    assert decode_args.count("--disaggregation-mode") == 1
+    assert decode_args[decode_args.index("--disaggregation-mode") + 1] == "decode"
+
+
+def test_build_dgd_config_vllm_disagg_removes_legacy_role_flags() -> None:
+    """Canonical worker roles must replace deprecated vLLM role flags."""
+    modifier = CONFIG_MODIFIERS["vllm"]
+    dgd_config = modifier.build_dgd_config(
+        mode="disagg",
+        model_name="test/model",
+        image="example/vllm:test",
+        prefill_cli_args=["--is-prefill-worker", "--is-decode-worker"],
+        decode_cli_args=["--is-prefill-worker", "--is-decode-worker"],
+    )
+
+    services = dgd_config["spec"]["services"]
+    prefill_args = next(
+        service["extraPodSpec"]["mainContainer"]["args"]
+        for service in services.values()
+        if service.get("subComponentType") == "prefill"
+    )
+    decode_args = next(
+        service["extraPodSpec"]["mainContainer"]["args"]
+        for service in services.values()
+        if service.get("subComponentType") == "decode"
+    )
+
+    for args, expected_mode in ((prefill_args, "prefill"), (decode_args, "decode")):
+        assert "--is-prefill-worker" not in args
+        assert "--is-decode-worker" not in args
+        assert args.count("--disaggregation-mode") == 1
+        assert args[args.index("--disaggregation-mode") + 1] == expected_mode
+
+
 def test_build_dgd_config_shapes_multinode_worker_resources() -> None:
     """DP-only workers keep per-node GPU shaping without multinode inflation."""
     modifier = CONFIG_MODIFIERS["sglang"]
@@ -345,7 +451,9 @@ _TOLERATION = {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSched
 _BASE_DGD = {
     "spec": {
         "services": {
-            "VllmDecodeWorker": {
+            "decode": {
+                "componentType": "worker",
+                "subComponentType": "decode",
                 "extraPodSpec": {
                     "mainContainer": {"image": "my-image", "args": ["--model", "m"]},
                 },
@@ -359,7 +467,7 @@ _BASE_DGD = {
 _OVERRIDE_DGD = {
     "spec": {
         "services": {
-            "VllmDecodeWorker": {"extraPodSpec": {"tolerations": [_TOLERATION]}},
+            "decode": {"extraPodSpec": {"tolerations": [_TOLERATION]}},
             "GhostService": {"extraPodSpec": {"tolerations": [_TOLERATION]}},
         }
     }
@@ -383,7 +491,7 @@ async def test_run_profile_applies_override_once_to_each_consumed_dgd(tmp_path) 
             services[name].setdefault("extraPodSpec", {}).update(
                 service_override["extraPodSpec"]
             )
-        services["VllmDecodeWorker"]["extraPodSpec"]["mainContainer"]["args"].append(
+        services["decode"]["extraPodSpec"]["mainContainer"]["args"].append(
             "--override-applied"
         )
         return result
@@ -402,7 +510,7 @@ async def test_run_profile_applies_override_once_to_each_consumed_dgd(tmp_path) 
 
     pick_result = {
         "dgd_config": base_dgd,
-        "resolved_backend": "vllm",
+        "resolved_backend": "trtllm",
         "chosen_exp": "disagg",
         "best_config_df": None,
         "best_latencies": {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0},
@@ -419,7 +527,7 @@ async def test_run_profile_applies_override_once_to_each_consumed_dgd(tmp_path) 
             "dynamo.profiler.profile_sla._extract_profiler_params",
             return_value=(
                 "test/model",
-                "vllm",
+                "trtllm",
                 "h100_sxm",
                 8,
                 4000,
@@ -470,13 +578,17 @@ async def test_run_profile_applies_override_once_to_each_consumed_dgd(tmp_path) 
     assert interpolation_kwargs, "run_interpolation was never called"
     disagg_config = interpolation_kwargs["disagg_config"]
 
-    # Tolerations must be present on VllmDecodeWorker before interpolation.
-    eps = disagg_config["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"]
+    # Tolerations and TRT-LLM runtime defaults must be present before interpolation.
+    eps = disagg_config["spec"]["services"]["decode"]["extraPodSpec"]
     assert eps["tolerations"] == [_TOLERATION]
 
     # mainContainer must be preserved (not overwritten by the tolerations merge).
     assert eps["mainContainer"]["image"] == "my-image"
     assert eps["mainContainer"]["args"].count("--override-applied") == 1
+    chunked_prefill_idx = eps["mainContainer"]["args"].index(
+        "--trtllm.enable_chunked_prefill"
+    )
+    assert eps["mainContainer"]["args"][chunked_prefill_idx + 1] == "true"
 
     # GhostService (absent from base DGD) must be silently skipped.
     assert "GhostService" not in disagg_config["spec"]["services"]
@@ -485,22 +597,19 @@ async def test_run_profile_applies_override_once_to_each_consumed_dgd(tmp_path) 
     assert assemble_final.call_args.args[2] == base_dgd
     assert len(override_inputs) == 2
     for override_input in override_inputs:
-        args = override_input["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        args = override_input["spec"]["services"]["decode"]["extraPodSpec"][
             "mainContainer"
         ]["args"]
         assert "--override-applied" not in args
 
     final_config = write_final.call_args.args[1]
-    final_args = final_config["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+    final_args = final_config["spec"]["services"]["decode"]["extraPodSpec"][
         "mainContainer"
     ]["args"]
     assert final_args.count("--override-applied") == 1
 
     # Neither merge mutates the clean picked DGD.
-    assert (
-        "tolerations"
-        not in base_dgd["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"]
-    )
+    assert "tolerations" not in base_dgd["spec"]["services"]["decode"]["extraPodSpec"]
 
 
 # ---------------------------------------------------------------------------
