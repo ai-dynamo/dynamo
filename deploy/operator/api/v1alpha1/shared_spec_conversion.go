@@ -259,15 +259,38 @@ func restoreSharedAlphaOnlyPodFields(dst *DynamoComponentDeploymentSharedSpec, p
 	if dst.ExtraPodMetadata == nil && extraPodMetadataNeedsPreservation(preserved.ExtraPodMetadata) {
 		dst.ExtraPodMetadata = preserved.ExtraPodMetadata.DeepCopy()
 	}
-	if dst.ExtraPodSpec == nil && shouldRestorePreservedExtraPodSpec(dst, preserved) {
-		cp := *preserved.ExtraPodSpec.DeepCopy()
-		dst.ExtraPodSpec = &cp
+	if shouldRestorePreservedExtraPodSpec(dst, preserved) {
+		if dst.ExtraPodSpec == nil {
+			cp := *preserved.ExtraPodSpec.DeepCopy()
+			dst.ExtraPodSpec = &cp
+		} else {
+			restorePreservedFrontendSidecarConflict(dst.ExtraPodSpec, preserved.ExtraPodSpec)
+		}
 	}
 	restoreMainContainerFieldOrigins(dst, preserved, mainContainerPresent)
 	if dst.ExtraPodSpec != nil && dst.ExtraPodSpec.MainContainer != nil &&
 		dst.ExtraPodSpec.MainContainer.Name == "" &&
 		preserved.ExtraPodSpec != nil && preserved.ExtraPodSpec.MainContainer != nil {
 		dst.ExtraPodSpec.MainContainer.Name = preserved.ExtraPodSpec.MainContainer.Name
+	}
+}
+
+func restorePreservedFrontendSidecarConflict(dst, preserved *ExtraPodSpec) {
+	if dst == nil || preserved == nil || !extraPodSpecHasContainer(preserved, defaultFrontendSidecarContainerName) {
+		return
+	}
+	if dst.PodSpec == nil {
+		dst.PodSpec = &corev1.PodSpec{}
+	}
+	if extraPodSpecHasContainer(dst, defaultFrontendSidecarContainerName) {
+		return
+	}
+	for i := range preserved.PodSpec.Containers {
+		container := preserved.PodSpec.Containers[i]
+		if container.Name == defaultFrontendSidecarContainerName {
+			dst.PodSpec.Containers = append(dst.PodSpec.Containers, *container.DeepCopy())
+			return
+		}
 	}
 }
 
