@@ -70,16 +70,24 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		},
 		{
 			name: "v1beta1 main image is required",
-			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
-				dcd.Spec.PodTemplate = nil
-			}),
-			wantWebhookErrs: []string{"spec.podTemplate.spec.containers: Required value: is required"},
+			deployment: func() *nvidiacomv1beta1.DynamoComponentDeployment {
+				dcd := betaDCDForAdmission(nil)
+				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: consts.MainContainerName}},
+				}}
+				return dcd
+			}(),
+			wantWebhookErrs: []string{"spec.podTemplate.spec.containers[0].image: Required value: is required"},
 		},
 		{
 			name: "v1alpha1 main image is required",
-			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
-				dcd.Spec.ExtraPodSpec = nil
-			}),
+			deployment: func() *nvidiacomv1alpha1.DynamoComponentDeployment {
+				dcd := alphaDCDForAdmission(nil)
+				dcd.Spec.ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{},
+				}
+				return dcd
+			}(),
 			wantWebhookErrs: []string{"spec.podTemplate.spec.containers: Required value: is required"},
 		},
 		{
