@@ -6,10 +6,10 @@ use std::sync::Arc;
 
 use dynamo_mocker::common::perf_model::PerfModel;
 use dynamo_mocker::common::protocols::{
-    DirectRequest, EngineType as RsMockerEngineType, MockEngineArgs as RsMockEngineArgs,
-    PreemptionMode as RsPreemptionMode, ReasoningConfig as RsReasoningConfig,
-    SglangArgs as RsSglangArgs, TrtllmArgs as RsTrtllmArgs, WorkerType as RsWorkerType,
-    G1Backend as RsG1Backend,
+    DirectRequest, EngineType as RsMockerEngineType, G1Backend as RsG1Backend,
+    MockEngineArgs as RsMockEngineArgs, PreemptionMode as RsPreemptionMode,
+    ReasoningConfig as RsReasoningConfig, SglangArgs as RsSglangArgs, TrtllmArgs as RsTrtllmArgs,
+    WorkerType as RsWorkerType,
 };
 use dynamo_mocker::loadgen::{
     ArrivalSpec, DelaySpec, DynamoRequestTrace, LengthSpec, SyntheticTraceSpec, Trace as RsTrace,
