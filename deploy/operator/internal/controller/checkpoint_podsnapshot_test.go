@@ -55,6 +55,15 @@ func newCheckpointJob(name string) *batchv1.Job {
 	}
 }
 
+// markCheckpointJobComplete stamps JobComplete=True for Ready promotion tests.
+func markCheckpointJobComplete(job *batchv1.Job) *batchv1.Job {
+	job.Status.Conditions = append(job.Status.Conditions, batchv1.JobCondition{
+		Type:   batchv1.JobComplete,
+		Status: corev1.ConditionTrue,
+	})
+	return job
+}
+
 // podNameFromJob derives the test source-pod name for a checkpoint Job.
 func podNameFromJob(jobName string) string {
 	return jobName + "-pod"
