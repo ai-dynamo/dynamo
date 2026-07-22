@@ -136,8 +136,17 @@ def test_resolve_project_clamp_never_patches_pods(k8s):
         power_scale_up_blocked=False,
     )
     adapter = _bare_adapter(caps)
-    wc = WorkerCounts(ready_num_prefill=2, ready_num_decode=2)
+    # Stable deployment: pin expected == ready so this exercises the power
+    # proportional clamp, not the rollout hold (which keys off expected=None).
+    wc = WorkerCounts(
+        ready_num_prefill=2,
+        ready_num_decode=2,
+        expected_num_prefill=2,
+        expected_num_decode=2,
+    )
     new_p, new_d = adapter._apply_final_budget(4, 4, wc)  # 4*700 + 4*1200 = 7600 > 5000
+    assert new_p is not None and new_d is not None
+    assert (new_p, new_d) != (4, 4)  # proportional clamp actually ran
     assert new_p * 700 + new_d * 1200 <= 5000  # clamped to fit
 
     # 4. HARD GATE: the connector never even instantiates a CoreV1 (Pod) client

@@ -493,7 +493,7 @@ class NativePlannerBase:
             "[summary] %s | current: prefill=%d decode=%d | "
             "recommended: prefill=%s decode=%s (delta: %+d / %+d) | "
             "load_reason=%s throughput_reason=%s | "
-            "est_ttft=%.1fms est_itl=%.1fms",
+            "est_ttft=%.1fms est_itl=%.1fms%s",
             action.upper(),
             current_p,
             current_d,
@@ -505,6 +505,11 @@ class NativePlannerBase:
             diag.throughput_decision_reason or "n/a",
             diag.estimated_ttft_ms or 0,
             diag.estimated_itl_ms or 0,
+            (
+                f" | power_scale_up_blocked={diag.power_scale_up_blocked_reason}"
+                if diag.power_scale_up_blocked_reason
+                else ""
+            ),
         )
 
     def _publish_inventory_and_gpu_hours(self, tick_input: TickInput) -> None:

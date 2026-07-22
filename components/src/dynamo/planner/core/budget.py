@@ -6,24 +6,19 @@
 Two layers:
 
 * **Pure math** (``compute_tolerance``, ``bounds_for_total``,
-  ``proportional_clamp_pair``, ``proportional_clamp_single``): no I/O, no
-  state, no logging. Shared by the builtin local planner state (where the
-  budget is enforced intra-DGD by clamping the joint
-  ``(num_prefill, num_decode)`` desired counts) and the centralized
-  GlobalPlanner (where it is enforced across DGDs by accepting/rejecting
-  incoming ScaleRequests). Both layers compute the same ``tolerance`` and
-  the same in-band check; only the action taken on a breach differs (the
-  local planner transforms counts, the GlobalPlanner decides).
-
-* **Config-aware wrappers** (``_apply_global_gpu_budget``,
-  ``_apply_component_gpu_budget``): pull ``min_gpu_budget``,
-  ``max_gpu_budget``, ``min_endpoint``, and per-engine GPU counts off a
-  ``PlannerConfig`` and delegate to the pure primitives. These are what
-  ``state_machine.py`` and friends call.
+  ``proportional_clamp_pair``, ``proportional_clamp_single``, plus the
+  power-budget helpers below): no I/O, no state, no logging. Shared by
+  the builtin local planner state (where the budget is enforced
+  intra-DGD by clamping the joint ``(num_prefill, num_decode)`` desired
+  counts), the orchestrator engine adapter's final budget clamp, and the
+  centralized GlobalPlanner (where it is enforced across DGDs by
+  accepting/rejecting incoming ScaleRequests). Callers share the same
+  ``tolerance`` / in-band check; only the action taken on a breach
+  differs (local transforms counts, GlobalPlanner decides).
 
 * ``_initialize_gpu_counts`` remains a deployment-bootstrap helper: it
   populates per-engine GPU counts from the DGD spec or CLI flags, with
-  a virtual-mode fallback. Untouched by this refactor.
+  a virtual-mode fallback.
 """
 
 from __future__ import annotations
@@ -331,6 +326,8 @@ def apply_power_budget(
             new_p, suppressed = _shrink_single(
                 proposed_p, current_p, p_watts, total_budget - fixed, min_endpoint
             )
+            if new_p == proposed_p:
+                return new_p, proposed_d, None
             reason = (
                 "power_budget_scale_up_suppressed"
                 if suppressed
@@ -341,6 +338,8 @@ def apply_power_budget(
         new_d, suppressed = _shrink_single(
             proposed_d, current_d, d_watts, total_budget - fixed, min_endpoint
         )
+        if new_d == proposed_d:
+            return proposed_p, new_d, None
         reason = (
             "power_budget_scale_up_suppressed" if suppressed else "power_budget_clamped"
         )
@@ -390,85 +389,18 @@ def _shrink_single(
     rather than the unproposed component being silently mutated.
     """
     if avail < min_endpoint * watts:
-        held, _ = _hold_at_current(proposed, current)
-        return (held if held is not None else min_endpoint), True
+        held, capped = _hold_at_current(proposed, current)
+        # ``suppressed`` tracks whether the proposal was actually held back.
+        # When ``current`` is None, ``_hold_at_current`` leaves the proposal
+        # unchanged and ``capped`` is False — do not claim a suppression.
+        return (held if held is not None else min_endpoint), capped
     max_fit = math.floor(avail / watts)
     return max(min_endpoint, min(proposed, max_fit)), False
 
 
 # ---------------------------------------------------------------------------- #
-# Config-aware wrappers — what state_machine.py and friends call.              #
+# Deployment bootstrap — GPU counts from DGD / CLI.                            #
 # ---------------------------------------------------------------------------- #
-
-
-def _apply_global_gpu_budget(
-    next_num_p: int, next_num_d: int, config: PlannerConfig
-) -> tuple[int, int]:
-    """Apply GPU budget band to disagg ``(num_p, num_d)``.
-
-    Honors ``config.max_gpu_budget`` (hard ceiling) and ``config.min_gpu_budget``
-    (floor; ``-1`` disables). When both are active, allows the result to
-    land in ``[min - tolerance, max]`` where ``tolerance =
-    max(prefill_engine_num_gpu, decode_engine_num_gpu)`` — see
-    ``proportional_clamp_pair``. ``max_gpu_budget`` is never relaxed.
-
-    Returns ``(0, 0)`` if the ceiling is below the per-pool minima
-    (configuration error).
-    """
-    if config.max_gpu_budget < 0 and config.min_gpu_budget < 0:
-        return next_num_p, next_num_d
-    assert config.prefill_engine_num_gpu is not None
-    assert config.decode_engine_num_gpu is not None
-
-    p_gpu = config.prefill_engine_num_gpu
-    d_gpu = config.decode_engine_num_gpu
-
-    new_p, new_d = proportional_clamp_pair(
-        next_num_p,
-        next_num_d,
-        p_gpu,
-        d_gpu,
-        config.min_gpu_budget,
-        config.max_gpu_budget,
-        config.min_endpoint,
-    )
-
-    if (new_p, new_d) != (next_num_p, next_num_d):
-        old_total = next_num_p * p_gpu + next_num_d * d_gpu
-        new_total = new_p * p_gpu + new_d * d_gpu
-        logger.warning(
-            f"GPU budget band [min={config.min_gpu_budget}, max={config.max_gpu_budget}] "
-            f"clamped ({next_num_p}P + {next_num_d}D = {old_total} GPUs) -> "
-            f"({new_p}P + {new_d}D = {new_total} GPUs)"
-        )
-
-    return new_p, new_d
-
-
-def _apply_component_gpu_budget(
-    desired_replicas: int, engine_num_gpu: int, config: PlannerConfig
-) -> int:
-    """Apply GPU budget band to a single component (agg, or
-    prefill-only / decode-only mode)."""
-    if config.max_gpu_budget < 0 and config.min_gpu_budget < 0:
-        return desired_replicas
-
-    new_replicas = proportional_clamp_single(
-        desired_replicas,
-        engine_num_gpu,
-        config.min_gpu_budget,
-        config.max_gpu_budget,
-        config.min_endpoint,
-    )
-
-    if new_replicas != desired_replicas:
-        logger.warning(
-            f"GPU budget band [min={config.min_gpu_budget}, max={config.max_gpu_budget}] "
-            f"clamped {desired_replicas} replicas (= {desired_replicas * engine_num_gpu} GPUs) "
-            f"-> {new_replicas} replicas (= {new_replicas * engine_num_gpu} GPUs)"
-        )
-
-    return new_replicas
 
 
 def _initialize_gpu_counts(
