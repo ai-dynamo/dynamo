@@ -283,16 +283,10 @@ func SerializeEndpointsToJSON(endpoints []schedtypes.Endpoint) (string, error) {
 	return string(data), nil
 }
 
-// BuildOpenAIRequestJSON serializes the request as an OpenAI-compatible JSON
-// body for the Rust router's FFI.
-//
-// A successfully parsed OpenAI request always yields a populated Payload holding
-// the complete body, so it is forwarded verbatim (overriding only the resolved
-// target model). This preserves tool_calls, tool_call_id, tools, and reasoning
-// content that the router's strict parse and chat-template rendering require —
-// fields the typed ChatCompletions view does not model. When the payload is
-// unavailable the request cannot be KV-routed, so an error is returned and the
-// scorer falls back to non-KV routing rather than a lossy reconstruction.
+// BuildOpenAIRequestJSON forwards the full request body (req.Body.Payload) to
+// the Rust router's FFI, overriding only the model, so tool-calling and
+// reasoning fields survive the router's parse and chat-template render. Errors
+// when no payload is available so the scorer falls back to non-KV routing.
 func BuildOpenAIRequestJSON(req *schedtypes.InferenceRequest) (string, error) {
 	if req == nil || req.Body == nil {
 		return "", fmt.Errorf("missing request body")
@@ -305,7 +299,7 @@ func BuildOpenAIRequestJSON(req *schedtypes.InferenceRequest) (string, error) {
 
 	requestBody := make(map[string]any, len(pm))
 	maps.Copy(requestBody, pm)
-	// Route on the resolved target model, not whatever alias the caller sent.
+	// Route on the resolved target model.
 	if strings.TrimSpace(req.TargetModel) != "" {
 		requestBody["model"] = req.TargetModel
 	}
