@@ -109,7 +109,7 @@ jobs:
     with:
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
-      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
+      # No override_arch: copy the full multi-arch manifest so arm64 (GB200) clusters can pull.
       copy_timeout_minutes: 10
     secrets: inherit
 
