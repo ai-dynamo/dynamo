@@ -22,6 +22,7 @@ import (
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -459,18 +460,26 @@ func runtimeVersionOverrideError(
 	fldPath *field.Path,
 ) *field.Error {
 	overridePath := fldPath.Child("runtimeVersionOverride")
+	image := ""
+	imagePath := fldPath.Child("podTemplate", "spec", "containers")
+	if spec.PodTemplate != nil {
+		for i := range spec.PodTemplate.Spec.Containers {
+			container := &spec.PodTemplate.Spec.Containers[i]
+			if container.Name != consts.MainContainerName {
+				continue
+			}
+			image = container.Image
+			imagePath = imagePath.Index(i).Child("image")
+			break
+		}
+	}
+	if image == "" {
+		return field.Required(imagePath, "is required")
+	}
 	if spec.RuntimeVersionOverride != "" {
 		if _, err := runtimeversion.Parse(spec.RuntimeVersionOverride); err != nil {
 			return field.Invalid(overridePath, spec.RuntimeVersionOverride, err.Error())
 		}
-		return nil
-	}
-
-	image := ""
-	if container := dynamo.GetMainContainer(spec); container != nil {
-		image = container.Image
-	}
-	if image == "" {
 		return nil
 	}
 	if _, err := runtimeversion.ParseImageVersion(image); err != nil {
