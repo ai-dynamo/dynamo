@@ -67,6 +67,7 @@ spec:
           command: [vllm, serve]
           env:
           - {name: HF_HOME, value: /model-cache}
+          - {name: PYTHONHASHSEED, value: "0"}
           - {name: VLLM_USE_RUST_FRONTEND, value: "1"}
           - name: VLLM_NIXL_SIDE_CHANNEL_HOST
             valueFrom:
@@ -131,6 +132,7 @@ spec:
           command: [vllm, serve]
           env:
           - {name: HF_HOME, value: /model-cache}
+          - {name: PYTHONHASHSEED, value: "0"}
           - {name: VLLM_USE_RUST_FRONTEND, value: "1"}
           - name: VLLM_NIXL_SIDE_CHANNEL_HOST
             valueFrom:

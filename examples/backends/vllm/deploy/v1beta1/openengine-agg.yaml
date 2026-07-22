@@ -77,6 +77,8 @@ spec:
           env:
           - name: HF_HOME
             value: /model-cache
+          - name: PYTHONHASHSEED
+            value: "0"
           - name: VLLM_USE_RUST_FRONTEND
             value: "1"
           - name: OPENENGINE_SCHEMA_RELEASE
