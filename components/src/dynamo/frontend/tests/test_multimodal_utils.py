@@ -16,11 +16,11 @@ def test_returns_none_for_text_only():
     messages = [
         {"role": "user", "content": "What is the capital of France?"},
     ]
-    assert extract_mm_urls(messages) is None
+    assert extract_mm_urls(messages) == (None, None)
 
 
 def test_returns_none_for_empty_messages():
-    assert extract_mm_urls([]) is None
+    assert extract_mm_urls([]) == (None, None)
 
 
 def test_extracts_image_urls():
@@ -37,7 +37,7 @@ def test_extracts_image_urls():
         }
     ]
     result = extract_mm_urls(messages)
-    assert result == {"image_url": [{"Url": "https://example.com/cat.png"}]}
+    assert result == ({"image_url": [{"Url": "https://example.com/cat.png"}]}, None)
 
 
 def test_extracts_audio_urls():
@@ -54,7 +54,10 @@ def test_extracts_audio_urls():
         }
     ]
     result = extract_mm_urls(messages)
-    assert result == {"audio_url": [{"Url": "data:audio/wav;base64,UklGRg=="}]}
+    assert result == (
+        {"audio_url": [{"Url": "data:audio/wav;base64,UklGRg=="}]},
+        None,
+    )
 
 
 def test_extracts_video_urls():
@@ -70,7 +73,10 @@ def test_extracts_video_urls():
         }
     ]
     result = extract_mm_urls(messages)
-    assert result == {"video_url": [{"Url": "https://example.com/clip.mp4"}]}
+    assert result == (
+        {"video_url": [{"Url": "https://example.com/clip.mp4"}]},
+        None,
+    )
 
 
 def test_extracts_mixed_modalities():
@@ -95,11 +101,14 @@ def test_extracts_mixed_modalities():
         }
     ]
     result = extract_mm_urls(messages)
-    assert result == {
-        "image_url": [{"Url": "https://example.com/img.jpg"}],
-        "audio_url": [{"Url": "https://example.com/audio.wav"}],
-        "video_url": [{"Url": "https://example.com/video.mp4"}],
-    }
+    assert result == (
+        {
+            "image_url": [{"Url": "https://example.com/img.jpg"}],
+            "audio_url": [{"Url": "https://example.com/audio.wav"}],
+            "video_url": [{"Url": "https://example.com/video.mp4"}],
+        },
+        None,
+    )
 
 
 def test_extracts_multiple_items_per_modality():
@@ -120,12 +129,15 @@ def test_extracts_multiple_items_per_modality():
         }
     ]
     result = extract_mm_urls(messages)
-    assert result == {
-        "image_url": [
-            {"Url": "https://example.com/a.png"},
-            {"Url": "https://example.com/b.png"},
-        ]
-    }
+    assert result == (
+        {
+            "image_url": [
+                {"Url": "https://example.com/a.png"},
+                {"Url": "https://example.com/b.png"},
+            ]
+        },
+        None,
+    )
 
 
 def test_ignores_non_user_messages():
@@ -142,7 +154,7 @@ def test_ignores_non_user_messages():
         },
         {"role": "user", "content": "Hello"},
     ]
-    assert extract_mm_urls(messages) is None
+    assert extract_mm_urls(messages) == (None, None)
 
 
 def test_handles_malformed_content_non_dict():
@@ -162,4 +174,114 @@ def test_handles_malformed_content_non_dict():
         }
     ]
     result = extract_mm_urls(messages)
-    assert result == {"image_url": [{"Url": "https://example.com/ok.png"}]}
+    assert result == ({"image_url": [{"Url": "https://example.com/ok.png"}]}, None)
+
+
+def test_extracts_url_and_uuid_only_slots_with_alignment():
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "https://example.com/a.png"},
+                    "uuid": "image-a",
+                },
+                {
+                    "type": "image_url",
+                    "image_url": None,
+                    "uuid": "image-b",
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "https://example.com/c.png"},
+                },
+            ],
+        }
+    ]
+
+    assert extract_mm_urls(messages) == (
+        {
+            "image_url": [
+                {"Url": "https://example.com/a.png"},
+                {"UuidOnly": "image-b"},
+                {"Url": "https://example.com/c.png"},
+            ]
+        },
+        {"image_url": ["image-a", "image-b", None]},
+    )
+
+
+def test_accepts_deprecated_nested_image_uuid() -> None:
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "https://example.com/a.png",
+                        "uuid": "92b888ad-e64a-478f-b688-5091e16544e3",
+                    },
+                }
+            ],
+        }
+    ]
+
+    assert extract_mm_urls(messages) == (
+        {"image_url": [{"Url": "https://example.com/a.png"}]},
+        {"image_url": ["92b888ad-e64a-478f-b688-5091e16544e3"]},
+    )
+
+
+def test_rejects_conflicting_top_level_and_nested_image_uuid() -> None:
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "https://example.com/image.png",
+                        "uuid": "92b888ad-e64a-478f-b688-5091e16544e3",
+                    },
+                    "uuid": "catalog-image",
+                }
+            ],
+        }
+    ]
+
+    with pytest.raises(ValueError, match="top-level and nested uuids must match"):
+        extract_mm_urls(messages)
+
+
+@pytest.mark.parametrize("part_type", ["audio_url", "video_url"])
+@pytest.mark.parametrize("nested", [False, True])
+def test_rejects_audio_video_cache_uuids(part_type: str, nested: bool) -> None:
+    media = {"url": "https://example.com/media", "uuid": "cached-media"}
+    part = {"type": part_type, part_type: media}
+    if not nested:
+        media.pop("uuid")
+        part["uuid"] = "cached-media"
+
+    with pytest.raises(ValueError, match="supported only for image_url.*vLLM"):
+        extract_mm_urls([{"role": "user", "content": [part]}])
+
+
+@pytest.mark.parametrize(
+    "part",
+    [
+        {"type": "image_url", "image_url": None},
+        {"type": "image_url", "image_url": {}},
+        {
+            "type": "image_url",
+            "image_url": {"url": "https://example.com/a.png"},
+            "uuid": "",
+        },
+    ],
+)
+def test_rejects_media_parts_without_valid_url_or_uuid(part):
+    messages = [{"role": "user", "content": [part]}]
+
+    with pytest.raises(ValueError, match="URL or uuid|non-empty string"):
+        extract_mm_urls(messages)

@@ -78,6 +78,10 @@ class BasePayload:
             p.body = {**p.body, "model": model}
         return p
 
+    def body_for_iteration(self, _iteration: int) -> Dict[str, Any]:
+        """Return the request body for one repeat_count iteration."""
+        return self.body
+
     def response_handler(self, response: Any) -> str:
         """Extract a text representation of the response for logging/validation."""
         raise NotImplementedError("Subclasses must implement response_handler()")
