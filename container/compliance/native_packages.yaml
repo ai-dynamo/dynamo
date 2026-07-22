@@ -34,40 +34,23 @@
 
 packages:
   # --- EFA (Elastic Fabric Adapter) components ---
-  # Installed by container/templates/aws.Dockerfile via the AWS-published
-  # `efa_installer.sh` (efa_version 1.47.0). The installer drops binaries
-  # directly without registering with apt, so dpkg/python/rust/go
-  # generators can't see them. This YAML overlay attributes them.
-  #
-  # Image filter:
-  #   - vllm-runtime-efa: baseline (nvcr.io/nvidia/cuda:X.Y-runtime) has
-  #     no libfabric, so EFA legitimately adds both libs.
-  #   - trtllm-runtime-efa: baseline (cuda-dl-base) already ships
-  #     libfabric-aws@2.1.0amzn5.0, but the EFA installer may install a
-  #     different version; explicit attribution closes the version-skew
-  #     gap defensively.
-  #   - (sglang-runtime-efa intentionally omitted: sglang's upstream
-  #     image already ships libfabric1@1.17.0-3build2; the make_efa
-  #     build is redundant and appears to be dead config.)
   - name: libfabric
-    # AWS fork: shipped by EFA installer 1.47.0 as libfabric1-aws_2.4.0amzn1.0
-    # (Ubuntu 24.04 DEB). The `amzn1.0` suffix indicates an AWS patch set on
-    # top of upstream libfabric 2.4.0; preserved here for OSRB traceability.
-    version: 2.4.0amzn1.0
+    version: 2.4.0amzn5.0
     license: BSD-2-Clause
-    source: https://github.com/ofiwg/libfabric
+    source: https://github.com/aws/libfabric
     images:
       - vllm-runtime-efa
       - trtllm-runtime-efa
+      - sglang-runtime-efa
 
   - name: aws-ofi-nccl
-    # Shipped by EFA installer 1.47.0 as libnccl-ofi_1.18.0-1 (Ubuntu 24.04 DEB).
-    version: 1.18.0
+    version: 1.20.0
     license: Apache-2.0
     source: https://github.com/aws/aws-ofi-nccl
     images:
       - vllm-runtime-efa
       - trtllm-runtime-efa
+      - sglang-runtime-efa
 
   # --- From-source binaries built in wheel_builder / dynamo_base and copied
   # into the runtime images (no apt/pip/cargo metadata, so the python/rust/dpkg
