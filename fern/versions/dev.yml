@@ -51,6 +51,8 @@ navigation:
             path: ../pages-dev/reference/feature-matrix.md
           - page: Release Artifacts
             path: ../pages-dev/reference/release-artifacts.md
+          - page: Model Early Access Builds
+            path: ../pages-dev/reference/model-early-access-builds.md
           - page: Examples
             path: ../pages-dev/getting-started/examples.md
           - page: Glossary
