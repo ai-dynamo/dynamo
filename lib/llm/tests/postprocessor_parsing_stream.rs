@@ -1697,7 +1697,7 @@ async fn tool_choice_matrix_force_reasoning_named_bare_json() {
     }
 }
 
-/// Regression (DIS-2381): with `n > 1`, each choice must decide bare-JSON vs.
+/// Regression (GH-11997): with `n > 1`, each choice must decide bare-JSON vs.
 /// reasoning-first INDEPENDENTLY. Choice 0 streams bare guided JSON (bypass →
 /// tool call), choice 1 streams `reasoning</think>{json}` in the SAME chunks.
 /// The pre-fix stream made ONE global bypass decision from whichever choice
@@ -1755,7 +1755,7 @@ async fn postprocessor_parsing_stream_multi_choice_isolates_guided_bypass_decisi
 }
 
 // ---------------------------------------------------------------------------
-// DIS-2381 step 3: n>1 synthetic-interleave lane (per-choice state isolation).
+// GH-11997 step 3: n>1 synthetic-interleave lane (per-choice state isolation).
 //
 // Invariant: `demux(parse(interleave(A@0, B@1, ...)))[i] == parse(shape_i)`.
 // Each choice's demuxed output must equal what that same single-choice shape
