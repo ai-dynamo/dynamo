@@ -5,6 +5,8 @@
 
 Patches:
   - MemorySnapshot.measure: adds GMS-committed bytes to free_memory in RO mode.
+  - WorkspaceManager: keeps process-global runtime workspaces out of the GMS
+    weights pool.
   - request_memory: bypasses the free>=requested check during deferred-KV init.
   - NixlConnector.register_kv_caches: defers registration during the scratch
     phase and stashes the dict for replay at wake.
@@ -25,6 +27,7 @@ from gpu_memory_service.common.utils import is_scratch_kv_enabled
 logger = logging.getLogger(__name__)
 
 _memory_snapshot_patched = False
+_workspace_manager_patched = False
 _request_memory_patched = False
 _register_kv_caches_patched = False
 _kv_cache_pool_scope_patched = False
@@ -79,6 +82,54 @@ def patch_memory_snapshot() -> None:
     MemorySnapshot.measure = patched_measure
     _memory_snapshot_patched = True
     logger.info("[GMS Patch] Patched MemorySnapshot.measure")
+
+
+def patch_workspace_manager() -> None:
+    """Allocate vLLM's shared runtime workspace outside the weights pool.
+
+    vLLM initializes its process-global workspace manager before model loading,
+    but allocates its backing tensors lazily. Backend construction can therefore
+    grow the workspace while the GMS weights pool is active. These tensors are
+    runtime state, not model storage, and can outlive model loading.
+
+    A manager-owned native MemPool overrides the enclosing GMS pool for
+    workspace allocations. Keeping the pool alive with the manager is required
+    because workspace growth can occur during CUDA graph capture, when PyTorch
+    cannot safely destroy a MemPool.
+    """
+    global _workspace_manager_patched
+
+    if _workspace_manager_patched:
+        return
+
+    try:
+        import torch
+        from vllm.v1.worker import workspace as workspace_module
+    except ImportError:
+        logger.debug("[GMS Patch] vLLM WorkspaceManager not available")
+        return
+
+    workspace_manager = workspace_module.WorkspaceManager
+    original_ensure_workspace_size = workspace_manager._ensure_workspace_size
+
+    def patched_ensure_workspace_size(self, required_bytes):
+        ubatch_id = workspace_module.dbo_current_ubatch_id()
+        current_workspace = self._current_workspaces[ubatch_id]
+        current_size = self._workspace_size_bytes(current_workspace)
+        if current_size >= required_bytes:
+            return original_ensure_workspace_size(self, required_bytes)
+
+        with torch.cuda.device(self._device):
+            pool = getattr(self, "_gms_runtime_workspace_pool", None)
+            if pool is None:
+                pool = torch.cuda.MemPool()
+                self._gms_runtime_workspace_pool = pool
+            with torch.cuda.use_mem_pool(pool, device=self._device):
+                return original_ensure_workspace_size(self, required_bytes)
+
+    workspace_manager._ensure_workspace_size = patched_ensure_workspace_size
+    _workspace_manager_patched = True
+    logger.info("[GMS Patch] Patched vLLM WorkspaceManager allocation scope")
 
 
 # =============================================================================

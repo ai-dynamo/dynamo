@@ -51,6 +51,7 @@ from gpu_memory_service.integrations.vllm.model_loader import (
 from gpu_memory_service.integrations.vllm.patches import (
     apply_scratch_kv_patches,
     patch_memory_snapshot,
+    patch_workspace_manager,
 )
 from gpu_memory_service.integrations.vllm.utils import configure_gms_worker_logging
 
@@ -66,6 +67,7 @@ register_gms_loader()
 # Apply core utility patches (always needed for GMS)
 patch_empty_cache()
 patch_memory_snapshot()
+patch_workspace_manager()
 
 # Apply scratch-KV patches when DYN_GMS_SCRATCH_KV_ENABLED is set
 apply_scratch_kv_patches()
