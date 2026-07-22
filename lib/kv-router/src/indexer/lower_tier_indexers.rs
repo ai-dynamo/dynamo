@@ -216,9 +216,11 @@ fn merge_router_hint_tier_candidates(
             (!hashes.is_empty()).then_some((*worker, continuation.start_pos, hashes.as_slice()))
         })
         .collect::<Vec<_>>();
-    // Router hints intentionally retain one compact root-aligned chain. When
-    // workers diverge at the same extension position, this deterministic order
-    // decides which branch is represented beyond the shared prefix.
+    // Router hints intentionally retain one compact root-aligned chain. Positional
+    // equality assumes ExternalSequenceBlockHash is stable across workers and tiers
+    // for the same request-prefix position. If workers diverge at the same extension
+    // position, this deterministic order decides which branch is represented beyond
+    // the shared prefix.
     extension_rows.sort_unstable_by_key(|(worker, start_pos, _)| (*start_pos, *worker));
 
     for (worker, start_pos, hashes) in extension_rows {

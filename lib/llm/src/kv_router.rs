@@ -1327,7 +1327,9 @@ mod tests {
     use async_trait::async_trait;
     use dynamo_kv_router::{
         indexer::{LowerTierMatchDetails, MatchDetails},
-        protocols::{OverlapScores, StorageTier, compute_seq_hash_for_block},
+        protocols::{
+            ExternalSequenceBlockHash, OverlapScores, StorageTier, compute_seq_hash_for_block,
+        },
     };
     use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
     use tokio::sync::watch;
@@ -1450,22 +1452,19 @@ mod tests {
             .unwrap()
     }
 
-    async fn make_test_router(
+    async fn make_test_router_with_workers(
         selector: impl dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>
         + Send
         + Sync
         + 'static,
         shared_cache: Option<Box<dyn SharedKvCache>>,
+        workers: HashMap<WorkerId, ModelRuntimeConfig>,
     ) -> KvRouter<
         impl dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + Sync + 'static,
     > {
         let component = make_test_component("shared-cache-router").await;
         let endpoint = component.endpoint("backend");
         let client = endpoint.client().await.unwrap();
-
-        let mut workers = HashMap::new();
-        workers.insert(0, ModelRuntimeConfig::default());
-        workers.insert(1, ModelRuntimeConfig::default());
         let (_tx, rx) = watch::channel(workers);
 
         let config = KvRouterConfig {
@@ -1494,6 +1493,59 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    async fn make_test_router(
+        selector: impl dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>
+        + Send
+        + Sync
+        + 'static,
+        shared_cache: Option<Box<dyn SharedKvCache>>,
+    ) -> KvRouter<
+        impl dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + Sync + 'static,
+    > {
+        let mut workers = HashMap::new();
+        workers.insert(0, ModelRuntimeConfig::default());
+        workers.insert(1, ModelRuntimeConfig::default());
+        make_test_router_with_workers(selector, shared_cache, workers).await
+    }
+
+    #[tokio::test]
+    async fn router_hint_excludes_other_dp_ranks_of_selected_target_worker() {
+        let mut runtime_config = ModelRuntimeConfig::default();
+        runtime_config.runtime_data.insert(
+            dynamo_kv_router::router_hint::ROUTER_HINT_RUNTIME_CAPABILITY_KEY.to_string(),
+            serde_json::Value::Bool(true),
+        );
+        runtime_config.runtime_data.insert(
+            dynamo_kv_router::router_hint::ROUTER_HINT_SOURCE_CONTROL_ENDPOINT_RUNTIME_KEY
+                .to_string(),
+            serde_json::Value::String("tcp://127.0.0.1:23280".to_string()),
+        );
+
+        let mut workers = HashMap::new();
+        workers.insert(7, runtime_config);
+        let router = make_test_router_with_workers(
+            InspectingSelector {
+                expected_hits: None,
+                selected_worker: WorkerWithDpRank::new(7, 0),
+            },
+            None,
+            workers,
+        )
+        .await;
+        let candidates = RouterHintRootCandidates {
+            block_hashes: vec![
+                ExternalSequenceBlockHash(101),
+                ExternalSequenceBlockHash(102),
+            ],
+            owner_prefix_blocks: vec![(WorkerWithDpRank::new(7, 1), 2)],
+        };
+
+        let hint =
+            router.router_hint_for_selection(WorkerWithDpRank::new(7, 0), 0, Some(&candidates));
+
+        assert_eq!(hint, None);
     }
 
     #[tokio::test]
