@@ -65,10 +65,8 @@ impl ReservedSglangDecode {
         let allocated_tokens = kv.allocated_tokens;
         let prompt_tokens = request.prompt_tokens.clone();
         let alloc = kv_manager.activate_destination(kv, &prompt_tokens);
-        request.last_node = Some(alloc.last_node);
-        request.kv_indices = alloc.kv_indices;
+        request.kv_lease = alloc.lease;
         request.materialized_tokens = request.prompt_len();
-        request.cached_tokens = request.page_aligned_materialized_tokens(block_size);
         request.allocated_tokens = allocated_tokens;
         request.debug_assert_invariants(block_size);
         request
@@ -446,12 +444,7 @@ impl SglangCore {
         let Some(mut request) = request else {
             return false;
         };
-        let capacity_improved = !request.kv_indices.is_empty() || request.last_node.is_some();
-        self.kv_manager
-            .free_indices(&request.kv_indices[request.cached_tokens..]);
-        if let Some(last_node) = request.last_node.take() {
-            self.kv_manager.free_request(last_node);
-        }
+        let capacity_improved = self.kv_manager.abort(std::mem::take(&mut request.kv_lease));
         self.source_holds.remove_request(request_id);
         self.active_destination_handoffs.remove_request(request_id);
         if capacity_improved {

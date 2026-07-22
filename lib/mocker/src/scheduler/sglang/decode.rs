@@ -52,35 +52,23 @@ pub(super) fn cache_materialized_prefix(
     config: &SglangConfig,
 ) {
     let aligned_tokens = req.page_aligned_materialized_tokens(config.block_size);
-    if aligned_tokens == 0 || aligned_tokens <= req.cached_tokens {
+    if aligned_tokens == 0 || aligned_tokens <= req.cached_tokens() {
         return;
     }
 
-    let last_node = req.last_node.unwrap_or_else(|| {
+    if !req.kv_lease.is_active() {
         panic!(
-            "cache_materialized_prefix: request {} has aligned_tokens={aligned_tokens} but last_node is None",
+            "cache_materialized_prefix: request {} has aligned_tokens={aligned_tokens} but no active KV lease",
             req.uuid
-        )
-    });
+        );
+    }
 
-    let new_last = if aligned_tokens <= req.prompt_len() {
-        kv_manager.cache_unfinished_req(
-            &req.prompt_tokens[..aligned_tokens],
-            &mut req.kv_indices[..aligned_tokens],
-            last_node,
-            req.cached_tokens,
-        )
+    if aligned_tokens <= req.prompt_tokens.len() {
+        kv_manager.extend_cached_prefix(&req.prompt_tokens[..aligned_tokens], &mut req.kv_lease);
     } else {
         let sequence = req.sequence_prefix(aligned_tokens).into_owned();
-        kv_manager.cache_unfinished_req(
-            &sequence,
-            &mut req.kv_indices[..aligned_tokens],
-            last_node,
-            req.cached_tokens,
-        )
-    };
-    req.last_node = Some(new_last);
-    req.cached_tokens = aligned_tokens;
+        kv_manager.extend_cached_prefix(&sequence, &mut req.kv_lease);
+    }
     req.debug_assert_invariants(config.block_size);
 }
 
@@ -124,10 +112,7 @@ fn check_decode_mem_for_burst(
         };
 
         let mut req = running.remove(idx);
-        kv_manager.free_indices(&req.kv_indices[req.cached_tokens..]);
-        if let Some(last_node) = req.last_node.take() {
-            kv_manager.free_request(last_node);
-        }
+        kv_manager.retract(std::mem::take(&mut req.kv_lease));
         req.reset_for_retract();
         req.debug_assert_invariants(config.block_size);
         retracted.push(req);
@@ -181,32 +166,15 @@ pub(super) fn cleanup_completed_request(
     block_size: usize,
 ) {
     let tokens_to_cache = floor_to_block(request.current_sequence_len(), block_size);
-    if request.kv_indices.len() > tokens_to_cache {
-        kv_manager.free_indices(&request.kv_indices[tokens_to_cache..]);
-    }
-
-    let Some(last_node) = request.last_node.take() else {
+    if !request.kv_lease.is_active() {
         return;
-    };
-    if tokens_to_cache > 0 {
-        if tokens_to_cache <= request.prompt_len() {
-            kv_manager.cache_finished_req(
-                &request.prompt_tokens[..tokens_to_cache],
-                &request.kv_indices[..tokens_to_cache],
-                last_node,
-                request.cached_tokens,
-            );
-        } else {
-            let sequence = request.sequence_tokens().into_owned();
-            kv_manager.cache_finished_req(
-                &sequence[..tokens_to_cache],
-                &request.kv_indices[..tokens_to_cache],
-                last_node,
-                request.cached_tokens,
-            );
-        }
+    }
+    let lease = std::mem::take(&mut request.kv_lease);
+    if tokens_to_cache <= request.prompt_len() {
+        kv_manager.finish(&request.prompt_tokens[..tokens_to_cache], lease);
     } else {
-        kv_manager.free_request(last_node);
+        let sequence = request.sequence_tokens().into_owned();
+        kv_manager.finish(&sequence[..tokens_to_cache], lease);
     }
 }
 
@@ -341,11 +309,7 @@ pub(super) fn simulate_decode_step_with_sampler(
     for (idx, (req, burst)) in running.iter_mut().zip(sampled_bursts).enumerate() {
         for _ in 0..burst {
             let crossing_page_boundary = req.current_sequence_len() + 1 > req.allocated_tokens;
-            let last_idx = req.kv_indices.last().copied();
-            let new_idx = reservation.take();
-            kv_manager.publish_decode_token(new_idx, last_idx);
-
-            req.kv_indices.push(new_idx);
+            kv_manager.extend_decode(&mut req.kv_lease, &mut reservation);
             if crossing_page_boundary {
                 req.allocated_tokens += config.block_size;
             }
