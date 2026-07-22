@@ -62,6 +62,11 @@ bytes = { version = "1" }
 dashmap = { version = "6.1" }
 futures = { version = "0.3" }
 rmp = { version = "0.8" }
+# msgpack dynamic value used as the request-plane intermediate for the Python
+# `Client` router path. Unlike `serde_json::Value`, `rmpv::Value` carries a
+# `Binary` variant, so `bytes` round-trip through the (default) msgpack codec
+# without base64. `with-serde` provides the `Serialize`/`Deserialize` impls.
+rmpv = { version = "1", features = ["with-serde"] }
 once_cell = { version = "1.20.3" }
 parking_lot = { version = "0.12.4" }
 serde = { version = "1" }
