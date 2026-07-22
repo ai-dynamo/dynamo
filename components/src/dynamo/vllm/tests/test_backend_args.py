@@ -247,6 +247,64 @@ class TestEmbeddingWorkerExclusivity:
         config._validate_embedding_worker_exclusivity()
 
 
+class TestClassifyWorkerExclusivity:
+    """--classify-worker mirrors the embedding-worker constraints (both are
+    pooling roles) and is additionally exclusive with --embedding-worker.
+    """
+
+    def test_baseline_aggregated_is_accepted(self):
+        config = create_config()
+        config.classify_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        # Must not raise.
+        config._validate_classify_worker_exclusivity()
+
+    def test_embedding_worker_combination_rejected(self):
+        config = create_config()
+        config.classify_worker = True
+        config.embedding_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            config._validate_classify_worker_exclusivity()
+
+    @pytest.mark.parametrize(
+        "mode",
+        [
+            DisaggregationMode.PREFILL,
+            DisaggregationMode.DECODE,
+            DisaggregationMode.ENCODE,
+        ],
+    )
+    def test_non_aggregated_disagg_rejected(self, mode):
+        config = create_config()
+        config.classify_worker = True
+        config.disaggregation_mode = mode
+        with pytest.raises(ValueError, match="disaggregation-mode=agg"):
+            config._validate_classify_worker_exclusivity()
+
+    def test_multimodal_combination_rejected(self):
+        config = create_config()
+        config.classify_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.enable_multimodal = True
+        with pytest.raises(ValueError, match="multimodal"):
+            config._validate_classify_worker_exclusivity()
+
+    def test_benchmark_mode_rejected(self):
+        config = create_config()
+        config.classify_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.benchmark_mode = "agg"
+        with pytest.raises(ValueError, match="benchmark-mode"):
+            config._validate_classify_worker_exclusivity()
+
+    def test_no_op_when_classify_worker_disabled(self):
+        config = create_config()
+        config.classify_worker = False
+        config.benchmark_mode = "agg"
+        config._validate_classify_worker_exclusivity()
+
+
 class TestValidateCustomEncoder:
     """--custom-encoder-class is an in-process, aggregated-only multimodal
     component, so validation must require --enable-multimodal and reject any

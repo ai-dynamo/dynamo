@@ -43,6 +43,7 @@ def _make_config(**overrides) -> Mock:
         "route_to_encoder": False,
         "disaggregation_mode": DisaggregationMode.AGGREGATED,
         "embedding_worker": False,
+        "classify_worker": False,
     }
     defaults.update(overrides)
     return Mock(**defaults)
@@ -471,6 +472,7 @@ class TestCreate:
         factory._create_prefill_worker = AsyncMock()  # type: ignore[assignment]
         factory._create_decode_worker = AsyncMock()  # type: ignore[assignment]
         factory._create_embedding_worker = AsyncMock()  # type: ignore[assignment]
+        factory._create_classify_worker = AsyncMock()  # type: ignore[assignment]
         return factory
 
     # Tests for non-legacy worker config, 'route_to_encode' is worker internal config
@@ -532,6 +534,19 @@ class TestCreate:
         await factory.create(Mock(), config, shutdown_event, [])
 
         factory._create_embedding_worker.assert_called_once()  # type: ignore[union-attr]
+        factory._create_decode_worker.assert_not_called()  # type: ignore[union-attr]
+        factory._create_prefill_worker.assert_not_called()  # type: ignore[union-attr]
+        factory._create_multimodal_encode_worker.assert_not_called()  # type: ignore[union-attr]
+
+    async def test_classify_worker_takes_priority(self, factory: WorkerFactory) -> None:
+        """--classify-worker routes to the classify factory; disaggregation_mode
+        is ignored (agg-only is enforced at config validation)."""
+        config = _make_config(classify_worker=True)
+        shutdown_event = asyncio.Event()
+
+        await factory.create(Mock(), config, shutdown_event, [])
+
+        factory._create_classify_worker.assert_called_once()  # type: ignore[union-attr]
         factory._create_decode_worker.assert_not_called()  # type: ignore[union-attr]
         factory._create_prefill_worker.assert_not_called()  # type: ignore[union-attr]
         factory._create_multimodal_encode_worker.assert_not_called()  # type: ignore[union-attr]

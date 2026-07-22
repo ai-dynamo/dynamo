@@ -1295,6 +1295,7 @@ def _make_dynamo_config(**overrides):
         "use_kv_events": False,
         "enable_local_indexer": True,
         "embedding_worker": False,
+        "classify_worker": False,
         "headless": False,
         "multimodal_worker": False,
         "multimodal_decode_worker": False,
@@ -1496,6 +1497,7 @@ class TestForwardPassMetricsActivation:
         [
             ({}, "unified backend", False),
             ({"embedding_worker": True}, "embedding", True),
+            ({"classify_worker": True}, "classify", True),
             ({"headless": True}, "headless", True),
             (
                 {"disaggregation_mode": DisaggregationMode.ENCODE},
