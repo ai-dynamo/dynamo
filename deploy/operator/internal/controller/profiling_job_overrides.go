@@ -376,7 +376,7 @@ func applyPodSpecOverrides(spec *corev1.PodSpec, overrides *corev1.PodSpec) {
 	}
 	if outputCopierOverride := findContainerOverride(overrides.Containers, ContainerNameOutputCopier); outputCopierOverride != nil {
 		if idx := findContainerIndex(spec.Containers, ContainerNameOutputCopier); idx >= 0 {
-			applyContainerOverrides(&spec.Containers[idx], outputCopierOverride)
+			applyOutputCopierOverrides(&spec.Containers[idx], outputCopierOverride)
 		}
 	}
 }
@@ -417,7 +417,7 @@ func profilerContainerOverride(overrides []corev1.Container) *corev1.Container {
 }
 
 // applyContainerOverrides merges fields from the user's container override
-// into a controller-generated container (profiler or output-copier sidecar).
+// into the controller-generated profiler container.
 func applyContainerOverrides(container *corev1.Container, overrides *corev1.Container) {
 	if overrides.Image != "" {
 		container.Image = overrides.Image
@@ -434,6 +434,19 @@ func applyContainerOverrides(container *corev1.Container, overrides *corev1.Cont
 
 	if len(overrides.EnvFrom) > 0 {
 		container.EnvFrom = append(container.EnvFrom, overrides.EnvFrom...)
+	}
+}
+
+// applyOutputCopierOverrides merges a narrow allowlist into the output-copier
+// sidecar: only image and resources. Other fields (env, envFrom, volumeMounts,
+// securityContext, command/args) are ignored so controller-owned mounts and
+// script wiring stay intact.
+func applyOutputCopierOverrides(container *corev1.Container, overrides *corev1.Container) {
+	if overrides.Image != "" {
+		container.Image = overrides.Image
+	}
+	if len(overrides.Resources.Requests) > 0 || len(overrides.Resources.Limits) > 0 || len(overrides.Resources.Claims) > 0 {
+		container.Resources = overrides.Resources
 	}
 }
 
