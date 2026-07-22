@@ -10,7 +10,7 @@
 //! this crate while the runtime glue stays in `lib/llm`.
 
 use dynamo_tokens::SequenceHash;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 use std::env;
@@ -40,6 +40,9 @@ use crate::protocols::{
 // in ActiveSequencesMultiWorker::force_expire_requests_across_all_workers for
 // more details.
 const FORCE_EXPIRE_REQUESTS_ACROSS_ALL_WORKERS_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Minimum interval between repeated logs for a saturated or unexpectedly closed publish queue.
+const SEQUENCE_PUBLISH_FAILURE_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Environment override for the stale active-request cleanup guard.
 const DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS: &str = "DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS";
@@ -117,6 +120,104 @@ pub trait SequencePublisher: Send + Sync {
 
     /// Observe that a worker/dp_rank was removed from the router.
     fn observe_worker_removed(&self, _worker: &WorkerWithDpRank, _worker_type: &str) {}
+}
+
+/// Admission failures reported by bounded active-sequence publisher queues.
+#[derive(Debug, thiserror::Error)]
+pub enum SequencePublishQueueError {
+    #[error(
+        "active-sequence publish queue full; dropping newest event \
+         (request_id={request_id}, worker={worker:?}, capacity={capacity})"
+    )]
+    Full {
+        request_id: String,
+        worker: WorkerWithDpRank,
+        capacity: usize,
+    },
+    #[error(
+        "active-sequence publish queue closed; dropping event \
+         (request_id={request_id}, worker={worker:?}, capacity={capacity})"
+    )]
+    Closed {
+        request_id: String,
+        worker: WorkerWithDpRank,
+        capacity: usize,
+        during_shutdown: bool,
+    },
+}
+
+impl SequencePublishQueueError {
+    pub fn full(event: ActiveSequenceEvent, capacity: usize) -> Self {
+        Self::Full {
+            request_id: event.request_id,
+            worker: event.worker,
+            capacity,
+        }
+    }
+
+    pub fn closed(event: ActiveSequenceEvent, capacity: usize, during_shutdown: bool) -> Self {
+        Self::Closed {
+            request_id: event.request_id,
+            worker: event.worker,
+            capacity,
+            during_shutdown,
+        }
+    }
+}
+
+#[derive(Default)]
+struct RateLimitedPublishFailure {
+    last_logged_at: Option<Instant>,
+    suppressed_since_last_log: u64,
+}
+
+impl RateLimitedPublishFailure {
+    fn record(&mut self, now: Instant) -> Option<u64> {
+        let should_log = self.last_logged_at.is_none_or(|last_logged_at| {
+            now.saturating_duration_since(last_logged_at) >= SEQUENCE_PUBLISH_FAILURE_LOG_INTERVAL
+        });
+        if should_log {
+            let failures_since_last_log = self.suppressed_since_last_log.saturating_add(1);
+            self.last_logged_at = Some(now);
+            self.suppressed_since_last_log = 0;
+            Some(failures_since_last_log)
+        } else {
+            self.suppressed_since_last_log = self.suppressed_since_last_log.saturating_add(1);
+            None
+        }
+    }
+}
+
+#[derive(Default)]
+struct SequencePublishFailureLogState {
+    full: RateLimitedPublishFailure,
+    unexpected_closed: RateLimitedPublishFailure,
+    shutdown_closed_logged: bool,
+}
+
+#[derive(Default)]
+struct SequencePublishFailureLogLimiter {
+    state: Mutex<SequencePublishFailureLogState>,
+}
+
+impl SequencePublishFailureLogLimiter {
+    fn record_full(&self, now: Instant) -> Option<u64> {
+        self.state.lock().full.record(now)
+    }
+
+    fn record_unexpected_closed(&self, now: Instant) -> Option<u64> {
+        self.state.lock().unexpected_closed.record(now)
+    }
+
+    fn record_shutdown_closed(&self) -> bool {
+        let mut state = self.state.lock();
+        if state.shutdown_closed_logged {
+            false
+        } else {
+            state.shutdown_closed_logged = true;
+            true
+        }
+    }
 }
 
 /// No-op publisher for callers that do not need active-sequence event transport.
@@ -213,6 +314,7 @@ pub struct ActiveSequencesMultiWorker<P: SequencePublisher> {
     block_size: usize,
     pub(super) router_id: u64,
     pub(super) publisher: Arc<P>,
+    publish_failure_logs: SequencePublishFailureLogLimiter,
     remote_state_updates: watch::Sender<()>,
     #[cfg(test)]
     remote_state_update_count: AtomicUsize,
@@ -355,6 +457,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             block_size,
             router_id,
             publisher,
+            publish_failure_logs: SequencePublishFailureLogLimiter::default(),
             remote_state_updates,
             #[cfg(test)]
             remote_state_update_count: AtomicUsize::new(0),
@@ -441,11 +544,64 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         let request_id = event.request_id.clone();
         let worker = event.worker;
         if let Err(error) = self.publisher.enqueue_event(event) {
-            tracing::error!(
-                request_id = %request_id,
-                worker = ?worker,
-                "failed to enqueue active-sequence event: {error}"
-            );
+            match error.downcast_ref::<SequencePublishQueueError>() {
+                Some(SequencePublishQueueError::Full { capacity, .. }) => {
+                    if let Some(dropped_events) =
+                        self.publish_failure_logs.record_full(Instant::now())
+                    {
+                        tracing::error!(
+                            request_id = %request_id,
+                            worker = ?worker,
+                            capacity,
+                            dropped_events_since_last_log = dropped_events,
+                            error = %format!("{error:#}"),
+                            "active-sequence publish queue full; dropping newest event"
+                        );
+                    }
+                }
+                Some(SequencePublishQueueError::Closed {
+                    capacity,
+                    during_shutdown: true,
+                    ..
+                }) => {
+                    if self.publish_failure_logs.record_shutdown_closed() {
+                        tracing::debug!(
+                            request_id = %request_id,
+                            worker = ?worker,
+                            capacity,
+                            error = %format!("{error:#}"),
+                            "active-sequence publish queue closed during shutdown"
+                        );
+                    }
+                }
+                Some(SequencePublishQueueError::Closed {
+                    capacity,
+                    during_shutdown: false,
+                    ..
+                }) => {
+                    if let Some(dropped_events) = self
+                        .publish_failure_logs
+                        .record_unexpected_closed(Instant::now())
+                    {
+                        tracing::error!(
+                            request_id = %request_id,
+                            worker = ?worker,
+                            capacity,
+                            dropped_events_since_last_log = dropped_events,
+                            error = %format!("{error:#}"),
+                            "active-sequence publish queue closed unexpectedly; dropping event"
+                        );
+                    }
+                }
+                None => {
+                    tracing::error!(
+                        request_id = %request_id,
+                        worker = ?worker,
+                        error = %error,
+                        "failed to enqueue active-sequence event"
+                    );
+                }
+            }
         }
     }
 
@@ -1649,6 +1805,34 @@ mod tests {
         sequences.free(&request_id, Instant::now()).unwrap();
 
         assert!(state.events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn active_sequence_publish_failure_logs_are_aggregated() {
+        let limiter = SequencePublishFailureLogLimiter::default();
+        let now = Instant::now();
+
+        assert_eq!(limiter.record_full(now), Some(1));
+        assert_eq!(limiter.record_full(now + Duration::from_secs(1)), None);
+        assert_eq!(
+            limiter.record_full(now + SEQUENCE_PUBLISH_FAILURE_LOG_INTERVAL),
+            Some(2)
+        );
+
+        assert_eq!(limiter.record_unexpected_closed(now), Some(1));
+        assert_eq!(
+            limiter.record_unexpected_closed(now + Duration::from_secs(1)),
+            None
+        );
+        assert_eq!(
+            limiter.record_unexpected_closed(
+                now + SEQUENCE_PUBLISH_FAILURE_LOG_INTERVAL + Duration::from_secs(1)
+            ),
+            Some(2)
+        );
+
+        assert!(limiter.record_shutdown_closed());
+        assert!(!limiter.record_shutdown_closed());
     }
 
     #[tokio::test]
