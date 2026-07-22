@@ -1,6 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES.
 # Start script for Dynamo SGLang Disaggregated Prefill/Decode (Intel XPU Encode Workers)
 # Model: Qwen3-VL-32B-Instruct-FP8
 # This starts: N Encode workers on Intel XPU devices for multimodal processing
