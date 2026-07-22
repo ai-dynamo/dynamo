@@ -19,13 +19,13 @@ maintainers:
     url: https://www.nvidia.com
 description: A Helm chart for NVIDIA Dynamo Platform.
 type: application
-version: 1.3.0
+version: 1.4.0
 # Kubernetes 1.30 enables CRD validation ratcheting by default; generated CRDs use optionalOldSelf.
 kubeVersion: ">=1.30.0-0"
 home: https://nvidia.com
 dependencies:
   - name: dynamo-operator
-    version: 1.3.0
+    version: 1.4.0
     repository: file://components/operator
     condition: dynamo-operator.enabled
   - name: nats
