@@ -228,16 +228,8 @@ navigation:
                 path: cli/disaggregated-serving.mdx
               - page: Multi-Node Deployment
                 path: cli/multinode-deployment.mdx
-              - section: KV Cache Offloading
-                contents:
-                  - page: LMCache Integration
-                    path: integrations/lmcache-integration.md
-                  - page: Hicache Integration
-                    path: cli/sglang-hicache.md
-                  - page: FlexKV Integration
-                    path: integrations/flexkv-integration.md
-                  - page: Custom KV Events
-                    path: integrations/kv-events-custom-engines.md
+              - page: KV Cache Offloading
+                path: cli/kv-cache-offloading.mdx
 
           - section: Operations
             icon: screwdriver-wrench
@@ -663,22 +655,14 @@ navigation:
                 path: development/unified-backends.md
               - page: Writing Python Workers
                 path: development/backend-guide.md
+              - page: Publish KV Events
+                path: integrations/kv-events-custom-engines.md
               - page: Runtime Containers
                 path: development/custom-containers.md
           - page: Metrics Developer Guide
             path: observability/metrics-developer-guide.md
           - page: Developing with Tilt
             path: kubernetes/tilt-dev-setup.md
-      # # ==================== Integrations ====================
-      # - section: Integrations
-      #   contents:
-      #     - page: LMCache
-      #       path: integrations/lmcache-integration.md
-      #     - page: FlexKV
-      #       path: integrations/flexkv-integration.md
-      #     - page: KV Events for Custom Engines
-      #       path: integrations/kv-events-custom-engines.md
-
       # ==================== Hidden Pages (User Guide) ====================
       # Pages accessible via direct URL but not shown in main navigation.
       - section: Additional Resources

@@ -82,7 +82,7 @@ Dynamo ***不是为供应商锁定而设计的***。Dynamo 旨在赋能更广泛
 | :--- | :--- |
 | 推理引擎 | SGLang、TensorRT-LLM、vLLM |
 | Kubernetes | Inference gateway |
-| 内存管理 | Dynamo KV Block Manager、[LMCache](../integrations/lmcache-integration.md)、[SGLang HiCache](../backends/sglang/sglang-hicache.md)、[FlexKV](../integrations/flexkv-integration.md) |
+| 内存管理 | [Dynamo KV Block Manager、LMCache、SGLang HiCache 和 FlexKV](../cli/kv-cache-offloading.mdx) |
 | 网络和存储 | Mooncake、DOCA NetIO、GDS、POSIX、S3、3FS（[通过 NIXL 支持](../design-docs/kvbm-design.md)） |
 | Multi-HW | Intel XPU、AMD |
 

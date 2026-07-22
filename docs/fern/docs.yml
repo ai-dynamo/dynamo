@@ -197,6 +197,15 @@ redirects:
     destination: "/dynamo/dev/local-deployment-examples/sg-lang"
   - source: "/dynamo/dev/cli/model-deployment/backends/trt-llm-deployments"
     destination: "/dynamo/dev/local-deployment-examples/tensor-rt-llm"
+  # Local KV cache guides consolidated into one tutorial; custom-engine events moved to Developer Guide.
+  - source: "/dynamo/dev/cli/model-deployment/kv-cache-offloading/lm-cache-integration"
+    destination: "/dynamo/dev/cli/model-deployment/kv-cache-offloading"
+  - source: "/dynamo/dev/cli/model-deployment/kv-cache-offloading/hicache-integration"
+    destination: "/dynamo/dev/cli/model-deployment/kv-cache-offloading"
+  - source: "/dynamo/dev/cli/model-deployment/kv-cache-offloading/flex-kv-integration"
+    destination: "/dynamo/dev/cli/model-deployment/kv-cache-offloading"
+  - source: "/dynamo/dev/cli/model-deployment/kv-cache-offloading/custom-kv-events"
+    destination: "/dynamo/dev/advanced-customizations/writing-custom-backends/publish-kv-events"
   # SGLang HiCache doc: canonical URL under Integrations > KV Cache Integrations.
   - source: "/dynamo/dev/backends/sg-lang/hi-cache"
     destination: "/dynamo/dev/integrations/kv-cache-integrations/hi-cache"

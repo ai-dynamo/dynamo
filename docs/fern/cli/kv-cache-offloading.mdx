@@ -1,0 +1,213 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Offload KV Cache Locally
+subtitle: Extend KV cache capacity beyond GPU memory when running Dynamo from a container or Python environment
+---
+
+KV cache offloading moves reusable KV blocks from GPU memory to host memory or storage. This tutorial
+starts an aggregated Dynamo deployment with one offloading backend, sends requests through it, and
+checks that the backend is running.
+
+<Steps toc={true}>
+  <Step title="Prepare Your Environment">
+
+Complete the local installation and start Dynamo's NATS and etcd services before continuing. Run
+the commands from the root of the cloned Dynamo repository.
+
+If `docker run` opened a shell in a prebuilt runtime container, you are already in the correct
+environment and can skip package installation when the table below marks the backend as included.
+For a container running in the background, open a shell with `docker exec`; the repository is
+available at `/workspace`:
+
+```bash
+docker exec -it <container-name> bash
+cd /workspace
+```
+
+If you installed Dynamo into a Python environment, activate that environment before continuing.
+
+  </Step>
+  <Step title="Choose a Backend">
+
+Select one offloading backend for each worker. KVBM, LMCache, FlexKV, and HiCache are alternatives,
+not cache layers to stack together. KV-aware routing and NIXL-based prefill/decode transfer are
+separate features that can operate alongside the selected backend.
+
+| Backend | Engine | Cache tiers | Prebuilt Dynamo runtime container | Python environment |
+| --- | --- | --- | --- | --- |
+| **KVBM** | vLLM, TensorRT-LLM | Host, disk, object storage | Included in current vLLM and TensorRT-LLM runtime images | Install `kvbm` |
+| **LMCache** | vLLM | Host and persistent L2 adapters | Inherited from the upstream vLLM image; verify compatibility for the image tag and platform | Install `lmcache` |
+| **HiCache** | SGLang | Host and optional external storage | Included with SGLang | Included with `ai-dynamo[sglang]` |
+| **FlexKV** | vLLM in this tutorial | Host, SSD, cloud storage | Requires a custom image or a source build inside the container | Build FlexKV from source |
+
+> [!NOTE]
+> The Dynamo Operator does not install these packages. Local containers and Kubernetes deployments
+> get them from the selected runtime image. The Python environment path installs packages on the
+> host instead.
+
+  </Step>
+  <Step title="Start Offloading">
+
+Choose a backend and follow its tab. Each example uses `Qwen/Qwen3-0.6B` and one GPU. The vLLM
+launch scripts start both the Dynamo frontend and the worker, and stop both processes when you press
+`Ctrl+C`.
+
+<Tabs>
+  <Tab title="KVBM">
+
+KVBM is Dynamo's native KV block manager and the recommended starting point for vLLM. The current
+Dynamo vLLM runtime container includes it. For a Python environment, install its wheel first:
+
+```bash
+uv pip install kvbm
+```
+
+Start an aggregated vLLM worker with a 20 GB host-memory cache:
+
+```bash
+cd examples/backends/vllm
+DYN_KVBM_CPU_CACHE_GB=20 ./launch/agg_kvbm.sh
+```
+
+The script selects `DynamoConnector`. To add a disk tier later, set `DYN_KVBM_DISK_CACHE_GB` and
+`DYN_KVBM_DISK_CACHE_DIR`. Keep every lower cache tier at least as large as the tier above it to
+avoid repeatedly evicting and reloading the same blocks.
+
+For all KVBM settings, see the [KVBM Configuration Reference](../components/kvbm/kvbm-config-reference.mdx).
+
+  </Tab>
+  <Tab title="LMCache">
+
+The current Dynamo vLLM runtime is based on an upstream vLLM image that provides LMCache on supported
+platforms. Confirm that the selected image contains a compatible build:
+
+```bash
+python -c "import lmcache; print(lmcache.__version__)"
+```
+
+For a compatible x86_64 Python environment, install LMCache with:
+
+```bash
+uv pip install lmcache
+```
+
+LMCache publishes x86_64 wheels built for specific CUDA versions. For Arm64 or a mismatched
+PyTorch/CUDA stack, build LMCache from source by following the
+[LMCache installation guide](https://docs.lmcache.ai/getting_started/installation.html).
+
+> [!WARNING]
+> Some Dynamo vLLM image tags include an LMCache build that is incompatible with
+> `LMCacheMPConnector`. If startup fails with `RuntimeError: Unsupported GPUKVFormat`, build LMCache
+> from a version containing [LMCache pull request #3282](https://github.com/LMCache/LMCache/pull/3282).
+
+Start the out-of-process LMCache server and an aggregated vLLM worker:
+
+```bash
+cd examples/backends/vllm
+LMCACHE_L1_SIZE_GB=16 ./launch/agg_lmcache_mp.sh
+```
+
+The script starts `lmcache server`, waits for its health endpoint, and connects the vLLM worker with
+`LMCacheMPConnector`. Inspect its metrics from another terminal:
+
+```bash
+curl -s localhost:8080/metrics | grep '^lmcache_mp_'
+```
+
+For server flags and persistent L2 adapters, see the
+[LMCache MP configuration reference](https://docs.lmcache.ai/mp/configuration.html).
+
+  </Tab>
+  <Tab title="HiCache">
+
+HiCache is part of SGLang, so both the SGLang runtime container and a Python environment installed
+with `ai-dynamo[sglang]` require no additional package.
+
+In one terminal, start an SGLang worker with a host cache twice the size of its GPU cache:
+
+```bash
+python -m dynamo.sglang \
+  --model-path Qwen/Qwen3-0.6B \
+  --page-size 64 \
+  --enable-hierarchical-cache \
+  --hicache-ratio 2 \
+  --hicache-write-policy write_through \
+  --hicache-storage-backend nixl \
+  --skip-tokenizer-init
+```
+
+In another terminal in the same environment, start the frontend:
+
+```bash
+python -m dynamo.frontend --http-port 8000
+```
+
+Press `Ctrl+C` in both terminals when you finish.
+
+These flags belong to SGLang and pass through Dynamo unchanged. For external storage and
+tier-aware shared-cache routing, see [SGLang HiCache](../backends/sglang/sglang-hicache.md). That
+advanced path has additional SGLang-version and Mooncake requirements.
+
+  </Tab>
+  <Tab title="FlexKV">
+
+**Experimental.** The stock Dynamo vLLM runtime does not explicitly install FlexKV. Build it in the
+active Python environment or create a derived runtime image containing the build:
+
+```bash
+git clone https://github.com/taco-project/FlexKV.git
+cd FlexKV
+./build.sh
+cd ..
+```
+
+For SSD offloading, also install `liburing-dev` and `libxxhash-dev` in the host or image before
+building FlexKV.
+
+Start an aggregated vLLM worker with a 32 GB host cache:
+
+```bash
+cd examples/backends/vllm
+FLEXKV_CPU_CACHE_GB=32 ./launch/agg_flexkv.sh
+```
+
+The script sets `DYNAMO_USE_FLEXKV=1` and selects `FlexKVConnectorV1`. For SSD and distributed-cache
+configuration, see the [FlexKV documentation](https://github.com/taco-project/FlexKV/tree/main/docs).
+
+  </Tab>
+</Tabs>
+
+  </Step>
+  <Step title="Send a Request">
+
+After the frontend listens on port 8000, send a request from another terminal:
+
+```bash
+curl localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "messages": [{"role": "user", "content": "Explain how a KV cache reduces repeated computation."}],
+    "stream": false,
+    "max_tokens": 30
+  }'
+```
+
+Send the request again to create an opportunity to reuse its prompt prefix. A short request confirms
+the deployment path but does not establish a performance improvement. Use a representative workload
+with long, repeated prefixes to measure Time To First Token (TTFT) and cache hit rate.
+
+  </Step>
+</Steps>
+
+## Next Steps
+
+- Add [KV-aware routing](kv-routing.mdx) when multiple workers can reuse cached prefixes.
+- Combine one offloading backend with [disaggregated serving](disaggregated-serving.mdx). In that
+  topology, the offloading connector manages storage while NIXL transfers blocks from prefill to
+  decode workers.
+- Review [KVBM architecture](../design-docs/kvbm-design.md) for Dynamo's cache-tier and transfer
+  design.
+- To make a custom inference engine visible to the KV router, implement
+  [KV event publishing](../integrations/kv-events-custom-engines.md).

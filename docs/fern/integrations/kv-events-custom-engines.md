@@ -1,10 +1,13 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: KV Events for Custom Engines
+title: Publish KV Events from a Custom Backend
+subtitle: Report cache allocation and eviction events to Dynamo's KV router
 ---
 
-This document explains how to implement KV event publishing for custom inference engines, enabling them to participate in Dynamo's KV cache-aware routing.
+Publish KV events from a custom inference engine so Dynamo's KV router can track which workers hold
+each cached prefix. This guide covers direct publishing and relaying an engine's existing ZeroMQ
+(ZMQ) event stream.
 
 ## Overview
 

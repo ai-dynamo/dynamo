@@ -44,7 +44,7 @@ For configuration details, see the [KVBM Guide](../../components/kvbm/kvbm-guide
 | Disaggregated                             | [`disagg_lmcache.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_lmcache.sh)                 |
 
 
-For configuration details, see the [LMCache Integration Guide](../../integrations/lmcache-integration.md).
+For local setup, see [KV Cache Offloading](../../cli/kv-cache-offloading.mdx).
 
 ## FlexKV
 
@@ -58,7 +58,7 @@ For configuration details, see the [LMCache Integration Guide](../../integration
 | Disaggregated           | [`disagg_flexkv.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_flexkv.sh)         |
 
 
-For configuration details, see the [FlexKV Integration Guide](../../integrations/flexkv-integration.md).
+For local setup, see [KV Cache Offloading](../../cli/kv-cache-offloading.mdx).
 
 ## See Also
 

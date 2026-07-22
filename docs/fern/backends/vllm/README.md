@@ -55,8 +55,8 @@ For development, use the [devcontainer](https://github.com/ai-dynamo/dynamo/tree
 | [**KV-Aware Routing**](../../components/router/README.md) | ✅ | |
 | [**SLA-Based Planner**](../../components/planner/planner-guide.md) | ✅ | |
 | [**KVBM**](../../components/kvbm/README.md) | ✅ | |
-| [**LMCache**](../../integrations/lmcache-integration.md) | ✅ | CUDA 12.9 and arm64/aarch64 containers may require building LMCache from source |
-| [**FlexKV**](../../integrations/flexkv-integration.md) | ✅ | |
+| [**LMCache**](../../cli/kv-cache-offloading.mdx) | ✅ | CUDA 12.9 and arm64/aarch64 containers may require building LMCache from source |
+| [**FlexKV**](../../cli/kv-cache-offloading.mdx) | ✅ | Requires a separate FlexKV build |
 | [**Multimodal Support**](../../features/diffusion/README.md) | ✅ | Via vLLM-Omni integration |
 | [**Observability**](vllm-observability.md) | ✅ | Metrics and monitoring |
 | **WideEP** | ✅ | Support for DeepEP |

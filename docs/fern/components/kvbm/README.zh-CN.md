@@ -61,7 +61,6 @@ KVBM 有三个主要逻辑层：
 
 - **[KVBM 指南](kvbm-guide.md)** — 安装、配置和部署说明
 - **[KVBM 设计](../../design-docs/kvbm-design.md)** — 架构深入解析、组件和数据流
-- **[LMCache 集成](../../integrations/lmcache-integration.md)** — 将 LMCache 与 Dynamo vLLM 后端配合使用
-- **[FlexKV 集成](../../integrations/flexkv-integration.md)** — 使用 FlexKV 进行 KV cache 管理
+- **[KV Cache 卸载](../../cli/kv-cache-offloading.mdx)** — 比较 KVBM、LMCache、FlexKV 和 HiCache
 - **[SGLang HiCache](../../backends/sglang/sglang-hicache.md)** — 通过 NIXL 启用 SGLang 的分层缓存
 - **[NIXL Documentation](https://github.com/ai-dynamo/nixl/blob/main/docs/nixl.md)** — NIXL 通信库详细信息

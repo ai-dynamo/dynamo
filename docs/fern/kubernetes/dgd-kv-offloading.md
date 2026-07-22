@@ -106,7 +106,6 @@ After the worker is `Running`, send repeated requests that share a long prefix a
 These cover engine internals, the local-CLI workflow, and tuning for each backend:
 
 - [KVBM Guide](../components/kvbm/kvbm-guide.md) — KV Block Manager architecture and the full env-var reference.
-- [LMCache Integration](../integrations/lmcache-integration.md) — LMCache server and connector details.
-- [FlexKV Integration](../integrations/flexkv-integration.md) — FlexKV runtime configuration.
+- [Local KV Cache Offloading](../cli/kv-cache-offloading.mdx) — compare the available backends and run their local examples.
 - [Using HiCache](../backends/sglang/sglang-hicache.md) — SGLang hierarchical cache.
-- [Custom KV Events](../integrations/kv-events-custom-engines.md) — publish KV events from a custom engine.
+- [Publish KV Events](../integrations/kv-events-custom-engines.md) — publish KV events from a custom engine.
