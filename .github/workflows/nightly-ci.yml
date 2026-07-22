@@ -419,7 +419,8 @@ jobs:
       enable_coverage: true
       run_cpu_only_tests: true
       cpu_only_test_markers: sglang and gpu_0
-      gpu_test_markers: sglang and gpu_1
+      # Exclude h100 tests: they need >24 GiB and run on the sglang-h100-test lane below.
+      gpu_test_markers: sglang and gpu_1 and not h100
       gpu_test_timeout_minutes: 240
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled SGLang pool
