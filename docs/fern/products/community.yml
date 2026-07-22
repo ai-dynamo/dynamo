@@ -1,0 +1,61 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+navigation:
+  - section: Contributing
+    icon: code-pull-request
+    path: ../community/README.md
+    slug: /
+    contents:
+      - page: Contributing to Dynamo
+        path: ../contribution-guide.md
+      - page: Documentation Style Guide
+        path: ../documentation-style-guide.md
+      - page: Docs Website
+        path: ../README.md
+
+  - section: Additional Resources
+    hidden: true
+    contents:
+      - page: Runtime Guide
+        path: ../development/runtime-guide.md
+      - page: Jail Stream
+        path: ../development/jail-stream.md
+      - section: Templates
+        contents:
+          - page: Overview
+            path: ../templates/README.md
+          - page: Backend Guide
+            path: ../templates/backend-guide.md
+          - page: Backend README
+            path: ../templates/backend-readme.md
+          - page: Component Design
+            path: ../templates/component-design.md
+          - page: Component Examples
+            path: ../templates/component-examples.md
+          - page: Component Guide
+            path: ../templates/component-guide.md
+          - page: Component README
+            path: ../templates/component-readme.md
+          - page: Feature Backend
+            path: ../templates/feature-backend.md
+          - page: Feature README
+            path: ../templates/feature-readme.md
+          - page: In-Code README
+            path: ../templates/incode-readme.md
+          - page: Infrastructure README
+            path: ../templates/infrastructure-readme.md
+          - page: Integration README
+            path: ../templates/integration-readme.md

@@ -188,6 +188,12 @@ jobs:
             cp source-checkout/docs/fern/main.css docs-checkout/fern/main.css
           fi
 
+          # Sync custom JavaScript used by the docs shell.
+          if [ -f source-checkout/docs/fern/custom.js ]; then
+            echo "Syncing custom.js to docs-website branch..."
+            cp source-checkout/docs/fern/custom.js docs-checkout/fern/custom.js
+          fi
+
       - name: Transform paths in dev.yml for docs-website layout
         run: |
           # In the source repo, index.yml uses paths relative to docs/ (e.g. getting-started/quickstart.md).

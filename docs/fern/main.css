@@ -162,6 +162,142 @@ html.dark,
     order: 4;
 }
 
+/* User Guide deployment environment selector
+
+   Fern tab variants only expose a dropdown. custom.js replaces the User Guide
+   dropdown with this vertical, always-visible, version-aware selector. */
+#fern-sidebar .fern-variant-selector {
+    display: none !important;
+}
+
+/* Reserve the final selector height while custom.js attaches. This prevents
+   Fern's dropdown from flashing and keeps the sidebar from shifting. */
+#fern-sidebar
+    .relative:has(> .fern-variant-selector):not(:has(> .dynamo-variant-selector))::before {
+    display: block;
+    width: auto;
+    height: 116px;
+    margin: 0 0.75rem 0.75rem;
+    border-radius: 10px;
+    background: linear-gradient(
+        100deg,
+        #eff1ef 20%,
+        #e5e8e5 40%,
+        #eff1ef 60%
+    );
+    background-size: 200% 100%;
+    content: "";
+    animation: dynamo-variant-selector-loading 1.2s ease-in-out infinite;
+}
+
+@keyframes dynamo-variant-selector-loading {
+    from {
+        background-position: 100% 0;
+    }
+    to {
+        background-position: -100% 0;
+    }
+}
+
+.dynamo-variant-selector {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    width: auto;
+    margin: 0 0.75rem 0.75rem;
+    padding: 4px;
+    border: 0 !important;
+    border-radius: 10px;
+    outline: 0 !important;
+    background: #eff1ef;
+    box-shadow: none !important;
+    isolation: isolate;
+}
+
+/* The NVIDIA-green selected surface moves between rows. */
+.dynamo-variant-selector::before {
+    position: absolute;
+    z-index: 0;
+    top: 4px;
+    right: 4px;
+    left: 4px;
+    height: 50px;
+    border-radius: 6px;
+    background: var(--nv-color-green);
+    content: "";
+    transform: translateY(0);
+    transition: transform 140ms ease;
+}
+
+.dynamo-variant-selector[data-active-variant="cli"]::before {
+    transform: translateY(54px);
+}
+
+.dynamo-variant-selector-option {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    min-width: 0;
+    height: 50px;
+    align-items: center;
+    gap: 0.65rem;
+    padding: 0.4rem 0.65rem;
+    border-radius: 6px;
+    color: var(--grayscale-a12);
+    font-size: 0.875rem;
+    font-weight: 600;
+    line-height: 1;
+    text-decoration: none !important;
+    transition: background-color 140ms ease, color 140ms ease;
+}
+
+.dynamo-variant-selector-option[data-state="inactive"]:hover {
+    background: #e5e8e5;
+}
+
+.dynamo-variant-selector-option[data-state="active"] {
+    color: #ffffff;
+}
+
+.dynamo-variant-selector-option:focus-visible {
+    outline: 2px solid currentColor;
+    outline-offset: -4px;
+}
+
+.dynamo-variant-selector-icon {
+    display: flex;
+    width: 30px;
+    height: 30px;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    color: currentColor;
+}
+
+.dynamo-variant-selector-icon svg {
+    width: 20px;
+    height: 20px;
+    fill: currentColor;
+}
+
+.dynamo-variant-selector-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    #fern-sidebar
+        .relative:has(> .fern-variant-selector):not(:has(> .dynamo-variant-selector))::before {
+        animation: none;
+    }
+
+    .dynamo-variant-selector::before {
+        transition: none;
+    }
+}
+
 .fern-version-selector {
     transform: none;
 }
