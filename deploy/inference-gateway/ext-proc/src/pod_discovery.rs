@@ -308,7 +308,7 @@ fn defer_pool_rebuild(relisting: bool, pool_present: bool) -> bool {
 
 /// Apply a single pod delta to the index: upsert the worker if it is `Ready` and
 /// pool-selected, otherwise drop any existing entry (a pod that went NotReady,
-/// terminating, or unselected). 
+/// terminating, or unselected).
 fn upsert_pod(
     index: &RwLock<WorkerIndex>,
     pod: &Pod,
