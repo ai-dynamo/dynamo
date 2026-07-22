@@ -112,6 +112,46 @@ fn zero_output_request_completes_after_prefill(#[case] engine_type: EngineType) 
 }
 
 #[test]
+fn fully_cached_zero_output_request_is_not_decode_fpm_work() {
+    let mut core = VllmCore::new(router_args());
+    let tokens = vec![1, 2, 3, 4];
+    let mut collector = crate::replay::TraceCollector::default();
+
+    core.receive(DirectRequest {
+        tokens: tokens.clone(),
+        max_output_tokens: 0,
+        uuid: Some(Uuid::from_u128(90_002)),
+        ..Default::default()
+    });
+    let seed_pass = core.execute_pass(&mut collector, 0.0);
+    assert_eq!(seed_pass.completed_requests, 1);
+
+    let uuid = core.receive(DirectRequest {
+        tokens,
+        max_output_tokens: 0,
+        uuid: Some(Uuid::from_u128(90_003)),
+        ..Default::default()
+    });
+    let pass = core.execute_pass(&mut collector, seed_pass.end_ms);
+
+    assert_eq!(pass.completed_requests, 1);
+    let fpm = pass.fpm.as_ref().unwrap();
+    assert_eq!(fpm.num_prefill_requests, 0);
+    assert_eq!(fpm.num_decode_requests, 0);
+    assert_eq!(fpm.sum_decode_kv_tokens, 0);
+    assert!(matches!(
+        pass.output_signals.as_slice(),
+        [OutputSignal {
+            uuid: signal_uuid,
+            token_id: None,
+            completed: true,
+            rejected: false,
+            ..
+        }] if *signal_uuid == uuid
+    ));
+}
+
+#[test]
 fn speculative_batch_drains_zero_output_before_emitting_tokens() {
     let args = MockEngineArgs::builder()
         .block_size(4)

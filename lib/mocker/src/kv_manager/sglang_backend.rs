@@ -196,14 +196,21 @@ impl SglangKvManager {
         last_node: NodeId,
         first_new_token: usize,
     ) -> NodeId {
+        let block_size = self.cache.page_size();
+        let complete_len = token_ids.len().min(kv_indices.len()) / block_size * block_size;
+        assert!(
+            first_new_token.is_multiple_of(block_size)
+                && first_new_token <= complete_len
+                && complete_len <= kv_indices.len(),
+            "invalid SGLang canonicalization range: first_new_token={first_new_token}, complete_len={complete_len}, kv_indices={}",
+            kv_indices.len()
+        );
+
         self.publish_stored_event(token_ids, kv_indices, first_new_token);
         let new_last_node = self.cache.insert(token_ids, kv_indices);
 
         // A concurrent insert can retain different physical pages for the same prefix.
         // Move the active request to canonical pages before releasing its duplicates.
-        let complete_len =
-            token_ids.len().min(kv_indices.len()) / self.cache.page_size() * self.cache.page_size();
-
         // Acquire the extended path before releasing the old prefix so
         // destination activation never leaves valid transferred KV unprotected.
         self.cache.inc_lock_ref(new_last_node);
@@ -418,20 +425,15 @@ impl SglangKvManager {
         debug_assert!(complete_len <= kv_indices.len());
         debug_assert!(first_new_token <= complete_len);
 
-        if !first_new_token.is_multiple_of(block_size)
-            || !complete_len.is_multiple_of(block_size)
-            || complete_len > kv_indices.len()
-            || first_new_token > complete_len
-            || !self.radix_path_covers(last_node, first_new_token, complete_len)
-        {
-            tracing::error!(
-                first_new_token,
-                complete_len,
-                kv_indices = kv_indices.len(),
-                "invalid SGLang canonicalization range or radix path"
-            );
-            return;
-        }
+        assert!(
+            first_new_token.is_multiple_of(block_size)
+                && complete_len.is_multiple_of(block_size)
+                && complete_len <= kv_indices.len()
+                && first_new_token <= complete_len
+                && self.radix_path_covers(last_node, first_new_token, complete_len),
+            "invalid SGLang canonicalization range or radix path: first_new_token={first_new_token}, complete_len={complete_len}, kv_indices={}",
+            kv_indices.len()
+        );
 
         let mut unretained_indices = Vec::new();
         let mut current = last_node;
@@ -1112,16 +1114,30 @@ mod tests {
     }
 
     #[test]
-    fn invalid_canonical_path_does_not_partially_rewrite_or_free_indices() {
+    #[should_panic(expected = "invalid SGLang canonicalization range or radix path")]
+    fn invalid_canonical_path_is_fatal() {
         let mut mgr = SglangKvManager::new(8, 4, KvEventPublishers::default(), 0);
         let mut indices = mgr.cache_mut().token_pool.allocate(4).unwrap();
-        let original = indices.clone();
         let root = mgr.cache().root();
 
         mgr.canonicalize_unfinished_indices(&mut indices, root, 0, 4);
+    }
 
-        assert_eq!(indices, original);
-        assert_eq!(mgr.cache().token_pool.available(), 4);
+    #[test]
+    fn cache_unfinished_rejects_invalid_range_before_publishing() {
+        let sink = Arc::new(MockSink::new());
+        let mut mgr =
+            SglangKvManager::new(8, 4, KvEventPublishers::new(Some(sink.clone()), None), 0);
+        let tokens = [1, 2, 3, 4];
+        let mut alloc = mgr.allocate_for_request(&tokens).unwrap();
+        let events_before = sink.event_count();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            mgr.cache_unfinished_req(&tokens, &mut alloc.kv_indices, alloc.last_node, 2)
+        }));
+
+        assert!(result.is_err());
+        assert_eq!(sink.event_count(), events_before);
     }
 
     #[test]
