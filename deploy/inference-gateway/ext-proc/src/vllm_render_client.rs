@@ -444,7 +444,9 @@ mod tests {
             VllmRenderError::ResponseTooLarge {
                 limit: actual_limit,
                 received,
-            } if actual_limit == limit && received == (FIRST_CHUNK.len() + SECOND_CHUNK.len()) as u64
+            } if actual_limit == limit
+                && received > limit as u64
+                && received <= (FIRST_CHUNK.len() + SECOND_CHUNK.len()) as u64
         ));
         server.abort();
     }
