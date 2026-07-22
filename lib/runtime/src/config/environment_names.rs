@@ -629,6 +629,9 @@ pub mod tcp_response_stream {
 
 /// Fixed-lane QUIC response transport.
 pub mod quic_response {
+    /// Physical QUIC connections per worker/frontend process pair. Defaults to 8.
+    pub const DYN_QUIC_RESPONSE_CONNECTIONS: &str = "DYN_QUIC_RESPONSE_CONNECTIONS";
+    /// Total response lanes distributed across the connection bundle. Defaults to 8.
     pub const DYN_QUIC_RESPONSE_LANES: &str = "DYN_QUIC_RESPONSE_LANES";
     pub const DYN_QUIC_RESPONSE_BATCH_INTERVAL_US: &str = "DYN_QUIC_RESPONSE_BATCH_INTERVAL_US";
 }
@@ -878,6 +881,7 @@ mod tests {
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,
+            quic_response::DYN_QUIC_RESPONSE_CONNECTIONS,
             quic_response::DYN_QUIC_RESPONSE_LANES,
             quic_response::DYN_QUIC_RESPONSE_BATCH_INTERVAL_US,
             // Event Plane

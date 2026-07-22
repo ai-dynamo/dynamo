@@ -3,10 +3,10 @@
 
 //! Fixed-lane QUIC transport for streaming worker responses.
 //!
-//! A worker keeps one connection to a frontend and opens a fixed set of
-//! long-lived bidirectional streams (lanes). Logical response frames are
-//! request-hashed to a lane once, queued in a bounded Tokio channel, and
-//! written in batches by the lane's sole writer task.
+//! A worker keeps a fixed connection bundle to a frontend and distributes a
+//! fixed set of long-lived bidirectional streams (lanes) across it. Logical
+//! response frames are request-hashed to a lane once, queued in a bounded
+//! Tokio channel, and written in batches by the lane's sole writer task.
 
 use std::{
     collections::HashMap,
@@ -49,7 +49,10 @@ use crate::{
 pub const TRANSPORT_NAME: &str = "quic-response";
 const PROTOCOL_VERSION: u8 = 1;
 const ALPN: &[u8] = b"dynamo-response-v1";
-const DEFAULT_LANES: usize = 4;
+const DEFAULT_CONNECTIONS: usize = 8;
+const MIN_CONNECTIONS: usize = 1;
+const MAX_CONNECTIONS: usize = 8;
+const DEFAULT_LANES: usize = 8;
 const MIN_LANES: usize = 1;
 const MAX_LANES: usize = 64;
 const LANE_QUEUE_CAPACITY: usize = 512;
@@ -64,12 +67,20 @@ const CLOSE_CODE_INVARIANT: quinn::VarInt = quinn::VarInt::from_u32(1);
 
 #[derive(Debug, Clone, Copy)]
 pub struct QuicResponseConfig {
+    pub connections: usize,
+    /// Total lanes across every connection in the bundle.
     pub lanes: usize,
     pub batch_interval: Duration,
 }
 
 impl QuicResponseConfig {
     pub fn from_env() -> Result<Self, PipelineError> {
+        let connections = parse_env_range(
+            quic_response::DYN_QUIC_RESPONSE_CONNECTIONS,
+            DEFAULT_CONNECTIONS,
+            MIN_CONNECTIONS,
+            MAX_CONNECTIONS,
+        )?;
         let lanes = parse_env_range(
             quic_response::DYN_QUIC_RESPONSE_LANES,
             DEFAULT_LANES,
@@ -82,7 +93,15 @@ impl QuicResponseConfig {
             0,
             MAX_BATCH_INTERVAL_US,
         )?;
+        if connections > lanes {
+            return Err(PipelineError::Generic(format!(
+                "{} ({connections}) cannot exceed {} ({lanes})",
+                quic_response::DYN_QUIC_RESPONSE_CONNECTIONS,
+                quic_response::DYN_QUIC_RESPONSE_LANES,
+            )));
+        }
         Ok(Self {
+            connections,
             lanes,
             batch_interval: Duration::from_micros(interval_us),
         })
@@ -696,16 +715,20 @@ struct Lane {
     sender: mpsc::Sender<Frame>,
 }
 
-struct ClientConnection {
-    connection: quinn::Connection,
+struct ClientConnectionBundle {
+    connections: Arc<[quinn::Connection]>,
     lanes: Arc<[Arc<Lane>]>,
     contexts: Arc<Mutex<HashMap<Uuid, Arc<ClientResponseContext>>>>,
     healthy: Arc<AtomicBool>,
 }
 
-impl ClientConnection {
+impl ClientConnectionBundle {
     fn is_healthy(&self) -> bool {
-        self.healthy.load(Ordering::Acquire) && self.connection.close_reason().is_none()
+        self.healthy.load(Ordering::Acquire)
+            && self
+                .connections
+                .iter()
+                .all(|connection| connection.close_reason().is_none())
     }
 }
 
@@ -719,7 +742,7 @@ struct ConnectionKey {
 pub struct QuicResponseClientPool {
     config: QuicResponseConfig,
     endpoints: Mutex<HashMap<bool, quinn::Endpoint>>,
-    connections: tokio::sync::Mutex<HashMap<ConnectionKey, Arc<ClientConnection>>>,
+    connections: tokio::sync::Mutex<HashMap<ConnectionKey, Arc<ClientConnectionBundle>>>,
 }
 
 static PROCESS_CLIENT_POOL: OnceLock<Arc<QuicResponseClientPool>> = OnceLock::new();
@@ -802,10 +825,10 @@ impl QuicResponseClientPool {
         })
     }
 
-    async fn connection(&self, key: ConnectionKey) -> Result<Arc<ClientConnection>> {
+    async fn connection(&self, key: ConnectionKey) -> Result<Arc<ClientConnectionBundle>> {
         // Holding this mutex through connection creation deliberately serializes
         // replacement. The path is cold and guarantees exactly one published
-        // connection/lane set for a frontend identity.
+        // connection bundle/lane set for a frontend identity.
         let mut connections = self.connections.lock().await;
         if let Some(connection) = connections.get(&key)
             && connection.is_healthy()
@@ -818,7 +841,7 @@ impl QuicResponseClientPool {
         Ok(connection)
     }
 
-    async fn connect(&self, key: &ConnectionKey) -> Result<Arc<ClientConnection>> {
+    async fn connect(&self, key: &ConnectionKey) -> Result<Arc<ClientConnectionBundle>> {
         let address: SocketAddr = key
             .address
             .parse()
@@ -826,16 +849,24 @@ impl QuicResponseClientPool {
         let expected_fingerprint = decode_fingerprint(&key.certificate_sha256)?;
         let client_config = pinned_client_config(expected_fingerprint)?;
         let endpoint = self.client_endpoint(address.is_ipv6())?;
-        let connection = endpoint
-            .connect_with(client_config, address, "localhost")?
-            .await
-            .with_context(|| format!("failed connecting QUIC response transport to {address}"))?;
-        crate::metrics::quic_response::track_connection(connection.clone());
+        let mut connections = Vec::with_capacity(self.config.connections);
+        for _ in 0..self.config.connections {
+            let connection = endpoint
+                .connect_with(client_config.clone(), address, "localhost")?
+                .await
+                .with_context(|| {
+                    format!("failed connecting QUIC response transport to {address}")
+                })?;
+            crate::metrics::quic_response::track_connection(connection.clone());
+            connections.push(connection);
+        }
+        let connections: Arc<[quinn::Connection]> = connections.into();
 
         let contexts = Arc::new(Mutex::new(HashMap::new()));
         let healthy = Arc::new(AtomicBool::new(true));
         let mut lanes = Vec::with_capacity(self.config.lanes);
         for index in 0..self.config.lanes {
+            let connection = connections[index % connections.len()].clone();
             let (send, recv) = connection.open_bi().await?;
             let (lane_tx, lane_rx) = mpsc::channel(LANE_QUEUE_CAPACITY);
             let lane = Arc::new(Lane {
@@ -847,7 +878,7 @@ impl QuicResponseClientPool {
                 recv,
                 lane_rx,
                 self.config.batch_interval,
-                connection.clone(),
+                connections.clone(),
                 contexts.clone(),
                 healthy.clone(),
             );
@@ -856,11 +887,12 @@ impl QuicResponseClientPool {
 
         tracing::debug!(
             remote = %address,
-            lanes = self.config.lanes,
-            "QUIC response connection and lanes ready"
+            connections = self.config.connections,
+            total_lanes = self.config.lanes,
+            "QUIC response connection bundle and lanes ready"
         );
-        Ok(Arc::new(ClientConnection {
-            connection,
+        Ok(Arc::new(ClientConnectionBundle {
+            connections,
             lanes: lanes.into(),
             contexts,
             healthy,
@@ -888,19 +920,19 @@ fn spawn_client_lane(
     recv: quinn::RecvStream,
     receiver: mpsc::Receiver<Frame>,
     interval: Duration,
-    connection: quinn::Connection,
+    connections: Arc<[quinn::Connection]>,
     contexts: Arc<Mutex<HashMap<Uuid, Arc<ClientResponseContext>>>>,
     healthy: Arc<AtomicBool>,
 ) {
-    let writer_connection = connection.clone();
+    let writer_connections = connections.clone();
     let writer_contexts = contexts.clone();
     let writer_healthy = healthy.clone();
     tokio::spawn(async move {
         if let Err(error) =
             run_client_writer(send, receiver, interval, writer_contexts.clone()).await
         {
-            fail_client_connection(
-                &writer_connection,
+            fail_client_connection_bundle(
+                &writer_connections,
                 &writer_contexts,
                 &writer_healthy,
                 &error.to_string(),
@@ -910,7 +942,7 @@ fn spawn_client_lane(
 
     tokio::spawn(async move {
         if let Err(error) = run_client_control_reader(recv, contexts.clone()).await {
-            fail_client_connection(&connection, &contexts, &healthy, &error.to_string());
+            fail_client_connection_bundle(&connections, &contexts, &healthy, &error.to_string());
         }
     });
 }
@@ -979,8 +1011,8 @@ async fn run_client_control_reader(
     }
 }
 
-fn fail_client_connection(
-    connection: &quinn::Connection,
+fn fail_client_connection_bundle(
+    connections: &[quinn::Connection],
     contexts: &Mutex<HashMap<Uuid, Arc<ClientResponseContext>>>,
     healthy: &AtomicBool,
     reason: &str,
@@ -988,15 +1020,17 @@ fn fail_client_connection(
     if !healthy.swap(false, Ordering::AcqRel) {
         return;
     }
-    tracing::warn!(%reason, "QUIC response connection invariant failed");
+    tracing::warn!(%reason, "QUIC response connection bundle invariant failed");
     for (_, entry) in contexts.lock().drain() {
         entry.record_cancellation();
         entry.context.kill();
     }
-    connection.close(
-        CLOSE_CODE_INVARIANT,
-        b"response connection invariant failure",
-    );
+    for connection in connections {
+        connection.close(
+            CLOSE_CODE_INVARIANT,
+            b"response connection bundle invariant failure",
+        );
+    }
 }
 
 pub struct QuicResponseSender {
@@ -1235,9 +1269,10 @@ mod tests {
         Frame::new(FrameKind::Data, Uuid::nil(), Bytes::from(index.to_string()))
     }
 
-    fn test_pool(lanes: usize) -> QuicResponseClientPool {
+    fn test_pool(connections: usize, lanes: usize) -> QuicResponseClientPool {
         QuicResponseClientPool {
             config: QuicResponseConfig {
+                connections,
                 lanes,
                 batch_interval: Duration::ZERO,
             },
@@ -1368,7 +1403,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn one_connection_four_lanes_carry_1000_ordered_responses() {
+    async fn eight_connections_eight_lanes_carry_1000_ordered_responses() {
         let shutdown = CancellationToken::new();
         let server = QuicResponseServer::new(
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
@@ -1376,7 +1411,7 @@ mod tests {
             shutdown.clone(),
         )
         .unwrap();
-        let pool = test_pool(4);
+        let pool = test_pool(8, 8);
 
         let mut lane_by_request = HashMap::new();
         for index in 0..1_000 {
@@ -1388,7 +1423,7 @@ mod tests {
                 .sender(context.context(), connection_info)
                 .await
                 .unwrap();
-            let expected_lane = xxh3_64(request_id.as_bytes()) as usize % 4;
+            let expected_lane = xxh3_64(request_id.as_bytes()) as usize % 8;
             assert_eq!(sender.lane_index(), expected_lane);
             lane_by_request.insert(request_id, sender.lane_index());
             sender.send_prologue(None).await.unwrap();
@@ -1417,7 +1452,9 @@ mod tests {
         assert_eq!(lane_by_request.len(), 1_000);
         let connections = pool.connections.lock().await;
         assert_eq!(connections.len(), 1);
-        assert_eq!(connections.values().next().unwrap().lanes.len(), 4);
+        let bundle = connections.values().next().unwrap();
+        assert_eq!(bundle.connections.len(), 8);
+        assert_eq!(bundle.lanes.len(), 8);
         shutdown.cancel();
     }
 
@@ -1426,7 +1463,7 @@ mod tests {
         let shutdown = CancellationToken::new();
         let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
         let server = QuicResponseServer::new(address, address, shutdown.clone()).unwrap();
-        let pool = test_pool(4);
+        let pool = test_pool(1, 4);
         let context = PipelineContext::new(());
         let registered = server.register_response(context.context());
         let (info, provider) = registered.into_parts();
@@ -1460,7 +1497,7 @@ mod tests {
         let shutdown = CancellationToken::new();
         let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
         let server = QuicResponseServer::new(address, address, shutdown.clone()).unwrap();
-        let pool = test_pool(4);
+        let pool = test_pool(1, 4);
         let context = PipelineContext::new(());
         let registered = server.register_response(context.context());
         let (info, provider) = registered.into_parts();
@@ -1481,7 +1518,7 @@ mod tests {
         let shutdown = CancellationToken::new();
         let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
         let server = QuicResponseServer::new(address, address, shutdown.clone()).unwrap();
-        let pool = Arc::new(test_pool(4));
+        let pool = Arc::new(test_pool(2, 8));
 
         let first_context = PipelineContext::new(());
         let first = server.register_response(first_context.context());
@@ -1491,12 +1528,22 @@ mod tests {
             .await
             .unwrap();
         first_sender.send_prologue(None).await.unwrap();
-        let old_connection = {
+        let old_connections = {
             let connections = pool.connections.lock().await;
-            connections.values().next().unwrap().connection.clone()
+            connections
+                .values()
+                .next()
+                .unwrap()
+                .connections
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
         };
-        let old_id = old_connection.stable_id();
-        old_connection.close(CLOSE_CODE_INVARIANT, b"test lane failure");
+        let old_ids = old_connections
+            .iter()
+            .map(quinn::Connection::stable_id)
+            .collect::<Vec<_>>();
+        old_connections[0].close(CLOSE_CODE_INVARIANT, b"test lane failure");
         let first_engine_context = first_context.context();
         tokio::time::timeout(Duration::from_secs(1), first_engine_context.killed())
             .await
@@ -1518,8 +1565,14 @@ mod tests {
         let connections = pool.connections.lock().await;
         assert_eq!(connections.len(), 1);
         let replacement = connections.values().next().unwrap();
-        assert_ne!(replacement.connection.stable_id(), old_id);
-        assert_eq!(replacement.lanes.len(), 4);
+        assert_eq!(replacement.connections.len(), 2);
+        assert!(
+            replacement
+                .connections
+                .iter()
+                .all(|connection| !old_ids.contains(&connection.stable_id()))
+        );
+        assert_eq!(replacement.lanes.len(), 8);
         shutdown.cancel();
     }
 
@@ -1534,7 +1587,7 @@ mod tests {
             Some(8 * 1024),
         )
         .unwrap();
-        let pool = Arc::new(test_pool(4));
+        let pool = Arc::new(test_pool(1, 4));
 
         let stalled_context = context_for_lane(0, 4);
         let stalled = server.register_response(stalled_context.context());
