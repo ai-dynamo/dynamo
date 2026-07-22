@@ -2,13 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "dynamo-worker-selector-plugin-api"
+name = "dynamo-worker-selection-api"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "Stable native plugin API for Dynamo KV worker selection"
+description = "Stable native plugin API for Dynamo worker selection"
 
 [dependencies]
