@@ -180,7 +180,11 @@ class TensorRTLLMEngine:
 
     def get_kv_cache_capacity(self) -> dict[str, int]:
         """Return the initialized engine's primary GPU KV-cache capacity."""
-        return self.llm.get_kv_cache_capacity()
+        try:
+            get_capacity = self.llm.get_kv_cache_capacity
+        except AttributeError:
+            return {}
+        return get_capacity()
 
     @staticmethod
     def _prune_engine_args_for_autodeploy(engine_args) -> None:

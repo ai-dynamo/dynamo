@@ -68,6 +68,12 @@ class TestTensorRTLLMEngine:
         assert engine.get_kv_cache_capacity() == capacity
         engine._llm.get_kv_cache_capacity.assert_called_once_with()
 
+    def test_get_kv_cache_capacity_returns_empty_when_api_is_unavailable(self):
+        engine = TensorRTLLMEngine(engine_args={})
+        engine._llm = mock.Mock(spec=[])
+
+        assert engine.get_kv_cache_capacity() == {}
+
     @pytest.mark.parametrize(
         "engine_args, is_forbidden",
         [
