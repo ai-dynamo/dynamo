@@ -111,6 +111,8 @@ pub(crate) struct ErrorMessage {
     error_type: String,
     code: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
+    param: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     details: Option<Box<serde_json::Value>>,
 }
 
@@ -201,6 +203,7 @@ impl ErrorMessage {
                 message: "Model not found".to_string(),
                 error_type,
                 code: code.as_u16(),
+                param: None,
                 details: None,
             }),
         )
@@ -233,6 +236,7 @@ impl ErrorMessage {
                 message: "Service is not ready".to_string(),
                 error_type,
                 code: code.as_u16(),
+                param: None,
                 details: None,
             }),
         )
@@ -250,6 +254,7 @@ impl ErrorMessage {
                 message,
                 error_type,
                 code: code.as_u16(),
+                param: None,
                 details: None,
             }),
         )
@@ -269,6 +274,7 @@ impl ErrorMessage {
                 message: msg.to_string(),
                 error_type,
                 code: code.as_u16(),
+                param: None,
                 details: None,
             }),
         )
@@ -292,6 +298,7 @@ impl ErrorMessage {
                 message: public_msg.to_string(),
                 error_type,
                 code: code.as_u16(),
+                param: None,
                 details: None,
             }),
         )
@@ -318,6 +325,7 @@ impl ErrorMessage {
                 message: err.to_string(),
                 error_type: map_error_code_to_error_type(status),
                 code: status.as_u16(),
+                param: None,
                 details: None,
             }),
         )
@@ -336,6 +344,7 @@ impl ErrorMessage {
                 message: msg.to_string(),
                 error_type,
                 code: code.as_u16(),
+                param: None,
                 details: None,
             }),
         )
@@ -350,6 +359,7 @@ impl ErrorMessage {
                 message: msg.to_string(),
                 error_type,
                 code: code.as_u16(),
+                param: None,
                 details: None,
             }),
         )
@@ -368,6 +378,7 @@ impl ErrorMessage {
                     message: rejection.to_string(),
                     error_type: map_error_code_to_error_type(code),
                     code: code.as_u16(),
+                    param: None,
                     details: serde_json::to_value(rejection).ok().map(Box::new),
                 }),
             );
@@ -397,6 +408,7 @@ impl ErrorMessage {
                     message: dynamo_err.message().to_string(),
                     error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST),
                     code: StatusCode::BAD_REQUEST.as_u16(),
+                    param: None,
                     details: None,
                 }),
             );
@@ -439,6 +451,7 @@ impl ErrorMessage {
                     message: err.message,
                     error_type: map_error_code_to_error_type(code),
                     code: code.as_u16(),
+                    param: None,
                     details: None,
                 }),
             ),
@@ -455,6 +468,7 @@ impl From<HttpError> for ErrorMessage {
                 StatusCode::from_u16(err.code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             ),
             code: err.code,
+            param: None,
             details: None,
         }
     }
@@ -478,6 +492,7 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
                 message: error_message,
                 error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST),
                 code: StatusCode::BAD_REQUEST.as_u16(),
+                param: None,
                 details: None,
             }),
         )
@@ -1371,6 +1386,7 @@ fn json_deserialize_error(error: serde_json::Error) -> ErrorResponse {
             message: format!("Failed to deserialize the JSON body into the target type: {error}"),
             error_type: map_error_code_to_error_type(code),
             code: code.as_u16(),
+            param: None,
             details: None,
         }),
     )
@@ -1399,6 +1415,7 @@ fn unsupported_media_type_error() -> ErrorResponse {
             message: "Expected request with Content-Type application/json".to_string(),
             error_type: map_error_code_to_error_type(code),
             code: code.as_u16(),
+            param: None,
             details: None,
         }),
     )
@@ -1453,17 +1470,55 @@ fn escape_json_string_control_chars(body: &[u8]) -> Option<Vec<u8>> {
     changed.then_some(out)
 }
 
-/// Checks if an Annotated event represents a backend error and extracts error information.
-/// Returns Some((message, status_code)) if it's an error, None otherwise.
-fn extract_backend_error_if_present<T: serde::Serialize>(
-    event: &Annotated<T>,
-) -> Option<(String, StatusCode)> {
-    #[derive(serde::Deserialize)]
-    struct ErrorPayload {
-        message: Option<String>,
-        code: Option<u16>,
+#[derive(serde::Deserialize)]
+struct BackendErrorPayload {
+    message: Option<String>,
+    code: Option<u16>,
+    #[serde(rename = "type")]
+    error_type: Option<String>,
+    param: Option<String>,
+}
+
+struct BackendErrorInfo {
+    message: String,
+    status_code: StatusCode,
+    error_type: Option<String>,
+    param: Option<String>,
+}
+
+impl BackendErrorInfo {
+    fn from_payload(
+        payload: BackendErrorPayload,
+        fallback_message: String,
+        fallback_status: StatusCode,
+    ) -> Self {
+        let status_code = payload
+            .code
+            .filter(|code| *code >= 400)
+            .and_then(|code| StatusCode::from_u16(code).ok())
+            .unwrap_or(fallback_status);
+        Self {
+            message: payload.message.unwrap_or(fallback_message),
+            status_code,
+            error_type: payload.error_type,
+            param: payload.param,
+        }
     }
 
+    fn legacy(message: String, status_code: StatusCode) -> Self {
+        Self {
+            message,
+            status_code,
+            error_type: None,
+            param: None,
+        }
+    }
+}
+
+/// Checks if an Annotated event represents a backend error and extracts error information.
+fn extract_backend_error_if_present<T: serde::Serialize>(
+    event: &Annotated<T>,
+) -> Option<BackendErrorInfo> {
     // Check if event type is "error" (from postprocessor when FinishReason::Error is encountered)
     if let Some(event_type) = &event.event
         && event_type == "error"
@@ -1509,44 +1564,46 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
             .as_ref()
             .map(|error| error.message())
             .unwrap_or(&error_str);
-        if let Ok(error_payload) = serde_json::from_str::<ErrorPayload>(status_message) {
+        if let Ok(error_payload) = serde_json::from_str::<BackendErrorPayload>(status_message) {
             // Preserve explicit HTTP-like statuses (for example 415); Python
             // 4xx exceptions share the Backend(InvalidArgument) category.
-            let code = match error_payload.code {
-                Some(code) => {
-                    StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
-                }
-                None if invalid_argument.is_some() => StatusCode::BAD_REQUEST,
-                None => StatusCode::INTERNAL_SERVER_ERROR,
+            let fallback_status = if invalid_argument.is_some() {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
             };
-            let message = error_payload
-                .message
-                .unwrap_or_else(|| status_message.to_string());
-            return Some((message, code));
+            return Some(BackendErrorInfo::from_payload(
+                error_payload,
+                status_message.to_string(),
+                fallback_status,
+            ));
         }
 
         if let Some(invalid_argument) = invalid_argument {
-            return Some((
+            return Some(BackendErrorInfo::legacy(
                 invalid_argument.message().to_string(),
                 StatusCode::BAD_REQUEST,
             ));
         }
 
-        return Some((error_str, StatusCode::INTERNAL_SERVER_ERROR));
+        return Some(BackendErrorInfo::legacy(
+            error_str,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ));
     }
 
     // Check if the data payload itself contains an error structure with code >= 400
     if let Some(data) = &event.data
         && let Ok(json_value) = serde_json::to_value(data)
-        && let Ok(error_payload) = serde_json::from_value::<ErrorPayload>(json_value.clone())
+        && let Ok(error_payload) = serde_json::from_value::<BackendErrorPayload>(json_value.clone())
         && let Some(code_num) = error_payload.code
         && code_num >= 400
     {
-        let code = StatusCode::from_u16(code_num).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        let message = error_payload
-            .message
-            .unwrap_or_else(|| json_value.to_string());
-        return Some((message, code));
+        return Some(BackendErrorInfo::from_payload(
+            error_payload,
+            json_value.to_string(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ));
     }
 
     // Check if comment contains error information (without event: error)
@@ -1556,19 +1613,24 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
         let comment_str = comments.join(", ");
 
         // Try to parse comment as error JSON with code >= 400
-        if let Ok(error_payload) = serde_json::from_str::<ErrorPayload>(&comment_str)
+        if let Ok(error_payload) = serde_json::from_str::<BackendErrorPayload>(&comment_str)
             && let Some(code_num) = error_payload.code
             && code_num >= 400
         {
-            let code = StatusCode::from_u16(code_num).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            let message = error_payload.message.unwrap_or(comment_str);
-            return Some((message, code));
+            return Some(BackendErrorInfo::from_payload(
+                error_payload,
+                comment_str,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ));
         }
 
         // Comments present with no data AND no event type indicates error
         // (events with event types like "request_id" or "event.dynamo.test.sentinel" are annotations)
         if event.data.is_none() && event.event.is_none() {
-            return Some((comment_str, StatusCode::INTERNAL_SERVER_ERROR));
+            return Some(BackendErrorInfo::legacy(
+                comment_str,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ));
         }
     }
 
@@ -1619,20 +1681,25 @@ pub(super) async fn check_for_backend_error(
             buffered.push(event);
             continue;
         }
-        if let Some((error_msg, status_code)) = extract_backend_error_if_present(&event) {
-            return Err(match SanitizedError::for_backend_status(status_code) {
-                Some(variant) => ErrorMessage::sanitized_with_details(variant, error_msg),
-                // 4xx (non-499): protocol contract — forward backend message as-is.
-                None => (
-                    status_code,
-                    Json(ErrorMessage {
-                        message: error_msg,
-                        error_type: map_error_code_to_error_type(status_code),
-                        code: status_code.as_u16(),
-                        details: None,
-                    }),
-                ),
-            });
+        if let Some(error) = extract_backend_error_if_present(&event) {
+            return Err(
+                match SanitizedError::for_backend_status(error.status_code) {
+                    Some(variant) => ErrorMessage::sanitized_with_details(variant, error.message),
+                    // 4xx (non-499): protocol contract — forward backend message as-is.
+                    None => (
+                        error.status_code,
+                        Json(ErrorMessage {
+                            message: error.message,
+                            error_type: error
+                                .error_type
+                                .unwrap_or_else(|| map_error_code_to_error_type(error.status_code)),
+                            code: error.status_code.as_u16(),
+                            param: error.param,
+                            details: None,
+                        }),
+                    ),
+                },
+            );
         }
 
         // First non-annotation, non-error event — push it back and stop;
@@ -2394,7 +2461,6 @@ async fn responses(
             include_usage: true,
             continuous_usage_stats: false,
         });
-
     let mut request = context.map(|mut _req| chat_request);
     if response_params.max_output_tokens.is_none() {
         request.insert(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, true);
@@ -3072,6 +3138,7 @@ async fn images_edits(
                 message: "input_reference is required for /v1/images/edits".to_string(),
                 error_type: map_error_code_to_error_type(code),
                 code: code.as_u16(),
+                param: None,
                 details: None,
             }),
         ));
@@ -4728,6 +4795,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_check_for_typed_python_http_error_preserves_openai_fields() {
+        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+        use futures::stream;
+
+        let error_event = Annotated::<NvCreateChatCompletionStreamResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                    .message(
+                        r#"{"message":"The image_url was not found.","code":400,"type":"image_url_not_found","param":"messages[].content[].image_url"}"#,
+                    )
+                    .build(),
+            ),
+        };
+
+        let result = check_for_backend_error(stream::iter(vec![error_event])).await;
+
+        let Err(error_response) = result else {
+            panic!("typed media error should fail preflight");
+        };
+        assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(error_response.1.message, "The image_url was not found.");
+        assert_eq!(error_response.1.error_type, "image_url_not_found");
+        assert_eq!(
+            error_response.1.param.as_deref(),
+            Some("messages[].content[].image_url")
+        );
+    }
+
+    #[tokio::test]
     async fn test_check_for_backend_error_with_json_error_and_code() {
         use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         use futures::stream;
@@ -4815,6 +4917,33 @@ mod tests {
             assert_eq!(error_response.1.message, "Internal server error");
             assert!(!error_response.1.message.contains("engine pool"));
             assert!(!error_response.1.message.contains("/srv/engine.py"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_check_for_backend_error_with_504_preserves_status() {
+        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use futures::stream;
+
+        let error_event = Annotated::<NvCreateChatCompletionStreamResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: Some(vec![
+                r#"{"message":"encoder GPU deadline exceeded","code":504}"#.to_string(),
+            ]),
+            error: None,
+        };
+
+        let result = check_for_backend_error(stream::iter(vec![error_event])).await;
+
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::GATEWAY_TIMEOUT);
+            assert_eq!(error_response.1.code, 504);
+            assert_eq!(error_response.1.message, "Internal server error");
+            assert!(!error_response.1.message.contains("GPU"));
+        } else {
+            panic!("backend 504 should fail preflight");
         }
     }
 

@@ -1632,13 +1632,19 @@ fn py_err_to_dynamo(err: PyErr) -> DynamoError {
         }
         // See engine.rs::process_item — emit JSON-shaped message so the OpenAI
         // frontend can read the status code instead of defaulting to 500.
-        if let Some((code, message)) = extract_http_like_error(py, &err) {
-            let backend = if (400..500).contains(&code) {
+        if let Some(http_error) = extract_http_like_error(py, &err) {
+            let backend = if (400..500).contains(&http_error.code) {
                 BackendError::InvalidArgument
             } else {
                 BackendError::Unknown
             };
-            let json_msg = serde_json::json!({ "message": message, "code": code }).to_string();
+            let json_msg = serde_json::json!({
+                "message": http_error.message,
+                "code": http_error.code,
+                "type": http_error.error_type,
+                "param": http_error.param,
+            })
+            .to_string();
             return (backend, json_msg);
         }
         let backend = if err.is_instance_of::<pyo3::exceptions::PyValueError>(py)

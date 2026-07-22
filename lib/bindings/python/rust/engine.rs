@@ -363,15 +363,17 @@ pub(crate) fn map_python_exception(error: PyErr) -> DynamoError {
                 .build();
         }
 
-        if let Some((code, message)) = extract_http_like_error(py, &error) {
-            let backend_err = if (400..500).contains(&code) {
+        if let Some(http_error) = extract_http_like_error(py, &error) {
+            let backend_err = if (400..500).contains(&http_error.code) {
                 BackendError::InvalidArgument
             } else {
                 BackendError::Unknown
             };
             let json_msg = serde_json::json!({
-                "message": message,
-                "code": code,
+                "message": http_error.message,
+                "code": http_error.code,
+                "type": http_error.error_type,
+                "param": http_error.param,
             })
             .to_string();
             return DynamoError::builder()
