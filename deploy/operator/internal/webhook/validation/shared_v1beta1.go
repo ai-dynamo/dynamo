@@ -477,9 +477,6 @@ func runtimeVersionOverrideError(
 		return field.Required(imagePath, "is required")
 	}
 	if spec.RuntimeVersionOverride != "" {
-		if _, err := runtimeversion.Parse(spec.RuntimeVersionOverride); err != nil {
-			return field.Invalid(overridePath, spec.RuntimeVersionOverride, err.Error())
-		}
 		return nil
 	}
 	if _, err := runtimeversion.ParseImageVersion(image); err != nil {
