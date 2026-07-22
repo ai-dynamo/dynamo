@@ -41,8 +41,9 @@ func TestDynamoComponentDeploymentV1Alpha1HandlerConvertsRequest(t *testing.T) {
 		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
 			BackendFramework: "vllm",
 			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ServiceName:   "worker",
-				ComponentType: consts.ComponentTypeWorker,
+				ServiceName:            "worker",
+				ComponentType:          consts.ComponentTypeWorker,
+				RuntimeVersionOverride: "1.1.0",
 			},
 		},
 	}

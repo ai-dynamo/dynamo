@@ -69,6 +69,17 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(nil),
 		},
 		{
+			name: "component custom image requires runtime version override",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.RuntimeVersionOverride = ""
+				worker.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:custom"}},
+				}}
+			}),
+			wantWebhookErrs: []string{"spec.components[1].runtimeVersionOverride: Required value: is required when the specified main container image has no parseable semantic-version tag"},
+		},
+		{
 			name: "no components",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Components = nil
@@ -744,7 +755,8 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				className := "nginx"
 				dgd.Spec.Services["frontend"] = &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-					ComponentType: consts.ComponentTypeFrontend,
+					ComponentType:          consts.ComponentTypeFrontend,
+					RuntimeVersionOverride: "1.1.0",
 					Ingress: &nvidiacomv1alpha1.IngressSpec{
 						Enabled:                    true,
 						IngressControllerClassName: &className,
@@ -794,7 +806,8 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "alpha frontend sidecar rejects generated container name conflict",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["frontend"] = &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-					ComponentType: consts.ComponentTypeFrontend,
+					ComponentType:          consts.ComponentTypeFrontend,
+					RuntimeVersionOverride: "1.1.0",
 					FrontendSidecar: &nvidiacomv1alpha1.FrontendSidecarSpec{
 						Image: "custom/frontend:latest",
 					},
@@ -1230,8 +1243,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			oldDeployment: newBetaDGDForValidation(),
 			deployment: betaDGDWithSpec(func(spec *nvidiacomv1beta1.DynamoGraphDeploymentSpec) {
 				spec.Components = append(spec.Components, nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
-					ComponentName: "extra",
-					Replicas:      k8sptr.To(int32(1)),
+					ComponentName:          "extra",
+					Replicas:               k8sptr.To(int32(1)),
+					RuntimeVersionOverride: "1.1.0",
 					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
 						Name: consts.MainContainerName,
 						Env:  []corev1.EnvVar{{Name: "TOKEN", Value: "do-not-leak-this-value"}},
@@ -1256,8 +1270,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				spec.Components = []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 					spec.Components[1],
 					{
-						ComponentName: "extra",
-						Replicas:      k8sptr.To(int32(1)),
+						ComponentName:          "extra",
+						Replicas:               k8sptr.To(int32(1)),
+						RuntimeVersionOverride: "1.1.0",
 					},
 				}
 			}),
@@ -1778,14 +1793,16 @@ func newBetaDGDForValidation() *nvidiacomv1beta1.DynamoGraphDeployment {
 			BackendFramework: "vllm",
 			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 				{
-					ComponentName: "frontend",
-					ComponentType: nvidiacomv1beta1.ComponentTypeFrontend,
-					Replicas:      k8sptr.To(int32(1)),
+					ComponentName:          "frontend",
+					ComponentType:          nvidiacomv1beta1.ComponentTypeFrontend,
+					RuntimeVersionOverride: "1.1.0",
+					Replicas:               k8sptr.To(int32(1)),
 				},
 				{
-					ComponentName: "worker",
-					ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
-					Replicas:      k8sptr.To(int32(2)),
+					ComponentName:          "worker",
+					ComponentType:          nvidiacomv1beta1.ComponentTypeWorker,
+					RuntimeVersionOverride: "1.1.0",
+					Replicas:               k8sptr.To(int32(2)),
 				},
 			},
 		},
@@ -1802,8 +1819,9 @@ func newAlphaDGDForCompatibilityValidation() *nvidiacomv1alpha1.DynamoGraphDeplo
 			BackendFramework: "vllm",
 			Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				"worker": {
-					ComponentType: consts.ComponentTypeWorker,
-					Replicas:      k8sptr.To(int32(1)),
+					ComponentType:          consts.ComponentTypeWorker,
+					RuntimeVersionOverride: "1.1.0",
+					Replicas:               k8sptr.To(int32(1)),
 				},
 			},
 		},

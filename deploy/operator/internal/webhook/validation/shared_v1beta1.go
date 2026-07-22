@@ -25,6 +25,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -122,6 +123,10 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 			spec.ComponentType,
 			dynamo.GetMainContainerResources(spec),
 		)...)
+	}
+
+	if err := runtimeVersionOverrideError(spec, fldPath); err != nil {
+		allErrs = append(allErrs, err)
 	}
 
 	return allErrs
@@ -447,4 +452,29 @@ func (v *sharedValidation) validateExperimentalSpecUpdate(
 		))
 	}
 	return allErrs
+}
+
+func runtimeVersionOverrideError(
+	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) *field.Error {
+	overridePath := fldPath.Child("runtimeVersionOverride")
+	if spec.RuntimeVersionOverride != "" {
+		if _, err := runtimeversion.Parse(spec.RuntimeVersionOverride); err != nil {
+			return field.Invalid(overridePath, spec.RuntimeVersionOverride, err.Error())
+		}
+		return nil
+	}
+
+	image := ""
+	if container := dynamo.GetMainContainer(spec); container != nil {
+		image = container.Image
+	}
+	if image == "" {
+		return nil
+	}
+	if _, err := runtimeversion.ParseImageVersion(image); err != nil {
+		return field.Required(overridePath, "is required when the specified main container image has no parseable semantic-version tag")
+	}
+	return nil
 }

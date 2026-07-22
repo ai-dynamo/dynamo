@@ -69,8 +69,42 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name:          "checkpoint configuration requires operator feature gate",
+			name: "operator-supplied image does not require runtime version override",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.RuntimeVersionOverride = ""
+			}),
+		},
+		{
+			name: "v1alpha1 custom image requires runtime version override",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{Image: "registry.example/runtime:custom"},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.runtimeVersionOverride: Required value: is required when the specified main container image has no parseable semantic-version tag"},
+		},
+		{
+			name: "v1beta1 derives runtime version from a semver image tag",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:v1.2.3-cuda12"}},
+				}}
+			}),
+		},
+		{
+			name: "runtime version override takes precedence over a semver image tag",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.RuntimeVersionOverride = "1.1.0"
+				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/vllm-opus:4.8.2"}},
+				}}
+			}),
+		},
+		{
 			checkpointOff: true,
+			name:          "checkpoint configuration requires operator feature gate",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
 					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
@@ -1033,8 +1067,9 @@ func alphaDCDForAdmission(
 		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
 			BackendFramework: dcdAdmissionVLLMBackend,
 			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ServiceName:   "worker",
-				ComponentType: consts.ComponentTypeWorker,
+				ServiceName:            "worker",
+				RuntimeVersionOverride: "1.1.0",
+				ComponentType:          consts.ComponentTypeWorker,
 			},
 		},
 	}
@@ -1049,6 +1084,9 @@ func alphaDCDWithSharedSpec(
 ) *nvidiacomv1alpha1.DynamoComponentDeployment {
 	return alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
 		dcd.Spec.DynamoComponentDeploymentSharedSpec = spec
+		if dcd.Spec.RuntimeVersionOverride == "" {
+			dcd.Spec.RuntimeVersionOverride = "1.1.0"
+		}
 	})
 }
 
@@ -1064,8 +1102,9 @@ func betaDCDForAdmission(
 		Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
 			BackendFramework: dcdAdmissionVLLMBackend,
 			DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
-				ComponentName: "worker",
-				ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
+				ComponentName:          "worker",
+				RuntimeVersionOverride: "1.1.0",
+				ComponentType:          nvidiacomv1beta1.ComponentTypeWorker,
 			},
 		},
 	}
