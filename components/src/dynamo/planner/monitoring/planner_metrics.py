@@ -179,6 +179,28 @@ class PlannerPrometheusMetrics:
             labelnames=_engine_labels,
         )
 
+        # -- Power-aware budget (DGD-owned caps; read-only) ---------------
+        self.power_budget_total_watts = Gauge(
+            f"{PREFIX}_power_budget_total_watts",
+            "Configured total GPU power budget for this DGD (watts).",
+        )
+        self.power_projected_watts = Gauge(
+            f"{PREFIX}_power_projected_watts",
+            "Projected GPU power draw at current replica counts and "
+            "DGD-resolved per-GPU caps (watts).",
+        )
+        self.power_budget_utilization = Gauge(
+            f"{PREFIX}_power_budget_utilization",
+            "Ratio of projected power to total budget (0.0–1.0+).",
+        )
+        self.power_config_scale_up_blocked = Gauge(
+            f"{PREFIX}_power_config_scale_up_blocked",
+            "1 when the planner is suppressing power-aware scale-up because a "
+            "DGD per-GPU cap changed or failed to resolve at runtime (adopt the "
+            "new cap by restarting the planner after the worker rollout "
+            "completes); 0 otherwise.",
+        )
+
 
 # ---------------------------------------------------------------------------
 # Plugin-framework metrics

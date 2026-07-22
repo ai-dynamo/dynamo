@@ -41,9 +41,11 @@ from dynamo.planner.errors import (
     UserProvidedModelNameMismatchError,
 )
 from dynamo.planner.monitoring.dgd_services import (
+    ComponentPowerConfig,
     get_component_from_type_or_name,
     get_component_type,
     get_components_by_name,
+    resolve_component_power_configs,
 )
 from dynamo.planner.monitoring.worker_info import (
     WorkerInfo,
@@ -403,6 +405,34 @@ class KubernetesConnector(PlannerConnector):
             raise DeploymentValidationError(errors)
 
         return prefill_gpu_count, decode_gpu_count
+
+    def get_component_power_configs(
+        self,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
+    ) -> tuple[Optional[ComponentPowerConfig], Optional[ComponentPowerConfig]]:
+        """Resolve DGD-owned per-role power configs from worker podTemplate annotations.
+
+        One DGD GET. ``watts_per_replica`` on each config uses the replica-wide
+        GPU total (nodeCount × per-pod) via ``Service.get_total_gpu_count()``,
+        independent of the per-pod ``num_gpus`` the GPU-budget math consumes.
+
+        The typed parser errors (``PowerAnnotationMissingError`` /
+        ``PowerAnnotationInvalidError`` / ``SubComponentNotFoundError`` /
+        ``DuplicateSubComponentError`` / ``ValueError`` for a bad GPU count)
+        propagate so the environment can apply the startup-fail vs
+        runtime-conservative policy rather than the planner guessing a cap.
+        """
+        deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        return resolve_component_power_configs(
+            deployment,
+            require_prefill=require_prefill,
+            require_decode=require_decode,
+            prefill_name=prefill_component_name,
+            decode_name=decode_component_name,
+        )
 
     def get_frontend_metrics_url(self, port: int = 8000) -> Optional[str]:
         """Auto-discover the frontend component's metrics URL from the DGD.

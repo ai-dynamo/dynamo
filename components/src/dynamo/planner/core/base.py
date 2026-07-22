@@ -48,8 +48,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _engine_caps(worker_info, num_gpu: Optional[int]) -> Optional[EngineCapabilities]:
-    if worker_info is None and num_gpu is None:
+def _engine_caps(
+    worker_info,
+    num_gpu: Optional[int],
+    power_watts_per_replica: Optional[int] = None,
+) -> Optional[EngineCapabilities]:
+    if worker_info is None and num_gpu is None and power_watts_per_replica is None:
         return None
     return EngineCapabilities(
         num_gpu=num_gpu,
@@ -61,13 +65,24 @@ def _engine_caps(worker_info, num_gpu: Optional[int]) -> Optional[EngineCapabili
         max_kv_tokens=worker_info.max_kv_tokens if worker_info else None,
         kv_cache_block_size=worker_info.kv_cache_block_size if worker_info else None,
         speculative_nextn=worker_info.speculative_nextn if worker_info else None,
+        power_watts_per_replica=power_watts_per_replica,
     )
 
 
 def build_worker_capabilities(state: DeploymentState) -> WorkerCapabilities:
     return WorkerCapabilities(
-        prefill=_engine_caps(state.prefill.info, state.prefill.num_gpus),
-        decode=_engine_caps(state.decode.info, state.decode.num_gpus),
+        prefill=_engine_caps(
+            state.prefill.info,
+            state.prefill.num_gpus,
+            state.prefill.power_watts_per_replica,
+        ),
+        decode=_engine_caps(
+            state.decode.info,
+            state.decode.num_gpus,
+            state.decode.power_watts_per_replica,
+        ),
+        power_scale_up_blocked=state.power_scale_up_blocked,
+        power_scale_up_blocked_reason=state.power_scale_up_blocked_reason,
     )
 
 
@@ -104,6 +119,12 @@ class NativePlannerBase:
 
         self._cumulative_gpu_hours: float = 0.0
         self._last_gpu_hours_update_ts: Optional[float] = None
+
+        # One-shot guard so the "power budget projected zero" warning (emitted
+        # when a required role has not yet resolved a per-replica watt value)
+        # logs once rather than every tick.
+        self._power_projected_zero_warned: bool = False
+
         self._recorder = DiagnosticsRecorder(config=config)
         self._dashboard_runner: Optional[aiohttp.web.AppRunner] = None
         self._engine: Optional[EngineProtocol] = None
@@ -368,6 +389,73 @@ class NativePlannerBase:
     async def _apply_effects(self, effects: PlannerEffects) -> None:
         pass
 
+    def _current_worker_counts(self) -> tuple[int, int]:
+        """Best-known current (prefill, decode) ready worker counts.
+
+        Reads ``self._last_worker_counts``, cached each tick in ``run()`` from
+        the tick input — the count source the orchestrator engine exposes.
+        Returns ``(0, 0)`` before the first worker-state tick populates it.
+        Consumed by ``_log_decision_summary``.
+        """
+        if self._last_worker_counts is not None:
+            return (
+                self._last_worker_counts.ready_num_prefill or 0,
+                self._last_worker_counts.ready_num_decode or 0,
+            )
+        return 0, 0
+
+    def _publish_power_budget_metrics(self, num_p: int, num_d: int) -> None:
+        """Emit power-budget gauges from DGD-resolved caps (read-only observe path).
+
+        Per-replica watts come from the cached deployment state
+        (``power_watts_per_replica``, resolved from the DGD worker podTemplate
+        annotation during refresh), so this performs no apiserver I/O and never
+        blocks the tick loop. These gauges are advisory observability; the
+        projected power budget (over the requested caps, not the effective
+        hardware draw) is applied separately by the final budget clamp.
+
+        ``power_config_scale_up_blocked`` is published whenever awareness is on
+        — even before caps resolve — so the restart-required diagnostic is
+        visible. The projection gauges are published only once every required
+        role has a resolved per-replica watt value and the total budget is a
+        positive integer; the typed parser and Pydantic keep these integral, so
+        there is no NaN to clamp.
+        """
+        if self.prometheus_port == 0 or not self.config.enable_power_awareness:
+            return
+        pm = self.prometheus_metrics
+        state = self.environment.deployment_state()
+        pm.power_config_scale_up_blocked.set(
+            1.0 if state.power_scale_up_blocked else 0.0
+        )
+
+        budget = self.config.total_gpu_power_limit
+        if budget is None or budget <= 0:
+            # Startup validation already requires budget > 0; guard here so a
+            # degenerate value can never publish a divide-by-zero utilization.
+            return
+
+        p_watts = state.prefill.power_watts_per_replica
+        d_watts = state.decode.power_watts_per_replica
+        if (self.require_prefill and p_watts is None) or (
+            self.require_decode and d_watts is None
+        ):
+            if not self._power_projected_zero_warned:
+                logger.warning(
+                    "power_projected_watts not published: per-replica watts "
+                    "unresolved (prefill=%s, decode=%s). Caps are authored on "
+                    "the DGD worker podTemplate annotation.",
+                    p_watts,
+                    d_watts,
+                )
+                self._power_projected_zero_warned = True
+            return
+
+        projected = num_p * (p_watts or 0) + num_d * (d_watts or 0)
+        pm.power_budget_total_watts.set(budget)
+        pm.power_projected_watts.set(projected)
+        pm.power_budget_utilization.set(projected / budget)
+
     async def _apply_scaling_targets(
         self, targets: list[TargetReplica], blocking: bool = False
     ) -> None:
@@ -376,15 +464,15 @@ class NativePlannerBase:
         await self.environment.apply_scaling(targets, blocking=blocking)
 
     def _log_decision_summary(self, effects: PlannerEffects) -> None:
+        """Log a one-line summary of the scaling decision after each tick.
+
+        Current worker counts come from ``_current_worker_counts`` — the
+        cached ``self._last_worker_counts`` set in ``run()``.
+        """
         decision = effects.scale_to
         diag = effects.diagnostics
 
-        if self._last_worker_counts is not None:
-            current_p = self._last_worker_counts.ready_num_prefill or 0
-            current_d = self._last_worker_counts.ready_num_decode or 0
-        else:
-            current_p = 0
-            current_d = 0
+        current_p, current_d = self._current_worker_counts()
 
         rec_p = decision.num_prefill if decision else None
         rec_d = decision.num_decode if decision else None
@@ -441,6 +529,7 @@ class NativePlannerBase:
         self.prometheus_metrics.num_prefill_replicas.set(num_p)
         self.prometheus_metrics.num_decode_replicas.set(num_d)
         self.prometheus_metrics.gpu_hours.set(self._cumulative_gpu_hours)
+        self._publish_power_budget_metrics(num_p, num_d)
 
     @staticmethod
     def _set_if_observed(gauge, value: Optional[float]) -> None:
@@ -472,9 +561,11 @@ class NativePlannerBase:
         # independently-scheduled PREDICT plugin).
         self._set_if_observed(
             pm.predicted_requests_per_second,
-            diag.predicted_num_req / interval
-            if diag.predicted_num_req is not None and interval > 0
-            else None,
+            (
+                diag.predicted_num_req / interval
+                if diag.predicted_num_req is not None and interval > 0
+                else None
+            ),
         )
         self._set_if_observed(pm.predicted_input_sequence_tokens, diag.predicted_isl)
         self._set_if_observed(pm.predicted_output_sequence_tokens, diag.predicted_osl)

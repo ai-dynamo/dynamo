@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Iterable
+from typing import Iterable, Optional
 
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.errors import DeploymentValidationError
@@ -212,6 +212,188 @@ def proportional_clamp_single(
 
     # total < min_gpus - tolerance
     return max(min_endpoint, math.ceil(min_gpus / engine_gpu))
+
+
+# ---------------------------------------------------------------------------- #
+# Power budget — pure ceiling clamp on PROJECTED watts (no floor).             #
+#                                                                              #
+# The per-GPU caps are DGD-owned; the planner reads ``watts_per_replica`` per  #
+# role (from the *requested* annotation) and a ``total_gpu_power_limit`` and   #
+# clamps proposed replica counts so projected watts fit the budget. This is a  #
+# ceiling on the projected draw of the requested caps — not a proven hardware  #
+# limit (the Power Agent may clamp a cap up to the GPU minimum or fail to      #
+# apply it, and does not feed the effective cap back here). Within that model  #
+# it is treated as a hard constraint: it only ever *lowers* counts and,        #
+# applied after the GPU-budget clamp, wins over the GPU floor when the two     #
+# conflict (the floor violation is reported, not enforced).                    #
+# ---------------------------------------------------------------------------- #
+
+
+def project_watts(
+    num_p: Optional[int],
+    num_d: Optional[int],
+    p_watts: Optional[int],
+    d_watts: Optional[int],
+) -> int:
+    """Projected watts = Σ count × per-replica watts. Missing count/watts = 0."""
+    total = 0
+    if num_p is not None and p_watts is not None:
+        total += num_p * p_watts
+    if num_d is not None and d_watts is not None:
+        total += num_d * d_watts
+    return total
+
+
+def minimum_power_footprint_fits(
+    total_budget: int,
+    min_endpoint: int,
+    p_watts: Optional[int],
+    d_watts: Optional[int],
+) -> bool:
+    """True when ``min_endpoint`` replicas of every present role fit the budget.
+
+    Startup feasibility gate: if even the minimum footprint overshoots the
+    total power budget the deployment can never satisfy the ceiling, so the
+    planner must fail closed rather than clamp to an impossible target.
+    """
+    required = 0
+    if p_watts is not None:
+        required += min_endpoint * p_watts
+    if d_watts is not None:
+        required += min_endpoint * d_watts
+    return required <= total_budget
+
+
+def _hold_at_current(
+    proposed: Optional[int], current: Optional[int]
+) -> tuple[Optional[int], bool]:
+    """Cap a proposal at the current count (block scale-up, allow scale-down)."""
+    if proposed is None:
+        return None, False
+    if current is None:
+        return proposed, False
+    held = min(proposed, current)
+    return held, held < proposed
+
+
+def apply_power_budget(
+    proposed_p: Optional[int],
+    proposed_d: Optional[int],
+    current_p: Optional[int],
+    current_d: Optional[int],
+    p_watts: Optional[int],
+    d_watts: Optional[int],
+    total_budget: int,
+    min_endpoint: int,
+    scale_up_blocked: bool,
+) -> tuple[Optional[int], Optional[int], Optional[str]]:
+    """Clamp proposed replica counts so projected power fits ``total_budget``.
+
+    ``None`` proposals preserve the proposal mask — an unproposed component is
+    never mutated; its *current* count is charged against the budget when
+    sizing the proposed component(s). Returns ``(new_p, new_d, reason)`` where
+    ``reason`` is a short diagnostic when the clamp changed a proposal (or
+    suppressed a scale-up), else ``None``.
+
+    Power is ceiling-only and never raises a count above what was proposed.
+    When ``scale_up_blocked`` (a DGD cap changed or failed to resolve at
+    runtime), proposals are held at ``min(proposed, current)`` — scale-down
+    still honored, scale-up suppressed — with no proportional shrink.
+    """
+    if scale_up_blocked:
+        new_p, capped_p = _hold_at_current(proposed_p, current_p)
+        new_d, capped_d = _hold_at_current(proposed_d, current_d)
+        reason = "power_scale_up_blocked" if (capped_p or capped_d) else None
+        return new_p, new_d, reason
+
+    eff_p = proposed_p if proposed_p is not None else current_p
+    eff_d = proposed_d if proposed_d is not None else current_d
+    if project_watts(eff_p, eff_d, p_watts, d_watts) <= total_budget:
+        return proposed_p, proposed_d, None
+
+    p_adjustable = proposed_p is not None and p_watts is not None and p_watts > 0
+    d_adjustable = proposed_d is not None and d_watts is not None and d_watts > 0
+
+    if p_adjustable and d_adjustable:
+        new_p, new_d = _shrink_pair(
+            proposed_p, proposed_d, p_watts, d_watts, total_budget, min_endpoint
+        )
+        # Ceiling never raises a proposed count (decode-no-upscale invariant).
+        new_p = min(new_p, proposed_p)
+        new_d = min(new_d, proposed_d)
+        return new_p, new_d, "power_budget_clamped"
+
+    if p_adjustable != d_adjustable:
+        # Exactly one proposed adjustable component; charge the other at its
+        # current count and never mutate it.
+        if p_adjustable:
+            fixed = eff_d * d_watts if (eff_d is not None and d_watts) else 0
+            new_p, suppressed = _shrink_single(
+                proposed_p, current_p, p_watts, total_budget - fixed, min_endpoint
+            )
+            reason = (
+                "power_budget_scale_up_suppressed"
+                if suppressed
+                else "power_budget_clamped"
+            )
+            return new_p, proposed_d, reason
+        fixed = eff_p * p_watts if (eff_p is not None and p_watts) else 0
+        new_d, suppressed = _shrink_single(
+            proposed_d, current_d, d_watts, total_budget - fixed, min_endpoint
+        )
+        reason = (
+            "power_budget_scale_up_suppressed" if suppressed else "power_budget_clamped"
+        )
+        return proposed_p, new_d, reason
+
+    # Over budget but nothing adjustable is proposed (baseline over budget with
+    # no lever this tick). Do not mutate unproposed components.
+    return proposed_p, proposed_d, None
+
+
+def _shrink_pair(
+    num_p: int,
+    num_d: int,
+    p_watts: int,
+    d_watts: int,
+    budget: int,
+    min_endpoint: int,
+) -> tuple[int, int]:
+    """Proportionally shrink a disagg pair so watts fit the budget ceiling."""
+    projected = num_p * p_watts + num_d * d_watts
+    if projected <= budget:
+        return num_p, num_d
+    if budget < min_endpoint * (p_watts + d_watts):
+        # Infeasible under the ceiling (startup validation should have caught
+        # it). Best effort: hold each pool at the floor.
+        return min_endpoint, min_endpoint
+    scale = budget / projected
+    max_p = math.floor((budget - min_endpoint * d_watts) / p_watts)
+    new_p = max(min_endpoint, min(max_p, math.floor(num_p * scale)))
+    remaining = budget - new_p * p_watts
+    new_d = max(min_endpoint, math.floor(remaining / d_watts))
+    return new_p, new_d
+
+
+def _shrink_single(
+    proposed: int,
+    current: Optional[int],
+    watts: int,
+    avail: int,
+    min_endpoint: int,
+) -> tuple[int, bool]:
+    """Fit a single adjustable pool into ``avail`` watts.
+
+    Returns ``(new_count, suppressed)``. ``suppressed`` is True when the fixed
+    (unproposed) component alone leaves no room to even seat ``min_endpoint``,
+    so the proposed scale-up is refused (held at ``min(proposed, current)``)
+    rather than the unproposed component being silently mutated.
+    """
+    if avail < min_endpoint * watts:
+        held, _ = _hold_at_current(proposed, current)
+        return (held if held is not None else min_endpoint), True
+    max_fit = math.floor(avail / watts)
+    return max(min_endpoint, min(proposed, max_fit)), False
 
 
 # ---------------------------------------------------------------------------- #

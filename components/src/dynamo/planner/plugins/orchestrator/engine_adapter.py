@@ -68,6 +68,7 @@ if TYPE_CHECKING:
     import grpc.aio
 
 from dynamo.planner.core.budget import (
+    apply_power_budget,
     proportional_clamp_pair,
     proportional_clamp_single,
 )
@@ -1051,14 +1052,167 @@ class OrchestratorEngineAdapter:
 
         num_p, num_d = self._apply_final_budget(num_p, num_d, worker_counts)
 
-        p_unchanged = (num_p is None) or (num_p == current_p)
-        d_unchanged = (num_d is None) or (num_d == current_d)
-        if p_unchanged and d_unchanged:
+        # Mask any target that equals its ready count back to None. Emitting such
+        # a target is a no-op in a stable deployment (spec desired == ready), but
+        # during a rollout (settled target unknown) the merged proposal carries
+        # the baseline == ready for every non-rolling role, and DisaggPlanner
+        # applies every non-None target as the new DGD desired. Emitting a
+        # rolling role's transient ready count would overwrite its larger
+        # in-flight desired and cancel the rollout — so a scale-down of one role
+        # must not drag the other role's echoed ready count along, and a
+        # scale-up held at ready (see ``_hold_scale_up_during_rollout``)
+        # collapses to "no change" instead of re-emitting ready.
+        if num_p is not None and num_p == current_p:
+            num_p = None
+        if num_d is not None and num_d == current_d:
+            num_d = None
+        if num_p is None and num_d is None:
             return None
 
         return ScalingDecision(num_prefill=num_p, num_decode=num_d)
 
     def _apply_final_budget(
+        self,
+        num_p: Optional[int],
+        num_d: Optional[int],
+        worker_counts: WorkerCounts,
+    ) -> tuple[Optional[int], Optional[int]]:
+        """Final invariant boundary: GPU budget then power budget.
+
+        Order is deliberate and non-commutative — the GPU clamp fits replica
+        counts to the GPU band first, then the power clamp holds the result to
+        the projected ``total_gpu_power_limit`` (a bound on projected draw from
+        the requested caps, not a proven hardware limit). Applied here once, it
+        covers builtin and external-plugin proposals alike.
+        """
+        num_p, num_d = self._apply_gpu_final_budget(num_p, num_d, worker_counts)
+        num_p, num_d = self._apply_power_final_budget(num_p, num_d, worker_counts)
+        return num_p, num_d
+
+    def _hold_scale_up_during_rollout(
+        self,
+        num_p: Optional[int],
+        num_d: Optional[int],
+        ready_p: Optional[int],
+        ready_d: Optional[int],
+        p_watts: Optional[int],
+        d_watts: Optional[int],
+        worker_counts: WorkerCounts,
+    ) -> tuple[Optional[int], Optional[int]]:
+        """Hold every scale-up at its ready count while ANY power-relevant role
+        is mid-rollout (conservative, fail-closed).
+
+        The Kubernetes environment tracks a single deployment-wide stability
+        flag, so a rollout of *either* role marks *both* roles' ``expected``
+        (settled) count unknown (None) — there is no per-role desired target to
+        reason about. A rolling role's settled power can only be charged at its
+        transient ready count, which undercounts it, so while any role rolls no
+        role may scale up above its ready count; otherwise the settled total (the
+        rolling role at its unknown-but-larger desired plus another role grown)
+        can exceed the budget. Scale-downs stay allowed. A held scale-up equals
+        the ready count, which ``_project_scale_to`` then masks back to None (as
+        it does for any target equal to ready), so the hold emits no target for
+        that role and the already-issued rollout's DGD desired is left untouched
+        even when the other role legitimately scales down this tick.
+
+        Rollout *state*, not None targets, is the signal — ``type_aware_merge``
+        fills a role a plugin omitted from the baseline, so the proposal usually
+        carries a target for every role. (A future per-role desired/stability
+        connector contract could relax this to only the roles actually rolling.)
+        """
+
+        def _rolling(ready, expected, watts):
+            return ready is not None and expected is None and bool(watts)
+
+        any_rolling = _rolling(
+            ready_p, worker_counts.expected_num_prefill, p_watts
+        ) or _rolling(ready_d, worker_counts.expected_num_decode, d_watts)
+        if not any_rolling:
+            return num_p, num_d
+
+        if num_p is not None and ready_p is not None and num_p > ready_p:
+            log.warning(
+                "power budget: holding prefill at %s (proposed %s) — a "
+                "power-relevant role is mid-rollout with an unknown settled "
+                "target, so a scale-up cannot be safely budgeted this tick",
+                ready_p,
+                num_p,
+            )
+            num_p = ready_p
+        if num_d is not None and ready_d is not None and num_d > ready_d:
+            log.warning(
+                "power budget: holding decode at %s (proposed %s) — a "
+                "power-relevant role is mid-rollout with an unknown settled "
+                "target, so a scale-up cannot be safely budgeted this tick",
+                ready_d,
+                num_d,
+            )
+            num_d = ready_d
+        return num_p, num_d
+
+    def _apply_power_final_budget(
+        self,
+        num_p: Optional[int],
+        num_d: Optional[int],
+        worker_counts: WorkerCounts,
+    ) -> tuple[Optional[int], Optional[int]]:
+        """Clamp the GPU-clamped proposal to the DGD-owned power budget.
+
+        Reads per-replica watts and the scale-up-blocked flag off the cached
+        ``WorkerCapabilities`` (no DGD I/O). No-op unless power awareness is on
+        and a total budget is configured. Power wins over the GPU floor when
+        they conflict — this runs after the GPU clamp and only lowers counts.
+
+        Fails closed during a rollout: while any power-relevant role is
+        mid-rollout (its settled target unknown), every role's scale-up is held
+        at its ready count — see ``_hold_scale_up_during_rollout`` — so a
+        proposal cannot admit an over-budget settled state.
+        """
+        if not self._config.enable_power_awareness:
+            return num_p, num_d
+        budget = self._config.total_gpu_power_limit
+        if budget is None:
+            return num_p, num_d
+
+        p_caps = self._capabilities.prefill
+        d_caps = self._capabilities.decode
+        p_watts = p_caps.power_watts_per_replica if p_caps else None
+        d_watts = d_caps.power_watts_per_replica if d_caps else None
+
+        ready_p = worker_counts.ready_num_prefill
+        ready_d = worker_counts.ready_num_decode
+
+        num_p, num_d = self._hold_scale_up_during_rollout(
+            num_p, num_d, ready_p, ready_d, p_watts, d_watts, worker_counts
+        )
+
+        new_p, new_d, reason = apply_power_budget(
+            num_p,
+            num_d,
+            ready_p,
+            ready_d,
+            p_watts,
+            d_watts,
+            budget,
+            self._config.min_endpoint,
+            self._capabilities.power_scale_up_blocked,
+        )
+        if reason is not None and (new_p, new_d) != (num_p, num_d):
+            log.warning(
+                "power budget clamp (%s): prefill %s->%s decode %s->%s "
+                "(budget=%sW, prefill=%sW/replica, decode=%sW/replica)",
+                reason,
+                num_p,
+                new_p,
+                num_d,
+                new_d,
+                budget,
+                p_watts,
+                d_watts,
+            )
+        return new_p, new_d
+
+    def _apply_gpu_final_budget(
         self,
         num_p: Optional[int],
         num_d: Optional[int],

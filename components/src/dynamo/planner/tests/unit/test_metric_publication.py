@@ -61,12 +61,11 @@ def _make_planner(prometheus_enabled: bool = True) -> NativePlannerBase:
     is toggled post-init as an enabled/disabled gate for the methods under
     test; the actual port value is never used for I/O.
     """
-    with patch(
-        "dynamo.planner.core.base.PlannerPrometheusMetrics"
-    ) as mock_metrics, patch("dynamo.planner.core.base.start_http_server"), patch(
-        "dynamo.planner.connectors.kubernetes.KubernetesAPI"
-    ), patch.dict(
-        os.environ, {"DYN_PARENT_DGD_K8S_NAME": "test-graph"}
+    with (
+        patch("dynamo.planner.core.base.PlannerPrometheusMetrics") as mock_metrics,
+        patch("dynamo.planner.core.base.start_http_server"),
+        patch("dynamo.planner.connectors.kubernetes.KubernetesAPI"),
+        patch.dict(os.environ, {"DYN_PARENT_DGD_K8S_NAME": "test-graph"}),
     ):
         mock_metrics.return_value = Mock()
         config = PlannerConfig.model_construct(
@@ -340,12 +339,11 @@ def _make_planner_with_port(
     ``start_http_server`` is still patched to avoid binding a real port.
     """
     port = 9091 if prometheus_enabled else 0
-    with patch(
-        "dynamo.planner.core.base.PlannerPrometheusMetrics"
-    ) as mock_metrics, patch("dynamo.planner.core.base.start_http_server"), patch(
-        "dynamo.planner.connectors.kubernetes.KubernetesAPI"
-    ), patch.dict(
-        os.environ, {"DYN_PARENT_DGD_K8S_NAME": "test-graph"}
+    with (
+        patch("dynamo.planner.core.base.PlannerPrometheusMetrics") as mock_metrics,
+        patch("dynamo.planner.core.base.start_http_server"),
+        patch("dynamo.planner.connectors.kubernetes.KubernetesAPI"),
+        patch.dict(os.environ, {"DYN_PARENT_DGD_K8S_NAME": "test-graph"}),
     ):
         mock_metrics.return_value = Mock()
         config = PlannerConfig.model_construct(
@@ -412,9 +410,10 @@ class TestPlannerPrometheusMetricsHasSlaTargetGauges:
 
     def test_metrics_object_has_sla_target_gauge_attributes(self):
         """Instance attributes sla_target_ttft_ms and sla_target_itl_ms must exist."""
-        with patch(
-            "dynamo.planner.monitoring.planner_metrics.Gauge"
-        ) as mock_gauge, patch("dynamo.planner.monitoring.planner_metrics.Enum"):
+        with (
+            patch("dynamo.planner.monitoring.planner_metrics.Gauge") as mock_gauge,
+            patch("dynamo.planner.monitoring.planner_metrics.Enum"),
+        ):
             mock_gauge.return_value = MagicMock()
             metrics = PlannerPrometheusMetrics()
 
@@ -432,3 +431,137 @@ class TestPlannerPrometheusMetricsHasSlaTargetGauges:
         assert (
             f"{PREFIX}_sla_target_itl_ms" in registered_names
         ), f"Expected Gauge name '{PREFIX}_sla_target_itl_ms' not registered"
+
+
+def _power_planner(
+    *,
+    prefill_watts_per_replica=700,
+    decode_watts_per_replica=1200,
+    total_gpu_power_limit=10000,
+    scale_up_blocked=False,
+):
+    """A power-aware planner whose deployment state carries DGD-resolved caps.
+
+    Per-replica watts live on the cached ``DeploymentState`` (resolved from the
+    DGD worker podTemplate annotation during refresh), so the projection reads
+    them directly — no config caps, no apiserver I/O.
+    """
+    planner = _make_planner(prometheus_enabled=True)
+    planner.config.enable_power_awareness = True
+    planner.config.total_gpu_power_limit = total_gpu_power_limit
+    # NativePlannerBase defaults these to False; disagg exercises both roles.
+    planner.require_prefill = True
+    planner.require_decode = True
+    state = planner.environment.deployment_state()
+    state.prefill.power_watts_per_replica = prefill_watts_per_replica
+    state.decode.power_watts_per_replica = decode_watts_per_replica
+    state.power_scale_up_blocked = scale_up_blocked
+    return planner
+
+
+class TestPublishPowerBudgetMetrics:
+    """_publish_power_budget_metrics reads DGD-resolved per-replica watts from
+    the cached deployment state and performs NO apiserver I/O on the tick loop."""
+
+    def test_projection_from_resolved_state(self):
+        """projected = Σ replicas × DGD-resolved watts_per_replica."""
+        planner = _power_planner(
+            prefill_watts_per_replica=700,
+            decode_watts_per_replica=1200,
+            total_gpu_power_limit=10000,
+        )
+        pm = planner.prometheus_metrics
+
+        planner._publish_power_budget_metrics(num_p=2, num_d=3)
+
+        # projected = 2*700 + 3*1200 = 1400 + 3600 = 5000
+        pm.power_projected_watts.set.assert_called_once_with(5000)
+        pm.power_budget_total_watts.set.assert_called_once_with(10000)
+        pm.power_budget_utilization.set.assert_called_once_with(0.5)
+        pm.power_config_scale_up_blocked.set.assert_called_once_with(0.0)
+
+    def test_asymmetric_caps(self):
+        """Prefill and decode watts are independent."""
+        planner = _power_planner(
+            prefill_watts_per_replica=350,
+            decode_watts_per_replica=250,
+            total_gpu_power_limit=2000,
+        )
+        pm = planner.prometheus_metrics
+
+        planner._publish_power_budget_metrics(num_p=1, num_d=1)
+
+        pm.power_projected_watts.set.assert_called_once_with(600)
+
+    def test_multinode_watts_already_multiplied(self):
+        """State watts are per-replica (nodeCount × per-pod × cap), used as-is."""
+        planner = _power_planner(
+            prefill_watts_per_replica=2100,  # 2 GPU × 3 nodes × 350 W
+            decode_watts_per_replica=300,
+            total_gpu_power_limit=10000,
+        )
+        pm = planner.prometheus_metrics
+
+        planner._publish_power_budget_metrics(num_p=2, num_d=1)
+
+        # 2*2100 + 1*300 = 4500
+        pm.power_projected_watts.set.assert_called_once_with(4500)
+
+    def test_scale_up_blocked_gauge_published(self):
+        """The restart-required diagnostic gauge reflects DeploymentState."""
+        planner = _power_planner(scale_up_blocked=True)
+        pm = planner.prometheus_metrics
+
+        planner._publish_power_budget_metrics(num_p=1, num_d=1)
+
+        pm.power_config_scale_up_blocked.set.assert_called_once_with(1.0)
+
+    def test_skipped_when_power_awareness_disabled(self):
+        """Disabled power awareness publishes nothing at all."""
+        planner = _power_planner()
+        planner.config.enable_power_awareness = False
+        pm = planner.prometheus_metrics
+
+        planner._publish_power_budget_metrics(num_p=1, num_d=1)
+
+        pm.power_projected_watts.set.assert_not_called()
+        pm.power_config_scale_up_blocked.set.assert_not_called()
+
+    def test_skipped_when_prometheus_disabled(self):
+        """No Prometheus port means no gauge publication."""
+        planner = _power_planner()
+        planner.prometheus_port = 0
+        pm = planner.prometheus_metrics
+
+        planner._publish_power_budget_metrics(num_p=1, num_d=1)
+
+        pm.power_projected_watts.set.assert_not_called()
+
+    @pytest.mark.parametrize("budget", [None, 0, -5])
+    def test_no_projection_without_positive_budget(self, budget):
+        """A missing / zero / negative budget publishes the blocked gauge but no
+        projection (never a divide-by-zero utilization)."""
+        planner = _power_planner(total_gpu_power_limit=budget)
+        pm = planner.prometheus_metrics
+
+        planner._publish_power_budget_metrics(num_p=1, num_d=1)
+
+        pm.power_projected_watts.set.assert_not_called()
+        pm.power_budget_utilization.set.assert_not_called()
+        pm.power_config_scale_up_blocked.set.assert_called_once_with(0.0)
+
+    def test_unresolved_watts_warns_once_and_skips_projection(self):
+        """A required role with no resolved watts skips projection and warns once
+        rather than publishing a misleading partial value."""
+        planner = _power_planner()
+        state = planner.environment.deployment_state()
+        state.prefill.power_watts_per_replica = None
+
+        pm = planner.prometheus_metrics
+        with patch("dynamo.planner.core.base.logger") as mock_logger:
+            planner._publish_power_budget_metrics(num_p=1, num_d=1)
+            planner._publish_power_budget_metrics(num_p=1, num_d=1)
+
+        pm.power_projected_watts.set.assert_not_called()
+        assert mock_logger.warning.call_count == 1
+        assert planner._power_projected_zero_warned is True
