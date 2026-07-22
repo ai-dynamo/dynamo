@@ -193,7 +193,6 @@ async fn cancel_pending_pass(
             &scheduler_start,
             &cancel_token,
             Instant::now() + Duration::from_secs(5),
-            false,
         );
         tokio::pin!(boundary);
         let result = tokio::select! {
@@ -428,7 +427,6 @@ async fn external_shutdown_stops_a_nonempty_zero_duration_progress_loop() {
         cancellation_rx,
         publisher,
         cancel_token,
-        false,
     )
     .await;
 

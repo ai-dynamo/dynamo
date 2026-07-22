@@ -23,7 +23,6 @@ use crate::scheduler::{
 };
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PublishedEffect {
