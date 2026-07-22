@@ -1,15 +1,19 @@
-# Ignore all file:// protocol URLs (examples, local references, etc.)
-^file://
+# Ignore all file-protocol URLs (examples, local references, etc.)
+# (Pattern kept anchored at start; uses a character class for the
+# slashes so this file is safe to scan from a lychee invocation that
+# walks the repo recursively.)
+^file:[/][/]
 
 # Ignore URLs in test data files
 .*tests/data.*
 
-# Ignore placeholder URLs in docs templates
-^https://\.\.\./
-^https://github\.com/\.\.\.
+# Placeholder URLs in docs templates (the literal text "..." after
+# the scheme is the placeholder).
+^https:[/][/]\.\.\./
+^https:[/][/]github\.com/\.\.\.
 
 # Private repos referenced in docs (404 to unauthenticated lychee)
-^https://github\.com/ai-dynamo/pi-dynamo-provider
+^https:[/][/]github\.com/ai-dynamo/pi-dynamo-provider
 
 # Redirects to networking-docs.nvidia.com which refuses connections from
 # GitHub runners (network/firewall). The page loads from a normal browser.
@@ -28,3 +32,16 @@
 
 # NGC intermittently returns 503 for this version-filtered page from GitHub runners.
 ^https://catalog\.ngc\.nvidia\.com/orgs/nvidia/teams/ai-dynamo/containers/dynamo-frontend\?version=1\.2\.1$
+
+# Kubernetes cluster-internal DNS — `*.svc.cluster.local` is only
+# resolvable from inside the cluster. Used in planner defaults
+# (e.g. the in-cluster Prometheus endpoint in `defaults.py` and
+# `planner_config.py`).
+\.svc\.cluster\.local
+
+# Documentation placeholders for "fill in your real host/port".
+# Appear in planner config docstrings and the auto-generated platform
+# Helm chart README (`Format: "http://hostname:port"` etc.).
+^https?://hostname:port/?$
+^nats://hostname:port/?$
+^https?://host:port/?$

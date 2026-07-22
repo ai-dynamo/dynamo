@@ -52,6 +52,7 @@ def mock_kube_api():
     mock_api.update_graph_replicas = AsyncMock()
     mock_api.wait_for_graph_deployment_ready = AsyncMock()
     mock_api.is_deployment_ready = Mock()
+    mock_api.custom_api.list_namespaced_custom_object.return_value = {"items": []}
     return mock_api
 
 
@@ -360,6 +361,28 @@ def test_get_service_name_from_v1beta_worker_type_by_name(kubernetes_connector):
 
     assert service.name == "worker"
     assert service.number_replicas() == 2
+
+
+def test_get_service_name_from_unique_v1beta_worker_type_for_decode(
+    kubernetes_connector,
+):
+    deployment = _deployment(_component("VllmDecodeWorker", "worker", replicas=2))
+
+    service = get_component_from_type_or_name(
+        deployment, SubComponentType.DECODE, "VllmWorker"
+    )
+
+    assert service.name == "VllmDecodeWorker"
+    assert service.number_replicas() == 2
+
+
+def test_get_service_name_from_unique_worker_does_not_satisfy_prefill(
+    kubernetes_connector,
+):
+    deployment = _deployment(_component("VllmDecodeWorker", "worker", replicas=2))
+
+    with pytest.raises(SubComponentNotFoundError):
+        get_component_from_type_or_name(deployment, SubComponentType.PREFILL)
 
 
 def test_get_service_name_from_sub_component_type_not_found(kubernetes_connector):
@@ -873,6 +896,40 @@ def test_get_model_name_agree_returns_model_name(kubernetes_connector, mock_kube
     assert result == "agreed-model"
 
 
+def test_get_model_name_forwards_component_name_overrides(
+    kubernetes_connector, mock_kube_api
+):
+    """Explicit component-name overrides are forwarded to the deployment lookup.
+
+    For aggregated or multi-generic-worker DGDs, callers pass explicit names to
+    disambiguate which component to read the model name from.  Dropping them
+    causes a silent fallback to role-based lookup that returns the wrong result.
+    """
+    mock_kube_api.get_graph_deployment.return_value = _deployment(
+        _component(
+            "custom-prefill",
+            "worker",
+            replicas=1,
+            args=["--served-model-name", "my-model"],
+        ),
+        _component(
+            "custom-decode",
+            "worker",
+            replicas=1,
+            args=["--served-model-name", "my-model"],
+        ),
+    )
+
+    result = kubernetes_connector.get_model_name(
+        require_prefill=True,
+        require_decode=True,
+        prefill_component_name="custom-prefill",
+        decode_component_name="custom-decode",
+    )
+
+    assert result == "my-model"
+
+
 def test_protocol_positional_flags_match_kubernetes_connector(
     kubernetes_connector, mock_kube_api
 ):
@@ -1111,6 +1168,73 @@ def test_get_gpu_counts_service_not_found_raises_error(
         kubernetes_connector.get_gpu_counts()
 
     assert "decode GPU count" in str(exc_info.value)
+
+
+def test_get_gpu_counts_multinode_per_pod_not_replica_total(
+    kubernetes_connector, mock_kube_api
+):
+    """get_gpu_counts stores per-pod GPU request for budget/perf-model paths."""
+    multinode_decode = {
+        "name": "decode-worker",
+        "type": "decode",
+        "replicas": 1,
+        "multinode": {"nodeCount": 4},
+        "podTemplate": {
+            "spec": {
+                "containers": [
+                    {
+                        "name": "main",
+                        "resources": {"limits": {"nvidia.com/gpu": "8"}},
+                    }
+                ]
+            }
+        },
+    }
+    mock_deployment = _deployment(
+        _component("prefill-worker", "prefill", replicas=1, gpu=2),
+        multinode_decode,
+    )
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+
+    prefill_gpu, decode_gpu = kubernetes_connector.get_gpu_counts()
+
+    assert prefill_gpu == 2
+    assert decode_gpu == 8
+
+
+def test_replica_gpu_counts_for_power_projection_multinode(
+    kubernetes_connector, mock_kube_api
+):
+    """Power projection multiplies per-pod GPUs by multinode.nodeCount."""
+    multinode_decode = {
+        "name": "decode-worker",
+        "type": "decode",
+        "replicas": 1,
+        "multinode": {"nodeCount": 4},
+        "podTemplate": {
+            "spec": {
+                "containers": [
+                    {
+                        "name": "main",
+                        "resources": {"limits": {"nvidia.com/gpu": "8"}},
+                    }
+                ]
+            }
+        },
+    }
+    mock_deployment = _deployment(
+        _component("prefill-worker", "prefill", replicas=1, gpu=2),
+        multinode_decode,
+    )
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+
+    (
+        prefill_gpu,
+        decode_gpu,
+    ) = kubernetes_connector.get_replica_gpu_counts_for_power_projection()
+
+    assert prefill_gpu == 2
+    assert decode_gpu == 32
 
 
 # Tests for get_actual_worker_counts
@@ -1476,3 +1600,294 @@ def test_service_get_component_name_from_endpoint_arg_missing_value():
         service=_component("VllmPrefillWorker", args=["--endpoint"]),
     )
     assert service.get_component_name_from_endpoint_arg() is None
+
+
+# ---------------------------------------------------------------------------
+# resolve_frontend_http_port — read the frontend HTTP port from the live pod
+# ---------------------------------------------------------------------------
+
+
+def _make_pod_with_ports(port_specs):
+    """Build a duck-typed V1Pod with one container whose ports == port_specs.
+
+    Each ``port_specs`` element is either ``None`` (no ports list at all) or
+    a list of ``(name, container_port)`` tuples.  We keep the fixture
+    explicit so tests don't accidentally pass through MagicMock auto-spec
+    fluff and silently match on something other than what they meant to.
+    """
+    pod = Mock()
+    container = Mock()
+    if port_specs is None:
+        container.ports = None
+    else:
+        ports = []
+        for name, container_port in port_specs:
+            p = Mock()
+            p.name = name
+            p.container_port = container_port
+            ports.append(p)
+        container.ports = ports
+    pod.spec.containers = [container]
+    return pod
+
+
+class TestResolveFrontendHttpPort:
+    """Pin :meth:`KubernetesConnector.resolve_frontend_http_port` behavior.
+
+    The planner reads the frontend's actual HTTP port from
+    V1Pod.spec.containers[].ports[name=http] and only falls back to the legacy
+    config field when the named port is absent.
+    """
+
+    def test_returns_named_http_port_when_present(self):
+        """Operator-emitted pod with ``http`` named port: resolver wins."""
+        pod = _make_pod_with_ports([("http", 8000)])
+        assert (
+            KubernetesConnector.resolve_frontend_http_port(pod, fallback=9999) == 8000
+        )
+
+    def test_falls_back_when_no_named_http_port(self):
+        """Legacy/hand-rolled pod with named ports that aren't ``http``."""
+        pod = _make_pod_with_ports([("metrics", 9090), ("admin", 19090)])
+        assert (
+            KubernetesConnector.resolve_frontend_http_port(pod, fallback=8000) == 8000
+        )
+
+    def test_falls_back_when_ports_list_is_none(self):
+        """Pod spec missing ``ports`` entirely (the kubernetes client returns
+        ``None`` rather than ``[]`` when the field is unset)."""
+        pod = _make_pod_with_ports(None)
+        assert (
+            KubernetesConnector.resolve_frontend_http_port(pod, fallback=8000) == 8000
+        )
+
+    def test_falls_back_when_ports_list_is_empty(self):
+        pod = _make_pod_with_ports([])
+        assert (
+            KubernetesConnector.resolve_frontend_http_port(pod, fallback=8000) == 8000
+        )
+
+    def test_picks_http_among_multiple_named_ports(self):
+        """Multi-port containers must filter by name rather than position —
+        the operator may add extra named ports (e.g. ``debug``) without
+        breaking discovery."""
+        pod = _make_pod_with_ports([("metrics", 9090), ("http", 8001), ("debug", 6060)])
+        assert (
+            KubernetesConnector.resolve_frontend_http_port(pod, fallback=8000) == 8001
+        )
+
+    def test_honors_operator_port_override(self):
+        """If the DGD overrides the frontend container port, the resolver
+        should follow the live spec rather than mirror the config field."""
+        pod = _make_pod_with_ports([("http", 8443)])
+        assert (
+            KubernetesConnector.resolve_frontend_http_port(pod, fallback=8000) == 8443
+        )
+
+    def test_string_container_port_is_coerced_to_int(self):
+        """Defensive: the kubernetes client typically yields ``int`` for
+        ``container_port`` but YAML hand-rolls can sneak in strings — the
+        resolver must coerce, not crash."""
+        pod = _make_pod_with_ports([("http", "8000")])
+        assert (
+            KubernetesConnector.resolve_frontend_http_port(pod, fallback=9999) == 8000
+        )
+
+    def test_falls_back_on_malformed_pod_without_raising(self):
+        """A malformed pod object (e.g. ``spec is None``) must not bring
+        down the admission-control loop."""
+        pod = Mock()
+        pod.spec = None
+        assert (
+            KubernetesConnector.resolve_frontend_http_port(pod, fallback=8000) == 8000
+        )
+
+    def test_falls_back_when_container_ports_attribute_missing(self):
+        """Pod object whose container has no ``ports`` attribute at all
+        (some test stubs forget to set it)."""
+        pod = Mock()
+        container = Mock(spec=[])  # no attributes at all
+        pod.spec.containers = [container]
+        assert (
+            KubernetesConnector.resolve_frontend_http_port(pod, fallback=8000) == 8000
+        )
+
+    def test_first_container_with_http_wins_in_multi_container_pod(self):
+        """If a pod has multiple containers (sidecars) and only one has the
+        ``http`` port, the resolver should still find it."""
+        pod = Mock()
+        sidecar = Mock()
+        sidecar_port = Mock()
+        sidecar_port.name = "metrics"
+        sidecar_port.container_port = 9090
+        sidecar.ports = [sidecar_port]
+
+        main = Mock()
+        main_port = Mock()
+        main_port.name = "http"
+        main_port.container_port = 8000
+        main.ports = [main_port]
+
+        pod.spec.containers = [sidecar, main]
+        assert (
+            KubernetesConnector.resolve_frontend_http_port(pod, fallback=9999) == 8000
+        )
+
+
+# ---------------------------------------------------------------------------
+# Aggregated (mode=agg) component resolution
+# ---------------------------------------------------------------------------
+
+
+def _agg_deployment(model_name="test-model", gpu=4, worker_name="VllmDecodeWorker"):
+    """DGD with a single generic type:worker component — the agg topology."""
+    return _deployment(
+        _component(
+            worker_name,
+            "worker",
+            replicas=1,
+            args=["--served-model-name", model_name],
+            gpu=gpu,
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_validate_deployment_agg_mode(kubernetes_connector, mock_kube_api):
+    """validate_deployment must resolve the actual generic worker name in agg mode."""
+    mock_kube_api.get_graph_deployment.return_value = _agg_deployment()
+
+    # Must not raise — both the component-existence check and model-name lookup
+    # must resolve the unique generic type:worker component from the DGD.
+    await kubernetes_connector.validate_deployment(
+        prefill_component_name=None,
+        decode_component_name="VllmWorker",
+        require_prefill=False,
+        require_decode=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_validate_deployment_agg_mode_explicit_decode_worker_name(
+    kubernetes_connector, mock_kube_api
+):
+    """validate_deployment must also work when the hint is the real agg name."""
+    mock_kube_api.get_graph_deployment.return_value = _agg_deployment()
+
+    await kubernetes_connector.validate_deployment(
+        prefill_component_name=None,
+        decode_component_name="VllmDecodeWorker",
+        require_prefill=False,
+        require_decode=True,
+    )
+
+
+def test_get_gpu_counts_agg_mode(kubernetes_connector, mock_kube_api):
+    """get_gpu_counts must return the GPU count from the agg worker, not fall back to CLI."""
+    mock_kube_api.get_graph_deployment.return_value = _agg_deployment(gpu=4)
+
+    prefill_gpu, decode_gpu = kubernetes_connector.get_gpu_counts(
+        require_prefill=False,
+        require_decode=True,
+        decode_component_name="VllmWorker",
+    )
+
+    assert prefill_gpu == 0
+    assert decode_gpu == 4
+
+
+def test_get_worker_info_agg_mode_sets_k8s_name(kubernetes_connector, mock_kube_api):
+    """get_worker_info must set k8s_name to the actual generic worker name."""
+    mock_kube_api.get_graph_deployment.return_value = _agg_deployment()
+
+    info = kubernetes_connector.get_worker_info(
+        sub_component_type=SubComponentType.DECODE,
+        backend="vllm",
+        component_name="VllmWorker",
+    )
+
+    assert info.k8s_name == "VllmDecodeWorker"
+
+
+# Static fallback path (connector=None) — covers build_worker_info_from_defaults
+def test_resolve_worker_info_static_fallback_respects_decode_component_name():
+    """resolve_worker_info with connector=None must honour decode_component_name."""
+    from dynamo.planner.monitoring.worker_info import resolve_worker_info
+
+    _, decode_info = resolve_worker_info(
+        backend="vllm",
+        require_prefill=False,
+        require_decode=True,
+        connector=None,
+        config_model_name="some-model",
+        decode_component_name="VllmWorker",
+    )
+
+    assert decode_info.k8s_name == "VllmWorker"
+
+
+def test_initialize_gpu_counts_agg_mode_reads_from_dgd(
+    kubernetes_connector, mock_kube_api
+):
+    """_initialize_gpu_counts must set decode_engine_num_gpu from DGD in agg mode
+    without requiring a CLI flag."""
+    from dynamo.planner.core.budget import _initialize_gpu_counts
+
+    mock_kube_api.get_graph_deployment.return_value = _agg_deployment(gpu=4)
+
+    config = Mock()
+    config.prefill_engine_num_gpu = None
+    config.decode_engine_num_gpu = None
+
+    _initialize_gpu_counts(
+        config,
+        kubernetes_connector,
+        require_prefill=False,
+        require_decode=True,
+        decode_component_name="VllmWorker",
+    )
+
+    assert config.decode_engine_num_gpu == 4
+
+
+def test_get_worker_info_agg_mode_mdc_present_dgd_down(
+    kubernetes_connector, mock_kube_api
+):
+    """k8s_name must remain 'VllmWorker' when MDC is populated but DGD is temporarily down.
+
+    Pins the `dgd_service_name or component_name` guard in get_worker_info: when
+    _resolve_dgd_service returns None (DGD fetch fails), the explicit component_name
+    parameter must be used as the k8s_name_override so the agg worker is still
+    identified correctly in subsequent scaling calls.
+    """
+    mdc_cr = {
+        "metadata": {"name": "test-graph-0-VllmWorker-abc123"},
+        "spec": {
+            "data": {
+                "model_cards": {
+                    "model": {
+                        "type": "Model",
+                        "component": "backend",
+                        "endpoint": "generate",
+                        "card_json": {"display_name": "test-model"},
+                    }
+                }
+            }
+        },
+    }
+    mock_kube_api.custom_api.list_namespaced_custom_object.return_value = {
+        "items": [mdc_cr]
+    }
+    # Simulate DGD temporarily unavailable — _resolve_dgd_service must fall back
+    # to component_name so k8s_name is preserved.
+    mock_kube_api.get_graph_deployment.side_effect = DynamoGraphDeploymentNotFoundError(
+        "test-graph", "default"
+    )
+
+    info = kubernetes_connector.get_worker_info(
+        sub_component_type=SubComponentType.DECODE,
+        backend="vllm",
+        component_name="VllmWorker",
+    )
+
+    assert info.k8s_name == "VllmWorker"

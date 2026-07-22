@@ -18,6 +18,8 @@ import logging
 import os
 from typing import Optional
 
+import httpx
+
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import PlannerConnector
 from dynamo.planner.connectors.clients.kubernetes_api import (
@@ -260,6 +262,8 @@ class KubernetesConnector(PlannerConnector):
         self,
         require_prefill: bool = True,
         require_decode: bool = True,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
     ) -> str:
         """Get the model name from the current deployment."""
         try:
@@ -276,6 +280,8 @@ class KubernetesConnector(PlannerConnector):
             deployment,
             require_prefill=require_prefill,
             require_decode=require_decode,
+            prefill_component_name=prefill_component_name,
+            decode_component_name=decode_component_name,
         )
 
     def _get_model_name_from_deployment(
@@ -347,6 +353,8 @@ class KubernetesConnector(PlannerConnector):
         self,
         require_prefill: bool = True,
         require_decode: bool = True,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
     ) -> tuple[int, int]:
         """Get the GPU counts for prefill and decode components."""
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
@@ -354,6 +362,8 @@ class KubernetesConnector(PlannerConnector):
             deployment,
             require_prefill=require_prefill,
             require_decode=require_decode,
+            prefill_component_name=prefill_component_name,
+            decode_component_name=decode_component_name,
         )
 
     def _get_gpu_counts_from_deployment(
@@ -361,6 +371,8 @@ class KubernetesConnector(PlannerConnector):
         deployment: dict,
         require_prefill: bool = True,
         require_decode: bool = True,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
     ) -> tuple[int, int]:
         """Get GPU counts from an already-fetched deployment.
 
@@ -368,6 +380,9 @@ class KubernetesConnector(PlannerConnector):
             deployment: Deployment dict to inspect
             require_prefill: Whether to require a prefill component
             require_decode: Whether to require a decode component
+            prefill_component_name: Explicit DGD component name for prefill lookup
+            decode_component_name: Explicit DGD component name for decode lookup
+                (required for agg mode where the worker is not typed as decode)
 
         Returns:
             Tuple of (prefill_gpu_count, decode_gpu_count)
@@ -384,6 +399,7 @@ class KubernetesConnector(PlannerConnector):
                 prefill_service = get_component_from_type_or_name(
                     deployment,
                     SubComponentType.PREFILL,
+                    component_name=prefill_component_name,
                 )
                 prefill_gpu_count = prefill_service.get_gpu_count()
             except (PlannerError, ValueError) as e:
@@ -394,6 +410,7 @@ class KubernetesConnector(PlannerConnector):
                 decode_service = get_component_from_type_or_name(
                     deployment,
                     SubComponentType.DECODE,
+                    component_name=decode_component_name,
                 )
                 decode_gpu_count = decode_service.get_gpu_count()
             except (PlannerError, ValueError) as e:
@@ -403,6 +420,215 @@ class KubernetesConnector(PlannerConnector):
             raise DeploymentValidationError(errors)
 
         return prefill_gpu_count, decode_gpu_count
+
+    def get_replica_gpu_counts_for_power_projection(
+        self,
+        deployment: Optional[dict] = None,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
+    ) -> tuple[int, int]:
+        """Return per-replica GPU totals for power projection (per-pod × nodeCount).
+
+        ``get_gpu_counts`` stores per-pod GPU request in config for budget and
+        perf-model paths. Power budget gauges need the replica-wide total for
+        multinode components, so this helper multiplies by ``multinode.nodeCount``
+        without changing shared config semantics.
+        """
+        if deployment is None:
+            deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+
+        prefill_gpu_count = 0
+        decode_gpu_count = 0
+        errors = []
+
+        if require_prefill:
+            try:
+                prefill_service = get_component_from_type_or_name(
+                    deployment,
+                    SubComponentType.PREFILL,
+                    component_name=prefill_component_name,
+                )
+                prefill_gpu_count = prefill_service.get_total_gpu_count()
+            except (PlannerError, ValueError) as e:
+                errors.append(f"Failed to get prefill GPU count: {e}")
+
+        if require_decode:
+            try:
+                decode_service = get_component_from_type_or_name(
+                    deployment,
+                    SubComponentType.DECODE,
+                    component_name=decode_component_name,
+                )
+                decode_gpu_count = decode_service.get_total_gpu_count()
+            except (PlannerError, ValueError) as e:
+                errors.append(f"Failed to get decode GPU count: {e}")
+
+        if errors:
+            raise DeploymentValidationError(errors)
+
+        return prefill_gpu_count, decode_gpu_count
+
+    def get_component_pods(
+        self,
+        sub_component_type: SubComponentType,
+        deployment: Optional[dict] = None,
+        component_name: Optional[str] = None,
+        strict: bool = False,
+    ) -> list:
+        """Return the list of Pod objects for the given sub-component (prefill/decode).
+
+        Uses the operator's canonical pod labels (see
+        deploy/operator/internal/consts/consts.go):
+          - nvidia.com/dynamo-graph-deployment-name=<dgd>
+          - nvidia.com/dynamo-component=<service-key> (e.g. VllmPrefillWorker)
+        Returns an empty list when the service cannot be resolved (e.g. the DGD
+        has no matching component — handled gracefully by the caller).
+
+        ``deployment`` lets a caller that already fetched the DGD this tick
+        (e.g. a power-annotation sweep resolving both prefill and decode) reuse
+        that snapshot, avoiding a redundant apiserver GET per role. When None,
+        the current DGD is fetched.
+
+        ``component_name`` is the fallback DGD component name used when the
+        role cannot be matched by ``type`` alone. Aggregated (``mode=agg``)
+        deployments label their single worker ``type: worker`` (the generic
+        v1beta1 worker type), which does not map to the DECODE role; when that
+        generic worker is unique, the resolver carries the actual DGD component
+        name rather than depending on a backend hard-coded agg name. Ignored
+        when the role matches by type (disagg).
+
+        ``strict`` controls how a component-resolution failure is reported.
+        The default (``False``) swallows the failure and returns ``[]`` so a
+        best-effort annotation sweep stays non-fatal. Callers that must
+        distinguish "resolved, zero pods" from "could not resolve" — e.g. the
+        disabled-mode removal sweep, which latches off after a genuinely clean
+        pass — pass ``strict=True`` to re-raise the resolution error instead of
+        masking it as an empty list.
+        """
+        if deployment is None:
+            deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        try:
+            service = get_component_from_type_or_name(
+                deployment, sub_component_type, component_name=component_name
+            )
+        except (PlannerError, ValueError) as e:
+            # A role legitimately absent from the DGD and a genuine resolution
+            # failure (invalid/renamed component, schema drift) both land here.
+            if strict:
+                # The caller needs to tell a clean sweep from a failed lookup,
+                # so surface the error rather than returning a misleading [].
+                raise
+            # Returning [] keeps the sweep non-fatal, but log so an unexpected
+            # "0 pods annotated" is diagnosable instead of silent.
+            logger.warning(
+                "Could not resolve %s component for DGD %s; annotating no pods "
+                "for this role this sweep: %s",
+                sub_component_type,
+                self.graph_deployment_name,
+                e,
+            )
+            return []
+        label_selector = (
+            f"nvidia.com/dynamo-graph-deployment-name={self.graph_deployment_name},"
+            f"nvidia.com/dynamo-component={service.name}"
+        )
+        return self.kube_api.list_pods_by_label(label_selector)
+
+    def list_frontend_pods(self) -> list:
+        """Return all frontend pods for this DGD.
+
+        Frontends are identified by nvidia.com/dynamo-component-type=frontend
+        (semantic role, robust to service-key naming variation across DGDs).
+        Used by the planner's admission-control fanout.
+        Returns an empty list when no frontend service is running.
+        Raises ApiException on transient apiserver errors (callers must handle).
+        """
+        label_selector = (
+            f"nvidia.com/dynamo-graph-deployment-name={self.graph_deployment_name},"
+            f"nvidia.com/dynamo-component-type=frontend"
+        )
+        return self.kube_api.list_pods_by_label(label_selector)
+
+    @staticmethod
+    def resolve_frontend_http_port(pod, fallback: int) -> int:
+        """Resolve the frontend HTTP port from the live pod spec.
+
+        The operator emits a named port ``http`` on the frontend container
+        (see ``deploy/operator/internal/dynamo/component_frontend.go``; the
+        constant ``DynamoContainerPortName = "http"`` lives in
+        ``deploy/operator/internal/consts/consts.go``).  Reading it from
+        ``V1Pod`` is the deterministic path: it follows DGD-spec port
+        overrides automatically and doesn't require the planner to keep a
+        config mirror of the frontend port in sync with the DGD spec.
+
+        Falls back to ``fallback`` (typically the deprecated
+        ``frontend_http_port`` config field) when the named port is absent —
+        covers legacy manifests authored before the operator started
+        emitting the named port, hand-rolled DGDs that omit ``ports``, and
+        unit-test fixtures that build minimal ``V1Pod`` mocks.
+
+        Args:
+            pod: A ``V1Pod`` (or a duck-typed mock).  The first container
+                with a ``ports[].name == "http"`` entry wins.
+            fallback: Port to return when no named port is found on any
+                container.  Must be a positive ``int``.
+
+        Returns:
+            The container port whose name is ``"http"``, or ``fallback``.
+        """
+        try:
+            containers = (pod.spec.containers if pod.spec else None) or []
+            for container in containers:
+                for port in container.ports or []:
+                    if getattr(port, "name", None) == "http":
+                        return int(port.container_port)
+        except (AttributeError, TypeError, ValueError):
+            # Defensive: malformed pod spec shouldn't take down the
+            # admission-control loop; we always have a fallback.
+            pass
+        return fallback
+
+    async def post_busy_threshold(
+        self,
+        pod,
+        model: str,
+        port: int,
+        active_decode_blocks_threshold: Optional[float],
+        active_prefill_tokens_threshold: Optional[int],
+        active_prefill_tokens_threshold_frac: Optional[float],
+    ) -> None:
+        """POST /busy_threshold to a single frontend pod (admission control).
+
+        Raises on HTTP error or network failure — callers should gather with
+        ``return_exceptions=True`` and inspect the results.
+        Per-pod timeout is 5 s (frontend is in-cluster; long timeouts mask
+        saturation events).
+        """
+        if not pod.status or not pod.status.pod_ip:
+            raise ValueError(
+                f"Pod {pod.metadata.name} has no pod IP; cannot POST /busy_threshold"
+            )
+        pod_ip = pod.status.pod_ip
+
+        # IPv6 literals must be bracketed in a URL authority (RFC 3986);
+        # an IPv6 pod IP always contains ':', IPv4 and hostnames never do.
+        host = f"[{pod_ip}]" if ":" in pod_ip else pod_ip
+        url = f"http://{host}:{port}/busy_threshold"
+        body: dict = {"model": model}
+        if active_decode_blocks_threshold is not None:
+            body["active_decode_blocks_threshold"] = active_decode_blocks_threshold
+        if active_prefill_tokens_threshold is not None:
+            body["active_prefill_tokens_threshold"] = active_prefill_tokens_threshold
+        if active_prefill_tokens_threshold_frac is not None:
+            body[
+                "active_prefill_tokens_threshold_frac"
+            ] = active_prefill_tokens_threshold_frac
+
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.post(url, json=body)
+            r.raise_for_status()
 
     def get_frontend_metrics_url(self, port: int = 8000) -> Optional[str]:
         """Auto-discover the frontend component's metrics URL from the DGD.
@@ -500,7 +726,10 @@ class KubernetesConnector(PlannerConnector):
         return entries
 
     def _resolve_dgd_service(
-        self, sub_component_type: SubComponentType, backend: str
+        self,
+        sub_component_type: SubComponentType,
+        backend: str,
+        component_name_override: Optional[str] = None,
     ) -> tuple[Optional[str], str]:
         """Return (dgd_service_name, component_name_for_filter).
 
@@ -519,6 +748,10 @@ class KubernetesConnector(PlannerConnector):
            :func:`build_worker_info_from_defaults` (e.g. ``"prefill"`` /
            ``"backend"``).
 
+        ``component_name_override`` is the DGD component name to use as the
+        explicit-name fallback when type-only resolution fails (e.g. agg mode
+        where the single worker is typed as ``worker``, not ``decode``).
+
         Note: the DGD component name (``service.name``) must NOT be used for
         filtering -- it is typically PascalCase (``"VllmPrefillWorker"``) and
         would never match the lowercase value the worker writes to MDC.
@@ -527,7 +760,9 @@ class KubernetesConnector(PlannerConnector):
         expected_component = defaults.component_name or ""
         try:
             deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
-            service = get_component_from_type_or_name(deployment, sub_component_type)
+            service = get_component_from_type_or_name(
+                deployment, sub_component_type, component_name=component_name_override
+            )
             user_component = service.get_component_name_from_endpoint_arg()
             if user_component:
                 expected_component = user_component
@@ -539,16 +774,20 @@ class KubernetesConnector(PlannerConnector):
         self,
         sub_component_type: SubComponentType,
         backend: str = "vllm",
+        component_name: Optional[str] = None,
     ) -> WorkerInfo:
         """Get WorkerInfo for a sub-component, trying MDC first, then fallbacks.
 
         Args:
             sub_component_type: PREFILL or DECODE
             backend: Backend framework name (for default fallback)
+            component_name: Explicit DGD component name to use as fallback when
+                type-only resolution fails (e.g. agg mode — see
+                ``_resolve_dgd_service``).
         """
         entries = self._extract_mdc_entries()
         dgd_service_name, expected_component = self._resolve_dgd_service(
-            sub_component_type, backend
+            sub_component_type, backend, component_name_override=component_name
         )
 
         def _dgd_model_name() -> Optional[str]:
@@ -557,7 +796,7 @@ class KubernetesConnector(PlannerConnector):
                     self.graph_deployment_name
                 )
                 service = get_component_from_type_or_name(
-                    deployment, sub_component_type
+                    deployment, sub_component_type, component_name=component_name
                 )
                 return service.get_model_name()
             except PlannerError:
@@ -570,7 +809,7 @@ class KubernetesConnector(PlannerConnector):
                 sub_component_type,
                 backend=backend,
                 model_name_fallback=_dgd_model_name,
-                k8s_name_override=dgd_service_name,
+                k8s_name_override=dgd_service_name or component_name,
             )
             if not info.model_name:
                 logger.warning(
@@ -588,9 +827,11 @@ class KubernetesConnector(PlannerConnector):
             f"No DynamoWorkerMetadata CR found for {sub_component_type.value}. "
             f"Workers may not be registered yet. Falling back to defaults."
         )
-        info = build_worker_info_from_defaults(backend, sub_component_type)
-        if dgd_service_name is not None:
-            info.k8s_name = dgd_service_name
+        info = build_worker_info_from_defaults(
+            backend,
+            sub_component_type,
+            k8s_name_override=dgd_service_name or component_name,
+        )
         arg_model = _dgd_model_name()
         if arg_model:
             info.model_name = arg_model

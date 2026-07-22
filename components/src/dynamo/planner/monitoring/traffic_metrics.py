@@ -221,7 +221,13 @@ class PrometheusAPIClient:
                         and container.metric.model.lower() == model_name.lower()
                         and container.metric.dynamo_namespace == self.dynamo_namespace
                     ):
-                        values.append(container.value[1])
+                        # Drop NaN: increase(_sum)/increase(_count) is 0/0 on
+                        # quiet windows, which Prometheus reports as NaN. We
+                        # treat that as "no data" — symmetric with the router
+                        # path below — to keep Metrics.is_valid() honest.
+                        v = container.value[1]
+                        if not math.isnan(v):
+                            values.append(v)
                 if not values:
                     logger.warning(
                         f"No prometheus metric data available for {full_metric_name} with model {model_name} and dynamo namespace {self.dynamo_namespace}, use 0 instead"
@@ -565,6 +571,55 @@ class PrometheusAPIClient:
                 )
         except Exception as e:
             logger.warning(f"Could not check router scraping status: {e}")
+
+    # ------------------------------------------------------------------
+    # Power-aware planner DCGM queries (Phase 1 dashboard + Phase 3 EMA)
+    # ------------------------------------------------------------------
+
+    def get_total_dgd_power(
+        self,
+        k8s_namespace: str,
+        dgd_name: str,
+    ) -> Optional[float]:
+        """Sum of DCGM-reported per-GPU watts across this DGD (all components).
+
+        Phase 3 (future) support — NOT wired in Phase 1. The closed-loop AIC
+        optimizer will read actual DCGM draw from here. The Phase 1
+        dynamo_planner_power_projected_watts gauge does NOT use this query; it
+        is published by NativePlannerBase from static replica counts and
+        configured caps (see core/base.py::_publish_power_budget_metrics).
+        Returns None when DCGM is unavailable or the query returns no results.
+
+        DCGM workload-attribution labels (added by the DCGM exporter when
+        kubelet/CRI exposes pod info):
+        - ``exported_namespace``: the Kubernetes namespace the workload runs in.
+          The bare ``namespace`` label identifies the DCGM exporter pod itself.
+        - ``nvidia_com_dynamo_graph_deployment_name``: the canonical DGD label
+          that the operator stamps on every workload pod
+          (``nvidia.com/dynamo-graph-deployment-name``), sanitized by the DCGM
+          exporter and emitted directly as a Prometheus label. This is an exact
+          string match, so it is immune to Grove/LWS vs Deployment pod-name
+          shape differences and does not require regex escaping.
+
+        Prerequisite: the DCGM exporter must be configured to expose
+        pod labels (for the upstream Helm chart, ``kubernetes.enablePodLabels``)
+        and include ``nvidia.com/dynamo-graph-deployment-name`` in any label
+        allowlist. In clusters without this label enabled the query returns no
+        data; this is the expected failure mode for unconfigured deployments.
+        """
+        try:
+            result = self.prom.custom_query(
+                f"sum(DCGM_FI_DEV_POWER_USAGE{{"
+                f'exported_namespace="{self._quote_label_value(k8s_namespace)}",'
+                f"nvidia_com_dynamo_graph_deployment_name="
+                f'"{self._quote_label_value(dgd_name)}"}})'
+            )
+            if result:
+                value = float(result[0]["value"][1])
+                return value if math.isfinite(value) else None
+        except Exception as e:
+            logger.debug("get_total_dgd_power query failed: %s", e)
+        return None
 
 
 def parse_frontend_metric_containers(

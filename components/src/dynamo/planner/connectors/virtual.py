@@ -82,6 +82,7 @@ class VirtualConnector(PlannerConnector):
         self,
         sub_component_type: SubComponentType,
         backend: str = "vllm",
+        component_name: "str | None" = None,
     ) -> WorkerInfo:
         worker_info = self.worker_info_provider.get_worker_info(
             sub_component_type, backend

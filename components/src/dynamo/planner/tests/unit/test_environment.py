@@ -199,3 +199,98 @@ def test_gpu_refresh_validates_required_widths(
 
     with pytest.raises(DeploymentValidationError, match=missing_field):
         environment._refresh_gpu_counts()
+
+
+# ---------------------------------------------------------------------------
+# _refresh_component_worker_info
+#
+# Refresh stops only when BOTH max_num_batched_tokens AND k8s_name are populated.
+# k8s_name is included in _MDC_REFRESH_FIELDS so a default name can be repaired
+# once the DGD becomes readable after a transient lookup failure at init time.
+# The power-projection path consumes the stored k8s_name as a component-name
+# override, so a stale None would silently fall back to role-based resolution.
+# ---------------------------------------------------------------------------
+
+
+def _make_environment_impl(
+    controller=None, require_prefill=True, require_decode=True
+) -> PlannerEnvironmentImpl:
+    return PlannerEnvironmentImpl(
+        config=_config(),
+        controller=controller or _controller(),
+        require_prefill=require_prefill,
+        require_decode=require_decode,
+    )
+
+
+def test_refresh_component_worker_info_populates_k8s_name_on_first_call():
+    """Initial assignment copies the full WorkerInfo including k8s_name."""
+    env = _make_environment_impl(require_prefill=False, require_decode=True)
+    assert env.deployment_state().decode.info is None
+
+    env._refresh_worker_info()
+
+    info = env.deployment_state().decode.info
+    assert info is not None
+    assert info.k8s_name == "VllmDecodeWorker"
+
+
+def test_refresh_component_worker_info_repairs_stale_k8s_name():
+    """k8s_name is repaired when max_num_batched_tokens is set but name is still None.
+
+    This covers the cold-start race where the first get_worker_info call succeeds
+    (setting max_num_batched_tokens from MDC) before the DGD lookup has resolved
+    the real component name.  The refresh must continue until k8s_name is also set.
+    """
+    controller = _controller()
+    controller.get_worker_info.side_effect = lambda sub_type, backend: WorkerInfo(
+        k8s_name="VllmDecodeWorker",
+        max_num_batched_tokens=2048,
+    )
+    env = _make_environment_impl(
+        controller=controller, require_prefill=False, require_decode=True
+    )
+    env.deployment_state().decode.info = WorkerInfo(
+        k8s_name=None,
+        max_num_batched_tokens=2048,
+    )
+
+    env._refresh_worker_info()
+
+    assert env.deployment_state().decode.info.k8s_name == "VllmDecodeWorker"
+    controller.get_worker_info.assert_called_once()
+
+
+def test_refresh_component_worker_info_noop_when_both_fields_populated():
+    """No re-query once both max_num_batched_tokens and k8s_name are present."""
+    controller = _controller()
+    env = _make_environment_impl(
+        controller=controller, require_prefill=False, require_decode=True
+    )
+    env.deployment_state().decode.info = WorkerInfo(
+        k8s_name="VllmDecodeWorker",
+        max_num_batched_tokens=2048,
+    )
+
+    env._refresh_worker_info()
+
+    controller.get_worker_info.assert_not_called()
+
+
+def test_refresh_component_worker_info_backfills_mdc_fields():
+    """MDC runtime-config fields are backfilled when info exists but is incomplete."""
+    controller = _controller()
+    controller.get_worker_info.side_effect = lambda sub_type, backend: WorkerInfo(
+        k8s_name="VllmDecodeWorker",
+        max_num_batched_tokens=4096,
+        kv_cache_block_size=16,
+    )
+    env = _make_environment_impl(
+        controller=controller, require_prefill=False, require_decode=True
+    )
+    env.deployment_state().decode.info = WorkerInfo(k8s_name="VllmDecodeWorker")
+
+    env._refresh_worker_info()
+
+    assert env.deployment_state().decode.info.max_num_batched_tokens == 4096
+    assert env.deployment_state().decode.info.kv_cache_block_size == 16

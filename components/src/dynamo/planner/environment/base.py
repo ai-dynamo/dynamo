@@ -26,6 +26,7 @@ from dynamo.planner.monitoring.traffic_metrics import Metrics
 logger = logging.getLogger(__name__)
 
 _MDC_REFRESH_FIELDS = (
+    "k8s_name",
     "total_kv_blocks",
     "kv_cache_block_size",
     "max_num_seqs",
@@ -186,6 +187,7 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         if (
             component_state.info is not None
             and component_state.info.max_num_batched_tokens is not None
+            and component_state.info.k8s_name is not None
         ):
             return
 

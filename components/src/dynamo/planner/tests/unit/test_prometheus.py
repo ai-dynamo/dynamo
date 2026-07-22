@@ -280,6 +280,71 @@ def test_get_average_metric_one_matching_container(mock_prometheus_result):
         assert result == 42.7
 
 
+def test_get_average_metric_frontend_path_filters_nan_values():
+    """Frontend-source path: NaN samples (from 0/0 increase ratios on quiet
+    windows) must be dropped, matching the router-source NaN handling.
+    Without this, Metrics.is_valid() would silently fail on a quiet cluster."""
+    client = PrometheusAPIClient("http://localhost:9090", "target_namespace")
+
+    nan_then_valid = [
+        {
+            "metric": {
+                "container": "main",
+                "dynamo_namespace": "target_namespace",
+                "model": "target_model",
+            },
+            "value": [0.0, "NaN"],
+        },
+        {
+            "metric": {
+                "container": "main",
+                "dynamo_namespace": "target_namespace",
+                "model": "target_model",
+            },
+            "value": [0.0, 12.0],
+        },
+    ]
+
+    with patch.object(client.prom, "custom_query") as mock_query:
+        mock_query.return_value = nan_then_valid
+        result = client._get_average_metric(
+            full_metric_name="test_metric",
+            interval="60s",
+            operation_name="test operation",
+            model_name="target_model",
+        )
+
+    assert result == 12.0
+
+
+def test_get_average_metric_frontend_path_returns_zero_when_only_nan():
+    """If every matching container is NaN, the path must return 0
+    (not propagate NaN), so downstream Metrics.is_valid() stays meaningful."""
+    client = PrometheusAPIClient("http://localhost:9090", "target_namespace")
+
+    only_nan = [
+        {
+            "metric": {
+                "container": "main",
+                "dynamo_namespace": "target_namespace",
+                "model": "target_model",
+            },
+            "value": [0.0, "NaN"],
+        }
+    ]
+
+    with patch.object(client.prom, "custom_query") as mock_query:
+        mock_query.return_value = only_nan
+        result = client._get_average_metric(
+            full_metric_name="test_metric",
+            interval="60s",
+            operation_name="test operation",
+            model_name="target_model",
+        )
+
+    assert result == 0
+
+
 def test_get_average_metric_with_validation_error():
     """Test _get_average_metric with one valid container and one that fails validation"""
     client = PrometheusAPIClient("http://localhost:9090", "target_namespace")
@@ -769,3 +834,118 @@ class TestPrometheusAPIClientRouterSource:
             "dynamo_component_router_requests_total" in r.message
             for r in caplog.records
         )
+
+
+# ---------------------------------------------------------------------------
+# Power-aware planner DCGM queries (regression suite for bug #1)
+#
+# These methods MUST live on PrometheusAPIClient — they were briefly placed
+# on DirectRouterMetricsClient by mistake.  base.py resolves the AIC closed
+# loop's DCGM queries on prometheus_traffic_client (a PrometheusAPIClient
+# instance), so a misplaced method would silently disable that loop.
+# NOTE: get_total_dgd_power is Phase 3 (future) support and is not yet called
+# by base.py in Phase 1 — the projected-watts gauge is published from static
+# config, not this query.  This suite pins its class placement and query shape
+# now so the wiring is correct when the AIC loop lands.  Each test below
+# exists to detect that class of regression.
+# ---------------------------------------------------------------------------
+
+
+class TestPowerAwareDcgmQueries:
+    """Smoke tests pinning the DCGM power queries to PrometheusAPIClient."""
+
+    def _client(self) -> PrometheusAPIClient:
+        return PrometheusAPIClient("http://localhost:9090", "test_namespace")
+
+    def test_get_total_dgd_power_is_method_on_prometheus_api_client(self):
+        """The method must exist on PrometheusAPIClient — not on a sibling class."""
+        client = self._client()
+        assert hasattr(client, "get_total_dgd_power"), (
+            "get_total_dgd_power missing from PrometheusAPIClient — was it "
+            "accidentally placed on DirectRouterMetricsClient?"
+        )
+        assert callable(client.get_total_dgd_power)
+
+    def test_get_total_dgd_power_returns_float_on_match(self):
+        client = self._client()
+        with patch.object(client.prom, "custom_query") as mock_query:
+            mock_query.return_value = [{"value": [0, "1234.5"]}]
+            result = client.get_total_dgd_power(
+                k8s_namespace="kube-namespace", dgd_name="my-dgd"
+            )
+            assert result == pytest.approx(1234.5)
+            # Assert on the raw query string (positional arg), not repr() —
+            # the escaped regex contains backslashes that repr would double.
+            query_str = mock_query.call_args[0][0]
+            assert "DCGM_FI_DEV_POWER_USAGE" in query_str
+            # exported_namespace carries the K8s namespace, NOT the dynamo
+            # logical namespace.  Bare `namespace` would label the DCGM
+            # exporter pod itself (DCGM exporter runs in its own ns), so
+            # using it would silently match nothing once attribution works.
+            assert 'exported_namespace="kube-namespace"' in query_str
+            # DGD identity is matched via the operator-stamped pod label,
+            # not a pod-name regex.
+            assert 'nvidia_com_dynamo_graph_deployment_name="my-dgd"' in query_str
+
+    def test_get_total_dgd_power_label_is_exact_not_regex(self):
+        """dgd_name is an exact label value, not a regex — dots are literal.
+
+        A name like "my.dgd" must match only pods whose label value is
+        exactly "my.dgd"; it must not be treated as a PromQL regex where
+        "." matches any character.  Verifies the switch from exported_pod=~
+        to nvidia_com_...="<exact>".
+        """
+        client = self._client()
+
+        # Name with a dot: must appear as a plain string, no backslash escaping.
+        with patch.object(client.prom, "custom_query") as mock_query:
+            mock_query.return_value = []
+            client.get_total_dgd_power(k8s_namespace="ns", dgd_name="my.dgd")
+            query_str = mock_query.call_args[0][0]
+            assert 'nvidia_com_dynamo_graph_deployment_name="my.dgd"' in query_str
+            assert "exported_pod" not in query_str
+
+        # Plain alphanumeric name: no stray backslashes or regex syntax.
+        with patch.object(client.prom, "custom_query") as mock_query:
+            mock_query.return_value = []
+            client.get_total_dgd_power(k8s_namespace="ns", dgd_name="qwen3quickstart")
+            query_str = mock_query.call_args[0][0]
+            assert (
+                'nvidia_com_dynamo_graph_deployment_name="qwen3quickstart"' in query_str
+            )
+
+    def test_get_total_dgd_power_returns_none_on_empty(self):
+        client = self._client()
+        with patch.object(client.prom, "custom_query") as mock_query:
+            mock_query.return_value = []
+            result = client.get_total_dgd_power(
+                k8s_namespace="kube-namespace", dgd_name="my-dgd"
+            )
+            assert result is None
+
+    def test_get_total_dgd_power_returns_none_on_exception(self):
+        client = self._client()
+        with patch.object(client.prom, "custom_query") as mock_query:
+            mock_query.side_effect = RuntimeError("prom down")
+            result = client.get_total_dgd_power(
+                k8s_namespace="kube-namespace", dgd_name="my-dgd"
+            )
+            assert result is None
+
+    def test_get_total_dgd_power_uses_dgd_label_not_pod_name(self):
+        """DGD identity must be matched via the operator pod label, not pod name.
+
+        The label ``nvidia_com_dynamo_graph_deployment_name`` is the
+        DCGM-exporter-sanitized form of the operator label stamped on every
+        workload pod. Neither ``exported_pod`` (name-regex) nor bare ``pod``
+        must appear.
+        """
+        client = self._client()
+        with patch.object(client.prom, "custom_query") as mock_query:
+            mock_query.return_value = []
+            client.get_total_dgd_power(k8s_namespace="ns", dgd_name="my-dgd")
+            query_str = mock_query.call_args[0][0]
+            assert 'nvidia_com_dynamo_graph_deployment_name="my-dgd"' in query_str
+            assert "exported_pod" not in query_str
+            assert "{pod=" not in query_str
+            assert ",pod=" not in query_str

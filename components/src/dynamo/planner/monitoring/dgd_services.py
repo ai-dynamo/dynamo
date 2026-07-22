@@ -181,6 +181,24 @@ class Service(BaseModel):
                 f"GPU count must be an integer."
             ) from err
 
+    def get_node_count(self) -> int:
+        """Return multinode.nodeCount from the component spec, defaulting to 1.
+
+        The operator CRD defines total GPUs as nodeCount × per-pod GPU request.
+        Single-node components either omit the field or set it to 1.
+        """
+        return int(self.service.get("multinode", {}).get("nodeCount", 1))
+
+    def get_total_gpu_count(self) -> int:
+        """Return total GPUs consumed by one replica: get_gpu_count() × get_node_count().
+
+        For single-node components this equals get_gpu_count(). For multinode
+        components the operator allocates nodeCount pods per replica each
+        carrying the same per-pod GPU request, so power projection must
+        multiply both factors.
+        """
+        return self.get_gpu_count() * self.get_node_count()
+
 
 def get_component_from_type_or_name(
     deployment: dict,
@@ -215,6 +233,20 @@ def get_component_from_type_or_name(
         if not _can_use_explicit_component_name(component, component_type):
             raise SubComponentNotFoundError(component_type.value)
         matching_components.append((component_name, component))
+    elif not matching_components and component_type == SubComponentType.DECODE:
+        generic_workers = [
+            (curr_name, curr_component)
+            for curr_name, curr_component in components.items()
+            if get_component_type(curr_component)
+            == V1BETA1_GENERIC_WORKER_COMPONENT_TYPE
+        ]
+        if len(generic_workers) == 1:
+            matching_components.append(generic_workers[0])
+        elif len(generic_workers) > 1:
+            component_names = [name for name, _ in generic_workers]
+            raise DuplicateSubComponentError(component_type.value, component_names)
+        else:
+            raise SubComponentNotFoundError(component_type.value)
     elif not matching_components:
         raise SubComponentNotFoundError(component_type.value)
 

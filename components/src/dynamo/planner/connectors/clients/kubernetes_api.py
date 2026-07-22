@@ -58,6 +58,7 @@ class KubernetesAPI:
             config.load_kube_config()  # for out-of-cluster deployment
 
         self.custom_api = client.CustomObjectsApi()
+        self.core_api = client.CoreV1Api()
         self.current_namespace = k8s_namespace or get_current_k8s_namespace()
 
     def _get_graph_deployment_from_name(self, graph_deployment_name: str) -> dict:
@@ -287,6 +288,83 @@ class KubernetesAPI:
         is_stable = desired_replicas == updated == traffic_serving_replicas
 
         return traffic_serving_replicas, is_stable
+
+    def patch_pod_annotation(self, pod_name: str, key: str, value: str) -> None:
+        """PATCH a single annotation on a named pod in the current namespace.
+
+        Used by the power-annotation loop to write the per-GPU power-limit
+        annotation so the Power Agent DaemonSet can read and apply it via NVML.
+        Only issues a PATCH when the annotation is missing or has changed
+        (callers do the string-equality check before calling this method).
+
+        Uses application/merge-patch+json (RFC 7396) so the body is treated as
+        a partial object update.  Without this the kubernetes-client defaults to
+        application/json-patch+json (RFC 6902), which expects a list of ops and
+        would reject the dict body with a 415/422.
+        """
+        self.core_api.patch_namespaced_pod(
+            name=pod_name,
+            namespace=self.current_namespace,
+            body={"metadata": {"annotations": {key: value}}},
+            _content_type="application/merge-patch+json",
+        )
+
+    def remove_pod_annotation(self, pod_name: str, key: str) -> None:
+        """Remove a single annotation key from a named pod via JSON merge patch.
+
+        Setting the key to null in a JSON merge patch is the only way to
+        delete an annotation key (a regular PATCH with a missing key is a
+        no-op).  Used by the power-annotation disable/rollback path so the
+        Power Agent can observe the missing key and release the GPU cap.
+
+        Uses application/merge-patch+json (RFC 7396) — same reason as
+        patch_pod_annotation.
+        """
+        self.core_api.patch_namespaced_pod(
+            name=pod_name,
+            namespace=self.current_namespace,
+            body={"metadata": {"annotations": {key: None}}},
+            _content_type="application/merge-patch+json",
+        )
+
+    def list_pods_by_label(self, label_selector: str) -> list:
+        """List all pods in the current namespace matching label_selector.
+
+        Returns all matching pods, paginating transparently with the K8s
+        continue-token protocol so results are not silently truncated at the
+        server's default page size.  Used by
+        KubernetesConnector.get_component_pods() to enumerate the worker pods
+        that belong to a specific prefill or decode service.
+        """
+        items = []
+        _continue = None
+        while True:
+            kwargs = {
+                "namespace": self.current_namespace,
+                "label_selector": label_selector,
+                # Cap page size so the apiserver emits a _continue token and
+                # pagination actually triggers. Without a limit the server
+                # returns all matching objects in one response and _continue
+                # is never set, making the loop a no-op.
+                "limit": 500,
+            }
+            if _continue:
+                # A continue token already encodes the resourceVersion of the
+                # first page. Passing resource_version alongside it is invalid
+                # (the apiserver rejects continue + an explicit resourceVersion),
+                # so only the first page opts into the cache read below.
+                kwargs["_continue"] = _continue
+            else:
+                # First page only: serve from the apiserver watch cache instead
+                # of forcing a quorum etcd read. A few hundred ms of cache
+                # staleness is acceptable for annotation reconciliation.
+                kwargs["resource_version"] = "0"
+            resp = self.core_api.list_namespaced_pod(**kwargs)
+            items.extend(resp.items)
+            _continue = (resp.metadata or {}) and resp.metadata._continue
+            if not _continue:
+                break
+        return items
 
     async def wait_for_graph_deployment_ready(
         self,

@@ -865,10 +865,11 @@ class TestRefreshWorkerInfoFromConnector:
         assert self._decode_info(planner).context_length == 4096
 
     def test_noop_when_already_set(self):
-        """Does not re-query once max_num_batched_tokens is populated."""
+        """Does not re-query once both max_num_batched_tokens and k8s_name are set."""
         planner = self._make_planner()
         planner.environment.deployment_state().decode.info = WorkerInfo(
-            max_num_batched_tokens=2048
+            k8s_name="VllmDecodeWorker",
+            max_num_batched_tokens=2048,
         )
 
         mock_connector = self._install_mock_connector(

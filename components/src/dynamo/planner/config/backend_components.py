@@ -32,9 +32,6 @@ class VllmComponentName(ComponentName):
     decode_worker_k8s_name = "VllmDecodeWorker"
     decode_worker_component_name = "backend"
     decode_worker_endpoint = "generate"
-    # Aggregated mode emits a single worker; name matches VllmWorker
-    # log identifier in dynamo.vllm.main.
-    agg_worker_k8s_name = "VllmWorker"
 
 
 class SGLangComponentName(ComponentName):
@@ -79,3 +76,24 @@ WORKER_COMPONENT_NAMES: dict[str, type[ComponentName]] = {
     "trtllm": TrtllmComponentName,
     "mocker": MockerComponentName,
 }
+
+
+def get_planner_k8s_component_names(backend: str) -> tuple["str | None", "str | None"]:
+    """Return the backend-default DGD/K8s component names.
+
+    The returned names are only explicit-name fallbacks. The DGD is still the
+    source of truth: aggregated deployments often declare a single generic
+    ``type: worker`` component whose actual name varies by manifest. The
+    component resolver handles that by selecting the unique generic worker from
+    the DGD and returning its actual name.
+
+    Returns:
+        (prefill_k8s_name, decode_k8s_name), either of which may be None if
+        the backend is unknown.
+    """
+    defaults = WORKER_COMPONENT_NAMES.get(backend)
+    if defaults is None:
+        return None, None
+    prefill = defaults.prefill_worker_k8s_name or None
+    decode = defaults.decode_worker_k8s_name or None
+    return prefill, decode
