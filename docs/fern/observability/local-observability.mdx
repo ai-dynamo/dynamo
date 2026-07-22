@@ -71,15 +71,35 @@ local OpenTelemetry Collector sends traces to Tempo and logs to Loki.
 <Steps toc={true}>
 <Step title="Launch a traced deployment" id="launch-a-traced-deployment">
 
-Run the aggregated vLLM tracing example:
+Select the tab for your accelerator:
 
-```bash
-cd examples/backends/vllm/launch
-./agg_tracing.sh
-```
+<Tabs>
+  <Tab title="NVIDIA GPU">
 
-For a two-GPU prefill/decode deployment, use `./disagg_tracing.sh` instead. The scripts enable JSONL
-logging and OTLP export over gRPC and assign service names to the Dynamo processes.
+  Run the aggregated vLLM tracing example:
+
+  ```bash
+  cd examples/backends/vllm/launch
+  ./agg_tracing.sh
+  ```
+
+  For a two-GPU prefill/decode deployment, use `./disagg_tracing.sh` instead.
+
+  </Tab>
+  <Tab title="Intel GPU">
+
+  Run the aggregated vLLM tracing example:
+
+  ```bash
+  cd examples/backends/vllm/launch/xpu
+  ./agg_tracing_xpu.sh
+  ```
+
+  </Tab>
+</Tabs>
+
+The scripts enable JSONL logging and OTLP export over gRPC and assign service names to the Dynamo
+processes.
 
 </Step>
 <Step title="Send an identifiable request" id="send-an-identifiable-request">
