@@ -68,6 +68,15 @@ class _SchedulerCacheMetrics:
     private CollectorRegistry keeps these metrics out of this process's global
     REGISTRY so they are never exported twice when the engine core runs
     in-process.
+
+    This filesystem transport only covers EngineCore processes that inherit
+    PROMETHEUS_MULTIPROC_DIR and share a filesystem with the metrics-serving
+    process — the default local-subprocess topology. Remote EngineCore actors
+    (Ray data-parallel placement) don't inherit the env var and write to their
+    own node's filesystem, so their cache metrics are never exported; covering
+    them would need EC-connector stats plumbed through EngineCoreOutputs, as
+    KV connectors do. The connector logs a warning for these topologies at
+    init instead of failing.
     """
 
     def __init__(
@@ -199,17 +208,34 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
 
         # Only the scheduler role does cache accounting, so only it emits
         # metrics; worker-role instances would just publish idle zeros.
-        extra_config = transfer_config.ec_connector_extra_config
-        self._metrics: _SchedulerCacheMetrics | None = (
-            _SchedulerCacheMetrics(
+        self._metrics: _SchedulerCacheMetrics | None = None
+        if role == ECConnectorRole.SCHEDULER:
+            extra_config = transfer_config.ec_connector_extra_config
+            self._metrics = _SchedulerCacheMetrics(
                 model_name=extra_config.get("model_name", ""),
                 component_name=extra_config.get("component", ""),
                 capacity_bytes=self._capacity_bytes,
                 dp_rank=getattr(vllm_config.parallel_config, "data_parallel_rank", 0),
             )
-            if role == ECConnectorRole.SCHEDULER
-            else None
-        )
+            # The mmap transport (see _SchedulerCacheMetrics) needs the env
+            # var inherited from the metrics-serving process; without it the
+            # values stay in this process's memory.
+            if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
+                logger.warning(
+                    "Embedding cache metrics: PROMETHEUS_MULTIPROC_DIR is not "
+                    "set; cache metrics stay local to this process and will "
+                    "not be exported (expected under offline LLM() usage or "
+                    "remote Ray DP actors)."
+                )
+            if (
+                getattr(vllm_config.parallel_config, "data_parallel_backend", "")
+                == "ray"
+            ):
+                logger.warning(
+                    "Embedding cache metrics: data_parallel_backend=ray — "
+                    "remote DP ranks do not share the multiprocess Prometheus "
+                    "directory and will not contribute cache metrics."
+                )
 
         # --- Worker-side: dumb CPU tensor store ---
         self._cpu_store: dict[str, torch.Tensor] = {}
