@@ -40,8 +40,8 @@ use dynamo_kv_router::protocols::PrefillLoadHint;
 #[cfg(test)]
 use dynamo_runtime::transports::event_plane::MsgpackCodec;
 
-// Match the existing standalone replica-sync queue. Senders wait asynchronously when it is full,
-// preserving the pre-existing fire-and-forget behavior rather than dropping lifecycle events.
+// Match the existing standalone replica-sync queue. Lifecycle callers enqueue without awaiting;
+// if the queue is full, the newest event is dropped without blocking the local mutation.
 const REPLICA_EVENT_CHANNEL_CAPACITY: usize = 100_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,40 +59,60 @@ fn active_sequence_event_wire_format(
     }
 }
 
-enum ActiveSequenceEventPublisher {
-    Nats(Box<EventPublisher>),
-    Zmq(mpsc::Sender<ActiveSequenceEvent>),
+struct ActiveSequenceEventSender {
+    event_tx: mpsc::Sender<ActiveSequenceEvent>,
 }
 
-/// Concrete [`SequencePublisher`] backed by the runtime event plane and Prometheus gauges.
-pub struct RuntimeSequencePublisher {
-    event_publisher: Option<ActiveSequenceEventPublisher>,
-    metrics_publisher: Arc<EventPublisher>,
-    worker_status_metrics: Arc<RouterWorkerStatusMetrics>,
-}
+impl ActiveSequenceEventSender {
+    fn channel(capacity: usize) -> (Self, mpsc::Receiver<ActiveSequenceEvent>) {
+        let (event_tx, event_rx) = mpsc::channel(capacity);
+        (Self { event_tx }, event_rx)
+    }
 
-impl RuntimeSequencePublisher {
-    async fn publish_owned_event(&self, event: ActiveSequenceEvent) -> anyhow::Result<()> {
-        let Some(event_publisher) = &self.event_publisher else {
-            return Ok(());
-        };
-        match event_publisher {
-            ActiveSequenceEventPublisher::Nats(publisher) => publisher.publish(&event).await,
-            ActiveSequenceEventPublisher::Zmq(event_tx) => event_tx
-                .send(event)
-                .await
-                .map_err(|_| anyhow::anyhow!("active-sequence replica publisher is closed")),
+    fn enqueue(&self, event: ActiveSequenceEvent) -> anyhow::Result<()> {
+        match self.event_tx.try_send(event) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(event)) => anyhow::bail!(
+                "active-sequence publish queue full; dropping newest event \
+                 (request_id={}, worker={:?}, capacity={})",
+                event.request_id,
+                event.worker,
+                self.event_tx.max_capacity()
+            ),
+            Err(mpsc::error::TrySendError::Closed(event)) => anyhow::bail!(
+                "active-sequence publish queue closed; dropping event \
+                 (request_id={}, worker={:?}, capacity={})",
+                event.request_id,
+                event.worker,
+                self.event_tx.max_capacity()
+            ),
         }
     }
 }
 
-impl SequencePublisher for RuntimeSequencePublisher {
-    async fn publish_event(&self, event: &ActiveSequenceEvent) -> anyhow::Result<()> {
-        self.publish_owned_event(event.clone()).await
-    }
+fn active_sequence_event_channel(
+    enabled: bool,
+    capacity: usize,
+) -> Option<(
+    ActiveSequenceEventSender,
+    mpsc::Receiver<ActiveSequenceEvent>,
+)> {
+    enabled.then(|| ActiveSequenceEventSender::channel(capacity))
+}
 
-    async fn publish_event_owned(&self, event: ActiveSequenceEvent) -> anyhow::Result<()> {
-        self.publish_owned_event(event).await
+/// Concrete [`SequencePublisher`] backed by the runtime event plane and Prometheus gauges.
+pub struct RuntimeSequencePublisher {
+    event_sender: Option<ActiveSequenceEventSender>,
+    metrics_publisher: Arc<EventPublisher>,
+    worker_status_metrics: Arc<RouterWorkerStatusMetrics>,
+}
+
+impl SequencePublisher for RuntimeSequencePublisher {
+    fn enqueue_event(&self, event: ActiveSequenceEvent) -> anyhow::Result<()> {
+        let Some(event_sender) = &self.event_sender else {
+            return Ok(());
+        };
+        event_sender.enqueue(event)
     }
 
     fn publish_load(&self, load: ActiveLoad) {
@@ -147,6 +167,30 @@ impl SequencePublisher for RuntimeSequencePublisher {
     fn observe_worker_removed(&self, worker: &WorkerWithDpRank, worker_type: &str) {
         self.worker_status_metrics
             .remove_worker(worker.worker_id, worker.dp_rank, worker_type);
+    }
+}
+
+async fn run_replica_singleton_publisher(
+    publisher: EventPublisher,
+    mut event_rx: mpsc::Receiver<ActiveSequenceEvent>,
+    cancellation_token: CancellationToken,
+) {
+    loop {
+        let event = tokio::select! {
+            _ = cancellation_token.cancelled() => break,
+            event = event_rx.recv() => match event {
+                Some(event) => event,
+                None => break,
+            },
+        };
+        if let Err(error) = publisher.publish(&event).await {
+            tracing::error!(
+                request_id = %event.request_id,
+                worker = ?event.worker,
+                error = %error,
+                "Failed to publish active-sequence replica event"
+            );
+        }
     }
 }
 
@@ -320,7 +364,9 @@ pub async fn create_multi_worker_sequences(
     cancellation_token: CancellationToken,
 ) -> Result<Arc<ActiveSequencesMulti>> {
     let transport_kind = endpoint.drt().default_event_transport_kind();
-    let event_publisher = if replica_sync {
+    let event_sender = if let Some((event_sender, event_rx)) =
+        active_sequence_event_channel(replica_sync, REPLICA_EVENT_CHANNEL_CAPACITY)
+    {
         let event_publisher = EventPublisher::for_endpoint_with_transport(
             &endpoint,
             ACTIVE_SEQUENCES_SUBJECT,
@@ -328,19 +374,22 @@ pub async fn create_multi_worker_sequences(
         )
         .await?;
         match active_sequence_event_wire_format(transport_kind) {
-            ActiveSequenceEventWireFormat::Singleton => Some(ActiveSequenceEventPublisher::Nats(
-                Box::new(event_publisher),
-            )),
+            ActiveSequenceEventWireFormat::Singleton => {
+                tokio::spawn(run_replica_singleton_publisher(
+                    event_publisher,
+                    event_rx,
+                    cancellation_token.child_token(),
+                ));
+            }
             ActiveSequenceEventWireFormat::Batch => {
-                let (event_tx, event_rx) = mpsc::channel(REPLICA_EVENT_CHANNEL_CAPACITY);
                 tokio::spawn(run_replica_batch_publisher(
                     event_publisher,
                     event_rx,
                     cancellation_token.child_token(),
                 ));
-                Some(ActiveSequenceEventPublisher::Zmq(event_tx))
             }
         }
+        Some(event_sender)
     } else {
         None
     };
@@ -349,7 +398,7 @@ pub async fn create_multi_worker_sequences(
     let worker_status_metrics = RouterWorkerStatusMetrics::from_component(endpoint.component());
 
     let publisher = RuntimeSequencePublisher {
-        event_publisher,
+        event_sender,
         metrics_publisher,
         worker_status_metrics,
     };
@@ -418,6 +467,73 @@ mod tests {
             router_id: 7,
             lora_name: None,
         }
+    }
+
+    fn add_event(request_id: impl Into<String>) -> ActiveSequenceEvent {
+        ActiveSequenceEvent {
+            request_id: request_id.into(),
+            worker: WorkerWithDpRank::new(1, 0),
+            data: ActiveSequenceEventData::AddRequest {
+                token_sequence: None,
+                track_prefill_tokens: false,
+                expected_output_tokens: None,
+                prefill_load_hint: None,
+            },
+            router_id: 7,
+            lora_name: None,
+        }
+    }
+
+    fn mark_event(request_id: impl Into<String>) -> ActiveSequenceEvent {
+        ActiveSequenceEvent {
+            request_id: request_id.into(),
+            worker: WorkerWithDpRank::new(1, 0),
+            data: ActiveSequenceEventData::MarkPrefillCompleted,
+            router_id: 7,
+            lora_name: None,
+        }
+    }
+
+    #[test]
+    fn active_sequence_publish_sender_preserves_lifecycle_order() {
+        let (sender, mut event_rx) = ActiveSequenceEventSender::channel(3);
+        sender.enqueue(add_event("ordered")).unwrap();
+        sender.enqueue(mark_event("ordered")).unwrap();
+        sender.enqueue(free_event("ordered")).unwrap();
+
+        assert!(matches!(
+            event_rx.try_recv().unwrap().data,
+            ActiveSequenceEventData::AddRequest { .. }
+        ));
+        assert!(matches!(
+            event_rx.try_recv().unwrap().data,
+            ActiveSequenceEventData::MarkPrefillCompleted
+        ));
+        assert!(matches!(
+            event_rx.try_recv().unwrap().data,
+            ActiveSequenceEventData::Free
+        ));
+    }
+
+    #[test]
+    fn active_sequence_publish_sender_drops_newest_when_full() {
+        let (sender, mut event_rx) = ActiveSequenceEventSender::channel(1);
+        sender.enqueue(add_event("accepted")).unwrap();
+
+        let error = sender
+            .enqueue(free_event("dropped"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("queue full"));
+        assert!(error.contains("request_id=dropped"));
+        assert!(error.contains("capacity=1"));
+        assert_eq!(event_rx.len(), 1);
+        assert_eq!(event_rx.try_recv().unwrap().request_id, "accepted");
+    }
+
+    #[test]
+    fn active_sequence_publish_channel_is_absent_when_replica_sync_disabled() {
+        assert!(active_sequence_event_channel(false, 1).is_none());
     }
 
     #[tokio::test(start_paused = true)]

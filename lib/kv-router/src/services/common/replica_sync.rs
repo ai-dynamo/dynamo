@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashSet;
-use std::future::{self, Future};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -133,35 +132,37 @@ impl ScopedSequencePublisher {
 }
 
 impl SequencePublisher for ScopedSequencePublisher {
-    fn publish_event(
-        &self,
-        event: &ActiveSequenceEvent,
-    ) -> impl Future<Output = Result<()>> + Send {
+    fn enqueue_event(&self, event: ActiveSequenceEvent) -> Result<()> {
         let Some(replica) = &self.replica else {
-            return future::ready(Ok(()));
+            return Ok(());
         };
         let envelope = ScopedReplicaEvent {
             model_name: replica.model_name.to_string(),
             routing_group: replica.routing_group.to_string(),
             block_size: replica.block_size,
-            event: event.clone(),
+            event,
         };
-        let result = match replica.tx.try_send(envelope) {
+        match replica.tx.try_send(envelope) {
             Ok(()) => Ok(()),
-            Err(mpsc::error::TrySendError::Full(event)) => {
-                tracing::trace!(
-                    model_name = %event.model_name,
-                    routing_group = %event.routing_group,
-                    request_id = %event.event.request_id,
-                    "Replica publisher channel full; dropping event"
-                );
-                Ok(())
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                Err(anyhow!("replica publisher channel is closed"))
-            }
-        };
-        future::ready(result)
+            Err(mpsc::error::TrySendError::Full(event)) => Err(anyhow!(
+                "replica publisher channel full; dropping newest event \
+                     (model_name={}, routing_group={}, request_id={}, worker={:?}, capacity={})",
+                event.model_name,
+                event.routing_group,
+                event.event.request_id,
+                event.event.worker,
+                replica.tx.max_capacity()
+            )),
+            Err(mpsc::error::TrySendError::Closed(event)) => Err(anyhow!(
+                "replica publisher channel closed; dropping event \
+                     (model_name={}, routing_group={}, request_id={}, worker={:?}, capacity={})",
+                event.model_name,
+                event.routing_group,
+                event.event.request_id,
+                event.event.worker,
+                replica.tx.max_capacity()
+            )),
+        }
     }
 
     fn publish_load(&self, _load: ActiveLoad) {}
@@ -601,11 +602,13 @@ mod tests {
             ScopedSequencePublisher::enabled(Arc::from("model"), Arc::from("group"), 16, tx);
         let event = event().event;
 
-        publisher.publish_event(&event).await.unwrap();
-        publisher.publish_event(&event).await.unwrap();
+        publisher.enqueue_event(event.clone()).unwrap();
+        let error = publisher.enqueue_event(event).unwrap_err().to_string();
 
         assert_eq!(rx.len(), 1);
         assert_eq!(rx.recv().await.unwrap().event.request_id, "request");
+        assert!(error.contains("channel full"));
+        assert!(error.contains("capacity=1"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
