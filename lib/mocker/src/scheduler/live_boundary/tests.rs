@@ -106,7 +106,7 @@ fn pass() -> EnginePassResult {
         completed_requests: 1,
         output_signals: vec![OutputSignal {
             uuid: request_id,
-            token_id: None,
+            token_id: Some(1),
             completed: true,
             rejected: false,
             handoff_delay_ms: None,

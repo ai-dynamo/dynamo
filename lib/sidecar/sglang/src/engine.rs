@@ -477,6 +477,14 @@ fn resolve_bootstrap_host_with_local(
     if let Some(host) = explicit.filter(|host| !host.trim().is_empty()) {
         return Ok(Some(host.trim().to_string()));
     }
+    let from_server = discovery
+        .server_info
+        .get("host")
+        .and_then(Value::as_str)
+        .filter(|host| is_routable_host(host));
+    if let Some(host) = from_server {
+        return Ok(Some(host.trim().to_string()));
+    }
     let from_dist = discovery
         .server_info
         .get("dist_init_addr")
@@ -628,11 +636,29 @@ mod tests {
     }
 
     #[test]
-    fn dist_init_addr_precedes_local_address() {
+    fn server_host_precedes_dist_init_addr() {
         let host = resolve_bootstrap_host_with_local(
             None,
             "http://127.0.0.1:30001",
-            &discovery(json!({"dist_init_addr": "10.0.0.1:20000"})),
+            &discovery(json!({
+                "host": "10.0.0.1",
+                "dist_init_addr": "10.0.0.2:20000"
+            })),
+            "10.0.0.3",
+        )
+        .unwrap();
+        assert_eq!(host.as_deref(), Some("10.0.0.1"));
+    }
+
+    #[test]
+    fn wildcard_server_host_uses_dist_init_addr() {
+        let host = resolve_bootstrap_host_with_local(
+            None,
+            "http://127.0.0.1:30001",
+            &discovery(json!({
+                "host": "0.0.0.0",
+                "dist_init_addr": "10.0.0.1:20000"
+            })),
             "10.0.0.2",
         )
         .unwrap();

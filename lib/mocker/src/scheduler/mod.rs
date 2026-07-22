@@ -125,12 +125,12 @@ pub(crate) fn build_fpm_snapshot(
 }
 
 /// Return (visible output tokens, request-forwards) for accept-length
-/// accounting. One output signal corresponds to one visible token; multiple
-/// signals with the same UUID in a pass are an MTP/spec-decode burst.
+/// accounting. A signal with a token corresponds to one visible token; multiple
+/// token signals with the same UUID in a pass are an MTP/spec-decode burst.
 pub(crate) fn accept_length_sample(output_signals: &[OutputSignal]) -> (usize, usize) {
     let visible_tokens = output_signals
         .iter()
-        .filter(|signal| !signal.rejected)
+        .filter(|signal| !signal.rejected && signal.token_id.is_some())
         .count();
     if visible_tokens == 0 {
         return (0, 0);
@@ -138,7 +138,7 @@ pub(crate) fn accept_length_sample(output_signals: &[OutputSignal]) -> (usize, u
 
     let request_forwards = output_signals
         .iter()
-        .filter(|signal| !signal.rejected)
+        .filter(|signal| !signal.rejected && signal.token_id.is_some())
         .map(|signal| signal.uuid)
         .collect::<std::collections::HashSet<_>>()
         .len();
@@ -665,6 +665,43 @@ mod tests {
         assert_eq!(acc.count, 0);
         assert_eq!(acc.sum, 0.0);
         assert_eq!(acc.variance(), 0.0);
+    }
+
+    #[test]
+    fn accept_length_ignores_terminal_signals_without_tokens() {
+        let token_uuid = Uuid::from_u128(1);
+        let signals = [
+            OutputSignal {
+                uuid: Uuid::from_u128(2),
+                token_id: None,
+                completed: true,
+                rejected: false,
+                handoff_delay_ms: None,
+            },
+            OutputSignal {
+                uuid: token_uuid,
+                token_id: Some(7),
+                completed: false,
+                rejected: false,
+                handoff_delay_ms: None,
+            },
+            OutputSignal {
+                uuid: token_uuid,
+                token_id: Some(8),
+                completed: true,
+                rejected: false,
+                handoff_delay_ms: None,
+            },
+            OutputSignal {
+                uuid: Uuid::from_u128(3),
+                token_id: Some(9),
+                completed: true,
+                rejected: true,
+                handoff_delay_ms: None,
+            },
+        ];
+
+        assert_eq!(accept_length_sample(&signals), (2, 1));
     }
 
     #[test]

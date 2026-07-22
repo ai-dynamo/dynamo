@@ -109,6 +109,7 @@ struct ScheduledWork {
     total_tokens: usize,
     prompt_tokens: usize,
     prefix_tokens: usize,
+    terminal_after_schedule: bool,
     /// Full prompt length, captured at schedule time for FPM variance calculation.
     prompt_len: usize,
     /// Total sequence length (prompt + generated) at schedule time, used for
@@ -1689,9 +1690,10 @@ impl VllmCore {
             ))
         });
 
-        let scheduled_decodes = scheduled
-            .values()
-            .filter_map(|work| (work.prompt_tokens == 0).then_some(work.sequence_len as u64));
+        let scheduled_decodes = scheduled.values().filter_map(|work| {
+            (work.prompt_tokens == 0 && !work.terminal_after_schedule)
+                .then_some(work.sequence_len as u64)
+        });
 
         let queued_prefills = self.state.waiting.iter().filter_map(|uuid| {
             let request = self.state.requests.get(uuid)?;
@@ -1894,12 +1896,16 @@ impl VllmCore {
             .get(&uuid)
             .map(|r| r.sequence.len())
             .unwrap_or(0);
+        let terminal_after_schedule = self.state.requests.get(&uuid).is_some_and(|request| {
+            policy::generation_complete(&request.sequence, self.args.max_model_len)
+        });
         scheduled.insert(
             uuid,
             ScheduledWork {
                 total_tokens: tokens_used,
                 prompt_tokens,
                 prefix_tokens: prompt_before,
+                terminal_after_schedule,
                 prompt_len,
                 sequence_len,
             },
@@ -1936,25 +1942,63 @@ impl VllmCore {
         decode_start_ms: f64,
     ) -> (Duration, Vec<OutputSignal>) {
         let mut ready = Vec::with_capacity(self.state.running.len());
+        let mut already_complete = Vec::new();
         let mut total_length = 0usize;
         for uuid in self.state.running.iter().copied() {
             let Some(request) = self.state.requests.get(&uuid) else {
                 continue;
             };
-            if request.num_computed_tokens < request.sequence.len()
-                || policy::generation_complete(&request.sequence, self.args.max_model_len)
-            {
+            if request.num_computed_tokens < request.sequence.len() {
+                continue;
+            }
+            if policy::generation_complete(&request.sequence, self.args.max_model_len) {
+                let handoff_delay_ms = compute_prefill_handoff_delay_ms(
+                    self.args.worker_type,
+                    true,
+                    request.sequence.num_input_tokens(),
+                    self.args.kv_transfer_bandwidth,
+                    self.args.kv_bytes_per_token,
+                );
+                let effects = split_terminal_effects(request.sequence.terminal_signals());
+                debug_assert!(effects.immediate.is_empty());
+                already_complete.push((uuid, handoff_delay_ms, effects.cleanup));
                 continue;
             }
             ready.push(uuid);
             total_length += request.sequence.len();
         }
+
+        // Requests already terminal after prefill must release their running slots
+        // without manufacturing an output token.
+        let mut output_signals = Vec::with_capacity(already_complete.len() + ready.len());
+        for (uuid, handoff_delay_ms, cleanup) in already_complete {
+            self.complete_source(uuid, cleanup);
+            output_signals.push(OutputSignal {
+                uuid,
+                token_id: None,
+                completed: true,
+                rejected: false,
+                handoff_delay_ms,
+            });
+        }
+
         if ready.is_empty() {
-            return (Duration::ZERO, Vec::new());
+            if !output_signals.is_empty() {
+                self.state.compact_running();
+            }
+            return (Duration::ZERO, output_signals);
         }
 
         if self.speculative_sampler.is_some() {
-            return self.emit_speculative_ready_tokens(ready, collector, decode_start_ms);
+            if output_signals.is_empty() {
+                return self.emit_speculative_ready_tokens(ready, collector, decode_start_ms);
+            }
+
+            self.state.compact_running();
+            let (decode_time, mut speculative_signals) =
+                self.emit_speculative_ready_tokens(ready, collector, decode_start_ms);
+            output_signals.append(&mut speculative_signals);
+            return (decode_time, output_signals);
         }
 
         // For prefill workers, the first decode token is produced as part of
@@ -1975,8 +2019,7 @@ impl VllmCore {
             (dt, decode_start_ms + dt.as_secs_f64() * 1000.0)
         };
 
-        let mut output_signals = Vec::with_capacity(ready.len());
-        let mut running_changed = false;
+        let mut running_changed = !output_signals.is_empty();
         for uuid in ready {
             let mut emitted = false;
             let mut emitted_token_id = None;

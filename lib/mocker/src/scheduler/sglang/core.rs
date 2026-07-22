@@ -65,10 +65,8 @@ impl ReservedSglangDecode {
         let allocated_tokens = kv.allocated_tokens;
         let prompt_tokens = request.prompt_tokens.clone();
         let alloc = kv_manager.activate_destination(kv, &prompt_tokens);
-        request.last_node = Some(alloc.last_node);
-        request.kv_indices = alloc.kv_indices;
+        request.kv_lease = alloc.lease;
         request.materialized_tokens = request.prompt_len();
-        request.cached_tokens = request.page_aligned_materialized_tokens(block_size);
         request.allocated_tokens = allocated_tokens;
         request.debug_assert_invariants(block_size);
         request
@@ -458,12 +456,7 @@ impl SglangCore {
         let Some(mut request) = request else {
             return false;
         };
-        let capacity_improved = !request.kv_indices.is_empty() || request.last_node.is_some();
-        self.kv_manager
-            .free_indices(&request.kv_indices[request.cached_tokens..]);
-        if let Some(last_node) = request.last_node.take() {
-            self.kv_manager.free_request(last_node);
-        }
+        let capacity_improved = self.kv_manager.abort(std::mem::take(&mut request.kv_lease));
         self.source_holds.remove_request(request_id);
         self.active_destination_handoffs.remove_request(request_id);
         if capacity_improved {
@@ -635,6 +628,7 @@ impl SglangCore {
         let scheduled_decode_lens: Vec<u64> = self
             .running
             .iter()
+            .filter(|req| req.remaining_output_tokens() > 0)
             .map(|req| req.current_sequence_len() as u64)
             .collect();
 
@@ -654,7 +648,9 @@ impl SglangCore {
 
         if let Some(collector) = collector {
             for signal in &decode.output_signals {
-                collector.on_token(signal.uuid, decode.end_ms);
+                if signal.token_id.is_some() {
+                    collector.on_token(signal.uuid, decode.end_ms);
+                }
             }
         }
 
@@ -713,13 +709,16 @@ impl SglangCore {
                     .map(|reservation| reservation.request.prompt_len() as u64),
             );
         let fpm = build_fpm_snapshot(
-            prefill_fpm.iter().map(|p| {
-                (
-                    p.prompt_len as u64,
-                    p.prefix_tokens as u64,
-                    p.tokens_computed as u64,
-                )
-            }),
+            prefill_fpm
+                .iter()
+                .filter(|p| p.tokens_computed > 0)
+                .map(|p| {
+                    (
+                        p.prompt_len as u64,
+                        p.prefix_tokens as u64,
+                        p.tokens_computed as u64,
+                    )
+                }),
             scheduled_decode_lens.into_iter(),
             queued_prefills,
             ordinary_queued_decodes.chain(preactivation_decodes),
