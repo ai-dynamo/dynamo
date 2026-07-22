@@ -308,6 +308,14 @@ struct SelectServiceCli {
     #[arg(long)]
     selection_cache_max_bytes: Option<usize>,
 
+    /// Assume KV cache reuse when deriving active-sequence identities
+    #[arg(long, conflicts_with = "no_router_assume_kv_reuse")]
+    router_assume_kv_reuse: bool,
+
+    /// Generate random active-sequence identities instead of assuming KV reuse
+    #[arg(long, conflicts_with = "router_assume_kv_reuse")]
+    no_router_assume_kv_reuse: bool,
+
     /// Hash function for router-derived active-sequence identities
     #[arg(long)]
     router_tracking_hash: Option<TrackingHashAlgorithm>,
@@ -319,6 +327,19 @@ struct SelectServiceCli {
     /// Provider-managed tracking-key epoch identifier
     #[arg(long)]
     router_tracking_key_id: Option<String>,
+}
+
+#[cfg(feature = "select-service")]
+impl SelectServiceCli {
+    fn router_assume_kv_reuse_override(&self) -> Option<bool> {
+        if self.router_assume_kv_reuse {
+            Some(true)
+        } else if self.no_router_assume_kv_reuse {
+            Some(false)
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(all(test, feature = "select-service"))]
@@ -380,6 +401,34 @@ mod select_service_cli_tests {
         assert_eq!(config.max_entries, 100);
         assert_eq!(config.max_bytes, 1_048_576);
     }
+
+    #[test]
+    fn parses_router_assume_kv_reuse_overrides() {
+        let default = SelectServiceCli::try_parse_from(["dynamo.select_service"]).unwrap();
+        assert_eq!(default.router_assume_kv_reuse_override(), None);
+
+        let enabled = SelectServiceCli::try_parse_from([
+            "dynamo.select_service",
+            "--router-assume-kv-reuse",
+        ])
+        .unwrap();
+        assert_eq!(enabled.router_assume_kv_reuse_override(), Some(true));
+
+        let disabled = SelectServiceCli::try_parse_from([
+            "dynamo.select_service",
+            "--no-router-assume-kv-reuse",
+        ])
+        .unwrap();
+        assert_eq!(disabled.router_assume_kv_reuse_override(), Some(false));
+
+        let conflict = SelectServiceCli::try_parse_from([
+            "dynamo.select_service",
+            "--router-assume-kv-reuse",
+            "--no-router-assume-kv-reuse",
+        ])
+        .unwrap_err();
+        assert_eq!(conflict.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
 }
 
 pub fn run_select_service_cli<I, T>(args: I) -> anyhow::Result<()>
@@ -399,6 +448,9 @@ where
         let rt = tokio::runtime::Runtime::new()?;
         let mut kv_router_config =
             try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
+        if let Some(assume_kv_reuse) = cli.router_assume_kv_reuse_override() {
+            kv_router_config.router_assume_kv_reuse = assume_kv_reuse;
+        }
         if let Some(algorithm) = cli.router_tracking_hash {
             kv_router_config.router_tracking_hash = algorithm;
         }

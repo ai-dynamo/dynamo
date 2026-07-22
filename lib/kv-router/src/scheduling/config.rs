@@ -126,6 +126,7 @@ fn log_env_config(config: &KvRouterConfig) {
         router_replica_sync = config.router_replica_sync,
         router_track_active_blocks = config.router_track_active_blocks,
         router_track_output_blocks = config.router_track_output_blocks,
+        router_assume_kv_reuse = config.router_assume_kv_reuse,
         router_track_prefill_tokens = config.router_track_prefill_tokens,
         router_tracking_hash = %config.router_tracking_hash,
         router_tracking_key_id = ?config.router_tracking_key_id,
@@ -197,6 +198,9 @@ fn kv_router_config_from_lookup(
     }
     if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_TRACK_OUTPUT_BLOCKS") {
         config.router_track_output_blocks = value;
+    }
+    if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_ASSUME_KV_REUSE") {
+        config.router_assume_kv_reuse = value;
     }
     if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_TRACK_PREFILL_TOKENS") {
         config.router_track_prefill_tokens = value;
@@ -1187,6 +1191,7 @@ mod tests {
             ("DYN_ROUTER_REPLICA_SYNC", "yes"),
             ("DYN_ROUTER_TRACK_ACTIVE_BLOCKS", "0"),
             ("DYN_ROUTER_TRACK_OUTPUT_BLOCKS", "on"),
+            ("DYN_ROUTER_ASSUME_KV_REUSE", "false"),
             ("DYN_ROUTER_TRACK_PREFILL_TOKENS", "false"),
             ("DYN_ROUTER_TRACKING_HASH", "keyed-xxh3-v1"),
             (
@@ -1205,6 +1210,7 @@ mod tests {
         assert!(config.router_replica_sync);
         assert!(!config.router_track_active_blocks);
         assert!(config.router_track_output_blocks);
+        assert!(!config.router_assume_kv_reuse);
         assert!(!config.router_track_prefill_tokens);
         assert_eq!(
             config.router_tracking_hash,

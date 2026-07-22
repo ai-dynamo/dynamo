@@ -119,15 +119,32 @@ pub(crate) fn compute_block_hash_for_seq_with_seed(
     options: BlockHashOptions<'_>,
     seed: u64,
 ) -> Vec<LocalBlockHash> {
+    let estimated_blocks = complete_block_count(
+        tokens.len(),
+        kv_block_size,
+        options.is_eagle.unwrap_or(false),
+    );
+    let mut hashes = Vec::with_capacity(estimated_blocks);
+    for_each_block_hash_for_seq_with_seed(tokens, kv_block_size, options, seed, |hash| {
+        hashes.push(hash);
+    });
+    hashes
+}
+
+fn for_each_block_hash_for_seq_with_seed(
+    tokens: &[u32],
+    kv_block_size: u32,
+    options: BlockHashOptions<'_>,
+    seed: u64,
+    mut visit: impl FnMut(LocalBlockHash),
+) {
     if kv_block_size == 0 {
-        return Vec::new();
+        return;
     }
 
     let is_eagle_flag = options.is_eagle.unwrap_or(false);
     let stride = kv_block_size as usize;
     let window_size = if is_eagle_flag { stride + 1 } else { stride };
-    let estimated_blocks = complete_block_count(tokens.len(), kv_block_size, is_eagle_flag);
-    let mut hashes = Vec::with_capacity(estimated_blocks);
     let mut bytes = Vec::with_capacity(window_size * std::mem::size_of::<u32>());
     let mut mm_hashes = Vec::new();
     let mut block_idx = 0;
@@ -151,16 +168,14 @@ pub(crate) fn compute_block_hash_for_seq_with_seed(
                 bytes.extend_from_slice(&mm_hash.to_le_bytes());
             }
 
-            hashes.push(LocalBlockHash(xxh3::xxh3_64_with_seed(&bytes, seed)));
+            visit(LocalBlockHash(xxh3::xxh3_64_with_seed(&bytes, seed)));
         } else {
-            hashes.push(hash_block_no_mm(chunk, seed, &mut bytes));
+            visit(hash_block_no_mm(chunk, seed, &mut bytes));
         }
 
         start += stride;
         block_idx += 1;
     }
-
-    hashes
 }
 
 /// Compute the next rolling sequence hash from a parent sequence hash and the
@@ -183,17 +198,49 @@ pub fn compute_seq_hash_for_block(block_hashes: &[LocalBlockHash]) -> Vec<Sequen
     compute_seq_hash_for_block_with(block_hashes, compute_next_seq_hash)
 }
 
-/// Compute rolling sequence hashes with an explicit XXH3 chain seed.
-pub(crate) fn compute_seq_hash_for_block_with_seed(
-    block_hashes: &[LocalBlockHash],
-    seed: u64,
+/// Compute rolling sequence hashes directly from canonical token blocks with
+/// separate XXH3 block and chain seeds, without materializing block hashes.
+pub(crate) fn compute_seq_hash_for_tokens_with_seeds(
+    tokens: &[u32],
+    kv_block_size: u32,
+    options: BlockHashOptions<'_>,
+    block_seed: u64,
+    chain_seed: u64,
 ) -> Vec<SequenceHash> {
-    compute_seq_hash_for_block_with(block_hashes, |parent, block| {
-        let mut bytes = [0_u8; 16];
-        bytes[..8].copy_from_slice(&parent.to_le_bytes());
-        bytes[8..].copy_from_slice(&block.0.to_le_bytes());
-        xxh3::xxh3_64_with_seed(&bytes, seed)
-    })
+    let estimated_blocks = complete_block_count(
+        tokens.len(),
+        kv_block_size,
+        options.is_eagle.unwrap_or(false),
+    );
+    let mut sequence_hashes = Vec::with_capacity(estimated_blocks);
+    for_each_block_hash_for_seq_with_seed(
+        tokens,
+        kv_block_size,
+        options,
+        block_seed,
+        |block_hash| {
+            let sequence_hash = sequence_hashes
+                .last()
+                .copied()
+                .map_or(block_hash.0, |parent| {
+                    compute_next_seq_hash_with_seed(parent, block_hash, chain_seed)
+                });
+            sequence_hashes.push(sequence_hash);
+        },
+    );
+    sequence_hashes
+}
+
+#[inline]
+fn compute_next_seq_hash_with_seed(
+    parent: SequenceHash,
+    block: LocalBlockHash,
+    seed: u64,
+) -> SequenceHash {
+    let mut bytes = [0_u8; 16];
+    bytes[..8].copy_from_slice(&parent.to_le_bytes());
+    bytes[8..].copy_from_slice(&block.0.to_le_bytes());
+    xxh3::xxh3_64_with_seed(&bytes, seed)
 }
 
 fn compute_seq_hash_for_block_with(

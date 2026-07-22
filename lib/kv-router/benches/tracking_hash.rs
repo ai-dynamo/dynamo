@@ -92,7 +92,7 @@ fn tracking_hash(c: &mut Criterion) {
     };
 
     let mut group = c.benchmark_group("tracking_hash");
-    for blocks in [1_u32, 32, 128] {
+    for blocks in [1_u32, 32, 128, 62_500] {
         let tokens = (0..blocks * block_size).collect::<Vec<_>>();
         let options = BlockHashOptions::default();
         let public_blocks = compute_block_hash_for_seq(&tokens, block_size, options);

@@ -16,8 +16,7 @@ use crate::config::KvRouterConfig;
 use crate::identity::RoutingPartitionRef;
 use crate::protocols::{
     BlockHashOptions, LocalBlockHash, complete_block_count, compute_block_hash_for_seq,
-    compute_block_hash_for_seq_with_seed, compute_seq_hash_for_block,
-    compute_seq_hash_for_block_with_seed,
+    compute_seq_hash_for_block, compute_seq_hash_for_tokens_with_seeds,
 };
 
 const KEY_SIZE: usize = 32;
@@ -80,6 +79,10 @@ pub(crate) fn validate_tracking_hash_options(
 
 /// Stable, trusted scope shared by router instances that should produce the
 /// same derived tracking identities.
+///
+/// TODO(#11971): Evaluate deriving the static tracking-domain identity from
+/// `IndexerDomainId`. `PoolId` and `DcId` represent placement and must remain
+/// excluded from tracking identity.
 #[derive(Clone, Copy, Debug)]
 pub struct TrackingHashScope<'a> {
     pub partition: RoutingPartitionRef<'a>,
@@ -186,13 +189,13 @@ impl TrackingHashContext {
             }
             TrackingHashAlgorithm::KeyedXxh3V1 => {
                 let (block_seed, chain_seed) = self.derive_seeds(scope, options);
-                let block_hashes = compute_block_hash_for_seq_with_seed(
+                compute_seq_hash_for_tokens_with_seeds(
                     tokens,
                     scope.block_size,
                     options,
                     block_seed,
-                );
-                compute_seq_hash_for_block_with_seed(&block_hashes, chain_seed)
+                    chain_seed,
+                )
             }
         }
     }

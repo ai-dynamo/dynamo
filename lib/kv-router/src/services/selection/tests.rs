@@ -318,6 +318,61 @@ fn keyed_reservation_hashes_directly_from_tokens() {
 }
 
 #[test]
+fn keyed_hash_only_inputs_remain_trusted_for_selection_and_reservation() {
+    let mut key_file = NamedTempFile::new().unwrap();
+    key_file.write_all(&[0x59; 32]).unwrap();
+    let config = crate::config::KvRouterConfig {
+        router_tracking_hash: crate::TrackingHashAlgorithm::KeyedXxh3V1,
+        router_tracking_key_file: Some(key_file.path().to_path_buf()),
+        router_tracking_key_id: Some("2026-01".to_string()),
+        ..test_config()
+    };
+    let context = TrackingHashContext::from_config(&config).unwrap();
+    let request: PromptRequest = serde_json::from_value(serde_json::json!({
+        "block_hashes": [11, 29],
+        "sequence_hashes": [-1, 7],
+        "isl_tokens": 8
+    }))
+    .unwrap();
+    let scope = TrackingHashScope {
+        partition: RoutingPartitionRef::new("model", "default"),
+        block_size: 4,
+    };
+
+    let selection = request
+        .normalize_for_selection(
+            false,
+            TrackingHashInput {
+                context: &context,
+                scope,
+                assume_kv_reuse: true,
+            },
+        )
+        .unwrap();
+    let reservation = request
+        .normalize_for_reservation(
+            false,
+            TrackingHashInput {
+                context: &context,
+                scope,
+                assume_kv_reuse: true,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(
+        selection.block_hashes,
+        vec![
+            crate::protocols::LocalBlockHash(11),
+            crate::protocols::LocalBlockHash(29)
+        ]
+    );
+    assert_eq!(selection.sequence_hashes, vec![u64::MAX, 7]);
+    assert_eq!(reservation.sequence_hashes, vec![u64::MAX, 7]);
+    assert_eq!(reservation.isl_tokens, 8);
+}
+
+#[test]
 fn randomized_reservation_uses_canonical_complete_block_count() {
     let config = test_config();
     let context = TrackingHashContext::from_config(&config).unwrap();
