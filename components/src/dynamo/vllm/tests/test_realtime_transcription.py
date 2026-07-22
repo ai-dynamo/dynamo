@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from dynamo.vllm.realtime_transcription import RealtimeTranscriptionHandler
+from dynamo.vllm.realtime_handler import RealtimeTranscriptionHandler
 
 pytestmark = [
     pytest.mark.unit,

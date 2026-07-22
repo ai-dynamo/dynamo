@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""OpenAI realtime transcription bridge for vLLM streaming ASR models."""
+"""OpenAI Realtime dispatch and transcription for standard vLLM models."""
 
 from __future__ import annotations
 
@@ -11,12 +11,22 @@ import binascii
 import logging
 import math
 import uuid
-from collections.abc import AsyncGenerator, Callable
-from typing import Any
+from collections.abc import AsyncGenerator, Callable, Mapping
+from typing import Any, Protocol
 
 import numpy as np
 
 from dynamo._core import Context
+
+from .realtime_events import (
+    input_audio_buffer_cleared_event,
+    input_audio_buffer_committed_event,
+    input_audio_transcription_completed_event,
+    input_audio_transcription_delta_event,
+    input_audio_transcription_failed_event,
+    invalid_request_error_event,
+    session_updated_event,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,94 +42,66 @@ StreamingInputFactory = Callable[
 SamplingParamsFactory = Callable[[], Any]
 
 
-def _event_id() -> str:
-    return f"event_{uuid.uuid4().hex}"
+class RealtimeSessionHandler(Protocol):
+    def generate(
+        self,
+        request_stream: AsyncGenerator[Any, None],
+        context: Context,
+    ) -> AsyncGenerator[dict, None]:
+        ...
 
 
-def _error_event(code: str, message: str, *, event_id: str | None = None) -> dict:
-    return {
-        "type": "error",
-        "event_id": _event_id(),
-        "error": {
-            "type": "invalid_request_error",
-            "code": code,
-            "message": message,
-            "event_id": event_id,
-        },
-    }
+class RealtimeHandler:
+    """Select one session handler from the initial ``session.update`` event."""
 
+    def __init__(self, handlers: Mapping[str, RealtimeSessionHandler]) -> None:
+        self._handlers = dict(handlers)
 
-def _session_updated_event(session: dict) -> dict:
-    return {
-        "type": "session.updated",
-        "event_id": _event_id(),
-        "session": session,
-    }
+    async def generate(
+        self,
+        request_stream: AsyncGenerator[Any, None],
+        context: Context,
+    ) -> AsyncGenerator[dict, None]:
+        try:
+            first_event = await anext(request_stream)
+        except StopAsyncIteration:
+            return
 
+        if (
+            not isinstance(first_event, dict)
+            or first_event.get("type") != "session.update"
+        ):
+            yield invalid_request_error_event(
+                "invalid_event",
+                "first event must be session.update",
+                client_event_id=(
+                    first_event.get("event_id")
+                    if isinstance(first_event, dict)
+                    else None
+                ),
+            )
+            return
 
-def _committed_event(item_id: str) -> dict:
-    return {
-        "type": "input_audio_buffer.committed",
-        "event_id": _event_id(),
-        "previous_item_id": None,
-        "item_id": item_id,
-    }
+        session = first_event.get("session")
+        session_type = session.get("type") if isinstance(session, dict) else None
+        handler = (
+            self._handlers.get(session_type) if isinstance(session_type, str) else None
+        )
+        if handler is None:
+            yield invalid_request_error_event(
+                "unsupported_session",
+                f"unsupported session type: {session_type!r}",
+                client_event_id=first_event.get("event_id"),
+            )
+            return
 
+        async def replay() -> AsyncGenerator[Any, None]:
+            yield first_event
+            async for event in request_stream:
+                yield event
 
-def _cleared_event() -> dict:
-    return {"type": "input_audio_buffer.cleared", "event_id": _event_id()}
-
-
-def _transcription_delta_event(item_id: str, delta: str) -> dict:
-    return {
-        "type": "conversation.item.input_audio_transcription.delta",
-        "event_id": _event_id(),
-        "item_id": item_id,
-        "content_index": 0,
-        "delta": delta,
-        "logprobs": None,
-    }
-
-
-def _transcription_completed_event(
-    item_id: str,
-    transcript: str,
-    *,
-    input_tokens: int,
-    output_tokens: int,
-) -> dict:
-    return {
-        "type": "conversation.item.input_audio_transcription.completed",
-        "event_id": _event_id(),
-        "item_id": item_id,
-        "content_index": 0,
-        "transcript": transcript,
-        "logprobs": None,
-        "usage": {
-            "type": "tokens",
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "total_tokens": input_tokens + output_tokens,
-            "input_token_details": {
-                "audio_tokens": input_tokens,
-                "text_tokens": 0,
-            },
-        },
-    }
-
-
-def _transcription_failed_event(item_id: str, message: str) -> dict:
-    return {
-        "type": "conversation.item.input_audio_transcription.failed",
-        "event_id": _event_id(),
-        "item_id": item_id,
-        "content_index": 0,
-        "error": {
-            "type": "server_error",
-            "code": "transcription_error",
-            "message": message,
-        },
-    }
+        async for event in handler.generate(replay(), context):
+            yield event
 
 
 def _default_sampling_params() -> Any:
@@ -306,11 +288,13 @@ class RealtimeTranscriptionHandler:
                     input_stream.put_nowait(token_ids)
                 if delta:
                     transcript += delta
-                    await output.put(_transcription_delta_event(turn.item_id, delta))
+                    await output.put(
+                        input_audio_transcription_delta_event(turn.item_id, delta)
+                    )
 
             if not context.is_stopped():
                 await output.put(
-                    _transcription_completed_event(
+                    input_audio_transcription_completed_event(
                         turn.item_id,
                         transcript,
                         input_tokens=input_tokens,
@@ -322,7 +306,9 @@ class RealtimeTranscriptionHandler:
         except Exception as exc:  # noqa: BLE001 - isolate engine failures per turn
             logger.exception("realtime transcription failed: %s", exc)
             await output.put(
-                _transcription_failed_event(turn.item_id, "Transcription failed")
+                input_audio_transcription_failed_event(
+                    turn.item_id, "Transcription failed"
+                )
             )
 
     def _validate_session(self, session: Any) -> str | None:
@@ -394,7 +380,9 @@ class RealtimeTranscriptionHandler:
                         break
                     if not isinstance(event, dict):
                         await output.put(
-                            _error_event("invalid_event", "event must be an object")
+                            invalid_request_error_event(
+                                "invalid_event", "event must be an object"
+                            )
                         )
                         continue
                     event_type = event.get("type")
@@ -403,24 +391,24 @@ class RealtimeTranscriptionHandler:
                         error = self._validate_session(session)
                         if error:
                             await output.put(
-                                _error_event(
+                                invalid_request_error_event(
                                     "invalid_session",
                                     error,
-                                    event_id=event.get("event_id"),
+                                    client_event_id=event.get("event_id"),
                                 )
                             )
                             continue
                         input_rate = session["audio"]["input"]["format"]["rate"]
-                        await output.put(_session_updated_event(session))
+                        await output.put(session_updated_event(session))
                     elif event_type == "input_audio_buffer.append":
                         try:
                             waveform = decode_pcm16(event.get("audio", ""))
                         except ValueError as exc:
                             await output.put(
-                                _error_event(
+                                invalid_request_error_event(
                                     "invalid_audio",
                                     str(exc),
-                                    event_id=event.get("event_id"),
+                                    client_event_id=event.get("event_id"),
                                 )
                             )
                             continue
@@ -432,10 +420,10 @@ class RealtimeTranscriptionHandler:
                                 turn.task.cancel()
                             active_turn = None
                             await output.put(
-                                _error_event(
+                                invalid_request_error_event(
                                     "invalid_audio",
                                     str(exc),
-                                    event_id=event.get("event_id"),
+                                    client_event_id=event.get("event_id"),
                                 )
                             )
                             continue
@@ -444,7 +432,7 @@ class RealtimeTranscriptionHandler:
                     elif event_type == "input_audio_buffer.commit":
                         if active_turn is None:
                             await output.put(
-                                _error_event(
+                                invalid_request_error_event(
                                     "invalid_audio", "input audio buffer is empty"
                                 )
                             )
@@ -452,7 +440,9 @@ class RealtimeTranscriptionHandler:
                         remainder = active_turn.flush_audio()
                         if remainder is not None:
                             active_turn.audio.put_nowait(remainder)
-                        await output.put(_committed_event(active_turn.item_id))
+                        await output.put(
+                            input_audio_buffer_committed_event(active_turn.item_id)
+                        )
                         active_turn.audio.put_nowait(None)
                         active_turn = None
                     elif event_type == "input_audio_buffer.clear":
@@ -460,13 +450,13 @@ class RealtimeTranscriptionHandler:
                             if active_turn.task is not None:
                                 active_turn.task.cancel()
                             active_turn = None
-                        await output.put(_cleared_event())
+                        await output.put(input_audio_buffer_cleared_event())
                     else:
                         await output.put(
-                            _error_event(
+                            invalid_request_error_event(
                                 "unsupported_event",
                                 f"unsupported event type: {event_type}",
-                                event_id=event.get("event_id"),
+                                client_event_id=event.get("event_id"),
                             )
                         )
             except asyncio.CancelledError:
@@ -474,7 +464,9 @@ class RealtimeTranscriptionHandler:
             except Exception as exc:  # noqa: BLE001 - keep the connection diagnosable
                 logger.exception("realtime transcription input failed: %s", exc)
                 await output.put(
-                    _error_event("server_error", "Internal transcription error")
+                    invalid_request_error_event(
+                        "server_error", "Internal transcription error"
+                    )
                 )
             finally:
                 if active_turn is not None:

@@ -3,7 +3,7 @@
 
 """Realtime (bidirectional) handler backed by vLLM-Omni's streaming engine.
 
-This handler expects ``request_stream`` to yield ``RealtimeServerEvent`` frames.
+This handler expects ``request_stream`` to yield ``RealtimeClientEvent`` frames.
 
 Turn model:
 
@@ -49,6 +49,8 @@ import numpy as np
 
 from dynamo._core import Context
 
+from .. import realtime_events
+
 logger = logging.getLogger(__name__)
 
 # ``streaming_input_factory(audio_stream, input_stream) -> AsyncGenerator`` —
@@ -61,19 +63,6 @@ StreamingInputFactory = Callable[
     [AsyncGenerator[np.ndarray, None], "asyncio.Queue[list[int]]"],
     AsyncGenerator[Any, None],
 ]
-
-
-def event_id() -> str:
-    return f"event_{uuid.uuid4().hex}"
-
-
-def session_updated_event(session: Any) -> dict:
-    """Echo a client ``session.update`` back as the spec ``session.updated``."""
-    return {
-        "type": "session.updated",
-        "event_id": event_id(),
-        "session": session,
-    }
 
 
 class Turn:
@@ -322,101 +311,58 @@ class RealtimeOmniHandler:
             # carries the id, so the client can correlate and the response reaches
             # a terminal state instead of hanging.
             await events.put(self.error_event(exc))
-            await events.put(
-                self.response_done_event(
-                    turn,
-                    status="failed",
-                    status_details={
-                        "type": "failed",
-                        "error": {
-                            "code": "omni_generation_error",
-                            "type": "server_error",
-                        },
-                    },
-                )
-            )
+            await events.put(self.response_failed_event(turn))
         finally:
             await events.put(None)
 
     # -- response lifecycle events --------------------------------------------
 
     def response_created_event(self, turn: Turn) -> dict:
-        return {
-            "type": "response.created",
-            "event_id": event_id(),
-            "response": {
-                "id": turn.response_id,
-                "max_output_tokens": "inf",
-                "object": "realtime.response",
-                "output": [],
-                "output_modalities": ["audio"],
-                "status": "in_progress",
-            },
-        }
+        return realtime_events.response_created_event(
+            turn.response_id,
+            output_modalities=["audio"],
+        )
 
-    def response_done_event(
-        self, turn: Turn, status: str = "completed", status_details: dict | None = None
-    ) -> dict:
-        response: dict[str, Any] = {
-            "id": turn.response_id,
-            "max_output_tokens": "inf",
-            "object": "realtime.response",
-            "output": [],
-            "output_modalities": ["audio"],
-            "status": status,
-        }
-        if status_details is not None:
-            response["status_details"] = status_details
-        return {
-            "type": "response.done",
-            "event_id": event_id(),
-            "response": response,
-        }
+    def response_done_event(self, turn: Turn) -> dict:
+        return realtime_events.response_done_event(
+            turn.response_id,
+            output_modalities=["audio"],
+        )
+
+    def response_failed_event(self, turn: Turn) -> dict:
+        return realtime_events.response_failed_event(
+            turn.response_id,
+            output_modalities=["audio"],
+            code="omni_generation_error",
+        )
 
     def error_event(self, exc: Exception) -> dict:
-        return {
-            "type": "error",
-            "event_id": event_id(),
-            "error": {
-                "type": "server_error",
-                "code": "omni_generation_error",
-                "message": str(exc),
-            },
-        }
+        return realtime_events.server_error_event(
+            "omni_generation_error",
+            str(exc),
+        )
 
     # -- output translation (ported from vllm-omni realtime_connection.py) ----
 
     def audio_delta_event(self, turn: Turn, chunk: np.ndarray) -> dict:
-        return {
-            "type": "response.output_audio.delta",
-            "event_id": event_id(),
-            "response_id": turn.response_id,
-            "item_id": turn.item_id,
-            "output_index": 0,
-            "content_index": 0,
-            "delta": pcm16_b64(chunk),
-        }
+        return realtime_events.response_output_audio_delta_event(
+            turn.response_id,
+            turn.item_id,
+            pcm16_b64(chunk),
+        )
 
     def audio_done_event(self, turn: Turn) -> dict:
-        return {
-            "type": "response.output_audio.done",
-            "event_id": event_id(),
-            "response_id": turn.response_id,
-            "item_id": turn.item_id,
-            "output_index": 0,
-            "content_index": 0,
-        }
+        return realtime_events.response_output_audio_done_event(
+            turn.response_id,
+            turn.item_id,
+        )
 
     def transcript_delta_event(self, turn: Turn, delta: str) -> dict:
-        return {
-            "type": "response.output_audio_transcript.delta",
-            "event_id": event_id(),
-            "response_id": turn.response_id,
-            "item_id": turn.item_id,
-            "output_index": 0,
-            "content_index": 0,
-            "delta": delta,
-        }
+        return realtime_events.response_output_audio_transcript_delta_event(
+            turn.response_id,
+            turn.item_id,
+            delta,
+        )
 
     async def generate(
         self, request_stream: AsyncGenerator[Any, None], context: Context
@@ -475,7 +421,9 @@ class RealtimeOmniHandler:
                         modalities = parse_output_modalities(session)
                         if modalities is not None:
                             session_output_modalities = modalities
-                        out_stream.put_nowait(session_updated_event(session))
+                        out_stream.put_nowait(
+                            realtime_events.session_updated_event(session)
+                        )
                     elif etype == "input_audio_buffer.append":
                         turn = await ensure_turn()
                         waveform = decode_pcm16(client_event.get("audio", ""))
