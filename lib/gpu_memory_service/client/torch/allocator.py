@@ -5,13 +5,19 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Iterator, Optional
 
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
+from gpu_memory_service.common.utils import (
+    ENV_DIAGNOSTIC_SEGMENT_LEDGER,
+    is_truthy_env,
+)
 from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm_device_type
 
 if TYPE_CHECKING:
@@ -31,7 +37,18 @@ class _TagState:
     is_scratch: bool = False
 
 
+@dataclass(frozen=True)
+class _PrunedMappingTombstone:
+    allocation_id: str
+    size: int
+    aligned_size: int
+    tag: str
+    pruned_monotonic_ns: int
+    segment_state: str
+
+
 _tag_states: dict[str, _TagState] = {}
+_pruned_mapping_tombstones: dict[int, _PrunedMappingTombstone] = {}
 _active_tag: ContextVar[str | None] = ContextVar(
     "gpu_memory_service_active_tag",
     default=None,
@@ -53,10 +70,12 @@ def _gms_malloc(size: int, device: int, stream: int) -> int:
 
     if state.is_scratch:
         va = state.manager.create_scratch_mapping(size=int(size), tag=tag)
+        _pruned_mapping_tombstones.pop(va, None)
         logger.debug("[GMS] scratch malloc(tag=%s): va=0x%x size=%d", tag, va, size)
         return va
 
     va = state.manager.create_mapping(size=int(size), tag=tag)
+    _pruned_mapping_tombstones.pop(va, None)
     logger.debug("[GMS] malloc(tag=%s): va=0x%x size=%d", tag, va, size)
     return va
 
@@ -74,6 +93,24 @@ def _gms_free(ptr: int, size: int, device: int, stream: int) -> None:
             continue
         logger.debug("[GMS] free(tag=%s): va=0x%x size=%d", tag, va, size)
         state.manager.destroy_mapping(va)
+        return
+    tombstone = _pruned_mapping_tombstones.get(va)
+    if tombstone is not None:
+        logger.warning(
+            "[GMS_SEGMENT_LEDGER] late_free va=0x%x callback_size=%d "
+            "device=%d stream=0x%x allocation_id=%s size=%d aligned_size=%d "
+            "tag=%s elapsed_ms=%.3f segment=%s",
+            va,
+            size,
+            device,
+            stream,
+            tombstone.allocation_id,
+            tombstone.size,
+            tombstone.aligned_size,
+            tombstone.tag,
+            (time.monotonic_ns() - tombstone.pruned_monotonic_ns) / 1_000_000,
+            tombstone.segment_state,
+        )
         return
     logger.warning("[GMS] free: no manager owns va=0x%x, ignoring", va)
 
@@ -264,6 +301,102 @@ def get_gms_client_memory_managers() -> tuple["GMSClientMemoryManager", ...]:
     return tuple(state.manager for state in _tag_states.values())
 
 
+def _segment_ledger(
+    manager: "GMSClientMemoryManager",
+    keep: set[str],
+) -> dict[int, str]:
+    if not is_truthy_env(ENV_DIAGNOSTIC_SEGMENT_LEDGER):
+        return {}
+    if manager.tag is None:
+        raise RuntimeError("GMS segment ledger requires a tagged manager")
+    state = _tag_states.get(manager.tag)
+    if state is None or state.manager is not manager or state.mem_pool is None:
+        raise RuntimeError(
+            f"GMS segment ledger cannot find MemPool for tag={manager.tag!r}"
+        )
+
+    segments = state.mem_pool.snapshot(include_traces=False)
+    segments_by_address = {int(segment["address"]): segment for segment in segments}
+    mapping_addresses = set(manager.mappings)
+    orphan_addresses = sorted(set(segments_by_address) - mapping_addresses)
+    logger.info(
+        "[GMS_SEGMENT_LEDGER] summary tag=%s mappings=%d segments=%d "
+        "orphan_segments=%d orphan_bytes=%d",
+        manager.tag,
+        len(mapping_addresses),
+        len(segments),
+        len(orphan_addresses),
+        sum(
+            int(segments_by_address[address]["total_size"])
+            for address in orphan_addresses
+        ),
+    )
+
+    encoded_by_va: dict[int, str] = {}
+    for va, mapping in manager.mappings.items():
+        segment = segments_by_address.get(va)
+        blocks = [] if segment is None else segment["blocks"]
+        states: dict[str, dict[str, int]] = {}
+        active_ranges: list[dict[str, int | str]] = []
+        for block in blocks:
+            block_state = str(block["state"])
+            aggregate = states.setdefault(
+                block_state,
+                {"count": 0, "size": 0, "requested_size": 0},
+            )
+            aggregate["count"] += 1
+            aggregate["size"] += int(block["size"])
+            aggregate["requested_size"] += int(block["requested_size"])
+            if block_state != "inactive":
+                active_ranges.append(
+                    {
+                        "address": int(block["address"]),
+                        "offset": int(block["address"]) - va,
+                        "size": int(block["size"]),
+                        "requested_size": int(block["requested_size"]),
+                        "state": block_state,
+                    }
+                )
+
+        record = {
+            "decision": "keep" if str(mapping.allocation_id) in keep else "prune",
+            "allocation_id": str(mapping.allocation_id),
+            "va": va,
+            "size": int(mapping.size),
+            "aligned_size": int(mapping.aligned_size),
+            "tag": str(mapping.tag),
+            "segment_found": segment is not None,
+            "segment_total_size": (
+                0 if segment is None else int(segment["total_size"])
+            ),
+            "segment_allocated_size": (
+                0 if segment is None else int(segment["allocated_size"])
+            ),
+            "segment_active_size": (
+                0 if segment is None else int(segment["active_size"])
+            ),
+            "segment_requested_size": (
+                0 if segment is None else int(segment["requested_size"])
+            ),
+            "states": states,
+            "active_ranges": active_ranges,
+        }
+        encoded = json.dumps(record, separators=(",", ":"), sort_keys=True)
+        encoded_by_va[va] = encoded
+        logger.info("[GMS_SEGMENT_LEDGER] mapping=%s", encoded)
+
+    for address in orphan_addresses:
+        logger.info(
+            "[GMS_SEGMENT_LEDGER] orphan=%s",
+            json.dumps(
+                segments_by_address[address],
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+        )
+    return encoded_by_va
+
+
 def prune_allocations(
     manager: "GMSClientMemoryManager",
     *,
@@ -300,6 +433,7 @@ def prune_allocations(
         torch_device().synchronize(manager.device)
 
     keep = {str(allocation_id) for allocation_id in referenced_allocation_ids}
+    segment_state_by_va = _segment_ledger(manager, keep)
 
     pruned_allocations = 0
     pruned_bytes = 0
@@ -311,6 +445,15 @@ def prune_allocations(
         pruned_allocations += 1
         pruned_bytes += int(mapping.aligned_size)
         manager.destroy_mapping(va)
+        if segment_state_by_va:
+            _pruned_mapping_tombstones[va] = _PrunedMappingTombstone(
+                allocation_id=str(mapping.allocation_id),
+                size=int(mapping.size),
+                aligned_size=int(mapping.aligned_size),
+                tag=str(mapping.tag),
+                pruned_monotonic_ns=time.monotonic_ns(),
+                segment_state=segment_state_by_va[va],
+            )
 
     if pruned_allocations:
         logger.info(

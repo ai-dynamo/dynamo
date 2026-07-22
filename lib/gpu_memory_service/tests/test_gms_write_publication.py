@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import gc
+import logging
 import sys
 import weakref
 from contextlib import nullcontext
@@ -25,6 +26,7 @@ if not HAS_TORCH:
 
 import msgspec
 import torch
+from gpu_memory_service.client.torch import allocator as torch_allocator
 from gpu_memory_service.client.torch import module as torch_module
 from gpu_memory_service.client.torch.module import (
     materialize_module_from_gms,
@@ -37,6 +39,7 @@ from gpu_memory_service.client.torch.tensor import (
     ModuleTensorKind,
     StorageManifest,
 )
+from gpu_memory_service.common.locks import GrantedLockType
 from gpu_memory_service.integrations.common import utils as common_utils
 from gpu_memory_service.integrations.trtllm import model_loader as trtllm_model_loader
 from gpu_memory_service.integrations.vllm import model_loader
@@ -179,6 +182,142 @@ def clear_pending_write(monkeypatch):
     monkeypatch.setattr(model_loader, "_pending_gms_client", None)
     monkeypatch.setattr(model_loader, "_last_imported_weights_bytes", 0)
     monkeypatch.setattr(model_loader, "_last_model_memory_usage_offset_bytes", 0)
+
+
+def test_segment_ledger_joins_mappings_to_active_pool_blocks(
+    monkeypatch,
+    caplog,
+):
+    caplog.set_level(logging.INFO, logger=torch_allocator.__name__)
+    va = 0x100000
+    mapping = SimpleNamespace(
+        allocation_id="scratch",
+        size=4096,
+        aligned_size=8192,
+        tag="weights",
+    )
+    manager = SimpleNamespace(tag="weights", mappings={va: mapping})
+    pool = SimpleNamespace(
+        snapshot=lambda *, include_traces: [
+            {
+                "address": va,
+                "total_size": 8192,
+                "allocated_size": 4096,
+                "active_size": 4096,
+                "requested_size": 3072,
+                "blocks": [
+                    {
+                        "address": va,
+                        "size": 4096,
+                        "requested_size": 3072,
+                        "state": "active_allocated",
+                    },
+                    {
+                        "address": va + 4096,
+                        "size": 4096,
+                        "requested_size": 0,
+                        "state": "inactive",
+                    },
+                ],
+            }
+        ]
+    )
+    state = torch_allocator._TagState(
+        manager=manager,
+        mem_pool=pool,
+        socket_path="/tmp/gms",
+        device=0,
+    )
+    monkeypatch.setenv("DYN_GMS_DIAGNOSTIC_SEGMENT_LEDGER", "1")
+    monkeypatch.setattr(torch_allocator, "_tag_states", {"weights": state})
+
+    records = torch_allocator._segment_ledger(manager, set())
+
+    record = msgspec.json.decode(records[va])
+    assert record["decision"] == "prune"
+    assert record["states"]["active_allocated"] == {
+        "count": 1,
+        "size": 4096,
+        "requested_size": 3072,
+    }
+    assert record["active_ranges"] == [
+        {
+            "address": va,
+            "offset": 0,
+            "size": 4096,
+            "requested_size": 3072,
+            "state": "active_allocated",
+        }
+    ]
+    assert "orphan_segments=0" in caplog.text
+
+
+def test_pruned_segment_late_free_reports_tombstone(monkeypatch, caplog):
+    va = 0x200000
+    mapping = SimpleNamespace(
+        allocation_id="scratch",
+        size=4096,
+        aligned_size=4096,
+        tag="weights",
+        handle=1,
+    )
+
+    class Manager:
+        tag = "weights"
+        device = 0
+        granted_lock_type = GrantedLockType.RW
+        is_unmapped = False
+
+        def __init__(self):
+            self.mappings = {va: mapping}
+
+        def destroy_mapping(self, mapping_va):
+            del self.mappings[mapping_va]
+
+        def destroy_scratch_mapping(self, _mapping_va):
+            return False
+
+    manager = Manager()
+    pool = SimpleNamespace(
+        snapshot=lambda *, include_traces: [
+            {
+                "address": va,
+                "total_size": 4096,
+                "allocated_size": 4096,
+                "active_size": 4096,
+                "requested_size": 4096,
+                "blocks": [
+                    {
+                        "address": va,
+                        "size": 4096,
+                        "requested_size": 4096,
+                        "state": "active_awaiting_free",
+                    }
+                ],
+            }
+        ]
+    )
+    state = torch_allocator._TagState(
+        manager=manager,
+        mem_pool=pool,
+        socket_path="/tmp/gms",
+        device=0,
+    )
+    monkeypatch.setenv("DYN_GMS_DIAGNOSTIC_SEGMENT_LEDGER", "1")
+    monkeypatch.setattr(torch_allocator, "_tag_states", {"weights": state})
+    monkeypatch.setattr(torch_allocator, "_pruned_mapping_tombstones", {})
+
+    torch_allocator.prune_allocations(
+        manager,
+        referenced_allocation_ids=set(),
+        synchronize=False,
+    )
+    torch_allocator._gms_free(va, 4096, 0, 0xABC)
+
+    assert manager.mappings == {}
+    assert "late_free" in caplog.text
+    assert "allocation_id=scratch" in caplog.text
+    assert "active_awaiting_free" in caplog.text
 
 
 @pytest.fixture

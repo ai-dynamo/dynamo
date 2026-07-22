@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 # constants in deploy/operator/internal/gms/gms.go.
 ENV_SCRATCH_KV_ENABLED = "DYN_GMS_SCRATCH_KV_ENABLED"
 ENV_VMM_GRANULARITY = "DYN_GMS_VMM_GRANULARITY"
+ENV_DIAGNOSTIC_SEGMENT_LEDGER = "DYN_GMS_DIAGNOSTIC_SEGMENT_LEDGER"
 
 # Production GMS tags: the per-GPU server child and every engine integration
 # serve exactly these logical memory pools, one UDS socket per (device, tag).
