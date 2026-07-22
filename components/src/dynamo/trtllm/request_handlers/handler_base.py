@@ -63,6 +63,7 @@ from dynamo.trtllm.utils.disagg_utils import (
 )
 from dynamo.trtllm.utils.request_utils import (
     apply_stop_conditions_to_sampling_params,
+    normalize_top_k_for_trtllm,
     request_cache_salt,
 )
 
@@ -1436,6 +1437,8 @@ class HandlerBase(BaseGenerativeHandler):
             for key, value in request["sampling_options"].items()
             if value is not None
         }
+        if "top_k" in overrides:
+            overrides["top_k"] = normalize_top_k_for_trtllm(overrides["top_k"])
 
         # Convert guided_decoding dict (from Rust serialization) to GuidedDecodingParams.
         # Explicit field mapping avoids breakage if either side adds fields the other

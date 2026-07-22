@@ -8,11 +8,11 @@ provider: openai
 model:
   name: GPT-OSS-120B
   hf_id: openai/gpt-oss-120b
-  precision: W4A8_MXFP4_MXFP8 (disagg, via OVERRIDE_QUANT_ALGO)
+  precision: MXFP4 + FP8 KV (vLLM); W4A8_MXFP4_MXFP8 (TRT-LLM disagg, via OVERRIDE_QUANT_ALGO)
 status: validated
 targets:
 - id: trtllm-agg
-  recommended: true
+  recommended: false
   hardware:
     gpu: GB200
     count: 4
@@ -59,10 +59,118 @@ targets:
     asset: recipes/gpt-oss-120b/trtllm/disagg/perf.yaml
   expected_performance:
     available: false
+- id: vllm-agg-b200
+  recommended: false
+  hardware:
+    gpu: B200
+    count: 8
+  runtime:
+    framework: vllm
+  topology: aggregated
+  techniques:
+  - mxfp4
+  - fp8-kv-cache
+  - kv-aware-routing
+  - eagle3-spec-dec
+  - moe-flashinfer-trtllm
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV hit, concurrency 512
+  deploy:
+    asset: recipes/gpt-oss-120b/vllm/agg-b200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/gpt-oss-120b/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 2896 tok/s/GPU, 58 tok/s/user, TTFT avg 4.4s at concurrency 512 (agentic 15% trace, EAGLE3 proxy)
+- id: vllm-agg-h200
+  recommended: false
+  hardware:
+    gpu: H200
+    count: 8
+  runtime:
+    framework: vllm
+  topology: aggregated
+  techniques:
+  - mxfp4
+  - fp8-kv-cache
+  - kv-aware-routing
+  - eagle3-spec-dec
+  - simple-cpu-offload
+  - moe-flashinfer-cutlass
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV hit, concurrency 256
+  deploy:
+    asset: recipes/gpt-oss-120b/vllm/agg-h200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/gpt-oss-120b/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 1256 tok/s/GPU, 47.5 tok/s/user, TTFT avg 1.4s at concurrency 256 (agentic 15% trace, EAGLE3 proxy)
+- id: vllm-disagg-b200
+  recommended: false
+  hardware:
+    gpu: B200
+    count: 8
+  runtime:
+    framework: vllm
+  topology: disaggregated
+  techniques:
+  - disagg-pd
+  - in-pod-colocated
+  - mxfp4
+  - fp8-kv-cache
+  - kv-aware-routing
+  - eagle3-spec-dec
+  - moe-flashinfer-trtllm
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV hit, concurrency 256 (2 prefill + 6 decode)
+  deploy:
+    asset: recipes/gpt-oss-120b/vllm/disagg-b200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/gpt-oss-120b/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 2069 tok/s/GPU, 99 tok/s/user, TTFT avg 5.6s at concurrency 256 (2P6D in-pod, agentic 15% trace, EAGLE3 proxy)
+- id: vllm-disagg-h200
+  recommended: false
+  hardware:
+    gpu: H200
+    count: 8
+  runtime:
+    framework: vllm
+  topology: disaggregated
+  techniques:
+  - disagg-pd
+  - in-pod-colocated
+  - mxfp4
+  - fp8-kv-cache
+  - kv-aware-routing
+  - eagle3-spec-dec
+  - moe-flashinfer-cutlass
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV hit, concurrency 256 (4 prefill + 4 decode)
+  deploy:
+    asset: recipes/gpt-oss-120b/vllm/disagg-h200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/gpt-oss-120b/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 1046 tok/s/GPU, 43 tok/s/user, TTFT avg 4.4s at concurrency 256 (4P4D in-pod, agentic 15% trace, EAGLE3 proxy)
 related_benchmarks: []
 maintainer: null
 gaps:
-- no expected performance numbers in source for either target — section omitted
+- TRT-LLM targets have no published expected-performance numbers (benchmark Jobs only)
 - disagg perf.yaml computes concurrency from DEPLOYMENT_GPU_COUNT=6 while deploy topology is 5 GPUs — noted on page
+- vLLM disaggregated is single-node in-pod only; multi-pod disaggregation unsupported
+- vLLM structured output may return invalid JSON with speculative decoding enabled — noted on page
+- vLLM EAGLE3 throughput numbers use the synthetic-acceptance proxy (relative comparison only)
 - no related feature benchmark exists
 - maintainer unknown

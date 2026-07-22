@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use dynamo_ext_proc::{ExtProcServer, Router};
+use dynamo_ext_proc::{EppMode, EppStandaloneConfig, ExtProcServer, Router};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
@@ -123,6 +123,8 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    let standalone = matches!(EppMode::from_env()?, EppMode::Standalone);
+
     let config = Config::from_env();
 
     tracing::info!(
@@ -130,8 +132,21 @@ async fn main() -> Result<()> {
         health_port = HEALTH_PORT,
         namespace = %config.namespace,
         component = %config.component,
+        standalone,
         "Starting Dynamo Rust EPP"
     );
+
+    // Standalone (selector) mode to be supported in a follow-up PR.
+    if standalone {
+        let selector_cfg = EppStandaloneConfig::from_env()?;
+        tracing::info!(
+            inference_pool_name = %selector_cfg.inference_pool_name,
+            model_name = %selector_cfg.model_name,
+            block_size = selector_cfg.block_size,
+            "Parsed standalone selector configuration"
+        );
+        anyhow::bail!("DYN_EPP_MODE=standalone is not yet supported");
+    }
 
     // Start plaintext gRPC health server immediately (NOT_SERVING until router ready).
     let (health_reporter, health_service) = tonic_health::server::health_reporter();
