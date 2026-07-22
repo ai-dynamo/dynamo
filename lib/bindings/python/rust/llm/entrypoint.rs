@@ -429,12 +429,13 @@ pub struct RouterConfig {
     /// Threshold for active prefill tokens as fraction of max_num_batched_tokens
     active_prefill_tokens_threshold_frac: Option<f64>,
     session_affinity_ttl_secs: Option<u64>,
+    session_affinity_header_key: Option<String>,
 }
 
 #[pymethods]
 impl RouterConfig {
     #[new]
-    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None))]
+    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None, session_affinity_header_key=None))]
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
@@ -443,6 +444,7 @@ impl RouterConfig {
         active_prefill_tokens_threshold_frac: Option<f64>,
         enforce_disagg: bool,
         session_affinity_ttl_secs: Option<u64>,
+        session_affinity_header_key: Option<String>,
     ) -> PyResult<Self> {
         if enforce_disagg {
             static WARN_ONCE: std::sync::Once = std::sync::Once::new();
@@ -471,6 +473,7 @@ impl RouterConfig {
             active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac,
             session_affinity_ttl_secs,
+            session_affinity_header_key,
         })
     }
 }
@@ -487,6 +490,7 @@ impl From<RouterConfig> for RsRouterConfig {
             },
             enforce_disagg: false,
             session_affinity_ttl_secs: rc.session_affinity_ttl_secs,
+            session_affinity_header_key: rc.session_affinity_header_key,
         }
     }
 }

@@ -112,6 +112,15 @@ a value from `1` through `31536000` to enable it, then send
 `X-Dynamo-Session-ID` to keep related requests on one worker. Supplying the header
 without the TTL option provides session identity but does not enable router affinity.
 
+To use a different ingress header for affinity, set
+`--router-session-header-key` or `DYN_ROUTER_SESSION_HEADER_KEY`. A non-empty
+`X-Dynamo-Session-ID` always takes precedence over the configured header. Coding-agent
+headers do not enable affinity unless one of them is explicitly configured here. The
+custom header controls routing only: it does not populate tracing `agent_context`.
+Affinity keys are process-global, so an ingress serving multiple tenants must supply a
+globally unique or tenant-scoped value; `x-tenant-id` and `cache_salt` do not
+automatically namespace affinity state.
+
 The first successfully dispatched request binds the session ID to its selected
 worker and, when available, data-parallel rank. Later requests exact-dispatch to
 that target without transport fallback. Concurrent requests can share a binding.
@@ -128,10 +137,7 @@ If the bound worker disappears, Dynamo invalidates the binding so a subsequent
 selection can bind an available worker. Router restart clears all bindings. Bindings
 are not shared between frontend replicas. In a multi-frontend deployment, configure
 the ingress or load balancer to consistently route a session to one frontend. Hash
-the raw session header received at ingress, not Dynamo's normalized internal
-`session_id`: canonical clients send `X-Dynamo-Session-ID`, while agent-native
-clients use the corresponding header listed in [Session IDs](../../agents/session-ids.md).
-Agent-native identity is normalized only after the request reaches the frontend.
+the same canonical or explicitly configured session header that the frontend uses.
 
 Direct mode still requires the phase-appropriate explicit worker ID on every
 affinity request. The stored binding validates that target but does not supply a

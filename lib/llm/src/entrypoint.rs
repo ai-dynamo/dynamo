@@ -52,6 +52,8 @@ pub struct RouterConfig {
     pub enforce_disagg: bool,
     #[serde(default)]
     pub session_affinity_ttl_secs: Option<u64>,
+    #[serde(default)]
+    pub session_affinity_header_key: Option<String>,
 }
 
 impl RouterConfig {
@@ -62,6 +64,7 @@ impl RouterConfig {
             load_threshold_config: LoadThresholdConfig::default(),
             enforce_disagg: false,
             session_affinity_ttl_secs: None,
+            session_affinity_header_key: None,
         }
     }
 

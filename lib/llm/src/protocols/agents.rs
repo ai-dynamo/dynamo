@@ -3,7 +3,7 @@
 
 //! Coding-agent request metadata recognized at Dynamo's HTTP boundary.
 
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, header::HeaderName};
 
 pub(crate) const HEADER_CLAUDE_CODE_SESSION_ID: &str = "x-claude-code-session-id";
 pub(crate) const HEADER_CLAUDE_CODE_AGENT_ID: &str = "x-claude-code-agent-id";
@@ -95,8 +95,18 @@ pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentCo
     None
 }
 
-pub(crate) fn session_affinity_header_value(headers: &HeaderMap) -> Option<String> {
-    header_value(headers, HEADER_DYNAMO_SESSION_ID)
+pub(crate) fn session_affinity_header_value(
+    headers: &HeaderMap,
+    configured_header_name: &HeaderName,
+) -> Option<String> {
+    if let Some(session_id) = header_value(headers, HEADER_DYNAMO_SESSION_ID) {
+        return Some(session_id);
+    }
+
+    if configured_header_name.as_str() != HEADER_DYNAMO_SESSION_ID {
+        return header_value(headers, configured_header_name.as_str());
+    }
+    None
 }
 
 fn header_bool(headers: &HeaderMap, header_name: &str) -> Option<bool> {

@@ -34,6 +34,7 @@ use super::openai::{
     get_or_create_request_id, smart_json_error_middleware,
 };
 use super::{RouteDoc, service_v2};
+use crate::protocols::common::extensions::agent_context_from_headers;
 use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::timing::RequestTracker;
 use crate::protocols::common::{SamplingOptions, StopConditions};
@@ -296,6 +297,10 @@ fn preprocessed_from_generate(
         .map_err(|error| anyhow::anyhow!("failed to build PreprocessedRequest: {error}"))
 }
 
+fn attach_generate_agent_context(request: &mut PreprocessedRequest, headers: &HeaderMap) {
+    request.agent_context = agent_context_from_headers(headers);
+}
+
 /// Metrics adapter for the raw engine stream used by `/inference/v1/generate`.
 ///
 /// Unlike the OpenAI text endpoints, Generate deliberately bypasses the
@@ -436,7 +441,7 @@ async fn handler_generate(
     };
 
     let request_context = resolve_generate_request_context(&headers, request.request_id.as_deref());
-    let preprocessed = match preprocessed_from_generate(
+    let mut preprocessed = match preprocessed_from_generate(
         request,
         &model,
         request_context.data_parallel_rank,
@@ -453,13 +458,20 @@ async fn handler_generate(
             );
         }
     };
+    // Context extensions are process-local. Embed the same identity in the
+    // serialized request so an out-of-process Python router receives it.
+    attach_generate_agent_context(&mut preprocessed, &headers);
 
     let request_id = request_context.request_id;
-    let context: Context<PreprocessedRequest> =
-        match context_from_headers(preprocessed, request_id.clone(), &headers) {
-            Ok(context) => context,
-            Err(response) => return response.into_response(),
-        };
+    let context: Context<PreprocessedRequest> = match context_from_headers(
+        preprocessed,
+        request_id.clone(),
+        &headers,
+        state.session_affinity_header_name(),
+    ) {
+        Ok(context) => context,
+        Err(response) => return response.into_response(),
+    };
     let engine_context = context.context();
     let cancellation_labels = CancellationLabels {
         model: state.manager().metric_model_for(&model).to_string(),

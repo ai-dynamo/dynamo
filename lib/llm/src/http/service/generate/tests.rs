@@ -113,6 +113,29 @@ mod tests {
 
     struct MetricEngine;
 
+    struct SerializedRequestCaptureEngine {
+        captured: Arc<Mutex<Option<serde_json::Value>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for SerializedRequestCaptureEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let (request, context) = request.into_parts();
+            *self.captured.lock().unwrap() = Some(serde_json::to_value(request)?);
+            let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
+                index: Some(0),
+                finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+                ..Default::default()
+            })]);
+            Ok(ResponseStream::new(Box::pin(stream), context.context()))
+        }
+    }
+
     #[async_trait::async_trait]
     impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
         for CancelledEngine
@@ -339,6 +362,65 @@ mod tests {
             let body: serde_json::Value = resp.json().await.expect("json body");
             assert_eq!(body["error"]["type"], "invalid_request_error");
         }
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn generate_route_serializes_agent_context_for_distributed_routers() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let port = listener.local_addr().unwrap().port();
+        let captured = Arc::new(Mutex::new(None));
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            Arc::new(SerializedRequestCaptureEngine {
+                captured: captured.clone(),
+            });
+        let service = HttpService::builder()
+            .port(port)
+            .enable_engine_apis(true)
+            .build()
+            .unwrap();
+        service
+            .model_manager()
+            .add_generate_model("Qwen/Qwen3-0.6B", "test-card", engine)
+            .unwrap();
+        let cancel_token = CancellationToken::new();
+        let handle = tokio::spawn(async move {
+            service.run_with_listener(cancel_token, listener).await.ok();
+        });
+
+        let response = reqwest::Client::new()
+            .post(format!(
+                "http://localhost:{port}/inference/v1/generate"
+            ))
+            .header("content-type", "application/json")
+            .header("x-session-id", "trajectory-123")
+            .header("x-parent-session-id", "rollout-7")
+            .header("x-dynamo-session-final", "true")
+            .body(
+                r#"{"model":"Qwen/Qwen3-0.6B","token_ids":[1,2,3],"sampling_params":{"max_tokens":1}}"#,
+            )
+            .send()
+            .await
+            .expect("generate request failed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let serialized = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("backend received serialized request");
+        assert_eq!(
+            serialized["agent_context"],
+            serde_json::json!({
+                "session_id": "trajectory-123",
+                "parent_session_id": "rollout-7",
+                "session_final": true,
+                "kv_hints": {"evict_session": true}
+            })
+        );
 
         handle.abort();
     }
@@ -1372,5 +1454,32 @@ mod tests {
     #[test]
     fn priority_inversion_saturates_at_i32_min() {
         assert_eq!(dynamo_routing_priority(i32::MIN), i32::MAX);
+    }
+
+    #[test]
+    fn oversized_agent_context_is_serialized_without_generate_only_limits() {
+        let mut preprocessed = PreprocessedRequest::builder()
+            .model("Qwen/Qwen3-0.6B".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(Default::default())
+            .eos_token_ids(vec![])
+            .annotations(vec![])
+            .build()
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-session-id", "x".repeat(257).parse().unwrap());
+
+        attach_generate_agent_context(&mut preprocessed, &headers);
+
+        assert_eq!(
+            preprocessed
+                .agent_context
+                .as_ref()
+                .expect("agent context")
+                .session_id,
+            "x".repeat(257)
+        );
     }
 }
