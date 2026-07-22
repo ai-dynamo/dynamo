@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Stable C ABI and safe Rust authoring API for Dynamo worker-selector plugins.
+//! Stable C ABI and safe Rust authoring API for Dynamo worker-selection plugins.
 //!
 //! Plugins are trusted native code. ABI pointers are borrowed for the duration of a callback;
 //! no Rust-owned allocation crosses the dynamic-library boundary.
