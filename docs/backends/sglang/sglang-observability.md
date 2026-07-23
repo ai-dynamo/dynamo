@@ -184,7 +184,7 @@ In disaggregated serving, queued request metrics read from the correct engine-sp
 
 | Engine | Queue Source |
 |--------|-------------|
-| Unified (non-disagg) | `waiting_queue` |
+| Aggregated (non-disagg) | `waiting_queue` |
 | Prefill | `disagg_prefill_bootstrap_queue` |
 | Decode | `disagg_decode_prealloc_queue` + `disagg_decode_transfer_queue` |
 

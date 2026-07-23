@@ -58,7 +58,7 @@ For development, use the [devcontainer](https://github.com/ai-dynamo/dynamo/tree
 | [**KVBM**](../../components/kvbm/README.md) | ✅ | |
 | [**LMCache**](../../integrations/lmcache-integration.md) | ✅ | CUDA 12.9 and arm64/aarch64 containers may require building LMCache from source |
 | [**FlexKV**](../../integrations/flexkv-integration.md) | ✅ | |
-| [**Multimodal Support**](../../features/multimodal/multimodal-vllm.md) | ✅ | Aggregated and P/D image/video serving on legacy and unified Python backends; separate Encode workers use the legacy path |
+| [**Multimodal Support**](../../features/multimodal/multimodal-vllm.md) | ✅ | Aggregated and P/D image/video serving; separate Encode workers for E/PD and E/P/D deployments |
 | [**Observability**](vllm-observability.md) | ✅ | Metrics and monitoring |
 | **WideEP** | ✅ | Support for DeepEP |
 | **DP Rank Routing** | ✅ | [Hybrid load balancing](https://docs.vllm.ai/en/stable/serving/data_parallel_deployment/?h=external+dp#hybrid-load-balancing) via external DP rank control |
@@ -116,8 +116,7 @@ The Python vLLM backend remains the recommended entry point for production
 deployments and examples. The Rust backend is a development preview for
 validating the Rust `LLMEngine` integration with vLLM's engine-core client.
 Use it when working on the Rust backend contract, cancellation, metrics,
-or P/D wiring; use `python -m dynamo.vllm` or
-`python -m dynamo.vllm.unified_main` for the most complete vLLM feature
+or P/D wiring; use `python -m dynamo.vllm` for the most complete vLLM feature
 coverage.
 
 > [!NOTE]
@@ -143,7 +142,7 @@ DYN_SYSTEM_PORT=8081 cargo run -p dynamo-vllm-rs-backend --features vllm_rs -- Q
 ```
 
 The Rust worker starts a managed vLLM engine-core process and registers with
-the Dynamo frontend using the same discovery path as the Python unified
+the Dynamo frontend using the same discovery path as the Python vLLM
 backend. The Rust backend is expected to become the default only after it
 reaches feature and operational parity with the Python vLLM backend.
 
