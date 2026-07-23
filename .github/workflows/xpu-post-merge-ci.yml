@@ -1,0 +1,280 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: XPU Post-Merge CI Pipeline
+
+# Runs on every merge to main. Uses broader test markers than xpu-pr.yml:
+# - PR workflow: "pre_merge and vllm and gpu_N"
+# - Post-merge:  "(pre_merge or post_merge) and vllm and gpu_N"
+#
+# This catches regressions in tests marked post_merge-only (heavier tests
+# that are too slow for every PR but should run on every merge to main).
+#
+# NOTE: when upstreaming, switch to:
+#   on:
+#     push:
+#       branches: [main, 'release/*.*.*']
+on:
+  push:
+    branches:
+      - main
+      - 'xpu-ci-*'
+  workflow_dispatch:
+
+concurrency:
+  group: xpu-post-merge-${{ github.ref_name }}
+  cancel-in-progress: true
+
+env:
+  XPU_RUNTIME_IMAGE: dynamo-vllm-xpu:${{ github.sha }}
+  XPU_TEST_IMAGE: dynamo-vllm-xpu-test:${{ github.sha }}
+
+  # Host path to pre-populated HuggingFace model cache.
+  XPU_HF_CACHE_PATH: /mnt/weka/data/llm-d-models-pv/hub
+
+  # Test files/directories to skip. Same list as xpu-pr.yml — see
+  # that file for detailed comments on each entry.
+  XPU_PYTEST_IGNORE: >-
+    components/src/dynamo/vllm/tests/multimodal_utils
+    components/src/dynamo/vllm/tests/test_vllm_chat_message_utils.py
+    components/src/dynamo/vllm/tests/test_vllm_prompt_embeds.py
+    components/src/dynamo/vllm/tests/test_vllm_sleep_wake_handlers.py
+    components/src/dynamo/vllm/tests/test_vllm_video_handler.py
+    components/src/dynamo/vllm/tests/test_vllm_worker_factory.py
+    components/src/dynamo/vllm/tests/test_vllm_worker_handler.py
+    tests/serve
+    tests/kvbm_integration
+    tests/test_predownload_models.py
+    tests/frontend/test_vllm_prepost_integration.py
+    tests/mm_router
+    tests/router
+    tests/fault_tolerance
+    tests/frontend/test_vllm.py
+
+  XPU_PYTEST_DESELECT: >-
+    components/src/dynamo/vllm/tests/test_vllm_unit.py::test_headless_namespace_has_required_fields
+    components/src/dynamo/vllm/tests/test_vllm_unit.py::TestVllmOmniOptionalDependency::test_dynamo_vllm_main_importable_without_vllm_omni
+
+jobs:
+  # ============================================================================
+  # BUILD
+  # ============================================================================
+  vllm-xpu-build:
+    name: vllm-xpu Build
+    runs-on: [self-hosted, xpu]
+    timeout-minutes: 120
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          lfs: true
+
+      - name: Generate XPU Dockerfile
+        shell: bash
+        run: |
+          python3 container/render.py \
+            --framework vllm \
+            --device xpu \
+            --target runtime \
+            --platform linux/amd64 \
+            --output-short-filename \
+            --show-result
+
+      - name: Build XPU runtime image
+        shell: bash
+        run: |
+          docker build \
+            --progress=plain \
+            --build-arg DYNAMO_COMMIT_SHA=${{ github.sha }} \
+            --build-arg http_proxy=${http_proxy:-} \
+            --build-arg https_proxy=${https_proxy:-} \
+            --build-arg HTTP_PROXY=${HTTP_PROXY:-} \
+            --build-arg HTTPS_PROXY=${HTTPS_PROXY:-} \
+            --build-arg no_proxy=${no_proxy:-} \
+            -f container/rendered.Dockerfile \
+            -t ${{ env.XPU_RUNTIME_IMAGE }} \
+            .
+
+      - name: Build XPU test image
+        shell: bash
+        run: |
+          if [ -f container/Dockerfile.test ]; then
+            docker build \
+              --progress=plain \
+              --build-arg BASE_IMAGE=${{ env.XPU_RUNTIME_IMAGE }} \
+              --build-arg http_proxy=${http_proxy:-} \
+              --build-arg https_proxy=${https_proxy:-} \
+              --build-arg HTTP_PROXY=${HTTP_PROXY:-} \
+              --build-arg HTTPS_PROXY=${HTTPS_PROXY:-} \
+              --build-arg no_proxy=${no_proxy:-} \
+              -f container/Dockerfile.test \
+              -t ${{ env.XPU_TEST_IMAGE }} \
+              .
+          else
+            docker tag ${{ env.XPU_RUNTIME_IMAGE }} ${{ env.XPU_TEST_IMAGE }}
+          fi
+
+  # ============================================================================
+  # SANITY CHECK
+  # ============================================================================
+  vllm-xpu-sanity:
+    name: vllm-xpu Sanity
+    needs: [vllm-xpu-build]
+    runs-on: [self-hosted, xpu]
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+
+      - name: Setup XPU runtime flags
+        id: setup-xpu
+        uses: ./.github/actions/setup-xpu
+
+      - name: Run sanity_check.py
+        shell: bash
+        run: |
+          docker run --rm \
+            ${{ steps.setup-xpu.outputs.docker_device_flags }} \
+            ${{ steps.setup-xpu.outputs.docker_group_flags }} \
+            ${{ steps.setup-xpu.outputs.docker_env_flags }} \
+            ${{ env.XPU_RUNTIME_IMAGE }} \
+            python /workspace/deploy/sanity_check.py --runtime-check --no-gpu-check
+
+      - name: XPU smoke test
+        shell: bash
+        run: |
+          docker run --rm \
+            ${{ steps.setup-xpu.outputs.docker_device_flags }} \
+            ${{ steps.setup-xpu.outputs.docker_group_flags }} \
+            ${{ steps.setup-xpu.outputs.docker_env_flags }} \
+            ${{ env.XPU_RUNTIME_IMAGE }} \
+            python3 -c "
+          import torch
+          print('PyTorch:', torch.__version__)
+          print('XPU available:', torch.xpu.is_available())
+          print('XPU devices:', torch.xpu.device_count())
+          assert torch.xpu.is_available(), 'XPU not available!'
+          t = torch.randn(2, 3).to('xpu')
+          print('Tensor on XPU:', t.device)
+          print('PASS')
+          "
+
+  # ============================================================================
+  # CPU-ONLY TESTS — post_merge markers included
+  # ============================================================================
+  vllm-xpu-cpu-tests:
+    name: vllm-xpu CPU Tests
+    needs: [vllm-xpu-build]
+    runs-on: [self-hosted, xpu]
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+
+      - name: Setup XPU runtime flags
+        id: setup-xpu
+        uses: ./.github/actions/setup-xpu
+
+      - name: Run CPU-only tests (pre_merge + post_merge)
+        uses: ./.github/actions/pytest-xpu
+        with:
+          image_tag: ${{ env.XPU_TEST_IMAGE }}
+          pytest_marks: '(pre_merge or post_merge) and vllm and gpu_0'
+          test_suite_name: vllm-xpu
+          test_type: post_merge_cpu
+          parallel_mode: 'auto'
+          hf_token: ${{ secrets.HF_TOKEN }}
+          docker_device_flags: ${{ steps.setup-xpu.outputs.docker_device_flags }}
+          docker_group_flags: ${{ steps.setup-xpu.outputs.docker_group_flags }}
+          docker_env_flags: ${{ steps.setup-xpu.outputs.docker_env_flags }}
+          pytest_ignore: ${{ env.XPU_PYTEST_IGNORE }}
+          pytest_deselect: ${{ env.XPU_PYTEST_DESELECT }}
+          hf_cache_path: ${{ env.XPU_HF_CACHE_PATH }}
+
+  # ============================================================================
+  # SINGLE-GPU TESTS — post_merge markers included
+  # ============================================================================
+  vllm-xpu-gpu-tests:
+    name: vllm-xpu Single-GPU Tests
+    needs: [vllm-xpu-build, vllm-xpu-sanity]
+    runs-on: [self-hosted, xpu]
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+
+      - name: Setup XPU runtime flags
+        id: setup-xpu
+        uses: ./.github/actions/setup-xpu
+        with:
+          min_gpus: '1'
+
+      - name: Run single-GPU tests (pre_merge + post_merge)
+        uses: ./.github/actions/pytest-xpu
+        with:
+          image_tag: ${{ env.XPU_TEST_IMAGE }}
+          pytest_marks: '(pre_merge or post_merge) and vllm and gpu_1'
+          test_suite_name: vllm-xpu
+          test_type: post_merge_gpu_1
+          parallel_mode: 'none'
+          hf_token: ${{ secrets.HF_TOKEN }}
+          docker_device_flags: ${{ steps.setup-xpu.outputs.docker_device_flags }}
+          docker_group_flags: ${{ steps.setup-xpu.outputs.docker_group_flags }}
+          docker_env_flags: ${{ steps.setup-xpu.outputs.docker_env_flags }}
+          pytest_ignore: ${{ env.XPU_PYTEST_IGNORE }}
+          pytest_deselect: ${{ env.XPU_PYTEST_DESELECT }}
+          hf_cache_path: ${{ env.XPU_HF_CACHE_PATH }}
+
+  # ============================================================================
+  # MULTI-GPU TESTS — post_merge markers included
+  # ============================================================================
+  # TODO: when 4-XPU runners are available, change min_gpus to 4 and the
+  #       marker to '(pre_merge or post_merge) and vllm and (gpu_2 or gpu_4)'
+  vllm-xpu-multi-gpu-tests:
+    name: vllm-xpu Multi-GPU Tests
+    needs: [vllm-xpu-build, vllm-xpu-sanity]
+    runs-on: [self-hosted, xpu, multi-gpu]
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+
+      - name: Setup XPU runtime flags
+        id: setup-xpu
+        uses: ./.github/actions/setup-xpu
+        with:
+          min_gpus: '2'
+
+      - name: Run multi-GPU tests (pre_merge + post_merge)
+        uses: ./.github/actions/pytest-xpu
+        with:
+          image_tag: ${{ env.XPU_TEST_IMAGE }}
+          pytest_marks: '(pre_merge or post_merge) and vllm and gpu_2'
+          test_suite_name: vllm-xpu
+          test_type: post_merge_gpu_2
+          parallel_mode: 'none'
+          hf_token: ${{ secrets.HF_TOKEN }}
+          docker_device_flags: ${{ steps.setup-xpu.outputs.docker_device_flags }}
+          docker_group_flags: ${{ steps.setup-xpu.outputs.docker_group_flags }}
+          docker_env_flags: ${{ steps.setup-xpu.outputs.docker_env_flags }}
+          pytest_ignore: ${{ env.XPU_PYTEST_IGNORE }}
+          pytest_deselect: ${{ env.XPU_PYTEST_DESELECT }}
+          hf_cache_path: ${{ env.XPU_HF_CACHE_PATH }}
+
+  # ============================================================================
+  # STATUS CHECK
+  # ============================================================================
+  xpu-post-merge-status:
+    name: XPU Post-Merge Status
+    runs-on: ubuntu-latest
+    needs:
+      - vllm-xpu-build
+      - vllm-xpu-sanity
+      - vllm-xpu-cpu-tests
+      - vllm-xpu-gpu-tests
+      - vllm-xpu-multi-gpu-tests
+    if: always()
+    steps:
+      - name: Aggregate job results
+        run: |
+          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $r | ["success", "skipped"] | any($r == .))'
