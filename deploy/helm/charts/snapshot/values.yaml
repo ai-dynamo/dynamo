@@ -46,6 +46,12 @@ storage:
   #   DaemonSet in an infrastructure namespace. Because the DaemonSet no longer
   #   mounts the PVC from every GPU node, suitable ReadWriteOnce storage
   #   classes can be used for sequential checkpoint/restore workflows.
+  # - agentInject: workload pods NEVER mount the checkpoint PVC. The agent mounts
+  #   it (like agentMount) and, for restore, grafts the checkpoint dir into the
+  #   target container's mount namespace via open_tree(OPEN_TREE_CLONE)+move_mount
+  #   before nsrestore reads it. Set the operator's checkpoint.storage.accessMode
+  #   to agentInject to match (the operator then skips injecting the PVC into
+  #   workload pods).
   accessMode: agentMount
 
   # PVC configuration (when type=pvc)

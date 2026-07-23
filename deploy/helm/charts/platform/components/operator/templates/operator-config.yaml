@@ -180,9 +180,18 @@ data:
       {{- $pvc := .pvc | default dict }}
       storage:
         type: {{ .type | quote }}
+        {{- if .accessMode }}
+        accessMode: {{ .accessMode | quote }}
+        {{- end }}
         {{- if eq .type "pvc" }}
         pvc:
-          pvcName: {{ required "checkpoint.storage.pvc.pvcName is required when checkpoint.storage.type=pvc" $pvc.pvcName | quote }}
+          {{- if eq (.accessMode | default "") "agentInject" }}
+          {{- if $pvc.pvcName }}
+          pvcName: {{ $pvc.pvcName | quote }}
+          {{- end }}
+          {{- else }}
+          pvcName: {{ required "checkpoint.storage.pvc.pvcName is required when checkpoint.storage.type=pvc and accessMode is not agentInject" $pvc.pvcName | quote }}
+          {{- end }}
           basePath: {{ required "checkpoint.storage.pvc.basePath is required when checkpoint.storage.type=pvc" $pvc.basePath | quote }}
           {{- if $pvc.create }}
           create: true

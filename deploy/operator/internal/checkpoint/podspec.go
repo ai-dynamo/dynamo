@@ -73,6 +73,7 @@ func ApplyRestorePodMetadataWithStorageConfig(
 		delete(annotations, snapshotprotocol.TargetContainersAnnotation)
 		delete(annotations, snapshotprotocol.CheckpointStorageTypeAnnotation)
 		delete(annotations, snapshotprotocol.CheckpointStorageBasePathAnnotation)
+		delete(annotations, snapshotprotocol.CheckpointStorageAccessModeAnnotation)
 		delete(annotations, commonconsts.CheckpointRestoreCandidateAnnotation)
 		delete(annotations, commonconsts.CheckpointNameAnnotation)
 		delete(annotations, commonconsts.CheckpointStartupPolicyAnnotation)

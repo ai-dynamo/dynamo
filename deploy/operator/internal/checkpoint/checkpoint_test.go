@@ -166,6 +166,32 @@ func TestStorageFromConfig(t *testing.T) {
 		assert.Equal(t, "/snapshots", storage.BasePath)
 	})
 
+	t.Run("agentInject resolves storage without a pvcName", func(t *testing.T) {
+		storage, ok, err := StorageFromConfig(configv1alpha1.CheckpointStorageConfiguration{
+			Type:       snapshotprotocol.StorageTypePVC,
+			AccessMode: snapshotprotocol.StorageAccessModeAgentInject,
+			PVC: configv1alpha1.CheckpointPVCConfig{
+				BasePath: "/checkpoints",
+			},
+		})
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.Equal(t, snapshotprotocol.StorageTypePVC, storage.Type)
+		assert.Equal(t, "", storage.PVCName, "agentInject must not carry a workload PVC name")
+		assert.Equal(t, "/checkpoints", storage.BasePath)
+		assert.Equal(t, snapshotprotocol.StorageAccessModeAgentInject, storage.AccessMode)
+	})
+
+	t.Run("non-agentInject still requires a pvcName", func(t *testing.T) {
+		_, _, err := StorageFromConfig(configv1alpha1.CheckpointStorageConfiguration{
+			Type: snapshotprotocol.StorageTypePVC,
+			PVC: configv1alpha1.CheckpointPVCConfig{
+				BasePath: "/checkpoints",
+			},
+		})
+		require.Error(t, err)
+	})
+
 	t.Run("pvc config normalizes clean base path", func(t *testing.T) {
 		storage, ok, err := StorageFromConfig(configv1alpha1.CheckpointStorageConfiguration{
 			Type: snapshotprotocol.StorageTypePVC,

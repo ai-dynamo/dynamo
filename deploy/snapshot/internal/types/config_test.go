@@ -51,3 +51,15 @@ func TestAgentConfigValidateDefaultsStorageAccessMode(t *testing.T) {
 		t.Fatalf("Storage.AccessMode = %q, want %q", cfg.Storage.AccessMode, StorageAccessModeAgentMount)
 	}
 }
+
+func TestAgentConfigValidateAcceptsAgentInject(t *testing.T) {
+	cfg := validAgentConfig()
+	cfg.Storage.AccessMode = StorageAccessModeAgentInject
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if cfg.Storage.AccessMode != StorageAccessModeAgentInject {
+		t.Fatalf("Storage.AccessMode = %q, want %q", cfg.Storage.AccessMode, StorageAccessModeAgentInject)
+	}
+}

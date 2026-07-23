@@ -583,6 +583,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		TargetPodIP:                 pod.Status.PodIP,
 		ContainerName:               containerName,
 		Clientset:                   w.clientset,
+		AccessMode:                  w.effectiveAccessMode(pod),
 	}
 	placeholderHostPID, err := executor.Restore(restoreCtx, w.runtime, log, req)
 	if err != nil {
@@ -694,6 +695,19 @@ func chooseActiveContent(objs []interface{}) string {
 		return ""
 	}
 	return chosen.Name
+}
+
+// effectiveAccessMode returns the operator-stamped storage access mode from the
+// pod (the single source of truth), falling back to the agent's own configured
+// mode when the annotation is absent (legacy pods). Making the stamped value
+// authoritative prevents the operator and agent configs from silently disagreeing.
+func (w *NodeController) effectiveAccessMode(pod *corev1.Pod) string {
+	if pod != nil {
+		if m := strings.TrimSpace(pod.Annotations[snapshotprotocol.CheckpointStorageAccessModeAnnotation]); m != "" {
+			return m
+		}
+	}
+	return strings.TrimSpace(w.config.Storage.AccessMode)
 }
 
 func (w *NodeController) checkpointLocationsFromPod(pod *corev1.Pod, checkpointID string, hostPID int) (checkpointLocations, error) {

@@ -125,8 +125,9 @@ spec:
             - name: config
               mountPath: /etc/snapshot
               readOnly: true
-            {{- if and (eq .Values.storage.type "pvc") (eq .Values.storage.accessMode "agentMount") }}
-            # Mount the checkpoint PVC directly in namespace-local agent mode
+            {{- if and (eq .Values.storage.type "pvc") (has .Values.storage.accessMode (list "agentMount" "agentInject")) }}
+            # Mount the checkpoint PVC directly. agentMount serves it to the pod;
+            # agentInject clones it into the target container via move_mount.
             - name: checkpoints
               mountPath: {{ .Values.storage.pvc.basePath }}
             {{- end }}
@@ -182,7 +183,7 @@ spec:
             path: /var/lib/kubelet/seccomp
             type: DirectoryOrCreate
         {{- end }}
-        {{- if and (eq .Values.storage.type "pvc") (eq .Values.storage.accessMode "agentMount") }}
+        {{- if and (eq .Values.storage.type "pvc") (has .Values.storage.accessMode (list "agentMount" "agentInject")) }}
         - name: checkpoints
           persistentVolumeClaim:
             claimName: {{ .Values.storage.pvc.name }}

@@ -255,6 +255,40 @@ func TestNewRestorePodRejectsUnknownContainer(t *testing.T) {
 	}
 }
 
+func TestPrepareRestorePodSpecAgentInjectSkipsPVC(t *testing.T) {
+	podSpec := corev1.PodSpec{
+		Containers: []corev1.Container{{Name: "main"}},
+	}
+	// agentInject resolves with an empty PVCName: the workload pod must NOT mount
+	// the checkpoint PVC; the agent grafts the checkpoint in at restore time.
+	storage := Storage{
+		Type:       StorageTypePVC,
+		PVCName:    "",
+		BasePath:   "/checkpoints",
+		AccessMode: StorageAccessModeAgentInject,
+	}
+	annotations := map[string]string{TargetContainersAnnotation: "main"}
+	if err := PrepareRestorePodSpec(&podSpec, annotations, storage, DefaultSeccompLocalhostProfile, true); err != nil {
+		t.Fatalf("PrepareRestorePodSpec error: %v", err)
+	}
+
+	for _, v := range podSpec.Volumes {
+		if v.Name == CheckpointVolumeName {
+			t.Fatalf("agentInject must not inject the %s PVC volume: %#v", CheckpointVolumeName, podSpec.Volumes)
+		}
+	}
+	for _, m := range podSpec.Containers[0].VolumeMounts {
+		if m.Name == CheckpointVolumeName {
+			t.Fatalf("agentInject must not inject the %s volume mount: %#v", CheckpointVolumeName, podSpec.Containers[0].VolumeMounts)
+		}
+	}
+	// The control volume/probe are still required and present, so validation passes
+	// even though the PVC is absent.
+	if err := ValidateRestorePodSpec(&podSpec, annotations, storage, DefaultSeccompLocalhostProfile); err != nil {
+		t.Fatalf("ValidateRestorePodSpec rejected an agentInject pod: %v", err)
+	}
+}
+
 func TestPrepareRestorePodSpec(t *testing.T) {
 	podSpec := corev1.PodSpec{}
 	readinessProbe := &corev1.Probe{PeriodSeconds: 13, SuccessThreshold: 1}

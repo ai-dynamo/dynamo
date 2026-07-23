@@ -389,6 +389,12 @@ func (c *CheckpointConfiguration) EffectiveSeccompProfile() string {
 type CheckpointStorageConfiguration struct {
 	// Type is the storage backend type. Only pvc is implemented today.
 	Type string `json:"type"`
+	// AccessMode selects how the snapshot-agent reaches storage and must match the
+	// snapshot chart's storage.accessMode. "agentInject" tells the operator to
+	// stamp checkpoint metadata but NOT mount the PVC into workload pods (the agent
+	// grafts the checkpoint into the container instead); pvcName is then not
+	// required. Empty/"agentMount"/"podMount" preserve the existing behavior.
+	AccessMode string `json:"accessMode,omitempty"`
 	// PVC configuration for pvc-based settings.
 	PVC CheckpointPVCConfig `json:"pvc"`
 	// Deprecated: S3 is retained for compatibility and ignored.

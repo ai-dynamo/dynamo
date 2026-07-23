@@ -35,6 +35,10 @@ type RestoreRequest struct {
 	TargetPodIP                 string
 	ContainerName               string
 	Clientset                   kubernetes.Interface
+	// AccessMode is the operator-stamped storage access mode. For agentInject the
+	// workload pod has no checkpoint PVC mount, so the agent clones its own
+	// checkpoint dir and grafts it into the container ns via nsrestore.
+	AccessMode string
 }
 
 // Restore performs external restore for the given request.
@@ -218,7 +222,24 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 		args = append(args, "--target-pod-ip", req.TargetPodIP)
 	}
 
+	// agentInject: the workload pod does not mount the checkpoint PVC. Clone the
+	// agent's own checkpoint dir into a detached mount and hand it to nsrestore,
+	// which grafts it into the container's mount namespace at --checkpoint-path.
+	var extraFiles []*os.File
+	if req.AccessMode == types.StorageAccessModeAgentInject {
+		tree, err := snapshotruntime.OpenCheckpointTree(req.CheckpointLocation)
+		if err != nil {
+			return nil, fmt.Errorf("agentInject checkpoint clone: %w", err)
+		}
+		defer tree.Close()
+		extraFiles = append(extraFiles, tree)
+		// First ExtraFiles entry lands at fd 3 in nsenter and is inherited by
+		// nsrestore across the execve chain (nsenter does not close it).
+		args = append(args, "--checkpoint-fd", "3")
+	}
+
 	cmd := exec.CommandContext(ctx, "nsenter", args...)
+	cmd.ExtraFiles = extraFiles
 	// Inherit the agent environment so nsrestore uses the same logger settings.
 	cmd.Env = os.Environ()
 	log.V(1).Info("Executing nsenter + nsrestore", "cmd", cmd.String())
