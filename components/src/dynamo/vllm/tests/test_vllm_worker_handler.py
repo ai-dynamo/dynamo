@@ -1948,6 +1948,61 @@ class TestClassifyPoolingWorkerHandler:
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
+    async def test_classify_forwards_use_activation(self):
+        """use_activation is passed into PoolingParams(task="classify") when
+        the client sets it, and left at the pooler default when omitted."""
+        handler = self._make_handler()
+        context = self._make_context()
+        captured: dict = {}
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            captured["task"] = pooling_params.task
+            captured["use_activation"] = pooling_params.use_activation
+            output = MagicMock()
+            output.outputs.data = torch.tensor([0.4, 0.6])
+            output.prompt_token_ids = [1, 2]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+
+        # Explicit False → forwarded.
+        request = {"input": "x", "model": "test-model", "use_activation": False}
+        [_] = [r async for r in handler.generate(request, context)]
+        assert captured["task"] == "classify"
+        assert captured["use_activation"] is False
+
+        # Omitted → pooler default (PoolingParams.use_activation is None).
+        captured.clear()
+        request = {"input": "x", "model": "test-model"}
+        [_] = [r async for r in handler.generate(request, context)]
+        assert captured["use_activation"] is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_classify_accepts_pretokenized_input(self):
+        """Pre-tokenized inputs (list[int] / list[list[int]]) are wrapped in
+        TokensPrompt, mirroring vLLM's CompletionRequestMixin input contract."""
+        handler = self._make_handler()
+        context = self._make_context()
+        seen_prompts: list = []
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            seen_prompts.append(prompt)
+            output = MagicMock()
+            output.outputs.data = torch.tensor([0.5, 0.5])
+            output.prompt_token_ids = [1, 2]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+
+        request = {"input": [[101, 102], [103, 104]], "model": "test-model"}
+        [response] = [r async for r in handler.generate(request, context)]
+        assert len(response["data"]) == 2
+        # Each prompt was wrapped as a TokensPrompt (not a raw str).
+        assert all(not isinstance(p, str) for p in seen_prompts)
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
     async def test_pooling_request_dispatches_on_encoding_format(self):
         """A wire request carrying ``encoding_format`` must run the /pooling
         path: task passthrough (None -> engine default), per-item ``object:

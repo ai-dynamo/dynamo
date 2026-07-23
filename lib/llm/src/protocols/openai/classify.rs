@@ -21,8 +21,10 @@ mod nvext;
 
 pub use nvext::{NvExt, NvExtProvider};
 
-/// Classification input — a single string or a batch of strings. Mirrors the
-/// `input` field of vLLM's classification request.
+/// Classification input — text or pre-tokenized prompts, single or batched.
+/// Mirrors the `input` field of vLLM's `ClassificationCompletionRequest`
+/// (`CompletionRequestMixin`: `list[int] | list[list[int]] | str | list[str]`),
+/// so upstream-tokenized clients migrate unchanged.
 #[derive(ToSchema, Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum ClassificationInput {
@@ -30,6 +32,10 @@ pub enum ClassificationInput {
     Single(String),
     /// A batch of texts to classify.
     Batch(Vec<String>),
+    /// A single pre-tokenized prompt (token IDs).
+    Tokens(Vec<u32>),
+    /// A batch of pre-tokenized prompts.
+    TokenBatch(Vec<Vec<u32>>),
 }
 
 /// Request for the `/classify` endpoint.
@@ -40,6 +46,12 @@ pub struct NvCreateClassifyRequest {
 
     /// The text (or texts) to classify.
     pub input: ClassificationInput,
+
+    /// Whether to apply the classification pooler's activation
+    /// (sigmoid/softmax). `None` uses the pooler's default. Forwarded verbatim
+    /// to `PoolingParams`, mirroring vLLM's `ClassifyRequestMixin`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_activation: Option<bool>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
@@ -147,6 +159,55 @@ mod tests {
             ClassificationInput::Batch(v) => assert_eq!(v.len(), 2),
             _ => panic!("expected batch input"),
         }
+    }
+
+    #[test]
+    fn token_inputs_parse_as_token_variants() {
+        let request: NvCreateClassifyRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "input": [101, 2023, 102]
+        }))
+        .unwrap();
+        assert!(matches!(request.input, ClassificationInput::Tokens(_)));
+
+        let request: NvCreateClassifyRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "input": [[101, 102], [101, 103]]
+        }))
+        .unwrap();
+        match &request.input {
+            ClassificationInput::TokenBatch(v) => assert_eq!(v.len(), 2),
+            other => panic!("expected token batch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn use_activation_round_trips_and_defaults_to_none() {
+        let request: NvCreateClassifyRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "input": "hello"
+        }))
+        .unwrap();
+        assert!(request.use_activation.is_none());
+        // Omitted → not serialized onto the wire to the worker.
+        assert!(
+            serde_json::to_value(&request)
+                .unwrap()
+                .get("use_activation")
+                .is_none()
+        );
+
+        let request: NvCreateClassifyRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "input": "hello",
+            "use_activation": false
+        }))
+        .unwrap();
+        assert_eq!(request.use_activation, Some(false));
+        assert_eq!(
+            serde_json::to_value(&request).unwrap()["use_activation"],
+            serde_json::json!(false)
+        );
     }
 
     #[test]

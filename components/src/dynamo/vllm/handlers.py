@@ -3948,10 +3948,15 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
         prompts: list[Any] = _classify_embedding_input(input_field)
 
         # Sequence classification is a pooling pass with the model's configured
-        # classification pooler. ``use_activation`` is left at the pooler
-        # default (vLLM applies sigmoid/softmax per the model's config) so
-        # per-model behaviour isn't overridden — matching bare ``vllm serve``.
-        pooling_params = PoolingParams(task="classify")
+        # classification pooler. ``use_activation`` is forwarded verbatim when
+        # the client sets it (mirroring vLLM's ClassifyRequestMixin); when
+        # omitted, the pooler default applies (vLLM's per-model sigmoid/softmax)
+        # so behaviour matches bare ``vllm serve``.
+        classify_pooling_kwargs: dict[str, Any] = {"task": "classify"}
+        use_activation = request.get("use_activation")
+        if use_activation is not None:
+            classify_pooling_kwargs["use_activation"] = use_activation
+        pooling_params = PoolingParams(**classify_pooling_kwargs)
 
         base_request_id = context.id()
 
