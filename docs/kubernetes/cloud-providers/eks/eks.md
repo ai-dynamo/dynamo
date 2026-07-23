@@ -176,13 +176,12 @@ dynamoworkermetadatas.nvidia.com                  2026-03-17T13:18:11Z
 
 ### Cache Models on EFS
 
-Before deploying an inference graph, download the model weights onto the shared EFS file system. Each Dynamo recipe includes a `model-cache/model-download.yaml` Job manifest that downloads the model from HuggingFace.
+Before deploying an inference graph, download the model weights onto the shared EFS file system using a model download Job.
 
-Copy the recipe's download manifest into the local kustomize directory and apply it:
+Copy the download manifest for your model into the local kustomize directory and apply it:
 
 ```bash
-# Example: cache the Qwen3-32B model which we will be using later
-cp ../../../recipes/qwen3-32b/model-cache/model-download.yaml manifests/model-download/model-download.yaml
+cp /path/to/model-download.yaml manifests/model-download/model-download.yaml
 kubectl kustomize manifests/model-download | kubectl -n ${DYNAMO_NAMESPACE} apply -f -
 rm -f manifests/model-download/model-download.yaml
 ```
