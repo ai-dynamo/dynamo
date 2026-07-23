@@ -303,7 +303,7 @@ def update_engine_config_with_dynamo(
     if hasattr(engine_config, "runner"):
         logger.debug(f"Using runner={engine_config.runner} from engine args")
 
-    kv_cfg = create_kv_events_config(dynamo_config, engine_config)
+    kv_cfg = create_kv_events_config(engine_config)
     defaults["kv_events_config"] = kv_cfg
     dynamo_config.use_kv_events = kv_cfg is not None and kv_cfg.enable_kv_cache_events
 
@@ -407,16 +407,9 @@ def update_engine_config_with_dynamo(
 
 
 def create_kv_events_config(
-    dynamo_config: Config, engine_config: AsyncEngineArgs
+    engine_config: AsyncEngineArgs,
 ) -> Optional[KVEventsConfig]:
     """Create KVEventsConfig for prefix caching if needed."""
-    if dynamo_config.disaggregation_mode == DisaggregationMode.DECODE:
-        logger.info(
-            "Decode worker detected (disaggregation_mode=decode): "
-            "kv_events_config disabled (decode workers don't publish KV events)"
-        )
-        return None
-
     # If prefix caching is not enabled, no events config needed
     if not engine_config.enable_prefix_caching:
         logger.info("No kv_events_config required: prefix caching is disabled")
