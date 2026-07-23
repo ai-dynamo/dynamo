@@ -1280,6 +1280,105 @@ class EmbeddingPayload(BasePayload):
 
 
 @dataclass
+class ClassifyPayload(BasePayload):
+    """Payload for the ``/classify`` endpoint (sequence classification /
+    cross-encoder pooling).
+
+    Validates the ``NvCreateClassifyResponse`` shape end-to-end and returns a
+    summary string of the per-input predictions for keyword assertion. The
+    summary is structural (label + class count) rather than semantic, so tiny
+    CI models whose predicted label may differ from a full-size model still
+    satisfy the check.
+    """
+
+    endpoint: str = "/classify"
+
+    @staticmethod
+    def extract_classifications(response):
+        response.raise_for_status()
+        result = response.json()
+        assert (
+            result.get("object") == "list"
+        ), f"Expected object='list', got {result.get('object')}"
+        assert "data" in result and len(result["data"]) > 0, "Empty data in response"
+
+        summaries = []
+        for item in result["data"]:
+            assert "index" in item, "Missing 'index' in classification item"
+            assert "probs" in item, "Missing 'probs' in classification item"
+            probs = item["probs"]
+            assert (
+                isinstance(probs, list) and len(probs) > 0
+            ), "probs must be a non-empty list"
+            assert item.get("num_classes") == len(
+                probs
+            ), f"num_classes {item.get('num_classes')} != len(probs) {len(probs)}"
+            # `label` is Optional[str] (None when the model has no id2label).
+            label = item.get("label")
+            assert label is None or isinstance(label, str), "label must be str or null"
+            summaries.append(f"label={label} classes={len(probs)}")
+
+        assert "usage" in result, "Missing 'usage' in response"
+        return f"Classified {len(summaries)} inputs: " + "; ".join(summaries)
+
+    def response_handler(self, response: Any) -> str:
+        return ClassifyPayload.extract_classifications(response)
+
+
+@dataclass
+class PoolingPayload(BasePayload):
+    """Payload for the ``/pooling`` endpoint (raw pooler output).
+
+    Validates the ``NvCreatePoolingResponse`` shape end-to-end. Each item's
+    ``data`` is the raw pooler output whose shape depends on the resolved
+    task: a flat vector for sequence-level tasks, a nested matrix for
+    token-level tasks, or a base64 string when ``encoding_format="base64"``.
+    The summary reports the item count and the first item's decoded shape.
+    """
+
+    endpoint: str = "/pooling"
+
+    @staticmethod
+    def _shape(data: Any) -> str:
+        if isinstance(data, str):
+            decoded = base64.b64decode(data)
+            assert (
+                len(decoded) % 4 == 0
+            ), f"base64 payload not f32-aligned: {len(decoded)} bytes"
+            return f"base64[{len(decoded) // 4}]"
+        assert (
+            isinstance(data, list) and len(data) > 0
+        ), "pooling data must be a non-empty list"
+        if isinstance(data[0], list):
+            return f"matrix[{len(data)}x{len(data[0])}]"
+        return f"vector[{len(data)}]"
+
+    @staticmethod
+    def extract_pooling(response):
+        response.raise_for_status()
+        result = response.json()
+        assert (
+            result.get("object") == "list"
+        ), f"Expected object='list', got {result.get('object')}"
+        assert "data" in result and len(result["data"]) > 0, "Empty data in response"
+
+        shapes = []
+        for item in result["data"]:
+            assert "index" in item, "Missing 'index' in pooling item"
+            assert (
+                item.get("object") == "pooling"
+            ), f"Expected object='pooling', got {item.get('object')}"
+            assert "data" in item, "Missing 'data' in pooling item"
+            shapes.append(PoolingPayload._shape(item["data"]))
+
+        assert "usage" in result, "Missing 'usage' in response"
+        return f"Pooled {len(shapes)} inputs: " + ", ".join(shapes)
+
+    def response_handler(self, response: Any) -> str:
+        return PoolingPayload.extract_pooling(response)
+
+
+@dataclass
 class EmbeddingMultiWorkerDispatchPayload(BasePayload):
     """Send ``repeat_count`` embedding requests to the frontend, capturing a
     per-worker ``/metrics`` snapshot on the FIRST iteration and on the LAST

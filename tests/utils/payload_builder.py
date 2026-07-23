@@ -11,6 +11,7 @@ from tests.utils.payloads import (
     CachedTokensChatPayload,
     ChatPayload,
     ChatPayloadWithLogprobs,
+    ClassifyPayload,
     ClearKVBlocksPayload,
     CompletionPayload,
     CompletionPayloadWithLogprobs,
@@ -21,6 +22,7 @@ from tests.utils.payloads import (
     KvEventMetricsPayload,
     LMCacheMetricsPayload,
     MetricsPayload,
+    PoolingPayload,
     ResponsesPayload,
     ResponsesStreamPayload,
     RouterNvextChatPayload,
@@ -511,6 +513,66 @@ def embedding_payload(
         expected_log=expected_log or [],
         expected_response=expected_response
         or [f"Generated {expected_count} embeddings with dimension"],
+    )
+
+
+def classify_payload(
+    input_text: Union[str, List[str]],
+    repeat_count: int = 1,
+    expected_response: Optional[List[str]] = None,
+    expected_log: Optional[List[str]] = None,
+    extra_body: Optional[Dict[str, Any]] = None,
+) -> ClassifyPayload:
+    """Build a ``/classify`` payload. ``input`` accepts a single string or a
+    batch of strings. Default assertion is structural (input count), so it is
+    robust to whichever label a small CI model predicts."""
+    if isinstance(input_text, str):
+        input_list: Union[str, List[str]] = input_text
+        expected_count = 1
+    else:
+        input_list = input_text
+        expected_count = len(input_text)
+
+    body: Dict[str, Any] = {"input": input_list}
+    if extra_body:
+        body.update(extra_body)
+
+    return ClassifyPayload(
+        body=body,
+        repeat_count=repeat_count,
+        expected_log=expected_log or [],
+        expected_response=expected_response or [f"Classified {expected_count} inputs"],
+    )
+
+
+def pooling_payload(
+    input_text: Union[str, List[str]],
+    task: Optional[str] = None,
+    repeat_count: int = 1,
+    expected_response: Optional[List[str]] = None,
+    expected_log: Optional[List[str]] = None,
+    extra_body: Optional[Dict[str, Any]] = None,
+) -> PoolingPayload:
+    """Build a ``/pooling`` payload. Optional ``task`` is forwarded verbatim;
+    ``None`` lets the vLLM engine pick its default pooling task."""
+    if isinstance(input_text, str):
+        input_list: Union[str, List[str]] = input_text
+        expected_count = 1
+    else:
+        input_list = input_text
+        expected_count = len(input_text)
+
+    body: Dict[str, Any] = {"input": input_list}
+    if task is not None:
+        body["task"] = task
+    if extra_body:
+        body.update(extra_body)
+
+    return PoolingPayload(
+        body=body,
+        repeat_count=repeat_count,
+        expected_log=expected_log or [],
+        expected_response=expected_response or [f"Pooled {expected_count} inputs"],
     )
 
 

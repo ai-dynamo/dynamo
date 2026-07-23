@@ -29,12 +29,14 @@ from tests.utils.payload_builder import (
     chat_payload,
     chat_payload_default,
     chat_payload_with_logprobs,
+    classify_payload,
     completion_payload_default,
     completion_payload_with_logprobs,
     embedding_payload,
     embedding_payload_default,
     kv_events_metrics_payload,
     metric_payload_default,
+    pooling_payload,
     router_cached_tokens_chat_payload,
     router_selection_chat_payload_default,
 )
@@ -730,6 +732,65 @@ vllm_configs = {
                 repeat_count=1,
                 expected_log=[],
                 expected_response=["Generated 1 embeddings with dimension 128"],
+            ),
+        ],
+    ),
+    "classify_agg": VLLMConfig(
+        name="classify_agg",
+        directory=vllm_dir,
+        script_name="agg_classify.sh",
+        marks=[
+            pytest.mark.core,
+            pytest.mark.gpu_1,
+            # cross-encoder/nli-MiniLM2-L6-H768 is a ~80M-param RoBERTa NLI
+            # classifier (~320 MiB fp32). Refine after first CI run profiles
+            # the actual peak.
+            pytest.mark.profiled_vram_gib(3.0),
+            # Pooling models do not use a KV cache, but the harness still needs
+            # a non-zero allocation budget. Use the minimum vLLM accepts (also
+            # used by embedding_agg).
+            pytest.mark.requested_vllm_kv_cache_bytes(559_693_824),
+            # Cold model load + vLLM pooling startup + warmup. Mirrors the
+            # embedding-test headroom; refine after profiling.
+            pytest.mark.timeout(360),
+            pytest.mark.pre_merge,
+        ],
+        model="cross-encoder/nli-MiniLM2-L6-H768",
+        request_payloads=[
+            # Single string — exercises the str path in
+            # ClassifyWorkerHandler.generate and the 3-class NLI head.
+            classify_payload(
+                input_text="A man is playing a sport. Some men are playing a sport.",
+                expected_response=["Classified 1 inputs"],
+            ),
+            # Batched list — per-input loop + index preservation.
+            classify_payload(
+                input_text=[
+                    "A soccer game with multiple males playing. Some men are playing a sport.",
+                    "A cat sleeps on the mat. The dog is swimming in the ocean.",
+                ],
+                expected_response=["Classified 2 inputs"],
+            ),
+            # Same worker also serves /pooling (ModelType.Classify | Pooling).
+            # Default task lets the engine pick its pooling default.
+            pooling_payload(
+                input_text="Some men are playing a sport.",
+                expected_response=["Pooled 1 inputs"],
+            ),
+            # /pooling with task=classify returns the sequence-level class
+            # vector (same head as /classify), as a flat float list.
+            pooling_payload(
+                input_text="Some men are playing a sport.",
+                task="classify",
+                expected_response=["Pooled 1 inputs"],
+            ),
+            # /pooling base64 encoding — the worker packs f32 bytes and the
+            # frontend passes the string through; the validator decodes it.
+            pooling_payload(
+                input_text="Some men are playing a sport.",
+                task="classify",
+                extra_body={"encoding_format": "base64"},
+                expected_response=["base64["],
             ),
         ],
     ),
