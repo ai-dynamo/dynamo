@@ -153,6 +153,8 @@ func TestSingleTargetContainer(t *testing.T) {
 		{name: "empty", containers: []string{}, wantErr: true},
 		{name: "nil", containers: nil, wantErr: true},
 		{name: "two", containers: []string{"main", "sidecar"}, wantErr: true},
+		{name: "single empty string", containers: []string{""}, wantErr: true},
+		{name: "single whitespace", containers: []string{"  "}, wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -185,6 +187,7 @@ func TestReconcileSourcePod_InvalidTargetContainerFails(t *testing.T) {
 	}{
 		{name: "empty", containers: []string{}},
 		{name: "two", containers: []string{"main", "sidecar"}},
+		{name: "single blank name", containers: []string{""}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
