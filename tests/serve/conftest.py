@@ -8,7 +8,12 @@ import pytest
 from pytest_httpserver import HTTPServer
 
 from dynamo.common.utils.paths import WORKSPACE_DIR
-from tests.serve.lora_utils import MinioLoraConfig, MinioService
+from tests.serve.lora_utils import (
+    MinioBaseModelConfig,
+    MinioBaseModelService,
+    MinioLoraConfig,
+    MinioService,
+)
 from tests.utils.port_utils import allocate_port, deallocate_port
 
 # Shared constants for multimodal testing
@@ -143,5 +148,36 @@ def minio_lora_service():
 
     finally:
         # Stop MinIO only if we started it, clean up temp dirs
+        service.stop()
+        service.cleanup_temp()
+
+
+@pytest.fixture(scope="function")
+def minio_base_model_service():
+    """Stage a base model from HF cache into MinIO and yield the config.
+
+    Companion of `minio_lora_service` for tests that load the model itself
+    (not a LoRA adapter) via `--model s3://...` / `--model-path s3://...`.
+
+    Same connect-or-create pattern: uses an externally-running MinIO if one
+    is already up on :9000, otherwise starts the singleton Docker container.
+
+    Usage:
+        @pytest.mark.model("Qwen/Qwen3-0.6B")
+        def test_s3_model(minio_base_model_service, predownload_models):
+            cfg = minio_base_model_service
+            # cfg.get_s3_uri()    -> "s3://my-base-models/Qwen_Qwen3-0.6B"
+            # cfg.get_env_vars()  -> AWS_ENDPOINT_URL + creds for the worker
+    """
+    config = MinioBaseModelConfig()
+    service = MinioBaseModelService(config)
+
+    try:
+        service.start()
+        service.create_bucket()
+        local_path = service.resolve_model_snapshot()
+        service.upload_model(local_path)
+        yield config
+    finally:
         service.stop()
         service.cleanup_temp()

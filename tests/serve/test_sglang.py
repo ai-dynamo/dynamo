@@ -15,7 +15,11 @@ from tests.serve.common import (
     params_with_model_mark,
     run_serve_deployment,
 )
-from tests.serve.lora_utils import DEFAULT_LORA_REPO, MinioLoraConfig
+from tests.serve.lora_utils import (
+    DEFAULT_LORA_REPO,
+    MinioBaseModelConfig,
+    MinioLoraConfig,
+)
 from tests.serve.multimodal_profiles.sglang import (
     SGLANG_MULTIMODAL_PROFILES,
     SGLANG_TOPOLOGY_SCRIPTS,
@@ -47,6 +51,49 @@ from tests.utils.payloads import (
 logger = logging.getLogger(__name__)
 
 pytest_plugins = ("tests.utils.otel_plugin",)
+
+
+def _collect_worker_log_dir(config_name: str) -> str:
+    """Collect the worker subprocess log dir contents as a string.
+
+    Returned text is appended to the test failure's exception message — pytest
+    always shows the exception message in the traceback, so this is the most
+    reliable surface for surfacing worker logs in CI output (more reliable
+    than logger.error or print-to-stderr, which xdist + the custom parallel
+    runner may suppress on failure).
+    """
+    try:
+        from tests.utils.test_output import resolve_test_output_path
+
+        log_dir = resolve_test_output_path(config_name)
+        out = [f"\n=== WORKER LOG DUMP: {log_dir} ==="]
+        if not os.path.isdir(log_dir):
+            out.append(f"(log_dir does not exist: {log_dir})")
+            return "\n".join(out)
+        for fname in sorted(os.listdir(log_dir)):
+            fpath = os.path.join(log_dir, fname)
+            if not os.path.isfile(fpath):
+                continue
+            out.append(f"\n--- {fname} ---")
+            try:
+                with open(fpath, errors="replace") as fh:
+                    body = fh.read()
+                # Cap individual files at 64 KB so an enormous worker log
+                # doesn't blow up pytest's error display.
+                out.append(
+                    body if len(body) <= 65536 else body[-65536:] + "\n[truncated]"
+                )
+            except Exception as e:
+                out.append(f"(failed to read {fpath}: {e})")
+        out.append("=== END WORKER LOG DUMP ===")
+        return "\n".join(out)
+    except Exception as e:
+        return f"\n(_collect_worker_log_dir failed: {e!r})"
+
+
+def _dump_worker_log_dir(config_name: str) -> None:
+    """Backwards-compatible no-op; the new pattern is to use
+    _collect_worker_log_dir and append to the exception message."""
 
 
 def _is_cuda13() -> bool:
@@ -984,3 +1031,72 @@ def test_sglang_lora_aggregated(
         ports=dynamo_dynamic_ports,
         extra_env=minio_config.get_env_vars(),
     )
+
+
+@pytest.mark.e2e
+@pytest.mark.sglang
+@pytest.mark.gpu_1
+@pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.profiled_vram_gib(4.7)
+@pytest.mark.requested_sglang_kv_tokens(2848)
+@pytest.mark.timeout(
+    600
+)  # CI under xdist parallel pressure is much slower than local (~30s)
+@pytest.mark.pre_merge
+def test_sglang_aggregated_s3_model_path(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    minio_base_model_service,
+    dynamo_dynamic_ports,
+):
+    """Aggregated SGLang with --model-path s3://... — covers the call path
+    that PR #10599 fixed (object-storage URI must route through SGLang's
+    maybe_pull_model_tokenizer_from_remote, not Dynamo's hub.rs/MX).
+
+    The fixture stages Qwen/Qwen3-0.6B (HF cache) into a local MinIO bucket
+    and yields the AWS_ENDPOINT_URL + credential env that runai-streamer +
+    sglang's S3Connector need. The launch script is the standard agg.sh —
+    no S3-specific plumbing in the launcher itself.
+    """
+    minio_config: MinioBaseModelConfig = minio_base_model_service
+
+    config = SGLangConfig(
+        name="test_sglang_aggregated_s3_model_path",
+        directory=sglang_dir,
+        script_name="agg.sh",
+        marks=[],
+        # --model-path s3://my-base-models/Qwen_Qwen3-0.6B
+        # SGLang sees this in ServerArgs.model_path; ModelConfig.__init__
+        # detects is_remote_url and pulls *config.json to a temp dir,
+        # rewriting model_config.model_path and setting model_weights.
+        model="Qwen/Qwen3-0.6B",
+        # remote_instance + modelexpress backend activates SGLang's
+        # runai-streamer weight load path AND gates Dynamo's prefetch skip via
+        # use_modelexpress_remote_instance.
+        script_args=[
+            "--model-path",
+            minio_config.get_s3_uri(),
+            "--load-format",
+            "remote_instance",
+            "--remote-instance-weight-loader-backend",
+            "modelexpress",
+        ],
+        timeout=180,
+        env=minio_config.get_env_vars(),
+        request_payloads=[chat_payload_default()],
+    )
+
+    config = dataclasses.replace(
+        config, frontend_port=dynamo_dynamic_ports.frontend_port
+    )
+    try:
+        run_serve_deployment(
+            config,
+            request,
+            ports=dynamo_dynamic_ports,
+            extra_env=minio_config.get_env_vars(),
+        )
+    except Exception as exc:
+        worker_log = _collect_worker_log_dir(config.name)
+        raise type(exc)(f"{exc}{worker_log}") from exc
