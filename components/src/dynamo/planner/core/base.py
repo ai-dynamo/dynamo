@@ -81,8 +81,6 @@ def build_worker_capabilities(state: DeploymentState) -> WorkerCapabilities:
             state.decode.num_gpus,
             state.decode.power_watts_per_replica,
         ),
-        power_scale_up_blocked=state.power_scale_up_blocked,
-        power_scale_up_blocked_reason=state.power_scale_up_blocked_reason,
     )
 
 
@@ -414,20 +412,15 @@ class NativePlannerBase:
         projected power budget (over the requested caps, not the effective
         hardware draw) is applied separately by the final budget clamp.
 
-        ``power_config_scale_up_blocked`` is published whenever awareness is on
-        — even before caps resolve — so the restart-required diagnostic is
-        visible. The projection gauges are published only once every required
-        role has a resolved per-replica watt value and the total budget is a
-        positive integer; the typed parser and Pydantic keep these integral, so
-        there is no NaN to clamp.
+        The projection gauges are published only once every required role has
+        a resolved per-replica watt value and the total budget is a positive
+        integer; the typed parser and Pydantic keep these integral, so there
+        is no NaN to clamp.
         """
         if self.prometheus_port == 0 or not self.config.enable_power_awareness:
             return
         pm = self.prometheus_metrics
         state = self.environment.deployment_state()
-        pm.power_config_scale_up_blocked.set(
-            1.0 if state.power_scale_up_blocked else 0.0
-        )
 
         budget = self.config.total_gpu_power_limit
         if budget is None or budget <= 0:
@@ -493,7 +486,7 @@ class NativePlannerBase:
             "[summary] %s | current: prefill=%d decode=%d | "
             "recommended: prefill=%s decode=%s (delta: %+d / %+d) | "
             "load_reason=%s throughput_reason=%s | "
-            "est_ttft=%.1fms est_itl=%.1fms%s",
+            "est_ttft=%.1fms est_itl=%.1fms",
             action.upper(),
             current_p,
             current_d,
@@ -505,11 +498,6 @@ class NativePlannerBase:
             diag.throughput_decision_reason or "n/a",
             diag.estimated_ttft_ms or 0,
             diag.estimated_itl_ms or 0,
-            (
-                f" | power_scale_up_blocked={diag.power_scale_up_blocked_reason}"
-                if diag.power_scale_up_blocked_reason
-                else ""
-            ),
         )
 
     def _publish_inventory_and_gpu_hours(self, tick_input: TickInput) -> None:

@@ -9,8 +9,7 @@ from typing import Any, Optional
 from dynamo._core import VirtualConnectorCoordinator
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import PlannerConnector, WorkerInfoProvider
-from dynamo.planner.errors import DeploymentValidationError, EmptyTargetReplicasError
-from dynamo.planner.monitoring.dgd_services import ComponentPowerConfig
+from dynamo.planner.errors import EmptyTargetReplicasError
 from dynamo.planner.monitoring.worker_info import WorkerInfo
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -262,26 +261,3 @@ class VirtualConnector(PlannerConnector):
         """Virtual deployments do not expose GPU shape through the coordinator."""
         del require_prefill, require_decode
         return None, None
-
-    def get_component_power_configs(
-        self,
-        require_prefill: bool = True,
-        require_decode: bool = True,
-        prefill_component_name: Optional[str] = None,
-        decode_component_name: Optional[str] = None,
-    ) -> tuple[Optional[ComponentPowerConfig], Optional[ComponentPowerConfig]]:
-        """Virtual/replay mode has no DGD, so no authoritative per-GPU caps.
-
-        Power awareness is already gated to ``environment='kubernetes'`` by
-        ``PlannerConfig`` validation; this method fails closed as defense in
-        depth so a misconfiguration can never scale on an unknown power budget.
-        """
-        del require_prefill, require_decode
-        del prefill_component_name, decode_component_name
-        raise DeploymentValidationError(
-            [
-                "Power awareness is unsupported for the virtual/replay connector: "
-                "there is no DynamoGraphDeployment to read per-GPU caps from. "
-                "Set enable_power_awareness=false or run with environment='kubernetes'."
-            ]
-        )

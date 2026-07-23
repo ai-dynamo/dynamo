@@ -37,14 +37,6 @@ class DeploymentState:
     prefill: ComponentState = field(default_factory=ComponentState)
     decode: ComponentState = field(default_factory=ComponentState)
     model_name: Optional[str] = None
-    # Deployment-scoped power scale-up suppression. Set when a runtime refresh
-    # observes a changed or malformed per-GPU cap: the planner keeps the
-    # conservative last-good watts, blocks scale-up, and surfaces a
-    # restart-required diagnostic. Lives on DeploymentState (not ComponentState)
-    # so a malformed refresh that leaves the per-component watts unchanged still
-    # flips ``deployment_state_changed`` and re-publishes capabilities.
-    power_scale_up_blocked: bool = False
-    power_scale_up_blocked_reason: str = ""
 
     def clone(self) -> "DeploymentState":
         return deepcopy(self)

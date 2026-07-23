@@ -13,7 +13,6 @@ from __future__ import annotations
 from typing import Optional, Protocol
 
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
-from dynamo.planner.monitoring.dgd_services import ComponentPowerConfig
 from dynamo.planner.monitoring.worker_info import WorkerInfo
 
 
@@ -55,22 +54,6 @@ class PlannerConnector(WorkerInfoProvider, Protocol):
         require_decode: bool = True,
     ) -> tuple[Optional[int], Optional[int]]:
         pass
-
-    def get_component_power_configs(
-        self,
-        require_prefill: bool = True,
-        require_decode: bool = True,
-        prefill_component_name: Optional[str] = None,
-        decode_component_name: Optional[str] = None,
-    ) -> tuple[Optional[ComponentPowerConfig], Optional[ComponentPowerConfig]]:
-        """Resolve the DGD-owned per-role power configs.
-
-        Only called when power awareness is enabled. Kubernetes resolves caps
-        from the DGD worker podTemplate annotations; connectors without an
-        authoritative DGD (virtual/replay) must raise so the planner fails
-        closed instead of scaling on an unknown budget.
-        """
-        ...
 
     async def get_actual_worker_counts(
         self,

@@ -193,13 +193,6 @@ class PlannerPrometheusMetrics:
             f"{PREFIX}_power_budget_utilization",
             "Ratio of projected power to total budget (0.0–1.0+).",
         )
-        self.power_config_scale_up_blocked = Gauge(
-            f"{PREFIX}_power_config_scale_up_blocked",
-            "1 when the planner is suppressing power-aware scale-up because a "
-            "DGD per-GPU cap changed or failed to resolve at runtime (adopt the "
-            "new cap by restarting the planner after the worker rollout "
-            "completes); 0 otherwise.",
-        )
 
 
 # ---------------------------------------------------------------------------

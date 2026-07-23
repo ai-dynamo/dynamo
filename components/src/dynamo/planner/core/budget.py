@@ -317,7 +317,6 @@ def apply_power_budget(
     d_watts: Optional[int],
     total_budget: int,
     min_endpoint: int,
-    scale_up_blocked: bool,
 ) -> tuple[Optional[int], Optional[int], Optional[str]]:
     """Clamp proposed replica counts so projected power fits ``total_budget``.
 
@@ -328,16 +327,7 @@ def apply_power_budget(
     suppressed a scale-up), else ``None``.
 
     Power is ceiling-only and never raises a count above what was proposed.
-    When ``scale_up_blocked`` (a DGD cap changed or failed to resolve at
-    runtime), proposals are held at ``min(proposed, current)`` — scale-down
-    still honored, scale-up suppressed — with no proportional shrink.
     """
-    if scale_up_blocked:
-        new_p, capped_p = _hold_at_current(proposed_p, current_p)
-        new_d, capped_d = _hold_at_current(proposed_d, current_d)
-        reason = "power_scale_up_blocked" if (capped_p or capped_d) else None
-        return new_p, new_d, reason
-
     p_adjustable = proposed_p is not None and p_watts is not None and p_watts > 0
     d_adjustable = proposed_d is not None and d_watts is not None and d_watts > 0
 

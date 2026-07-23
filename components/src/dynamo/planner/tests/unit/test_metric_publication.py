@@ -438,7 +438,6 @@ def _power_planner(
     prefill_watts_per_replica=700,
     decode_watts_per_replica=1200,
     total_gpu_power_limit=10000,
-    scale_up_blocked=False,
 ):
     """A power-aware planner whose deployment state carries DGD-resolved caps.
 
@@ -455,7 +454,6 @@ def _power_planner(
     state = planner.environment.deployment_state()
     state.prefill.power_watts_per_replica = prefill_watts_per_replica
     state.decode.power_watts_per_replica = decode_watts_per_replica
-    state.power_scale_up_blocked = scale_up_blocked
     return planner
 
 
@@ -478,7 +476,6 @@ class TestPublishPowerBudgetMetrics:
         pm.power_projected_watts.set.assert_called_once_with(5000)
         pm.power_budget_total_watts.set.assert_called_once_with(10000)
         pm.power_budget_utilization.set.assert_called_once_with(0.5)
-        pm.power_config_scale_up_blocked.set.assert_called_once_with(0.0)
 
     def test_asymmetric_caps(self):
         """Prefill and decode watts are independent."""
@@ -507,15 +504,6 @@ class TestPublishPowerBudgetMetrics:
         # 2*2100 + 1*300 = 4500
         pm.power_projected_watts.set.assert_called_once_with(4500)
 
-    def test_scale_up_blocked_gauge_published(self):
-        """The restart-required diagnostic gauge reflects DeploymentState."""
-        planner = _power_planner(scale_up_blocked=True)
-        pm = planner.prometheus_metrics
-
-        planner._publish_power_budget_metrics(num_p=1, num_d=1)
-
-        pm.power_config_scale_up_blocked.set.assert_called_once_with(1.0)
-
     def test_skipped_when_power_awareness_disabled(self):
         """Disabled power awareness publishes nothing at all."""
         planner = _power_planner()
@@ -525,7 +513,6 @@ class TestPublishPowerBudgetMetrics:
         planner._publish_power_budget_metrics(num_p=1, num_d=1)
 
         pm.power_projected_watts.set.assert_not_called()
-        pm.power_config_scale_up_blocked.set.assert_not_called()
 
     def test_skipped_when_prometheus_disabled(self):
         """No Prometheus port means no gauge publication."""
@@ -539,8 +526,7 @@ class TestPublishPowerBudgetMetrics:
 
     @pytest.mark.parametrize("budget", [None, 0, -5])
     def test_no_projection_without_positive_budget(self, budget):
-        """A missing / zero / negative budget publishes the blocked gauge but no
-        projection (never a divide-by-zero utilization)."""
+        """A missing / zero / negative budget skips projection gauges."""
         planner = _power_planner(total_gpu_power_limit=budget)
         pm = planner.prometheus_metrics
 
@@ -548,7 +534,6 @@ class TestPublishPowerBudgetMetrics:
 
         pm.power_projected_watts.set.assert_not_called()
         pm.power_budget_utilization.set.assert_not_called()
-        pm.power_config_scale_up_blocked.set.assert_called_once_with(0.0)
 
     def test_unresolved_watts_warns_once_and_skips_projection(self):
         """A required role with no resolved watts skips projection and warns once

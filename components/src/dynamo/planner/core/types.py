@@ -184,14 +184,6 @@ class TickDiagnostics:
     # ``PipelineOutcome.audit_events``.
     audit_events: list[str] = field(default_factory=list)
 
-    # Deployment-scoped power scale-up block reason, projected from
-    # ``WorkerCapabilities``. Empty when power awareness is off or
-    # scale-up is not blocked; otherwise the human-readable latch
-    # reason (cap changed / resolve failed). Operators query the
-    # companion ``power_config_scale_up_blocked`` gauge for the boolean
-    # and this field (tick diagnostics / snapshot log) for "why".
-    power_scale_up_blocked_reason: str = ""
-
 
 @dataclass
 class PlannerEffects:
@@ -232,9 +224,3 @@ class WorkerCapabilities:
 
     prefill: Optional[EngineCapabilities] = None
     decode: Optional[EngineCapabilities] = None
-    # Deployment-scoped power scale-up suppression, projected from
-    # ``DeploymentState``. When True the final budget clamp holds each
-    # component at its current count (scale-down still allowed) and the
-    # planner emits the restart-required diagnostic.
-    power_scale_up_blocked: bool = False
-    power_scale_up_blocked_reason: str = ""

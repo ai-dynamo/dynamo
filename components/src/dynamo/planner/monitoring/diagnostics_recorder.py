@@ -88,9 +88,6 @@ class TickSnapshot:
     scale_to_prefill: Optional[int] = None
     scale_to_decode: Optional[int] = None
 
-    # Power awareness — latch reason when scale-up is suppressed
-    power_scale_up_blocked_reason: str = ""
-
     # GPU usage
     gpu_hours: float = 0.0
 
@@ -208,7 +205,6 @@ class DiagnosticsRecorder:
                 effects.scale_to.num_prefill if effects.scale_to else None
             ),
             scale_to_decode=(effects.scale_to.num_decode if effects.scale_to else None),
-            power_scale_up_blocked_reason=diag.power_scale_up_blocked_reason,
             gpu_hours=gpu_hours,
         )
         self._snapshots.append(snap)

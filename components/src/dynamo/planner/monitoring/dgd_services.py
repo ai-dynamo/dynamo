@@ -306,20 +306,6 @@ def get_component_from_type_or_name(
         if not _can_use_explicit_component_name(component, component_type):
             raise SubComponentNotFoundError(component_type.value)
         matching_components.append((component_name, component))
-    elif not matching_components and component_type == SubComponentType.DECODE:
-        generic_workers = [
-            (curr_name, curr_component)
-            for curr_name, curr_component in components.items()
-            if get_component_type(curr_component)
-            == V1BETA1_GENERIC_WORKER_COMPONENT_TYPE
-        ]
-        if len(generic_workers) == 1:
-            matching_components.append(generic_workers[0])
-        elif len(generic_workers) > 1:
-            component_names = [name for name, _ in generic_workers]
-            raise DuplicateSubComponentError(component_type.value, component_names)
-        else:
-            raise SubComponentNotFoundError(component_type.value)
     elif not matching_components:
         raise SubComponentNotFoundError(component_type.value)
 
@@ -353,13 +339,32 @@ def _resolve_one_power_config(
 ) -> ComponentPowerConfig:
     """Resolve a single role's power config, or raise a typed error.
 
-    Role/name resolution reuses ``get_component_from_type_or_name`` so disagg
-    (typed ``prefill``/``decode``) and agg (generic ``type: worker``) resolve
-    the same way GPU-count and model-name lookups already do.
+    Role/name resolution reuses ``get_component_from_type_or_name`` for disagg
+    typed roles. For agg (single generic ``type: worker``), the fallback is
+    scoped to this power parser only — not the shared component resolver.
     """
-    service = get_component_from_type_or_name(
-        deployment, sub_component_type, component_name=component_name
-    )
+    try:
+        service = get_component_from_type_or_name(
+            deployment, sub_component_type, component_name=component_name
+        )
+    except SubComponentNotFoundError:
+        if sub_component_type != SubComponentType.DECODE:
+            raise
+        components = get_components_by_name(deployment)
+        generic_workers = [
+            (curr_name, curr_component)
+            for curr_name, curr_component in components.items()
+            if get_component_type(curr_component)
+            == V1BETA1_GENERIC_WORKER_COMPONENT_TYPE
+        ]
+        if len(generic_workers) == 1:
+            name, component = generic_workers[0]
+            service = Service(name=name, service=component)
+        elif len(generic_workers) > 1:
+            component_names = [name for name, _ in generic_workers]
+            raise DuplicateSubComponentError(sub_component_type.value, component_names)
+        else:
+            raise
     watts = service.get_gpu_power_limit_watts()
     gpus_per_replica = service.get_total_gpu_count()
     role = get_component_type(service.service) or sub_component_type.value

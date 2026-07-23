@@ -624,11 +624,6 @@ class OrchestratorEngineAdapter:
         diagnostics.execute_action = outcome.execute_action
         diagnostics.short_circuit_reason = outcome.short_circuit_reason
         diagnostics.audit_events = list(outcome.audit_events)
-        diagnostics.power_scale_up_blocked_reason = (
-            self._capabilities.power_scale_up_blocked_reason
-            if self._capabilities.power_scale_up_blocked
-            else ""
-        )
 
         return PlannerEffects(
             scale_to=scale_to,
@@ -1091,7 +1086,6 @@ class OrchestratorEngineAdapter:
             d_watts,
             budget,
             self._config.min_endpoint,
-            self._capabilities.power_scale_up_blocked,
         )
         if reason is not None and (new_p, new_d) != (num_p, num_d):
             log.warning(

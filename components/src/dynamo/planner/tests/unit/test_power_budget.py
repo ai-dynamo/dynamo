@@ -66,12 +66,12 @@ def test_minimum_power_footprint_fits(budget, min_endpoint, p, d, fits):
 
 
 def test_fit_is_a_no_op():
-    assert apply_power_budget(2, 2, 2, 2, 700, 1200, 100000, 1, False) == (2, 2, None)
+    assert apply_power_budget(2, 2, 2, 2, 700, 1200, 100000, 1) == (2, 2, None)
 
 
 def test_disagg_over_budget_shrinks_proportionally_to_fit():
     # 3*700 + 3*1200 = 5700 > 5000
-    new_p, new_d, reason = apply_power_budget(3, 3, 2, 2, 700, 1200, 5000, 1, False)
+    new_p, new_d, reason = apply_power_budget(3, 3, 2, 2, 700, 1200, 5000, 1)
     assert reason == "power_budget_clamped"
     assert new_p <= 3 and new_d <= 3  # decode-no-upscale: never raised
     assert new_p * 700 + new_d * 1200 <= 5000
@@ -79,13 +79,13 @@ def test_disagg_over_budget_shrinks_proportionally_to_fit():
 
 def test_ceiling_never_raises_a_proposed_count():
     # Even with a huge budget, a proposal that already fits is untouched.
-    assert apply_power_budget(1, 1, 5, 5, 700, 1200, 100000, 1, False) == (1, 1, None)
+    assert apply_power_budget(1, 1, 5, 5, 700, 1200, 100000, 1) == (1, 1, None)
 
 
 def test_partial_proposal_does_not_mutate_unproposed_component():
     # Only prefill proposed; decode fixed at current=2 (2*1200=2400).
     # 4*700 + 2400 = 5200 > 5000, so prefill must shrink; decode stays None.
-    new_p, new_d, reason = apply_power_budget(4, None, 2, 2, 700, 1200, 5000, 1, False)
+    new_p, new_d, reason = apply_power_budget(4, None, 2, 2, 700, 1200, 5000, 1)
     assert new_d is None  # unproposed decode untouched
     assert new_p * 700 + 2 * 1200 <= 5000
     assert reason is not None
@@ -94,24 +94,10 @@ def test_partial_proposal_does_not_mutate_unproposed_component():
 def test_partial_proposal_suppressed_when_unproposed_alone_over_budget():
     # decode current=5 → 5*1200 = 6000 already over the 5500 budget; prefill
     # cannot fit even min_endpoint without changing decode → scale-up refused.
-    new_p, new_d, reason = apply_power_budget(4, None, 1, 5, 700, 1200, 5500, 1, False)
+    new_p, new_d, reason = apply_power_budget(4, None, 1, 5, 700, 1200, 5500, 1)
     assert new_d is None
     assert new_p == 1  # held at current (no scale-up)
     assert reason == "power_budget_scale_up_suppressed"
-
-
-def test_scale_up_blocked_holds_at_current():
-    # Blocked: scale-up (5,5 vs current 2,2) is held at current.
-    assert apply_power_budget(5, 5, 2, 2, 700, 1200, 100000, 1, True) == (
-        2,
-        2,
-        "power_scale_up_blocked",
-    )
-
-
-def test_scale_up_blocked_still_allows_scale_down():
-    # Blocked: a scale-down (1,1 vs current 3,3) is honored.
-    assert apply_power_budget(1, 1, 3, 3, 700, 1200, 100000, 1, True) == (1, 1, None)
 
 
 def test_peak_parallel_watts_rebalance_example():
@@ -121,7 +107,7 @@ def test_peak_parallel_watts_rebalance_example():
 
 def test_apply_power_budget_rebalance_stages_scale_down_first():
     # Ted P1: settled (4,1)=5000W fits, but parallel peak (4,4)=8000W does not.
-    assert apply_power_budget(4, 1, 1, 4, 1000, 1000, 5000, 1, False) == (
+    assert apply_power_budget(4, 1, 1, 4, 1000, 1000, 5000, 1) == (
         1,
         1,
         "power_rebalance_staged",
@@ -130,7 +116,7 @@ def test_apply_power_budget_rebalance_stages_scale_down_first():
 
 def test_already_over_budget_baseline_with_no_proposal_is_left_alone():
     # Nothing proposed (both None); baseline over budget but no lever this tick.
-    assert apply_power_budget(None, None, 10, 10, 700, 1200, 100, 1, False) == (
+    assert apply_power_budget(None, None, 10, 10, 700, 1200, 100, 1) == (
         None,
         None,
         None,
@@ -170,7 +156,6 @@ def test_gpu_budget_then_power_budget_order_is_not_commutative():
     caps = WorkerCapabilities(
         prefill=None,
         decode=EngineCapabilities(num_gpu=1, power_watts_per_replica=400),
-        power_scale_up_blocked=False,
     )
     adapter = _bare_adapter(_agg_config(), caps)
     wc = WorkerCounts(ready_num_decode=2, expected_num_decode=2)  # stable
@@ -193,7 +178,6 @@ def test_power_clamp_noop_when_awareness_disabled():
     caps = WorkerCapabilities(
         prefill=None,
         decode=EngineCapabilities(num_gpu=1, power_watts_per_replica=400),
-        power_scale_up_blocked=False,
     )
     adapter = _bare_adapter(
         _agg_config(enable_power_awareness=False, min_gpu_budget=-1), caps
@@ -201,21 +185,6 @@ def test_power_clamp_noop_when_awareness_disabled():
     wc = WorkerCounts(ready_num_decode=2)
     # No GPU floor, awareness off → proposal passes through untouched.
     assert adapter._apply_final_budget(None, 5, wc) == (None, 5)
-
-
-def test_power_clamp_blocked_holds_scale_up_at_current():
-    caps = WorkerCapabilities(
-        prefill=None,
-        decode=EngineCapabilities(num_gpu=1, power_watts_per_replica=100),
-        power_scale_up_blocked=True,
-    )
-    adapter = _bare_adapter(
-        _agg_config(total_gpu_power_limit=100000, min_gpu_budget=-1), caps
-    )
-    wc = WorkerCounts(ready_num_decode=2, expected_num_decode=2)  # stable
-    # Blocked (not rolling) → scale-up proposal of 6 is held at current 2 by the
-    # blocked flag, isolating that path from the rollout hold.
-    assert adapter._apply_final_budget(None, 6, wc) == (None, 2)
 
 
 def _mode_config(mode, **overrides):
@@ -235,7 +204,6 @@ def test_final_boundary_clamps_prefill_mode():
     caps = WorkerCapabilities(
         prefill=EngineCapabilities(num_gpu=1, power_watts_per_replica=400),
         decode=None,
-        power_scale_up_blocked=False,
     )
     adapter = _bare_adapter(_mode_config("prefill", total_gpu_power_limit=1200), caps)
     wc = WorkerCounts(ready_num_prefill=2, expected_num_prefill=2)  # stable
@@ -248,7 +216,6 @@ def test_final_boundary_clamps_decode_mode():
     caps = WorkerCapabilities(
         prefill=None,
         decode=EngineCapabilities(num_gpu=1, power_watts_per_replica=300),
-        power_scale_up_blocked=False,
     )
     adapter = _bare_adapter(_mode_config("decode", total_gpu_power_limit=900), caps)
     wc = WorkerCounts(ready_num_decode=2, expected_num_decode=2)  # stable
@@ -260,7 +227,6 @@ def test_final_boundary_clamps_disagg_mode():
     caps = WorkerCapabilities(
         prefill=EngineCapabilities(num_gpu=2, power_watts_per_replica=700),
         decode=EngineCapabilities(num_gpu=4, power_watts_per_replica=1200),
-        power_scale_up_blocked=False,
     )
     adapter = _bare_adapter(_mode_config("disagg", total_gpu_power_limit=5000), caps)
     wc = WorkerCounts(
@@ -283,7 +249,6 @@ def test_final_boundary_clamps_merged_proposal_regardless_of_source():
     caps = WorkerCapabilities(
         prefill=None,
         decode=EngineCapabilities(num_gpu=1, power_watts_per_replica=400),
-        power_scale_up_blocked=False,
     )
     adapter = _bare_adapter(_mode_config("agg", total_gpu_power_limit=1200), caps)
     outcome = SimpleNamespace(
@@ -311,7 +276,6 @@ def test_scale_up_held_while_deployment_is_rolling():
     caps = WorkerCapabilities(
         prefill=EngineCapabilities(num_gpu=2, power_watts_per_replica=700),
         decode=EngineCapabilities(num_gpu=4, power_watts_per_replica=1200),
-        power_scale_up_blocked=False,
     )
     adapter = _bare_adapter(_mode_config("disagg", total_gpu_power_limit=5000), caps)
     wc = WorkerCounts(
@@ -330,7 +294,6 @@ def test_scale_up_allowed_when_deployment_stable():
     caps = WorkerCapabilities(
         prefill=EngineCapabilities(num_gpu=2, power_watts_per_replica=700),
         decode=EngineCapabilities(num_gpu=4, power_watts_per_replica=1200),
-        power_scale_up_blocked=False,
     )
     adapter = _bare_adapter(_mode_config("disagg", total_gpu_power_limit=6000), caps)
     wc = WorkerCounts(
@@ -348,7 +311,6 @@ def test_scale_down_allowed_while_deployment_is_rolling():
     caps = WorkerCapabilities(
         prefill=EngineCapabilities(num_gpu=2, power_watts_per_replica=700),
         decode=EngineCapabilities(num_gpu=4, power_watts_per_replica=1200),
-        power_scale_up_blocked=False,
     )
     adapter = _bare_adapter(_mode_config("disagg", total_gpu_power_limit=5000), caps)
     wc = WorkerCounts(
@@ -373,7 +335,6 @@ def test_project_scale_to_holds_scale_up_during_rollout_full_merge():
     caps = WorkerCapabilities(
         prefill=EngineCapabilities(num_gpu=2, power_watts_per_replica=700),
         decode=EngineCapabilities(num_gpu=4, power_watts_per_replica=1200),
-        power_scale_up_blocked=False,
     )
     # Huge budget so only the rollout guard (not the budget clamp) can act.
     adapter = _bare_adapter(_mode_config("disagg", total_gpu_power_limit=100000), caps)
@@ -414,7 +375,6 @@ def test_project_scale_to_masks_ready_echo_during_rollout_scale_down():
     caps = WorkerCapabilities(
         prefill=EngineCapabilities(num_gpu=2, power_watts_per_replica=700),
         decode=EngineCapabilities(num_gpu=4, power_watts_per_replica=1200),
-        power_scale_up_blocked=False,
     )
     # Budget large enough that the decode scale-down is never the constraint.
     adapter = _bare_adapter(_mode_config("disagg", total_gpu_power_limit=100000), caps)
@@ -455,7 +415,6 @@ def test_project_scale_to_partial_prefill_proposal_does_not_scale_decode():
     caps = WorkerCapabilities(
         prefill=EngineCapabilities(num_gpu=2, power_watts_per_replica=700),
         decode=EngineCapabilities(num_gpu=4, power_watts_per_replica=1200),
-        power_scale_up_blocked=False,
     )
     adapter = _bare_adapter(_mode_config("disagg", total_gpu_power_limit=5000), caps)
     wc = WorkerCounts(
@@ -487,7 +446,6 @@ def test_project_scale_to_partial_decode_proposal_does_not_scale_prefill():
     caps = WorkerCapabilities(
         prefill=EngineCapabilities(num_gpu=2, power_watts_per_replica=700),
         decode=EngineCapabilities(num_gpu=4, power_watts_per_replica=1200),
-        power_scale_up_blocked=False,
     )
     adapter = _bare_adapter(_mode_config("disagg", total_gpu_power_limit=5000), caps)
     wc = WorkerCounts(
@@ -517,7 +475,6 @@ def test_project_scale_to_rebalance_emits_decode_only_tick1():
     caps = WorkerCapabilities(
         prefill=EngineCapabilities(num_gpu=1, power_watts_per_replica=1000),
         decode=EngineCapabilities(num_gpu=1, power_watts_per_replica=1000),
-        power_scale_up_blocked=False,
     )
     adapter = _bare_adapter(_mode_config("disagg", total_gpu_power_limit=5000), caps)
     wc = WorkerCounts(
@@ -546,7 +503,6 @@ def test_project_scale_to_rebalance_prefill_up_after_decode_stable():
     caps = WorkerCapabilities(
         prefill=EngineCapabilities(num_gpu=1, power_watts_per_replica=1000),
         decode=EngineCapabilities(num_gpu=1, power_watts_per_replica=1000),
-        power_scale_up_blocked=False,
     )
     adapter = _bare_adapter(_mode_config("disagg", total_gpu_power_limit=5000), caps)
     wc = WorkerCounts(
@@ -576,7 +532,6 @@ def test_project_scale_to_partial_scale_down_does_not_mutate_unproposed_role():
     caps = WorkerCapabilities(
         prefill=EngineCapabilities(num_gpu=2, power_watts_per_replica=700),
         decode=EngineCapabilities(num_gpu=4, power_watts_per_replica=1200),
-        power_scale_up_blocked=False,
     )
     adapter = _bare_adapter(_mode_config("disagg", total_gpu_power_limit=5000), caps)
     # Current 4P+4D = 7600 W already over the 5000 W budget.
