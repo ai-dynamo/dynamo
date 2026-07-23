@@ -41,6 +41,10 @@ TXT2 = C["text"]["secondary"]
 
 STORE = "#76b900"
 REMOVE = "#fac200"
+# Inner diverging-colorscale stops, sourced from the muted chart-fill tokens
+# (muted versions of STORE / REMOVE) so every scale stop is a design token.
+STORE_MID = C["chart_fills"][0]  # Muted green
+REMOVE_MID = C["chart_fills"][2]  # Muted Fluorite
 
 SANS = T["font_family"]
 MONO = T["font_family_mono"]
@@ -222,9 +226,9 @@ def make_heatmap(
 
     colorscale = [
         [0.0, REMOVE],
-        [0.15, "#c89a00"],
+        [0.15, REMOVE_MID],
         [0.5, BG],
-        [0.85, "#5aaa00"],
+        [0.85, STORE_MID],
         [1.0, STORE],
     ]
 

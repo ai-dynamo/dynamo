@@ -41,7 +41,7 @@ BACKENDS = {
     },
     "inverted-index": {
         "label": "Inverted Index",
-        "color": "#969696",  # Silver Gray (7.1:1 on black) -- weak
+        "color": "#8c8c8c",  # Medium Gray token (text.medium / chart_series[4], 6.2:1 on black) -- weak
         "version": "Naive",
     },
     "naive-nested-map": {
