@@ -89,13 +89,14 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         self.runtime_namespace_source = runtime_namespace_source
         self._state = DeploymentState()
         self._metrics_state = Metrics()
-        # Per-role ``gpus_per_replica`` (nodeCount × per-pod GPUs) the startup
-        # power caps were computed against. ``power_watts_per_replica`` is
-        # cached once at startup; if this topology quantity changes under a
-        # running planner the cached wattage goes stale, so the runtime guard
-        # fails closed until the planner restarts and re-reads the caps.
-        self._power_startup_gpus_per_replica: Optional[
-            tuple[Optional[int], Optional[int]]
+        # Per-role ``(gpus_per_replica, gpu_power_limit_watts)`` fingerprint
+        # the startup power caps were computed against.
+        # ``power_watts_per_replica`` is cached once at startup; if either
+        # the replica-wide GPU total or the per-GPU annotation changes under
+        # a running planner the cached wattage goes stale, so the runtime
+        # guard fails closed until the planner restarts and re-reads the caps.
+        self._power_startup_fingerprint: Optional[
+            tuple[Optional[tuple[int, int]], Optional[tuple[int, int]]]
         ] = None
 
     async def initialize(self) -> None:
@@ -137,7 +138,7 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         if namespace_changed:
             await self.fpm_provider.async_init(self._runtime_namespace_or_none())
             await self._refresh_deployment_state()
-        self._assert_power_topology_static()
+        self._assert_power_config_static()
         await self.fpm_provider.refresh(self._state)
         return self._state
 
@@ -287,19 +288,26 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         if self.require_decode and decode_cfg is not None:
             self._adopt_power_config(state.decode, decode_cfg)
         self._validate_minimum_power_footprint(prefill_cfg, decode_cfg)
-        # Snapshot the replica-wide GPU total the cached wattage was derived
-        # from so the runtime guard can detect a topology change (see
-        # ``_assert_power_topology_static``). Uses the power resolver's
-        # ``gpus_per_replica`` (not ``get_gpu_counts`` / ``num_gpus``), so
-        # aggregate ``type: worker`` and named generic workers are visible.
-        self._power_startup_gpus_per_replica = (
-            prefill_cfg.gpus_per_replica
-            if self.require_prefill and prefill_cfg is not None
+        # Snapshot the power-projection inputs the cached wattage was derived
+        # from so the runtime guard can detect a DGD change (see
+        # ``_assert_power_config_static``). Uses the power resolver (not
+        # ``get_gpu_counts`` / ``num_gpus``), so aggregate ``type: worker``
+        # and named generic workers are visible, and both topology and
+        # per-GPU annotation drifts are caught.
+        self._power_startup_fingerprint = (
+            self._power_config_fingerprint(prefill_cfg)
+            if self.require_prefill
             else None,
-            decode_cfg.gpus_per_replica
-            if self.require_decode and decode_cfg is not None
-            else None,
+            self._power_config_fingerprint(decode_cfg) if self.require_decode else None,
         )
+
+    @staticmethod
+    def _power_config_fingerprint(
+        cfg: Optional[ComponentPowerConfig],
+    ) -> Optional[tuple[int, int]]:
+        if cfg is None:
+            return None
+        return (cfg.gpus_per_replica, cfg.gpu_power_limit_watts)
 
     def _resolve_power_configs(
         self,
@@ -308,7 +316,7 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
 
         Uses ``get_component_power_configs`` (explicit backend names + unique
         generic ``type: worker`` fallback). Does not write environment state —
-        callers decide whether to adopt caps or only compare topology.
+        callers decide whether to adopt caps or only compare fingerprints.
         """
         get_configs = getattr(self.controller, "get_component_power_configs", None)
         if not callable(get_configs):
@@ -328,28 +336,30 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
             decode_component_name=decode_name,
         )
 
-    def _assert_power_topology_static(self) -> None:
-        """Fail closed if GPUs-per-replica changed since startup.
+    def _assert_power_config_static(self) -> None:
+        """Fail closed if DGD power topology or per-GPU caps changed since startup.
 
         ``power_watts_per_replica`` is read once at startup and treated as
         static for the planner lifetime. A worker rollout that changes
-        per-pod GPUs or ``multinode.nodeCount`` leaves that cached wattage
-        stale, so the power budget would be projected against the old
-        per-replica watts and could admit a scale-up that exceeds the real
-        requested-cap total.
+        per-pod GPUs, ``multinode.nodeCount``, or the
+        ``dynamo.nvidia.com/gpu-power-limit`` annotation leaves that cached
+        wattage stale, so the power budget would be projected against the
+        old per-replica watts and could admit a scale-up that exceeds the
+        real requested-cap total.
 
-        Re-resolve topology through the same power-config path used at
-        startup (explicit component names + aggregate generic-worker
-        fallback). Do **not** trust ``get_gpu_counts`` / ``num_gpus`` here —
-        that shared path cannot see generic ``type: worker`` components and
-        would silently retain the previous count on ``DeploymentValidationError``,
-        leaving this guard blind. Cap watts stay static; only topology is
-        re-checked. On change or resolution failure, refuse to act and require
-        a restart.
+        Re-resolve through the same power-config path used at startup
+        (explicit component names + aggregate generic-worker fallback) and
+        compare both ``gpus_per_replica`` and ``gpu_power_limit_watts``. Do
+        **not** trust ``get_gpu_counts`` / ``num_gpus`` here — that shared
+        path cannot see generic ``type: worker`` components and would
+        silently retain the previous count on ``DeploymentValidationError``,
+        leaving this guard blind. Cap watts stay static in environment
+        state; only the fingerprint is re-checked. On change or resolution
+        failure, refuse to act and require a restart.
         """
         if not self.config.enable_power_awareness:
             return
-        baseline = self._power_startup_gpus_per_replica
+        baseline = self._power_startup_fingerprint
         if baseline is None:
             return
 
@@ -358,7 +368,7 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         except Exception as exc:
             raise DeploymentValidationError(
                 [
-                    "Failed to re-verify power-relevant GPU topology at runtime "
+                    "Failed to re-verify DGD power configuration at runtime "
                     f"({exc}). power_watts_per_replica is cached at startup, so "
                     "the planner cannot safely project the budget. Restart the "
                     "Planner to re-read the DGD power annotation."
@@ -368,24 +378,26 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         startup_p, startup_d = baseline
         changed = []
         if self.require_prefill and startup_p is not None:
-            current_p = (
-                prefill_cfg.gpus_per_replica if prefill_cfg is not None else None
-            )
+            current_p = self._power_config_fingerprint(prefill_cfg)
             if current_p != startup_p:
-                changed.append(f"prefill {startup_p} -> {current_p}")
+                changed.append(
+                    f"prefill (gpus/replica, W/GPU) {startup_p} -> {current_p}"
+                )
         if self.require_decode and startup_d is not None:
-            current_d = decode_cfg.gpus_per_replica if decode_cfg is not None else None
+            current_d = self._power_config_fingerprint(decode_cfg)
             if current_d != startup_d:
-                changed.append(f"decode {startup_d} -> {current_d}")
+                changed.append(
+                    f"decode (gpus/replica, W/GPU) {startup_d} -> {current_d}"
+                )
         if changed:
             raise DeploymentValidationError(
                 [
-                    "Power-relevant GPU topology changed at runtime ("
+                    "DGD power configuration changed at runtime ("
                     + ", ".join(changed)
-                    + " GPUs/replica). power_watts_per_replica is cached at "
-                    "startup, so the power budget would be projected against "
-                    "stale per-replica watts. Restart the Planner to re-read "
-                    "the DGD power annotation against the new topology."
+                    + "). power_watts_per_replica is cached at startup, so "
+                    "the power budget would be projected against stale "
+                    "per-replica watts. Restart the Planner to re-read the "
+                    "DGD power annotation against the new configuration."
                 ]
             )
 

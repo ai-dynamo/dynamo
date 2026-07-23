@@ -205,25 +205,25 @@ def test_runtime_gpus_per_replica_change_fails_closed():
     )
     env = _env(controller)
     env._load_static_power_caps_at_startup()
-    # Caps stay at the startup-adopted values; only topology is re-checked.
+    # Caps stay at the startup-adopted values; only the fingerprint is checked.
     assert env.deployment_state().prefill.power_watts_per_replica == 300
 
-    with pytest.raises(DeploymentValidationError, match="topology changed"):
-        env._assert_power_topology_static()
+    with pytest.raises(DeploymentValidationError, match="power configuration changed"):
+        env._assert_power_config_static()
     assert env.deployment_state().prefill.power_watts_per_replica == 300
 
 
 def test_runtime_topology_unchanged_passes():
     env = _env(_controller(700, 1200, gpus_per_replica=2))
     env._load_static_power_caps_at_startup()
-    env._assert_power_topology_static()
+    env._assert_power_config_static()
 
 
 def test_topology_guard_noop_when_awareness_off():
     controller = _controller()
     env = _env(controller, enable_power=False)
     env._load_static_power_caps_at_startup()
-    env._assert_power_topology_static()
+    env._assert_power_config_static()
     controller.get_component_power_configs.assert_not_called()
 
 
@@ -238,7 +238,7 @@ def test_topology_guard_fails_closed_when_re_resolve_fails():
     env = _env(controller)
     env._load_static_power_caps_at_startup()
     with pytest.raises(DeploymentValidationError, match="re-verify"):
-        env._assert_power_topology_static()
+        env._assert_power_config_static()
 
 
 def test_topology_guard_sees_agg_generic_worker_gpu_change():
@@ -259,7 +259,7 @@ def test_topology_guard_sees_agg_generic_worker_gpu_change():
 
         custom_api.get_namespaced_custom_object.return_value = dgd_v2
         with pytest.raises(DeploymentValidationError, match="Restart the Planner"):
-            env._assert_power_topology_static()
+            env._assert_power_config_static()
         # Caps must not be re-adopted from the new topology.
         assert env.deployment_state().decode.power_watts_per_replica == 300
 
@@ -288,5 +288,36 @@ def test_topology_guard_sees_named_generic_worker_gpu_change():
 
         custom_api.get_namespaced_custom_object.return_value = dgd_v2
         with pytest.raises(DeploymentValidationError, match="Restart the Planner"):
-            env._assert_power_topology_static()
+            env._assert_power_config_static()
         assert env.deployment_state().decode.power_watts_per_replica == 300
+
+
+def test_guard_sees_cap_only_annotation_change():
+    """A cap-only DGD annotation edit (same GPUs/replica) must still fail closed.
+
+    After the worker rollout settles on the higher cap, the Planner would
+    otherwise resume scale-up against the lower startup-cached
+    ``power_watts_per_replica`` and admit an over-budget projection.
+    """
+    dgd_v1 = _dgd(
+        _worker("VllmPrefillWorker", comp_type="prefill", watts="300", gpus="4"),
+        _worker("VllmDecodeWorker", comp_type="decode", watts="300", gpus="4"),
+    )
+    dgd_v2 = _dgd(
+        _worker("VllmPrefillWorker", comp_type="prefill", watts="400", gpus="4"),
+        _worker("VllmDecodeWorker", comp_type="decode", watts="300", gpus="4"),
+    )
+    with _k8s_env(dgd_v1, require_prefill=True, require_decode=True) as (
+        env,
+        custom_api,
+    ):
+        env._load_static_power_caps_at_startup()
+        # 300 W × 4 GPUs = 1200 W/replica at startup.
+        assert env.deployment_state().prefill.power_watts_per_replica == 1200
+
+        custom_api.get_namespaced_custom_object.return_value = dgd_v2
+        with pytest.raises(DeploymentValidationError, match="Restart the Planner"):
+            env._assert_power_config_static()
+        # Must not silently adopt the new 400 W × 4 = 1600 W projection.
+        assert env.deployment_state().prefill.power_watts_per_replica == 1200
+        assert env.deployment_state().prefill.power_gpu_limit_watts == 300
