@@ -166,11 +166,7 @@ pub(super) fn cleanup_completed_request(
         return;
     }
     let lease = std::mem::take(&mut request.kv_lease);
-    if tokens_to_cache <= request.prompt_len() {
-        kv_manager.finish(&request.prompt_tokens()[..tokens_to_cache], lease);
-    } else {
-        kv_manager.finish(request.sequence_prefix(tokens_to_cache), lease);
-    }
+    kv_manager.finish(request.sequence_prefix(tokens_to_cache), lease);
 }
 
 pub(super) fn simulate_decode_step_with_sampler(

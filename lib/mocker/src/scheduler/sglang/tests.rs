@@ -1400,7 +1400,7 @@ mod core_behavior {
 
         simulate_decode_step(&mut running, &mut kv_manager, &config, 0.0, false);
         let prefix = running[0].sequence_prefix(4);
-        assert_eq!(kv_manager.cache().prefix_match_len(&prefix), 4);
+        assert_eq!(kv_manager.cache().prefix_match_len(prefix), 4);
     }
 
     #[test]

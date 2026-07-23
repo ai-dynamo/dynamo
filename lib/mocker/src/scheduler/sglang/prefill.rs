@@ -121,10 +121,10 @@ pub(super) fn get_new_batch_prefill(
                 );
             }
             kv_manager
-                .extend_allocation(&alloc_tokens, &mut lease)
+                .extend_allocation(alloc_tokens, &mut lease)
                 .then_some(req.materialized_tokens)
         } else {
-            kv_manager.allocate_for_request(&alloc_tokens).map(|alloc| {
+            kv_manager.allocate_for_request(alloc_tokens).map(|alloc| {
                 lease = alloc.lease;
                 alloc.prefix_len
             })
