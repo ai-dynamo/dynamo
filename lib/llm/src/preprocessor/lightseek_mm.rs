@@ -265,9 +265,10 @@ pub fn resolve_routing_tokens(model_id: &str, model_dir: &Path) -> RoutingTokens
     }
 }
 
-/// Read + parse a JSON file under `model_dir`. Warns on read or parse
-/// failure (missing files are silent — many models legitimately lack
-/// `tokenizer_config.json`). Returns `None` on any error.
+/// Read and parse a model metadata file under `model_dir`.
+/// `config.json` accepts JSON5 syntax; `tokenizer_config.json` remains strict JSON.
+/// Warns on read or parse failure (missing files are silent — many models
+/// legitimately lack `tokenizer_config.json`). Returns `None` on any error.
 fn read_json(model_dir: &Path, filename: &str) -> Option<serde_json::Value> {
     let path = model_dir.join(filename);
     let raw = match std::fs::read_to_string(&path) {
@@ -283,7 +284,12 @@ fn read_json(model_dir: &Path, filename: &str) -> Option<serde_json::Value> {
             return None;
         }
     };
-    match serde_json::from_str(&raw) {
+    let res = if filename == "config.json" {
+        json_five::from_str(&raw).map_err(|e| e.to_string())
+    } else {
+        serde_json::from_str(&raw).map_err(|e| e.to_string())
+    };
+    match res {
         Ok(v) => Some(v),
         Err(e) => {
             tracing::warn!(
@@ -404,5 +410,45 @@ mod tests {
              the supported-families list in docs.",
             missing
         );
+    }
+
+    #[test]
+    fn test_resolve_routing_tokens_with_infinity_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_content = r#"{
+            "model_type": "qwen2_5_vl",
+            "image_token_id": 151655,
+            "vision_token_id": 151655,
+            "time_step_limit": [0.0, Infinity]
+        }"#;
+        std::fs::write(dir.path().join("config.json"), config_content).unwrap();
+
+        let tokenizer_content = r#"{
+            "version": "1.0",
+            "truncation": null,
+            "padding": null,
+            "added_tokens": [
+                {
+                    "id": 151655,
+                    "content": "<|image_pad|>",
+                    "single_word": false,
+                    "lstrip": false,
+                    "rstrip": false,
+                    "normalized": false,
+                    "special": true
+                }
+            ],
+            "model": {
+                "type": "BPE",
+                "vocab": {
+                    "<|image_pad|>": 151655
+                },
+                "merges": []
+            }
+        }"#;
+        std::fs::write(dir.path().join("tokenizer.json"), tokenizer_content).unwrap();
+
+        let tokens = resolve_routing_tokens("Qwen/Qwen2.5-VL-7B-Instruct", dir.path());
+        assert_eq!(tokens.image_token_id, Some(151655));
     }
 }
