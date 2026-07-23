@@ -22,12 +22,15 @@ import (
 	"fmt"
 	"strings"
 
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
 const (
@@ -36,6 +39,42 @@ const (
 	vllmDistributedExecutorBackendMP  = "mp"
 	vllmDistributedExecutorBackendRay = "ray"
 )
+
+// runtimeVersionValidationSource identifies the API representation whose field
+// paths must be used for runtime-version validation errors.
+type runtimeVersionValidationSource uint8
+
+const (
+	runtimeVersionSourceV1Beta1 runtimeVersionValidationSource = iota
+	runtimeVersionSourceV1Alpha1
+)
+
+// runtimeVersionValidationSourceForRequest uses RequestKind because it preserves
+// the GVK the client submitted when the API server converts the object for
+// an equivalent-version webhook. For unconverted requests, RequestKind is nil;
+// the handler endpoint GVK is then the source representation.
+func runtimeVersionValidationSourceForRequest(ctx context.Context, fallbackGVK schema.GroupVersionKind) runtimeVersionValidationSource {
+	request, err := admission.RequestFromContext(ctx)
+	if err == nil && request.RequestKind != nil {
+		return runtimeVersionValidationSourceForGVK(schema.GroupVersionKind{
+			Group:   request.RequestKind.Group,
+			Version: request.RequestKind.Version,
+			Kind:    request.RequestKind.Kind,
+		})
+	}
+	return runtimeVersionValidationSourceForGVK(fallbackGVK)
+}
+
+func runtimeVersionValidationSourceForGVK(gvk schema.GroupVersionKind) runtimeVersionValidationSource {
+	if gvk.GroupVersion() == nvidiacomv1alpha1.GroupVersion {
+		return runtimeVersionSourceV1Alpha1
+	}
+	return runtimeVersionSourceV1Beta1
+}
+
+func (v *sharedValidation) validatesRuntimeVersionFor(source runtimeVersionValidationSource) bool {
+	return v.runtimeVersionSource == source
+}
 
 func hasContainerNamed(containers []corev1.Container, name string) bool {
 	for i := range containers {
