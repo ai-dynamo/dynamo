@@ -2384,6 +2384,8 @@ name = "dynamo-ext-proc"
 version = "1.4.0"
 dependencies = [
  "anyhow",
+ "axum 0.8.4",
+ "bytes",
  "dynamo-kv-router",
  "dynamo-llm",
  "dynamo-runtime",
@@ -2394,14 +2396,17 @@ dependencies = [
  "prost 0.13.5",
  "prost-types 0.13.5",
  "rcgen",
+ "reqwest 0.12.28",
  "rustls 0.23.40",
  "rustls-pemfile",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls 0.26.4",
  "tokio-stream",
+ "tokio-util",
  "tonic 0.13.1",
  "tonic-build 0.13.1",
  "tonic-health",
@@ -2700,9 +2705,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "3.0.0"
+version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aaf9875c31601458f29b83e5ed0bf63479dc3a086e4131bbee0863101f4fd5f3"
+checksum = "92d05c9671ed19fd2ad5c7062e79c3ee83533d9d5a602a41b1fc5a0279c0dbef"
 dependencies = [
  "async-openai",
  "derive_builder",

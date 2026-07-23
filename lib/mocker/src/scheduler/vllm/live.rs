@@ -277,6 +277,8 @@ mod tests {
     use crate::common::protocols::KvCacheEventSink;
     #[cfg(feature = "kvbm-offload")]
     use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, StorageTier};
+    #[cfg(feature = "kvbm-offload")]
+    use std::sync::{Arc, Mutex};
 
     #[cfg(feature = "kvbm-offload")]
     #[derive(Default)]
