@@ -61,6 +61,13 @@ python -m dynamo.frontend --router-mode kv --http-port 8001 --router-replica-syn
 
 With replica sync enabled, a new router still starts with zero active-block knowledge, but it converges through live request handling and active-sequence events from other replicas. Without it, each replica keeps an isolated active-block view, which can lead to suboptimal load balancing.
 
+Replica lifecycle events are best effort. If a remote `Free` event is missed, the orphaned
+replica record becomes eligible for cleanup after 15 minutes by default. Cleanup runs once
+per minute, so removal can occur up to one sweep interval later. Set
+`DYN_ROUTER_REPLICA_SYNC_ORPHAN_TIMEOUT_SECS` on every router replica to change the
+eligibility timeout. The setting applies only to records learned from other routers; it does
+not expire locally owned requests or limit backend request execution.
+
 Session-affinity synchronization starts automatically when
 `--router-session-affinity-ttl-secs` is set. That path is best effort: each replica
 owns its local idle TTL, rejects targets outside its local worker membership, and
