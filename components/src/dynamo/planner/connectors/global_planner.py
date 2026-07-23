@@ -23,6 +23,7 @@ from dynamo.planner.errors import (
     ModelNameNotFoundError,
     UserProvidedModelNameMismatchError,
 )
+from dynamo.planner.monitoring.dgd_services import ComponentPowerConfig
 from dynamo.planner.monitoring.worker_info import (
     WorkerInfo,
     build_worker_info_from_defaults,
@@ -326,6 +327,30 @@ class GlobalPlannerConnector(PlannerConnector):
         return local.get_gpu_counts(
             require_prefill=require_prefill,
             require_decode=require_decode,
+        )
+
+    def get_component_power_configs(
+        self,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
+    ) -> tuple[Optional[ComponentPowerConfig], Optional[ComponentPowerConfig]]:
+        """Resolve DGD-owned caps from the pool-local deployment when available."""
+        local = self._get_local_k8s_connector()
+        if local is None:
+            raise DeploymentValidationError(
+                [
+                    "Power awareness requires a pool-local DynamoGraphDeployment "
+                    "to read per-GPU caps from; none is available for this "
+                    "GlobalPlannerConnector."
+                ]
+            )
+        return local.get_component_power_configs(
+            require_prefill=require_prefill,
+            require_decode=require_decode,
+            prefill_component_name=prefill_component_name,
+            decode_component_name=decode_component_name,
         )
 
     def get_worker_info(

@@ -239,6 +239,43 @@ def project_watts(
     return total
 
 
+def peak_parallel_watts(
+    current_p: Optional[int],
+    current_d: Optional[int],
+    proposed_p: Optional[int],
+    proposed_d: Optional[int],
+    p_watts: Optional[int],
+    d_watts: Optional[int],
+) -> int:
+    """Worst-case draw if both roles move toward their targets in parallel."""
+    p_ready = current_p or 0
+    d_ready = current_d or 0
+    p_peak = max(p_ready, proposed_p if proposed_p is not None else p_ready)
+    d_peak = max(d_ready, proposed_d if proposed_d is not None else d_ready)
+    return project_watts(p_peak, d_peak, p_watts, d_watts)
+
+
+def _is_opposing_rebalance(
+    proposed_p: Optional[int],
+    proposed_d: Optional[int],
+    current_p: Optional[int],
+    current_d: Optional[int],
+) -> bool:
+    """True when one role scales up and the other scales down."""
+    if (
+        proposed_p is None
+        or proposed_d is None
+        or current_p is None
+        or current_d is None
+    ):
+        return False
+    p_up = proposed_p > current_p
+    p_down = proposed_p < current_p
+    d_up = proposed_d > current_d
+    d_down = proposed_d < current_d
+    return (p_up and d_down) or (p_down and d_up)
+
+
 def minimum_power_footprint_fits(
     total_budget: int,
     min_endpoint: int,
@@ -301,15 +338,34 @@ def apply_power_budget(
         reason = "power_scale_up_blocked" if (capped_p or capped_d) else None
         return new_p, new_d, reason
 
+    p_adjustable = proposed_p is not None and p_watts is not None and p_watts > 0
+    d_adjustable = proposed_d is not None and d_watts is not None and d_watts > 0
+
+    if (
+        p_adjustable
+        and d_adjustable
+        and _is_opposing_rebalance(proposed_p, proposed_d, current_p, current_d)
+        and peak_parallel_watts(
+            current_p, current_d, proposed_p, proposed_d, p_watts, d_watts
+        )
+        > total_budget
+    ):
+        # Settled target may fit, but parallel rollouts can transiently exceed
+        # the ceiling (e.g. (1,4)->(4,1) peaks at (4,4)). Stage scale-downs
+        # first by deferring scale-up legs to a later stable tick.
+        new_p, capped_p = _hold_at_current(proposed_p, current_p)
+        new_d, capped_d = _hold_at_current(proposed_d, current_d)
+        if capped_p or capped_d:
+            return new_p, new_d, "power_rebalance_staged"
+
     eff_p = proposed_p if proposed_p is not None else current_p
     eff_d = proposed_d if proposed_d is not None else current_d
     if project_watts(eff_p, eff_d, p_watts, d_watts) <= total_budget:
         return proposed_p, proposed_d, None
 
-    p_adjustable = proposed_p is not None and p_watts is not None and p_watts > 0
-    d_adjustable = proposed_d is not None and d_watts is not None and d_watts > 0
-
     if p_adjustable and d_adjustable:
+        assert proposed_p is not None and proposed_d is not None
+        assert p_watts is not None and d_watts is not None
         new_p, new_d = _shrink_pair(
             proposed_p, proposed_d, p_watts, d_watts, total_budget, min_endpoint
         )
@@ -322,6 +378,7 @@ def apply_power_budget(
         # Exactly one proposed adjustable component; charge the other at its
         # current count and never mutate it.
         if p_adjustable:
+            assert proposed_p is not None and p_watts is not None
             fixed = eff_d * d_watts if (eff_d is not None and d_watts) else 0
             new_p, suppressed = _shrink_single(
                 proposed_p, current_p, p_watts, total_budget - fixed, min_endpoint
@@ -334,6 +391,7 @@ def apply_power_budget(
                 else "power_budget_clamped"
             )
             return new_p, proposed_d, reason
+        assert proposed_d is not None and d_watts is not None
         fixed = eff_p * p_watts if (eff_p is not None and p_watts) else 0
         new_d, suppressed = _shrink_single(
             proposed_d, current_d, d_watts, total_budget - fixed, min_endpoint
