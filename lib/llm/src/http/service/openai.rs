@@ -1384,6 +1384,24 @@ async fn pooling(
             request.encoding_format
         )));
     }
+    // The worker always packs base64 as little-endian float32. Reject any
+    // non-default embed_dtype/endianness rather than silently returning a
+    // float32/little-endian payload the caller would misinterpret.
+    if let Some(dtype) = request.embed_dtype.as_deref()
+        && dtype != "float32"
+    {
+        return Err(pooling_bad_request(format!(
+            "Unsupported 'embed_dtype' value {dtype:?}; only 'float32' is supported"
+        )));
+    }
+    if let Some(endianness) = request.endianness.as_deref()
+        && endianness != "native"
+        && endianness != "little"
+    {
+        return Err(pooling_bad_request(format!(
+            "Unsupported 'endianness' value {endianness:?}; only 'native'/'little' are supported"
+        )));
+    }
 
     // Resolve alias → primary served name before wrapping the request, so
     // engine routing, metrics, and the response model all use the canonical

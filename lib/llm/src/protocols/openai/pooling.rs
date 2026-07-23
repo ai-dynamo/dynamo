@@ -83,6 +83,22 @@ pub struct NvCreatePoolingRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dimensions: Option<u32>,
 
+    /// base64 element dtype. vLLM's `EncodingRequestMixin` supports several
+    /// (`float32`, `float16`, `bfloat16`, …) and packs them via `tensor2binary`,
+    /// but the worker always emits little-endian `float32`. Captured so a
+    /// non-default value is rejected with a 400 rather than silently returning
+    /// a `float32` payload the caller would misinterpret. `None`/`"float32"`
+    /// are accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embed_dtype: Option<String>,
+
+    /// base64 byte order. vLLM's default is `"native"` (little-endian on the
+    /// x86 servers this runs on), which the worker matches. Captured so a
+    /// non-default (`"big"`) is rejected with a 400 instead of silently
+    /// returning little-endian bytes. `None`/`"native"`/`"little"` are accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endianness: Option<String>,
+
     /// Truncate the tokenized prompt to this many tokens (`-1` = model max).
     /// Forwarded to the worker's tokenizer path for raw-text inputs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -243,6 +259,32 @@ mod tests {
         assert_eq!(request.task.as_deref(), Some("token_classify"));
         assert_eq!(request.encoding_format, "base64");
         assert_eq!(request.use_activation, Some(false));
+    }
+
+    #[test]
+    fn embed_dtype_and_endianness_are_captured() {
+        // Captured (not silently dropped) so the handler can 400 on non-default
+        // values instead of returning a mislabeled base64 payload.
+        let request: NvCreatePoolingRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "input": "hi",
+            "encoding_format": "base64",
+            "embed_dtype": "float16",
+            "endianness": "big"
+        }))
+        .unwrap();
+        assert_eq!(request.embed_dtype.as_deref(), Some("float16"));
+        assert_eq!(request.endianness.as_deref(), Some("big"));
+
+        // Omitted → None, and not serialized onto the worker wire.
+        let request: NvCreatePoolingRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "input": "hi"
+        }))
+        .unwrap();
+        assert!(request.embed_dtype.is_none() && request.endianness.is_none());
+        let value = serde_json::to_value(&request).unwrap();
+        assert!(value.get("embed_dtype").is_none() && value.get("endianness").is_none());
     }
 
     #[test]
