@@ -196,6 +196,16 @@ class DynamoVllmArgGroup(ArgGroup):
             "and InstrumentedScheduler injection (none apply to pooling models).",
         )
 
+        add_negatable_bool_argument(
+            g,
+            flag_name="--realtime",
+            env_var="DYN_VLLM_REALTIME",
+            default=False,
+            help="Serve a ModelType.Realtime bidirectional endpoint through "
+            "the OpenAI /v1/realtime protocol. Standard vLLM currently "
+            "supports transcription sessions only. Aggregated workers only.",
+        )
+
         # Headless mode for multi-node TP/PP
         add_negatable_bool_argument(
             g,
@@ -455,6 +465,7 @@ class DynamoVllmConfig(ConfigBase):
         str, EmbeddingTransferMode
     ]  # resolved to enum in validate()
     embedding_worker: bool = False
+    realtime: bool = False
 
     # CustomEncoder (image-only embeddings; worker assembles mixed prompt)
     custom_encoder_class: Optional[str] = None
@@ -502,6 +513,7 @@ class DynamoVllmConfig(ConfigBase):
         self._validate_multimodal_role_exclusivity()
         self._validate_multimodal_requires_flag()
         self._validate_embedding_worker_exclusivity()
+        self._validate_realtime_worker_exclusivity()
         self._validate_custom_encoder()
         self._load_explicit_benchmark_points()
         self._resolve_legacy_benchmark_sampling()
@@ -844,3 +856,35 @@ class DynamoVllmConfig(ConfigBase):
                 "Embedding workers do not run generation, so prefill/decode "
                 "benchmark sweeps are not meaningful."
             )
+
+    def _validate_realtime_worker_exclusivity(self) -> None:
+        """Realtime serving uses a dedicated aggregated bidirectional worker."""
+        if not self.realtime:
+            return
+        if self.disaggregation_mode != DisaggregationMode.AGGREGATED:
+            mode = (
+                self.disaggregation_mode.value
+                if isinstance(self.disaggregation_mode, DisaggregationMode)
+                else self.disaggregation_mode
+            )
+            raise ValueError(
+                f"--realtime is only valid with --disaggregation-mode=agg (got {mode})."
+            )
+        if self.embedding_worker:
+            raise ValueError("--realtime cannot be combined with --embedding-worker.")
+        for enabled, option in (
+            (bool(self.custom_encoder_class), "--custom-encoder-class"),
+            (self.gms_shadow_mode, "--gms-shadow-mode"),
+            (self.enable_rl, "--enable-rl"),
+            (self.headless, "--headless"),
+        ):
+            if enabled:
+                raise ValueError(f"--realtime cannot be combined with {option}.")
+        if self._count_multimodal_roles() > 0 or self.enable_multimodal:
+            raise ValueError(
+                "--realtime cannot be combined with multimodal worker flags."
+            )
+        if self.benchmark_mode is not None:
+            raise ValueError("--realtime cannot be combined with --benchmark-mode.")
+        if getattr(getattr(self, "engine_args", None), "enable_lora", False):
+            raise ValueError("--realtime cannot be combined with --enable-lora.")

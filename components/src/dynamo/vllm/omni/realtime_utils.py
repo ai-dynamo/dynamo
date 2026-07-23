@@ -12,16 +12,13 @@ event translation.
 import asyncio
 import logging
 
-from vllm.entrypoints.openai.models.protocol import BaseModelPath
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.speech_to_text.realtime.serving import OpenAIServingRealtime
-
 from dynamo import prometheus_names
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime
 from dynamo.vllm.main import setup_metrics_collection
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
 from dynamo.vllm.omni.realtime_handler import RealtimeOmniHandler
+from dynamo.vllm.realtime.serving import build_realtime_serving
 
 from .args import OmniConfig
 
@@ -50,12 +47,17 @@ async def init_omni_realtime(
     )
 
     sampling_params_list = streaming_sampling_params(base.engine_client)
-    streaming_input_factory = build_streaming_input_factory(config, base.engine_client)
+    model_name = config.served_model_name or config.model
+    serving_realtime = build_realtime_serving(
+        engine_client=base.engine_client,
+        model_name=model_name,
+        model_path=config.model,
+    )
 
     handler = RealtimeOmniHandler(
         engine_client=base.engine_client,
-        model_name=config.served_model_name or config.model,
-        streaming_input_factory=streaming_input_factory,
+        model_name=model_name,
+        streaming_input_factory=serving_realtime.transcribe_realtime,
         default_sampling_params_list=sampling_params_list,
     )
 
@@ -105,23 +107,6 @@ async def init_omni_realtime(
     finally:
         logger.debug("Cleaning up realtime Omni worker")
         base.cleanup()
-
-
-def build_streaming_input_factory(config: OmniConfig, engine_client):
-    """Build the audio -> StreamingInput factory from vLLM utils."""
-    model_name = config.served_model_name or config.model
-    base_model_paths = [BaseModelPath(name=model_name, model_path=config.model)]
-    serving_models = OpenAIServingModels(
-        engine_client=engine_client,
-        base_model_paths=base_model_paths,
-        lora_modules=None,
-    )
-    serving_realtime = OpenAIServingRealtime(
-        engine_client=engine_client,
-        models=serving_models,
-        request_logger=None,
-    )
-    return serving_realtime.transcribe_realtime
 
 
 def streaming_sampling_params(engine_client) -> list | None:
