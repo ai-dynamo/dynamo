@@ -89,7 +89,13 @@ class NativePlannerBase:
         self.namespace = config.namespace
 
         self.prometheus_port = config.metric_reporting_prometheus_port
-        self.prometheus_metrics = PlannerPrometheusMetrics()
+        if config.model_name == "":
+            raise ValueError(
+                "PlannerConfig.model_name must be a non-empty string or None"
+            )
+        self.prometheus_metrics = PlannerPrometheusMetrics(
+            model_name=config.model_name,
+        )
         if self.prometheus_port != 0:
             try:
                 start_http_server(self.prometheus_port)
