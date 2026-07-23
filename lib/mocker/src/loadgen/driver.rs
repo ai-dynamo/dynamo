@@ -751,6 +751,11 @@ impl WorkloadDriver {
                     // does not need to retain the expanded prompt. Materialize
                     // once transiently for hashing, then keep only the compact
                     // payload until a worker admission.
+                    // TODO: Derive engine-block hashes directly from the compact
+                    // trace blocks so immediate dispatch does not materialize
+                    // the prompt once for routing and again for admission.
+                    // Preserve `ReplayRequestHashes::from_tokens` semantics when
+                    // trace and engine block sizes differ.
                     let replay_hashes = self.include_replay_hashes.then(|| {
                         let request_tokens = request.prompt_tokens();
                         ReplayRequestHashes::from_tokens(&request_tokens, self.engine_block_size)
