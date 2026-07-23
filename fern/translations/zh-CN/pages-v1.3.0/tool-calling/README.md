@@ -41,7 +41,8 @@ python -m dynamo.<backend> --help
 | 解析器名称 | 模型 | Upstream name | 说明 |
 |---|---|---|---|
 | `kimi_k2` | Kimi K2 Instruct/Thinking, Kimi K2.5 | | 与 `--dyn-reasoning-parser kimi` 或 `kimi_k25` 配对 |
-| `minimax_m2` | MiniMax M2 / M2.1 | vLLM: `minimax` | XML `<minimax:tool_call>` |
+| `minimax_m2` | MiniMax M2 / M2.1 | vLLM: `minimax_m2` | XML `<minimax:tool_call>` |
+| `minimax_m3` | MiniMax M3 | vLLM: `minimax_m3` | MiniMax 命名空间令牌 XML |
 | `deepseek_v4` | DeepSeek V4 Pro / Flash | vLLM: `deepseek_v4`; SGLang: `deepseekv4` | DSML 标签（`<｜DSML｜tool_calls>...`）。别名：`deepseek-v4`、`deepseekv4` |
 | `deepseek_v3` | DeepSeek V3, DeepSeek R1-0528+ | SGLang: `deepseekv3` | 特殊 Unicode 标记 |
 | `deepseek_v3_1` | DeepSeek V3.1 | Dynamo-only | JSON 分隔符 |

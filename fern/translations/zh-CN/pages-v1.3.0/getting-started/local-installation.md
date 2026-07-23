@@ -54,13 +54,13 @@ description: 使用容器或 PyPI 在本地机器或 VM 上安装并运行 Dynam
 
     ```bash
     # SGLang
-    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
+    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0
 
     # TensorRT-LLM
-    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
+    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
 
     # vLLM
-    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
     ```
 
   </Tab>
@@ -152,7 +152,7 @@ Dynamo 组件通过共享后端相互发现。可使用两个选项：
 | 后端 | 何时使用 | 设置 |
 |---|---|---|
 | **File** | 单机、本地开发 | 无需设置 -- 将 `--discovery-backend file` 传递给所有组件。事件平面会自动默认使用 ZMQ（无需 NATS）。 |
-| **etcd** | 多节点、生产环境 | 需要正在运行的 etcd 实例（如果未指定标志，则为默认值）。事件平面默认使用 NATS。 |
+| **etcd** | 多节点、生产环境 | 需要正在运行的 etcd 实例（如果未指定标志，则为默认值）。事件平面仍默认使用 ZMQ；设置 `DYN_EVENT_PLANE=nats` 可切换至 NATS。 |
 
 本指南使用 `--discovery-backend file`。如需设置 etcd，请参阅[服务发现](/dynamo/dev/kubernetes-deployment/advanced-platform/service-discovery)。
 
@@ -277,10 +277,10 @@ curl localhost:8000/v1/chat/completions \
 
     ```bash
     # Correct
-    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
+    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0
 
     # Wrong -- no GPU access
-    docker run --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
+    docker run --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0
     ```
 
     **vLLM worker 启动失败：FlashInfer sampler 的 JIT 与 CUDA 13 wheels**
