@@ -558,32 +558,18 @@ def build_tool_call_guided_decoding(
     if tool_choice == "none":
         return None
 
-    parallel_tool_calls = request.get("parallel_tool_calls")
+    parallel_tool_calls = request.get("parallel_tool_calls", True)
+
     constraint: Any = None
 
-    if tool_choice == "required" or _is_named_tool_choice(tool_choice):
-        # get_json_schema_constraint branches on isinstance(tool_choice,
-        # ToolChoice) for the named-function case — passing our raw dict
-        # would silently fall through and return None, disabling guided
-        # decoding and letting the model omit required fields.
-        sglang_tool_choice: Any = tool_choice
-        if _is_named_tool_choice(tool_choice):
-            sglang_tool_choice = SglangToolChoice(
-                type="function",
-                function=SglangToolChoiceFuncName(
-                    name=tool_choice["function"]["name"],
-                ),
-            )
-        constraint = (
-            "json_schema",
-            _call_with_optional_parallel_tool_calls(
-                get_json_schema_constraint,
-                sglang_tools,
-                sglang_tool_choice,
-                parallel_tool_calls=parallel_tool_calls,
+    if _is_named_tool_choice(tool_choice):
+        tool_choice = SglangToolChoice(
+            type="function",
+            function=SglangToolChoiceFuncName(
+                name=tool_choice["function"]["name"],
             ),
         )
-    elif tool_call_parser_name:
+    if tool_call_parser_name:
         tool_call_parser_name = _normalize_sglang_parser_name(tool_call_parser_name)
         parser = FunctionCallParser(
             tools=sglang_tools,
@@ -592,7 +578,22 @@ def build_tool_call_guided_decoding(
         constraint = _call_with_optional_parallel_tool_calls(
             parser.get_structure_constraint,
             tool_choice,
-            parallel_tool_calls=parallel_tool_calls,
+            parallel_tool_calls=bool(parallel_tool_calls),
+        )
+
+    # Fallback: use generic JSON schema for required/named tool choice
+    # only when no parser-specific constraint was set
+    elif constraint is None and (
+        tool_choice == "required" or isinstance(tool_choice, SglangToolChoice)
+    ):
+        constraint = (
+            "json_schema",
+            _call_with_optional_parallel_tool_calls(
+                get_json_schema_constraint,
+                sglang_tools,
+                tool_choice,
+                parallel_tool_calls=bool(parallel_tool_calls),
+            ),
         )
 
     if isinstance(constraint, tuple) and len(constraint) == 2:
