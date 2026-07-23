@@ -99,10 +99,10 @@ async fn reconcile_once(
     selector: &Selector,
     defaults: &RegistrationDefaults,
 ) {
-    let desired: HashMap<u64, WorkerRegistration> = reflector
+    let desired: Vec<WorkerRegistration> = reflector
         .ready_workers()
         .into_iter()
-        .map(|w| (w.worker_id, build_registration(w, defaults)))
+        .map(|w| build_registration(w, defaults))
         .collect();
 
     if let Err(e) = selector.reconcile(&desired).await {
