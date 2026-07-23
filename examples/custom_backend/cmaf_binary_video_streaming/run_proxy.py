@@ -4,18 +4,14 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import http.client
 import http.server
 import mimetypes
-import os
-import subprocess
 import sys
 import time
 from pathlib import Path
 
 EXAMPLE_DIR = Path(__file__).resolve().parent
-REPO_ROOT = EXAMPLE_DIR.parents[2]
 CLIENT_HTML = EXAMPLE_DIR / "client.html"
 HOP_BY_HOP_HEADERS = {
     "connection",
@@ -151,7 +147,8 @@ class DemoProxyHandler(http.server.BaseHTTPRequestHandler):
 
 def create_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Serve the CMAF binary demo page and proxy Dynamo under one browser origin."
+        description="Serve the CMAF binary demo page and proxy an already-running "
+        "Dynamo frontend under one browser origin."
     )
     parser.add_argument(
         "--bind",
@@ -167,70 +164,27 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--frontend-host",
         default="127.0.0.1",
-        help="Internal host where the Dynamo frontend listens (default: 127.0.0.1)",
+        help="Host where the running Dynamo frontend listens (default: 127.0.0.1)",
     )
     parser.add_argument(
         "--frontend-port",
         type=int,
         default=18001,
-        help="Internal port for the Dynamo frontend subprocess or existing frontend (default: 18001)",
+        help="Port of the running Dynamo frontend to proxy (default: 18001)",
     )
     parser.add_argument(
         "--frontend-timeout-seconds",
         type=float,
         default=30.0,
-        help="How long to wait for the frontend to start responding (default: 30)",
-    )
-    parser.add_argument(
-        "--discovery-backend",
-        default=os.environ.get("DYN_DISCOVERY_BACKEND", "file"),
-        help="Discovery backend used when auto-starting the frontend (default: file)",
-    )
-    parser.add_argument(
-        "--request-plane",
-        default=os.environ.get("DYN_REQUEST_PLANE", "tcp"),
-        help="Request plane used when auto-starting the frontend (default: tcp)",
-    )
-    parser.add_argument(
-        "--no-start-frontend",
-        action="store_true",
-        help="Reuse an already-running frontend instead of starting a subprocess",
-    )
-    parser.add_argument(
-        "frontend_args",
-        nargs=argparse.REMAINDER,
-        help="Extra arguments forwarded to `python -m dynamo.frontend` after `--`",
+        help="How long to wait for the frontend to respond before serving (default: 30)",
     )
     return parser
 
 
-def build_frontend_command(args: argparse.Namespace) -> list[str]:
-    cmd = [
-        sys.executable,
-        "-m",
-        "dynamo.frontend",
-        "--http-port",
-        str(args.frontend_port),
-        "--discovery-backend",
-        args.discovery_backend,
-    ]
-    if args.frontend_args:
-        extras = list(args.frontend_args)
-        if extras and extras[0] == "--":
-            extras = extras[1:]
-        cmd.extend(extras)
-    return cmd
-
-
-def wait_for_frontend(
-    host: str, port: int, timeout_seconds: float, proc: subprocess.Popen[str] | None
-) -> None:
+def wait_for_frontend(host: str, port: int, timeout_seconds: float) -> None:
     deadline = time.time() + timeout_seconds
     last_error: Exception | None = None
     while time.time() < deadline:
-        if proc is not None and proc.poll() is not None:
-            raise RuntimeError(f"Frontend exited early with code {proc.returncode}")
-
         try:
             conn = http.client.HTTPConnection(host, port, timeout=1)
             conn.request("GET", "/live")
@@ -246,43 +200,14 @@ def wait_for_frontend(
     )
 
 
-def terminate_process(proc: subprocess.Popen[str]) -> None:
-    if proc.poll() is not None:
-        return
-    with contextlib.suppress(ProcessLookupError):
-        proc.terminate()
-    try:
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
-        proc.wait(timeout=5)
-
-
 def main() -> int:
     args = create_parser().parse_args()
 
-    frontend_proc: subprocess.Popen[str] | None = None
-    if not args.no_start_frontend:
-        frontend_env = os.environ.copy()
-        frontend_env.setdefault("DYN_DISCOVERY_BACKEND", args.discovery_backend)
-        frontend_env.setdefault("DYN_REQUEST_PLANE", args.request_plane)
-        cmd = build_frontend_command(args)
-        print(f"Starting Dynamo frontend: {' '.join(cmd)}")
-        frontend_proc = subprocess.Popen(cmd, cwd=REPO_ROOT, env=frontend_env)
-        wait_for_frontend(
-            args.frontend_host,
-            args.frontend_port,
-            args.frontend_timeout_seconds,
-            frontend_proc,
-        )
-    else:
-        wait_for_frontend(
-            args.frontend_host,
-            args.frontend_port,
-            args.frontend_timeout_seconds,
-            None,
-        )
+    wait_for_frontend(
+        args.frontend_host,
+        args.frontend_port,
+        args.frontend_timeout_seconds,
+    )
 
     server = DemoProxyServer(
         (args.bind, args.proxy_port),
@@ -303,8 +228,6 @@ def main() -> int:
         pass
     finally:
         server.server_close()
-        if frontend_proc is not None:
-            terminate_process(frontend_proc)
 
     return 0
 

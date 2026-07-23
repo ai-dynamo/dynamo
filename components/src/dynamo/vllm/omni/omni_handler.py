@@ -21,6 +21,7 @@ from dynamo.common.utils.video_utils import compute_num_frames, parse_size
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
+from dynamo.vllm.omni.cmaf_video import has_cmaf_annotation
 from dynamo.vllm.omni.output_formatter import OutputFormatter
 from dynamo.vllm.omni.utils import (
     build_image_generation_prompt,
@@ -183,11 +184,28 @@ class OmniHandler(BaseOmniHandler):
 
         previous_text = ""
 
+        # Binary CMAF streaming: the frontend's /v1/videos/stream/binary/cmaf
+        # route injects the experimental_binary_cmaf annotation. When present on
+        # a video request, encode + fragment the generated clip and stream CMAF
+        # pieces instead of a single full-video response.
+        cmaf_enabled = (
+            inputs.request_type == RequestType.VIDEO_GENERATION
+            and isinstance(parsed_request, NvCreateVideoRequest)
+            and has_cmaf_annotation(parsed_request.nvext)
+        )
+
         async with self._abort_monitor(context, request_id):
             try:
                 async for stage_output in self.engine_client.generate(
                     **generate_kwargs,
                 ):
+                    if cmaf_enabled:
+                        async for chunk in self.output_formatter.stream_video_cmaf(
+                            stage_output, request_id, fps=inputs.fps
+                        ):
+                            yield chunk
+                        continue
+
                     chunk = await self.output_formatter.format(
                         stage_output,
                         request_id,
@@ -300,8 +318,8 @@ class OmniHandler(BaseOmniHandler):
         defaults = list(self.engine_client.default_sampling_params_list or [])
         result = []
         for i, default in enumerate(defaults):
-            stage_type = self.engine_client.engine.get_stage_metadata(i).get(
-                "stage_type", "llm"
+            stage_type = getattr(
+                self.engine_client.engine.get_stage_metadata(i), "stage_type", "llm"
             )
             if stage_type == "diffusion":
                 result.append(diffusion_sp)

@@ -124,22 +124,23 @@ The client uses `MediaSource`, so browser support depends on MSE availability.
 
 ## Same-Origin Demo Launcher
 
-This example also includes [run_demo.py](./run_demo.py), which gives the browser
-one origin without changing Dynamo CORS behavior.
+This example also includes [run_proxy.py](./run_proxy.py), which gives the
+browser one origin without changing Dynamo CORS behavior.
 
 What it does:
 
-- starts `python -m dynamo.frontend` on an internal port
 - serves `client.html` on a browser-facing port
-- reverse-proxies `/v1/*` to the internal frontend
+- reverse-proxies `/v1/*` (and health routes) to an already-running Dynamo
+  frontend
 
 That means the browser only talks to one origin, so the CMAF `POST` stream works
 without enabling CORS in Dynamo itself.
 
-Example:
+Start the Dynamo frontend and the worker yourself first, then run the proxy
+pointed at that frontend:
 
 ```bash
-python examples/custom_backend/cmaf_binary_video_streaming/run_demo.py \
+python examples/custom_backend/cmaf_binary_video_streaming/run_proxy.py \
   --proxy-port 8080 \
   --frontend-port 18001
 ```
@@ -153,30 +154,15 @@ http://localhost:8080/
 The client defaults its `Frontend Base URL` to the page origin, so no manual URL
 editing should be needed in the simple case.
 
-If you want to reuse an already-running frontend instead of starting a new one:
-
-```bash
-python examples/custom_backend/cmaf_binary_video_streaming/run_demo.py \
-  --proxy-port 8080 \
-  --frontend-port 8001 \
-  --no-start-frontend
-```
-
-If you need extra frontend flags, pass them after `--`:
-
-```bash
-python examples/custom_backend/cmaf_binary_video_streaming/run_demo.py \
-  --proxy-port 8080 \
-  --frontend-port 18001 \
-  -- --router-mode round-robin
-```
+Use `--frontend-host` / `--frontend-port` to point the proxy at wherever your
+frontend is listening.
 
 ## Browser Testing Note
 
 This minimal branch intentionally does **not** add CORS support. That keeps the
 Dynamo delta smaller, but it means the browser client needs to be served from
 the same origin as the Dynamo frontend, or you need an external same-origin
-proxy for local testing. `run_demo.py` is the built-in same-origin helper for
+proxy for local testing. `run_proxy.py` is the built-in same-origin helper for
 this example.
 
 `curl` does not enforce browser CORS rules, so protocol inspection works even

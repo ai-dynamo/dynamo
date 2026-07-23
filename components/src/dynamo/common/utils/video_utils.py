@@ -451,11 +451,19 @@ def _encode_video_ffmpeg_cli(
     codec: str | None,
     hw_accel: str,
     device: str,
+    gop_seconds: int | None = None,
+    fragmented: bool = False,
 ) -> bytes:
     """Encode by piping raw RGB frames to the ffmpeg CLI (XPU / new codecs).
 
     mp4 needs a seekable output for the moov atom, so we encode to a temp file
     and read the bytes back.
+
+    When ``fragmented`` is set, emit a fragmented (CMAF-compatible) MP4 -- an
+    ``empty_moov`` initialization plus one ``moof``+``mdat`` per keyframe -- and
+    force keyframes every ``gop_seconds`` so the stream can be split into
+    independently decodable media segments. This is the single controlled
+    encoder path; callers fragment the result with :func:`split_fragmented_mp4`.
     """
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
@@ -490,18 +498,39 @@ def _encode_video_ffmpeg_cli(
             # players (browsers, mobile) cannot decode; force widely-compatible
             # 4:2:0. The XPU path already gets 4:2:0 via the nv12 hwupload above.
             cmd += ["-pix_fmt", "yuv420p"]
+        if fragmented:
+            # Force IDR keyframes at segment boundaries so each fragment is
+            # independently decodable. The HW encoder may not honor this
+            # exactly (driver GOP constraints), which is why callers must parse
+            # the produced bitstream rather than assume the requested layout.
+            gop = max(1, (gop_seconds or 1) * fps)
+            cmd += ["-g", str(gop), "-keyint_min", str(gop), "-sc_threshold", "0"]
+            if gop_seconds:
+                cmd += [
+                    "-force_key_frames",
+                    f"expr:gte(t,n_forced*{gop_seconds})",
+                ]
         if container == "mp4":
-            cmd += ["-movflags", "+faststart"]
+            if fragmented:
+                # Fragmented CMAF MP4: empty moov init + one moof+mdat per
+                # keyframe. Mutually exclusive with +faststart.
+                cmd += [
+                    "-movflags",
+                    "+frag_keyframe+empty_moov+default_base_moof",
+                ]
+            else:
+                cmd += ["-movflags", "+faststart"]
         cmd += ["-f", container, output_path]
 
         logger.info(
-            "Encoding %d frames (%dx%d @ %d fps) via %s on %s",
+            "Encoding %d frames (%dx%d @ %d fps) via %s on %s (fragmented=%s)",
             num_frames,
             width,
             height,
             fps,
             encoder,
             device if hw_accel == "xpu" else hw_accel,
+            fragmented,
         )
         proc = subprocess.run(
             cmd,
@@ -531,6 +560,8 @@ def encode_video(
     codec: str | None = None,
     hw_accel: str | None = None,
     device: str | None = None,
+    gop_seconds: int | None = None,
+    fragmented: bool = False,
 ) -> bytes:
     """Unified video encoder: encode canonical frames to video bytes.
 
@@ -551,6 +582,13 @@ def encode_video(
             ``auto`` picks a hardware encoder (XPU if present, else NVENC) and
             never selects CPU -- request ``cpu`` explicitly for software encoding.
         device: HW device / DRM render node (env: ``DYN_VIDEO_DEVICE``).
+        gop_seconds: When ``fragmented``, force a keyframe every this many
+            seconds so the stream splits into ~this-long media segments.
+        fragmented: Emit a fragmented (CMAF-compatible) MP4 instead of a
+            monolithic one. The returned bytes are still a single valid MP4;
+            split them into init + media segments with
+            :func:`split_fragmented_mp4`. Forces the ffmpeg-CLI path for every
+            accelerator (the imageio/NVENC path cannot emit fragmented MP4).
 
     Returns:
         Encoded video as bytes.
@@ -578,16 +616,114 @@ def encode_video(
         )
 
     logger.info(
-        "Encoding %d frames -> %s (hw=%s codec=%s) at %d fps",
+        "Encoding %d frames -> %s (hw=%s codec=%s fragmented=%s) at %d fps",
         len(frames),
         container,
         hw_accel,
         codec or "default",
+        fragmented,
         fps,
     )
 
-    if hw_accel == "nvenc":
+    # The imageio/NVENC path cannot emit fragmented MP4; fragmented requests go
+    # through the ffmpeg CLI for every accelerator (NVENC via h264_nvenc).
+    if hw_accel == "nvenc" and not fragmented:
         return _encode_video_imageio(frames, fps, container, codec)
 
     device = device or _video_device()
-    return _encode_video_ffmpeg_cli(frames, fps, container, codec, hw_accel, device)
+    return _encode_video_ffmpeg_cli(
+        frames,
+        fps,
+        container,
+        codec,
+        hw_accel,
+        device,
+        gop_seconds=gop_seconds,
+        fragmented=fragmented,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fragmented-MP4 (CMAF) helpers
+#
+# These are pure ISO-BMFF container operations -- independent of which HW
+# encoder produced the stream -- so they live next to the encoder rather than
+# being duplicated per backend.
+# ---------------------------------------------------------------------------
+
+
+def _iter_top_level_boxes(data: bytes):
+    """Yield ``(offset, size, type)`` for each top-level ISO-BMFF box."""
+    off = 0
+    n = len(data)
+    while off + 8 <= n:
+        size = int.from_bytes(data[off : off + 4], "big")
+        btype = data[off + 4 : off + 8]
+        header = 8
+        if size == 1:
+            if off + 16 > n:
+                break
+            size = int.from_bytes(data[off + 8 : off + 16], "big")
+            header = 16
+        elif size == 0:
+            size = n - off
+        if size < header or off + size > n:
+            break
+        yield off, size, btype
+        off += size
+
+
+def split_fragmented_mp4(data: bytes) -> Tuple[bytes, list[bytes]]:
+    """Split a fragmented (fMP4/CMAF) MP4 into ``(init, [media_segments])``.
+
+    The initialization segment is everything up to and including the ``moov``
+    box (typically ``ftyp`` + ``moov``). Each media segment is a ``moof`` box
+    with its following boxes (``mdat``) up to the next ``moof``. Pure container
+    parsing -- encoder-agnostic. A stream with a single ``moof`` yields one
+    segment, which CMAF handles fine.
+
+    Raises:
+        RuntimeError: If the stream has no ``moov`` or no ``moof`` box.
+    """
+    moov_end: int | None = None
+    moof_starts: list[int] = []
+    for off, size, btype in _iter_top_level_boxes(data):
+        if btype == b"moov":
+            moov_end = off + size
+        elif btype == b"moof":
+            moof_starts.append(off)
+
+    if moov_end is None:
+        raise RuntimeError("Fragmented MP4 has no moov box; cannot build init segment")
+    if not moof_starts:
+        raise RuntimeError("Fragmented MP4 has no moof boxes; no media segments")
+
+    init = data[:moov_end]
+    boundaries = [start for start in moof_starts if start >= moov_end]
+    boundaries.append(len(data))
+    segments = [
+        data[boundaries[i] : boundaries[i + 1]] for i in range(len(boundaries) - 1)
+    ]
+    return init, segments
+
+
+def h264_codec_string_from_init(init: bytes) -> str | None:
+    """Derive the RFC 6381 ``avc1.PPCCLL`` codec string from an fMP4 init segment.
+
+    Reads the profile / compatibility / level bytes from the
+    AVCDecoderConfigurationRecord (``avcC`` box) so the codec string advertised
+    to Media Source Extensions matches the encoded bitstream exactly (HW
+    encoders may not honor a requested profile). Returns ``None`` if no ``avcC``
+    box is present (e.g. a non-H.264 codec).
+    """
+    idx = init.find(b"avcC")
+    if idx == -1:
+        return None
+    # avcC payload immediately follows the 4-byte box type:
+    #   configurationVersion(1) AVCProfileIndication(1)
+    #   profile_compatibility(1) AVCLevelIndication(1) ...
+    payload = init[idx + 4 : idx + 8]
+    if len(payload) < 4:
+        return None
+    profile, compat, level = payload[1], payload[2], payload[3]
+    return f"avc1.{profile:02x}{compat:02x}{level:02x}"
