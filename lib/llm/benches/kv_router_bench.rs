@@ -144,6 +144,10 @@ struct Args {
     #[arg(long, default_value = "backend")]
     component: String,
 
+    /// Endpoint name used to discover routable workers
+    #[arg(long, default_value = "generate")]
+    endpoint: String,
+
     // Output
     /// Write results to JSON file
     #[arg(long)]
@@ -584,14 +588,20 @@ struct HealthResponse {
 #[derive(Debug, Deserialize)]
 struct HealthInstance {
     instance_id: u64,
-    #[allow(dead_code)]
+    namespace: String,
+    component: String,
     endpoint: String,
 }
 
 /// Discover worker IDs from the frontend's /health endpoint.
 ///
 /// Returns a list of instance_ids (worker_ids) that are currently registered.
-async fn discover_worker_ids(frontend_url: &str) -> Result<Vec<WorkerId>> {
+async fn discover_worker_ids(
+    frontend_url: &str,
+    namespace: &str,
+    component: &str,
+    endpoint: &str,
+) -> Result<Vec<WorkerId>> {
     let client = reqwest::Client::new();
     let url = format!("{}/health", frontend_url);
 
@@ -612,17 +622,33 @@ async fn discover_worker_ids(frontend_url: &str) -> Result<Vec<WorkerId>> {
         .await
         .context("Failed to parse health response")?;
 
-    let worker_ids: Vec<WorkerId> = health.instances.iter().map(|i| i.instance_id).collect();
+    let worker_ids: Vec<WorkerId> = health
+        .instances
+        .iter()
+        .filter(|i| i.namespace == namespace && i.component == component && i.endpoint == endpoint)
+        .map(|i| i.instance_id)
+        .collect();
 
-    // Deduplicate (in case of multiple endpoints per worker)
+    // Deduplicate in case discovery reports the same endpoint instance more than once.
     let mut unique_ids: Vec<WorkerId> = worker_ids.clone();
     unique_ids.sort_unstable();
     unique_ids.dedup();
 
-    println!("  Discovered {} workers", unique_ids.len());
+    println!(
+        "  Discovered {} workers for {}.{}.{}",
+        unique_ids.len(),
+        namespace,
+        component,
+        endpoint
+    );
 
     if unique_ids.is_empty() {
-        anyhow::bail!("No workers discovered from frontend. Are kv_stress_workers running?");
+        anyhow::bail!(
+            "No workers discovered from frontend for {}.{}.{}. Are kv_stress_workers running?",
+            namespace,
+            component,
+            endpoint
+        );
     }
 
     Ok(unique_ids)
@@ -1342,6 +1368,7 @@ async fn main() -> Result<()> {
     println!("  Tokenizer: {}", tokenizer_path);
     println!("  Namespace: {}", args.namespace);
     println!("  Component: {}", args.component);
+    println!("  Endpoint: {}", args.endpoint);
     println!(
         "  NATS subject: namespace.{}.component.{}.kv-events",
         args.namespace, args.component
@@ -1506,7 +1533,13 @@ async fn main() -> Result<()> {
     println!("\nPhase 2: Discover Workers & Generate Sequences");
 
     // Discover actual worker IDs from the frontend
-    let discovered_worker_ids = discover_worker_ids(&args.frontend_url).await?;
+    let discovered_worker_ids = discover_worker_ids(
+        &args.frontend_url,
+        &args.namespace,
+        &args.component,
+        &args.endpoint,
+    )
+    .await?;
 
     if discovered_worker_ids.len() != args.num_workers {
         println!(
