@@ -77,8 +77,10 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecV1alpha1(
 	if spec.Failover != nil {
 		allErrs = append(allErrs, v.validateFailoverSpecV1alpha1(spec.Failover, fldPath.Child("failover"))...)
 	}
-	if err := runtimeVersionOverrideErrorV1Alpha1(spec, fldPath); err != nil {
-		allErrs = append(allErrs, err)
+	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Alpha1) {
+		if err := runtimeVersionOverrideErrorV1Alpha1(spec, fldPath); err != nil {
+			allErrs = append(allErrs, err)
+		}
 	}
 
 	return allErrs

@@ -80,7 +80,7 @@ func (h *DynamoComponentDeploymentHandler) validateCreate(
 	logger.Info("validate create", "name", deployment.Name, "namespace", deployment.Namespace)
 
 	validator := NewDynamoComponentDeploymentValidator()
-	return validator.Validate(ctx, deployment)
+	return validator.validate(ctx, deployment, runtimeVersionValidationSourceForRequest(ctx, expectedGVK))
 }
 
 // ValidateUpdate validates a DynamoComponentDeployment update request.
@@ -118,7 +118,7 @@ func (h *DynamoComponentDeploymentHandler) validateUpdate(
 	}
 
 	validator := NewDynamoComponentDeploymentValidator()
-	return validator.ValidateUpdate(ctx, oldDeployment, newDeployment)
+	return validator.validateUpdate(ctx, oldDeployment, newDeployment, runtimeVersionValidationSourceForRequest(ctx, expectedGVK))
 }
 
 // ValidateDelete validates a DynamoComponentDeployment delete request.
