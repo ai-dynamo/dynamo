@@ -71,6 +71,15 @@ type PodReference struct {
 	// pod and not a same-named recreation.
 	// +optional
 	UID types.UID `json:"uid,omitempty"`
+
+	// Containers narrows the capture to these containers of the source pod. The
+	// node agent reads this instead of the source pod's target-container
+	// annotation. v1alpha1 supports exactly one container; the cap is lifted when
+	// the runtime supports multi-container capture.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=1
+	Containers []string `json:"containers"`
 }
 
 // PodSnapshotStatus defines the observed state of PodSnapshot.

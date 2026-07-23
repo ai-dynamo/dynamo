@@ -91,8 +91,12 @@ func TestProjectedPodSupportsControllerContract(t *testing.T) {
 	})
 
 	t.Run("checkpoint and snapshot", func(t *testing.T) {
-		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{ObjectMeta: metav1.ObjectMeta{Name: "checkpoint", Namespace: pod.Namespace}}
-		snapshot := buildPodSnapshot(ckpt, "checkpoint-id", pod)
+		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
+			ObjectMeta: metav1.ObjectMeta{Name: "checkpoint", Namespace: pod.Namespace},
+			Spec:       nvidiacomv1alpha1.DynamoCheckpointSpec{Job: nvidiacomv1alpha1.DynamoCheckpointJobConfig{TargetContainerName: "main"}},
+		}
+		snapshot, err := buildPodSnapshot(ckpt, "checkpoint-id", pod)
+		require.NoError(t, err)
 		assert.Equal(t, pod.Name, snapshot.Spec.Source.PodRef.Name)
 		assert.Equal(t, pod.UID, snapshot.Spec.Source.PodRef.UID)
 		require.NoError(t, validateSourcePod(snapshot, pod))
