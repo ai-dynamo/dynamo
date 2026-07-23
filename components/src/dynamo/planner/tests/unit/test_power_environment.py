@@ -5,20 +5,27 @@
 
 ``PlannerEnvironmentImpl._load_static_power_caps_at_startup`` reads DGD-owned
 caps once after worker readiness and fails closed on malformed or infeasible
-values. Runtime refresh does not re-read caps.
+values. Runtime refresh does not re-adopt caps, but re-resolves topology via
+the same power-config path to fail closed if GPUs-per-replica drifts.
 """
 
-from unittest.mock import Mock
+import os
+from contextlib import contextmanager
+from unittest.mock import Mock, patch
 
 import pytest
 from kubernetes.client import ApiException
 
 from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.connectors.kubernetes import KubernetesConnector
 from dynamo.planner.core.util import deployment_state_changed
 from dynamo.planner.environment.base import PlannerEnvironmentImpl
 from dynamo.planner.environment.state import DeploymentState
 from dynamo.planner.errors import DeploymentValidationError, PowerAnnotationInvalidError
-from dynamo.planner.monitoring.dgd_services import ComponentPowerConfig
+from dynamo.planner.monitoring.dgd_services import (
+    POWER_ANNOTATION_KEY,
+    ComponentPowerConfig,
+)
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -28,16 +35,24 @@ pytestmark = [
 ]
 
 
-def _cfg(role, watts_per_replica):
+def _cfg(role, gpu_power_limit_watts, gpus_per_replica=1):
     return ComponentPowerConfig(
         component_name=role,
         role=role,
-        gpu_power_limit_watts=watts_per_replica,
-        gpus_per_replica=1,
+        gpu_power_limit_watts=gpu_power_limit_watts,
+        gpus_per_replica=gpus_per_replica,
     )
 
 
-def _env(controller, *, enable_power=True, budget=10000, min_endpoint=1):
+def _env(
+    controller,
+    *,
+    enable_power=True,
+    budget=10000,
+    min_endpoint=1,
+    require_prefill=True,
+    require_decode=True,
+):
     config = PlannerConfig.model_construct(
         backend="vllm",
         namespace="ns",
@@ -49,17 +64,68 @@ def _env(controller, *, enable_power=True, budget=10000, min_endpoint=1):
     return PlannerEnvironmentImpl(
         config=config,
         controller=controller,
-        require_prefill=True,
-        require_decode=True,
+        require_prefill=require_prefill,
+        require_decode=require_decode,
     )
 
 
-def _controller(prefill_watts=700, decode_watts=1200):
+def _controller(prefill_watts=700, decode_watts=1200, *, gpus_per_replica=1):
     controller = Mock()
     controller.get_component_power_configs = Mock(
-        return_value=(_cfg("prefill", prefill_watts), _cfg("decode", decode_watts))
+        return_value=(
+            _cfg("prefill", prefill_watts, gpus_per_replica),
+            _cfg("decode", decode_watts, gpus_per_replica),
+        )
     )
     return controller
+
+
+def _worker(name, *, comp_type, watts="300", gpus="1"):
+    return {
+        "name": name,
+        "type": comp_type,
+        "replicas": 1,
+        "podTemplate": {
+            "metadata": {"annotations": {POWER_ANNOTATION_KEY: watts}},
+            "spec": {
+                "containers": [
+                    {
+                        "name": "main",
+                        "resources": {"limits": {"nvidia.com/gpu": gpus}},
+                    }
+                ]
+            },
+        },
+    }
+
+
+def _dgd(*components):
+    return {
+        "metadata": {"name": "power-topology-test"},
+        "spec": {"components": list(components)},
+    }
+
+
+@contextmanager
+def _k8s_env(dgd, *, require_prefill, require_decode):
+    """Real KubernetesConnector over a mocked apiserver returning ``dgd``."""
+    with (
+        patch("dynamo.planner.connectors.clients.kubernetes_api.config"),
+        patch("dynamo.planner.connectors.clients.kubernetes_api.client.CoreV1Api"),
+        patch(
+            "dynamo.planner.connectors.clients.kubernetes_api.client.CustomObjectsApi"
+        ) as custom,
+        patch.dict(os.environ, {"DYN_PARENT_DGD_K8S_NAME": "power-topology-test"}),
+    ):
+        custom_api = custom.return_value
+        custom_api.get_namespaced_custom_object.return_value = dgd
+        connector = KubernetesConnector("test-ns")
+        env = _env(
+            connector,
+            require_prefill=require_prefill,
+            require_decode=require_decode,
+        )
+        yield env, custom_api
 
 
 def test_init_populates_power_watts():
@@ -127,36 +193,100 @@ def test_deployment_state_changed_on_watts_change():
 
 
 def test_runtime_gpus_per_replica_change_fails_closed():
-    """A worker rollout that changes per-pod GPUs must not run against the
+    """A worker rollout that changes GPUs/replica must not run against the
     startup-cached wattage; the runtime guard fails closed and demands a
     restart instead of projecting the budget from stale per-replica watts."""
-    env = _env(_controller(700, 1200))
-    state = env.deployment_state()
-    state.prefill.num_gpus = 1
-    state.decode.num_gpus = 1
+    controller = Mock()
+    controller.get_component_power_configs = Mock(
+        side_effect=[
+            (_cfg("prefill", 300, gpus_per_replica=1), _cfg("decode", 300, 1)),
+            (_cfg("prefill", 300, gpus_per_replica=4), _cfg("decode", 300, 1)),
+        ]
+    )
+    env = _env(controller)
     env._load_static_power_caps_at_startup()
+    # Caps stay at the startup-adopted values; only topology is re-checked.
+    assert env.deployment_state().prefill.power_watts_per_replica == 300
 
-    state.prefill.num_gpus = 4  # rollout bumped per-pod GPUs 1 -> 4
     with pytest.raises(DeploymentValidationError, match="topology changed"):
         env._assert_power_topology_static()
+    assert env.deployment_state().prefill.power_watts_per_replica == 300
 
 
 def test_runtime_topology_unchanged_passes():
-    env = _env(_controller(700, 1200))
-    state = env.deployment_state()
-    state.prefill.num_gpus = 2
-    state.decode.num_gpus = 4
+    env = _env(_controller(700, 1200, gpus_per_replica=2))
     env._load_static_power_caps_at_startup()
-
     env._assert_power_topology_static()
 
 
 def test_topology_guard_noop_when_awareness_off():
-    env = _env(_controller(), enable_power=False)
-    state = env.deployment_state()
-    state.prefill.num_gpus = 1
-    state.decode.num_gpus = 1
+    controller = _controller()
+    env = _env(controller, enable_power=False)
     env._load_static_power_caps_at_startup()
-
-    state.prefill.num_gpus = 8
     env._assert_power_topology_static()
+    controller.get_component_power_configs.assert_not_called()
+
+
+def test_topology_guard_fails_closed_when_re_resolve_fails():
+    controller = Mock()
+    controller.get_component_power_configs = Mock(
+        side_effect=[
+            (_cfg("prefill", 300, 1), _cfg("decode", 300, 1)),
+            ApiException(status=503, reason="Service Unavailable"),
+        ]
+    )
+    env = _env(controller)
+    env._load_static_power_caps_at_startup()
+    with pytest.raises(DeploymentValidationError, match="re-verify"):
+        env._assert_power_topology_static()
+
+
+def test_topology_guard_sees_agg_generic_worker_gpu_change():
+    """Aggregate ``type: worker`` is invisible to ``get_gpu_counts``; the
+    power-path guard must still fail closed when that worker's GPUs change."""
+    dgd_v1 = _dgd(_worker("VllmWorker", comp_type="worker", watts="300", gpus="1"))
+    dgd_v2 = _dgd(_worker("VllmWorker", comp_type="worker", watts="300", gpus="4"))
+    with _k8s_env(dgd_v1, require_prefill=False, require_decode=True) as (
+        env,
+        custom_api,
+    ):
+        env._load_static_power_caps_at_startup()
+        assert env.deployment_state().decode.power_watts_per_replica == 300
+
+        # Prove the shared GPU path cannot see this worker (the old blind spot).
+        with pytest.raises(DeploymentValidationError):
+            env.controller.get_gpu_counts(require_prefill=False, require_decode=True)
+
+        custom_api.get_namespaced_custom_object.return_value = dgd_v2
+        with pytest.raises(DeploymentValidationError, match="Restart the Planner"):
+            env._assert_power_topology_static()
+        # Caps must not be re-adopted from the new topology.
+        assert env.deployment_state().decode.power_watts_per_replica == 300
+
+
+def test_topology_guard_sees_named_generic_worker_gpu_change():
+    """Named disagg ``type: worker`` components need explicit-name resolution;
+    the power-path guard must observe a GPU-resource change on those roles."""
+    dgd_v1 = _dgd(
+        _worker("VllmPrefillWorker", comp_type="worker", watts="350", gpus="1"),
+        _worker("VllmDecodeWorker", comp_type="worker", watts="300", gpus="1"),
+    )
+    dgd_v2 = _dgd(
+        _worker("VllmPrefillWorker", comp_type="worker", watts="350", gpus="1"),
+        _worker("VllmDecodeWorker", comp_type="worker", watts="300", gpus="4"),
+    )
+    with _k8s_env(dgd_v1, require_prefill=True, require_decode=True) as (
+        env,
+        custom_api,
+    ):
+        env._load_static_power_caps_at_startup()
+        assert env.deployment_state().prefill.power_watts_per_replica == 350
+        assert env.deployment_state().decode.power_watts_per_replica == 300
+
+        with pytest.raises(DeploymentValidationError):
+            env.controller.get_gpu_counts(require_prefill=True, require_decode=True)
+
+        custom_api.get_namespaced_custom_object.return_value = dgd_v2
+        with pytest.raises(DeploymentValidationError, match="Restart the Planner"):
+            env._assert_power_topology_static()
+        assert env.deployment_state().decode.power_watts_per_replica == 300
