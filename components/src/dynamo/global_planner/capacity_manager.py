@@ -6,10 +6,10 @@
 :class:`CapacityManager` is the infrastructure-facing base class the
 :class:`~dynamo.global_planner.orchestrator.Orchestrator` drives to **observe**
 current pool state and **scale** replicas. It defines a neutral,
-infrastructure-agnostic surface (``observe`` / ``scale`` / ``discover`` /
-``ensure_participant`` / ``participant_exists`` / ``remember_roles`` /
-``current_replicas``) keyed by opaque ``participant_id``; the orchestrator never
-sees Kubernetes concepts.
+infrastructure-agnostic surface (``observe`` / ``observe_async`` / ``scale`` /
+``discover`` / ``ensure_participant`` / ``participant_exists`` /
+``remember_roles`` / ``current_replicas``) keyed by opaque
+``participant_id``; the orchestrator never sees Kubernetes concepts.
 
 The concrete Kubernetes backend is
 :class:`~dynamo.global_planner.kubernetes_capacity_manager.KubernetesCapacityManager`.
@@ -17,6 +17,7 @@ The concrete Kubernetes backend is
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Optional
 
@@ -92,6 +93,16 @@ class CapacityManager:
         under-count usage from a partially-read snapshot.
         """
         raise NotImplementedError
+
+    async def observe_async(self, require_complete: bool = False) -> PoolSnapshot:
+        """Read pool state without blocking the caller's event loop.
+
+        Infrastructure backends generally implement :meth:`observe` with
+        synchronous client libraries, so the default runs that method on a worker
+        thread. Pure in-memory backends may override this method and return their
+        snapshot directly.
+        """
+        return await asyncio.to_thread(self.observe, require_complete)
 
     async def scale(
         self,

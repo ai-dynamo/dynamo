@@ -289,12 +289,13 @@ class Orchestrator:
 
         # Read ALL known participants' current state once. Cross-participant
         # partner search needs every pool's current replicas and gpu_per_replica;
-        # cross-participant budget math also consumes this. Run the synchronous
-        # backend reads off-thread so the event loop isn't blocked for the N
-        # round-trips. When budget is enforced, require a complete snapshot so a
-        # partial read can't under-count cluster usage.
-        all_pools = await asyncio.to_thread(
-            self.capacity_manager.observe, self.budget_enforcement_enabled()
+        # cross-participant budget math also consumes this. The backend owns the
+        # sync/async boundary: production offloads synchronous infrastructure
+        # reads, while in-memory replay can return directly. When budget is
+        # enforced, require a complete snapshot so a partial read can't
+        # under-count cluster usage.
+        all_pools = await self.capacity_manager.observe_async(
+            self.budget_enforcement_enabled()
         )
 
         result = self.mediate(

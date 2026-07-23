@@ -19,7 +19,7 @@ use super::core::{
     AdmissionSource as CoreAdmissionSource, EngineEventBatch, NoEngineEvents, Placement,
     PlacementDecision, PlacementPolicy, ReadyArrival, WorkerTopology,
 };
-use super::events::{SimulationEvent, SimulationWorkerStage};
+use super::events::{SimulationEvent, SimulationEventKind, SimulationWorkerStage};
 #[cfg(test)]
 use super::extensions::kv_router::{
     DisaggRuntime, ReplayKvRouterConfig, derive_decode_router_config, derive_prefill_router_config,
@@ -1111,6 +1111,35 @@ where
         }
         self.planner_hook = Some(hook);
         self
+    }
+
+    /// Prepare this runtime for a world-owned planner. The world coordinator owns
+    /// planner deadlines and callbacks, so no `PlannerTick` event or local hook is
+    /// installed here.
+    pub(in crate::replay) fn enable_world_planner(&mut self) -> Result<()> {
+        if self.planner_hook.is_some()
+            || self
+                .events
+                .iter()
+                .any(|event| matches!(&event.kind, SimulationEventKind::PlannerTick))
+        {
+            bail!("disaggregated replay runtime already has a local planner attached");
+        }
+        if self.max_sim_time_ms.is_some() {
+            bail!("max_sim_time_ms is not supported by multi-deployment replay");
+        }
+        self.collect_fpm = true;
+        let prefill_dp_size = self.prefill_engine.dp_size();
+        for worker_id in self.prefill_engine.active_group_ids() {
+            self.prefill_fpm_buffer
+                .activate_worker(worker_id, prefill_dp_size, self.now_ms);
+        }
+        let decode_dp_size = self.decode_engine.dp_size();
+        for worker_id in self.decode_engine.active_group_ids() {
+            self.decode_fpm_buffer
+                .activate_worker(worker_id, decode_dp_size, self.now_ms);
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -2225,28 +2254,7 @@ where
             if self.is_workload_done() {
                 continue;
             }
-            let active_prefill_ids = self.prefill_engine.active_group_ids();
-            let active_decode_ids = self.decode_engine.active_group_ids();
-            self.prefill_fpm_buffer.emit_idle_due(
-                &active_prefill_ids,
-                self.prefill_engine.dp_size(),
-                self.now_ms,
-            );
-            self.decode_fpm_buffer.emit_idle_due(
-                &active_decode_ids,
-                self.decode_engine.dp_size(),
-                self.now_ms,
-            );
-            let metrics = PlannerTickMetrics {
-                now_ms: self.now_ms,
-                prefill_fpm: self.prefill_fpm_buffer.take(),
-                decode_fpm: self.decode_fpm_buffer.take(),
-                traffic: self.traffic.drain(self.now_ms),
-                active_prefill_ids,
-                active_decode_ids,
-                total_prefill: self.total_prefill_count(),
-                total_decode: self.total_decode_count(),
-            };
+            let metrics = self.take_planner_metrics();
             // Borrow the hook out so the runtime stays mutably available for
             // apply_scaling; restore it before propagating any error.
             let mut hook = self
@@ -2258,13 +2266,7 @@ where
             let decision = decision?;
 
             if decision.target_prefill.is_some() || decision.target_decode.is_some() {
-                let target_prefill = decision
-                    .target_prefill
-                    .unwrap_or_else(|| self.total_prefill_count());
-                let target_decode = decision
-                    .target_decode
-                    .unwrap_or_else(|| self.total_decode_count());
-                self.apply_scaling(target_prefill, target_decode)?;
+                self.apply_scaling_targets(decision.target_prefill, decision.target_decode)?;
             }
 
             // Re-arm only into the strict, finite future and only while work
@@ -2285,6 +2287,31 @@ where
             changed = true;
         }
         Ok(changed)
+    }
+
+    fn take_planner_metrics(&mut self) -> PlannerTickMetrics {
+        let active_prefill_ids = self.prefill_engine.active_group_ids();
+        let active_decode_ids = self.decode_engine.active_group_ids();
+        self.prefill_fpm_buffer.emit_idle_due(
+            &active_prefill_ids,
+            self.prefill_engine.dp_size(),
+            self.now_ms,
+        );
+        self.decode_fpm_buffer.emit_idle_due(
+            &active_decode_ids,
+            self.decode_engine.dp_size(),
+            self.now_ms,
+        );
+        PlannerTickMetrics {
+            now_ms: self.now_ms,
+            prefill_fpm: self.prefill_fpm_buffer.take(),
+            decode_fpm: self.decode_fpm_buffer.take(),
+            traffic: self.traffic.drain(self.now_ms),
+            active_prefill_ids,
+            active_decode_ids,
+            total_prefill: self.total_prefill_count(),
+            total_decode: self.total_decode_count(),
+        }
     }
 
     /// Finalize test-only request snapshots before returning.
@@ -2346,6 +2373,85 @@ where
         self.decode_engine.worker_count()
     }
 
+    /// Current logical time for a world-owned deployment runtime.
+    pub(in crate::replay) fn world_now_ms(&self) -> f64 {
+        self.now_ms
+    }
+
+    /// Earliest data-plane timestamp. Planner deadlines live in the world
+    /// coordinator and are intentionally absent from this runtime's event heap.
+    pub(in crate::replay) fn world_next_data_timestamp(&mut self) -> Option<f64> {
+        self.next_timestamp()
+    }
+
+    /// Advance through every data-plane timestamp up to `control_ms`, settling
+    /// each timestamp to the runtime's existing fixed point.
+    pub(in crate::replay) fn world_settle_data_plane_to(&mut self, control_ms: f64) -> Result<()> {
+        if !control_ms.is_finite() || control_ms < self.now_ms {
+            bail!(
+                "disaggregated deployment cannot advance from {}ms to {control_ms}ms",
+                self.now_ms
+            );
+        }
+
+        self.drain_current_timestamp()?;
+        while let Some(next_ms) = self.next_timestamp() {
+            if next_ms > control_ms {
+                break;
+            }
+            if next_ms < self.now_ms {
+                bail!(
+                    "disaggregated deployment produced a past event at {next_ms}ms while at {}ms",
+                    self.now_ms
+                );
+            }
+            self.advance_now_ms(next_ms);
+            self.drain_current_timestamp()?;
+        }
+        if control_ms > self.now_ms {
+            self.advance_now_ms(control_ms);
+        }
+        self.drain_current_timestamp()
+    }
+
+    /// Freeze planner-visible state after the world has settled every deployment
+    /// at the current control timestamp.
+    pub(in crate::replay) fn world_take_planner_metrics(&mut self) -> PlannerTickMetrics {
+        self.take_planner_metrics()
+    }
+
+    /// Apply a world-mediated target using the same lifecycle path as the legacy
+    /// local planner.
+    pub(in crate::replay) fn world_apply_targets(
+        &mut self,
+        target_prefill: Option<usize>,
+        target_decode: Option<usize>,
+    ) -> Result<()> {
+        self.apply_scaling_targets(target_prefill, target_decode)
+    }
+
+    pub(in crate::replay) fn world_has_request_work(&self) -> bool {
+        !self.is_workload_done()
+    }
+
+    pub(in crate::replay) fn world_has_lifecycle_work(&self) -> bool {
+        self.events
+            .iter()
+            .any(|event| matches!(&event.kind, SimulationEventKind::WorkerReady { .. }))
+    }
+
+    pub(in crate::replay) fn world_stop_planner(&mut self) {
+        self.collect_fpm = false;
+        self.prefill_fpm_buffer.take();
+        self.decode_fpm_buffer.take();
+    }
+
+    pub(in crate::replay) fn world_finish(mut self) -> TraceCollector {
+        self.progress.finish();
+        self.finish_test_stats();
+        self.collector
+    }
+
     /// Apply a scaling decision with separate prefill and decode targets.
     ///
     /// Scale-up: if `startup_time` is configured on the respective engine args,
@@ -2355,12 +2461,34 @@ where
     ///
     /// Scale-down: the worker is removed from the router immediately so no
     /// new requests land on it while it drains in-flight work.
+    #[cfg(test)]
     pub(in crate::replay) fn apply_scaling(
         &mut self,
         target_prefill: usize,
         target_decode: usize,
     ) -> Result<()> {
-        // -- prefill --
+        self.apply_scaling_targets(Some(target_prefill), Some(target_decode))
+    }
+
+    /// Apply only the explicitly targeted pools. An omitted role must not be
+    /// replaced with `worker_count()`: that count includes draining workers and
+    /// would create a replacement while the prior scale-down is still pending.
+    fn apply_scaling_targets(
+        &mut self,
+        target_prefill: Option<usize>,
+        target_decode: Option<usize>,
+    ) -> Result<()> {
+        if let Some(target_prefill) = target_prefill {
+            self.apply_prefill_scaling(target_prefill)?;
+        }
+        if let Some(target_decode) = target_decode {
+            self.apply_decode_scaling(target_decode)?;
+        }
+        self.record_router_pending();
+        Ok(())
+    }
+
+    fn apply_prefill_scaling(&mut self, target_prefill: usize) -> Result<()> {
         let (added, newly_marked, removed) = self.prefill_engine.apply_target_count(target_prefill);
         let prefill_delay = self.prefill_engine.startup_time_ms();
         for &id in &added {
@@ -2419,8 +2547,10 @@ where
         if !added.is_empty() && prefill_delay.is_none() {
             self.wake_worker_waiters(SimulationWorkerStage::Prefill);
         }
+        Ok(())
+    }
 
-        // -- decode --
+    fn apply_decode_scaling(&mut self, target_decode: usize) -> Result<()> {
         let (added, newly_marked, removed) = self.decode_engine.apply_target_count(target_decode);
         let decode_delay = self.decode_engine.startup_time_ms();
         for &id in &added {
@@ -2479,7 +2609,6 @@ where
         if !added.is_empty() && decode_delay.is_none() {
             self.wake_worker_waiters(SimulationWorkerStage::Decode);
         }
-        self.record_router_pending();
         Ok(())
     }
 

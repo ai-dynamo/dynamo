@@ -20,6 +20,7 @@ __all__ = ["__version__"]
 try:
     from dynamo._core import MockEngineArgs as MockEngineArgs
     from dynamo._core import PlannerReplayBridge as PlannerReplayBridge
+    from dynamo._core import ReplayWorldBridge as ReplayWorldBridge
     from dynamo._core import ReasoningConfig as ReasoningConfig
     from dynamo._core import SglangArgs as SglangArgs
     from dynamo._core import TrtllmArgs as TrtllmArgs
@@ -33,6 +34,7 @@ else:
         [
             "MockEngineArgs",
             "PlannerReplayBridge",
+            "ReplayWorldBridge",
             "ReasoningConfig",
             "SglangArgs",
             "TrtllmArgs",
