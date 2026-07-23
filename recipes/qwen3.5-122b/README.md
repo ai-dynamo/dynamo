@@ -7,7 +7,7 @@ attention every 4th layer). The FP8 weights fit a single 143 GB H200 at the full
 262,144-token context, which is what this recipe exploits: **one TP1 engine per GPU,
 scaled horizontally behind a Dynamo KV-aware router**, with MTP speculative decoding.
 
-## Configuration
+## Configurations
 
 Dynamo + vLLM aggregated profile for the agentic workload on **H200**.
 
@@ -83,7 +83,18 @@ kubectl apply -f vllm/agg-h200/deploy.yaml -n ${NAMESPACE}
 ```
 Scale to a full node by editing `spec.components[VllmWorker].replicas` to `8`.
 
-### 5. Benchmark
+### 5. Smoke test
+```bash
+kubectl port-forward svc/$(kubectl get svc -o name -n ${NAMESPACE} | grep frontend | head -1 | cut -d/ -f2) 8000:8000 -n ${NAMESPACE} &
+curl http://localhost:8000/v1/models
+curl http://localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "model": "Qwen/Qwen3.5-122B-A10B-FP8",
+  "messages": [{"role": "user", "content": "Hello"}],
+  "max_tokens": 32
+}'
+```
+
+### 6. Benchmark
 See [perf/README.md](perf/README.md) — mooncake agentic trace replay, and the
 round_robin-vs-kv router comparison.
 
@@ -148,7 +159,7 @@ To reproduce the throughput numbers, set the worker env `SPECULATIVE_CONFIG`
 (perf/README.md). **Never ship the synthetic key** — production serves real traffic with
 real acceptance.
 
-## Notes
+## Known issues
 
 - **`--max-num-seqs` must stay ≤ 228.** The Mamba/DeltaNet SSM cache is block-allocated
   at TP1; the vLLM default (`1024`) crashes at startup. The recipe ships `128`.
@@ -165,3 +176,18 @@ real acceptance.
   the ConfigMap-env indirection and `"moe_backend":"triton"` field follow the Nemotron-3-Super
   reference recipe (TRITON is what tp1 FP8 auto-selects here anyway) — smoke-test on first deploy.
 - **Runtime version.** Manifest pins `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0`.
+
+## File layout
+
+```
+qwen3.5-122b/
+├── README.md                     # this file
+├── model-cache/
+│   ├── model-cache.yaml          # ReadWriteMany PVC for the model
+│   └── model-download.yaml       # Job: hf download the FP8 checkpoint
+├── vllm/
+│   └── agg-h200/
+│       └── deploy.yaml           # DGD + ConfigMap (real / synthetic spec-config)
+└── perf/
+    └── README.md                 # mooncake benchmark + SpeedBench AL measurement
+```
