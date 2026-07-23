@@ -909,7 +909,15 @@ class WorkerFactory:
                 prometheus_temp_dir,
                 component_gauges,
             ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
-        await configure_kv_event_block_size(engine_client, vllm_config)
+        await configure_kv_event_block_size(
+            engine_client,
+            vllm_config,
+            require_exact_match=bool(
+                config.engine_args.enable_prefix_caching
+                and config.engine_args.kv_events_config is not None
+                and config.engine_args.kv_events_config.enable_kv_cache_events
+            ),
+        )
 
         # TODO Hack to get data, move this to registering in TBD
         _, dp_size = get_dp_range_for_worker(vllm_config)
@@ -1187,7 +1195,15 @@ class WorkerFactory:
                 prometheus_temp_dir,
                 _component_gauges,
             ) = self.setup_vllm_engine(config, fpm_worker_id=fpm_worker_id)
-        await configure_kv_event_block_size(engine_client, vllm_config)
+        await configure_kv_event_block_size(
+            engine_client,
+            vllm_config,
+            require_exact_match=bool(
+                config.engine_args.enable_prefix_caching
+                and config.engine_args.kv_events_config is not None
+                and config.engine_args.kv_events_config.enable_kv_cache_events
+            ),
+        )
 
         encode_worker_client = await self._maybe_get_encode_worker_client(
             runtime, config
