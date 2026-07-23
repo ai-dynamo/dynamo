@@ -15,6 +15,7 @@ CLUSTERTEST_KUBECONFIG = $(LOCALBIN)/clustertest.kubeconfig
 CLUSTERTEST_NODE_IMAGE ?= kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5
 CLUSTERTEST_PROFILER_IMAGE ?= $(DYNAMO_CLUSTERTEST_PROFILER_IMAGE)
 CLUSTERTEST_OPERATOR_IMAGE ?= $(DYNAMO_CLUSTERTEST_OPERATOR_IMAGE)
+CLUSTERTEST_PLATFORM ?= linux/$(GOARCH)
 CLUSTERTEST_LWS_VERSION = $(shell go list -m -f '{{.Version}}' sigs.k8s.io/lws)
 CLUSTERTEST_LWS_CRD_DIR = $(shell go env GOMODCACHE)/sigs.k8s.io/lws@$(CLUSTERTEST_LWS_VERSION)/config/crd/bases
 CLUSTERTEST_GROVE_VERSION = $(shell go list -m -f '{{.Version}}' github.com/ai-dynamo/grove/operator/api)
@@ -328,6 +329,9 @@ setup-clustertest: kubectl kind ## Create or reuse the clustertest Kind cluster 
 	@$(CONTAINER_TOOL) image inspect '$(CLUSTERTEST_PROFILER_IMAGE)' >/dev/null 2>&1 || { echo "Error: planner image $(CLUSTERTEST_PROFILER_IMAGE) is not available locally"; exit 1; }
 	@test -n '$(CLUSTERTEST_OPERATOR_IMAGE)' || { echo "Error: DYNAMO_CLUSTERTEST_OPERATOR_IMAGE must name a locally available production operator image"; exit 1; }
 	@$(CONTAINER_TOOL) image inspect '$(CLUSTERTEST_OPERATOR_IMAGE)' >/dev/null 2>&1 || { echo "Error: operator image $(CLUSTERTEST_OPERATOR_IMAGE) is not available locally"; exit 1; }
+	@for image in '$(CLUSTERTEST_PROFILER_IMAGE)' '$(CLUSTERTEST_OPERATOR_IMAGE)'; do \
+		printf 'FROM %s\n' "$$image" | $(CONTAINER_TOOL) build --platform '$(CLUSTERTEST_PLATFORM)' --provenance=false --tag "$$image" --file - .; \
+	done
 	@if $(KIND) get clusters | grep -Fxq '$(CLUSTERTEST_KIND_NAME)'; then \
 		echo "Reusing Kind cluster $(CLUSTERTEST_KIND_NAME)"; \
 		$(KIND) export kubeconfig --name '$(CLUSTERTEST_KIND_NAME)' --kubeconfig '$(CLUSTERTEST_KUBECONFIG)'; \
