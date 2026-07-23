@@ -164,6 +164,22 @@ const (
 	GMSModeInterPod GPUMemoryServiceMode = "InterPod"
 )
 
+// GroveSpec groups experimental Grove-specific rendering options.
+type GroveSpec struct {
+	// forceScalingGroup opts a single-node component into rendering as a
+	// PodCliqueScalingGroup with one single-pod PodClique per replica.
+	// Scaling changes the scaling-group replica count; the first
+	// `minAvailable` replicas share the base PodGang, and replicas beyond
+	// `minAvailable` are gang-scheduled independently in their own
+	// PodGangs (set `minAvailable: 1` for fully independent replicas).
+	// `false` or omitted means automatic selection (multi-node and
+	// inter-pod GMS components use a scaling group, other single-node
+	// components a standalone PodClique), not "force PodClique".
+	// Immutable after creation.
+	// +optional
+	ForceScalingGroup bool `json:"forceScalingGroup,omitempty"`
+}
+
 // ExperimentalSpec groups opt-in preview features whose API shape and behavior
 // may change in breaking ways between v1beta1 releases (including disappearing
 // without a name-preserving graduation path). Fields placed under
@@ -182,6 +198,10 @@ type ExperimentalSpec struct {
 	// match `gpuMemoryService.mode` (enforced by the validation webhook).
 	// +optional
 	Failover *FailoverSpec `json:"failover,omitempty"`
+
+	// grove groups Grove-specific rendering options.
+	// +optional
+	Grove *GroveSpec `json:"grove,omitempty"`
 
 	// checkpoint configures container-image snapshotting and restore for
 	// this component. Set `checkpoint.enabled: true` to opt in. Without

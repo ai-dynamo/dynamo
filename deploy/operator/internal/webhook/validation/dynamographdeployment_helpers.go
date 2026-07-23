@@ -159,7 +159,7 @@ func dgdComponentResourceNameLength(
 	combinedLength := len(pcsName) + len(strings.ToLower(componentName))
 	detail := "PCS name + component name"
 
-	if component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled() {
+	if component.UsesPCSG() {
 		longestPodCliqueName := dynamo.LongestPodCliqueNameForDGDComponent(componentName, component)
 		combinedLength += len(longestPodCliqueName)
 		detail = fmt.Sprintf("PCS name + PCSG name + longest PodClique name %q", longestPodCliqueName)

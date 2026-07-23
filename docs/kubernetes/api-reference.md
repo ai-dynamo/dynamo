@@ -2463,6 +2463,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `gpuMemoryService` _[GPUMemoryServiceSpec](#gpumemoryservicespec)_ | gpuMemoryService configures the GPU Memory Service (GMS). When set, GPU<br />access for GMS clients is managed via DRA. |  | Optional: \{\} <br /> |
 | `failover` _[FailoverSpec](#failoverspec)_ | failover configures active-passive GPU failover for this component.<br />Requires `gpuMemoryService` to also be set, and `failover.mode` must<br />match `gpuMemoryService.mode` (enforced by the validation webhook). |  | Optional: \{\} <br /> |
+| `grove` _[GroveSpec](#grovespec)_ | grove groups Grove-specific rendering options. |  | Optional: \{\} <br /> |
 | `checkpoint` _[ComponentCheckpointConfig](#componentcheckpointconfig)_ | checkpoint configures container-image snapshotting and restore for<br />this component. Set `checkpoint.enabled: true` to opt in. Without<br />checkpointRef, the DGD controller creates a DGD-scoped DynamoCheckpoint<br />CR and later restores pods in the same DGD generation from that<br />checkpoint. With checkpointRef, the DGD restores from that existing<br />checkpoint instead. The user-facing shape of this field is still settling,<br />which is why it lives under `experimental` in v1beta1 instead of at the<br />top level. |  | Optional: \{\} <br /> |
 
 
@@ -2594,6 +2595,22 @@ _Appears in:_
 | `t4` |  |
 | `mi200` | --- AMD ---<br /> |
 | `mi300` |  |
+
+
+#### GroveSpec
+
+
+
+GroveSpec groups experimental Grove-specific rendering options.
+
+
+
+_Appears in:_
+- [ExperimentalSpec](#experimentalspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `forceScalingGroup` _boolean_ | forceScalingGroup opts a single-node component into rendering as a<br />PodCliqueScalingGroup with one single-pod PodClique per replica.<br />Scaling changes the scaling-group replica count; the first<br />`minAvailable` replicas share the base PodGang, and replicas beyond<br />`minAvailable` are gang-scheduled independently in their own<br />PodGangs (set `minAvailable: 1` for fully independent replicas).<br />`false` or omitted means automatic selection (multi-node and<br />inter-pod GMS components use a scaling group, other single-node<br />components a standalone PodClique), not "force PodClique".<br />Immutable after creation. |  | Optional: \{\} <br /> |
 
 
 #### HardwareSpec

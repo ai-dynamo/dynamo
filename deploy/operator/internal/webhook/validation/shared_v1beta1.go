@@ -121,6 +121,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 			fldPath.Child("experimental"),
 			spec.ComponentType,
 			dynamo.GetMainContainerResources(spec),
+			grovePathway,
 		)...)
 	}
 
@@ -179,6 +180,7 @@ func (v *sharedValidation) validateExperimentalSpec(
 	fldPath *field.Path,
 	componentType nvidiacomv1beta1.ComponentType,
 	resources corev1.ResourceRequirements,
+	grovePathway bool,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	if experimental.GPUMemoryService != nil {
@@ -209,6 +211,13 @@ func (v *sharedValidation) validateExperimentalSpec(
 			experimental.GPUMemoryService,
 			componentType,
 			resources,
+		)...)
+	}
+	if experimental.Grove != nil {
+		allErrs = append(allErrs, v.validateGroveSpec(
+			experimental.Grove,
+			fldPath.Child("grove"),
+			grovePathway,
 		)...)
 	}
 	if experimental.Checkpoint != nil {
@@ -278,6 +287,22 @@ func (v *sharedValidation) validateFailoverSpec(
 		}
 	}
 	return allErrs
+}
+
+// validateGroveSpec validates grove. grove and fldPath must not be nil.
+// grovePathway is supplied by the owning resource.
+func (v *sharedValidation) validateGroveSpec(
+	grove *nvidiacomv1beta1.GroveSpec,
+	fldPath *field.Path,
+	grovePathway bool,
+) field.ErrorList {
+	if grove.ForceScalingGroup && !grovePathway {
+		return field.ErrorList{field.Forbidden(
+			fldPath.Child("forceScalingGroup"),
+			"is currently supported only for Grove-backed DynamoGraphDeployment components",
+		)}
+	}
+	return nil
 }
 
 // validateComponentCheckpointConfig validates checkpoint. checkpoint and fldPath must not be nil.
@@ -388,6 +413,13 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 				fmt.Sprintf("inter-pod GMS failover cannot be toggled after creation; delete and recreate the %s", ownerKind.Kind),
 			))
 		}
+		if forceScalingGroupFor(oldComponent.Experimental) {
+			allErrs = append(allErrs, field.Invalid(
+				fldPath.Child("experimental", "grove", "forceScalingGroup"),
+				nil,
+				fmt.Sprintf("cannot be toggled after creation; delete and recreate the %s to change it", ownerKind.Kind),
+			))
+		}
 	}
 	return allErrs
 }
@@ -446,5 +478,41 @@ func (v *sharedValidation) validateExperimentalSpecUpdate(
 			fmt.Sprintf("is immutable for inter-pod GMS failover; delete and recreate the %s to change it", ownerKind.Kind),
 		))
 	}
+
+	oldGrove := groveForExperimental(oldExperimental)
+	if newExperimental.Grove != nil {
+		allErrs = append(allErrs, v.validateGroveSpecUpdate(
+			newExperimental.Grove,
+			oldGrove,
+			fldPath.Child("grove"),
+			ownerKind,
+		)...)
+	} else if oldGrove != nil && oldGrove.ForceScalingGroup {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("grove", "forceScalingGroup"),
+			nil,
+			fmt.Sprintf("cannot be toggled after creation; delete and recreate the %s to change it", ownerKind.Kind),
+		))
+	}
 	return allErrs
+}
+
+// validateGroveSpecUpdate validates a grove update. newGrove and fldPath must
+// not be nil; oldGrove may be nil for an addition. false and omitted both
+// mean automatic selection, so only the effective opt-in is immutable.
+func (v *sharedValidation) validateGroveSpecUpdate(
+	newGrove *nvidiacomv1beta1.GroveSpec,
+	oldGrove *nvidiacomv1beta1.GroveSpec,
+	fldPath *field.Path,
+	ownerKind schema.GroupKind,
+) field.ErrorList {
+	oldForced := oldGrove != nil && oldGrove.ForceScalingGroup
+	if newGrove.ForceScalingGroup == oldForced {
+		return nil
+	}
+	return field.ErrorList{field.Invalid(
+		fldPath.Child("forceScalingGroup"),
+		newGrove.ForceScalingGroup,
+		fmt.Sprintf("cannot be toggled after creation; delete and recreate the %s to change it", ownerKind.Kind),
+	)}
 }

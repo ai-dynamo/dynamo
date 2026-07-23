@@ -573,6 +573,10 @@ func saveSharedHubOnlySpec(src *v1beta1.DynamoComponentDeploymentSharedSpec, con
 	}
 	if experimentalIsHubOnlyShape(src.Experimental) {
 		save.Experimental = src.Experimental.DeepCopy()
+	} else if src.Experimental != nil && src.Experimental.Grove != nil {
+		// The grove block has no v1alpha1 representation; preserve it sparsely
+		// when the rest of the experimental block converts to alpha fields.
+		save.Experimental = &v1beta1.ExperimentalSpec{Grove: src.Experimental.Grove.DeepCopy()}
 	}
 	return nil
 }
@@ -1595,6 +1599,11 @@ func restoreSharedHubOnlyFields(dst, preserved *v1beta1.DynamoComponentDeploymen
 	restoreSharedHubOnlyFrontendSidecar(dst, preserved)
 	if dst.Experimental == nil && experimentalIsHubOnlyShape(preserved.Experimental) {
 		dst.Experimental = preserved.Experimental.DeepCopy()
+	} else if dst.Experimental != nil && preserved.Experimental != nil &&
+		dst.Experimental.Grove == nil && preserved.Experimental.Grove != nil {
+		// The experimental block was rebuilt from alpha fields (GMS, failover,
+		// checkpoint); merge back the sparsely preserved hub-only grove block.
+		dst.Experimental.Grove = preserved.Experimental.Grove.DeepCopy()
 	}
 	return nil
 }
