@@ -89,6 +89,14 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         self.runtime_namespace_source = runtime_namespace_source
         self._state = DeploymentState()
         self._metrics_state = Metrics()
+        # Per-role per-pod GPU count the startup power caps were computed
+        # against. ``power_watts_per_replica`` is cached once at startup, but
+        # ``num_gpus`` is refreshed every tick; if the GPUs-per-replica changes
+        # under a running planner the cached wattage goes stale, so the runtime
+        # guard fails closed until the planner restarts and re-reads the caps.
+        self._power_startup_num_gpus: Optional[
+            tuple[Optional[int], Optional[int]]
+        ] = None
 
     async def initialize(self) -> None:
         await self.controller.async_init()
@@ -129,6 +137,7 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         if namespace_changed:
             await self.fpm_provider.async_init(self._runtime_namespace_or_none())
             await self._refresh_deployment_state()
+        self._assert_power_topology_static()
         await self.fpm_provider.refresh(self._state)
         return self._state
 
@@ -294,6 +303,56 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         if self.require_decode and decode_cfg is not None:
             self._adopt_power_config(state.decode, decode_cfg)
         self._validate_minimum_power_footprint(prefill_cfg, decode_cfg)
+        # Snapshot the per-pod GPU count the cached wattage was derived from so
+        # the runtime guard can detect a topology change (see refresh()).
+        self._power_startup_num_gpus = (
+            state.prefill.num_gpus if self.require_prefill else None,
+            state.decode.num_gpus if self.require_decode else None,
+        )
+
+    def _assert_power_topology_static(self) -> None:
+        """Fail closed if GPUs-per-replica changed since startup.
+
+        ``power_watts_per_replica`` is read once at startup and treated as
+        static for the planner lifetime, but ``num_gpus`` is refreshed every
+        tick. A worker rollout that changes per-pod GPUs leaves the cached
+        wattage stale, so the power budget would be projected against the old
+        per-replica watts and could admit a scale-up that exceeds the real
+        requested-cap total. Rather than silently under-count, refuse to act
+        and require a restart (which re-reads the annotation against the new
+        topology), matching the static-cap contract.
+        """
+        if not self.config.enable_power_awareness:
+            return
+        baseline = self._power_startup_num_gpus
+        if baseline is None:
+            return
+        state = self.deployment_state()
+        startup_p, startup_d = baseline
+        changed = []
+        if (
+            self.require_prefill
+            and startup_p is not None
+            and state.prefill.num_gpus != startup_p
+        ):
+            changed.append(f"prefill {startup_p} -> {state.prefill.num_gpus}")
+        if (
+            self.require_decode
+            and startup_d is not None
+            and state.decode.num_gpus != startup_d
+        ):
+            changed.append(f"decode {startup_d} -> {state.decode.num_gpus}")
+        if changed:
+            raise DeploymentValidationError(
+                [
+                    "Power-relevant GPU topology changed at runtime ("
+                    + ", ".join(changed)
+                    + " GPUs/replica). power_watts_per_replica is cached at "
+                    "startup, so the power budget would be projected against "
+                    "stale per-replica watts. Restart the Planner to re-read "
+                    "the DGD power annotation against the new topology."
+                ]
+            )
 
     def _power_component_names(self) -> tuple[Optional[str], Optional[str]]:
         """Backend-default component names used as explicit-name fallbacks.

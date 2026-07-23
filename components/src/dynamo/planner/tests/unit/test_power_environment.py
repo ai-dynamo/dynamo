@@ -124,3 +124,39 @@ def test_deployment_state_changed_on_watts_change():
     old.decode.power_watts_per_replica = 1200
     new.decode.power_watts_per_replica = 1000
     assert deployment_state_changed(old, new, False, True) is True
+
+
+def test_runtime_gpus_per_replica_change_fails_closed():
+    """A worker rollout that changes per-pod GPUs must not run against the
+    startup-cached wattage; the runtime guard fails closed and demands a
+    restart instead of projecting the budget from stale per-replica watts."""
+    env = _env(_controller(700, 1200))
+    state = env.deployment_state()
+    state.prefill.num_gpus = 1
+    state.decode.num_gpus = 1
+    env._load_static_power_caps_at_startup()
+
+    state.prefill.num_gpus = 4  # rollout bumped per-pod GPUs 1 -> 4
+    with pytest.raises(DeploymentValidationError, match="topology changed"):
+        env._assert_power_topology_static()
+
+
+def test_runtime_topology_unchanged_passes():
+    env = _env(_controller(700, 1200))
+    state = env.deployment_state()
+    state.prefill.num_gpus = 2
+    state.decode.num_gpus = 4
+    env._load_static_power_caps_at_startup()
+
+    env._assert_power_topology_static()
+
+
+def test_topology_guard_noop_when_awareness_off():
+    env = _env(_controller(), enable_power=False)
+    state = env.deployment_state()
+    state.prefill.num_gpus = 1
+    state.decode.num_gpus = 1
+    env._load_static_power_caps_at_startup()
+
+    state.prefill.num_gpus = 8
+    env._assert_power_topology_static()
