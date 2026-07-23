@@ -12,7 +12,11 @@ pytestmark = [
 
 try:
     from dynamo.profiler.utils.config import update_image
-    from dynamo.profiler.utils.dgd_generation import add_planner_to_config
+    from dynamo.profiler.utils.dgd_generation import (
+        add_planner_to_config,
+        apply_runtime_version_override,
+        assemble_final_config,
+    )
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         DynamoGraphDeploymentRequestSpec,
         HardwareSpec,
@@ -20,6 +24,7 @@ try:
         WorkloadSpec,
     )
     from dynamo.profiler.utils.profile_common import (
+        ProfilerOperationalConfig,
         derive_backend_image,
         derive_planner_image,
     )
@@ -27,11 +32,14 @@ except ImportError as e:
     pytest.skip(f"Skip (missing dependency): {e}", allow_module_level=True)
 
 
-def _make_dgdr(image: str) -> DynamoGraphDeploymentRequestSpec:
+def _make_dgdr(
+    image: str, runtime_version_override: str | None = None
+) -> DynamoGraphDeploymentRequestSpec:
     return DynamoGraphDeploymentRequestSpec(
         model="Qwen/Qwen3-32B",
         backend="trtllm",
         image=image,
+        runtimeVersionOverride=runtime_version_override,
         hardware=HardwareSpec(gpuSku="h200_sxm", totalGpus=8, numGpusPerNode=8),
         workload=WorkloadSpec(isl=4000, osl=1000),
         sla=SLASpec(ttft=2000.0, itl=50.0),
@@ -117,6 +125,30 @@ def test_add_planner_to_config_uses_dynamo_planner_image():
         "mainContainer"
     ]["image"]
     assert planner_image == "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.3"
+
+
+def test_assemble_final_config_applies_runtime_version_override():
+    image = "nvcr.io/nvidia/ai-dynamo/dynamo-planner:custom"
+    dgdr = _make_dgdr(image, runtime_version_override="1.2.3")
+    config = _base_dgd_config(image)
+
+    result = assemble_final_config(dgdr, ProfilerOperationalConfig(), config)
+
+    assert result["spec"]["services"]["Frontend"]["runtimeVersionOverride"] == "1.2.3"
+
+
+def test_runtime_version_override_applies_to_injected_planner():
+    image = "nvcr.io/nvidia/ai-dynamo/dynamo-planner:custom"
+    dgdr = _make_dgdr(image, runtime_version_override="1.2.3")
+    config = _base_dgd_config(image)
+    add_planner_to_config(dgdr, config)
+
+    apply_runtime_version_override(dgdr, config)
+
+    assert {
+        name: service["runtimeVersionOverride"]
+        for name, service in config["spec"]["services"].items()
+    } == {"Frontend": "1.2.3", "Planner": "1.2.3"}
 
 
 def test_update_image_does_not_overwrite_planner_service_image():

@@ -459,6 +459,14 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// +optional
 	Image string `json:"image,omitempty"`
 
+	// RuntimeVersionOverride explicitly sets the Dynamo runtime version for every
+	// component in the generated DynamoGraphDeployment. Set this when Image uses
+	// a non-semantic-version tag or digest, or when its tag does not identify the
+	// Dynamo runtime version.
+	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`
+	// +optional
+	RuntimeVersionOverride string `json:"runtimeVersionOverride,omitempty"`
+
 	// ModelCache provides optional PVC configuration for pre-downloaded model weights.
 	// When provided, weights are loaded from the PVC instead of downloading from HuggingFace.
 	// +optional

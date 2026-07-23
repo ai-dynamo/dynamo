@@ -23,6 +23,7 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -93,6 +94,13 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 		))
 	}
 
+	if dgdrRuntimeVersionOverrideRequired(spec) {
+		allErrs = append(allErrs, field.Required(
+			fldPath.Child("runtimeVersionOverride"),
+			"is required when spec.image has no parseable semantic-version tag",
+		))
+	}
+
 	return allErrs
 }
 
@@ -141,6 +149,15 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 		))
 	}
 
+	newRequiresRuntimeVersion := dgdrRuntimeVersionOverrideRequired(newSpec)
+	oldRequiresRuntimeVersion := dgdrRuntimeVersionOverrideRequired(oldSpec)
+	if newRequiresRuntimeVersion && !oldRequiresRuntimeVersion {
+		allErrs = append(allErrs, field.Required(
+			fldPath.Child("runtimeVersionOverride"),
+			"is required when spec.image has no parseable semantic-version tag",
+		))
+	}
+
 	if isImmutableDGDRPhase(oldPhase) && !apiequality.Semantic.DeepEqual(newSpec, oldSpec) {
 		allErrs = append(allErrs, field.Forbidden(
 			fldPath,
@@ -149,4 +166,12 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 	}
 
 	return allErrs
+}
+
+func dgdrRuntimeVersionOverrideRequired(spec *nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec) bool {
+	if spec.Image == "" || spec.RuntimeVersionOverride != "" {
+		return false
+	}
+	_, err := runtimeversion.ParseImageVersion(spec.Image)
+	return err != nil
 }
