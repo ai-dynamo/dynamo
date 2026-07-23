@@ -17,10 +17,8 @@ limitations under the License.
 package dynamo_kv_scorer
 
 import (
-	"reflect"
 	"testing"
 
-	fwkrh "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/requesthandling"
 	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling"
 )
 
@@ -30,15 +28,15 @@ import (
 // the router falls back to priority_jump=0.0 for every request and queue
 // ordering silently regresses.
 func TestBuildOpenAIRequest_ForwardsAgentHintsPriority(t *testing.T) {
-	req := &schedtypes.InferenceRequest{
+	req := &schedtypes.LLMRequest{
 		TargetModel: "test-model",
-		Body: &fwkrh.InferenceRequestBody{
-			ChatCompletions: &fwkrh.ChatCompletionsRequest{
-				Messages: []fwkrh.Message{
-					{Role: "user", Content: fwkrh.Content{Raw: "hi"}},
+		Body: &schedtypes.LLMRequestBody{
+			ChatCompletions: &schedtypes.ChatCompletionsRequest{
+				Messages: []schedtypes.Message{
+					{Role: "user", Content: schedtypes.Content{Raw: "hi"}},
 				},
 			},
-			Payload: fwkrh.PayloadMap{
+			Payload: schedtypes.PayloadMap{
 				"messages": []any{map[string]any{"role": "user", "content": "hi"}},
 				"model":    "test-model",
 				"nvext":    map[string]any{"agent_hints": map[string]any{"priority": 7}},
@@ -65,15 +63,15 @@ func TestBuildOpenAIRequest_ForwardsAgentHintsPriority(t *testing.T) {
 }
 
 func TestBuildOpenAIRequest_ForwardsLegacyTopLevelCacheSalt(t *testing.T) {
-	req := &schedtypes.InferenceRequest{
+	req := &schedtypes.LLMRequest{
 		TargetModel: "test-model",
-		Body: &fwkrh.InferenceRequestBody{
-			ChatCompletions: &fwkrh.ChatCompletionsRequest{
-				Messages: []fwkrh.Message{
-					{Role: "user", Content: fwkrh.Content{Raw: "hi"}},
+		Body: &schedtypes.LLMRequestBody{
+			ChatCompletions: &schedtypes.ChatCompletionsRequest{
+				Messages: []schedtypes.Message{
+					{Role: "user", Content: schedtypes.Content{Raw: "hi"}},
 				},
 			},
-			Payload: fwkrh.PayloadMap{
+			Payload: schedtypes.PayloadMap{
 				"messages":   []any{map[string]any{"role": "user", "content": "hi"}},
 				"model":      "test-model",
 				"cache_salt": "tenant-legacy",
@@ -90,38 +88,12 @@ func TestBuildOpenAIRequest_ForwardsLegacyTopLevelCacheSalt(t *testing.T) {
 	}
 }
 
-func TestBuildOpenAIRequest_CompletionsTokenPromptUsesPromptIDs(t *testing.T) {
-	req := &schedtypes.InferenceRequest{
-		TargetModel: "test-model",
-		Body: &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{
-				Prompt: fwkrh.Prompt{TokenIDs: []uint32{101, 102, 103}},
-			},
-		},
-	}
-
-	body, err := BuildOpenAIRequest(req)
-	if err != nil {
-		t.Fatalf("BuildOpenAIRequest returned error: %v", err)
-	}
-
-	if _, ok := body["messages"]; ok {
-		t.Fatalf("did not expect token-id completions to synthesize messages: %v", body["messages"])
-	}
-	if got := body["prompt"]; !reflect.DeepEqual(got, []uint32{101, 102, 103}) {
-		t.Fatalf("expected prompt token IDs, got %#v", got)
-	}
-	if got := body["model"]; got != "test-model" {
-		t.Fatalf("expected model=test-model, got %v", got)
-	}
-}
-
 func TestBuildOpenAIRequest_CompletionsTextPromptKeepsLegacyMessageShape(t *testing.T) {
-	req := &schedtypes.InferenceRequest{
+	req := &schedtypes.LLMRequest{
 		TargetModel: "test-model",
-		Body: &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{
-				Prompt: fwkrh.Prompt{Raw: "hello"},
+		Body: &schedtypes.LLMRequestBody{
+			Completions: &schedtypes.CompletionsRequest{
+				Prompt: schedtypes.Prompt{Raw: "hello"},
 			},
 		},
 	}
@@ -143,12 +115,47 @@ func TestBuildOpenAIRequest_CompletionsTextPromptKeepsLegacyMessageShape(t *test
 	}
 }
 
-func TestBuildOpenAIRequest_CompletionsStringArrayPromptKeepsLegacyMessageShape(t *testing.T) {
-	req := &schedtypes.InferenceRequest{
+func TestBuildOpenAIRequest_TokenizedPromptUsesCompletionPromptShape(t *testing.T) {
+	req := &schedtypes.LLMRequest{
 		TargetModel: "test-model",
-		Body: &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{
-				Prompt: fwkrh.Prompt{Strings: []string{"hello", "world"}},
+		TokenizedPrompt: &schedtypes.TokenizedPrompt{
+			TokenIDs: []uint32{101, 102, 103},
+		},
+		Body: &schedtypes.LLMRequestBody{
+			Completions: &schedtypes.CompletionsRequest{
+				Prompt: schedtypes.Prompt{Raw: "hello"},
+			},
+		},
+	}
+
+	body, err := BuildOpenAIRequest(req)
+	if err != nil {
+		t.Fatalf("BuildOpenAIRequest returned error: %v", err)
+	}
+
+	prompt, ok := body["prompt"].([]uint32)
+	if !ok {
+		t.Fatalf("expected tokenized prompt shape, got %#v", body["prompt"])
+	}
+	if len(prompt) != 3 || prompt[0] != 101 || prompt[1] != 102 || prompt[2] != 103 {
+		t.Fatalf("expected prompt token IDs [101 102 103], got %#v", prompt)
+	}
+	if _, ok := body["messages"]; ok {
+		t.Fatalf("did not expect tokenized prompt to also include messages: %v", body["messages"])
+	}
+
+	req.TokenizedPrompt.TokenIDs[0] = 999
+	if prompt[0] != 101 {
+		t.Fatalf("expected BuildOpenAIRequest to copy token IDs, got %#v", prompt)
+	}
+}
+
+func TestBuildOpenAIRequest_CompletionsStringArrayPromptKeepsLegacyMessageShape(t *testing.T) {
+	req := &schedtypes.LLMRequest{
+		TargetModel: "test-model",
+		Body: &schedtypes.LLMRequestBody{
+			Completions: &schedtypes.CompletionsRequest{
+				Prompt: schedtypes.Prompt{Strings: []string{"hello", "world"}},
 			},
 		},
 	}

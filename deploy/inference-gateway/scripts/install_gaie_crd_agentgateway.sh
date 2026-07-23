@@ -32,7 +32,7 @@ kubectl apply --server-side --force-conflicts \
   -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
 
 # Install the Inference Extension CRDs.
-IGW_LATEST_RELEASE=v1.2.1
+IGW_LATEST_RELEASE=v1.5.0
 kubectl apply \
   -f "https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${IGW_LATEST_RELEASE}/manifests.yaml"
 

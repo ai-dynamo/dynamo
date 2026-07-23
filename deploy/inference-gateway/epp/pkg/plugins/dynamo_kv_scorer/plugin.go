@@ -108,7 +108,6 @@ import (
 	"unsafe"
 
 	ctrl "sigs.k8s.io/controller-runtime"
-	fwkrh "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/requesthandling"
 	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling"
 )
 
@@ -282,14 +281,16 @@ func SerializeEndpointsToJSON(endpoints []schedtypes.Endpoint) (string, error) {
 	return string(data), nil
 }
 
-func BuildOpenAIRequest(req *schedtypes.InferenceRequest) (map[string]any, error) {
+func BuildOpenAIRequest(req *schedtypes.LLMRequest) (map[string]any, error) {
 	requestBody := make(map[string]any)
 
 	if req == nil || req.Body == nil {
 		return nil, fmt.Errorf("missing request body")
 	}
 
-	if req.Body.ChatCompletions != nil && len(req.Body.ChatCompletions.Messages) > 0 {
+	if hasTokenizedPrompt(req) {
+		addTokenizedPrompt(requestBody, req.TokenizedPrompt.TokenIDs)
+	} else if req.Body.ChatCompletions != nil && len(req.Body.ChatCompletions.Messages) > 0 {
 		messages := make([]map[string]any, 0, len(req.Body.ChatCompletions.Messages))
 		anyNonEmpty := false
 		for _, msg := range req.Body.ChatCompletions.Messages {
@@ -330,15 +331,18 @@ func BuildOpenAIRequest(req *schedtypes.InferenceRequest) (map[string]any, error
 	return requestBody, nil
 }
 
-func addCompletionPrompt(requestBody map[string]any, prompt fwkrh.Prompt) {
-	if len(prompt.TokenIDs) > 0 {
-		tokenIDs := make([]uint32, len(prompt.TokenIDs))
-		copy(tokenIDs, prompt.TokenIDs)
-		requestBody["prompt"] = tokenIDs
-		return
-	}
+func addTokenizedPrompt(requestBody map[string]any, tokenIDs []uint32) {
+	prompt := make([]uint32, len(tokenIDs))
+	copy(prompt, tokenIDs)
+	requestBody["prompt"] = prompt
+}
 
-	// Keep non-token completions on the legacy chat-shaped scorer path.
+func hasTokenizedPrompt(req *schedtypes.LLMRequest) bool {
+	return req != nil && req.TokenizedPrompt != nil && len(req.TokenizedPrompt.TokenIDs) > 0
+}
+
+func addCompletionPrompt(requestBody map[string]any, prompt schedtypes.Prompt) {
+	// Keep text completions on the legacy chat-shaped scorer path.
 	requestBody["messages"] = []map[string]any{
 		{
 			"role":    "user",
@@ -352,8 +356,8 @@ func addCompletionPrompt(requestBody map[string]any, prompt fwkrh.Prompt) {
 //
 // This is how routing hints — most notably nvext.agent_hints.priority — reach
 // the Rust router via the FFI JSON.
-func extractNvext(payload fwkrh.RequestPayload) map[string]any {
-	pm, ok := payload.(fwkrh.PayloadMap)
+func extractNvext(payload schedtypes.RequestPayload) map[string]any {
+	pm, ok := payload.(schedtypes.PayloadMap)
 	if !ok {
 		return nil
 	}
@@ -361,8 +365,8 @@ func extractNvext(payload fwkrh.RequestPayload) map[string]any {
 	return nvext
 }
 
-func extractTopLevelCacheSalt(payload fwkrh.RequestPayload) string {
-	pm, ok := payload.(fwkrh.PayloadMap)
+func extractTopLevelCacheSalt(payload schedtypes.RequestPayload) string {
+	pm, ok := payload.(schedtypes.PayloadMap)
 	if !ok {
 		return ""
 	}
