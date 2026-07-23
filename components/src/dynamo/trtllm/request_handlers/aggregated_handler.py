@@ -13,6 +13,7 @@ from dynamo._core import Context
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
+from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
 from dynamo.trtllm.multimodal.embedding_fetcher import fetch_embeddings_from_encoder
 from dynamo.trtllm.request_handlers.handler_base import (
     HandlerBase,
@@ -40,6 +41,9 @@ class AggregatedHandler(HandlerBase):
         self, request: dict, context: Context
     ) -> AsyncGenerator[dict, None]:
         """Generate response, optionally using remote encoder for multimodal."""
+        # Reject before optional remote encoder/cache work. HandlerBase keeps a
+        # second guard as a backstop for paths without these early side effects.
+        reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
         logging.debug(f"AggregatedHandler Request ID: {context.id()}")
 
         embeddings: Optional[Union[torch.Tensor, dict]] = None

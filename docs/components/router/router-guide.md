@@ -148,6 +148,7 @@ Disaggregated mode is activated automatically when prefill workers register alon
 ## More Router Docs
 
 - **[Routing Concepts](router-concepts.md)**: Cost model, worker selection, and routing primitives
+- **[Multi-DC KV Routing and the DC Relay](multi-dc-kv-routing.md)**: DC-local exact ownership, pool publication, and cross-DC CKF search
 - **[Frontend Configuration Reference](../frontend/configuration.md#router)**: Canonical router flags, environment variables, defaults, and boolean forms
 - **[Configuration and Tuning](router-configuration.md)**: Router behavior, transport modes, load tracking, and tuning guidance
 - **[Disaggregated Serving](router-disaggregated-serving.md)**: Prefill and decode routing setups

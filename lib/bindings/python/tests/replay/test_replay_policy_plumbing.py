@@ -36,7 +36,13 @@ def test_replay_api_forwards_policy_model_name(monkeypatch):
     )
 
     replay_api.run_trace_replay("trace.jsonl", model_name="model-a")
-    replay_api.run_synthetic_trace_replay(64, 8, 2, model_name="model-b")
+    replay_api.run_synthetic_trace_replay(
+        64,
+        8,
+        2,
+        model_name="model-b",
+        replay_concurrency=1,
+    )
 
     assert calls[0][2]["model_name"] == "model-a"
     assert calls[1][2]["model_name"] == "model-b"

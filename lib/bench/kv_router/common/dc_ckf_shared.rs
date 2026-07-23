@@ -3,88 +3,19 @@
 
 use std::fs::File;
 use std::io::{BufReader, Read};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, bail};
 use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, WorkerWithDpRank};
 use dynamo_mocker::loadgen::{SessionTrace, Trace};
 use dynamo_mocker::replay::ReplayWorkerArtifacts;
 use rustc_hash::{FxHashMap, FxHashSet};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const DEFAULT_CKF_MOONCAKE_BLOCK_SIZE: usize = 512;
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DcCkfCorpusSpec {
-    pub trace_path: PathBuf,
-    pub expected_sha256: Option<String>,
-    pub trace_block_size: usize,
-    pub prefix_depth_factor: usize,
-    pub trace_duplication_factor: usize,
-    pub dc_count: usize,
-    pub workers_per_dc: usize,
-    pub endpoint_ordinal: usize,
-    pub default_dp_rank: u32,
-}
-
-impl DcCkfCorpusSpec {
-    pub fn new(trace_path: impl Into<PathBuf>, dc_count: usize, workers_per_dc: usize) -> Self {
-        Self {
-            trace_path: trace_path.into(),
-            expected_sha256: None,
-            trace_block_size: DEFAULT_CKF_MOONCAKE_BLOCK_SIZE,
-            prefix_depth_factor: 1,
-            trace_duplication_factor: 1,
-            dc_count,
-            workers_per_dc,
-            endpoint_ordinal: 0,
-            default_dp_rank: 0,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DcCkfSourceTopology {
-    pub source_index: usize,
-    pub dc_ordinal: usize,
-    pub endpoint_ordinal: usize,
-    pub worker_ordinal: usize,
-    pub member: WorkerWithDpRank,
-    pub session_count: usize,
-    pub turn_count: usize,
-    pub trace_distinct_hash_upper_bound: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DcCkfPoolCorpusMetadata {
-    pub dc_ordinal: usize,
-    pub endpoint_ordinal: usize,
-    pub session_count: usize,
-    pub turn_count: usize,
-    /// Conservative trace-row bound, not a measured live CKF peak.
-    pub trace_distinct_hash_upper_bound: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DcCkfCorpusMetadata {
-    pub trace_path: PathBuf,
-    pub trace_sha256: String,
-    pub trace_block_size: usize,
-    pub prefix_depth_factor: usize,
-    pub trace_duplication_factor: usize,
-    pub original_session_count: usize,
-    pub prepared_session_count: usize,
-    pub turn_count: usize,
-    pub hash_reference_count: usize,
-    /// Conservative trace-row bound, not a measured live CKF peak.
-    pub trace_distinct_hash_upper_bound: usize,
-    pub dc_count: usize,
-    pub workers_per_dc: usize,
-    pub endpoint_ordinal: usize,
-    pub sources: Vec<DcCkfSourceTopology>,
-    pub pools: Vec<DcCkfPoolCorpusMetadata>,
-}
+pub use super::dc_ckf_metadata::{
+    DcCkfCapacityMetadata, DcCkfCorpusMetadata, DcCkfCorpusSpec, DcCkfPoolCapacity,
+    DcCkfPoolCorpusMetadata, DcCkfSourceTopology,
+};
 
 #[derive(Debug, Clone)]
 pub struct PreparedDcCkfCorpus {
@@ -99,22 +30,6 @@ impl PreparedDcCkfCorpus {
     ) -> anyhow::Result<DcCkfCapacityMetadata> {
         measure_dc_ckf_capacity(&self.metadata, artifacts)
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DcCkfPoolCapacity {
-    pub dc_ordinal: usize,
-    pub endpoint_ordinal: usize,
-    pub measured_peak_active_distinct_hashes: usize,
-    pub final_active_distinct_hashes: usize,
-    pub recommended_distinct_hash_capacity: usize,
-    pub event_count: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DcCkfCapacityMetadata {
-    pub headroom_percent: usize,
-    pub pools: Vec<DcCkfPoolCapacity>,
 }
 
 pub fn prepare_dc_ckf_corpus(spec: &DcCkfCorpusSpec) -> anyhow::Result<PreparedDcCkfCorpus> {
@@ -186,8 +101,6 @@ pub fn prepare_dc_ckf_corpus(spec: &DcCkfCorpusSpec) -> anyhow::Result<PreparedD
             .flat_map(|turn| &turn.hash_ids)
             .copied()
         {
-            let hash = u32::try_from(hash)
-                .context("prepared Mooncake hash unexpectedly exceeds the u32 namespace")?;
             source_hashes.insert(hash);
             pool_hashes[dc_ordinal].insert(hash);
             global_hashes.insert(hash);
@@ -350,7 +263,7 @@ fn checked_expand_and_duplicate(
     prefix_depth_factor: usize,
     copies: usize,
 ) -> anyhow::Result<Trace> {
-    let factor = u64::try_from(prefix_depth_factor).context("prefix depth does not fit in u64")?;
+    let factor = u32::try_from(prefix_depth_factor).context("prefix depth does not fit in u32")?;
     for session in &mut trace.sessions {
         for turn in &mut session.turns {
             turn.input_length = turn
@@ -371,7 +284,6 @@ fn checked_expand_and_duplicate(
                     let expanded_hash = base
                         .checked_add(offset)
                         .context("Mooncake hash prefix expansion overflow")?;
-                    ensure_u32_hash(expanded_hash)?;
                     expanded.push(expanded_hash);
                 }
             }
@@ -396,11 +308,9 @@ fn checked_expand_and_duplicate(
         .checked_mul(copies)
         .context("Mooncake duplicated session count overflow")?;
     let mut sessions = Vec::with_capacity(duplicated_count);
-    let mut narrowed = FxHashMap::<u64, u32>::default();
-    let mut effective_hashes = FxHashSet::default();
 
     for copy_index in 0..copies {
-        let copy_index = u64::try_from(copy_index).context("copy index does not fit in u64")?;
+        let copy_index = u32::try_from(copy_index).context("copy index does not fit in u32")?;
         let offset = offset_base
             .checked_mul(copy_index)
             .context("Mooncake hash duplication offset overflow")?;
@@ -414,21 +324,6 @@ fn checked_expand_and_duplicate(
                     *hash = hash
                         .checked_add(offset)
                         .context("Mooncake duplicated hash overflow")?;
-                    let narrowed_hash = ensure_u32_hash(*hash)?;
-                    match narrowed.entry(*hash) {
-                        std::collections::hash_map::Entry::Occupied(entry) => {
-                            debug_assert_eq!(*entry.get(), narrowed_hash);
-                        }
-                        std::collections::hash_map::Entry::Vacant(entry) => {
-                            if !effective_hashes.insert(narrowed_hash) {
-                                bail!(
-                                    "Mooncake hash duplication aliases after u32 narrowing at {}",
-                                    *hash
-                                );
-                            }
-                            entry.insert(narrowed_hash);
-                        }
-                    }
                 }
             }
             sessions.push(duplicated);
@@ -436,11 +331,6 @@ fn checked_expand_and_duplicate(
     }
     trace.sessions = sessions;
     Ok(trace)
-}
-
-fn ensure_u32_hash(hash: u64) -> anyhow::Result<u32> {
-    u32::try_from(hash)
-        .with_context(|| format!("Mooncake hash {hash} exceeds the effective u32 token namespace"))
 }
 
 fn stable_member(
@@ -580,9 +470,10 @@ impl PoolCapacityTracker {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-support"))]
 mod tests {
     use std::io::Write;
+    use std::path::PathBuf;
 
     use dynamo_kv_router::protocols::{
         ExternalSequenceBlockHash, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
@@ -680,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn preparation_rejects_hashes_that_alias_in_effective_u32_namespace() -> anyhow::Result<()> {
+    fn preparation_canonicalizes_raw_hashes_before_duplication() -> anyhow::Result<()> {
         let file = write_trace(&[serde_json::json!({
             "timestamp": 0,
             "input_length": 1,
@@ -690,8 +581,15 @@ mod tests {
         let mut spec = DcCkfCorpusSpec::new(file.path(), 1, 1);
         spec.trace_block_size = 1;
         spec.trace_duplication_factor = 2;
-        let error = prepare_dc_ckf_corpus(&spec).unwrap_err();
-        assert!(error.to_string().contains("effective u32 token namespace"));
+        let prepared = prepare_dc_ckf_corpus(&spec)?;
+        let hashes = prepared.worker_traces[0]
+            .sessions
+            .iter()
+            .flat_map(|session| &session.turns)
+            .flat_map(|turn| &turn.hash_ids)
+            .copied()
+            .collect::<FxHashSet<_>>();
+        assert_eq!(hashes, FxHashSet::from_iter([0, 1]));
         Ok(())
     }
 

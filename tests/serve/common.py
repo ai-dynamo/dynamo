@@ -362,7 +362,10 @@ def run_serve_deployment(
                             mapped_system_ports.append(p)
                     payload.system_ports = mapped_system_ports
 
-                for _ in range(payload.repeat_count):
+                for iteration in range(payload.repeat_count):
+                    # Resolve an iteration-specific body once so validation
+                    # retries resend the same request.
+                    request_body = payload.body_for_iteration(iteration)
                     # Re-issue the request (server stays up) on validation
                     # failure when payload.max_attempts > 1. See tests/README.md
                     # "Flaky Tests" for when this is appropriate. Backoff
@@ -374,7 +377,7 @@ def run_serve_deployment(
                             try:
                                 response = send_request(
                                     url=payload.url(),
-                                    payload=payload.body,
+                                    payload=request_body,
                                     timeout=payload.timeout,
                                     method=payload.method,
                                     stream=payload.http_stream,
