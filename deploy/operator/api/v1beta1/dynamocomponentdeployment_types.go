@@ -102,7 +102,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// It overrides the version derived from spec.podTemplate.spec.containers[name=main].image. Set this for images
 	// whose tags are not valid semantic versions (for example, custom or SHA tags), or whose
 	// tag version is not the Dynamo runtime version.
-	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`
+	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`
 	// +optional
 	RuntimeVersionOverride string `json:"runtimeVersionOverride,omitempty"`
 
