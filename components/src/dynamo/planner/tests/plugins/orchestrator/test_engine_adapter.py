@@ -363,6 +363,36 @@ def test_project_scale_to_applies_final_gpu_budget_to_external_proposal():
     assert dec.num_prefill + dec.num_decode <= 4
 
 
+def test_project_scale_to_budget_preserves_single_component_target_mask():
+    """Decode-only proposal: joint GPU clamp must not invent a prefill target.
+
+    Prefill is charged at its ready count inside ``proportional_clamp_pair`` but
+    the proposal-mask invariant (``clamped_p if proposed_p else None``) must keep
+    ``num_prefill`` None so a decode-only decision cannot rewrite prefill desired.
+    """
+    cfg = PlannerConfig(
+        mode="disagg",
+        enable_load_scaling=True,
+        enable_throughput_scaling=True,
+        optimization_target="sla",
+        served_model_name="test",
+        max_gpu_budget=4,
+        min_gpu_budget=-1,
+    )
+    adapter = OrchestratorEngineAdapter(cfg, _disagg_caps())
+    wc = WorkerCounts(ready_num_prefill=1, ready_num_decode=1)
+    outcome = _apply_outcome(
+        [ComponentTarget(sub_component_type="decode", replicas=10)]
+    )
+
+    dec = adapter._project_scale_to(outcome, wc)
+
+    assert dec is not None
+    assert dec.num_prefill is None
+    assert dec.num_decode is not None
+    assert 1 + dec.num_decode <= 4
+
+
 def test_project_scale_to_does_not_apply_budget_on_baseline_only_noop():
     cfg = PlannerConfig(
         mode="disagg",

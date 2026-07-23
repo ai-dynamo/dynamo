@@ -266,8 +266,8 @@ class Service(BaseModel):
             raise PowerAnnotationMissingError(self.name)
         try:
             watts = int(str(raw).strip())
-        except (ValueError, TypeError):
-            raise PowerAnnotationInvalidError(self.name, str(raw))
+        except (ValueError, TypeError) as err:
+            raise PowerAnnotationInvalidError(self.name, str(raw)) from err
         if watts <= 0:
             raise PowerAnnotationInvalidError(self.name, str(raw))
         return watts
