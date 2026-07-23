@@ -77,6 +77,9 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
         self._lora_load_locks = self._lora_state.lora_load_locks
         self._lora_load_locks_guard = self._lora_state.lora_load_locks_guard
         self._lora_capacity = self._resolve_lora_capacity(config)
+        self._advertised_gpu_lora_capacity = self._resolve_advertised_gpu_lora_capacity(
+            config
+        )
         # Track adapters already handed to vLLM so load/unload stays idempotent.
         # This set ensures the same adapter isn't handed to add_lora() twice,
         # and tracks which adapters are in the engine (vs. just in loaded_loras metadata).
@@ -96,6 +99,12 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
         if resident_capacity is not None:
             return resident_capacity
 
+        return getattr(config.engine_args, "max_loras", None)
+
+    def _resolve_advertised_gpu_lora_capacity(self, config) -> int | None:
+        """Return advertised GPU LoRA concurrency for discovery metadata."""
+        if not getattr(config.engine_args, "enable_lora", False):
+            return None
         return getattr(config.engine_args, "max_loras", None)
 
     def _build_omni_kwargs(self, config) -> Dict[str, Any]:

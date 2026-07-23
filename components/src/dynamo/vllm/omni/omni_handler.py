@@ -281,7 +281,7 @@ class OmniHandler(BaseOmniHandler):
             base_model_path=self.config.model,
             worker_type=WorkerType.Aggregated,
             needs=[],
-            max_gpu_lora_count=self._lora_capacity,
+            max_gpu_lora_count=self._advertised_gpu_lora_capacity,
         )
 
     async def generate(

@@ -37,9 +37,6 @@ def _base_model_lora_capacity(config: OmniConfig, lora_enabled: bool) -> int | N
     """Return LoRA capacity advertised on the base model registration card."""
     if not lora_enabled:
         return None
-    resident_capacity = getattr(config.engine_args, "max_cpu_loras", None)
-    if resident_capacity is not None:
-        return resident_capacity
     return getattr(config.engine_args, "max_loras", None)
 
 

@@ -135,3 +135,19 @@ class TestDiffusionParallelConfigCoverage:
         handler = BaseOmniHandler.__new__(BaseOmniHandler)
 
         assert handler._resolve_lora_capacity(config) == 2
+
+    def test_advertised_gpu_capacity_uses_max_loras_even_when_max_cpu_loras_set(self):
+        config = _make_config()
+        config.engine_args.enable_lora = True
+        config.engine_args.max_cpu_loras = 8
+        config.engine_args.max_loras = 2
+        handler = BaseOmniHandler.__new__(BaseOmniHandler)
+
+        assert handler._resolve_advertised_gpu_lora_capacity(config) == 2
+
+    def test_advertised_gpu_capacity_none_when_lora_disabled(self):
+        config = _make_config()
+        config.engine_args.enable_lora = False
+        handler = BaseOmniHandler.__new__(BaseOmniHandler)
+
+        assert handler._resolve_advertised_gpu_lora_capacity(config) is None
