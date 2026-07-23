@@ -153,7 +153,7 @@ const TL_CSS = `
 `;
 
 const KIND_BADGE: Record<ReleaseKind, { label: string; variant: string }> = {
-  stable: { label: "Minor", variant: "green" },
+  stable: { label: "GA release", variant: "green" },
   patch: { label: "Patch", variant: "gray" },
   "platform-preview": { label: "Early access", variant: "amber" },
   "model-build": { label: "Model build", variant: "amber" },

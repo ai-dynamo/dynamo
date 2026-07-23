@@ -14,7 +14,6 @@
  * ReferenceStyles.tsx and carries only its own .dynref-vm-* layout rules.
  */
 
-import { Fragment } from "react";
 
 import {
   RELEASES,
@@ -81,27 +80,23 @@ const VM_CSS = `
     border-radius: 0 4px 4px 0;
 }
 
-.dynref-vm-nixl {
-    display: inline-block;
-    max-width: 200px;
-    white-space: normal;
+.dynref-vm-nixl { display: inline-block; }
+
+/* One line per backend, always — the label column keeps the three rows
+   aligned into a compact sub-table. */
+.dynref-vm-nixl-entry {
+    display: block;
+    white-space: nowrap;
+    line-height: 1.5;
 }
 
-.dynref-vm-nixl-entry { white-space: nowrap; }
-
 .dynref-vm-nixl-label {
-    margin-left: 3px;
+    margin-left: 5px;
     font-size: 12px;
     color: var(--pst-color-text-muted);
 }
 
-.dynref-vm-nixl-sep { color: var(--pst-color-text-muted); }
-
-.dynref-vm-th-sub {
-    font-weight: 400;
-    letter-spacing: normal;
-    text-transform: none;
-}
+.dynref-vm-kind { white-space: nowrap; }
 
 .dynref-vm-dash { color: var(--pst-color-text-muted); }
 `;
@@ -115,9 +110,8 @@ const PIN_COLUMNS: { key: PinKey; label: string }[] = [
   { key: "vllm", label: "vLLM" },
 ];
 
-/* Sub-entry labels are abbreviated (SGL / TRT / vLLM) so the mode="all" table
-   fits its ~775px container without clipping; the column header spells out the
-   mapping. */
+/* Sub-entry labels are abbreviated (SGL / TRT / vLLM) so the stacked NIXL
+   sub-rows stay compact. */
 const NIXL_COLUMNS: { key: NixlKey; label: string }[] = [
   { key: "nixlSglang", label: "SGL" },
   { key: "nixlTrtllm", label: "TRT" },
@@ -125,7 +119,7 @@ const NIXL_COLUMNS: { key: NixlKey; label: string }[] = [
 ];
 
 const KIND_BADGE: Record<ReleaseKind, { variant: "green" | "gray" | "amber"; label: string }> = {
-  stable: { variant: "green", label: "Minor" },
+  stable: { variant: "green", label: "GA release" },
   patch: { variant: "gray", label: "Patch" },
   "platform-preview": { variant: "amber", label: "Early access" },
   "model-build": { variant: "amber", label: "Model build" },
@@ -150,30 +144,14 @@ function NixlCell({ pins, prev }: { pins?: BackendPins; prev?: BackendPins }) {
   if (!pins || entries.length === 0) return <span className="dynref-vm-dash">&mdash;</span>;
 
   const changedFor = (key: NixlKey) => (prev ? prev[key] !== pins[key] : false);
-  const allEqual =
-    entries.length === NIXL_COLUMNS.length &&
-    entries.every(({ key }) => pins[key] === pins[NIXL_COLUMNS[0].key]);
-
-  if (allEqual) {
-    const changed = NIXL_COLUMNS.some(({ key }) => changedFor(key));
-    return <Pin value={pins[NIXL_COLUMNS[0].key]} changed={changed} />;
-  }
 
   return (
     <span className="dynref-vm-nixl">
-      {entries.map(({ key, label }, i) => (
-        <Fragment key={key}>
-          {i > 0 && (
-            <>
-              {" "}
-              <span className="dynref-vm-nixl-sep">&middot;</span>{" "}
-            </>
-          )}
-          <span className="dynref-vm-nixl-entry">
-            <Pin value={pins[key]} changed={changedFor(key)} />
-            <span className="dynref-vm-nixl-label">{label}</span>
-          </span>
-        </Fragment>
+      {entries.map(({ key, label }) => (
+        <span className="dynref-vm-nixl-entry" key={key}>
+          <Pin value={pins[key]} changed={changedFor(key)} />
+          <span className="dynref-vm-nixl-label">{label}</span>
+        </span>
       ))}
     </span>
   );
@@ -199,10 +177,12 @@ function ReleaseRow({ release, prev }: { release: Release; prev?: BackendPins })
   return (
     <tr>
       <td className="dynref-vm-version">
-        <span className="dynref-mono">{release.version}</span>{" "}
-        <span className={`dynref-badge dynref-badge--${badge.variant}`}>{badge.label}</span>
+        <span className="dynref-mono">{release.version}</span>
         {release.date && <span className="dynref-vm-date">{release.date}</span>}
         {release.partial && <span className="dynref-vm-partial">partial coverage</span>}
+      </td>
+      <td className="dynref-vm-kind">
+        <span className={`dynref-badge dynref-badge--${badge.variant}`}>{badge.label}</span>
       </td>
       <PinCells pins={release.pins} prev={prev} />
     </tr>
@@ -220,20 +200,19 @@ export function BackendVersionMatrix({ mode = "current" }: { mode?: "current" | 
           <thead>
             <tr>
               <th>Dynamo</th>
+              <th>Type</th>
               {PIN_COLUMNS.map(({ key, label }) => (
                 <th key={key}>{label}</th>
               ))}
-              <th>
-                NIXL <span className="dynref-vm-th-sub">(SGL &middot; TRT &middot; vLLM)</span>
-              </th>
+              <th>NIXL</th>
             </tr>
           </thead>
           <tbody>
             {mode === "current" ? (
               <>
                 <tr>
-                  <td className="dynref-vm-version">
-                    main (ToT){" "}
+                  <td className="dynref-vm-version">main (ToT)</td>
+                  <td className="dynref-vm-kind">
                     <span className="dynref-badge dynref-badge--gray">development</span>
                   </td>
                   <PinCells pins={MAIN_TOT} />
@@ -241,9 +220,11 @@ export function BackendVersionMatrix({ mode = "current" }: { mode?: "current" | 
                 {current && (
                   <tr>
                     <td className="dynref-vm-version">
-                      <span className="dynref-mono">{current.version}</span>{" "}
-                      <span className="dynref-badge dynref-badge--green">Stable</span>
+                      <span className="dynref-mono">{current.version}</span>
                       {current.date && <span className="dynref-vm-date">{current.date}</span>}
+                    </td>
+                    <td className="dynref-vm-kind">
+                      <span className="dynref-badge dynref-badge--green">Stable</span>
                     </td>
                     <PinCells pins={current.pins} />
                   </tr>

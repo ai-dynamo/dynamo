@@ -25,6 +25,10 @@ The backend framework versions included with the current Dynamo release. Backend
 
 <BackendVersionMatrix />
 
+<Accordion title="Backend dependencies by release (back to v0.6.0)">
+  <BackendVersionMatrix mode="all" />
+</Accordion>
+
 ## CUDA & Driver Requirements
 
 Dynamo container images include CUDA toolkit libraries; the host must have a compatible NVIDIA GPU driver.
@@ -32,6 +36,10 @@ Dynamo container images include CUDA toolkit libraries; the host must have a com
 <CudaDriverMatrix />
 
 For extended driver compatibility beyond these minimums (forward compatibility, `cuda-compat` packages, troubleshooting), see the [CUDA Compatibility documentation](https://docs.nvidia.com/deploy/cuda-compatibility/).
+
+<Accordion title="CUDA & driver requirements by release">
+  <CudaDriverMatrix mode="all" />
+</Accordion>
 
 ## Platform Notes
 
@@ -113,18 +121,6 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 
   </Tab>
 </Tabs>
-
-## Version History
-
-Current-release data lives above; the full per-release history is collapsed here.
-
-<Accordion title="Backend dependencies by release (back to v0.6.0)">
-  <BackendVersionMatrix mode="all" />
-</Accordion>
-
-<Accordion title="CUDA & driver requirements by release">
-  <CudaDriverMatrix mode="all" />
-</Accordion>
 
 [vllm-readme]: ../backends/vllm/README.md
 [sglang-readme]: ../backends/sglang/README.md
