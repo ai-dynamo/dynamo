@@ -29,6 +29,17 @@ High-performance deployment with separated prefill and decode workers.
 - `SGLangPrefillWorker`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
 - Communication via NIXL transfer backend (`--disaggregation-transfer-backend nixl`)
 
+### 4. **Deployments with Intel XPU (Optional)** (see [`xpu/`](./xpu/))
+Hardware-specific deployment templates for Intel XPU GPUs using Kubernetes Dynamic Resource Allocation (DRA).
+
+**Available Templates:**
+- `agg_xpu_dra.yaml`: Aggregated deployment with DRA
+- `disagg_xpu_dra.yaml`: Disaggregated deployment with DRA
+- `disagg_planner_xpu_dra.yaml`: Disaggregated + Planner with DRA
+- `disagg_xpu.yaml`: Disaggregated deployment using traditional device plugin (non-DRA)
+
+See the [XPU deployment README](./xpu/README.md) for detailed prerequisites and usage instructions.
+
 ## CRD Structure
 
 All templates use the **DynamoGraphDeployment** CRD:
@@ -88,6 +99,8 @@ Select the deployment pattern that matches your requirements:
 - Use `agg.yaml` for development/testing
 - Use `agg_router.yaml` for production with load balancing
 - Use `disagg.yaml` for maximum performance
+- Use `disagg_planner.yaml` for SLA-optimized performance
+- Use [XPU templates](./xpu/) for Intel XPU clusters with Kubernetes DRA
 
 ### 2. Customize Configuration
 Edit the template to match your environment:
