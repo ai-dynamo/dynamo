@@ -117,18 +117,45 @@ def test_eager_warmup_points_dedupe_and_flag():
     )
 
     grid = [
-        BenchmarkPoint(point_type="decode", batch_size=513, total_kv_read_tokens=513,
-                       expected_capture_size=None),
-        BenchmarkPoint(point_type="decode", batch_size=513, total_kv_read_tokens=2048,
-                       expected_capture_size=None),
-        BenchmarkPoint(point_type="decode", batch_size=512, total_kv_read_tokens=512,
-                       expected_capture_size=512),
-        BenchmarkPoint(point_type="prefill", batch_size=1, total_prefill_tokens=1024,
-                       total_kv_read_tokens=0, expected_capture_size=None),
-        BenchmarkPoint(point_type="prefill", batch_size=2, total_prefill_tokens=1024,
-                       total_kv_read_tokens=4096, expected_capture_size=None),
-        BenchmarkPoint(point_type="prefill", batch_size=1, total_prefill_tokens=256,
-                       total_kv_read_tokens=0, expected_capture_size=256),
+        BenchmarkPoint(
+            point_type="decode",
+            batch_size=513,
+            total_kv_read_tokens=513,
+            expected_capture_size=None,
+        ),
+        BenchmarkPoint(
+            point_type="decode",
+            batch_size=513,
+            total_kv_read_tokens=2048,
+            expected_capture_size=None,
+        ),
+        BenchmarkPoint(
+            point_type="decode",
+            batch_size=512,
+            total_kv_read_tokens=512,
+            expected_capture_size=512,
+        ),
+        BenchmarkPoint(
+            point_type="prefill",
+            batch_size=1,
+            total_prefill_tokens=1024,
+            total_kv_read_tokens=0,
+            expected_capture_size=None,
+        ),
+        BenchmarkPoint(
+            point_type="prefill",
+            batch_size=2,
+            total_prefill_tokens=1024,
+            total_kv_read_tokens=4096,
+            expected_capture_size=None,
+        ),
+        BenchmarkPoint(
+            point_type="prefill",
+            batch_size=1,
+            total_prefill_tokens=256,
+            total_kv_read_tokens=0,
+            expected_capture_size=256,
+        ),
     ]
     stub = SimpleNamespace(_bench_grid=grid)
     replicas = InstrumentedScheduler._bench_eager_warmup_points(stub)

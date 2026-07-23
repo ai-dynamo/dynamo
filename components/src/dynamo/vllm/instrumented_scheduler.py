@@ -3330,9 +3330,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 return
 
             if EAGER_WARMUP_REASON in point.sample_reasons:
-                logger.debug(
-                    "Discarding eager-shape warmup result: %s", point
-                )
+                logger.debug("Discarding eager-shape warmup result: %s", point)
                 self._bench_current_point = None
                 self._bench_current_fpms = []
                 self._bench_point_deadline = 0.0
