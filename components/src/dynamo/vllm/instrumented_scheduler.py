@@ -112,7 +112,6 @@ from dynamo.common.forward_pass_metrics import (
     encode,
 )
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.vllm import gc_policy as _fpm_gc_policy
 from dynamo.vllm.benchmark_points import (
     BENCHMARK_MODES,
     BenchmarkMode,
@@ -1629,6 +1628,8 @@ class InstrumentedScheduler(AsyncScheduler):
             self._bench_active = False
             return
 
+        from dynamo.vllm import gc_policy as _fpm_gc_policy
+
         _fpm_gc_policy.start_gc_policy()
 
         cfg = bench_cfg if isinstance(bench_cfg, dict) else {}
@@ -2908,6 +2909,8 @@ class InstrumentedScheduler(AsyncScheduler):
             self._publisher.resume()
         # Benchmark over: re-enable automatic gen2 collections and reclaim
         # the frozen heap before regular serving resumes.
+        from dynamo.vllm import gc_policy as _fpm_gc_policy
+
         _fpm_gc_policy.stop_gc_policy()
 
     def _bench_abort(self, error: Exception) -> None:

@@ -53,8 +53,6 @@ _stop_event: threading.Event | None = None
 _freeze_thread: threading.Thread | None = None
 _saved_gen2_threshold: int | None = None
 
-WORKER_EXTENSION_CLS = "dynamo.vllm.gc_policy.FpmGcWorkerExtension"
-
 
 def _policy() -> str:
     return os.environ.get("DYN_FPM_GC_POLICY", "").strip().lower()
@@ -165,7 +163,10 @@ class FpmGcWorkerExtension:
         return gc_maintain()
 
 
-# Auto-start in any process that imports this module (worker processes
-# import it while resolving worker_extension_cls; the engine-core process
-# via InstrumentedScheduler). No-op unless DYN_FPM_GC_POLICY is set.
+# Auto-start when a worker process imports this module while resolving
+# worker_extension_cls (args.py injects the class path as a literal for the
+# same reason: importing this module starts the policy in the importing
+# process). The engine-core process instead imports lazily and starts from
+# InstrumentedScheduler._bench_init, so serving without an active benchmark
+# never runs the policy. No-op unless DYN_FPM_GC_POLICY is set.
 start_gc_policy()

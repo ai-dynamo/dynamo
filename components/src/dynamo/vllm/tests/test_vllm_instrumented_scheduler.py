@@ -36,6 +36,7 @@ from dynamo.vllm.benchmark_points import BenchmarkPoints  # noqa: E402
 from dynamo.vllm.instrumented_scheduler import (  # noqa: E402
     BenchmarkConfig,
     BenchmarkPoint,
+    EAGER_WARMUP_REASON,
     InstrumentedScheduler,
     SkippedBenchmarkPoint,
     _BenchPhase,
@@ -1344,8 +1345,13 @@ def test_benchmark_grid_has_no_point_cap():
     InstrumentedScheduler._bench_build_grid(stub)
 
     assert stub._bench_expected_points == 4097
-    assert len(stub._bench_grid) == 4097
-    assert [point.benchmark_id for point in stub._bench_grid] == list(range(1, 4098))
+    real_points = [
+        point
+        for point in stub._bench_grid
+        if EAGER_WARMUP_REASON not in point.sample_reasons
+    ]
+    assert len(real_points) == 4097
+    assert [point.benchmark_id for point in real_points] == list(range(1, 4098))
     assert stub._bench_grid_error is None
 
 
@@ -1370,7 +1376,21 @@ def test_benchmark_grid_assigns_stable_contiguous_ids_and_digest():
 
     InstrumentedScheduler._bench_build_grid(stub)
 
-    assert [point.benchmark_id for point in stub._bench_grid] == [1, 2]
+    real_points = [
+        point
+        for point in stub._bench_grid
+        if EAGER_WARMUP_REASON not in point.sample_reasons
+    ]
+    warmup_points = [
+        point
+        for point in stub._bench_grid
+        if EAGER_WARMUP_REASON in point.sample_reasons
+    ]
+    # Real points own the contiguous 1..N range (native-artifact contract);
+    # discarded eager-warmup replicas take IDs after the real range even
+    # though they execute first.
+    assert [point.benchmark_id for point in real_points] == [1, 2]
+    assert [point.benchmark_id for point in warmup_points] == [3, 4]
     assert len(stub._bench_grid_digest) == 64
 
 
