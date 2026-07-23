@@ -101,6 +101,9 @@ ARG MAX_JOBS={{ context.vllm.max_jobs }}
 ARG FLASHINF_REF={{ context.vllm.flashinf_ref }}
 {% endif %}
 ARG VLLM_OMNI_REF={{ context.vllm.vllm_omni_ref }}
+{% if device == "xpu" -%}
+ARG LMCACHE_REF={{ context.vllm.xpu.lmcache_ref }}
+{% endif %}
 
 {% if device == "cuda" -%}
 # If left blank, then we will fallback to vLLM defaults
