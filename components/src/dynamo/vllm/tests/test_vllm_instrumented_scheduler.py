@@ -34,9 +34,9 @@ from vllm.v1.request import RequestStatus  # noqa: E402
 import dynamo.vllm.instrumented_scheduler as instrumented_scheduler_module  # noqa: E402
 from dynamo.vllm.benchmark_points import BenchmarkPoints  # noqa: E402
 from dynamo.vllm.instrumented_scheduler import (  # noqa: E402
+    EAGER_WARMUP_REASON,
     BenchmarkConfig,
     BenchmarkPoint,
-    EAGER_WARMUP_REASON,
     InstrumentedScheduler,
     SkippedBenchmarkPoint,
     _BenchPhase,
