@@ -13,6 +13,13 @@ if __name__ == "__main__":
     # capture env and hold without importing SGLang or constructing backend state.
     maybe_run_restore_standby_mode()
 
+    # Opt-in (DYN_ENABLE_MEDIA_DECODERS, off by default): install this backend's
+    # media-decoder package(s) before the first lazy decord import at request
+    # time. After the standby check so a snapshot pod never triggers an install.
+    from dynamo.common.utils.media_decoders import maybe_install_media_decoders
+
+    maybe_install_media_decoders("sglang")
+
     from dynamo.sglang.main import main
 
     main()

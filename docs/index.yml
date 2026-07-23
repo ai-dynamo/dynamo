@@ -342,6 +342,8 @@ navigation:
                 path: features/multimodal/multimodal-trtllm.md
               - page: vLLM Multimodal
                 path: features/multimodal/multimodal-vllm.md
+              - page: Additional Media Decoders
+                path: features/multimodal/additional-media-decoders.md
           - section: Diffusion
             slug: diffusion
             path: features/diffusion/README.md
