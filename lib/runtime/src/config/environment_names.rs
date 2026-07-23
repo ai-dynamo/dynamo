@@ -473,11 +473,16 @@ pub mod llm {
         /// Master switch. Truthy enables request trace emission.
         pub const DYN_REQUEST_TRACE: &str = "DYN_REQUEST_TRACE";
 
-        /// Request trace sink selection. Comma-separated values: `file`, `stderr`, `nats`, `otel`.
+        /// Request trace sink selection. Comma-separated values: `file`,
+        /// `stderr`, `nats`, `otel`, `s3`.
         ///
         /// Legacy values map as follows: `jsonl` => `file` with `jsonl` format,
         /// `jsonl_gz` => `file` with `jsonl_gz` format, `stderr` => `stderr`,
         /// `nats` => `nats`, and `otel` => `otel`.
+        ///
+        /// The `s3` sink requires `dynamo-llm` to be built with the
+        /// `request-trace-s3` cargo feature and reads bucket/region/prefix
+        /// from `DYN_REQUEST_TRACE_S3_{BUCKET,REGION,PREFIX}`.
         pub const DYN_REQUEST_TRACE_SINKS: &str = "DYN_REQUEST_TRACE_SINKS";
 
         /// Local output path for request trace file records.
@@ -550,6 +555,30 @@ pub mod llm {
         /// are recorded unredacted; avoid credential-bearing headers.
         pub const DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST: &str =
             "DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST";
+
+        /// S3 bucket for the S3 request-trace sink. Required when
+        /// `DYN_REQUEST_TRACE_SINKS` includes `s3`.
+        pub const DYN_REQUEST_TRACE_S3_BUCKET: &str = "DYN_REQUEST_TRACE_S3_BUCKET";
+
+        /// AWS region for the S3 request-trace sink. When unset the AWS SDK
+        /// default region resolution is used (env, profile, IMDS).
+        pub const DYN_REQUEST_TRACE_S3_REGION: &str = "DYN_REQUEST_TRACE_S3_REGION";
+
+        /// Optional object key prefix for the S3 request-trace sink. When unset
+        /// records land at the bucket root.
+        pub const DYN_REQUEST_TRACE_S3_PREFIX: &str = "DYN_REQUEST_TRACE_S3_PREFIX";
+
+        /// S3 batch roll threshold in uncompressed bytes. When the pending
+        /// batch reaches this size, it is finalized and uploaded. Default
+        /// `67108864` (64 MiB).
+        pub const DYN_REQUEST_TRACE_S3_ROLL_UNCOMPRESSED_BYTES: &str =
+            "DYN_REQUEST_TRACE_S3_ROLL_UNCOMPRESSED_BYTES";
+
+        /// S3 periodic flush interval in milliseconds. Any partial batch is
+        /// finalized and uploaded when this elapses, so low-volume traces
+        /// still land in S3. Default `10000` (10 s).
+        pub const DYN_REQUEST_TRACE_S3_FLUSH_INTERVAL_MS: &str =
+            "DYN_REQUEST_TRACE_S3_FLUSH_INTERVAL_MS";
     }
 }
 

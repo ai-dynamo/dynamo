@@ -40,6 +40,11 @@ nvtx = ["dynamo-runtime/nvtx"]
 # recipes pass this flag explicitly; the dev container's
 # `.devcontainer/post-create.sh` also enables it for local workflows.
 mm-routing = ["dynamo-llm/mm-routing"]
+# Enable the native S3 destination for the request-trace sink. Pulls in
+# aws-sdk-s3 + aws-config so the default wheel stays lean; production wheel
+# builds enable this flag in container/templates/wheel_builder.Dockerfile so
+# `DYN_REQUEST_TRACE_SINKS=s3` works on shipped artifacts.
+request-trace-s3 = ["dynamo-llm/request-trace-s3"]
 
 [dependencies]
 # AIC perf model: pure-Rust hot-path latency engine. Pinned to aiconfigurator

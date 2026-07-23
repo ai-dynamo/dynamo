@@ -35,6 +35,8 @@ ckf-diagnostics = []
 kv-router-stress = ["dep:clap", "dep:indicatif", "bench"]
 mm-routing = ["dep:llm-multimodal", "dep:llm-tokenizer"]
 request-trace-bench = []
+# S3 destination for the request-trace sink. Pulls in aws-sdk-s3 + aws-config.
+request-trace-s3 = ["dep:aws-sdk-s3", "dep:aws-config"]
 
 [[bench]]
 name = "tokenizer_simple"
@@ -141,6 +143,10 @@ nix = { version = "0.26", optional = true }
 
 # media (zlib compression for NIXL metadata)
 flate2 = { version = "1" }
+
+# request-trace-s3 (optional S3 sink)
+aws-sdk-s3 = { version = "1.120.0", optional = true }
+aws-config = { version = "1.8.11", optional = true }
 
 # block_manager_bench
 clap = { version = "4.5.49", features = ["derive"], optional = true }
