@@ -485,6 +485,9 @@ runs:
             Smoke:
               componentType: worker
               replicas: 0
+              extraPodSpec:
+                mainContainer:
+                  image: registry.example/runtime:1.1.0
         EOF
         }
 
@@ -502,6 +505,11 @@ runs:
           - name: Smoke
             type: worker
             replicas: 0
+            podTemplate:
+              spec:
+                containers:
+                - name: main
+                  image: registry.example/runtime:1.1.0
         EOF
         }
 

@@ -41,6 +41,40 @@ The Dynamo Platform Helm chart deploys the complete Dynamo Kubernetes Platform i
 
 ## 🔄 Upgrading Notes
 
+### Runtime version override for custom runtime images (v1.4.0+)
+
+Each `DynamoGraphDeployment` (DGD) or standalone `DynamoComponentDeployment` (DCD)
+component now resolves its Dynamo runtime compatibility version from its main container image.
+Use a semantic-version image tag such as `:1.4.0`, or set
+`runtimeVersionOverride` to the compatible Dynamo runtime version when the image has a custom,
+SHA, or other non-semantic-version tag. The override takes precedence over the image-derived
+version, so set it when a semantic-version tag does not identify the Dynamo runtime version.
+
+```yaml
+components:
+  - name: worker
+    runtimeVersionOverride: 1.4.0
+    podTemplate:
+      spec:
+        containers:
+          - name: main
+            image: registry.example/my-runtime:build-20260723
+```
+
+Admission now requires every component's main-container image. In `v1beta1`, set
+`spec.components[*].podTemplate.spec.containers[name=main].image` for a DGD, or
+`spec.podTemplate.spec.containers[name=main].image` for a standalone DCD. In `v1alpha1`, set
+`spec.components[*].extraPodSpec.mainContainer.image` for a DGD, or
+`spec.extraPodSpec.mainContainer.image` for a standalone DCD. These fields were not previously
+required by Dynamo admission, but were effectively required: Kubernetes rejects the rendered Pod
+specification when its main container has no image.
+
+After upgrading the CRDs and operator, admission denies a new DGD, or an update to a pre-existing
+DGD, when a component's main-image tag is not a semantic version and `runtimeVersionOverride` is
+unset. This includes custom and SHA-tagged images. Set `runtimeVersionOverride` to the Dynamo
+runtime compatibility version for that image before creating or updating the DGD. Existing resources
+are not changed or revalidated solely by the upgrade.
+
 ### Bundled NATS is now disabled by default
 
 The bundled NATS subchart is no longer installed by default because Dynamo's default request and

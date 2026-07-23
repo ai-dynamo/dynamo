@@ -109,11 +109,12 @@ generated component, so `spec.runtimeVersionOverride` also covers a worker image
 replaced through `overrides.dgd`.
 
 With a profiler based on Dynamo 1.3.0 or earlier, the DGDR-level field is
-ignored. However, `overrides.dgd` is a raw embedded resource and preserves a
-per-component `runtimeVersionOverride`. Use the legacy `v1alpha1`
-service-shaped DGD override understood by those profilers, and set the field on
-the affected service rather than relying on the DGDR-level
-`spec.runtimeVersionOverride`.
+ignored. Those profilers also discard the embedded override's `apiVersion` and
+`kind`, then directly merge the remaining dictionary into a generated
+`v1alpha1` DGD. Raw storage preserves the override fields but does not convert
+between DGD schemas. Use a `v1alpha1`-shaped override under `spec.services` and
+set `runtimeVersionOverride` on the affected service. A `v1beta1`
+`spec.components` override is not translated into the generated service.
 
 ### Planner
 
