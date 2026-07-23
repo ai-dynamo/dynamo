@@ -233,6 +233,39 @@ jobs:
           yq -i '(.. | select(has("path")).path) |= sub("^digest/", "../digest/")' docs-checkout/fern/versions/dev.yml
           yq -i '(.. | select(has("path")).path) |= sub("^([a-zA-Z])", "../pages-dev/${1}")' docs-checkout/fern/versions/dev.yml
 
+      - name: Propagate shared Reference nav to released versions
+        run: |
+          # The Reference tab's General variant (Compatibility, Release
+          # Artifacts, Releases, Known Issues, Deprecations, Model EA Builds,
+          # Glossary) is SHARED across versions: release snapshots keep its nav
+          # paths on ../pages-dev/ so every version dropdown renders the
+          # always-current reference. When a page is added to the shared
+          # reference on main (e.g. a new release-notes page), copy the
+          # variant's nav block from dev.yml into each released version's yml
+          # so the new page appears in every dropdown, not just dev. Version
+          # snapshots cut before the reference rework have no such variant and
+          # are left untouched (the yq selection matches nothing).
+          yq '[.navigation[] | select(.tab == "reference") | .variants[] | select(.title == "General")][0]' \
+            docs-checkout/fern/versions/dev.yml > /tmp/reference_general_variant.yml
+
+          if [ "$(yq 'length' /tmp/reference_general_variant.yml)" = "0" ] || \
+             [ "$(head -c4 /tmp/reference_general_variant.yml)" = "null" ]; then
+            echo "No shared Reference General variant in dev.yml; skipping propagation"
+          else
+            for vfile in docs-checkout/fern/versions/v*.yml; do
+              [ -e "$vfile" ] || continue
+              # Only rewrite files that actually carry the shared variant —
+              # yq -i normalizes whitespace, so touching pre-rework snapshots
+              # (which have no reference General variant) is pure churn.
+              if [ "$(yq '[.navigation[] | select(.tab == "reference") | .variants[] | select(.title == "General")] | length' "$vfile")" != "0" ]; then
+                yq -i '(.navigation[] | select(.tab == "reference") | .variants[] | select(.title == "General")) = load("/tmp/reference_general_variant.yml")' "$vfile"
+                echo "Synced shared Reference nav into $vfile"
+              else
+                echo "Skipped (no shared Reference variant): $vfile"
+              fi
+            done
+          fi
+
       - name: Convert GitHub callouts to Fern format
         run: |
           echo "Converting GitHub-style callouts to Fern format in pages/..."
@@ -439,6 +472,18 @@ jobs:
           # Copy current pages-dev/ to pages-vX.Y.Z/
           cp -r fern/pages-dev "fern/pages-$TAG"
 
+          # The Reference tab's General variant is shared (always-current)
+          # across versions: its nav paths stay on ../pages-dev/ (see the
+          # version-config step), so drop exactly the files that variant
+          # references from the snapshot rather than freezing stale copies.
+          # Everything else under reference/ (observability pages, config
+          # references) belongs to versioned tabs and stays in the snapshot.
+          yq '.navigation[] | select(.tab == "reference") | .variants[] | select(.title == "General") | .. | select(has("path")) | .path' \
+            fern/versions/dev.yml | sed 's|^\.\./pages-dev/||' | while read -r relpath; do
+              [ -n "$relpath" ] && rm -f "fern/pages-$TAG/$relpath"
+            done
+          find "fern/pages-$TAG/reference" -type d -empty -delete 2>/dev/null || true
+
           echo "Created fern/pages-$TAG/"
           ls -la "fern/pages-$TAG/" | head -20
 
@@ -491,6 +536,14 @@ jobs:
 
           # Update all page paths from ../pages-dev/ to ../pages-vX.Y.Z/
           sed -i "s|path: \.\./pages-dev/|path: ../pages-$TAG/|g" "$VERSION_FILE"
+
+          # Revert the Reference tab's General variant to the shared source:
+          # it is always-current across versions (release metadata is
+          # cumulative — each page carries per-release sections), so its pages
+          # render from pages-dev in every version. The Kubernetes API and
+          # Components variants stay on the frozen snapshot (CRD fields and
+          # config flags are genuinely per-version).
+          yq -i "(.navigation[] | select(.tab == \"reference\") | .variants[] | select(.title == \"General\") | .. | select(has(\"path\")).path) |= sub(\"\.\./pages-$TAG/\", \"../pages-dev/\")" "$VERSION_FILE"
 
           # Keep cross-navigation links within the selected documentation version.
           sed -i "s|href: /dynamo/dev/|href: /dynamo/$TAG/|g" "$VERSION_FILE"
