@@ -50,7 +50,9 @@ fail or defer that attempt until reconciliation sees a fresh container.
 ## CRI-O and OpenShift
 
 For CRI-O nodes set `runtime.type=crio`. Only set `runtime.socketPath` if the CRI
-socket is not the default for that type (see `values.yaml`). On OpenShift, set
+socket is not the default for that type (see `values.yaml`). Set
+`runtime.storagePath` when the runtime's per-container storage root is also
+non-standard, for example on MicroK8s containerd nodes. On OpenShift, set
 `openshift.enabled=true` so the chart emits the extra RBAC and pod annotations
 the agent needs. Example:
 
@@ -112,6 +114,7 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `daemonset.imagePullSecrets` | Image pull secrets for the agent | `[{name: ngc-secret}]` |
 | `runtime.type` | CRI backend: `containerd` or `crio` | `containerd` |
 | `runtime.socketPath` | CRI socket (empty = default for `runtime.type`) | `""` |
+| `runtime.storagePath` | CRI storage root (empty = default for `runtime.type`) | `""` |
 | `openshift.enabled` | OpenShift RBAC / SCC-related chart pieces | `false` |
 
 Reserved `s3` and `oci` values remain chart-owned placeholders for future
