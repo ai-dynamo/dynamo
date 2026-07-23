@@ -815,7 +815,12 @@ impl ExtProcError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::time::Duration;
+
+    use tokio::sync::Notify;
 
     use crate::picker::{PickError, PickResult};
     use crate::proto::envoy::config::core::v3::{HeaderMap, HeaderValue};
@@ -824,30 +829,77 @@ mod tests {
         external_processor_client::ExternalProcessorClient, processing_request::Request as ProcReq,
     };
 
+    /// RAII probe that records, on drop, that a `pick` future was torn down. A
+    /// blocked `pick` that never resolves only drops when the server cancels it,
+    /// so this observes the disconnect-cancellation path.
+    struct CancelProbe(Arc<AtomicBool>);
+    impl Drop for CancelProbe {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Mock `EndpointPicker` with per-callback counters. Extended beyond the
+    /// simple 3-counter form to support the reservation-lifecycle tests:
+    ///
+    /// * `mint_reservations` makes `pick` return a fresh, distinct
+    ///   `reservation_id` per call and records the booking ids handed back to the
+    ///   lifecycle callbacks, so a test can prove each stream frees its own
+    ///   booking (keyed by the EPP-minted id, not `x-request-id`).
+    /// * `block` makes `pick` park until cancelled, so a test can close the
+    ///   stream while a pick is in flight and observe the server cancel it.
     struct Tracker {
         add: AtomicU32,
         prefill_complete: AtomicU32,
         free: AtomicU32,
         disagg: bool,
+        /// When true, `pick` mints `res-{n}` reservation ids.
+        mint_reservations: bool,
+        next_reservation: AtomicU32,
+        /// Booking ids passed to `on_request_complete` / `on_prefill_complete`.
+        freed: Mutex<Vec<String>>,
+        prefilled: Mutex<Vec<String>>,
+        /// When set, `pick` waits on this (never-notified) `Notify`, so it only
+        /// resolves by being dropped (cancelled).
+        block: Option<Arc<Notify>>,
+        /// Notified once `pick` has entered its blocking wait.
+        pick_started: Arc<Notify>,
+        /// Set when a blocked `pick` future is dropped (cancelled).
+        pick_cancelled: Arc<AtomicBool>,
     }
 
-    // Tracker is a mock EndpointPicker with 3 atomic counters, one per bookkeeping call. Each trait method just increments its counter.
     impl Tracker {
-        fn agg() -> Self {
+        fn new(disagg: bool) -> Self {
             Self {
                 add: 0.into(),
                 prefill_complete: 0.into(),
                 free: 0.into(),
-                disagg: false,
+                disagg,
+                mint_reservations: false,
+                next_reservation: 0.into(),
+                freed: Mutex::new(Vec::new()),
+                prefilled: Mutex::new(Vec::new()),
+                block: None,
+                pick_started: Arc::new(Notify::new()),
+                pick_cancelled: Arc::new(AtomicBool::new(false)),
             }
         }
+        fn agg() -> Self {
+            Self::new(false)
+        }
         fn disagg() -> Self {
-            Self {
-                add: 0.into(),
-                prefill_complete: 0.into(),
-                free: 0.into(),
-                disagg: true,
-            }
+            Self::new(true)
+        }
+        /// Mint a distinct `reservation_id` per `pick`, so bookings are keyed by
+        /// the picker's id rather than the request's `x-request-id`.
+        fn minting(mut self) -> Self {
+            self.mint_reservations = true;
+            self
+        }
+        /// Park `pick` on `block` until its future is dropped (cancelled).
+        fn blocking(mut self, block: Arc<Notify>) -> Self {
+            self.block = Some(block);
+            self
         }
     }
 
@@ -855,22 +907,36 @@ mod tests {
     impl EndpointPicker for Tracker {
         async fn pick(&self, _: &RequestInfo, _: &[Endpoint]) -> Result<PickResult, PickError> {
             self.add.fetch_add(1, Ordering::SeqCst);
+            if let Some(block) = &self.block {
+                // Signal that the pick is in flight, then park until cancelled.
+                // The probe records the cancellation when this future is dropped.
+                let _probe = CancelProbe(self.pick_cancelled.clone());
+                self.pick_started.notify_one();
+                block.notified().await;
+            }
             let mode = if self.disagg {
                 "disaggregated"
             } else {
                 "aggregated"
             };
+            let reservation_id = self.mint_reservations.then(|| {
+                let n = self.next_reservation.fetch_add(1, Ordering::SeqCst);
+                format!("res-{n}")
+            });
             Ok(PickResult {
                 endpoint: "1.2.3.4:80".into(),
                 headers: vec![("x-dynamo-routing-mode".into(), mode.into())],
+                reservation_id,
                 ..Default::default()
             })
         }
-        async fn on_prefill_complete(&self, _: &str) {
+        async fn on_prefill_complete(&self, booking_id: &str) {
             self.prefill_complete.fetch_add(1, Ordering::SeqCst);
+            self.prefilled.lock().unwrap().push(booking_id.to_string());
         }
-        async fn on_request_complete(&self, _: &str) {
+        async fn on_request_complete(&self, booking_id: &str) {
             self.free.fetch_add(1, Ordering::SeqCst);
+            self.freed.lock().unwrap().push(booking_id.to_string());
         }
     }
 
@@ -895,13 +961,19 @@ mod tests {
     }
 
     fn stream() -> Vec<ProcessingRequest> {
+        stream_with_request_id("r1")
+    }
+
+    /// A full request/response stream carrying an explicit `x-request-id`, so
+    /// tests can drive two streams that share the same client-controlled id.
+    fn stream_with_request_id(request_id: &str) -> Vec<ProcessingRequest> {
         vec![
             ProcessingRequest {
                 request: Some(ProcReq::RequestHeaders(HttpHeaders {
                     headers: Some(HeaderMap {
                         headers: vec![HeaderValue {
                             key: "x-request-id".into(),
-                            value: "r1".into(),
+                            value: request_id.into(),
                             raw_value: vec![],
                         }],
                     }),
@@ -933,6 +1005,34 @@ mod tests {
             ProcessingRequest {
                 request: Some(ProcReq::ResponseBody(HttpBody {
                     body: b"}".to_vec(),
+                    end_of_stream: true,
+                })),
+                ..Default::default()
+            },
+        ]
+    }
+
+    /// Just the request headers + end-of-stream body, with no response phase, so
+    /// the picker's `pick` is invoked and left in flight (used to drive the
+    /// disconnect-cancellation path).
+    fn request_only_stream(request_id: &str) -> Vec<ProcessingRequest> {
+        vec![
+            ProcessingRequest {
+                request: Some(ProcReq::RequestHeaders(HttpHeaders {
+                    headers: Some(HeaderMap {
+                        headers: vec![HeaderValue {
+                            key: "x-request-id".into(),
+                            value: request_id.into(),
+                            raw_value: vec![],
+                        }],
+                    }),
+                    end_of_stream: false,
+                })),
+                ..Default::default()
+            },
+            ProcessingRequest {
+                request: Some(ProcReq::RequestBody(HttpBody {
+                    body: br#"{"model":"m","messages":[]}"#.to_vec(),
                     end_of_stream: true,
                 })),
                 ..Default::default()
@@ -1024,5 +1124,97 @@ mod tests {
         assert_eq!(t.add.load(Ordering::SeqCst), 1);
         assert_eq!(t.prefill_complete.load(Ordering::SeqCst), 0);
         assert_eq!(t.free.load(Ordering::SeqCst), 0);
+    }
+
+    /// Item 4 (queued disconnect / cancellation): when the ext-proc stream closes
+    /// while a `pick` is still in flight, the server's biased `select!` on
+    /// `tx.closed()` must drop the pick future (cancelling it) instead of
+    /// blocking on it, and it must not run the completion callback for a booking
+    /// that was never adopted (no leak).
+    #[tokio::test]
+    async fn test_queued_pick_is_cancelled_when_stream_closes() {
+        // `block` is never notified, so `pick` only resolves by being dropped.
+        let block = Arc::new(Notify::new());
+        let t = Arc::new(Tracker::agg().blocking(block));
+        let mut c = connect(t.clone()).await;
+
+        // Send headers + body(eos); the request stream then half-closes, and the
+        // server enters the pick and parks awaiting the (blocked) result.
+        let response = c
+            .process(tokio_stream::iter(request_only_stream("r1")))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // Wait until the pick is actually in flight before disconnecting.
+        tokio::time::timeout(Duration::from_secs(5), t.pick_started.notified())
+            .await
+            .expect("pick should start");
+
+        // Client goes away: dropping the response stream and the client tears down
+        // the gRPC call, which the biased `select!` observes as `tx.closed()`.
+        drop(response);
+        drop(c);
+
+        // The server must promptly cancel the in-flight pick (drop its future).
+        let cancelled = tokio::time::timeout(Duration::from_secs(5), async {
+            while !t.pick_cancelled.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        assert!(
+            cancelled.is_ok(),
+            "server must cancel the in-flight pick on stream close (no hang)"
+        );
+
+        // No booking was adopted, so no lifecycle callback leaks.
+        assert_eq!(
+            t.free.load(Ordering::SeqCst),
+            0,
+            "a cancelled pick must not trigger on_request_complete"
+        );
+        assert_eq!(
+            t.prefill_complete.load(Ordering::SeqCst),
+            0,
+            "a cancelled pick must not trigger on_prefill_complete"
+        );
+    }
+
+    /// Item 6 (duplicate `x-request-id` isolation): two concurrent streams that
+    /// reuse the same client-controlled `x-request-id` must each free only their
+    /// own booking. Bookings are keyed by the EPP-minted `reservation_id` carried
+    /// on the per-stream context, so the picker sees two distinct booking ids
+    /// freed — never the shared `x-request-id`, and never one stream freeing the
+    /// other's reservation.
+    #[tokio::test]
+    async fn test_duplicate_request_id_streams_free_their_own_bookings() {
+        let t = Arc::new(Tracker::agg().minting());
+
+        // Run both streams concurrently, both carrying x-request-id "dup".
+        let (mut c1, mut c2) = tokio::join!(connect(t.clone()), connect(t.clone()));
+        tokio::join!(
+            run_stream(&mut c1, stream_with_request_id("dup")),
+            run_stream(&mut c2, stream_with_request_id("dup")),
+        );
+
+        let freed = t.freed.lock().unwrap().clone();
+        assert_eq!(freed.len(), 2, "each stream completes and frees once");
+        assert!(
+            freed.iter().all(|id| id != "dup"),
+            "bookings are freed by the minted reservation_id, not the shared x-request-id"
+        );
+        let unique: HashSet<&String> = freed.iter().collect();
+        assert_eq!(
+            unique.len(),
+            2,
+            "each stream frees its own distinct booking (no cross-free)"
+        );
+
+        // Prefill completion is likewise keyed per-stream: two distinct ids.
+        let prefilled = t.prefilled.lock().unwrap().clone();
+        assert_eq!(prefilled.len(), 2);
+        let unique_prefilled: HashSet<&String> = prefilled.iter().collect();
+        assert_eq!(unique_prefilled, unique);
     }
 }
