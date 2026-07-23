@@ -15,14 +15,19 @@ pub mod manager;
 pub mod tcp;
 
 use crate::SystemHealth;
-use std::sync::{Arc, OnceLock};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{Arc, OnceLock},
+    task::{Context as TaskContext, Poll},
+};
 
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
 use codec::{TwoPartCodec, TwoPartMessage, TwoPartMessageType};
 use derive_builder::Builder;
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 // io::Cursor, TryStreamExt
 use super::{AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, ResponseStream};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -172,17 +177,6 @@ pub enum ControlMessage {
     Stop,
     Kill,
     Sentinel,
-}
-
-/// This is the first message in a `ResponseStream`. This is not a message that gets process
-/// by the general pipeline, but is a control message that is awaited before the
-/// [`AsyncEngine::generate`] method is allowed to return.
-///
-/// If an error is present, the [`AsyncEngine::generate`] method will return the error instead
-/// of returning the `ResponseStream`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ResponseStreamPrologue {
-    error: Option<String>,
 }
 
 pub type StreamProvider<T> = tokio::sync::oneshot::Receiver<Result<T, String>>;
@@ -349,60 +343,224 @@ mod registered_stream_tests {
 //     }
 // }
 
-// this probably needs to be come a ResponseStreamSender
-// since the prologue in this scenario sender telling the receiver
-// that all is good and it's ready to send
-//
-// in the RequestStreamSender, the prologue would be coming from the
-// receiver, so the sender would have to await the prologue which if
-// was not an error, would indicate the RequestStreamReceiver is read
-// to receive data.
+enum StreamSenderInner {
+    Dedicated(tokio::sync::mpsc::Sender<TwoPartMessage>),
+    Multiplexed(tcp::mux::client::MuxResponseStreamSender),
+}
+
 pub struct StreamSender {
-    tx: tokio::sync::mpsc::Sender<TwoPartMessage>,
-    prologue: Option<ResponseStreamPrologue>,
+    inner: StreamSenderInner,
 }
 
 impl StreamSender {
+    pub(crate) fn dedicated(tx: tokio::sync::mpsc::Sender<TwoPartMessage>) -> Self {
+        Self {
+            inner: StreamSenderInner::Dedicated(tx),
+        }
+    }
+
+    pub(crate) fn multiplexed(sender: tcp::mux::client::MuxResponseStreamSender) -> Self {
+        Self {
+            inner: StreamSenderInner::Multiplexed(sender),
+        }
+    }
+
     pub async fn send(&self, data: Bytes) -> Result<()> {
-        Ok(self.tx.send(TwoPartMessage::from_data(data)).await?)
+        match &self.inner {
+            StreamSenderInner::Dedicated(tx) => {
+                Ok(tx.send(TwoPartMessage::from_data(data)).await?)
+            }
+            StreamSenderInner::Multiplexed(sender) => sender.send_data(data).await,
+        }
     }
 
     pub async fn send_control(&self, control: ControlMessage) -> Result<()> {
-        let bytes = serde_json::to_vec(&control)?;
-        Ok(self
-            .tx
-            .send(TwoPartMessage::from_header(bytes.into()))
-            .await?)
+        match &self.inner {
+            StreamSenderInner::Dedicated(tx) => {
+                let bytes = serde_json::to_vec(&control)?;
+                Ok(tx.send(TwoPartMessage::from_header(bytes.into())).await?)
+            }
+            StreamSenderInner::Multiplexed(_) => {
+                anyhow::bail!("generic control messages are not valid on a mux response sender")
+            }
+        }
     }
 
-    #[allow(clippy::needless_update)]
     pub async fn send_prologue(&mut self, error: Option<String>) -> Result<(), String> {
-        // leaving the original logic in place for now
-        // error overrides the dissolved prologue, but the only field on `ResponseStreamPrologue` is `error`
-        // so the second argument can never be used, and the value of error passed by the caller would always be used
-        if let Some(_prologue) = self.prologue.take() {
-            // let prologue = ResponseStreamPrologue { error, ..prologue };
-            let prologue = ResponseStreamPrologue { error };
-            let header_bytes: Bytes = match serde_json::to_vec(&prologue) {
-                Ok(b) => b.into(),
-                Err(err) => {
-                    tracing::error!(%err, "send_prologue: ResponseStreamPrologue did not serialize to a JSON array");
-                    return Err("Invalid prologue".to_string());
-                }
-            };
-            self.tx
-                .send(TwoPartMessage::from_header(header_bytes))
-                .await
-                .map_err(|e| e.to_string())?;
-        } else {
-            panic!("Prologue already sent; or not set; logic error");
+        match &mut self.inner {
+            StreamSenderInner::Dedicated(_) => {
+                Err("prologues are not valid on a dedicated request sender".to_string())
+            }
+            StreamSenderInner::Multiplexed(sender) => sender.send_prologue(error).await,
         }
-        Ok(())
+    }
+
+    /// Finish one logical response stream without closing a shared physical
+    /// connection. Dedicated request-stream senders retain their existing
+    /// drop-driven lifecycle and therefore have no explicit finish action.
+    pub async fn finish(self) -> Result<()> {
+        match self.inner {
+            StreamSenderInner::Dedicated(_) => Ok(()),
+            StreamSenderInner::Multiplexed(sender) => sender.finish().await,
+        }
     }
 }
 
+pub(crate) struct StreamRxItem {
+    bytes: Bytes,
+    credit_bytes: usize,
+}
+
+impl StreamRxItem {
+    pub(crate) fn dedicated(bytes: Bytes) -> Self {
+        Self {
+            bytes,
+            credit_bytes: 0,
+        }
+    }
+
+    pub(crate) fn multiplexed(bytes: Bytes, credit_bytes: usize) -> Self {
+        Self {
+            bytes,
+            credit_bytes,
+        }
+    }
+}
+
+impl AsRef<[u8]> for StreamRxItem {
+    fn as_ref(&self) -> &[u8] {
+        self.bytes.as_ref()
+    }
+}
+
+pub(crate) struct StreamReceiverHooks {
+    pub context: Arc<dyn AsyncEngineContext>,
+    pub window_update_threshold: usize,
+    pub on_window_update: Box<dyn Fn(usize) + Send + Sync>,
+    pub on_close: Box<dyn Fn(ControlMessage) + Send + Sync>,
+}
+
 pub struct StreamReceiver {
-    rx: tokio::sync::mpsc::Receiver<Bytes>,
+    rx: tokio::sync::mpsc::Receiver<StreamRxItem>,
+    hooks: Option<StreamReceiverHooks>,
+    stop_wait: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
+    kill_wait: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
+    consumed_since_update: usize,
+    stop_sent: bool,
+    closed: bool,
+}
+
+impl StreamReceiver {
+    pub(crate) fn dedicated(rx: tokio::sync::mpsc::Receiver<StreamRxItem>) -> Self {
+        Self {
+            rx,
+            hooks: None,
+            stop_wait: None,
+            kill_wait: None,
+            consumed_since_update: 0,
+            stop_sent: false,
+            closed: false,
+        }
+    }
+
+    pub(crate) fn multiplexed(
+        rx: tokio::sync::mpsc::Receiver<StreamRxItem>,
+        hooks: StreamReceiverHooks,
+    ) -> Self {
+        let stop_context = hooks.context.clone();
+        let kill_context = hooks.context.clone();
+        Self {
+            rx,
+            hooks: Some(hooks),
+            stop_wait: Some(Box::pin(async move { stop_context.stopped().await })),
+            kill_wait: Some(Box::pin(async move { kill_context.killed().await })),
+            consumed_since_update: 0,
+            stop_sent: false,
+            closed: false,
+        }
+    }
+
+    pub async fn recv(&mut self) -> Option<Bytes> {
+        futures::future::poll_fn(|cx| Pin::new(&mut *self).poll_next(cx)).await
+    }
+}
+
+impl Stream for StreamReceiver {
+    type Item = Bytes;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        if self.closed {
+            return Poll::Ready(None);
+        }
+        let killed = self
+            .kill_wait
+            .as_mut()
+            .is_some_and(|wait| wait.as_mut().poll(cx).is_ready());
+        if killed {
+            if let Some(hooks) = self.hooks.as_ref() {
+                (hooks.on_close)(ControlMessage::Kill);
+            }
+            self.closed = true;
+            return Poll::Ready(None);
+        }
+
+        let stopped = !self.stop_sent
+            && self
+                .stop_wait
+                .as_mut()
+                .is_some_and(|wait| wait.as_mut().poll(cx).is_ready());
+        if stopped {
+            if let Some(hooks) = self.hooks.as_ref() {
+                (hooks.on_close)(ControlMessage::Stop);
+            }
+            self.stop_sent = true;
+        }
+
+        match Pin::new(&mut self.rx).poll_recv(cx) {
+            Poll::Ready(Some(item)) => {
+                let threshold = self
+                    .hooks
+                    .as_ref()
+                    .map(|hooks| hooks.window_update_threshold);
+                if let Some(threshold) = threshold {
+                    self.consumed_since_update =
+                        self.consumed_since_update.saturating_add(item.credit_bytes);
+                    if self.consumed_since_update >= threshold {
+                        if let Some(hooks) = self.hooks.as_ref() {
+                            (hooks.on_window_update)(self.consumed_since_update);
+                        }
+                        self.consumed_since_update = 0;
+                    }
+                }
+                Poll::Ready(Some(item.bytes))
+            }
+            Poll::Ready(None) => {
+                self.closed = true;
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl Drop for StreamReceiver {
+    fn drop(&mut self) {
+        if let Some(hooks) = self.hooks.as_ref() {
+            let mut credits = self.consumed_since_update;
+            while let Ok(item) = self.rx.try_recv() {
+                credits = credits.saturating_add(item.credit_bytes);
+            }
+            if credits > 0 {
+                (hooks.on_window_update)(credits);
+            }
+        }
+        if !self.closed
+            && let Some(hooks) = self.hooks.as_ref()
+        {
+            (hooks.on_close)(ControlMessage::Kill);
+            self.closed = true;
+        }
+    }
 }
 
 /// Connection Info is encoded as JSON and then again serialized has part of the Transport
@@ -732,6 +890,7 @@ where
 pub struct Ingress<Req: PipelineIO, Resp: PipelineIO, Adapter = SerdeIngressPayloadAdapter> {
     segment: OnceLock<Arc<SegmentSource<Req, Resp>>>,
     metrics: OnceLock<Arc<WorkHandlerMetrics>>,
+    response_mux_client: OnceLock<Arc<tcp::mux::client::ResponseMuxClientPool>>,
     /// Endpoint-specific notifier for health check timer resets
     endpoint_health_check_notifier: OnceLock<Arc<tokio::sync::Notify>>,
     payload_adapter: Arc<Adapter>,
@@ -769,6 +928,7 @@ where
         Arc::new(Self {
             segment: OnceLock::new(),
             metrics: OnceLock::new(),
+            response_mux_client: OnceLock::new(),
             endpoint_health_check_notifier: OnceLock::new(),
             payload_adapter: Arc::new(payload_adapter),
         })
@@ -841,6 +1001,13 @@ pub trait PushWorkHandler: Send + Sync {
         endpoint: &crate::component::Endpoint,
         metrics_labels: Option<&[(&str, &str)]>,
     ) -> Result<()>;
+
+    fn set_response_mux_client(
+        &self,
+        _client: Arc<tcp::mux::client::ResponseMuxClientPool>,
+    ) -> Result<()> {
+        Ok(())
+    }
 
     /// Set the endpoint-specific notifier for health check timer resets
     fn set_endpoint_health_check_notifier(

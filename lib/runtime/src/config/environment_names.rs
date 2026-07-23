@@ -633,6 +633,21 @@ pub mod tcp_response_stream {
     /// Host/interface for the TCP response stream server.
     /// If unset, the server auto-detects a routable local IP.
     pub const DYN_TCP_RESPONSE_STREAM_HOST: &str = "DYN_TCP_RESPONSE_STREAM_HOST";
+
+    /// Maximum time response data may wait for cross-stream batching.
+    pub const DYN_TCP_RESPONSE_BATCH_INTERVAL_MS: &str = "DYN_TCP_RESPONSE_BATCH_INTERVAL_MS";
+
+    /// Maximum encoded bytes in one response batch.
+    pub const DYN_TCP_RESPONSE_BATCH_MAX_BYTES: &str = "DYN_TCP_RESPONSE_BATCH_MAX_BYTES";
+
+    /// Maximum logical frames in one response batch.
+    pub const DYN_TCP_RESPONSE_BATCH_MAX_FRAMES: &str = "DYN_TCP_RESPONSE_BATCH_MAX_FRAMES";
+
+    /// Per-stream response flow-control window in bytes.
+    pub const DYN_TCP_RESPONSE_STREAM_WINDOW_BYTES: &str = "DYN_TCP_RESPONSE_STREAM_WINDOW_BYTES";
+
+    /// Enables diagnostic TCP_INFO data-segment accounting for response sockets.
+    pub const DYN_TCP_RESPONSE_PACKET_METRICS: &str = "DYN_TCP_RESPONSE_PACKET_METRICS";
 }
 
 /// Event Plane transport environment variables
@@ -882,6 +897,11 @@ mod tests {
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,
+            tcp_response_stream::DYN_TCP_RESPONSE_BATCH_INTERVAL_MS,
+            tcp_response_stream::DYN_TCP_RESPONSE_BATCH_MAX_BYTES,
+            tcp_response_stream::DYN_TCP_RESPONSE_BATCH_MAX_FRAMES,
+            tcp_response_stream::DYN_TCP_RESPONSE_STREAM_WINDOW_BYTES,
+            tcp_response_stream::DYN_TCP_RESPONSE_PACKET_METRICS,
             // Event Plane
             event_plane::DYN_EVENT_PLANE,
             event_plane::DYN_EVENT_PLANE_CODEC,
