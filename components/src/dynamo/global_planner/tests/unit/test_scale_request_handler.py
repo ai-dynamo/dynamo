@@ -49,7 +49,7 @@ async def test_handler_authorization_success(mock_runtime):
 
     # Mock KubernetesConnector
     with patch(
-        "dynamo.global_planner.capacity_manager.KubernetesConnector"
+        "dynamo.global_planner.kubernetes_capacity_manager.KubernetesConnector"
     ) as mock_connector_cls:
         mock_connector = AsyncMock()
         mock_connector_cls.return_value = mock_connector
@@ -142,7 +142,7 @@ async def test_handler_multiple_dgds(mock_runtime):
     )
 
     with patch(
-        "dynamo.global_planner.capacity_manager.KubernetesConnector"
+        "dynamo.global_planner.kubernetes_capacity_manager.KubernetesConnector"
     ) as mock_connector_cls:
         mock_connector = AsyncMock()
         mock_connector_cls.return_value = mock_connector
@@ -184,7 +184,7 @@ async def test_handler_error_handling(mock_runtime):
     )
 
     with patch(
-        "dynamo.global_planner.capacity_manager.KubernetesConnector"
+        "dynamo.global_planner.kubernetes_capacity_manager.KubernetesConnector"
     ) as mock_connector_cls:
         mock_connector = AsyncMock()
         mock_connector_cls.return_value = mock_connector
@@ -216,9 +216,11 @@ async def test_populate_connectors_explicit_mode(mock_runtime):
     )
 
     with (
-        patch("dynamo.global_planner.capacity_manager.KubernetesAPI") as mock_kube_cls,
         patch(
-            "dynamo.global_planner.capacity_manager.KubernetesConnector"
+            "dynamo.global_planner.kubernetes_capacity_manager.KubernetesAPI"
+        ) as mock_kube_cls,
+        patch(
+            "dynamo.global_planner.kubernetes_capacity_manager.KubernetesConnector"
         ) as mock_connector_cls,
     ):
         mock_kube = MagicMock()
@@ -231,7 +233,7 @@ async def test_populate_connectors_explicit_mode(mock_runtime):
         mock_connector_cls.return_value = MagicMock()
 
         handler.orchestrator.capacity_manager.discover(
-            handler.orchestrator.managed_callers
+            handler.orchestrator.managed_deployments
         )
 
         # Only model-a should be discovered
@@ -252,9 +254,11 @@ async def test_populate_connectors_implicit_mode(mock_runtime):
     )
 
     with (
-        patch("dynamo.global_planner.capacity_manager.KubernetesAPI") as mock_kube_cls,
         patch(
-            "dynamo.global_planner.capacity_manager.KubernetesConnector"
+            "dynamo.global_planner.kubernetes_capacity_manager.KubernetesAPI"
+        ) as mock_kube_cls,
+        patch(
+            "dynamo.global_planner.kubernetes_capacity_manager.KubernetesConnector"
         ) as mock_connector_cls,
     ):
         mock_kube = MagicMock()
@@ -266,7 +270,7 @@ async def test_populate_connectors_implicit_mode(mock_runtime):
         mock_connector_cls.return_value = MagicMock()
 
         handler.orchestrator.capacity_manager.discover(
-            handler.orchestrator.managed_callers
+            handler.orchestrator.managed_deployments
         )
 
         # All DGDs should be discovered
@@ -295,7 +299,7 @@ async def test_handler_blocking_mode(mock_runtime):
     )
 
     with patch(
-        "dynamo.global_planner.capacity_manager.KubernetesConnector"
+        "dynamo.global_planner.kubernetes_capacity_manager.KubernetesConnector"
     ) as mock_connector_cls:
         mock_connector = AsyncMock()
         mock_connector_cls.return_value = mock_connector
@@ -915,9 +919,11 @@ async def test_initial_below_floor_logs_warning(mock_runtime):
     semantics — and the floor only blocks explicit scale-downs going forward
     (covered by the standalone-deny tests above)."""
     with (
-        patch("dynamo.global_planner.capacity_manager.KubernetesAPI") as mock_kube_cls,
         patch(
-            "dynamo.global_planner.capacity_manager.KubernetesConnector"
+            "dynamo.global_planner.kubernetes_capacity_manager.KubernetesAPI"
+        ) as mock_kube_cls,
+        patch(
+            "dynamo.global_planner.kubernetes_capacity_manager.KubernetesConnector"
         ) as mock_connector_cls,
     ):
         mock_kube = MagicMock()
