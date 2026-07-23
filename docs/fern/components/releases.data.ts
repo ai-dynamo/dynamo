@@ -7,8 +7,25 @@
  *
  * Every value here is transcribed from the authoritative reference pages on
  * main (docs/reference/support-matrix.md, feature-matrix.md,
- * release-artifacts.md, model-early-access-builds.md). When a release ships,
- * bump this file; the three Reference pages re-render from it.
+ * release-artifacts.md, model-early-access-builds.md).
+ *
+ * PER-RELEASE BUMP CHECKLIST (a release touches more than this file):
+ *   1. This file: add the RELEASES entry (pins, date, delta, notesSummary,
+ *      notesHref), CUDA_HISTORY rows, ARTIFACTS tags/versions, MAIN_TOT,
+ *      CURRENT_* consts, MODEL_EA_BUILDS as applicable.
+ *   2. New page reference/release-notes/vX-Y-Z.mdx (ingest the GitHub body;
+ *      counts in ReleaseHeader props and the UpgradePanel readingList are
+ *      ingestion-time constants — count them from the body).
+ *   3. reference/known-issues.mdx + reference/deprecations.mdx: new vXYZ
+ *      section + accordion retitles ("vX.Y.Z — N entries").
+ *   4. Nav: docs/fern/index.yml Release Notes section (+ explicit slug).
+ *   5. Regenerate agent twins: python3 scripts/gen_llms_tables.py
+ *      (--check must pass afterwards).
+ *
+ * PARSER NOTE: scripts/gen_llms_tables.py parses this file with a
+ * conservative literal parser — keep it a disciplined literal (no computed
+ * values, spreads, calls, or ternaries); see the PARSER CONTRACT in that
+ * script. The parser fails closed on anything it does not understand.
  */
 
 export type ReleaseKind = "stable" | "patch" | "platform-preview" | "model-build";

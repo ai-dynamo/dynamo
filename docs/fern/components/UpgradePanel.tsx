@@ -124,20 +124,14 @@ const UP_CSS = `
     display: inline-flex;
     align-items: center;
     padding: 2px 9px;
-    border: 1px solid rgba(37, 99, 235, 0.3);
+    border: 1px solid var(--dynref-blue-border);
     border-radius: 6px;
-    background: rgba(37, 99, 235, 0.08);
-    color: #1D4ED8;
+    background: var(--dynref-blue-bg);
+    color: var(--dynref-blue-fg);
     font-size: 12px;
     font-weight: 600;
     text-decoration: none;
     white-space: nowrap;
-}
-
-.dark .dynref-up-read {
-    background: rgba(59, 130, 246, 0.12);
-    border-color: rgba(59, 130, 246, 0.42);
-    color: #93C5FD;
 }
 
 .dynref-up-read:hover {

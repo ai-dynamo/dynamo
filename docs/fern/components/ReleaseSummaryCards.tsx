@@ -83,26 +83,20 @@ const SC_CSS = `
 }
 
 /* Area chip — badge-sized, self-contained, uniformly blue (system rule:
-   area badges are blue, as on known-issues). Arch-blue rgba values from
-   ReferenceStyles, duplicated deliberately. */
+   area badges are blue, as on known-issues). Shared --dynref-blue-* tokens
+   from ReferenceStyles flip for dark mode on their own. */
 .dynref-sc-chip {
     display: inline-flex;
     align-items: center;
     align-self: flex-start;
     padding: 1px 8px;
-    border: 1px solid rgba(37, 99, 235, 0.28);
+    border: 1px solid var(--dynref-blue-border);
     border-radius: 6px;
-    background: rgba(37, 99, 235, 0.1);
-    color: #1D4ED8;
+    background: var(--dynref-blue-bg);
+    color: var(--dynref-blue-fg);
     font-size: 11.5px;
     font-weight: 600;
     white-space: nowrap;
-}
-
-.dark .dynref-sc-chip {
-    background: rgba(59, 130, 246, 0.18);
-    color: #93C5FD;
-    border-color: rgba(59, 130, 246, 0.42);
 }
 `;
 

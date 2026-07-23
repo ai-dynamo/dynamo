@@ -54,6 +54,9 @@ const REFERENCE_CSS = `
     --dynref-amber-border: rgba(239, 159, 39, 0.35);
     --dynref-amber-fg: #854F0B;
     --dynref-amber-dash: rgba(185, 122, 23, 0.7);
+    --dynref-blue-bg: rgba(37, 99, 235, 0.1);
+    --dynref-blue-border: rgba(37, 99, 235, 0.28);
+    --dynref-blue-fg: #1D4ED8;
 }
 
 .dark {
@@ -64,6 +67,9 @@ const REFERENCE_CSS = `
     --dynref-amber-border: rgba(239, 159, 39, 0.4);
     --dynref-amber-fg: #FAC775;
     --dynref-amber-dash: rgba(239, 159, 39, 0.55);
+    --dynref-blue-bg: rgba(59, 130, 246, 0.18);
+    --dynref-blue-border: rgba(59, 130, 246, 0.42);
+    --dynref-blue-fg: #93C5FD;
 }
 
 /* Card container shared by every reference component. */
@@ -180,16 +186,11 @@ const REFERENCE_CSS = `
 
 /* CPU architecture — blue. */
 .dynref-chip--arch {
-    background: rgba(37, 99, 235, 0.1);
-    color: #1D4ED8;
-    border-color: rgba(37, 99, 235, 0.28);
+    background: var(--dynref-blue-bg);
+    color: var(--dynref-blue-fg);
+    border-color: var(--dynref-blue-border);
 }
 
-.dark .dynref-chip--arch {
-    background: rgba(59, 130, 246, 0.18);
-    color: #93C5FD;
-    border-color: rgba(59, 130, 246, 0.42);
-}
 
 /* Experimental modifier — dashed border marks experimental/preview entries,
    matching the heatmap's dashed-amber "experimental" encoding. Composes with
@@ -285,16 +286,11 @@ const REFERENCE_CSS = `
 }
 
 .dynref-badge--blue {
-    background: rgba(37, 99, 235, 0.1);
-    color: #1D4ED8;
-    border-color: rgba(37, 99, 235, 0.28);
+    background: var(--dynref-blue-bg);
+    color: var(--dynref-blue-fg);
+    border-color: var(--dynref-blue-border);
 }
 
-.dark .dynref-badge--blue {
-    background: rgba(59, 130, 246, 0.18);
-    color: #93C5FD;
-    border-color: rgba(59, 130, 246, 0.42);
-}
 
 /* Click-to-copy affordance. Used as
    <button className="dynref-copy dynref-badge dynref-badge--blue" type="button"
