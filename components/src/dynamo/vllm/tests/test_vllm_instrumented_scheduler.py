@@ -81,6 +81,11 @@ def _install_test_capacity_preflight(stub, capacity=None):
     capacity = capacity or _benchmark_capacity()
     stub._bench_make_local_capacity = lambda: capacity
     stub._bench_synchronizer = None
+    # ``_bench_build_grid`` re-filters the decode capture list against the
+    # negotiated request limit before generating the grid; stubs that don't
+    # model captures still need the attribute to exist.
+    if not hasattr(stub, "_bench_decode_capture_sizes"):
+        stub._bench_decode_capture_sizes = []
 
 
 def _make_request(status, num_tokens: int, num_computed_tokens: int = 0):
@@ -1680,6 +1685,7 @@ def _explicit_grid_stub(mode="agg", points=None):
             "decode": [{"total_kv_read_tokens": 16, "batch_size": 1}],
         }
     )
+    _install_test_capacity_preflight(stub)
     return stub
 
 
@@ -1753,7 +1759,11 @@ def test_explicit_decode_respects_scheduled_token_limit():
             "decode": [{"total_kv_read_tokens": 2, "batch_size": 2}],
         },
     )
-    stub.max_num_scheduled_tokens = 1
+    # The limit is read through the negotiated capacity envelope, so the
+    # constraint must be installed there rather than on the stub attribute.
+    _install_test_capacity_preflight(
+        stub, _benchmark_capacity(max_num_scheduled_tokens=1)
+    )
 
     with pytest.raises(ValueError, match=r"decode\[0\].*infeasible"):
         InstrumentedScheduler._bench_build_grid(stub)
