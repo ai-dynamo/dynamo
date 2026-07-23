@@ -204,12 +204,6 @@ func EnsureLocalhostSeccompProfile(podSpec *corev1.PodSpec, profile string) {
 	}
 }
 
-// wrapWithCudaCheckpointLaunchJob rewrites the container's entrypoint so the
-// workload is launched under `cuda-checkpoint --launch-job`, required for
-// multi-GPU checkpoints. The original command and args are preserved as-is
-// (including shell-form entrypoints): workload-to-agent signaling now uses
-// file sentinels in the snapshot-control volume, so an intervening shell at
-// PID 1 is no longer an issue.
 // DisableCheckpointJobSidecarInjection stamps sidecar opt-out annotations on a
 // pod annotation map. Checkpoint Jobs must complete when the target container
 // exits; an injected sidecar that outlives the checkpoint keeps the pod alive,
@@ -226,6 +220,12 @@ func DisableCheckpointJobSidecarInjection(annotations map[string]string) map[str
 	return annotations
 }
 
+// wrapWithCudaCheckpointLaunchJob rewrites the container's entrypoint so the
+// workload is launched under `cuda-checkpoint --launch-job`, required for
+// multi-GPU checkpoints. The original command and args are preserved as-is
+// (including shell-form entrypoints): workload-to-agent signaling now uses
+// file sentinels in the snapshot-control volume, so an intervening shell at
+// PID 1 is no longer an issue.
 func wrapWithCudaCheckpointLaunchJob(command []string, args []string) ([]string, []string) {
 	wrappedArgs := make([]string, 0, len(command)+len(args)+1)
 	wrappedArgs = append(wrappedArgs, "--launch-job")
