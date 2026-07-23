@@ -29,7 +29,7 @@ from dynamo.common.multimodal import ImageLoader
 from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
 from dynamo.common.protocols.image_protocol import ImageNvExt, NvCreateImageRequest
 from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
-from dynamo.common.rl import RLAdminValidationError, require_lora_load_request
+from dynamo.common.rl import RLAdminValidationError
 from dynamo.common.utils.output_modalities import (
     RequestType,
     get_output_modalities,
@@ -226,9 +226,6 @@ class OmniHandler(BaseOmniHandler):
             get_lora_manager() is not None
         )
 
-    def _parse_lora_load_request(self, request: Any) -> tuple[str, str]:
-        return require_lora_load_request(request)
-
     def _parse_lora_unload_request(self, request: Any) -> str:
         # Keep broad key compatibility via _extract_lora_name_from_request,
         # but preserve the shared validation contract by raising
@@ -277,49 +274,6 @@ class OmniHandler(BaseOmniHandler):
             needs=[],
             max_gpu_lora_count=self._lora_capacity,
         )
-
-    async def load_lora(self, request=None):
-        """Load a LoRA adapter into the vLLM-Omni engine.
-
-        Delegates to BaseWorkerHandler which calls AsyncOmni.add_lora().
-        AsyncOmni supports the vLLM LoRA interface (add_lora/remove_lora).
-
-        Note: Diffusion LoRA is separately applied at request time via
-        OmniDiffusionSamplingParams.lora_request (omni_handler.py:100-102),
-        not through this engine method. This engine path handles LLM and
-        other stage adapters.
-
-        Concurrency Safety (P1 Race Condition Fix):
-            In-flight generation requests hold the per-adapter lock through
-            the first result via _generate_with_lora_admission_lock().
-            This prevents concurrent unload_lora() from removing the adapter
-            while it is actively being used. The lock pattern mirrors
-            handlers.py:_generate_with_lora_admission_lock for consistency
-            with standard vLLM workers.
-        """
-        async for response in super().load_lora(request):
-            yield response
-
-    async def unload_lora(self, request=None):
-        """Unload a LoRA adapter from the vLLM-Omni engine.
-
-        Delegates to BaseWorkerHandler which calls AsyncOmni.remove_lora().
-        AsyncOmni supports the vLLM LoRA interface (add_lora/remove_lora).
-
-        Concurrency Safety (P1 Race Condition Fix):
-            See load_lora() for details on the per-adapter lock mechanism
-            that serializes unload_lora() against in-flight generation.
-        """
-        async for response in super().unload_lora(request):
-            yield response
-
-    async def list_loras(self, request=None):
-        """List currently loaded LoRA adapters.
-
-        Delegates to BaseWorkerHandler which queries the engine's loaded adapters.
-        """
-        async for response in super().list_loras(request):
-            yield response
 
     async def generate(
         self, request: Dict[str, Any], context: Context

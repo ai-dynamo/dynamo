@@ -1999,10 +1999,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         """Get/create the per-LoRA lock without eagerly allocating a new lock each call."""
         return self._lora_state.get_lock(lora_name)
 
-    def _parse_lora_load_request(self, request: Any) -> tuple[str, str]:
-        """Parse and validate a LoRA load request payload."""
-        return require_lora_load_request(request)
-
     def _parse_lora_unload_request(self, request: Any) -> str:
         """Parse and validate a LoRA unload request payload."""
         return require_lora_unload_request(request)
@@ -2172,7 +2168,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         """
         try:
             try:
-                lora_name, lora_uri = self._parse_lora_load_request(request)
+                lora_name, lora_uri = require_lora_load_request(request)
             except RLAdminValidationError as e:
                 yield {"status": "error", "message": str(e)}
                 return
