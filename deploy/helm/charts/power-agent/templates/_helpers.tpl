@@ -216,7 +216,7 @@ pinned nodeName or scheduler affinity. Surfaces at `helm install` /
 {{- fail "daemonset.enabled and dev.enabled are mutually exclusive. Set exactly one." -}}
 {{- end -}}
 {{- if and .Values.dev.enabled (not .Values.dev.nodeName) (not .Values.dev.affinity) -}}
-{{- fail "dev.enabled requires a placement target: set dev.nodeName to pin the dev pod to a GPU node, or dev.affinity to let the scheduler place it. Set exactly one (nodeName wins if both are set)." -}}
+{{- fail "dev.enabled requires a placement target: set dev.nodeName to pin the dev pod to a GPU node, or dev.affinity to let the scheduler place it. Set at least one; nodeName takes precedence if both are set." -}}
 {{- end -}}
 {{- end -}}
 

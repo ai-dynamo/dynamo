@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Dev-pod placement contract. The dev pod supports two mutually exclusive
-# placement targets, guarded by validateMutex in templates/_helpers.tpl:
+# Dev-pod placement contract. The dev pod supports two placement targets,
+# guarded by validateMutex in templates/_helpers.tpl:
 #   - dev.nodeName  → pin directly to a node (scheduler bypassed)
 #   - dev.affinity  → let the scheduler place the pod (only when nodeName empty)
-# validateMutex fails at `helm template` time when dev.enabled=true but
-# neither is provided. nodeName wins when both are set, and dev.affinity is
-# then intentionally not rendered (Kubernetes ignores affinity once nodeName
-# is set, so emitting it would be misleading dead config).
+# At least one is required; nodeName takes precedence if both are set, and
+# dev.affinity is then intentionally not rendered (Kubernetes ignores affinity
+# once nodeName is set, so emitting it would be misleading dead config).
+# validateMutex also rejects daemonset.enabled + dev.enabled together.
 
 suite: dev-pod placement (nodeName / affinity)
 templates:
@@ -50,6 +50,10 @@ tests:
       - notFailedTemplate: {}
       - notExists:
           path: spec.nodeName
+      # Stable top-level check: affinity block rendered.
+      - isNotNull:
+          path: spec.affinity.nodeAffinity
+      # Secondary: confirm the operator-supplied rule survived toYaml.
       - equal:
           path: spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].key
           value: nvidia.com/gpu.present
@@ -84,3 +88,14 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: "dev.enabled requires a placement target"
+
+  - it: fails when both daemonset.enabled and dev.enabled are set
+    set:
+      daemonset.enabled: true
+      dev.enabled: true
+      # placement target present so the failure is specifically the mutex,
+      # not the "requires a placement target" branch.
+      dev.nodeName: gpu-node-0
+    asserts:
+      - failedTemplate:
+          errorPattern: "mutually exclusive"
