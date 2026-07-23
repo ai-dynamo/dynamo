@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import functools
 import logging
 import os
 import random
@@ -217,6 +218,7 @@ class OmniHandler(BaseOmniHandler):
             media_output_http_url=media_output_http_url,
         )
 
+    @functools.cached_property
     def _lora_enabled(self) -> bool:
         # Match non-Omni LoRA gating: engine must be started with LoRA support
         # and the LoRA manager must be initialized.

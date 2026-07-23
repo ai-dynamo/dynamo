@@ -3,6 +3,7 @@
 
 import asyncio
 import base64
+import functools
 import importlib
 import inspect
 import logging
@@ -1032,10 +1033,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self._served_model_name = config.served_model_name or config.model
         self.engine_args = config.engine_args
         self._lora_state = LoRAState()
-        # Keep historical attribute names for compatibility with existing code.
-        self.loaded_loras = self._lora_state.loaded_loras
-        self._lora_load_locks = self._lora_state.lora_load_locks
-        self._lora_load_locks_guard = self._lora_state.lora_load_locks_guard
         # Adapters known to have been handed to vLLM. Prefill registration is
         # metadata-only, but vLLM activates a prefill adapter lazily when an
         # inference request supplies its LoRARequest.
@@ -1102,6 +1099,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # after all other fallible setup removes that window by construction.
         self._load_custom_encoder(config)
 
+    @functools.cached_property
     def _lora_enabled(self) -> bool:
         """Conservative default for handlers that don't override LoRA policy.
 
@@ -1983,7 +1981,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         return self._lora_state.resolve_request(
             model_name,
             base_model_names=(self._served_model_name, self.engine_args.model),
-            lora_enabled=self._lora_enabled(),
+            lora_enabled=self._lora_enabled,
         )
 
     def _track_lora_request_activation(self, lora_request: LoRARequest | None) -> None:
@@ -2187,7 +2185,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             lock = self._get_lora_lock(lora_name)
             async with lock:
                 try:
-                    old_info = self.loaded_loras.get(lora_name)
+                    old_info = self._lora_state.loaded_loras.get(lora_name)
                     hot_swap_enabled = env_bool("DYN_LORA_HOTSWAP_ENABLED")
                     is_hot_swap = old_info is not None and hot_swap_enabled
                     old_engine_loaded = lora_name in self._engine_loaded_loras
@@ -2276,7 +2274,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                     )
                                     self._engine_loaded_loras.add(lora_name)
                                 except Exception as rollback_error:
-                                    self.loaded_loras.pop(lora_name, None)
+                                    self._lora_state.loaded_loras.pop(lora_name, None)
                                     logger.exception(
                                         f"Rollback failed for LoRA {lora_name}: "
                                         f"{rollback_error}"
@@ -2289,7 +2287,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             return
 
                     # Track the LoRA
-                    self.loaded_loras[lora_name] = LoRAInfo(id=lora_id, path=lora_path)
+                    self._lora_state.loaded_loras[lora_name] = LoRAInfo(
+                        id=lora_id, path=lora_path
+                    )
                     logger.info(
                         f"Successfully {'hot-swapped' if is_hot_swap else 'loaded'} "
                         f"LoRA adapter: {lora_name} with ID {lora_id}"
@@ -2321,7 +2321,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                             )
                                         )
                                         self._engine_loaded_loras.add(lora_name)
-                                    self.loaded_loras[lora_name] = old_info
+                                    self._lora_state.loaded_loras[lora_name] = old_info
                                     rolled_back = (
                                         "engine+tracking"
                                         if old_engine_loaded
@@ -2330,13 +2330,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 except Exception as rollback_error:
                                     # Engine is in an indeterminate adapter state;
                                     # drop tracking so we never claim a clean swap.
-                                    self.loaded_loras.pop(lora_name, None)
+                                    self._lora_state.loaded_loras.pop(lora_name, None)
                                     logger.exception(
                                         f"LoRA '{lora_name}' hot-swap engine "
                                         f"rollback failed: {rollback_error}"
                                     )
                             else:
-                                self.loaded_loras.pop(lora_name, None)
+                                self._lora_state.loaded_loras.pop(lora_name, None)
                             logger.error(
                                 f"LoRA '{lora_name}' hot-swap rolled back "
                                 f"({rolled_back}): prefix cache reset failed: {e}"
@@ -2372,7 +2372,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                     )
                                     await self.engine_client.remove_lora(lora_id)
                                     self._engine_loaded_loras.discard(lora_name)
-                                self.loaded_loras.pop(lora_name, None)
+                                self._lora_state.loaded_loras.pop(lora_name, None)
                                 logger.debug(
                                     f"Successfully rolled back LoRA '{lora_name}'"
                                 )
@@ -2427,11 +2427,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             async with lock:
                 try:
                     # Check if the LoRA exists *after* waiting for any in-progress load.
-                    lora = self.loaded_loras.get(lora_name)
+                    lora = self._lora_state.loaded_loras.get(lora_name)
                     if lora is None:
                         yield {
                             "status": "error",
-                            "message": f"LoRA adapter '{lora_name}' not found. Available LoRAs: {list(self.loaded_loras.keys())}",
+                            "message": f"LoRA adapter '{lora_name}' not found. Available LoRAs: {list(self._lora_state.loaded_loras.keys())}",
                         }
                         return
 
@@ -2477,7 +2477,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             if not self._is_lora_not_loaded_error(e):
                                 raise
                         self._engine_loaded_loras.discard(lora_name)
-                    del self.loaded_loras[lora_name]
+                    del self._lora_state.loaded_loras[lora_name]
 
                     logger.info(
                         f"Successfully unloaded LoRA adapter: {lora_name} with ID {lora_id}"

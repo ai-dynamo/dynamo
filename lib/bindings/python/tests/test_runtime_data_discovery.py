@@ -340,7 +340,9 @@ async def test_lora_registration_persists_base_and_lora_model_cards(temp_file_st
         assert len(base_cards) == 1
         assert len(lora_cards) == 1
 
-        assert base_cards[0]["card_json"]["source_path"] == "base-model"
+        # Base card may omit source_path when it equals display_name/model_name
+        # to preserve legacy MDC checksums.
+        assert base_cards[0]["card_json"].get("source_path") in (None, "base-model")
 
         assert lora_cards[0]["card_json"]["source_path"] == "base-model"
         assert lora_cards[0]["card_json"]["lora"] == {"name": "adapterA"}

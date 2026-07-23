@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_llm::local_model::LocalModel;
+use dynamo_llm::local_model::{LocalModel, register_model_card};
 use dynamo_runtime::discovery::EventTransportKind;
 use dynamo_runtime::distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode};
 use dynamo_runtime::storage::kv;
@@ -32,7 +32,6 @@ use dynamo_runtime::{
         network::egress::push_router::RouterMode as RsRouterMode,
     },
     protocols::annotated::Annotated as RsAnnotated,
-    slug::Slug,
     traits::DistributedRuntimeProvider,
 };
 
@@ -549,7 +548,10 @@ fn register_model<'p>(
             let model_name = model_name.unwrap_or_else(|| source_path.clone());
             let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only(&model_name);
             // Preserve source_path for compatibility checks (LoRA vs base model).
-            card.source_path = Some(source_path.clone());
+            // Only set if it differs from model_name to preserve legacy MDC checksums.
+            if source_path != model_name {
+                card.source_path = Some(source_path.clone());
+            }
 
             // Populate lora_info if this is a LoRA registration.
             if let Some(lora_name) = lora_identifier.clone() {
@@ -584,19 +586,9 @@ fn register_model<'p>(
             card.router_config = explicit_router_config.clone();
 
             // Register the Model Deployment Card via discovery interface
-            let discovery = endpoint.inner.drt().discovery();
-            let model_suffix = lora_identifier
-                .as_ref()
-                .map(|name| Slug::slugify(name).to_string());
-            let spec = rs::discovery::DiscoverySpec::from_model_with_suffix(
-                endpoint.inner.component().namespace().name().to_string(),
-                endpoint.inner.component().name().to_string(),
-                endpoint.inner.name().to_string(),
-                &card,
-                model_suffix,
-            )
-            .map_err(to_pyerr)?;
-            discovery.register(spec).await.map_err(to_pyerr)?;
+            register_model_card(&endpoint.inner, &card)
+                .await
+                .map_err(|e| PyException::new_err(format!("{}", e)))?;
 
             return Ok(());
         }

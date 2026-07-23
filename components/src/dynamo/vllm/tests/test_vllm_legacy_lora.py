@@ -61,9 +61,6 @@ def _make_prefill_handler():
     handler.engine_args = handler.config.engine_args
     handler._served_model_name = "llama2-7b"
     handler._lora_state = LoRAState()
-    handler.loaded_loras = handler._lora_state.loaded_loras
-    handler._lora_load_locks = handler._lora_state.lora_load_locks
-    handler._lora_load_locks_guard = handler._lora_state.lora_load_locks_guard
     handler._engine_loaded_loras = set()
     return handler
 
@@ -93,7 +90,9 @@ async def test_prefill_load_records_and_publishes_without_eager_engine_add(
 
     assert results[-1]["status"] == "success"
     handler.engine_client.add_lora.assert_not_awaited()
-    assert handler.loaded_loras["adapterA"] == LoRAInfo(id=123, path="/cache/adapter")
+    assert handler._lora_state.loaded_loras["adapterA"] == LoRAInfo(
+        id=123, path="/cache/adapter"
+    )
     register.assert_awaited_once()
     kwargs = register.await_args.kwargs
     assert str(kwargs["model_type"]) == str(ModelType.Prefill)
@@ -151,7 +150,7 @@ async def test_prefill_publish_failure_rolls_back_metadata_only(monkeypatch):
     ]
 
     assert results[-1]["status"] == "error"
-    assert "adapterA" not in handler.loaded_loras
+    assert "adapterA" not in handler._lora_state.loaded_loras
     handler.engine_client.add_lora.assert_not_awaited()
     handler.engine_client.remove_lora.assert_not_awaited()
 
@@ -159,7 +158,9 @@ async def test_prefill_publish_failure_rolls_back_metadata_only(monkeypatch):
 @pytest.mark.asyncio
 async def test_legacy_unload_unregisters_before_engine_removal(monkeypatch):
     handler = _make_prefill_handler()
-    handler.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    handler._lora_state.loaded_loras = {
+        "adapterA": LoRAInfo(id=123, path="/cache/adapter")
+    }
     handler._engine_loaded_loras = {"adapterA"}
     order: list[str] = []
     unregister = AsyncMock(side_effect=lambda **_kwargs: order.append("unregister"))
@@ -172,7 +173,7 @@ async def test_legacy_unload_unregisters_before_engine_removal(monkeypatch):
 
     assert results[-1]["status"] == "success"
     assert order == ["unregister", "remove"]
-    assert "adapterA" not in handler.loaded_loras
+    assert "adapterA" not in handler._lora_state.loaded_loras
 
 
 @pytest.mark.asyncio
@@ -211,7 +212,9 @@ async def test_legacy_prefill_unload_skips_engine_removal_for_metadata_only_adap
 @pytest.mark.asyncio
 async def test_legacy_prefill_unload_removes_request_activated_adapter(monkeypatch):
     handler = _make_prefill_handler()
-    handler.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    handler._lora_state.loaded_loras = {
+        "adapterA": LoRAInfo(id=123, path="/cache/adapter")
+    }
     handler._track_lora_request_activation(handler._resolve_lora_request("adapterA"))
     monkeypatch.setattr(handlers_mod, "unregister_model", AsyncMock())
 
@@ -226,7 +229,9 @@ async def test_legacy_prefill_unload_removes_request_activated_adapter(monkeypat
 @pytest.mark.asyncio
 async def test_legacy_prefill_request_admission_serializes_with_unload(monkeypatch):
     handler = _make_prefill_handler()
-    handler.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    handler._lora_state.loaded_loras = {
+        "adapterA": LoRAInfo(id=123, path="/cache/adapter")
+    }
     monkeypatch.setattr(handlers_mod, "unregister_model", AsyncMock())
 
     admission_started = asyncio.Event()
@@ -259,7 +264,7 @@ async def test_legacy_prefill_request_admission_serializes_with_unload(monkeypat
     unload_task = asyncio.create_task(_unload())
     await asyncio.sleep(0)
     assert not unload_task.done()
-    assert "adapterA" in handler.loaded_loras
+    assert "adapterA" in handler._lora_state.loaded_loras
 
     allow_admission.set()
     await admission_task
@@ -275,7 +280,9 @@ async def test_legacy_prefill_request_rejects_adapter_unloaded_before_admission(
     monkeypatch, caplog
 ):
     handler = _make_prefill_handler()
-    handler.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    handler._lora_state.loaded_loras = {
+        "adapterA": LoRAInfo(id=123, path="/cache/adapter")
+    }
     monkeypatch.setattr(handlers_mod, "unregister_model", AsyncMock())
     stale_request = handler._resolve_lora_request("adapterA")
 
@@ -305,7 +312,9 @@ async def test_legacy_prefill_unload_treats_missing_request_adapter_as_idempoten
     monkeypatch,
 ):
     handler = _make_prefill_handler()
-    handler.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    handler._lora_state.loaded_loras = {
+        "adapterA": LoRAInfo(id=123, path="/cache/adapter")
+    }
     handler._engine_loaded_loras = {"adapterA"}
     handler.engine_client.remove_lora.side_effect = RuntimeError("adapter not found")
     monkeypatch.setattr(handlers_mod, "unregister_model", AsyncMock())
@@ -315,14 +324,14 @@ async def test_legacy_prefill_unload_treats_missing_request_adapter_as_idempoten
     ]
 
     assert results[-1]["status"] == "success"
-    assert "adapterA" not in handler.loaded_loras
+    assert "adapterA" not in handler._lora_state.loaded_loras
 
 
 @pytest.mark.asyncio
 async def test_legacy_unload_unregister_failure_preserves_engine_state(monkeypatch):
     handler = _make_prefill_handler()
     original = LoRAInfo(id=123, path="/cache/adapter")
-    handler.loaded_loras = {"adapterA": original}
+    handler._lora_state.loaded_loras = {"adapterA": original}
     monkeypatch.setattr(
         handlers_mod,
         "unregister_model",
@@ -335,4 +344,4 @@ async def test_legacy_unload_unregister_failure_preserves_engine_state(monkeypat
 
     assert results[-1]["status"] == "error"
     handler.engine_client.remove_lora.assert_not_awaited()
-    assert handler.loaded_loras["adapterA"] == original
+    assert handler._lora_state.loaded_loras["adapterA"] == original
