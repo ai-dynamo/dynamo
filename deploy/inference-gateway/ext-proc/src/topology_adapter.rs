@@ -1,20 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Engine topology adapter: reconcile discovered raw vLLM pods into the
-//! selection-service worker catalog.
+//! Reconciles discovered vLLM pods with the selection-service worker catalog.
 //!
-//! Raw vLLM pods never register a `ModelRuntimeConfig` in any Dynamo discovery
-//! plane, so the per-worker metadata the selector needs to admit a worker
-//! (endpoint, block size, KV-event endpoints, DP size, capacity hints) is
-//! produced here instead. For each `Ready` pod the [`PodDiscovery`]
-//! surfaces, this adapter normalizes a [`WorkerRegistration`] from environment
-//! defaults plus the pod's resolved endpoints, and hands the whole desired set
-//! to the [`Selector`], which owns the actual-vs-desired diff against its
-//! in-process catalog.
-//!
-//! The adapter reuses the `worker_id` the reflector derives (a stable hash of the
-//! pod name) and applies the same id everywhere, so each replica's catalog agrees.
+//! The adapter converts each ready pod into a [`WorkerRegistration`] using its
+//! resolved endpoints and configured defaults, then passes the desired worker
+//! set to the [`Selector`].
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -25,8 +16,6 @@ use crate::epp_standalone_config::EppStandaloneConfig;
 use crate::pod_discovery::{PodDiscovery, RawWorker};
 use crate::selector::{Selector, WorkerRegistration};
 
-/// Environment-derived defaults applied to every worker registration. Raw vLLM
-/// pods carry no model card, so these come from the EPP's configuration.
 #[derive(Debug, Clone)]
 pub struct RegistrationDefaults {
     pub model_name: String,
@@ -54,8 +43,6 @@ pub struct TopologyAdapter {
 }
 
 impl TopologyAdapter {
-    /// Spawn the reconciliation loop. Performs an initial reconcile immediately,
-    /// then re-reconciles whenever the reflector reports a pod change.
     pub fn spawn(
         reflector: PodDiscovery,
         selector: Arc<Selector>,
@@ -110,12 +97,7 @@ async fn reconcile_once(
     }
 }
 
-/// Normalize a discovered worker into a selector registration payload. Consumes
-/// the worker so its endpoint strings move into the registration instead of
-/// being cloned.
 fn build_registration(w: RawWorker, defaults: &RegistrationDefaults) -> WorkerRegistration {
-    // Register the pod's single KV-event PUB socket under rank 0 (the core keys
-    // its KV-event endpoints by rank).
     let mut kv_events_endpoints = HashMap::new();
     kv_events_endpoints.insert(0u32, w.kv_events_endpoint);
 
@@ -128,7 +110,6 @@ fn build_registration(w: RawWorker, defaults: &RegistrationDefaults) -> WorkerRe
         replay_endpoint: w.replay_endpoint,
         total_kv_blocks: defaults.total_kv_blocks,
         max_num_batched_tokens: defaults.max_num_batched_tokens,
-        stable_routing_id: Some(w.pod_name),
     }
 }
 
@@ -168,6 +149,5 @@ mod tests {
             "tcp://10.0.0.1:5557"
         );
         assert_eq!(reg.total_kv_blocks, Some(1000));
-        assert_eq!(reg.stable_routing_id.as_deref(), Some("vllm-7"));
     }
 }
