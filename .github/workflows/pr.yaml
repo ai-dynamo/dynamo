@@ -585,7 +585,7 @@ jobs:
       needs.changed-files.outputs.operator == 'true' &&
       needs.planner-build.result == 'success' &&
       needs.operator.result == 'success'
-    runs-on: prod-default-v2
+    runs-on: prod-builder-amd-v1
     permissions:
       contents: read
     env:

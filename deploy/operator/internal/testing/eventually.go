@@ -109,6 +109,7 @@ func eventuallyWithReason(
 	ctx context.Context,
 	t pollT,
 	condition func() (success bool, reason string),
+	callerSkip int,
 	waitFor time.Duration,
 	tick time.Duration,
 	msgAndArgs ...any,
@@ -130,7 +131,7 @@ func eventuallyWithReason(
 			}
 		}
 		return ok
-	}, 2, waitFor, tick, msgAndArgs...)
+	}, callerSkip, waitFor, tick, msgAndArgs...)
 }
 
 // Eventually requires condition to succeed within waitFor. It logs distinct
@@ -143,5 +144,5 @@ func Eventually(
 	msgAndArgs ...any,
 ) {
 	t.Helper()
-	eventuallyWithReason(t.Context(), t, condition, waitFor, tick, msgAndArgs...)
+	eventuallyWithReason(t.Context(), t, condition, 3, waitFor, tick, msgAndArgs...)
 }

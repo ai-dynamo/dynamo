@@ -99,7 +99,8 @@ type proxyRuntime struct {
 	service    string
 
 	forwardStop chan struct{}
-	forwardDone chan error
+	forwardDone chan struct{}
+	forwardErr  error
 	forwardPort uint16
 	bridgeStop  context.CancelFunc
 	bridgeDone  sync.WaitGroup
@@ -220,24 +221,30 @@ func (p *proxyRuntime) startPortForward(ctx context.Context) error {
 	}
 	serverURL.Path = fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/portforward", p.namespace, proxyPodName)
 	dialer := transportspdy.NewDialer(upgrader, &http.Client{Transport: roundTripper}, http.MethodPost, serverURL)
-	p.forwardStop = make(chan struct{})
+	forwardStop := make(chan struct{})
 	ready := make(chan struct{})
-	p.forwardDone = make(chan error, 1)
+	forwardDone := make(chan struct{})
 	var output bytes.Buffer
 	forwarder, err := portforward.NewOnAddresses(
 		dialer, []string{"127.0.0.1"}, []string{fmt.Sprintf("0:%d", proxyControlPort)},
-		p.forwardStop, ready, &output, &output,
+		forwardStop, ready, &output, &output,
 	)
 	if err != nil {
 		return fmt.Errorf("create webhook proxy port-forward: %w", err)
 	}
+	p.forwardStop = forwardStop
+	p.forwardDone = forwardDone
 	go func() {
-		p.forwardDone <- forwarder.ForwardPorts()
+		p.forwardErr = forwarder.ForwardPorts()
+		close(forwardDone)
 	}()
 	select {
 	case <-ready:
-	case err := <-p.forwardDone:
-		return fmt.Errorf("start webhook proxy port-forward: %w: %s", err, output.String())
+	case <-p.forwardDone:
+		if p.forwardErr == nil {
+			return fmt.Errorf("webhook proxy port-forward exited before becoming ready: %s", output.String())
+		}
+		return fmt.Errorf("start webhook proxy port-forward: %w: %s", p.forwardErr, output.String())
 	case <-ctx.Done():
 		return fmt.Errorf("start webhook proxy port-forward: %w: %s", ctx.Err(), output.String())
 	}
@@ -346,8 +353,9 @@ func (p *proxyRuntime) stop() error {
 	}
 	if p.forwardStop != nil {
 		close(p.forwardStop)
-		if err := <-p.forwardDone; err != nil && !errors.Is(err, context.Canceled) {
-			errs = append(errs, fmt.Errorf("stop webhook proxy port-forward: %w", err))
+		<-p.forwardDone
+		if p.forwardErr != nil && !errors.Is(p.forwardErr, context.Canceled) {
+			errs = append(errs, fmt.Errorf("stop webhook proxy port-forward: %w", p.forwardErr))
 		}
 	}
 	p.bridgeDone.Wait()

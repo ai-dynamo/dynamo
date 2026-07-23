@@ -129,7 +129,7 @@ func TestEventuallyWithReasonLogsReason(t *testing.T) {
 			return false, "not ready yet"
 		}
 		return true, "done"
-	}, 500*time.Millisecond, 10*time.Millisecond)
+	}, 2, 500*time.Millisecond, 10*time.Millisecond)
 
 	require.False(t, mock.failed)
 	require.Contains(t, mock.logOutput(), "Waiting but got: not ready yet")
@@ -143,6 +143,36 @@ func TestEventuallyImmediateSuccess(t *testing.T) {
 		return true, ""
 	}, time.Second, 10*time.Millisecond)
 	require.Equal(t, 1, calls)
+}
+
+func TestEventuallyWatchdogWarningIncludesExternalCaller(t *testing.T) {
+	t.Log("Run an Eventually condition that exceeds its watchdog interval")
+	output := runHelperTest(t, "TestHelperEventuallyWatchdogWarning")
+
+	t.Log("Point the warning at the test call site instead of the Eventually wrapper")
+	var warning string
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(line, "WARNING: Eventually condition at") {
+			warning = line
+			break
+		}
+	}
+	require.Contains(t, warning, "eventually_test.go:")
+	require.NotContains(t, warning, "/eventually.go:")
+}
+
+func TestHelperEventuallyWatchdogWarning(t *testing.T) {
+	if os.Getenv("EVENTUALLY_TEST_HELPER") != "1" {
+		t.Skip("helper test run by TestEventuallyWatchdogWarningIncludesExternalCaller")
+	}
+	calls := 0
+	Eventually(t, func() (bool, string) {
+		calls++
+		if calls == 1 {
+			time.Sleep(60 * time.Millisecond)
+		}
+		return calls >= 2, ""
+	}, time.Second, 20*time.Millisecond)
 }
 
 func TestPollTimeoutReportsCallerLine(t *testing.T) {

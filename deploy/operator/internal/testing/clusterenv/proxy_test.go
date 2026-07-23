@@ -7,6 +7,7 @@ package clusterenv
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 )
@@ -38,5 +39,29 @@ func TestWaitForProxySignalRejectsUnexpectedByte(t *testing.T) {
 	t.Log("Reject the signal instead of treating the tunnel as ready")
 	if err := waitForProxySignal(context.Background(), bridge, 2); err == nil {
 		t.Fatal("unexpected proxy signal was accepted")
+	}
+}
+
+func TestProxyStopAfterPortForwardExited(t *testing.T) {
+	t.Log("Represent a port-forward process whose error was already observed by startup")
+	forwardStop := make(chan struct{})
+	forwardDone := make(chan struct{})
+	forwardErr := errors.New("port-forward failed")
+	close(forwardDone)
+	proxy := &proxyRuntime{
+		forwardStop: forwardStop,
+		forwardDone: forwardDone,
+		forwardErr:  forwardErr,
+	}
+
+	t.Log("Stop without waiting for a second delivery of the process result")
+	err := proxy.stop()
+	if !errors.Is(err, forwardErr) {
+		t.Fatalf("stop proxy error = %v, want %v", err, forwardErr)
+	}
+	select {
+	case <-forwardStop:
+	default:
+		t.Fatal("port-forward stop channel was not closed")
 	}
 }

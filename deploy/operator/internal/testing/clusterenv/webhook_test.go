@@ -6,9 +6,12 @@
 package clusterenv
 
 import (
+	"errors"
 	"testing"
+	"time"
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
 )
 
 func TestPointAdmissionAtProxyPreservesPath(t *testing.T) {
@@ -40,5 +43,29 @@ func TestPointAdmissionAtProxyRejectsURLRegistration(t *testing.T) {
 
 	if err := pointAdmissionAtProxy(configuration, &proxyRuntime{}, nil); err == nil {
 		t.Fatal("URL-only admission registration was accepted")
+	}
+}
+
+func TestWebhookRuntimeStopAfterManagerExitedBeforeServing(t *testing.T) {
+	t.Log("Represent a webhook manager that exited before its server became ready")
+	managerErr := errors.New("manager failed")
+	runtime := &webhookRuntime{
+		cancel:     func() {},
+		done:       make(chan struct{}),
+		managerErr: managerErr,
+	}
+	close(runtime.done)
+	server := webhook.NewServer(webhook.Options{})
+
+	t.Log("Observe the manager failure while waiting for the webhook server")
+	err := waitForWebhookServer(t.Context(), server, runtime, time.Second)
+	if !errors.Is(err, managerErr) {
+		t.Fatalf("wait for webhook server error = %v, want %v", err, managerErr)
+	}
+
+	t.Log("Stop without waiting for a second delivery of the manager result")
+	err = runtime.stop()
+	if !errors.Is(err, managerErr) {
+		t.Fatalf("stop webhook runtime error = %v, want %v", err, managerErr)
 	}
 }

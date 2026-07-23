@@ -26,16 +26,18 @@ func TestRequireEnv(t *testing.T) {
 }
 
 func TestLoadRESTConfigRequiresUnlockedContext(t *testing.T) {
+	t.Log("Clear the explicit cluster-test context")
 	t.Setenv(ContextEnvVar, "")
 
+	t.Log("Reject loading cluster credentials without an unlocked context")
 	_, err := loadRESTConfig()
-
 	if err == nil || !strings.Contains(err.Error(), ContextEnvVar+" must be set") {
 		t.Fatalf("loadRESTConfig() error = %v, want missing %s error", err, ContextEnvVar)
 	}
 }
 
 func TestLoadRESTConfigSelectsUnlockedContext(t *testing.T) {
+	t.Log("Write a kubeconfig whose current context differs from the unlocked context")
 	kubeconfig := writeKubeconfig(t, clientcmdapi.Config{
 		CurrentContext: "other",
 		Clusters: map[string]*clientcmdapi.Cluster{
@@ -54,6 +56,7 @@ func TestLoadRESTConfigSelectsUnlockedContext(t *testing.T) {
 	t.Setenv("KUBECONFIG", kubeconfig)
 	t.Setenv(ContextEnvVar, "allowed")
 
+	t.Log("Load credentials for the explicitly unlocked context")
 	config, err := loadRESTConfig()
 	if err != nil {
 		t.Fatalf("loadRESTConfig(): %v", err)
@@ -64,6 +67,7 @@ func TestLoadRESTConfigSelectsUnlockedContext(t *testing.T) {
 }
 
 func TestLoadRESTConfigRejectsUnknownContext(t *testing.T) {
+	t.Log("Write a kubeconfig without the context named by the unlock variable")
 	kubeconfig := writeKubeconfig(t, clientcmdapi.Config{
 		CurrentContext: "other",
 		Clusters: map[string]*clientcmdapi.Cluster{
@@ -77,8 +81,8 @@ func TestLoadRESTConfigRejectsUnknownContext(t *testing.T) {
 	t.Setenv("KUBECONFIG", kubeconfig)
 	t.Setenv(ContextEnvVar, "missing")
 
+	t.Log("Reject an unlock context that is absent from the kubeconfig")
 	_, err := loadRESTConfig()
-
 	if err == nil || !strings.Contains(err.Error(), `context "missing"`) {
 		t.Fatalf("loadRESTConfig() error = %v, want unknown context error", err)
 	}

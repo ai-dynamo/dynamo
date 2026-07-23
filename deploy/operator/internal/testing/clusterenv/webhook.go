@@ -42,7 +42,8 @@ type webhookRuntime struct {
 	proxy      *proxyRuntime
 	cert       *servingCertificate
 	cancel     context.CancelFunc
-	done       chan error
+	done       chan struct{}
+	managerErr error
 
 	mutatingNames   []string
 	validatingNames []string
@@ -87,11 +88,12 @@ func startWebhookRuntime(opts Options, config *rest.Config, kubeClient kubernete
 	}
 	managerContext, cancel := context.WithCancel(context.Background())
 	runtime.cancel = cancel
-	runtime.done = make(chan error, 1)
+	runtime.done = make(chan struct{})
 	go func() {
-		runtime.done <- mgr.Start(managerContext)
+		runtime.managerErr = mgr.Start(managerContext)
+		close(runtime.done)
 	}()
-	if err := waitForWebhookServer(managerContext, server, runtime.done, opts.EventuallyTimeout); err != nil {
+	if err := waitForWebhookServer(managerContext, server, runtime, opts.EventuallyTimeout); err != nil {
 		return nil, err
 	}
 	if err := runtime.proxy.startBridge(net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), opts.EventuallyTimeout); err != nil {
@@ -113,7 +115,12 @@ func unusedLocalPort() (int, error) {
 	return listener.Addr().(*net.TCPAddr).Port, nil
 }
 
-func waitForWebhookServer(ctx context.Context, server webhook.Server, done <-chan error, timeout time.Duration) error {
+func waitForWebhookServer(
+	ctx context.Context,
+	server webhook.Server,
+	runtime *webhookRuntime,
+	timeout time.Duration,
+) error {
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	ticker := time.NewTicker(50 * time.Millisecond)
@@ -121,11 +128,11 @@ func waitForWebhookServer(ctx context.Context, server webhook.Server, done <-cha
 	started := server.StartedChecker()
 	for {
 		select {
-		case err := <-done:
-			if err == nil {
+		case <-runtime.done:
+			if runtime.managerErr == nil {
 				return errors.New("cluster-test webhook manager exited before serving")
 			}
-			return fmt.Errorf("cluster-test webhook manager exited before serving: %w", err)
+			return fmt.Errorf("cluster-test webhook manager exited before serving: %w", runtime.managerErr)
 		case <-waitCtx.Done():
 			return fmt.Errorf("wait for cluster-test webhook server: %w", waitCtx.Err())
 		case <-ticker.C:
@@ -244,8 +251,9 @@ func (e *webhookRuntime) stop() error {
 	}
 	if e.cancel != nil {
 		e.cancel()
-		if err := <-e.done; err != nil && !errors.Is(err, context.Canceled) {
-			errs = append(errs, fmt.Errorf("stop cluster-test webhook manager: %w", err))
+		<-e.done
+		if e.managerErr != nil && !errors.Is(e.managerErr, context.Canceled) {
+			errs = append(errs, fmt.Errorf("stop cluster-test webhook manager: %w", e.managerErr))
 		}
 	}
 	if e.cert != nil {

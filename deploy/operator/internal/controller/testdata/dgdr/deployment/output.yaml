@@ -598,5 +598,3 @@ spec:
   type: prefill
 status:
   $ignore: true
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
