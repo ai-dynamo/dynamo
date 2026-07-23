@@ -26,7 +26,9 @@ use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
 use crate::envoy_helpers::find_header;
-use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo};
+use crate::picker::{
+    Endpoint, EndpointPicker, PickError, PickResult, RequestInfo, format_address_port,
+};
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
 const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
@@ -237,7 +239,7 @@ impl Router {
         ))
     }
 
-    /// Resolve a worker_id to a pod endpoint address (ip:port).
+    /// Resolve a worker_id to a pod endpoint socket address.
     /// Lock-free read from the in-memory reflector store — no K8s API calls.
     /// Port is read from the pod's Dynamo HTTP container port.
     pub fn resolve_worker_endpoint(&self, worker_id: u64) -> Option<String> {
@@ -252,7 +254,7 @@ impl Router {
         None
     }
 
-    /// Resolve any available worker to its endpoint address (ip:port).
+    /// Resolve any available worker to its endpoint socket address.
     /// Used for body-less requests (GET /v1/models) where we just need any backend.
     pub fn resolve_any_worker_endpoint(&self) -> Option<String> {
         self.pod_store
@@ -278,8 +280,8 @@ impl Router {
         None
     }
 
-    /// Map an Envoy `candidate_subset` (endpoint addresses, "ip:port" or bare
-    /// "ip") onto the worker IDs of the reflected pods that match it.
+    /// Map an Envoy `candidate_subset` (endpoint socket addresses or bare IPs)
+    /// onto the worker IDs of the reflected pods that match it.
     ///
     /// This is how the InferencePool subset hint is honored on the hot path:
     /// the ext_proc server always calls `pick()` with an empty external
@@ -296,8 +298,11 @@ impl Router {
             let Some(addr_port) = pod_endpoint_address(&pod) else {
                 continue;
             };
-            let ip = addr_port.split(':').next().unwrap_or("");
-            if candidates.contains(addr_port.as_str()) || candidates.contains(ip) {
+            let ip = addr_port
+                .parse::<std::net::SocketAddr>()
+                .map(|address| address.ip().to_string())
+                .unwrap_or_default();
+            if candidates.contains(addr_port.as_str()) || candidates.contains(ip.as_str()) {
                 ids.insert(hash_pod_name(pod_name));
             }
         }
@@ -642,7 +647,7 @@ async fn fetch_preprocessor_from_discovery(
     })
 }
 
-/// Extract "ip:port" from a pod by reading its IP from status and the
+/// Extract a socket address from a pod by reading its IP from status and the
 /// container port named `http` (the Dynamo HTTP inference port) from the
 /// container spec.
 ///
@@ -670,7 +675,7 @@ fn pod_endpoint_address(pod: &k8s_openapi::api::core::v1::Pod) -> Option<String>
         .flatten()
         .find(|p| p.name.as_deref() == Some(DYNAMO_CONTAINER_PORT_NAME))
         .map(|p| p.container_port)?;
-    Some(format!("{ip}:{port}"))
+    Some(format_address_port(ip, &port.to_string()))
 }
 
 /// Start a background pod reflector that watches worker pods matching the
@@ -830,7 +835,7 @@ fn spawn_prefill_discovery_watcher(
 // EndpointPicker trait implementation (mirrors Go LW-EPP from GAIE #2834)
 // ---------------------------------------------------------------------------
 
-/// Narrow `endpoints` down to only those whose address (or address:port)
+/// Narrow `endpoints` down to only those whose address (or socket address)
 /// appears in the `candidate_subset` sent via `envoy.lb.subset_hint`.
 /// If `candidate_subset` is empty, returns the full list unchanged.
 fn apply_subset_filter<'a>(
@@ -1111,6 +1116,7 @@ impl EndpointPicker for Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn tenant_header_overrides_body_cache_namespace() {
@@ -1137,6 +1143,66 @@ mod tests {
     #[test]
     fn absent_cache_namespace_stays_absent() {
         assert_eq!(cache_namespace_with_header_override(&[], None), None);
+    }
+
+    #[test]
+    fn pod_endpoint_address_brackets_ipv6() {
+        use k8s_openapi::api::core::v1::{Container, ContainerPort, Pod, PodSpec, PodStatus};
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+
+        let pod = Pod {
+            metadata: ObjectMeta::default(),
+            spec: Some(PodSpec {
+                containers: vec![Container {
+                    name: "worker".to_string(),
+                    ports: Some(vec![ContainerPort {
+                        container_port: 8000,
+                        name: Some("http".to_string()),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                pod_ip: Some("fd00::10".to_string()),
+                ..Default::default()
+            }),
+        };
+
+        assert_eq!(
+            pod_endpoint_address(&pod).as_deref(),
+            Some("[fd00::10]:8000")
+        );
+    }
+
+    #[test]
+    fn endpoint_format_preserves_ipv4_hostname_and_ipv6() {
+        assert_eq!(format_address_port("10.0.0.1", "8000"), "10.0.0.1:8000");
+        assert_eq!(
+            format_address_port("worker.example", "8000"),
+            "worker.example:8000"
+        );
+        assert_eq!(format_address_port("fd00::10", "8000"), "[fd00::10]:8000");
+    }
+
+    #[test]
+    fn ipv6_pod_endpoint_and_subset_filter_match() {
+        let endpoints = [Endpoint {
+            pod_name: "worker-0".to_string(),
+            address: "fd00::10".to_string(),
+            port: "8000".to_string(),
+            labels: HashMap::new(),
+        }];
+
+        assert_eq!(
+            apply_subset_filter(&endpoints, &["fd00::10".to_string()]).len(),
+            1
+        );
+        assert_eq!(
+            apply_subset_filter(&endpoints, &["[fd00::10]:8000".to_string()]).len(),
+            1
+        );
     }
 
     /// Proves the core feature: `nvext.agent_hints.priority` lifts into a
