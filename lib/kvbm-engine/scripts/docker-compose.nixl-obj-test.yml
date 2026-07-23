@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Docker Compose for NIXL OBJ integration tests.
+# Brings up MinIO (S3-compatible) alongside the NIXL test runner.
+#
+# Usage:
+#   bash lib/kvbm-engine/scripts/test-nixl-obj.sh
+
+networks:
+  nixl-test:
+    driver: bridge
+
+services:
+  minio:
+    image: minio/minio:latest
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9877:9000"
+    networks:
+      - nixl-test
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9000/minio/health/live"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+  nixl-test-runner:
+    image: kvbm-nixl-obj-test:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - nixl-test
+    environment:
+      S3_TEST_ENDPOINT: http://minio:9000
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_DEFAULT_REGION: us-east-1
+      NIXL_PREFIX: /opt/nvidia/nvda_nixl
+      NIXL_PLUGIN_DIR: /opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/plugins
+      NIXL_NO_STUBS_FALLBACK: "1"
+      LD_LIBRARY_PATH: /opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu:/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/plugins
+      RUST_LOG: info
+      RUST_BACKTRACE: "1"

@@ -27,6 +27,8 @@ cargo machete
 |------|---------|
 | `s3` (default) | S3/MinIO object storage (G4 tier) |
 | `testing` | Test utilities, mock infrastructure, fixtures |
+| `testing-s3` | S3 integration tests (requires live S3/MinIO endpoint) |
+| `testing-nixl-obj` | NIXL OBJ integration tests (requires NIXL OBJ backend + S3 endpoint) |
 | `nats` | NATS-based pub/sub transport |
 | `collectives` | NIXL + NCCL multi-GPU collectives |
 | `nccl` | NCCL via cudarc |

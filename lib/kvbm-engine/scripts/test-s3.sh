@@ -46,7 +46,7 @@ export AWS_SECRET_ACCESS_KEY="${MINIO_ROOT_PASSWORD}"
 export AWS_DEFAULT_REGION="us-east-1"
 
 echo "Running S3 integration tests..."
-timeout 120 cargo test -p kvbm-engine --features testing-s3 -- s3_integration
+timeout 120 cargo test -p kvbm-engine --features testing-s3 -- s3_integration nixl_integration
 exit_code=$?
 
 echo "Tests finished with exit code: $exit_code"

@@ -113,17 +113,34 @@ impl KvbmRuntimeBuilder {
         };
 
         // 3. NixL - use provided or build from config (AFTER Messenger)
-        //    Only build if config.nixl is Some (NixL enabled)
+        //    Only build if config.nixl is Some (NixL enabled).
+        //    When object.client = Nixl, also register the OBJ backend on the agent.
         let nixl_agent = match self.nixl_agent {
             Some(agent) => Some(agent),
             None => match &self.config.nixl {
                 Some(nixl_config) => {
                     let agent_name = format!("nixl-{}", messenger.instance_id());
                     let backend_config = nixl_config.clone().into();
-                    Some(NixlAgent::from_nixl_backend_config(
-                        &agent_name,
-                        backend_config,
-                    )?)
+                    let mut agent =
+                        NixlAgent::from_nixl_backend_config(&agent_name, backend_config)?;
+
+                    // If Nixl object storage is configured, register the OBJ backend.
+                    if let Some(obj_config) = &self.config.object {
+                        use kvbm_config::ObjectClientConfig;
+                        if let ObjectClientConfig::Nixl(nixl_obj) = &obj_config.client {
+                            let params = nixl_obj_backend_params(nixl_obj);
+                            if let Err(e) =
+                                crate::object::nixl::add_obj_backend(&mut agent, params)
+                            {
+                                tracing::warn!(
+                                    "Failed to initialise NIXL OBJ backend \
+                                     (object storage will be unavailable): {e}"
+                                );
+                            }
+                        }
+                    }
+
+                    Some(agent)
                 }
                 None => None, // NixL disabled
             },
@@ -135,5 +152,19 @@ impl KvbmRuntimeBuilder {
             messenger,
             nixl_agent,
         })
+    }
+}
+
+/// Build the parameter map passed to `create_backend("OBJ", params)`.
+///
+/// Delegates to [`NixlS3Config::to_nixl_params`] which emits only the fields
+/// that are set, letting NIXL fall back to its defaults / AWS env vars for the
+/// rest.
+fn nixl_obj_backend_params(
+    cfg: &kvbm_config::NixlObjectConfig,
+) -> std::collections::HashMap<String, String> {
+    use kvbm_config::NixlObjectConfig;
+    match cfg {
+        NixlObjectConfig::S3(s3) => s3.to_nixl_params(),
     }
 }
