@@ -65,21 +65,6 @@ def _is_multiple_of(value: float, base: float) -> bool:
     return math.isclose(ratio, round(ratio), rel_tol=1e-9, abs_tol=1e-9)
 
 
-# Power-write fields removed when per-GPU cap ownership moved to the DGD worker
-# podTemplate. PlannerConfig has no ``model_config`` (so Pydantic v2 would
-# silently ignore unknown keys); the ``_reject_removed_power_write_fields``
-# migration validator rejects these explicitly with a pointer to the new
-# contract instead of letting a stale YAML lose its caps silently.
-_REMOVED_POWER_WRITE_FIELDS = frozenset(
-    {
-        "prefill_engine_gpu_power_limit",
-        "decode_engine_gpu_power_limit",
-        "power_agent_safe_default_watts",
-        "power_annotation_interval_seconds",
-    }
-)
-
-
 class PlannerPreDeploymentSweepMode(str, Enum):
     None_ = "none"
     Rapid = "rapid"
@@ -636,15 +621,7 @@ class PlannerConfig(BaseModel):
     # (``dynamo.nvidia.com/gpu-power-limit``), applied to Pods by the operator,
     # and enforced by the Power Agent. The planner reads those caps from the DGD
     # and combines them with ``total_gpu_power_limit`` to project and clamp a
-    # power budget. It never writes per-GPU caps, so there is no per-GPU /
-    # safe-default / sweep-interval knob on this config.
-    #
-    # Removed fields (``prefill_engine_gpu_power_limit``,
-    # ``decode_engine_gpu_power_limit``, ``power_agent_safe_default_watts``,
-    # ``power_annotation_interval_seconds``) are explicitly rejected by the
-    # ``_reject_removed_power_write_fields`` migration validator so an old YAML
-    # fails loudly with a pointer to the DGD annotation contract instead of
-    # silently ignoring the key.
+    # power budget. It never writes per-GPU caps.
     enable_power_awareness: bool = Field(
         default=False,
         description=(
@@ -726,24 +703,6 @@ class PlannerConfig(BaseModel):
             "K8s SA / SPIFFE JWT support lands in a follow-up PR."
         ),
     )
-
-    @model_validator(mode="before")
-    @classmethod
-    def _reject_removed_power_write_fields(cls, data: object) -> object:
-        if not isinstance(data, dict):
-            return data
-        present = sorted(k for k in _REMOVED_POWER_WRITE_FIELDS if k in data)
-        if present:
-            raise ValueError(
-                "PlannerConfig no longer owns per-GPU power caps; these removed "
-                f"fields must not be set: {present}. Author per-GPU caps on each "
-                "worker component's DGD podTemplate.metadata.annotations "
-                "('dynamo.nvidia.com/gpu-power-limit') and keep only "
-                "'total_gpu_power_limit' (with 'enable_power_awareness') here. "
-                "The Power Agent's cold-start safe-default cap is configured on "
-                "the Power Agent Helm chart, not on the planner."
-            )
-        return data
 
     @model_validator(mode="before")
     @classmethod

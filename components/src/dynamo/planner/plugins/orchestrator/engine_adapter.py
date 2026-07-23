@@ -933,32 +933,39 @@ class OrchestratorEngineAdapter:
         if p_unchanged and d_unchanged:
             return None
 
-        # Restore the proposal mask before the final budget boundary (see
-        # docstring). Ready-equal echoes are charged via ``current_*`` inside
-        # the clamps, never returned as adjustable targets.
-        if num_p is not None and num_p == current_p:
-            num_p = None
-        if num_d is not None and num_d == current_d:
-            num_d = None
+        if self._config.enable_power_awareness:
+            # Restore the proposal mask before the final budget boundary (see
+            # docstring). Ready-equal echoes are charged via ``current_*`` inside
+            # the clamps, never returned as adjustable targets.
+            if num_p is not None and num_p == current_p:
+                num_p = None
+            if num_d is not None and num_d == current_d:
+                num_d = None
 
         num_p, num_d = self._apply_final_budget(num_p, num_d, worker_counts)
 
-        # Mask any target that equals its ready count back to None. Emitting such
-        # a target is a no-op in a stable deployment (spec desired == ready), but
-        # during a rollout (settled target unknown) the merged proposal carries
-        # the baseline == ready for every non-rolling role, and DisaggPlanner
-        # applies every non-None target as the new DGD desired. Emitting a
-        # rolling role's transient ready count would overwrite its larger
-        # in-flight desired and cancel the rollout — so a scale-down of one role
-        # must not drag the other role's echoed ready count along, and a
-        # scale-up held at ready (see ``_hold_scale_up_during_rollout``)
-        # collapses to "no change" instead of re-emitting ready.
-        if num_p is not None and num_p == current_p:
-            num_p = None
-        if num_d is not None and num_d == current_d:
-            num_d = None
-        if num_p is None and num_d is None:
-            return None
+        if self._config.enable_power_awareness:
+            # Mask any target that equals its ready count back to None. Emitting such
+            # a target is a no-op in a stable deployment (spec desired == ready), but
+            # during a rollout (settled target unknown) the merged proposal carries
+            # the baseline == ready for every non-rolling role, and DisaggPlanner
+            # applies every non-None target as the new DGD desired. Emitting a
+            # rolling role's transient ready count would overwrite its larger
+            # in-flight desired and cancel the rollout — so a scale-down of one role
+            # must not drag the other role's echoed ready count along, and a
+            # scale-up held at ready (see ``_hold_scale_up_during_rollout``)
+            # collapses to "no change" instead of re-emitting ready.
+            if num_p is not None and num_p == current_p:
+                num_p = None
+            if num_d is not None and num_d == current_d:
+                num_d = None
+            if num_p is None and num_d is None:
+                return None
+        else:
+            p_unchanged = (num_p is None) or (num_p == current_p)
+            d_unchanged = (num_d is None) or (num_d == current_d)
+            if p_unchanged and d_unchanged:
+                return None
 
         return ScalingDecision(num_prefill=num_p, num_decode=num_d)
 
@@ -1108,15 +1115,7 @@ class OrchestratorEngineAdapter:
         num_d: Optional[int],
         worker_counts: WorkerCounts,
     ) -> tuple[Optional[int], Optional[int]]:
-        """Clamp proposed counts to the GPU budget band.
-
-        For disagg, a one-role proposal must charge the unproposed role at its
-        current ready count and size *only* the proposed role against the
-        residual budget. Jointly shrinking both then discarding the unproposed
-        result can leave the settled total above ``max_gpu_budget`` (the hard
-        ceiling). This mirrors ``apply_power_budget``'s fixed-versus-adjustable
-        treatment.
-        """
+        """Clamp proposed counts to the GPU budget band."""
         min_endpoint = self._config.min_endpoint
         min_gpus = self._config.min_gpu_budget
         max_gpus = self._config.max_gpu_budget
@@ -1167,91 +1166,13 @@ class OrchestratorEngineAdapter:
                 max(base_d, min_endpoint) if proposed_d else None,
             )
 
-        if proposed_p and proposed_d:
-            clamped_p, clamped_d = proportional_clamp_pair(
-                max(base_p, min_endpoint),
-                max(base_d, min_endpoint),
-                p_gpu,
-                d_gpu,
-                min_gpus,
-                max_gpus,
-                min_endpoint,
-            )
-            return clamped_p, clamped_d
-
-        if proposed_p != proposed_d:
-            # Exactly one role proposed: charge the other at ready and size
-            # only the adjustable pool against the residual band.
-            if proposed_p:
-                return (
-                    self._clamp_adjustable_with_fixed(
-                        proposed=num_p,
-                        current=ready_p,
-                        adjustable_gpu=p_gpu,
-                        fixed_replicas=ready_d,
-                        fixed_gpu=d_gpu,
-                        min_gpus=min_gpus,
-                        max_gpus=max_gpus,
-                        min_endpoint=min_endpoint,
-                    ),
-                    None,
-                )
-            return None, self._clamp_adjustable_with_fixed(
-                proposed=num_d,
-                current=ready_d,
-                adjustable_gpu=d_gpu,
-                fixed_replicas=ready_p,
-                fixed_gpu=p_gpu,
-                min_gpus=min_gpus,
-                max_gpus=max_gpus,
-                min_endpoint=min_endpoint,
-            )
-
-        return None, None
-
-    @staticmethod
-    def _clamp_adjustable_with_fixed(
-        *,
-        proposed: Optional[int],
-        current: Optional[int],
-        adjustable_gpu: int,
-        fixed_replicas: Optional[int],
-        fixed_gpu: int,
-        min_gpus: int,
-        max_gpus: int,
-        min_endpoint: int,
-    ) -> Optional[int]:
-        """Size one adjustable pool while charging a fixed peer at ready.
-
-        When the fixed peer alone leaves no room for ``min_endpoint`` of the
-        adjustable pool under the hard ceiling, suppress scale-up (hold at
-        current) rather than inventing a shrink of the unproposed role.
-        Scale-downs are still honored.
-        """
-        if proposed is None:
-            return None
-        fixed_gpus = (fixed_replicas or 0) * fixed_gpu
-        residual_max = (max_gpus - fixed_gpus) if max_gpus >= 0 else -1
-        residual_min = (min_gpus - fixed_gpus) if min_gpus >= 0 else -1
-
-        if max_gpus >= 0 and residual_max < min_endpoint * adjustable_gpu:
-            if current is not None and proposed > current:
-                log.warning(
-                    "GPU budget: holding adjustable role at %s (proposed %s) — "
-                    "fixed peer already consumes %s GPUs of the %s ceiling, "
-                    "leaving no room for min_endpoint",
-                    current,
-                    proposed,
-                    fixed_gpus,
-                    max_gpus,
-                )
-                return current
-            return max(proposed, min_endpoint) if current is None else proposed
-
-        return proportional_clamp_single(
-            max(proposed, min_endpoint),
-            adjustable_gpu,
-            residual_min,
-            residual_max,
+        clamped_p, clamped_d = proportional_clamp_pair(
+            max(base_p, min_endpoint),
+            max(base_d, min_endpoint),
+            p_gpu,
+            d_gpu,
+            min_gpus,
+            max_gpus,
             min_endpoint,
         )
+        return clamped_p if proposed_p else None, clamped_d if proposed_d else None
