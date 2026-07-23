@@ -174,6 +174,12 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
         .expect("prefill response should carry an opaque KV handoff");
     assert_eq!(handoff["do_remote_prefill"], true);
     assert!(handoff["remote_engine_id"].is_string());
+    // The non-rendezvous sentinel proves the sidecar preserved opaque handoff
+    // fields rather than reconstructing only the keys it recognizes.
+    assert!(
+        handoff["mocker_request_id"].is_string(),
+        "sidecar must forward opaque KV-transfer fields verbatim"
+    );
 
     let mut decode_request = request(3);
     decode_request.prefill_result = Some(PrefillResult {

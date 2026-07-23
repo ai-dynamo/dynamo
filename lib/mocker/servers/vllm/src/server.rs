@@ -155,6 +155,32 @@ impl pb::generate_server::Generate for VllmMockerService {
         request: Request<pb::GenerateRequest>,
     ) -> Result<Response<Self::GenerateStreamStream>, Status> {
         let (prepared, mut live, permit) = self.start_generation(request.into_inner()).await?;
+        // Decouple LiveEngine's small fixed per-request buffer from client and
+        // transport pacing. A pump drains the engine promptly into a buffer
+        // bounded by this request's own token budget, so a bursty producer
+        // racing ahead of a slow gRPC consumer no longer trips LiveEngine's
+        // slow-consumer shedding and surfaces as a spurious INTERNAL. The buffer
+        // cannot grow past the request's declared output length, and dropping
+        // the client stream still cancels unfinished scheduler work.
+        let (signal_tx, mut signal_rx) =
+            tokio::sync::mpsc::channel(prepared.max_output_tokens.saturating_add(1));
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    // The client dropped the stream: stop and let `live` drop,
+                    // which cancels any unfinished scheduler work promptly.
+                    _ = signal_tx.closed() => break,
+                    signal = live.recv() => {
+                        let Some(signal) = signal else { break };
+                        let completed = signal.completed;
+                        if signal_tx.send(signal).await.is_err() || completed {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
         let stream = async_stream::try_stream! {
             let _permit = permit;
             yield pb::GenerateResponse {
@@ -163,7 +189,7 @@ impl pb::generate_server::Generate for VllmMockerService {
             };
 
             let mut generated = 0usize;
-            while let Some(signal) = live.recv().await {
+            while let Some(signal) = signal_rx.recv().await {
                 let token_id = checked_token(&signal).map_err(|status| *status)?;
                 generated += 1;
                 yield pb::GenerateResponse {
