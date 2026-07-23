@@ -66,7 +66,7 @@ ensure_sglang_top_level_exports()
 def ensure_sglang_tensor_image_size() -> None:
     """Allow SGLang's image-token resolver to handle decoded image tensors.
 
-    SGLang 0.5.13 through 0.5.15 assume every decoded image exposes the PIL
+    SGLang 0.5.13 through 0.5.16 assume every decoded image exposes the PIL
     ``height``/``width`` attributes. Its CUDA JPEG decoder instead returns a
     CHW tensor, causing multimodal requests to fall back to retokenization.
 
@@ -173,49 +173,6 @@ def require_reasoning_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[st
     return kwargs
 
 
-@lru_cache(maxsize=32)
-def _start_profile_accepts_request_object(start_profile: Any) -> bool:
-    """Return whether TokenizerManager.start_profile expects a ProfileReq."""
-    try:
-        signature = inspect.signature(start_profile)
-    except (TypeError, ValueError):
-        logger.debug(
-            "Could not inspect SGLang TokenizerManager.start_profile signature; "
-            "using the legacy keyword-argument API"
-        )
-        return False
-
-    return "req" in signature.parameters
-
-
-def _build_profile_request(body: dict[str, Any]) -> Any:
-    from sglang.srt.managers.io_struct import ProfileReq
-
-    return ProfileReq(**body)
-
-
-async def start_profile_compat(tokenizer_manager: Any, body: dict[str, Any]) -> None:
-    """Start profiling across SGLang's old and new control APIs.
-
-    SGLang 0.5.14 accepts profiling fields as keyword arguments. SGLang 0.5.15
-    accepts one ``ProfileReq`` object instead.
-    """
-    start_profile = tokenizer_manager.start_profile
-    signature_source = getattr(start_profile, "__func__", start_profile)
-
-    try:
-        accepts_request_object = _start_profile_accepts_request_object(signature_source)
-    except TypeError:
-        accepts_request_object = _start_profile_accepts_request_object.__wrapped__(
-            signature_source
-        )
-
-    if accepts_request_object:
-        await start_profile(_build_profile_request(body))
-    else:
-        await start_profile(**body)
-
-
 def enable_disjoint_streaming_output(server_args: Any) -> None:
     """Enable SGLang's disjoint streaming output.
 
@@ -232,5 +189,4 @@ __all__ = [
     "ensure_sglang_top_level_exports",
     "filter_supported_async_generate_kwargs",
     "require_reasoning_kwargs",
-    "start_profile_compat",
 ]
