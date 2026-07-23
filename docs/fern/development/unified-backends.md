@@ -105,8 +105,7 @@ alongside this guide.
 
 The unified backend is in beta. The summary below is the common
 contract — what every engine on the unified interface gets — plus the
-gaps in the contract itself. Backend-specific details live in the
-[package README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/README.md#feature-gaps).
+gaps in the contract itself.
 
 **Supported today**
 
@@ -896,8 +895,7 @@ guide.
 The unified backend is in beta. The summary below is the common
 contract — what every engine on the unified interface gets, whether
 written in Rust directly or plugged in from Python via the PyO3
-`Worker` shim. Backend-specific details live in the
-[Python package README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/README.md#feature-gaps).
+`Worker` shim.
 
 **Supported today**
 
