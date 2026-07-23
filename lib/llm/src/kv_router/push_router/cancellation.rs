@@ -18,7 +18,6 @@ pub(super) fn cancelled_error(context_id: &str) -> Error {
 
 pub(super) async fn cancel_on_stop<T>(
     context: &dyn AsyncEngineContext,
-    context_id: &str,
     operation: impl Future<Output = T>,
 ) -> Result<T, Error> {
     tokio::pin!(operation);
@@ -28,7 +27,7 @@ pub(super) async fn cancel_on_stop<T>(
         // Preserve a simultaneously completed ownership-bearing result so its
         // normal cleanup path runs instead of treating it as an unseen result.
         result = &mut operation => Ok(result),
-        _ = context.stopped() => Err(cancelled_error(context_id)),
+        _ = context.stopped() => Err(cancelled_error(context.id())),
     }
 }
 
@@ -73,7 +72,7 @@ mod tests {
         context.stop();
         let dropped = Arc::new(AtomicBool::new(false));
 
-        let error = cancel_on_stop(&context, context.id(), PendingUntilDropped(dropped.clone()))
+        let error = cancel_on_stop(&context, PendingUntilDropped(dropped.clone()))
             .await
             .unwrap_err();
 
@@ -89,7 +88,7 @@ mod tests {
         let context = Controller::new("completed-request".to_string());
         context.stop();
 
-        let result = cancel_on_stop(&context, context.id(), std::future::ready(42))
+        let result = cancel_on_stop(&context, std::future::ready(42))
             .await
             .unwrap();
 

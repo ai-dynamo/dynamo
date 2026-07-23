@@ -755,18 +755,49 @@ class WorkerFactory:
         finally:
             handler.cleanup()
 
+    def _maybe_create_failover_metrics(self, config: Config, generate_endpoint):
+        """Create + register per-engine failover metrics (shadow mode only).
+
+        Called before the model loads so ``init`` spans the load and a restarted
+        engine re-exposes its persisted switch counters within seconds. Uses a
+        dedicated registry surfaced on ``generate_endpoint``'s system /metrics.
+        """
+        if not config.gms_shadow_mode:
+            return None
+        from gpu_memory_service.failover_lock.failover_metrics import (
+            create_failover_metrics,
+        )
+
+        persist_dir = os.path.dirname(
+            os.path.abspath(
+                os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
+            )
+        )
+        failover_metrics = create_failover_metrics(
+            endpoint=generate_endpoint,
+            engine_id=os.environ.get("ENGINE_ID", "0"),
+            model_name=config.served_model_name or config.model,
+            component_name=config.component,
+            persist_dir=persist_dir,
+        )
+        failover_metrics.set_state("init")
+        return failover_metrics
+
     async def _maybe_wait_for_failover_lock(
         self,
         handler,
         runtime: DistributedRuntime,
         config: Config,
-    ) -> None:
-        # Shadow mode: lock-driven activation.
-        # Flow: sleep → startup probe passes → block on lock → wake → register.
+        failover_metrics=None,
+    ) -> bool:
+        # Shadow mode: sleep → probe → block on lock → wake. True only for a real
+        # (contended) failover, not the initial bootup.
         if not config.gms_shadow_mode:
-            return
+            return False
 
         await handler._pause_controller.pause(1)
+        if failover_metrics is not None:
+            failover_metrics.set_state("standby")
 
         runtime.set_health_status(True)
         logger.info(
@@ -779,11 +810,18 @@ class WorkerFactory:
         engine_id = os.environ.get("ENGINE_ID", "0")
         lock = FlockFailoverLock(lock_path)
         await lock.acquire(engine_id=f"engine-{engine_id}")
+        was_failover = lock.was_contended
         logger.info("[Shadow] Lock acquired, waking engine")
+        if failover_metrics is not None:
+            failover_metrics.set_state("waking")
+            if was_failover:
+                # Only a contended acquire is a failover; a bootup is not a switch.
+                failover_metrics.record_switch_attempt()
 
         await handler._pause_controller.resume()
         handler._pause_controller.mark_resumed()
         logger.info("[Shadow] Engine awake, registering with discovery")
+        return was_failover
 
     async def _create_decode_worker(
         self,
@@ -835,6 +873,11 @@ class WorkerFactory:
                     list_loras_endpoint,
                 ]
             )
+
+        # Shadow mode: create metrics + enter 'init' before load, so 'init' spans it.
+        failover_metrics = self._maybe_create_failover_metrics(
+            config, generate_endpoint
+        )
 
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
         fpm_worker_id = str(generate_endpoint.connection_id())
@@ -960,7 +1003,9 @@ class WorkerFactory:
                 "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
             )
 
-        await self._maybe_wait_for_failover_lock(handler, runtime, config)
+        was_failover = await self._maybe_wait_for_failover_lock(
+            handler, runtime, config, failover_metrics
+        )
 
         # Wait for self-benchmark to complete before registering.
         bench_cfg = vllm_config.additional_config.get("benchmark")
@@ -995,6 +1040,12 @@ class WorkerFactory:
             worker_type=worker_type,
             needs=needs,
         )
+        # Serving now: a failover that got here succeeded. Gated on was_failover
+        # (same as the attempt) so bootup isn't counted and success pairs with attempt.
+        if failover_metrics is not None:
+            failover_metrics.set_state("active")
+            if was_failover:
+                failover_metrics.record_switch_success()
 
         health_check_payload = VllmHealthCheckPayload(
             engine_client, use_text_input=config.use_vllm_tokenizer
@@ -1108,6 +1159,11 @@ class WorkerFactory:
                 f"{config.namespace}.{config.component}.list_loras"
             )
 
+        # Shadow mode: create metrics + enter 'init' before load, so 'init' spans it.
+        failover_metrics = self._maybe_create_failover_metrics(
+            config, generate_endpoint
+        )
+
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
         fpm_worker_id = str(generate_endpoint.connection_id())
         if snapshot_engine is not None:
@@ -1200,7 +1256,9 @@ class WorkerFactory:
             runtime, handler, lora_enabled=config.engine_args.enable_lora
         )
 
-        await self._maybe_wait_for_failover_lock(handler, runtime, config)
+        was_failover = await self._maybe_wait_for_failover_lock(
+            handler, runtime, config, failover_metrics
+        )
 
         # Wait for self-benchmark to complete before registering.
         bench_cfg = vllm_config.additional_config.get("benchmark")
@@ -1245,6 +1303,12 @@ class WorkerFactory:
             worker_type=WorkerType.Prefill,
             needs=[prefill_needs_set],
         )
+        # Serving now: a failover that got here succeeded. Gated on was_failover
+        # (same as the attempt) so bootup isn't counted and success pairs with attempt.
+        if failover_metrics is not None:
+            failover_metrics.set_state("active")
+            if was_failover:
+                failover_metrics.record_switch_success()
 
         health_check_payload = VllmPrefillHealthCheckPayload(
             engine_client, use_text_input=config.use_vllm_tokenizer

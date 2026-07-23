@@ -8373,8 +8373,8 @@ spec:
                       type: string
                     ttlSecondsAfterFinished:
                       description: |-
-                        Deprecated: TTLSecondsAfterFinished is ignored. Checkpoint Jobs use a fixed
-                        300 second TTL.
+                        Deprecated: TTLSecondsAfterFinished is ignored. The operator deletes checkpoint
+                        Jobs after recording their terminal outcome.
                       format: int32
                       minimum: 0
                       type: integer

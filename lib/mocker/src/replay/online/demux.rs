@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use crate::common::protocols::OutputSignal;
-use crate::replay::{TraceCollector, TraceSimulationReport};
+use crate::replay::{ReplayTerminalStatus, TraceCollector, TraceSimulationReport};
 use crate::scheduler::AdmissionEvent;
 
 use super::ReplayRouter;
@@ -21,9 +21,9 @@ async fn process_output_signal(
     router: &ReplayRouter,
     stats: &SharedLiveRuntimeStats,
 ) {
-    // Rejected requests never ran: skip the phantom token / prefill-mark, but
-    // still fall through to the completion path to notify the waiter below.
-    if !output.rejected {
+    // Signals without a token (rejections and zero-output terminals) must skip
+    // token accounting and the first-token callback, but still complete below.
+    if !output.rejected && output.token_id.is_some() {
         collector.on_token(output.uuid, batch_time_ms);
     }
 
@@ -31,7 +31,7 @@ async fn process_output_signal(
         return;
     };
 
-    if !output.rejected && state.mark_first_token_once() {
+    if !output.rejected && output.token_id.is_some() && state.mark_first_token_once() {
         tracing::debug!(uuid = %output.uuid, "replay_diag: demux on_first_token start");
         match router.on_first_token(output.uuid).await {
             Ok(true) => stats.record_prefill_marked(),
@@ -47,6 +47,13 @@ async fn process_output_signal(
     if !output.completed || !state.mark_completed_once() {
         return;
     }
+
+    let terminal_status = if output.rejected {
+        ReplayTerminalStatus::Rejected
+    } else {
+        ReplayTerminalStatus::Completed
+    };
+    collector.on_terminal(output.uuid, batch_time_ms, terminal_status);
 
     tracing::debug!(uuid = %output.uuid, "replay_diag: demux on_complete start");
     match router.on_complete(output.uuid).await {

@@ -25,6 +25,7 @@ use crate::common::protocols::{
     SglangArgs,
 };
 use crate::kv_manager::SglangKvManager;
+use crate::kv_manager::sglang_backend::ActiveKvLease;
 use crate::scheduler::test_utils::{
     CapturingFpmSink, RouterIndexerHarness, nth_stored_hashes, removed_event_count, stored_hashes,
 };
@@ -79,15 +80,149 @@ fn make_decoded_request(
         max_output_tokens,
         planned_output_ids: None,
         output_ids: Vec::new(),
-        last_node: Some(alloc.last_node),
-        kv_indices: alloc.kv_indices,
+        kv_lease: alloc.lease,
         materialized_tokens: prompt_len,
-        cached_tokens: 0,
         allocated_tokens: ceil_to_block(prompt_len, config.block_size),
     }];
     let result = simulate_decode_step(&mut running, kv_manager, config, 0.0, false);
     assert_eq!(result.output_signals.len(), 1);
     running.pop().unwrap()
+}
+
+#[test]
+fn zero_output_request_completes_after_prefill() {
+    let mut core = SglangCore::new(test_args(32, 4, 16));
+    let uuid = core.receive(direct_request(vec![1, 2, 3, 4], 0));
+
+    let pass = core.execute_pass_internal(None, 0.0);
+
+    assert!(core.is_empty());
+    assert_eq!(pass.completed_requests, 1);
+    let fpm = pass.fpm.as_ref().unwrap();
+    assert_eq!(fpm.num_decode_requests, 0);
+    assert_eq!(fpm.sum_decode_kv_tokens, 0);
+    assert!(matches!(
+        pass.output_signals.as_slice(),
+        [OutputSignal {
+            uuid: signal_uuid,
+            token_id: None,
+            completed: true,
+            rejected: false,
+            ..
+        }] if *signal_uuid == uuid
+    ));
+}
+
+#[test]
+fn zero_output_completion_survives_decode_reservation_failure() {
+    let config = SglangConfig::from_args(&test_args(2, 4, 16));
+    let mut kv_manager = SglangKvManager::new(8, 4, KvEventPublishers::default(), 0);
+    let zero_alloc = kv_manager.allocate_for_request(&[1, 2, 3, 4]).unwrap();
+    let normal_alloc = kv_manager.allocate_for_request(&[5, 6, 7, 8]).unwrap();
+    let zero_uuid = Uuid::from_u128(90_004);
+    let normal_uuid = Uuid::from_u128(90_005);
+    let mut running = vec![
+        SglangRequest {
+            uuid: zero_uuid,
+            prompt_tokens: vec![1, 2, 3, 4],
+            max_output_tokens: 0,
+            planned_output_ids: None,
+            output_ids: Vec::new(),
+            kv_lease: zero_alloc.lease,
+            materialized_tokens: 4,
+            allocated_tokens: 4,
+        },
+        SglangRequest {
+            uuid: normal_uuid,
+            prompt_tokens: vec![5, 6, 7, 8],
+            max_output_tokens: 1,
+            planned_output_ids: None,
+            output_ids: Vec::new(),
+            kv_lease: normal_alloc.lease,
+            materialized_tokens: 4,
+            allocated_tokens: 4,
+        },
+    ];
+
+    // The normal request cannot reserve a decode token while both prompts own
+    // the entire pool. Its retry must not discard the zero-output completion.
+    let result = decode::simulate_decode_step_with_sampler(
+        &mut running,
+        &mut kv_manager,
+        &config,
+        None,
+        0.0,
+        false,
+    );
+
+    assert_eq!(running.len(), 1);
+    assert_eq!(running[0].uuid, normal_uuid);
+    assert_eq!(result.completed_requests.len(), 1);
+    assert!(matches!(
+        result.output_signals.as_slice(),
+        [OutputSignal {
+            uuid: signal_uuid,
+            token_id: None,
+            completed: true,
+            rejected: false,
+            ..
+        }] if *signal_uuid == zero_uuid
+    ));
+}
+
+#[test]
+fn fresh_prefill_tracks_cache_owned_prefix_indices() {
+    let args = test_args(8, 4, 16);
+    let config = SglangConfig::from_args(&args);
+    let (buffer, sink) = capture_router_event_sink(ROUTER_TEST_WORKER_ID);
+    let mut kv_manager = SglangKvManager::new(11, 4, KvEventPublishers::new(Some(sink), None), 0);
+    let prompt = vec![1, 2, 3, 4];
+
+    let cached = kv_manager.allocate_for_request(&prompt).unwrap();
+    let cached_indices = cached.lease.indices().to_vec();
+    kv_manager.finish(&prompt, cached.lease);
+    let mut waiting = VecDeque::from([SglangRequest {
+        uuid: Uuid::from_u128(90_002),
+        prompt_tokens: prompt.clone(),
+        max_output_tokens: 1,
+        planned_output_ids: None,
+        output_ids: Vec::new(),
+        materialized_tokens: 0,
+        kv_lease: ActiveKvLease::default(),
+        allocated_tokens: 0,
+    }]);
+    let req = get_new_batch_prefill(&mut waiting, &mut kv_manager, &config, 0.7, &[])
+        .can_run
+        .pop()
+        .unwrap();
+
+    assert_eq!(req.cached_tokens(), prompt.len());
+    assert_eq!(req.kv_indices(), cached_indices);
+
+    // Leave four free slots and one block of page growth for the cache-hit
+    // request. Reserved page overhead makes check_decode_mem retract it, while
+    // the remaining request still fits without evicting the cached prompt.
+    let blocker_tokens = vec![9, 10, 11];
+    let blocker_alloc = kv_manager.allocate_for_request(&blocker_tokens).unwrap();
+    let blocker = SglangRequest {
+        uuid: Uuid::from_u128(90_003),
+        prompt_tokens: blocker_tokens,
+        max_output_tokens: 1,
+        planned_output_ids: None,
+        output_ids: Vec::new(),
+        kv_lease: blocker_alloc.lease,
+        materialized_tokens: 3,
+        allocated_tokens: 4,
+    };
+    buffer.drain();
+
+    let mut running = vec![req, blocker];
+    let retracted = decode::check_decode_mem(&mut running, &mut kv_manager, &config);
+    assert_eq!(retracted.len(), 1);
+    assert_eq!(retracted[0].uuid, Uuid::from_u128(90_002));
+    assert_eq!(removed_event_count(&buffer.drain()), 0);
+    assert_eq!(kv_manager.cache().token_pool.available(), 4);
+    assert_eq!(kv_manager.cache_mut().match_prefix(&prompt).0, prompt.len());
 }
 
 mod source_holds {
@@ -605,7 +740,7 @@ mod destination_lifecycle {
         let ready = destination
             .prebuilt_request(logical_uuid)
             .expect("activated request must be prebuilt-ready");
-        assert_eq!(ready.kv_indices, reserved_indices);
+        assert_eq!(ready.kv_indices(), reserved_indices);
         assert_eq!(destination.running.len(), 1);
         assert!(destination.kv_manager.cache().protected_size >= protected_before_activation);
         let activation_stores = stored_hashes(&destination.drain_kv_events());
@@ -630,7 +765,7 @@ mod destination_lifecycle {
         let ready = destination
             .prebuilt_request(logical_uuid)
             .expect("full running batch must keep request ready");
-        assert_eq!(ready.kv_indices, reserved_indices);
+        assert_eq!(ready.kv_indices(), reserved_indices);
         assert_no_republished_stores(&activation_stores, &stored_hashes(&blocked.kv_events));
 
         let blocker_terminal = execute(&mut destination, blocked.end_ms);
@@ -661,7 +796,7 @@ mod destination_lifecycle {
             .iter()
             .find(|request| request.uuid == logical_uuid)
             .expect("prebuilt request must enter the running batch");
-        assert!(running.kv_indices.starts_with(&reserved_indices));
+        assert!(running.kv_indices().starts_with(&reserved_indices));
         assert_no_republished_stores(&activation_stores, &stored_hashes(&admitted.kv_events));
 
         let terminal = execute(&mut destination, admitted.end_ms);
@@ -883,10 +1018,8 @@ mod scheduling {
                 max_output_tokens: 1,
                 planned_output_ids: None,
                 output_ids: Vec::new(),
-                last_node: None,
-                kv_indices: Vec::new(),
                 materialized_tokens: 0,
-                cached_tokens: 0,
+                kv_lease: ActiveKvLease::default(),
                 allocated_tokens: 0,
             },
             SglangRequest {
@@ -895,10 +1028,8 @@ mod scheduling {
                 max_output_tokens: 1,
                 planned_output_ids: None,
                 output_ids: vec![6, 7],
-                last_node: None,
-                kv_indices: Vec::new(),
                 materialized_tokens: 0,
-                cached_tokens: 0,
+                kv_lease: ActiveKvLease::default(),
                 allocated_tokens: 0,
             },
         ]);
@@ -930,10 +1061,8 @@ mod scheduling {
                 max_output_tokens: 1,
                 planned_output_ids: None,
                 output_ids: Vec::new(),
-                last_node: None,
-                kv_indices: Vec::new(),
                 materialized_tokens: 0,
-                cached_tokens: 0,
+                kv_lease: ActiveKvLease::default(),
                 allocated_tokens: 0,
             });
         }
@@ -944,10 +1073,8 @@ mod scheduling {
             max_output_tokens: 1,
             planned_output_ids: None,
             output_ids: Vec::new(),
-            last_node: None,
-            kv_indices: Vec::new(),
             materialized_tokens: 0,
-            cached_tokens: 0,
+            kv_lease: ActiveKvLease::default(),
             allocated_tokens: 0,
         });
 
@@ -1012,10 +1139,8 @@ mod core_behavior {
             max_output_tokens: 3,
             planned_output_ids: None,
             output_ids: Vec::new(),
-            last_node: None,
-            kv_indices: Vec::new(),
             materialized_tokens: 0,
-            cached_tokens: 0,
+            kv_lease: ActiveKvLease::default(),
             allocated_tokens: 0,
         }]);
 
@@ -1044,10 +1169,8 @@ mod core_behavior {
             max_output_tokens: 2,
             planned_output_ids: None,
             output_ids: Vec::new(),
-            last_node: None,
-            kv_indices: Vec::new(),
             materialized_tokens: 0,
-            cached_tokens: 0,
+            kv_lease: ActiveKvLease::default(),
             allocated_tokens: 0,
         }]);
 
@@ -1079,10 +1202,8 @@ mod core_behavior {
                 max_output_tokens: 3,
                 planned_output_ids: None,
                 output_ids: Vec::new(),
-                last_node: None,
-                kv_indices: Vec::new(),
                 materialized_tokens: 0,
-                cached_tokens: 0,
+                kv_lease: ActiveKvLease::default(),
                 allocated_tokens: 0,
             },
             SglangRequest {
@@ -1091,10 +1212,8 @@ mod core_behavior {
                 max_output_tokens: 3,
                 planned_output_ids: None,
                 output_ids: Vec::new(),
-                last_node: None,
-                kv_indices: Vec::new(),
                 materialized_tokens: 0,
-                cached_tokens: 0,
+                kv_lease: ActiveKvLease::default(),
                 allocated_tokens: 0,
             },
         ]);
@@ -1117,19 +1236,18 @@ mod core_behavior {
                 .unwrap(),
         );
         let mut kv_manager = SglangKvManager::new(64, 4, KvEventPublishers::default(), 0);
-        let alloc = kv_manager
+        let mut alloc = kv_manager
             .allocate_for_request(&[1, 2, 3, 4, 5, 6])
             .unwrap();
+        kv_manager.extend_cached_prefix(&[1, 2, 3, 4], &mut alloc.lease);
         let mut running = vec![SglangRequest {
             uuid: Uuid::new_v4(),
             prompt_tokens: vec![1, 2, 3, 4, 5, 6],
             max_output_tokens: 4,
             planned_output_ids: None,
             output_ids: Vec::new(),
-            last_node: Some(alloc.last_node),
-            kv_indices: alloc.kv_indices,
+            kv_lease: alloc.lease,
             materialized_tokens: 6,
-            cached_tokens: 4,
             allocated_tokens: 8,
         }];
 
@@ -1172,10 +1290,8 @@ mod core_behavior {
             max_output_tokens: 4,
             planned_output_ids: None,
             output_ids: Vec::new(),
-            last_node: Some(base_alloc.last_node),
-            kv_indices: base_alloc.kv_indices,
+            kv_lease: base_alloc.lease,
             materialized_tokens: 4,
-            cached_tokens: 0,
             allocated_tokens: 4,
         }];
 
@@ -1187,10 +1303,8 @@ mod core_behavior {
             max_output_tokens: 4,
             planned_output_ids: None,
             output_ids: Vec::new(),
-            last_node: Some(fast_alloc.last_node),
-            kv_indices: fast_alloc.kv_indices,
+            kv_lease: fast_alloc.lease,
             materialized_tokens: 4,
-            cached_tokens: 0,
             allocated_tokens: 4,
         }];
 
@@ -1238,10 +1352,8 @@ mod core_behavior {
                 max_output_tokens: 10,
                 planned_output_ids: None,
                 output_ids: vec![11, 12, 13],
-                last_node: None,
-                kv_indices: first,
+                kv_lease: ActiveKvLease::from_parts(first, 4, kv_manager.cache().root()),
                 materialized_tokens: 7,
-                cached_tokens: 4,
                 allocated_tokens: 8,
             },
             SglangRequest {
@@ -1250,10 +1362,8 @@ mod core_behavior {
                 max_output_tokens: 10,
                 planned_output_ids: None,
                 output_ids: vec![21],
-                last_node: None,
-                kv_indices: second,
+                kv_lease: ActiveKvLease::from_parts(second, 4, kv_manager.cache().root()),
                 materialized_tokens: 5,
-                cached_tokens: 4,
                 allocated_tokens: 8,
             },
         ];
@@ -1262,7 +1372,7 @@ mod core_behavior {
         assert_eq!(retracted.len(), 1);
         assert_eq!(retracted[0].output_ids, vec![21]);
         assert_eq!(retracted[0].materialized_tokens, 0);
-        assert!(retracted[0].kv_indices.is_empty());
+        assert!(retracted[0].kv_indices().is_empty());
     }
 
     #[test]
@@ -1283,10 +1393,8 @@ mod core_behavior {
             max_output_tokens: 4,
             planned_output_ids: None,
             output_ids: Vec::new(),
-            last_node: Some(alloc.last_node),
-            kv_indices: alloc.kv_indices,
+            kv_lease: alloc.lease,
             materialized_tokens: 4,
-            cached_tokens: 0,
             allocated_tokens: 4,
         }];
 
@@ -1581,10 +1689,8 @@ mod router_events {
             max_output_tokens: 2,
             planned_output_ids: None,
             output_ids: Vec::new(),
-            last_node: None,
-            kv_indices: Vec::new(),
             materialized_tokens: 0,
-            cached_tokens: 0,
+            kv_lease: ActiveKvLease::default(),
             allocated_tokens: 0,
         };
         let first_output = expected_request.next_output_token();
@@ -1683,10 +1789,8 @@ mod router_events {
             max_output_tokens: 3,
             planned_output_ids: None,
             output_ids: Vec::new(),
-            last_node: None,
-            kv_indices: Vec::new(),
             materialized_tokens: 0,
-            cached_tokens: 0,
+            kv_lease: ActiveKvLease::default(),
             allocated_tokens: 0,
         }]);
 
@@ -2052,6 +2156,49 @@ mod forward_pass_metrics {
             pass2.mocker_metrics.sglang_cache_hit_tokens
                 <= pass2.mocker_metrics.sglang_cache_total_tokens
         );
+    }
+
+    #[test]
+    fn fully_cached_zero_output_request_is_not_forward_pass_work() {
+        let mut core = SglangCore::new(fpm_args());
+        let tokens = (0..8).collect::<Vec<_>>();
+        let mut collector = crate::replay::TraceCollector::default();
+
+        core.receive(DirectRequest {
+            tokens: tokens.clone(),
+            max_output_tokens: 0,
+            uuid: Some(Uuid::from_u128(90_004)),
+            ..Default::default()
+        });
+        let seed_pass = core.execute_pass(&mut collector, 0.0);
+        assert_eq!(seed_pass.completed_requests, 1);
+
+        let uuid = core.receive(DirectRequest {
+            tokens,
+            max_output_tokens: 0,
+            uuid: Some(Uuid::from_u128(90_005)),
+            ..Default::default()
+        });
+        let pass = core.execute_pass(&mut collector, seed_pass.end_ms);
+
+        assert_eq!(pass.completed_requests, 1);
+        assert_eq!(pass.mocker_metrics.sglang_cache_hit_tokens, 8);
+        assert_eq!(pass.mocker_metrics.sglang_cache_total_tokens, 8);
+        let fpm = pass.fpm.as_ref().unwrap();
+        assert_eq!(fpm.num_prefill_requests, 0);
+        assert_eq!(fpm.sum_prefill_tokens, 0);
+        assert_eq!(fpm.num_decode_requests, 0);
+        assert_eq!(fpm.sum_decode_kv_tokens, 0);
+        assert!(matches!(
+            pass.output_signals.as_slice(),
+            [OutputSignal {
+                uuid: signal_uuid,
+                token_id: None,
+                completed: true,
+                rejected: false,
+                ..
+            }] if *signal_uuid == uuid
+        ));
     }
 
     #[test]
