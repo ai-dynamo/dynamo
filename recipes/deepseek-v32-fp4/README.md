@@ -1,12 +1,99 @@
 # DeepSeek V3.2 NVFP4: Aggregated Round Robin vs Disaggregated KV Routing with WideEP
 
-This **GB200 NVL72** recipe for DeepSeek V3.2 demonstrates the performance difference between **aggregated (round-robin) routing** and **disaggregated (KV-aware) routing + WideEP** on a synthetic trace dataset adapted from the [Mooncake FAST25 paper](https://github.com/kvcache-ai/Mooncake).
+Production-ready **GB200 NVL72** deployment for **DeepSeek V3.2** using TensorRT-LLM with NVFP4 quantization.
 
-## Results
+The recommended deployment is **disaggregated serving with KV-aware routing + WideEP**. An aggregated round-robin configuration is also included as a comparison baseline for benchmarking (see [Benchmark: Round-Robin vs Disaggregated KV Routing](#benchmark-round-robin-vs-disaggregated-kv-routing)).
+
+## Available Configurations
+
+| Configuration | GPUs | Mode | Routing | Description |
+|---------------|------|------|---------|-------------|
+| [**trtllm/disagg-kv-router**](trtllm/disagg-kv-router/) *(recommended)* | 32x GB200 across 8 nodes | Disaggregated | KV-aware + WideEP | 2x prefill + 2x decode (DEP8) |
+| [**trtllm/agg-round-robin**](trtllm/agg-round-robin/) | 32x GB200 across 8 nodes | Aggregated | Round-robin | 4x DEP8 workers — comparison baseline |
+
+## Prerequisites
+
+1. **Dynamo Platform installed** - See [Kubernetes Deployment Guide](../../docs/kubernetes/README.md)
+2. **32x GB200 GPUs** across 8 nodes
+3. **HuggingFace token** configured:
+   ```bash
+   export NAMESPACE=your-namespace
+   kubectl create secret generic hf-token-secret \
+     --from-literal=HF_TOKEN="your-token" \
+     -n ${NAMESPACE}
+   ```
+
+## Quick Start
+
+### 1. Create Storage
+
+> **Note:** Edit `model-cache/model-cache.yaml` first and update `storageClassName` to match your cluster (run `kubectl get storageclass` to find available options).
+
+```bash
+kubectl apply -f model-cache/model-cache.yaml -n ${NAMESPACE}
+```
+
+### 2. Configure ComputeDomain
+
+For multinode Kubernetes deployments, your cluster may require a ComputeDomain to exist in your namespace so the DRA scheduler can co-locate worker pods on MNNVL-connected nodes. (Otherwise, internode GPU peer memory access would fail.)
+
+```bash
+kubectl apply -f model-cache/compute-domain.yaml -n ${NAMESPACE}
+```
+
+Make sure to apply any name modifications to this file to the deployment YAMLs, under `extraPodSpec.resourceClaims` and `mainContainer.resources.claims`.
+
+### 3. Download Model
+
+We use NVIDIA's official NVFP4-quantized checkpoint ([Hugging Face](https://huggingface.co/nvidia/DeepSeek-V3.2-NVFP4)). Copy it into the PVC storage:
+
+```bash
+kubectl apply -f model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=600s
+```
+
+### 4. Deploy
+
+Deploy the recommended disaggregated (KV-aware routing) configuration:
+
+```bash
+kubectl apply -f trtllm/disagg-kv-router/deploy.yaml -n ${NAMESPACE}
+
+kubectl wait --for=condition=ready pod -l nvidia.com/dynamo-graph-deployment-name=disagg-kv-dsv32-nvfp4 \
+  -n ${NAMESPACE} --timeout=1200s
+```
+
+## Test the Deployment
+
+```bash
+# Port-forward the frontend
+kubectl port-forward svc/disagg-kv-dsv32-nvfp4-frontend 8000:8000 -n ${NAMESPACE}
+
+# Send a test request
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "nvidia/DeepSeek-V3.2-NVFP4",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "max_tokens": 50
+  }'
+```
+
+## Model Details
+
+- **Model**: `nvidia/DeepSeek-V3.2-NVFP4`
+- **Quantization**: NVFP4
+- **Hardware**: GB200 NVL72 (32x GB200 across 8 nodes)
+
+## Benchmark: Round-Robin vs Disaggregated KV Routing
+
+> The steps below are for **benchmarking only** — they are not required to serve the model. They reproduce a performance comparison between **aggregated (round-robin) routing** and **disaggregated (KV-aware) routing + WideEP** on a synthetic trace dataset adapted from the [Mooncake FAST25 paper](https://github.com/kvcache-ai/Mooncake).
+
+### Results
 
 https://github.com/user-attachments/assets/fcdb703c-7c1a-4109-a7ca-54196fcef885
 
-## Experiment Overview
+### Experiment Overview
 
 We compare two deployment modes on **32x GB200 GPUs across 8 nodes**:
 
@@ -15,11 +102,12 @@ We compare two deployment modes on **32x GB200 GPUs across 8 nodes**:
 | **Aggregated** | Round-robin | 4x DEP8 workers |
 | **Disaggregated** | KV-aware | 2x prefill + 2x decode w/ WideEP (DEP8) |
 
-## Dataset: Mooncake-based Synthetic Coding Trace
+### Dataset: Mooncake-based Synthetic Coding Trace
 
 The benchmark uses a trace which simulates coding workloads. We synthesize the trace by increasing the input sequence length and prefix reuse rate of the original [Mooncake conversation trace](https://github.com/kvcache-ai/Mooncake/blob/main/FAST25-release/traces/conversation_trace.jsonl).
 
 To reproduce our benchmark, run Dynamo's [prefix data generator tool](https://github.com/ai-dynamo/dynamo/tree/main/benchmarks/prefix_data_generator) on the Mooncake `conversation_trace.jsonl`:
+
 ```bash
 datagen synthesize \
     --input-file conversation_trace.jsonl \
@@ -71,51 +159,16 @@ The ISL/OSL/cache hit statistics of our trace is below.
 
 </details>
 
+### 1. Prepare the Benchmark Trace
 
-## Prerequisites
+Copy the trace file for the benchmark into the PVC:
 
-1. **Dynamo Platform installed** - See [Kubernetes Deployment Guide](../../docs/kubernetes/README.md)
-2. **32x GB200 GPUs** across 8 nodes
-3. **HuggingFace token** configured:
-   ```bash
-   export NAMESPACE=your-namespace
-   kubectl create secret generic hf-token-secret \
-     --from-literal=HF_TOKEN="your-token" \
-     -n ${NAMESPACE}
-   ```
-
-## Quick Start
-
-### 1. Create Storage
-
-> **Note:** Edit `model-cache/model-cache.yaml` first and update `storageClassName` to match your cluster (run `kubectl get storageclass` to find available options).
-
-```bash
-kubectl apply -f model-cache/model-cache.yaml -n ${NAMESPACE}
-```
-
-### 2. Configure K8 Benchmarking Environment
-For multinode kubernetes deployments, your cluster may require a ComputeDomain to exist in your namespace such that the DRA scheduler can co-locate worker pods on MNNVL-connected nodes. (Otherwise, internode GPU peer memory access would fail.)
-```bash
-kubectl apply -f model-cache/compute-domain.yaml -n ${NAMESPACE}
-```
-Make sure to apply any name modifications to this file to the deployment yamls, under `extraPodSpec.resourceClaims` and `mainContainer.resources.claims`.
-
-
-### 3. Setup Model and Data
-We use NVIDIA's official NVFP4-quantized checkpoint ([Huggingface](https://huggingface.co/nvidia/DeepSeek-V3.2-NVFP4)). Copy it into the PVC storage:
-
-```bash
-kubectl apply -f model-cache/model-download.yaml -n ${NAMESPACE}
-kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=600s
-```
-Similarly, copy the trace file for the benchmark into the PVC:
 ```bash
 # conversation_trace_synth_16.00x1+10.00_speedup1_maxisl110000.jsonl in our case
-kubectl cp <local_trace.jsonl> your-namespace/<helper-pod>:/model-cache/traces/
+kubectl cp <local_trace.jsonl> ${NAMESPACE}/<helper-pod>:/model-cache/traces/
 ```
 
-### 4. Deploy & Benchmark
+### 2. Run the Benchmarks
 
 **Option A: Aggregated (Round-Robin Baseline)**
 
@@ -134,7 +187,7 @@ kubectl apply -f trtllm/agg-round-robin/perf.yaml -n ${NAMESPACE}
 **Option B: Disaggregated (KV-Aware Routing)**
 
 ```bash
-# Deploy
+# Deploy (skip if already deployed in Quick Start)
 kubectl apply -f trtllm/disagg-kv-router/deploy.yaml -n ${NAMESPACE}
 
 # Wait for ready
@@ -145,7 +198,7 @@ kubectl wait --for=condition=ready pod -l nvidia.com/dynamo-graph-deployment-nam
 kubectl apply -f trtllm/disagg-kv-router/perf.yaml -n ${NAMESPACE}
 ```
 
-### 4. Monitor Benchmark Progress
+### 3. Monitor Benchmark Progress
 
 The benchmark runs inside a tmux session for easy monitoring:
 
@@ -159,7 +212,7 @@ kubectl exec -it -n ${NAMESPACE} <benchmark-pod-name> -- tmux a -t benchmark
 # Detach from tmux: Ctrl+B, then D
 ```
 
-### 5. View Results
+### 4. View Results
 
 Results are saved to the `perf-cache` PVC:
 
@@ -171,7 +224,7 @@ kubectl exec -it -n ${NAMESPACE} <benchmark-pod-name> -- ls -la /perf-cache/arti
 kubectl cp ${NAMESPACE}/<benchmark-pod-name>:/perf-cache/artifacts ./benchmark-results
 ```
 
-## Expected Results
+### Expected Results
 
 Since the benchmark uses `--fixed-schedule` (replaying requests at their original timestamps), **throughput metrics are fixed by the trace**—latency metrics are what we're comparing:
 
