@@ -52,6 +52,7 @@ bitflags! {
         const Audios = 1 << 6;
         const Videos = 1 << 7;
         const Realtime = 1 << 8;
+        const Transcriptions = 1 << 9;
     }
 }
 
@@ -91,6 +92,9 @@ impl ModelType {
     pub fn supports_realtime(&self) -> bool {
         self.contains(ModelType::Realtime)
     }
+    pub fn supports_transcriptions(&self) -> bool {
+        self.contains(ModelType::Transcriptions)
+    }
 
     pub fn as_vec(&self) -> Vec<&'static str> {
         let mut result = Vec::new();
@@ -120,6 +124,9 @@ impl ModelType {
         }
         if self.supports_realtime() {
             result.push("realtime");
+        }
+        if self.supports_transcriptions() {
+            result.push("transcriptions");
         }
         result
     }
@@ -154,6 +161,9 @@ impl ModelType {
         }
         if self.supports_realtime() {
             result.push(ModelType::Realtime);
+        }
+        if self.supports_transcriptions() {
+            result.push(ModelType::Transcriptions);
         }
         result
     }
@@ -198,6 +208,9 @@ impl ModelType {
         }
         if self.contains(Self::Realtime) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Realtime);
+        }
+        if self.contains(Self::Transcriptions) {
+            endpoint_types.push(crate::endpoint_type::EndpointType::Transcriptions);
         }
         // [gluo NOTE] ModelType::Tensor doesn't map to any endpoint type,
         // current use of endpoint type is LLM specific and so does the HTTP
@@ -311,6 +324,16 @@ mod tests {
         assert_eq!(
             ModelType::Realtime.as_endpoint_types(),
             vec![EndpointType::Realtime]
+        );
+    }
+
+    #[test]
+    fn transcriptions_capability_and_endpoint_mapping() {
+        assert_eq!(ModelType::Transcriptions.bits(), 1 << 9);
+        assert!(ModelType::Transcriptions.supports_transcriptions());
+        assert_eq!(
+            ModelType::Transcriptions.as_endpoint_types(),
+            vec![EndpointType::Transcriptions]
         );
     }
 

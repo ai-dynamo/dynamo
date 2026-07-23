@@ -1611,6 +1611,7 @@ class ModelType:
     Prefill: ModelType
     Images: ModelType
     Audios: ModelType
+    Transcriptions: ModelType
     Videos: ModelType
     Realtime: ModelType
 
