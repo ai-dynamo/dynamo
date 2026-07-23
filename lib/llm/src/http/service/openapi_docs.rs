@@ -110,7 +110,15 @@ pub fn generate_openapi_spec(route_docs: &[RouteDoc]) -> utoipa::openapi::OpenAp
             }
         };
 
-        paths.paths.insert(path.to_string(), path_item);
+        // Merge into an existing PathItem so multiple methods on one path (the
+        // built-in GET+POST /busy_threshold, or an extension GET on a built-in
+        // path) all appear, instead of the last method overwriting the rest.
+        match paths.paths.get_mut(path) {
+            Some(existing) => existing.merge_operations(path_item),
+            None => {
+                paths.paths.insert(path.to_string(), path_item);
+            }
+        }
     }
 
     openapi.paths = paths;
@@ -415,5 +423,21 @@ mod tests {
         // Verify paths were added
         assert!(spec.paths.paths.contains_key("/v1/chat/completions"));
         assert!(spec.paths.paths.contains_key("/v1/models"));
+    }
+
+    // Two methods on one path (e.g. built-in GET+POST /busy_threshold, or an
+    // extension GET on a built-in POST path) must both survive in the spec,
+    // not overwrite each other under the path key.
+    #[test]
+    fn openapi_spec_keeps_all_methods_on_a_shared_path() {
+        let routes = vec![
+            RouteDoc::new(axum::http::Method::POST, "/busy_threshold"),
+            RouteDoc::new(axum::http::Method::GET, "/busy_threshold"),
+        ];
+        let spec = generate_openapi_spec(&routes);
+        let json = serde_json::to_value(&spec).unwrap();
+        let item = &json["paths"]["/busy_threshold"];
+        assert!(item.get("get").is_some(), "GET operation missing: {item}");
+        assert!(item.get("post").is_some(), "POST operation missing: {item}");
     }
 }

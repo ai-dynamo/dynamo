@@ -269,6 +269,34 @@ impl WorkerCatalogRecord {
     }
 }
 
+// Implemented manually because `model_name` and `routing_group` have custom
+// default values.
+impl Default for WorkerRequest {
+    fn default() -> Self {
+        Self {
+            worker_id: 0,
+            model_name: default_model_name(),
+            routing_group: default_routing_group(),
+            endpoint: None,
+            kv_events_endpoint: None,
+            kv_events_endpoints: HashMap::new(),
+            replay_endpoint: None,
+            block_size: None,
+            data_parallel_start_rank: None,
+            data_parallel_size: None,
+            max_num_batched_tokens: None,
+            total_kv_blocks: None,
+            stable_routing_id: None,
+            is_eagle: None,
+            taints: HashSet::new(),
+            topology_domains: HashMap::new(),
+            kv_transfer_domain: None,
+            kv_transfer_enforcement: None,
+            kv_transfer_preferred_weight: None,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct WorkerRequest {
     pub worker_id: WorkerId,
