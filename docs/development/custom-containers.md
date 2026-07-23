@@ -69,6 +69,49 @@ COPY --from=backend-builder /src/target/release/my-backend /usr/local/bin/my-bac
 ENTRYPOINT ["my-backend"]
 ```
 
+## Declare the Runtime Version for Kubernetes
+
+When you deploy a custom image with a `DynamoGraphDeployment` (DGD) or standalone
+`DynamoComponentDeployment` (DCD), admission determines the Dynamo runtime compatibility version
+from the component's main-container image tag. The tag itself must be a semantic version. Tags such
+as `1.4.0`, `v1.4.0`, and `1.4.0-cuda13` can provide the version. Set
+`runtimeVersionOverride` when the image is tagless, digest-only, uses a tag such as `latest`,
+`main`, `sha-abc`, or `cuda13-1.4.0`, or when a semantic-version tag does not identify the Dynamo
+runtime version packaged in the image.
+
+Set the override to the canonical `MAJOR.MINOR.PATCH` Dynamo runtime version without a `v` prefix,
+prerelease suffix, or build metadata. Each numeric segment may contain at most four digits.
+Admission can verify that an image tag is parseable, but it cannot determine whether that tag
+actually represents the Dynamo runtime version. Set the override when a valid semantic-version
+tag describes another part of the image stack:
+
+```yaml
+spec:
+  backendFramework: vllm
+  components:
+    - name: worker
+      runtimeVersionOverride: "1.4.0"
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: registry.example/my-runtime:build-20260723
+```
+
+The override is optional in the CRD schema but conditionally required by admission:
+
+| API and resource | Main image | Runtime version override |
+| --- | --- | --- |
+| `v1beta1` DGD component | `spec.components[*].podTemplate.spec.containers[name=main].image` | `spec.components[*].runtimeVersionOverride` |
+| `v1beta1` standalone DCD | `spec.podTemplate.spec.containers[name=main].image` | `spec.runtimeVersionOverride` |
+| `v1alpha1` DGD service | `spec.services.<service-name>.extraPodSpec.mainContainer.image` | `spec.services.<service-name>.runtimeVersionOverride` |
+| `v1alpha1` standalone DCD | `spec.extraPodSpec.mainContainer.image` | `spec.runtimeVersionOverride` |
+
+The main image remains required when an override is set. Sidecar image tags are not used for
+runtime-version detection. The override declares the Dynamo runtime packaged in the image; it is
+not the CUDA, inference-engine, operator, Git, or image-build version. It does not rewrite the
+image or change the rendered Pod, and changing only this field does not trigger a worker rollout.
+
 ## Run Locally
 
 Use `container/run.sh` to launch the image with the same GPU and mount defaults used by Dynamo development workflows:

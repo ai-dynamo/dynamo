@@ -26,7 +26,8 @@ import (
 func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentV1alpha1(
 	dcd *nvidiacomv1alpha1.DynamoComponentDeployment,
 ) field.ErrorList {
-	if !hasDynamoComponentDeploymentV1alpha1CompatibilityFields(dcd) {
+	if !hasDynamoComponentDeploymentV1alpha1CompatibilityFields(dcd) &&
+		!v.validatesRuntimeVersionFor(runtimeVersionSourceV1Alpha1) {
 		return nil
 	}
 	return v.validateDynamoComponentDeploymentSpecV1alpha1(

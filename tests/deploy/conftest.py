@@ -342,5 +342,8 @@ def deployment_spec(
     # Override image if provided
     if image:
         spec.set_image(image)
+        # CI-built images use SHA tags, from which the operator cannot derive
+        # the Dynamo runtime compatibility version.
+        spec.set_runtime_version_override("1.3.0")
 
     return spec

@@ -46,8 +46,16 @@ func (v *DynamoComponentDeploymentValidator) Validate(
 	ctx context.Context,
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 ) (admission.Warnings, error) {
+	return v.validate(ctx, dcd, runtimeVersionSourceV1Beta1)
+}
+
+func (v *DynamoComponentDeploymentValidator) validate(
+	ctx context.Context,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	runtimeVersionSource runtimeVersionValidationSource,
+) (admission.Warnings, error) {
 	validation := &dynamoComponentDeploymentValidation{
-		sharedValidation: sharedValidation{ctx: ctx},
+		sharedValidation: sharedValidation{ctx: ctx, runtimeVersionSource: runtimeVersionSource},
 	}
 
 	allErrs := validation.validateDynamoComponentDeployment(dcd)
@@ -68,8 +76,17 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 	oldDCD *nvidiacomv1beta1.DynamoComponentDeployment,
 	newDCD *nvidiacomv1beta1.DynamoComponentDeployment,
 ) (admission.Warnings, error) {
+	return v.validateUpdate(ctx, oldDCD, newDCD, runtimeVersionSourceV1Beta1)
+}
+
+func (v *DynamoComponentDeploymentValidator) validateUpdate(
+	ctx context.Context,
+	oldDCD *nvidiacomv1beta1.DynamoComponentDeployment,
+	newDCD *nvidiacomv1beta1.DynamoComponentDeployment,
+	runtimeVersionSource runtimeVersionValidationSource,
+) (admission.Warnings, error) {
 	validation := &dynamoComponentDeploymentValidation{
-		sharedValidation: sharedValidation{ctx: ctx},
+		sharedValidation: sharedValidation{ctx: ctx, runtimeVersionSource: runtimeVersionSource},
 	}
 
 	allErrs := validation.validateDynamoComponentDeployment(newDCD)

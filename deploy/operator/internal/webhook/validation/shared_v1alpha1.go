@@ -22,6 +22,7 @@ import (
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
@@ -76,6 +77,12 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecV1alpha1(
 	if spec.Failover != nil {
 		allErrs = append(allErrs, v.validateFailoverSpecV1alpha1(spec.Failover, fldPath.Child("failover"))...)
 	}
+	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Alpha1) {
+		if err := runtimeVersionOverrideErrorV1Alpha1(spec, fldPath); err != nil {
+			allErrs = append(allErrs, err)
+		}
+	}
+
 	return allErrs
 }
 
@@ -132,4 +139,25 @@ func (v *sharedValidation) validateFailoverSpecV1alpha1(
 		failover.NumShadows,
 		fmt.Sprintf("is invalid for mode=%q: intraPod uses a fixed 1 primary + 1 shadow sidecar; use failover.mode=%q to configure numShadows", nvidiacomv1alpha1.GMSModeIntraPod, nvidiacomv1alpha1.GMSModeInterPod),
 	)}
+}
+
+func runtimeVersionOverrideErrorV1Alpha1(
+	spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) *field.Error {
+	overridePath := fldPath.Child("runtimeVersionOverride")
+	image := ""
+	if spec.ExtraPodSpec != nil && spec.ExtraPodSpec.MainContainer != nil {
+		image = spec.ExtraPodSpec.MainContainer.Image
+	}
+	if image == "" {
+		return field.Required(fldPath.Child("extraPodSpec", "mainContainer", "image"), "is required")
+	}
+	if spec.RuntimeVersionOverride != "" {
+		return nil
+	}
+	if _, err := runtimeversion.ParseImageVersion(image); err != nil {
+		return field.Required(overridePath, "is required when the specified main container image has no parseable semantic-version tag")
+	}
+	return nil
 }

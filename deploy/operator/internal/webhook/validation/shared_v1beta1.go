@@ -22,9 +22,11 @@ import (
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -36,9 +38,10 @@ import (
 // sharedValidation carries request-wide dependencies and accumulation used by
 // validation for API types shared by multiple resources.
 type sharedValidation struct {
-	ctx      context.Context
-	mgr      ctrl.Manager
-	warnings admission.Warnings
+	ctx                  context.Context
+	mgr                  ctrl.Manager
+	warnings             admission.Warnings
+	runtimeVersionSource runtimeVersionValidationSource
 }
 
 func (v *sharedValidation) warn(message string) {
@@ -122,6 +125,12 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 			spec.ComponentType,
 			dynamo.GetMainContainerResources(spec),
 		)...)
+	}
+
+	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Beta1) {
+		if err := runtimeVersionOverrideError(spec, fldPath); err != nil {
+			allErrs = append(allErrs, err)
+		}
 	}
 
 	return allErrs
@@ -447,4 +456,34 @@ func (v *sharedValidation) validateExperimentalSpecUpdate(
 		))
 	}
 	return allErrs
+}
+
+func runtimeVersionOverrideError(
+	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) *field.Error {
+	overridePath := fldPath.Child("runtimeVersionOverride")
+	image := ""
+	imagePath := fldPath.Child("podTemplate", "spec", "containers")
+	if spec.PodTemplate != nil {
+		for i := range spec.PodTemplate.Spec.Containers {
+			container := &spec.PodTemplate.Spec.Containers[i]
+			if container.Name != consts.MainContainerName {
+				continue
+			}
+			image = container.Image
+			imagePath = imagePath.Index(i).Child("image")
+			break
+		}
+	}
+	if image == "" {
+		return field.Required(imagePath, "is required")
+	}
+	if spec.RuntimeVersionOverride != "" {
+		return nil
+	}
+	if _, err := runtimeversion.ParseImageVersion(image); err != nil {
+		return field.Required(overridePath, "is required when the specified main container image has no parseable semantic-version tag")
+	}
+	return nil
 }

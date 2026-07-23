@@ -76,8 +76,16 @@ func (v *DynamoGraphDeploymentValidator) Validate(
 	ctx context.Context,
 	deployment *nvidiacomv1beta1.DynamoGraphDeployment,
 ) (admission.Warnings, error) {
+	return v.validate(ctx, deployment, runtimeVersionSourceV1Beta1)
+}
+
+func (v *DynamoGraphDeploymentValidator) validate(
+	ctx context.Context,
+	deployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	runtimeVersionSource runtimeVersionValidationSource,
+) (admission.Warnings, error) {
 	validation := &dynamoGraphDeploymentValidation{
-		sharedValidation: sharedValidation{ctx: ctx, mgr: v.mgr},
+		sharedValidation: sharedValidation{ctx: ctx, mgr: v.mgr, runtimeVersionSource: runtimeVersionSource},
 	}
 
 	allErrs := validation.validateDynamoGraphDeployment(deployment)
@@ -101,7 +109,7 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
 	operatorPrincipal string,
 ) (admission.Warnings, error) {
 	validation := &dynamoGraphDeploymentValidation{
-		sharedValidation:  sharedValidation{ctx: ctx, mgr: v.mgr},
+		sharedValidation:  sharedValidation{ctx: ctx, mgr: v.mgr, runtimeVersionSource: runtimeVersionSourceV1Beta1},
 		userInfo:          userInfo,
 		operatorPrincipal: operatorPrincipal,
 	}

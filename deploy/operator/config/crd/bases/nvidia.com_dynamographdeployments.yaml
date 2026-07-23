@@ -11747,6 +11747,15 @@ spec:
                                 type: string
                             type: object
                         type: object
+                      runtimeVersionOverride:
+                        description: |-
+                          RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's
+                          main image. Admission requires it when spec.extraPodSpec.mainContainer.image has no parseable
+                          semantic-version tag. Set it also when the parsed tag is not the Dynamo runtime version. Use
+                          the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image or rendered
+                          Pod, and changing only this field does not trigger a rollout.
+                        pattern: ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$
+                        type: string
                       scalingAdapter:
                         description: |-
                           ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.
@@ -20861,6 +20870,15 @@ spec:
                         format: int32
                         minimum: 0
                         type: integer
+                      runtimeVersionOverride:
+                        description: |-
+                          RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's
+                          main image. Admission requires it when spec.podTemplate.spec.containers[name=main].image has no
+                          parseable semantic-version tag. Set it also when the parsed tag is not the Dynamo runtime
+                          version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the
+                          image or rendered Pod, and changing only this field does not trigger a rollout.
+                        pattern: ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$
+                        type: string
                       scalingAdapter:
                         description: |-
                           scalingAdapter opts this component into using the
