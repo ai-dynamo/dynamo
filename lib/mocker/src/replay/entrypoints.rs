@@ -1406,8 +1406,9 @@ pub fn simulate_concurrency_live_workload_with_router_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::protocols::{EngineType, SglangArgs, WorkerType};
+    use crate::common::protocols::{EngineType, G1Backend, SglangArgs, WorkerType};
     use crate::loadgen::{SessionTrace, TurnTrace};
+    use rstest::rstest;
     use std::io::Write;
     use tempfile::NamedTempFile;
     use uuid::Uuid;
@@ -1494,6 +1495,49 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("first_arrival_timestamp_ms"));
+    }
+
+    #[rstest]
+    #[case::vllm(EngineType::Vllm)]
+    #[case::trtllm(EngineType::Trtllm)]
+    fn native_g1_runs_through_offline_replay_entrypoint(#[case] engine_type: EngineType) {
+        let args = MockEngineArgs::builder()
+            .engine_type(engine_type)
+            .g1_backend(G1Backend::Native)
+            .block_size(4)
+            .num_gpu_blocks(16)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(2))
+            .enable_prefix_caching(true)
+            .enable_chunked_prefill(true)
+            .speedup_ratio(1000.0)
+            .build()
+            .unwrap();
+        let requests = [11_u128, 22]
+            .into_iter()
+            .enumerate()
+            .map(|(index, uuid)| DirectRequest {
+                tokens: (0..8).collect(),
+                max_output_tokens: 2,
+                output_token_ids: Some(vec![100, 101]),
+                uuid: Some(Uuid::from_u128(uuid)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(index as f64 * 100.0),
+                ..Default::default()
+            })
+            .collect();
+
+        // This public API normalizes/validates args and then executes the
+        // deterministic single-worker replay core used by offline replay.
+        let report = simulate_trace_requests(args, requests, 1, 1.0).unwrap();
+
+        assert_eq!(report.request_counts.num_requests, 2);
+        assert_eq!(report.request_counts.completed_requests, 2);
+        assert_eq!(report.request_counts.total_output_tokens, 4);
+        assert!(
+            report.first_admission_prefix_cache_reused_ratio > 0.0,
+            "second identical prompt should reuse native G1 prefix blocks"
+        );
     }
 
     #[test]

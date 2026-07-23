@@ -13,11 +13,11 @@ use uuid::Uuid;
 
 use crate::common::handoff::HandoffId;
 use crate::common::protocols::{
-    DirectRequest, EngineType, FpmPublisher, KvCacheEventSink, KvEventPublishers, MockEngineArgs,
-    OutputSignal, PreemptionMode, RawKvEvent, RawKvEventSink,
+    DirectRequest, EngineType, FpmPublisher, G1Backend, KvCacheEventSink, KvEventPublishers,
+    MockEngineArgs, OutputSignal, PreemptionMode, RawKvEvent, RawKvEventSink,
 };
 use crate::common::sequence::ActiveSequence;
-use crate::kv_manager::kvbm_backend::G1Acquire;
+use crate::kv_manager::G1Acquire;
 use crate::scheduler::SchedulerHandle;
 use crate::scheduler::test_utils::{RouterIndexerHarness, removed_event_count, stored_hashes};
 use crate::scheduler::{
@@ -251,6 +251,10 @@ mod source_holds {
         assert!(!first.output_signals[0].completed);
         let active_before_terminal = core.kv_manager.num_active_blocks();
         assert!(active_before_terminal > 0);
+        let expected_held_blocks = core.state.requests[&request_id]
+            .sequence
+            .len()
+            .div_ceil(core.args.block_size);
 
         let terminal = execute(&mut core, first.end_ms);
         assert!(terminal.output_signals[0].completed);
@@ -264,7 +268,8 @@ mod source_holds {
         ));
         assert!(core.source_is_held(handoff_id));
         assert!(!core.state.requests.contains_key(&request_id));
-        assert_eq!(core.kv_manager.num_active_blocks(), active_before_terminal);
+        assert_eq!(core.kv_manager.num_active_blocks(), expected_held_blocks);
+        assert!(expected_held_blocks > active_before_terminal);
 
         core.apply_command(SchedulerCommand::ReleaseSource { handoff_id })
             .unwrap();
@@ -675,8 +680,8 @@ mod destination_lifecycle {
                 && *transferable_prompt_tokens == 4
         ));
         assert!(destination.kv_manager.num_active_blocks() > usage_before_physical_reservation);
-        let reserved_block_ids = destination.destination_block_ids(handoff_id);
-        assert!(!reserved_block_ids.is_empty());
+        let reserved_block_count = destination.destination_block_count(handoff_id);
+        assert!(reserved_block_count > 0);
 
         let activation_blocker_uuid = Uuid::from_u128(10_005);
         destination.receive(request(activation_blocker_uuid, (200..204).collect(), 3));
@@ -700,8 +705,8 @@ mod destination_lifecycle {
         );
         assert_eq!(destination.state.running.len(), 1);
         assert_eq!(
-            destination.request_block_ids(logical_uuid),
-            reserved_block_ids
+            destination.request_block_count(logical_uuid),
+            reserved_block_count
         );
         let activation_stores = stored_hashes(&destination.drain_kv_events());
         assert!(!activation_stores.is_empty());
@@ -721,8 +726,8 @@ mod destination_lifecycle {
             RequestStatus::Waiting
         );
         assert_eq!(
-            destination.request_block_ids(logical_uuid),
-            reserved_block_ids
+            destination.request_block_count(logical_uuid),
+            reserved_block_count
         );
         let blocked_stores = stored_hashes(&blocked.kv_events);
         assert_no_republished_stores(&activation_stores, &blocked_stores);
@@ -744,11 +749,7 @@ mod destination_lifecycle {
             destination.state.requests[&logical_uuid].status,
             RequestStatus::Running
         );
-        assert!(
-            destination
-                .request_block_ids(logical_uuid)
-                .starts_with(&reserved_block_ids)
-        );
+        assert!(destination.request_block_count(logical_uuid) >= reserved_block_count);
         assert!(
             destination.state.requests[&logical_uuid]
                 .sequence
@@ -1010,7 +1011,7 @@ mod core_behavior {
             core.state.requests.get(&r2).unwrap().status,
             RequestStatus::Running
         );
-        assert_eq!(core.kv_manager.num_active_blocks(), 4);
+        assert_eq!(core.kv_manager.num_active_blocks(), 3);
     }
 
     #[test]
@@ -1431,8 +1432,9 @@ mod core_behavior {
 
         assert_eq!(pass.output_signals.len(), 1);
         assert_eq!(request.num_computed_tokens, 12);
-        assert_eq!(request.sequence.num_allocated_tokens(), 13);
-        assert_eq!(core.kv_manager.num_active_blocks(), 4);
+        assert_eq!(request.sequence.len(), 13);
+        assert_eq!(request.sequence.num_allocated_tokens(), 12);
+        assert_eq!(core.kv_manager.num_active_blocks(), 3);
     }
 
     #[test]
@@ -1577,9 +1579,12 @@ mod core_behavior {
         assert_eq!(second_request_admission_reuse(true), (4, 8, 4));
     }
 
-    #[test]
-    fn test_mtp_releases_unused_block_reservations() {
+    #[rstest]
+    #[case::kvbm(G1Backend::Kvbm)]
+    #[case::native(G1Backend::Native)]
+    fn test_mtp_releases_unused_block_reservations(#[case] backend: G1Backend) {
         let args = MockEngineArgs::builder()
+            .g1_backend(backend)
             .block_size(2)
             .num_gpu_blocks(8)
             .max_num_batched_tokens(Some(8))
@@ -1608,7 +1613,7 @@ mod core_behavior {
         assert_eq!(
             core.kv_manager.num_active_blocks(),
             2,
-            "the block reserved only for rejected drafts must return through RAII"
+            "the block reserved only for rejected drafts must be released: backend={backend:?}"
         );
         let request = core.state.requests.get(&uuid).unwrap();
         assert_eq!(request.sequence.generated_tokens(), 1);
@@ -1675,6 +1680,113 @@ mod router_events {
         assert!(saw_store);
         assert!(harness.ok_count(METRIC_EVENT_STORED) > 0);
         assert_eq!(core.kv_manager.num_active_blocks(), 0);
+        harness.assert_no_event_warnings();
+        harness.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_native_destination_cancel_preserves_tail_first_eviction() {
+        let block_size = 4;
+        let harness = RouterIndexerHarness::new(block_size as u32, ROUTER_TEST_WORKER_ID);
+        let args = MockEngineArgs::builder()
+            .block_size(block_size)
+            .num_gpu_blocks(3)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(1))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(true)
+            .g1_backend(G1Backend::Native)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new_with_kv_capture(args, ROUTER_TEST_WORKER_ID);
+        let seed_tokens = (0..8).collect::<Vec<_>>();
+        core.receive(DirectRequest {
+            tokens: seed_tokens.clone(),
+            max_output_tokens: 1,
+            output_token_ids: Some(vec![8]),
+            uuid: Some(Uuid::from_u128(81)),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+            ..Default::default()
+        });
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let mut now_ms = 0.0;
+        let mut prefix_hashes = Vec::new();
+        for _ in 0..4 {
+            if core.is_empty() {
+                break;
+            }
+            let pass = core.execute_pass(&mut collector, now_ms);
+            now_ms = pass.end_ms;
+            prefix_hashes.extend(stored_hashes(&pass.kv_events));
+            harness.apply_events(pass.kv_events).await;
+        }
+        assert!(core.is_empty(), "seed request should complete");
+        assert_eq!(
+            prefix_hashes.len(),
+            2,
+            "seed request should store the two-block prefix A -> B"
+        );
+        assert_eq!(harness.overlap_for_hashes(prefix_hashes.clone()).await, 2);
+
+        let handoff_id = HandoffId::from(Uuid::from_u128(82));
+        let request_id = Uuid::from_u128(83);
+        let reservation = core
+            .apply_command_effects(
+                SchedulerCommand::ReserveDestination {
+                    handoff_id,
+                    request: DirectRequest {
+                        tokens: seed_tokens,
+                        max_output_tokens: 1,
+                        output_token_ids: Some(vec![8]),
+                        uuid: Some(request_id),
+                        dp_rank: 0,
+                        arrival_timestamp_ms: None,
+                        ..Default::default()
+                    },
+                },
+                true,
+            )
+            .unwrap();
+        assert!(matches!(
+            reservation.lifecycle_events.as_slice(),
+            [SchedulerLifecycleEvent::DestinationReserved {
+                handoff_id: reserved_handoff,
+                request_id: reserved_request,
+                ..
+            }] if *reserved_handoff == handoff_id && *reserved_request == request_id
+        ));
+        assert_eq!(
+            core.apply_command(SchedulerCommand::CancelDestination { handoff_id })
+                .unwrap(),
+            SchedulerCommandResult::Applied
+        );
+
+        core.receive(DirectRequest {
+            tokens: (100..108).collect(),
+            max_output_tokens: 1,
+            output_token_ids: Some(vec![108]),
+            uuid: Some(Uuid::from_u128(84)),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+            ..Default::default()
+        });
+        let pressure = core.execute_pass(&mut collector, now_ms);
+        assert_eq!(
+            removed_event_count(&pressure.kv_events),
+            1,
+            "two fresh blocks with one free slot should evict exactly one cached block"
+        );
+        harness.apply_events(pressure.kv_events).await;
+
+        assert_eq!(
+            harness.overlap_for_hashes(prefix_hashes).await,
+            1,
+            "destination cancellation must make leaf B older than parent A"
+        );
+        harness.assert_no_event_errors();
         harness.assert_no_event_warnings();
         harness.shutdown();
     }
@@ -1844,6 +1956,92 @@ mod live_scheduler {
                 .push((event.event, event.block_token_ids));
             Ok(())
         }
+    }
+
+    #[rstest]
+    #[case::vllm(EngineType::Vllm)]
+    #[case::trtllm(EngineType::Trtllm)]
+    #[tokio::test]
+    async fn native_g1_runs_through_live_scheduler_wrapper(#[case] engine_type: EngineType) {
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
+        let args = MockEngineArgs::builder()
+            .engine_type(engine_type)
+            .g1_backend(G1Backend::Native)
+            .block_size(4)
+            .num_gpu_blocks(16)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(2))
+            .enable_prefix_caching(true)
+            .enable_chunked_prefill(true)
+            .speedup_ratio(1000.0)
+            .build()
+            .unwrap();
+        let scheduler = Scheduler::new(
+            args,
+            0,
+            Some(output_tx),
+            KvEventPublishers::default(),
+            None,
+            FpmPublisher::default(),
+        );
+
+        // Submit identical prompts sequentially so the second request exercises
+        // the native manager's inactive-prefix lookup through the async wrapper.
+        for uuid in [Uuid::from_u128(81), Uuid::from_u128(82)] {
+            scheduler.receive(DirectRequest {
+                tokens: (0..8).collect(),
+                max_output_tokens: 2,
+                output_token_ids: Some(vec![100, 101]),
+                uuid: Some(uuid),
+                dp_rank: 0,
+                arrival_timestamp_ms: None,
+                ..Default::default()
+            });
+
+            let signals = tokio::time::timeout(Duration::from_secs(2), async {
+                let mut signals = Vec::new();
+                loop {
+                    let batch = output_rx
+                        .recv()
+                        .await
+                        .expect("live scheduler output channel should remain open");
+                    let completed = batch
+                        .iter()
+                        .any(|signal| signal.uuid == uuid && signal.completed);
+                    signals.extend(batch.into_iter().filter(|signal| signal.uuid == uuid));
+                    if completed {
+                        break signals;
+                    }
+                }
+            })
+            .await
+            .expect("native G1 live request should complete");
+
+            assert_eq!(
+                signals
+                    .iter()
+                    .filter_map(|signal| signal.token_id)
+                    .collect::<Vec<_>>(),
+                vec![100, 101]
+            );
+            assert!(signals.last().is_some_and(|signal| signal.completed));
+        }
+
+        let metrics_rx = scheduler.metrics_receiver();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let metrics = metrics_rx.borrow().clone();
+                if metrics.running_requests == 0
+                    && metrics.waiting_requests == 0
+                    && metrics.active_decode_blocks == 0
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("native G1 live scheduler should return to idle");
     }
 
     #[rstest]
@@ -2669,7 +2867,7 @@ mod offload {
     use crate::common::handoff::HandoffId;
     use crate::common::protocols::{DirectRequest, MockEngineArgs, MoveBlock, WorkerType};
     use crate::common::sequence::ActiveSequence;
-    use crate::kv_manager::kvbm_backend::G1Acquire;
+    use crate::kv_manager::G1Acquire;
     use crate::kvbm_offload::shared_g3::shared_g3_test_guard_blocking;
     use crate::kvbm_offload::{KvbmOffloadConfig, MockOffloadEngine};
     use crate::scheduler::{
@@ -2802,13 +3000,27 @@ mod offload {
         attach_g1_offload_engine(&mut core);
 
         let mut collector = crate::replay::TraceCollector::default();
-        let blocked_pass = core.execute_pass(&mut collector, 0.0);
+        let sampled_pass = core.execute_pass(&mut collector, 0.0);
+        assert!(
+            sampled_pass
+                .output_signals
+                .iter()
+                .any(|signal| signal.uuid == blocked),
+            "sampling must not acquire the dangling token's new block"
+        );
+        let blocked_state = core.state.requests.get(&blocked).unwrap();
+        assert_eq!(blocked_state.sequence.generated_tokens(), 1);
+        assert_eq!(blocked_state.sequence.num_allocated_tokens(), 4);
+        assert_eq!(blocked_state.num_computed_tokens, 4);
+        assert!(blocked_state.offload_dependency.is_none());
+
+        let blocked_pass = core.execute_pass(&mut collector, sampled_pass.end_ms);
         assert!(
             blocked_pass
                 .output_signals
                 .iter()
                 .all(|signal| signal.uuid != blocked),
-            "the blocked decode token must not be emitted"
+            "the sampled token must wait before computation when its block cannot be acquired"
         );
         assert!(
             blocked_pass
@@ -2818,7 +3030,7 @@ mod offload {
             "the unrelated running request should continue"
         );
         let blocked_state = core.state.requests.get(&blocked).unwrap();
-        assert_eq!(blocked_state.sequence.generated_tokens(), 0);
+        assert_eq!(blocked_state.sequence.generated_tokens(), 1);
         assert_eq!(blocked_state.sequence.num_allocated_tokens(), 4);
         assert_eq!(blocked_state.num_computed_tokens, 4);
         let dependency = blocked_state
@@ -2843,8 +3055,9 @@ mod offload {
             "decode must resume after its exact offload dependency terminates"
         );
         let blocked_state = core.state.requests.get(&blocked).unwrap();
-        assert_eq!(blocked_state.sequence.generated_tokens(), 1);
+        assert_eq!(blocked_state.sequence.generated_tokens(), 2);
         assert_eq!(blocked_state.sequence.num_allocated_tokens(), 5);
+        assert_eq!(blocked_state.num_computed_tokens, 5);
         assert!(blocked_state.offload_dependency.is_none());
         assert_eq!(core.state.preemptions_total, 0);
     }
@@ -3056,7 +3269,7 @@ mod offload {
             event.storage_tier == dynamo_kv_router::protocols::StorageTier::HostPinned
         }));
         assert_eq!(core.kv_manager.num_active_blocks(), 1);
-        assert!(core.destination_block_ids(handoff_id).is_empty());
+        assert_eq!(core.destination_block_count(handoff_id), 0);
 
         let reserved = core.retry_pending_destinations();
         assert!(reserved.iter().any(|event| matches!(
@@ -3067,7 +3280,7 @@ mod offload {
                 ..
             } if *observed == handoff_id && *request_id == Uuid::from_u128(2)
         )));
-        assert!(!core.destination_block_ids(handoff_id).is_empty());
+        assert!(core.destination_block_count(handoff_id) > 0);
     }
 
     /// Retain-and-promote: an admission-parked swap-in whose handle reports
@@ -3233,7 +3446,9 @@ mod offload {
     fn tick_offload_only_completes_g3_staging_before_same_timestamp_admission() {
         let _guard = shared_g3_test_guard_blocking();
         let args = MockEngineArgs::builder()
-            .num_gpu_blocks(1)
+            // Use two blocks so the staged hit still has a reusable prefix
+            // after vLLM's required final-block recompute.
+            .num_gpu_blocks(2)
             .block_size(4)
             .max_num_batched_tokens(Some(64))
             .max_num_seqs(Some(1))
@@ -3265,7 +3480,7 @@ mod offload {
 
         let uuid = Uuid::new_v4();
         core.receive(DirectRequest {
-            tokens: (0..4).collect(),
+            tokens: (0..8).collect(),
             max_output_tokens: 2,
             output_token_ids: None,
             uuid: Some(uuid),
@@ -3280,7 +3495,7 @@ mod offload {
             .unwrap()
             .sequence
             .positional_lineage_hashes();
-        assert_eq!(plhs.len(), 1, "test request should have one full block");
+        assert_eq!(plhs.len(), 2, "test request should have two full blocks");
         seed_g3_blocks(engine.g3_manager().expect("G3 enabled"), plhs);
         core.kv_manager.attach_new_offload_engine(engine);
 
@@ -3289,20 +3504,20 @@ mod offload {
         assert!(parked.admissions.is_empty());
         assert_eq!(core.requests_awaiting_swap_in.len(), 1);
 
-        core.tick_offload_only(1.0);
+        core.tick_offload_only(2.0);
         assert_eq!(
             core.requests_awaiting_swap_in.len(),
             1,
             "G3→G2 completion should start, not finish, the G2→G1 hop"
         );
 
-        core.tick_offload_only(2.0);
+        core.tick_offload_only(4.0);
         assert!(
             core.requests_awaiting_swap_in.is_empty(),
             "G2→G1 completion should requeue the request before admission"
         );
 
-        let admitted = core.execute_pass(&mut collector, 2.0);
+        let admitted = core.execute_pass(&mut collector, 4.0);
         assert_eq!(admitted.admissions.len(), 1);
         assert_eq!(admitted.admissions[0].reused_input_tokens, 4);
     }
@@ -3995,6 +4210,6 @@ mod offload {
             } if *observed_handoff == handoff_id && *observed_request == request_id
         )));
         assert!(core.destination_is_held(handoff_id));
-        assert_eq!(core.destination_block_ids(handoff_id).len(), 2);
+        assert_eq!(core.destination_block_count(handoff_id), 2);
     }
 }

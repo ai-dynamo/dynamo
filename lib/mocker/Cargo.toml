@@ -51,6 +51,7 @@ rmp-serde = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_path_to_error = { workspace = true }
+smallvec = { workspace = true }
 tmq = { workspace = true, optional = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

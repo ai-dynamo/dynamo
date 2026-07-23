@@ -32,6 +32,19 @@ pub enum MockerEvictionBackend {
     Lineage,
 }
 
+/// G1 implementation used by the shared vLLM/TRT-LLM mock scheduler.
+///
+/// `Kvbm` preserves the existing kvbm-logical implementation while `Native`
+/// selects the self-contained physical-copy pool. Both remain available until
+/// the KVBM G1 implementation is removed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum G1Backend {
+    #[default]
+    Kvbm,
+    Native,
+}
+
 /// Trait for publishing KV cache events.
 /// This abstracts the runtime dependency so mocker components can remain generic.
 pub trait KvCacheEventSink: Send + Sync {
@@ -576,6 +589,7 @@ struct MockEngineArgsSerde {
     max_num_seqs: OptionalConfigValue<usize>,
     max_num_batched_tokens: OptionalConfigValue<usize>,
     enable_prefix_caching: OptionalConfigValue<bool>,
+    g1_backend: OptionalConfigValue<G1Backend>,
     enable_chunked_prefill: OptionalConfigValue<bool>,
     speedup_ratio: OptionalConfigValue<f64>,
     decode_speedup_ratio: OptionalConfigValue<f64>,
@@ -659,6 +673,10 @@ pub struct MockEngineArgs {
     #[builder(default = "EngineType::Vllm")]
     pub engine_type: EngineType,
 
+    /// Usable simulated G1 capacity. This preserves the mocker's historical
+    /// convention across backends. A raw vLLM `num_gpu_blocks` value also
+    /// includes its reserved null block, so parity runs configure real vLLM
+    /// with one additional total block.
     #[builder(default = "16384")]
     #[validate(range(min = 1))]
     pub num_gpu_blocks: usize,
@@ -684,6 +702,10 @@ pub struct MockEngineArgs {
 
     #[builder(default = true)]
     pub enable_prefix_caching: bool,
+
+    /// G1 block-manager implementation for the shared vLLM/TRT-LLM scheduler.
+    #[builder(default)]
+    pub g1_backend: G1Backend,
 
     #[builder(default = true)]
     pub enable_chunked_prefill: bool,
@@ -981,6 +1003,26 @@ fn validate_mock_engine_args(args: &MockEngineArgs) -> Result<(), ValidationErro
         ));
     }
 
+    if args.g1_backend == G1Backend::Native && args.engine_type == EngineType::Sglang {
+        return Err(mock_engine_args_validation_error(
+            "native_g1_requires_shared_scheduler",
+            format!(
+                "g1_backend=native is supported only for engine_type=vllm or trtllm, got engine_type={:?}",
+                args.engine_type
+            ),
+        ));
+    }
+
+    if args.g1_backend == G1Backend::Native
+        && (args.num_g2_blocks.is_some() || args.num_g3_blocks.is_some() || args.enable_g4_storage)
+    {
+        return Err(mock_engine_args_validation_error(
+            "native_g1_legacy_offload_conflict",
+            "g1_backend=native cannot be combined with the legacy kvbm-offload G2/G3/G4 path"
+                .to_string(),
+        ));
+    }
+
     if args.num_g3_blocks.is_some() && args.num_g2_blocks.is_none() {
         return Err(mock_engine_args_validation_error(
             "g3_requires_g2",
@@ -1099,6 +1141,9 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
             .into_non_null("enable_prefix_caching")?
         {
             builder = builder.enable_prefix_caching(enable_prefix_caching);
+        }
+        if let Some(g1_backend) = compat.g1_backend.into_non_null("g1_backend")? {
+            builder = builder.g1_backend(g1_backend);
         }
         if let Some(enable_chunked_prefill) = compat
             .enable_chunked_prefill
@@ -1540,6 +1585,7 @@ mod tests {
     fn test_mock_engine_args_json_round_trip_preserves_worker_type_and_nulls() {
         let args = MockEngineArgs::builder()
             .worker_type(WorkerType::Decode)
+            .g1_backend(G1Backend::Native)
             .max_model_len(Some(32768))
             .max_num_seqs(None)
             .max_num_batched_tokens(None)
@@ -1594,6 +1640,7 @@ mod tests {
             "has_perf_model": true,
         });
         payload["max_model_len"] = serde_json::json!(args.max_model_len);
+        payload["g1_backend"] = serde_json::json!(args.g1_backend);
 
         let restored = MockEngineArgs::from_json_str(&payload.to_string()).unwrap();
 
@@ -1601,6 +1648,7 @@ mod tests {
         assert_eq!(restored.max_model_len, Some(32768));
         assert_eq!(restored.max_num_seqs, None);
         assert_eq!(restored.max_num_batched_tokens, None);
+        assert_eq!(restored.g1_backend, G1Backend::Native);
         assert_eq!(
             restored.kv_transfer_timing_mode,
             KvTransferTimingMode::FullPrompt
@@ -1780,6 +1828,67 @@ mod tests {
             missing_g2.to_string().contains("requires num_g2_blocks"),
             "unexpected error: {missing_g2}",
         );
+    }
+
+    #[test]
+    fn test_native_g1_accepts_both_shared_scheduler_engines() {
+        for engine_type in [EngineType::Vllm, EngineType::Trtllm] {
+            let args = MockEngineArgs::builder()
+                .engine_type(engine_type)
+                .g1_backend(G1Backend::Native)
+                .build()
+                .unwrap()
+                .normalized()
+                .unwrap_or_else(|error| {
+                    panic!("native G1 should support {engine_type:?}: {error}")
+                });
+            assert_eq!(args.g1_backend, G1Backend::Native);
+        }
+    }
+
+    #[test]
+    fn test_native_g1_rejects_sglang_and_legacy_kvbm_offload() {
+        let sglang = MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .g1_backend(G1Backend::Native)
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap_err();
+        assert!(
+            sglang.to_string().contains("engine_type=vllm or trtllm"),
+            "unexpected error: {sglang}"
+        );
+
+        let offload = MockEngineArgs::builder()
+            .g1_backend(G1Backend::Native)
+            .num_g2_blocks(Some(8))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap_err();
+        assert!(
+            offload.to_string().contains("legacy kvbm-offload"),
+            "unexpected error: {offload}"
+        );
+    }
+
+    #[test]
+    fn test_native_g1_accepts_mtp() {
+        for engine_type in [EngineType::Vllm, EngineType::Trtllm] {
+            let args = MockEngineArgs::builder()
+                .engine_type(engine_type)
+                .g1_backend(G1Backend::Native)
+                .aic_nextn(Some(1))
+                .build()
+                .unwrap()
+                .normalized()
+                .unwrap_or_else(|error| {
+                    panic!("native G1 MTP should support {engine_type:?}: {error}")
+                });
+            assert_eq!(args.g1_backend, G1Backend::Native);
+            assert_eq!(args.aic_nextn, Some(1));
+        }
     }
 
     #[test]
