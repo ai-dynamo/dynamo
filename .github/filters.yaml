@@ -162,6 +162,9 @@ deploy:
   - *ci
   - 'deploy/helm/**'
   - 'deploy/utils/**'
+  - 'deploy/chrek/**'
+  - 'deploy/docker/**'
+  - 'deploy/docker/.*'
   - 'deploy/snapshot/**'
   - 'tests/deploy/**'
   - 'tests/utils/managed_deployment.py'

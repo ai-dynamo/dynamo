@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: dynamo_vllm_local_2
+
+networks:
+  server:
+    driver: bridge
+
+volumes:
+  discovery:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+
+services:
+  dynamo-frontend:
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1
+    command: python3 -m dynamo.frontend --http-port 8000 --store-kv file --request-plane tcp
+    networks:
+      - server
+    ports:
+      - 8000:8000
+    ulimits:
+      memlock: -1
+      stack: 67108864
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    environment:
+      - DYN_REQUEST_PLANE=tcp
+      - HF_HOME=/data/hf
+      - HF_HUB_CACHE=/data/hf/hub
+    volumes:
+      - ${HOME}/.cache/huggingface:/data/hf
+      - discovery:/tmp/dynamo_store_kv
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/live >/dev/null || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+
+  dynamo-vllm-backend:
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1
+    command: >
+      python3 -m dynamo.vllm
+      --model Qwen/Qwen3-0.6B
+      --store-kv file
+      --kv-events-config '{"enable_kv_cache_events": false}'
+      --gpu-memory-utilization 0.8
+    networks:
+      - server
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    env_file:
+      - ../.env
+    environment:
+      - DYN_REQUEST_PLANE=tcp
+      - HF_HOME=/data/hf
+      - HF_HUB_CACHE=/data/hf/hub
+    volumes:
+      - ${HOME}/.cache/huggingface:/data/hf
+      - discovery:/tmp/dynamo_store_kv
+    gpus: all
+    depends_on:
+      dynamo-frontend:
+        condition: service_healthy
