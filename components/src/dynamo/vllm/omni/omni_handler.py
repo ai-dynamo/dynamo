@@ -394,7 +394,7 @@ class OmniHandler(BaseOmniHandler):
                     inputs.lora_request,
                     create_generator,
                 ):
-                    if chunk:
+                    if chunk and chunk.get("formatted_chunk"):
                         yield chunk["formatted_chunk"]
 
             except EngineShutdown:
