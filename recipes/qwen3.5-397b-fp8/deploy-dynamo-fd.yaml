@@ -1,0 +1,139 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Aggregated Dynamo on a single 8×H100 node with **frontend-decoding ON**.
+# Compared against vllm-serve/ to isolate the frontend-decoding effect.
+#
+# TP=8, expert-parallel, mm-encoder-tp data, max-model-len=32K.
+# `--mm-processor-cache-gb 30` matches vllm-serve so frontend-decoding
+# is the only flag that differs between the two configs.
+#
+# Per-config flag diff:
+#                                              fd          vllm-serve
+#   --tensor-parallel-size                       8           8
+#   --enable-expert-parallel                    yes         yes
+#   --mm-encoder-tp-mode                        data        data
+#   --mm-processor-cache-gb                      30          30
+#   --max-model-len                             32768       32768
+#   --frontend-decoding                         yes         n/a
+#
+# Frontend + VllmWorker are both pinned to the same host via
+# hw/${HW}.env so the gang scheduler places them on one 8×H100 node,
+# keeping the request-plane RPC intra-node.
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen35-dynamo-fd
+  labels:
+    app.kubernetes.io/name: qwen3.5-397b-fp8
+    app.kubernetes.io/component: dynamo-fd
+    app.kubernetes.io/managed-by: dynamo-recipe
+spec:
+  pvcs:
+    - create: false
+      name: shared-model-cache
+  services:
+    Frontend:
+      componentType: frontend
+      envs:
+        - name: HF_HOME
+          value: /home/dynamo/.cache/huggingface
+        - name: DYN_REQUEST_PLANE
+          value: tcp
+        # Multimodal bodies are 5×2400x1080 base64-inlined images per
+        # request; default 50 MiB body limit will reject them.
+        - name: DYN_HTTP_BODY_LIMIT_MB
+          value: "200"
+      extraPodSpec:
+        nodeSelector: ${HW_NODE_SELECTOR}
+        tolerations: ${HW_TOLERATIONS}
+        mainContainer:
+          image: ${VLLM_IMAGE}
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+      # Frontend-decoding does CPU-side base64-decode + image-preprocess
+      # + token decode. On the qwen3.5-397b workload (5 images × ~2400×1080
+      # per turn, base64-inlined) the prior 16-core limit was the prefill
+      # bottleneck — TTFT regressed +45% vs vllm-serve. p5.48xlarge has
+      # 192 vCPU and the VllmWorker has no CPU request (burstable), so
+      # giving the Frontend 64-128 cores leaves ~60 cores for worker /
+      # bench / system pods. Memory bumped proportionally for the image
+      # decode buffers + token-decode arenas.
+      replicas: 1
+      resources:
+        requests:
+          cpu: "64"
+          memory: 256Gi
+        limits:
+          cpu: "128"
+          memory: 512Gi
+      subComponentType: null
+
+    VllmWorker:
+      componentType: worker
+      extraPodSpec:
+        # Same hostname pin as Frontend — kai-scheduler gang-schedules
+        # both pods atomically; pinning both to one host is the only
+        # reliable way to land them on the same node (inter-pod
+        # podAffinity deadlocks under gang scheduling; preferred
+        # podAffinity is a no-op at decision time).
+        nodeSelector: ${HW_NODE_SELECTOR}
+        tolerations: ${HW_TOLERATIONS}
+        mainContainer:
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              set -euo pipefail
+              ulimit -l unlimited
+              python3 -m dynamo.vllm \
+                --model "${MODEL_NAME}" \
+                --enable-multimodal \
+                --frontend-decoding \
+                --mm-processor-cache-gb 30 \
+                --mm-encoder-tp-mode data \
+                --dyn-tool-call-parser qwen3_coder \
+                --dyn-reasoning-parser qwen3 \
+                --tensor-parallel-size 8 \
+                --enable-expert-parallel \
+                --gpu-memory-utilization 0.85 \
+                --max-model-len 32768 \
+                --enable-prefix-caching \
+                --no-enable-log-requests
+          image: ${VLLM_IMAGE}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MODEL_NAME
+              value: "Qwen/Qwen3.5-397B-A17B-FP8"
+            - name: HF_HOME
+              value: /home/dynamo/.cache/huggingface
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: DYN_REQUEST_PLANE
+              value: tcp
+            - name: DYN_MM_ALLOW_INTERNAL
+              value: "1"
+            # Relax NCCL watchdog — DeepGEMM JIT + cudagraph capture for
+            # 397B at TP=8 can stall NCCL ops longer than the default
+            # heartbeat.
+            - name: TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC
+              value: "1800"
+            - name: NCCL_TIMEOUT
+              value: "1800"
+          workingDir: /workspace
+          securityContext:
+            capabilities:
+              add:
+                - IPC_LOCK
+                - SYS_RESOURCE
+      replicas: 1
+      resources:
+        limits:
+          gpu: "8"
+        requests:
+          gpu: "8"
+      subComponentType: null
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /home/dynamo/.cache/huggingface

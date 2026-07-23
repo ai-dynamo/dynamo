@@ -1,0 +1,161 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Shared aiperf benchmark Pod template — one file, both configs.
+# run-benchmark.sh's case statement exports per-config knobs:
+#   ${BENCH_POD}        — Pod name (qwen35-bench / qwen35-fd-bench)
+#   ${BENCH_FRONTEND}   — Service the bench hits at $FRONTEND:8000
+#                         (qwen35-vllm-serve / qwen35-dynamo-fd-frontend)
+#   ${BENCH_RUN_LABEL}  — Run-isolated sub-path under
+#                         /perf-cache/artifacts/qwen35_fp8/, resolved by
+#                         run-benchmark.sh as <namespace>/<run-id>/<config>
+#                         so runs across namespaces (all sharing one FSx
+#                         filesystem) never read or clobber each other.
+# The hostname pin (${HW_NODE_SELECTOR}) is the same as the
+# server/worker pods, which is what guarantees same-node placement.
+# No podAffinity — the hostname pin makes it redundant.
+#
+# Installs aiperf from PyPI pinned at AIPERF_VERSION (0.8.0+).
+# Our sliding-window jsonl writes session_id=user_<N> per row;
+# aiperf's single_turn mode honors that ordering so the 3 turns of
+# any one user are issued in causal order and prefix-cache hits
+# across turns actually land.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${BENCH_POD}
+  labels:
+    app.kubernetes.io/name: qwen3.5-397b-fp8
+    app.kubernetes.io/component: benchmark
+    app.kubernetes.io/managed-by: dynamo-recipe
+spec:
+  restartPolicy: Never
+  # Hostname pin + toleration come from hw/${HW}.env — same target as
+  # the model server (Deployment for vllm-serve, DGD Frontend+Worker
+  # for dynamo-fd). All three pods land on the same node, eliminating
+  # intra-AZ network as a benchmark variable.
+  nodeSelector: ${HW_NODE_SELECTOR}
+  tolerations: ${HW_TOLERATIONS}
+  containers:
+    - name: benchmark
+      image: python:3.11
+      command:
+        - /bin/bash
+        - -lc
+        - |
+          set -euo pipefail
+          ulimit -n 1048576
+          ulimit -u 65536
+
+          apt update && apt install -y --no-install-recommends curl jq git
+
+          # Pin to a released aiperf wheel (0.8.0+).
+          # Bump AIPERF_VERSION to roll forward.
+          pip install --no-cache-dir "aiperf==${AIPERF_VERSION}"
+          python -c "import aiperf; print('aiperf', getattr(aiperf, '__version__', '?'), 'OK')"
+
+          echo "Waiting for model '${MODEL_NAME}' at http://${FRONTEND}:8000/v1/models ..."
+          until curl -s "http://${FRONTEND}:8000/v1/models" \
+              | jq -e --arg m "${MODEL_NAME}" '.data[]? | select(.id == $m)' >/dev/null 2>&1; do
+            echo "[$(date '+%H:%M:%S')] not ready, sleeping 15s"
+            sleep 15
+          done
+          echo "Model '${MODEL_NAME}' is ready."
+
+          INPUT_FILE="${DATASET_DIR}/30u_3t_5w_8000word_base64.jsonl"
+          if [[ ! -f "${INPUT_FILE}" ]]; then
+            echo "Dataset not found: ${INPUT_FILE}" >&2
+            exit 1
+          fi
+
+          RUN_DIR="${ARTIFACT_BASE_DIR}/${RUN_LABEL}"
+          mkdir -p "${RUN_DIR}"
+          echo "Running benchmark; artifacts → ${RUN_DIR}"
+
+          # single_turn (NOT multi_turn): each jsonl row is one request.
+          # session_id is honored so the 3 turns of user_<N> are issued
+          # in causal order.
+          aiperf profile \
+            --model "${MODEL_NAME}" \
+            --input-file "${INPUT_FILE}" \
+            --custom-dataset-type single_turn \
+            --url "http://${FRONTEND}:8000" \
+            --streaming \
+            --ui-type none \
+            --request-count "${REQUEST_COUNT}" \
+            --concurrency "${CONCURRENCY}" \
+            --request-rate-mode constant \
+            --warmup-request-count "${WARMUP_REQUEST_COUNT}" \
+            --artifact-dir "${RUN_DIR}" \
+            --extra-inputs "max_tokens:${MAX_TOKENS}" \
+            --extra-inputs "min_tokens:${MAX_TOKENS}" \
+            --extra-inputs "ignore_eos:true"
+
+          # aiperf writes inputs.json containing every prompt + every base64
+          # image actually sent — multi-GiB for our multimodal datasets,
+          # vs ~30 MB of actual metric outputs. Regenerable from the
+          # input jsonl + aiperf args, so we drop it by default. Set
+          # KEEP_INPUTS_JSON=1 to retain it for individual-request
+          # debugging.
+          if [[ "${KEEP_INPUTS_JSON:-}" != "1" ]]; then
+            rm -fv "${RUN_DIR}/inputs.json" || true
+          else
+            echo "KEEP_INPUTS_JSON=1 → retaining $(du -sh ${RUN_DIR}/inputs.json 2>/dev/null | cut -f1) inputs.json"
+          fi
+
+          # Sentinel file consumed by run-benchmark.sh bench() to detect
+          # actual completion. Necessary because `kubectl logs -f` is
+          # not a reliable synchronization primitive — under transient
+          # teleport / network hiccups it can exit early, causing the
+          # driver to race past into retrieve+clean while aiperf is
+          # still mid-run and produce empty artifacts.
+          touch "${RUN_DIR}/.aiperf-done"
+
+          echo "Run complete. Artifacts in ${RUN_DIR}"
+          sleep 3600
+      env:
+        - name: MODEL_NAME
+          value: Qwen/Qwen3.5-397B-A17B-FP8
+        # Driver-exported: which Service to hit at port 8000. Differs
+        # between vllm-serve (Deployment+Service) and dynamo-fd (DGD's
+        # auto-created <dgd>-frontend Service).
+        - name: FRONTEND
+          value: ${BENCH_FRONTEND}
+        # Driver-exported run-isolated sub-path (<namespace>/<run-id>/<config>)
+        # under ARTIFACT_BASE_DIR so retrieve() scoops only this run and
+        # runs never collide on the shared FSx PVC.
+        - name: RUN_LABEL
+          value: ${BENCH_RUN_LABEL}
+        - name: AIPERF_VERSION
+          value: "0.9.0"
+        - name: MAX_TOKENS
+          value: "1024"
+        - name: REQUEST_COUNT
+          value: "90"  # 30 users × 3 turns
+        - name: CONCURRENCY
+          value: "30"
+        - name: WARMUP_REQUEST_COUNT
+          value: "2"
+        - name: DATASET_DIR
+          value: /perf-cache/datasets
+        - name: ARTIFACT_BASE_DIR
+          value: /perf-cache/artifacts/qwen35_fp8
+        - name: AIPERF_DATASET_CONFIGURATION_TIMEOUT
+          value: "1800"
+        - name: AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT
+          value: "1800"
+      resources:
+        requests:
+          cpu: "8"
+          memory: 16Gi
+        limits:
+          cpu: "16"
+          memory: 32Gi
+      volumeMounts:
+        - name: shared-model-cache
+          mountPath: /perf-cache
+          subPath: qwen35-bench/perf-cache
+  volumes:
+    - name: shared-model-cache
+      persistentVolumeClaim:
+        claimName: shared-model-cache
