@@ -390,7 +390,19 @@ class DeploymentSpec:
     ):
         """Load the deployment YAML file"""
         with open(base, "r") as f:
-            self._deployment_spec = yaml.safe_load(f)
+            docs = [doc for doc in yaml.safe_load_all(f) if doc is not None]
+
+        if not docs:
+            raise ValueError(f"No YAML documents found in {base}")
+
+        self._deployment_docs = docs
+        self._deployment_doc_index = 0
+        for idx, doc in enumerate(docs):
+            if doc.get("kind") == "DynamoGraphDeployment":
+                self._deployment_doc_index = idx
+                break
+
+        self._deployment_spec = self._deployment_docs[self._deployment_doc_index]
         self._endpoint = endpoint
         self._port = port
         self._system_port = system_port
@@ -680,7 +692,12 @@ class DeploymentSpec:
     def save(self, out_file: str):
         """Save updated deployment to file"""
         with open(out_file, "w") as f:
-            yaml.safe_dump(self._deployment_spec, f, default_flow_style=False)
+            if len(self._deployment_docs) == 1:
+                yaml.safe_dump(self._deployment_spec, f, default_flow_style=False)
+            else:
+                docs = list(self._deployment_docs)
+                docs[self._deployment_doc_index] = self._deployment_spec
+                yaml.safe_dump_all(docs, f, default_flow_style=False)
 
 
 class PodProcess:
