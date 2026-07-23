@@ -112,6 +112,12 @@ func singleTargetContainer(content *nvidiacomv1alpha1.PodSnapshotContent) (strin
 	if len(containers) != 1 {
 		return "", fmt.Errorf("source podRef must reference exactly one container, got %d", len(containers))
 	}
+	// The CRD's per-item DNS-1123 validation rejects an empty name, but a work order that bypassed
+	// admission could still carry one. Fail terminally instead of resolving "" to no container and
+	// hanging in the not-ready wait below.
+	if strings.TrimSpace(containers[0]) == "" {
+		return "", errors.New("source podRef container name must not be empty")
+	}
 	return containers[0], nil
 }
 
