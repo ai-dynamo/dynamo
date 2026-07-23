@@ -8,8 +8,8 @@ import multiprocessing as mp
 import os
 import struct
 import sys
-import types
 import time
+import types
 
 import pytest
 from gpu_memory_service.integrations.common import kv_lease_client as _klc
