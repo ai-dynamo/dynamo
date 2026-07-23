@@ -215,12 +215,6 @@ spec:
 > silently discard the DGDR-level `spec.runtimeVersionOverride` field and
 > therefore cannot propagate it into the generated DGD.
 >
-> If `overrides.dgd` replaces a generated worker image, that worker image must
-> either have a parseable semantic-version tag or have an effective
-> `runtimeVersionOverride` on the same DGD service or component. Profiler 1.4.0
-> and later propagate the DGDR-level override to generated components. For an
-> older profiler, include the field directly in the raw, legacy `v1alpha1` DGD
-> service override because that profiler ignores the DGDR-level field. See
 > [Profiler Image Version Compatibility](../../kubernetes/dgdr.md#profiler-image-version-compatibility)
 > for details.
 
