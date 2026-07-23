@@ -451,6 +451,39 @@ class ManagedProcess:
                     pass
         return live_pgids
 
+    def _record_descendant_process_groups(
+        self,
+        all_pgids: set[int],
+        pgid_to_pids: dict[int, set[int]],
+    ) -> set[int]:
+        """Add the current descendants and their process groups to a snapshot."""
+        if self.proc is None:
+            return set()
+
+        child_pids: set[int] = set()
+        try:
+            children = psutil.Process(self.proc.pid).children(recursive=True)
+        except (PermissionError, psutil.AccessDenied) as exc:
+            self._logger.warning(
+                "Unable to enumerate child processes for PID %s; "
+                "falling back to known process groups only: %s",
+                self.proc.pid,
+                exc,
+            )
+            return child_pids
+        except psutil.NoSuchProcess:
+            return child_pids
+
+        for child in children:
+            child_pids.add(child.pid)
+            try:
+                child_pgid = os.getpgid(child.pid)
+                all_pgids.add(child_pgid)
+                pgid_to_pids.setdefault(child_pgid, set()).add(child.pid)
+            except (ProcessLookupError, OSError):
+                pass
+        return child_pids
+
     def _start_process(self):
         assert self._command_name
         assert self._log_path
@@ -531,9 +564,10 @@ class ManagedProcess:
         4. SIGKILL ALL snapshotted process groups (those that ignored SIGTERM
            or timed out).
 
-        Limitation: if a child calls setsid()/setpgid() AFTER our snapshot,
-        its new group won't be in our set. This is rare -- Python
-        multiprocessing and vLLM engine core inherit the parent's group.
+        In parent-first mode, descendants are re-snapshotted while the parent
+        handles SIGTERM so helpers created during cleanup are included. A child
+        that fully daemonizes between two snapshots still requires an external
+        containment boundary such as a cgroup.
 
         Post-SIGKILL resource cleanup notes:
         - GPU memory: vLLM Engine releases VRAM on process death (driver-level
@@ -558,26 +592,14 @@ class ManagedProcess:
         # in self._pgid (start_new_session=True); _tee_proc/_sed_proc are pipe
         # helpers in pytest's group with no children.
         all_pgids: set[int] = {self._pgid}
+        pgid_to_pids: dict[int, set[int]] = {
+            self._pgid: {self.proc.pid} if self.proc is not None else set()
+        }
         child_pids: set[int] = set()
-        pgid_to_pids: dict[int, set[int]] = {self._pgid: set()}
         if self.proc and self.proc.poll() is None:
-            try:
-                for child in psutil.Process(self.proc.pid).children(recursive=True):
-                    child_pids.add(child.pid)
-                    try:
-                        child_pgid = os.getpgid(child.pid)
-                        all_pgids.add(child_pgid)
-                        pgid_to_pids.setdefault(child_pgid, set()).add(child.pid)
-                    except (ProcessLookupError, OSError):
-                        pass
-            except (PermissionError, psutil.AccessDenied) as exc:
-                self._logger.warning(
-                    "Unable to enumerate child processes for PID %s; falling back to the main process group only: %s",
-                    self.proc.pid,
-                    exc,
-                )
-            except psutil.NoSuchProcess:
-                pass
+            child_pids.update(
+                self._record_descendant_process_groups(all_pgids, pgid_to_pids)
+            )
 
         if (
             self.terminate_parent_only_first
@@ -591,7 +613,7 @@ class ManagedProcess:
                 self.proc.terminate()
             except ProcessLookupError:
                 pass
-            except Exception as e:
+            except OSError as e:
                 self._logger.warning(
                     "Error sending SIGTERM to parent process %s: %s",
                     self.proc.pid,
@@ -600,6 +622,9 @@ class ManagedProcess:
 
             poll_interval = 0.1
             while time.monotonic() < deadline:
+                child_pids.update(
+                    self._record_descendant_process_groups(all_pgids, pgid_to_pids)
+                )
                 if self.proc.poll() is not None:
                     live_pgids = self._live_process_groups_for_pids(child_pids)
                     if live_pgids:
