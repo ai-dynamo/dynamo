@@ -489,7 +489,22 @@ pub struct Client {
     /// This ensures instances removed via `report_instance_down` are eventually restored.
     /// A zero value disables local worker inhibition.
     reconcile_interval: Duration,
+    /// workers fenced on death/deregistration. Independent of the
+    /// routing snapshot — read only by the KV-router's `RoutingEligibility` to
+    /// reject dead workers on every path (availability overrides cache affinity)
+    /// while the candidate watch catches up, and to break a sticky session
+    /// affinity bound to a now-dead worker. Cleared early by
+    /// `unfence_present_instances` when an id reappears (a live worker that only
+    /// transiently dropped from availability), and TTL-bounded (see `FENCE_TTL`)
+    /// as a backstop for ids that never return.
+    fenced_instances: Arc<std::sync::RwLock<HashMap<u64, std::time::Instant>>>,
 }
+
+/// how long a fenced (dead) worker stays fenced. Only needs to exceed
+/// the candidate-watch convergence window — the affinity path re-binds after a
+/// single fenced rejection (`select_with_affinity`) — with margin. TTL-bounded
+/// so churn of unique-per-lease ids cannot grow the fenced set without limit.
+const FENCE_TTL: Duration = Duration::from_secs(30);
 
 impl Client {
     // Client with auto-discover instances using key-value store
@@ -527,6 +542,7 @@ impl Client {
             instance_source: instance_source.clone(),
             routing_instances: Arc::new(RoutingInstancesState::new(initial_ids)),
             reconcile_interval,
+            fenced_instances: Arc::new(std::sync::RwLock::new(HashMap::new())),
         };
         client.monitor_instance_source();
         Ok(client)
@@ -640,6 +656,60 @@ impl Client {
 
     pub fn overloaded_instance_ids(&self) -> Option<HashSet<u64>> {
         self.routing_instances.overloaded_ids()
+    }
+
+    /// fence workers that were just removed from discovery (dead /
+    /// deregistered). A fenced worker is rejected by the KV-router on every
+    /// eligibility path — unlike overload, it is not ignored by cache-affinity.
+    pub fn fence_instances_removed(&self, removed_instance_ids: &[u64]) {
+        if removed_instance_ids.is_empty() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let mut fenced = self.fenced_instances.write().unwrap();
+        // Prune expired entries on this (rare) write path so the set stays
+        // bounded and the hot read path can stay lock-cheap.
+        fenced.retain(|_, fenced_at| now.duration_since(*fenced_at) < FENCE_TTL);
+        for id in removed_instance_ids {
+            fenced.insert(*id, now);
+        }
+    }
+
+    /// Clear the fence for instances that are present again. A worker that only
+    /// transiently dropped from availability (e.g. `report_instance_down` then
+    /// reconcile) reappears under the same id, so its fence must be lifted
+    /// promptly instead of waiting out [`FENCE_TTL`].
+    pub fn unfence_present_instances(&self, present_instance_ids: &[u64]) {
+        if present_instance_ids.is_empty() {
+            return;
+        }
+        // Read-guarded fast path: nothing fenced, nothing to clear.
+        if self.fenced_instances.read().unwrap().is_empty() {
+            return;
+        }
+        let mut fenced = self.fenced_instances.write().unwrap();
+        for id in present_instance_ids {
+            fenced.remove(id);
+        }
+    }
+
+    /// Snapshot of currently fenced workers, or `None` when none are live
+    /// (matching the overloaded-set convention so selection can skip the check
+    /// cheaply). Read-only: expired entries are filtered out of the snapshot but
+    /// pruning is left to [`fence_instances_removed`], so this stays on a read
+    /// lock — it is called on every selection while the fence set is non-empty.
+    pub fn fenced_instance_ids(&self) -> Option<HashSet<u64>> {
+        let fenced = self.fenced_instances.read().unwrap();
+        if fenced.is_empty() {
+            return None;
+        }
+        let now = std::time::Instant::now();
+        let live: HashSet<u64> = fenced
+            .iter()
+            .filter(|(_, fenced_at)| now.duration_since(**fenced_at) < FENCE_TTL)
+            .map(|(id, _)| *id)
+            .collect();
+        if live.is_empty() { None } else { Some(live) }
     }
 
     /// Monitor the key-value instance source and update instance_avail.
