@@ -626,6 +626,16 @@ pub struct ActiveSequenceEvent {
     pub lora_name: Option<String>,
 }
 
+/// Active-sequence lifecycle events carried in publisher-queue arrival order.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ActiveSequenceEventBatch {
+    pub events: Vec<ActiveSequenceEvent>,
+}
+
+/// Shared cooperative batch limits for active-sequence replica sync.
+pub const MAX_REPLICA_BATCH_EVENTS: usize = 256;
+pub const MAX_REPLICA_BATCH_DURATION: Duration = Duration::from_millis(1);
+
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PrefillLoadHint {
     pub initial_effective_prefill_tokens: usize,
@@ -689,6 +699,10 @@ pub struct KvCacheEvent {
 pub enum KvCacheEventData {
     Stored(KvCacheStoreData),
     Removed(KvCacheRemoveData),
+    /// Remove all KV ownership for the emitting `(worker_id, dp_rank)`.
+    ///
+    /// This is ordered only within that rank publisher's event sequence. Worker-wide removal is
+    /// a separate serving-membership lifecycle operation.
     Cleared,
 }
 
@@ -888,8 +902,17 @@ pub enum KvCacheEventError {
     #[error("Invalid block sequence")]
     InvalidBlockSequence,
 
+    /// A bounded, pre-commit index omission; this does not prove the backing table is full.
     #[error("Indexer capacity exhausted")]
     CapacityExhausted,
+
+    /// A pre-commit allocation or reservation failed; no lossy-capacity policy is implied.
+    #[error("Indexer allocation failed")]
+    AllocationFailed,
+
+    /// An exact ownership degree overflowed before mutation.
+    #[error("Indexer ownership degree overflow")]
+    OwnershipDegreeOverflow,
 
     #[error("Indexer invariant violated")]
     IndexerInvariantViolation,

@@ -7,6 +7,7 @@ use dynamo_kv_router::protocols::{
 use tempfile::NamedTempFile;
 use uuid::Uuid;
 
+use super::trace::{synthesize_trace_tokens, validate_synthesizable_prompt};
 use super::*;
 
 fn write_trace(lines: &[serde_json::Value]) -> NamedTempFile {
@@ -42,6 +43,18 @@ fn request_trace_row(
         row["agent_context"] = agent_context;
     }
     row
+}
+
+#[test]
+fn trace_synthesis_bounds_each_hash_block_to_remaining_input() {
+    let tokens = synthesize_trace_tokens(1, &[7], usize::MAX).unwrap();
+    assert_eq!(tokens, vec![7]);
+}
+
+#[test]
+fn trace_synthesis_rejects_capacity_overflow() {
+    let error = validate_synthesizable_prompt(1, &[7, 8], usize::MAX).unwrap_err();
+    assert!(error.to_string().contains("capacity overflow"));
 }
 
 #[test]
@@ -138,6 +151,43 @@ fn test_from_mooncake_single_turn_preserves_fields() {
     assert_eq!(session.turns[0].hash_ids, vec![7, 8]);
     assert_eq!(session.turns[0].priority, -3);
     assert_eq!(session.turns[0].strict_priority, 7);
+}
+
+#[test]
+fn single_turn_requests_plan_missing_output_tokens_deterministically() {
+    let trace = Trace {
+        block_size: 1,
+        sessions: vec![
+            SessionTrace {
+                session_id: "missing".into(),
+                first_arrival_timestamp_ms: Some(0.0),
+                turns: vec![TurnTrace {
+                    input_length: 2,
+                    max_output_tokens: 3,
+                    hash_ids: vec![10, 11],
+                    ..Default::default()
+                }],
+            },
+            SessionTrace {
+                session_id: "authored".into(),
+                first_arrival_timestamp_ms: Some(1.0),
+                turns: vec![TurnTrace {
+                    input_length: 1,
+                    max_output_tokens: 2,
+                    output_token_ids: Some(vec![20, 21]),
+                    hash_ids: vec![12],
+                    ..Default::default()
+                }],
+            },
+        ],
+    };
+
+    let first = trace.to_single_turn_requests().unwrap();
+    let second = trace.to_single_turn_requests().unwrap();
+
+    assert_eq!(first[0].output_token_ids, second[0].output_token_ids);
+    assert_eq!(first[0].output_token_ids.as_ref().map(Vec::len), Some(3));
+    assert_eq!(first[1].output_token_ids.as_deref(), Some(&[20, 21][..]));
 }
 
 #[test]
