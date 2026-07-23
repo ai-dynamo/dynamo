@@ -314,6 +314,14 @@ spec:
                   required:
                     - profilerImage
                   type: object
+                runtimeVersionOverride:
+                  description: |-
+                    RuntimeVersionOverride explicitly sets the Dynamo runtime version for every
+                    component in the generated DynamoGraphDeployment. Set this when
+                    profilingConfig.profilerImage uses a non-semantic-version tag or digest, or
+                    when its tag does not identify the Dynamo runtime version.
+                  pattern: ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$
+                  type: string
                 useMocker:
                   default: false
                   description: |-
@@ -9228,6 +9236,14 @@ spec:
                         - template
                       type: object
                   type: object
+                runtimeVersionOverride:
+                  description: |-
+                    RuntimeVersionOverride explicitly sets the Dynamo runtime version for every
+                    component in the generated DynamoGraphDeployment. Set this when Image uses
+                    a non-semantic-version tag or digest, or when its tag does not identify the
+                    Dynamo runtime version.
+                  pattern: ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$
+                  type: string
                 searchStrategy:
                   allOf:
                     - enum:

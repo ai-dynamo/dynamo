@@ -256,6 +256,10 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
         default=None,
         description='Image is the container image reference for the profiling job (planner image). Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1". For Dynamo < 1.1.0, use dynamo-frontend.',
     )
+    runtimeVersionOverride: Optional[str] = Field(
+        default=None,
+        description="RuntimeVersionOverride explicitly sets the Dynamo runtime version for every component in the generated DynamoGraphDeployment. Set this when Image uses a non-semantic-version tag or digest, or when its tag does not identify the Dynamo runtime version.",
+    )
     modelCache: Optional[ModelCacheSpec] = Field(
         default=None,
         description="ModelCache provides optional PVC configuration for pre-downloaded model weights. When provided, weights are loaded from the PVC instead of downloading from HuggingFace.",
