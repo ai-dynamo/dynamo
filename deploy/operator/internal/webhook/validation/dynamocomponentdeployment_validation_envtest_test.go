@@ -507,9 +507,12 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			name: "frontend sidecar container-name collision is rejected",
 			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				FrontendSidecar: &nvidiacomv1alpha1.FrontendSidecarSpec{Image: "frontend:latest"},
-				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{PodSpec: &corev1.PodSpec{
-					Containers: []corev1.Container{{Name: consts.FrontendSidecarContainerName, Image: "conflict:latest"}},
-				}},
+				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+					PodSpec: &corev1.PodSpec{
+						Containers: []corev1.Container{{Name: consts.FrontendSidecarContainerName, Image: "conflict:latest"}},
+					},
+					MainContainer: &corev1.Container{Name: consts.MainContainerName, Image: "main:1.1.0"},
+				},
 			}),
 			wantWebhookErrs: []string{`spec.frontendSidecar: Forbidden: cannot inject frontend sidecar: a container named "sidecar-frontend" already exists in extraPodSpec.containers`},
 		},
@@ -517,9 +520,12 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			name: "frontend sidecar with non-conflicting containers is accepted",
 			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				FrontendSidecar: &nvidiacomv1alpha1.FrontendSidecarSpec{Image: "frontend:latest"},
-				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{PodSpec: &corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "other-sidecar", Image: "other:latest"}},
-				}},
+				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+					PodSpec: &corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "other-sidecar", Image: "other:latest"}},
+					},
+					MainContainer: &corev1.Container{Name: consts.MainContainerName, Image: "main:1.1.0"},
+				},
 			}),
 		},
 
@@ -885,9 +891,12 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "v1alpha1 sidecar without image reaches the webhook",
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
-				dcd.Spec.ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{PodSpec: &corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "metrics"}},
-				}}
+				dcd.Spec.ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{
+					PodSpec: &corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "metrics"}},
+					},
+					MainContainer: &corev1.Container{Name: consts.MainContainerName, Image: "main:1.1.0"},
+				}
 			}),
 		},
 		{
@@ -903,9 +912,12 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "v1alpha1 init container without image reaches the webhook",
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
-				dcd.Spec.ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{PodSpec: &corev1.PodSpec{
-					InitContainers: []corev1.Container{{Name: "prepare"}},
-				}}
+				dcd.Spec.ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{
+					PodSpec: &corev1.PodSpec{
+						InitContainers: []corev1.Container{{Name: "prepare"}},
+					},
+					MainContainer: &corev1.Container{Name: consts.MainContainerName, Image: "main:1.1.0"},
+				}
 			}),
 		},
 		{
@@ -927,7 +939,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
 						consts.KubeAnnotationVLLMDistributedExecutorBackend: "RaY",
 					}},
-					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName}}},
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "main:1.1.0"}}},
 				}
 			}),
 		},
@@ -1095,7 +1107,6 @@ func alphaDCDForAdmission(
 	if mutate != nil {
 		mutate(dcd)
 	}
-	ensureAlphaDCDMainImage(dcd)
 	return dcd
 }
 
@@ -1105,11 +1116,9 @@ func alphaDCDWithSharedSpec(
 	return alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
 		defaultExtraPodSpec := dcd.Spec.ExtraPodSpec
 		dcd.Spec.DynamoComponentDeploymentSharedSpec = spec
+		// admission requires that the main image is set
 		if dcd.Spec.ExtraPodSpec == nil {
 			dcd.Spec.ExtraPodSpec = defaultExtraPodSpec
-		}
-		if dcd.Spec.RuntimeVersionOverride == "" {
-			dcd.Spec.RuntimeVersionOverride = "1.1.0"
 		}
 	})
 }
@@ -1138,24 +1147,5 @@ func betaDCDForAdmission(
 	if mutate != nil {
 		mutate(dcd)
 	}
-	ensureBetaDCDMainImage(dcd)
 	return dcd
-}
-
-func ensureAlphaDCDMainImage(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
-	if dcd.Spec.ExtraPodSpec != nil && dcd.Spec.ExtraPodSpec.MainContainer == nil {
-		dcd.Spec.ExtraPodSpec.MainContainer = &corev1.Container{Image: "registry.example/runtime:1.1.0"}
-	}
-}
-
-func ensureBetaDCDMainImage(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
-	if dcd.Spec.PodTemplate == nil {
-		return
-	}
-	for i := range dcd.Spec.PodTemplate.Spec.Containers {
-		container := &dcd.Spec.PodTemplate.Spec.Containers[i]
-		if container.Name == consts.MainContainerName && container.Image == "" {
-			container.Image = "registry.example/runtime:1.1.0"
-		}
-	}
 }
