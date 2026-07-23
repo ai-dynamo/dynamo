@@ -8,6 +8,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -112,4 +113,125 @@ bool
 kvbm_kernels_is_stub_build(void)
 {
   return true;
+}
+
+cudaError_t
+kvbm_kernels_kvtc_quantize_fp8(
+    const float* input, uint8_t* output, size_t batch, size_t total_features, size_t start_feature,
+    size_t range_features, cudaStream_t stream)
+{
+  (void)input;
+  (void)output;
+  (void)batch;
+  (void)total_features;
+  (void)start_feature;
+  (void)range_features;
+  (void)stream;
+  STUB_ABORT("kvbm_kernels_kvtc_quantize_fp8");
+  return 1;  // Unreachable
+}
+
+cudaError_t
+kvbm_kernels_kvtc_dequantize_fp8(
+    const uint8_t* input, float* output, size_t batch, size_t total_features, size_t start_feature,
+    size_t range_features, cudaStream_t stream)
+{
+  (void)input;
+  (void)output;
+  (void)batch;
+  (void)total_features;
+  (void)start_feature;
+  (void)range_features;
+  (void)stream;
+  STUB_ABORT("kvbm_kernels_kvtc_dequantize_fp8");
+  return 1;  // Unreachable
+}
+
+cudaError_t
+kvbm_kernels_kvtc_minmax_reduce(
+    const float* input, float* min_vals, float* max_vals, size_t batch, size_t total_features, size_t start_feature,
+    size_t range_features, cudaStream_t stream)
+{
+  (void)input;
+  (void)min_vals;
+  (void)max_vals;
+  (void)batch;
+  (void)total_features;
+  (void)start_feature;
+  (void)range_features;
+  (void)stream;
+  STUB_ABORT("kvbm_kernels_kvtc_minmax_reduce");
+  return 1;  // Unreachable
+}
+
+cudaError_t
+kvbm_kernels_kvtc_quantize_intx(
+    const float* input, const float* min_vals, const float* max_vals, uint8_t* output, size_t batch,
+    size_t total_features, size_t start_feature, size_t range_features, int int_bits, cudaStream_t stream)
+{
+  (void)input;
+  (void)min_vals;
+  (void)max_vals;
+  (void)output;
+  (void)batch;
+  (void)total_features;
+  (void)start_feature;
+  (void)range_features;
+  (void)int_bits;
+  (void)stream;
+  STUB_ABORT("kvbm_kernels_kvtc_quantize_intx");
+  return 1;  // Unreachable
+}
+
+cudaError_t
+kvbm_kernels_kvtc_dequantize_intx(
+    const uint8_t* input, const float* min_vals, const float* max_vals, float* output, size_t batch,
+    size_t total_features, size_t start_feature, size_t range_features, int int_bits, cudaStream_t stream)
+{
+  (void)input;
+  (void)min_vals;
+  (void)max_vals;
+  (void)output;
+  (void)batch;
+  (void)total_features;
+  (void)start_feature;
+  (void)range_features;
+  (void)int_bits;
+  (void)stream;
+  STUB_ABORT("kvbm_kernels_kvtc_dequantize_intx");
+  return 1;  // Unreachable
+}
+
+cudaError_t
+kvbm_kernels_kvtc_gather_mean_subtract(
+    const void* const* block_ptrs, const float* mean, float* output, size_t num_blocks, size_t features,
+    size_t block_stride, int input_dtype, cudaStream_t stream)
+{
+  (void)block_ptrs;
+  (void)mean;
+  (void)output;
+  (void)num_blocks;
+  (void)features;
+  (void)block_stride;
+  (void)input_dtype;
+  (void)stream;
+  STUB_ABORT("kvbm_kernels_kvtc_gather_mean_subtract");
+  return 1;
+}
+
+cudaError_t
+kvbm_kernels_kvtc_mean_add_scatter(
+    const float* input, const float* mean, void* const* block_ptrs, size_t num_blocks, size_t features,
+    size_t block_stride, int output_dtype, cudaStream_t stream)
+{
+  (void)input;
+  (void)mean;
+  (void)block_ptrs;
+  (void)num_blocks;
+  (void)features;
+  (void)block_stride;
+  (void)output_dtype;
+  (void)stream;
+  STUB_ABORT("kvbm_kernels_kvtc_mean_add_scatter");
+  return 1;
 }
