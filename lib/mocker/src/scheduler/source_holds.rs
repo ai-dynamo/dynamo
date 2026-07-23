@@ -13,6 +13,14 @@ use crate::common::protocols::DirectRequest;
 #[allow(dead_code)]
 pub enum SchedulerCommand {
     Submit(DirectRequest),
+    /// Remove an ordinary request from the live scheduler by its stable ID.
+    ///
+    /// Live requests use a dedicated cancellation lane. Their owned submit
+    /// task must acknowledge admission before cancellation is enqueued, so a
+    /// dropped network stream cannot race ahead of its own request admission.
+    CancelRequest {
+        request_id: Uuid,
+    },
     SubmitHandoffPrefill {
         handoff_id: HandoffId,
         request: DirectRequest,

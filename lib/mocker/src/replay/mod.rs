@@ -158,6 +158,7 @@ mod tests {
         collector.on_token(uuid, 11.0);
         collector.on_token(uuid, 12.0);
         collector.on_token(uuid, 110.0);
+        collector.on_terminal(uuid, 110.0, ReplayTerminalStatus::Completed);
 
         let report = collector.finish();
 

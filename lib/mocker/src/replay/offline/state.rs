@@ -150,7 +150,7 @@ impl DisaggRequestState {
 
     pub(crate) fn build_prefill_request(&self) -> Result<DirectRequest> {
         let mut request = self.original_request()?.clone();
-        request.max_output_tokens = 1;
+        request.max_output_tokens = request.max_output_tokens.min(1);
         Ok(request)
     }
 
@@ -307,6 +307,7 @@ impl OfflineWorkerState {
         enum Accounting {
             Submit,
             ReserveDestination,
+            CancelRequest,
             CancelSource,
             CancelDestination,
             None,
@@ -317,6 +318,7 @@ impl OfflineWorkerState {
                 Accounting::Submit
             }
             SchedulerCommand::ReserveDestination { .. } => Accounting::ReserveDestination,
+            SchedulerCommand::CancelRequest { .. } => Accounting::CancelRequest,
             SchedulerCommand::CancelSource { .. } => Accounting::CancelSource,
             SchedulerCommand::CancelDestination { .. } => Accounting::CancelDestination,
             SchedulerCommand::ReleaseSource { .. }
@@ -332,6 +334,9 @@ impl OfflineWorkerState {
                 SchedulerCommandResult::DestinationAccepted { .. },
             ) => self.increment_in_flight(),
             (Accounting::CancelDestination, SchedulerCommandResult::Applied) => {
+                self.decrement_in_flight(1)
+            }
+            (Accounting::CancelRequest, SchedulerCommandResult::Applied) => {
                 self.decrement_in_flight(1)
             }
             (Accounting::CancelSource, SchedulerCommandResult::Applied) => {
@@ -375,8 +380,8 @@ impl OfflineWorkerState {
         self.core.retry_pending_destinations()
     }
 
-    pub(crate) fn drain_kv_events(&self) -> Vec<dynamo_kv_router::protocols::RouterEvent> {
-        self.core.drain_kv_events()
+    pub(in crate::replay) fn engine_core(&self) -> &EngineCore {
+        &self.core
     }
 
     fn increment_in_flight(&mut self) {
@@ -444,8 +449,8 @@ mod tests {
     use super::{DisaggRequestState, OfflineWorkerState};
     use crate::common::handoff::{HandoffId, HandoffOrder};
     use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs, WorkerType};
+    use crate::replay::offline::extensions::kv_events::KvCacheEventData;
     use crate::scheduler::{SchedulerCommand, SchedulerCommandResult};
-    use dynamo_kv_router::protocols::KvCacheEventData;
 
     fn worker(
         engine_type: EngineType,
@@ -485,6 +490,33 @@ mod tests {
     }
 
     #[test]
+    fn request_cancellation_releases_offline_in_flight_slot() {
+        let mut worker = worker(EngineType::Vllm, WorkerType::Aggregated, 8);
+        let request_id = Uuid::from_u128(850);
+        worker.receive_request(request(request_id.as_u128(), 8));
+        assert_eq!(worker.in_flight(), 1);
+
+        assert_eq!(
+            worker
+                .apply_command(SchedulerCommand::CancelRequest { request_id })
+                .unwrap()
+                .result,
+            SchedulerCommandResult::Applied
+        );
+        assert_eq!(worker.in_flight(), 0);
+        assert!(worker.is_drained());
+
+        assert_eq!(
+            worker
+                .apply_command(SchedulerCommand::CancelRequest { request_id })
+                .unwrap()
+                .result,
+            SchedulerCommandResult::Noop
+        );
+        assert_eq!(worker.in_flight(), 0);
+    }
+
+    #[test]
     fn ranked_worker_preserves_router_worker_and_dp_rank_identity() {
         for engine_type in [EngineType::Vllm, EngineType::Sglang] {
             let mut builder = MockEngineArgs::builder()
@@ -511,7 +543,7 @@ mod tests {
                 worker.mark_completed(pass.completed_requests);
                 events.extend(pass.kv_events);
             }
-            events.extend(worker.drain_kv_events());
+            events.extend(worker.core.drain_kv_events());
 
             assert!(!events.is_empty());
             assert!(events.iter().all(|event| event.worker_id == 7));
